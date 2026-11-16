@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 67)
+  t.is(LEGAL_VERSION, 68)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 67, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 68, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '593ccfb548df29a343a7c5d6b57c1ab4a5c307f3baa70090dfd3e8889a3df011', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f2b5592eaadb96c0997113fc98e2032ac6f633461216bd7f966e8d096d9dc4df', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -851,4 +851,14 @@ test('legal: version 66 says the account service checks a new @nome and what a p
     'O texto recusado não é guardado, e o registro da recusa tem só o tipo do pedido e o motivo'
   ]) t.ok(all(PRIVACY).includes(required), 'privacy: ' + required)
   t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 67 keeps opened direct message media across a lock and sends redirected links to the account service', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Ela também fica guardada, cifrada, nos aparelhos que a abriram, mesmo quando o app bloqueia, até você tocar em Sair ou em Recomeçar, ou apagar os dados do app.'), 'kept across a lock')
+  t.absent(text(TERMS).includes('até a sessão terminar, você tocar em Sair ou apagar os dados do app'), 'the old wipe on every lock is gone')
+  t.ok(text(TERMS).includes('No app nativo, quem monta a prévia é o aparelho de quem envia, que não segue redirecionamentos: quando o link leva a outro endereço (um link encurtado, por exemplo), o app ligado à instalação da associação pede a prévia ao serviço de conta'), 'terms: a redirect goes to the account service')
+  t.ok(text(PRIVACY).includes('no app nativo, pelo aparelho de quem envia, que fala direto com o site e não segue redirecionamentos (quando o site responde com um redirecionamento, como o de um link encurtado, e o app está ligado à instalação da associação, o aparelho pede a prévia ao serviço de conta, que lê a página como na versão web hospedada)'), 'privacy: a redirect goes to the account service')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
 })

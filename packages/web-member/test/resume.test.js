@@ -4,7 +4,8 @@
 // global (ws) and a fake authenticator with the PRF extension, against an
 // in-process seeder. Proves: a successful unlock stores the session and a new
 // start() resumes it without any WebAuthn call (status().resumed true, writes
-// work); lock() keeps it, signOut() and reset() erase it; a MISMATCH saves
+// work); lock() keeps it and the opened direct message media, signOut()
+// and reset() erase them; a MISMATCH saves
 // nothing; a tampered record, another public key or another passkey clears
 // it and leaves the node locked; the per-device media nonce is drawn once and
 // stable across resumes, its key is not the identity key; handle.media.upload
@@ -119,6 +120,8 @@ async function kvValue (key) {
   const value = await idb('varanda-node', 'kv', 'readonly', (s) => s.get(key))
   return value === undefined ? undefined : JSON.parse(value)
 }
+
+const putKv = (key, value) => idb('varanda-node', 'kv', 'readwrite', (s) => s.put(JSON.stringify(value), key))
 
 test('the stored session: resume without a passkey, lock keeps it, signOut and reset erase it', async (t) => {
   t.timeout(150000)
@@ -275,11 +278,13 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   t.is(e2.message, 'identidade bloqueada: entre com a passkey')
 
   // lock() is memory-only: the next start resumes.
+  await putKv('dmMediaIndex', { v: 1, items: [] })
   await h.identity.lock()
   status = await h.identity.status()
   t.is(status.unlocked, false)
   t.is(status.resumed, false)
   t.ok(await sessionRecord(), 'lock keeps the stored session')
+  t.alike(await kvValue('dmMediaIndex'), { v: 1, items: [] }, 'lock keeps the opened direct message media')
   await h.close()
   h = await start()
   status = await h.identity.status()
@@ -288,11 +293,13 @@ test('the stored session: resume without a passkey, lock keeps it, signOut and r
   t.is(fake.calls.length, 0)
 
   // ---- signOut ('Sair'): locked and forgotten ----
+  await putKv('dmMediaIndex', { v: 1, items: [] })
   await h.identity.signOut()
   status = await h.identity.status()
   t.is(status.unlocked, false)
   t.is(status.resumed, false)
   t.is(await sessionRecord(), undefined, 'signOut erases the stored session')
+  t.is(await kvValue('dmMediaIndex'), null, 'signOut wipes the opened direct message media')
   await h.close()
   h = await start()
   status = await h.identity.status()

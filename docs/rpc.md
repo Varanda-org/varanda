@@ -590,10 +590,10 @@ Who started following the caller and whom the caller does not follow yet ("follo
 
 ### 5.51 `identity.clear` (IPC only)
 
-- Params: `{}`. Mutating.
+- Params: `{ keepMedia?: boolean }`, nothing else. Mutating. The host's lock passes `keepMedia: true`; its relocks after an unlock that failed or was cancelled once the pairs went in (the install's own stop, the code recovery rollback, a 'Sair' whose 5.54 failed) leave it out.
 - Result: `{}`.
 - IPC only, offered only by the in-app web-node worklet (the `web` node kind: `packages/web-member` running inside the Bare worklet), next to its session's handlers; the node session (`session.handlers`), the browser node's own session, `varanda-serve` and the browser page do not register it, so elsewhere it reaches no handler and the dispatcher answers `INTERNAL` `'erro interno'` (section 8, step 6), as 5.17.
-- The browser handle's `identity.lock()`: zero-fills the key pairs in memory; reads still work; the host's stored session and the `signedOut` marker are untouched.
+- The browser handle's `identity.lock()`: zero-fills the key pairs in memory; reads still work; the host's stored session and the `signedOut` marker are untouched. With `keepMedia: true` the sealed cache of opened direct message media (protocol section 11, "Media of a message") and the sealed list summaries ("List summary", the member's and each Página's) are kept too; without it (or `false`) both are wiped, as by 5.53, 5.54 and an install under another key. Until 5.50 unlocks again neither can be read: it is opened only by an unlocked direct message store.
 
 ### 5.52 `identity.status` (IPC only)
 
