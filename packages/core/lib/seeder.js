@@ -7057,7 +7057,7 @@ class Seeder {
   // them: on a failure the diary stays listed and the next start scans it
   // again (the caller's purge failure path).
   async _purgeMomentBlobs (key) {
-    if (this._blob === null) return
+    if (!this._blob) return
     const core = await openReplica(this.store, key)
     try {
       const ids = await momentBlobIds(core)

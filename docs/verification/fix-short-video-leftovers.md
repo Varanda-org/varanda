@@ -31,7 +31,7 @@ Cada arquivo rodou sozinho (`node <arquivo>`) nesta branch. A coluna "sem a corr
 
 | Arquivo | Branch | Sem a correção |
 |---|---|---|
-| `packages/core/test/blob-pool.test.js` (3 testes novos de `purge`) | 27/27 | os 3 quebram (`purge is not a function`) |
+| `packages/core/test/blob-pool.test.js` (3 testes novos de `purge`) | 36/36 | os 3 quebram (`purge is not a function`) |
 | `packages/core/test/blocklist-seeder.test.js` (3 testes novos) | 15/15 | sem a chamada no drop, o teste de tempo de execução e o de motivo trocado falham; sem a do passo 3, a parte da partida falha; sem as duas, o teste de falha fatal não vê `purge-failed` |
 | `apps/app/test/hardening.test.js` (descarte depois do `cancel`, mais duas mutações) | 24/24 | falha ("stop discards the files the muxer wrote after the cancel") |
 | `apps/app/test/legal.test.js` | 48/48 | versão 67, digest e o texto novo de Termos e Política |
