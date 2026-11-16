@@ -211,6 +211,13 @@ function followRows (author, kind) {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
 }
 
+function fanRows (author) {
+  const related = liveEntries().filter(({ record: r }) => r.type === 'fan' && r.key === author)
+  return lastWrites(related, (r) => r.key)
+    .map(({ author: from, seq, record }) => ({ key: from, seq, at: record.at }))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
+}
+
 function writersOf (group) {
   const rows = new Map([[group.writer, { key: group.writer, diary: fixtures.own, seq: 1, length: 2, signed: 2, left: false }]])
   for (const item of group.items) {
@@ -346,6 +353,22 @@ export function vitrineIndex (url, request) {
     return { ...flags, author: key, kind: part, items, total: rows.length, next: remaining.length > 20 ? { atMs: Date.parse(last.at), key: last.key } : null, authors: authorsOf(items.map((r) => r.key)) }
   }
 
+  if (route === 'fans') {
+    requireProfile(key)
+    const rows = fanRows(key)
+    let after = null
+    const raw = part
+    if (raw !== undefined) {
+      if (!/^[0-9]+\.[0-9a-f]{64}$/.test(raw)) notFound()
+      const [atMs, k] = raw.split('.')
+      after = { atMs: Number(atMs), key: k }
+    }
+    const remaining = rows.filter((r) => after === null || Date.parse(r.at) < after.atMs || (Date.parse(r.at) === after.atMs && r.key > after.key))
+    const items = remaining.slice(0, 20)
+    const last = items[items.length - 1]
+    return { ...flags, author: key, items, total: rows.length, next: remaining.length > 20 ? { atMs: Date.parse(last.at), key: last.key } : null, authors: authorsOf(items.map((r) => r.key)) }
+  }
+
   if (route === 'search' && part === undefined) {
     const rows = profiles.filter((p) => matches(p.name + ' ' + p.username, key))
     return { ...flags, members: rows.slice(0, 20).map((p) => ({ author: p.author, ...hint(), ...pageHint(p.author) })), more: rows.length > 20 }
@@ -396,7 +419,11 @@ export function vitrineIndex (url, request) {
       const rows = liveEntries().filter((e) => e.author === key && e.record.type === type)
       return rows.length === 0 ? null : Math.max(...rows.map((e) => e.seq))
     }
-    return { about: latest('profile-about'), mood: latest('mood'), ...flags }
+    const rows = (type) => liveEntries().filter((e) => e.author === key && e.record.type === type).sort((a, b) => b.seq - a.seq)
+    const fans = fanRows(key)
+    const top = rows('top-friends')[0]
+    const back = top ? Object.fromEntries(top.record.keys.map((k) => [k, liveFollowSeq(liveEntries(), k, key)])) : null
+    return { about: latest('profile-about'), mood: latest('mood'), fans: { count: fans.length, indexing: false }, top: top ? { seq: top.seq, back } : null, ...flags }
   }
 
   if (route === 'follow' && cursor === undefined) {

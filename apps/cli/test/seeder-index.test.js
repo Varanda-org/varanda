@@ -2240,8 +2240,8 @@ test('indexProfile: newest about and mood pointers, deletes, fail closed while i
     await pass()
   }
   await pass()
-  t.alike(seeder.indexProfile(O), { about: 1, mood: 2, indexing: false, complete: true })
-  t.alike(seeder.indexProfile(V), { about: null, mood: 1, indexing: false, complete: true }, 'each author has its own pointers')
+  t.alike(seeder.indexProfile(O), { about: 1, mood: 2, fans: { count: 0, indexing: false }, top: null, indexing: false, complete: true })
+  t.alike(seeder.indexProfile(V), { about: null, mood: 1, fans: { count: 0, indexing: false }, top: null, indexing: false, complete: true }, 'each author has its own pointers')
   t.is(seeder.indexProfile('f'.repeat(64)), null, 'an author not served is unknown')
   t.is(seeder.indexProfile('nope'), null)
 
@@ -2250,19 +2250,19 @@ test('indexProfile: newest about and mood pointers, deletes, fail closed while i
   await grow(O, ofO, [deleteRecord({ seq: 3, at: at(4) })]) // 4
   t.is(seeder.indexProfile(O).about, 1, 'a deleted block falls back to the previous one')
   await grow(O, ofO, [deleteRecord({ seq: 2, at: at(5) })]) // 5
-  t.alike(seeder.indexProfile(O), { about: 1, mood: null, indexing: false, complete: true })
+  t.alike(seeder.indexProfile(O), { about: 1, mood: null, fans: { count: 0, indexing: false }, top: null, indexing: false, complete: true })
 
   seeder._rebuildIndex()
-  t.alike(seeder.indexProfile(O), { about: null, mood: null, indexing: true, complete: false }, 'between a rebuild and the re-index: fail closed')
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, indexing: true, complete: false }, 'between a rebuild and the re-index: fail closed')
   await settleIndex(seeder)
-  t.alike(seeder.indexProfile(O), { about: 1, mood: null, indexing: false, complete: true }, 'the same after a rebuild')
+  t.alike(seeder.indexProfile(O), { about: 1, mood: null, fans: { count: 0, indexing: false }, top: null, indexing: false, complete: true }, 'the same after a rebuild')
 
   const owner = seeder._served.get(O)
   owner.indexPaused = true
-  t.alike(seeder.indexProfile(O), { about: null, mood: null, indexing: true, complete: false }, 'a paused diary: no pointer')
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, indexing: true, complete: false }, 'a paused diary: no pointer')
   owner.indexPaused = false
   owner.core.contiguousLength++
-  t.alike(seeder.indexProfile(O), { about: null, mood: null, indexing: true, complete: false }, 'a diary behind its present length: no pointer')
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, indexing: true, complete: false }, 'a diary behind its present length: no pointer')
   owner.core.contiguousLength--
   t.is(seeder.indexProfile(O).about, 1, 'caught up: the pointer again')
 
@@ -2276,6 +2276,129 @@ test('indexProfile: newest about and mood pointers, deletes, fail closed while i
 
   seeder._drop(O, 'blocked')
   t.is(seeder.indexProfile(O), null, 'a purged author is unknown')
+})
+
+test('indexProfile and indexFans: fan count and pages, top-friends with follow-back pointers, deletes, fail closed, held, blocked and purged', async (t) => {
+  const { fanRecord, topFriendsRecord, followRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const F = authorKey(2)
+  const G = authorKey(3)
+  const H = authorKey(4)
+  // O lists F, G and H; F follows O back, G follows O then unfollows, H not.
+  const ofO = [topFriendsRecord({ keys: [F, G, H], at: at(0) })]
+  const ofF = [fanRecord({ key: O, on: true, at: at(1) }), followRecord({ key: O, on: true, at: at(2) })]
+  const ofG = [fanRecord({ key: O, on: true, at: at(3) }), followRecord({ key: O, on: true, at: at(4) }), followRecord({ key: O, on: false, at: at(5) })]
+  const ofH = [fanRecord({ key: O, on: true, at: at(6) }), fanRecord({ key: O, on: false, at: at(7) }), fanRecord({ key: F, on: true, at: at(8) })]
+  const { seeder, diary } = scanFixture()
+  const all = [[O, ofO], [F, ofF], [G, ofG], [H, ofH]]
+  const entries = new Map(all.map(([key, records]) => [key, scannable(seeder, diary(key, records.length, (seq) => records[seq - 1]))]))
+  const pass = async () => {
+    for (const [key] of all) {
+      const entry = entries.get(key)
+      if (!entry || entry.dropped) continue
+      await seeder._runScan(key, entry)
+      seeder._onGrow(key, entry, entry.core.contiguousLength)
+    }
+    await settleIndex(seeder)
+  }
+  const grow = async (key, records, more) => {
+    records.push(...more)
+    entries.get(key).core.contiguousLength = records.length + 1
+    await pass()
+  }
+  await pass()
+  t.alike(seeder.indexProfile(O), {
+    about: null,
+    mood: null,
+    fans: { count: 2, indexing: false },
+    top: { seq: 1, back: { [F]: 2, [G]: null, [H]: null } },
+    indexing: false,
+    complete: true
+  }, 'two fas (H took it back), F follows back, G unfollowed, H never followed')
+  const hints = { profileSeq: null, usernameSeq: null }
+  t.alike(seeder.indexFans(O), {
+    author: O,
+    items: [{ key: G, seq: 1, at: at(3) }, { key: F, seq: 1, at: at(1) }],
+    next: null,
+    total: 2,
+    authors: { [G]: hints, [F]: hints },
+    indexing: false,
+    complete: true
+  }, 'newest first, each row the fan\'s own block')
+  t.alike(seeder.indexFans(F).items, [{ key: H, seq: 3, at: at(8) }])
+  t.alike(seeder.indexProfile(F).top, null, 'no top-friends block')
+  t.is(seeder.indexProfile(F).fans.count, 1)
+  t.alike(seeder.indexFans(O, Date.parse(at(3)) + '.' + G).items, [{ key: F, seq: 1, at: at(1) }], 'an exclusive cursor')
+  for (const bad of ['x', '1.' + 'A'.repeat(64), '99999999999999999.' + G, 7]) t.is(seeder.indexFans(O, bad), null, 'a malformed cursor: ' + bad)
+  t.is(seeder.indexFans('f'.repeat(64)), null, 'an author not served is unknown')
+  t.is(seeder.indexFans('nope'), null)
+
+  await grow(H, ofH, [followRecord({ key: O, on: true, at: at(9) })]) // H:4
+  t.alike(seeder.indexProfile(O).top.back, { [F]: 2, [G]: null, [H]: 4 }, 'H now follows back')
+  await grow(F, ofF, [deleteRecord({ seq: 1, at: at(10) })]) // F:3
+  t.alike(seeder.indexFans(O).items.map((r) => r.key), [G], 'a deleted fan block takes F out')
+  t.is(seeder.indexProfile(O).fans.count, 1)
+  await grow(O, ofO, [topFriendsRecord({ keys: [H], at: at(11) })]) // O:2
+  t.alike(seeder.indexProfile(O).top, { seq: 2, back: { [H]: 4 } }, 'the newest list wins')
+  await grow(O, ofO, [deleteRecord({ seq: 2, at: at(12) })]) // O:3
+  t.is(seeder.indexProfile(O).top.seq, 1, 'a deleted list falls back')
+
+  seeder._rebuildIndex()
+  const mid = seeder.indexProfile(O)
+  t.alike([mid.about, mid.mood, mid.top, mid.fans.indexing, mid.indexing, mid.complete], [null, null, null, true, true, false], 'between a rebuild and the re-index: fail closed')
+  await settleIndex(seeder)
+  t.alike(seeder.indexProfile(O).top, { seq: 1, back: { [F]: 2, [G]: null, [H]: 4 } }, 'the same after a rebuild')
+  t.alike(seeder.indexFans(O).items.map((r) => r.key), [G])
+
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  const paused = seeder.indexProfile(O)
+  t.alike([paused.top, paused.fans, paused.complete], [null, { count: 1, indexing: true }, false], 'a paused owner: no top, the fas known so far')
+  owner.indexPaused = false
+  seeder._served.get(H).indexPaused = true
+  t.alike(seeder.indexProfile(O).fans, { count: 1, indexing: true }, 'another diary paused: the count may grow')
+  t.is(seeder.indexFans(O).complete, false)
+  seeder._served.get(H).indexPaused = false
+
+  // A live fan whose own diary is pending may have a withdrawal not yet
+  // indexed or scanned: left out of the list and the count, not complete.
+  seeder._served.get(G).indexPaused = true
+  const pending = seeder.indexFans(O)
+  t.alike([pending.items, pending.total, pending.complete], [[], 0, false], 'a fan with a pending diary is left out and the page is not complete')
+  t.alike(seeder.indexProfile(O).fans, { count: 0, indexing: true }, 'and not counted')
+  seeder._served.get(G).indexPaused = false
+  seeder._served.get(G).scanned = 0
+  t.alike(seeder.indexFans(O).items, [], 'a tombstone scan behind: the same')
+  seeder._served.get(G).scanned = seeder._served.get(G).present
+  t.alike(seeder.indexFans(O).items.map((r) => r.key), [G], 'caught up: listed again')
+  t.is(seeder.indexFans(O).complete, true)
+
+  seeder._served.get(G).searchHold = 1
+  const held = seeder.indexFans(O)
+  t.alike([held.items, held.total, held.complete], [[], 0, false], 'a held fan is left out and the page is not complete')
+  t.alike(seeder.indexProfile(O).fans, { count: 0, indexing: true })
+  t.is(seeder.indexProfile(O).top.back[G], null)
+  seeder._served.get(G).searchHold = 0
+  seeder._served.get(H).searchHold = 1
+  t.is(seeder.indexProfile(O).top.back[H], null, 'a held friend: no follow pointer')
+  seeder._served.get(H).searchHold = 0
+  owner.searchHold = 1
+  t.is(seeder.indexFans(O), null, 'a held author is unknown')
+  t.is(seeder.indexProfile(O), null)
+  owner.searchHold = 0
+
+  seeder._isBlocked = (hex) => hex === G || hex === H
+  t.alike(seeder.indexFans(O).items, [], 'a blocked fan is filtered')
+  t.alike(seeder.indexProfile(O).top.back, { [F]: 2, [G]: null, [H]: null }, 'a blocked friend keeps its key, no pointer')
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexFans(O), null, 'a blocked author is unknown')
+  seeder._isBlocked = () => false
+
+  seeder._drop(G, 'blocked')
+  t.alike(seeder.indexFans(O).items, [], 'a purged fan leaves at once')
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexFans(O), null, 'a purged author is unknown')
+  t.alike(seeder.indexFans(F).items.map((r) => r.key), [H], 'other authors are unaffected')
 })
 
 test('indexScraps: the caps count admitted writers only and pages carry exclusive cursors', async (t) => {

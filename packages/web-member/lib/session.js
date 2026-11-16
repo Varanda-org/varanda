@@ -344,6 +344,11 @@ const TESTIMONIAL_INDEX_MAX_CHARS = 256 * 1024
 // seeder answers it reads (50 rows and 1000 hides fit in about 25 KB).
 const SCRAP_SELF = 'não pode deixar recado para si'
 const SCRAP_PAGE = 'páginas não recebem recados'
+// Fas e Melhores amigos (docs/rpc.md): a page is neither fanned nor listed.
+const FAN_SELF = 'não pode ser fã de si'
+const TOP_SELF = 'não pode listar a si entre os melhores amigos'
+const FAN_PAGE = 'páginas não têm fãs'
+const TOP_PAGE = 'páginas não entram nos melhores amigos'
 const SCRAP_FOLLOWING = 'esta pessoa só recebe recados de quem ela segue'
 const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
 const SCRAP_INDEX_MAX_CHARS = 64 * 1024
@@ -473,6 +478,8 @@ const DM_LOOKUP_WINDOWS = 8
 const PEEK_WINDOW = 36
 // diary.peek requests in flight at once.
 const MAX_DIARY_PEEKS = 2
+// How often refusePages looks for a free diary.peek slot.
+const PEEK_SLOT_POLL_MS = 20
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
 // The longest a read waits for a starting run to publish its cores
@@ -3015,6 +3022,49 @@ function createBrowserSession ({
     if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
   }
 
+  // Refuses (USAGE `message`) a key whose diary is a page: blocks 1 and 2
+  // tell a page diary (a page-roster there) from a person's, peeked as the
+  // recados check does. Fails closed: an unread block 1 or 2 inside the
+  // diary may be a page's roster, so it answers SEEDER_UNAVAILABLE (a
+  // person whose block 1 or 2 is deleted and cleared reads the same way).
+  // A diary with no block past 0 has no roster, so it is no page.
+  async function refusePage (key, message) {
+    return refusePages([key], message)
+  }
+
+  // The same check for several keys under ONE deadline (peekTimeoutMs for the
+  // whole list, not per key): blocks 1 and 2 of every key are peeked one after
+  // the other, each peek getting what is left of the deadline. A single worker
+  // never holds more than one of the MAX_DIARY_PEEKS slots, and when the others
+  // (the app's own diary.peek calls count) fill them it waits for a slot inside
+  // the same deadline instead of failing 'ocupado'. Fails closed: a key that
+  // cannot be ruled out (or the deadline reached first) fails the whole call
+  // with SEEDER_UNAVAILABLE, and a page among them is refused with `message`.
+  async function refusePages (keys, message) {
+    const deadline = Date.now() + peekTimeoutMs
+    const reads = []
+    for (const key of keys) {
+      for (;;) {
+        const ms = deadline - Date.now()
+        if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+        if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, ms)))
+          continue
+        }
+        try {
+          reads.push(await diaryPeekWithin({ author: key, seqs: [1, 2] }, ms))
+          break
+        } catch (err) {
+          // A slot taken between the check and the peek: wait again.
+          if (err === null || typeof err !== 'object' || err.code !== 'USAGE' || err.message !== DIARY_PEEK_BUSY) throw err
+          await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, Math.max(1, deadline - Date.now()))))
+        }
+      }
+    }
+    if (reads.some((r) => r.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster'))) throw new UsageError(message)
+    if (reads.some((r) => [1, 2].some((q) => q < r.length && r.missing.includes(q)))) throw new Error(SEEDER_UNAVAILABLE)
+  }
+
   // The DM engine opens each box with its in-memory pair; nothing else
   // sees the key.
   function openTestimonial (box, gen) {
@@ -4166,6 +4216,63 @@ function createBrowserSession ({
       await pushAfterWrite()
       return { seq: r.seq, deleted: r.deleted }
     }),
+
+    // Fas e Melhores amigos (docs/rpc.md). The record validator cannot see
+    // the writer, so self, a person this member blocked and a page are
+    // refused here before anything is written (a blocked or page `key`
+    // only matters turning ON; withdrawing a fan mark never reads). The
+    // page check reads the target's blocks off the chain and fails closed.
+    // Appended like profile.about, never retried.
+    'fan.set': async ({ key: rawKey, on }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = rawKey.toLowerCase()
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(FAN_SELF)
+        if (on && (await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      await serial(async () => { await refuse(await requireUnlocked()) })({})
+      try {
+        if (on) await refusePage(key, FAN_PAGE)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        return profileExtraWrite((c) => member.fanSet(c, { key, on }))
+      })({})
+    },
+
+    'top.set': async ({ keys: rawKeys }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const keys = rawKeys.map((k) => k.toLowerCase())
+      if (new Set(keys).size !== keys.length) throw new UsageError('parâmetro inválido: keys')
+      // A blocked key refuses only when it is new: one already in the list in
+      // effect may stay (blocking someone listed must not lock every edit).
+      // The page check runs on the new keys alone.
+      const added = async (own, read) => {
+        if (keys.includes(own)) throw new UsageError(TOP_SELF)
+        const listed = new Set(await read((c) => member.ownTopKeys(c)))
+        const fresh = keys.filter((k) => !listed.has(k))
+        const blocked = await member.memberBlocks(storage)
+        if (fresh.some((k) => blocked.has(k))) throw new UsageError(DM_BLOCKED)
+        return fresh
+      }
+      const checked = await serial(async () => added(await requireUnlocked(), withCores))({})
+      try {
+        await refusePages(checked, TOP_PAGE)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        const fresh = await added(await requireUnlocked(), withCores)
+        // The list moved since the page check: a key not checked then cannot
+        // be ruled out now (the caller may retry).
+        if (fresh.some((k) => !checked.includes(k))) throw toRpcError(new Error(SEEDER_UNAVAILABLE), reportInternal)
+        await ensureCaughtUp(epoch)
+        return profileExtraWrite((c) => member.topSet(c, { keys }))
+      })({})
+    },
 
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.

@@ -57,7 +57,8 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.scrapsUrl(f.members[2].author), (b) => c.validScraps(b, f.members[2].author)],
     [c.profileUrl(f.own), c.validProfile],
     [c.profileUrl(f.members[2].author), c.validProfile],
-    [c.followPairUrl(f.own, f.members[1].author), c.validFollowPair]
+    [c.followPairUrl(f.own, f.members[1].author), c.validFollowPair],
+    [c.fansUrl(f.own), (b) => c.validFans(b, f.own)]
   ]
   for (const [url, validate] of cases) {
     t.ok(url, 'builder accepts the fixture input')
@@ -574,6 +575,17 @@ test('the topic route answers folded hashtag tokens, including a post with the b
   t.ok(respond('/index/topic/ceu', undefined).items.some((ref) => textOf(ref).includes('#Céu')), 'case and accents fold away')
   t.ok(respond('/index/topic/festajunina+paodequeijo', undefined).items.map(textOf).every((x) => /pãodequeijo/.test(x) && /festajunina/.test(x)), 'a phrase needs every token')
   t.is(respond('/index/topic/naoexiste', undefined).items.length, 0)
+})
+
+test('the profile route answers the fan count and the top friends with one pending pick', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const body = c.validProfile(respond(c.profileUrl(f.own)))
+  t.is(body.fans.count, 3)
+  t.is(body.top.seq, 50)
+  const [back, pending] = [f.members[4].author, f.members[1].author]
+  t.is(typeof body.top.back[back], 'number')
+  t.is(body.top.back[pending], null, 'one pick does not follow back')
+  t.is(c.validProfile(respond(c.profileUrl(f.members[2].author))).top, null)
 })
 
 test('the roda route answers the seeder shape: root, top and the subtree parents first', async (t) => {

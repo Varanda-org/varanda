@@ -1098,6 +1098,12 @@ export function createVitrineRequest (fixtures, options) {
       }
       return { seq: last.seq, deleted: seqs }
     },
+    // Fãs e Melhores amigos (docs/protocol.md): the newest record of each kind wins.
+    'fan.set': ({ key, on }) => append({ type: 'fan', key, on: on === true, at: stamp() }),
+    'top.set': ({ keys }) => {
+      if (!Array.isArray(keys) || keys.length > 8 || new Set(keys).size !== keys.length || keys.includes(data.own)) refuse('USAGE', 'escolha inválida')
+      return append({ type: 'top-friends', keys: [...keys], at: stamp() })
+    },
     // Only an item the Vitrine media handle's putMoment answered and no
     // moment published yet, as the web node's entry check.
     'moment.create': ({ text, media, music }) => {

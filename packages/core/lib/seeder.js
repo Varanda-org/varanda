@@ -191,6 +191,7 @@ const {
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_TOP_FRIENDS,
   PAGE_KEYS
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
@@ -284,7 +285,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -5985,6 +5986,62 @@ class Seeder {
     }
   }
 
+  // GET /index/fans/<author>[/<atMs>.<key>]: one page of the author's fas,
+  // newest first (engagement-index.js fans), with a hint per listed key, the
+  // same cursor, flags and gate as indexFollows: null for an author not shown
+  // or held, or a malformed cursor; a held fan, or one whose own diary is
+  // still pending (_fansShown), is left out and the answer says complete
+  // false. seq and at point at the fan's own `fan` block, which
+  // the node peeks and verifies.
+  indexFans (authorHex, cursor = null) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      let after = null
+      if (cursor !== null) {
+        if (typeof cursor !== 'string') return null
+        const m = /^(\d{1,16})\.([0-9a-f]{64})$/.exec(cursor)
+        if (m === null) return null
+        const t = Number(m[1])
+        if (!Number.isSafeInteger(t) || t < 0) return null
+        after = { atMs: t, key: m[2] }
+      }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const page = this._index.fans(authorHex, { after, visible: shown.visible })
+      if (page === null) return null
+      const authors = {}
+      for (const item of page.items) {
+        if (!(item.key in authors)) authors[item.key] = this._index.hints(item.key)
+      }
+      const flags = this._indexFlags()
+      return { author: authorHex, items: page.items, next: page.next, total: page.total, authors, indexing: flags.indexing, complete: flags.complete && !v.held && !shown.left() }
+    } catch {
+      return null
+    }
+  }
+
+  // The fan writers the index may list: the follows gate, and only writers
+  // whose own diary is fully indexed and scanned. The index publishes a fan
+  // operation as soon as it is indexed, with no commit step, so while a
+  // writer's diary is pending (paused at a cap, a tombstone scan not run) a
+  // superseded `on` could still stand: that writer is left out of the list
+  // and the count, and left() tells whether any was (the answer is then not
+  // complete). Evaluated lazily, so left() is read after the index call.
+  _fansShown (v) {
+    let left = false
+    return {
+      visible: (hex) => {
+        if (!v.visible(hex)) return false
+        if (this._ownerIndexPending(hex)) {
+          left = true
+          return false
+        }
+        return true
+      },
+      left: () => left
+    }
+  }
+
   // GET /index/counts/<ref,...>: counts for the refs that are indexed (an
   // unknown ref, or one of an author not visible, is omitted).
   indexCounts (refs) {
@@ -6063,20 +6120,42 @@ class Seeder {
   }
 
   // GET /index/profile/<author>: pointers to the author's perfil rico blocks,
-  // { about: seq | null, mood: seq | null, indexing, complete } (engagement-index.js
-  // profileExtra): the newest live `profile-about` and `mood` block. The
-  // object is OPEN: later features add pointers and readers ignore keys they
-  // do not know. Null when the author is not visible or held (_searchHeld).
-  // Fails closed while the author's own diary is not fully indexed and
-  // scanned (the newest block may be missing, a tombstone not yet applied):
-  // both pointers null, indexing true and complete false. Seqs only: the node reads and
-  // verifies the blocks.
+  // { about: seq | null, mood: seq | null, fans: { count, indexing }, top:
+  // { seq, back: { <friend>: followSeq | null } } | null, indexing, complete }
+  // (engagement-index.js profileExtra, fanCount): the newest live
+  // `profile-about`, `mood` and `top-friends` block. fans.count is the number
+  // of visible fas indexed so far (held ones, and writers whose own diary
+  // is pending, left out: _fansShown), a claim like the follower counts;
+  // fans.indexing is true while it may still grow (any diary not fully
+  // indexed, a held fan, a writer left out). back maps every key of the
+  // top-friends block to the seq of that friend's committed live follow of
+  // the author, or null (none, a friend not shown or held): the node peeks
+  // those blocks. The object is OPEN: later features add pointers and
+  // readers ignore keys they do not know. Null when the author is not
+  // visible or held (_searchHeld). Fails closed while the author's own diary
+  // is not fully indexed and scanned (the newest block may be missing, a
+  // tombstone not yet applied): about, mood and top null, fans.indexing,
+  // indexing true and complete false. Seqs only: the node reads and verifies
+  // the blocks.
   indexProfile (authorHex) {
     try {
       if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
-      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, indexing: true, complete: false }
-      const { about, mood } = this._index.profileExtra(authorHex)
-      return { about, mood, indexing: this._indexFlags().indexing, complete: true }
+      const v = this._followsVisible()
+      const shown = this._fansShown(v)
+      const count = this._index.fanCount(authorHex, shown.visible)
+      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, indexing: true, complete: false }
+      const { about, mood, top } = this._index.profileExtra(authorHex)
+      let pointers = null
+      if (top !== null) {
+        const back = {}
+        for (const key of top.keys.slice(0, MAX_TOP_FRIENDS)) {
+          const listed = key !== authorHex && this._indexVisible(key) && !this._searchHeld(key)
+          back[key] = listed ? this._notices.followSeq(key, authorHex) : null
+        }
+        pointers = { seq: top.seq, back }
+      }
+      const flags = this._indexFlags()
+      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, indexing: flags.indexing, complete: true }
     } catch {
       return null
     }

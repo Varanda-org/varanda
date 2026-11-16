@@ -160,6 +160,9 @@ const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next
 const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
 const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
+const FANS_COUNT_KEYS = ['count', 'indexing']
+const TOP_KEYS = ['back', 'seq']
+const TOP_MAX = 8
 const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
 const TESTIMONIALS_KEYS = ['complete', 'indexing', 'pending', 'shown']
 const SHOWN_KEYS = ['from', 'seq', 'wseq']
@@ -365,6 +368,15 @@ export function followsUrl (author, kind, cursor = null) {
   if (a === null || !isFollowKind(kind)) return null
   if (cursor !== null && !isFollowCursor(cursor)) return null
   return resolveUrl('/index/follows/' + a + '/' + kind + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Fãs: GET /index/fans/<author>[/<cursor>], newest first, the same cursor as
+// the follower list. An invalid cursor is null, never dropped.
+export function fansUrl (author, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/fans/' + a + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -1055,7 +1067,36 @@ export function validProfile (body) {
   const about = body.about === undefined ? null : body.about
   const mood = body.mood === undefined ? null : body.mood
   if (!isHint(about) || !isHint(mood)) return null
-  return { about, mood, indexing: body.indexing, complete: body.complete }
+  const out = { about, mood, indexing: body.indexing, complete: body.complete }
+  // Fãs and Melhores amigos: strict when present, null when absent.
+  let fans = null
+  if (body.fans !== undefined && body.fans !== null) {
+    if (!hasExactKeys(body.fans, FANS_COUNT_KEYS) || !isCount(body.fans.count) || typeof body.fans.indexing !== 'boolean') return null
+    fans = { count: body.fans.count, indexing: body.fans.indexing }
+  }
+  let top = null
+  if (body.top !== undefined && body.top !== null) {
+    const t = body.top
+    if (!hasExactKeys(t, TOP_KEYS) || !isSeq(t.seq) || !isPlain(t.back)) return null
+    const keys = Object.keys(t.back)
+    if (keys.length > TOP_MAX) return null
+    const back = {}
+    for (const k of keys) {
+      if (!isHex64(k) || !isHint(t.back[k])) return null
+      back[k] = t.back[k]
+    }
+    top = { seq: t.seq, back }
+  }
+  return { ...out, fans, top }
+}
+
+// Same rows, cursor and flags as validFollows, without a `kind`.
+export function validFans (body, author, cursor = null) {
+  if (!isPlain(body) || Object.prototype.hasOwnProperty.call(body, 'kind')) return null
+  const ok = validFollows({ ...body, kind: 'seguidores' }, author, 'seguidores', cursor)
+  if (ok === null) return null
+  const { kind, ...rest } = ok
+  return rest
 }
 
 export function validFollowPair (body) {
@@ -1380,6 +1421,12 @@ export function fetchProfile (author, deps = {}) {
 
 export function fetchFollowPair (author, target, deps = {}) {
   return run(followPairUrl(author, target), validFollowPair, deps)
+}
+
+export function fetchFans (author, cursor = null, deps = {}) {
+  const url = fansUrl(author, cursor)
+  const a = url === null ? null : inputAuthor(author)
+  return run(url, (body) => validFans(body, a, cursor), deps)
 }
 
 export function fetchFollows (author, kind, cursor = null, deps = {}) {

@@ -43,7 +43,9 @@ async function scanOwn (request, author, alive) {
   return scan
 }
 
-// { held: { about, mood } (each { seq, record } or null), status, reload(),
+// { held: { about, mood } (each { seq, record } or null), status, index (the
+//   seeder's last /index/profile answer for `author`, the own one included;
+//   null with `own`, which does not ask the seeder), reload(),
 //   check(dropKinds), apply(kind, seq), drop(kind) }. status: 'loading', 'ready' (every
 // kind is settled: the seeder's index of this author is complete or named
 // it, and each named record was read back and checked; with `own`, the own
@@ -56,6 +58,7 @@ async function scanOwn (request, author, alive) {
 export function useProfileExtra ({ author, enabled, request, own = false }) {
   const [held, setHeld] = useState(NONE)
   const [status, setStatus] = useState('loading')
+  const [index, setIndex] = useState(null)
   const [tick, setTick] = useState(0)
   const heldRef = useRef(NONE)
   const requestRef = useRef(request)
@@ -85,6 +88,7 @@ export function useProfileExtra ({ author, enabled, request, own = false }) {
       const res = await fetchProfile(author)
       if (!alive()) return null
       if (!res.ok) return 'failed'
+      setIndex(res.value)
       const peeks = await peekAll(requestRef.current, planExtraPeeks(res.value, author), alive)
       if (!alive()) return null
       const got = readExtra(res.value, peeks, author)
@@ -102,6 +106,7 @@ export function useProfileExtra ({ author, enabled, request, own = false }) {
   useEffect(() => {
     heldRef.current = NONE
     setHeld(NONE)
+    setIndex(null)
     setStatus('loading')
   }, [author])
 
@@ -153,7 +158,7 @@ export function useProfileExtra ({ author, enabled, request, own = false }) {
     setHeld(heldRef.current)
   }, [])
 
-  return { held, status, reload, check, apply, drop }
+  return { held, status, index, reload, check, apply, drop }
 }
 
 export function AboutCard ({ about, theme = null }) {

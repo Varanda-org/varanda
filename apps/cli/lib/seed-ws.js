@@ -147,13 +147,22 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   segment after the owner is 400 'pedido inválido', never 404, so a
 //   client tells a bad cursor from an unknown owner.
 // - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
-//   mood: seq | null, indexing, complete }`, the author's newest live
-//   profile-about and mood blocks (perfil rico). The object is open: later
-//   features add pointers and readers ignore keys they do not know, so
-//   profileBody keeps only the keys it lists. While the author's own diary
-//   is still being indexed or scanned (fail closed) both are null, indexing
-//   is true and complete is false; otherwise complete is true and indexing
-//   is the global flag. Pointers only; the node verifies.
+//   mood: seq | null, fans: { count, indexing }, top: { seq, back:
+//   { <friend>: seq | null } } | null, indexing, complete }`, the author's
+//   newest live profile-about, mood and top-friends blocks (perfil rico,
+//   melhores amigos), the claimed number of fas and, per listed friend, the
+//   friend's live follow block of the author (at most MAX_TOP_FRIENDS). The
+//   object is open: later features add pointers and readers ignore keys they
+//   do not know, so profileBody keeps only the keys it lists. While the
+//   author's own diary is still being indexed or scanned (fail closed)
+//   about, mood and top are null, indexing and fans.indexing are true and
+//   complete is false; otherwise complete is true and indexing is the global
+//   flag. Pointers only; the node verifies.
+// - /index/fans/<author>[/<atMs>.<key>] -> Seeder#indexFans: `{ author,
+//   items: [{ key, seq, at }], next, total, authors, indexing, complete }`,
+//   the author's fas newest first (at most 20 rows), the rows, cursor and
+//   flags of /index/follows/<author>/seguidores without `kind`; seq and at
+//   point at the fan's own block. Rebuilt here field by field.
 // - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
 //   seq | null, indexing }`, the author's live follow block of target.
 //   Both rebuilt here field by field; both spend the index budget.
@@ -385,6 +394,10 @@ const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9
 // malformed cursor (400).
 const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
 const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
+const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+const FAN_ROWS_MAX = 20
+// Same value as MAX_TOP_FRIENDS in @varanda/core/lib/records.js.
+const TOP_FRIENDS_MAX = 8
 const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
 const SCRAP_ROWS_MAX = 50
 const SCRAP_HIDES_MAX = 1000
@@ -838,6 +851,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexProfile', [m[1]], profileBody]
     m = INDEX_FOLLOW_RE.exec(url)
     if (m) return ['indexFollowSeq', [m[1], m[2]], followSeqBody]
+    m = INDEX_FANS_RE.exec(url)
+    if (m) return ['indexFans', [m[1], m[2] === undefined ? null : m[2]], fansBody]
     // Without a public origin the Feira has no public surface at all.
     if (origin === null) return null
     m = INDEX_FEIRA_AUTHOR_RE.exec(url)
@@ -905,10 +920,54 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   // The pointer keys known so far; a new key is added here when its feature
   // ships, an unknown one is never echoed.
-  function profileBody ({ about, mood, indexing, complete }) {
+  function profileBody ({ about, mood, fans = null, top = null, indexing, complete }) {
     const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
     if (!seqOk(about) || !seqOk(mood)) throw new Error('index')
-    return { about, mood, indexing: indexing === true, complete: complete === true }
+    let fanCount = null
+    if (fans !== null) {
+      if (typeof fans !== 'object' || !Number.isSafeInteger(fans.count) || fans.count < 0) throw new Error('index')
+      fanCount = { count: fans.count, indexing: fans.indexing === true }
+    }
+    let pointers = null
+    if (top !== null) {
+      if (typeof top !== 'object' || !Number.isSafeInteger(top.seq) || top.seq < 1 || top.back === null || typeof top.back !== 'object') throw new Error('index')
+      const keys = Object.keys(top.back)
+      if (keys.length > TOP_FRIENDS_MAX) throw new Error('index')
+      const back = {}
+      for (const key of keys) {
+        if (!HEX64_RE.test(key) || !seqOk(top.back[key])) throw new Error('index')
+        back[key] = top.back[key]
+      }
+      pointers = { seq: top.seq, back }
+    }
+    return { about, mood, fans: fanCount, top: pointers, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Only the follower-list fields, checked as the client checks them: a
+  // malformed row, a duplicate key or the author itself is a 404.
+  function fansBody ({ author, items, next, total, authors, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    const hintOk = (n) => n === null || seqOk(n)
+    if (typeof author !== 'string' || !HEX64_RE.test(author) || !Array.isArray(items) || items.length > FAN_ROWS_MAX) throw new Error('index')
+    if (!Number.isSafeInteger(total) || total < items.length || authors === null || typeof authors !== 'object') throw new Error('index')
+    const seen = new Set()
+    const rows = items.map(({ key, seq, at }) => {
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || key === author || seen.has(key) || !seqOk(seq) || typeof at !== 'string' || at.length > 32) throw new Error('index')
+      seen.add(key)
+      return { key, seq, at }
+    })
+    const hints = {}
+    for (const key of seen) {
+      const h = authors[key]
+      if (h === null || typeof h !== 'object' || !hintOk(h.profileSeq) || !hintOk(h.usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq }
+    }
+    let cursor = null
+    if (next !== null) {
+      if (typeof next !== 'object' || !Number.isSafeInteger(next.atMs) || next.atMs < 0 || typeof next.key !== 'string' || !HEX64_RE.test(next.key)) throw new Error('index')
+      cursor = { atMs: next.atMs, key: next.key }
+    }
+    return { author, items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
   }
 
   function followSeqBody ({ seq, indexing }) {
@@ -1809,6 +1868,7 @@ module.exports = {
   INDEX_TESTIMONIALS_RE,
   INDEX_SCRAPS_RE,
   INDEX_PROFILE_RE,
+  INDEX_FANS_RE,
   INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,

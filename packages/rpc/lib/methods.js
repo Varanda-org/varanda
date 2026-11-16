@@ -57,6 +57,11 @@ function isKeyList (v) {
   return Array.isArray(v) && v.length >= 1 && v.length <= L.PROFILE_LIMIT_MAX && v.every(isKey)
 }
 
+// top.set: 0..MAX_TOP_FRIENDS distinct keys; an empty list clears the list.
+function isTopKeys (v) {
+  return Array.isArray(v) && v.length <= L.MAX_TOP_FRIENDS && v.every(isKey) && new Set(v).size === v.length
+}
+
 function isRefList (v) {
   if (!Array.isArray(v) || v.length < 1 || v.length > L.ENGAGEMENT_LIMIT_MAX) return false
   const seen = new Set()
@@ -971,6 +976,11 @@ const SPECS = {
   // the caller's diary, so no older version shows again. Result { seq,
   // deleted } as scrap.delete.
   'profile.extra.delete': { fields: { kind: req(isProfileExtraKind) }, mutating: true },
+  // Fas e Melhores amigos (docs/rpc.md): `fan.set` turns the caller's fan
+  // mark of a diary on or off, independent of follow. `top.set` replaces
+  // the caller's list of up to eight distinct keys; [] clears it.
+  'fan.set': { fields: { key: req(isKey), on: req(isBool) }, mutating: true },
+  'top.set': { fields: { keys: req(isTopKeys) }, mutating: true },
   'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
   'moments.read': { fields: none },
   // The momento a v5 reaction names, while it is showing (docs/rpc.md

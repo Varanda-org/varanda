@@ -188,6 +188,10 @@ test('the perfil rico methods are refused on the node session, nothing written',
   t.alike(await failure(m.call('profile.mood', { emoji: '' })), NO)
   t.alike(await failure(m.call('profile.extra.delete', { kind: 'about' })), NO)
   t.alike(await failure(m.call('profile.extra.delete', { kind: 'mood' })), NO)
+  t.alike(await failure(m.call('fan.set', { key: OTHER, on: true })), NO)
+  t.alike(await failure(m.call('fan.set', { key: OTHER, on: false })), NO)
+  t.alike(await failure(m.call('top.set', { keys: [OTHER] })), NO)
+  t.alike(await failure(m.call('top.set', { keys: [] })), NO)
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike(m.session.internal, [])
   const USAGE = (p) => ({ code: 'USAGE', message: 'parâmetro inválido: ' + p })
@@ -195,6 +199,10 @@ test('the perfil rico methods are refused on the node session, nothing written',
   t.alike(await failure(m.call('profile.about', { ...about, birthday: '02-30' })), USAGE('birthday'))
   t.alike(await failure(m.call('profile.mood', { emoji: 'ab' })), USAGE('emoji'))
   t.alike(await failure(m.call('profile.extra.delete', { kind: 'theme' })), USAGE('kind'))
+  t.alike(await failure(m.call('fan.set', { key: 'zz', on: true })), USAGE('key'))
+  t.alike(await failure(m.call('fan.set', { key: OTHER, on: 'sim' })), USAGE('on'))
+  t.alike(await failure(m.call('top.set', { keys: [OTHER, OTHER] })), USAGE('keys'))
+  t.alike(await failure(m.call('top.set', { keys: Array.from({ length: 9 }, (_, i) => String(i).repeat(64)) })), USAGE('keys'))
 })
 
 test('the dispatcher rejects unknown params on the new methods', async (t) => {

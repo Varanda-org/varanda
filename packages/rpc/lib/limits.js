@@ -28,6 +28,8 @@ const MAX_WORK = 80
 const MAX_STUDIES = 80
 const MAX_INTERESTS = 200
 const MAX_MOOD_TEXT = 60
+// Melhores amigos (top-friends record), same value as records.js.
+const MAX_TOP_FRIENDS = 8
 const TESTIMONIAL_PENDING_MAX = 64
 // Testimonial decisions synced in the member's seen document: kept and
 // declined each keep their newest entries (packages/core/lib/seen-blob.js).
@@ -206,6 +208,7 @@ module.exports = {
   MAX_STUDIES,
   MAX_INTERESTS,
   MAX_MOOD_TEXT,
+  MAX_TOP_FRIENDS,
   TESTIMONIAL_PENDING_MAX,
   TESTIMONIAL_KEPT_MAX,
   TESTIMONIAL_DECLINED_MAX,

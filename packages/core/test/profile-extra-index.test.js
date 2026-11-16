@@ -6,10 +6,11 @@
 // answer is an open object, so keys are asserted by name only. No network.
 const test = require('brittle')
 const { createEngagementIndex } = require('../lib/engagement-index')
-const { profileAboutRecord, moodRecord, profileRecord, validRecordCopy } = require('../lib/records')
+const { profileAboutRecord, moodRecord, profileRecord, topFriendsRecord, validRecordCopy } = require('../lib/records')
 
 const A = 'a'.repeat(64)
 const B = 'b'.repeat(64)
+const C = 'c'.repeat(64)
 const at = (i) => new Date(Date.UTC(2026, 2, 1, 12, 0, i)).toISOString()
 
 function add (ix, author, seq, record, opts = null) {
@@ -106,11 +107,43 @@ test('profileExtra: removeDiary purges the pointers and frees the slots', (t) =>
   t.is(ix.profileExtra(B).about, null)
 })
 
-test('profileExtra: the answer carries the about and mood keys by name (later features add more)', (t) => {
+test('profileExtra: the answer carries the about, mood and top keys by name (later features add more)', (t) => {
   const ix = createEngagementIndex()
   const got = ix.profileExtra(A)
   t.ok('about' in got)
   t.ok('mood' in got)
+  t.ok('top' in got)
+  t.is(got.top, null)
+})
+
+test('profileExtra: top is the newest live top-friends block with its keys, deletes fall back', (t) => {
+  const ix = createEngagementIndex()
+  t.ok(add(ix, A, 1, topFriendsRecord({ keys: [B], at: at(1) })))
+  t.ok(add(ix, A, 2, moodRecord({ emoji: '🙂', text: 'a', at: at(2) })))
+  t.ok(add(ix, A, 3, topFriendsRecord({ keys: [C, B], at: at(3) })))
+  t.alike(ix.profileExtra(A).top, { seq: 3, keys: [C, B] }, 'latest wins, order kept')
+  ix.profileExtra(A).top.keys.push('x')
+  t.alike(ix.profileExtra(A).top.keys, [C, B], 'the keys are a fresh copy')
+  t.is(ix.profileExtra(A).mood, 2, 'the other pointers are untouched')
+  t.ok(ix.removeRecord(A, 3))
+  t.alike(ix.profileExtra(A).top, { seq: 1, keys: [B] }, 'a deleted block falls back')
+  t.ok(add(ix, A, 4, topFriendsRecord({ keys: [], at: at(4) })))
+  t.alike(ix.profileExtra(A).top, { seq: 4, keys: [] }, 'an empty list is a list')
+  t.is(ix.stats().records, 3)
+  ix.removeDiary(A)
+  t.is(ix.profileExtra(A).top, null)
+  t.is(ix.stats().records, 0)
+})
+
+test('profileExtra: a top-friends block naming its writer or malformed takes no slot', (t) => {
+  const ix = createEngagementIndex()
+  add(ix, A, 1, topFriendsRecord({ keys: [B], at: at(1) }))
+  t.ok(ix.add(A, 2, { type: 'top-friends', keys: [B, A], at: at(2) }), 'self: skipped, the cursor moves on')
+  t.alike(ix.profileExtra(A).top, { seq: 1, keys: [B] }, 'the earlier list stays')
+  t.absent(ix.add(A, 3, { type: 'top-friends', keys: [B, B], at: at(3) }), 'a duplicate key is refused')
+  t.absent(ix.add(A, 3, { type: 'top-friends', keys: Array.from({ length: 9 }, (_, i) => String(i).repeat(64)), at: at(3) }), 'more than eight keys are refused')
+  t.absent(ix.add(A, 3, { type: 'top-friends', keys: 'nope', at: at(3) }))
+  t.is(ix.stats().records, 1)
 })
 
 test('profileExtra: a record refused at the per-author cap leaves no pointer', (t) => {

@@ -502,4 +502,13 @@ export const profileRecords = [
   { author: members[2].author, seq: 96, record: { type: 'mood', emoji: '🌱', text: 'Trocando mudas hoje', at: at(5, 11) } }
 ]
 
-export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords], sealed, listings, rates }
+// Fãs e Melhores amigos: three members are fans of the own diary; the own
+// top friends name Bia, who follows back, and João, who does not (pending).
+export const fanRecords = [
+  { author: members[1].author, seq: 97, record: { type: 'fan', key: own, on: true, at: at(5, 8) } },
+  { author: members[2].author, seq: 97, record: { type: 'fan', key: own, on: true, at: at(5, 9) } },
+  { author: members[4].author, seq: 97, record: { type: 'fan', key: own, on: true, at: at(5, 10) } },
+  { author: own, seq: 50, record: { type: 'top-friends', keys: [members[4].author, members[1].author], at: at(5, 11) } }
+]
+
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords], sealed, listings, rates }

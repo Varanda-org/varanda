@@ -205,7 +205,8 @@ import NovaPaginaScreen from './src/screens/NovaPagina'
 import PaginaAjustesScreen from './src/screens/PaginaAjustes'
 import * as actingAs from './src/actingAs'
 import Publicar from './src/screens/Publicar'
-import SeguindoScreen from './src/screens/Seguindo'
+import SeguindoScreen, { Fas as FasScreen } from './src/screens/Seguindo'
+import MelhoresAmigosScreen from './src/screens/MelhoresAmigos'
 import Termos from './src/screens/Termos'
 import { ContaExcluida, ExclusaoRecibo } from './src/screens/ExcluirConta'
 import { clearChatMedia, onAppStateChange, screenWatcher, stopBoundPlayback, stopPlayback } from './src/media/chatMedia'
@@ -245,6 +246,8 @@ const AnuncioEditar = memo(AnuncioEditarScreen)
 const Avaliar = memo(AvaliarScreen)
 const Anunciar = memo(AnunciarScreen)
 const Seguindo = memo(SeguindoScreen)
+const Fas = memo(FasScreen)
+const MelhoresAmigos = memo(MelhoresAmigosScreen)
 const Paginas = memo(PaginasScreen)
 const NovaPagina = memo(NovaPaginaScreen)
 const PaginaAjustes = memo(PaginaAjustesScreen)
@@ -2063,8 +2066,17 @@ function Member () {
     pushScreen({ screen: 'membro', key, params: { seed: seed || null } })
   }, [pushScreen, clearStack, ownKey])
   const openPeople = useCallback((key, kind) => {
-    if ((kind !== 'seguindo' && kind !== 'seguidores') || typeof key !== 'string') return
-    pushScreen({ screen: kind, key: key.toLowerCase(), params: {} })
+    if ((kind !== 'seguindo' && kind !== 'seguidores' && kind !== 'fas') || typeof key !== 'string') return
+    const lower = key.toLowerCase()
+    // The own fan list is the Fãs segment of the own Seguindo screen.
+    if (kind === 'fas' && lower === ownKey) {
+      pushScreen({ screen: 'seguindo', key: lower, params: { segment: 'fas' } })
+      return
+    }
+    pushScreen({ screen: kind, key: lower, params: {} })
+  }, [pushScreen, ownKey])
+  const openTop = useCallback(() => {
+    pushScreen({ screen: 'melhores-amigos', params: {} })
   }, [pushScreen])
   // The Momentos viewer, starting at one author's ring (hosted only: the
   // strip and the Diário rows that call it render only there).
@@ -3546,6 +3558,7 @@ function Member () {
       handleOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       handleOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined,
       handleOpenRecados: node.hosted === true ? openRecados : undefined,
+      handleOpenTop: node.hosted === true ? openTop : undefined,
       handleComposeSeen: () => setComposeSignal(null),
       handleOpenInvite: (link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key),
       handleConversar: ({ peer, draft, card }) => openMessage(peer, { draft, card })
@@ -3608,6 +3621,20 @@ function Member () {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={h.handleOpenMomentComposer} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'fas') {
+        return (
+          <StackLayer key={i + ':fas:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Fas entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} active={ready} onBack={goBack} onOpenMember={openMember} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'melhores-amigos') {
+        return (
+          <StackLayer key={i + ':melhores-amigos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <MelhoresAmigos ownKey={ownKey} active={ready} onBack={goBack} onToast={h.handleShowToast} />
           </StackLayer>
         )
       }
@@ -3997,6 +4024,7 @@ function Member () {
                       onOpenMomentos={openMomentos}
                       onOpenSalvos={openSalvos}
                       onOpenRecados={h.handleOpenRecados}
+                      onOpenTop={h.handleOpenTop}
                     />
                   )}
                 </ScreenVisible.Provider>

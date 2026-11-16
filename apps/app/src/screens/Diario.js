@@ -61,6 +61,10 @@ import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
 import { AboutCard, useProfileExtra } from '../ui/AboutCard'
+import { useOwnMarks } from '../ui/FanButton'
+import { TopFriendsRow, useTopFriends } from '../ui/TopFriendsRow'
+import { fansCountView, NOTICES } from '../fans.js'
+import { ownTopRows } from '../fansView.js'
 import { MoodChip } from '../ui/MoodChip'
 import { SorteCard } from '../ui/SorteCard'
 import { bandTint, extraView } from '../profileExtraView.js'
@@ -260,7 +264,7 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onTabChange }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const node = useNode()
@@ -590,6 +594,11 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   // Rich profile (hosted only); the Sorte do dia is local and always shown.
   const rich = useProfileExtra({ author: publicKey || ownPublicKey, enabled: node.hosted === true, request })
   const extraShown = extraView(rich.held, now)
+  const topOwner = publicKey || ownPublicKey
+  const ownMarks = useOwnMarks({ request, ownKey: topOwner, enabled: node.hosted === true })
+  const topRead = useTopFriends({ owner: topOwner, ownKey: topOwner, index: rich.index, request, enabled: node.hosted === true })
+  const topRows = ownTopRows(ownMarks.marks.top, topRead.view)
+  const fansView = fansCountView({ fans: rich.index ? rich.index.fans : null, complete: rich.index ? rich.index.complete : false })
   const tint = bandTint(extraShown.theme, scheme)
 
   const bandHeight = insets.top + BAND
@@ -699,6 +708,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           theme={extraShown.theme}
           mood={extraShown.mood ? <MoodChip mood={extraShown.mood} now={now} theme={extraShown.theme} onPress={node.hosted === true ? () => setEditing(true) : undefined} /> : null}
           about={<><AboutCard about={extraShown.about} theme={extraShown.theme} /><SorteCard /></>}
+          top={node.hosted === true && typeof onOpenTop === 'function'
+            ? <TopFriendsRow rows={topRows} mine onEdit={onOpenTop} onOpen={onOpenMember} loading={ownMarks.marks.status === 'loading'} notice={ownMarks.marks.status === 'unsure' && !ownMarks.marks.top ? NOTICES.unreadable : null} />
+            : null}
           avatar={{ name: who.avatarName, publicKey: info.publicKey, picture: profile && profile.avatar, persist: true }}
           title={displayText(who.title)}
           subtitle={who.subtitle ? displayText(who.subtitle) : null}
@@ -711,8 +723,14 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
             label: followCounts.seguidores === 1 ? 'seguidor' : 'seguidores',
             value: followCounts.seguidores === null ? null : displayText(formatCount(followCounts.seguidores)),
             onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'seguidores') : undefined
-          }]}
-          note={followCounts.incomplete && followCounts.seguidores !== null ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
+          }, node.hosted === true
+            ? {
+                label: fansView.count === 1 ? 'fã' : 'fãs',
+                value: fansView.count === null ? null : displayText(formatCount(fansView.count)),
+                onPress: typeof onOpenPeople === 'function' ? () => onOpenPeople(ownPublicKey, 'fas') : undefined
+              }
+            : null]}
+          note={(followCounts.incomplete && followCounts.seguidores !== null) || (node.hosted === true && fansView.count !== null && fansView.incomplete) ? <View style={styles.countsNote}><Soft>{COUNTS_INCOMPLETE_NOTE}</Soft></View> : null}
           corner={<Pill key='edit' label='Editar perfil' onPress={() => setEditing(true)} maxFontSizeMultiplier={TEXT_CAP} />}
           actions={[
             profileUrl !== null ? <Pill key='share' icon='compartilhar' accessibilityLabel='compartilhar perfil' onPress={() => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) }} /> : null
