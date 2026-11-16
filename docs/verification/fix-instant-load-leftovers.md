@@ -35,7 +35,13 @@ Também passam, sem mudança: `mediaKeptLoad`, `mediaKeep`, `localCaches`, `medi
 
 ## Conferência em aparelho
 
-PENDENTE
+Modo Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`, Metro com `--clear`), na ordem celular primeiro:
+
+- **iOS**, simulador iPhone 17 Pro, build de debug: A Rua, Diário, Busca, Conversas, a conversa com a Bia (duas fotos), Membro (Bia), Comunidades, Feira e um anúncio com foto abrem sem tela vermelha e sem aviso novo. As fotos da conversa e do anúncio aparecem: no Vitrine o transporte é falso, mas a conferência do SHA-256 usa o `mediaHashDeps()` nativo, o caminho que esta branch passou a usar.
+- **Android**, emulador API 36 (`varanda-api36-parity`), build de debug: as mesmas telas, com as fotos. O logcat do `ReactNativeJS` só mostra os avisos de ciclo de `require` (Conversa, PostRow, PollCard e EventCard) que já existiam na `main`.
+- **Web**, painel do navegador em `localhost:8106`: A Rua, Diário, Conversas e as fotos da conversa com a Bia. A Feira pede a cidade, como antes. O único erro no console é o endereço `https://vitrine.invalid/p/policy` de propósito do Vitrine.
+
+Não dá para alcançar no Vitrine nem no build de debug, e ficam na #224 como conferência pós-deploy: a espera pela primeira resposta de `block.list` (o Vitrine não usa instantâneos), a troca de instalação com a mesma chave, a leitura que cruza uma poda e o desregistro da tarefa de segundo plano depois de uma falha.
 
 ## Caixas das seções 152 a 170 de `docs/verification.md`
 
