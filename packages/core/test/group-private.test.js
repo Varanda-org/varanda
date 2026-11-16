@@ -955,6 +955,30 @@ test('a member back in the community enters G only on a new writer an admit list
   t.absent(g.entitled.includes(wX), 'the writer on the retired CW stays out')
 })
 
+test('after leaving C, a G admission entitles only writers of the CW generation it lists, whatever the dates', (t) => {
+  const wX4 = K(0x403)
+  const wX5 = K(0x404)
+  const w = cworld()
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(60) }))
+  // The leave dated before both admits: no causal link places it.
+  const leave = w.cleave(X, 1)
+  w.comm.addWriter(X, cwX2, { rejoin: leave })
+  w.add(X, wX3, { at: 70 })
+  let g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wX3), 'the admits list only a writer of the old CW generation')
+  t.ok(g.requests.includes(X))
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX3, seq: 1 }], at: AT(80) }))
+  w.add(X, wX4, { at: 81 })
+  g = buildGroup(w.input())
+  t.ok(g.entitled.includes(wX3) && g.entitled.includes(wX4), 'an admit listing a writer of the new CW covers its later devices')
+  t.alike(g.requests, [])
+  // A G writer on the retired CW: same generation as the listed wX, never covered.
+  w.add(X, wX5, { cw: w.logs.get(wX).entries[0].record.member, at: 90 })
+  g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wX5), 'a writer on a retired CW')
+  t.alike(g.requests, [X], 'it stays uncovered, as without automatic cover')
+})
+
 const wY2 = K(0x501)
 const wY3 = K(0x502)
 const leaveOn = (w, writer, at, extra = {}) => w.push(writer, groupLeave({ cuts: [{ writer, seq: w.len(writer) }], at: AT(at), ...extra }))

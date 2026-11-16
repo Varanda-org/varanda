@@ -1120,6 +1120,38 @@ test('gate: a new CW of an admitted member is admitted, and its group writers co
   t.alike(shown(buildGroup(g.input())), [])
 })
 
+test('gate: after leaving C, a G admission covers only writers of the CW generation it lists, whatever the dates', (t) => {
+  const cwX2 = K(0x41)
+  const wX3 = K(0x4011)
+  const wX4 = K(0x4012)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  const a = groupIn(C, { key: G1, join: 'approval' })
+  a.add(X, wX)
+  a.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(60) }))
+  // The leave dated before the admit: no causal link places it.
+  const leave = cwLeave(C, cwX, 1)
+  C.addWriter(X, cwX2, { rejoin: leave })
+  a.add(X, wX3, { cw: cwX2, at: AT(70) })
+  gpost(a, wX3, 71)
+  let r = buildGroup(a.input())
+  t.alike(shown(r), [], 'the admit lists only a writer of the old CW generation')
+  t.ok(r.requests.includes(X), 'the new writer waits for an admit')
+  a.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX3, seq: 1 }], at: AT(80) }))
+  a.add(X, wX4, { cw: cwX2, at: AT(81) })
+  gpost(a, wX4, 82)
+  r = buildGroup(a.input())
+  t.alike(shown(r).sort(), [wX3 + ':1', wX4 + ':1'].sort(), 'an admit listing a writer of the new CW covers its later devices')
+  t.alike(r.requests, [])
+  // A G writer on the retired CW, of the generation the first admit lists.
+  const wX5 = K(0x4013)
+  a.add(X, wX5, { cw: cwX, at: AT(90) })
+  gpost(a, wX5, 91)
+  r = buildGroup(a.input())
+  t.absent(shown(r).includes(wX5 + ':1'), 'a writer on a retired CW is never covered')
+  t.absent(r.liveWriters.has(wX5))
+  t.alike(r.requests, [X], 'it stays uncovered, as without automatic cover')
+})
+
 test('no authority after leaving: a departed admin moderation never counts, with or without a G leave', (t) => {
   const setup = () => {
     const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })

@@ -2404,13 +2404,16 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // not retired; in a group, no leave and no rejoin, or a rejoin naming the
   // diary's latest leave) gets, on each positive admit of that generation
   // not listing it, the cut an admin listing it would have written: its
-  // first record after the admit in causal order, else its next seq. Its
-  // records before the admission stay unadmitted, and a device from before
-  // a leave never comes back. Under a community, leaving it counts too: only
-  // an admit after the diary's latest community leave covers a writer, and
-  // never one whose CW C retired. Auto cuts never prove a leave was seen
-  // (sawPrefix and admitGen read `cuts` only). The opened pass of a private
-  // group reuses these events.
+  // first record (side records included, placed at their reactsAt anchor)
+  // after the admit in causal order, else its next seq. Its records before
+  // the admission stay unadmitted, and a device from before a leave never
+  // comes back. Under a community, leaving it counts too, decided from
+  // headers and the admit's own cuts, never from order positions (a
+  // community leave has no causal link to G's admits): never a writer whose
+  // CW C retired, and only an admit that lists a G writer of the diary bound
+  // to a CW of the same community generation (genOfC) as the writer's CW.
+  // Auto cuts never prove a leave was seen (sawPrefix and admitGen read
+  // `cuts` only). The opened pass of a private group reuses these events.
   if (!auth) {
     const autoEligible = (w, d) => {
       if (isC) return !monoRetired.has(w)
@@ -2418,24 +2421,31 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       const list = leavesOf.get(d)
       return list ? names(w, list[list.length - 1]) : !rejoinRef.has(w)
     }
-    const nodesOf = new Map()
-    const leftCAt = new Map()
-    for (const n of order) {
-      if (n.record.type === 'community-leave') leftCAt.set(n.diary, n.pos)
-      else if (!n.virtual && n.seq >= 1) pushTo(nodesOf, n.writer, n)
+    const cwGen = (w) => cwOf.has(w) && cs.genOfC.has(cwOf.get(w)) ? cs.genOfC.get(cwOf.get(w)) : -1
+    const sameCGen = (e, w, d) => {
+      const g = cwGen(w)
+      if (g < 0) return false
+      for (const x of e.cuts.keys()) if (writerDiary.get(x) === d && cwGen(x) === g) return true
+      return false
     }
-    const at = (n) => n.pos
+    const seqsOf = new Map()
+    for (const n of order) if (!n.virtual && n.seq >= 1) pushTo(seqsOf, n.writer, { seq: n.seq, pos: n.pos })
+    for (const list of reactsAt.values()) for (const p of list) pushTo(seqsOf, p.writer, { seq: p.seq, pos: p.pos })
+    for (const list of seqsOf.values()) list.sort((a, b) => a.seq - b.seq)
+    const at = (x) => x.pos
     for (const l of kept) {
       const w = l.key
       const d = l.diary
       const list = admits.get(d)
       if (w === G || !list || !autoEligible(w, d)) continue
       const gen = leaves.get(d) || 0
-      const since = leftCAt.has(d) ? leftCAt.get(d) : -1
-      const mine = nodesOf.get(w) || []
-      const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
+      const mine = seqsOf.get(w) || []
+      let next = 1
+      for (const x of l.records) if (x.seq + 1 > next) next = x.seq + 1
+      for (const x of l.reacts || []) if (x.seq + 1 > next) next = x.seq + 1
       for (const e of list) {
-        if (!e.on || e.gen < gen || e.pos < since || e.cuts.has(w)) continue
+        if (!e.on || e.gen < gen || e.cuts.has(w)) continue
+        if (cs !== null && !sameCGen(e, w, d)) continue
         const j = firstAbove(mine, e.pos, at)
         e.auto.set(w, j < mine.length ? mine[j].seq : next)
       }
@@ -3015,6 +3025,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       repairC,
       withdrawnC,
       retiredC: retired,
+      // Each CW's leave-set generation by its header: the automatic cover of
+      // a G writer needs an admit listing a writer of the same one.
+      genOfC: part.genOf,
       retiredBy,
       leavesOf,
       rejoinOf: rejoinRef,
@@ -3448,7 +3461,7 @@ function buildCommunity (input) {
 
 // buildCommunity's result plus the fold's internal state for buildGroup
 // (null when C is unbound or not a community): authorizedC(cw, seq),
-// repairC(cw, seq), withdrawnC(cw, seq), retiredC, leavesOf, rejoinOf,
+// repairC(cw, seq), withdrawnC(cw, seq), retiredC, genOfC, leavesOf, rejoinOf,
 // cwDiary, counted, lastSeq, rootAdminC, bansC, everOn, created, overflow,
 // general, dropped.
 function foldCommunityState (input) {
