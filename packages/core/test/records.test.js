@@ -2110,3 +2110,57 @@ test('poll posts and choice records: key sets, rules and builders', async (t) =>
   t.is(copied.to.seq, 3, 'the builder copies the target')
   await t.exception.all(async () => choiceRecord({ to: { author: K1, seq: 3 }, pick: 4 }), /malformed/)
 })
+
+test('event posts: key set, rules and builder', async (t) => {
+  const { POST_EVENT_KEYS, POST_POLL_KEYS } = records
+  t.alike([...POST_EVENT_KEYS], ['type', 'text', 'at', 'replyTo', 'event'])
+  t.ok(Object.isFrozen(POST_EVENT_KEYS))
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: '2026-12-24T23:00:00.000Z', place: 'Casa' }
+  const post = { type: 'post', text: 'Venham todos', at: AT, replyTo: null, event }
+  t.is(validateRecord(post, 1), null)
+  t.is(validateRecord({ ...post, event: { ...event, end: null, place: '' } }, 1), null, 'no end, no place')
+  t.alike(postRecord({ text: 'Venham todos', at: AT, event }), post)
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, event })), [...POST_EVENT_KEYS])
+  t.alike(Object.keys(postRecord({ text: 'q', at: AT, event: null })), ['type', 'text', 'at', 'replyTo'], 'a null event is no event')
+  const source = { ...event }
+  const built = postRecord({ text: 'q', at: AT, event: source })
+  source.title = 'outro'
+  t.is(built.event.title, 'Ceia', 'the builder copies the event')
+  t.alike(Object.keys(built.event), ['title', 'start', 'end', 'place'])
+
+  const bads = [
+    {}, { title: 'a' }, null, 'x', [], 5, { ...event, extra: 1 },
+    { title: event.title, start: event.start, end: event.end }, { title: event.title, start: event.start, place: 'x' },
+    { ...event, title: '' }, { ...event, title: ' ' }, { ...event, title: 'a\nb' }, { ...event, title: 'a'.repeat(81) },
+    { ...event, place: 'a'.repeat(121) }, { ...event, place: 'a\u0000' }, { ...event, place: 5 },
+    { ...event, start: '2026-12-24' }, { ...event, start: '2026-12-24T20:00:00Z' }, { ...event, start: '2019-12-31T23:59:59.999Z' },
+    { ...event, start: '2100-01-01T00:00:00.001Z' }, { ...event, start: 1798142400000 }, { ...event, end: event.start },
+    { ...event, end: '2026-12-24T19:00:00.000Z' }, { ...event, end: '2027-12-26T00:00:00.000Z' }, { ...event, end: undefined }
+  ]
+  for (const bad of bads) t.is(validateRecord({ ...post, event: bad }, 1), 'event-invalid', 'event ' + JSON.stringify(bad))
+  t.is(validateRecord({ ...post, text: '' }, 1), 'text-length', 'an event post needs its text')
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT) }, 1), null)
+  t.is(validateRecord({ ...post, text: 'a'.repeat(MAX_TEXT + 1) }, 1), 'text-length')
+  t.is(validateRecord({ ...post, text: 'a\u0000b' }, 1), 'control-chars')
+  t.is(validateRecord({ ...post, at: '2026-01-01' }, 1), 'date-invalid')
+  t.is(validateRecord({ ...post, replyTo: { author: K1, seq: 1 } }, 1), 'reply-invalid', 'an event is a root post')
+  t.is(validateRecord({ ...post, extra: 1 }, 1), 'malformed')
+  const media = [{ core: K1, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: K1, width: 1, height: 1 }]
+  t.is(validateRecord({ ...post, media }, 1), 'malformed', 'no media beside an event')
+  t.is(validateRecord({ ...post, quote: { author: K1, seq: 1 } }, 1), 'malformed', 'no quote beside an event')
+  t.is(validateRecord({ ...post, poll: ['a', 'b'] }, 1), 'malformed', 'no poll beside an event')
+  const noEvent = { ...post }
+  delete noEvent.event
+  t.is(validateRecord(noEvent, 1), null, 'without the key it is a plain post')
+  t.absent(records.hasExactKeys(post, ['type', 'text', 'at', 'replyTo']), 'an old reader matches no key set')
+  t.absent(records.hasExactKeys(post, [...POST_POLL_KEYS]), 'not a poll key set')
+  const hostile = { ...post }
+  Object.defineProperty(hostile, 'event', { get () { throw new Error('boom') }, enumerable: true })
+  t.is(validateRecord(hostile, 1), 'malformed', 'a throwing getter is malformed')
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event, poll: ['a', 'b'] }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event, media }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event, quote: { author: K1, seq: 1 } }), /malformed/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, event: { ...event, end: event.start } }), /event-invalid/)
+  await t.exception.all(async () => postRecord({ text: 'q', at: AT, replyTo: { author: K1, seq: 1 }, event }), /reply-invalid/)
+  await t.exception.all(async () => postRecord({ text: '', at: AT, event }), /text-length/)
+})

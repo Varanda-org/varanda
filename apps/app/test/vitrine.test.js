@@ -89,6 +89,7 @@ const resultKeys = {
   'group.react': ['ok'],
   'group.choose': ['ok'],
   'group.topics': ['items', 'next', 'incomplete'],
+  'group.events': ['items', 'next', 'incomplete'],
   'group.voters': ['voters'],
   'choice.set': ['seq'],
   'choice.mine': ['pick', 'seq'],
@@ -177,7 +178,7 @@ async function answer (t, request, method, params) {
   t.ok(validateResponse({ v: 1, id: 1, ok: true, result }).ok, method + ' success envelope')
   let expected = resultKeys[method]
   if (method === 'username.add' && !result.changed) expected = ['changed', 'username']
-  if (method === 'group.read' && params.topic) expected = [...expected, 'poll']
+  if (method === 'group.read' && params.topic) expected = [...expected, 'poll', 'event']
   if (method === 'sync.status' && result.state === 'running') expected = ['state', 'runId', 'once']
   if (method === 'page.sign') {
     if (['accept', 'remove', 'offer', 'transfer-accept', 'close'].includes(params.action)) expected = ['record']
@@ -206,7 +207,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(new Set(f.conversations.map((c) => c.peer)).size, 8)
   t.is(f.communities.length, 3)
   t.is(f.groups.length, 5)
-  t.is(f.feed.length, 42, '36 base posts, one more photo post, 4 topic posts and a poll post')
+  t.is(f.feed.length, 43, '36 base posts, one more photo post, 4 topic posts, a poll post and an event post')
   t.is(f.notices.length, 10)
   for (const p of [...f.members, ...f.pages]) {
     t.ok(/^[0-9a-f]{64}$/.test(p.author))
@@ -285,7 +286,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   }
   const feed = await answer(t, request, 'feed.read', {})
   for (const row of feed.items) {
-    keys(t, row, ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : [])])
+    keys(t, row, ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : []), ...(row.event ? ['event'] : [])])
     if (row.quote) keys(t, row.quote, ['author', 'seq'])
     if (row.media) for (const media of row.media) keys(t, media, ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
   }
@@ -701,6 +702,7 @@ function samples (f) {
     'group.reactors': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 } },
     'group.rekey': { group },
     'group.topics': { group: forum.group },
+    'group.events': { group: forum.group },
     'group.voters': { group: forum.group, target: { writer: forum.topics[0].writer, seq: forum.topics[0].seq } },
     'group.choose': { group: forum.group, target: { writer: forum.topics[0].writer, seq: forum.topics[0].seq }, pick: 1 },
     'choice.set': { to: `${f.own}:60`, pick: 1 },
@@ -1728,7 +1730,7 @@ test('forum topics: group.topics, marks, topic reads, group.choose and group.vot
   t.alike([fresh.seq, fresh.replies, fresh.poll.totals], [made.seq, 0, [0, 0]])
   const marks = await call('group.read', { group: g.group, marks: true, limit: 1 })
   t.alike(marks.items[0].topic, { writer: fresh.writer, seq: made.seq, poll: true })
-  t.alike(Object.keys(thread), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'state'], 'the topic read keeps the real key order')
+  t.alike(Object.keys(thread), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'event', 'state'], 'the topic read keeps the real key order')
 })
 
 test('forum topics: a hidden root loses its poll, marker and votes, as the real handler', async (t) => {
@@ -1744,10 +1746,53 @@ test('forum topics: a hidden root loses its poll, marker and votes, as the real 
   t.alike([row.hidden, row.text, row.poll], [true, '', null])
   const thread = await call('group.read', { group: g.group, topic: target })
   t.is(thread.poll, null, 'the topic read of a hidden root has no poll')
-  t.alike(Object.keys(thread), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'state'])
+  t.alike(Object.keys(thread), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'event', 'state'])
   const marked = await call('group.read', { group: g.group, marks: true })
   t.is(marked.items.find((i) => i.writer === one.writer && i.seq === one.seq).topic, null, 'the hidden root has no marker')
   await refused(t, request, 'group.voters', { group: g.group, target }, 'USAGE', 'mensagem não encontrada')
   await refused(t, request, 'group.choose', { group: g.group, target, pick: 0 }, 'USAGE', 'mensagem não encontrada')
   await refused(t, request, 'group.voters', { group: g.group, target: { writer: g.topics[1].writer, seq: g.topics[1].seq } }, 'USAGE', 'enquete não encontrada')
+})
+
+test('group events: the fake lists the root event, RSVP counts and posting adds one', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const g = f.groups[2]
+  const first = await call('group.events', { group: g.group })
+  t.is(first.items.length, 1)
+  keys(t, first.items[0], ['writer', 'diary', 'seq', 'at', 'text', 'name', 'username', 'hidden', 'event', 'totals', 'mine'])
+  t.alike(first.items[0].totals, [0, 0])
+  await call('group.choose', { group: g.group, target: { writer: first.items[0].writer, seq: first.items[0].seq }, pick: 1 })
+  const voted = await call('group.events', { group: g.group })
+  t.alike([voted.items[0].totals, voted.items[0].mine], [[0, 1], 1])
+  const event = { title: 'Roda de conversa', start: '2026-12-01T18:00:00.000Z', end: null, place: '' }
+  const made = await call('group.post', { group: g.group, text: 'Venham!', event })
+  const after = await call('group.events', { group: g.group })
+  t.is(after.items.length, 2)
+  t.is(after.items[0].seq, made.seq)
+  t.alike(after.items[0].event, event)
+})
+
+test('event RSVP on the diary fixture event and the topic read of a group event', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const to = `${f.own}:61`
+  t.alike(await call('choice.mine', { to }), { pick: null, seq: null })
+  const set = await call('choice.set', { to, pick: 1 })
+  t.alike((await call('choice.mine', { to })).pick, 1, 'maybe on a diary event')
+  t.ok(set.seq > 0)
+  await refused(t, request, 'choice.set', { to, pick: 2 }, 'USAGE', 'opção inválida')
+  const g = f.groups[2]
+  const root = g.events[0]
+  const topic = { writer: root.writer, seq: root.seq }
+  await call('group.choose', { group: g.group, target: topic, pick: 0 })
+  const voters = await call('group.voters', { group: g.group, target: topic })
+  t.alike(voters.voters.map((v) => v.count), [1, 0])
+  const made = await call('group.post', { group: g.group, text: 'Tópico com evento', topic: true, event: { title: 'Mutirão', start: '2026-12-02T18:00:00.000Z', end: null, place: '' } })
+  const read = await call('group.read', { group: g.group, topic: { writer: g.writer, seq: made.seq } })
+  t.alike(Object.keys(read), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'event', 'state'])
+  t.alike(Object.keys(read.event), ['writer', 'seq', 'title', 'start', 'end', 'place', 'totals', 'mine'])
+  t.alike(read.event.totals, [0, 0])
 })

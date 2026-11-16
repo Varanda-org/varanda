@@ -11,6 +11,7 @@ const { isMomentMusic } = require('./music')
 const { isReaction } = require('./reaction')
 const PX = require('./profile-extra')
 const { isPoll, isPick } = require('./poll')
+const { isEvent, copyEvent } = require('./event')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -325,6 +326,9 @@ function postCross (given, value) {
 // card, and a poll always has its question as text.
 function postPollCross (given, value) {
   if (hasOwn(value, 'poll') && (hasOwn(value, 'media') || hasOwn(value, 'preview'))) return 'parâmetro inválido: poll'
+  // An event post is the event key set: no poll, media or link card, and its
+  // text is required.
+  if (hasOwn(value, 'event') && (hasOwn(value, 'poll') || hasOwn(value, 'media') || hasOwn(value, 'preview'))) return 'parâmetro inválido: event'
   return postCross(given, value)
 }
 
@@ -336,6 +340,16 @@ function groupTopicCross (given, value) {
   if (topic && (hasOwn(value, 'replyTo') || value.fwd === 1 || value.sealed === true)) return 'parâmetro inválido: topic'
   if (topic && (charLength(value.text) < 1 || PX.isInvisibleOnly(value.text))) return 'parâmetro inválido: text'
   if (hasOwn(value, 'poll') && (!topic || hasOwn(value, 'media') || hasOwn(value, 'card'))) return 'parâmetro inválido: poll'
+  return null
+}
+
+// group.post `event`: a root post (no replyTo, not a forward, not sealed)
+// that carries an event or a poll, never both, with no media and no card.
+function groupEventCross (given, value) {
+  if (!hasOwn(value, 'event')) return null
+  if (hasOwn(value, 'replyTo') || value.fwd === 1 || value.sealed === true) return 'parâmetro inválido: event'
+  if (hasOwn(value, 'poll') || hasOwn(value, 'media') || hasOwn(value, 'card')) return 'parâmetro inválido: event'
+  if (charLength(value.text) < 1 || PX.isInvisibleOnly(value.text)) return 'parâmetro inválido: text'
   return null
 }
 
@@ -875,8 +889,8 @@ function req (check) {
   return { check, optional: false }
 }
 
-function opt (check, fallback) {
-  return { check, optional: true, fallback }
+function opt (check, fallback, copy) {
+  return { check, optional: true, fallback, copy }
 }
 
 const none = {}
@@ -1132,7 +1146,7 @@ const SPECS = {
   // `poll` (docs/rpc.md): POLL_MIN..POLL_MAX options, never with media or a
   // preview; the post is written with the poll key set.
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard), poll: opt(isPoll) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
     mutating: true,
     cross: postPollCross
   },
@@ -1310,13 +1324,16 @@ const SPECS = {
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
     // `topic: true` also writes a `group-topic` side record on the new post,
-    // and `poll` a `group-poll` on it (docs/rpc.md); public groups only, the
-    // node refuses both in a private group.
-    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool), topic: opt(isBool), poll: opt(isPoll) },
+    // and `poll` a `group-poll` on it (docs/rpc.md); `event` a `group-event`
+    // on a root post, never with a poll. Public groups only, the node refuses
+    // them in a private group.
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool), topic: opt(isBool), poll: opt(isPoll), event: opt(isEvent, undefined, copyEvent) },
     mutating: true,
     cross: (given, value) => {
       const topic = groupTopicCross(given, value)
       if (topic !== null) return topic
+      const event = groupEventCross(given, value)
+      if (event !== null) return event
       if (value.sealed === true && !hasOwn(value, 'media') && !hasOwn(value, 'card')) return 'parâmetro inválido: sealed'
       if (value.media && !value.media.every((item) => (item.mime === 'application/octet-stream') === (value.sealed === true))) return 'parâmetro inválido: media'
       if (value.card && !isGroupCard(value.card, value.sealed === true)) return 'parâmetro inválido: card'
@@ -1407,6 +1424,13 @@ const SPECS = {
       before: opt(isGroupCursor)
     }
   },
+  // The events of a public group (docs/rpc.md): { items: [{ writer, diary,
+  // seq, at, text, name, username, hidden, event, totals, mine }], next,
+  // incomplete }, at most GROUP_EVENTS_LIMIT per page in group order, newest
+  // first; `cursor` is the exclusive group-order position of the oldest item
+  // the caller holds (absent = the newest page). totals is [going, maybe]
+  // and mine the caller's pick (0 going, 1 maybe) or null.
+  'group.events': { fields: { group: req(isKey), cursor: opt(isGroupCursor) } },
   // Who voted on a topic's poll: { voters: [{ pick, count, by }] }, by up to
   // GROUP_VOTERS_MAX diary keys per option in causal order.
   'group.voters': { fields: { group: req(isKey), target: req(isGroupRef) } },
@@ -1832,7 +1856,9 @@ function validateParams (method, params) {
         if (field.fallback !== undefined) value[name] = field.fallback
         continue
       }
-      const v = params[name]
+      // A field with `copy` is validated and stored as one plain copy, so an
+      // object with traps or accessors cannot answer differently later.
+      const v = field.copy ? field.copy(params[name]) : params[name]
       if (!field.check(v)) return fail('parâmetro inválido: ' + name)
       value[name] = v
     }

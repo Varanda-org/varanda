@@ -32,13 +32,15 @@
 // takes no key.
 // 'topico' (one topic of a public group) is keyed by the root ref
 // '<writer hex64>:<seq>' and requires params.group (the group's hex64 key).
+// 'eventos' (a member's events, keyed by the member's hex64; with params.groups,
+// a list of up to 12 group keys, the Agenda of a community keyed by its root).
 // The stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
@@ -75,6 +77,13 @@ export function validEntry (entry) {
     const params = entry.params
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
     return isRef(entry.key) && isAuthorKey(params.group)
+  }
+  if (entry.screen === 'eventos') {
+    const params = entry.params
+    if (!isAuthorKey(entry.key)) return false
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.groups === undefined || (Array.isArray(params.groups) && params.groups.length <= 12 && params.groups.every(isAuthorKey))
   }
   if (entry.screen === 'avaliar') {
     const params = entry.params

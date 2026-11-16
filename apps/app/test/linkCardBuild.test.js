@@ -623,6 +623,7 @@ test('Publicar holds the ordinary Audius build while availability is unknown or 
     asPage: null,
     musicDraft: null,
     pollDraft: null,
+    eventDraft: null,
     shareLinkHeld: false,
     hasMedia: false,
     self: { publicKey: MEMBER },

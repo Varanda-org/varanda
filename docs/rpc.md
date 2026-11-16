@@ -69,6 +69,9 @@ Every message is ONE JSON object of one of three kinds. The protocol version is 
 | `GROUP_MARKED_LIMIT` | 24 | `group.read` page with `marks` or `topic` (the unmarked page keeps `GROUP_LIMIT_MAX`; 5.140) |
 | `GROUP_TOPICS_LIMIT` | 30 | `group.topics` page (5.138) |
 | `GROUP_VOTERS_MAX` | 900 | diary keys per option in a `group.voters` answer (5.139) |
+| `GROUP_EVENTS_LIMIT` | 30 | `group.events` page (5.141) and `/index/events` page |
+| `MAX_EVENT_TITLE`, `MAX_EVENT_PLACE` | 80, 120 | code points of an event title and place (5.142) |
+| `EVENT_MIN_MS`, `EVENT_MAX_MS`, `EVENT_MAX_SPAN_MS` | 2020-01-01, 2100-01-01, 366 days | bounds of an event instant and of its span |
 | `GROUP_REACTIONS_MAX` | 12 | distinct emojis kept per group message, the ones the most members chose (ties by first use); `group.read` items carry at most this many summaries (5.117) |
 | `GROUP_REACTORS_MAX` | 324 | diary keys per emoji in a `group.reactors` answer (5.118): 12 emojis of 324 keys each fit `MAX_MESSAGE`, 325 do not |
 | `GROUP_MEMBERS_LIMIT_MAX` | 100 | `group.members` page |
@@ -1371,9 +1374,33 @@ Fóruns e enquetes. Who voted on the poll of a topic. Not mutating; it reads the
 Fóruns e enquetes (protocol section 10, "Topics and polls"). Two existing methods take new optional parameters. A node that predates them answers `USAGE` `'parâmetro desconhecido'`, and the core node answers `USAGE` `'leitura sob demanda só na versão web'` when they are present.
 
 - `group.post` (5.39) takes `topic?: boolean` and `poll?: [string]`. `topic: true` writes the post, then a `group-topic` naming it, on the caller's own writer, in one atomic append (all or none; the seqs are the root and the root plus 1, plus 2 with a poll). `poll` (2..4 options by `isPoll`) is allowed only with `topic: true` and writes a `group-poll` after the `group-topic`. A topic needs a non-empty text for its title, and it is a root post: `topic` with `replyTo`, `fwd: 1` or `sealed: true`, or with an empty or invisible-only text -> `USAGE` `'parâmetro inválido: topic'` (`'parâmetro inválido: text'` for the text); `poll` without `topic`, or with `media` or `card` -> `USAGE` `'parâmetro inválido: poll'`. `topic` with `sealed: true` gets the same `'parâmetro inválido: topic'`, and `poll` without `topic` the `'parâmetro inválido: poll'` above, both from the cross check before the node runs. The node answers `USAGE` `'fóruns e enquetes só em grupo público'` only for `topic` or `poll` in a private group, before anything is written. Result: `{ seq }`, the block of the topic root. Posting without `topic` and `poll` is unchanged.
-- `group.read` (5.40) takes `marks?: boolean` and `topic?: { writer, seq }`. With `marks: true` every item carries `topic: null | { writer, seq, poll: boolean }`: the topic root the item opens or replies under, and whether that root shows a poll; a hidden item carries `topic: null`. With `topic` the page is the thread of that root: the root and its replies, newest first, all marked, and the answer adds `poll: null | { options, totals, mine }` at the top level (`null` for a hidden root); the key order is `items, next, hidden, incomplete, sealed, epoch, poll, state`. A `topic` that is not a topic root -> `USAGE` `'tópico não encontrado'` (also while the group is pending). `page` with `marks` or `topic` -> `USAGE` `'fóruns e enquetes só em grupo público'`.
+- `group.read` (5.40) takes `marks?: boolean` and `topic?: { writer, seq }`. With `marks: true` every item carries `topic: null | { writer, seq, poll: boolean }`: the topic root the item opens or replies under, and whether that root shows a poll; a hidden item carries `topic: null`. With `topic` the page is the thread of that root: the root and its replies, newest first, all marked, and the answer adds `poll: null | { options, totals, mine }` at the top level (`null` for a hidden root); the key order is `items, next, hidden, incomplete, sealed, epoch, poll, state` (Eventos adds `event` between `poll` and `state`, 5.143). A `topic` that is not a topic root -> `USAGE` `'tópico não encontrado'` (also while the group is pending). `page` with `marks` or `topic` -> `USAGE` `'fóruns e enquetes só em grupo público'`.
 - A marked page holds at most `GROUP_MARKED_LIMIT` (24) items: with `marks` or `topic` an absent `limit` becomes 24 and a larger one -> `USAGE` `'parâmetro inválido: limit'`. The unmarked page keeps its 26 items and its bytes, which is why the marker is opt-in: 26 worst-case items already fill `MAX_MESSAGE` (section 2).
 - Poll summaries in a group come from `group.topics` (5.138) and the thread read, not from `marks`.
+
+### 5.141 `group.events`
+
+Eventos (protocol section 10, "Events in groups"). The events of a public group, one row per event root. Not mutating; it reads the fold only. Both nodes name it for parity (the core node's parity count becomes 24); only the web node reads, and the core node answers `USAGE` `'leitura sob demanda só na versão web'`.
+
+- Params: `{ group, cursor? }`: `cursor` optional, exactly `{ at, writer, seq }` as the `before` of `group.read` (5.40), the position of the oldest event the caller holds, exclusive. The page is fixed at `GROUP_EVENTS_LIMIT` (30).
+- Result: `{ items: [{ writer, diary, seq, at, text, name, username, hidden, event, totals, mine }], next, incomplete }`. Event roots newest first in the group's causal order; the server order is authoritative. `event` is `{ title, start, end, place }`; `totals` is `[going, maybe]` from the group fold; `mine` is `0`, `1` or `null` (the caller's own RSVP). A hidden root keeps its place with `text: ''`, `hidden: true`, `event: null`, `totals: [0, 0]` and `mine: null`. `next` is `null` or `{ at, writer, seq }` of the oldest item. A group still pending answers `{ items: [], next: null, incomplete: true }`. The title, place and text are peer data: the app shows them through `displayText`.
+- Errors: a private group -> `USAGE` `'eventos só em grupo público'`; a group not held -> `NOT_FOUND` `'grupo não encontrado'`. Size: `GROUP_EVENTS_LIMIT` items of maximal text, name, title and place fit `MAX_MESSAGE` (`test/sizes.test.js`).
+
+### 5.142 Event parameters of `post.create` and `group.post`
+
+Eventos. Two existing methods take an optional `event`, `{ title, start, end, place }` as `isEvent` (`packages/rpc/lib/event.js`; protocol section 2, "Eventos"). A node that predates it answers `USAGE` `'parâmetro desconhecido'`; the core node answers `USAGE` `'leitura sob demanda só na versão web'` when `event` is present (the session refuses before it opens anything).
+
+- `post.create` (5.7) with `event` writes an event post (the key set `POST_EVENT_KEYS`) in the caller's diary; the text is required as for any post. `event` with `poll`, `media` or `preview` -> `USAGE` `'parâmetro inválido: event'`.
+- `group.post` (5.39) with `event` writes the root post and then a `group-event` naming it, on the caller's own writer, in one atomic append (all or none; the seqs are the root and the root plus 1). It is a root post: `event` with `replyTo`, `fwd: 1`, `sealed: true`, `poll`, `media` or `card` -> `USAGE` `'parâmetro inválido: event'`; an empty or invisible-only text -> `'parâmetro inválido: text'`. `topic: true` together with `event` is allowed. In a private group -> `USAGE` `'eventos só em grupo público'` before anything is written. Result: `{ seq }`, the block of the root.
+- Events are immutable: there is no edit method. To change or cancel, delete the post (`post.delete`) or, in a group, an admin hides it.
+
+### 5.143 RSVP on event posts: `choice.set`, `choice.mine`, `group.choose`, `group.voters`
+
+Eventos. The answer to an event is a vote with two options (0 Vou, 1 Talvez, `null` withdraws).
+
+- `choice.set` (5.135) and `choice.mine` (5.136) accept a diary event post as a poll of two picks (`EVENT_PICKS`): `pick` above 1 -> `USAGE` `'opção inválida'`. The caller's `choice` record is public in the caller's diary and withdrawing writes a new record (protocol section 2, "Enquetes"). Totals and voters come from the seeder poll routes (picks 0 and 1) and are claims.
+- `group.choose` (5.137) and `group.voters` (5.139) accept the root of a group event: `group.voters` answers two entries, going then maybe. A hidden root answers `'mensagem não encontrada'`, a root with neither poll nor event `'enquete não encontrada'`.
+- `group.read` (5.40) with a `topic` adds `event: null | { writer, seq, title, start, end, place, totals, mine }` at the top level, between `poll` and `state` (key order `items, next, hidden, incomplete, sealed, epoch, poll, event, state`); `null` for a hidden root or a root without an event, `totals` is `[going, maybe]` and `mine` is `0`, `1` or `null`. Its items never carry `event`. The feed and peek items carry the folded `event` on event posts only. The core node strips it.
 
 ## 6. Events
 

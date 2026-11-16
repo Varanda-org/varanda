@@ -139,7 +139,7 @@ test('group and community RPC handler names match the core session and the metho
   t.teardown(() => core.close(), { force: true })
   t.teardown(() => browser.close(), { force: true })
   const keys = (handlers, prefix) => Object.keys(handlers).filter((key) => key.startsWith(prefix)).sort()
-  t.is(keys(core.handlers, 'group.').length, 23)
+  t.is(keys(core.handlers, 'group.').length, 24)
   t.alike(keys(browser.handlers, 'group.'), keys(core.handlers, 'group.'))
   t.alike(keys(browser.handlers, 'community.'), COMMUNITY_METHODS, 'every community method of protocol v2, no community.link')
   t.alike(METHODS.filter((m) => m.startsWith('community.')).sort(), COMMUNITY_METHODS, 'as the rpc method table')

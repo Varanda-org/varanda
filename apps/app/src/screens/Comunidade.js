@@ -13,7 +13,8 @@
 // Props: community (hex64 root key), afterGroup (a group to open once the
 // person joined, from a /g/ link), isTop (this screen is the visible one),
 // seenTick (bumped when a group was marked seen), onBack(),
-// onOpenGroup(group), onOpenInfo(community). The screen runs wherever the
+// onOpenGroup(group), onOpenInfo(community), onOpenAgenda(community, groups)
+// (the Agenda row: the events of the community's public groups, hosted only). The screen runs wherever the
 // node is hosted (site and installed app with an installation), like the
 // Comunidades tab.
 
@@ -192,7 +193,7 @@ function PagePanel ({ node, community, page }) {
   )
 }
 
-export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, onOpenGroup, onOpenInfo }) {
+export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, onOpenGroup, onOpenInfo, onOpenAgenda }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -310,6 +311,13 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
   const role = !asPage.page && info && typeof info.role === 'string' ? info.role : null
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
+  // The Agenda reads the public groups only (events are public); never as a page.
+  const agendaAll = hosted && !asPage.page && isMember && typeof onOpenAgenda === 'function'
+    ? groups.filter((g) => g.visibility === 'public' && typeof g.group === 'string' && HEX64.test(g.group)).map((g) => g.group)
+    : []
+  const agendaGroups = agendaAll.slice(0, 12)
+  // More public groups than the Agenda reads: it shows its list as partial.
+  const agendaTruncated = agendaAll.length > agendaGroups.length
   const staff = isMember && (role === 'creator' || role === 'admin')
   const deviceJoin = !asPage.page && needsDeviceJoin(info)
   const writerNow = info ? info.writerHere : undefined
@@ -552,6 +560,15 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
             </View>
             )
           : null}
+        {agendaGroups.length > 0
+          ? (
+            <PressScale accessibilityRole='link' accessibilityLabel='Agenda' onPress={() => onOpenAgenda(community, agendaGroups, agendaTruncated)} style={({ pressed }) => [styles.agenda, pressed && styles.pressed]}>
+              <Icon name='evento' size={20} color={colors.accent} />
+              <Text style={styles.agendaText}>Agenda</Text>
+              <Icon name='seta' size={20} color={colors.soft} />
+            </PressScale>
+            )
+          : null}
         <SectionHeader>Grupos</SectionHeader>
         {ordered.length === 0
           ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel={canCreate && !offline ? 'Novo grupo' : 'Tentar de novo'} onAction={canCreate && !offline ? () => setNewGroup(true) : load} secondaryLabel='Voltar' onSecondary={onBack} />
@@ -669,5 +686,7 @@ const makeStyles = (colors) => StyleSheet.create({
   grow: { flex: 1, minWidth: 0 },
   // The 8 pt disc of ConversationRow: the spoken label already carries the count.
   dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent },
+  agenda: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: 44, paddingHorizontal: space.lg },
+  agendaText: { ...type.pill, color: colors.ink, flex: 1 },
   hitText: { flex: 1, minWidth: 0, gap: 2 }
 })

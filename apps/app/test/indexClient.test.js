@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -2112,4 +2112,20 @@ test('fetchRoda with an installation set goes to that origin only', async (t) =>
   t.alike(urls, [O + '/index/roda/' + A + '/5'])
   setInstallation(null)
   t.is(rodaUrl(REF), '/index/roda/' + A + '/5', 'relative again once cleared')
+})
+
+test('events: URL builder and body contract', async (t) => {
+  const { eventsUrl, validEvents } = await load()
+  t.is(eventsUrl(A), '/index/events/' + A)
+  t.is(eventsUrl(A, 10), '/index/events/' + A + '/10')
+  for (const bad of ['x', null, A + '/x']) t.is(eventsUrl(bad), null, String(bad))
+  for (const bad of [0, -1, 1.5, '3']) t.is(eventsUrl(A, bad), null, String(bad))
+  const good = { posts: [9, 4], next: null, total: 2, indexing: false, complete: true }
+  t.alike(validEvents(good), good)
+  t.alike(validEvents({ ...good, next: 4 }), { ...good, next: 4 })
+  for (const bad of [null, { ...good, extra: 1 }, { ...good, posts: [4, 9] }, { ...good, posts: [4, 4] }, { ...good, next: 9 }, { ...good, posts: [], next: 3 }, { ...good, total: -1 }, { ...good, indexing: 1 }, { ...good, posts: Array.from({ length: 31 }, (_, i) => 40 - i) }]) {
+    t.is(validEvents(bad), null)
+  }
+  t.is(validEvents(good, 9), null, 'not below before')
+  t.alike(validEvents(good, 10), good)
 })

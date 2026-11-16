@@ -331,7 +331,7 @@ const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
 const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
-const { pollOptions } = require('@varanda/core/lib/polls')
+const { pickCount } = require('@varanda/core/lib/polls')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
@@ -3093,7 +3093,8 @@ function createBrowserSession ({
   }
 
   // Enquetes: refuses a vote unless block `to.seq` of `to.author`, peeked,
-  // is a poll post with an option `pick`. Fails closed: an unread block
+  // is a poll post with an option `pick`, or an event post (Eventos: an RSVP,
+  // pick 0 'vou' or 1 'talvez'). Fails closed: an unread block
   // inside the diary (a deleted one too) is SEEDER_UNAVAILABLE. RESIDUAL: a
   // deleted poll whose bytes the seeder still serves, of a diary not held
   // here (refuseDeletedPoll), passes; the seeder index and every reader
@@ -3105,9 +3106,9 @@ function createBrowserSession ({
       if (to.seq < p.length) throw new Error(SEEDER_UNAVAILABLE)
       throw new UsageError(CHOICE_NOT_POLL)
     }
-    const options = pollOptions(e.record, to.seq)
-    if (options === null) throw new UsageError(CHOICE_NOT_POLL)
-    if (!(pick < options.length)) throw new UsageError(CHOICE_PICK_INVALID)
+    const count = pickCount(e.record, to.seq)
+    if (count === null) throw new UsageError(CHOICE_NOT_POLL)
+    if (!(pick < count)) throw new UsageError(CHOICE_PICK_INVALID)
   }
 
   // The DM engine opens each box with its in-memory pair; nothing else
@@ -3900,10 +3901,10 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media, preview, poll }, epoch) => {
+    'post.create': serial(async ({ text, media, preview, poll, event }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media, preview, poll }))
+      const r = await withStore((c) => member.postCreate(c, { text, media, preview, poll, event }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -4655,6 +4656,8 @@ function createBrowserSession ({
       return withCores((c) => member.groupTopics(c, params))
     }),
     'group.voters': serial((params) => withCores((c) => member.groupVoters(c, params))),
+    // Eventos (docs/rpc.md): public groups only, as the forum methods.
+    'group.events': serial((params) => withCores((c) => member.groupEvents(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),

@@ -1,6 +1,7 @@
 // Novo tópico: the title and text of a root post of a public group, and an
-// optional poll (2 to 4 options, polls.js editor). The sheet only collects;
-// onCreate(text, poll | null) does the one request and answers
+// optional poll (2 to 4 options, polls.js editor) or an optional event (never
+// both, as the group fold keeps one per root). The sheet only collects;
+// onCreate(text, poll | null, event | null) does the one request and answers
 // { ok: true } or { ok: false }. A failure keeps the draft and shows the error
 // the caller gives; nothing here sends a second time on its own.
 
@@ -12,6 +13,7 @@ import {
   NOTICES, editorAddOption, editorCanAdd, editorCanRemove, editorInit, editorPoll, editorRemoveOption, editorSetOption
 } from '../polls'
 import { Btn, ErrorText, Field, Soft } from './index'
+import { EventEditor, eventEditorEvent, eventEditorInit } from './EventEditor'
 import { Pill } from './Pill'
 import { Sheet } from './Sheet'
 import { space } from './theme'
@@ -22,9 +24,12 @@ export function NewTopicSheet ({ open, onClose, onCreate, pending = false, error
   const [text, setText] = useState('')
   const [withPoll, setWithPoll] = useState(false)
   const [poll, setPoll] = useState(editorInit)
+  const [withEvent, setWithEvent] = useState(false)
+  const [eventDraft, setEventDraft] = useState(() => eventEditorInit())
   const [note, setNote] = useState('')
 
   const parsed = withPoll ? editorPoll(poll) : null
+  const builtEvent = withEvent ? eventEditorEvent(eventDraft) : null
   const left = MAX_TEXT - countChars(text)
   const blank = text.trim() === ''
   const cannot = blank || left < 0 || pending
@@ -32,12 +37,15 @@ export function NewTopicSheet ({ open, onClose, onCreate, pending = false, error
   async function submit () {
     if (cannot) return
     if (parsed !== null && !parsed.ok) { setNote(parsed.error); return }
+    if (builtEvent !== null && !builtEvent.ok) { setNote(builtEvent.error); return }
     setNote('')
-    const done = await onCreate(text.trim(), parsed === null ? null : parsed.poll)
+    const done = await onCreate(text.trim(), parsed === null ? null : parsed.poll, builtEvent === null ? null : builtEvent.event)
     if (done && done.ok) {
       setText('')
       setWithPoll(false)
       setPoll(editorInit())
+      setWithEvent(false)
+      setEventDraft(eventEditorInit())
     }
   }
 
@@ -64,7 +72,18 @@ export function NewTopicSheet ({ open, onClose, onCreate, pending = false, error
               <Soft>{NOTICES.publicVote}</Soft>
             </View>
             )
-          : <Pill label='Adicionar enquete' icon='lista' onPress={() => setWithPoll(true)} disabled={pending} />}
+          : withEvent
+            ? (
+              <View style={styles.poll}>
+                <EventEditor state={eventDraft} onChange={(next) => { setEventDraft(next); setNote('') }} onClose={() => { setWithEvent(false); setNote('') }} disabled={pending} />
+              </View>
+              )
+            : (
+              <View style={styles.optionRow}>
+                <Pill label='Adicionar enquete' icon='lista' onPress={() => setWithPoll(true)} disabled={pending} />
+                <Pill label='Adicionar evento' icon='evento' onPress={() => setWithEvent(true)} disabled={pending} />
+              </View>
+              )}
         {note ? <ErrorText>{note}</ErrorText> : null}
         <ErrorText>{error}</ErrorText>
         <Btn label='Criar tópico' onPress={submit} pending={pending} disabled={cannot} block />

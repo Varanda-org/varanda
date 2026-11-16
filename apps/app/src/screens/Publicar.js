@@ -100,6 +100,7 @@ import { withPreview } from '../attach-plan'
 import { previewRefusal, refusalOf } from '../wordCheck'
 import { editorInit, editorPoll } from '../polls'
 import { PollEditor } from '../ui/PollEditor'
+import { EventEditor, eventEditorEvent, eventEditorInit, eventEditorTexts } from '../ui/EventEditor'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
@@ -128,6 +129,9 @@ export const MOMENT_ONE_PHOTO = 'Um momento leva uma foto só.'
 export const DRAFT_KEPT = 'Seu rascunho da publicação continua guardado.'
 const POLL_NEEDS_TEXT = 'Escreva a pergunta da enquete.'
 const POLL_NEEDS_ONLINE = 'Enquete só pode ser publicada com conexão.'
+const EVENT_NEEDS_ONLINE = 'Evento só pode ser publicado com conexão.'
+const EVENT_ALONE = 'O evento vai sozinho: tire o que estiver anexado ou responda sem evento.'
+const EVENT_NEEDS_TEXT = 'Escreva uma linha sobre o evento.'
 const POLL_ALONE = 'A enquete vai sozinha: tire o que estiver anexado ou responda sem enquete.'
 const MEDIA_STALE = 'prepare a mídia de novo'
 
@@ -935,11 +939,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // While a poll draft exists the post is never a plain post or an outbox
   // entry: send refuses with a message and keeps the draft.
   const pollHeldBack = pollDraft !== null && !pollOk
+  // Evento: the same rules as the poll (hosted, online, a plain post), and
+  // never together with it.
+  const [eventDraft, setEventDraft] = useState(null)
+  const eventActive = eventDraft !== null && pollOk
+  const eventHeldBack = eventDraft !== null && !pollOk
   const musicTried = useRef(new Set())
   const musicResolveOn = musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())
   const musicResolveTarget = resolveTarget(text, musicTried.current)
   // Wait for the music policy before allowing an Audius page fetch on the device.
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld && pollDraft === null && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
+  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld && pollDraft === null && eventDraft === null && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
   useEffect(() => {
     if (!open || momentMode || asPage !== null || hasMedia || musicDraft || busy || frozen || musicPickerOpen || shareLinkHeld || !musicResolveOn) return undefined
     const url = musicResolveTarget
@@ -1124,7 +1133,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const attach = async () => {
     if (!canAttach || !mediaOnline || busy || frozen) return
     if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
-    if (pollActive) return
+    if (pollActive || eventActive) return
     setNote('')
     let files
     try {
@@ -1142,7 +1151,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const attachVideo = async () => {
-    if (!canVideo || busy || frozen || pollActive) return
+    if (!canVideo || busy || frozen || pollActive || eventActive) return
     setNote('')
     try {
       await video.draft.pick({ pickVideo, prepareVideo, photos: liveRef.current.size, preview: !!linkDraft.view || musicDraftRef.current !== null })
@@ -1250,6 +1259,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
     tap('success')
     setPollDraft(null)
+    setEventDraft(null)
     setMusicDraft(null)
     musicTried.current.clear()
     setText((current) => (current === sent ? '' : current))
@@ -1382,13 +1392,26 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
   }
 
+  // An event post: post.create with the event (docs/rpc.md). Never resent.
+  const sendEvent = async () => {
+    const built = eventEditorEvent(eventDraft)
+    if (!built.ok) { setCheckError(built.error); return }
+    if (countChars(text) < 1) { setCheckError(EVENT_NEEDS_TEXT); return }
+    const sent = text
+    const r = await action.run(() => node.request('post.create', { text: sent, event: built.event }))
+    if (r.ok) {
+      confirm(seqOf(r.value))
+      published(sent, null, [], null)
+    }
+  }
+
   const send = async () => {
     if (busy || uploadingRef.current || queueingRef.current || video.draft.state.phase === 'preparing') return
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
     // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : [])) || previewRefusal(linkDraft.view)) : ''
+    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.view)) : ''
     if (refused !== '') {
       setCheckError(refused)
       return
@@ -1396,6 +1419,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (pollDraft !== null && pageRetryRef.current === null) {
       if (!pollOk) { setCheckError(node.online === false ? POLL_NEEDS_ONLINE : POLL_ALONE); return }
       return sendPoll()
+    }
+    if (eventDraft !== null && pageRetryRef.current === null) {
+      if (!pollOk) { setCheckError(node.online === false ? EVENT_NEEDS_ONLINE : EVENT_ALONE); return }
+      return sendEvent()
     }
     const sentMusic = musicDraft
     if (sentMusic !== null) {
@@ -1979,6 +2006,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           {pollActive
             ? <PollEditor state={pollDraft} onChange={setPollDraft} disabled={held} onClose={() => setPollDraft(null)} />
             : null}
+          {eventActive
+            ? <EventEditor state={eventDraft} onChange={setEventDraft} disabled={held} onClose={() => setEventDraft(null)} />
+            : null}
           <MentionSuggest rows={frozen ? [] : suggestions} loading={!frozen && mentionQuery !== '' && search.phase === 'loading'} onPick={pickMention} />
           <View ref={postView.tailRef} style={styles.counterRow} onLayout={postView.handleTailLayout}>
             <View style={styles.tools}>
@@ -2033,7 +2063,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     accessibilityLabel='Enquete'
                     accessibilityState={{ selected: pollDraft !== null, disabled: held }}
                     disabled={held}
-                    onPress={() => setPollDraft(pollDraft !== null ? null : editorInit())}
+                    onPress={() => { setEventDraft(null); setPollDraft(pollDraft !== null ? null : editorInit()) }}
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
@@ -2041,7 +2071,22 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   </Pressable>
                   )
                 : null}
-              {musicAvailable === true && asPage === null && pollDraft === null
+              {(pollOk && !hasVideo && !preparingVideo) || eventHeldBack
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Evento'
+                    accessibilityState={{ selected: eventDraft !== null, disabled: held }}
+                    disabled={held}
+                    onPress={() => { setPollDraft(null); setEventDraft(eventDraft !== null ? null : eventEditorInit()) }}
+                    hitSlop={6}
+                    style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
+                  >
+                    <Icon name='evento' size={21} color={eventDraft !== null ? colors.accent : colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {musicAvailable === true && asPage === null && pollDraft === null && eventDraft === null
                 ? (
                   <Pressable
                     accessibilityRole='button'

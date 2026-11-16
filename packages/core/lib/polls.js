@@ -52,6 +52,23 @@ function pollOptions (record, seq = 1) {
   }
 }
 
+// Eventos (docs/protocol.md): RSVPs on a diary event post are choices with
+// pick 0 ('vou') or 1 ('talvez'), so the post takes two options.
+const EVENT_PICKS = 2
+
+// How many options a vote on this post record may pick from: a poll's option
+// count, EVENT_PICKS for a valid event post, else null (no vote target).
+function pickCount (record, seq = 1) {
+  try {
+    const copy = validRecordCopy(record, Number.isSafeInteger(seq) && seq >= 1 ? seq : 1)
+    if (copy === null || copy.type !== 'post') return null
+    if (Array.isArray(copy.poll)) return copy.poll.length
+    return copy.replyTo === null && copy.event !== null && typeof copy.event === 'object' ? EVENT_PICKS : null
+  } catch {
+    return null
+  }
+}
+
 // foldPicks(ops, count) -> { totals, picks }
 //   ops     [{ voter, pick }] in causal order (later wins), voter a hex64 key
 //   count   the poll's number of options
@@ -153,4 +170,4 @@ function liveEntries (entries) {
   return out
 }
 
-module.exports = { pollOptions, foldPicks, livePick, tallyPoll, MAX_FUTURE_MS }
+module.exports = { pollOptions, pickCount, foldPicks, livePick, tallyPoll, EVENT_PICKS, MAX_FUTURE_MS }

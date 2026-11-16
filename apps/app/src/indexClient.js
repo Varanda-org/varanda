@@ -144,6 +144,8 @@ const MEMBER_KEYS = ['complete', 'indexing', 'length', 'posts', 'postsTotal', 'p
 const HINT_KEYS = ['profileSeq', 'usernameSeq']
 const SEARCH_KEYS = ['complete', 'indexing', 'members', 'more']
 const HIT_KEYS = ['author', 'profileSeq', 'usernameSeq']
+const EVENTS_KEYS = ['complete', 'indexing', 'next', 'posts', 'total']
+const EVENTS_MAX = 30
 const TOPIC_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 const GROUP_KEYS = ['attached', 'community', 'complete', 'creator', 'indexing', 'join', 'kind', 'name', 'next', 'rootServed', 'visibility', 'writers']
 const WRITER_KEYS = ['diary', 'key', 'left', 'length', 'seq', 'signed']
@@ -380,6 +382,15 @@ export function fansUrl (author, cursor = null) {
   if (a === null) return null
   if (cursor !== null && !isFollowCursor(cursor)) return null
   return resolveUrl('/index/fans/' + a + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Eventos: GET /index/events/<author>[/<before>] lists the seqs of the author's
+// event posts, newest first (a seeder claim: the node verifies each post).
+export function eventsUrl (author, before = null) {
+  const a = inputAuthor(author)
+  if (a === null) return null
+  if (before !== null && !isSeq(before)) return null
+  return resolveUrl('/index/events/' + a + (before === null ? '' : '/' + before))
 }
 
 // Enquetes: GET /index/poll/<author>/<seq> answers the totals per option (a
@@ -916,6 +927,23 @@ export function validMemberIndex (body, before = null) {
     complete: body.complete,
     ...hint
   }
+}
+
+// Events: posts <= 30 seqs, strictly descending and below `before` when given;
+// next is null or the last seq of a non-empty page; total a count.
+export function validEvents (body, before = null) {
+  if (!hasExactKeys(body, EVENTS_KEYS)) return null
+  if (typeof body.indexing !== 'boolean' || typeof body.complete !== 'boolean') return null
+  const events = body.posts
+  if (!isCount(body.total)) return null
+  if (!Array.isArray(events) || events.length > EVENTS_MAX) return null
+  let prev = before === null ? Infinity : before
+  for (const seq of events) {
+    if (!isSeq(seq) || seq >= prev) return null
+    prev = seq
+  }
+  if (body.next !== null && (!isSeq(body.next) || events.length === 0 || body.next !== events[events.length - 1])) return null
+  return { posts: events.slice(), next: body.next, total: body.total, indexing: body.indexing, complete: body.complete }
 }
 
 // Items: <= 30 distinct refs (may be empty). Authors: exactly one hint per
@@ -1491,6 +1519,10 @@ export function fetchScraps (owner, cursor = null, deps = {}) {
 
 export function fetchProfile (author, deps = {}) {
   return run(profileUrl(author), validProfile, deps)
+}
+
+export function fetchEvents (author, before = null, deps = {}) {
+  return run(eventsUrl(author, before), (body) => validEvents(body, before), deps)
 }
 
 export function fetchFollowPair (author, target, deps = {}) {

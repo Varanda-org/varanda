@@ -716,8 +716,8 @@ function createSession ({
 
     // Photos live in media cores only the browser node writes: a post with
     // `media` is refused before anything is opened (like account.sign).
-    'post.create': serial(async ({ text, media, preview, poll }) => {
-      if (poll !== undefined) throw new UsageError(PEEK_WEB_ONLY)
+    'post.create': serial(async ({ text, media, preview, poll, event }) => {
+      if (poll !== undefined || event !== undefined) throw new UsageError(PEEK_WEB_ONLY)
       if (media !== undefined || (preview && preview.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.postCreate(c, { text, preview }))
       return { seq: r.seq, ref: r.ref }
@@ -992,7 +992,7 @@ function createSession ({
     'group.post': serial(async (params, epoch) => {
       // The core node seals nothing itself: `sealed` (media or a card
       // thumbnail, rpc.md 5.98) is refused here even beside a text card.
-      if (params.topic !== undefined || params.poll !== undefined) throw new UsageError(PEEK_WEB_ONLY)
+      if (params.topic !== undefined || params.poll !== undefined || params.event !== undefined) throw new UsageError(PEEK_WEB_ONLY)
       if (params.media !== undefined || params.sealed === true || (params.card && params.card.image !== null)) throw new UsageError(MEDIA_WEB_ONLY)
       const r = await withStore((c) => member.groupPost(c, params))
       send('groups.changed', { group: params.group }, epoch)
@@ -1052,6 +1052,8 @@ function createSession ({
     'group.choose': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
     'group.topics': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
     'group.voters': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
+    // Eventos: browser node only, as the forum methods.
+    'group.events': serial(async () => { throw new UsageError(PEEK_WEB_ONLY) }),
 
     'group.meta': serial(async (params, epoch) => {
       const r = await withStore((c) => member.groupMeta(c, params))

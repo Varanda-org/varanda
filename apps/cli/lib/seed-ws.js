@@ -176,6 +176,16 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   and at point at the voter's own `choice` block, which the node peeks
 //   and verifies. A pick the poll has no option for is a 404. Rebuilt here
 //   field by field.
+// - /index/events/<author>[/<before>] -> Seeder#indexEvents: `{ posts: [seq],
+//   next, total, indexing, complete }`, the seqs of the author's event posts
+//   (Eventos) newest first, strictly below <before> (a canonical seq, no
+//   leading zero), at most EVENT_ROWS_MAX per page; `next` is the <before> of
+//   the following page or null. Pointers only: the title, place and dates
+//   stay in the diary, which the node reads and verifies (the shared
+//   isEvent). RSVP totals and voters are the /index/poll routes (picks 0 and
+//   1). While the author's own diary is still being indexed or scanned: no
+//   rows, indexing true, complete false. A malformed segment after the
+//   author is the generic 404. Rebuilt here field by field.
 // - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
 //   seq | null, indexing }`, the author's live follow block of target.
 //   Both rebuilt here field by field; both spend the index budget.
@@ -415,6 +425,9 @@ const INDEX_POLL_VOTERS_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})
 const POLL_OPTIONS_MAX = 4
 // Same value as MAX_TOP_FRIENDS in @varanda/core/lib/records.js.
 const TOP_FRIENDS_MAX = 8
+const INDEX_EVENTS_RE = /^\/index\/events\/([0-9a-f]{64})(?:\/([1-9][0-9]{0,14}))?$/
+// Same value as GROUP_EVENTS_LIMIT in @varanda/rpc lib/limits.js.
+const EVENT_ROWS_MAX = 30
 const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
 const SCRAP_ROWS_MAX = 50
 const SCRAP_HIDES_MAX = 1000
@@ -744,7 +757,7 @@ function refuse (socket, code, reason) {
 // ({ maxInFlight, rate, burst }). sockets: optional socket cap of the
 // listener (see socketCap). The seeder's indexPost(authorHex, seq,
 // cursor), indexRoda(authorHex, seq, cursor), indexCounts(refs), indexMember(authorHex, before), indexPageEnd(authorHex),
-// indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor) and
+// indexSearch(segment), indexEngagers(kind, authorHex, seq, cursor), indexEvents(authorHex, before) and
 // indexTestimonials(ownerHex) ->
 // null | plain object back /index; indexSearch's
 // object is { members: [{ author, profileSeq, usernameSeq, [page, closed, moved] }] (at most 20),
@@ -874,6 +887,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexPoll', [m[1], Number(m[2])], pollBody]
     m = INDEX_POLL_VOTERS_RE.exec(url)
     if (m) return ['indexPollVoters', [m[1], Number(m[2]), Number(m[3]), m[4] === undefined ? null : m[4]], pollVotersBody]
+    m = INDEX_EVENTS_RE.exec(url)
+    if (m) return ['indexEvents', [m[1], m[2] === undefined ? null : Number(m[2])], eventsBody]
     // Without a public origin the Feira has no public surface at all.
     if (origin === null) return null
     m = INDEX_FEIRA_AUTHOR_RE.exec(url)
@@ -1026,6 +1041,21 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       cursor = { atMs: next.atMs, key: next.key }
     }
     return { items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Event post pointers: strictly descending seqs, at most EVENT_ROWS_MAX,
+  // and a cursor that is one of them; anything else is a 404.
+  function eventsBody ({ posts, next, total, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (!Array.isArray(posts) || posts.length > EVENT_ROWS_MAX || !Number.isSafeInteger(total) || total < posts.length) throw new Error('index')
+    let prev = Infinity
+    const seqs = posts.map((seq) => {
+      if (!seqOk(seq) || seq >= prev) throw new Error('index')
+      prev = seq
+      return seq
+    })
+    if (next !== null && (!seqOk(next) || seqs.length === 0 || next !== seqs[seqs.length - 1])) throw new Error('index')
+    return { posts: seqs, next, total, indexing: indexing === true, complete: complete === true }
   }
 
   function followSeqBody ({ seq, indexing }) {
@@ -1929,6 +1959,7 @@ module.exports = {
   INDEX_FANS_RE,
   INDEX_POLL_RE,
   INDEX_POLL_VOTERS_RE,
+  INDEX_EVENTS_RE,
   INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,

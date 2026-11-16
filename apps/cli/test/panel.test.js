@@ -895,7 +895,7 @@ test('the verified post renders as text with its notes; a bad shape is ignored',
   t.is(q.children.length, 0)
   t.ok(c1.textContent.includes('A publicação tem fotos ou vídeo; a IA não vê imagens nem vídeo.'))
   t.ok(c1.textContent.includes('A publicação cita outra; confira no app.'))
-  t.ok(c1.textContent.includes('A publicação é uma enquete; confira as opções no app.'))
+  t.ok(c1.textContent.includes('A publicação é uma enquete ou um evento; confira no app.'))
   t.absent(doc.created.some((n) => n.tagName === 'B'))
   t.absent(c2.textContent.includes('Publicação lida no semeador'), 'over 1000 code points is ignored')
 

@@ -53,6 +53,7 @@ import { Pill } from '../ui/Pill'
 import { useSaved } from '../savedProvider'
 import { SAVED_ENTRY_LABEL } from '../savedView'
 import { PostRow } from '../ui/PostRow'
+import { ReminderBanner } from '../ui/ReminderBanner'
 import { PostSheetProvider } from '../ui/PostSheetHost'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
@@ -255,6 +256,7 @@ function postOf (author, seq, record) {
     preview: record.preview || null,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media : null,
     ...(Array.isArray(record.poll) ? { poll: record.poll } : {}),
+    ...(record.event && typeof record.event === 'object' ? { event: record.event } : {}),
     name: null,
     username: null
   }
@@ -265,7 +267,7 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onTabChange, onOpenTop }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const node = useNode()
@@ -746,6 +748,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                 onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
                 onDelete={setMomentDeleting}
               />
+              {node.hosted === true ? <ReminderBanner now={now} onOpenThread={onOpenThread} /> : null}
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
               {node.hosted === true && savedList.available && typeof onOpenSalvos === 'function'
                 ? (
@@ -757,6 +760,20 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                   >
                     <Icon name='salvar' size={20} color={colors.soft} />
                     <Text style={styles.salvosText}>{SAVED_ENTRY_LABEL}</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {node.hosted === true && ownPublicKey && typeof onOpenEventos === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Eventos'
+                    onPress={() => onOpenEventos(ownPublicKey)}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='evento' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>Eventos</Text>
                     <Icon name='seta' size={20} color={colors.soft} />
                   </Pressable>
                   )

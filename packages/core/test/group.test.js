@@ -184,7 +184,7 @@ test('header shapes', async (t) => {
 })
 
 test('record shapes', async (t) => {
-  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice'])
+  t.alike([...GROUP_TYPES], ['group-post', 'group-hide', 'group-admit', 'group-ban', 'group-meta', 'group-admin', 'group-leave', 'group-create', 'group-drop', 'group-key', 'group-sealed', 'group-invites', 'group-react', 'group-topic', 'group-poll', 'group-choice', 'group-event'])
   const p = groupPost({ text: 'oi', replyTo: { writer: wA, seq: 1, extra: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.alike(p, { type: 'group-post', text: 'oi', replyTo: { writer: wA, seq: 1 }, seen: { writer: wB, seq: 2 }, at: AT(1) })
   t.is(validateGroupRecord(p, 1), null)
@@ -2850,7 +2850,7 @@ const choose = (w, key, target, pick, s) => w.push(key, groupChoice({ target, pi
 const postOf = (g, ref) => g.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq)
 
 test('forum record shapes', async (t) => {
-  t.alike([...GROUP_TYPES].slice(-3), ['group-topic', 'group-poll', 'group-choice'])
+  t.alike([...GROUP_TYPES].slice(-4), ['group-topic', 'group-poll', 'group-choice', 'group-event'])
   const target = { writer: wA, seq: 1, x: 1 }
   const tp = groupTopic({ target, seen: { writer: wX, seq: 2 }, at: AT(1) })
   t.alike(tp, { type: 'group-topic', target: { writer: wA, seq: 1 }, seen: { writer: wX, seq: 2 }, at: AT(1) })
@@ -3042,7 +3042,7 @@ test('an old reader skips the forum records and still reads later posts', (t) =>
   const Module = require('module')
   const file = require.resolve('../lib/group')
   const src = fs.readFileSync(file, 'utf8')
-  const oldSrc = src.replace(/,\n {2}'group-topic': \[[^\]]*\],\n {2}'group-poll': \[[^\]]*\],\n {2}'group-choice': \[[^\]]*\]/, '')
+  const oldSrc = src.replace(/,\n {2}'group-topic': \[[^\]]*\],\n {2}'group-poll': \[[^\]]*\],\n {2}'group-choice': \[[^\]]*\](,\n {2}'group-event': \[[^\]]*\])?/, '')
   t.not(oldSrc, src, 'the types are gone from RECORD_KEYS')
   const m = new Module(file, module)
   m.filename = file

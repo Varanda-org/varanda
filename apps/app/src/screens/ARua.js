@@ -1483,6 +1483,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       media: post.media || null,
       preview: post.preview || null,
       ...(diaryPost && Array.isArray(post.poll) ? { poll: post.poll } : {}),
+      ...(diaryPost && post.event && typeof post.event === 'object' ? { event: post.event } : {}),
       replyToName,
       level: post.replyTo ? 'comment' : 'post',
       // Feed posts pass persist: true (own or followed by construction).
@@ -1553,6 +1554,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     focusRef,
     focusTop,
     poll: diaryPost && Array.isArray(post.poll) ? post.poll : null,
+    event: diaryPost && post.event && typeof post.event === 'object' ? post.event : null,
     // By value: a refetch answers with new objects for the same numbers.
     counts: counts !== null && typeof counts === 'object',
     replies: counts ? counts.replies : null,

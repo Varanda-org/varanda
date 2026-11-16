@@ -56,6 +56,10 @@ const {
   GROUP_MARKED_LIMIT,
   GROUP_TOPICS_LIMIT,
   GROUP_VOTERS_MAX,
+  MAX_EVENT_TITLE,
+  MAX_EVENT_PLACE,
+  GROUP_EVENTS_LIMIT,
+  isEvent,
   MAX_TESTIMONIAL,
   TESTIMONIAL_PENDING_MAX,
   TESTIMONIAL_KEPT_MAX,
@@ -789,6 +793,8 @@ function markedGroupReadResult (n, ch, card = PRIVATE_CARD) {
   const result = groupReadResult(n, ch, null, card)
   result.items = result.items.map((item) => ({ ...item, topic: WORST_MARK }))
   result.poll = worstPollSummary()
+  // A root carries a poll or an event, never both; the event summary is the smaller one.
+  result.event = { writer: HEX, seq: SEQ, ...WORST_EVENT, totals: [SEQ, SEQ], mine: 1 }
   return result
 }
 
@@ -852,4 +858,83 @@ test('group.voters: a full page fits', (t) => {
   while (size(votersResult(largest + 1)) <= MAX_MESSAGE) largest++
   t.is(largest, 977, 'the largest list that would fit')
   t.comment('group.voters worst case at ' + GROUP_VOTERS_MAX + ' keys per option: ' + worst + ' bytes')
+})
+
+// Eventos (docs/rpc.md): a title of MAX_EVENT_TITLE and a place of
+// MAX_EVENT_PLACE characters, an end and a start. Like a poll option, a
+// title or place refuses lone surrogates and line breaks, so the widest valid
+// character is a 4-byte one; the sizes below use lone surrogates anyway (6
+// bytes each on the wire), an upper bound of every valid event. The instants
+// are the 24-byte canonical form, wider than null.
+const WORST_EVENT_INSTANT = '2099-12-31T23:59:59.999Z'
+function eventOf (ch) {
+  return { title: ch.repeat(MAX_EVENT_TITLE), start: WORST_EVENT_INSTANT, end: WORST_EVENT_INSTANT, place: ch.repeat(MAX_EVENT_PLACE) }
+}
+const WORST_EVENT = eventOf('\ud800')
+const WIDEST_VALID_EVENT = { ...eventOf('\u{1f600}'), start: '2099-12-30T23:59:59.999Z' }
+
+// An event post is a root post: replyTo null, no media, preview, quote or poll.
+function worstEventPost (ch) {
+  return { type: 'post', text: ch.repeat(MAX_TEXT), at: AT, replyTo: null, event: eventOf(ch) }
+}
+
+test('event posts: the widest valid event record is valid and bounded, and smaller than the worst quote', (t) => {
+  t.is(isEvent(WORST_EVENT), false, 'the size bound itself is no valid event')
+  t.ok(utf8ByteLength(JSON.stringify(WIDEST_VALID_EVENT)) <= utf8ByteLength(JSON.stringify(WORST_EVENT)), 'the bound covers the widest valid event')
+  for (const ch of WORST) {
+    const record = { ...worstEventPost(ch), event: WIDEST_VALID_EVENT }
+    t.is(validateRecord(record, 1), null, 'valid core record ' + JSON.stringify(ch))
+    t.ok(validateParams('post.create', { text: record.text, event: record.event }).ok, 'valid rpc event ' + JSON.stringify(ch))
+    t.ok(validateParams('group.post', { group: HEX, text: 'a' + ch.repeat(MAX_TEXT - 1), event: record.event }).ok, 'valid group.post event ' + JSON.stringify(ch))
+    t.ok(utf8ByteLength(JSON.stringify(worstEventPost(ch))) < utf8ByteLength(JSON.stringify(worstQuote(ch, false))), 'smaller than a ten-photo quote ' + JSON.stringify(ch))
+  }
+  t.comment('worst event post record: ' + utf8ByteLength(JSON.stringify(worstEventPost('\ud800'))) + ' bytes')
+})
+
+test('event posts: feed, peek and log items stay under the page maxima', (t) => {
+  // A FeedItem or PeekItem of an event post carries `event` (no media, no
+  // preview); a log entry carries the record.
+  const withEvent = (result) => (n, ch) => {
+    const out = result(n, ch, false)
+    const items = out.items || out.entries
+    for (let i = 0; i < items.length; i++) {
+      const e = items[i]
+      items[i] = e.record ? { ...e, record: worstEventPost(ch) } : { ...e, replyTo: null, quote: null, media: null, preview: null, event: eventOf(ch) }
+    }
+    return out
+  }
+  for (const ch of WORST) {
+    for (const result of [feedResult, peekResult, logResult]) {
+      t.ok(size(withEvent(result)(1, ch)) < size(result(1, ch, false)), 'an event item is smaller than a ten-photo item ' + JSON.stringify(ch))
+    }
+  }
+  t.ok(size(withEvent(feedResult)(FEED_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+  t.ok(size(withEvent(peekResult)(PEEK_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+  t.ok(size(withEvent(logResult)(LOG_LIMIT_MAX, '\ud800')) <= MAX_MESSAGE)
+})
+
+test('diary.peek: PEEK_SEQS_MAX event posts fit with profile and username', (t) => {
+  t.is(PEEK_SEQS_MAX, 29)
+  const events = (ch) => ({ ...diaryPeekResult(0, 0, 0, ch, false), entries: Array(PEEK_SEQS_MAX).fill({ seq: SEQ, record: worstEventPost(ch) }) })
+  for (const ch of WORST) {
+    t.ok(size(events(ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+    t.ok(size(events(ch)) < size(diaryPeekResult(PEEK_SEQS_MAX, 0, 0, ch, false)), 'below the quote worst case ' + JSON.stringify(ch))
+  }
+  t.comment('diary.peek at ' + PEEK_SEQS_MAX + ' event posts: ' + size(events('\ud800')) + ' bytes')
+})
+
+// A group.events item: the root's text and author, its hidden flag, the
+// event, the going and maybe totals and the caller's pick (null is widest).
+function eventsResult (n, ch) {
+  const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), hidden: false, event: eventOf(ch), totals: [SEQ, SEQ], mine: null }
+  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, incomplete: true }
+}
+
+test('group.events: a full page fits', (t) => {
+  t.is(GROUP_EVENTS_LIMIT, 30)
+  for (const ch of WORST) t.ok(size(eventsResult(GROUP_EVENTS_LIMIT, ch)) <= MAX_MESSAGE, JSON.stringify(ch))
+  const worst = size(eventsResult(GROUP_EVENTS_LIMIT, '\ud800'))
+  t.ok(worst <= MAX_MESSAGE)
+  t.ok(size(eventsResult(GROUP_EVENTS_LIMIT + 1, '\ud800')) <= MAX_MESSAGE, 'one item to spare')
+  t.comment('group.events worst case at ' + GROUP_EVENTS_LIMIT + ' events: ' + worst + ' bytes')
 })

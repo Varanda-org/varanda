@@ -129,6 +129,24 @@ test('read: a poll post is read with its options as part of the text and never j
   t.is((await reader.read({ diaryKey: key, seq: 2 })).hasPoll, false)
 })
 
+test('read: an event post is read with its title and place as part of the text and never judged alone', async (t) => {
+  const assoc = makeAssociation()
+  const key = randomKey()
+  const b0 = block(memberCertRecord(createCert({ member: key }, assoc.kp)))
+  const fx = await fixture(t)
+  const reader = createPostReader({ baseUrl: fx.baseUrl, token: TOKEN, association: assoc.hex })
+  const event = { title: 'Mutirão da horta', start: '2030-05-01T12:00:00.000Z', end: null, place: 'Praça Central' }
+
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'Venha!', at: AT, event }))))
+  const r = await reader.read({ diaryKey: key, seq: 2 })
+  const text = 'Venha!\nMutirão da horta\nPraça Central'
+  t.alike(r, { ok: true, text, hasMedia: false, hasQuote: false, hasPoll: true, textCp: Array.from(text).length, contentHash: digest(text), seq: 2 })
+  t.alike(judge({ ...r, kind: 'post', reason: 'spam', priorAi: false, truncated: false }), { action: 'aberta', code: 'enquete', note: '', nearest: null }, 'the verified event post stays open for a person')
+
+  fx.handler = serveJson(body(b0, block(postRecord({ text: 'Venha!', at: AT, event: { ...event, place: '' } }))))
+  t.is((await reader.read({ diaryKey: key, seq: 2 })).text, 'Venha!\nMutirão da horta', 'no place: the title alone')
+})
+
 test('read: wrong type, bad certificate and revoked issuer never return ok', async (t) => {
   const assoc = makeAssociation()
   const key = randomKey()

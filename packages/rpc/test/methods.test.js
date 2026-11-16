@@ -20,7 +20,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
@@ -2996,6 +2996,84 @@ test('post.create: optional poll, never with media or a preview, text required',
   // Only post.create takes a poll: a reply or a quote never does.
   bad(t, 'post.reply', { to: KEY + ':1', text: 'q', poll }, 'reply with a poll')
   bad(t, 'post.quote', { to: KEY + ':1', text: 'q', poll }, 'quote with a poll')
+})
+
+test('post.create: optional event, never with a poll, media or a preview', (t) => {
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: '' }
+  ok(t, 'post.create', { text: 'Venham', event }, { text: 'Venham', event })
+  ok(t, 'post.create', { text: 'Venham', event: { ...event, end: '2026-12-24T23:00:00.000Z', place: 'Casa' } })
+  bad(t, 'post.create', { text: '', event }, 'an event post needs its text')
+  bad(t, 'post.create', { text: 'q', event: null }, 'null event')
+  bad(t, 'post.create', { text: 'q', event: 'x' }, 'string event')
+  bad(t, 'post.create', { text: 'q', event: { ...event, extra: 1 } }, 'extra event key')
+  bad(t, 'post.create', { text: 'q', event: { title: 'a', start: event.start, end: null } }, 'missing place')
+  bad(t, 'post.create', { text: 'q', event: { ...event, title: '' } }, 'empty title')
+  bad(t, 'post.create', { text: 'q', event: { ...event, title: 'a'.repeat(81) } }, 'long title')
+  bad(t, 'post.create', { text: 'q', event: { ...event, place: 'a'.repeat(121) } }, 'long place')
+  bad(t, 'post.create', { text: 'q', event: { ...event, start: '2026-12-24' } }, 'non-canonical start')
+  bad(t, 'post.create', { text: 'q', event: { ...event, end: event.start } }, 'end equals start')
+  bad(t, 'post.create', { text: 'q', event: { ...event, start: '2019-12-31T23:59:59.999Z' } }, 'start out of range')
+  bad(t, 'post.create', { text: 'q', event, poll: ['a', 'b'] }, 'event with a poll')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  bad(t, 'post.create', { text: 'q', event, media }, 'event with media')
+  bad(t, 'post.create', { text: '', event, media }, 'event with media and no text')
+  // Only post.create takes an event: a reply or a quote never does.
+  bad(t, 'post.reply', { to: KEY + ':1', text: 'q', event }, 'reply with an event')
+  bad(t, 'post.quote', { to: KEY + ':1', text: 'q', event }, 'quote with an event')
+})
+
+test('event params are stored as a plain copy', (t) => {
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: '' }
+  const proxy = new Proxy({ ...event }, { get (o, k) { return k === 'title' ? 'x'.repeat(5000) : o[k] } })
+  for (const [method, params] of [['post.create', { text: 'q', event: proxy }], ['group.post', { group: KEY, text: 'q', event: proxy }]]) {
+    const r = validateParams(method, params)
+    if (r.ok) {
+      t.not(r.value.event, proxy, method + ' does not keep the proxy')
+      t.alike(r.value.event, event, method + ' keeps the checked values')
+      t.is(Object.getPrototypeOf(r.value.event), Object.prototype)
+    } else t.pass(method + ' rejects it')
+  }
+  const given = { ...event }
+  const r = validateParams('post.create', { text: 'q', event: given })
+  t.not(r.value.event, given, 'a copy of a plain event too')
+  t.alike(Object.keys(r.value.event), ['title', 'start', 'end', 'place'])
+})
+
+test('group.post: event on a root post, never with a poll', (t) => {
+  const event = { title: 'Ceia', start: '2026-12-24T20:00:00.000Z', end: null, place: 'Casa' }
+  ok(t, 'group.post', { group: KEY, text: 'Venham', event }, { group: KEY, text: 'Venham', fwd: 0, event })
+  ok(t, 'group.post', { group: KEY, text: 'Venham', event, topic: true })
+  ok(t, 'group.post', { group: KEY, text: 'Venham', event, fwd: 0 })
+  bad(t, 'group.post', { group: KEY, text: '', event }, 'text required')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, poll: ['a', 'b'], topic: true }, 'event with a poll')
+  bad(t, 'group.post', { group: KEY, text: ' ', event }, 'a blank text')
+  bad(t, 'group.post', { group: KEY, text: '\u200b \u3164', event }, 'an invisible-only text')
+  bad(t, 'group.post', { group: KEY, text: '\u200b \u3164', event, topic: true }, 'an invisible-only text on a topic')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, replyTo: { writer: KEY, seq: 1 } }, 'an event is a root')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, fwd: 1 }, 'an event is not a forward')
+  bad(t, 'group.post', { group: KEY, text: 'q', event, sealed: true }, 'an event is not sealed')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  bad(t, 'group.post', { group: KEY, text: 'q', event, media }, 'event with media')
+  bad(t, 'group.post', { group: KEY, text: 'q', event: null }, 'null event')
+  bad(t, 'group.post', { group: KEY, text: 'q', event: { ...event, end: event.start } }, 'end equals start')
+  bad(t, 'group.post', { group: KEY, text: 'q', event: { ...event, extra: 1 } }, 'extra event key')
+})
+
+test('group.events: { group, cursor? }', (t) => {
+  const { GROUP_EVENTS_LIMIT } = require('..')
+  t.is(GROUP_EVENTS_LIMIT, 30)
+  t.absent(isMutating('group.events'))
+  ok(t, 'group.events', { group: KEY }, { group: KEY })
+  const cursor = { at: '2026-12-24T20:00:00.000Z', writer: KEY, seq: 3 }
+  ok(t, 'group.events', { group: KEY, cursor }, { group: KEY, cursor })
+  bad(t, 'group.events', {}, 'missing group')
+  bad(t, 'group.events', { group: KEY.slice(1) }, 'short group')
+  bad(t, 'group.events', { group: KEY, limit: 5 }, 'no limit param')
+  bad(t, 'group.events', { group: KEY, before: cursor }, 'before is not a param')
+  bad(t, 'group.events', { group: KEY, extra: 1 }, 'extra field')
+  for (const c of [null, KEY, { at: cursor.at, writer: KEY }, { ...cursor, seq: 0 }, { ...cursor, at: '2026-12-24' }, { ...cursor, extra: 1 }]) {
+    bad(t, 'group.events', { group: KEY, cursor: c }, 'cursor ' + JSON.stringify(c))
+  }
 })
 
 test('choice.set and choice.mine', (t) => {

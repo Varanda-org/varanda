@@ -213,6 +213,12 @@ groups[2].topics = [
   { writer: key(300), seq: 2, poll: ['Contos', 'Romance', 'Poesia'] },
   { writer: key(303), seq: 2, poll: null }
 ]
+// Evento do grupo: a root post of 'Geral' with an event (g.events), RSVP by
+// group.choose (pick 0 vou, 1 talvez).
+groups[2].items.push(forumRoot(5, members[3], 40, 'Encontro de leitura no parque'))
+groups[2].events = [
+  { writer: key(305), seq: 2, event: { title: 'Encontro de leitura', start: '2026-11-28T17:00:00.000Z', end: null, place: 'Parque central' } }
+]
 groups[2].choices = [
   { writer: key(300), seq: 2, diary: members[2].author, pick: 0 },
   { writer: key(300), seq: 2, diary: members[4].author, pick: 0 },
@@ -310,7 +316,12 @@ const topicPosts = [
 export const pollPostRef = { author: own, seq: 60 }
 const pollPost = { ...photoPost(members[0], 60, at(5, 14, 40), 'Qual o melhor horário para o próximo mutirão da horta?', null), poll: ['Sábado de manhã', 'Sábado à tarde', 'Domingo'] }
 
-export const feed = [...baseFeed, ...photoPosts, ...topicPosts, pollPost]
+// Evento do diário: a post of the own diary with the `event` key (title, start,
+// end, place), shown under Eventos on the profile.
+export const eventPostRef = { author: own, seq: 61 }
+const eventPost = { ...photoPost(members[0], 61, at(5, 14, 45), 'Mutirão da horta no sábado, tragam luvas!', null), event: { title: 'Mutirão da horta', start: '2026-11-21T12:00:00.000Z', end: '2026-11-21T15:00:00.000Z', place: 'Horta comunitária' } }
+
+export const feed = [...baseFeed, ...photoPosts, ...topicPosts, pollPost, eventPost]
 
 const ownPost = (n) => feed.filter((post) => post.author === own)[n]
 

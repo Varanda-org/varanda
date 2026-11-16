@@ -34,7 +34,9 @@
 // text: `text` is the post's text, then each option on its own line, so a
 // moderator and the model see what the author asked and offered. `hasPoll`
 // is true then (false otherwise) and the triage rule never lets the AI act
-// alone on such a post.
+// alone on such a post. An event post (`event`: title, start, end, place) is
+// read the same way: its title and place follow the text, one per line, and
+// `hasPoll` is true for it too, so the AI never acts alone on it either.
 //
 // Nothing is logged: not the text, keys, token or address. Only the post
 // record is read: no /media fetch, no Corestore, no DHT, no replication.
@@ -192,7 +194,11 @@ function createPostReader ({ baseUrl, token, association, revokedIssuers = () =>
       // The options are part of what the author signed: read them with the
       // text. The array is a validated plain-data copy.
       const poll = Array.isArray(record.poll) ? record.poll : null
-      const text = poll === null ? record.text : [record.text, ...poll].join('\n')
+      // An event's title and place are signed text too, and the same rule
+      // applies: a person decides (hasPoll), the AI may only keep it open.
+      const event = isPlainObject(record.event) ? record.event : null
+      const extra = poll !== null ? poll : event === null ? null : (event.place === '' ? [event.title] : [event.title, event.place])
+      const text = extra === null ? record.text : [record.text, ...extra].join('\n')
       // records.js allows lone surrogates; UTF-8 turns them into U+FFFD, so
       // digest() would collide with different text and the ledger refuses
       // the string. Such a post is not something the AI can judge.
@@ -202,7 +208,7 @@ function createPostReader ({ baseUrl, token, association, revokedIssuers = () =>
         text,
         hasMedia: Array.isArray(record.media) && record.media.length >= 1,
         hasQuote: record.quote !== undefined,
-        hasPoll: poll !== null,
+        hasPoll: extra !== null,
         textCp: Array.from(text).length,
         contentHash: digest(text),
         seq
