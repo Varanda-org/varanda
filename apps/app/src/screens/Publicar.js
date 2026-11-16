@@ -45,6 +45,13 @@
 // de novo' drops the item, so the next press (the person's) puts the photo
 // again. An uncertain moment.create holds the draft until the person checks
 // in the Diário and discards it: never sent again.
+// 'Publicar também na web' (../postShareCompose) is offered where the
+// installation has public post pages on and the node is hosted
+// (usePostPublic), for a plain own-diary post only: not a reply or quote (the
+// page never shows the parent), not a poll or event (the page shows only
+// text, photos and a link title), not a page, not a moment, not offline. It
+// starts unticked on every opening. Ticked, one post.share follows the post,
+// is never resent, and the post never waits in the outbox.
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -115,6 +122,9 @@ import { useChatAttachments } from '../ui/AttachSheet'
 import { canPublishMoment } from '../momentSeen'
 import { momentMusicOf } from '../moments'
 import { momentsChanged } from './Momentos'
+import { usePostPublic } from '../postPublicContext'
+import { POST_SHARE_CONSENT } from '../ui/PostShareSheet'
+import { WEB_SHARE_LABEL, shareNew, webShareOffered } from '../postShareCompose'
 
 export const MOMENT_TEXT_MAX = 200
 // maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
@@ -668,8 +678,10 @@ function Ring ({ progress, tone }) {
 const ATTACH_AFTER_OPEN_MS = 700
 
 // `quote` takes precedence over `reply` (the shell keeps them exclusive);
-// `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref)
-// with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply'.
+// `onClearQuote` (optional) adds 'cancelar citação'. onPublished(kind, ref,
+// web) with kind 'post' | 'reply' | 'quote' | 'queued-post' | 'queued-reply';
+// web is { ref, result } (shareNew) only after a post with 'Publicar também
+// na web' ticked, else null.
 // onReplyDraft(accepted) settles the caller's onExpand promise.
 // `shared` (optional) prefills this post once per id. `onSharedDone(id)`
 // releases the shell's copy of the files. A lock unmounts this screen, so
@@ -959,6 +971,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const [eventDraft, setEventDraft] = useState(null)
   const eventActive = eventDraft !== null && pollOk
   const eventHeldBack = eventDraft !== null && !pollOk
+  const postPublic = usePostPublic()
+  const [webShare, setWebShare] = useState(false)
+  const webShareOk = webShareOffered({ enabled: postPublic.enabled, online: node.online, author: self.publicKey, page: asPage !== null || locked, moment: momentMode, reply: !!reply, quote: !!quote, poll: pollDraft !== null, event: eventDraft !== null })
+  const webOn = webShare && webShareOk
+  // Consent is per post: the tick never survives a close, nor a state where
+  // the box is not offered.
+  useEffect(() => { if (!open || !webShareOk) setWebShare(false) }, [open, webShareOk])
   const musicTried = useRef(new Set())
   const musicResolveOn = musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())
   const musicResolveTarget = resolveTarget(text, musicTried.current)
@@ -1288,6 +1307,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       freeRef.current(old.id)
     }
     setMode('post')
+    // Consent is per post: shared text or files never inherit a tick.
+    setWebShare(false)
     const current = textRef.current
     const merged = mergeDraft(current, shared.text, MAX_TEXT)
     if (merged.text !== current) {
@@ -1388,17 +1409,20 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Clears only what was sent (an edit made meanwhile stays) and tells the
   // shell, which shows the toast and clears the reply or quote if it still
   // matches.
-  const published = (sent, sentReply, sentIds = [], sentQuote = null) => {
+  const published = (sent, sentReply, sentIds = [], sentQuote = null, web = null) => {
     tap('success')
     setPollDraft(null)
     setEventDraft(null)
     setMusicDraft(null)
+    // The tick never outlives its post, even when the shell reopens the
+    // composer in the same commit (an OS share arriving right after).
+    setWebShare(false)
     musicTried.current.clear()
     setText((current) => (current === sent ? '' : current))
     if (video.draft.state.file && sentIds.includes(video.draft.state.file)) video.draft.clear()
     if (sentIds.length > 0) removeItems(sentIds)
     if (sentQuote) return onPublished('quote', sentQuote.ref)
-    onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
+    onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null, web)
   }
 
   // Keeps the post in the outbox (the reply target verbatim), sealed by the
@@ -1566,6 +1590,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sent = text
     const sentReply = reply
     const sentQuote = quote
+    // A reply or quote never shares, even in the render before the reset
+    // effect unticks the box.
+    const sentWeb = webOn && !sentReply && !sentQuote
     if (sentQuote && (node.online === false || countChars(sent) < 1)) return
     const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
     let sentMedia = null
@@ -1628,18 +1655,28 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // The draft is kept on any failure; a request is never resent.
     let raw = null
     const call = () => node.request(method, params)
-    const r = await action.run(() => call().catch((err) => {
-      raw = err
-      throw err
-    }))
+    // One post.share for the post just written, inside the same pending
+    // action so a second Publicar cannot slip in; shareNew never rejects, and
+    // neither request is ever resent.
+    let web = null
+    const r = await action.run(async () => {
+      const value = await call().catch((err) => {
+        raw = err
+        throw err
+      })
+      if (sentWeb) web = await shareNew(node.request, self.publicKey, seqOf(value)).catch(() => ({ ref: null, result: null }))
+      return value
+    })
     if (r.ok) {
       confirm(seqOf(r.value))
-      return published(sent, sentReply, sentIds, sentQuote)
+      // A lock unmounts this screen: the share's answer is dropped then.
+      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null)
     }
     // The write gate could not reach the seeder: nothing was written, so the
     // post waits in the outbox (text only: a post with photos or a quote
-    // stays here).
-    if (sentMusic === null && sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
+    // stays here, and so does a post ticked for the web, since the share
+    // could not follow it out of the outbox).
+    if (sentMusic === null && sentMedia === null && !sentQuote && !sentWeb && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
       if (await queue(sent, sentReply)) action.clearError()
       return
     }
@@ -1663,9 +1700,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       const found = (res.entries || []).find((entry) => matches(entry) &&
         (sentMusic === null || (entry.record.preview && typeof entry.record.preview === 'object' && !Array.isArray(entry.record.preview) && entry.record.preview.url === built.card.url)))
       if (found) {
-        confirm(Number.isInteger(found.seq) ? found.seq : null)
+        const foundSeq = Number.isInteger(found.seq) ? found.seq : null
+        confirm(foundSeq)
         action.clearError()
-        published(sent, sentReply, sentIds, sentQuote)
+        const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq).catch(() => ({ ref: null, result: null })) : null
+        published(sent, sentReply, sentIds, sentQuote, late !== null && mountedRef.current ? late : null)
       }
     } catch (err) {
       setCheckError(errorText(err))
@@ -1779,6 +1818,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     return !sel || sel.start >= postTextRef.current.length
   }, [])
   const postView = useKeepInView(open && !momentMode, postCaretAtEnd, inputRef)
+  // Ticking scrolls to the end, so the consent text under the box is not
+  // left behind the keyboard on a phone.
+  const toggleWebShare = () => {
+    const next = !webShare
+    setWebShare(next)
+    if (!next) return
+    nextFrame(() => {
+      const v = postView.scrollRef.current
+      if (v && typeof v.scrollToEnd === 'function') v.scrollToEnd({ animated: true })
+    })
+  }
   // The web only (a textarea has selectionStart): each mode mounts its own
   // field, and a new textarea with a saved draft puts the caret at the start,
   // so typing would land before the old text. It starts at the end instead,
@@ -2255,6 +2305,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             modes={['snippet', 'track', 'playlist']}
           />
           <EmojiPicker open={emojiOpen && !frozen} onPick={pickEmoji} />
+          {webShareOk
+            ? (
+              <View style={styles.errors}>
+                <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: webShare, disabled: held }} disabled={held} onPress={toggleWebShare} style={styles.webRow}>
+                  <View style={[styles.webBox, webShare && styles.webBoxOn]}>{webShare ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}</View>
+                  <Text style={styles.webText}>{WEB_SHARE_LABEL}</Text>
+                </Pressable>
+                {webShare ? <Soft>{POST_SHARE_CONSENT}</Soft> : null}
+              </View>
+              )
+            : null}
           {quoteOffline
             ? <View style={styles.errors}><Soft>Citações precisam de internet</Soft></View>
             : null}
@@ -2565,6 +2626,10 @@ const makeStyles = (colors) => StyleSheet.create({
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },
   errors: { paddingHorizontal: 16, gap: 4 },
+  webRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
+  webBox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.outline, alignItems: 'center', justifyContent: 'center' },
+  webBoxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
+  webText: { color: colors.ink, fontSize: 15, flexShrink: 1 },
   ring: { width: 20, height: 20 },
   track: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2.5, borderColor: colors.ring },
   half: { position: 'absolute', top: 0, width: 10, height: 20, overflow: 'hidden' },
