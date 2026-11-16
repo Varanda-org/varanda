@@ -12,7 +12,9 @@
 // service through createAccountServer with the phone stub (GET
 // /account/phone/policy answers { required: true }), no age check (GET
 // /account/age/policy answers { required: false }), an issuer certified by
-// the lab association and the terms store on. Passkey, terms and the account flow are the real ones.
+// the lab association, the terms store on and GIF search through the stub of
+// ./gif-stub.js (a loopback provider of one-color GIFs, no key). Passkey,
+// terms and the account flow are the real ones.
 // One origin, http://localhost:<port>, carries what Caddy carries in a
 // deployment: /varanda.json, /seeder, /media/*, /index/*, /account/*, /p/*, and
 // everything else goes to the Expo web dev server or to an exported dist.
@@ -305,6 +307,7 @@ function steps (origin, opts) {
     'Laboratório hospedado pronto em ' + origin,
     'Interface: ' + (opts.ui !== null ? 'dist exportado em ' + opts.ui : 'servidor web do Expo em ' + opts.expo + ' (npm run web -w apps/app)'),
     'código de SMS do laboratório: ' + STUB_CODE,
+    'Busca de GIF: provedor simulado, qualquer busca traz as mesmas imagens de uma cor só.',
     '',
     'No Chrome:',
     '  1. Abra ' + origin + ' (use localhost, não 127.0.0.1: o rp.id da passkey não pode ser um IP).',
@@ -394,6 +397,7 @@ async function main () {
   const { openPasskeyStore } = require('../lib/account/passkey-store')
   const nodeCrypto = require('node:crypto')
   const { createPhoneStub } = require('./phone-stub')
+  const { createGifStub } = require('./gif-stub')
   const { openPhoneStore } = require('../lib/account/phone-store')
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-lab-'))
@@ -481,10 +485,12 @@ async function main () {
     // sandbox code, never the key.
     const phoneClient = createPhoneStub()
     const phones = openPhoneStore(accountDir, { key: nodeCrypto.randomBytes(32) })
-    const account = createAccountServer({ association, origin, store, issuer, terms, moderation, passkeys, didit: null, ages: null, phoneClient, phones })
+    const gifStub = await createGifStub()
+    cleanups.push(() => gifStub.close())
+    const account = createAccountServer({ association, origin, store, issuer, terms, moderation, passkeys, didit: null, ages: null, phoneClient, phones, gif: gifStub.config, gifTransport: gifStub.transport })
     const accountListener = await account.listen({ host: '127.0.0.1', port: 0 })
     cleanups.push(() => accountListener.close())
-    log('serviço de conta no ar (cadastro por celular com SMS simulado)')
+    log('serviço de conta no ar (cadastro por celular com SMS simulado, busca de GIF simulada)')
 
     const proxy = await startLabProxy({
       host: opts.host,

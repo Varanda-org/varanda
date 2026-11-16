@@ -403,7 +403,8 @@ async function sender (overrides = {}) {
     offlineQueue: false,
     canQueue: true,
     queue: (...args) => { state.queued.push(args); return true },
-    linkDraft: { take: () => { throw new Error('music must hide the ordinary card') } },
+    // The word check reads the card through take, and neither flow has one.
+    linkDraft: { take: () => null },
     cardRef: { current: null },
     media: null,
     setUploading: () => {},
@@ -598,7 +599,7 @@ test('attaching a photo removes music only after files were picked', async (t) =
   for (const files of [[], [{}]]) {
     const musicDraftRef = { current: draft }
     let note = ''
-    const attach = composerFunction('  const addFiles = async (files, onRoom) => {', '\n  // Done after unmount', 'attach', {
+    const attach = composerFunction('  const addFiles = async (files, onRoom, until = Infinity) => {', '\n  // Done after unmount', 'attach', {
       canAttach: true,
       mediaOnline: true,
       busy: false,
@@ -617,6 +618,8 @@ test('attaching a photo removes music only after files were picked', async (t) =
       genRef: { current: 0 },
       setItems: () => {},
       encodeFile: async () => { throw new Error('invalid photo') },
+      retryableEncode: () => true,
+      sourcesRef: { current: new Map() },
       patch: () => {},
       errorText: (err) => err.message,
       thumbsRef: { current: new Map() },

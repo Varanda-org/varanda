@@ -31,3 +31,19 @@ export function useKeyboardOpen () {
   }, [])
   return open
 }
+
+// The soft keyboard's height while it is up, 0 otherwise, on the same events.
+// The web sends none: there the window itself shrinks to the visible area.
+export function useKeyboardHeight () {
+  const [height, setHeight] = useState(0)
+  useEffect(() => {
+    const ios = Platform.OS === 'ios'
+    const show = Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', (e) => {
+      const h = e && e.endCoordinates ? e.endCoordinates.height : NaN
+      setHeight(Number.isFinite(h) && h > 0 ? h : 0)
+    })
+    const hide = Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => setHeight(0))
+    return () => { show.remove(); hide.remove() }
+  }, [])
+  return height
+}

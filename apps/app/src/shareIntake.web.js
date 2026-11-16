@@ -113,3 +113,41 @@ export async function sweep (maxAgeMs) {
 export function listen () {
   return function () {}
 }
+
+// The worker (scripts/sw.js takeShare) sends the page here with this field
+// when it could not store a share, usually for lack of browser storage.
+const LOST_FIELD = 'compartilhamento'
+const LOST_VALUE = 'nao-coube'
+
+// True once when the page was opened by a share the worker could not store.
+// The field leaves the address either way; any other field stays as written.
+export function takeLost () {
+  try {
+    const loc = globalThis.location
+    const search = loc && typeof loc.search === 'string' ? loc.search : ''
+    const body = search.startsWith('?') ? search.slice(1) : search
+    if (body === '') return false
+    let lost = false
+    let seen = false
+    const kept = []
+    for (const raw of body.split('&')) {
+      if (raw === '') continue
+      const eq = raw.indexOf('=')
+      const key = eq === -1 ? raw : raw.slice(0, eq)
+      if (key !== LOST_FIELD) {
+        kept.push(raw)
+        continue
+      }
+      seen = true
+      if (raw.slice(eq + 1) === LOST_VALUE && eq !== -1) lost = true
+    }
+    if (!seen) return false
+    const history = globalThis.history
+    if (history && typeof history.replaceState === 'function') {
+      history.replaceState(history.state, '', loc.pathname + (kept.length === 0 ? '' : '?' + kept.join('&')) + (loc.hash || ''))
+    }
+    return lost
+  } catch {
+    return false
+  }
+}

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 63)
+  t.is(LEGAL_VERSION, 64)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 63, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 64, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -159,7 +159,7 @@ test('legal: version 49 keeps a loaded music player at any scroll distance', asy
       'Um link de YouTube, SoundCloud, Spotify ou Apple Music pode aparecer como um cartão com o player do próprio serviço',
       'numa publicação, numa citação, numa conversa privada, num grupo e na prévia enquanto você escreve',
       'mas fica sabendo que o seu aparelho mostrou aquele item, e quando',
-      'Na prévia enquanto você escreve, o player pode carregar assim que a prévia fica pronta, antes de você publicar ou enviar.',
+      'Na prévia enquanto você escreve, o player pode carregar assim que a prévia fica pronta e aparece na tela, antes de você publicar ou enviar; enquanto o teclado cobre a prévia, ele não carrega.',
       'O player carrega sozinho um pouco antes de o cartão aparecer',
       'pode usar cookies e outros dados que o serviço guarda no aparelho',
       'O player não começa com som: o som só sai quando você toca o play dentro do player',
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'c269c6785edd4dd9ed1cd174eb9c0748ede9331183db1dfaffbe664e89dd60aa', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '2ec343e54dc55d254408479c9e1bc834330438bec782fc9c62373fb3821c091d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -807,4 +807,17 @@ test('legal: version 63 puts the momentos seen in the seen block', async (t) => 
     'essa lista fica só no aparelho e é apagada quando você sai da conta'
   ]) t.ok(all.includes(required), 'privacy: ' + required)
   t.absent(all.includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 64 keeps the players off with Prévia de links off and under the keyboard', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('o player pode carregar assim que a prévia fica pronta e aparece na tela, antes de você publicar ou enviar; enquanto o teclado cobre a prévia, ele não carrega.'), 'the draft player waits for the keyboard')
+    t.ok(text(doc).includes('Com a chave Prévia de links, em Ajustes, desligada, nenhum player carrega e os que estavam carregados fecham: o cartão aparece como os outros, e um toque nele abre o link.'), 'off, no player')
+    t.absent(text(doc).includes('o player pode carregar assim que a prévia fica pronta, antes de você publicar ou enviar.'), 'the old draft sentence is gone')
+    t.absent(text(doc).includes('\u2014'), 'no em dash')
+  }
+  t.ok(text(TERMS).includes('desliga a montagem das suas prévias e os players do parágrafo seguinte; os cartões que outras pessoas enviam continuam aparecendo, sem player.'))
+  t.ok(text(PRIVACY).includes('desliga a montagem e o player; os cartões que outras pessoas enviam continuam aparecendo, sem player.'))
 })

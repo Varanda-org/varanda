@@ -538,6 +538,68 @@ test('dm-postage file: get() rotates once the current key is due', async (t) => 
   t.alike(next.keys.map((k) => k.kid), [next.kid, first.kid])
 })
 
+test('dm-postage file: another writer that lands right after our write is what get() serves', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const other = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  const now = Date.parse('2026-11-03T12:00:00.000Z')
+  const theirs = loadOrCreate(other, { now: () => now })
+  const rename = fs.renameSync
+  t.teardown(() => { fs.renameSync = rename })
+  let raced = false
+  fs.renameSync = (from, to) => {
+    rename(from, to)
+    if (!raced && to === file) {
+      raced = true
+      fs.copyFileSync(path.join(other, 'dm-postage.json'), file)
+    }
+  }
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const got = await pf.get()
+  fs.renameSync = rename
+  t.ok(raced, 'the other write landed between our rename and our stat')
+  t.is(got.kid, theirs.kid, 'the key on disk, not the one we generated')
+  t.is(JSON.parse(fs.readFileSync(file, 'utf8')).keys[0].kid, got.kid)
+  t.is(await pf.get(), got, 'and the cache holds it')
+})
+
+test('dm-postage file: a write that lands while ours is read back is what the next get() serves', async (t) => {
+  const dataDir = tmpDir(t, 'varanda-dm-')
+  const other = tmpDir(t, 'varanda-dm-')
+  const file = path.join(dataDir, 'dm-postage.json')
+  const now = Date.parse('2026-11-03T12:00:00.000Z')
+  const theirs = loadOrCreate(other, { now: () => now })
+  const rename = fs.renameSync
+  const read = fs.readFileSync
+  const restore = () => {
+    fs.renameSync = rename
+    fs.readFileSync = read
+  }
+  t.teardown(restore)
+  let renamed = false
+  let raced = false
+  fs.renameSync = (from, to) => {
+    rename(from, to)
+    if (to === file) renamed = true
+  }
+  fs.readFileSync = function (p, ...rest) {
+    const out = read.call(fs, p, ...rest)
+    if (renamed && !raced && p === file) {
+      raced = true
+      fs.copyFileSync(path.join(other, 'dm-postage.json'), file)
+    }
+    return out
+  }
+  const pf = createPostageFile(dataDir, { now: () => now })
+  const mine = await pf.get()
+  restore()
+  t.ok(raced, 'the other write landed while ours was read back')
+  t.not(mine.kid, theirs.kid, 'that get() serves the file it read')
+  const next = await pf.get()
+  t.is(next.kid, theirs.kid, 'the next get() reads the file again')
+  t.is(await pf.get(), next, 'and then the cache holds it')
+})
+
 test('dm-postage file: get() reads the file again once it changes on disk', async (t) => {
   const dataDir = tmpDir(t, 'varanda-dm-')
   const other = tmpDir(t, 'varanda-dm-')

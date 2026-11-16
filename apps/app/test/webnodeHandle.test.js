@@ -6,7 +6,8 @@
 // file named over the IPC (media.uploadFile, dm.putMedia) and come back as a
 // read-dir file named by media.readFile, which the handle releases on
 // eviction, lock, sign-out and reset. src/client/browser.js mediaOf gives
-// the web facade the same shape, with the bytes in the page.
+// the web facade the same shape, with the bytes in the page, and its loader
+// names the node script after the page's release.
 const { register } = require('node:module')
 const test = require('brittle')
 
@@ -379,4 +380,41 @@ test('web: mediaOf reports video and passes a video read through without measuri
   t.alike(await media.read({ kind: 'group', diary: 'd', item: {} }), { bytes: png, mime: 'image/png', w: 3, h: 2 }, 'an image is still measured and has no ms')
 
   t.absent('video' in mediaOf({ readMoment: facade.readMoment }), 'no upload, no video capability')
+})
+
+test('nodeScriptUrl names the node after a valid page release only, as the web export does', async (t) => {
+  const { nodeScriptUrl } = await import('../src/client/browser.js')
+  const { releaseNodePath } = require('../scripts/finish-web')
+  t.is(nodeScriptUrl('fedcba9876543210'), releaseNodePath('fedcba9876543210'), 'the name finish-web.js writes')
+  t.is(nodeScriptUrl('0123456789abcdef'), '/varanda-node-0123456789abcdef.js')
+  for (const bad of [undefined, null, '', '0123456789abcde', '0123456789abcdef0', '0123456789ABCDEF', '../../x/abcdef01', '0123456789abcdeg', 1, {}, '0123456789abcdef\n']) {
+    t.is(nodeScriptUrl(bad), '/varanda-node.js', 'plain name for ' + JSON.stringify(bad))
+  }
+})
+
+test('the page loads the node copy named by its varanda-release meta', async (t) => {
+  const { preloadNode } = await import('../src/client/browser.js')
+  const had = Object.prototype.hasOwnProperty.call(globalThis, 'document')
+  const prev = globalThis.document
+  const added = []
+  globalThis.document = {
+    querySelector: (sel) => sel === 'meta[name="varanda-release"]' ? { getAttribute: (k) => k === 'content' ? '0123456789abcdef' : null } : null,
+    createElement: () => ({ remove () {} }),
+    head: { appendChild: (s) => added.push(s) }
+  }
+  try {
+    preloadNode()
+    t.is(added.length, 1, 'one script element')
+    t.is(added[0].src, '/varanda-node-0123456789abcdef.js')
+    added[0].onerror()
+    await new Promise((resolve) => setImmediate(resolve))
+    globalThis.document.querySelector = () => null
+    preloadNode()
+    t.is(added.length, 2, 'a failed load is retried')
+    t.is(added[1].src, '/varanda-node.js', 'no marker: the plain name')
+    added[1].onerror()
+  } finally {
+    if (had) globalThis.document = prev
+    else delete globalThis.document
+  }
 })

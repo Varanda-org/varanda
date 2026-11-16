@@ -238,7 +238,7 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
       const r = await follow.run(() => node.request('follow.add', { key: hit.author }))
       if (r.ok) {
         markKnown(hit.author, true)
-        names.learnMany([[hit.author, { name: hit.name, username: hit.username }]])
+        names.learnMany([[hit.author, { name: hit.name, username: hit.username, page: hit.page, closed: hit.closed, moved: hit.moved }]])
         const title = displayText(whoOf({ name: hit.name, username: hit.username }).title)
         setDone(r.value.changed ? 'Agora você segue ' + title + '.' : 'Você já segue esta pessoa.')
         if (r.value.changed && typeof onFollowsChanged === 'function') onFollowsChanged()
