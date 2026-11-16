@@ -81,7 +81,7 @@ import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker } from '../ui/ReactionPicker'
 import { olderInitial, olderStep } from '../olderTrigger'
 import { actAs, pagesDm } from '../pages'
-import { pageKeyText } from '../pageSecrets'
+import { pageKeyText, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
@@ -848,6 +848,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
       if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setHold(null)
+      // The node refuses a page's sends while its key differs.
+      if (pageKey !== null && typeof node.clearPageMismatch === 'function') node.clearPageMismatch(pageKey)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
       // The held text is now a faded bubble, so the composer is free for a new
       // message; sendPlan asks before sending a different one.
@@ -1398,6 +1400,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         {/* The conversation menu closes before its action runs: a failed
             block or delete says so here. */}
         <ErrorText>{act.error}</ErrorText>
+        {/* Not a block: the flag may be stale until the next pull, and a
+            send the node refuses shows the block note instead. */}
+        {pageMismatchNote(node.pageMismatch, pageKey) !== '' ? <Soft>{pageMismatchNote(node.pageMismatch, pageKey)}</Soft> : null}
         {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
           ? (
             <View style={styles.inline}>

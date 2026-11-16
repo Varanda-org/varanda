@@ -514,7 +514,7 @@ export function rowAvatarSource (item, peeked) {
 const PAGE_SEEN_PREFIX = 'page:'
 
 export const PAGE_EMPTY_TITLE = 'Nenhum aviso da página ainda'
-export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, comentar, citar ou mencionar o @nome dela, aparece aqui.'
+export const PAGE_EMPTY_TEXT = 'Quando alguém seguir a página, comentar, citar, mencionar o @nome dela, curtir ou republicar uma publicação dela, aparece aqui.'
 export const PAGE_NOTICES_UNAVAILABLE_TITLE = 'Avisos da página ainda não disponíveis'
 export const PAGE_SEEN_MAX = 8
 

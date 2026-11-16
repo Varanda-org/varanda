@@ -18,7 +18,7 @@ import { LABELS, sortConversations } from '../dm'
 import { requestsRow } from '../conversas'
 import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../dm-screen'
 import { pagesDm, pagesDmActivate, pagesDmAdopt, pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPeers } from '../pages'
-import { PAGE_DM_ACTIVATE_TEXT, PAGE_DM_ACTIVATE_TITLE, PAGE_DM_ASK_OWNER, PAGE_DM_CONFLICT, PAGE_DM_ROTATE_TEXT, PAGE_DM_ROTATE_TITLE, PAGE_DM_ROTATING, PAGE_DM_BLOCKS_FAILED, PAGE_KEYS_IDLE, blockPeersLine, legacyBundleOf, legacyCardLabel, pageDmState, pageKeyText, pageKeysOf } from '../pageSecrets'
+import { PAGE_DM_ACTIVATE_TEXT, PAGE_DM_ACTIVATE_TITLE, PAGE_DM_ASK_OWNER, PAGE_DM_CONFLICT, PAGE_DM_ROTATE_TEXT, PAGE_DM_ROTATE_TITLE, PAGE_DM_ROTATING, PAGE_DM_BLOCKS_FAILED, PAGE_KEYS_IDLE, blockPeersLine, legacyBundleOf, legacyCardLabel, pageDmState, pageKeyText, pageKeysOf, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { ConversationRow } from '../ui/ConversationRow'
@@ -109,6 +109,9 @@ function usePageKeys (pageKey) {
           return
         }
         adopted.set(pageKey, held)
+        // The node flags the page again on its next pull if the key still
+        // differs.
+        if (typeof n.clearPageMismatch === 'function') n.clearPageMismatch(pageKey)
         if (typeof n.bumpDm === 'function') n.bumpDm()
       }
       // The old blocks still to re-apply live only in the node's sealed list.
@@ -219,14 +222,23 @@ function usePageKeys (pageKey) {
 
   const legacyLabel = pageKey !== null && state.phase === 'share' ? legacyCardLabel({ bundle: legacyBundleOf(state.status), pending: state.pending }) : null
 
-  return { ...state, act, hold, activate, retry, read, blocksAct, blocksHold, legacyLabel, reapply }
+  // After dm.pageKeyMismatch: the share is stored again even if this session
+  // already stored it.
+  const recheck = () => {
+    if (pageKey === null || !unlocked) return
+    adopted.delete(pageKey)
+    read()
+  }
+
+  return { ...state, act, hold, activate, retry, read, recheck, blocksAct, blocksHold, legacyLabel, reapply }
 }
 
 // The page's inbox title, custody sentence and key state, above its lists.
 export function PageInboxNote ({ pageKey }) {
   const styles = useStyles(makeStyles)
+  const node = useNode()
   const keys = usePageKeys(pageKey)
-  const { activate, retry, read, reapply } = keys
+  const { activate, retry, read, recheck, reapply } = keys
   const { profileOf, resolveMany } = useNames()
   const blockPeers = keys.peers
   useEffect(() => {
@@ -281,10 +293,21 @@ export function PageInboxNote ({ pageKey }) {
       </View>
     )
   }
+  // Flagged by the node after a pull, before any send is tried.
+  const mismatch = pageMismatchNote(node.pageMismatch, pageKey)
+  const mismatchCard = mismatch !== '' && keys.error !== mismatch && keys.phase !== 'reading'
+    ? (
+      <View style={styles.card}>
+        <Notice>{mismatch}</Notice>
+        <Pill label='ler a chave de novo' onPress={recheck} />
+      </View>
+      )
+    : null
   return (
     <View style={styles.pad}>
       <Text style={styles.name} accessibilityRole='header'>{pageInboxTitle(actingLabel())}</Text>
       <Soft>{PAGE_DM_CUSTODY}</Soft>
+      {mismatchCard}
       {body}
       {blocks}
     </View>
