@@ -733,6 +733,20 @@ test('a lock while the pull opens its link fails with the locked message, not a 
   t.is(err && err.constructor.name, 'UsageError')
 })
 
+test('a lock while a ctl flush opens its link puts nothing; the stamped ctl goes out at the next unlock', async (t) => {
+  const { set, calls, engine, link, storage, prf } = await sendingEngine(t)
+  link.onOpen = () => engine.lock()
+  t.alike(await set(), { ok: true })
+  t.alike(calls, [], 'no dm.sending and no put after the lock')
+  t.is((await store.readDmCtlQueue(storage)).length, 1, 'still queued')
+  link.onOpen = null
+  await engine.unlock(prf)
+  await engine.loaded()
+  await engine.idle()
+  t.alike(calls, [['dm.sending', {}], ['put']], 'put at the next unlock')
+  t.alike(await store.readDmCtlQueue(storage), [])
+})
+
 test('no dm.sending or put when send and ctl flush have no stamps', async (t) => {
   const { send, set, calls, engine, storage, prf } = await sendingEngine(t, { stamps: 0 })
   const err = await errorOf(send())

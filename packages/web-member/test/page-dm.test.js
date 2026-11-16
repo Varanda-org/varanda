@@ -15,6 +15,7 @@ const { signRoster, signOrigin, issuerCountersign } = require('@varanda/core/lib
 const dmCore = require('@varanda/core/lib/dm')
 const ps = require('@varanda/core/lib/page-secrets')
 const gc = require('@varanda/core/lib/group-crypto')
+const visitsCore = require('@varanda/core/lib/visits')
 const { createBrowserNode } = require('../lib/node')
 const { createMember } = require('../lib/member')
 const { memoryStorage } = require('../lib/storage')
@@ -1310,7 +1311,7 @@ test('dm.react tells a Página only from a diary held here: a held one is refuse
 
 // ---- buckets (docs/protocol.md section 11, "Buckets") ----
 
-test('buckets: a member that holds a Página asks every bucket in one pass; one that holds none asks only its own', async (t) => {
+test('buckets: a member that holds a Página asks every bucket; one that holds none asks only its own', async (t) => {
   t.timeout(TEST_TIMEOUT_MS * 2)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
@@ -1348,16 +1349,21 @@ test('buckets: a member that holds a Página asks every bucket in one pass; one 
   t.alike(await texts(), ['para a 1'])
   t.alike(await own(), ['para voce'])
 
-  // A new gen resets the page cursor behind the own one: still one pass,
-  // from the oldest cursor, nothing filed twice.
+  // A new gen resets the page cursor behind the own one: the own pass goes
+  // first, then the page catches up from 0, every bucket in both, nothing
+  // filed twice.
   const made2 = await A.web.request('dm.pageGenerate', { page: P, gen: 2, recipients: [{ member: A.key, box: A.box }] })
   const s2 = made2.shares[0]
   await A.web.request('dm.pageSecrets', { page: P, gen: 2, sealed: s2.sealed, by: A.key, sig: s2.sig, box: made2.box, groupBox: made2.groupBox, cert: pageCert })
   await C.web.request('dm.send', { to: P, text: 'ainda para a 1' })
   seeder.pageQueries.length = 0
+  const trafficAt = seeder.traffic.length
   await A.web.request('dm.pull')
-  t.is(seeder.pageQueries.length, 1, 'one pass after the gen change')
+  t.is(seeder.pageQueries.length, 2, 'the own pass, then the catch-up')
   t.ok(everyBucket(seeder.pageQueries))
+  const afters = seeder.traffic.slice(trafficAt).filter((x) => x.startsWith('{')).map((x) => JSON.parse(x).after)
+  t.ok(afters[0] > 0, 'the own pass starts at the own cursor')
+  t.is(afters[1], 0, 'the catch-up starts at the reset page cursor')
   t.alike(await texts(), ['para a 1', 'ainda para a 1'])
   t.alike(await own(), ['para voce'], 'the own scan filed nothing twice')
 
@@ -1373,4 +1379,255 @@ test('buckets: a member that holds a Página asks every bucket in one pass; one 
   }
   t.alike(await texts(), ['para a 1', 'ainda para a 1', 'de carona', 'e outra'])
   t.alike(await own(), ['para voce'])
+})
+
+// A prf whose box prefix is not among `taken` (dm.test.js prfWithPrefix):
+// the nodes then sit in different buckets at 6 bits, whatever the keys.
+async function prfWithPrefix (taken) {
+  for (;;) {
+    const prf = crypto.randomBytes(32)
+    const p = dmCore.bucketPrefix(hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey))
+    if (!taken.includes(p)) return { prf, p }
+  }
+}
+
+// A and C in two buckets at 6 bits, and a Página P owned by A, its diary
+// held by both; adopt() gives A its gen 1 secrets.
+async function bucketPage (t) {
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6 })
+  const a = await prfWithPrefix([])
+  const c = await prfWithPrefix([a.p])
+  const A = await memberNode(t, assoc, seeder.url, { prf: a.prf })
+  const C = await memberNode(t, assoc, seeder.url, { prf: c.prf })
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: A.box }] })
+  const diary = await pageDiary(t, { assoc, issuer, pageKp, ownerKp: A.keyPair, box: made.box })
+  await hold(diary, A.storage)
+  await hold(diary, C.storage)
+  const s = made.shares[0]
+  const adopt = () => A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: s.sealed, by: A.key, sig: s.sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: P }, assoc) })
+  return { seeder, A, C, a: a.p, c: c.p, P, pageKp, adopt }
+}
+
+test('buckets: drops sealed to a Página box go untagged; the own self copy and the own ctl keep the own bucket', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const { seeder, A, C, a, c, P, pageKp, adopt } = await bucketPage(t)
+  await adopt()
+  await copyDiary(C, A)
+  let at = seeder.putInfos.length
+  const tags = () => {
+    const out = seeder.putInfos.slice(at).map((i) => i.bucket)
+    at = seeder.putInfos.length
+    return out
+  }
+
+  const op = await A.web.request('dm.pageDraft', { page: P, kind: 'ctl', op: 'accepted', peer: C.key })
+  await A.web.request('dm.pageSend', { page: P, id: op.id, ...signed(op.digest, pageKp) })
+  t.alike(tags(), [null], 'a Página ctl goes untagged')
+  const reply = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text: 'da página' })
+  await A.web.request('dm.pageSend', { page: P, id: reply.id, ...signed(reply.digest, pageKp) })
+  t.alike(tags(), [c, null], 'a Página reply: the recipient bucket, then its self copy untagged')
+  await A.web.request('dm.send', { to: C.key, text: 'minha' })
+  t.alike(tags(), [c, a], 'an own message: its self copy keeps the own bucket')
+  await A.web.request('dm.set', { peer: C.key, state: 'accepted' })
+  t.alike(tags(), [a], 'an own ctl keeps the own bucket')
+  t.ok(seeder.putInfos.every((i) => i.bits === 6), 'all on the v2 lane')
+
+  await C.web.request('dm.pull')
+  t.alike((await C.web.request('dm.thread', { peer: P })).messages.map((m) => m.text), ['da página'], 'the recipient still gets the Página reply')
+})
+
+test('buckets: a Página adopted after the own cursor passed its drop files that drop on the next pull', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const { seeder, A, C, P, adopt } = await bucketPage(t)
+  await copyDiary(A, C)
+  await C.web.request('dm.send', { to: P, text: 'antes da adoção' })
+  const dropSeq = seeder.pool.entries[seeder.pool.entries.length - 2].seq
+  await C.web.request('dm.send', { to: A.key, text: 'para voce' })
+  await A.web.request('dm.pull')
+  t.ok(seeder.pageQueries.every((q) => q.buckets.length === 1), 'no Página held yet: one bucket')
+  t.ok((await A.storage.readJson('dmCursor')).after > dropSeq, 'the own cursor passed the drop to the Página')
+
+  await adopt()
+  seeder.pageQueries.length = 0
+  await A.web.request('dm.pull')
+  t.ok(seeder.pageQueries.length > 0 && seeder.pageQueries.every((q) => q.buckets.length === 64), 'every bucket')
+  t.alike((await A.web.request('dm.thread', { page: P, peer: C.key })).messages.map((m) => m.text), ['antes da adoção'])
+  t.alike((await A.web.request('dm.thread', { peer: C.key })).messages.map((m) => m.text), ['para voce'], 'the own thread as before')
+})
+
+// ---- a holder's pull passes, over a fake pool (engine level) ----
+
+// A fake pool for the dm and visit links of an engine: items { seq, bytes }
+// on the dm lane (the visit lane is empty); each page request is recorded
+// as { lane, after, prefixes } (prefixes null: every bucket).
+function fakePool () {
+  const pool = {
+    items: [],
+    pages: [],
+    add (bytes) {
+      pool.items.push({ seq: pool.items.length + 1, bytes })
+    },
+    link (lane) {
+      return {
+        async page ({ after, limit, prefixes }) {
+          pool.pages.push({ lane, after, prefixes: prefixes === undefined ? null : prefixes })
+          const rest = lane === 'dm' ? pool.items.filter((x) => x.seq > after) : []
+          const items = rest.slice(0, limit)
+          return { items, next: rest.length > items.length ? items[items.length - 1].seq : null }
+        },
+        async put () {
+          return { ok: true, reason: null }
+        },
+        close: noop
+      }
+    }
+  }
+  return pool
+}
+
+// An unlocked engine over `pool`, holding no Página yet; adopt() makes it
+// hold a new one at gen 1, its cursor at 0 -> { page, box }.
+async function poolEngine (t, pool, assoc, limits = {}) {
+  const transport = require('../lib/dm-link')
+  const originalDm = transport.openDmLink
+  const originalVisit = transport.openVisitLink
+  const id = require.resolve('../lib/dm')
+  const cached = require.cache[id]
+  let createEngine
+  try {
+    transport.openDmLink = async () => pool.link('dm')
+    transport.openVisitLink = async () => pool.link('visit')
+    delete require.cache[id]
+    createEngine = require('../lib/dm').createDmEngine
+  } finally {
+    transport.openDmLink = originalDm
+    transport.openVisitLink = originalVisit
+    require.cache[id] = cached
+  }
+  const storage = memoryNodeStorage()
+  const engine = createEngine({ storage, association: hex(assoc.publicKey), seederUrl: 'ws://127.0.0.1:1/seeder', createSocket: () => { throw new Error('sem rede') }, limits })
+  t.teardown(() => engine.close(), { force: true })
+  const idKp = crypto.keyPair()
+  const own = hex(idKp.publicKey)
+  const prf = crypto.randomBytes(32)
+  await engine.unlock(prf)
+  await engine.loaded()
+  const ownBox = hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey)
+  async function adopt () {
+    const page = hex(crypto.keyPair().publicKey)
+    const made = engine.pageGenerate(own, idKp, { page, gen: 1, recipients: [{ member: own, box: ownBox }] })
+    const sh = made.shares[0]
+    await engine.pageSecrets(own, { owner: own, admins: [] }, { page, gen: 1, sealed: sh.sealed, by: own, sig: sh.sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: page }, assoc) })
+    return { page, box: made.box }
+  }
+  return { engine, storage, idKp, own, ownBox, adopt }
+}
+
+// A drop from senderKp to `to`, sealed to boxHex.
+function dropTo (assoc, senderKp, to, boxHex, text) {
+  const inner = dmCore.buildInner({ kind: 'msg', to, text, cert: createCert({ member: hex(senderKp.publicKey) }, assoc) }, senderKp)
+  return dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: crypto.randomBytes(8), rsaSig: crypto.randomBytes(dmCore.DROP.SIG_BYTES), token: crypto.randomBytes(32), sealed: dmCore.sealInner(inner, boxHex) })
+}
+
+// A drop that no box of the engine opens.
+function strayDrop (assoc, senderKp) {
+  return dropTo(assoc, senderKp, hex(crypto.keyPair().publicKey), hex(gc.boxKeyPairFromSeed(crypto.randomBytes(32)).publicKey), 'de fora')
+}
+
+// Two drops per page and a budget of two drops: a pull reads one page past
+// the budget, then stops (incomplete).
+const SMALL_BUDGET = { pageMax: 2, budgetBytes: 2 * dmCore.DM_DROP_BYTES }
+
+test('buckets: the visit pull of a device that holds a Página asks every bucket; one that holds none asks its own', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = fakePool()
+  const E = await poolEngine(t, pool, assoc)
+  const since = visitsCore.visitDay(Date.now())
+  const visitAsks = () => pool.pages.filter((q) => q.lane === 'visit').map((q) => q.prefixes)
+  await E.engine.pullVisits(E.own, { since })
+  t.alike(visitAsks(), [[dmCore.bucketPrefix(E.ownBox)]], 'no Página: the own bucket')
+  await E.adopt()
+  pool.pages.length = 0
+  await E.engine.pullVisits(E.own, { since })
+  t.alike(visitAsks(), [null], 'a holder: every bucket')
+  await E.engine.pull(E.own)
+  const dmAsks = pool.pages.filter((q) => q.lane === 'dm')
+  t.ok(dmAsks.length > 0 && dmAsks.every((q) => q.prefixes === null), 'as on its dm pull')
+})
+
+test('buckets: a new own message is filed on the first pull while a Página catches up from 0', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = fakePool()
+  const E = await poolEngine(t, pool, assoc, SMALL_BUDGET)
+  const C = crypto.keyPair()
+  for (let i = 0; i < 10; i++) pool.add(strayDrop(assoc, C))
+  await store.writeDmCursor(E.storage, 10)
+  await E.adopt()
+  pool.add(dropTo(assoc, C, E.own, E.ownBox, 'nova'))
+  const r = await E.engine.pull(E.own)
+  t.is(r.added, 1, 'the new own message, on the first pull')
+  t.is(r.cursor, 11)
+  t.is(r.incomplete, true, 'the Página catch-up ran out of budget')
+  t.alike(pool.pages.map((q) => q.after), [10, 0], 'the own pass first, then the catch-up from 0')
+  t.ok(pool.pages.every((q) => q.prefixes === null), 'every request asks every bucket')
+  t.alike((await E.engine.thread(E.own, { peer: hex(C.publicKey) })).messages.map((m) => m.text), ['nova'])
+})
+
+test('buckets: where the budget stops a holder pull, each cursor stays at the last item its scan saw and the next pull goes on from there', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = fakePool()
+  const E = await poolEngine(t, pool, assoc, SMALL_BUDGET)
+  const C = crypto.keyPair()
+  const P = await E.adopt()
+  pool.add(strayDrop(assoc, C))
+  pool.add(strayDrop(assoc, C))
+  pool.add(dropTo(assoc, C, P.page, P.box, 'para a página'))
+  for (let i = 0; i < 6; i++) pool.add(strayDrop(assoc, C))
+  await store.writeDmCursor(E.storage, 9)
+  pool.add(dropTo(assoc, C, E.own, E.ownBox, 'nova'))
+  const starts = []
+  const ownCursors = []
+  const pageCursors = []
+  const incomplete = []
+  for (let i = 0; i < 6; i++) {
+    pool.pages.length = 0
+    incomplete.push((await E.engine.pull(E.own)).incomplete)
+    starts.push(pool.pages.map((q) => q.after))
+    ownCursors.push(await store.readDmCursor(E.storage))
+    pageCursors.push((await store.readPageCursor(E.storage, store.pageDmPrefix(P.page))).after)
+  }
+  t.alike(starts, [[9, 0], [10, 2], [10, 4], [10, 6], [10, 8], [10]], 'each catch-up goes on where the last stopped; then the Página rides along')
+  t.alike(ownCursors, [10, 10, 10, 10, 10, 10], 'the own cursor never moves backwards')
+  t.alike(pageCursors, [2, 4, 6, 8, 10, 10], 'the Página cursor at the last item its scan saw')
+  t.alike(incomplete, [true, true, true, true, false, false])
+  const peer = hex(C.publicKey)
+  t.alike((await E.engine.thread(E.own, { peer, page: P.page })).messages.map((m) => m.text), ['para a página'])
+  t.alike((await E.engine.thread(E.own, { peer })).messages.map((m) => m.text), ['nova'])
+})
+
+test('buckets: a message the own scan skipped stays unfiled when a Página catch-up reads it again', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = fakePool()
+  const E = await poolEngine(t, pool, assoc)
+  const C = crypto.keyPair()
+  const peer = hex(C.publicKey)
+  const P = await E.adopt()
+  await E.engine.set(E.own, E.idKp, { peer, state: 'blocked' })
+  pool.add(dropTo(assoc, C, E.own, E.ownBox, 'enquanto bloqueado'))
+  t.is((await E.engine.pull(E.own)).added, 0, 'skipped while blocked')
+  await E.engine.set(E.own, E.idKp, { peer, state: 'unblocked' })
+  // The Página's cursor starts over, as a new gen or a legacy box makes it.
+  const prefix = store.pageDmPrefix(P.page)
+  const before = await store.readPageCursor(E.storage, prefix)
+  t.is(before.after, 1)
+  await store.writePageCursor(E.storage, prefix, { ...before, after: 0 })
+  pool.pages.length = 0
+  t.is((await E.engine.pull(E.own)).added, 0, 'not filed after the unblock')
+  t.alike(pool.pages.map((q) => q.after), [1, 0], 'the catch-up read it again')
+  t.alike((await E.engine.thread(E.own, { peer })).messages, [])
 })
