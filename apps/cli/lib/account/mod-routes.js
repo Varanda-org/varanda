@@ -104,10 +104,12 @@ const MAX_ANEXO_INFLIGHT = 4
 // plus its declared length at ANEXO_MIN_BITS_PER_MS (1 Mbit/s, a slow mobile
 // link): a full ANEXO_BODY_MAX (about 1.4 MB, 11.3 s at that rate) would get
 // about 13.3 s, a small image a couple of seconds. The service's
-// requestTimeout (server.js) still ends any request first.
+// requestTimeout (server.js) is the headers timeout plus ANEXO_READ_MAX_MS,
+// so it never ends an anexo body before this deadline does.
 const ANEXO_IDLE_MS = 5000
 const ANEXO_READ_SLACK_MS = 2000
 const ANEXO_MIN_BITS_PER_MS = 1000
+const ANEXO_READ_MAX_MS = ANEXO_READ_SLACK_MS + Math.ceil(ANEXO_BODY_MAX * 8 / ANEXO_MIN_BITS_PER_MS)
 const DECIMAL_RE = /^[0-9]{1,10}$/
 const B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 // The image itself, served to a signed-in moderator: never a document.
@@ -1277,7 +1279,7 @@ function createModRoutes ({
       const deadline = setTimeout(cut, ANEXO_READ_SLACK_MS + Math.ceil(length * 8 / ANEXO_MIN_BITS_PER_MS))
       idle = setTimeout(cut, ANEXO_IDLE_MS)
       req.on('data', onData)
-      readJsonBody(req, ANEXO_BODY_MAX).then((value) => finish(null, value), finish)
+      readJsonBody(req, ANEXO_BODY_MAX, null).then((value) => finish(null, value), finish)
     })
   }
 
@@ -1405,6 +1407,7 @@ module.exports = {
   SESSION_COOKIE,
   REPORT_BODY_MAX,
   ANEXO_BODY_MAX,
+  ANEXO_READ_MAX_MS,
   MAX_ANEXO_INFLIGHT,
   ANEXO_LIST_LABEL,
   ANEXO_PROVENANCE,

@@ -10,12 +10,17 @@
 // Lifecycle: a new release installs in the background and waits until every
 // window of the previous one is closed (no forced activation, no taking over
 // open pages), so an open page never sees its caches change mid-session.
-// Online, navigations and /varanda-node.js always run what the server
-// delivers; the cache only answers when the network does not (offline, or a
-// 404/5xx while a deploy replaces the files). Besides the verified precache of
-// this release, the worker stores only values it builds itself (the DM mute
-// record, the block list, a received share), never a network response, and
-// never serves them.
+// Online, navigations always run what the server delivers; the cached shell
+// only answers when the network does not (offline, or a 404/5xx while a deploy
+// replaces the files). The page loads the node copy named for its own release
+// (/varanda-node-<release>.js, scripts/finish-web.js), a precached file like a
+// hashed bundle: the cached shell of this release runs this release's node,
+// and a page of another release never gets it. /varanda-node.js itself is
+// not precached, so only the network answers it.
+//
+// Besides the verified precache of this release, the worker stores only
+// values it builds itself (the DM mute record, the block list, a received
+// share), never a network response, and never serves them.
 //
 // Every cached response is re-verified before it is returned (verifiedMatch):
 // the Cache API is writable by any same-origin script (window.caches), so a
@@ -98,8 +103,10 @@ const SHARE_KEY_PREFIX = '/__varanda-share/'
 const SHARE_MAX_FILES = 10
 const SHARE_MAX_BYTES = 50 * 1024 * 1024
 const SHARE_MAX_TEXT = 4000
-// No video, and no HEIC: the post composer cannot show or send them.
+// No HEIC: the post composer cannot show or send it. A video is MP4 only, the
+// one container the browser composer takes without re-encoding.
 const SHARE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const SHARE_VIDEO = 'video/mp4'
 
 const abs = (p) => new URL(p, self.location.origin).href
 const RELEASE_META = '<meta name="varanda-release" content="' + VERSION + '">'
@@ -327,26 +334,11 @@ async function navigate (request) {
   return (await cached('/index.html')) || res
 }
 
-// /varanda-node.js is not content-hashed: network first, never stored here.
-// The cached copy answers offline, on a failed status or when the server
-// answers with HTML (a missing file behind an SPA fallback).
-async function nodeScript (request) {
-  let res
-  try {
-    res = await fetch(request)
-  } catch {
-    return (await cached('/varanda-node.js')) || text503('sem conexão')
-  }
-  if (res.ok && !isHtml(res)) return res
-  const copy = await cached('/varanda-node.js')
-  if (copy) return copy
-  return isHtml(res) ? text503('tipo inesperado') : res
-}
-
 // Everything else: cache first, otherwise the network, never stored. A miss
 // is a file outside this release's verified precache (e.g. a newer release's
-// bundle, possibly still being written): keeping it could pin a broken file.
-// A cached copy that fails verification is a miss too.
+// bundle or node copy, possibly still being written, or /varanda-node.js):
+// keeping it could pin a broken file. A cached copy that fails verification
+// is a miss too.
 async function cacheFirst (request) {
   const cache = await caches.open(CACHE)
   const hit = await verifiedMatch(cache, request.url)
@@ -443,36 +435,59 @@ async function storeShare (share, files) {
   }
 }
 
+// Read and stripped by src/shareIntake.web.js takeLost.
+const SHARE_LOST = '/?compartilhamento=nao-coube'
+
 // The answer is always the redirect, also on a malformed or failed share:
-// the person lands in the app either way, never on a browser error page.
+// the person lands in the app either way, never on a browser error page. A
+// share that could not be stored (usually out of quota) lands on SHARE_LOST,
+// so the app says so instead of opening as if nothing was shared.
 async function takeShare (request) {
   // Taken on arrival, before the body is parsed: arrival order decides which
   // share is the newest.
   const at = Date.now()
+  let lost = false
   try {
     const form = await request.formData()
     const title = shareText(form, 'title')
     const text = shareText(form, 'text')
     const url = shareText(form, 'url')
-    const kept = []
+    let kept = []
     let total = 0
+    let videos = 0
+    let video = null
     for (const v of form.getAll('fotos')) {
       if (typeof v === 'string' || !v) continue
-      total++
       const mime = typeof v.type === 'string' ? v.type.toLowerCase() : ''
-      if (kept.length < SHARE_MAX_FILES && SHARE_TYPES.has(mime) && typeof v.size === 'number' && v.size <= SHARE_MAX_BYTES) {
+      const fits = typeof v.size === 'number' && v.size <= SHARE_MAX_BYTES
+      if (mime.startsWith('video/')) {
+        videos++
+        if (video === null && mime === SHARE_VIDEO && fits) video = { file: v, mime }
+        continue
+      }
+      total++
+      if (kept.length < SHARE_MAX_FILES && SHARE_TYPES.has(mime) && fits) {
         kept.push({ file: v, mime })
       }
     }
-    if (kept.length > 0 || title.trim() !== '' || text.trim() !== '' || url.trim() !== '') {
+    // A post holds one video or photos, and photos win: the video is only
+    // counted, so the app can say why it was left out.
+    if (kept.length === 0 && video !== null) kept = [video]
+    // A video that cannot be kept (not MP4, too big) is still stored as a
+    // count, so the app says it did not arrive instead of opening blank.
+    if (kept.length > 0 || videos > 0 || title.trim() !== '' || text.trim() !== '' || url.trim() !== '') {
       const id = shareId(at)
-      const share = { v: 1, id, at, title, text, url, total, files: kept.map((k, n) => ({ n, mime: k.mime })) }
+      const share = { v: 1, id, at, title, text, url, total, videos, files: kept.map((k, n) => ({ n, mime: k.mime })) }
       const files = kept.map((k) => k.file)
       shareWrite = shareWrite.catch(() => {}).then(() => storeShare(share, files))
-      await shareWrite
+      try {
+        await shareWrite
+      } catch {
+        lost = true
+      }
     }
   } catch {}
-  return Response.redirect(abs('/'), 303)
+  return Response.redirect(abs(lost ? SHARE_LOST : '/'), 303)
 }
 
 self.addEventListener('install', (event) => {
@@ -501,8 +516,6 @@ self.addEventListener('fetch', (event) => {
     pathname.startsWith(FEIRA_PREFIX) || pathname.startsWith(POST_PAGE_PREFIX)) return
   if (request.mode === 'navigate') {
     event.respondWith(navigate(request))
-  } else if (pathname === '/varanda-node.js') {
-    event.respondWith(nodeScript(request))
   } else {
     event.respondWith(cacheFirst(request))
   }

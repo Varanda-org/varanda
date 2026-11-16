@@ -64,11 +64,13 @@
 // budget). The budget is charged per block as it arrives, in flight or
 // already abandoned, and checked before every block request; a worker's
 // first get may always go out, a further one only while every get in
-// flight on the link fits under the budget, so in-flight data is bounded
-// by PEEK_PARALLEL x 3 blocks and the overshoot past the budget stays at
-// one block per worker. A block over MAX_BLOCK_BYTES ends its diary for
-// the snapshot. A bounded link adds one candidate page per batch the pages
-// need. A page over PEEK_SLOW_READ_MS writes one local timing line
+// flight on the link fits under the budget, so the overshoot past the
+// budget stays at one block per worker. Every byte on the link also counts
+// against the budget plus one frame per worker (wire), which bounds the
+// data in flight when a seeder answers with oversized signed blocks. A
+// block over MAX_BLOCK_BYTES ends its diary for the snapshot. A bounded
+// link adds one candidate page per batch the pages need. A page over
+// PEEK_SLOW_READ_MS writes one local timing line
 // (connection, inventory or candidates, blocks). FRAMES: the link runs
 // behind a frame guard (./ws-stream.js guardedWsStream, @varanda/core
 // lib/frame-guard) bounding every frame the seeder sends after the Noise
@@ -213,6 +215,13 @@ function randomIndex (n) {
   }
 }
 
+// Bytes of one WebSocket message event (an ArrayBuffer or a view; anything
+// else counts 0 and the stream itself refuses it).
+function messageBytes (event) {
+  const data = event && event.data
+  return data !== null && data !== undefined && Number.isSafeInteger(data.byteLength) ? data.byteLength : 0
+}
+
 // Fisher-Yates in place: a deadline or budget cut never falls
 // systematically on the same diaries.
 function shuffle (list) {
@@ -240,8 +249,8 @@ async function pool (items, n, fn) {
 // log(text): warnings for the page. limits: test-only overrides of the
 // timings and budgets (connectTimeoutMs, pageTimeoutMs, fetchTimeoutMs,
 // snapshotTtlMs, pageMaxBytes, snapshotMaxBytes, parallel, windowInflight,
-// maxFrame, candidates, candidatePages, candidateTimeoutMs) and test hooks
-// (now: the slow-read clock; trace(event): every block get, its outcome,
+// maxFrame, wireMaxBytes, candidates, candidatePages, candidateTimeoutMs) and
+// test hooks (now: the slow-read clock; trace(event): every block get, its outcome,
 // its charge, every accepted block and every candidate page asked).
 // ownKey() returns the viewer's lowercase hex64 key or a Promise of it: the
 // viewer's diary is fetched like any candidate (cover for the anonymous
@@ -259,6 +268,8 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     parallel: PEEK_PARALLEL,
     windowInflight: PEEK_WINDOW_INFLIGHT,
     maxFrame: PEEK_MAX_FRAME,
+    // null: pageMaxBytes + parallel x maxFrame (wire).
+    wireMaxBytes: null,
     candidates: PEEK_CANDIDATES,
     maxCandidates: MAX_INVENTORY,
     candidatePages: PEEK_CANDIDATE_PAGES,
@@ -352,6 +363,9 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       // inventory completed.
       const link = { noise, peer: null, discovery: null, bounded: false, verified: false, incomplete: false, offered: false, supported: null, inventory: false }
       run.link = link
+      socket.addEventListener('message', (event) => {
+        if (run.link === link) wire(run, messageBytes(event))
+      })
       let settled = false
       const finish = (err) => {
         if (settled) return
@@ -689,6 +703,21 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
       closeLink(run)
     }
     return raw.byteLength <= MAX_BLOCK_BYTES
+  }
+
+  // Counts every byte the seeder sends on the read's link (each WebSocket
+  // message, handshake, inventory and proofs included). A get cancelled in
+  // flight (a target a tombstone deleted, a window that stopped) is never
+  // charged even when its block already arrived, so past the page budget
+  // plus one frame per worker, more than the charged blocks can explain, the
+  // link is cut like a budget cut.
+  function wire (run, bytes) {
+    run.wire += bytes
+    const max = L.wireMaxBytes === null ? L.pageMaxBytes + L.parallel * L.maxFrame : L.wireMaxBytes
+    if (run.wire > max && run.link !== null) {
+      run.overBudget = true
+      closeLink(run)
+    }
   }
 
   // One raw get on the read's link, counted in run.pending while in flight
@@ -1075,7 +1104,7 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
     // pages asked by this read; candidatesFailed: one could not be asked or
     // did not come, so this read asks no more; bounded: a link of this read
     // was bounded.
-    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, pending: 0, overBudget: false, frameCut: false, candidatePages: 0, candidatesFailed: false, bounded: false, times: { connect: 0, inventory: 0, blocks: 0 } }
+    const run = { link: null, cores: new Set(), aborted: false, lost: false, budget: 0, wire: 0, pending: 0, overBudget: false, frameCut: false, candidatePages: 0, candidatesFailed: false, bounded: false, times: { connect: 0, inventory: 0, blocks: 0 } }
     current = run
     const startedAt = clock()
     try {
@@ -1143,4 +1172,4 @@ function createPeeker ({ storage, association, seederUrl, createSocket, ownKey, 
   return { read, abort, close, hasSnapshot }
 }
 
-module.exports = { createPeeker, PEEK_SNAPSHOT_MAX_BYTES, PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY }
+module.exports = { createPeeker, messageBytes, PEEK_SNAPSHOT_MAX_BYTES, PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY }

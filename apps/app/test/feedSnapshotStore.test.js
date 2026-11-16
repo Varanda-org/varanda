@@ -51,7 +51,7 @@ test('native: a missing file reads as null', async (t) => {
   fresh(t)
   const { loadSnapshotText, previewCapable } = await loadNative()
   t.is(loadSnapshotText(), null)
-  t.is(previewCapable, true)
+  t.is(previewCapable, false, 'the cold-start preview is off on every platform: the splash waits for Momentos')
 })
 
 test('native: save, load and overwrite in the cache dir (never backed up), no .tmp or .bak left', async (t) => {

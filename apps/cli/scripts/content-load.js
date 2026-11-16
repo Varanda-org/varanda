@@ -3,7 +3,7 @@
 
 // Development-only loopback measurement of what opening the app costs:
 //   node apps/cli/scripts/content-load.js [--clients 8] [--duration-ms 30000] [--rtt-ms 0]
-//     [--dataset-size 20x40] [--inventory 0] [--host 127.0.0.1] [--json]
+//     [--dataset-size 20x40] [--inventory 0] [--no-discovery] [--host 127.0.0.1] [--json]
 // It starts its OWN temporary installation on this machine (a loopback
 // hyperdht testnet, an in-memory association and issuer, a certified seeder
 // and its WebSocket listener on an ephemeral port), fills it with
@@ -12,7 +12,9 @@
 // notices.list, one GET /index/counts with 27 refs and 4 GET /media, over
 // and over until --duration-ms ends. --rtt-ms delays every frame of the
 // readers' WebSockets by half of it in each direction. --inventory pads the
-// served diaries (small real diaries) up to that many.
+// served diaries (small real diaries) up to that many. --no-discovery runs
+// the seeder with discovery: false, as one from before candidate pages, so
+// peek.read gets the whole inventory in the hello.
 // Never reads operator configuration, the environment or a credential: every
 // key is made here, in memory or in the temporary directory, and removed at
 // the end, on success and on failure. Nothing it prints is a capacity claim.
@@ -27,7 +29,7 @@ const { parseDatasetSize } = require('../lib/lab-dataset-plan')
 const DESCRIPTION = 'Medição somente em loopback, numa instalação temporária deste computador, para desenvolvimento; não é uma medida de capacidade.'
 const USAGE = 'uso: node apps/cli/scripts/content-load.js [--clients <1..64> (padrão: 8)] [--duration-ms <1000..600000> (padrão: 30000)] ' +
   '[--rtt-ms <0..2000> (padrão: 0)] [--dataset-size <membros>x<blocos> (padrão: 20x40)] [--inventory <0..4096> (padrão: 0)] ' +
-  '[--host 127.0.0.1|::1] [--json]. ' + DESCRIPTION
+  '[--no-discovery] [--host 127.0.0.1|::1] [--json]. ' + DESCRIPTION
 
 const LOOPBACK = new Set(['127.0.0.1', '::1'])
 const OPERATIONS = ['sync.start', 'feed.read', 'profile.read', 'peek.read', 'notices.list', 'index.counts', 'media']
@@ -45,7 +47,7 @@ class ContentLoadUsageError extends Error {}
 
 // argv -> options; throws ContentLoadUsageError (never echoing the value).
 function parseArgs (argv) {
-  const options = { clients: 8, durationMs: 30000, rttMs: 0, datasetSize: { members: 20, blocksPerMember: 40 }, inventory: 0, host: '127.0.0.1', json: false }
+  const options = { clients: 8, durationMs: 30000, rttMs: 0, datasetSize: { members: 20, blocksPerMember: 40 }, inventory: 0, discovery: true, host: '127.0.0.1', json: false }
   const numbers = new Map([
     ['--clients', ['clients', 1, 64]],
     ['--duration-ms', ['durationMs', 1000, 600000]],
@@ -59,6 +61,10 @@ function parseArgs (argv) {
     seen.add(flag)
     if (flag === '--json') {
       options.json = true
+      continue
+    }
+    if (flag === '--no-discovery') {
+      options.discovery = false
       continue
     }
     if (flag === '--help' || flag === '-h') {
@@ -293,7 +299,7 @@ async function runContentLoad (opts) {
     const certFile = path.join(root, 'seeder-cert.json')
     fs.writeFileSync(certFile, JSON.stringify(createSeederCert({ seeder: seederKey }, assocKp)))
     Seeder.addCert(seedDir, certFile, association)
-    const seeder = new Seeder({ dataDir: seedDir, associationKey: association, bootstrap, host: '127.0.0.1' })
+    const seeder = new Seeder({ dataDir: seedDir, associationKey: association, bootstrap, host: '127.0.0.1', discovery: options.discovery !== false })
     const ws = await startSeedWs({ host: options.host, port: 0, seeder })
     cleanups.push(() => ws.close())
     await seeder.start()
@@ -469,6 +475,7 @@ async function runContentLoad (opts) {
       rttMs: options.rttMs,
       dataset: { members, blocksPerMember },
       inventory: { requested: options.inventory, served: seeder._served.size },
+      discovery: seeder.discovery,
       opens: readers.reduce((a, r) => a + r.opens, 0),
       operations,
       closes1013: stats.closes1013,
@@ -501,7 +508,7 @@ function formatReport (r) {
   const lines = [
     r.description,
     'Leitores: ' + r.clients + '; duração: ' + r.elapsedMs + ' ms; atraso de ida e volta simulado: ' + r.rttMs + ' ms; aberturas completas: ' + r.opens + '.',
-    'Conjunto: ' + r.dataset.members + ' membros x ' + r.dataset.blocksPerMember + ' blocos; diários servidos: ' + r.inventory.served + '.'
+    'Conjunto: ' + r.dataset.members + ' membros x ' + r.dataset.blocksPerMember + ' blocos; diários servidos: ' + r.inventory.served + '; descoberta no semeador: ' + (r.discovery ? 'ligada' : 'desligada') + '.'
   ]
   for (const [op, s] of Object.entries(r.operations)) {
     lines.push(op + ': ' + s.ok + '/' + s.count + ' ok; p50 ' + v(s.p50) + ' ms; p95 ' + v(s.p95) + ' ms; máxima ' + v(s.max) + ' ms; falhas: 1013 ' + s.failures[1013] +

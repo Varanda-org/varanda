@@ -37,7 +37,9 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     is given back only when no art host was contacted (the MAX_ART_INFLIGHT
 //     cover slots, apart from the provider's, were full, the member already
 //     had ART_PER_MEMBER covers waiting, or the budget was spent first);
-//     concurrent loads of one cover share one fetch. With exactly
+//     concurrent loads of one cover share one fetch. A fetch that failed
+//     after contacting the art host is answered 503 for ART_RETRY_MS with
+//     no new contact, and that answer gives the use back. With exactly
 //     `?size=480` it answers the 480x480 cover instead, cached apart under
 //     kind:id:480, with the same caps, slots and one art use; an item without
 //     one gets the 150x150 path, and a large miss (oversize, not an image, a
@@ -55,18 +57,55 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     the last check and every RECHECK_MS while audio is relayed. The audio
 //     passes through in memory: nothing is written to disk and no byte is
 //     kept after a response ends.
+//   - A walk from the API host ends on the storage node's own URL (a
+//     presigned one that expires in minutes). When that answer was audio
+//     that passed the checks below (a 206 whose Content-Range matches the
+//     Range asked, or a 200) and the URL is an https host on 443 other than
+//     the API host, at most STORED_URL_MAX characters, the ticket row keeps
+//     it for UPSTREAM_REUSE_MS, inside that expiry, and the ticket's later
+//     opens ask it directly, with no redirect followed and no key sent: one
+//     hop instead of three. Any answer but audio or a 416 (an error status,
+//     a redirect, a network error, the STORED_CONNECT_MS deadline, another
+//     type), or a clock that stepped back, forgets it, and the same request
+//     walks from the API host within what is left of DEADLINE_MS. An audio
+//     answer refused here (a Content-Range that does not match) or a body
+//     the storage node cuts short forgets it too, and the next open walks.
+//     The URL lives in memory on the ticket row only, per ticket and never
+//     per track, dies with the row, is never logged and never reaches the
+//     member.
 //   - Every JSON call to the provider is counted first against the member's
 //     PROVIDER_CALLS_PER_DAY, never given back once the provider was
 //     contacted, so no member can spend the shared daily budget alone.
-//   - Every audio request that reaches the provider spends one unit of the
+//   - Every audio request that gets past the ticket checks, walked from the
+//     provider or opened at a kept storage URL, spends one unit of the
 //     shared daily budget, so it is counted first and never given back:
 //     AUDIO_OPENS_PER_DAY per member (then limite-musica) and
 //     OPENS_PER_TICKET per ticket (then the ticket is retired, 404). Bytes
 //     are bounded by TICKET_BYTES per ticket and DAILY_BYTES per member.
+//   - Every unit of the shared budget a member spends (a JSON call, an audio
+//     open, an art host contact of a cover fetch it started) also counts
+//     against its MEMBER_BUDGET_PER_DAY, checked first and never given back
+//     once spent; past it the member gets limite-musica.
+//   - At most config.streams audio relays run in all; past that an open is
+//     503 with Retry-After before anything is counted, and nobody is cut.
+//     A member holds at most STREAMS_PER_MEMBER relays. At that cap a new
+//     open replaces one instead of failing: the oldest relay of the same
+//     ticket, else the older relay of a ticket of the member that holds
+//     two, and only a relay whose upstream already answered (a pending open
+//     cannot be aborted, so it keeps its slot until it settles). So a seeking media element (its pre-seek request still open) and
+//     the next momento's audio opened ahead fit under the cap. With one
+//     relay on each of two other tickets, or only pending opens, the open is 503 with Retry-After,
+//     nothing counted. A replaced relay frees its slot at once and is cut
+//     unended, its bytes sent charged at once; what it took counts against
+//     the room of the open that replaces it before that open is admitted.
+//     Its client asks again with Range, as after a stall. Only an open that
+//     passes every check above replaces one, and it is counted and charged
+//     as any other.
 //
 // What reaches the provider: the query text, an id or a permalink, the
-// operator's key (in a header, first hop only) and app name, this service's
-// address and a fixed User-Agent. Never the member's address, key or token.
+// operator's key (in a header, first hop only, never to a kept storage URL)
+// and app name, this service's address and a fixed User-Agent. Never the
+// member's address, key or token.
 // What reaches the art host: a GET from this service's address with
 // User-Agent and Accept only, never the key, a cookie or anything of the
 // member. Logs carry { event: 'audius', reason } only, never the key, the
@@ -75,7 +114,10 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 // SSRF: every JSON call is pinned to the API host, redirects included. The
 // stream's first hop is pinned to the API host and its redirects (to a
 // storage node) go to any https host on port 443 whose name resolves only to
-// public addresses, checked in the socket's own lookup. The art fetch follows
+// public addresses, checked in the socket's own lookup. A kept storage URL is
+// opened under the same rule, with no redirect: its name is checked in the
+// socket's lookup whenever a socket is dialled, and a pooled socket is one
+// that passed that check. The art fetch follows
 // the same rule from its first hop: an https host on 443 that resolves only to
 // public addresses, at most 3 redirects, each one checked again.
 
@@ -98,6 +140,11 @@ const PLAYS_PER_DAY = 300
 const AUDIO_OPENS_PER_DAY = 1000
 const OPENS_PER_TICKET = 64
 const PROVIDER_PER_DAY = 12000
+// One member's share of the shared budget a day: every unit the member
+// spends counts (its JSON calls, its audio opens and the art host contacts
+// of the cover fetches it starts), never given back once spent, so it takes
+// ten members at their cap to turn music off for everyone until the day ends.
+const MEMBER_BUDGET_PER_DAY = PROVIDER_PER_DAY / 10
 const ARTS_PER_DAY = 600
 const ART_MAX_BYTES = 128 * 1024
 // 128 covers of ART_MAX_BYTES: 16 MiB at worst.
@@ -108,6 +155,11 @@ const MAX_ART_INFLIGHT = 6
 // One member's cover requests waiting on an art host fetch at once: the app
 // loads three at once, and one member cannot hold every cover slot.
 const ART_PER_MEMBER = 3
+// A cover fetch that failed after contacting the art host (an outage, a
+// timeout, a 5xx, throttling) is answered as failed for this long with no
+// new contact: otherwise every appearance of the cover would spend the
+// shared budget again while the host is down.
+const ART_RETRY_MS = 60 * 1000
 const ART_ACCEPT = 'image/jpeg, image/png, image/webp'
 // A size=480 request answers within this, under the app's 25 s art timeout
 // (AUDIUS_ART_TIMEOUT_MS): a lookup and the large fetch may already have
@@ -128,6 +180,13 @@ const TOTAL_MS = 15 * 60 * 1000
 const STREAMS_PER_MEMBER = 2
 const MAX_INFLIGHT = 16
 const DEADLINE_MS = 10 * 1000
+// A storage URL a walk ended on is asked directly for this long: under the
+// 300 s the presigned URL lives, so it is not asked once it has expired.
+const UPSTREAM_REUSE_MS = 4 * 60 * 1000
+// A kept storage URL that has not answered in this falls back to the walk,
+// which still has the rest of DEADLINE_MS.
+const STORED_CONNECT_MS = 3 * 1000
+const STORED_URL_MAX = 2048
 const JSON_CAP = 1024 * 1024
 const MAX_BYTE_WINDOWS = 10000
 const RETRY_AFTER_S = '5'
@@ -235,6 +294,7 @@ function createAudiusRoutes ({
     art: refundableWindow(caps.arts ?? ARTS_PER_DAY, DAY_MS, now)
   }
   const budget = refundableWindow(budgetPerDay, DAY_MS, now, 1)
+  const memberBudget = refundableWindow(caps.share ?? MEMBER_BUDGET_PER_DAY, DAY_MS, now)
   const providerCalls = refundableWindow(caps.calls ?? PROVIDER_CALLS_PER_DAY, DAY_MS, now)
   const dailyBytes = byteWindow(caps.dailyBytes ?? DAILY_BYTES, DAY_MS, now)
 
@@ -253,9 +313,16 @@ function createAudiusRoutes ({
   // The arts key and href -> { promise, startedAt }: the running fetch of
   // that cover, shared by concurrent requests, and its Date.now() start.
   const pendingArt = new Map()
-  // sha256(ticket) -> { member, id, expiresAt, checkedAt, bytes, opens }
+  // sha256(ticket) -> { member, id, expiresAt, checkedAt, bytes, opens,
+  // upstream }, `upstream` null or the kept storage URL { href, until }.
   const tickets = new Map()
-  const memberStreams = new Map()
+  // member -> its running relays in open order, each { key, opened, used, cut }:
+  // `key` the ticket digest, `opened` true once its upstream answered (a
+  // pending open cannot be aborted, so it is never replaced and keeps its
+  // slot until it settles), `used()` the bytes it has downloaded so far
+  // (skipped and sent, not yet charged), `cut()` charges them, frees the
+  // slot and ends the relay.
+  const memberRelays = new Map()
   // member -> its art requests waiting on a host fetch, started or joined.
   const memberArts = new Map()
   let streams = 0
@@ -293,24 +360,32 @@ function createAudiusRoutes ({
   // A storage node may be any public https host: the redirect target is the
   // provider's choice, so only the address rules bind it.
   const openAudio = enabled ? createStreamFetch({ request, lookup, allowAddress, firstTarget: apiTarget, userAgent: USER_AGENT }) : null
+  // A storage URL a walk ended on, asked again directly: the same address
+  // rules as a redirect hop, and no redirect of its own.
+  const openStored = enabled ? createStreamFetch({ request, lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT, maxRedirects: 0 }) : null
 
-  // One provider call against the service-wide daily budget, or a rejection
-  // with a short token ('orcamento' when the budget is spent).
-  function spendBudget () {
-    if (!budget('all')) throw new Error('orcamento')
+  // One provider call against `member`'s share and the service-wide daily
+  // budget, or a rejection with a short token: 'limite' when the member's
+  // share is spent, 'orcamento' when the budget is (the share unit goes back).
+  function spendBudget (member) {
+    if (!memberBudget(member)) throw new Error('limite')
+    if (budget('all')) return
+    memberBudget.giveBack(member)
+    throw new Error('orcamento')
   }
 
   // -> the parsed JSON answer of a provider request for `member`, or a
   // rejection with a short token: 'status' when the provider answered with an
-  // error status, 'limite' when the member's PROVIDER_CALLS_PER_DAY are
-  // spent, anything else when no usable answer came. The member's call is
-  // given back only when the provider is not contacted at all.
+  // error status, 'limite' when the member's PROVIDER_CALLS_PER_DAY or its
+  // budget share are spent, anything else when no usable answer came. The
+  // member's call is given back only when the provider is not contacted at
+  // all.
   async function providerJson (spec, member) {
     if (spec === null) throw new Error('pedido')
     if (inflight >= MAX_INFLIGHT) throw new Error('lotado')
     if (!providerCalls(member)) throw new Error('limite')
     try {
-      spendBudget()
+      spendBudget(member)
     } catch (err) {
       providerCalls.giveBack(member)
       throw err
@@ -601,12 +676,24 @@ function createAudiusRoutes ({
     arts.delete(key)
   }
 
-  function storeArt (key, mime, bytes, href) {
+  // A `failed` row has no bytes either, but answers unavailable() instead of
+  // notFound(), and only for ART_RETRY_MS: the app keeps a 404 for the
+  // session, so a host outage must never look like a missing cover.
+  function storeArt (key, mime, bytes, href, failed = false) {
+    if (failed) {
+      const was = storedArt(key)
+      // A cover held for another href stays: the failed fetch was older.
+      if (was !== null && was.bytes !== null) return
+      // A wide outage must not push good covers out: with the cache full, a
+      // new failure is not remembered.
+      if (was === null && arts.size >= MAX_ART_CACHED) return
+    }
     dropArt(key)
-    const row = { mime, bytes, href, expiresAt: now() + CACHE_TTL_MS, timer: null }
+    const ttl = failed ? ART_RETRY_MS : CACHE_TTL_MS
+    const row = { mime, bytes, href, failed, expiresAt: now() + ttl, timer: null }
     row.timer = setTimer(() => {
       if (arts.get(key) === row) arts.delete(key)
-    }, CACHE_TTL_MS)
+    }, ttl)
     if (row.timer && typeof row.timer.unref === 'function') row.timer.unref()
     arts.set(key, row)
     while (arts.size > MAX_ART_CACHED) dropArt(arts.keys().next().value)
@@ -642,16 +729,17 @@ function createAudiusRoutes ({
   }
 
   // The request of every art hop, first and redirects alike: each contact
-  // with the art host spends one unit of the shared budget, never given
-  // back, and is counted in `state.contacts`. The stream fetch reports a
-  // throw here as a failed request, so the spent budget is also recorded in
-  // `state`.
-  function budgetedRequest (state) {
+  // with the art host spends one unit of the shared budget and of `member`'s
+  // share, never given back, and is counted in `state.contacts`. The stream
+  // fetch reports a throw here as a failed request, so a spent budget or
+  // share is also recorded in `state`.
+  function budgetedRequest (state, member) {
     return (opts) => {
       try {
-        spendBudget()
-      } catch {
+        spendBudget(member)
+      } catch (spent) {
         state.budgetSpent = true
+        if (spent.message === 'limite') state.shareSpent = true
         const err = new Error('orcamento')
         err.budgetSpent = true
         throw err
@@ -661,13 +749,16 @@ function createAudiusRoutes ({
     }
   }
 
-  // One fetch of a cover, shared by every request for `key` while it runs.
-  // Never rejects: -> { row } with the bytes, { missing: true } for a cover
-  // the host does not serve as an image, or { contacted } for any other
-  // failure, `contacted` false only when no art host was reached.
-  async function fetchArt (key, href) {
-    const state = { budgetSpent: false, contacts: 0 }
-    const openArt = createStreamFetch({ request: budgetedRequest(state), lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT })
+  // One fetch of a cover for `member`, shared by every request for `key`
+  // while it runs. Never rejects: -> { row } with the bytes, { missing: true }
+  // for a cover the host does not serve as an image, or { contacted,
+  // shareSpent } for any other failure, `contacted` false only when no art
+  // host was reached and `shareSpent` true when `member`'s budget share ran
+  // out. A failure after a contact, with budget left, is remembered for
+  // ART_RETRY_MS.
+  async function fetchArt (key, href, member) {
+    const state = { budgetSpent: false, shareSpent: false, contacts: 0 }
+    const openArt = createStreamFetch({ request: budgetedRequest(state, member), lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT })
     artInflight++
     const started = Date.now()
     let up = null
@@ -687,8 +778,9 @@ function createAudiusRoutes ({
         storeArt(key, null, null, href)
         return { missing: true }
       }
-      log({ event: 'audius', reason: state.budgetSpent ? 'orcamento' : 'indisponivel' })
-      return { contacted: state.contacts > 0 }
+      if (state.contacts > 0 && !state.budgetSpent) storeArt(key, null, null, href, true)
+      if (!state.shareSpent) log({ event: 'audius', reason: state.budgetSpent ? 'orcamento' : 'indisponivel' })
+      return { contacted: state.contacts > 0, shareSpent: state.shareSpent }
     } finally {
       clearTimeout(timer)
       if (up !== null) up.destroy()
@@ -701,6 +793,12 @@ function createAudiusRoutes ({
     }
     storeArt(key, mime, bytes, href)
     return { row: { mime, bytes } }
+  }
+
+  // A remembered failure: answered with no contact, so the use goes back.
+  function failedArt (member) {
+    limits.art.giveBack(member)
+    return unavailable()
   }
 
   function sendArt (res, row) {
@@ -728,6 +826,7 @@ function createAudiusRoutes ({
       hit = null
     }
     if (hit !== null) {
+      if (hit.failed) throw failedArt(member)
       if (hit.bytes === null) throw notFound()
       return sendArt(res, hit)
     }
@@ -756,6 +855,7 @@ function createAudiusRoutes ({
     const hit = storedArt(largeKey)
     if (hit !== null && row !== null && hit.href !== row.artLarge) dropArt(largeKey)
     else if (hit !== null && hit.bytes !== null) return sendArt(res, hit)
+    else if (hit !== null && hit.failed) throw failedArt(member)
     // A remembered large miss with no cached row is the small request, cache
     // first, as plain art answers it: no lookup only to learn the small href.
     else if (hit !== null && row === null) return smallArt(res, member, kind, id)
@@ -784,7 +884,9 @@ function createAudiusRoutes ({
   // { missing, fetched } for a cover the host does not serve as an image,
   // `fetched` false when that miss was already remembered. Throws busy() or
   // unavailable(), giving the art use back only when no art host was
-  // contacted; `keepUse` says this request already had one contacted. Past
+  // contacted; `keepUse` says this request already had one contacted. A
+  // member whose budget share ran out during a fetch it started gets
+  // overLimit() instead; members that joined it get unavailable(). Past
   // `startBy` (a Date.now() instant) no fetch starts and none is joined that
   // started after it, as it could end past the deadline: -> { late: true }.
   async function loadArt (member, key, href, keepUse = false, startBy = Infinity) {
@@ -793,6 +895,10 @@ function createAudiusRoutes ({
     let fetching = running === undefined ? undefined : running.promise
     if (fetching === undefined) {
       const done = storedArt(key)
+      if (done !== null && done.href === href && done.failed) {
+        if (!keepUse) limits.art.giveBack(member)
+        throw unavailable()
+      }
       if (done !== null && done.href === href) return done.bytes === null ? { missing: true, fetched: false } : { row: done }
       if (Date.now() > startBy) return { late: true }
     } else if (running.startedAt > startBy) return { late: true }
@@ -801,9 +907,10 @@ function createAudiusRoutes ({
       if (!keepUse) limits.art.giveBack(member)
       throw busy()
     }
-    if (fetching === undefined) {
+    const startedHere = fetching === undefined
+    if (startedHere) {
       const startedAt = Date.now()
-      fetching = fetchArt(key, href)
+      fetching = fetchArt(key, href, member)
       const entry = { promise: fetching, startedAt }
       pendingArt.set(pending, entry)
       const settled = () => {
@@ -825,7 +932,7 @@ function createAudiusRoutes ({
     // Each failed contact spent the shared budget: keeping the use is what
     // stops one member looping on a failing cover from spending it for all.
     if (!out.contacted && !keepUse) limits.art.giveBack(member)
-    throw unavailable()
+    throw out.shareSpent && startedHere ? overLimit() : unavailable()
   }
 
   function digest (ticket) {
@@ -875,7 +982,7 @@ function createAudiusRoutes ({
     const ticket = nodeCrypto.randomBytes(32).toString('base64url')
     const t = now()
     const expiresAt = t + TICKET_TTL_MS
-    tickets.set(digest(ticket), { member, id, expiresAt, checkedAt: t, bytes: 0, opens: 0 })
+    tickets.set(digest(ticket), { member, id, expiresAt, checkedAt: t, bytes: 0, opens: 0, upstream: null })
     log({ event: 'audius', reason: 'toque' })
     send(res, 200, { ticket, expiresAt: new Date(expiresAt).toISOString() })
   }
@@ -902,23 +1009,75 @@ function createAudiusRoutes ({
     return { key, row }
   }
 
+  // -> { up, kept, href } for a ticket row, or openAudio's rejection: `up`
+  // the open answer, `kept` the row's kept storage URL entry when it is what
+  // answered (else null), `href` the storage URL a walk ended on when it may
+  // be kept (else null). The row's kept storage URL is asked first, without
+  // the key; any answer but audio or a 416 forgets it and the walk from the
+  // API host runs with what is left of DEADLINE_MS. Nothing is kept here:
+  // audio() keeps `href` only once the answer passed its checks.
+  async function openUpstream (row, spec, range) {
+    const started = Date.now()
+    const kept = row.upstream
+    if (kept !== null) {
+      const t = now()
+      if (t >= kept.until - UPSTREAM_REUSE_MS && t < kept.until) {
+        let up = null
+        try {
+          up = await openStored(kept.href, { range, accept: 'audio/*', connectMs: STORED_CONNECT_MS })
+        } catch (err) {
+          if (err.status === 416) throw err
+        }
+        if (up !== null && AUDIO_TYPES.has(up.type)) return { up, kept, href: null }
+        if (up !== null) up.destroy()
+      }
+      // A concurrent walk may have kept a newer URL meanwhile.
+      if (row.upstream === kept) row.upstream = null
+    }
+    const left = Math.max(0, DEADLINE_MS - (Date.now() - started))
+    const up = await openAudio(spec.href, { firstHeaders: spec.firstHeaders, range, accept: 'audio/*', connectMs: left })
+    const keepable = AUDIO_TYPES.has(up.type) && typeof up.url === 'string' && up.url !== spec.href && up.url.length <= STORED_URL_MAX &&
+      apiTarget(up.url) === null && httpsTarget(up.url) !== null
+    return { up, kept: null, href: keepable ? up.url : null }
+  }
+
+  // The relay an open of ticket `key` replaces once `member` is at
+  // STREAMS_PER_MEMBER: the oldest opened one of that ticket, else the older
+  // opened one of a ticket that holds two, else null (one relay on each of
+  // other tickets, or only pending opens).
+  function victimFor (member, key) {
+    const list = memberRelays.get(member) || []
+    const same = list.find((r) => r.opened && r.key === key)
+    if (same !== undefined) return same
+    return list.find((r) => r.opened && list.filter((o) => o.key === r.key).length >= 2) ?? null
+  }
+
   async function audio (req, res, ticket) {
     const { key, row } = liveTicket(ticket)
     const member = row.member
-    if (streams >= config.streams || (memberStreams.get(member) || 0) >= STREAMS_PER_MEMBER) {
+    const atCap = streams < config.streams && (memberRelays.get(member) || []).length >= STREAMS_PER_MEMBER
+    const victim = atCap ? victimFor(member, key) : null
+    if (streams >= config.streams || (atCap && victim === null)) {
       log({ event: 'audius', reason: 'indisponivel' })
       throw busy()
     }
     // Charged when the response ends. Two streams of one member may each
     // start from the same remainder, so the caps hold within a factor of
     // STREAMS_PER_MEMBER; reserving the room up front instead would starve
-    // the second request a seeking media element makes.
-    const room = Math.min(ticketBytes - row.bytes, dailyBytes.left(member))
+    // the second request a seeking media element makes. A relay this open
+    // replaces is charged only when it is cut below, so what it already took
+    // counts against this open's room here, before anything is decided: an
+    // open refused for a limit cuts nobody.
+    const taken = victim === null ? 0 : victim.used()
+    const ticketLeft = ticketBytes - row.bytes - (victim !== null && victim.key === key ? taken : 0)
+    const room = Math.min(ticketLeft, dailyBytes.left(member) - taken)
     if (room <= 0) {
       if (ticketBytes - row.bytes <= 0) {
         tickets.delete(key)
         throw notFound()
       }
+      // Spent once the relay it would replace is charged.
+      if (ticketLeft <= 0) throw notFound()
       throw overLimit()
     }
     const spec = requestFor(config, 'stream', { id: row.id })
@@ -933,37 +1092,92 @@ function createAudiusRoutes ({
     if (!limits.audio(member)) throw overLimit()
     row.opens++
     try {
-      spendBudget()
-    } catch {
+      spendBudget(member)
+    } catch (err) {
+      if (err.message === 'limite') {
+        limits.audio.giveBack(member)
+        row.opens--
+        throw overLimit()
+      }
       log({ event: 'audius', reason: 'orcamento' })
       throw unavailable()
     }
 
+    // Everything from the cap check to here ran without a wait, so the
+    // victim picked there still holds its slot and has taken exactly the
+    // bytes counted against the room above.
+    if (victim !== null) victim.cut()
+    // Upstream bytes this relay has downloaded, skipped and sent alike, up
+    // to what pipeCapped can take (`most`, set once the relay starts).
+    let moved = 0
+    let most = 0
+    const relay = { key, opened: false, used: () => moved, cut: null }
     streams++
-    memberStreams.set(member, (memberStreams.get(member) || 0) + 1)
-    let released = false
+    if (!memberRelays.has(member)) memberRelays.set(member, [])
+    memberRelays.get(member).push(relay)
+    let freed = false
+    let charged = false
     let skip = 0
-    // Charges what was downloaded: the bytes sent and those discarded of a
-    // skip, which may be fewer than planned when the upstream closed early.
-    const release = (sent, skipped) => {
-      if (released) return
-      released = true
+    // The slot goes back once, whether the relay ends or is replaced first.
+    const free = () => {
+      if (freed) return
+      freed = true
       streams--
-      const n = memberStreams.get(member) - 1
-      if (n > 0) memberStreams.set(member, n)
-      else memberStreams.delete(member)
-      if (skipped + sent > 0) {
-        row.bytes += skipped + sent
-        dailyBytes.add(member, skipped + sent)
+      const list = memberRelays.get(member)
+      if (list === undefined) return
+      const i = list.indexOf(relay)
+      if (i !== -1) list.splice(i, 1)
+      if (list.length === 0) memberRelays.delete(member)
+    }
+    // Charges what was downloaded, once.
+    const charge = (n) => {
+      if (charged) return
+      charged = true
+      if (n > 0) {
+        row.bytes += n
+        dailyBytes.add(member, n)
       }
+    }
+    // The bytes sent and those discarded of a skip, which may be fewer than
+    // planned when the upstream closed early.
+    const release = (sent, skipped) => {
+      free()
+      charge(skipped + sent)
     }
     let gone = false
     res.once('close', () => { gone = true })
+    let up = null
+    // The row's kept storage URL entry this relay answered from or kept.
+    let entry = null
+    // Set when this service ends the relay itself, which says nothing of the
+    // storage node.
+    let ownCut = false
+    // Forgets the storage URL this relay used, unless a newer one replaced it.
+    const forget = () => {
+      if (entry !== null && row.upstream === entry) row.upstream = null
+    }
+    // Only a relay whose upstream answered is replaced (victimFor). It is
+    // charged what it took now, so no later open of the member starts from a remainder that
+    // still holds those bytes, and loses its upstream, so pipeCapped cuts the
+    // response unended; destroying the response too makes that report now,
+    // not after the stall deadline a client that stopped reading the old
+    // request leaves. Its report then charges nothing more.
+    relay.cut = () => {
+      free()
+      charge(moved)
+      ownCut = true
+      up.destroy()
+      res.destroy()
+    }
 
     const range = parseRange(req.headers.range)
-    let up
+    let fresh = null
     try {
-      up = await openAudio(spec.href, { firstHeaders: spec.firstHeaders, range: range === null ? null : req.headers.range, accept: 'audio/*' })
+      const opened = await openUpstream(row, spec, range === null ? null : req.headers.range)
+      up = opened.up
+      relay.opened = true
+      entry = opened.kept
+      fresh = opened.href
     } catch (err) {
       release(0, 0)
       if (err.status === 416) {
@@ -975,6 +1189,13 @@ function createAudiusRoutes ({
       }
       log({ event: 'audius', reason: 'indisponivel' })
       throw unavailable()
+    }
+    // Once the answer passed the checks below, the storage URL the walk
+    // ended on is kept for the ticket's later opens.
+    const keepFresh = () => {
+      if (fresh === null) return
+      entry = { href: fresh, until: now() + UPSTREAM_REUSE_MS }
+      row.upstream = entry
     }
     const refuseUp = (err) => {
       up.destroy()
@@ -1001,6 +1222,8 @@ function createAudiusRoutes ({
         (length === null || length === end - start + 1)
       if (!valid) {
         log({ event: 'audius', reason: 'indisponivel' })
+        // A kept URL that answers this is not asked again: the next open walks.
+        forget()
         throw refuseUp(unavailable())
       }
       // A node may answer more than was asked: only the asked slice is
@@ -1014,6 +1237,7 @@ function createAudiusRoutes ({
       // The node ignored Range: the asked slice is cut from the full body.
       log({ event: 'audius', reason: 'sem-range' })
       if (range.start >= length) {
+        keepFresh()
         up.destroy()
         release(0, 0)
         res.writeHead(416, { ...AUDIO_HEADERS, 'Content-Range': 'bytes */' + length, 'Content-Length': 0 })
@@ -1031,6 +1255,7 @@ function createAudiusRoutes ({
     }
     if (size !== null) headers['Content-Length'] = size
     if (status === 206 && up.status === 200) skip = range.start
+    keepFresh()
 
     // The skipped bytes are downloaded too, so they count against the room:
     // that bounds what a far Range can make this service fetch.
@@ -1050,6 +1275,7 @@ function createAudiusRoutes ({
         good = auth.standing(member) === null
       } catch {
         log({ event: 'audius', reason: 'indisponivel' })
+        ownCut = true
         return up.destroy()
       }
       if (good) {
@@ -1058,8 +1284,10 @@ function createAudiusRoutes ({
       }
       tickets.delete(key)
       log({ event: 'audius', reason: 'sessao-revogada' })
+      ownCut = true
       up.destroy()
     }, recheckMs)
+    most = skip + cap
     pipeCapped(up.stream, res, {
       skip,
       cap,
@@ -1069,9 +1297,15 @@ function createAudiusRoutes ({
       onDone: (reason, bytes, skipped) => {
         clearInterval(recheck)
         up.destroy()
+        // A storage node that cut the body short is not asked directly again.
+        if (reason === 'upstream' && !ownCut) forget()
         release(bytes, skipped)
       }
     })
+    // Counted beside pipeCapped, which takes the same bytes: a stream
+    // destroyed by pipeCapped emits no more data, and `most` bounds the
+    // chunk that crosses its cap.
+    up.stream.on('data', (chunk) => { moved = Math.min(most, moved + chunk.length) })
   }
 
   function owns (pathname) {
@@ -1129,15 +1363,20 @@ module.exports = {
   AUDIO_OPENS_PER_DAY,
   OPENS_PER_TICKET,
   PROVIDER_PER_DAY,
+  MEMBER_BUDGET_PER_DAY,
   PROVIDER_CALLS_PER_DAY,
   ARTS_PER_DAY,
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
   ART_PER_MEMBER,
+  ART_RETRY_MS,
   ART_ANSWER_MS,
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,
   STREAMS_PER_MEMBER,
+  UPSTREAM_REUSE_MS,
+  STORED_CONNECT_MS,
+  DEADLINE_MS,
   createAudiusRoutes
 }

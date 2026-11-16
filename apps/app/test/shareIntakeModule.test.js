@@ -79,6 +79,7 @@ const GOOD = {
   text: 'texto',
   url: 'https://exemplo.test/a',
   total: 1,
+  videos: 0,
   files: [{ uri: uriFor(ID, '0.jpg'), mimeType: 'image/jpeg', width: 640, height: 480 }]
 }
 
@@ -361,6 +362,34 @@ test('share intake: non-positive sizes are dropped', async (t) => {
   t.is(got.total, 1)
 })
 
+test('share intake: a video entry has a video name, no sizes, and counts in videos', async (t) => {
+  fake()
+  const mod = await load()
+  globalThis.__shareNative.peek = () => Promise.resolve(payload({
+    total: 0,
+    files: [
+      entry(ID, '0.mp4', { mimeType: 'video/mp4', width: 0, height: 0 }),
+      entry(ID, '1.jpg', { mimeType: 'video/mp4' }),
+      entry(ID, '2.mov', { mimeType: 'image/jpeg' }),
+      entry(ID, '3.exe', { mimeType: 'video/mp4' }),
+      entry(ID, '4.mov', { mimeType: 'video/quicktime', width: 'x' }),
+      entry(ID, '5.mkv', { mimeType: 'video/x-matroska' })
+    ]
+  }))
+  const got = await mod.peek()
+  t.alike(got.files, [
+    { uri: uriFor(ID, '0.mp4'), mimeType: 'video/mp4' },
+    { uri: uriFor(ID, '4.mov'), mimeType: 'video/quicktime' }
+  ])
+  t.is(got.total, 0, 'a video is not a photo')
+  t.is(got.videos, 2, 'never below the videos kept')
+
+  globalThis.__shareNative.peek = () => Promise.resolve(payload({ total: 0, videos: 1, files: [] }))
+  t.is((await mod.peek()).videos, 1, 'a video that could not be copied still counts')
+  globalThis.__shareNative.peek = () => Promise.resolve(payload({ videos: '1' }))
+  t.is((await mod.peek()).videos, 0)
+})
+
 test('share intake: more than 10 files are cut', async (t) => {
   const files = [{ uri: 'file:///tmp/nope.jpg', mimeType: 'image/jpeg', width: 8, height: 8 }]
   for (let i = 0; i < 11; i++) files.push(entry(ID, i + '.jpg', { width: i + 1, height: i + 2 }))
@@ -515,7 +544,8 @@ test('share intake: listen and its unsubscribe', async (t) => {
 // here) the web intake is inert, and it never reaches for a page API.
 test('share intake web: inert without Cache Storage, no page APIs', async (t) => {
   const web = await import('../src/shareIntake.web.js')
-  for (const name of ['peek', 'release', 'sweep', 'listen', 'clear']) t.is(typeof web[name], 'function', name)
+  for (const name of ['peek', 'release', 'sweep', 'listen', 'clear', 'takeLost']) t.is(typeof web[name], 'function', name)
+  t.is(web.takeLost(), false, 'no address to read')
   t.is(await web.peek(), null)
   t.is(await web.clear(), undefined)
   t.is(await web.release(ID), undefined)
@@ -527,7 +557,8 @@ test('share intake web: inert without Cache Storage, no page APIs', async (t) =>
   t.is(called, false)
   const src = fs.readFileSync(path.join(__dirname, '../src/shareIntake.web.js'), 'utf8')
   t.is(/\b(window|document|navigator|localStorage|sessionStorage|self)\b/.test(src), false)
-  t.is(src.split('globalThis.').length - 1, src.split('globalThis.caches').length - 1, 'globalThis only for caches')
+  // takeLost reads and rewrites the address the worker redirected to.
+  t.alike([...new Set(src.match(/globalThis\.\w+/g))].sort(), ['globalThis.caches', 'globalThis.history', 'globalThis.location'], 'globalThis for caches, and the address in takeLost')
 })
 
 test('share intake native: listen follows onPending and the app becoming active', async (t) => {

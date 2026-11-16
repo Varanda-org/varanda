@@ -11,8 +11,9 @@ const KEY = 'varanda-rua-snapshot'
 // them equal). A longer text is over it in bytes too.
 const MAX_BYTES = 524288
 
-// A Rua paints a snapshot first only on the phone. The web keeps the same
-// API, so the shared screen decides by this flag, not by Platform.OS.
+// The App.js cold-start preview runs only where this is true, which is
+// nowhere now (see the native twin). The web keeps the same API, so App.js
+// decides by this flag, not by Platform.OS.
 export const previewCapable = false
 
 function storage () {

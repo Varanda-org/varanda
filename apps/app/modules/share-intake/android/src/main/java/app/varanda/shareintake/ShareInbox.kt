@@ -8,10 +8,14 @@ import android.net.Uri
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -19,16 +23,27 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 // Everything another app shares with Varanda lands here as plain files in the
-// app's cache, so the JS side never touches a foreign Uri or its grant. One
-// directory per share; its manifest.json is written last (temporary file and
-// rename), so a directory without one is a capture still in progress.
+// app's own storage, so the JS side never touches a foreign Uri or its grant.
+// One directory per share; its manifest.json is written last (temporary file
+// and rename), so a directory without one is a capture still in progress.
+// Not the cache: Android may empty that while the person is still on the way
+// to the composer, and the share would vanish with no word. noBackupFilesDir
+// is never cleared by the system nor sent to a backup, so every share is
+// swept here instead: by the app (src/useSharedIntent.js) and, with the app
+// closed, by ShareSweepWorker an hour after the capture.
 object ShareInbox {
   const val MAX_FILES = 10
   const val MAX_BYTES = 50L * 1024 * 1024
+  // A shared video is copied as it is and re-encoded to the post limits in
+  // the composer (src/media/videoPrep), so this only bounds the copy: room
+  // for a 30 second clip recorded at 4K.
+  const val MAX_VIDEO_BYTES = 512L * 1024 * 1024
   const val MAX_TEXT = 4000
   // A file that delivers no byte for this long, counted from its open, is
   // skipped: its open is cancelled, its descriptor closed and its thread left.
   const val STALL_MS = 30_000L
+  // Same as SHARE_TTL_MS in src/sharedIntent.js.
+  const val TTL_MS = 3_600_000L
 
   private const val DIR = "varanda-share"
   private const val MANIFEST = "manifest.json"
@@ -45,9 +60,13 @@ object ShareInbox {
   private val live = AtomicInteger(0)
   private const val MAX_ZERO_READS = 8
   private const val ZERO_READ_PAUSE_MS = 50L
+  private const val SWEEP_WORK = "varanda-share-sweep"
+  // A minute past the TTL, so the share it runs for is old enough to go.
+  private const val SWEEP_DELAY_MS = TTL_MS + 60_000L
   private val ID = Regex("^[0-9]{13}-[0-9a-f]{32}$")
   // A tampered or stale manifest must not point outside its own directory.
   private val FILE_NAME = Regex("^[0-9]{1,2}\\.(jpg|png|gif|webp|heic|img)$")
+  private val VIDEO_NAME = Regex("^[0-9]{1,2}\\.(mp4|mov)$")
   private val random = SecureRandom()
 
   // Set by the module while a JS runtime is alive, so a share that arrives
@@ -64,6 +83,7 @@ object ShareInbox {
     val text: String,
     val url: String,
     val total: Int,
+    val videos: Int,
     val files: List<SharedFile>
   )
 
@@ -214,9 +234,32 @@ object ShareInbox {
 
   fun isId(id: String): Boolean = ID.matches(id)
 
-  private fun root(context: Context): File = File(context.cacheDir, DIR)
+  private fun root(context: Context): File = File(context.noBackupFilesDir, DIR)
 
-  // Off the main thread: it copies up to MAX_FILES streams of MAX_BYTES each.
+  // Where shares were kept before they left the cache.
+  private fun legacyRoot(context: Context): File = File(context.cacheDir, DIR)
+
+  // A complete share still waiting there when the app was updated moves over
+  // (same partition, a rename), so the update does not lose it; the rest of
+  // the old directory goes. True when a share moved.
+  private fun adopt(context: Context): Boolean {
+    val old = legacyRoot(context)
+    val children = old.listFiles() ?: return false
+    val dest = root(context)
+    dest.mkdirs()
+    var moved = false
+    for (child in children) {
+      if (child.isDirectory && isId(child.name) && File(child, MANIFEST).isFile) {
+        val target = File(dest, child.name)
+        if (!target.exists() && child.renameTo(target)) moved = true
+      }
+    }
+    old.deleteRecursively()
+    return moved
+  }
+
+  // Off the main thread: it copies up to MAX_FILES streams of MAX_BYTES each,
+  // or the one video a share of video/* brings.
   // A stalled file is skipped and the rest are still copied: each Uri has its
   // own descriptor, so closing one cannot corrupt another, and one slow cloud
   // photo should not cost the whole share. The person leaving stops it all.
@@ -227,26 +270,48 @@ object ShareInbox {
     val dir = File(root(context), id)
     try {
       if (!dir.mkdirs()) return null
+      // Before the copy, so a process killed halfway still has its partial
+      // files swept with the app closed.
+      scheduleSweep(context)
       val title = cut(textExtra(intent, Intent.EXTRA_SUBJECT))
       val text = cut(textExtra(intent, Intent.EXTRA_TEXT))
-      val offered = if (intent.type?.startsWith("image/", ignoreCase = true) == true) streams(intent) else emptyList()
+      val images = intent.type?.startsWith("image/", ignoreCase = true) == true
+      val video = intent.type?.startsWith("video/", ignoreCase = true) == true
+      val offered = if (images || video) streams(intent) else emptyList()
       val kept = ArrayList<SharedFile>()
-      for ((i, uri) in offered.take(MAX_FILES).withIndex()) {
-        if (guard.cancelled) throw Cancelled()
-        try {
-          val file = copyImage(context, uri, dir, i, kept.size, guard)
-          if (file != null) kept.add(file)
-        } catch (e: Cancelled) {
-          throw e
-        } catch (e: Exception) {
-          // One unreadable or stalled Uri must not cost the rest of the share.
+      if (video) {
+        // A post holds one video, so only the first is copied.
+        val uri = offered.firstOrNull()
+        if (uri != null) {
+          if (guard.cancelled) throw Cancelled()
+          try {
+            val file = copyVideo(context, uri, dir, guard)
+            if (file != null) kept.add(file)
+          } catch (e: Cancelled) {
+            throw e
+          } catch (e: Exception) {
+            // Counted in videos, so the composer says it did not arrive.
+          }
+        }
+      } else {
+        for ((i, uri) in offered.take(MAX_FILES).withIndex()) {
+          if (guard.cancelled) throw Cancelled()
+          try {
+            val file = copyImage(context, uri, dir, i, kept.size, guard)
+            if (file != null) kept.add(file)
+          } catch (e: Cancelled) {
+            throw e
+          } catch (e: Exception) {
+            // One unreadable or stalled Uri must not cost the rest of the share.
+          }
         }
       }
       if (guard.cancelled || (title.isBlank() && text.isBlank() && kept.isEmpty())) {
         dir.deleteRecursively()
         return null
       }
-      writeManifest(dir, id, at, title, text, offered.size, kept)
+      writeManifest(dir, id, at, title, text, if (video) 0 else offered.size, if (video) offered.size else 0, kept)
+      scheduleSweep(context)
       return id
     } catch (e: Exception) {
       dir.deleteRecursively()
@@ -257,6 +322,8 @@ object ShareInbox {
   // The newest complete share. Only one share is ever pending, so the older
   // complete ones go; a directory without a manifest is still being written.
   fun newest(context: Context): Share? {
+    // Not from the worker's own sweep: replacing the running work cancels it.
+    if (adopt(context)) scheduleSweep(context)
     val children = root(context).listFiles() ?: return null
     val complete = children
       .filter { it.isDirectory && isId(it.name) && File(it, MANIFEST).isFile }
@@ -292,9 +359,25 @@ object ShareInbox {
     }
   }
 
+  // Each capture moves the run to an hour after it, so the newest share is
+  // swept even if the app is never opened again. The sweep keeps anything
+  // younger than the TTL, so a run for an older share leaves a newer one.
+  private fun scheduleSweep(context: Context) {
+    try {
+      val request = OneTimeWorkRequestBuilder<ShareSweepWorker>()
+        .setInitialDelay(SWEEP_DELAY_MS, TimeUnit.MILLISECONDS)
+        .build()
+      WorkManager.getInstance(context.applicationContext)
+        .enqueueUniqueWork(SWEEP_WORK, ExistingWorkPolicy.REPLACE, request)
+    } catch (e: Exception) {
+      // WorkManager unavailable: the app's own sweep on its next start.
+    }
+  }
+
   fun sweep(context: Context, maxAgeMs: Double) {
     // NaN or a negative age from JS would otherwise wipe captures in progress.
     if (maxAgeMs.isNaN() || maxAgeMs < 0) return
+    adopt(context)
     val children = root(context).listFiles() ?: return
     val oldest = System.currentTimeMillis() - maxAgeMs.toLong()
     for (child in children) {
@@ -384,7 +467,7 @@ object ShareInbox {
     // thread may still hold its part, so no later file may reuse the name.
     val part = File(dir, i.toString() + PART)
     try {
-      if (!guard.copy(part) { attempt -> fetch(context, uri, attempt, guard) }) {
+      if (!guard.copy(part) { attempt -> fetch(context, uri, attempt, guard, MAX_BYTES) }) {
         part.delete()
         return null
       }
@@ -416,8 +499,58 @@ object ShareInbox {
     }
   }
 
+  // The type is sniffed, never taken from the sender: an ISO media file (MP4
+  // or QuickTime), the containers phones record and the composer's encoder
+  // reads. Its sizes and length come from that encode, so none are read here.
+  private fun copyVideo(context: Context, uri: Uri, dir: File, guard: Guard): SharedFile? {
+    if (uri.scheme != "content") return null
+    if (isOwnProvider(context, uri)) return null
+    val part = File(dir, "0" + PART)
+    try {
+      if (!guard.copy(part) { attempt -> fetch(context, uri, attempt, guard, MAX_VIDEO_BYTES) }) {
+        part.delete()
+        return null
+      }
+      val mime = isoMedia(part)
+      if (mime == null) {
+        part.delete()
+        return null
+      }
+      val target = File(dir, if (mime == QUICKTIME) "0.mov" else "0.mp4")
+      if (!part.renameTo(target)) {
+        part.delete()
+        return null
+      }
+      return SharedFile(target, mime, 0, 0)
+    } catch (e: Exception) {
+      part.delete()
+      throw e
+    }
+  }
+
+  private const val QUICKTIME = "video/quicktime"
+
+  // An ftyp box first: QuickTime for the "qt  " brand, MP4 for any other.
+  private fun isoMedia(file: File): String? {
+    return try {
+      val head = ByteArray(12)
+      RandomAccessFile(file, "r").use { it.readFully(head) }
+      val size = ((head[0].toLong() and 0xff) shl 24) or ((head[1].toLong() and 0xff) shl 16) or
+        ((head[2].toLong() and 0xff) shl 8) or (head[3].toLong() and 0xff)
+      val box = String(head, 4, 4, Charsets.US_ASCII)
+      val brand = String(head, 8, 4, Charsets.US_ASCII)
+      when {
+        box != "ftyp" || size < 16 -> null
+        brand == "qt  " -> QUICKTIME
+        else -> "video/mp4"
+      }
+    } catch (e: Exception) {
+      null
+    }
+  }
+
   // On the attempt's own thread. True when the part holds the whole file.
-  private fun fetch(context: Context, uri: Uri, attempt: Attempt, guard: Guard): Boolean {
+  private fun fetch(context: Context, uri: Uri, attempt: Attempt, guard: Guard, maxBytes: Long): Boolean {
     // openFileDescriptor refuses a provider that serves the image from inside a
     // larger file; the asset descriptor's stream reads just that slice.
     val afd = context.contentResolver.openAssetFileDescriptor(uri, "r", attempt.signal) ?: return false
@@ -441,7 +574,7 @@ object ShareInbox {
           zeros = 0
           guard.progress(attempt)
           size += read
-          if (size > MAX_BYTES) return false
+          if (size > maxBytes) return false
           sink.write(buf, 0, read)
         }
         // The manifest is synced before it names this file, so the bytes
@@ -490,6 +623,7 @@ object ShareInbox {
     title: String,
     text: String,
     total: Int,
+    videos: Int,
     files: List<SharedFile>
   ) {
     val list = JSONArray()
@@ -510,6 +644,7 @@ object ShareInbox {
       .put("text", text)
       .put("url", "")
       .put("total", total)
+      .put("videos", videos)
       .put("files", list)
     val tmp = File(dir, MANIFEST_TMP)
     FileOutputStream(tmp).use { out ->
@@ -535,9 +670,12 @@ object ShareInbox {
         val width = item.getInt("width")
         val height = item.getInt("height")
         val file = File(dir, name)
-        if (!FILE_NAME.matches(name) || !mime.startsWith("image/") || width <= 0 || height <= 0 || !file.isFile) {
-          return null
+        val ok = if (mime.startsWith("video/")) {
+          VIDEO_NAME.matches(name) && width >= 0 && height >= 0
+        } else {
+          FILE_NAME.matches(name) && mime.startsWith("image/") && width > 0 && height > 0
         }
+        if (!ok || !file.isFile) return null
         files.add(SharedFile(file, mime, width, height))
       }
       Share(
@@ -547,6 +685,7 @@ object ShareInbox {
         text = json.getString("text"),
         url = json.getString("url"),
         total = json.getInt("total"),
+        videos = maxOf(0, json.optInt("videos", 0)),
         files = files
       )
     } catch (e: Exception) {

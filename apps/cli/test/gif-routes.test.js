@@ -18,6 +18,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { parseGifConfig, publicAddress, fromProvider, createGifRoutes, TINY_CAP, SEARCHES_PER_DAY, FULL_PER_DAY, FINISH_LIMIT, USER_AGENT } = require('../lib/account/gif-routes')
+const { MAX_MEMBER_SESSIONS } = require('../lib/account/member-session')
 
 const ORIGIN = 'https://varanda.test'
 const KEY = 'chave-sentinela-gif-42'
@@ -26,6 +27,7 @@ const GIF = Buffer.concat([Buffer.from('GIF89a', 'latin1'), Buffer.alloc(64, 1)]
 
 function fakeProvider () {
   const seen = []
+  const held = []
   let port = 0
   let mode = 'ok'
   const server = http.createServer((req, res) => {
@@ -63,6 +65,8 @@ function fakeProvider () {
     const m = url.pathname.match(/^\/media\/([^/]+)\/(tiny|full)\.gif$/)
     if (m) {
       const [, id] = m
+      // Held until release(): an image fetch still in flight.
+      if (mode === 'hold') return held.push(res)
       if (id === 'notgif') {
         res.writeHead(200, { 'Content-Type': 'image/gif' })
         return res.end('<html>not a gif</html>')
@@ -87,7 +91,14 @@ function fakeProvider () {
   })
   return {
     seen,
+    held,
     setMode (m) { mode = m },
+    release () {
+      for (const res of held.splice(0)) {
+        res.writeHead(200, { 'Content-Type': 'image/gif' })
+        res.end(GIF)
+      }
+    },
     async listen () {
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
       port = server.address().port
@@ -337,6 +348,33 @@ test('gif: query and cursor are bounded', async (t) => {
   for (const cursor of ['-1', '01', '5000', 'abc', 9]) {
     t.is((await search(token, { q: 'a', cursor })).status, 400, 'cursor ' + cursor)
   }
+})
+
+test('gif: at most 16 image fetches run at once, and one past that is refused before it is counted', async (t) => {
+  const { call, login, search, provider, server } = await setup(t)
+  const { token } = await login()
+  const headers = { Authorization: 'Bearer ' + token }
+  await search(token, { q: 'gato' })
+  provider.setMode('hold')
+  const running = []
+  for (let i = 0; i < 16; i++) running.push(call('GET', '/account/gif/image/abc123?size=full', { headers }))
+  while (provider.held.length < 16) await new Promise((resolve) => setTimeout(resolve, 10))
+  t.is(server.gifStats().inflight, 16)
+  const extra = await call('GET', '/account/gif/image/abc123?size=full', { headers })
+  t.is(extra.status, 503)
+  t.alike(extra.json, { error: 'indisponivel' })
+  t.is(provider.held.length, 16, 'the refused one never reached the provider')
+  provider.setMode('ok')
+  provider.release()
+  const done = await Promise.all(running)
+  t.alike(done.map((r) => r.status), new Array(16).fill(200))
+  t.is(server.gifStats().inflight, 0)
+  for (let i = 16; i < FULL_PER_DAY; i++) {
+    const res = await call('GET', '/account/gif/image/abc123?size=full', { headers })
+    if (res.status !== 200) return t.fail('full image ' + i + ' answered ' + res.status)
+  }
+  const over = await call('GET', '/account/gif/image/abc123?size=full', { headers })
+  t.is(over.status, 429, 'the daily count holds the 16 that ran and not the refused one')
 })
 
 test('gif: images come only from remembered results, as checked GIF bytes', async (t) => {
@@ -651,6 +689,31 @@ test('gif: a clock stepped back never revives a spent nonce', async (t) => {
   const replay = await call('POST', '/account/gif/session/finish', { body })
   t.is(replay.status, 404, 'the spent entry outlived the sweep')
   t.alike(replay.json, { error: 'expirado' })
+})
+
+test('gif: a member holds at most MAX_MEMBER_SESSIONS live tokens, and a new one ends the oldest', async (t) => {
+  const { login, search, server, linked, terms } = await setup(t)
+  const other = crypto.keyPair()
+  const otherHex = b4a.toString(other.publicKey, 'hex')
+  linked.add(otherHex)
+  terms.accept({ member: otherHex, version: TERMS_VERSION, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
+  const theirs = (await login(other)).token
+  t.ok(MAX_MEMBER_SESSIONS < FINISH_LIMIT, 'the cap is reachable inside one finish window')
+  const tokens = []
+  for (let i = 0; i < MAX_MEMBER_SESSIONS + 2; i++) {
+    const { token } = await login()
+    if (typeof token !== 'string') return t.fail('login ' + i + ' issued no token')
+    tokens.push(token)
+  }
+  t.is(server.gifStats().sessions, MAX_MEMBER_SESSIONS + 1)
+  t.is((await search(tokens[0], { q: 'gato' })).status, 401, 'the oldest token ended')
+  t.is((await search(tokens[1], { q: 'gato' })).status, 401)
+  for (const token of tokens.slice(2)) {
+    const res = await search(token, { q: 'gato' })
+    if (res.status !== 200) return t.fail('a recent token answered ' + res.status)
+  }
+  t.pass('the newest MAX_MEMBER_SESSIONS tokens work')
+  t.is((await search(theirs, { q: 'gato' })).status, 200, 'another member keeps the token issued before')
 })
 
 test('gif: a session is re-checked at once when the clock reads earlier than the last check', async (t) => {

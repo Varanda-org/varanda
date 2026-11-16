@@ -97,22 +97,19 @@ async function seeded (t) {
 }
 
 // A new engine on `storage` whose row load is held. -> { engine, gate,
-// unlocking, keyed, store }; keyed: onKey ran before the rows loaded.
+// unlocking, keyed, store }; unlocking: unlock() and then the row load
+// (loaded()); keyed: unlock() settled with the keys ready and the rows not
+// loaded yet.
 async function reopenHeld (storage, prf) {
   const gate = loadGate()
   gate.held = true
   const { engine, store: local } = engineFor(storage, gate)
   let keyed = false
-  let onKey
-  const ready = new Promise((resolve) => { onKey = resolve })
-  const unlocking = engine.unlock(prf, {
-    onKey: () => {
-      keyed = !engine.unlocked()
-      onKey()
-    }
-  })
+  const keying = engine.unlock(prf)
+  const unlocking = keying.then(() => engine.loaded())
   unlocking.catch(noop)
-  await Promise.race([ready, unlocking.catch(noop), sleep(5000)])
+  const stage = keying.then(() => { keyed = engine.keyReady() && !engine.unlocked() }, noop)
+  await Promise.race([stage, sleep(5000)])
   return { engine, gate, unlocking, keyed, store: local }
 }
 
@@ -158,9 +155,9 @@ test('with the row load held, a first page answers from the summary and equals t
   const { storage, prf, inbox, requests } = await seeded(t)
   const { engine, gate, unlocking, keyed } = await reopenHeld(storage, prf)
   t.teardown(() => engine.close())
-  // Fails before the summary: the unlock never reports its keys apart from
-  // the row load.
-  t.ok(keyed, 'the keys are ready while the rows are held')
+  // Fails while unlock() settles only after the row load: it then never
+  // settles while the rows are held.
+  t.ok(keyed, 'unlock() settles with the keys ready while the rows are held')
   t.absent(engine.unlocked(), 'the rows are still loading')
   t.alike(await engine.list(OWN), inbox, 'the inbox page equals the folded one')
   t.alike(await engine.list(OWN, { folder: 'request' }), requests, 'the request page equals the folded one')
@@ -395,6 +392,7 @@ test('a page store whose row load failed is dropped: the next dm.list of the pag
   const page = b4a.toString(pageKp.publicKey, 'hex')
   const a = engineFor(storage)
   await a.engine.unlock(prf)
+  await a.engine.loaded()
   const made = a.engine.pageGenerate(own, id, { page, gen: 1, recipients: [{ member: own, box: a.engine.boxHex().box }] })
   const share = made.shares[0]
   await a.engine.pageSecrets(own, { owner: own, admins: [] }, { page, gen: 1, sealed: share.sealed, by: own, sig: share.sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: page }, ASSOC_KP) })
@@ -414,6 +412,7 @@ test('a page store whose row load failed is dropped: the next dm.list of the pag
   const b = engineFor(storage)
   t.teardown(() => b.engine.close())
   await b.engine.unlock(prf)
+  await b.engine.loaded()
   await t.exception(b.engine.list(own, { page }), /bloqueada/, 'the failed load answers locked')
   t.absent(fail, 'the load did fail')
   const again = await b.engine.list(own, { page })

@@ -144,9 +144,9 @@ function createPreviewRoutes ({
 
   // A page fetch that also says whether this service refused it before any
   // socket could open: a name whose addresses the address check refuses,
-  // with no earlier hop admitted. Only that failure gives the daily count
-  // back; a target that fails after the address was admitted (slow, too big,
-  // wrong type) is the member's choice and stays counted.
+  // with no earlier hop admitted. That preview ends there, with no cover
+  // fetch, and stays counted like any other: a free refusal would let a
+  // member probe names through this service's resolver without limit.
   function watchedFetch (href, opts) {
     const seen = { admitted: false, refused: false }
     const watch = (hostname, options, cb) => lookup(hostname, options, (err, addrs) => {
@@ -205,7 +205,6 @@ function createPreviewRoutes ({
         page = await done
       } catch {
         if (seen.refused && !seen.admitted) {
-          quota.giveBack(member)
           log({ event: 'preview', reason: 'indisponivel' })
           throw unavailable()
         }

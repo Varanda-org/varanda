@@ -49,12 +49,13 @@ import { createChatMedia, pinChatMedia, sourceFor } from '../media/chatMedia'
 import { readReportAudio as readLocalBytes } from '../media/reportAudio'
 import { ErrorText, Soft, errorText } from './index'
 import { Icon } from './Icon'
+import { mediaHashDeps } from './MediaView'
 import { Pill } from './Pill'
 import { Sheet } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, space, type } from './theme'
 
-const fetchDeps = () => (isAppClient() ? { fetch: expoFetch } : {})
+const fetchDeps = () => ({ ...mediaHashDeps(), ...(isAppClient() ? { fetch: expoFetch } : {}) })
 
 const STATE_TEXT = Object.freeze({
   waiting: 'Na fila',

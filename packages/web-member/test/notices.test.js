@@ -1068,6 +1068,39 @@ test('row window: after the budget cut no get starts', async (t) => {
   t.alike(internal, [])
 })
 
+// ---- bytes in flight (#459) ----
+
+test('regression: bytes the seeder sends past the wire bound cut the read like the budget', async (t) => {
+  t.timeout(120000)
+  const assoc = association()
+  const now = Date.now()
+  const size = 100000
+  const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
+  const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
+  const wireMaxBytes = 500000
+  const parallel = 2
+  const served = { bytes: 0 }
+  // A budget roomy enough for pipelined gets: the first oversized block of a
+  // row ends it and cancels the gets behind it, never charged.
+  const { web, key: me, internal } = await webNode(t, assoc, seeder.url, { notices: { budgetBytes: 8 * 1048576, parallel, wireMaxBytes } })
+  const items = []
+  for (let i = 0; i < 30; i++) {
+    const at = iso(now - (i + 1) * 1000)
+    const records = [certOf(assoc), () => followRecord({ key: me, on: true, at })]
+    for (let j = 0; j < 6; j++) records.push(() => ({ type: 'post', text: String(j).repeat(size), at: iso(Date.parse(at) + j + 1), replyTo: null }))
+    const F = await diary(t, records)
+    F.on('upload', (index, byteLength) => { served.bytes += byteLength })
+    state.cores.push(F)
+    items.push({ key: hex(F.key), seq: 1, at })
+  }
+  state.page = (target) => target === me ? { items, next: null, incomplete: false } : { items: [], next: null, incomplete: false }
+  const r = await web.request('notices.list', {})
+  t.comment('bytes served ' + served.bytes)
+  t.is(r.incomplete, true, 'the read is cut')
+  t.ok(served.bytes <= 2 * wireMaxBytes + 4 * parallel * size, 'about the wire bound plus what was already in flight')
+  t.alike(internal, [])
+})
+
 test('regression: an abort cancels every row window get in flight at once, none waits for its block timeout', async (t) => {
   t.timeout(90000)
   const assoc = association()

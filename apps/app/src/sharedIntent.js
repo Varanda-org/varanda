@@ -8,6 +8,10 @@ export const SHARE_TTL_MS = 3600000
 export const SHARE_SKEW_MS = 60000
 export const SHARE_ID = /^[0-9]{13}-[0-9a-f]{32}$/
 export const EXPIRED_TEXT = 'o compartilhamento expirou'
+// The web worker could not store a share (src/shareIntake.web.js takeLost).
+export const LOST_TEXT = 'o compartilhamento não coube no espaço do navegador'
+// A shared video met a draft that already holds one.
+export const VIDEO_HELD_TEXT = 'o rascunho já tem um vídeo'
 export const EMPTY = Object.freeze({ held: null, phase: 'idle', owner: null, last: null, taken: false })
 
 function clean (value) {
@@ -67,6 +71,17 @@ function acceptedFile (file) {
   return null
 }
 
+function isVideo (offered) {
+  if (offered === null || typeof offered !== 'object') return false
+  const mime = typeof offered.mimeType === 'string' ? offered.mimeType : offered.type
+  return typeof mime === 'string' && /^video\//i.test(mime)
+}
+
+// total counts the photos offered and videos the videos, so a video that
+// could not be copied is told apart from a photo that could not.
+// video: the first video, used only when no photo came along, since a post
+// holds a video or photos. videoNote: '' or why a video offered is not used
+// ('photos', 'failed', 'extra': the ones after the first).
 export function acceptShare (raw, now) {
   if (!isPlainObject(raw)) return null
   if (typeof raw.id !== 'string' || !SHARE_ID.test(raw.id)) return null
@@ -74,16 +89,33 @@ export function acceptShare (raw, now) {
   if (!(raw.at <= now + SHARE_SKEW_MS) || !Array.isArray(raw.files)) return null
 
   const files = []
+  let photoEntries = 0
+  let videoEntries = 0
+  let video = null
   for (const offered of raw.files) {
     const file = acceptedFile(offered)
+    if (isVideo(offered)) {
+      videoEntries++
+      if (file !== null && video === null) video = file
+      continue
+    }
+    photoEntries++
     if (file !== null && files.length < MAX_MEDIA_PER_POST) files.push(file)
   }
   const composed = composeShareText(raw)
-  if (composed.text === '' && files.length === 0) return null
+  if (files.length > 0) video = null
+  const videos = Math.max(Number.isSafeInteger(raw.videos) ? raw.videos : 0, videoEntries)
+  // A video that did not arrive still opens the composer, to say so (the
+  // PWA keeps such a share; Android and iOS say it in their own sheet).
+  if (composed.text === '' && files.length === 0 && video === null && videos === 0) return null
   const total = Number.isSafeInteger(raw.total) ? raw.total : 0
-  const announced = Math.max(total, raw.files.length)
+  const announced = Math.max(total, photoEntries)
   const dropped = Math.max(0, announced - MAX_MEDIA_PER_POST)
   const failed = Math.max(0, announced - files.length - dropped)
+  let videoNote = ''
+  if (videos > 0 && files.length > 0) videoNote = 'photos'
+  else if (videos > 0 && video === null) videoNote = 'failed'
+  else if (videos > 1) videoNote = 'extra'
   return {
     id: raw.id,
     at: raw.at,
@@ -91,7 +123,9 @@ export function acceptShare (raw, now) {
     clipped: composed.clipped,
     files,
     dropped,
-    failed
+    failed,
+    video,
+    videoNote
   }
 }
 
@@ -179,10 +213,59 @@ export function shareStep (state, event) {
     }
   }
 
+  // Publicar loaded the photos and some failed to open: it keeps the files
+  // for a retry and frees them itself. The shell lets go without releasing,
+  // so the next share is read meanwhile.
+  if (event.type === 'loaded') {
+    if (state.phase !== 'shown' || !state.taken || state.held.id !== event.id) return { state, effects: [] }
+    return { state: droppedState(state.held.id), effects: [] }
+  }
+
+  // Publicar no longer needs a share it kept after 'loaded'.
+  if (event.type === 'free') {
+    if (typeof event.id !== 'string' || !SHARE_ID.test(event.id)) return { state, effects: [] }
+    if (state.held !== null && state.held.id === event.id) {
+      return { state: droppedState(state.held.id), effects: [{ type: 'release', id: event.id }] }
+    }
+    return { state, effects: [{ type: 'release', id: event.id }] }
+  }
+
   if (event.type === 'requeue' && state.phase === 'shown' && !state.taken) {
     return { state: { ...state, phase: 'idle' }, effects: [] }
   }
   return { state, effects: [] }
+}
+
+// A size or format refusal fails the same way on every try.
+export function retryableEncode (message) {
+  return typeof message === 'string' && message !== '' && message !== 'formato não aceito' && !message.endsWith('grande demais')
+}
+
+// The ids of a share's photos that failed to open and may work on a retry.
+// None: the share is done now. Some: it is held until each one loads on a
+// retry or leaves the draft (removed, published or discarded).
+export function holdShare (id, failed) {
+  const ids = Array.from(new Set(Array.isArray(failed) ? failed : []))
+  return ids.length === 0 ? { hold: null, done: id } : { hold: { id, ids }, done: null }
+}
+
+export function settleHold (hold, settled) {
+  if (hold === null || !Array.isArray(settled)) return { hold, done: null }
+  const gone = new Set(settled)
+  const ids = hold.ids.filter((x) => !gone.has(x))
+  if (ids.length === hold.ids.length) return { hold, done: null }
+  return ids.length === 0 ? { hold: null, done: hold.id } : { hold: { id: hold.id, ids }, done: null }
+}
+
+// The post text kept across a page load (src/draftKeep.web.js) goes before
+// what is already in the draft, which can only be a share's text applied
+// first. As in mergeDraft, what the person typed is never cut: when both do
+// not fit, the kept text alone stays.
+export function restoreDraft (kept, current, max) {
+  if (typeof kept !== 'string' || kept === '') return current
+  if (typeof current !== 'string' || current.trim() === '' || current === kept) return kept
+  const merged = kept + '\n' + current
+  return Array.from(merged).length <= max ? merged : kept
 }
 
 // The post field has no length cap, so a draft may already be over max: only
@@ -216,13 +299,22 @@ export function linkHeld (hold, text) {
   return typeof hold === 'string' && hold === text && previewTarget(text) !== null
 }
 
-export function shareNote ({ canAttach, hadFiles, noRoom, dropped, failed = 0, kept, clipped }) {
+const VIDEO_NOTES = {
+  photos: 'o vídeo ficou de fora, uma publicação leva um vídeo ou fotos',
+  failed: 'o vídeo não pôde ser recebido',
+  extra: 'só o primeiro vídeo foi anexado'
+}
+
+export function shareNote ({ canAttach, hadFiles, noRoom, dropped, failed = 0, kept, clipped, hadVideo = false, canVideo = false, videoNote = '' }) {
   let note = ''
   if (hadFiles && !canAttach) note = 'não dá para anexar fotos agora'
+  else if (hadVideo && !canVideo) note = 'não dá para anexar vídeos agora'
   else if (noRoom > 0) note = 'até ' + MAX_MEDIA_PER_POST + ' fotos por publicação'
   else if (dropped > 0) note = 'só as ' + MAX_MEDIA_PER_POST + ' primeiras fotos foram anexadas'
   else if (kept === false) note = 'o texto compartilhado não coube no rascunho'
   else if (clipped) note = 'o texto compartilhado foi cortado em ' + MAX_TEXT + ' caracteres'
-  if (failed > 0) return note + (note === '' ? '' : '. ') + 'algumas fotos não puderam ser abertas'
-  return note
+  const more = []
+  if (failed > 0) more.push('algumas fotos não puderam ser abertas')
+  if (typeof VIDEO_NOTES[videoNote] === 'string') more.push(VIDEO_NOTES[videoNote])
+  return [note, ...more].filter((x) => x !== '').join('. ')
 }

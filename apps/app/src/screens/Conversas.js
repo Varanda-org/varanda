@@ -43,7 +43,7 @@ import { SearchField } from '../ui/SearchField'
 import { EmptyState as ListEmptyState, SkeletonRow } from '../ui/States'
 import { layout, radius, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
-import { NovaComunidade, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
+import { NovaComunidade, bindingKeyOf, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
 import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
@@ -85,8 +85,8 @@ const NO_GROUPS = { rows: [], loaded: false, loading: false, partial: false, err
 // A stored row as the live read would give it, without last post or unread
 // count (never stored). A private group has no stored name: mergeRows shows
 // its placeholder until the live answer.
-function seedRow (r) {
-  const row = { group: r.group, community: r.community, role: r.role, general: r.general, seeded: true }
+function seedRow (r, binding) {
+  const row = { group: r.group, community: r.community, role: r.role, general: r.general, seeded: true, seedBinding: binding }
   if (r.name !== null) {
     if (r.general) row.title = r.name
     else row.name = r.name
@@ -98,7 +98,15 @@ function seedRow (r) {
 // community.info still run and replace them; else no rows.
 function seededGroups (binding) {
   const rows = readGroupSnapshot('conversasGrupos', binding)
-  return rows === null ? NO_GROUPS : { ...NO_GROUPS, rows: rows.map(seedRow), seeded: true }
+  return rows === null ? NO_GROUPS : { ...NO_GROUPS, rows: rows.map((r) => seedRow(r, binding)), seeded: true }
+}
+
+// `rows` without the stored rows read for another binding: another
+// installation, association or owner, even with the same key (its store was
+// already wiped). Live rows stay.
+export function seedsFor (rows, binding) {
+  const out = rows.filter((r) => r.seeded !== true || sameSnapshotBinding(r.seedBinding, binding))
+  return out.length === rows.length ? rows : out
 }
 
 // The live rows plus the stored rows of `missed` communities the live read
@@ -188,6 +196,16 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       setState(NO_GROUPS)
     }
   }, [enabled, load])
+
+  // memberSnapshotBinding is a new object each render: the effect follows
+  // what it names.
+  const bindingKey = bindingKeyOf(binding)
+  useEffect(() => {
+    setState((s) => {
+      const rows = seedsFor(s.rows, bindingRef.current)
+      return rows === s.rows ? s : { ...s, rows, seeded: rows.some((r) => r.seeded === true) }
+    })
+  }, [bindingKey])
 
   const seeded = state.seeded === true
   useEffect(() => {

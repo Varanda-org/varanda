@@ -123,6 +123,11 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   // Bumped when ranges are freed. A load samples it at schedule time so a
   // key revoked while it is still queued is never fetched.
   let generation = 0
+  // Bumped by clear(). A load that was already running when the cache was
+  // cleared may hand back what the purge just removed (a kept file a wipe or
+  // an author drop deleted after loadKept read it): it is not stored and
+  // runs once more.
+  let clears = 0
   // fn(url) for each URL let go by LRU eviction, replacement or clear(),
   // never by a range revoke: ./keptLoad.js releases the kept file's in-use
   // mark so ./keep's trim may delete it again.
@@ -189,19 +194,32 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
     const running = inflight.get(key)
     if (running) return running
     const gen = generation
-    const p = schedule(() => {
-      // Still queued when the range was freed: do not start the fetch.
-      if (generation !== gen && blocked(key)) throw goneError()
-      return load()
-    }).then((url) => {
-      // The fetch finished after the range was freed: do not store it.
-      if (blocked(key)) {
-        if (typeof url === 'string') release(url)
-        throw goneError()
-      }
-      store(key, url)
-      return url
-    }).finally(() => {
+    const run = (again) => {
+      let cleared = null
+      return schedule(() => {
+        // Still queued when the range was freed: do not start the fetch.
+        if (generation !== gen && blocked(key)) throw goneError()
+        cleared = clears
+        return load()
+      }).then((url) => {
+        // The fetch finished after the range was freed: do not store it.
+        if (blocked(key)) {
+          if (typeof url === 'string') release(url)
+          throw goneError()
+        }
+        if (clears !== cleared) {
+          if (typeof url === 'string') {
+            release(url)
+            evicted(url)
+          }
+          if (!again) return run(true)
+          throw Object.assign(new Error('indisponível'), { retryable: true })
+        }
+        store(key, url)
+        return url
+      })
+    }
+    const p = run(false).finally(() => {
       if (inflight.get(key) === p) inflight.delete(key)
     })
     inflight.set(key, p)
@@ -209,6 +227,7 @@ export function createMediaCache ({ max = 64, concurrency = 4, revoke = noopRevo
   }
 
   const clear = () => {
+    clears++
     const urls = [...entries.values()]
     entries.clear()
     for (const url of urls) {

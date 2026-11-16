@@ -71,7 +71,7 @@ function png (size) {
   return out
 }
 
-async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
+async function blobSeeder (t, { signer, blobBudget = 10000, partialMs, now } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const dmRsa = rsaKey()
@@ -82,6 +82,7 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
     dir: tmpDir(t),
     sweepMs: 0,
     ...(partialMs === undefined ? {} : { partialMs }),
+    ...(now === undefined ? {} : { now }),
     verifyStamp: (kidHex, token, sig) => kidHex === blobPub.kid && postage.verify(token, sig, blobPub, 'blob')
   })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -694,6 +695,8 @@ test('a 503 or 429 read honours Retry-After and retries at most 3 times; a 404 i
   const d = sealed.descriptor
   const origin = 'http://127.0.0.1:1'
   const bad = (p) => p.then(() => null, (e) => e)
+  // Both chunks are in the window at once, so each chunk's GETs are counted.
+  const of = (gets, index) => gets.filter((i) => i === index)
 
   let route = fakeRoute(sealed, { answer: (index, n) => (index === 1 && n === 1 ? { status: 503, retryAfter: 1 } : null) })
   const started = Date.now()
@@ -704,23 +707,242 @@ test('a 503 or 429 read honours Retry-After and retries at most 3 times; a 404 i
 
   route = fakeRoute(sealed, { answer: (index, n) => (index === 0 && n <= 3 ? { status: 429 } : null) })
   t.ok(b4a.equals((await fetchBlob(d, origin, { mime: 'image/png', fetch: route.fetch, limits: { retryDefaultMs: 5 } })).bytes, plain), 'three 429s and then a frame succeed')
-  t.alike(route.gets, [0, 0, 0, 0, 1])
+  t.alike(of(route.gets, 0), [0, 0, 0, 0], 'chunk 0: the first GET and 3 retries')
+  t.alike(of(route.gets, 1), [1])
 
   route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 503, retryAfter: 3600 } : null) })
   let err = await bad(fetchBlob(d, origin, { fetch: route.fetch, limits: { retryAfterMaxMs: 5 } }))
   t.is(err && err.message, 'sem conexão com o semeador', 'a 503 on every try is the normal error')
-  t.alike(route.gets, [0, 0, 0, 0], 'the first GET and 3 retries, no more')
+  t.alike(of(route.gets, 0), [0, 0, 0, 0], 'the first GET and 3 retries, no more')
 
   route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : null) })
   err = await bad(fetchBlob(d, origin, { fetch: route.fetch, limits: { retryDefaultMs: 5 } }))
   t.is(err && err.message, 'mídia indisponível')
-  t.alike(route.gets, [0], 'a 404 fails at once')
+  t.alike(of(route.gets, 0), [0], 'a 404 fails at once')
+  t.ok(route.gets.length <= 2, 'only the chunks already in the window were fetched')
+})
+
+// fakeRoute behind a gate: every GET waits until the test releases its chunk
+// (or, with delayMs, for that long), counting the GETs in flight.
+function heldRoute (sealed, { answer = null, delayMs = 0 } = {}) {
+  const inner = fakeRoute(sealed, { answer })
+  const route = { gets: [], at: [], waiting: new Map(), released: [], inFlight: 0, maxInFlight: 0 }
+  route.fetch = (url) => {
+    const index = Number(url.split('/').pop())
+    route.gets.push(index)
+    route.at.push(Date.now())
+    route.inFlight++
+    route.maxInFlight = Math.max(route.maxInFlight, route.inFlight)
+    const gate = new Promise((resolve) => {
+      route.waiting.set(index, resolve)
+      if (delayMs > 0) setTimeout(() => route.release(index), delayMs)
+    })
+    return gate.then(() => {
+      route.inFlight--
+      return inner.fetch(url)
+    })
+  }
+  route.release = (index) => {
+    const resolve = route.waiting.get(index)
+    if (!resolve) return
+    route.waiting.delete(index)
+    route.released.push(index)
+    resolve()
+  }
+  return route
+}
+
+function tick (ms = 5) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function until (cond, ms = 2000) {
+  const end = Date.now() + ms
+  while (!cond() && Date.now() < end) await tick(1)
+}
+
+test('a download keeps at most getWindow chunk GETs in flight', async (t) => {
+  t.timeout(60000)
+  const plain = png(9 * coreBlob.BLOB_CHUNK_BYTES)
+  const sealed = sealBlob(plain)
+  t.is(sealed.descriptor.chunks, 10)
+  for (const [limits, want] of [[{}, 4], [{ getWindow: 1 }, 1]]) {
+    const route = heldRoute(sealed)
+    const state = { done: false }
+    const p = fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: route.fetch, limits })
+    p.then(() => { state.done = true }, () => { state.done = true })
+    await until(() => route.gets.length >= want)
+    await tick(20)
+    t.is(route.gets.length, want, want + ' GETs go out before any answer')
+    while (!state.done) {
+      if (route.waiting.size > 0) route.release(Math.min(...route.waiting.keys()))
+      await tick(2)
+    }
+    t.ok(b4a.equals((await p).bytes, plain), 'every chunk arrived')
+    t.is(route.maxInFlight, want, 'never more than ' + want + ' in flight')
+    t.alike(route.gets, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 'launched in chunk order')
+  }
+})
+
+test('chunks answered out of order still give the right plaintext', async (t) => {
+  t.timeout(60000)
+  const plain = png(9 * coreBlob.BLOB_CHUNK_BYTES)
+  const sealed = sealBlob(plain)
+  const route = heldRoute(sealed)
+  const state = { done: false }
+  const p = fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: route.fetch })
+  p.then(() => { state.done = true }, () => { state.done = true })
+  while (!state.done) {
+    await until(() => state.done || route.waiting.size >= Math.min(4, 10 - route.released.length))
+    if (route.waiting.size > 0) route.release(Math.max(...route.waiting.keys()))
+    await tick(2)
+  }
+  t.ok(b4a.equals((await p).bytes, plain), 'the plaintext matches')
+  t.unlike(route.released, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 'the answers came back out of order')
+})
+
+test('a failing chunk launches no more chunks and the lowest failing chunk decides the error', async (t) => {
+  t.timeout(60000)
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+
+  const sealed = sealBlob(png(9 * coreBlob.BLOB_CHUNK_BYTES))
+  const answer = (index) => (index === 2 ? { status: 404 } : index === 3 ? { status: 500 } : null)
+  const route = heldRoute(sealed, { answer })
+  let settled = false
+  const p = fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: route.fetch }).then(() => null, (e) => e)
+  p.then(() => { settled = true })
+  await until(() => route.gets.length >= 4)
+  route.release(0)
+  route.release(1)
+  await until(() => route.gets.length >= 6)
+  t.alike(route.gets, [0, 1, 2, 3, 4, 5], 'chunks 2 to 5 are in flight')
+  route.release(3)
+  await tick(20)
+  t.absent(settled, 'the fetch waits for chunk 2, still in flight below the failure')
+  route.release(2)
+  await tick(20)
+  t.is(route.gets.length, 6, 'no chunk is launched after a failure')
+  t.ok(settled, 'chunks 4 and 5, halted by the failures below them, are aborted: their answers are not awaited')
+  route.release(4)
+  route.release(5)
+  const err = await p
+  t.is(err && err.message, 'mídia indisponível', 'chunk 2 (404) decides, though chunk 3 (500) failed first')
+  t.is(route.gets.length, 6)
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+function timers () {
+  return process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+}
+
+test('a failed chunk stops the retries of the chunks above it at once, with no timer left', async (t) => {
+  t.timeout(60000)
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+
+  const sealed = sealBlob(png(3 * coreBlob.BLOB_CHUNK_BYTES + 10))
+  t.is(sealed.descriptor.chunks, 4)
+  // A swept blob on a loaded seeder: chunk 0 is gone, 1 to 3 are throttled.
+  for (const late of [false, true]) {
+    const route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : { status: 503, retryAfter: 10 }) })
+    // late: the 404 lands only after chunks 1 to 3 are already waiting out
+    // their Retry-After, so the wait itself must end early. Otherwise it
+    // lands after their first GETs went out (a chunk halted before its first
+    // GET sends none) but before their 503s, so no wait starts.
+    const fetchFn = late
+      ? (url) => (url.endsWith('/0') ? tick(50).then(() => route.fetch(url)) : route.fetch(url))
+      : (url) => (url.endsWith('/0') ? tick(1).then(() => route.fetch(url)) : route.fetch(url).then((res) => tick(20).then(() => res)))
+    const before = timers()
+    const started = Date.now()
+    const err = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: fetchFn }).then(() => null, (e) => e)
+    const took = Date.now() - started
+    t.is(err && err.message, 'mídia indisponível', 'chunk 0 (404) decides')
+    t.ok(took < 1000, 'the 404 surfaces at once, not after a 10 s Retry-After: ' + took + ' ms')
+    t.alike(route.gets.slice().sort(), [0, 1, 2, 3], 'no retry GET for chunks 1 to 3')
+    // The halted GETs are aborted, so the fake's own 20 ms answer delays can
+    // outlive the fetch; a Retry-After or deadline timer would not end by then.
+    await tick(30)
+    t.is(timers(), before, 'no Retry-After timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('a higher chunk failing does not cut short a lower chunk retrying: its own outcome decides', async (t) => {
+  t.timeout(60000)
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  const of = (gets, index) => gets.filter((i) => i === index)
+  const cases = [
+    // chunk 0's retry succeeds, so chunk 1's 404 is the error
+    [(index, n) => (index === 0 && n === 1 ? { status: 503, retryAfter: 1 } : index === 1 ? { status: 404 } : null), 'mídia indisponível'],
+    // chunk 0's retry fails, so its error wins over chunk 1's 404
+    [(index, n) => (index === 0 ? (n === 1 ? { status: 503, retryAfter: 1 } : { status: 500 }) : { status: 404 }), 'sem conexão com o semeador']
+  ]
+  for (const [answer, want] of cases) {
+    const route = fakeRoute(sealed, { answer })
+    const started = Date.now()
+    const err = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: route.fetch }).then(() => null, (e) => e)
+    t.ok(Date.now() - started >= 900, 'chunk 0 waited its whole Retry-After second')
+    t.alike(of(route.gets, 0), [0, 0], 'chunk 0 still sent its retry after chunk 1 failed')
+    t.alike(of(route.gets, 1), [1])
+    t.is(err && err.message, want, 'the lowest failing chunk decides')
+  }
+})
+
+test('a chunk still waiting for its pace slot sends no GET once a lower chunk failed', async (t) => {
+  t.timeout(60000)
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+
+  const sealed = sealBlob(png(9 * coreBlob.BLOB_CHUNK_BYTES))
+  const limits = { getBurst: 1, getPaceMs: 200, getWindow: 4 }
+  for (const [burst, launched] of [[1, [0]], [2, [0, 1]]]) {
+    const route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : null) })
+    // chunk 0's 404 lands after the burst went out, while the chunks above
+    // it are queued for their 200 ms pace slots
+    const fetchFn = (url) => (url.endsWith('/0') ? tick(30).then(() => route.fetch(url)) : route.fetch(url))
+    const before = timers()
+    const started = Date.now()
+    const err = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: fetchFn, limits: { ...limits, getBurst: burst } }).then(() => null, (e) => e)
+    const took = Date.now() - started
+    t.is(err && err.message, 'mídia indisponível', 'chunk 0 (404) decides')
+    t.alike(route.gets.slice().sort(), launched, 'only the GETs of the burst went out')
+    t.ok(took < 180, 'the 404 surfaces without waiting for the queued pace slots: ' + took + ' ms')
+    t.is(timers(), before, 'no pace timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('concurrent GETs keep the pacing: past the burst, one per getPaceMs', async (t) => {
+  t.timeout(60000)
+  const plain = png(9 * coreBlob.BLOB_CHUNK_BYTES)
+  const sealed = sealBlob(plain)
+  const route = heldRoute(sealed, { delayMs: 60 })
+  const got = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: route.fetch, limits: { getBurst: 2, getPaceMs: 20 } })
+  t.ok(b4a.equals(got.bytes, plain), 'every chunk arrived')
+  t.ok(route.maxInFlight > 1, 'GETs overlapped')
+  const gaps = []
+  for (let i = 2; i < route.at.length; i++) gaps.push(route.at[i] - route.at[i - 1])
+  t.ok(gaps.every((g) => g >= 18), 'past the burst the GETs start about 20 ms apart: ' + gaps.join(','))
 })
 
 test('a retry puts every frame again: a swept partial blob is refused, a live one completes with repeats', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
-  const seeder = await blobSeeder(t, { signer: assoc, partialMs: 1 })
+  // The pool's own clock: the first partial blob ages out on purpose, and the
+  // ones written after the sweep stay live (an aged-out blob takes no frame).
+  let clock = Date.now()
+  const seeder = await blobSeeder(t, { signer: assoc, partialMs: 1000, now: () => clock })
   const identity = crypto.keyPair()
   const client = clientFor(seeder, { wallet: 6, walletLow: 2 })
   t.is(await client.topUp(identity), 6)
@@ -735,7 +957,7 @@ test('a retry puts every frame again: a swept partial blob is refused, a live on
   t.is(err && err.message, 'o semeador está cheio: tente mais tarde')
   t.alike(a.acked, [true, false])
   seeder.refuse = null
-  await new Promise((resolve) => setTimeout(resolve, 10))
+  clock += 1000
   t.is(seeder.pool.sweep(), 1, 'the partial blob is swept')
   const frame0 = a.frames[0]
   seeder.puts.length = 0
@@ -1008,6 +1230,179 @@ test('a frame body that ended early is a transient error; a complete frame of th
   t.not(err && err.message, 'mídia inválida', 'a body shorter than its Content-Length is not a bad blob')
   err = await bad(fetchBlob(sealed.descriptor, origin, { fetch: answer(streamOf(frame.slice(0, 1000)), '1000') }))
   t.is(err && err.message, 'mídia inválida', 'a complete frame of the wrong size is')
+})
+
+// A GET that never finishes: the seeder (or anyone on the path) holds the
+// request open. onFetch(init) sees each GET's options.
+function stalledResponse (body) {
+  return {
+    status: 200,
+    redirected: false,
+    headers: { get: (n) => (n === 'content-length' ? String(coreBlob.BLOB_FRAME_BYTES) : null) },
+    body
+  }
+}
+
+// The pending timers of exactly ms, the GET deadlines, told apart by their
+// length from unrelated timers the network tests before may leave behind.
+function deadlineTimers (t, ms) {
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  const live = new Set()
+  globalThis.setTimeout = (fn, wait, ...args) => {
+    const h = realSet((...a) => {
+      live.delete(h)
+      fn(...a)
+    }, wait, ...args)
+    if (wait === ms) live.add(h)
+    return h
+  }
+  globalThis.clearTimeout = (h) => {
+    live.delete(h)
+    realClear(h)
+  }
+  t.teardown(() => {
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+  })
+  return live
+}
+
+// A GET that never settles holds no timer, so a run hung on one would let the
+// process exit with the test unfinished; this keeps it alive and turns the
+// hang into a failed assert.
+function within (p, ms = 5000) {
+  let timer = null
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(new Error('still pending after ' + ms + ' ms')), ms)
+  })
+  return Promise.race([p, guard]).finally(() => clearTimeout(timer))
+}
+
+function watchUnhandled (t) {
+  const unhandled = []
+  const onUnhandled = (err) => unhandled.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  t.teardown(() => process.removeListener('unhandledRejection', onUnhandled))
+  return unhandled
+}
+
+test('a GET whose body never ends times out as a transient error, with no timer left', async (t) => {
+  t.timeout(60000)
+  const unhandled = watchUnhandled(t)
+  const sealed = sealBlob(png(100))
+  const live = deadlineTimers(t, 50)
+  // The stream ignores the abort, or honours it as a browser stream does.
+  for (const honours of [false, true]) {
+    const signals = []
+    const stalled = (url, init) => {
+      signals.push(init.signal)
+      const read = () => new Promise((resolve, reject) => {
+        if (honours && init.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+      return Promise.resolve(stalledResponse({ getReader: () => ({ read, cancel: async () => {} }) }))
+    }
+    const started = Date.now()
+    const err = await within(fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: stalled, limits: { getTimeoutMs: 50 } }).then(() => null, (e) => e))
+    const took = Date.now() - started
+    t.is(err && err.message, 'sem conexão com o semeador', 'a stalled body is a transient error, not a gone blob')
+    t.ok(took < 1000, 'the read ends at the deadline: ' + took + ' ms')
+    t.is(signals.length, 1, 'a timed-out GET is not retried')
+    t.ok(signals[0] && signals[0].aborted, 'its signal is aborted')
+    t.is(live.size, 0, 'no deadline timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('a GET that never answers times out as a transient error, with no timer left', async (t) => {
+  t.timeout(60000)
+  const unhandled = watchUnhandled(t)
+  const sealed = sealBlob(png(coreBlob.BLOB_CHUNK_BYTES + 10))
+  t.is(sealed.descriptor.chunks, 2)
+  const live = deadlineTimers(t, 50)
+  // The fetch ignores the abort, or rejects on it as a browser fetch does.
+  for (const honours of [false, true]) {
+    const signals = []
+    const silent = (url, init) => {
+      signals.push(init.signal)
+      return new Promise((resolve, reject) => {
+        if (honours && init.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }
+    const started = Date.now()
+    const err = await within(fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: silent, limits: { getTimeoutMs: 50 } }).then(() => null, (e) => e))
+    const took = Date.now() - started
+    t.is(err && err.message, 'sem conexão com o semeador', 'no answer is a transient error, not a gone blob')
+    t.ok(took < 1000, 'the GET ends at the deadline: ' + took + ' ms')
+    t.is(signals.length, 2, 'one GET per chunk, none retried')
+    t.ok(signals.every((s) => s && s.aborted), 'every signal is aborted')
+    t.is(live.size, 0, 'no deadline timer is left running')
+  }
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
+})
+
+test('every GET carries its own signal, left unaborted on success', async (t) => {
+  t.timeout(60000)
+  const plain = png(2 * coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  const route = fakeRoute(sealed)
+  const signals = []
+  const spying = (url, init) => {
+    signals.push(init.signal)
+    return route.fetch(url)
+  }
+  const live = deadlineTimers(t, 4999)
+  const got = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: spying, limits: { getTimeoutMs: 4999 } })
+  t.ok(b4a.equals(got.bytes, plain))
+  t.is(signals.length, 3)
+  t.ok(signals.every((s) => s instanceof AbortSignal), 'each GET has a signal')
+  t.is(new Set(signals).size, 3, 'one per GET')
+  t.ok(signals.every((s) => s && !s.aborted), 'none is aborted after a complete frame')
+  t.is(live.size, 0, 'no deadline timer is left running')
+})
+
+test('a bad getTimeoutMs falls back to the default deadline', async (t) => {
+  t.timeout(60000)
+  const plain = png(100)
+  const sealed = sealBlob(plain)
+  for (const getTimeoutMs of [0, -5, 1.5, '10', 1e12]) {
+    const route = fakeRoute(sealed)
+    const slow = (url) => tick(30).then(() => route.fetch(url))
+    const got = await fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { mime: 'image/png', fetch: slow, limits: { getTimeoutMs } }).then((r) => r, (e) => e)
+    t.ok(got && got.bytes && b4a.equals(got.bytes, plain), 'a 30 ms answer is not cut off under getTimeoutMs ' + getTimeoutMs)
+  }
+})
+
+test('a chunk halted by a lower failure aborts its GET in flight and the run settles at once', async (t) => {
+  t.timeout(60000)
+  const unhandled = watchUnhandled(t)
+  const sealed = sealBlob(png(3 * coreBlob.BLOB_CHUNK_BYTES + 10))
+  t.is(sealed.descriptor.chunks, 4)
+  const route = fakeRoute(sealed, { answer: (index) => (index === 0 ? { status: 404 } : null) })
+  const signals = new Map()
+  // Chunks 1 to 3 never answer unless aborted; chunk 0 is a 404 once they
+  // are all in flight.
+  const held = (url, init) => {
+    const index = Number(url.split('/').pop())
+    signals.set(index, init.signal)
+    if (index === 0) return tick(30).then(() => route.fetch(url))
+    return new Promise((resolve, reject) => {
+      if (init.signal) init.signal.addEventListener('abort', () => reject(new Error('aborted')))
+    })
+  }
+  const live = deadlineTimers(t, 30000)
+  const started = Date.now()
+  const err = await within(fetchBlob(sealed.descriptor, 'http://127.0.0.1:1', { fetch: held }).then(() => null, (e) => e))
+  const took = Date.now() - started
+  t.is(err && err.message, 'mídia indisponível', 'chunk 0 (404) decides')
+  t.ok(took < 1000, 'the run settles without waiting for the default deadline: ' + took + ' ms')
+  t.alike([...signals.keys()].sort(), [0, 1, 2, 3])
+  t.ok([1, 2, 3].every((i) => signals.get(i) && signals.get(i).aborted), 'the GETs of chunks 1 to 3 are aborted')
+  t.is(live.size, 0, 'no deadline timer is left running')
+  await tick(20)
+  t.is(unhandled.length, 0, 'no unhandled rejection')
 })
 
 test('a failed write of the key check time is retried by the next top-up', async (t) => {

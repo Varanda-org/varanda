@@ -13,8 +13,11 @@
 //   seeder -> member  { type: 'ack', ok, reason }      reason: null | 'cheio' | 'invalido' | 'ritmo'
 //   member -> seeder  { type: 'page', after, limit }   after: seq cursor, exclusive
 //   seeder -> member  { type: 'items', items, next, oldest }
-// One request in flight per channel: a second put or page while one is
-// unanswered is a bad message.
+// One request in flight per socket, not per channel: a second put or page
+// while one is unanswered is a bad message, also on a channel the member
+// reopened while the first was still running. A request that settles after
+// its channel closed answers nothing (never on a newer channel); one that
+// throws closes the channel it came on, a no-op once that channel is gone.
 //
 // Bad messages: a frame over maxBytes, a JSON or shape failure, a drop that
 // is not the canonical base64 of DM_DROP_BYTES bytes, a request while one is
@@ -256,7 +259,8 @@ function attachDm (socket, opts = {}) {
   const pages = tokenBucket(pageBurst, pageRate)
   const puts = tokenBucket(putBurst, putRate)
 
-  // Seeder: whether a request is being answered. Member: the request being
+  // Seeder: whether a request is being answered, for the socket's lifetime, so
+  // a reopened channel cannot start a second one. Member: the request being
   // waited for, with the reply type it expects.
   let answering = false
   let request = null
@@ -291,7 +295,6 @@ function attachDm (socket, opts = {}) {
     const ch = mux.createChannel({ protocol, onopen, onclose: onchannelclose })
     if (ch === null) return
     channel = ch
-    answering = false
     message = ch.addMessage({ encoding: c.buffer, onmessage: onraw })
     ch.open()
   }
@@ -332,11 +335,6 @@ function attachDm (socket, opts = {}) {
   function close () {
     const ch = channel
     end()
-    if (ch !== null) ch.close()
-  }
-
-  function closeChannel () {
-    const ch = channel
     if (ch !== null) ch.close()
   }
 
@@ -422,10 +420,7 @@ function attachDm (socket, opts = {}) {
     } catch {
       log({ event: lane.tag + '-put-failed', reason: 'erro' })
     }
-    if (ch !== channel || ended || dropped) return
-    answering = false
-    if (reply === null) closeChannel()
-    else rawSend(reply)
+    answer(ch, reply)
   }
 
   async function answerPage (msg) {
@@ -438,10 +433,18 @@ function attachDm (socket, opts = {}) {
     } catch {
       log({ event: lane.tag + '-page-failed', reason: 'erro' })
     }
-    if (ch !== channel || ended || dropped) return
+    answer(ch, reply)
+  }
+
+  // ch: the channel the request came on. A null reply closes only that one.
+  function answer (ch, reply) {
     answering = false
-    if (reply === null) closeChannel()
-    else rawSend(reply)
+    if (reply === null) {
+      if (ch !== null) ch.close()
+      return
+    }
+    if (ch !== channel || ended || dropped) return
+    rawSend(reply)
   }
 
   // ---- member role ----

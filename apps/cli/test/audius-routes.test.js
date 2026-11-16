@@ -28,13 +28,18 @@ const {
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,
   PROVIDER_PER_DAY,
+  MEMBER_BUDGET_PER_DAY,
   PROVIDER_CALLS_PER_DAY,
   ARTS_PER_DAY,
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
   ART_PER_MEMBER,
-  ART_ANSWER_MS
+  ART_RETRY_MS,
+  ART_ANSWER_MS,
+  UPSTREAM_REUSE_MS,
+  STORED_CONNECT_MS,
+  DEADLINE_MS
 } = require('../lib/account/audius-routes')
 
 const KEY = 'chave-sentinela-audius-42'
@@ -42,6 +47,8 @@ const QUERY = 'samba-sentinela'
 const API = 'api.audius.test'
 const NODE = 'node.audius.test'
 const PRIVATE = 'private.audius.test'
+// A storage name whose address the test can move (s.dns.moved).
+const MOVED = 'moved.audius.test'
 const ART = 'art.audius.test'
 const CACHE_TTL_MS = 10 * 60 * 1000
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 1)])
@@ -165,7 +172,10 @@ function fakeApi (state) {
   // state.artwork[id], when set, replaces that item's artwork (undefined: none).
   // state.large adds a 480x480 artwork beside any other item's 150x150, and
   // state.info a genre and a release date to every item; state.fields[id]
-  // adds its own fields to that item.
+  // adds its own fields to that item. state.storage[id] names the host the
+  // stream of that track redirects to (NODE by default); Signed1's redirect
+  // carries a new ?sig= on every walk, as a presigned URL would, and Long1's
+  // a query that makes the URL longer than the service keeps.
   const withArt = (item) => {
     if (item === null || typeof item !== 'object') return item
     let out = item
@@ -221,7 +231,14 @@ function fakeApi (state) {
     let m = p.match(/^\/v1\/tracks\/([A-Za-z0-9]+)\/stream$/)
     if (m) {
       const id = m[1]
-      res.writeHead(302, { Location: id === 'Private1' ? 'https://' + PRIVATE + '/audio/x' : 'https://' + NODE + '/audio/' + id })
+      if (id === 'Direct1') {
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': AUDIO.length })
+        return res.end(AUDIO)
+      }
+      let location = id === 'Private1' ? 'https://' + PRIVATE + '/audio/x' : 'https://' + (state.storage[id] ?? NODE) + '/audio/' + id
+      if (id === 'Signed1') location += '?sig=' + (++state.signed)
+      if (id === 'Long1') location += '?p=' + 'x'.repeat(2100)
+      res.writeHead(302, { Location: location })
       return res.end()
     }
     m = p.match(/^\/v1\/tracks\/([A-Za-z0-9]+)$/)
@@ -250,12 +267,22 @@ function fakeApi (state) {
   })
 }
 
+// `answers` maps a path and query to the { status, headers, body } the node
+// gives it instead, as for an expired presigned URL, or to { hang: true }
+// for a request held in `waiting` until the test answers it.
 function fakeNode () {
   const held = new Set()
+  const answers = new Map()
   const node = fixture(NODE, (url, req, res) => {
     const id = url.pathname.slice('/audio/'.length)
     const range = typeof req.headers.range === 'string' ? req.headers.range.match(/^bytes=(\d+)-(\d*)$/) : null
-    if (id === 'Ranged1') {
+    const answer = answers.get(url.pathname + url.search)
+    if (answer !== undefined && answer.hang === true) return waiting.push(res)
+    if (answer !== undefined) {
+      res.writeHead(answer.status, answer.headers)
+      return res.end(answer.body ?? '')
+    }
+    if (id === 'Ranged1' || id === 'Signed1' || id === 'Moved1' || id === 'Long1') {
       if (range === null) {
         res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': AUDIO.length, 'Accept-Ranges': 'bytes', 'Set-Cookie': 'node=1' })
         return res.end(AUDIO)
@@ -299,16 +326,22 @@ function fakeNode () {
       res.writeHead(206, { 'Content-Type': 'audio/mpeg', 'Content-Range': 'bytes 0-99/100', 'Content-Length': id === 'Liar1' ? 50 : AUDIO.length })
       return res.end(id === 'Liar1' ? AUDIO.subarray(0, 50) : AUDIO)
     }
-    if (id === 'Hold1') {
+    if (id === 'Hold1' || id === 'Hold2') {
+      // Sends 5 bytes (Hold2: 2) and holds the rest.
       res.writeHead(200, { 'Content-Type': 'audio/mpeg' })
       held.add(res)
       res.on('close', () => held.delete(res))
-      return res.write(Buffer.alloc(5, 2))
+      return res.write(Buffer.alloc(id === 'Hold1' ? 5 : 2, 2))
     }
+    // Answers nothing until the test does, to keep an open pending.
+    if (id === 'Wait1') return waiting.push(res)
     res.writeHead(404)
     res.end()
   })
+  const waiting = []
   node.held = held
+  node.answers = answers
+  node.waiting = waiting
   return node
 }
 
@@ -369,14 +402,15 @@ function fakeArt () {
 async function setup (t, { audius = true, moments = false, covers = false, streams = 16, caps = {}, accepted = true, timers = null } = {}) {
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
-  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false }
+  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false, storage: {}, signed: 0 }
+  const dns = { moved: '127.0.0.1' }
   const api = fakeApi(state)
   const node = fakeNode()
   const art = fakeArt()
   await api.listen()
   await node.listen()
   await art.listen()
-  const ports = { [API]: api.port, [NODE]: node.port, [ART]: art.port }
+  const ports = { [API]: api.port, [NODE]: node.port, [ART]: art.port, [MOVED]: node.port }
   const looked = []
   const connected = []
   // { host, addresses } for what the guarded lookup let through, or
@@ -413,6 +447,7 @@ async function setup (t, { audius = true, moments = false, covers = false, strea
       looked.push(host)
       if (host === API || host === NODE || host === ART) return cb(null, [{ address: '127.0.0.1', family: 4 }])
       if (host === PRIVATE) return cb(null, [{ address: '10.0.0.7', family: 4 }])
+      if (host === MOVED) return cb(null, [{ address: dns.moved, family: 4 }])
       const err = new Error('ENOTFOUND')
       err.code = 'ENOTFOUND'
       cb(err)
@@ -492,13 +527,20 @@ async function setup (t, { audius = true, moments = false, covers = false, strea
     })
   }
 
-  // An audio request left open once its headers arrived.
+  // An audio request left open once its headers arrived: `received` counts
+  // its body bytes so far, and `ended` resolves on its end or cut with
+  // `complete` false for a cut body.
   function hold (path) {
     return new Promise((resolve, reject) => {
       const req = http.request({ host: '127.0.0.1', port, method: 'GET', path, agent: false }, (res) => {
+        const held = { status: res.statusCode, headers: res.headers, received: 0, close: () => req.destroy() }
+        held.ended = new Promise((resolve) => {
+          res.on('end', () => resolve({ complete: res.complete }))
+          res.on('close', () => resolve({ complete: res.complete }))
+        })
         res.on('error', () => {})
-        res.resume()
-        resolve({ status: res.statusCode, headers: res.headers, close: () => req.destroy() })
+        res.on('data', (c) => { held.received += c.length })
+        resolve(held)
       })
       req.on('error', () => {})
       req.end()
@@ -529,7 +571,7 @@ async function setup (t, { audius = true, moments = false, covers = false, strea
     return cond()
   }
 
-  return { routes, call, post, audio, hold, login, ticketFor, until, api, node, art, state, logs, responses, looked, connected, dials, clock, linked, blocked, member, other, memberHex, otherHex }
+  return { routes, call, post, audio, hold, login, ticketFor, until, api, node, art, state, dns, logs, responses, looked, connected, dials, clock, linked, blocked, member, other, memberHex, otherHex }
 }
 
 function noKeyAnywhere (t, { logs, responses }) {
@@ -852,13 +894,15 @@ test('audius: two streams per member and the operator cap in all', async (t) => 
   const a = await s.login()
   const b = await s.login(s.other)
   const ta = await s.ticketFor(a.token, 'Hold1')
+  const ta2 = await s.ticketFor(a.token, 'Hold1')
+  const ta3 = await s.ticketFor(a.token, 'Hold1')
   const tb = await s.ticketFor(b.token, 'Hold1')
   const a1 = await s.hold('/account/audius/audio/' + ta)
-  const a2 = await s.hold('/account/audius/audio/' + ta)
+  const a2 = await s.hold('/account/audius/audio/' + ta2)
   t.is(a1.status, 200)
   t.is(a2.status, 200)
-  const a3 = await s.audio(ta)
-  t.is(a3.status, 503, 'a third stream of one member')
+  const a3 = await s.audio(ta3)
+  t.is(a3.status, 503, 'a third stream of one member, one relay on each of two other tickets')
   t.is(a3.headers['retry-after'], '5')
   const b1 = await s.hold('/account/audius/audio/' + tb)
   t.is(b1.status, 200, 'another member still streams')
@@ -873,6 +917,226 @@ test('audius: two streams per member and the operator cap in all', async (t) => 
   b1.close()
   b3.close()
   t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0), 'the node sockets close too')
+})
+
+const audioPath = (ticket) => '/account/audius/audio/' + ticket
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100))
+
+// Resolves `held.ended` into a flag the test can read while it runs.
+function watchEnd (held) {
+  const w = { ended: false }
+  held.ended.then(() => { w.ended = true })
+  return w
+}
+
+test('audius: a third open of a ticket replaces its oldest relay, cut unended and charged', async (t) => {
+  // 15 bytes a day: three relays of Hold1 send 5 each.
+  const s = await setup(t, { caps: { dailyBytes: 15 } })
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Hold1')
+  const a1 = await s.hold(audioPath(ticket))
+  t.ok(await s.until(() => a1.received === 5))
+  const a2 = await s.hold(audioPath(ticket))
+  t.ok(await s.until(() => a2.received === 5))
+  const w2 = watchEnd(a2)
+  const a3 = await s.hold(audioPath(ticket))
+  t.is(a3.status, 200, 'the third open of the ticket succeeds')
+  const cut = await a1.ended
+  t.absent(cut.complete, 'the oldest relay is cut without a terminating chunk')
+  t.ok(await s.until(() => a3.received === 5))
+  t.ok(await s.until(() => s.node.held.size === 2), 'its node socket closes')
+  t.absent(w2.ended, 'the newer relay of the ticket keeps running')
+  t.is(s.routes.stats().streams, 2)
+  a2.close()
+  a3.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+  const over = await s.hold(audioPath(ticket))
+  over.close()
+  t.is(over.status, 429, 'the cut relay was charged its 5 bytes: the 15 of the day are spent')
+})
+
+test('audius: at the member cap with one relay on each of two tickets, an open on a third is 503 and counts no open', async (t) => {
+  const s = await setup(t, { caps: { opens: 3 } })
+  const { token } = await s.login()
+  const t1 = await s.ticketFor(token, 'Hold1')
+  const t2 = await s.ticketFor(token, 'Hold1')
+  const t3 = await s.ticketFor(token, 'Hold1')
+  const a1 = await s.hold(audioPath(t1))
+  const a2 = await s.hold(audioPath(t2))
+  const w1 = watchEnd(a1)
+  const w2 = watchEnd(a2)
+  const contacts = s.api.seen.length + s.node.seen.length
+  for (let i = 0; i < 3; i++) {
+    const busy = await s.audio(t3)
+    t.is(busy.status, 503)
+    t.is(busy.headers['retry-after'], '5')
+    t.alike(busy.json, { error: 'indisponivel' })
+  }
+  t.is(s.routes.stats().streams, 2, 'nobody was cut')
+  t.is(s.api.seen.length + s.node.seen.length, contacts, 'nothing was contacted')
+  await settle()
+  t.absent(w1.ended)
+  t.absent(w2.ended)
+  a1.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 1))
+  const a3 = await s.hold(audioPath(t3))
+  t.is(a3.status, 200, 'the third open of the day: the refused ones counted none')
+  const w3 = watchEnd(a3)
+  const over = await s.audio(t3)
+  t.is(over.status, 429, 'a fourth open is over the day')
+  await settle()
+  t.absent(w3.ended, 'an open refused over the day cuts nobody')
+  t.is(s.routes.stats().streams, 2)
+  a2.close()
+  a3.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+})
+
+test('audius: an open on another ticket replaces the older relay of a ticket that holds two', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ta = await s.ticketFor(token, 'Hold1')
+  const tb = await s.ticketFor(token, 'Hold1')
+  const a1 = await s.hold(audioPath(ta))
+  t.ok(await s.until(() => a1.received === 5))
+  const a2 = await s.hold(audioPath(ta))
+  t.ok(await s.until(() => a2.received === 5))
+  const w2 = watchEnd(a2)
+  const b1 = await s.hold(audioPath(tb))
+  t.is(b1.status, 200, 'the next ticket opens at the member cap')
+  t.absent((await a1.ended).complete, 'the older relay of the ticket that held two is cut unended')
+  t.ok(await s.until(() => b1.received === 5))
+  t.ok(await s.until(() => s.node.held.size === 2))
+  t.absent(w2.ended, 'its newer relay keeps running')
+  t.is(s.routes.stats().streams, 2)
+  a2.close()
+  b1.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+})
+
+test('audius: the operator cap answers 503 before any relay is replaced', async (t) => {
+  const s = await setup(t, { streams: 2 })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  const ta = await s.ticketFor(a.token, 'Hold1')
+  const tb = await s.ticketFor(b.token, 'Hold1')
+  const a1 = await s.hold(audioPath(ta))
+  const a2 = await s.hold(audioPath(ta))
+  t.ok(await s.until(() => a1.received === 5 && a2.received === 5))
+  const w1 = watchEnd(a1)
+  const w2 = watchEnd(a2)
+  const own = await s.audio(ta)
+  t.is(own.status, 503, 'the member would replace a relay, but the operator cap is full')
+  t.is(own.headers['retry-after'], '5')
+  const other = await s.audio(tb)
+  t.is(other.status, 503)
+  t.is(other.headers['retry-after'], '5')
+  t.is(s.routes.stats().streams, 2, 'nobody was cut')
+  await settle()
+  t.absent(w1.ended)
+  t.absent(w2.ended)
+  t.is(s.node.held.size, 2)
+  a1.close()
+  a2.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+})
+
+test('audius: a pending open is never replaced, so it keeps its slot and no extra upstream open starts', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Wait1')
+  const first = s.audio(ticket)
+  t.ok(await s.until(() => s.node.waiting.length === 1))
+  const second = s.audio(ticket)
+  t.ok(await s.until(() => s.node.waiting.length === 2))
+  t.is(s.routes.stats().streams, 2, 'both pending opens hold a slot')
+  const third = await s.audio(ticket)
+  t.is(third.status, 503, 'only pending opens at the cap: refused')
+  t.alike(third.json, { error: 'indisponivel' })
+  await settle()
+  t.is(s.node.waiting.length, 2, 'the refused open started no upstream request')
+  t.is(s.routes.stats().streams, 2)
+  for (const res of s.node.waiting) {
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': AUDIO.length })
+    res.end(AUDIO)
+  }
+  const [a, b] = await Promise.all([first, second])
+  t.is(a.status, 200)
+  t.ok(a.raw.equals(AUDIO))
+  t.is(b.status, 200)
+  t.ok(b.raw.equals(AUDIO))
+  t.ok(await s.until(() => s.routes.stats().streams === 0))
+  await settle()
+  t.is(s.routes.stats().streams, 0, 'no slot was given back twice')
+
+  // The member holds no stale relay: two opens on two tickets fit, a third
+  // ticket is refused.
+  const h1 = await s.ticketFor(token, 'Hold1')
+  const h2 = await s.ticketFor(token, 'Hold1')
+  const h3 = await s.ticketFor(token, 'Hold1')
+  const r1 = await s.hold(audioPath(h1))
+  const r2 = await s.hold(audioPath(h2))
+  t.is(r1.status, 200)
+  t.is(r2.status, 200)
+  const busy = await s.audio(h3)
+  t.is(busy.status, 503)
+  t.is(busy.headers['retry-after'], '5')
+  r1.close()
+  r2.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+})
+
+test('audius: an open that replaces a relay gets no room the replaced relay already took', async (t) => {
+  // Hold1 sends 5 bytes and holds. Two relays may each start from the same
+  // remainder (7), but a third that replaces the first has 7 - 5 left.
+  for (const caps of [{ dailyBytes: 7 }, { ticketBytes: 7 }]) {
+    const label = Object.keys(caps)[0]
+    const s = await setup(t, { caps })
+    const { token } = await s.login()
+    const ticket = await s.ticketFor(token, 'Hold1')
+    const a1 = await s.hold(audioPath(ticket))
+    t.ok(await s.until(() => a1.received === 5))
+    const a2 = await s.hold(audioPath(ticket))
+    t.ok(await s.until(() => a2.received === 5))
+    const a3 = await s.hold(audioPath(ticket))
+    const w3 = watchEnd(a3)
+    t.is(a3.status, 200, label + ': the replacing open is admitted')
+    t.absent((await a1.ended).complete, label + ': the oldest relay was replaced')
+    t.ok(await s.until(() => a3.received >= 2))
+    await settle()
+    t.is(a3.received, 2, label + ': only what the replaced relay had not taken')
+    t.ok(await s.until(() => w3.ended), label + ': cut at that room')
+    a2.close()
+    a3.close()
+    t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+  }
+
+  // The replaced relay took more than the day has left (9 - 5 charged): the
+  // open is refused for the limit and cuts nobody.
+  const s = await setup(t, { caps: { dailyBytes: 9 } })
+  const { token } = await s.login()
+  const five = await s.ticketFor(token, 'Hold1')
+  const two = await s.ticketFor(token, 'Hold2')
+  const v = await s.hold(audioPath(five))
+  t.ok(await s.until(() => v.received === 5))
+  const w = await s.hold(audioPath(five))
+  t.ok(await s.until(() => w.received === 5))
+  w.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 1), 'its 5 bytes are charged: 4 left of the day')
+  const x = await s.hold(audioPath(two))
+  t.ok(await s.until(() => x.received === 2))
+  const wv = watchEnd(v)
+  const wx = watchEnd(x)
+  const over = await s.audio(five)
+  t.is(over.status, 429, 'the 4 left are fewer than the 5 the relay it would replace took')
+  t.alike(over.json, { error: 'limite-musica' })
+  await settle()
+  t.absent(wv.ended, 'nobody was cut')
+  t.absent(wx.ended)
+  t.is(s.routes.stats().streams, 2)
+  v.close()
+  x.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
 })
 
 test('audius: a ticket and a member day are bounded in bytes', async (t) => {
@@ -1156,7 +1420,8 @@ test('audius: audio opens are counted per member and per ticket before the budge
   t.is(over.status, 429)
   t.alike(over.json, { error: 'limite-musica' })
   t.is((await s.audio(await s.ticketFor(token, 'Plain1'))).status, 429, 'per member, not per ticket')
-  t.is(streamHops(s), 5, 'the budget was spent once per counted open')
+  t.is(streamHops(s), 1, 'the first open walked, the later ones asked the kept storage URL')
+  t.is(s.node.seen.length, 5, 'one upstream open per counted open, walked or direct')
 
   const p = await setup(t)
   const own = await p.login()
@@ -1242,6 +1507,348 @@ test('audius: a member blocked while audio is relayed is cut within a re-check a
   t.is(g.routes.stats().tickets, 1)
   open.close()
   t.ok(await g.until(() => g.routes.stats().streams === 0))
+})
+
+// --- kept storage URLs ------------------------------------------------------
+
+const streamHops = (s) => s.api.seen.filter((r) => r.path.endsWith('/stream')).length
+
+test('audius: a later open of a ticket asks the storage URL its walk ended on, with the Range and without the key', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Ranged1')
+  const first = await s.audio(ticket)
+  t.is(first.status, 200)
+  t.ok(first.raw.equals(AUDIO))
+  t.is(streamHops(s), 1)
+  const asked = s.api.seen.length
+
+  const part = await s.audio(ticket, { Range: 'bytes=10-19' })
+  t.is(part.status, 206)
+  t.ok(part.raw.equals(AUDIO.subarray(10, 20)))
+  t.is(part.headers['content-range'], 'bytes 10-19/100')
+  t.is(part.headers['content-length'], '10')
+  t.absent(part.headers['x-node-secret'])
+  t.is(s.api.seen.length, asked, 'the API host was not asked again')
+  t.is(s.node.seen.length, 2)
+  const direct = s.node.seen[1]
+  t.is(direct.path, '/audio/Ranged1')
+  t.is(direct.headers.range, 'bytes=10-19', 'the Range reaches the storage URL')
+  t.absent(direct.headers['x-api-key'], 'no key at the kept storage URL')
+  t.ok(Object.keys(direct.headers).every((h) => PROVIDER_HEADERS.includes(h) && h !== 'x-api-key'))
+  t.absent(JSON.stringify(direct).includes(KEY))
+  t.absent(JSON.stringify(direct).includes(ticket))
+
+  const other = await s.ticketFor(token, 'Ranged1')
+  t.is((await s.audio(other)).status, 200)
+  t.is(streamHops(s), 2, 'another ticket of the same track walks: the URL is kept per ticket')
+
+  for (const r of s.responses) {
+    t.absent(r.raw.toString('latin1').includes(NODE), 'no storage URL in a body')
+    t.absent(JSON.stringify(r.headers).includes(NODE), 'no storage URL in a header')
+  }
+  t.absent(JSON.stringify(s.logs).includes(NODE), 'no storage URL in a log line')
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: a kept storage URL that fails falls back to the walk in the same request', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const cases = [
+    ['403', { status: 403, headers: { 'Content-Type': 'application/xml' }, body: '<Error>expired</Error>' }],
+    ['a redirect', { status: 302, headers: { Location: 'https://' + NODE + '/audio/Ranged1' } }],
+    ['another type', { status: 200, headers: { 'Content-Type': 'text/html' }, body: '<script>alert(1)</script>' }]
+  ]
+  for (const [label, answer] of cases) {
+    const ticket = await s.ticketFor(token, 'Signed1')
+    t.is((await s.audio(ticket)).status, 200, label + ': the first open walks')
+    const kept = s.node.seen.at(-1)
+    s.node.answers.set(kept.path + '?sig=' + kept.query.sig, answer)
+    const hops = streamHops(s)
+    const seen = s.node.seen.length
+
+    const part = await s.audio(ticket, { Range: 'bytes=10-19' })
+    t.is(part.status, 206, label)
+    t.ok(part.raw.equals(AUDIO.subarray(10, 20)), label + ': the asked bytes')
+    t.absent(part.raw.toString('latin1').includes('script'), label + ': nothing of the failed answer')
+    t.is(streamHops(s), hops + 1, label + ': walked again in the same request')
+    t.is(s.node.seen.length, seen + 2, label + ': the kept URL once, then the fresh one')
+    t.is(s.node.seen.at(-2).query.sig, kept.query.sig)
+    t.is(s.node.seen.at(-1).query.sig, String(s.state.signed))
+    t.is(s.node.seen.at(-1).headers.range, 'bytes=10-19')
+
+    t.is((await s.audio(ticket, { Range: 'bytes=0-9' })).status, 206)
+    t.is(streamHops(s), hops + 1, label + ': the fresh URL is kept')
+    t.is(s.node.seen.at(-1).query.sig, String(s.state.signed))
+  }
+  t.absent(s.node.seen.some((r) => r.path === '/audio/Ranged1'), 'a redirect from a kept URL is not followed')
+
+  // A 416 from the kept URL is the answer: relayed, with no walk, and the URL
+  // stays kept.
+  const far = await s.ticketFor(token, 'Signed1')
+  t.is((await s.audio(far)).status, 200)
+  const path = '/audio/Signed1?sig=' + s.state.signed
+  s.node.answers.set(path, { status: 416, headers: { 'Content-Range': 'bytes */100' } })
+  const hops = streamHops(s)
+  const past = await s.audio(far, { Range: 'bytes=500-' })
+  t.is(past.status, 416)
+  t.is(past.headers['content-range'], 'bytes */100')
+  t.is(past.raw.length, 0)
+  t.is(streamHops(s), hops, 'a 416 from the kept URL does not walk')
+  s.node.answers.delete(path)
+  t.is((await s.audio(far, { Range: 'bytes=0-9' })).status, 206)
+  t.is(streamHops(s), hops, 'the URL stays kept after a 416')
+
+  // A kept URL that failed is forgotten even when the walk fails too.
+  const lost = await s.ticketFor(token, 'Signed1')
+  t.is((await s.audio(lost)).status, 200)
+  s.node.answers.set('/audio/Signed1?sig=' + s.state.signed, { status: 403 })
+  s.state.mode = 'garbage'
+  const seen = s.node.seen.length
+  t.is((await s.audio(lost)).status, 503, 'the kept URL and the walk both failed')
+  t.is(s.node.seen.length, seen + 1, 'the kept URL was asked once')
+  s.state.mode = 'ok'
+  t.is((await s.audio(lost)).status, 200)
+  t.is(s.node.seen.length, seen + 2, 'the next open walks without asking the failed URL again')
+  t.is(s.node.seen.at(-1).query.sig, String(s.state.signed))
+  t.absent(s.node.seen.some((r) => r.headers['x-api-key'] !== undefined), 'no key at the node, ever')
+  t.ok(await s.until(() => s.routes.stats().streams === 0))
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: a kept storage URL is not used after UPSTREAM_REUSE_MS or once the clock steps back', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Ranged1')
+  t.is((await s.audio(ticket)).status, 200)
+  s.clock.offset += UPSTREAM_REUSE_MS - 1000
+  t.is((await s.audio(ticket)).status, 200)
+  t.is(streamHops(s), 1, 'still kept just inside the window')
+  s.clock.offset += 1000
+  t.is((await s.audio(ticket)).status, 200)
+  t.is(streamHops(s), 2, 'walked again once the window ended')
+  t.is(s.node.seen.length, 3, 'the expired URL was not asked')
+  s.clock.offset -= 1000
+  t.is((await s.audio(ticket)).status, 200)
+  t.is(streamHops(s), 3, 'a clock that stepped back walks again')
+  t.is(s.node.seen.length, 4, 'the URL kept before the step was not asked')
+  t.is((await s.audio(ticket)).status, 200)
+  t.is(streamHops(s), 3, 'the walk after the step is kept')
+  t.is(s.node.seen.length, 5)
+})
+
+test('audius: nothing is kept when the API host answers the audio itself or the storage URL is too long', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Direct1')
+  for (let i = 0; i < 2; i++) {
+    const res = await s.audio(ticket)
+    t.is(res.status, 200)
+    t.ok(res.raw.equals(AUDIO))
+  }
+  const hops = s.api.seen.filter((r) => r.path.endsWith('/stream'))
+  t.is(hops.length, 2, 'every open walked from the API host')
+  t.ok(hops.every((r) => r.headers['x-api-key'] === KEY), 'each one a walk with the key, not a direct open of the API URL')
+  t.is(s.node.seen.length, 0)
+
+  const long = await s.ticketFor(token, 'Long1')
+  for (let i = 0; i < 2; i++) t.is((await s.audio(long)).status, 200)
+  t.is(streamHops(s), 4, 'a storage URL over the length cap is not kept')
+  t.is(s.node.seen.length, 2)
+})
+
+test('audius: a kept storage URL whose name now resolves to a non-public address opens no socket and falls back', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  s.state.storage.Moved1 = MOVED
+  const ticket = await s.ticketFor(token, 'Moved1')
+  t.is((await s.audio(ticket)).status, 200)
+  t.ok(s.dials.some((d) => d.host === MOVED && d.addresses !== undefined), 'the walk ended at the movable name')
+  s.dns.moved = '10.0.0.8'
+  delete s.state.storage.Moved1
+  const connects = s.connected.length
+  const dials = s.dials.length
+
+  const part = await s.audio(ticket, { Range: 'bytes=10-19' })
+  t.is(part.status, 206)
+  t.ok(part.raw.equals(AUDIO.subarray(10, 20)))
+  const now = s.dials.slice(dials)
+  t.ok(now.some((d) => d.host === MOVED && d.refused !== undefined), 'the guarded lookup refused the moved name')
+  t.absent(now.some((d) => d.host === MOVED && d.addresses !== undefined), 'no address of it was let through')
+  t.is(s.connected.length - connects, 2, 'only the API host and the node were dialled')
+  t.is(streamHops(s), 2, 'the walk ran in the same request')
+  onlyLoopback(t, s)
+  noKeyAnywhere(t, s)
+})
+
+test('audius: an audio answer refused here or a body cut short forgets the storage URL, and the next open walks', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+
+  // A walk whose storage answer is refused keeps nothing.
+  const skew = await s.ticketFor(token, 'Skew1')
+  t.is((await s.audio(skew, { Range: 'bytes=10-19' })).status, 503, 'a Content-Range that does not match')
+  t.is(streamHops(s), 1)
+  t.is((await s.audio(skew, { Range: 'bytes=10-19' })).status, 503)
+  t.is(streamHops(s), 2, 'the refused storage URL was not kept: walked again')
+
+  // A kept URL whose audio answer is refused is forgotten.
+  const signed = await s.ticketFor(token, 'Signed1')
+  t.is((await s.audio(signed)).status, 200)
+  const kept = '/audio/Signed1?sig=' + s.state.signed
+  s.node.answers.set(kept, { status: 206, headers: { 'Content-Type': 'audio/mpeg', 'Content-Range': 'bytes 5-9/100', 'Content-Length': 5 }, body: AUDIO.subarray(5, 10) })
+  let hops = streamHops(s)
+  let seen = s.node.seen.length
+  t.is((await s.audio(signed, { Range: 'bytes=10-19' })).status, 503, 'the kept URL answered a range that was not asked')
+  t.is(streamHops(s), hops, 'an audio answer does not walk in the same request')
+  t.is(s.node.seen.length, seen + 1)
+  s.node.answers.delete(kept)
+  const part = await s.audio(signed, { Range: 'bytes=10-19' })
+  t.is(part.status, 206)
+  t.ok(part.raw.equals(AUDIO.subarray(10, 20)))
+  t.is(streamHops(s), hops + 1, 'the next open walks, though the old URL would answer again')
+  t.is(s.node.seen.at(-1).query.sig, String(s.state.signed))
+  t.is(s.node.seen.filter((r) => r.path + '?sig=' + r.query.sig === kept).length, 2, 'the refused URL was asked once after its walk')
+
+  // A body the storage node cuts short forgets the URL it came from.
+  const drop = await s.ticketFor(token, 'Drop1')
+  const cut = await s.audio(drop)
+  t.is(cut.status, 200)
+  t.absent(cut.complete, 'the node dropped the body')
+  t.ok(await s.until(() => s.routes.stats().streams === 0))
+  hops = streamHops(s)
+  seen = s.node.seen.length
+  t.absent((await s.audio(drop)).complete)
+  t.is(streamHops(s), hops + 1, 'the next open walks')
+  t.is(s.node.seen.length, seen + 1)
+  t.ok(await s.until(() => s.routes.stats().streams === 0))
+
+  // A relay this service cuts, replaced at the member cap, keeps the URL.
+  const hold = await s.ticketFor(token, 'Hold1')
+  const a1 = await s.hold(audioPath(hold))
+  t.ok(await s.until(() => a1.received === 5))
+  hops = streamHops(s)
+  const a2 = await s.hold(audioPath(hold))
+  const a3 = await s.hold(audioPath(hold))
+  t.absent((await a1.ended).complete, 'the oldest relay was replaced')
+  a2.close()
+  a3.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+  const a4 = await s.hold(audioPath(hold))
+  t.is(a4.status, 200)
+  t.is(streamHops(s), hops, 'every later open asked the kept URL: a replaced relay says nothing of the node')
+  a4.close()
+  t.ok(await s.until(() => s.routes.stats().streams === 0 && s.node.held.size === 0))
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: a kept storage URL that never answers gives up after STORED_CONNECT_MS, and the walk gets what is left of the deadline', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Signed1')
+  t.is((await s.audio(ticket)).status, 200)
+  s.node.answers.set('/audio/Signed1?sig=' + s.state.signed, { hang: true })
+  const hops = streamHops(s)
+  // Every connect deadline the stream fetch arms goes through setTimeout.
+  const delays = []
+  const realSetTimeout = global.setTimeout
+  global.setTimeout = (fn, ms, ...args) => {
+    delays.push(ms)
+    return realSetTimeout(fn, ms, ...args)
+  }
+  let part
+  let elapsed
+  try {
+    const started = Date.now()
+    part = await s.audio(ticket, { Range: 'bytes=10-19' })
+    elapsed = Date.now() - started
+  } finally {
+    global.setTimeout = realSetTimeout
+  }
+  t.is(part.status, 206, 'the walk answered in the same request')
+  t.ok(part.raw.equals(AUDIO.subarray(10, 20)))
+  t.is(s.node.waiting.length, 1, 'the kept URL was asked once')
+  t.is(streamHops(s), hops + 1)
+  t.ok(delays.includes(STORED_CONNECT_MS), 'the kept URL had STORED_CONNECT_MS')
+  t.absent(delays.includes(DEADLINE_MS), 'no open of this request had the whole deadline')
+  t.ok(elapsed >= STORED_CONNECT_MS - 50 && elapsed < DEADLINE_MS, 'answered after the kept URL gave up, inside the deadline: ' + elapsed)
+  // The relay's own timers are 1 s or less, or the stall and total deadlines.
+  const walk = delays.filter((ms) => ms > STORED_CONNECT_MS && ms < DEADLINE_MS)
+  t.is(walk.length, 1, 'one walk deadline')
+  t.ok(walk[0] <= DEADLINE_MS - STORED_CONNECT_MS && walk[0] >= DEADLINE_MS - elapsed, 'the walk had what was left: ' + walk[0])
+  t.is((await s.audio(ticket, { Range: 'bytes=0-9' })).status, 206)
+  t.is(streamHops(s), hops + 1, 'the walked URL is kept')
+})
+
+test('audius: a kept URL that fails does not forget a newer one a concurrent open kept', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const ticket = await s.ticketFor(token, 'Signed1')
+  t.is((await s.audio(ticket)).status, 200)
+  const first = '/audio/Signed1?sig=' + s.state.signed
+  s.node.answers.set(first, { hang: true })
+  const slow = s.audio(ticket, { Range: 'bytes=0-9' })
+  t.ok(await s.until(() => s.node.waiting.length === 1), 'the first open waits on the kept URL')
+  s.node.answers.set(first, { status: 403 })
+  const fast = await s.audio(ticket, { Range: 'bytes=10-19' })
+  t.is(fast.status, 206, 'the second open fell back to a walk')
+  const newer = String(s.state.signed)
+  t.not(newer, '1')
+  const hops = streamHops(s)
+  // The first open's kept URL fails now, and its own walk fails too.
+  s.state.mode = 'garbage'
+  const held = s.node.waiting[0]
+  held.writeHead(403)
+  held.end()
+  t.is((await slow).status, 503)
+  t.is(streamHops(s), hops + 1, 'the first open walked')
+  s.state.mode = 'ok'
+  const next = await s.audio(ticket, { Range: 'bytes=20-29' })
+  t.is(next.status, 206)
+  t.ok(next.raw.equals(AUDIO.subarray(20, 30)))
+  t.is(streamHops(s), hops + 1, 'the newer URL survived: no walk')
+  t.is(s.node.seen.at(-1).query.sig, newer)
+  t.ok(await s.until(() => s.routes.stats().streams === 0))
+})
+
+test('audius: a direct or fallen-back open spends one member open, one ticket open and one budget unit, as a walk does', async (t) => {
+  const b = await setup(t, { caps: { budget: 4 } })
+  const login = await b.login()
+  // The play's lookup is the first unit.
+  const ticket = await b.ticketFor(login.token, 'Plain1')
+  for (let i = 0; i < 3; i++) t.is((await b.audio(ticket, { Range: 'bytes=100-' })).status, 416, 'open ' + i)
+  t.is(streamHops(b), 1)
+  t.is(b.node.seen.length, 3)
+  const broke = await b.audio(ticket, { Range: 'bytes=100-' })
+  t.is(broke.status, 503)
+  t.alike(broke.json, { error: 'indisponivel' })
+  t.ok(b.logs.some((e) => e.reason === 'orcamento'))
+  t.is(b.node.seen.length, 3, 'no upstream open past the budget')
+
+  const p = await setup(t)
+  const own = await p.login()
+  const kept = await p.ticketFor(own.token, 'Plain1')
+  let wrong = 0
+  for (let i = 0; i < OPENS_PER_TICKET; i++) if ((await p.audio(kept, { Range: 'bytes=100-' })).status !== 416) wrong++
+  t.is(wrong, 0)
+  t.is(streamHops(p), 1, 'only the first open walked')
+  t.is(p.node.seen.length, OPENS_PER_TICKET)
+  t.is((await p.audio(kept)).status, 404, 'direct opens retire the ticket at OPENS_PER_TICKET too')
+  t.is(p.node.seen.length, OPENS_PER_TICKET)
+
+  const f = await setup(t, { caps: { opens: 2 } })
+  const mine = await f.login()
+  const signed = await f.ticketFor(mine.token, 'Signed1')
+  t.is((await f.audio(signed)).status, 200)
+  f.node.answers.set('/audio/Signed1?sig=1', { status: 403 })
+  t.is((await f.audio(signed, { Range: 'bytes=0-9' })).status, 206, 'a kept URL that failed, then the walk')
+  t.is(streamHops(f), 2)
+  const over = await f.audio(signed, { Range: 'bytes=0-9' })
+  t.is(over.status, 429, 'the fallen-back request was one open, not two')
+  t.alike(over.json, { error: 'limite-musica' })
 })
 
 // --- covers ------------------------------------------------------------------
@@ -1614,7 +2221,7 @@ test('audius: art releases inflight on failure and timeout', async (t) => {
     t.ok(Date.now() - started < 5000, id + ' ends within the deadline')
     t.is(s.routes.stats().artInflight, 0, id + ' released inflight')
   }
-  t.is(s.routes.stats().covers, 0, 'no failure is cached')
+  t.is(s.routes.stats().covers, ids.length, 'each failure after a host contact is remembered for a while')
   artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
 
   // Held fetches of two members fill the cover slots: the next, from a third
@@ -1654,6 +2261,89 @@ test('audius: a failing art host keeps the art use and cannot drain the shared b
   const other = await s.login(s.other)
   const search = await s.post(other.token, 'search', { q: QUERY, kind: 'track' })
   t.is(search.status, 200, 'another member still searches')
+})
+
+test('audius: a cover fetch that failed after a host contact is answered 503 for ART_RETRY_MS, with no contact and the use given back', async (t) => {
+  t.is(ART_RETRY_MS, 60 * 1000)
+  const timers = boundTimers()
+  const s = await setup(t, { covers: true, timers, caps: { arts: 3 } })
+  const { token } = await s.login()
+  const first = await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })
+  t.is(first.status, 503)
+  t.alike(first.json, { error: 'indisponivel' })
+  t.ok([...timers.live.values()].some(({ handle }) => handle.ms === ART_RETRY_MS), 'the failure expires after ART_RETRY_MS')
+  for (let i = 0; i < 5; i++) {
+    const again = await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })
+    t.is(again.status, 503, 'remembered: 503, never the 404 the app keeps for the session')
+    t.alike(again.json, { error: 'indisponivel' })
+  }
+  t.alike(artPaths(s), ['/ArtErr1'], 'no new host contact while remembered')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  s.clock.offset += ART_RETRY_MS
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })).status, 503)
+  t.alike(artPaths(s), ['/ArtErr1', '/Plain1', '/ArtErr1'], 'asked again once the failure expired')
+  const over = await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })
+  t.is(over.status, 429, 'the two contacted fetches kept their uses: the cap of 3 is reached')
+  t.alike(over.json, { error: 'limite-musica' })
+})
+
+test('audius: each member spends at most MEMBER_BUDGET_PER_DAY of the shared budget, and past it gets 429 while others still play', async (t) => {
+  t.is(MEMBER_BUDGET_PER_DAY, PROVIDER_PER_DAY / 10)
+  t.is(MEMBER_BUDGET_PER_DAY, 1200)
+
+  // JSON calls: one unit each.
+  const j = await setup(t, { caps: { share: 2 } })
+  const ja = await j.login()
+  const jb = await j.login(j.other)
+  t.is((await j.post(ja.token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  t.is((await j.post(ja.token, 'search', { q: 'outra', kind: 'track' })).status, 200)
+  const asked = j.api.seen.length
+  const spent = await j.post(ja.token, 'search', { q: 'terceira', kind: 'track' })
+  t.is(spent.status, 429, 'the share is spent')
+  t.alike(spent.json, { error: 'limite-musica' })
+  t.is(j.api.seen.length, asked, 'and the provider is not asked')
+  t.is((await j.post(jb.token, 'search', { q: QUERY, kind: 'track' })).status, 200, 'another member has its own share')
+
+  // Art host contacts: one unit each, the use given back when none was made.
+  const a = await setup(t, { covers: true, caps: { share: 2, arts: 2 } })
+  const aa = await a.login()
+  const ab = await a.login(a.other)
+  t.is((await a.post(aa.token, 'search?covers=1', { q: QUERY, kind: 'track' })).status, 200)
+  artOk(t, await a.post(aa.token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  const art = await a.post(aa.token, 'art', { kind: 'track', id: 'Fill6' })
+  t.is(art.status, 429, 'the share is spent before the art host is contacted')
+  t.alike(art.json, { error: 'limite-musica' })
+  t.alike(artPaths(a), ['/Fill5'])
+  t.is(a.routes.stats().covers, 1, 'a fetch the share stopped is not remembered')
+  artOk(t, await a.post(aa.token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  artOk(t, await a.post(ab.token, 'art', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  t.absent(a.logs.some((e) => e.reason === 'orcamento'), 'a spent share is not the spent budget')
+
+  // A redirect hop past the share: the starter gets 429 and keeps the use.
+  const h = await setup(t, { covers: true, caps: { share: 2 } })
+  const ha = await h.login()
+  const hop = await h.post(ha.token, 'art', { kind: 'track', id: 'ArtHop2' })
+  t.is(hop.status, 429)
+  t.alike(hop.json, { error: 'limite-musica' })
+  t.alike(artPaths(h), ['/ArtHop2'], 'the provider call and the first hop spent the share')
+  t.is(h.routes.stats().covers, 0)
+
+  // Audio opens: one unit each, the open given back past the share.
+  const o = await setup(t, { caps: { share: 2 } })
+  const oa = await o.login()
+  const ob = await o.login(o.other)
+  const ticket = await o.ticketFor(oa.token, 'Ranged1')
+  t.is(o.api.seen.length, 1, 'the play spent one unit on the track lookup')
+  const played = await o.audio(ticket)
+  t.is(played.status, 200)
+  const streamed = o.node.seen.length
+  const cut = await o.audio(ticket)
+  t.is(cut.status, 429, 'the share is spent')
+  t.alike(cut.json, { error: 'limite-musica' })
+  t.is(o.node.seen.length, streamed, 'and no storage node is contacted')
+  t.is(o.api.seen.length, 2, 'nor the provider')
+  const other = await o.ticketFor(ob.token, 'Ranged1')
+  t.is((await o.audio(other)).status, 200, 'another member still plays')
 })
 
 test('audius: covers have their own slot pool', async (t) => {
@@ -1875,6 +2565,29 @@ test('audius: a full cover cache evicts the oldest and clears its timer', async 
   t.is(s.art.seen.length, before, 'a recent cover is still held')
   t.is((await s.post(token, 'art', { kind: 'track', id: 'Many0' })).status, 200)
   t.is(s.art.seen.length, before + 1, 'the evicted one is fetched again')
+  for (let i = 0; i < 2; i++) t.is((await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })).status, 503)
+  t.is(artPaths(s).filter((p) => p === '/ArtErr1').length, 2, 'with the cache full, a failure is not remembered')
+  t.is(s.routes.stats().covers, MAX_ART_CACHED)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Many' + MAX_ART_CACHED })).status, 200)
+  t.is(s.art.seen.length, before + 3, 'and pushes no good cover out')
+})
+
+test('audius: a failed fetch of an older href leaves the newer cover held', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.artwork.Fill7 = { '150x150': 'https://' + ART + '/ArtHang1' }
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  const old = s.post(token, 'art', { kind: 'track', id: 'Fill7' })
+  t.ok(await s.until(() => s.art.held.size === 1), 'the old href is in flight')
+  s.state.artwork.Fill7 = { '150x150': 'https://' + ART + '/Fill7' }
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill7' }), 'image/jpeg', JPEG)
+  for (const res of s.art.held) json(res, 500, {})
+  t.is((await old).status, 503, 'the old fetch failed after the newer one landed')
+  const before = s.art.seen.length
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill7' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, before, 'the newer cover is still held')
+  t.is(s.routes.stats().covers, 1)
 })
 
 // --- the 480 cover and song info ---------------------------------------------
@@ -2087,7 +2800,14 @@ test('audius: a failed 480 fetch answers as is, with no fallback', async (t) => 
     t.alike(res.json, { error: 'indisponivel' })
     t.absent(artPaths(s).includes('/Small' + id), id + ': the small cover is not tried')
   }
-  t.is(s.routes.stats().covers, 0, 'no failure is cached')
+  t.is(s.routes.stats().covers, 4, 'each failed 480 is remembered under its own key')
+  const seen = artPaths(s).length
+  for (const id of ['Err480', 'Busy480', 'Loop480', 'Part480']) {
+    const res = await s.post(token, 'art?size=480', { kind: 'track', id })
+    t.is(res.status, 503, id + ' remembered')
+    t.absent(artPaths(s).includes('/Small' + id), id + ': still no fallback')
+  }
+  t.is(artPaths(s).length, seen, 'a remembered failure contacts no host')
 
   // The 480 contact spent the last budget token: the fallback finds the
   // budget spent, answers 503 and keeps the use, as the host was contacted.

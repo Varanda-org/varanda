@@ -142,6 +142,7 @@ import { TabBar } from './src/ui/TabBar'
 import { TabBarShown } from './src/ui/tabBarShown'
 import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
 import { holdAllEmbeds } from './src/embedLive'
+import { usePreviewsEnabled } from './src/ui/usePreviewsEnabled'
 import { TopBar } from './src/ui/TopBar'
 import { ActionCapsule, TopActions } from './src/ui/TopActions'
 import { StackLayer, stackBusy, useReduceMotion, useStackMotion } from './src/ui/StackLayer'
@@ -575,8 +576,9 @@ function Member () {
   const generationRef = useRef(generation)
 
   // --- the cold-start preview (src/splashGate.js previewAllowed) ---
-  // A Rua's saved rows instead of the splash while the node boots, on the
-  // phone only (previewCapable). Read once, and only once the app was active:
+  // A Rua's saved rows instead of the splash while the node boots, only where
+  // previewCapable (now false on every platform: the preview had no Momentos
+  // strip, src/feedSnapshotStore.native.js). Read once, and only once the app was active:
   // the snapshot must parse for this installation and association, and the
   // session store must hold a live record for exactly its owner on this
   // rp.id, the record the resume will use. Any doubt or error: the splash.
@@ -784,8 +786,10 @@ function Member () {
     })
     return () => sub.remove()
   }, [])
-  // A lock or the background unloads every player, sheets included.
-  useEffect(() => (locked || backgrounded ? holdAllEmbeds() : undefined), [locked, backgrounded])
+  // A lock or the background unloads every player, sheets included, and so
+  // does "Prévia de links" switched off, for as long as it stays off.
+  const players = usePreviewsEnabled()
+  useEffect(() => (locked || backgrounded || !players ? holdAllEmbeds() : undefined), [locked, backgrounded, players])
   // A lock ends this account's session in the tab: nothing it opened or
   // quoted (the composer's reply or quote, an open Ajustes screen) reaches the
   // next account.
@@ -4194,6 +4198,8 @@ function Member () {
           shared={share.shared}
           onSharedDone={(id) => share.done(id)}
           onSharedTaken={(id) => share.taken(id)}
+          onSharedLoaded={(id) => share.loaded(id)}
+          onSharedFree={(id) => share.free(id)}
           me={me}
           busyRef={composerBusyRef}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}

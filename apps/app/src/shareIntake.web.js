@@ -2,6 +2,8 @@ import { MAX_MEDIA_PER_POST } from './media/plan.js'
 
 const ID = /^[0-9]{13}-[0-9a-f]{32}$/
 const IMAGES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+// The one video a share can bring (scripts/sw.js SHARE_VIDEO).
+const VIDEO = 'video/mp4'
 // The worker may write three 4000 character fields, each JSON-escaped.
 const MAX_META_CHARS = 1048576
 const MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -41,13 +43,16 @@ export async function peek () {
         const seen = new Set()
         for (const file of meta.files.slice(0, MAX_MEDIA_PER_POST)) {
           try {
-            if (!file || !Number.isSafeInteger(file.n) || file.n < 0 || !IMAGES.has(file.mime) || seen.has(file.n)) continue
+            if (!file || !Number.isSafeInteger(file.n) || file.n < 0 || seen.has(file.n)) continue
+            if (!IMAGES.has(file.mime) && (file.mime !== VIDEO || files.length > 0)) continue
             seen.add(file.n)
             const entry = await cache.match(key.base + file.n)
             if (!entry) continue
             const blob = await entry.blob()
             if (blob.size === 0 || blob.size > MAX_FILE_BYTES) continue
-            files.push(new File([blob], 'foto-' + file.n, { type: file.mime }))
+            files.push(new File([blob], (file.mime === VIDEO ? 'video-' : 'foto-') + file.n, { type: file.mime }))
+            // A video is the whole share's media.
+            if (file.mime === VIDEO) break
           } catch {
             // A read that failed may work on the next peek: offered without
             // its photos, the share would be released as empty. One that never
@@ -62,6 +67,7 @@ export async function peek () {
           text: typeof meta.text === 'string' ? meta.text : '',
           url: typeof meta.url === 'string' ? meta.url : '',
           total: Number.isSafeInteger(meta.total) && meta.total >= 0 ? meta.total : 0,
+          videos: Number.isSafeInteger(meta.videos) && meta.videos >= 0 ? meta.videos : 0,
           files
         }
       } catch {}
@@ -112,4 +118,42 @@ export async function sweep (maxAgeMs) {
 // A share target opens a fresh page, so the mount peek is enough.
 export function listen () {
   return function () {}
+}
+
+// The worker (scripts/sw.js takeShare) sends the page here with this field
+// when it could not store a share, usually for lack of browser storage.
+const LOST_FIELD = 'compartilhamento'
+const LOST_VALUE = 'nao-coube'
+
+// True once when the page was opened by a share the worker could not store.
+// The field leaves the address either way; any other field stays as written.
+export function takeLost () {
+  try {
+    const loc = globalThis.location
+    const search = loc && typeof loc.search === 'string' ? loc.search : ''
+    const body = search.startsWith('?') ? search.slice(1) : search
+    if (body === '') return false
+    let lost = false
+    let seen = false
+    const kept = []
+    for (const raw of body.split('&')) {
+      if (raw === '') continue
+      const eq = raw.indexOf('=')
+      const key = eq === -1 ? raw : raw.slice(0, eq)
+      if (key !== LOST_FIELD) {
+        kept.push(raw)
+        continue
+      }
+      seen = true
+      if (raw.slice(eq + 1) === LOST_VALUE && eq !== -1) lost = true
+    }
+    if (!seen) return false
+    const history = globalThis.history
+    if (history && typeof history.replaceState === 'function') {
+      history.replaceState(history.state, '', loc.pathname + (kept.length === 0 ? '' : '?' + kept.join('&')) + (loc.hash || ''))
+    }
+    return lost
+  } catch {
+    return false
+  }
 }

@@ -222,3 +222,60 @@ test('warm state shares completion and refusal only within the current epoch', a
   updatePeekWarmState(2, { pending: true })
   t.is(updates.length, count, 'unmounted screens stop receiving updates')
 })
+
+// #467: a node that pages candidates in batches can end a whole read
+// incomplete and empty for a person who follows nearly all of the newest
+// diaries; the next read from its cursor may hold rows.
+test('regression: a later page that adds nothing and is incomplete reads on from its cursor, within one load', async (t) => {
+  const { readLaterPages, mergePage } = await load()
+  const cursor = (n) => Object.freeze({ round: 0, at: 'c' + n, author: 'x', seq: 1 })
+  const pages = [
+    { items: [], next: cursor(1), incomplete: true },
+    { items: [], next: cursor(1), incomplete: true },
+    { items: [item('a', 1), item('b', 1)], next: cursor(2), incomplete: false }
+  ]
+  const asked = []
+  const taken = []
+  let list = []
+  const last = await readLaterPages({
+    after: cursor(0),
+    read: async (after) => { asked.push(after); return pages[asked.length - 1] },
+    take: (page, after) => {
+      taken.push(after)
+      const merged = mergePage(list, page.items)
+      list = merged.items
+      return merged.added
+    }
+  })
+  t.is(asked.length, 3, 'two empty incomplete pages, then the one with rows')
+  t.alike(asked, [cursor(0), cursor(1), cursor(1)], 'each read from the cursor the page before carried')
+  t.alike(taken, asked, 'each page taken with the cursor it was read from')
+  t.is(last, pages[2])
+  t.alike(list.map((i) => i.author), ['a', 'b'])
+})
+
+test('readLaterPages: bounded, and it stops at a complete page, a page with rows, the end, a null take and a failed read', async (t) => {
+  const { readLaterPages, followsEmptyPage, PEEK_EMPTY_FOLLOW_MAX } = await load()
+  const empty = { items: [], next: 'c', incomplete: true }
+  const run = async (pages, take = () => 0) => {
+    let n = 0
+    await readLaterPages({ after: 'c0', read: async () => pages[Math.min(n++, pages.length - 1)], take })
+    return n
+  }
+  t.is(await run([empty]), 1 + PEEK_EMPTY_FOLLOW_MAX, 'a seeder that keeps answering empty pages costs a bounded number of reads')
+  t.is(await run([{ items: [], next: 'c', incomplete: false }]), 1, 'a complete empty page is not followed')
+  t.is(await run([empty, { items: [], next: null, incomplete: true }]), 2, 'a page with no cursor ends the load')
+  t.is(await run([empty], () => 1), 1, 'a page that added rows ends the load')
+  t.is(await run([empty], () => null), 1, 'a null take reads no further')
+  let reads = 0
+  const err = await readLaterPages({
+    after: 'c0',
+    read: async () => { if (++reads === 2) throw new Error('falhou'); return empty },
+    take: () => 0
+  }).then(() => null, (e) => e)
+  t.is(err && err.message, 'falhou', 'a failed read reaches the caller')
+  t.is(reads, 2, 'and is never asked again')
+  t.is(followsEmptyPage({ page: empty, added: 0, hops: 0 }), true)
+  t.is(followsEmptyPage({ page: empty, added: 0, hops: PEEK_EMPTY_FOLLOW_MAX }), false)
+  t.is(followsEmptyPage({ page: empty, added: 0, hops: 0, max: 0 }), false)
+})
