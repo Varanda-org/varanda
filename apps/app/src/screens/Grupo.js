@@ -974,7 +974,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     // Before every path below (a caption, a page's statement, plain text). The
     // draft is kept, so the person can edit it.
     const visibility = knownVisibility({ page: asPage.page, info, epoch: meta.epoch, pagePrivate: pageVis === 'private' })
-    const refused = publicGroupRefusal(visibility, draft) || publicGroupPreviewRefusal(visibility, linkDraft.view)
+    const refused = publicGroupRefusal(visibility, draft) || publicGroupPreviewRefusal(visibility, linkDraft.take(draft))
     setDraftRefusal(refused)
     if (refused !== '') return
     if (attachments.items.length > 0 && !asPage.page) {
