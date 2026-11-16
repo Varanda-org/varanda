@@ -805,17 +805,26 @@ function slotEvents (joins, marks) {
   return { events, gap }
 }
 
-// The cut a diary marks on an own writer it replaces (a boxless writer of a
-// private group), so the slot walk gives its slot back to the new writer:
-// 0 for a header with no rejoin (nothing of it counts), 1 for a header with a
-// rejoin (the generation reads its block 0), else its whole length, so no
-// record it holds stops counting. `entries` are the writer's records from
-// block 0, as held. null when nothing is held.
+// The cut a diary marks on an own writer of a private group it replaces, so
+// the slot walk gives its slot back to the new writer. A boxless header is
+// header-invalid there, so nothing of the writer ever counts: 0, whatever it
+// holds. A writer boxed to another key: 0 for a header with no rejoin, 1
+// for a header with a rejoin (the generation reads its block 0), else past
+// its last record, so no record it holds stops counting. `entries` are the
+// writer's records as held ({ seq, record }). null when block 0 is not held.
 function replacedWriterCut (entries) {
-  if (!Array.isArray(entries) || entries.length === 0) return null
-  if (entries.length > 1) return entries.length
-  const head = entries[0] && entries[0].record
-  return head && head.rejoin ? 1 : 0
+  if (!Array.isArray(entries)) return null
+  let head = null
+  let last = -1
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || e.seq < 0) continue
+    if (e.seq === 0) head = e.record
+    if (e.seq > last) last = e.seq
+  }
+  if (!isPlainObject(head)) return null
+  if (head.box === null || head.box === undefined) return 0
+  if (last > 0) return last + 1
+  return head.rejoin ? 1 : 0
 }
 
 // The walk of one diary for G (see slotWalkState): { live, frozen,

@@ -9,7 +9,7 @@ const {
   validateGroupRecord, validateWriterHeader, validateGroupHeader, isWeakBoxKey,
   groupHeader, writerHeader, groupPost, groupHide, groupMeta, groupAdmit, groupBan, groupAdmin, groupLeave,
   groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites,
-  groupReact
+  groupReact, replacedWriterCut
 } = require('../lib/group')
 const { community } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
@@ -2626,4 +2626,24 @@ test('slot walk: a cut on an entitled writer asks for a new key, the frozen writ
   t.absent(g.entitled.includes(wX), 'no new epoch for the frozen writer')
   t.is(g.rekeyPending, true, 'the epoch it holds must rotate')
   t.is(g.epoch, null, 'and no longer sends')
+})
+
+test('replacedWriterCut: a boxless writer is released whatever it holds, a writer boxed to another key keeps what counts (#350)', (t) => {
+  const box = hex(newBoxKeyPair().publicKey)
+  const ref = { writer: wX, seq: 1, digest: 'a'.repeat(64) }
+  const head = (opts) => ({ seq: 0, record: writerHeader({ group: G, diary: X, member: K(0x600), at: AT(1), ...opts }) })
+  const post = (seq) => ({ seq, record: groupPost({ text: 'p' + seq, at: AT(seq + 1) }) })
+  t.is(replacedWriterCut(null), null, 'nothing held')
+  t.is(replacedWriterCut([]), null)
+  t.is(replacedWriterCut([post(1)]), null, 'no block 0 held: no cut')
+
+  t.is(replacedWriterCut([head({})]), 0, 'boxless header alone')
+  t.is(replacedWriterCut([head({ rejoin: ref })]), 0, 'boxless with a rejoin: still nothing of it counts')
+  t.is(replacedWriterCut([head({}), post(1), post(2)]), 0, 'boxless with records: still released')
+  t.is(replacedWriterCut([head({ rejoin: ref }), post(1)]), 0)
+
+  t.is(replacedWriterCut([head({ box })]), 0, 'boxed to another key, header alone')
+  t.is(replacedWriterCut([head({ box, rejoin: ref })]), 1, 'boxed with a rejoin: block 0 stays')
+  t.is(replacedWriterCut([head({ box }), post(1), post(2)]), 3, 'boxed with records: past its last record')
+  t.is(replacedWriterCut([head({ box }), post(1), post(4)]), 5, 'past the last seq held, not the count held')
 })
