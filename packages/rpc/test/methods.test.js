@@ -484,7 +484,7 @@ test('seen.merge: bounded notice tokens and page keys', (t) => {
 })
 
 test('no-param methods reject any key', (t) => {
-  for (const m of ['node.info', 'identity.create', 'identity.show', 'sync.stop', 'sync.status', 'node.close', 'identity.clear', 'identity.status',
+  for (const m of ['node.info', 'identity.create', 'identity.show', 'sync.stop', 'sync.status', 'node.close', 'identity.status',
     'identity.reset', 'identity.forget', 'identity.sessionSaved']) {
     ok(t, m, {}, {})
     bad(t, m, { x: 1 })
@@ -1874,6 +1874,16 @@ test('web-node host controls: mutating flags', (t) => {
   }
   t.absent(isMutating('identity.status'), 'identity.status not mutating')
   for (const m of ['follows.legacy', 'follows.confirmLegacy']) t.is(validateParams(m, {}).message, 'método desconhecido', m + ' not offered')
+})
+
+test('identity.clear: only an optional keepMedia', (t) => {
+  ok(t, 'identity.clear', {}, {})
+  ok(t, 'identity.clear', { keepMedia: true }, { keepMedia: true })
+  ok(t, 'identity.clear', { keepMedia: false }, { keepMedia: false })
+  bad(t, 'identity.clear', { keepMedia: 'yes' })
+  bad(t, 'identity.clear', { keepMedia: 1 })
+  bad(t, 'identity.clear', { x: 1 })
+  for (const k of ['dataDir', 'path', 'association', 'bootstrap', 'host', 'secretKey', 'maxLogBlocks']) bad(t, 'identity.clear', { [k]: 'x' })
 })
 
 test('identity.install', (t) => {

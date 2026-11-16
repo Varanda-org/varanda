@@ -5644,9 +5644,10 @@ function createBrowserSession ({
     if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > maxBytes) throw new TypeError(BAD_MEDIA_ARGS)
     if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
     if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
-    // Nobody but a member can look inside a sealed photo, so the node
-    // checks it is the image it claims before sealing (readers check again).
-    if (sealed && mediaBounds(bytes, mime) === null) throw new TypeError(BAD_MEDIA_ARGS)
+    // The node checks every photo is the image it claims before storing it
+    // (readers check again): nobody but a member can look inside a sealed
+    // one, and a public one goes to every reader of the diary or the group.
+    if (mediaBounds(bytes, mime) === null) throw new TypeError(BAD_MEDIA_ARGS)
     const copy = new Uint8Array(bytes.byteLength)
     copy.set(bytes)
     const progress = typeof onProgress === 'function' ? (fraction) => { try { onProgress(fraction) } catch {} } : noop
@@ -6027,9 +6028,13 @@ function createBrowserSession ({
     return body.byteLength === size ? body : null
   }
 
-  // Locks the identity: the pair is zero-filled and the chat media cache
-  // deleted (lock and 'Sair' both come here). After close() it already is.
-  function clearKeyPair () {
+  // Locks the identity: the pair is zero-filled and, unless keepMedia, the
+  // chat media cache deleted (lock and 'Sair' both come here). After close()
+  // it already is.
+  // keepMedia (a lock, never a sign-out or a failed unlock): the opened
+  // direct message media and the list summaries stay, sealed under keys
+  // derived from the local key, which an unlock under another key wipes.
+  function clearKeyPair ({ keepMedia = false } = {}) {
     if (closing !== null) return closing.then(noop)
     cancelGroups()
     retarget(null)
@@ -6039,6 +6044,7 @@ function createBrowserSession ({
       // A pending DM unlock was stopped by the lock above; it settles before
       // the cache goes and before any later unlock starts.
       await dm.previous
+      if (keepMedia === true) return
       // The identity is locked already; a storage failure while wiping the
       // media cache must not turn the lock into an error (the next unlock
       // under another key wipes it again).
