@@ -98,8 +98,10 @@ const SHARE_KEY_PREFIX = '/__varanda-share/'
 const SHARE_MAX_FILES = 10
 const SHARE_MAX_BYTES = 50 * 1024 * 1024
 const SHARE_MAX_TEXT = 4000
-// No video, and no HEIC: the post composer cannot show or send them.
+// No HEIC: the post composer cannot show or send it. A video is MP4 only, the
+// one container the browser composer takes without re-encoding.
 const SHARE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const SHARE_VIDEO = 'video/mp4'
 
 const abs = (p) => new URL(p, self.location.origin).href
 const RELEASE_META = '<meta name="varanda-release" content="' + VERSION + '">'
@@ -460,19 +462,32 @@ async function takeShare (request) {
     const title = shareText(form, 'title')
     const text = shareText(form, 'text')
     const url = shareText(form, 'url')
-    const kept = []
+    let kept = []
     let total = 0
+    let videos = 0
+    let video = null
     for (const v of form.getAll('fotos')) {
       if (typeof v === 'string' || !v) continue
-      total++
       const mime = typeof v.type === 'string' ? v.type.toLowerCase() : ''
-      if (kept.length < SHARE_MAX_FILES && SHARE_TYPES.has(mime) && typeof v.size === 'number' && v.size <= SHARE_MAX_BYTES) {
+      const fits = typeof v.size === 'number' && v.size <= SHARE_MAX_BYTES
+      if (mime.startsWith('video/')) {
+        videos++
+        if (video === null && mime === SHARE_VIDEO && fits) video = { file: v, mime }
+        continue
+      }
+      total++
+      if (kept.length < SHARE_MAX_FILES && SHARE_TYPES.has(mime) && fits) {
         kept.push({ file: v, mime })
       }
     }
-    if (kept.length > 0 || title.trim() !== '' || text.trim() !== '' || url.trim() !== '') {
+    // A post holds one video or photos, and photos win: the video is only
+    // counted, so the app can say why it was left out.
+    if (kept.length === 0 && video !== null) kept = [video]
+    // A video that cannot be kept (not MP4, too big) is still stored as a
+    // count, so the app says it did not arrive instead of opening blank.
+    if (kept.length > 0 || videos > 0 || title.trim() !== '' || text.trim() !== '' || url.trim() !== '') {
       const id = shareId(at)
-      const share = { v: 1, id, at, title, text, url, total, files: kept.map((k, n) => ({ n, mime: k.mime })) }
+      const share = { v: 1, id, at, title, text, url, total, videos, files: kept.map((k, n) => ({ n, mime: k.mime })) }
       const files = kept.map((k) => k.file)
       shareWrite = shareWrite.catch(() => {}).then(() => storeShare(share, files))
       try {

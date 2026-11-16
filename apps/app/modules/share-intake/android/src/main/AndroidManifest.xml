@@ -17,12 +17,16 @@
       android:noHistory="true"
       android:taskAffinity=""
       android:theme="@android:style/Theme.Translucent.NoTitleBar">
-      <!-- No video: the post protocol has no video record, so Varanda must
-           not offer to receive one. -->
+      <!-- One video at a time, as a post holds one: no SEND_MULTIPLE. -->
       <intent-filter>
         <action android:name="android.intent.action.SEND" />
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="image/*" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="video/*" />
       </intent-filter>
       <intent-filter>
         <action android:name="android.intent.action.SEND" />

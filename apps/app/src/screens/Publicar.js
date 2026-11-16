@@ -26,7 +26,9 @@
 // blocks unused but public in the own media core. Media is never queued in
 // the outbox (it is text-only): offline, attaching is disabled.
 // A share (`shared`) uses the same local encode and may attach while
-// offline: nothing is uploaded until the person presses Publicar.
+// offline: nothing is uploaded until the person presses Publicar. A shared
+// video goes through the same preparation as one picked here, and only
+// where picking one is offered (canComposeVideo).
 // @ suggestions (hosted web, online only): while the caret is inside an
 // @token of 2+ characters the member search (../useMemberSearch) lists up to
 // 5 verified members under the compose box; tapping one replaces the token
@@ -76,7 +78,7 @@ import { prepareVideo } from '../media/videoPrep'
 import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
-import { EXPIRED_TEXT, SHARE_TTL_MS, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
+import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
@@ -674,6 +676,9 @@ const ATTACH_AFTER_OPEN_MS = 700
 // `shared` (optional) prefills this post once per id. `onSharedDone(id)`
 // releases the shell's copy of the files. A lock unmounts this screen, so
 // done is skipped then and the shell hands the same share back after unlock.
+// Files still needed after the share is applied (a photo kept for a retry, a
+// video being prepared) are kept with `onSharedLoaded(id)` and released with
+// `onSharedFree(id)`.
 // A send in flight cannot be closed: the upload and the post.create that
 // follow it run to the end, so no Cancelar, swipe, backdrop or back button
 // (the draft stays after a failure, and Cancelar is back).
@@ -1295,6 +1300,33 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       setText(merged.text)
     }
     setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
+    const sharedVideo = shared.video || null
+    if (sharedVideo !== null) {
+      setNote(shareNote({ canAttach, hadFiles: false, noRoom: 0, dropped: 0, kept: merged.kept, clipped: shared.clipped, hadVideo: true, canVideo, videoNote: shared.videoNote }))
+      if (!canVideo) {
+        onSharedDone(shared.id)
+        return
+      }
+      if (video.draft.state.phase !== 'empty') {
+        setNote(VIDEO_HELD_TEXT)
+        onSharedDone(shared.id)
+        return
+      }
+      // The same preparation as a video picked here. Its file stays until
+      // the preparation ends: the shell lets go ('loaded') and this screen
+      // frees it, even once unmounted, when the cancelled run returns.
+      const id = shared.id
+      onSharedLoaded(id)
+      video.draft.pick({
+        pickVideo: async () => sharedVideo,
+        prepareVideo,
+        photos: liveRef.current.size,
+        preview: !!linkDraft.view || musicDraftRef.current !== null
+      }).catch((err) => {
+        if (mountedRef.current) setNote(err.message)
+      }).finally(() => freeRef.current(id))
+      return
+    }
     if (shared.files.length === 0 || !canAttach) {
       setNote(shareNote({
         canAttach,
@@ -1303,7 +1335,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         dropped: shared.dropped,
         failed: shared.failed || 0,
         kept: merged.kept,
-        clipped: shared.clipped
+        clipped: shared.clipped,
+        videoNote: shared.videoNote
       }))
       onSharedDone(shared.id)
       return
@@ -1329,7 +1362,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       dropped: shared.dropped,
       failed: shared.failed || 0,
       kept: merged.kept,
-      clipped: shared.clipped
+      clipped: shared.clipped,
+      videoNote: shared.videoNote
     })), shared.at + SHARE_TTL_MS).then(done, () => done([]))
   }, [open, shared && shared.id, frozen, busy, moment.pending])
 
