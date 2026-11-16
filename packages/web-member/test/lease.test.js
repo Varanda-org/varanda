@@ -20,6 +20,7 @@ const { createCert, createSeederCert, generateAssociationKeyPair } = require('@v
 const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { connectClient, stoppedOf } = require('./helpers/session')
+const { jpegHead } = require('./helpers/photo')
 const { until } = require('./helpers/net')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
@@ -297,6 +298,7 @@ test('an unconfirmed own media core blocks the lease until leaseMediaMaxMs; a co
   const assoc = association()
   const bytes = new Uint8Array(MEDIA_BLOCK_BYTES * 2 + 100)
   for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 13 + 5) & 0xff
+  jpegHead(bytes)
 
   // The seeder never replicates the media core: pending until the media wait.
   const quiet = await fakeSeeder(t, { signer: assoc.kp })
@@ -475,6 +477,7 @@ test('after a link drop the reconnected link must confirm the media core again b
   const assoc = association()
   const bytes = new Uint8Array(MEDIA_BLOCK_BYTES * 2 + 100)
   for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7 + 3) & 0xff
+  jpegHead(bytes)
   const mediaKeyPair = crypto.keyPair()
   // The first connection downloads (and so confirms) the media core; the
   // second one never replicates it: a seeder that is behind.

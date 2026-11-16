@@ -739,6 +739,8 @@ function assertRolledBack (t, err, w, store, local) {
   t.is(err.credentialId, FRESH)
   t.absent(w.unlocked, 'relocked')
   t.is(w.root, null)
+  const relock = w.calls.filter((c) => c.method === 'identity.clear').pop()
+  t.ok(relock && relock.params === undefined, 'the relock wipes the opened direct message media (no keepMedia)')
   t.ok(store.log.some((l) => l[0] === 'clear'), 'the keychain session deleted')
   const rec = local.byRp.get(RP)
   t.alike(rec.refused.map((r) => ({ credentialId: r.credentialId, code: r.code, cleaned: r.cleaned, created: r.created })), [{ credentialId: FRESH, code: 'INSTALL_FAILED', cleaned: false, created: true }])
