@@ -1577,7 +1577,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
     // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.view)) : ''
+    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
     if (refused !== '') {
       setCheckError(refused)
       return

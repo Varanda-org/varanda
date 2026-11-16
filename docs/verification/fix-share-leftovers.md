@@ -38,7 +38,13 @@ Cada arquivo rodou sozinho (`node apps/app/test/<arquivo>`) nesta branch e, com 
 
 ## Nos aparelhos
 
-A preencher na conferência.
+Em 16/11/2026, com o Metro desta branch (`EXPO_PUBLIC_VARANDA_VITRINE=1`, porta 8103):
+
+- **Android** (emulador API 36, build de debug `app.varanda.debug` desta branch): uma foto compartilhada pelo app Arquivos abre o Publicar com a foto. Antes de ela abrir, a cópia está em `no_backup/varanda-share/<id>/` (`0.png` e `manifest.json`); depois, a pasta está vazia. `dumpsys jobscheduler` mostra o job do WorkManager (`SystemJobService`) para dali a 58 min e pouco.
+- **iOS** (simulador iPhone 17 Pro, build de debug de 15/11 já instalado, com a extensão de hoje na `main`; esta parte não muda código nativo do iOS): foto compartilhada pelo app Fotos, "Pronto. Abra o app Varanda para publicar.", e o app abre o Publicar com a foto.
+- **Web** (`localhost:8103` no navegador): `/?compartilhamento=nao-coube` sai do endereço na carga e o aviso "o compartilhamento não coube no espaço do navegador" aparece quando o app fica pronto. Um texto digitado no Publicar, depois `pagehide` e recarregar: o texto volta no Publicar uma vez e o registro de `sessionStorage` some.
+
+Não alcançado aqui, e listado na #224: o "tentar de novo" com um erro passageiro de verdade (no emulador a foto abre na primeira vez; os testes cobrem o caminho); a varredura do WorkManager com o app fechado depois de 1 hora; um Android de verdade com o APK de preview e conta; a PWA instalada a partir da origem hospedada, com a cota do navegador cheia de verdade e com o alvo de compartilhar recarregando o app.
 
 ## Fica de fora
 
