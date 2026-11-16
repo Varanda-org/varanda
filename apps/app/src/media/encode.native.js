@@ -15,6 +15,7 @@ import rpc from '@varanda/rpc'
 import { File } from 'expo-file-system'
 import { SaveFormat, manipulateAsync } from 'expo-image-manipulator'
 import { revokeUrl, urlFromBytes } from './display'
+import { orientedSize } from './exif.js'
 import { gifProblem, gifSize } from './gif.js'
 import { acceptedSource, canHaveAlpha, gifOverCap } from './source.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, checkFile, fitWithin } from './plan.js'
@@ -122,6 +123,9 @@ export async function encodeThumbnail (bytes, mime, { side = 320, maxBytes = 327
   // size is what the first resize starts from (no full-size probe decode).
   const bounds = rpc.mediaBounds(bytes, mime)
   if (bounds === null || !(bounds.width >= 1 && bounds.height >= 1)) return null
+  // The decoder turns a JPEG by its EXIF orientation before resizing, so a
+  // resize to the stored sides would squash a photo taken sideways.
+  const size = orientedSize(bytes, mime, bounds)
   let uri
   try {
     uri = urlFromBytes(bytes, mime)
@@ -130,7 +134,7 @@ export async function encodeThumbnail (bytes, mime, { side = 320, maxBytes = 327
   }
   try {
     for (const scale of THUMB_SCALES) {
-      const fit = fitWithin(bounds.width, bounds.height, Math.max(1, Math.round(side * scale)))
+      const fit = fitWithin(size.width, size.height, Math.max(1, Math.round(side * scale)))
       for (const q of THUMB_QUALITIES) {
         const out = await manipulateAsync(uri, [{ resize: { width: fit.width, height: fit.height } }], { compress: q, format: SaveFormat.JPEG })
         const file = new File(out.uri)
