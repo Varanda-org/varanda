@@ -36,7 +36,7 @@ Cada arquivo rodado sozinho com `node <arquivo>`.
 | `apps/cli/test/cli.test.js` | 5 | 1336 | o `HELP` com 2147483648 falha contra o texto novo |
 | `apps/cli/test/readme-help.test.js` | 1 | 2 | idem |
 | `apps/cli/test/blob-seeder.test.js` | 5 | 101 | passa nos dois casos |
-| `apps/app/test/legal.test.js` | 48 | 1716 | o teste do digest (`published text is pinned to its acceptance version`) falha até o merge subir `LEGAL_VERSION` e `TERMS_VERSION` e atualizar o digest |
+| `apps/app/test/legal.test.js` | 49 | passa | o digest (`published text is pinned to its acceptance version`) falha sem os textos novos; Termos e Política na versão 68 |
 | `apps/app/test/help.test.js` | 15 | 541 | falha sem o texto novo |
 | `apps/app/test/momentosScreen.test.js` | 167 | 1362 | falha sem o texto novo (`OWN_NOTE`) |
 | `apps/site/test/legal.test.js` | 7 | 115 | falha se as páginas não forem geradas de novo |
@@ -57,6 +57,10 @@ Cada arquivo rodado sozinho com `node <arquivo>`.
 - Partida do semeador com o conjunto de blobs cheio: a carga lê os pedaços guardados para recuperar os selos (`tokens.json` e os registros de confirmação); com 4 GiB isso leva mais tempo que com 2 GiB. A espera do `/health` no deploy é de 180 s. Fica no #224 medir uma partida com o conjunto cheio antes de confiar nesse prazo.
 - Os resumos de selos gastos continuam 14 dias em `head.json` e `tokens.json`, sem mudança de formato.
 
-## Por fazer
+## Termos
 
-- [ ] Depois do merge, subir `TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) e atualizar o digest do teste `legal.test.js`.
+`TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) sobem para 68, com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo. Quem já aceitou a versão 67 vê o pedido de aceite de novo.
+
+## Conferência em aparelho
+
+Pendente: a nota do Momento ("O momento sai dos servidores em até 14 dias.") e a ajuda das conversas no Android, no iOS e na web.
