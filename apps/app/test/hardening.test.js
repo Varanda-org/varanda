@@ -303,6 +303,7 @@ function androidWatchdogProblems (kt) {
   const failed = stop.indexOf('fail("FAILED")')
   const cancelled = stop.indexOf('.cancel()')
   if (failed === -1 || cancelled === -1 || failed > cancelled) problems.push('stop settles before the cancel')
+  if (cancelled === -1 || stop.indexOf('discardUnlessResolved()', cancelled) === -1) problems.push('stop discards the files the muxer wrote after the cancel')
   return problems
 }
 
@@ -338,6 +339,8 @@ test('the Android video watchdog leaves room for the muxer, the finished file is
     ['watchdog at maxBytes', 'out.length() > growthCeiling()', 'out.length() > limits.maxBytes'],
     ['final size check removed', ANDROID_FINAL_SIZE, ''],
     ['initial watch removed', ANDROID_WATCH, ''],
+    ['no discard after the cancel', '      }\n      discardUnlessResolved()\n    }', '      }\n    }'],
+    ['discard moved before the cancel', 'fail("FAILED")\n      try {\n        t?.cancel()\n      } catch (e: Exception) {\n        // Already finished.\n      }\n      discardUnlessResolved()', 'fail("FAILED")\n      discardUnlessResolved()\n      try {\n        t?.cancel()\n      } catch (e: Exception) {\n        // Already finished.\n      }'],
     ['cancel before fail', 'val t = transformer\n      fail("FAILED")\n      try {\n        t?.cancel()\n      } catch (e: Exception) {\n        // Already finished.\n      }', 'try {\n        transformer?.cancel()\n      } catch (e: Exception) {\n        // Already finished.\n      }\n      fail("FAILED")']
   ]
   for (const [name, from, to] of mutations) {

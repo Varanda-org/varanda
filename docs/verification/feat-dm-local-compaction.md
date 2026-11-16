@@ -62,7 +62,7 @@ As lojas das Páginas usam a mesma faxina e agora têm teste próprio (`page-dm.
 
 ## Termos
 
-`TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) sobem para 68, com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo (`node apps/site/scripts/render-legal.js`). Quem já aceitou a versão 67 vê o pedido de aceite de novo.
+`TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) sobem para 70 (a 69 é a do `feat/dm-retention-14-days`), com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo (`node apps/site/scripts/render-legal.js`). Quem já aceitou uma versão anterior vê o pedido de aceite de novo.
 
 ## Para conferir à mão num aparelho
 

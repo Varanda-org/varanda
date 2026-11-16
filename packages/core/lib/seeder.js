@@ -354,6 +354,21 @@ async function deletedHole (core, seq) {
   }
 }
 
+// The blob ids the valid momentos among a diary's local blocks name, deleted
+// or not. A record already cleared, or a block that never arrived, names
+// nothing: its blob expires by itself. A read error throws (fail closed).
+async function momentBlobIds (core) {
+  const ids = new Set()
+  for (let i = 1; i < core.length; i++) {
+    const raw = await core.get(i, { wait: false, raw: true })
+    if (raw === null) continue
+    const block = decodeBlock(raw)
+    const r = block !== null && block.type === 'moment' ? validRecordCopy(block, i) : null
+    if (r !== null) ids.add(r.media.id)
+  }
+  return ids
+}
+
 // Media cores whose deletion counters one diary keeps (a diary entry's
 // `media`). Only the latest MAX_MEDIA_CORES are ever bound, so twice that
 // covers every honest diary (about one core per device) with room to spare,
@@ -1645,6 +1660,7 @@ class Seeder {
         else this.log({ event: 'rejected', key, reason })
         if (reason === 'revoked-issuer') this._noteRevokedCreator(key, judged.cert)
         try {
+          if (reason === 'blocked') await this._purgeMomentBlobs(key)
           await this._purge(key)
         } catch {
           throw new Error('falha ao limpar diário rejeitado: ' + key8(key))
@@ -2104,7 +2120,10 @@ class Seeder {
       // listed for the next start), un-admit, persist, then refuse.
       await core.close().catch(noop)
       try {
-        if (await this._stored(key)) await this._purge(key)
+        if (await this._stored(key)) {
+          if (this._isBlocked(key)) await this._purgeMomentBlobs(key)
+          await this._purge(key)
+        }
       } catch {
         if (!this._closing) this._fatal(key)
         return
@@ -2677,6 +2696,8 @@ class Seeder {
     const drop = (async () => {
       if (inflight) await inflight.catch(noop)
       try {
+        // A blocked key can settle on another reason first (revoked-issuer).
+        if (reason === 'blocked' || this._isBlocked(key)) await this._purgeMomentBlobs(key)
         await this._purge(key)
       } catch {
         if (!this._closing) this._fatal(key)
@@ -7029,6 +7050,20 @@ class Seeder {
       }
       p.then(settled, settled)
       return p
+    }
+  }
+
+  // A blocked diary's momento blobs go before its log, which is what names
+  // them: on a failure the diary stays listed and the next start scans it
+  // again (the caller's purge failure path).
+  async _purgeMomentBlobs (key) {
+    if (!this._blob) return
+    const core = await openReplica(this.store, key)
+    try {
+      const ids = await momentBlobIds(core)
+      if (ids.size > 0) this._blob.purge(ids)
+    } finally {
+      await core.close().catch(noop)
     }
   }
 
