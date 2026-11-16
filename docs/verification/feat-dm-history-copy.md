@@ -42,17 +42,30 @@ Revisão da PR 5 (correções, cada teste novo conferido sem a sua correção):
 | `packages/web-member/test/dm-copy-e2e.test.js` | asserção nova: o próprio aviso não busca nada | |
 | `apps/app/test/historyCopy.test.js` | 5/5, 43 asserções | os textos novos (fotos de Página, cota de cópia, duração) falham sem a troca |
 
-Importação em um só trabalho: a remoção da junção em `importAll` não foi pega pelo teste 2 do `dm-copy-e2e-2` (a contagem de avisos continuou 1, porque o dedupe também a segura); o teste vale como regressão do resultado, não do mecanismo.
+Revisão 2 (reexame de 88447b08): `shownAt` limitado ao relógio de quem importa; horizonte da importação guardado no pendente (e no armazém de Página retido) antes do primeiro bloco, para uma importação cortada continuar na mesma ordem; o texto reserva os selos da cota semanal antes das fotos (`copySource.reserve` e `stampsNeeded`), então as fotos nunca empurram o texto para a cota diária; `a.stores` só é gravado depois da checagem de partes; uma falha conta uma vez por `dm.pull`; o teste da cota semanal passou de 2 para 5 selos (o texto reserva 3 antes); o teste da Página mudou para `dm-copy-e2e-4.test.js`.
+
+| Arquivo | Testes novos / contagem | Sem a correção |
+|---|---|---|
+| `packages/web-member/test/dm-copy-unit-2.test.js` | 6 testes, 31 asserções (~0,2 s) | sem o teto de `shownAt`: falham 3 asserções do teste 1; sem reaproveitar o horizonte: falham 5 do teste 2; sem a junção em `importAll`: falha "the second call gets the running job"; contando a falha por passagem: falha "three overlapping pulls, one failure"; `a.stores` gravado antes da checagem: falham 2 do teste 5 ("the retry is refused the same way", "and put nothing more") |
+| `packages/web-member/test/dm-copy-e2e-4.test.js` | 2 testes, 29 asserções (~71 s) | sem a reserva (`a.held = []`): falham 3 asserções do teste 2 (fotos 3 em vez de 1, nenhuma de fora, carteira diária 12 em vez de 13) |
+| `packages/web-member/test/dm-copy-e2e.test.js` | 2 testes, 33 asserções (~87 s; era 137 s) | |
+| `packages/web-member/test/blob.test.js` | 47 testes, 405 asserções (era 46 e 399): `copySource.reserve` | |
+| `apps/app/test/historyCopy.test.js` | 5/5, 43 asserções | o texto novo do aviso ("na data em que foram enviadas") |
+
+Importação em um só trabalho: a remoção da junção em `importAll` não foi pega pelo teste 2 do `dm-copy-e2e-2` (a contagem de avisos continuou 1, porque o dedupe também a segura); o teste vale como regressão do resultado, não do mecanismo. O mecanismo (uma só tarefa, uma só leitura do registro) é coberto por `dm-copy-unit-2.test.js`, que falha sem a junção.
 
 O seeder de teste do `blob.test.js` ganhou a opção `copyBudget` (nulo é um semeador de antes do tipo `copy`, que não responde). O teste do semeador antigo cobre a falha de `copySource` e o selo diário que passa a pagar o blob.
 
-O `dm-copy-e2e-2` cobre a falha do selo `copy` no semeador real (o selo lança erro): fotos de fora, texto inteiro, descritor original intacto. Parte e manifesto ainda recuam para a cota diária nesse caso, para a cópia completar com um semeador antigo; só as fotos nunca gastam a cota diária.
+O `dm-copy-e2e-2` cobre a falha do selo `copy` no semeador real (o selo lança erro): fotos de fora, texto inteiro, descritor original intacto. Parte e manifesto ainda recuam para a cota diária nesse caso, para a cópia completar com um semeador antigo; só as fotos nunca gastam a cota diária. Com a cota semanal funcionando, o texto sai dela primeiro (reserva antes das fotos).
 
 Limites conhecidos (não corrigidos de propósito):
 
 - Se várias fotos de uma mensagem batem no limite no meio, todas contam como de fora.
 - Selos de cópia comprados e não usados se perdem numa nova tentativa que falha antes de usá-los (uma nova tentativa na mesma sessão reaproveita os quadros e não compra outro).
 - O ganho de custo do dedupe com `Set` na importação e a chamada de `checkLimits` dentro de `run` não têm teste de comportamento próprio (só pelo e2e e pelo teste unitário de `checkLimits`).
+- Uma exclusão ou um bloqueio feito neste aparelho antes de um intervalo offline esconde as mensagens importadas que vieram depois dele (as linhas entram abaixo de tudo o que o aparelho tem).
+- Os selos que sobram da reserva do texto (a estimativa leva um de folga por parte) se perdem; fica menos de uma parte por cópia.
+- Se uma importação é cortada depois de arquivar as linhas e antes de gravar as marcas de visto, a nova tentativa pula as linhas já arquivadas e não regrava essas marcas.
 - Quem tem o segredo da caixa abre o histórico inteiro, e o aviso é lacrado só para a geração atual da caixa (ver `docs/protocol.md`, riscos residuais).
 
 ## Conferências no aparelho (pendentes)
@@ -65,4 +78,4 @@ Limites conhecidos (não corrigidos de propósito):
 
 Implante o semeador antes do app. O semeador cria `copy-stamps.json` ao primeiro pedido de selo `copy`; sem ele, um app novo recua para a cota diária de blobs nos textos e deixa as fotos de fora (as fotos nunca usam a cota diária).
 
-O selo `copy` é um selo de blob: 8192 por conta e semana, pagos pelo semeador. Dimensione `--blob-bytes` para isso: uma cópia completa de uma conta com muitas fotos consome essa cota inteira de blobs, e os avisos de cópia têm o próprio balde de erros (`issues.copy`).
+O selo `copy` é um selo de blob: 8192 por conta e semana, pagos pelo semeador. Dimensione `--blob-bytes` para isso: uma cópia completa de uma conta com muitas fotos consome essa cota inteira de blobs, e os avisos de cópia têm o próprio balde de emissão (`issues.copy`, o das emissões, não um balde de erros). Qualquer conta admitida pode comprar os 8192 selos da semana sem fazer uma cópia: poucas contas bastam para encher o pool pela janela de retenção (dimensionamento do operador, #224).

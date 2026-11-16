@@ -1576,6 +1576,25 @@ test('a copy source whose weekly allowance ends keeps what it bought and then fa
   t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
 })
 
+test('a copy source reserves what it can: the whole ask, or what is left when the allowance ends, and never throws', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 6 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 2 })
+  t.is((await source.reserve(4)).length, 4, 'the whole ask')
+  const rest = await source.reserve(5)
+  t.is(rest.length, 2, 'what the allowance still had')
+  t.is(source.exhausted, true)
+  t.is((await source.reserve(1)).length, 0, 'nothing once it is spent, and no throw')
+  t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
+
+  const old = await blobSeeder(t, { signer: assoc })
+  const none = clientFor(old).copySource(identity, { batch: 4 })
+  t.is((await none.reserve(3)).length, 0, 'a seeder from before the copy kind gives none')
+})
+
 test('a copy source on a seeder from before the copy kind fails with its own reason and the daily wallet still works', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()

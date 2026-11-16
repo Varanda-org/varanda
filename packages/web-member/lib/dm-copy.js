@@ -18,11 +18,15 @@
 //      way; last, a v7 pointer drop (kind 'copy', signed by the identity key,
 //      sealed to the own box, one dm stamp) is put to the dm pool.
 //   3. Blob stamps come from the copy source first (the seeder's weekly copy
-//      allowance, ./blob.js copySource). A photo is paid from it only: when
-//      it cannot be used (ended, an older seeder, no answer, any failure)
-//      the photo is left out and counted, never paid from the daily wallet.
-//      The text parts and the manifest must go, so they fall back to the
-//      daily wallet.
+//      allowance, ./blob.js copySource). The text's stamps (every part and the
+//      manifest, estimated from the rows) are reserved from it BEFORE any
+//      photo, so photos can never push the text onto the daily wallet. A
+//      photo is paid from the rest of the allowance only: when it cannot be
+//      used (ended, an older seeder, no answer, any failure) the photo is left
+//      out and counted, never paid from the daily wallet. The text parts and
+//      the manifest must go, so whatever the reservation did not cover (an
+//      older seeder, no answer, an allowance an earlier copy spent) falls back
+//      to the daily wallet.
 //   A failed call is a normal error and repeats nothing by itself. The user's
 //   retry in the same unlock keeps the copy id, the photos already put (only
 //   their new descriptors are kept), and the sealed parts, manifest and
@@ -46,7 +50,10 @@
 //     imported 'deleted' never hides a message received here since and a
 //     'deleted' held here still hides the imported older rows. A message is
 //     deduped by sender and id, a ctl by its id, a reaction by its id. A row
-//     the bundle marked seen is marked seen here.
+//     the bundle marked seen is marked seen here. The horizon is kept with the
+//     todo before the first chunk is appended and reused by a retry, so an
+//     import cut short files the rest in the same order as one that was not.
+//     A message's shown time (shownAt) is capped at the receiver's clock.
 //   - A Página's store is filed into that page's store when its secrets are
 //     held, else kept sealed (kv dmCopyPend) until they are, or until
 //     DM_RETENTION_MS passes.
@@ -141,6 +148,17 @@ function validTodo (t) {
     blobCore.validateBlobDescriptor(t.copy) && Number.isSafeInteger(t.seen) && t.seen > 0
 }
 
+// The import horizon of each store of a todo, by 'own' or the page key.
+function horizonsOf (v) {
+  const out = {}
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return out
+  let n = 0
+  for (const k of Object.keys(v)) {
+    if ((k === 'own' || HEX64.test(k)) && isCount(v[k]) && n++ < STORES_MAX) out[k] = v[k]
+  }
+  return out
+}
+
 function idList (v) {
   return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && HEX32.test(x)) : []
 }
@@ -188,6 +206,28 @@ function checkLimits (rowSets, limits = LIMITS) {
   if (stores > limits.stores || manifestBytes(stores, parts) > limits.manifest) throw new UsageError(TOO_BIG)
 }
 
+// The stamps the text of `rowSets` needs: one per chunk of every part and of
+// the manifest, at the widest the manifest can be, plus one per part for what
+// swapping a photo's descriptor in adds to a row. The weekly copy allowance
+// gives them up before any photo, so the text never falls on the daily wallet
+// because photos spent the week's stamps.
+function stampsNeeded (rowSets) {
+  const chunks = (bytes) => Math.ceil((bytes + blobCore.BLOB_MAC_BYTES) / blobCore.BLOB_CHUNK_BYTES)
+  let stores = 0
+  let parts = 0
+  let need = 0
+  for (const rows of rowSets) {
+    if (rows.length === 0) continue
+    stores++
+    for (const cur of cutRows(rows)) {
+      parts++
+      // The part's envelope ({ v, page, rows }) is under 128 bytes.
+      need += chunks(b4a.byteLength(JSON.stringify(cur)) + 128) + 1
+    }
+  }
+  return need + chunks(manifestBytes(stores, parts))
+}
+
 // The largest manifest for that many stores and parts: every descriptor and
 // count at its widest.
 function manifestBytes (stores, parts) {
@@ -214,9 +254,97 @@ function cutRows (rows) {
   return cuts
 }
 
+// The filing time everything imported goes below: older than every row the
+// store held, like the Página legacy bundle's (./dm.js legacyHorizon).
+function horizonOf (lc, snap) {
+  const { messages, ops, reactions } = snap
+  let min = lc.nextFiled()
+  for (const r of [...messages, ...ops, ...reactions]) if (Number.isFinite(r.filedAt) && r.filedAt < min) min = r.filedAt
+  return min
+}
+
+// Files the rows of one store -> { messages, ops, reactions, skipped, fresh }
+// (fresh: the message rows filed now whose photos travelled).
+// pin: { get () -> horizon or null, set (horizon) } keeps the horizon with the
+// todo, written before the first chunk and reused by a retry, so rows filed
+// after an interruption land where an uninterrupted run would have put them
+// (the Página legacy import keeps meta.horizon the same way).
+// now: the receiver's clock; a shown time is capped at it, so a maker whose
+// clock ran ahead cannot pin a conversation above the receiver's own rows.
+async function fileRows (ctx, storage, self, rawRows, blocked, { pin = null, now = Date.now(), chunkRows = CHUNK_ROWS } = {}) {
+  const lc = ctx.local
+  const items = []
+  const taken = new Set()
+  let skipped = 0
+  for (const r of rawRows) {
+    const c = cleanRow(r, self, blocked)
+    if (c === null || taken.has(c.n)) {
+      skipped++
+      continue
+    }
+    taken.add(c.n)
+    items.push(c)
+  }
+  items.sort((x, y) => x.n - y.n)
+  // One scan of the store, then sets: a lookup per row (lc.hasMessage and
+  // its kin scan every row) would take quadratic time on a large store.
+  const snap = lc.snapshot()
+  const haveMsg = new Set(snap.messages.map((m) => m.from + '\n' + m.id))
+  const haveOp = new Set(snap.ops.map((o) => o.id))
+  const haveRx = new Set(snap.reactions.map((x) => x.from + '\n' + x.id))
+  let horizon = pin === null ? null : pin.get()
+  if (!isCount(horizon)) {
+    horizon = horizonOf(lc, snap)
+    if (pin !== null) await pin.set(horizon)
+  }
+  const out = []
+  const keys = new Set()
+  const seenIds = []
+  const fresh = []
+  let messages = 0
+  let ops = 0
+  let reactions = 0
+  for (let pos = 0; pos < items.length; pos++) {
+    const { row, seen, c } = items[pos]
+    const filedAt = horizon - items.length + pos
+    const k = row.t + '\n' + (row.from || '') + '\n' + row.id
+    if (keys.has(k)) continue
+    keys.add(k)
+    let filed = { ...row, filedAt }
+    if (row.t === 'msg') {
+      if (haveMsg.has(row.from + '\n' + row.id)) continue
+      haveMsg.add(row.from + '\n' + row.id)
+      messages++
+      if (seen && !row.mine) seenIds.push(lc.seenToken(dmFold.seenKey(row.from, row.id)))
+      if (c && itemsOf(row).length > 0) fresh.push({ ...row, filedAt })
+      if (row.shownAt !== undefined) filed = { ...filed, shownAt: Math.min(row.shownAt, now) }
+    } else if (row.t === 'ctl') {
+      if (haveOp.has(row.id)) continue
+      haveOp.add(row.id)
+      ops++
+    } else {
+      if (haveRx.has(row.from + '\n' + row.id)) continue
+      haveRx.add(row.from + '\n' + row.id)
+      reactions++
+    }
+    out.push(filed)
+  }
+  for (let i = 0; i < out.length; i += chunkRows) await lc.append(out.slice(i, i + chunkRows))
+  if (seenIds.length > 0) {
+    // First in the list (newest last, the cap drops the front): about
+    // 5000 imported marks never evict the device's own recent ones.
+    const existing = await store.readDmSeen(storage, ctx.prefix)
+    const have = new Set(existing)
+    await store.writeDmSeen(storage, [...seenIds.filter((id) => !have.has(id)), ...existing], ctx.prefix)
+  }
+  return { messages, ops, reactions, skipped, fresh }
+}
+
 // env: the engine's pieces (see createDmEngine in ./dm.js).
 function createDmCopy (env) {
   const { storage, local, blobs } = env
+  // What the reader accepts; a test passes smaller ones to reach the edges.
+  const limits = env.limits || LIMITS
   let copying = false
   // The copy being retried by the user in this unlock (see the header).
   let attempt = null
@@ -242,7 +370,7 @@ function createDmCopy (env) {
     return {
       made: idList(v.made).slice(-MADE_MAX),
       imported: idList(v.imported).slice(-IMPORTED_MAX),
-      todo: (Array.isArray(v.todo) ? v.todo.filter(validTodo) : []).slice(0, TODO_MAX).map((t) => ({ id: t.id, copy: plainDescriptor(t.copy), seen: t.seen, fails: isCount(t.fails) ? Math.min(t.fails, FAILS_MAX) : 0 }))
+      todo: (Array.isArray(v.todo) ? v.todo.filter(validTodo) : []).slice(0, TODO_MAX).map((t) => ({ id: t.id, copy: plainDescriptor(t.copy), seen: t.seen, fails: isCount(t.fails) ? Math.min(t.fails, FAILS_MAX) : 0, horizons: horizonsOf(t.horizons) }))
     }
   }
 
@@ -312,10 +440,20 @@ function createDmCopy (env) {
     }
   }
 
-  // Text parts and the manifest must go, so the daily wallet backs them.
-  async function stampRequired (sealed, keyPair, source) {
+  // Text parts and the manifest must go: the stamps reserved for them before
+  // any photo, then the copy source for a shortfall, and only what neither
+  // covers (an older seeder, no answer, an allowance spent by an earlier
+  // copy this week) is paid from the daily wallet.
+  async function stampRequired (sealed, keyPair, held, source) {
+    const own = {
+      async take (n) {
+        if (held.length >= n) return held.splice(0, n)
+        const more = await source.take(n - held.length)
+        return held.splice(0).concat(more)
+      }
+    }
     try {
-      await blobs.stamp(sealed, keyPair, source)
+      await blobs.stamp(sealed, keyPair, own)
       return
     } catch (err) {
       if (!(err instanceof UsageError)) throw err
@@ -362,7 +500,7 @@ function createDmCopy (env) {
 
   async function run (keyPair, gen) {
     if (attempt === null || attempt.gen !== gen) {
-      attempt = { gen, id: dm.newMessageId(), at: nowIso(), photos: new Map(), stores: null, counts: null, manifest: null, pointer: null }
+      attempt = { gen, id: dm.newMessageId(), at: nowIso(), photos: new Map(), stores: null, counts: null, manifest: null, pointer: null, held: null }
     }
     const a = attempt
     const source = blobs.copySource(keyPair)
@@ -380,7 +518,12 @@ function createDmCopy (env) {
         snaps.push({ ...h, snap: cutSnap(h.ctx.local.snapshot()), seenTokens: new Set(await store.readDmSeen(storage, h.ctx.prefix)) })
       }
       if (snaps.every((h) => h.snap.messages.length + h.snap.ops.length + h.snap.reactions.length === 0)) throw new UsageError(NOTHING)
-      checkLimits(snaps.map((h) => itemsOfStore(h, new Map()).rows))
+      const rowSets = snaps.map((h) => itemsOfStore(h, new Map()).rows)
+      checkLimits(rowSets, limits)
+      // The text goes first: its stamps are taken from the weekly copy
+      // allowance before any photo can spend it, and kept in the attempt so a
+      // retry reuses them instead of buying again.
+      if (a.held === null) a.held = await source.reserve(stampsNeeded(rowSets))
 
       // The photos of the own store, newest first.
       const cands = []
@@ -449,8 +592,11 @@ function createDmCopy (env) {
         env.emit('dm.copyProgress', { done, total })
       }
       checkGen(gen)
-      a.stores = buildStores(snaps, a.photos)
-      if (a.stores.some((s) => s.parts.length > PARTS_MAX)) throw new UsageError(TOO_BIG)
+      // Checked before it is kept: a retry after a refusal here must not
+      // find stores to upload and no counts.
+      const stores = buildStores(snaps, a.photos)
+      if (stores.some((s) => s.parts.length > limits.parts)) throw new UsageError(TOO_BIG)
+      a.stores = stores
       a.counts = { photos, notCached, leftOut }
     }
     const total = a.total
@@ -462,7 +608,7 @@ function createDmCopy (env) {
       for (const part of s.parts) {
         checkGen(gen)
         if (part.desc !== null) continue
-        await stampRequired(part.sealed, keyPair, source)
+        await stampRequired(part.sealed, keyPair, a.held, source)
         await putBlob(part.sealed)
         part.desc = plainDescriptor(part.sealed.descriptor)
         part.sealed = null
@@ -479,7 +625,7 @@ function createDmCopy (env) {
     }
     if (a.manifest.desc === null) {
       checkGen(gen)
-      await stampRequired(a.manifest.sealed, keyPair, source)
+      await stampRequired(a.manifest.sealed, keyPair, a.held, source)
       await putBlob(a.manifest.sealed)
       a.manifest.desc = plainDescriptor(a.manifest.sealed.descriptor)
       a.manifest.sealed = null
@@ -572,7 +718,7 @@ function createDmCopy (env) {
         if (!HEX32.test(p.id) || !blobCore.validateBlobDescriptor(p.copy)) continue
         if (s.made.includes(p.id) || s.imported.includes(p.id) || s.todo.some((t) => t.id === p.id)) continue
         if (s.todo.length >= TODO_MAX) s.todo.shift()
-        s.todo.push({ id: p.id, copy: plainDescriptor(p.copy), seen: Date.now(), fails: 0 })
+        s.todo.push({ id: p.id, copy: plainDescriptor(p.copy), seen: Date.now(), fails: 0, horizons: {} })
       }
     })
   }
@@ -614,80 +760,6 @@ function createDmCopy (env) {
     return true
   }
 
-  // The filing time everything imported goes below: older than every row
-  // the store held, like the Página legacy bundle's (./dm.js legacyHorizon).
-  function horizonOf (lc, snap) {
-    const { messages, ops, reactions } = snap
-    let min = lc.nextFiled()
-    for (const r of [...messages, ...ops, ...reactions]) if (Number.isFinite(r.filedAt) && r.filedAt < min) min = r.filedAt
-    return min
-  }
-
-  // Files the rows of one store -> { messages, ops, reactions, skipped,
-  // fresh } (fresh: the message rows filed now whose photos travelled).
-  async function fileRows (ctx, self, rawRows, blocked) {
-    const lc = ctx.local
-    const items = []
-    const taken = new Set()
-    let skipped = 0
-    for (const r of rawRows) {
-      const c = cleanRow(r, self, blocked)
-      if (c === null || taken.has(c.n)) {
-        skipped++
-        continue
-      }
-      taken.add(c.n)
-      items.push(c)
-    }
-    items.sort((x, y) => x.n - y.n)
-    // One scan of the store, then sets: a lookup per row (lc.hasMessage and
-    // its kin scan every row) would take quadratic time on a large store.
-    const snap = lc.snapshot()
-    const haveMsg = new Set(snap.messages.map((m) => m.from + '\n' + m.id))
-    const haveOp = new Set(snap.ops.map((o) => o.id))
-    const haveRx = new Set(snap.reactions.map((x) => x.from + '\n' + x.id))
-    const horizon = horizonOf(lc, snap)
-    const out = []
-    const keys = new Set()
-    const seenIds = []
-    const fresh = []
-    let messages = 0
-    let ops = 0
-    let reactions = 0
-    for (let pos = 0; pos < items.length; pos++) {
-      const { row, seen, c } = items[pos]
-      const filedAt = horizon - items.length + pos
-      const k = row.t + '\n' + (row.from || '') + '\n' + row.id
-      if (keys.has(k)) continue
-      keys.add(k)
-      if (row.t === 'msg') {
-        if (haveMsg.has(row.from + '\n' + row.id)) continue
-        haveMsg.add(row.from + '\n' + row.id)
-        messages++
-        if (seen && !row.mine) seenIds.push(lc.seenToken(dmFold.seenKey(row.from, row.id)))
-        if (c && itemsOf(row).length > 0) fresh.push({ ...row, filedAt })
-      } else if (row.t === 'ctl') {
-        if (haveOp.has(row.id)) continue
-        haveOp.add(row.id)
-        ops++
-      } else {
-        if (haveRx.has(row.from + '\n' + row.id)) continue
-        haveRx.add(row.from + '\n' + row.id)
-        reactions++
-      }
-      out.push({ ...row, filedAt })
-    }
-    for (let i = 0; i < out.length; i += CHUNK_ROWS) await lc.append(out.slice(i, i + CHUNK_ROWS))
-    if (seenIds.length > 0) {
-      // First in the list (newest last, the cap drops the front): about
-      // 5000 imported marks never evict the device's own recent ones.
-      const existing = await store.readDmSeen(storage, ctx.prefix)
-      const have = new Set(existing)
-      await store.writeDmSeen(storage, [...seenIds.filter((id) => !have.has(id)), ...existing], ctx.prefix)
-    }
-    return { messages, ops, reactions, skipped, fresh }
-  }
-
   // Newest first, within the prefetch budget, never for a conversation in
   // the request folder.
   async function prefetch (own, fresh) {
@@ -713,7 +785,7 @@ function createDmCopy (env) {
     const sealed = await store.readCopyPiece(storage, k, 'meta')
     const v = sealed === null ? null : local.open(sealed)
     if (v === null || typeof v !== 'object' || typeof v.id !== 'string' || !HEX32.test(v.id) || typeof v.page !== 'string' || !HEX64.test(v.page) || !Number.isSafeInteger(v.seen)) return null
-    return { id: v.id, page: v.page, seen: v.seen }
+    return { id: v.id, page: v.page, seen: v.seen, horizon: isCount(v.horizon) ? v.horizon : null }
   }
 
   async function hold (id, page, rows) {
@@ -788,7 +860,14 @@ function createDmCopy (env) {
       } catch {
         continue
       }
-      const f = await fileRows(ctx, meta.page, rows, mod.association)
+      const pin = {
+        get: () => meta.horizon,
+        set: async (h) => {
+          meta.horizon = h
+          await store.writeCopyPiece(storage, e.k, 'meta', local.seal({ id: meta.id, page: meta.page, seen: meta.seen, horizon: h }))
+        }
+      }
+      const f = await fileRows(ctx, storage, meta.page, rows, mod.association, { pin })
       await store.deleteCopyPendEntry(storage, e.k)
       messages += f.messages
       if (f.messages + f.ops + f.reactions > 0) {
@@ -839,7 +918,20 @@ function createDmCopy (env) {
         await hold(t.id, b.page, b.rows)
         continue
       }
-      const f = await fileRows(ctx, b.page === null ? own : b.page, b.rows, b.page === null ? mod.blocked : mod.association)
+      const key = b.page === null ? 'own' : b.page
+      // Written to the todo before the first chunk, so a retry after an
+      // interruption files the rest at the positions it would have had.
+      const pin = {
+        get: () => (isCount(t.horizons[key]) ? t.horizons[key] : null),
+        set: async (h) => {
+          t.horizons[key] = h
+          await updateState((st) => {
+            const x = st.todo.find((y) => y.id === t.id)
+            if (x !== undefined) x.horizons[key] = h
+          })
+        }
+      }
+      const f = await fileRows(ctx, storage, b.page === null ? own : b.page, b.rows, b.page === null ? mod.blocked : mod.association, { pin })
       messages += f.messages
       filed += f.messages + f.ops + f.reactions
       if (f.messages + f.ops + f.reactions > 0) env.emit('dm.changed', b.page === null ? { added: f.messages } : { added: f.messages, page: b.page })
@@ -854,6 +946,10 @@ function createDmCopy (env) {
   // One job at a time: a call while one runs joins it, and the running job
   // goes over the todo once more when it ends, so a pointer noted meanwhile
   // is not left for a later pull. The caller does not have to wait for it.
+  // Only the first pass of a job (the one the pull that started it asked for)
+  // counts a failure against a todo: the passes that overlapping pulls add
+  // are re-reads of the same moment, so a seeder that answers 404 for a few
+  // seconds cannot use up the three failures a copy has.
   function importAll (own) {
     if (importing !== null) {
       again = true
@@ -861,9 +957,11 @@ function createDmCopy (env) {
     }
     const job = (async () => {
       try {
+        let counts = true
         do {
           again = false
-          await importPass(own)
+          await importPass(own, counts)
+          counts = false
         } while (again && env.unlocked())
       } finally {
         importing = null
@@ -874,7 +972,7 @@ function createDmCopy (env) {
     return job
   }
 
-  async function importPass (own) {
+  async function importPass (own, counts) {
     const gen = env.generation()
     if (env.blobOrigin === null) return
     let total = 0
@@ -904,7 +1002,7 @@ function createDmCopy (env) {
             await updateState((st) => {
               const x = st.todo.find((y) => y.id === t.id)
               if (x === undefined) return
-              x.fails = Math.min(x.fails + 1, FAILS_MAX)
+              if (counts) x.fails = Math.min(x.fails + 1, FAILS_MAX)
               if (x.fails >= FAILS_MAX) {
                 st.todo = st.todo.filter((y) => y.id !== t.id)
                 if (!st.imported.includes(t.id)) st.imported.push(t.id)
@@ -949,4 +1047,4 @@ function createDmCopy (env) {
   }
 }
 
-module.exports = { createDmCopy, cleanRow, checkLimits, manifestBytes, LIMITS, COPY_BUSY, NOTHING, COPY_FAILED, TOO_BIG, PART_BYTES }
+module.exports = { createDmCopy, cleanRow, checkLimits, fileRows, stampsNeeded, manifestBytes, LIMITS, COPY_BUSY, NOTHING, COPY_FAILED, TOO_BIG, PART_BYTES }

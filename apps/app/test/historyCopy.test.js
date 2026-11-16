@@ -41,7 +41,7 @@ test('progress and the import notice read plainly', async (t) => {
   t.is(progressText({ done: 9, total: 5 }), 'Copiando: 5 de 5')
   t.is(progressText(null), COPY_STARTING)
   t.is(progressText({ done: 0, total: 0 }), COPY_STARTING)
-  t.is(importedText({ messages: 1 }), '1 mensagem chegou de outro aparelho seu. Elas aparecem abaixo das mais recentes.')
+  t.is(importedText({ messages: 1 }), '1 mensagem chegou de outro aparelho seu. Elas aparecem na data em que foram enviadas.')
   t.ok(importedText({ messages: 4 }).startsWith('4 mensagens chegaram'))
   t.ok(importedText({ messages: 0 }).includes('em dia'))
 })

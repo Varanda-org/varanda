@@ -520,7 +520,8 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
   // put in the wallet, so a copy never spends the daily blob allowance nor
   // the reverse. take(n) resolves n stamps, or throws once the allowance is
   // gone, the seeder cannot be reached (an old seeder never answers the
-  // kind) or answers badly. `exhausted` says the weekly allowance ended.
+  // kind) or answers badly. reserve(n) is take that gives what it got instead
+  // of throwing. `exhausted` says the weekly allowance ended.
   // Nothing here repeats a request: a batch that fails is a normal error
   // and only the user's next copy asks again.
   function copySource (keyPair, { batch = L.copyBatch } = {}) {
@@ -554,6 +555,18 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
         const out = stock.slice(0, n)
         stock = stock.slice(n)
         return out
+      },
+      // Up to n stamps for the caller to hold: fewer, down to none, when the
+      // allowance ends or a purchase fails (whatever was bought is handed
+      // over, and the source stays ended as take leaves it). Never throws.
+      async reserve (n) {
+        try {
+          return await source.take(n)
+        } catch {
+          const out = stock
+          stock = []
+          return out
+        }
       }
     }
     return source

@@ -59,7 +59,7 @@ export function resultLines (result) {
 export function importedText (imported) {
   const n = imported && isCount(imported.messages) ? imported.messages : 0
   if (n === 0) return 'As conversas deste aparelho já estavam em dia.'
-  return plural(n, 'mensagem chegou', 'mensagens chegaram') + ' de outro aparelho seu. Elas aparecem abaixo das mais recentes.'
+  return plural(n, 'mensagem chegou', 'mensagens chegaram') + ' de outro aparelho seu. Elas aparecem na data em que foram enviadas.'
 }
 
 const IDLE = Object.freeze({ progress: null, imported: null })
