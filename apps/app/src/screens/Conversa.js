@@ -687,6 +687,7 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       // Before ...extra, so a link a caller passes (an offer's) keeps winning.
       link,
       publishable,
+      onNotice: has('onNotice') ? (notice) => live.handlers.onNotice(notice) : undefined,
       ...extra
     }
   }
@@ -1492,7 +1493,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       dropDeleted.current(t.ref, true)
     }
   })
-  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
+  const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage, onNotice: onToast }
   const props = (item, extra, rowKey) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra, cache: rowKey === undefined ? undefined : rowCache, rowKey })
   // Before the offline return: hooks run on every render.
   const shownRodas = useMemo(() => new Map([...rodas].map(([key, roda]) => [key, rodaOrder(roda.replies, key)])), [rodas])

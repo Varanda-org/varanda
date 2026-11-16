@@ -70,6 +70,8 @@ import { embedOf, sameMusicPage } from '../musicEmbed'
 import { musicRefOf } from '../music'
 import { moreActions, repostActions, shareLink } from '../postActions'
 import { usePostPublic } from '../postPublicContext'
+import { useSaved } from '../savedProvider'
+import { canSavePost, saveNotice, unsaveNotice } from '../savedView'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
@@ -341,10 +343,13 @@ function PostRowView ({
   const hosted = useHosted()
   const messageable = fn(onMessage) && hosted === true && Number.isSafeInteger(seq) && seq > 0
   const postPublic = usePostPublic()
+  const saved = useSaved()
+  const savable = saved.available && canSavePost({ hosted, author: typeof author === 'string' ? author.toLowerCase() : null, seq })
+  const isSaved = savable && saved.has(author.toLowerCase(), seq)
   const publicRow = publishable === true && postPublic.enabled === true && fn(postPublic.open) && Number.isSafeInteger(seq) && seq > 0
   const moreRows = [
     ...(messageable ? [{ id: 'message', icon: 'mensagem', label: 'Mensagem em particular' }] : []),
-    ...moreActions(null, { link, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
+    ...moreActions(savable ? { author, seq, repostedBy } : null, { link, canSave: savable, saved: isSaved, onReport: fn(onReport) ? true : null, onBlock: fn(onBlock) ? true : null }),
     ...(publicRow ? [{ id: 'public', icon: 'link', label: 'Página pública na web' }] : []),
     ...(fn(onOpenQuotes) && quotes !== null && quotes > 0 ? [{ id: 'quotes', icon: 'citar', label: quotes === 1 ? 'Ver 1 citação' : 'Ver ' + quotes + ' citações' }] : []),
     ...(fn(onDelete) ? [{ id: 'delete', icon: 'lixeira', label: 'Apagar', danger: true }] : [])
@@ -354,6 +359,13 @@ function PostRowView ({
       return async () => {
         const ok = await copyText(shareNav(), href)
         if (fn(onNotice)) onNotice(ok ? 'Link copiado' : 'Não foi possível copiar o link')
+      }
+    }
+    if (row.id === 'save' || row.id === 'unsave') {
+      return async () => {
+        const key = author.toLowerCase()
+        const note = row.id === 'save' ? saveNotice(await saved.save(key, seq)) : unsaveNotice(await saved.unsave(key, seq))
+        if (fn(onNotice)) onNotice(note)
       }
     }
     if (row.id === 'message') return () => onMessage(author, { context: { author, seq, at, text, hasMedia } })
