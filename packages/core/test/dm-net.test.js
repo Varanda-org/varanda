@@ -264,6 +264,72 @@ test('a second request while one is unanswered is bad', async (t) => {
   await t.exception(first, /closed/)
 })
 
+for (const kind of ['put', 'page']) {
+  const ask = (h) => kind === 'put' ? h.put(fakeDrop()) : h.requestPage({ after: 0, limit: 1 })
+
+  test('one ' + kind + ' in flight per socket: a reopened channel waits, a late result never answers it', async (t) => {
+    const { a, b } = streams(t)
+    const pool = fakePool()
+    let calls = 0
+    let release
+    const held = (fn) => (arg) => {
+      calls++
+      if (calls === 1) return new Promise((resolve) => { release = () => resolve(fn(arg)) })
+      return fn(arg)
+    }
+    const hs = attachDm(a, { role: 'seeder', put: held(pool.put), page: held(pool.page) })
+    const first = attachDm(b, { role: 'member' })
+    const pending = ask(first)
+    await until(() => calls === 1, { name: 'first request running' })
+    first.close()
+    await t.exception(pending, /closed/)
+
+    const second = attachDm(b, { role: 'member', requestTimeoutMs: 1000 })
+    t.is(await second.supported, true)
+    let settled = null
+    const during = ask(second).then((v) => { settled = v }, (e) => { settled = e })
+    await until(() => hs.badMessages === 1, { name: 'second request refused' })
+    t.is(calls, 1, 'the second request is not run while the first is held')
+
+    release()
+    await delay(100)
+    t.is(settled, null, 'the first result never answers the new channel')
+    await during
+    t.ok(settled instanceof Error && /timed out/.test(settled.message))
+
+    const third = attachDm(b, { role: 'member' })
+    t.ok(await ask(third), 'the lock is released once the first request settles')
+    t.is(calls, 2)
+  })
+
+  test('a ' + kind + ' that throws after a reopen closes only its own channel', async (t) => {
+    const { a, b } = streams(t)
+    const pool = fakePool()
+    let calls = 0
+    let fail
+    const logged = []
+    const held = (fn) => (arg) => {
+      calls++
+      if (calls === 1) return new Promise((resolve, reject) => { fail = reject })
+      return fn(arg)
+    }
+    attachDm(a, { role: 'seeder', put: held(pool.put), page: held(pool.page), log: (e) => logged.push(e) })
+    const first = attachDm(b, { role: 'member' })
+    const pending = ask(first)
+    await until(() => calls === 1, { name: 'first request running' })
+    first.close()
+    await t.exception(pending, /closed/)
+
+    const second = attachDm(b, { role: 'member' })
+    t.is(await second.supported, true)
+    fail(new Error('disk'))
+    await delay(100)
+    t.alike(logged, [{ event: 'dm-' + kind + '-failed', reason: 'erro' }])
+    t.ok(await ask(second), 'the newer channel stays open')
+    t.is(calls, 2)
+  })
+}
+
 test('pages over the page rate drop the peer; puts over their budget are answered ritmo', async (t) => {
   const { a, b } = streams(t)
   const pool = fakePool()
