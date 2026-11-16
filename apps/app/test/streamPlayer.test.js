@@ -713,6 +713,49 @@ test('B native: seek resolves only at the target, after a newer seek or release 
   }
 })
 
+test('B2 native: a seek landing between status updates resolves within 50 ms', async (t) => {
+  const n = await native()
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  const held = new Map()
+  let next = 0
+  globalThis.setInterval = (fn, ms, ...args) => {
+    if (ms !== 50) return realSetInterval(fn, ms, ...args)
+    const id = { held: ++next, ms }
+    held.set(id, fn)
+    return id
+  }
+  globalThis.clearInterval = (id) => {
+    if (id && typeof id === 'object' && 'held' in id) held.delete(id)
+    else realClearInterval(id)
+  }
+  try {
+    const box = resetNative()
+    const player = n.createStreamPlayer(BASE + PATH, { origin: BASE })
+    let resolved = false
+    const p = player.seek(12000).then(() => { resolved = true })
+    await settle()
+    // The seek's poll is the one interval at 50 ms.
+    const [poll] = [...held.values()]
+    t.is(held.size, 1, 'one 50 ms poll while the seek is pending')
+    poll()
+    t.absent(resolved, 'the position is not there yet')
+    // The position lands between status updates; no status update arrives.
+    box.isLoaded = true
+    box.time = 12
+    // 50 ms of fake time later, the poll fires and confirms the seek.
+    poll()
+    await p
+    t.ok(resolved, 'resolved at the first poll')
+    t.absent(box.log.includes('play'), 'seek never plays')
+    t.is(held.size, 0, 'the poll is cleared once the seek resolves')
+    player.release()
+  } finally {
+    globalThis.setInterval = realSetInterval
+    globalThis.clearInterval = realClearInterval
+  }
+})
+
 test('C web: a repeated seek while the element is seeking waits for seeked', async (t) => {
   const w = await web()
   installFakeAudio()
