@@ -26,7 +26,7 @@ const {
   MAX_TEXT, MAX_BLOCK_BYTES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY,
   MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY,
   nowIso, isHex64, isCanonicalIso, isPlainObject, hasExactKeys, hasControlChars,
-  charLength, plainCopy, validRecordCopy, validDescriptor
+  charLength, plainCopy, validRecordCopyOfType, validDescriptor
 } = require('./records')
 const { openRecord, wipe, keyTag, keyCommit, MAX_KEY_RECIPIENTS, MAX_SEALED_INNER_BYTES } = require('./group-crypto')
 const { validGroupMedia, copyGroupMedia, copyGroupItem, validPrivateItem } = require('./group-media')
@@ -588,7 +588,7 @@ function groupJoins (entries) {
   const latest = new Map()
   try {
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-join')
       if (copy === null || copy.type !== 'group-join') return
       const prev = latest.get(copy.writer)
       if (!prev || seq > prev.seq) latest.set(copy.writer, { group: copy.group, writer: copy.writer, on: copy.on, seq, at: copy.at })
@@ -628,7 +628,7 @@ function groupConfirmHistory (entries, group) {
   const out = []
   try {
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-confirm')
       if (copy === null || copy.type !== 'group-confirm' || copy.group !== group) return
       out.push({ writer: copy.writer, seq: copy.seq, digest: copy.digest, dseq: seq })
     })
@@ -647,7 +647,7 @@ function groupCutHistory (entries, group) {
     eachEntry(entries, (seq, record) => {
       if (seq !== next) gap = true
       next = seq + 1
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-cut')
       if (copy === null || copy.type !== 'group-cut' || copy.group !== group) return
       out.push({ writer: copy.writer, cut: copy.cut, seq })
     })
@@ -662,7 +662,7 @@ function groupJoinHistory (entries, group) {
   const out = []
   try {
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-join')
       if (copy === null || copy.type !== 'group-join' || copy.group !== group) return
       out.push({ writer: copy.writer, on: copy.on, seq, rejoin: copy.rejoin === undefined ? null : copy.rejoin })
     })
@@ -682,7 +682,7 @@ function diaryGroupKeys (entries, max = MAX_GROUPS_PER_DIARY) {
     // groupFirst: a later leave does not free the writer's slot.
     const first = new Map()
     eachEntry(entries, (seq, record) => {
-      const copy = validRecordCopy(record, seq)
+      const copy = validRecordCopyOfType(record, seq, 'group-join')
       if (copy === null || copy.type !== 'group-join' || copy.on !== true) return
       let writers = first.get(copy.group)
       if (writers === undefined) {
