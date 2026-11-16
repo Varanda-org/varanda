@@ -672,6 +672,37 @@ test('a write handler pushes while the seeder has not confirmed the local length
   t.is(later[0].lines[0], 'sincronizando antes de publicar')
 })
 
+test('dm.enable pushes a dm-key appended in an earlier session whose push the seeder never confirmed', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const prf = crypto.randomBytes(32)
+  // The gate off: the append is never pushed, as after a push that failed.
+  const first = await webNode(t, assoc, seeder.url)
+  await first.node.setKeyPair(first.keyPair, { prf })
+  const enabled = await first.web.request('dm.enable')
+  t.ok(enabled.seq !== null, 'the key is appended')
+  t.alike(await store.readDmKey(first.storage), { v: 1, gen: enabled.gen, push: enabled.seq + 1 }, 'marked as not pushed')
+  first.storage.close = async () => {}
+  await first.node.close()
+
+  const { node, web, storage } = await webNode(t, assoc, seeder.url, {}, { storage: first.storage, keyPair: first.keyPair, write: false, writeGate: true })
+  await node.setKeyPair(first.keyPair, { prf })
+  const from = web.events.length
+  t.alike(await web.request('dm.enable'), { ...enabled, seq: null }, 'the key is current: nothing appended')
+  const runs = await runsSince(web, from)
+  t.is(runs.length, 1, 'one push run on a fresh start')
+  t.is(runs[0].lines[0], 'enviando ao semeador')
+  t.is(runs[0].stopped.reason, 'done')
+  t.is(runs[0].stopped.result.seederConfirmed, true, 'the seeder confirmed the local length')
+  t.alike(await store.readDmKey(storage), { v: 1, gen: enabled.gen }, 'the mark is cleared')
+
+  const again = web.events.length
+  t.alike(await web.request('dm.enable'), { ...enabled, seq: null })
+  t.is((await runsSince(web, again)).length, 0, 'confirmed: no push any more')
+})
+
 // A certified member on a fresh storage following `count` stored replicas
 // (block 0 and a post each), in kv order; the ones at `bad` carry a
 // certificate of another association.
