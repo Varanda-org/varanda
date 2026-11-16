@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 71)
+  t.is(LEGAL_VERSION, 72)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 71, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 72, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd6ce3e639cb6332038edbdba1b2f56416cebbca331934f622e7d820b76fddd04', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ff3469502cc9d7dc7544958fee6bf6d65c7b0384203ece320b30f242d81be287', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -872,4 +872,18 @@ test('legal: version 71 shares the Sorte do dia and the acceptance across device
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
   t.ok(text(PRIVACY).includes('O serviço só responde para conta vinculada, e responde só a versão e a data desse aceite.'), 'signed check answers only version and date')
   t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
+})
+
+test('legal: version 72 describes connected devices and the periodic key change', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(doc.sections.some(({ heading }) => heading === 'Aparelhos conectados'), 'a section for it')
+    t.ok(text(doc).includes('a cada 7 dias ou a cada 1000 mensagens'), 'the periodic key change')
+    t.ok(text(doc).includes('"Aparelhos conectados"'), 'names the screen')
+    t.absent(text(doc).includes('\u2014'), 'no em dash')
+  }
+  t.ok(text(PRIVACY).includes('O nome vai cifrado com uma chave da sua passkey, e só os aparelhos da conta conseguem lê-lo.'), 'the name is encrypted')
+  t.ok(text(PRIVACY).includes('vê só o número aleatório'), 'holders see only the random id')
+  t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
 })
