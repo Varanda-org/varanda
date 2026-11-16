@@ -427,6 +427,42 @@ test('a pending new device of an admitted diary is never an entitled recipient',
   t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2))
 })
 
+// The fold's `cuts` as entries, or null when the result has none.
+const cutsOf = (r) => r.cuts instanceof Map ? [...r.cuts] : null
+
+test('a writer its own diary cut is never entitled: the group rotates as after a removal (#350)', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  const cut = w.len(wX)
+  sealedPost(w, wX, E2, 9)
+  const marks = new Map([[X, [{ writer: wX, cut, seq: 1 }]]])
+  let g = buildGroup(w.input(w.reader(wX2)))
+  t.is(kidOf(g.epoch), kidOf(E2), 'control: E2 is eligible')
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p9'])
+
+  g = buildGroup(w.input(w.reader(wX2), { marks }))
+  t.alike(g.entitled, [G, wA, wX2, wY].sort(), 'the cut writer is not entitled')
+  t.alike(cutsOf(g), [[wX, cut]])
+  t.is(g.epoch, null, 'an epoch sealed to it is no longer eligible')
+  t.is(g.rekeyPending, true, 'a rotation is needed')
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'its sealed post past the cut does not count')
+  t.is(buildGroup(w.input(w.reader(wX), { marks })).rekeyPending, true, 'the cut device reads as pending too')
+
+  const E3 = w.rotate(G, [G, wA, wX2, wY], { at: 10 })
+  sealedPost(w, wX2, E3, 11)
+  g = buildGroup(w.input(w.reader(wX2), { marks }))
+  t.is(kidOf(g.epoch), kidOf(E3), 'a rotation that leaves it out is eligible')
+  t.is(g.rekeyPending, false)
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p11'], 'the others read the group again')
+  const lost = buildGroup(w.input(w.reader(wX), { marks }))
+  t.absent(lost.posts.some((p) => p.text === 'p11'), 'the cut device cannot open the new epoch')
+  t.ok(lost.sealed >= 1)
+  t.alike(buildGroup(w.input(w.reader(wX2), { marks: new Map([[Y, [{ writer: wX, cut: 1, seq: 1 }]]]) })).entitled, [G, wA, wX, wX2, wY].sort(), 'a mark in another diary changes nothing')
+})
+
 test('a community admin receives keys and distributes through auth; a demotion in C ends it, history stays', (t) => {
   const w = cworld()
   const E1 = w.rotate(G, [G, wA, wX], { at: 3 })

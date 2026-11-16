@@ -658,6 +658,21 @@ function groupCutHistory (entries, group) {
   return out
 }
 
+// The lowest cut `diary` marks on its own writer `writer` (groupCutHistory
+// items), or Infinity. A gap entry is ignored: unlike the creator's root
+// rule, a hole in a reader's copy of the diary only delays a mark on another
+// writer until it fills, and treating it as a cut would let any hole silence
+// every device of the diary.
+function diaryCut (marks, diary, writer) {
+  const list = marks instanceof Map ? marks.get(diary) : null
+  let cut = Infinity
+  if (!Array.isArray(list)) return cut
+  for (const m of list) {
+    if (isPlainObject(m) && m.gap !== true && m.writer === writer && Number.isSafeInteger(m.cut) && m.cut >= 0) cut = Math.min(cut, m.cut)
+  }
+  return cut
+}
+
 function groupJoinHistory (entries, group) {
   const out = []
   try {
@@ -1049,6 +1064,7 @@ function emptyGroup () {
     lastLeave: new Map(),
     liveWriters: new Set(),
     authorityWriters: new Set(),
+    cuts: new Map(),
     writers: new Set(),
     sealed: 0,
     epoch: null,
@@ -1524,9 +1540,15 @@ function bindCores (input, asCommunity) {
       else invalid.add(key)
       continue
     }
+    // A writer its own diary cut ends there for every later rule: records
+    // from max(cut, 1) on are dropped as if the core stopped, block 0 stays
+    // (owner decision, #350). A community's root is never cut this way.
+    const cut = key === header.community ? Infinity : diaryCut(input.marks, h.diary, key)
+    const records = cut === Infinity ? log.records : log.records.filter((x) => x.seq < Math.max(cut, 1))
     // A CW's generation counts its header's rejoin only when the diary's
     // earliest on-join of it names the same leave (dropStaleLeaves).
-    const c = { key, diary: h.diary, member: h.member, rejoin: h.rejoin, at: h.at, ...splitReacts(log.records) }
+    const c = { key, diary: h.diary, member: h.member, rejoin: h.rejoin, at: h.at, ...splitReacts(records) }
+    if (cut !== Infinity) c.cut = cut
     if (asCommunity) c.joinRejoin = joinRejoin.get(h.diary + ':' + key) || null
     candidates.set(key, c)
   }
@@ -2622,14 +2644,17 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // with authority, so nodes never approximate liveness or power per
   // device. A community counts only members' writers; a group excludes
   // banned diaries and writers, and, under the gate, writers whose CW is
-  // not live in C (the root: rootLive).
+  // not live in C (the root: rootLive). A writer its own diary cut is
+  // neither: nothing it appends counts.
+  const cuts = new Map()
+  for (const l of logs) if (l.cut !== undefined && counted.has(l.key)) cuts.set(l.key, l.cut)
   const liveWriters = new Set()
   const authorityWriters = new Set()
   const endPos = order.length
   for (const l of logs) {
     const w = l.key
     const d = l.diary
-    if (!counted.has(w) || retired.has(w)) continue
+    if (!counted.has(w) || retired.has(w) || cuts.has(w)) continue
     if (isC
       ? members.get(d) !== 'member' || layerNow(bans.get(d), w)
       : members.get(d) === 'banned' || layerNow(bans.get(d), w) || bannedC(d) || (w === G ? !rootLive : cs !== null && !live(w))) continue
@@ -2658,6 +2683,10 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // creating device would read every later post); the creator receives
     // them on its new writer.
     if (w === G && !isC && gRootCut !== Infinity) return false
+    // A writer its own diary cut never receives keys again, whatever the
+    // cut: an epoch sealed to it stops being eligible, so the group rotates
+    // as after a removal (owner decision, #350).
+    if (cuts.has(w)) return false
     if (d === owner && !rootLive) return false
     const list = leavesOf.get(d)
     if (!list) {
@@ -3017,6 +3046,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       admittedCws,
       liveWriters,
       authorityWriters,
+      cuts,
       last,
       writers: counted,
       groups: [...created.keys()].sort(cmp),
@@ -3054,6 +3084,9 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     // The lowest cut the creator's diary marks on the root (`group-cut`),
     // or null: root records at or above it carry no authority.
     rootCut: gRootCut === Infinity ? null : gRootCut,
+    // Each counted writer its own diary cut (`group-cut`) -> the lowest cut:
+    // its records from max(cut, 1) on do not count.
+    cuts,
     // The writers the fold counted (root included when bound): a record in
     // any other core, even one bound by the diary, is not part of the group.
     writers: counted,
@@ -3365,6 +3398,7 @@ function emptyCommunity () {
     admittedCws: new Set(),
     liveWriters: new Set(),
     authorityWriters: new Set(),
+    cuts: new Map(),
     last: null,
     writers: new Set(),
     groups: [],
