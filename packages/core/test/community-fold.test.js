@@ -6,7 +6,7 @@ const {
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, communityMetaCw, communityDrop, groupKey, groupSealed, groupInvites, communityInvites,
-  buildGroup, buildCommunity
+  groupReact, buildGroup, buildCommunity
 } = require('../lib/group')
 const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
 
@@ -1088,6 +1088,79 @@ test('gate: a request never admitted in C neither posts nor acts in its groups',
   go.add(B, wB)
   gpost(go, wB, 5)
   t.alike(shown(buildGroup(go.input())), [wB + ':1'])
+})
+
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('gate: a new CW of an admitted member is admitted, and its group writers count', (t) => {
+  const cwX2 = K(0x41)
+  const wX2 = K(0x4001)
+  const wX3 = K(0x4002)
+  const C = community({ creator: Z, join: 'approval', members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }, { by: Z, group: G2 }] })
+  C.addWriter(X, cwX2)
+  const c = comm(C)
+  t.ok(c.admittedCws.has(cwX2), 'no admit lists it')
+  t.alike(c.requests, [])
+  const g = groupIn(C, { key: G1 })
+  g.add(X, wX).add(X, wX2, { cw: cwX2 })
+  gpost(g, wX2, 5)
+  const r = buildGroup(g.input())
+  t.alike(shown(r), [wX2 + ':1'], 'the second device posts in an open group of C')
+  t.ok(r.liveWriters.has(wX2))
+  const a = groupIn(C, { key: G2, join: 'approval' })
+  a.add(X, wX)
+  a.push(G2, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+  a.add(X, wX3, { cw: cwX2, at: AT(7) })
+  gpost(a, wX3, 8)
+  const ra = buildGroup(a.input())
+  t.alike(shown(ra), [wX3 + ':1'], 'and in an approval group of C that admitted it')
+  t.alike(ra.requests, [])
+  C.push(C.key, communityAdmit({ member: X, on: false, cuts: [{ writer: cwX, seq: 1 }], at: C.at() }))
+  t.absent(comm(C).admittedCws.has(cwX2), 'not once the admission is withdrawn')
+  t.alike(shown(buildGroup(g.input())), [])
+})
+
+test('gate: after leaving C, a G admission covers only writers of the CW generation it lists, whatever the dates', (t) => {
+  const cwX2 = K(0x41)
+  const wX3 = K(0x4011)
+  const wX4 = K(0x4012)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  const a = groupIn(C, { key: G1, join: 'approval' })
+  a.add(X, wX)
+  a.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(60) }))
+  // The leave dated before the admit: no causal link places it.
+  const leave = cwLeave(C, cwX, 1)
+  C.addWriter(X, cwX2, { rejoin: leave })
+  a.add(X, wX3, { cw: cwX2, at: AT(70) })
+  gpost(a, wX3, 71)
+  let r = buildGroup(a.input())
+  t.alike(shown(r), [], 'the admit lists only a writer of the old CW generation')
+  t.ok(r.requests.includes(X), 'the new writer waits for an admit')
+  a.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX3, seq: 1 }], at: AT(80) }))
+  a.add(X, wX4, { cw: cwX2, at: AT(81) })
+  gpost(a, wX4, 82)
+  r = buildGroup(a.input())
+  t.alike(shown(r).sort(), [wX3 + ':1', wX4 + ':1'].sort(), 'an admit listing a writer of the new CW covers its later devices')
+  t.alike(r.requests, [])
+  // A G writer on the retired CW, of the generation the first admit lists.
+  const wX5 = K(0x4013)
+  a.add(X, wX5, { cw: cwX, at: AT(90) })
+  gpost(a, wX5, 91)
+  r = buildGroup(a.input())
+  t.absent(shown(r).includes(wX5 + ':1'), 'a writer on a retired CW is never covered')
+  t.absent(r.liveWriters.has(wX5))
+  t.alike(r.requests, [X], 'it stays uncovered, as without automatic cover')
+  // Side records: a device of the new CW that only reacts counts from seq 1;
+  // one on the retired CW never does.
+  const wX6 = K(0x4014)
+  const target = { writer: wX3, seq: 1 }
+  const reactionsOf = (g) => g.posts.find((p) => p.writer === target.writer && p.seq === target.seq).reactions
+  a.add(X, wX6, { cw: cwX2, at: AT(92) })
+  a.push(wX6, groupReact({ target, emoji: '\u{1f44d}', at: AT(93) }))
+  t.alike(reactionsOf(buildGroup(a.input())), [{ emoji: '\u{1f44d}', count: 1, by: [X] }], 'the reaction of a new device that only reacts counts')
+  a.push(wX6, groupReact({ target, emoji: '', at: AT(94) }))
+  a.push(wX5, groupReact({ target, emoji: '\u{1f44d}', at: AT(95) }))
+  t.is(reactionsOf(buildGroup(a.input())), undefined, 'a reaction on the retired CW never counts')
 })
 
 test('no authority after leaving: a departed admin moderation never counts, with or without a G leave', (t) => {
@@ -2598,6 +2671,81 @@ test('group-cut: mark order and arrival give one result, a gap is reported (#350
   const holed = build([{ writer: wX, cut: 3, seq: 1 }, { gap: true }])
   t.alike([...holed.cutUnknown], [X], 'a hole in the diary is reported without cutting')
   t.alike(cutsOf(holed), [[wX, 3]])
+})
+
+// An own-writer cut is final, also for a device the admission covers
+// automatically ("Admits list their writers").
+test('group-cut and automatic admission: a cut device is never covered past its cut, the others stay covered, a hole changes nothing (#350)', (t) => {
+  const wX2 = K(0x4021)
+  const wX3 = K(0x4022)
+  const THUMB = [{ emoji: '\u{1f44d}', count: 1, by: [X] }]
+  const setup = ({ marks = null, extra = null } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(10) }))
+    const target = gpost(g, wX, 11)
+    g.add(X, wX2, { at: AT(12) })
+    gpost(g, wX2, 13)
+    gpost(g, wX2, 14)
+    gpost(g, wX2, 15)
+    g.push(wX2, groupReact({ target, emoji: '\u{1f44d}', at: AT(16) }))
+    gpost(g, wY, 17)
+    if (extra) extra(g, target)
+    const input = g.input()
+    if (marks !== null) input.marks = new Map(marks)
+    return { r: buildGroup(input), target }
+  }
+  const reactionsOf = (r, ref) => r.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq).reactions
+
+  let { r, target } = setup()
+  t.alike(shown(r), [wX + ':1', wX2 + ':1', wX2 + ':2', wX2 + ':3'], 'control: the admission covers the new device')
+  t.alike(reactionsOf(r, target), THUMB)
+  t.ok(r.liveWriters.has(wX2))
+  t.ok(r.requests.includes(Y), 'Y was never admitted')
+
+  // 1. The cut device: nothing from its cut on, whatever is appended or admitted later.
+  const later = (g) => {
+    gpost(g, wX2, 18)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(19) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }, { writer: wX2, seq: 1 }], at: AT(20) }))
+    gpost(g, wX2, 21)
+  }
+  ;({ r, target } = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }]]], extra: later }))
+  t.alike(shown(r), [wX + ':1', wX2 + ':1'], 'the cut device keeps only what is below its cut')
+  t.is(reactionsOf(r, target), undefined, 'its side record past the cut never counts')
+  t.absent(r.liveWriters.has(wX2), 'nothing it appends counts')
+  t.ok(r.liveWriters.has(wX))
+  t.is(r.members.get(X), 'member')
+  for (const cut of [0, 1]) {
+    ;({ r } = setup({ marks: [[X, [{ writer: wX2, cut, seq: 1 }]]], extra: later }))
+    t.alike(shown(r), [wX + ':1'], 'cut ' + cut + ': nothing of the device counts')
+    t.absent(r.liveWriters.has(wX2))
+  }
+
+  // 2. Another device of the same diary cut: a new device stays covered.
+  const newer = (g) => {
+    g.add(X, wX3, { at: AT(18) })
+    gpost(g, wX3, 19)
+  }
+  ;({ r, target } = setup({ marks: [[X, [{ writer: wX, cut: 1, seq: 1 }]]], extra: newer }))
+  t.alike(shown(r), [wX2 + ':1', wX2 + ':2', wX2 + ':3', wX3 + ':1'], 'the cut writer stops; the covered devices go on')
+  t.ok(r.liveWriters.has(wX2))
+  t.ok(r.liveWriters.has(wX3))
+  t.absent(r.liveWriters.has(wX))
+  t.absent(r.requests.includes(X), 'the admission still covers the new device')
+
+  // 3. A hole in the marks: reported, and the cover is what it is without it.
+  const plain = setup({ extra: newer }).r
+  const holed = setup({ marks: [[X, [{ gap: true }]], [Y, [{ gap: true }]]], extra: newer }).r
+  t.alike([...holed.cutUnknown].sort(), [X, Y].sort(), 'both holes are reported')
+  t.alike(shown(holed), shown(plain), 'a hole covers nothing more and hides nothing')
+  t.alike([...holed.liveWriters].sort(), [...plain.liveWriters].sort())
+  t.alike(holed.requests, plain.requests, 'a diary never admitted stays a request')
+  const cutHoled = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }, { gap: true }]]], extra: later }).r
+  const cutOnly = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }]]], extra: later }).r
+  t.alike(shown(cutHoled), shown(cutOnly), 'a hole next to a cut changes nothing')
+  t.alike([...cutHoled.liveWriters].sort(), [...cutOnly.liveWriters].sort())
 })
 
 test('group-cut: a creator mark on its own non-root writer cuts it, root marks keep their meaning (#350)', (t) => {

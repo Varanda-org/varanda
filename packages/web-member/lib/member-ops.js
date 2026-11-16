@@ -5698,9 +5698,12 @@ function autoEnrolStatus (fold, ownHex) {
 // A group writer counts only when its community writer is admitted
 // (admittedCws): a CW waiting for an admin would leave a new group writer
 // that counts only if an admin ever admits it, a slot spent meanwhile. A
-// community this plan enrols first gets a CW the fold admits at once only
-// when it is open or the diary created it. Geral follows the same rule: the
-// upkeep joins it as a group, never through community.join's Geral step.
+// community this plan enrols first is trusted to admit the new CW at once
+// only when it is open or the diary created it; in an approval community
+// the admission of the diary covers it too (#350), but its groups wait for
+// a later run (`community-first` is transient), when the fold shows it.
+// Geral follows the same rule: the upkeep joins it as a group, never
+// through community.join's Geral step.
 function parentAdmits (c, ownHex, planned) {
   const admitted = c.built.admittedCws instanceof Set ? c.built.admittedCws : new Set()
   if (planned) return c.built.join === 'open' || c.built.creator === ownHex
