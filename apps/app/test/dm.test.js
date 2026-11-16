@@ -25,7 +25,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     decline: 'Recusar',
     block: 'Bloquear mensagens',
     unblock: 'Desbloquear mensagens',
-    delete: 'Apagar conversa neste aparelho',
+    delete: 'Apagar conversa',
     report: 'Denunciar',
     reply: 'Responder',
     message: 'Mensagem',

@@ -582,7 +582,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -698,6 +698,7 @@ function samples (f) {
     'dm.pageSend': { page: member, id: 'ab'.repeat(16), signature: 'ab'.repeat(64), expiresAt: 1800000000000 },
     'dm.pageLegacyChunk': { page: member, id: member, index: 0, count: 1, sealed: 'abc' },
     'dm.pageLegacyBlocks': { page: member },
+    'dm.pageForget': { page: member },
     'dm.seen': { peer: member },
     'dm.set': { peer: member, state: 'accepted' },
     'dm.send': { to: member, text: 'Olá!' },
