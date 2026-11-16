@@ -98,7 +98,8 @@ function load (file, extra) {
     },
     react: {
       useEffect () {},
-      useRef (value) { return { current: value } }
+      useRef (value) { return { current: value } },
+      useState (value) { return [value, () => {}] }
     },
     './haptics': { tap (kind) { taps.push(kind) } },
     './ThemeProvider': {
@@ -168,7 +169,7 @@ test('a selected FilterChips chip is an ink fill with a bg-coloured label', (t) 
 })
 
 test('Segmented taps select once when the tab changes and not on a reselect', (t) => {
-  const { exports, taps } = load('Segmented.js')
+  const { exports, taps } = load('Segmented.js', { './segmentedFit': compile(read('segmentedFit.js'), {}) })
   const picked = []
   const options = [
     { id: 'posts', label: 'Publicações' },
