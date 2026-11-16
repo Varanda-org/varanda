@@ -97,7 +97,7 @@ import { MusicEmbedCard } from './MusicEmbedCard'
 import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
 import { tap } from './haptics'
-import { hasMention, MentionText } from './MentionText'
+import { hasHashtag, hasMention, MentionText, useHashtagOpen } from './MentionText'
 import { useHosted } from '../node'
 import { captionWidthNext, headActionsKey, headReserveOf, openedNext, rememberHeadActions, sameSize, seedHeadActions } from '../postRowLayout'
 import { useReduceMotion } from './StackLayer'
@@ -232,6 +232,7 @@ function PostRowView ({
   if (perfOn) usePerfRow((repostedBy ? 'repost:' + String(repostedBy.author) : 'post') + ':' + String(author) + ':' + String(seq))
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const tagsOn = useHashtagOpen(true) !== undefined
   const likes = countOf(counts, 'likes')
   const reposts = countOf(counts, 'reposts')
   const likeText = countLabel(likes)
@@ -548,7 +549,7 @@ function PostRowView ({
   const previewsLabel = 'Comentários. ' + previewLines.map(previewLineText).concat(moreText === '' ? [] : [moreText]).join('. ')
   const openMention = otherPress(onOpenMention)
   const quoteOn = quote && typeof quote === 'object'
-  const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)))
+  const textOut = hasText && numberOfLines === 0 && (hasLink(body) || (!!openMention && hasMention(body)) || (tagsOn && hasHashtag(body)))
   // The screen gives a quote its own handler carrying the quoted author.
   const quoteMention = (quoteOn && otherPress(quote.onOpenMention)) || openMention
   const quoteOut = quoteOn && ((typeof quote.text === 'string' && !!quoteMention && hasMention(quote.text)) || quotePlayerOf(quote) !== null)
@@ -556,7 +557,7 @@ function PostRowView ({
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
     ? textOut
-      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} />
+      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} hashtags />
       : (
         <Pressable
           accessibilityRole={open ? 'link' : 'text'}

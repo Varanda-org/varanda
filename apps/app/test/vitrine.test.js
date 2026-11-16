@@ -191,7 +191,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(new Set(f.conversations.map((c) => c.peer)).size, 8)
   t.is(f.communities.length, 3)
   t.is(f.groups.length, 5)
-  t.is(f.feed.length, 36)
+  t.is(f.feed.length, 40, '36 base posts and 4 topic posts')
   t.is(f.notices.length, 10)
   for (const p of [...f.members, ...f.pages]) {
     t.ok(/^[0-9a-f]{64}$/.test(p.author))
@@ -1598,4 +1598,14 @@ test('post.share, post.shared and post.unshare follow the newest live share', as
   const post = await call('post.create', { text: 'Some daqui a pouco.' })
   await call('post.delete', { to: post.ref })
   for (const method of ['post.shared', 'post.share', 'post.unshare']) await refused(t, request, method, { to: post.ref }, 'USAGE', 'referência inválida')
+})
+
+test('the demo feed shows the hashtag posts, so a tag can be tapped there', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { textSegments } = await import('../src/links.js')
+  const feed = await answer(t, request, 'feed.read', { limit: FEED_LIMIT_MAX })
+  const tagged = feed.items.filter((p) => typeof p.text === 'string' && textSegments(p.text, { hashtags: true }).some((s) => s.tag === 'festajunina'))
+  t.ok(tagged.length >= 2, 'feed.read lists posts with a #festajunina tag segment')
+  t.ok(feed.items.some((p) => p.text === 'Que saudade da festajunina do bairro, com a turma toda reunida.'), 'the bare-word post is in the feed too')
+  t.absent(f.noticePosts.some((p) => typeof p.text === 'string' && p.text.includes('#festajunina')), 'not hidden among the notice posts')
 })

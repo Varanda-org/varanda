@@ -10,6 +10,7 @@
 // ends before, so emoji typed flush against a link no longer hide it.
 
 import rpc from '@varanda/rpc'
+import { findTags } from './hashtags.js'
 
 const { findMentions, displayText } = rpc
 
@@ -302,29 +303,42 @@ export function hasLink (text) {
   return findLinks(text).length > 0
 }
 
-export function textSegments (text, { mentions = false } = {}) {
+export function textSegments (text, { mentions = false, hashtags = false } = {}) {
   try {
     if (typeof text !== 'string' || text === '') return []
-    const spans = findLinks(text).map(({ start, end, href }) => ({ start, end, username: null, href }))
+    const spans = findLinks(text).map(({ start, end, href }) => ({ start, end, username: null, href, tag: null }))
     if (mentions === true) {
       for (const m of findMentions(text)) {
         if (spans.some((s) => m.start < s.end && s.start < m.end)) continue
-        spans.push({ start: m.start, end: m.end, username: m.username, href: null })
+        spans.push({ start: m.start, end: m.end, username: m.username, href: null, tag: null })
       }
-      spans.sort((a, b) => a.start - b.start)
     }
+    if (hashtags === true) {
+      for (const h of findTags(text)) {
+        if (spans.some((s) => h.start < s.end && s.start < h.end)) continue
+        spans.push({ start: h.start, end: h.end, username: null, href: null, tag: h.tag })
+      }
+    }
+    if (mentions === true || hashtags === true) spans.sort((a, b) => a.start - b.start)
     const segments = []
+    // The tag key exists only with the option on, so the default output is unchanged.
+    const make = (t, span) => {
+      const seg = { text: t, username: span ? span.username : null, href: span ? span.href : null }
+      if (hashtags === true) seg.tag = span ? span.tag : null
+      return seg
+    }
     let offset = 0
     for (const span of spans) {
       if (span.start < offset) continue
-      if (span.start > offset) segments.push({ text: text.slice(offset, span.start), username: null, href: null })
-      segments.push({ text: text.slice(span.start, span.end), username: span.username, href: span.href })
+      if (span.start > offset) segments.push(make(text.slice(offset, span.start), null))
+      segments.push(make(text.slice(span.start, span.end), span))
       offset = span.end
     }
-    if (offset < text.length) segments.push({ text: text.slice(offset), username: null, href: null })
+    if (offset < text.length) segments.push(make(text.slice(offset), null))
     return segments
   } catch {
-    return typeof text === 'string' && text !== '' ? [{ text, username: null, href: null }] : []
+    if (typeof text !== 'string' || text === '') return []
+    return [hashtags === true ? { text, username: null, href: null, tag: null } : { text, username: null, href: null }]
   }
 }
 

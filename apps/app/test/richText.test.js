@@ -454,3 +454,55 @@ test('a clipped preview closes styles at its first || and keeps a line break bef
   t.is(plainOf('a\n||Q||', { clipped: true }), 'a\nspoiler')
   t.is(plainOf('||Q||', { clipped: true }), 'spoiler')
 })
+
+test('parseRich: hashtags are off by default and leave the output unchanged', async (t) => {
+  const { parseRich } = await load()
+  const text = 'oi #ceu *forte* #Céu'
+  t.is(JSON.stringify(parseRich(text)), JSON.stringify(parseRich(text, { hashtags: false })))
+  t.alike(brief(parseRich(text)), [[['oi #ceu ', ''], ['forte', 'bold'], [' #Céu', '']]])
+  t.alike(brief(parseRich('oi #ceu')), [[['oi #ceu', '']]])
+})
+
+test('parseRich: with hashtags a tag is one atom span, and a style may wrap it whole', async (t) => {
+  const { parseRich } = await load()
+  t.alike(brief(parseRich('oi #Céu', { hashtags: true })), [[['oi ', ''], ['#Céu', 'atom']]])
+  const blocks = parseRich('*#ceu* e _x_', { hashtags: true })
+  t.alike(brief(blocks)[0].slice(0, 1), [['#ceu', 'bold,atom']])
+  t.is(blocks[0].spans[0].segment.tag, 'ceu')
+})
+
+// One style string per character, so a tag split into its own span compares
+// equal to the same characters inside a plain span.
+function perChar (blocks) {
+  const out = []
+  for (const b of blocks) {
+    if (b.kind === 'code') {
+      out.push('block:' + b.text)
+      continue
+    }
+    for (const s of b.spans) for (const c of s.text) out.push(c + ':' + FLAGS.filter((f) => s[f]).join(','))
+    out.push('|')
+  }
+  return out
+}
+
+test('parseRich: a marker flush against a tag pairs the same with hashtags on or off', async (t) => {
+  const { parseRich } = await load()
+  for (const text of ['||segredo||#tag', '*a*#tag', '`code`#tag', '_x_#tag fim', '~r~#tag']) {
+    t.alike(perChar(parseRich(text, { hashtags: true })), perChar(parseRich(text)), text)
+  }
+  const spoiler = parseRich('||segredo||#tag', { hashtags: true })[0].spans
+  const hidden = spoiler.find((s) => s.text === 'segredo')
+  const tag = spoiler.find((s) => s.text === '#tag')
+  t.ok(hidden && hidden.spoiler, 'the spoiler still hides its text')
+  t.ok(tag && !tag.spoiler, 'and the tag after it is not hidden')
+})
+
+test('parseRich: inline code holds no tag atom', async (t) => {
+  const { parseRich } = await load()
+  const spans = parseRich('veja `#include` e #ceu', { hashtags: true })[0].spans
+  const code = spans.filter((s) => s.code)
+  t.is(code.map((s) => s.text).join(''), '#include')
+  t.ok(code.every((s) => !s.atom), 'the code text is literal')
+  t.ok(spans.some((s) => s.atom && s.segment.tag === 'ceu'), 'a tag outside the code is still one')
+})
