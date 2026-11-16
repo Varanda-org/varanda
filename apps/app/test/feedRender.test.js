@@ -353,3 +353,16 @@ test('ARua forwards the scroll callbacks to both live lists', (t) => {
   t.ok(src.includes('onDeletedPost, onScrollFrame, onUserScroll })'), 'the page feed takes both props')
   t.ok(src.includes('onCreateMoment, onScrollFrame, onUserScroll })'), 'the member feed takes both props')
 })
+
+test('the Espiadinha keeps its rows stable between renders', (t) => {
+  const src = read('screens/Espiadinha.js')
+  t.ok(src.includes('const renderItem = useCallback((info) => renderRef.current(info), [])'), 'renderItem is stable')
+  t.absent(/const renderItem = \(/.test(src), 'no inline arrow renderItem')
+  t.ok(/cache: rowCache, rowKey: peekKey\(item\)/.test(src), 'row props come from the cache')
+  t.ok(src.includes('useRowPropsCache(items, peekKey, { h: handlers, social })'), 'the live box carries the newest handlers')
+  t.ok(src.includes('extraData={extra}') && src.includes('const extra = useMemo('), 'extraData is memoized')
+  t.ok(src.includes('ownKey, offered, hosted }), [now, following, social.social, names.profileOf, ownKey, offered, hosted]'), 'extraData carries offered and hosted')
+  t.absent(/\(\) => follow\(item\.author/.test(src), 'follow is not a new arrow per render')
+  t.ok(src.includes('followRef.current = follow'), 'a tap runs the newest follow')
+  t.ok(src.includes('useVisibleNow(60000)'), 'the clock pauses while the tab is hidden')
+})

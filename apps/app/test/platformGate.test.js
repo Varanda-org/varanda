@@ -58,3 +58,38 @@ test('only src/media/audio.web.js touches MediaRecorder', (t) => {
   const users = files.filter((file) => withoutComments(fs.readFileSync(file, 'utf8')).includes('MediaRecorder'))
   t.alike(users.map((file) => path.relative(SRC, file)), [path.join('media', 'audio.web.js')])
 })
+
+// A phone with the installation is hosted, so it never meets this title; a
+// phone without one is not on the web, and the note must say what is missing.
+test('no shared screen tells a phone "Só na versão web"', (t) => {
+  const files = sources(SCREENS).filter((file) => !/\.(web|native)\.js$/.test(file))
+  t.ok(files.length > 0, 'shared screens are scanned')
+  for (const file of files) {
+    const src = withoutComments(fs.readFileSync(file, 'utf8'))
+    t.absent(src.includes('Só na versão web'), path.relative(SCREENS, file))
+  }
+})
+
+test('no file under src tells a phone "Só na versão web"', (t) => {
+  const src = path.join(__dirname, '../src')
+  const files = sources(src)
+  t.ok(files.length > 0, 'src is scanned')
+  for (const file of files) t.absent(fs.readFileSync(file, 'utf8').includes('Só na versão web'), path.relative(src, file))
+})
+
+test('Comunidades, Comunidade and ComunidadeInfo gate on node.hosted with the words Grupo uses', (t) => {
+  const read = (name) => fs.readFileSync(path.join(SCREENS, name), 'utf8')
+  const grupo = read('Grupo.js')
+  const title = /title='(Comunidades indisponíveis)'/.exec(grupo)
+  const body = /export const WEB_ONLY_TEXT = '([^']*)'/.exec(grupo)
+  t.ok(title && body, 'Grupo states the capability note')
+  const comunidades = read('Comunidades.js')
+  t.ok(comunidades.includes("export const UNAVAILABLE_TITLE = '" + title[1] + "'"), 'same title as Grupo')
+  t.ok(comunidades.includes("export const UNAVAILABLE_MESSAGE = '" + body[1] + "'"), 'same body as Grupo')
+  for (const name of ['Comunidades.js', 'Comunidade.js', 'ComunidadeInfo.js']) {
+    const src = withoutComments(read(name))
+    t.ok(src.includes('title={UNAVAILABLE_TITLE} body={UNAVAILABLE_MESSAGE}'), name + ': shows the shared note')
+    t.ok(/if \(!hosted\) \{[\s\S]{0,160}?<EmptyState[^>]*UNAVAILABLE_TITLE/.test(src), name + ': only when the node is not hosted')
+    t.absent(src.includes('Platform.OS'), name + ': no platform check')
+  }
+})

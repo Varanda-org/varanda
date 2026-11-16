@@ -22,7 +22,7 @@ export function ReactionPicker ({ open, onClose, onPick }) {
     if (typeof onPick === 'function') onPick(emoji)
   }
   return (
-    <Sheet open={open} onClose={onClose} title='Reações'>
+    <Sheet open={open} onClose={onClose} title='Reações' closeLabel='Fechar'>
       <EmojiPicker open={!!open} onPick={pick} />
     </Sheet>
   )
@@ -32,7 +32,7 @@ export function WhoReacted ({ open, onClose, rows }) {
   const styles = useStyles(makeStyles)
   const list = Array.isArray(rows) ? rows : []
   return (
-    <Sheet open={open} onClose={onClose} title='Quem reagiu'>
+    <Sheet open={open} onClose={onClose} title='Quem reagiu' closeLabel='Fechar'>
       <ScrollView style={styles.scroll} contentContainerStyle={styles.list} keyboardShouldPersistTaps='handled'>
         {list.map((row, i) => {
           const emoji = displayText(row && typeof row.emoji === 'string' ? row.emoji : '')

@@ -34,27 +34,27 @@ test('Conversa: the root is the only main post and the thread has two levels', (
 test('Conversa: no tap inside the thread pushes another Conversa', (t) => {
   t.ok(src.includes('const THREAD_ROW = { onOpen: undefined, onOpenParent: undefined, replyToName: null }'))
   t.ok(src.includes('const SEED_ROW = { onOpen: undefined, onOpenParent: undefined }'))
-  const renderer = between('  const renderThreadRow = (row) => {', '  const notes = []')
+  const renderer = between('  renderRef.current = (row) => {', '  const notes = []')
   t.absent(renderer.includes('onOpenThread'), 'no thread row builds an onOpenThread')
-  t.is(renderer.split('props(row.item, THREAD_ROW)').length - 1, 2, 'comments and replies both drop the open taps')
+  t.is(renderer.split('props(row.item, THREAD_ROW, row.key)').length - 1, 2, 'comments and replies both drop the open taps')
   const header = between('  const header = (', '  // The screen pads')
   t.absent(header.includes('onOpenThread'))
   t.is(header.split('props(post, THREAD_ROW)').length - 1, 2, 'the root and the orphan row')
   t.ok(header.includes('props(seed, SEED_ROW)'))
   const rows = src.slice(src.indexOf('export function rowProps'), src.indexOf('export function seedItem'))
-  t.ok(rows.includes('onOpen: hasSeq ? () => onOpenThread({ ref, seed: item }) : undefined,'), 'Membro keeps its row tap')
-  t.ok(rows.includes('onOpen: () => onOpenThread({ ref: qref, seed: q })'), 'a quoted post still opens its own thread')
+  t.ok(rows.includes('onOpen: hasSeq ? () => live.handlers.onOpenThread({ ref, seed: item }) : undefined,'), 'Membro keeps its row tap')
+  t.ok(rows.includes('onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q })'), 'a quoted post still opens its own thread')
   t.ok(rows.indexOf('...extra') > rows.indexOf('onOpenParent:'), 'extra overrides the taps')
 })
 
 test('Conversa: levels, the author tag and the reply quote reach PostRow', (t) => {
-  const renderer = between('  const renderThreadRow = (row) => {', '  const notes = []')
+  const renderer = between('  renderRef.current = (row) => {', '  const notes = []')
   t.ok(src.includes("<PostRow expanded level='post' {...props(post, THREAD_ROW)} />"))
-  t.ok(renderer.includes("<PostRow {...props(row.item, THREAD_ROW)} level='comment' tag={tag} />"))
-  t.ok(renderer.includes("<PostRow {...props(row.item, THREAD_ROW)} level='reply' tag={tag} replyQuote={quoteOf(row)} />"))
+  t.ok(renderer.includes("<PostRow {...props(row.item, THREAD_ROW, row.key)} level='comment' tag={tag} />"))
+  t.ok(renderer.includes("<PostRow {...props(row.item, THREAD_ROW, row.key)} level='reply' tag={tag} replyQuote={quoteOf(row)} />"))
   t.ok(renderer.includes('const tag = row.isAuthor ? AUTHOR_TAG : undefined'))
-  t.ok(src.includes("postAuthor: view.post && status === 'ok' ? view.post.author : null"), 'an orphan top-most message is never tagged as the post author')
-  t.ok(between('  const quoteOf =', '  const renderThreadRow =').includes("onPress: () => scrollRef.current('reply:' + ref)"), 'the quote tap jumps to the answered row')
+  t.ok(src.includes("postAuthor: view.post && view.status === 'ok' ? view.post.author : null"), 'an orphan top-most message is never tagged as the post author')
+  t.ok(between('  const quoteOf =', '  renderRef.current = (row) =>').includes("onPress: () => scrollRef.current('reply:' + ref)"), 'the quote tap jumps to the answered row')
 })
 
 test('Conversa: a seed with replyTo is never drawn expanded', (t) => {
@@ -98,7 +98,23 @@ test('Conversa: full nodes pin ReplyBar and keep the sheet path elsewhere', (t) 
   t.is(src.split('<ReplyBar').length - 1, 1)
   t.ok(src.includes('onClearTarget={() => setReplyTarget(null)}'))
   t.ok(src.includes('onSend={sendReply}'))
-  t.ok(src.includes('renderItem={({ item: row }) => renderThreadRow(row)}'))
+  t.ok(src.includes('renderItem={renderItem}'))
+})
+
+test('Conversa: thread rows are stable across renders', (t) => {
+  t.absent(/renderItem=\{\(/.test(src), 'no inline renderItem')
+  t.ok(src.includes('const renderItem = useCallback(({ item: row }) => renderRef.current(row), [])'), 'one renderItem through a ref')
+  t.ok(src.includes('renderRef.current = (row) => {'), 'the ref holds the newest row renderer')
+  t.ok(src.includes('extraData={extra}') && src.includes('const extra = useMemo(() => ({ eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, profileOf: names.profileOf }), [eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, names.profileOf])') && src.includes('return useMemo(() => ({ state, counts, pending, reset, readOwn, readCounts, setCount, toggle }), [state, counts, pending, reset, readOwn, readCounts, setCount, toggle])'), 'extraData is memoized on what rows read')
+  t.ok(src.includes('const rowCache = useThreadRowCache(rows.map((row) => row.key), { handlers, eng: full ? eng : null })'), 'the list owns a row props cache')
+  t.is(src.split('{...props(row.item, THREAD_ROW, row.key)}').length - 1, 2, 'comment and reply rows take cached props')
+  t.ok(src.includes('const shownRodas = useMemo(() => new Map([...rodas].map(([key, roda]) => [key, rodaOrder(roda.replies, key)])), [rodas])'), 'the roda order is kept while the rodas are')
+  t.ok(src.includes('return cachedRow(cache, rowKey, inputs, latest, build)'), 'rowProps caches through cachedRow')
+  const hooks = src.indexOf('const rowCache = useThreadRowCache(')
+  t.ok(hooks !== -1 && hooks < src.indexOf('if (!full && !sending) {'), 'the list hooks run before the offline return')
+  const screen = src.slice(src.indexOf('export default function Conversa ('), src.indexOf('export function ReplyDock ('))
+  t.absent(screen.includes('useKeyboardOpen()'), 'the keyboard state is not read by the screen')
+  t.ok(/export function ReplyDock \([^)]*\) \{\s*const insets = useSafeAreaInsets\(\)\s*const keyboardOpen = useKeyboardOpen\(\)/.test(src), 'the reply dock owns the keyboard state')
 })
 
 test('Conversa: compose signals match the opened post and wait for the root', (t) => {
@@ -146,7 +162,7 @@ const refOf = (author, seq) => author + ':' + seq
 
 async function localReplies (registerLocalCache = () => {}) {
   const { withOwnReply } = await import('../src/threadRows.js')
-  return handler(src, 'const ownReplyCache =', 'const INITIAL =', '{ ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, forgetOwnReplies, dropOwnReplies, pruneOwnReplies, refsOf, appendComments, topOf }', {
+  return handler(src, 'const ownReplyCache =', 'const INITIAL =', '{ ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, deletionListeners, announceDeleted, forgetOwnReplies, dropOwnReplies, pruneOwnReplies, refsOf, appendComments, topOf }', {
     withOwnReply,
     registerLocalCache,
     refOf
@@ -206,7 +222,7 @@ async function sending (options = {}) {
       return { ref: A + ':8', seq: 8 }
     }
   }
-  const send = handler(src, '  const sendReply = async', '  const shownRodas =', 'sendReply', context)
+  const send = handler(src, '  const sendReply = async', '  const scrollToKey =', 'sendReply', context)
   return { send, state, context }
 }
 
@@ -350,21 +366,22 @@ test('an own reply finishing after a cache wipe cannot recreate the cache', asyn
 test('Conversa bar respects the safe area and consumes compose intent once', (t) => {
   t.ok(src.includes("import { useSafeAreaInsets } from 'react-native-safe-area-context'"))
   t.ok(src.includes('const insets = useSafeAreaInsets()'))
-  t.ok(/<View ref=\{barBox\} collapsable=\{false\} style=\{\[styles.barWrap, \{ paddingBottom: keyboardOpen \? 8 : Math.max\(8, insets.bottom\) \}\]\}>\s*<ReplyBar/.test(src), 'the inset is dropped while the keyboard is open')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>'), 'the inset is dropped while the keyboard is open')
+  t.ok(/<ReplyDock barBox=\{barBox\} style=\{styles.barWrap\}>\s*<ReplyBar/.test(src), 'the bar sits in the dock')
   t.ok(src.includes('barWrap: { backgroundColor: colors.bg, paddingHorizontal: space.md, paddingTop: space.sm }'), 'the page shows around the floating pill')
-  t.ok(src.includes('me={me}') && /export default function Conversa \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
+  t.ok(src.includes('me={me}') && /function ConversaList \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
   t.ok(app.includes('me: tabMe,'), 'App passes the tab profile to screens')
   t.ok(src.includes("onAttach={(draft) => expandReply(draft, undefined, 'photo')}"), 'the photo button expands with attach')
   t.ok(src.includes('nonFocalTarget={replyTarget !== null && !toRoot}'), 'a reply to another row is flagged')
   t.ok(src.includes('onReply(attach ? { ...target, draft, attach } : { ...target, draft })'), 'attach rides only when given')
   t.ok(/targetReply\(composeSignal.target\)\s*if \(typeof onComposeSeen === 'function'\) onComposeSeen\(\)/.test(src))
-  t.ok(app.includes('onComposeSeen={() => setComposeSignal(null)}'))
+  t.ok(app.includes('onComposeSeen={h.handleComposeSeen}') && app.includes('handleComposeSeen: () => setComposeSignal(null)'))
 })
 
 test('Conversa ends the player band at the reply bar', (t) => {
   t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), 'imports the band context')
   t.ok(src.includes('const barBox = useRef(null)'), 'the bar wrapper ref')
-  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[styles.barWrap'), 'the bar wrapper is measured')
+  t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style,') && src.includes('<ReplyDock barBox={barBox} style={styles.barWrap}>'), 'the bar wrapper is measured')
   t.ok(src.includes('<EmbedBandBottom.Provider value={full || sending ? band : null}>'), 'the list gets the band while the bar shows')
   const opens = src.indexOf('<EmbedBandBottom.Provider')
   const list = src.indexOf('<RefreshableList')
@@ -528,7 +545,7 @@ test('Conversa roda failures have their own retry and cannot overwrite send warn
 
 test('Conversa: roda controls are slim text links, not filled pills', (t) => {
   const link = readFileSync(join(__dirname, '../src/ui/BranchLink.js'), 'utf8')
-  const rowsSrc = between('  const renderThreadRow = (row) => {', '  const notes = []')
+  const rowsSrc = between('  renderRef.current = (row) => {', '  const notes = []')
   t.absent(rowsSrc.includes('<Btn'), 'roda controls use no filled buttons')
   t.is(rowsSrc.split('<BranchLink ').length - 1, 3, 'toggle, retry and more use links')
   t.is(rowsSrc.split('expanded={').length - 1, 1, 'only the toggle has expanded state')
@@ -565,7 +582,7 @@ test('Conversa: roda controls are slim text links, not filled pills', (t) => {
 test('Conversa reply quotes keep one object per row while unchanged', (t) => {
   const quotes = { current: new Map() }
   const jumps = []
-  const quoteOf = handler(src, '  const quoteOf =', '  const renderThreadRow =', 'quoteOf', {
+  const quoteOf = handler(src, '  const quoteOf =', '  renderRef.current = (row) =>', 'quoteOf', {
     quotes,
     scrollRef: { current: (key) => jumps.push(key) },
     names: {},
@@ -632,9 +649,9 @@ async function loading (options) {
   const { commentOrder, withAnchor } = await import('../src/roda.js')
   const { resolveRoot } = await import('../src/rodaLoad.js')
   const own = await localReplies()
-  const postAt = handler(src.replace('export function postAt', 'function postAt'), 'function postAt', '// Names learned from the peeks', 'postAt', { parseRef: thread.parseRef, assembleMember: thread.assembleMember })
+  const postAt = handler(src.replace('export function postAt', 'function postAt'), 'function postAt', '// Names learned from the peeks', 'postAt', { parseRef: thread.parseRef, assembleMember: thread.assembleMember, postsByPeek: new WeakMap() })
   const anchorOfFn = await anchorOfLoaded()
-  const state = { resolves: 0, opened: [], rodaResets: 0, fetchPost: [], fetchRoda: [], peeks: [] }
+  const state = { resolves: 0, opened: [], rodaResets: 0, fetchPost: [], fetchRoda: [], peeks: [], resets: 0, undos: 0 }
   const context = {
     ownFor: own.ownFor,
     pruneOwnReplies: own.pruneOwnReplies,
@@ -670,8 +687,8 @@ async function loading (options) {
     sleep: async () => {},
     SEEDER_RETRY_MS: 0,
     focusTop: options.focusTop || null,
-    reset: () => {},
-    readOwn: async () => {},
+    reset: () => { state.resets++; return () => { state.undos++ } },
+    readOwn: async () => { if (options.readOwnFails && options.readOwnFails()) throw new Error('falhou') },
     loadFollows: async () => new Set(),
     followsRef: { current: Promise.resolve(new Set()) },
     assembleThread: thread.assembleThread,
@@ -1012,7 +1029,7 @@ const rodaOf = (replies, total) => ({ replies, waiting: [], mode: 'roda', comple
 async function deleting (options) {
   const roda = await import('../src/roda.js')
   const own = await localReplies()
-  const state = { rodas: options.rodas, open: options.open || new Set(), back: 0 }
+  const state = { rodas: options.rodas, open: options.open || new Set(), back: 0, commits: 0 }
   const comments = options.comments || []
   const context = {
     ...own,
@@ -1022,12 +1039,12 @@ async function deleting (options) {
     onToast: () => {},
     load: () => {},
     genRef: { current: 1 },
-    onDeletedPost: () => {},
+    onDeletedPost: options.onDeletedPost || (() => {}),
     revokeDeletedMedia: () => {},
     onBack: () => { state.back++ },
     focal: options.focal || R,
     viewRef: { current: { root: R, comments, meta: { repliesTotal: comments.length } } },
-    peekedRef: { current: new Map() },
+    peekedRef: { current: options.peeked || new Map() },
     rodasRef: { current: state.rodas },
     putRodas: (next) => { context.rodasRef.current = next; state.rodas = next },
     setOpen: (update) => { state.open = update(state.open) },
@@ -1035,11 +1052,15 @@ async function deleting (options) {
     setCount: (key, value) => context.eng.counts.set(key, value),
     assembleRoda: roda.assembleRoda,
     ownReplies: { current: new Map() },
-    commit: (patch) => { context.viewRef.current = { ...context.viewRef.current, ...patch } },
-    refOf
+    commit: (patch) => { state.commits++; context.viewRef.current = { ...context.viewRef.current, ...patch } },
+    refOf,
+    useRef: (value) => ({ current: value }),
+    useEffect: (fn) => fn(),
+    deletionListeners: new Set(),
+    focalRef: { current: options.focal || R }
   }
-  const del = handler(src, '  const del = useDelete({', '  const handlers =', 'del', context)
-  return { del, state, context, own }
+  const del = handler(src, '  const dropDeleted = useRef(null)', '  const handlers =', 'del', context)
+  return { del, state, context, own, listener: [...context.deletionListeners][0] }
 }
 
 test('Conversa delete drops the reply and its descendants from the roda, as the server does', async (t) => {
@@ -1079,6 +1100,187 @@ test('Conversa delete closes an emptied roda and a deleted comment takes its rod
   const root = await deleting({ comments: [item(2, 1, B, A)], rodas: new Map() })
   await root.del.onDeleted({ ref: R, seq: 1 })
   t.is(root.state.back, 1, 'deleting the root leaves the screen')
+})
+
+test('a refresh that fails after the clear gives the counts and own likes back', async (t) => {
+  let failing = false
+  const failed = await loading({ ...deepThread(), readOwnFails: () => failing })
+  await failed.load(false)
+  failing = true
+  await failed.load(true)
+  t.is(failed.state.resets, 1)
+  t.is(failed.state.undos, 1, 'the cleared engagement is restored')
+  t.is(failed.context.viewRef.current.phase, 'ready')
+  t.is(failed.context.viewRef.current.error, 'Não foi possível atualizar a conversa.')
+  const ok = await loading(deepThread())
+  await ok.load(false)
+  await ok.load(true)
+  t.is(ok.state.resets, 1)
+  t.is(ok.state.undos, 0, 'a refresh that lands keeps the new engagement')
+  let superseded = false
+  const stale = await loading({ ...deepThread(), readOwnFails: () => { if (!superseded) return false; stale.context.genRef.current++; return true } })
+  await stale.load(false)
+  superseded = true
+  await stale.load(true)
+  t.is(stale.state.undos, 0, 'a load superseded meanwhile leaves the engagement to the newer one')
+
+  const stateRef = { current: { liked: new Set(['a:1', 'a:2']), reposted: new Set(['a:1']) } }
+  const countsRef = { current: new Map([['a:1', { likes: 3 }], ['a:2', { likes: 1 }]]) }
+  const touchedRef = { current: new Map() }
+  const counts = { current: countsRef.current }
+  const { emptyState } = await import('../src/engagement.js')
+  let current = stateRef.current
+  const reset = handler(src, '  const reset = useCallback(() => {', '  // engagement.read for', 'reset', {
+    useCallback: (fn) => fn,
+    stateRef,
+    countsRef,
+    clockRef: { current: 0 },
+    touchedRef,
+    pendingRef: { current: new Map() },
+    emptyState,
+    setState: (update) => { current = typeof update === 'function' ? update(current) : update },
+    setCounts: (update) => { counts.current = typeof update === 'function' ? update(counts.current) : update }
+  })
+  const undo = reset()
+  t.is(current.liked.size, 0)
+  t.is(counts.current.size, 0)
+  // Read after the clear, and a like toggled after it.
+  counts.current = new Map([['a:1', { likes: 9 }]])
+  touchedRef.current.set('liked|a:2', 99)
+  undo()
+  t.alike([...current.liked], ['a:1'], 'a field touched since the clear is not brought back')
+  t.alike([...current.reposted], ['a:1'])
+  t.alike(counts.current.get('a:1'), { likes: 9 }, 'a fresher count wins')
+  t.alike(counts.current.get('a:2'), { likes: 1 }, 'the old count of a row still on screen returns')
+})
+
+test('Conversa decides Apagar with the postActions rule and carries no copy', async (t) => {
+  t.absent(/from '\.\.\/deletion'/.test(src) && /import \{[^}]*\bcanDelete\b[^}]*\} from '\.\.\/deletion'/.test(src), 'no canDelete import')
+  t.absent(/(^|[^\w.])canDelete\(/m.test(src), 'no call to the deletion rule')
+  t.ok(src.includes("import { canDeletePost } from '../postActions'"))
+  const { canDeletePost } = await import('../src/postActions.js')
+  let page = null
+  const here = handler(src.replace('export function canDeleteHere', 'function canDeleteHere'), 'function canDeleteHere', 'export function refOf', 'canDeleteHere', { canDeletePost, actingPageKey: () => page })
+  const mine = { kind: 'post', author: A, seq: 3 }
+  t.is(here(mine, A), true)
+  t.is(here(mine, B), false)
+  t.is(here({ ...mine, author: A.toUpperCase() }, A), true, 'the rule lowercases the author')
+  t.is(here({ ...mine, seq: 0 }, A), false)
+  t.is(here({ ...mine, repostedBy: B }, A), false, 'a repost row never offers Apagar')
+  page = B
+  t.is(here({ kind: 'post', author: B, seq: 2 }, A), true, 'the page acted as owns its posts')
+})
+
+test('Conversa: thread rows offer the quotes list on the same gate as likes and reposts', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  t.ok(/onOpenQuotes: eng && hasSeq && has\('onOpenQuotes'\) \? \(\) => live\.handlers\.onOpenQuotes\(\{ ref \}\)/.test(src), 'row prop gated on engagement and a seq')
+  t.ok(/const handlers = \{[^}]*onOpenQuotes/.test(src), 'the screen hands its handler to the rows')
+  t.ok(/function ConversaList \(\{[^}]*onOpenQuotes/.test(src), 'the screen receives it from App')
+})
+
+test('the undo of a failed refresh never brings back a like a read since the clear cleared', async (t) => {
+  const src = readFileSync(join(__dirname, '..', 'src', 'screens', 'Conversa.js'), 'utf8')
+  const { emptyState, fromRead } = await import('../src/engagement.js')
+  let current = { liked: new Set(['a:1', 'a:2']), reposted: new Set() }
+  const clockRef = { current: 0 }
+  const touchedRef = { current: new Map() }
+  const context = {
+    useCallback: (fn) => fn,
+    stateRef: { get current () { return current } },
+    countsRef: { current: new Map() },
+    clockRef,
+    touchedRef,
+    touch: (field, ref) => touchedRef.current.set(field + '|' + ref, ++clockRef.current),
+    pendingRef: { current: new Map() },
+    readRefs: { current: new Set() },
+    sourceRef: { current: null },
+    request: null,
+    emptyState,
+    fromRead,
+    chunks: (list, size) => [list.slice(0, size)],
+    ENGAGEMENT_MAX: 62,
+    actingPageKey: () => null,
+    readEngagement: async () => ({ liked: ['a:2'], reposted: [] }),
+    setState: (update) => { current = typeof update === 'function' ? update(current) : update },
+    setCounts: () => {}
+  }
+  const reset = handler(src, '  const reset = useCallback(() => {', '  // engagement.read for', 'reset', context)
+  const readOwn = handler(src, '  const readOwn = useCallback(async', '  // Index counts for', 'readOwn', context)
+  const undo = reset()
+  await readOwn(['a:1'])
+  undo()
+  t.absent(current.liked.has('a:1'), 'a like removed elsewhere and read since stays off')
+  t.ok(current.liked.has('a:2'), 'a ref not read since comes back')
+})
+
+test('Conversa: a deletion made on another screen reaches the Conversas still open below it', (t) => {
+  t.ok(src.includes('const deletionListeners = new Set()'))
+  t.ok(src.includes('function announceDeleted (refs) {\n  for (const listener of deletionListeners) listener(refs)\n}'))
+  t.ok(src.includes('announceDeleted(refs)\n        forgetOwnReplies(refs)'), 'the Conversas below still find the reply in their own copy')
+  t.ok(src.includes('deletionListeners.add(listener)') && src.includes('deletionListeners.delete(listener)'), 'a Conversa listens while mounted')
+  t.ok(src.includes('if (ref !== (viewRef.current.root || focalRef.current)) dropDeleted.current(ref)'), 'the main post of an older screen is left to its own flow')
+  t.ok(src.includes('dropDeleted.current(t.ref, true)'), 'the screen that deleted always clears its flags')
+  t.ok(src.includes('if (!force && !held && !quoted && !wasComment) return'), 'a screen that does not show the post stays as it is')
+})
+
+test('Conversa: an older screen drops a reply deleted above it, with its descendants, and lowers the parent count', async (t) => {
+  const r5 = item(5, 2, B, B)
+  const r6 = item(6, 5, C, B)
+  const r7 = item(7, 2, C, B)
+  const { listener, state, context } = await deleting({
+    comments: [item(2, 1, B, A)],
+    rodas: new Map([[TOP, rodaOf([r5, r6, r7], 3)]]),
+    open: new Set([TOP]),
+    counts: [[TOP, { replies: 2 }]],
+    onDeletedPost: () => { throw new Error('only the screen that deleted counts it') }
+  })
+  listener(new Set([B + ':5']))
+  t.is(context.eng.counts.get(TOP).replies, 1)
+  t.alike(refsIn(state.rodas.get(TOP).replies), [C + ':7'])
+  t.is(state.back, 0)
+  const commits = state.commits
+  listener(new Set([A + ':77']))
+  t.is(context.eng.counts.get(TOP).replies, 1, 'a post this screen does not hold changes nothing')
+  t.is(state.commits, commits)
+  listener(new Set([R]))
+  t.is(state.commits, commits, 'the root is left alone')
+  t.is(state.back, 0)
+})
+
+test('Conversa: an older screen opened on a reply still drops that reply: only the root is its main post', async (t) => {
+  const r5 = item(5, 2, B, B)
+  const { listener, state } = await deleting({
+    focal: B + ':5',
+    comments: [item(2, 1, B, A)],
+    rodas: new Map([[TOP, rodaOf([r5, item(7, 2, C, B)], 2)]]),
+    open: new Set([TOP]),
+    counts: [[TOP, { replies: 2 }]]
+  })
+  listener(new Set([B + ':5']))
+  t.alike(refsIn(state.rodas.get(TOP).replies), [C + ':7'])
+})
+
+test('Conversa: an older screen that only quotes the deleted post clears the quote', async (t) => {
+  const peeked = new Map([[A, { key: A, entries: [{ seq: 8 }, { seq: 9 }] }]])
+  const { listener, state } = await deleting({ comments: [], rodas: new Map(), peeked })
+  listener(new Set([A + ':8']))
+  t.alike(peeked.get(A).entries.map((e) => e.seq), [9])
+  t.is(state.commits, 1, 'the screen renders again')
+  listener(new Set([A + ':77']))
+  t.is(state.commits, 1, 'a post that is neither shown nor quoted changes nothing')
+})
+
+test('Conversa: an older screen lowers the root count for a comment it only showed', async (t) => {
+  const { listener, context } = await deleting({
+    comments: [item(8, 1, B, A), item(9, 1, C, A)],
+    rodas: new Map(),
+    counts: [[R, { replies: 3, likes: 1 }]]
+  })
+  context.viewRef.current.meta = { repliesTotal: 3 }
+  listener(new Set([B + ':8']))
+  t.alike(context.eng.counts.get(R), { replies: 2, likes: 1 })
+  t.alike(refsIn(context.viewRef.current.comments), [C + ':9'])
+  t.is(context.viewRef.current.meta.repliesTotal, 2)
 })
 
 async function anchorOfLoaded () {
@@ -1227,13 +1429,13 @@ test('Conversa quote jump: the chat pattern without onScrollToIndexFailed', (t) 
   t.ok(helper.includes('}, JUMP_RETRY_MS)'), 'the second attempt')
   t.ok(src.includes('const JUMP_RETRY_MS = 120') && src.includes('const FLASH_MS = 900'))
   t.ok(src.includes('listRef={listRef}'), 'the list hands its ref')
-  t.ok(src.includes('extraData={{ eng, follows, now, rodas, rodaBusy, rodaErrors, profileOf: names.profileOf, flashKey, sending }}'), 'the flash and the send state re-render the rows')
+  t.ok(src.includes('extraData={extra}') && /const extra = useMemo\(\(\) => \(\{[^}]*\bflashKey, sending\b[^}]*\}\), \[[^\]]*\bflashKey, sending\b/.test(src), 'the flash and the send state re-render the rows')
   t.ok(src.includes("flash: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: colors.accent, opacity: 0.12 }"), 'the flash is drawn over the opaque row')
   t.ok(src.includes('useEffect(() => () => {\n    clearTimeout(jumpTimer.current)\n    clearTimeout(flashTimer.current)\n  }, [])'), 'no timer outlives the screen')
 })
 
 test('Conversa swipe: comment and reply rows answer by swipe, off when it cannot reply', async (t) => {
-  const renderer = between('  const renderThreadRow = (row) => {', '  const notes = []')
+  const renderer = between('  renderRef.current = (row) => {', '  const notes = []')
   t.is(renderer.split('<SwipeReply disabled={swipeOff(row.item)} onReply={swipeTo(row.item)}>').length - 1, 2, 'comments and replies')
   t.ok(src.includes("import { SwipeReply } from '../ui/SwipeReply'"))
   t.ok(src.includes('const swipeOff = (item) => !full || sending || !canSwipeReply(item)'), 'the three disable conditions')
@@ -1259,13 +1461,13 @@ test('Conversa swipe: comment and reply rows answer by swipe, off when it cannot
   open.swipeTo(reply)()
   t.alike(targets, [{ ref: B + ':5', name: 'Bia', username: 'bia', text: 'resposta 5' }], 'the swipe targets that message, as its reply icon does')
   const rows = src.slice(src.indexOf('export function rowProps'), src.indexOf('export function seedItem'))
-  t.ok(rows.includes('onReply: hasSeq && typeof onReply === \'function\' ? () => onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,'), 'the reply icon stays')
+  t.ok(rows.includes('onReply: hasSeq && has(\'onReply\') ? () => live.handlers.onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,'), 'the reply icon stays')
 })
 
 async function anchoring (options) {
   const thread = await import('../src/thread.js')
   const { seekTarget, SEEK_PAGES } = await import('../src/rodaLoad.js')
-  const postAt = handler(src.replace('export function postAt', 'function postAt'), 'function postAt', '// Names learned from the peeks', 'postAt', { parseRef: thread.parseRef, assembleMember: thread.assembleMember })
+  const postAt = handler(src.replace('export function postAt', 'function postAt'), 'function postAt', '// Names learned from the peeks', 'postAt', { parseRef: thread.parseRef, assembleMember: thread.assembleMember, postsByPeek: new WeakMap() })
   const pages = options.pages || {}
   const state = { open: new Set(), loads: [], climbs: [], reloads: 0, ticks: 0, rodaResets: 0 }
   const context = {

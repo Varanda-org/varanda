@@ -151,3 +151,108 @@ test('replyChip prefers @username, then the name, then a bare label', async (t) 
   t.is(replyChip({ username: 'ana\u202e' }).includes('\u202e'), false)
   t.is(replyChip({ name: 'Ana\u0001' }).includes('\u0001'), false)
 })
+
+// Conversa's rowProps with a row cache (Conversa.js loads react-native, so
+// the function runs from its source text with stubbed imports).
+function sourceFn (src, name) {
+  let start = src.indexOf('\nexport function ' + name + ' (')
+  if (start >= 0) start += '\nexport '.length
+  else {
+    start = src.indexOf('\nfunction ' + name + ' (')
+    if (start < 0) throw new Error('no function ' + name)
+    start += 1
+  }
+  const open = src.indexOf('{', src.indexOf(')', start))
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1)
+  }
+  throw new Error('unbalanced ' + name)
+}
+
+async function cachedRowProps () {
+  const conversa = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  const { cachedRow } = await import('../src/namesCache.js')
+  const { canDeletePost } = await import('../src/postActions.js')
+  // eslint-disable-next-line no-new-func
+  return new Function(
+    'cachedRow', 'canDeletePost', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'postAt',
+    [sourceFn(conversa, 'refOf'), sourceFn(conversa, 'identityOf'), sourceFn(conversa, 'canDeleteHere'), sourceFn(conversa, 'rowProps'), 'return rowProps'].join('\n')
+  )(cachedRow, canDeletePost, () => null, () => null, () => null, () => null, (p) => (p ? p.name : null), () => null)
+}
+
+const engOf = (over = {}) => ({ counts: new Map(), state: { liked: new Set(), reposted: new Set() }, pending: new Map(), toggle () {}, ...over })
+
+test('Conversa rowProps: a cached row keeps its props until what it shows changes', async (t) => {
+  const rowProps = await cachedRowProps()
+  const cache = new Map()
+  const item = post(B, 2, { replyTo: { author: C, seq: 1 } })
+  const names = { profileOf: () => null }
+  const calls = []
+  const handlersA = { onOpenThread () {}, onOpenMember () {}, onReply: (x) => calls.push(['old', x.ref]), onDelete: () => calls.push('old delete') }
+  const base = { item, names, peeked: null, now: 1, ownKey: B, follows: null, cache, rowKey: 'r' }
+  const eng = engOf()
+  const first = rowProps({ ...base, eng, handlers: handlersA })
+  t.is(rowProps({ ...base, eng, handlers: { ...handlersA } }), first, 'a new handlers object alone keeps the props')
+  t.is(rowProps({ ...base, eng, handlers: handlersA, extra: { replyToName: null, onOpenParent: undefined } }) === first, false, 'extra values are inputs')
+
+  // Handlers of a later render run, though the props object is the old one.
+  const handlersB = { ...handlersA, onReply: (x) => calls.push(['new', x.ref]), onDelete: () => calls.push('new delete') }
+  const same = rowProps({ ...base, eng, handlers: handlersB })
+  same.onReply()
+  same.onDelete()
+  t.alike(calls, [['new', B + ':2'], 'new delete'], 'reply and delete call the newest handlers')
+
+  const liked = engOf({ state: { liked: new Set([B + ':2']), reposted: new Set() } })
+  const afterLike = rowProps({ ...base, eng: liked, handlers: handlersB })
+  t.ok(afterLike !== same && afterLike.liked === true, 'a reaction rebuilds the row')
+  const counted = engOf({ state: liked.state, counts: new Map([[B + ':2', { replies: 1, likes: 1, reposts: 0, quotes: 0 }]]) })
+  const withCounts = rowProps({ ...base, eng: counted, handlers: handlersB })
+  t.ok(withCounts !== afterLike && withCounts.counts.likes === 1, 'new counts rebuild the row')
+  const refetched = engOf({ state: liked.state, counts: new Map([[B + ':2', { replies: 1, likes: 1, reposts: 0, quotes: 0 }]]) })
+  t.is(rowProps({ ...base, eng: refetched, handlers: handlersB }), withCounts, 'equal counts in new objects keep the props')
+
+  const toggles = []
+  const live = engOf({ state: liked.state, counts: refetched.counts, toggle: (kind, ref) => toggles.push([kind, ref]) })
+  rowProps({ ...base, eng: live, handlers: handlersB }).onLike()
+  t.alike(toggles, [['like', B + ':2']], 'like toggles on the newest engagement')
+
+  const named = rowProps({ ...base, eng: live, handlers: handlersB, names: { profileOf: (k) => (k === C ? { name: 'Cida' } : null) } })
+  t.ok(named.replyToName === 'Cida', 'a profile learned later rebuilds the reply chip')
+  const noDelete = rowProps({ ...base, eng: live, handlers: { ...handlersB, onDelete: undefined }, names: { profileOf: (k) => (k === C ? { name: 'Cida' } : null) } })
+  t.is(noDelete.onDelete, undefined, 'a handler no longer offered drops its button')
+
+  const uncached = rowProps({ ...base, cache: undefined, eng: live, handlers: handlersB })
+  t.ok(uncached !== rowProps({ ...base, cache: undefined, eng: live, handlers: handlersB }), 'without a cache every call builds')
+})
+
+test('Conversa rowProps: repost and quoting rows keep their props over the same peeks', async (t) => {
+  const conversa = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  const { cachedRow } = await import('../src/namesCache.js')
+  const { canDelete } = await import('../src/deletion.js')
+  const { assembleMember } = await import('../src/thread.js')
+  const memoLine = conversa.split('\n').find((line) => line.startsWith('const postsByPeek = ')) || ''
+  // eslint-disable-next-line no-new-func
+  const { rowProps, postAt } = new Function(
+    'cachedRow', 'canDelete', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'assembleMember',
+    [memoLine, sourceFn(conversa, 'refOf'), sourceFn(conversa, 'parseRef'), sourceFn(conversa, 'postAt'), sourceFn(conversa, 'identityOf'), sourceFn(conversa, 'rowProps'), 'return { rowProps, postAt }'].join('\n')
+  )(cachedRow, canDelete, () => null, () => null, () => null, () => null, () => null, assembleMember)
+  const at = '2026-11-01T10:00:00.000Z'
+  const peeked = new Map([[C, { key: C, entries: [{ seq: 1, record: { type: 'post', text: 'original', at, replyTo: null } }], profile: null, username: null }]])
+  const cache = new Map()
+  const names = { profileOf: () => null }
+  const handlers = { onOpenThread () {}, onOpenMember () {} }
+  const base = { names, peeked, now: 1, ownKey: A, follows: null, eng: null, handlers, cache }
+  // Membro's repost row: the original comes from postAt on every render.
+  const repost = () => rowProps({ ...base, item: postAt(peeked, C + ':1'), extra: { repostedBy: null }, rowKey: 'repost:3' })
+  t.is(repost(), repost(), 'a repost row keeps its props')
+  const quoting = post(B, 2, { quote: { author: C, seq: 1 } })
+  const quoted = () => rowProps({ ...base, item: quoting, rowKey: 'post:2' })
+  const first = quoted()
+  t.is(first.quote.text, 'original', 'the quote shows the original')
+  t.is(quoted(), first, 'a quoting row keeps its props')
+  // A merged peek is a new object: the row shows what it now holds.
+  peeked.set(C, { ...peeked.get(C), entries: [{ seq: 1, record: { type: 'post', text: 'original', at, replyTo: null } }] })
+  t.ok(quoted() !== first, 'a new peek rebuilds the row')
+})

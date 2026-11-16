@@ -25,6 +25,7 @@ const GLYPHS = {
   bloquear: 'slash',
   seta_cima: 'arrow-up',
   copiar: 'copy',
+  salvar: 'bookmark',
   chave: 'key',
   ok: 'check',
   atualizar: 'rotate-cw',

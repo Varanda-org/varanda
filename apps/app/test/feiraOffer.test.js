@@ -24,7 +24,7 @@ test('the listing opens an offer intent and forwards the shared listings capabil
   const mount = src.slice(src.indexOf("if (entry.screen === 'anuncio')"), src.indexOf("if (entry.screen === 'editar-anuncio'"))
   t.ok(mount.includes('const author = entry.key.slice(0, at)'))
   t.ok(mount.includes('author={author}'))
-  t.ok(mount.includes('onOffer={(listing) => openMessage(author, { offer: listing })}'))
+  t.ok(mount.includes('onOffer={entryHandlers.current.for(i + \':anuncio:\' + entry.key, { handleOffer: (listing) => openMessage(author, { offer: listing }) }).handleOffer}'), 'per-entry offer handler opens the message with the listing')
   t.ok(mount.includes('onOpenListings={screenProps.onOpenListings}'))
   const open = src.slice(src.indexOf('const openMessage = useCallback('), src.indexOf('const intentUsed'))
   t.ok(open.includes('options.context || options.offer'), 'either payload creates an intent')
@@ -247,4 +247,11 @@ test('every style Mensagem uses is defined, so the offer sheets keep their margi
   const used = new Set([...src.matchAll(/\bstyles\.([A-Za-z]\w*)/g)].map((m) => m[1]))
   for (const key of used) t.ok(defined.has(key), 'styles.' + key + ' is defined')
   t.ok(/title='Fazer oferta'>\s*<View style=\{styles\.sheet\}>/.test(src), 'the offer sheet body uses styles.sheet')
+})
+
+test('the offer field hints a neutral amount, since the listing price is not known there', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  const field = src.slice(src.indexOf("<Field label='Valor (R$)'"), src.indexOf("<Field label='Valor (R$)'") + 300)
+  t.ok(field.includes("placeholder='0,00'"), 'neutral placeholder')
+  t.absent(field.includes('80,00'), 'no fixed example price')
 })

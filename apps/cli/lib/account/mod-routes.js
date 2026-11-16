@@ -1018,6 +1018,19 @@ function createModRoutes ({
     afterAnswer(() => triage.onHumanDecision(result.report))
   }
 
+  // "Reabrir" on an AI decision in Histórico: the report goes back to the
+  // open queue for a person. The store refuses anything but an AI decision
+  // ('sem-permissao'), an open report ('ja-revertido') and an AI `by`, and
+  // leaves any block in place. No worker hook: the AI is never asked about
+  // it and only ever sees the row as one a person reopened.
+  async function reopen (req, res, session, id) {
+    const row = store(() => moderation.get(id))
+    if (row === null || ownCase(row, ownMember(session))) throw refuse('nao-encontrado')
+    const result = await storeAsync(() => moderation.reopen(id, { by: session.email }))
+    log({ event: 'reopened' })
+    send(res, 200, { report: projectReport(result.report, new Map()) })
+  }
+
   // The moderator's own case stays hidden here too (as in api/reports): a
   // block or pending change about their own diary is not listed.
   async function blocked (req, res, session) {
@@ -1336,6 +1349,12 @@ function createModRoutes ({
       const id = decideMatch[1]
       const body = await postBody(req, undefined)
       return withSession(req, (s) => decide(req, res, s, id, body))
+    }
+    const reopenMatch = /^\/account\/mod\/api\/reports\/([^/]+)\/reopen$/.exec(p)
+    if (post && reopenMatch && ID_RE.test(reopenMatch[1])) {
+      const id = reopenMatch[1]
+      await postBody(req, undefined)
+      return withSession(req, (s) => reopen(req, res, s, id))
     }
     const appealMatch = /^\/account\/mod\/api\/appeals\/([^/]+)\/decide$/.exec(p)
     if (post && appealMatch && ID_RE.test(appealMatch[1])) {
