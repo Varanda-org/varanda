@@ -35,6 +35,7 @@ function fakeSession ({ diaryKey = null, legacy = false } = {}) {
     media: null,
     prf: null,
     resets: 0,
+    clears: [],
     received: [],
     receivedPrf: [],
     setKeyPair (kp, { media, prf } = {}) {
@@ -46,7 +47,8 @@ function fakeSession ({ diaryKey = null, legacy = false } = {}) {
       s.prf = prf ? new Uint8Array(prf) : null
       return Promise.resolve()
     },
-    async clearKeyPair () {
+    async clearKeyPair (options) {
+      s.clears.push(options === undefined ? {} : options)
       s.keyPair = null
       s.media = null
       if (s.prf !== null) s.prf.fill(0)
@@ -313,6 +315,25 @@ test('forget locks the node and keeps the passkey record', async (t) => {
   t.is(session.keyPair, null)
   t.ok(await storage.readJson('passkey'))
   t.alike(await storage.readJson('signedOut'), { v: 1 })
+})
+
+test('a lock and a passkey of another diary keep the opened direct message media; Sair and a relock wipe them', async (t) => {
+  const { session, host } = setup()
+  await host.install(params())
+  await host.clear({ keepMedia: true })
+  t.alike(session.clears, [{ keepMedia: true }], 'the lock keeps them')
+  await host.install(params())
+  await host.clear()
+  t.alike(session.clears.slice(1), [{}], 'the host\'s relock after a failed unlock wipes them')
+  await host.install(params())
+  await host.clear({ keepMedia: false })
+  t.alike(session.clears.slice(2), [{}], 'keepMedia false wipes them too')
+  await host.install(params())
+  await host.forget()
+  t.alike(session.clears.slice(3), [{}], 'Sair wipes them')
+  const refused = setup({ diaryKey: await expectedPublicKey(OTHER_PRF) })
+  await t.exception(refused.host.install(params()), /passkey não corresponde ao diário guardado/)
+  t.alike(refused.session.clears, [{ keepMedia: true }], 'a passkey of another diary keeps the stored identity\'s media')
 })
 
 // worklet/web-node-parts.js: the media read loop and the shutdown order.
@@ -1011,7 +1032,9 @@ test('readMediaToFile checks a voice note as audio: a sound-only MPEG-4 passes, 
   const be32 = (v) => [(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]
   const ascii = (str) => Array.from(str, (c) => c.charCodeAt(0))
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
-  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
+  // AAC at an explicit 1024000 Hz: a 1024-sample access unit lasts 1 ms,
+  // so samples of one tick play as long as the sample table says.
+  const minf = box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(2500), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(2500)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(2500), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))
   const trak = (handler) => box('trak', box('tkhd', new Array(84).fill(0)), box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(handler), be32(0), be32(0), be32(0), [0]), minf))
   const m4a = (tracks) => new Uint8Array([...box('ftyp', ascii('M4A '), be32(0), ascii('M4A '), ascii('isom')), ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(2500), new Array(80).fill(0)), ...tracks.map(trak)), ...box('mdat', new Array(2504).fill(1))])
   let serve = m4a(['soun'])
