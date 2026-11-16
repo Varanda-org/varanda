@@ -72,6 +72,12 @@ export function sameSnapshotBinding (binding, now) {
     binding.association === now.association && binding.owner === now.owner
 }
 
+// What sameSnapshotBinding compares, as one string ('' for none): a stable
+// effect dependency for a binding rebuilt on every render.
+export function bindingKeyOf (binding) {
+  return binding === null || binding === undefined ? '' : binding.origin + '|' + binding.association + '|' + binding.owner
+}
+
 // -> the stored rows of `kind` for `binding`, or null when there are none.
 export function readGroupSnapshot (kind, binding) {
   if (binding === null) return null
@@ -260,8 +266,14 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   // them. Nothing unread is stored; the dots come from live versions.
   const [list, setList] = useState(() => {
     const rows = hosted ? readGroupSnapshot('comunidades', snapshotBinding) : null
-    return { rows: rows === null ? [] : rows, loaded: false, loading: false, error: '', seeded: rows !== null }
+    return { rows: rows === null ? [] : rows, loaded: false, loading: false, error: '', seeded: rows !== null, seedBinding: snapshotBinding }
   })
+  // Stored rows read for another installation, association or owner never
+  // stay, even with the same key: that store was already wiped.
+  const bindingKey = bindingKeyOf(snapshotBinding)
+  useEffect(() => {
+    setList((l) => (l.seeded === true && !sameSnapshotBinding(l.seedBinding, bindingRef.current) ? { ...l, rows: [], seeded: false, seedBinding: null } : l))
+  }, [bindingKey])
   const liveMarked = useRef(false)
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)

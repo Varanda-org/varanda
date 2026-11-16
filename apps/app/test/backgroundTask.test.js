@@ -265,6 +265,8 @@ test('the task refuses and unregisters when stale, missing, or with a saved manu
   t.ok(/if \(\(await loadConfig\(\)\) !== null\) \{\s*await unregisterBackgroundRefresh\(\)/.test(body), 'a saved core configuration wins')
   t.ok(body.indexOf('lastUseFresh(') < body.indexOf('runRefresh('))
   t.ok(body.indexOf('loadConfig()') < body.indexOf('runRefresh('))
+  t.ok(/if \(nothingToRefresh\(\{ snapshot, config \}\)\) \{\s*await unregisterBackgroundRefresh\(\)\s*return BackgroundTask\.BackgroundTaskResult\.Success/.test(body), 'a run with nothing to refresh removes the task (#539)')
+  t.ok(body.indexOf('nothingToRefresh(') > body.indexOf('parseSnapshot(') && body.indexOf('nothingToRefresh(') < body.indexOf('shouldRun('), 'checked on the parsed snapshot, before the busy and gap rules')
   const reg = src.slice(src.indexOf('export function registerBackgroundRefresh'), src.indexOf('export function unregisterBackgroundRefresh'))
   t.ok(reg.includes('noteForegroundUse()'), 'registering records the use')
   const node = withoutComments(read('src/node.js'))
@@ -280,4 +282,16 @@ test('gate: never throws on a broken state source', async (t) => {
   gate.wait().then(() => { done = true })
   await tick()
   t.is(done, false)
+})
+
+// pod install adds the task manager's privacy manifest to the iOS copy phase;
+// the project keeps it committed so a clean checkout builds the same app (#475).
+test('the iOS project copies the ExpoTaskManager privacy bundle', (t) => {
+  const pbx = read('ios/Varanda.xcodeproj/project.pbxproj')
+  const phase = pbx.slice(pbx.indexOf('/* [CP] Copy Pods Resources */ = {'))
+  const end = phase.indexOf('};')
+  t.ok(end > 0, 'copy phase found')
+  const body = phase.slice(0, end)
+  t.ok(/"\$\{PODS_CONFIGURATION_BUILD_DIR\}\/ExpoTaskManager\/ExpoTaskManager_privacy\.bundle",/.test(body), 'input path')
+  t.ok(/"\$\{TARGET_BUILD_DIR\}\/\$\{UNLOCALIZED_RESOURCES_FOLDER_PATH\}\/ExpoTaskManager_privacy\.bundle",/.test(body), 'output path')
 })

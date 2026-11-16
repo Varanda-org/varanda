@@ -243,19 +243,29 @@ export function noteDeleted () {
 
 // `loadMark`: deletionCount when the committed first page read started (null
 // before any). -> whether the snapshot may be written from that page.
+// How many placeholder rows stand for the stored rows snapshotRowsShown
+// holds back while block.list has not answered yet: at most 3, none once it
+// answered (a failed list only keeps own rows, with nothing to wait for).
+export function heldPlaceholders (items, shown, loadState) {
+  if (loadState !== 'pending' || !Array.isArray(items) || !Array.isArray(shown)) return 0
+  return Math.min(3, Math.max(0, items.length - shown.length))
+}
+
 export function snapshotWriteAllowed (loadMark, deletions) {
   return typeof loadMark === 'number' && loadMark === deletions
 }
 
 // Stored rows (A Rua's snapshot, painted before the live first page) under
 // the block list in force: a blocked author's rows, and reposts of them,
-// never show. `loadState` 'failed' (blocksProvider): the list is unknown, so
-// only own rows whose shown content involves no one else stay: an own post
-// with no quote or reply of another author, an own repost of such an own
-// post. `originalOf(ref)` -> the original at hand (post item), if any: its
-// quote card and reply mark show too, one level deep.
+// never show. `loadState` (blocksProvider) 'pending' (before block.list first
+// answers, a block made on another device is not known yet) or 'failed' (the
+// list is unknown): only own rows whose shown content involves no one else
+// stay: an own post with no quote or reply of another author, an own repost
+// of such an own post. The others wait for the answer (heldPlaceholders).
+// `originalOf(ref)` -> the original at hand (post item), if any: its quote
+// card and reply mark show too, one level deep.
 export function snapshotRowsShown (items, blocked, loadState, owner, originalOf) {
-  if (loadState === 'failed') {
+  if (loadState === 'pending' || loadState === 'failed') {
     const own = typeof owner === 'string' ? owner.toLowerCase() : null
     if (own === null) return []
     const isOwn = (t) => !!t && typeof t.author === 'string' && t.author.toLowerCase() === own
@@ -2651,6 +2661,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const shownItems = useMemo(() => (loadedAt !== null
     ? items
     : snapshotRowsShown(items, blockedKeys, blockLoad, ownKey, (ref) => shownOriginals.get(ref))), [items, loadedAt, blockedKeys, blockLoad, ownKey, shownOriginals])
+  // Stored rows of others wait for the first block.list answer: placeholders
+  // stand for them meanwhile (an empty list already shows its skeleton).
+  const held = loadedAt === null && shownItems.length > 0 ? heldPlaceholders(items, shownItems, blockLoad) : 0
   // Comments fold into their post's card (../feedFold.js); a block re-folds
   // at once, so a blocked commenter leaves the header and the lines.
   const { foldOriginal, pending } = social
@@ -2720,7 +2733,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
           </View>
         )}
         ListEmptyComponent={empty}
-        ListFooterComponent={footer}
+        ListFooterComponent={held > 0 ? <View>{Array.from({ length: held }, (_, i) => <SkeletonRow key={i} />)}{footer}</View> : footer}
         contentContainerStyle={{ paddingBottom: bottomPad }}
         onRefresh={handleRefresh}
         refreshing={refreshing}
@@ -2790,11 +2803,13 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
     perfMarks().mark('preview-shown')
   }, [])
   // The block list in force, as A Rua applies it to its snapshot rows. Before
-  // the node is up it is still 'pending' and the rows show as stored.
+  // the node is up it is still 'pending': own rows show, others wait.
   const blockedKeys = blocks.keys
   const blockLoad = blocks.loadState
   const ownKey = snapshot.owner
   const shown = useMemo(() => snapshotRowsShown(view.items, blockedKeys, blockLoad, ownKey, view.original), [view, blockedKeys, blockLoad, ownKey])
+  // Others' rows wait for the first block.list answer, as in A Rua.
+  const held = heldPlaceholders(view.items, shown, blockLoad)
   // Folded as the live list folds them, so the rows do not jump when the
   // feed goes live. Nothing is asked here: pendingOf is the seed's.
   const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: blockedKeys }), [shown, view, ownKey, blockedKeys])
@@ -2830,6 +2845,7 @@ export function ARuaPreview ({ snapshot, progress = 0, onScrollFrame }) {
           keyExtractor={rowKeyOf}
           renderItem={renderItem}
           extraData={now}
+          ListFooterComponent={held > 0 ? <View>{Array.from({ length: held }, (_, i) => <SkeletonRow key={i} />)}</View> : null}
           contentContainerStyle={{ paddingBottom: bottomPad }}
           onScrollFrame={onScrollFrame}
         />
