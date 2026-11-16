@@ -123,6 +123,15 @@ async function diaryJoins (s) {
   }
 }
 
+async function diaryRecords (s) {
+  const core = await store.openDiary(s.storage)
+  try {
+    return (await store.readAll(core)).map((e) => e.record)
+  } finally {
+    await core.close()
+  }
+}
+
 async function coreRecords (s, key) {
   const core = await store.openGroupCoreReadOnly(s.storage, key)
   try {
@@ -671,4 +680,125 @@ test('deviceUpkeepNeeded opens no group core', async (t) => {
   const opens = groupCoreOpens(t, d.storage)
   t.is(await ops.deviceUpkeepNeeded(d.ctx), true)
   t.is(opens(), 0)
+})
+
+// Member `b` of a's community joined private group P by key before holding
+// its root: a boxless writer the diary binds. The root is still on `a` only.
+async function boxlessJoin (t) {
+  const { a, members: [b], community, general } = await world(t, 1)
+  await ops.communityJoin(b.ctx, { community })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Segredo', join: 'approval', visibility: 'private', community })
+  // The creator's diary too: it binds the new root.
+  await share(a, b, [community])
+  t.is((await ops.groupJoin(b.ctx, { group, community })).state, 'pending')
+  const boxless = await ownWriter(b, group)
+  t.is((await coreRecords(b, boxless))[0].box, null, 'a boxless writer')
+  return { a, b, community, general, group, boxless }
+}
+
+test('a boxless private writer is reboxed once the root arrives, then nothing is left to plan', async (t) => {
+  const { a, b, group, boxless } = await boxlessJoin(t)
+  t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [{ root: group, reason: 'unheld', transient: true }] }, 'the root is awaited')
+  await copyCore(a, b, group)
+
+  const plan = await ops.deviceUpkeepPlan(b.ctx)
+  t.alike(plan.enrol.map((x) => [x.root, x.kind, x.rebox]), [[group, 'group', true]])
+  t.alike(plan.skipped, [])
+  const before = await diaryLength(b)
+  const res = await ops.deviceUpkeep(b.ctx, plan)
+  t.alike([res.failed, res.enrolled.map((x) => [x.root, x.state])], [[], [[group, 'requested']]], 'an approval group ends as a request')
+  t.alike(res.changed, [group])
+
+  const boxed = await ownWriter(b, group)
+  t.not(boxed, boxless, 'a new writer takes its place')
+  t.is((await coreRecords(b, boxed))[0].box, hex(b.ctx.groupKeys.boxPublicKey()), 'this device\'s box')
+  const joins = (await diaryJoins(b)).filter((j) => j.group === group)
+  t.alike(joins.slice(-2).map((j) => [j.writer, j.on]), [[boxless, false], [boxed, true]], 'the old writer is unbound, the new one bound')
+  // The join off keeps the slot in the slot walk: one cut on the header-only
+  // boxless writer, between the two joins, gives it back (#350).
+  const own = await diaryRecords(b)
+  const at = (type, writer) => own.findIndex((r) => r.type === type && r.group === group && r.writer === writer && (type !== 'group-join' || r.on === (writer === boxed)))
+  t.alike(own.filter((r) => r.type === 'group-cut' && r.group === group).map((r) => [r.writer, r.cut]), [[boxless, 0]], 'one cut at 0 on the boxless writer')
+  t.ok(at('group-join', boxless) < at('group-cut', boxless) && at('group-cut', boxless) < at('group-join', boxed), 'after the join off, before the new join')
+  t.is(await diaryLength(b), before + 3)
+  const entries = own.map((record, seq) => ({ seq, record }))
+  const walk = grp.slotWalk(grp.groupJoinHistory(entries, group), grp.groupCutHistory(entries, group), group)
+  t.ok(walk.released.has(boxless) && walk.live.has(boxed), 'the slot walk releases the boxless writer and counts the new one')
+
+  t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [] }, 'nothing left: no loop')
+  const still = await footprint(b)
+  t.alike(await ops.deviceUpkeep(b.ctx, plan), { enrolled: [], shared: [], failed: [], changed: [] }, 'an old plan writes nothing')
+  t.alike(await footprint(b), still)
+})
+
+test('a boxless private writer is never reboxed after a leave written on another device', async (t) => {
+  const { a, b, community, general, group } = await boxlessJoin(t)
+  await copyCore(a, b, group)
+  // Another device of b joins with a boxed writer and leaves.
+  const keys = [community, general, group, await ownWriter(b, community), await ownWriter(b, general), await ownWriter(b, group)]
+  const x = await secondDevice(t, b, keys, [a])
+  t.alike((await ops.deviceUpkeep(x.ctx, { enrol: [{ root: community }, { root: general }] })).failed, [])
+  t.is((await ops.groupJoin(x.ctx, { group })).state, 'requested')
+  t.is((await ops.groupLeave(x.ctx, { group })).state, 'left')
+  await syncDiary(x, b)
+  for (const key of [await ownWriter(x, community), await ownWriter(x, general), await ownWriter(x, group)]) await copyCore(x, b, key)
+  t.is((await ops.groupInfo(b.ctx, { group })).state, 'left')
+
+  const plan = await ops.deviceUpkeepPlan(b.ctx)
+  t.absent(plan.enrol.some((e) => e.root === group), 'a leave from another device is respected')
+  t.alike(reasons(plan).filter((r) => r[0] === group), [[group, 'status']])
+  const before = await footprint(b)
+  t.alike((await ops.deviceUpkeep(b.ctx, { enrol: [{ root: group }] })).enrolled, [])
+  t.alike(await footprint(b), before, 'nothing written')
+})
+
+test('a banned diary\'s boxless private writer is not reboxed', async (t) => {
+  const { a, b, group, boxless } = await boxlessJoin(t)
+  await copyCore(a, b, group)
+  // The creator holds b's diary and boxless writer, so the ban names a diary it knows.
+  await share(b, a, [boxless])
+  await ops.groupBan(a.ctx, { group, member: b.key, on: true })
+  await copyCore(a, b, group)
+  const plan = await ops.deviceUpkeepPlan(b.ctx)
+  t.absent(plan.enrol.some((e) => e.root === group), 'a ban is not worked around')
+  t.alike(reasons(plan).filter((r) => r[0] === group), [[group, 'status']])
+})
+
+test('a leave on another device whose writer core has not arrived yet is respected too', async (t) => {
+  const { a, b, community, general, group } = await boxlessJoin(t)
+  await copyCore(a, b, group)
+  const keys = [community, general, group, await ownWriter(b, community), await ownWriter(b, general), await ownWriter(b, group)]
+  const x = await secondDevice(t, b, keys, [a])
+  t.alike((await ops.deviceUpkeep(x.ctx, { enrol: [{ root: community }, { root: general }] })).failed, [])
+  t.is((await ops.groupJoin(x.ctx, { group })).state, 'requested')
+  t.is((await ops.groupLeave(x.ctx, { group })).state, 'left')
+  // Only the diary reaches b: its off join is there, x's writer core is not.
+  await syncDiary(x, b)
+  const plan = await ops.deviceUpkeepPlan(b.ctx)
+  t.absent(plan.enrol.some((e) => e.root === group), 'no rebox on the local evidence of the leave')
+  t.alike(reasons(plan).filter((r) => r[0] === group), [[group, 'status']])
+  const before = await footprint(b)
+  t.alike((await ops.deviceUpkeep(b.ctx, { enrol: [{ root: group }] })).enrolled, [])
+  t.alike(await footprint(b), before, 'nothing written, no slot spent')
+})
+
+test('a public group\'s boxless writer is never reboxed once its root is held', async (t) => {
+  const { a, members: [b], community } = await world(t, 1)
+  await ops.communityJoin(b.ctx, { community })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Praia', join: 'open', community })
+  await share(a, b, [community])
+  t.is((await ops.groupJoin(b.ctx, { group, community })).state, 'pending')
+  t.alike(reasons(await ops.deviceUpkeepPlan(b.ctx)), [[group, 'unheld']], 'waited for while the root is unknown')
+  await copyCore(a, b, group)
+  t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [] }, 'public writers carry no box: nothing to replace')
+})
+
+test('a boxless private writer is skipped as locked without this device\'s box', async (t) => {
+  const { a, b, group } = await boxlessJoin(t)
+  await copyCore(a, b, group)
+  const locked = { ...b.ctx, groupKeys: createGroupKeys() }
+  t.teardown(() => locked.groupKeys.close())
+  const plan = await ops.deviceUpkeepPlan(locked)
+  t.alike(plan.enrol, [])
+  t.alike(plan.skipped, [{ root: group, reason: 'locked', transient: true }])
 })

@@ -47,7 +47,7 @@ Prova de regressão: com os testes no lugar e `packages/core/lib/group.js` do pr
 - Ainda não há tela: nenhum nó grava marcas em escritores que não são a raiz. A lista de aparelhos conectados vem no próximo PR, que também deve pedir a troca de chave e respeitar `cutUnknown`.
 - A troca de chave não acontece sozinha depois de um corte: o grupo fica `rekeyPending` até um distribuidor rodar `group.rekey` (ou o reparo depois da próxima mudança de chave dele).
 - Uma saída gravada pelo aparelho perdido depois do corte continua valendo: quem estiver com ele pode fazer o diário sair, nunca desfazer uma saída.
-- Limite aceito por Rodrigo: uma conta pode, com a própria passkey, cortar um escritor seu abaixo de registros que já gravou, e assim desfazer banimentos, admissões e ocultações que fez ali como admin. Outro admin pode banir de novo.
+- Limite aceito por Rodrigo: uma conta pode, com a própria passkey, cortar um escritor seu abaixo de registros que já gravou, e assim desfazer banimentos, admissões e ocultações que fez ali como admin, mesmo depois de deixar de ser admin. Outro admin pode banir de novo.
 - Um bloco de chave gravado pelo aparelho perdido depois do corte ainda entrega, para leitura, chaves de épocas que ele já tinha.
 - Um leitor cuja cópia do diário tem um buraco pode não ver a marca até o buraco ser preenchido (`cutUnknown` avisa).
 - O corte não detém quem tem a identidade desbloqueada: essa pessoa também assina o diário e pode gravar marcas, inclusive nos outros aparelhos da dona.
