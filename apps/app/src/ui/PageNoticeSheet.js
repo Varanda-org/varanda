@@ -1,7 +1,8 @@
 // The one-time note before a first message to a Pagina, shared by the
 // profile (Membro), a page listing (Anuncio) and a page's post (App).
-// Continuar remembers the page on this device, closes the sheet and hands
-// over to the caller once the sheet is gone.
+// Continuar remembers the page on this device (and in the synced seen
+// document, when there is one), closes the sheet and hands over to the
+// caller once the sheet is gone.
 // While open it reads the page's published dm-key: a page that has not
 // activated its private Conversas yet gets one more line.
 
@@ -10,6 +11,8 @@ import { Platform, StyleSheet, View } from 'react-native'
 import { useNode } from '../node'
 import { PAGE_DM_NOTICE, PAGE_DM_NOT_ACTIVE, notePageNotice, pageNotActivated } from '../pageNotice'
 import { pageNoticeStore } from '../pageNoticeStore'
+import { syncedPageNoticeStore } from '../onceMarks'
+import { onceMember, onceRegistry } from '../onceSync'
 import { Sheet } from './Sheet'
 import { ConfirmStack, Soft } from './index'
 import { space } from './theme'
@@ -61,7 +64,7 @@ export function PageNoticeSheet ({ open, page, onClose, onContinue }) {
     // On the web the sheet takes touches while it slides out; the caller's
     // state is already cleared by then.
     if (!shownNow.current || gone.current || pending.current !== null) return
-    notePageNotice(pageNoticeStore(), page)
+    notePageNotice(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), page)
     pending.current = onContinue
     onClose()
   }

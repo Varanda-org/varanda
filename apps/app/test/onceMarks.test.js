@@ -1,0 +1,135 @@
+'use strict'
+
+const test = require('brittle')
+const { createHash } = require('node:crypto')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
+
+const load = () => import('../src/onceMarks.js')
+const MEMBER = 'a'.repeat(64)
+const OTHER = 'b'.repeat(64)
+const PAGE = 'c'.repeat(64)
+const expected = (kind, member, id) => createHash('sha256').update('varanda-once-v1\n' + kind + '\n' + member + '\n' + id).digest('hex').slice(0, 32)
+
+test('onceToken matches the known-answer vector', async (t) => {
+  const { onceToken } = await load()
+  t.is(onceToken('page-dm-notice', MEMBER, PAGE), expected('page-dm-notice', MEMBER, PAGE))
+  t.is(onceToken('invite-drop', MEMBER, '2026-11-09T03:00:00.000Z#1'), expected('invite-drop', MEMBER, '2026-11-09T03:00:00.000Z#1'))
+  t.ok(/^[0-9a-f]{32}$/.test(onceToken('invite-drop', MEMBER, 'x')))
+})
+
+test('onceToken validates kind, member and id', async (t) => {
+  const { onceToken } = await load()
+  t.is(onceToken('other', MEMBER, 'x'), null)
+  t.is(onceToken('invite-drop', 'a', 'x'), null)
+  t.is(onceToken('invite-drop', MEMBER.toUpperCase(), 'x'), null)
+  t.is(onceToken('invite-drop', MEMBER, ''), null)
+  t.is(onceToken('invite-drop', MEMBER, 'a\nb'), null)
+  t.is(onceToken('invite-drop', MEMBER, 'x'.repeat(201)), null)
+  t.is(onceToken('invite-drop', MEMBER, 5), null)
+  t.ok(onceToken('invite-drop', MEMBER, 'x'.repeat(200)))
+})
+
+test('kinds and members give different tokens', async (t) => {
+  const { onceToken } = await load()
+  t.not(onceToken('page-dm-notice', MEMBER, 'x'), onceToken('invite-drop', MEMBER, 'x'))
+  t.not(onceToken('invite-drop', MEMBER, 'x'), onceToken('invite-drop', OTHER, 'x'))
+})
+
+test('once ids', async (t) => {
+  const { pageNoticeOnceId, inviteDropOnceId } = await load()
+  t.is(pageNoticeOnceId(PAGE), PAGE)
+  t.is(pageNoticeOnceId('nope'), null)
+  const rec = { v: 1, member: MEMBER, resetsAt: '2026-11-09T03:00:00.000Z', seenOpened: 2 }
+  t.is(inviteDropOnceId(rec), '2026-11-09T03:00:00.000Z#2')
+  t.is(inviteDropOnceId({ ...rec, v: 2 }), null)
+  t.is(inviteDropOnceId(null), null)
+})
+
+test('registry sees remote and local marks', async (t) => {
+  const { createOnceRegistry, onceToken } = await load()
+  const r = createOnceRegistry()
+  t.is(r.has('page-dm-notice', MEMBER, PAGE), false)
+  r.setRemote(MEMBER, [onceToken('page-dm-notice', MEMBER, PAGE)])
+  t.is(r.has('page-dm-notice', MEMBER, PAGE), true)
+  t.is(r.has('page-dm-notice', OTHER, PAGE), false)
+  t.is(r.has('bad', MEMBER, PAGE), false)
+  t.is(r.mark('invite-drop', MEMBER, 'x'), onceToken('invite-drop', MEMBER, 'x'))
+  t.is(r.has('invite-drop', MEMBER, 'x'), true)
+  r.setRemote(MEMBER, [])
+  t.is(r.has('page-dm-notice', MEMBER, PAGE), false)
+  t.is(r.has('invite-drop', MEMBER, 'x'), true, 'local mark survives a remote replace')
+  t.is(r.mark('bad', MEMBER, 'x'), null)
+})
+
+test('mark notifies once per new token and survives a throwing listener', async (t) => {
+  const { createOnceRegistry, onceToken } = await load()
+  const r = createOnceRegistry()
+  const seen = []
+  r.onMark(() => { throw new Error('boom') })
+  const off = r.onMark((m) => seen.push(m))
+  r.mark('invite-drop', MEMBER, 'x')
+  r.mark('invite-drop', MEMBER, 'x')
+  t.alike(seen, [{ member: MEMBER, token: onceToken('invite-drop', MEMBER, 'x') }])
+  r.setRemote(MEMBER, [onceToken('invite-drop', MEMBER, 'y')])
+  t.is(r.mark('invite-drop', MEMBER, 'y'), onceToken('invite-drop', MEMBER, 'y'))
+  t.is(seen.length, 1, 'known remotely: no listener')
+  off()
+  r.mark('invite-drop', MEMBER, 'z')
+  t.is(seen.length, 1)
+})
+
+test('setRemote notifies only on change and ignores invalid tokens', async (t) => {
+  const { createOnceRegistry } = await load()
+  const r = createOnceRegistry()
+  let n = 0
+  const off = r.onChange(() => { n++ })
+  const tok = 'd'.repeat(32)
+  r.setRemote(MEMBER, [tok, 'short', 5, tok.toUpperCase()])
+  t.is(n, 1)
+  r.setRemote(MEMBER, [tok])
+  t.is(n, 1)
+  r.setRemote('bad', [tok])
+  t.is(n, 1)
+  r.setRemote(MEMBER, 'nope')
+  t.is(n, 2)
+  r.setRemote(MEMBER, null)
+  t.is(n, 2)
+  off()
+  r.setRemote(MEMBER, [tok])
+  t.is(n, 2)
+})
+
+test('syncedPageNoticeStore', async (t) => {
+  const { createOnceRegistry, syncedPageNoticeStore, onceToken } = await load()
+  const { pageNoticeSeen, notePageNotice, pageNoticeKey } = await import('../src/pageNotice.js')
+  const data = new Map()
+  const base = { getItem: (k) => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v) } }
+  const r = createOnceRegistry()
+  t.is(syncedPageNoticeStore(base, null, r), base)
+  t.is(syncedPageNoticeStore(base, MEMBER, null), base)
+  const store = syncedPageNoticeStore(base, MEMBER, r)
+  t.is(pageNoticeSeen(store, PAGE), false)
+  r.setRemote(MEMBER, [onceToken('page-dm-notice', MEMBER, PAGE)])
+  t.is(pageNoticeSeen(store, PAGE), true)
+  t.is(pageNoticeSeen(store, 'e'.repeat(64)), false)
+  const marks = []
+  r.onMark((m) => marks.push(m))
+  notePageNotice(store, 'e'.repeat(64))
+  t.is(data.get(pageNoticeKey('e'.repeat(64))), '1')
+  t.is(marks.length, 1)
+  store.setItem(pageNoticeKey(PAGE), '0')
+  store.setItem('other-key', '1')
+  t.is(marks.length, 1)
+  const broken = syncedPageNoticeStore({ getItem () { throw new Error('r') }, setItem () { throw new Error('w') } }, MEMBER, r)
+  t.is(broken.getItem(pageNoticeKey('f'.repeat(64))), null)
+  t.is(broken.getItem(pageNoticeKey(PAGE)), '1')
+  t.execution(() => broken.setItem(pageNoticeKey('f'.repeat(64)), '1'))
+  t.is(marks.length, 2)
+})
+
+test('the module is pure', (t) => {
+  const src = readFileSync(join(__dirname, '../src/onceMarks.js'), 'utf8')
+  for (const bad of ['react', 'react-native', 'require(', 'fetch']) t.absent(src.includes(bad), bad)
+  t.absent(src.includes(String.fromCharCode(0x2014)))
+})

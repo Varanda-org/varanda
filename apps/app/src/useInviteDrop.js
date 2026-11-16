@@ -3,9 +3,11 @@ import { invitePolicy, invitesStart, invitesSummary } from './account'
 import { createInviteDropMonitor } from './inviteDrop.js'
 import { loadInviteSeen, saveInviteSeen } from './inviteSeenStore'
 
-export function useInviteDrop ({ enabled, member, request }) {
+export function useInviteDrop ({ enabled, member, request, seenElsewhere, onMarked }) {
   const [note, setNote] = useState(null)
   const monitor = useRef(null)
+  const hooks = useRef({})
+  hooks.current = { seenElsewhere, onMarked }
   if (monitor.current === null) {
     monitor.current = createInviteDropMonitor({
       policy: invitePolicy,
@@ -14,12 +16,14 @@ export function useInviteDrop ({ enabled, member, request }) {
       store: { load: loadInviteSeen, save: saveInviteSeen },
       setInterval,
       clearInterval,
-      onNote: setNote
+      onNote: setNote,
+      seenElsewhere: (record) => (hooks.current.seenElsewhere ? hooks.current.seenElsewhere(record) : false),
+      onMarked: (record) => { if (hooks.current.onMarked) hooks.current.onMarked(record) }
     })
   }
   useEffect(() => {
     const active = monitor.current
-    active.update({ enabled, member, request })
+    active.update({ enabled, member, request, seenElsewhere, onMarked })
     return () => active.stop()
   }, [enabled, member, request])
   const markSeen = useCallback((record) => monitor.current.markSeen(record), [])

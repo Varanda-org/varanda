@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 66)
+  t.is(LEGAL_VERSION, 67)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 66, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 67, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'fa4e6988bf3482b92639bf34e362771fc3c6a4cee39dc13e2ee3548903275234', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '3021e9f6e2907f07330f7b3a5a5bc0f8855c5a9b72406cbe7632ae3a86039e02', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -845,4 +845,11 @@ test('legal: version 66 shares the Sorte do dia and the acceptance across device
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
   t.ok(text(PRIVACY).includes('O serviço só responde para conta vinculada, e responde só a versão e a data desse aceite.'), 'signed check answers only version and date')
   t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
+})
+
+test('legal: version 67 keeps the one-time notes from repeating on another device', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(PRIVACY).includes('marcas opacas de que o aviso antes da primeira mensagem a uma Página e o aviso de convite novo já foram mostrados, na mesma janela do Avisos, para que outro aparelho da mesma conta não os mostre de novo; as marcas não revelam a Página nem o convite'), 'opaque marks for the one-time notes')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('—'), 'no em dash')
 })

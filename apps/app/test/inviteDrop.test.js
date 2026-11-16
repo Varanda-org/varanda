@@ -480,6 +480,46 @@ test('web and native stores round trip and keep memory when storage fails', asyn
   }
 })
 
+test('a mark from another device suppresses the note and is remembered', async (t) => {
+  const f = await fixture({ seenElsewhere: () => true })
+  f.update()
+  await flush()
+  t.alike(f.notes, [])
+  t.alike(f.saved, [record()])
+  await f.c.advance(f.POLL_MS)
+  t.alike(f.notes, [], 'no later announcement for the same grant')
+})
+
+test('without a mark elsewhere the note appears as before', async (t) => {
+  const f = await fixture({ seenElsewhere: () => false })
+  f.update()
+  await flush()
+  t.alike(f.notes, [record()])
+  t.is(f.saved.length, 0)
+})
+
+test('markSeen reports the record once through onMarked', async (t) => {
+  const marked = []
+  const f = await fixture({ onMarked: (r) => marked.push(r) })
+  f.update()
+  await flush()
+  f.monitor.markSeen(f.notes[0])
+  f.monitor.markSeen(f.notes[0])
+  await flush()
+  t.alike(marked, [record()])
+  t.alike(f.saved, [record()])
+})
+
+test('a throwing seenElsewhere or onMarked changes nothing else', async (t) => {
+  const f = await fixture({ seenElsewhere: () => { throw new Error('x') }, onMarked: () => { throw new Error('y') } })
+  f.update()
+  await flush()
+  t.alike(f.notes, [record()])
+  f.monitor.markSeen(f.notes[0])
+  await flush()
+  t.alike(f.saved, [record()])
+})
+
 test('shell and note share the push action and gate on hosted capabilities', (t) => {
   const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
   const note = readFileSync(join(__dirname, '../src/ui/InviteDropNote.js'), 'utf8')

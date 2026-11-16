@@ -57,6 +57,8 @@ import { ShareProfile, shareProfileDirect } from '../ui/ShareProfile'
 import { buildProfileUrl } from '../profileLink'
 import { installationOrigin } from '../installation'
 import { pageNoticeStore } from '../pageNoticeStore'
+import { syncedPageNoticeStore } from '../onceMarks'
+import { onceMember, onceRegistry } from '../onceSync'
 import { pageNoticeKey, pageReadKind } from '../pageNotice'
 import { PressScale } from '../ui/PressScale'
 import { ProfileHeader, ProfileStatus } from '../ui/ProfileHeader'
@@ -957,7 +959,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const key = pageNoticeKey(author)
     if (!canConverse || key === null) return
     try {
-      if (pageNoticeStore().getItem(key) === '1') {
+      if (syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry).getItem(key) === '1') {
         onMessage(author)
         return
       }
