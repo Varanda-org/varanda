@@ -26,6 +26,9 @@ Branch `feat/dm-pool-buckets`. O conjunto de envelopes de mensagens diretas e o 
 - Envelopes postos por versões anteriores não têm marca e continuam baixados por todos.
 - Com mais de 6 bits anunciados, o aparelho volta ao v1.
 - Rodada 7: o pedido de todos os grupos diz ao semeador que o aparelho cuida de alguma Página, e a cópia própria e as mudanças próprias desse aparelho vão no grupo próprio. Cruzando horário e endereço de internet com os rosters públicos (os `dm-key`s dos admins ele consegue pôr em grupos), um semeador poderia descobrir qual Página o aparelho cuida. Como a lista de quem cuida de cada Página é pública, isso diz também de quem são as mensagens da Página. O grupo sorteado da rodada 9 não piora isso.
+- Rodada 9, semeador que também junta os envios por endereço: a segunda marca de uma resposta da Página de quem cuida não é o grupo próprio 63 vezes em 64, então ele distingue esses envios dos envios próprios e fica sabendo o grupo de quem recebe e o horário de cada resposta da Página. Sem marca ele sabia o mesmo.
+- Rodada 9: um canal com três ou mais envios cujas marcas são todas diferentes só vem de uma fila de mudanças de Página esvaziada num canal só (uma fila própria é `(X, X, X)`, um envio são dois). O semeador fica sabendo que aqueles envelopes são mudanças de Página e que um aparelho que cuida de Página está atrás do canal, não qual Página nem qual grupo.
+- Rodada 9, semeador alterado que anuncia 6 bits numa rede pequena: muitos grupos ficam sem nenhuma caixa (cerca de e^(-N/64) deles com N contas), e um envio num grupo vazio só pode ser cópia de Página. Um semeador honesto só liga os grupos acima de 1.000 diários, onde cada grupo tem centenas de caixas.
 
 ## Nota para quem opera
 
@@ -96,7 +99,7 @@ Em `packages/web-member/lib/dm.js`:
 
 | Arquivo | Testes novos | Resultado | Sem a correção |
 |---|---|---|---|
-| `packages/web-member/test/page-dm-buckets.test.js` | "drops sealed to a Página box go with a random group drawn per drop..." (substitui o teste "untagged"; 10 sorteios) | 16/16 (101 asserções), 2,8 s | sorteio trocado por `null` (comportamento antigo): este e os dois seguintes falham, 10 asserções. Grupo próprio no lugar do sorteio: 2 asserções falham ("not one fixed group", "not the holder's own bucket") |
+| `packages/web-member/test/page-dm-buckets.test.js` | "drops sealed to a Página box go with a random group drawn per drop..." (substitui o teste "untagged"; 10 sorteios; na quarta rodada passou a 6 mudanças e 5 respostas, com as marcas de cada caminho em listas separadas, ver a quarta rodada) | 16/16 (101 asserções), 2,8 s | sorteio trocado por `null` (comportamento antigo): este e os dois seguintes falham, 10 asserções. Grupo próprio no lugar do sorteio nos dois caminhos ao mesmo tempo: 2 asserções falham ("not one fixed group", "not the holder's own bucket"); só num dos dois caminhos esta versão do teste passava, ver a quarta rodada |
 | idem | "a Página drop whose put failed goes out again with the group drawn the first time" | idem | sorteio novo a cada put (na fila e na cópia própria): 2 asserções falham |
 | idem | "a second holder files the Página reply copy and the Página ctl a holder put with random groups" | idem | falha com `null` (acima) |
 | idem | "a catch-up that reaches the pool end with nothing left brings the Página cursor up to the own one" | idem | sem a subida no fim do conjunto (P3-1): 2 asserções falham |
@@ -108,6 +111,27 @@ Em `packages/web-member/lib/dm.js`:
 | idem | "a lock as the Página catch-up reaches the pool end leaves its cursor at the last item it read" | idem | falha (sem `LOCKED`, cursor da Página em 3 em vez de 2) só com as três checagens tiradas juntas: a da geração depois dos itens, a do fim do conjunto e a de `movePageCursor`. Tirando uma ou duas, as outras seguram |
 
 Os testes de grupo movidos sem mudança (6 testes, 45 asserções) passam no arquivo novo como passavam no antigo. `page-dm.test.js` sem eles: 19/19 (213 asserções, as mesmas dos 19 testes de antes), 68 s. `packages/web-member/test/dm.test.js` (a fila de mudanças mudou de formato): 74/74 (751 asserções), 110 s. `apps/app/test/legal.test.js`: 48/49, só o digest fixo falha (esperado).
+
+## Quarta rodada de correções da revisão (2026-11-16)
+
+Sem mudança em `packages/web-member/lib/dm.js` (as mutações abaixo foram feitas no arquivo e desfeitas; `git diff` dele vazio no fim).
+
+- P2-1: o teste do grupo sorteado separa os dois caminhos. As mudanças de Página (6) e as cópias próprias das respostas da Página (5) ficam em listas à parte; em cada lista confere-se mais de um valor, que nem todos são o grupo próprio de quem cuida e que nem todos são o grupo da Página. A carteira tem 20 senhas (`DM_STAMP_WALLET`), então 8 de cada não cabem; com 5 ou 6 sorteios por lista, uma falha falsa é cerca de 64^-4 por asserção.
+- Teste novo: uma mudança de Página que ficou na fila antes desta versão (item `{ b }` sem `p`, um sem carimbo e outros já carimbados) sai sem grupo no put que falha e de novo no seguinte; itens com `p` guardado fora de 0..63 (`64`, `'5'`, `-1`) também saem sem grupo, e um `p` guardado válido (5) é mantido.
+- P3-1 e P3-2 (só documento): `docs/protocol.md` (onde fica a marca da resposta e da mudança, o que um semeador que junta os envios por endereço aprende, o formato de `dmCtlQueue` com `p`, e dois riscos novos: canal com três ou mais marcas diferentes e semeador alterado numa rede pequena) e "Riscos que ficam" acima.
+
+`packages/web-member/test/page-dm-buckets.test.js`: 17/17 (124 asserções), 2,7 s (antes: 16/16, 101 asserções); mais cinco rodadas seguidas, todas 17/17 e 124/124.
+
+| Teste | Mutação em `dm.js` (feita e desfeita) | Resultado |
+|---|---|---|
+| grupo sorteado | cópia própria da resposta com o grupo próprio de quem cuida | falha: "Página reply self copy: not one fixed group" e "not always the holder's own bucket" |
+| idem | cópia própria da resposta com o grupo da Página | falha: "Página reply self copy: not one fixed group" e "not always the Página's bucket" |
+| idem | mudança de Página com o grupo próprio de quem cuida | falha: "Página ctl: not one fixed group" e "not always the holder's own bucket" |
+| idem | mudança de Página com o grupo da Página | falha: "Página ctl: not one fixed group" e "not always the Página's bucket" |
+| fila de antes da mudança | `ctxPrefix` sorteia um grupo para item sem `p` | falha: "the first put, refused" e a lista de grupos dos itens antigos |
+| idem | `readQueue` sorteia um `p` para item sem `p` | falha: as mesmas duas |
+| idem | `isPrefix` aceita qualquer valor (`x !== undefined`) | falha: a lista de grupos dos itens antigos |
+| idem | `isPrefix` sem o limite `< 64` | falha: a lista de grupos dos itens antigos |
 
 ## Limites conhecidos (não corrigidos)
 

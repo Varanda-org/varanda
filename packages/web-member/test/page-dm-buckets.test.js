@@ -139,7 +139,7 @@ async function bucketPage (t, { second = false, dropPutAck } = {}) {
     const shared = await A.web.request('dm.pageShare', { page: P, member: B.key, box: B.box })
     return B.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: shared.sealed, by: A.key, sig: shared.sig, box: made.box, groupBox: made.groupBox, cert })
   }
-  return { seeder, A, B, C, a: a.p, c: c.p, P, pageKp, adopt, share }
+  return { seeder, A, B, C, a: a.p, c: c.p, P, pageKp, pageBucket: dmCore.bucketPrefix(made.box), adopt, share }
 }
 
 // The bucket of each put since the last call (null: untagged).
@@ -159,41 +159,48 @@ async function pageCtl (A, P, pageKp, peer, op) {
 
 test('buckets: drops sealed to a Página box go with a random group drawn per drop; the own self copy and the own ctl keep the own bucket', async (t) => {
   t.timeout(TEST_TIMEOUT_MS)
-  const { seeder, A, C, a, c, P, pageKp, adopt } = await bucketPage(t)
+  const { seeder, A, C, a, c, P, pageKp, pageBucket, adopt } = await bucketPage(t)
   await adopt()
   await copyDiary(C, A)
   const tags = putTags(seeder)
-  const drawn = []
+  // The two paths apart, so a fixed tag on either one fails on its own.
+  const ctlTags = []
+  const replyTags = []
 
-  await pageCtl(A, P, pageKp, C.key, 'accepted')
-  const ctl = tags()
-  t.is(ctl.length, 1)
-  t.ok(isPrefix(ctl[0]), 'a Página ctl carries a group')
-  drawn.push(ctl[0])
-  const reply = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text: 'da página' })
-  await A.web.request('dm.pageSend', { page: P, id: reply.id, ...signed(reply.digest, pageKp) })
-  const pair = tags()
-  t.is(pair[0], c, 'a Página reply: the recipient bucket first')
-  t.ok(isPrefix(pair[1]), 'then its self copy with a group')
-  drawn.push(pair[1])
+  // The wallet holds 20 stamps (DM_STAMP_WALLET): 6 ctls, 5 replies (2 each)
+  // and the 3 own drops below fit; each list still has 5 or 6 draws, a
+  // false failure about 64^-4 per assertion.
+  for (let i = 0; i < 6; i++) {
+    await pageCtl(A, P, pageKp, C.key, ['accepted', 'blocked', 'unblocked'][i % 3])
+    const ctl = tags()
+    t.is(ctl.length, 1, 'one put per Página ctl')
+    ctlTags.push(ctl[0])
+  }
+  for (let i = 0; i < 5; i++) {
+    const reply = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text: 'da página ' + i })
+    await A.web.request('dm.pageSend', { page: P, id: reply.id, ...signed(reply.digest, pageKp) })
+    const pair = tags()
+    t.is(pair.length, 2, 'a recipient copy and a self copy')
+    t.is(pair[0], c, 'a Página reply: the recipient bucket first')
+    replyTags.push(pair[1])
+  }
+  // A group drawn per drop: not one fixed value, and from neither the own
+  // bucket nor the Página's, whichever of the two paths it is.
+  for (const [name, list] of [['Página ctl', ctlTags], ['Página reply self copy', replyTags]]) {
+    t.ok(list.length >= 5)
+    t.ok(list.every(isPrefix), name + ': every drop carries a group')
+    t.ok(new Set(list).size > 1, name + ': not one fixed group')
+    t.ok(list.some((x) => x !== a), name + ': not always the holder\'s own bucket')
+    t.ok(list.some((x) => x !== pageBucket), name + ': not always the Página\'s bucket')
+  }
   await A.web.request('dm.send', { to: C.key, text: 'minha' })
   t.alike(tags(), [c, a], 'an own message: its self copy keeps the own bucket')
   await A.web.request('dm.set', { peer: C.key, state: 'accepted' })
   t.alike(tags(), [a], 'an own ctl keeps the own bucket')
-
-  // A group drawn per drop: from neither the own bucket nor a fixed value.
-  for (let i = 0; i < 8; i++) {
-    await pageCtl(A, P, pageKp, C.key, i % 2 === 0 ? 'blocked' : 'unblocked')
-    drawn.push(...tags())
-  }
-  t.is(drawn.length, 10)
-  t.ok(drawn.every(isPrefix), 'every Página drop carries a group')
-  t.ok(new Set(drawn).size > 1, 'not one fixed group')
-  t.ok(drawn.some((x) => x !== a), 'not the holder\'s own bucket')
   t.ok(seeder.putInfos.every((i) => i.bits === 6), 'all on the v2 lane')
 
   await C.web.request('dm.pull')
-  t.alike((await C.web.request('dm.thread', { peer: P })).messages.map((m) => m.text), ['da página'], 'the recipient still gets the Página reply')
+  t.is((await C.web.request('dm.thread', { peer: P })).messages.length, 5, 'the recipient still gets every Página reply')
 })
 
 test('buckets: a Página drop whose put failed goes out again with the group drawn the first time', async (t) => {
@@ -281,7 +288,8 @@ test('buckets: a Página adopted after the own cursor passed its drop files that
 // A fake pool for the dm and visit links of an engine: items { seq, bytes }
 // on the dm lane (the visit lane is empty); each page request is recorded
 // as { lane, after, prefixes } (prefixes null: every bucket), each put's
-// prefix in `puts`. onOpen / onPage: awaited when a dm link opens and before
+// prefix in `puts` (failPuts: how many next puts are refused, still
+// recorded). onOpen / onPage: awaited when a dm link opens and before
 // a page answers. sweep(seq): drops the items up to seq, as the retention
 // does; seqs never go back.
 function fakePool () {
@@ -290,6 +298,7 @@ function fakePool () {
     items: [],
     pages: [],
     puts: [],
+    failPuts: 0,
     onOpen: null,
     onPage: null,
     add (bytes) {
@@ -310,6 +319,10 @@ function fakePool () {
         },
         async put (bytes, prefix) {
           pool.puts.push(prefix === undefined ? null : prefix)
+          if (pool.failPuts > 0) {
+            pool.failPuts--
+            return { ok: false, reason: 'cheio' }
+          }
           return { ok: true, reason: null }
         },
         close: noop
@@ -658,4 +671,53 @@ test('buckets: a lock as the Página catch-up reaches the pool end leaves its cu
   t.is(err && err.message, LOCKED)
   t.alike(pool.pages.map((q) => q.after), [3, 0, 1, 2], 'locked on the catch-up\'s last page')
   t.is((await store.readPageCursor(E.storage, prefix)).after, 2, 'not moved up to the own cursor after the lock')
+})
+
+test('buckets: a Página ctl queued before the random groups goes out untagged on every put; a stored group that is not 0..63 reads as none', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = fakePool()
+  const E = await poolEngine(t, pool, assoc)
+  const P = await E.adopt()
+  const C = crypto.keyPair()
+  // The key of the Página's local store, derived as lib/page-dm.js localKeyOf
+  // does from the local key (the queue items are sealed under it).
+  const key = crypto.hash([b4a.from('varanda/member-dm-local/page/v1\n', 'utf8'), await dmLocalKeyFromPrf(E.prf), b4a.from(P.page, 'hex')])
+  const b64 = (bytes) => b4a.toString(bytes, 'base64')
+  const envelope = () => {
+    const inner = dmCore.buildInner({ kind: 'msg', to: hex(C.publicKey), text: 'antiga', cert: createCert({ member: P.page }, assoc) }, P.kp)
+    return b64(dmCore.sealInner(inner, P.box))
+  }
+  const stamped = () => b64(dropTo(assoc, P.kp, hex(C.publicKey), P.box, 'antiga'))
+  // As a build from before the groups wrote the queue: sealed { b } only,
+  // the first one never stamped (an envelope), the others stamped drops;
+  // then stored groups that are not an integer 0..63, and one that is.
+  const items = [
+    { b: envelope() },
+    { b: stamped() },
+    { b: stamped(), p: 64 },
+    { b: stamped(), p: '5' },
+    { b: stamped(), p: -1 },
+    { b: stamped(), p: 5 }
+  ]
+  const prefix = store.pageDmPrefix(P.page)
+  await store.writeDmCtlQueue(E.storage, items.map((x) => gc.sealRecord(x, key)), prefix)
+  await E.stamp(3)
+  const ctl = async (op) => {
+    const d = await E.engine.pageDraft({ page: P.page, kind: 'ctl', op, peer: hex(C.publicKey) })
+    await E.engine.pageSend({ page: P.page, id: d.id, ...signed(d.digest, P.kp) })
+  }
+
+  // The first put fails: the stamped envelope stays queued, still without a group.
+  pool.failPuts = 1
+  await ctl('accepted')
+  await E.engine.idle()
+  t.alike(pool.puts, [null], 'the first put, refused')
+  // The next flush repeats it: never a group drawn for an item that has none.
+  pool.puts.length = 0
+  await ctl('blocked')
+  await E.engine.idle()
+  t.is(pool.puts.length, 8, 'the six old items, then the two new ones')
+  t.alike(pool.puts.slice(0, 6), [null, null, null, null, null, 5], 'old items untagged, a stored 64, "5" or -1 too; a stored 5 kept')
+  t.ok(pool.puts.slice(6).every(isPrefix), 'the new ones carry the group drawn when they were queued')
+  t.alike(await store.readDmCtlQueue(E.storage, prefix), [], 'nothing left queued')
 })
