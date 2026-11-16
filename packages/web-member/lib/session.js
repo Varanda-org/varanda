@@ -5771,14 +5771,15 @@ function createBrowserSession ({
   }
 
   // The plaintext of item `index` of a kept message -> { bytes, mime }, for
-  // the page only (never over RPC: a photo is far above MAX_MESSAGE).
-  function dmReadMedia ({ from, id, index } = {}) {
+  // the page only (never over RPC: a photo is far above MAX_MESSAGE). page:
+  // a message of that Página's conversations held on this device.
+  function dmReadMedia ({ from, id, index, page } = {}) {
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
         const ident = identityTarget
         const own = await dmIdentity({}, ident)
-        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index }))
+        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index, page }))
       } catch (err) {
         if (err instanceof TypeError) throw err
         throw toRpcError(err, reportInternal)

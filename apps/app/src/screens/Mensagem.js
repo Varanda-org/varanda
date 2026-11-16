@@ -1666,7 +1666,9 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
   const listing = item.listingLink
   const offerRow = item.deleted || offerKey === null ? null : offerOfRow(index)
   const actions = []
-  const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media })
+  // As a Página, its items are read from the Página's store on this device.
+  const pageOf = pageKey !== null ? { page: pageKey } : {}
+  const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })
   if (!item.deleted) {
     actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
     actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
@@ -1694,7 +1696,7 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
           media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
           item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
           mine={mine}
-          cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+          cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}
           plainCard={folder === 'request'}
           shape={shape}
           forwarded={!item.deleted && fwd === 1}

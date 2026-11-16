@@ -2052,7 +2052,9 @@ function writePageLegacyDone (storage, prefix, sealed) {
 
 // One page's store and kv entries (dm.pageForget, reset), its media cache
 // included (the ./dm-store.js index under the prefix needs no key).
-async function deletePageDm (storage, page) {
+// A page's opened media cache, read with no key: sign-out and reset, as
+// the identity's own (dm-store wipeCache), and deletePageDm.
+async function wipePageMedia (storage, page) {
   const prefix = pageDmPrefix(page)
   const index = await readKv(storage, prefix + 'dmMediaIndex')
   if (isVersioned(index) && Array.isArray(index.items)) {
@@ -2062,6 +2064,11 @@ async function deletePageDm (storage, page) {
     }
   }
   await storage.writeJson(prefix + 'dmMediaIndex', null)
+}
+
+async function deletePageDm (storage, page) {
+  const prefix = pageDmPrefix(page)
+  await wipePageMedia(storage, page)
   await storage.deleteCore(prefix + DM_LOCAL)
   await deletePageLegacyChunks(storage, prefix)
   for (const key of ['dmCursor', 'dmSeen', 'dmCtlQueue', 'dmLegacyBlocks', 'dmLegacyDone']) await storage.writeJson(prefix + key, null)
@@ -2223,6 +2230,7 @@ module.exports = {
   readPageMaxGen,
   writePageMaxGen,
   deletePageDm,
+  wipePageMedia,
   pageDmPrefix,
   readPageStores,
   notePageStore,
