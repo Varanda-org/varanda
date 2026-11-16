@@ -69,6 +69,10 @@ class FakeNode {
     return Object.prototype.hasOwnProperty.call(this.attributes, k) ? this.attributes[k] : null
   }
 
+  removeAttribute (k) {
+    delete this.attributes[k]
+  }
+
   addEventListener (type, fn) {
     if (!this.listeners[type]) this.listeners[type] = []
     this.listeners[type].push(fn)
@@ -1673,6 +1677,38 @@ test('a voice note report plays in an audio control the panel CSP allows', (t) =
   t.ok(/img-src 'self'; media-src 'self'; frame-ancestors/.test(routes), 'the panel CSP allows same-origin media')
   const store = require('../lib/account/moderation-store')
   t.ok(store.ANEXO_MIMES === undefined || store.ANEXO_MIMES.includes('audio/mp4'), 'the store accepts audio/mp4 anexos')
+})
+
+test('a report anexo renders as an image or an audio control, and logout releases both', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([
+    report({ id: R1, anexo: { mime: 'image/jpeg', size: 10 } }),
+    report({ id: R2, anexo: { mime: 'audio/mp4', size: 10 } }),
+    report({ id: 'r3abcdefghijklmnopqrst' })
+  ])
+  routes['POST /account/mod/logout'] = () => [200, { ok: true }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  const media = walk(doc.main).filter((n) => n.className === 'anexo')
+  t.is(media.length, 2, 'only the reports with an anexo show one')
+  const [img, audio] = media
+  t.is(img.tagName, 'IMG')
+  t.is(img.getAttribute('src'), '/account/mod/api/reports/' + R1 + '/anexo')
+  t.is(img.getAttribute('alt'), 'Imagem anexada à denúncia')
+  t.is(audio.tagName, 'AUDIO')
+  t.is(audio.getAttribute('src'), '/account/mod/api/reports/' + R2 + '/anexo')
+  t.is(audio.getAttribute('controls'), '')
+  t.is(audio.getAttribute('preload'), 'none', 'nothing loads before the moderator plays it')
+  t.is(audio.getAttribute('aria-label'), 'Áudio anexado à denúncia')
+  const text = doc.main.textContent
+  t.ok(text.includes('imagem enviada por quem denunciou, não conferida'))
+  t.ok(text.includes('áudio enviado por quem denunciou, não conferido'))
+  buttons(doc, 'Sair')[0].click()
+  await p.settled()
+  t.is(p.state, null)
+  t.is(img.getAttribute('src'), null, 'the image leaves with the session')
+  t.is(audio.getAttribute('src'), null, 'the audio leaves with the session')
 })
 
 // Feira listing reports: the panel row and the api/reports/<id>/anuncio view.

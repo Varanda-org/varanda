@@ -3,6 +3,11 @@ import { listen as onPending } from '../modules/share-intake'
 
 export { clear, peek, release, sweep } from '../modules/share-intake'
 
+// Only the web worker can fail to store a share after answering it.
+export function takeLost () {
+  return false
+}
+
 // A share stored while the app is suspended can miss onPending. Becoming
 // active runs the same callback so the composer still sees it.
 export function listen (fn) {

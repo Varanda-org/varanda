@@ -7,13 +7,28 @@
 // token or address is ever logged: logs carry counts and fixed reasons.
 //
 // Layout:
-//   blobs/<id hex>/meta.json   { v: 1, count, receivedAt }
+//   blobs/<id hex>/meta.json   { v: 2, count, receivedAt }
+//   blobs/<id hex>/acks        one ACK_BYTES record per acked chunk
 //   blobs/<id hex>/<index>     the whole chunk frame (BLOB_FRAME_BYTES)
 //   blobs/tokens.json          { v: 1, tokens: [{ h, at, kid }] }
-// meta.json is written atomically before the first chunk; each chunk is
-// written to a temporary name, fsynced and renamed, and only then acked.
+// acks is created empty and fsynced, then meta.json is written atomically,
+// before the first chunk. Each chunk is written to a temporary name, fsynced
+// and renamed, then its record [index u16be | kid 8 | token hash 32 | frame
+// hash 32] is written into acks and fsynced, and only then is it acked. The
+// journal is what the pool acked, so a load never takes a file's word for it:
+// an acked chunk whose file is gone or no longer the recorded frame (a token,
+// kid or signature changed at rest included) breaks its blob, and its token
+// stays spent from the record. A valid chunk without a record was written but
+// never acked (a crash between the rename and the record): the load records
+// it. A put that fails after the rename removes its chunk, first cutting
+// acks back to its whole records when its record was being written; when
+// that cut fails too, the chunk stays, and the load finds it with its record
+// or unrecorded. A meta.json of v: 1 (no journal) is the earlier layout, read
+// as before until its blob ages out.
 // receivedAt is the arrival of the blob's first chunk and is never refreshed:
-// not by a later chunk, not by a repeated put.
+// not by a later chunk, not by a repeated put. A blob past its retention (or
+// past partialMs while incomplete) is neither read nor added to, even before
+// the sweep removes it: a put for it sweeps first.
 //
 // The pool counts the chunks it actually stores, BLOB_CHUNK_BYTES each, never
 // a blob's declared count: a put is answered 'cheio' when storing its chunk
@@ -34,8 +49,8 @@
 // Spent tokens outlive their chunks, as in lib/dm-pool.js: a token hash stays
 // while verifyStamp could still accept its stamp. A hash goes only when it is
 // older than tokenRetentionMs AND isKidAccepted(kid) says its key is no
-// longer accepted. The tokens of stored chunks are read back from the frames
-// at load; tokens.json holds the rest, and the pool writes it before it
+// longer accepted. The tokens of stored chunks are read back from the acks
+// records and the frames at load; tokens.json holds the rest, and the pool writes it before it
 // deletes any chunk (a sweep, a load, a broken blob), so a hash is never on
 // disk only inside a deleted file.
 //
@@ -67,7 +82,10 @@ const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, BLOB_RETENTION_MS, 
 
 const BLOBS_DIR = 'blobs'
 const META_FILE = 'meta.json'
+const ACKS_FILE = 'acks'
 const TOKENS_FILE = 'tokens.json'
+const META_V = 2
+const ACK_BYTES = 2 + 8 + 32 + 32
 const BLOB_SWEEP_MS = 60000
 const BLOB_PARTIAL_MS = 60 * 60 * 1000
 const FILE_MODE = 0o600
@@ -88,9 +106,49 @@ function tokenHash (token) {
   return hex(hcrypto.hash(token))
 }
 
-function writeFull (fd, buf) {
+function writeFull (fd, buf, pos = 0) {
   let off = 0
-  while (off < buf.byteLength) off += fs.writeSync(fd, buf, off, buf.byteLength - off, off)
+  while (off < buf.byteLength) off += fs.writeSync(fd, buf, off, buf.byteLength - off, pos + off)
+}
+
+function ackRecord (index, rec) {
+  const out = b4a.alloc(ACK_BYTES)
+  out[0] = index >> 8
+  out[1] = index & 0xff
+  out.set(b4a.from(rec.kid, 'hex'), 2)
+  out.set(b4a.from(rec.token, 'hex'), 10)
+  out.set(b4a.from(rec.frame, 'hex'), 42)
+  return out
+}
+
+// The records of an acks file: { records, whole, bad, rewrite } (records maps
+// an index to { token, kid, frame }). A record outside count or two different
+// records for one index make it bad; a partial last record (a crash while
+// writing it, never acked) or a repeated one asks for a rewrite.
+// records holds one record per index; every holds each whole record, a
+// contradictory or out of range one included, so the tokens of a blob that
+// breaks over its journal still stay spent.
+function parseAcks (buf, count) {
+  const records = new Map()
+  const every = []
+  const whole = Math.floor(buf.byteLength / ACK_BYTES)
+  let bad = false
+  let rewrite = buf.byteLength % ACK_BYTES !== 0
+  for (let i = 0; i < whole; i++) {
+    const o = i * ACK_BYTES
+    const index = buf[o] * 256 + buf[o + 1]
+    const rec = {
+      kid: hex(buf.subarray(o + 2, o + 10)),
+      token: hex(buf.subarray(o + 10, o + 42)),
+      frame: hex(buf.subarray(o + 42, o + ACK_BYTES))
+    }
+    every.push(rec)
+    const prev = records.get(index)
+    if (index >= count || (prev !== undefined && (prev.token !== rec.token || prev.frame !== rec.frame || prev.kid !== rec.kid))) bad = true
+    else if (prev !== undefined) rewrite = true
+    else records.set(index, rec)
+  }
+  return { records, every, whole, bad, rewrite }
 }
 
 function fsyncDir (dir) {
@@ -238,6 +296,7 @@ function createBlobPool (opts = {}) {
     const badDirs = []
     const brokenDirs = []
     const clamped = []
+    const journals = []
     for (const name of readDirNames(poolDir) || []) {
       if (isTmpName(name)) {
         unlinkQuiet(path.join(poolDir, name))
@@ -248,14 +307,21 @@ function createBlobPool (opts = {}) {
       const names = readDirNames(d)
       if (names === null) continue
       const meta = readJsonFile(path.join(d, META_FILE))
-      const valid = meta !== null && typeof meta === 'object' && meta.v === 1 &&
+      const valid = meta !== null && typeof meta === 'object' && (meta.v === 1 || meta.v === META_V) &&
         Number.isInteger(meta.count) && meta.count >= 1 && meta.count <= BLOB_MAX_CHUNKS &&
         Number.isSafeInteger(meta.receivedAt) && meta.receivedAt >= 0
       const receivedAt = valid && meta.receivedAt <= loadNow + FUTURE_SLACK_MS ? meta.receivedAt : loadNow
+      // undefined for a v1 blob; null when a v2 blob lost its journal, which
+      // only corruption or tampering explains.
+      const acks = valid && meta.v === META_V ? readAcks(path.join(d, ACKS_FILE), meta.count) : undefined
       const chunks = new Map()
-      let broken = false
+      let broken = acks === null || (acks !== undefined && acks.bad)
+      let rewrite = acks ? acks.rewrite : false
+      if (acks) {
+        for (const r of acks.every) spend(r.token, receivedAt, r.kid)
+      }
       for (const f of names) {
-        if (f === META_FILE) continue
+        if (f === META_FILE || f === ACKS_FILE) continue
         const file = path.join(d, f)
         if (isTmpName(f) || !INDEX_NAME.test(f)) {
           unlinkQuiet(file)
@@ -264,36 +330,70 @@ function createBlobPool (opts = {}) {
         const frame = readFrameFile(file)
         const chunk = frame === null ? null : decodeChunk(frame)
         if (chunk !== null) spend(tokenHash(chunk.token), receivedAt, hex(chunk.kid))
-        if (valid && chunk === null && Number(f) < meta.count) {
+        const rec = acks ? acks.records.get(Number(f)) : undefined
+        if (chunk === null && (rec !== undefined || (acks === undefined && valid && Number(f) < meta.count))) {
           broken = true
           continue
         }
         if (!valid || chunk === null || hex(chunk.id) !== name || chunk.count !== meta.count || String(chunk.index) !== f) {
-          tornFiles.push(file)
+          if (rec !== undefined) broken = true
+          else tornFiles.push(file)
           continue
         }
-        chunks.set(chunk.index, { token: tokenHash(chunk.token), kid: hex(chunk.kid), frame: frameHash(frame) })
+        const got = { token: tokenHash(chunk.token), kid: hex(chunk.kid), frame: frameHash(frame) }
+        if (rec !== undefined && (rec.token !== got.token || rec.frame !== got.frame)) {
+          broken = true
+          continue
+        }
+        if (acks && rec === undefined) rewrite = true
+        chunks.set(chunk.index, got)
       }
       if (!valid) {
         badDirs.push(name)
         continue
       }
-      blobs.set(name, { count: meta.count, receivedAt, expired: broken, chunks })
+      if (acks) {
+        for (const index of acks.records.keys()) {
+          if (!chunks.has(index)) broken = true
+        }
+      }
+      const acked = acks ? (rewrite ? chunks.size : acks.whole) : 0
+      blobs.set(name, { v: meta.v, count: meta.count, receivedAt, expired: broken, chunks, acked })
       stored += chunks.size * BLOB_CHUNK_BYTES
-      if (broken) brokenDirs.push(name)
-      else if (receivedAt !== meta.receivedAt) clamped.push(name)
+      if (broken) {
+        brokenDirs.push(name)
+        continue
+      }
+      if (rewrite) journals.push(name)
+      if (receivedAt !== meta.receivedAt) clamped.push(name)
     }
 
     if (tornFiles.length > 0 || badDirs.length > 0 || brokenDirs.length > 0) writeTokens(new Set())
     for (const file of tornFiles) unlinkQuiet(file)
     for (const name of badDirs) removeBlobDir(name)
     for (const name of brokenDirs) removeBroken(name)
+    for (const name of journals) {
+      const blob = blobs.get(name)
+      const records = [...blob.chunks.keys()].sort((a, b) => a - b).map((i) => ackRecord(i, blob.chunks.get(i)))
+      writeFileAtomic(blobDir(name), ACKS_FILE, b4a.concat(records))
+    }
     for (const name of clamped) {
       const blob = blobs.get(name)
-      writeJsonAtomic(path.join(blobDir(name), META_FILE), { v: 1, count: blob.count, receivedAt: blob.receivedAt }, FILE_MODE)
+      writeJsonAtomic(path.join(blobDir(name), META_FILE), { v: blob.v, count: blob.count, receivedAt: blob.receivedAt }, FILE_MODE)
     }
     if (tornFiles.length > 0) log({ event: 'blob-pool-torn', chunks: tornFiles.length })
     if (brokenDirs.length > 0) log({ event: 'blob-pool-broken', blobs: brokenDirs.length })
+  }
+
+  function readAcks (file, count) {
+    let buf
+    try {
+      buf = fs.readFileSync(file)
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'EISDIR') return null
+      throw err
+    }
+    return parseAcks(buf, count)
   }
 
   function frameHash (frame) {
@@ -388,10 +488,56 @@ function createBlobPool (opts = {}) {
     return blob.chunks.size === blob.count
   }
 
-  function writeChunk (idHex, index, bytes) {
-    const d = blobDir(idHex)
-    const file = path.join(d, String(index))
-    const tmp = path.join(d, '.' + index + '.' + hex(hcrypto.randomBytes(6)) + '.tmp')
+  // Broken, or past its retention (partialMs while incomplete) by the clock,
+  // whether or not a sweep has removed it yet.
+  function gone (blob, t) {
+    return blob.expired || blob.receivedAt + (complete(blob) ? retentionMs : partialMs) <= t
+  }
+
+  // An empty journal, fsynced, before meta.json names the blob as v2.
+  function createAcks (d) {
+    const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
+    const fd = fs.openSync(path.join(d, ACKS_FILE), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
+    try {
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+  }
+
+  // Writes rec at the slot after the last whole record, so a failed write is
+  // overwritten by the next one instead of shifting every later record.
+  function appendAck (idHex, blob, index, rec) {
+    const fd = fs.openSync(path.join(blobDir(idHex), ACKS_FILE), fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW)
+    try {
+      writeFull(fd, ackRecord(index, rec), blob.acked * ACK_BYTES)
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+    blob.acked++
+  }
+
+  // Cuts acks back to its whole records after a failed appendAck. false
+  // when that fails too: the record may then still be on disk.
+  function dropAck (idHex, blob) {
+    try {
+      const fd = fs.openSync(path.join(blobDir(idHex), ACKS_FILE), fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW)
+      try {
+        fs.ftruncateSync(fd, blob.acked * ACK_BYTES)
+        fs.fsyncSync(fd)
+      } finally {
+        fs.closeSync(fd)
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function writeFileAtomic (d, name, bytes) {
+    const file = path.join(d, name)
+    const tmp = path.join(d, '.' + name + '.' + hex(hcrypto.randomBytes(6)) + '.tmp')
     const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
     const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, FILE_MODE)
     let renamed = false
@@ -419,6 +565,10 @@ function createBlobPool (opts = {}) {
     if (chunk === null) return null
     const idHex = hex(chunk.id)
     let blob = blobs.get(idHex)
+    if (blob !== undefined && !blob.expired && gone(blob, nowMs())) {
+      sweep()
+      blob = blobs.get(idHex)
+    }
     if (blob !== undefined) {
       if (blob.expired || blob.count !== chunk.count) return null
       if (blob.chunks.has(chunk.index)) {
@@ -449,25 +599,40 @@ function createBlobPool (opts = {}) {
         // The new directory's entry in blobs/ must be durable before any ack,
         // or a power cut can lose a blob the member was told is stored.
         fsyncDir(poolDir)
-        writeJsonAtomic(path.join(d, META_FILE), { v: 1, count: chunk.count, receivedAt: at }, FILE_MODE)
+        createAcks(d)
+        writeJsonAtomic(path.join(d, META_FILE), { v: META_V, count: chunk.count, receivedAt: at }, FILE_MODE)
       } catch (err) {
         try { removeBlobDir(idHex) } catch {}
         throw err
       }
-      blob = { count: chunk.count, receivedAt: at, expired: false, chunks: new Map() }
+      blob = { v: META_V, count: chunk.count, receivedAt: at, expired: false, chunks: new Map(), acked: 0 }
     }
+    const rec = { token, kid: hex(chunk.kid), frame: frameHash(bytes) }
+    let recording = false
     try {
-      writeChunk(idHex, chunk.index, bytes)
+      writeFileAtomic(blobDir(idHex), String(chunk.index), bytes)
+      if (blob.v === META_V) {
+        recording = true
+        appendAck(idHex, blob, chunk.index, rec)
+      }
     } catch (err) {
       if (fresh) {
         try { removeBlobDir(idHex) } catch {}
+      } else if (!recording || dropAck(idHex, blob)) {
+        // No record names the chunk (the failure came before it, or it was
+        // cut off): the file goes, renamed into place or not, so the disk
+        // holds only what is counted.
+        unlinkQuiet(path.join(blobDir(idHex), String(chunk.index)))
       }
+      // Otherwise the chunk stays next to a record that may have reached
+      // the disk: the load finds the two matching, or the chunk unrecorded,
+      // and a retry of this index overwrites both.
       throw err
     }
     if (fresh) blobs.set(idHex, blob)
     stored += BLOB_CHUNK_BYTES
-    blob.chunks.set(chunk.index, { token, kid: hex(chunk.kid), frame: frameHash(bytes) })
-    spend(token, at, hex(chunk.kid))
+    blob.chunks.set(chunk.index, rec)
+    spend(token, at, rec.kid)
     onStored()
     return { ok: true, complete: complete(blob) }
   }
@@ -477,7 +642,7 @@ function createBlobPool (opts = {}) {
     usable()
     const idHex = idHexOf(id)
     const blob = idHex === null ? undefined : blobs.get(idHex)
-    if (blob === undefined || blob.expired) return null
+    if (blob === undefined || gone(blob, nowMs())) return null
     return { count: blob.count, have: blob.chunks.size, complete: complete(blob) }
   }
 
@@ -486,7 +651,7 @@ function createBlobPool (opts = {}) {
     usable()
     const idHex = idHexOf(id)
     const blob = idHex === null ? undefined : blobs.get(idHex)
-    if (blob === undefined || blob.expired || !complete(blob) || !Number.isInteger(index) || !blob.chunks.has(index)) return null
+    if (blob === undefined || gone(blob, nowMs()) || !complete(blob) || !Number.isInteger(index) || !blob.chunks.has(index)) return null
     const frame = readFrameFile(path.join(blobDir(idHex), String(index)))
     if (isStoredFrame(idHex, blob, index, frame)) return frame
     dropBroken(idHex, blob)
@@ -503,8 +668,7 @@ function createBlobPool (opts = {}) {
     const t = nowMs()
     const expired = new Set()
     for (const [idHex, blob] of blobs) {
-      const ttl = complete(blob) ? retentionMs : partialMs
-      if (blob.expired || blob.receivedAt + ttl <= t) expired.add(idHex)
+      if (gone(blob, t)) expired.add(idHex)
     }
     const live = new Set()
     for (const [idHex, blob] of blobs) {
@@ -575,6 +739,8 @@ function createBlobPool (opts = {}) {
 module.exports = {
   BLOBS_DIR,
   META_FILE,
+  ACKS_FILE,
+  ACK_BYTES,
   TOKENS_FILE,
   BLOB_SWEEP_MS,
   BLOB_PARTIAL_MS,

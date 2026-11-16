@@ -415,3 +415,92 @@ test('linkHeld keeps the hold only while the text is exactly the shared one', as
   t.is(linkHeld(null, merged), false, 'the tap releases it')
   t.is(linkHeld('só texto', 'só texto'), false, 'no preview target, nothing held')
 })
+
+test('shareStep loaded lets go of a taken share without releasing its files', async (t) => {
+  const { EMPTY, shareStep } = await load()
+  const item = share()
+  const state = { ...EMPTY, held: item, phase: 'shown', owner: 'one', taken: true }
+  const result = shareStep(state, { type: 'loaded', id: item.id })
+  t.alike(result.state, { ...EMPTY, last: item.id }, 'the shell forgets it')
+  t.alike(result.effects, [], 'Publicar keeps the files for a retry')
+  const again = shareStep(result.state, { type: 'inbox', share: item, ownKey: 'one' })
+  t.is(again.state, result.state, 'the same share is not read again')
+  const next = share('b', AT + 1)
+  const other = shareStep(result.state, { type: 'inbox', share: next, ownKey: 'one' })
+  t.is(other.state.held, next, 'a newer share is read meanwhile')
+  t.alike(other.effects, [], 'nothing of the kept share is released')
+})
+
+test('shareStep ignores loaded unless the matching share is shown and taken', async (t) => {
+  const { EMPTY, shareStep } = await load()
+  const item = share()
+  for (const state of [
+    EMPTY,
+    { ...EMPTY, held: item, owner: 'one' },
+    { ...EMPTY, held: item, phase: 'shown', owner: 'one' },
+    { ...EMPTY, held: share('b'), phase: 'shown', owner: 'one', taken: true }
+  ]) {
+    const result = shareStep(state, { type: 'loaded', id: item.id })
+    t.is(result.state, state)
+    t.alike(result.effects, [])
+  }
+})
+
+test('shareStep free releases a kept share, and drops it if it is still held', async (t) => {
+  const { EMPTY, shareStep } = await load()
+  const item = share()
+  const next = { ...EMPTY, held: share('b', AT + 1), owner: 'one' }
+  const kept = shareStep(next, { type: 'free', id: item.id })
+  t.is(kept.state, next, 'the share the shell holds now stays')
+  t.alike(kept.effects, [{ type: 'release', id: item.id }])
+  const held = { ...EMPTY, held: item, phase: 'shown', owner: 'one', taken: true }
+  const dropped = shareStep(held, { type: 'free', id: item.id })
+  t.alike(dropped.state, { ...EMPTY, last: item.id })
+  t.alike(dropped.effects, [{ type: 'release', id: item.id }])
+  for (const id of ['', 'x', null, 42, '../' + item.id]) {
+    const bad = shareStep(next, { type: 'free', id })
+    t.is(bad.state, next, 'no release for ' + JSON.stringify(id))
+    t.alike(bad.effects, [])
+  }
+})
+
+test('retryableEncode refuses only size and format', async (t) => {
+  const { retryableEncode } = await load()
+  t.ok(retryableEncode('não foi possível abrir a foto'))
+  t.ok(retryableEncode('não foi possível preparar a foto'))
+  t.ok(retryableEncode('sem conexão'))
+  t.absent(retryableEncode('formato não aceito'))
+  t.absent(retryableEncode('arquivo grande demais'))
+  t.absent(retryableEncode('foto grande demais'))
+  t.absent(retryableEncode('imagem grande demais'))
+  t.absent(retryableEncode(''))
+  t.absent(retryableEncode(undefined))
+})
+
+test('holdShare and settleHold keep a share until each failed photo settles', async (t) => {
+  const { holdShare, settleHold } = await load()
+  t.alike(holdShare(ID, []), { hold: null, done: ID }, 'nothing failed: done now')
+  t.alike(holdShare(ID, undefined), { hold: null, done: ID })
+  const start = holdShare(ID, [3, 5, 3])
+  t.alike(start, { hold: { id: ID, ids: [3, 5] }, done: null }, 'held, each id once')
+  const same = settleHold(start.hold, [9])
+  t.is(same.hold, start.hold, 'another photo changes nothing')
+  t.is(same.done, null)
+  const one = settleHold(start.hold, [3])
+  t.alike(one, { hold: { id: ID, ids: [5] }, done: null })
+  t.alike(settleHold(one.hold, [5, 7]), { hold: null, done: ID }, 'the last one frees it')
+  t.alike(settleHold(null, [5]), { hold: null, done: null }, 'no hold')
+  t.alike(settleHold(start.hold, null), { hold: start.hold, done: null })
+})
+
+test('restoreDraft puts the kept text first and never cuts it', async (t) => {
+  const { restoreDraft } = await load()
+  t.is(restoreDraft('', 'atual', 10), 'atual', 'nothing kept')
+  t.is(restoreDraft(null, 'atual', 10), 'atual')
+  t.is(restoreDraft('guardado', '', 3), 'guardado', 'an empty draft takes it whole, over max too')
+  t.is(restoreDraft('guardado', '  \n', 3), 'guardado', 'a blank draft too')
+  t.is(restoreDraft('guardado', 'guardado', 3), 'guardado', 'not twice')
+  t.is(restoreDraft('ab', 'cd', 5), 'ab\ncd', 'both when they fit')
+  t.is(restoreDraft('ab', 'cde', 5), 'ab', 'the kept text alone when they do not')
+  t.is(restoreDraft('😀', 'ab', 4), '😀\nab', 'counted by code point')
+})

@@ -28,12 +28,14 @@ const {
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,
   PROVIDER_PER_DAY,
+  MEMBER_BUDGET_PER_DAY,
   PROVIDER_CALLS_PER_DAY,
   ARTS_PER_DAY,
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
   ART_PER_MEMBER,
+  ART_RETRY_MS,
   ART_ANSWER_MS,
   UPSTREAM_REUSE_MS,
   STORED_CONNECT_MS,
@@ -2219,7 +2221,7 @@ test('audius: art releases inflight on failure and timeout', async (t) => {
     t.ok(Date.now() - started < 5000, id + ' ends within the deadline')
     t.is(s.routes.stats().artInflight, 0, id + ' released inflight')
   }
-  t.is(s.routes.stats().covers, 0, 'no failure is cached')
+  t.is(s.routes.stats().covers, ids.length, 'each failure after a host contact is remembered for a while')
   artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
 
   // Held fetches of two members fill the cover slots: the next, from a third
@@ -2259,6 +2261,89 @@ test('audius: a failing art host keeps the art use and cannot drain the shared b
   const other = await s.login(s.other)
   const search = await s.post(other.token, 'search', { q: QUERY, kind: 'track' })
   t.is(search.status, 200, 'another member still searches')
+})
+
+test('audius: a cover fetch that failed after a host contact is answered 503 for ART_RETRY_MS, with no contact and the use given back', async (t) => {
+  t.is(ART_RETRY_MS, 60 * 1000)
+  const timers = boundTimers()
+  const s = await setup(t, { covers: true, timers, caps: { arts: 3 } })
+  const { token } = await s.login()
+  const first = await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })
+  t.is(first.status, 503)
+  t.alike(first.json, { error: 'indisponivel' })
+  t.ok([...timers.live.values()].some(({ handle }) => handle.ms === ART_RETRY_MS), 'the failure expires after ART_RETRY_MS')
+  for (let i = 0; i < 5; i++) {
+    const again = await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })
+    t.is(again.status, 503, 'remembered: 503, never the 404 the app keeps for the session')
+    t.alike(again.json, { error: 'indisponivel' })
+  }
+  t.alike(artPaths(s), ['/ArtErr1'], 'no new host contact while remembered')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Plain1' }), 'image/jpeg', JPEG)
+  s.clock.offset += ART_RETRY_MS
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })).status, 503)
+  t.alike(artPaths(s), ['/ArtErr1', '/Plain1', '/ArtErr1'], 'asked again once the failure expired')
+  const over = await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })
+  t.is(over.status, 429, 'the two contacted fetches kept their uses: the cap of 3 is reached')
+  t.alike(over.json, { error: 'limite-musica' })
+})
+
+test('audius: each member spends at most MEMBER_BUDGET_PER_DAY of the shared budget, and past it gets 429 while others still play', async (t) => {
+  t.is(MEMBER_BUDGET_PER_DAY, PROVIDER_PER_DAY / 10)
+  t.is(MEMBER_BUDGET_PER_DAY, 1200)
+
+  // JSON calls: one unit each.
+  const j = await setup(t, { caps: { share: 2 } })
+  const ja = await j.login()
+  const jb = await j.login(j.other)
+  t.is((await j.post(ja.token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  t.is((await j.post(ja.token, 'search', { q: 'outra', kind: 'track' })).status, 200)
+  const asked = j.api.seen.length
+  const spent = await j.post(ja.token, 'search', { q: 'terceira', kind: 'track' })
+  t.is(spent.status, 429, 'the share is spent')
+  t.alike(spent.json, { error: 'limite-musica' })
+  t.is(j.api.seen.length, asked, 'and the provider is not asked')
+  t.is((await j.post(jb.token, 'search', { q: QUERY, kind: 'track' })).status, 200, 'another member has its own share')
+
+  // Art host contacts: one unit each, the use given back when none was made.
+  const a = await setup(t, { covers: true, caps: { share: 2, arts: 2 } })
+  const aa = await a.login()
+  const ab = await a.login(a.other)
+  t.is((await a.post(aa.token, 'search?covers=1', { q: QUERY, kind: 'track' })).status, 200)
+  artOk(t, await a.post(aa.token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  const art = await a.post(aa.token, 'art', { kind: 'track', id: 'Fill6' })
+  t.is(art.status, 429, 'the share is spent before the art host is contacted')
+  t.alike(art.json, { error: 'limite-musica' })
+  t.alike(artPaths(a), ['/Fill5'])
+  t.is(a.routes.stats().covers, 1, 'a fetch the share stopped is not remembered')
+  artOk(t, await a.post(aa.token, 'art', { kind: 'track', id: 'Fill5' }), 'image/jpeg', JPEG)
+  artOk(t, await a.post(ab.token, 'art', { kind: 'track', id: 'Fill6' }), 'image/jpeg', JPEG)
+  t.absent(a.logs.some((e) => e.reason === 'orcamento'), 'a spent share is not the spent budget')
+
+  // A redirect hop past the share: the starter gets 429 and keeps the use.
+  const h = await setup(t, { covers: true, caps: { share: 2 } })
+  const ha = await h.login()
+  const hop = await h.post(ha.token, 'art', { kind: 'track', id: 'ArtHop2' })
+  t.is(hop.status, 429)
+  t.alike(hop.json, { error: 'limite-musica' })
+  t.alike(artPaths(h), ['/ArtHop2'], 'the provider call and the first hop spent the share')
+  t.is(h.routes.stats().covers, 0)
+
+  // Audio opens: one unit each, the open given back past the share.
+  const o = await setup(t, { caps: { share: 2 } })
+  const oa = await o.login()
+  const ob = await o.login(o.other)
+  const ticket = await o.ticketFor(oa.token, 'Ranged1')
+  t.is(o.api.seen.length, 1, 'the play spent one unit on the track lookup')
+  const played = await o.audio(ticket)
+  t.is(played.status, 200)
+  const streamed = o.node.seen.length
+  const cut = await o.audio(ticket)
+  t.is(cut.status, 429, 'the share is spent')
+  t.alike(cut.json, { error: 'limite-musica' })
+  t.is(o.node.seen.length, streamed, 'and no storage node is contacted')
+  t.is(o.api.seen.length, 2, 'nor the provider')
+  const other = await o.ticketFor(ob.token, 'Ranged1')
+  t.is((await o.audio(other)).status, 200, 'another member still plays')
 })
 
 test('audius: covers have their own slot pool', async (t) => {
@@ -2480,6 +2565,29 @@ test('audius: a full cover cache evicts the oldest and clears its timer', async 
   t.is(s.art.seen.length, before, 'a recent cover is still held')
   t.is((await s.post(token, 'art', { kind: 'track', id: 'Many0' })).status, 200)
   t.is(s.art.seen.length, before + 1, 'the evicted one is fetched again')
+  for (let i = 0; i < 2; i++) t.is((await s.post(token, 'art', { kind: 'track', id: 'ArtErr1' })).status, 503)
+  t.is(artPaths(s).filter((p) => p === '/ArtErr1').length, 2, 'with the cache full, a failure is not remembered')
+  t.is(s.routes.stats().covers, MAX_ART_CACHED)
+  t.is((await s.post(token, 'art', { kind: 'track', id: 'Many' + MAX_ART_CACHED })).status, 200)
+  t.is(s.art.seen.length, before + 3, 'and pushes no good cover out')
+})
+
+test('audius: a failed fetch of an older href leaves the newer cover held', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.artwork.Fill7 = { '150x150': 'https://' + ART + '/ArtHang1' }
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  const old = s.post(token, 'art', { kind: 'track', id: 'Fill7' })
+  t.ok(await s.until(() => s.art.held.size === 1), 'the old href is in flight')
+  s.state.artwork.Fill7 = { '150x150': 'https://' + ART + '/Fill7' }
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill7' }), 'image/jpeg', JPEG)
+  for (const res of s.art.held) json(res, 500, {})
+  t.is((await old).status, 503, 'the old fetch failed after the newer one landed')
+  const before = s.art.seen.length
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Fill7' }), 'image/jpeg', JPEG)
+  t.is(s.art.seen.length, before, 'the newer cover is still held')
+  t.is(s.routes.stats().covers, 1)
 })
 
 // --- the 480 cover and song info ---------------------------------------------
@@ -2692,7 +2800,14 @@ test('audius: a failed 480 fetch answers as is, with no fallback', async (t) => 
     t.alike(res.json, { error: 'indisponivel' })
     t.absent(artPaths(s).includes('/Small' + id), id + ': the small cover is not tried')
   }
-  t.is(s.routes.stats().covers, 0, 'no failure is cached')
+  t.is(s.routes.stats().covers, 4, 'each failed 480 is remembered under its own key')
+  const seen = artPaths(s).length
+  for (const id of ['Err480', 'Busy480', 'Loop480', 'Part480']) {
+    const res = await s.post(token, 'art?size=480', { kind: 'track', id })
+    t.is(res.status, 503, id + ' remembered')
+    t.absent(artPaths(s).includes('/Small' + id), id + ': still no fallback')
+  }
+  t.is(artPaths(s).length, seen, 'a remembered failure contacts no host')
 
   // The 480 contact spent the last budget token: the fallback finds the
   // budget spent, answers 503 and keeps the use, as the host was contacted.

@@ -76,7 +76,8 @@ import { prepareVideo } from '../media/videoPrep'
 import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { encodeFile } from '../media/encode'
-import { linkHeld, mergeDraft, shareNote, sharedLinkHold } from '../sharedIntent'
+import { EXPIRED_TEXT, SHARE_TTL_MS, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
+import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
@@ -678,13 +679,17 @@ const ATTACH_AFTER_OPEN_MS = 700
 // (the draft stays after a failure, and Cancelar is back).
 const noop = () => {}
 
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, onSharedDone = () => {}, onSharedTaken = () => {}, onSharedLoaded = () => {}, onSharedFree = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
+  // The text as of this render, or as just restored by the draft keep below
+  // in this same commit, which the share effect then merges into.
+  const textRef = useRef(text)
+  textRef.current = text
   // Serials only grow and one hand-off is active at a time, so the highest
   // settled one stands for all older ones.
   const [lastSettled, setLastSettled] = useState(0)
@@ -754,6 +759,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const liveRef = useRef(new Set())
   const thumbsRef = useRef(new Map())
   const genRef = useRef(0)
+  // A retry waits while a photo is encoding: one decode at a time.
+  const encodingAny = items.some((item) => item.status === 'encoding')
+  // Each photo that failed to open and may on a retry, by id: { file, until }.
+  // A shared file is swept with its share after SHARE_TTL_MS, so its retry
+  // ends then; a picked one has no end.
+  const sourcesRef = useRef(new Map())
+  // The share kept for those retries, { id, ids } or null, and how to free it.
+  const holdRef = useRef(null)
+  const freeRef = useRef(onSharedFree)
+  freeRef.current = onSharedFree
   // True while Publicar uploads the items (one send at a time).
   const uploadingRef = useRef(false)
   // While the node seals a post for the outbox: no second send meanwhile.
@@ -999,14 +1014,24 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setItems((list) => list.map((item) => (item.id === id ? { ...item, ...fields } : item)))
   }
 
+  // A held share is done once each photo kept for a retry has loaded or
+  // left the draft (see holdShare in src/sharedIntent.js).
+  const settleShare = (ids) => {
+    const next = settleHold(holdRef.current, ids)
+    holdRef.current = next.hold
+    if (next.done !== null) freeRef.current(next.done)
+  }
+
   const removeItems = (ids) => {
     const gone = new Set(ids)
     for (const id of gone) {
       liveRef.current.delete(id)
+      sourcesRef.current.delete(id)
       revokeUrl(thumbsRef.current.get(id))
       thumbsRef.current.delete(id)
     }
     setItems((list) => list.filter((item) => !gone.has(item.id)))
+    settleShare(Array.from(gone))
   }
 
   // Closing the composer (Cancelar, swipe, the backdrop) keeps the text and
@@ -1031,6 +1056,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     genRef.current++
     for (const url of thumbsRef.current.values()) revokeUrl(url)
     thumbsRef.current.clear()
+    sourcesRef.current.clear()
+    // The draft goes with the screen (a lock), so a share held for a retry
+    // goes too.
+    if (holdRef.current !== null) freeRef.current(holdRef.current.id)
+    holdRef.current = null
   }, [])
 
   // One photo as the page: its own statement (start, page.sign) and the raw
@@ -1094,13 +1124,16 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
 
   // Reported before the encode: a full draft returns here, and the note still
   // has to say the new files did not fit.
-  const addFiles = async (files, onRoom) => {
+  // -> the ids of the photos that failed to open and may on a retry.
+  // until: when the files stop existing (a share's expiry), else Infinity.
+  const addFiles = async (files, onRoom, until = Infinity) => {
+    const failed = []
     // Shared photos land here too, and a post holds a video or photos.
-    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return }
+    if (video.draft.state.phase !== 'empty') { setNote(VIDEO_OR_PHOTOS); return failed }
     const room = Math.max(0, MAX_MEDIA_PER_POST - liveRef.current.size)
     onRoom(Math.max(0, files.length - room))
     const chosen = files.slice(0, room).map((file) => ({ id: nextItemId(), file }))
-    if (chosen.length === 0) return
+    if (chosen.length === 0) return failed
     if (musicDraftRef.current !== null) {
       setMusicDraft(null)
       setNote(MUSIC_PHOTOS_TEXT)
@@ -1112,22 +1145,68 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }))])
     // One at a time: decoding big photos in parallel would use a lot of memory.
     for (const { id, file } of chosen) {
-      if (gen !== genRef.current) return
+      if (gen !== genRef.current) return failed
       let encoded
       try {
         encoded = await encodeFile(file)
       } catch (err) {
-        if (gen === genRef.current && liveRef.current.has(id)) patch(id, { status: 'invalid', error: errorText(err) })
+        if (gen === genRef.current && liveRef.current.has(id)) {
+          const error = errorText(err)
+          const again = retryableEncode(error)
+          if (again) {
+            sourcesRef.current.set(id, { file, until })
+            failed.push(id)
+          }
+          patch(id, { status: 'invalid', error, reencode: again })
+        }
         continue
       }
       if (gen !== genRef.current || !liveRef.current.has(id)) continue
-      let thumb = null
-      try {
-        thumb = urlFromBytes(encoded.bytes, encoded.mime)
-        thumbsRef.current.set(id, thumb)
-      } catch {}
-      patch(id, { status: 'ready', encoded, thumb })
+      readyItem(id, encoded)
     }
+    return failed
+  }
+
+  const readyItem = (id, encoded) => {
+    let thumb = null
+    try {
+      thumb = urlFromBytes(encoded.bytes, encoded.mime)
+      thumbsRef.current.set(id, thumb)
+    } catch {}
+    patch(id, { status: 'ready', encoded, thumb, error: '', reencode: false })
+  }
+
+  // 'tentar de novo' on a photo that failed to open: the same file again.
+  const reencode = async (id) => {
+    const source = sourcesRef.current.get(id)
+    if (source === undefined || !liveRef.current.has(id) || held || encodingAny) return
+    if (Date.now() > source.until) {
+      sourcesRef.current.delete(id)
+      settleShare([id])
+      patch(id, { error: EXPIRED_TEXT, reencode: false })
+      return
+    }
+    const gen = genRef.current
+    patch(id, { status: 'encoding', error: '', reencode: false })
+    let encoded
+    try {
+      encoded = await encodeFile(source.file)
+    } catch (err) {
+      if (gen !== genRef.current || !liveRef.current.has(id)) return
+      const error = errorText(err)
+      // A newer share may have replaced this one meanwhile.
+      const again = retryableEncode(error) && sourcesRef.current.has(id)
+      if (!again) {
+        sourcesRef.current.delete(id)
+        settleShare([id])
+      }
+      patch(id, { status: 'invalid', error, reencode: again })
+      return
+    }
+    if (gen !== genRef.current || !liveRef.current.has(id)) return
+    sourcesRef.current.delete(id)
+    readyItem(id, encoded)
+    settleShare([id])
   }
 
   const attach = async () => {
@@ -1166,14 +1245,56 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
+
+  // The plain post text survives the reload a web share brings (the PWA
+  // share target loads the app again, src/draftKeep.web.js), for this
+  // account only. Defined before the share effect: a share applied in the
+  // same commit merges into the restored text.
+  const keepOwner = typeof me?.publicKey === 'string' && me.publicKey !== '' ? me.publicKey.toLowerCase() : null
+  const keptTextRef = useRef('')
+  keptTextRef.current = !replyProp && !quote && asPage === null ? text : ''
+  const draftTakenRef = useRef(false)
+  useEffect(() => {
+    if (keepOwner === null) return
+    if (!draftTakenRef.current) {
+      draftTakenRef.current = true
+      const kept = takeDraft(keepOwner)
+      if (kept !== '') {
+        const next = restoreDraft(kept, textRef.current, MAX_TEXT)
+        textRef.current = next
+        setText(next)
+      }
+    }
+    const stop = watchDraft(() => ({ owner: keepOwner, text: keptTextRef.current }))
+    return () => {
+      stop()
+      dropDraft()
+    }
+  }, [keepOwner])
+
   useEffect(() => {
     if (!(open && shared && shared.id !== appliedShareRef.current && !frozen && !busy && !moment.pending)) return
     appliedShareRef.current = shared.id
     onSharedTaken(shared.id)
+    // A newer share replaced the stored one (one is kept on each platform),
+    // so the photos kept for a retry can no longer open.
+    if (holdRef.current !== null) {
+      const old = holdRef.current
+      holdRef.current = null
+      for (const id of old.ids) {
+        sourcesRef.current.delete(id)
+        patch(id, { reencode: false })
+      }
+      freeRef.current(old.id)
+    }
     setMode('post')
-    const merged = mergeDraft(text, shared.text, MAX_TEXT)
-    if (merged.text !== text) setText(merged.text)
-    setLinkHold((hold) => sharedLinkHold(text, merged.text, hold))
+    const current = textRef.current
+    const merged = mergeDraft(current, shared.text, MAX_TEXT)
+    if (merged.text !== current) {
+      textRef.current = merged.text
+      setText(merged.text)
+    }
+    setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))
     if (shared.files.length === 0 || !canAttach) {
       setNote(shareNote({
         canAttach,
@@ -1187,8 +1308,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       onSharedDone(shared.id)
       return
     }
-    const done = () => {
-      if (mountedRef.current) onSharedDone(shared.id)
+    // Photos that failed to open keep the share's files for 'tentar de
+    // novo': the shell lets go of it ('loaded') and this screen frees it.
+    const done = (failed) => {
+      if (!mountedRef.current) return
+      // A photo removed or opened by a retry while the rest still loaded no
+      // longer needs the share.
+      const next = holdShare(shared.id, failed.filter((id) => sourcesRef.current.has(id)))
+      if (next.done !== null) {
+        onSharedDone(shared.id)
+        return
+      }
+      holdRef.current = next.hold
+      onSharedLoaded(shared.id)
     }
     addFiles(shared.files, (n) => setNote(shareNote({
       canAttach: true,
@@ -1198,7 +1330,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       failed: shared.failed || 0,
       kept: merged.kept,
       clipped: shared.clipped
-    }))).then(done, done)
+    })), shared.at + SHARE_TTL_MS).then(done, () => done([]))
   }, [open, shared && shared.id, frozen, busy, moment.pending])
 
   const pickEmoji = (emoji) => {
@@ -1411,7 +1543,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
     // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.view)) : ''
+    const refused = pageRetryRef.current === null ? (refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text))) : ''
     if (refused !== '') {
       setCheckError(refused)
       return
@@ -1558,7 +1690,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     busyRef.current = sending
     return () => { busyRef.current = false }
   }, [busyRef, sending])
-  const videoOff = held || hasVideo || items.some((item) => item.status === 'encoding')
+  const videoOff = held || hasVideo || encodingAny
   // One launch per handoff serial; attachRef reads the latest attach when the timer fires.
   const attachedHandoffRef = useRef(null)
   const attachTimerRef = useRef(null)
@@ -1973,6 +2105,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     busy={held}
                     onRemove={() => removeItems([item.id])}
                     onRetry={send}
+                    onReencode={encodingAny ? null : () => reencode(item.id)}
                     onMoveBefore={() => setItems((list) => moveById(list, item.id, -1))}
                     onMoveAfter={() => setItems((list) => moveById(list, item.id, 1))}
                   />
@@ -2194,7 +2327,7 @@ function Chip ({ label, on, disabled, onPress }) {
 // progress bar while uploading and the retry line after a failure. With two
 // or more photos, arrows move this one earlier or later: the first is the
 // cover, so it sets the carousel frame and the Mural tile.
-function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onMoveAfter }) {
+function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMoveBefore, onMoveAfter }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const label = 'foto ' + (index + 1) + ' de ' + count
@@ -2304,7 +2437,13 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onMoveBefore, onM
           </Pressable>
           )
         : null}
-      {invalid ? <Text style={styles.thumbError} numberOfLines={2}>{item.error || 'falhou'}</Text> : null}
+      {invalid && item.reencode === true && onReencode
+        ? (
+          <Pressable accessibilityRole='button' accessibilityLabel={label + ': ' + (item.error || 'falhou') + ', tentar de novo'} disabled={busy} onPress={onReencode} hitSlop={4}>
+            <Text style={styles.thumbError} numberOfLines={3}>{(item.error || 'falhou') + ' · tentar de novo'}</Text>
+          </Pressable>
+          )
+        : invalid ? <Text style={styles.thumbError} numberOfLines={2}>{item.error || 'falhou'}</Text> : null}
     </View>
   )
 }

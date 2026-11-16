@@ -13,3 +13,9 @@ android {
     versionName "0.1.0"
   }
 }
+
+// Sweeps a share nobody opened with the app closed (ShareSweepWorker). The
+// app already ships this exact version through expo-background-task.
+dependencies {
+  implementation 'androidx.work:work-runtime-ktx:2.9.1'
+}

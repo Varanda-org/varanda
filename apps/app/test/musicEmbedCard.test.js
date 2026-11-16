@@ -76,7 +76,8 @@ test('the card checks its slot every 500 ms against the feed band', (t) => {
   t.absent(/function mostlyHidden/.test(src), 'no local mostlyHidden')
   t.ok(src.includes('setInterval(check, EMBED_TICK_MS)'), 'EMBED_TICK_MS in setInterval')
   t.ok(src.includes('const top = insets.top + layout.topBar'), 'the band starts under the top bar')
-  t.ok(src.includes('const bottom = win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0))'), 'the band ends above the tab bar, when there is one')
+  t.ok(src.includes('const bottom = Math.min(win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0)), win.height - keyboard)'), 'the band ends above the tab bar, when there is one, and above the soft keyboard')
+  t.ok(src.includes("import { useKeyboardHeight } from './keyboardAvoid'") && src.includes('const keyboard = useKeyboardHeight()'), 'reads the keyboard height')
   t.ok(src.includes('answer(x, y, w, h, bottom)'), 'measured against the band')
   t.ok(/const settle = \(hidden, mayYield = true, gap = Infinity, near = false\) => \{\s*pending = false\s*if \(mayYield\) misses = 0\s*const free = stateRef\.current\.live \|\| embedSlots\.free\(gap, readerTouchNow\(\), Date\.now\(\)\)\s*apply\(embedStep\(stateRef\.current, \{ hidden, near, allowed, turned, free \}\), mayYield, gap, mayYield \|\| misses >= MISSED_LEAVE\)\s*if \(hidden === false && stateRef\.current\.live\) shown\.current = true\s*\}/.test(src), 'embedStep with the answer, its distance handed to apply; a fresh visible answer marks a live frame shown')
   t.ok(/const answer = \(x, y, w, h, lower\) => \{\s*const hidden = mostlyHidden\(x, y, w, h, top, lower, win\.width\)\s*const gap = hidden \? Math\.max\(bandGap\(x, y, w, h, top, lower, win\.width\), 1\) : 0\s*settle\(hidden, true, gap, embedNear\(gap, top, lower\)\)\s*\}/.test(src), 'the distance and nearness of the slot, never 0 when hidden')
@@ -87,7 +88,7 @@ test('the card checks its slot every 500 ms against the feed band', (t) => {
   t.ok(/\} catch \{\s*unseen\(\)\s*\}/.test(src), 'a throwing measure counts as hidden')
   t.ok(src.includes('const unseen = () => settle(true)'), 'hidden: true')
   t.ok(src.includes("import { TabBarShown } from './tabBarShown'") && src.includes('useContext(TabBarShown)'), 'reads TabBarShown')
-  t.ok(src.includes('[active, fits, locked, win.width, win.height, insets.top, insets.bottom, tabBarShown, band]'), 'the effect dependencies')
+  t.ok(src.includes('[active, fits, locked, win.width, win.height, insets.top, insets.bottom, tabBarShown, band, keyboard]'), 'the effect dependencies, the keyboard included')
 })
 
 test('a new claim drops the frame before any measurement', (t) => {
@@ -1251,7 +1252,7 @@ test('a draft has a remove button and a tall draft has no frame', (t) => {
   t.ok(/<\/Pressable>\s*<\/View>\s*\)\s*:\s*null\n/.test(src), 'no actions row without a remove button')
   t.ok(src.includes("import { LINK_CARD_DISMISS, LinkCard } from './LinkCard'"))
   t.ok(src.includes('const tooTall = !!draft && !state.live && height > win.height / 3'), 'a live draft frame is never swapped out when the window turns')
-  t.ok(/if \(tooNarrow \|\| tooTall\) \{\s*return \(\s*<View onLayout=\{onLayout\}>\s*\{plain\}\s*\{actions\}\s*<\/View>/.test(src), 'no slot or frame when too narrow or too tall')
+  t.ok(/if \(tooNarrow \|\| tooTall \|\| !players\) \{\s*return \(\s*<View onLayout=\{onLayout\}>\s*\{plain\}\s*\{actions\}\s*<\/View>/.test(src), 'no slot or frame when too narrow, too tall or with previews off')
 })
 
 test('taps inside the slot stay in the slot', (t) => {
@@ -1280,10 +1281,35 @@ test('an open sheet holds what is under it', (t) => {
   t.ok(ios.includes('{children}</View>'), 'IosContent renders its own children')
 })
 
-test('a lock or the background holds every player', (t) => {
+test('a lock, the background or Prévia de links off holds every player', (t) => {
   const app = withoutComments(fs.readFileSync(path.join(APP, 'App.js'), 'utf8'))
   t.ok(app.includes("import { holdAllEmbeds } from './src/embedLive'"))
-  t.ok(app.includes('useEffect(() => (locked || backgrounded ? holdAllEmbeds() : undefined), [locked, backgrounded])'))
+  t.ok(app.includes("import { usePreviewsEnabled } from './src/ui/usePreviewsEnabled'"))
+  t.ok(/const players = usePreviewsEnabled\(\)\s*useEffect\(\(\) => \(locked \|\| backgrounded \|\| !players \? holdAllEmbeds\(\) : undefined\), \[locked, backgrounded, players\]\)/.test(app), 'held while the switch is off')
+})
+
+test('with Prévia de links off a music card is the stored link card', (t) => {
+  t.ok(src.includes("import { usePreviewsEnabled } from './usePreviewsEnabled'") && src.includes('const players = usePreviewsEnabled()'), 'the card follows the switch')
+  t.ok(src.includes('const plain = <LinkCard card={draft ? undefined : card} draft={draft || undefined} imageUri={imageUri} thumb={thumb} onLongPress={onLongPress} />'), 'the stored card, with no onPress of its own: a tap opens the link')
+  const hook = withoutComments(fs.readFileSync(path.join(APP, 'src/ui/usePreviewsEnabled.js'), 'utf8'))
+  t.ok(hook.includes("import { onPreviewsChange, previewsEnabled } from '../previewPref'") && hook.includes("import { onPreviewPrefStorage, previewPrefStore } from '../previewBuild'"), 'the store Ajustes writes')
+  t.ok(/function read \(\) \{\s*if \(current === null\) current = previewsEnabled\(previewPrefStore\(\)\)\s*return current\s*\}/.test(hook), 'read once for every card')
+  t.ok(/const offSwitch = onPreviewsChange\(\(on\) => \{\s*current = on\s*fn\(\)\s*\}\)/.test(hook), 'and followed live')
+  t.ok(/const offStorage = onPreviewPrefStorage\(\(\) => \{\s*current = null\s*fn\(\)\s*\}\)/.test(hook), 'another tab switching it is read again')
+  t.ok(/return \(\) => \{\s*offSwitch\(\)\s*offStorage\(\)\s*\}/.test(hook), 'both listeners removed')
+  const native = withoutComments(fs.readFileSync(path.join(APP, 'src/previewBuild.native.js'), 'utf8'))
+  t.ok(/export function onPreviewPrefStorage \(\) \{\s*return \(\) => \{\}\s*\}/.test(native), 'nothing else writes the phone file')
+  t.ok(hook.includes('return useSyncExternalStore(subscribe, read, read)'))
+  t.absent(/react-native|Platform/.test(hook), 'no platform branch')
+})
+
+test('the keyboard height comes from the keyboard events and is 0 once it hides', (t) => {
+  const kb = withoutComments(fs.readFileSync(path.join(APP, 'src/ui/keyboardAvoid.js'), 'utf8'))
+  const fn = kb.slice(kb.indexOf('export function useKeyboardHeight'))
+  t.ok(fn.includes("Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', (e) => {"), 'on the same events as useKeyboardOpen')
+  t.ok(/const h = e && e\.endCoordinates \? e\.endCoordinates\.height : NaN\s*setHeight\(Number\.isFinite\(h\) && h > 0 \? h : 0\)/.test(fn), 'a missing or bad height counts as none')
+  t.ok(fn.includes("Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => setHeight(0))"), '0 once hidden')
+  t.ok(fn.includes('return () => { show.remove(); hide.remove() }'), 'listeners removed')
 })
 
 test('a chat menu holds the players', (t) => {

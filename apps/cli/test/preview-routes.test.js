@@ -525,7 +525,7 @@ test('preview: the finish limit counts verified finishes and answers limite-prev
   t.is(server.gifStats().spent, 0, 'the GIF session is separate')
 })
 
-test('preview: 60 previews per member per day; only a refused address gives the count back', async (t) => {
+test('preview: 60 previews per member per day, and a refused address stays counted', async (t) => {
   const { login, fetchPreview, clock } = await setup(t)
   let { token } = await login()
   for (let i = 0; i < PREVIEWS_PER_DAY; i++) {
@@ -535,6 +535,12 @@ test('preview: 60 previews per member per day; only a refused address gives the 
       return
     }
   }
+  const probed = await fetchPreview(token, { url: SITE + '/plain' })
+  t.is(probed.status, 429, 'refused names spend the count, so they cannot probe the resolver for free')
+  t.alike(probed.json, { error: 'limite-previa' })
+
+  clock.offset += 25 * 3600 * 1000
+  token = (await login()).token
   for (let i = 0; i < PREVIEWS_PER_DAY; i++) {
     const res = await fetchPreview(token, { url: SITE + '/plain' })
     if (res.status !== 200) {
@@ -729,15 +735,17 @@ test('preview: a non-YouTube page gets no fallback, and a titleless one stays em
   t.is(thumbs(site).length, 0)
 })
 
-test('preview: a refused YouTube address gives the count back with no fallback fetch', async (t) => {
+test('preview: a refused YouTube address is counted with no fallback fetch', async (t) => {
   const { login, fetchPreview, site } = await setup(t)
   const { token } = await login()
-  for (let i = 0; i < PREVIEWS_PER_DAY; i++) {
+  for (let i = 0; i < PREVIEWS_PER_DAY - 1; i++) {
     const res = await fetchPreview(token, { url: 'https://music.youtube.com/watch?v=bigpage0001' })
     if (res.status !== 503) return t.fail('refused preview ' + i + ' answered ' + res.status)
   }
   t.is(site.seen.length, 0, 'neither the page nor the thumbnail was fetched')
-  t.is((await fetchPreview(token, { url: YT + 'bigpage0001' })).status, 200, 'the refused ones were not counted')
+  t.is((await fetchPreview(token, { url: YT + 'bigpage0001' })).status, 200, 'the last preview of the day still works')
+  const over = await fetchPreview(token, { url: YT + 'bigpage0001' })
+  t.is(over.status, 429, 'the refused ones were counted')
 
   const extra = await fetchPreview(token, { url: YT + 'bigpage0001', extra: 1 })
   t.is(extra.status, 400, 'the body is still exactly { url }')

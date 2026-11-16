@@ -376,6 +376,7 @@ test('update.sh: executable, shebang, required strings and last line', (t) => {
     '/account/health',
     '/account/mod/api/me',
     'servido_igual sw.js sw.js',
+    '[ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"',
     'x86_64',
     'mv -Tf',
     ...SEEDER_LIMITS
@@ -948,6 +949,19 @@ test('update.sh: the real health gate passes a healthy full server and fails eac
   t.is(web.status, 1, 'a web probe serving other bytes fails in profile full')
   t.ok(web.log.includes('não serve o app de ' + dir + '/www'), 'says the app is not served')
   fs.copyFileSync(path.join(dir, 'www/sw.js'), s.p('fix/served/sw.js'))
+
+  // A page marked with its release loads varanda-node-<release>.js: that copy
+  // is probed too, and a page without the mark skips it (an older release).
+  const releaseNode = 'varanda-node-0123456789abcdef.js'
+  fs.writeFileSync(path.join(dir, 'www/index.html'), '<html><head><meta name="varanda-release" content="0123456789abcdef"></head></html>\n')
+  fs.copyFileSync(path.join(dir, 'www/index.html'), s.p('fix/served/_root'))
+  fs.writeFileSync(path.join(dir, 'www', releaseNode), 'node copy\n')
+  const noCopy = gate()
+  t.is(noCopy.status, 1, 'a marked page whose node copy is not served fails')
+  t.ok(noCopy.calls.includes('https://app.exemplo.org/' + releaseNode), 'probes the node copy')
+  fs.copyFileSync(path.join(dir, 'www', releaseNode), s.p('fix/served', releaseNode))
+  const marked = gate()
+  t.is(marked.status, 0, 'passes once the node copy is served: ' + marked.log)
 
   s.write('fix/served/account/mod/api/me.w', '200 application/json')
   t.is(gate().status, 1, 'a moderation API answering 200 fails')
