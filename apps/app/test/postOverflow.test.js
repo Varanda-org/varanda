@@ -155,6 +155,6 @@ test('body long press opens more with feedback and cancels pending navigation', 
   t.ok(caption.includes('onLongPress={bodyLongPress}') && caption.includes('delayLongPress={350}'), 'the nested plain caption also handles the hold')
   t.ok(!body.includes('disabled={!open && !bodyLongPress}') && caption.includes('disabled={!open && !bodyLongPress}'), 'more remains reachable without a conversation handler')
   t.ok(caption.includes('<MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress}'), 'a caption with links or mentions handles the hold too')
-  const head = post.slice(post.indexOf('<View style={[styles.head'), post.indexOf('{mediaNode}'))
+  const head = post.slice(post.indexOf('<View style={[styles.head'), post.indexOf('{videoOut ? null : mediaNode}'))
   t.is(head.split('onLongPress={bodyLongPress}\n').length - 1, 4, 'name, @nome, date and the reply line open the sheet on a hold instead of their own press')
 })

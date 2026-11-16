@@ -1114,6 +1114,26 @@ function validRecordCopy (record, seq) {
   return validateRecord(copy, seq) === null ? copy : null
 }
 
+// validRecordCopy for a walker that keeps only records of `type`: the copy,
+// or null when the record is invalid or of another type. A copy keeps the
+// source's own `type` (structuredClone and plainClone copy data properties
+// as they are), so for plain data (decodeBlock output, plainCopy entries) a
+// record whose OWN data `type` differs can never yield a copy of `type`, and
+// the clone and the validation are skipped. A getter on an earlier key could
+// rewrite `type` during the clone; that record is now skipped (fail closed). No
+// own `type`, an accessor, a throwing read: fall through to validRecordCopy.
+function validRecordCopyOfType (record, seq, type) {
+  try {
+    if (!isPlainObject(record)) return null
+    const d = Object.getOwnPropertyDescriptor(record, 'type')
+    if (d !== undefined && 'value' in d && d.value !== type) return null
+  } catch {
+    return null
+  }
+  const copy = validRecordCopy(record, seq)
+  return copy !== null && copy.type === type ? copy : null
+}
+
 // Plain-data copy of any value read once, or null. Never throws.
 function plainCopy (value) {
   try {
@@ -1125,7 +1145,7 @@ function plainCopy (value) {
 }
 
 function latestProfile (entries) {
-  return pickProfile(entries, validRecordCopy)
+  return pickProfile(entries, validRecordCopyOfType)
 }
 
 // latestProfile over entries whose records are already validRecordCopy
@@ -1139,7 +1159,7 @@ function latestProfileOfCopies (copies) {
 function pickProfile (entries, copyOf) {
   let best = null
   for (const { seq, record } of entries) {
-    const copy = copyOf(record, seq)
+    const copy = copyOf(record, seq, 'profile')
     if (copy === null || copy.type !== 'profile') continue
     if (best === null || seq > best.seq) best = { seq, name: copy.name, bio: copy.bio, avatar: copy.avatar }
   }
@@ -1304,6 +1324,7 @@ module.exports = {
   validPreviewImage,
   validateRecord,
   validRecordCopy,
+  validRecordCopyOfType,
   parseRef,
   formatRef,
   latestProfile,

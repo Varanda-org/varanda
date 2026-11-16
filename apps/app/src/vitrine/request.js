@@ -1229,7 +1229,8 @@ export function createVitrineRequest (fixtures, options) {
       }
     },
     'feed.read': ({ limit, before }) => ({
-      items: [...data.feed, ...extraFeed].filter((item) => (item.author === data.own || data.follows.includes(item.author)) && (!before || comparePosition(item, before, 'author') < 0)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit),
+      items: [...data.feed, ...extraFeed].filter((item) => (item.author === data.own || data.follows.includes(item.author)) && (!before || comparePosition(item, before, 'author') < 0)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit)
+        .map((item) => ({ ...item, avatar: (profileOf(item.author) || {}).avatar || null })),
       skipped: [],
       skippedTruncated: 0,
       future: [],

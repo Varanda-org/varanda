@@ -706,7 +706,13 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
 // onStepHeld: true while a step must be finished on this screen (a code that
 // opened the root, a creation awaiting 'concluir'), so the shell keeps a post
 // preview from replacing it; false otherwise and on unmount.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, initialInfo = null, onInfo, onInfoError, onAccountRead, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, invite = null, feira = null }) {
+// termsBeforeCreate (the hosted shell, also through Ajustes): { needed, ask,
+// accepted }. While needed, a new account starts nothing (no ceremony, no
+// request): ask() brings up the shell's Termos gate, and the person presses
+// Criar again afterwards. accepted: that gate was accepted in this page load,
+// so Criar stays offered after the remount it caused. Without the prop a
+// hosted node with a passkey refuses to create (fails closed).
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, initialInfo = null, onInfo, onInfoError, onAccountRead, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, termsBeforeCreate = null, invite = null, feira = null }) {
   // This device was disconnected from the account and the shell locked it (#350).
   const deviceForced = useDeviceState().forced
   const styles = useStyles(makeStyles)
@@ -877,7 +883,15 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   }, [active, locked, node.hosted, admissionAsks, admissionState, readAdmission])
   useEffect(() => () => { admissionSeq.current++ }, [])
 
+  const termsFirst = () => {
+    if (termsBeforeCreate === null) return node.hosted === true && passkey !== null
+    if (termsBeforeCreate.needed !== true) return false
+    termsBeforeCreate.ask()
+    return true
+  }
+
   const doCreate = async () => {
+    if (termsFirst()) return
     const r = await create.run(() => node.request('identity.create', {}))
     if (r.ok) refresh()
   }
@@ -1067,7 +1081,8 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // knownLost offers Criar again even when this device still has a record
   // of the passkey that just failed to appear.
   // While 'concluir' waits, a new creation would abandon that passkey.
-  const createFirst = (knownLost && !showComplete) || (pkStatus !== null && !pkStatus.passkeyKnown && (!showComplete || createToo))
+  const createAccepted = termsBeforeCreate !== null && termsBeforeCreate.accepted === true
+  const createFirst = ((knownLost || createAccepted) && !showComplete) || (pkStatus !== null && !pkStatus.passkeyKnown && (!showComplete || createToo))
   // Hybrid transport (the phone QR) is a browser capability. Native has no
   // such sheet: the button is not offered, and no phone ceremony is started.
   const phoneOk = !NATIVE && pkStatus !== null && pkStatus.hybrid !== 'no'
@@ -1083,6 +1098,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const doUnlock = () => ceremony(() => passkey.unlock({}), false, false, 'plain')
   const doRegister = (phone = false) => {
     if (!offer.create) return
+    if (termsFirst()) return
     // The press event is truthy and is not a phone choice. The flag set when
     // the EXISTS confirm opened is what the second click has to forward.
     const usePhone = phone === true || (typeof confirmCreate === 'object' && confirmCreate !== null && confirmCreate.phone === true)
@@ -1094,10 +1110,16 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     }
     ceremony(() => passkey.unlock(usePhone ? { register: true, phone: true } : { register: true }), true)
   }
-  const doComplete = () => ceremony(() => passkey.complete(), true, true)
+  // Finishes a new account's creation, which may have begun before a reload
+  // (status.pending survives it) while the claim did not.
+  const doComplete = () => {
+    if (termsFirst()) return
+    ceremony(() => passkey.complete(), true, true)
+  }
 
   const onCreatePress = (phone = false) => {
     if (!offer.create) return
+    if (termsFirst()) return
     const usePhone = phone === true
     if (pkStatus !== null && pkStatus.exists && !confirmCreate) {
       setConfirmCreate(usePhone ? { phone: true } : true)
@@ -1108,6 +1130,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
 
   const onPhonePress = () => {
     if (!phoneOk) return
+    if (offer.phoneCreate && termsFirst()) return
     // A new account on top of an existing diary still needs the EXISTS
     // confirm. The ceremony itself stays in that later click (doRegister).
     if (offer.phoneCreate && pkStatus !== null && pkStatus.exists && !confirmCreate) {
@@ -1119,9 +1142,18 @@ export default function Identidade ({ active, embedded = false, setup = false, v
 
   const onOtherPasskey = () => ceremony(() => passkey.unlock({ any: true }), false, false, 'other')
 
+  // A code always ends in a new passkey and a recovery write to the account
+  // service, so it is a creation: the Termos come before the field opens
+  // (nobody retypes a code after the gate), and every later step refuses
+  // without an acceptance.
+  const onCodeOpen = () => {
+    if (termsFirst()) return
+    setCodeOpen(true)
+  }
   // No WebAuthn here: the node checks the code, then the provider fetches the
   // sealed root. The ceremony wrapper keeps one flow and one busy flag.
   const onCodeSubmit = () => {
+    if (termsFirst()) return
     const code = codeText.trim()
     // Another creation awaits 'concluir': it is finished or abandoned first.
     if (code === '' || showComplete) return
@@ -1132,11 +1164,17 @@ export default function Identidade ({ active, embedded = false, setup = false, v
     setCodeOpen(false)
   }
   // WebAuthn inside the press: finishRecovery is the call itself.
-  const onFinishRecovery = () => ceremony(() => passkey.finishRecovery(), true, false, 'finish')
+  const onFinishRecovery = () => {
+    if (termsFirst()) return
+    ceremony(() => passkey.finishRecovery(), true, false, 'finish')
+  }
   // The recovery's own creation answered { pending: true }: its 'concluir'
   // keeps the 'finish' mode, so the result is registered and a dropped root
   // (RECOVERY_BAD) ends the recovery card.
-  const onFinishComplete = () => ceremony(() => passkey.complete(), true, true, 'finish')
+  const onFinishComplete = () => {
+    if (termsFirst()) return
+    ceremony(() => passkey.complete(), true, true, 'finish')
+  }
   const onCancelRecovery = () => {
     setNeedsPasskey(false)
     passkey.cancelRecovery().catch(() => {})
@@ -1388,7 +1426,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
                         />
                       </OptionBlock>
                       )
-                    : <OptionRow label={CODE_LABEL} icon='hash' onPress={() => setCodeOpen(true)} disabled={pkPending || confirmCreate !== false} first={!otherRow && !phoneOk} />}
+                    : <OptionRow label={CODE_LABEL} icon='hash' onPress={onCodeOpen} disabled={pkPending || confirmCreate !== false} first={!otherRow && !phoneOk} />}
               </OptionList>
               )
             : null}

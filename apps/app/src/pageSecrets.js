@@ -157,3 +157,62 @@ export function pageKeyText (err) {
 }
 
 export const isPageKeyMismatch = (err) => !!err && (err.pageKeyMismatch === true || err.message === NODE_MISMATCH)
+
+// ---- the session's mismatch notes (dm.pageKeyMismatch) ------------------------
+
+// The pages the node reported as holding a key other than the published one.
+// Each helper returns the same Set when nothing changes, so an event repeated
+// after every pull renders nothing new.
+export const NO_PAGE_MISMATCH = new Set()
+
+export function notePageMismatch (pages, page) {
+  const set = pages instanceof Set ? pages : NO_PAGE_MISMATCH
+  if (!isKey(page) || set.has(page)) return set
+  return new Set([...set, page])
+}
+
+export function clearPageMismatch (pages, page) {
+  const set = pages instanceof Set ? pages : NO_PAGE_MISMATCH
+  if (!set.has(page)) return set
+  const next = new Set(set)
+  next.delete(page)
+  return next
+}
+
+export const pageMismatchNote = (pages, page) => (pages instanceof Set && isKey(page) && pages.has(page) ? PAGE_DM_MISMATCH : '')
+
+// ---- pages no longer run (dm.pageForget) --------------------------------------
+
+// From a signed 'list' answer: `run`, the pages the member runs as owner or
+// admin, and `closed`. A moved page is run: the service marks its old key
+// closed with movedTo, and its old conversations stay. null for a malformed
+// answer or row, which never reads as "runs none".
+export function pagesRun (data) {
+  if (!isObject(data) || !Array.isArray(data.owned) || !Array.isArray(data.admin)) return null
+  const run = []
+  const closed = []
+  for (const row of [...data.owned, ...data.admin]) {
+    if (!isObject(row) || !isKey(row.page)) return null
+    const into = row.closed === true && !isKey(row.movedTo) ? closed : run
+    if (!into.includes(row.page)) into.push(row.page)
+  }
+  return { run: run.filter((p) => !closed.includes(p)), closed }
+}
+
+// After a list read: `run`, and `gone`, the pages whose keys this device
+// should forget: the closed ones, and those an earlier answer for the same
+// member (`before`) or `also` (the acting page, the pages the node flagged)
+// named and this one no longer lists, each once (`tried`). null on a
+// malformed answer: nothing is forgotten on it.
+export function pagesNoLongerRun (data, { before = [], also = [], tried = null } = {}) {
+  const got = pagesRun(data)
+  if (got === null) return null
+  const extra = also instanceof Set ? [...also] : (Array.isArray(also) ? also : [])
+  const gone = []
+  for (const page of [...got.closed, ...(Array.isArray(before) ? before : []), ...extra]) {
+    if (!isKey(page) || got.run.includes(page) || gone.includes(page)) continue
+    if (tried instanceof Set && tried.has(page)) continue
+    gone.push(page)
+  }
+  return { run: got.run, gone }
+}

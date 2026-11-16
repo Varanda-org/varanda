@@ -148,6 +148,7 @@ import { wipeLocalCaches } from './localCaches'
 import * as shareIntake from './shareIntake'
 import { clearMomentSeen } from './momentSeenStore'
 import { deviceStore } from './devices'
+import { NO_PAGE_MISMATCH, clearPageMismatch as dropPageMismatch, notePageMismatch } from './pageSecrets'
 import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
 
 const { loadConfig, saveConfig, clearConfig, discoverConfig, hostedPage, canConfigure } = configStore
@@ -434,6 +435,8 @@ function VitrineNodeProvider ({ children }) {
       dmVersion,
       bumpDm,
       seenVersion: 0,
+      pageMismatch: NO_PAGE_MISMATCH,
+      clearPageMismatch: () => {},
       // Never syncing, so always idle: background name reads wait for that
       // (autoSyncPolicy.js namesQuiet).
       autoSync: { wanted: autoWanted, backoffUntil: 0, failureUntil: 0, reconciling: false, idleSince: 1 },
@@ -556,6 +559,10 @@ function LiveNodeProvider ({ children }) {
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   // Bumped per seen.changed: a hint for the seen pass (seenSync.js), never data.
   const [seenVersion, setSeenVersion] = useState(0)
+  // The pages the node flagged with dm.pageKeyMismatch in this connection
+  // and unlock; the page screens warn as soon as they open as that page.
+  const [pageMismatch, setPageMismatch] = useState(NO_PAGE_MISMATCH)
+  const clearPageMismatch = useCallback((page) => setPageMismatch((set) => dropPageMismatch(set, page)), [])
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
   const recoveryRef = useRef(null)
@@ -755,6 +762,11 @@ function LiveNodeProvider ({ children }) {
       setDmVersion((n) => n + 1)
       return
     }
+    // Sent on every pull while the held key differs: no sync line.
+    if (name === 'dm.pageKeyMismatch') {
+      setPageMismatch((set) => notePageMismatch(set, data && data.page))
+      return
+    }
     if (name === 'follows.changed') {
       setFollows((f) => ({ version: f.version + 1, count: data && Number.isInteger(data.count) ? data.count : null }))
       return
@@ -821,6 +833,7 @@ function LiveNodeProvider ({ children }) {
     setError('')
     setSync({ active: null, lines: [], stopped: null })
     resetSignals()
+    setPageMismatch(NO_PAGE_MISMATCH)
     bumpEpoch()
     setRecovery(null)
     setFollows((f) => ({ version: f.version, count: null }))
@@ -1677,6 +1690,10 @@ function LiveNodeProvider ({ children }) {
     return conn.media.upload(args)
   }, [])
   const unlocked = pkStatus !== null && pkStatus.unlocked === true
+  // A lock drops the held page keys: what the node flagged goes with them.
+  useEffect(() => {
+    if (!unlocked) setPageMismatch(NO_PAGE_MISMATCH)
+  }, [unlocked])
   const media = useMemo(() => {
     if (!(hasPasskey && hasMedia && unlocked)) return null
     const out = { upload: mediaUpload }
@@ -1724,8 +1741,8 @@ function LiveNodeProvider ({ children }) {
   const syncView = useMemo(() => ({ active: sync.active, stopped: sync.stopped, starting }), [sync.active, sync.stopped, starting])
   const runFlags = useRunFlags(signals)
   const value = useMemo(() => ({
-    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, promote, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
-  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, promote, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
+    phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, promote, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, pageMismatch, clearPageMismatch, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
+  }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, promote, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, pageMismatch, clearPageMismatch, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
   const handle = useHandle(hosted, request, media, accountOrigin, syncNow)
   const memberKey = memberKeyOf(passkey)

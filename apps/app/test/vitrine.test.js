@@ -296,7 +296,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   }
   const feed = await answer(t, request, 'feed.read', {})
   for (const row of feed.items) {
-    keys(t, row, ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : []), ...(row.event ? ['event'] : [])])
+    keys(t, row, ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : []), ...(row.event ? ['event'] : [])])
     if (row.quote) keys(t, row.quote, ['author', 'seq'])
     if (row.media) for (const media of row.media) keys(t, media, ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
   }
@@ -437,7 +437,9 @@ test('feed, notices, profiles and diary peeks preserve paging and references', a
     before = { at, author, seq }
   }
   t.alike(pages.filter((item) => item.author === f.own || f.follows.includes(item.author)), pages)
-  t.alike(pages, f.feed.filter((item) => item.author === f.own || f.follows.includes(item.author)))
+  // Each item carries its author's avatar from the profile, as a node's does.
+  const avatarOf = (author) => ([...f.members, ...f.pages, ...f.applicants].find((p) => p.author === author) || {}).avatar || null
+  t.alike(pages, f.feed.filter((item) => item.author === f.own || f.follows.includes(item.author)).map((item) => ({ ...item, avatar: avatarOf(item.author) })))
   t.is((await answer(t, request, 'feed.read', { before: { at: f.feed[0].at, author: f.feed[0].author, seq: f.feed[0].seq } })).items.length, 0)
   const notices = []
   let after
@@ -585,7 +587,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -701,6 +703,7 @@ function samples (f) {
     'dm.pageSend': { page: member, id: 'ab'.repeat(16), signature: 'ab'.repeat(64), expiresAt: 1800000000000 },
     'dm.pageLegacyChunk': { page: member, id: member, index: 0, count: 1, sealed: 'abc' },
     'dm.pageLegacyBlocks': { page: member },
+    'dm.pageForget': { page: member },
     'dm.seen': { peer: member },
     'dm.set': { peer: member, state: 'accepted' },
     'dm.send': { to: member, text: 'Olá!' },

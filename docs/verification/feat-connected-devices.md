@@ -21,6 +21,9 @@ node packages/rpc/test/envelope.test.js
 node packages/web-member/test/devices-ops.test.js
 node packages/web-member/test/session-devices.test.js
 node packages/web-member/test/session-upkeep.test.js
+node packages/web-member/test/device-upkeep-ops.test.js
+node packages/web-member/test/periodic-rekey.test.js
+node packages/core/test/private-rekey.test.js
 npm run lint
 ```
 
@@ -42,6 +45,7 @@ O que cobrem:
 - [x] `device.reconnect` no navegador só depois de entrar com a passkey nesta abertura ("para conectar de novo, entre com a passkey"); no núcleo, sem essa exigência.
 - [x] `devices.changed` sai só quando o estado muda (nenhum enviado vale `off: false`): `[{ off: true }, { off: false }]` no fluxo desconectar e reconectar.
 - [x] Depois dos cortes, a chave gira nos grupos privados em que este nó distribui (melhor esforço; uma falha não desfaz o corte).
+- [x] Um aparelho desconectado não faz a troca periódica de chave (#700), nos dois nós: no navegador o plano sai vazio e um plano antigo não troca nada; no núcleo `periodicRekey` não grava nada. Sem esse bloqueio, `periodic-rekey.test.js` e `private-rekey.test.js` falham (o grupo vencido troca de chave). Na revisão de um novo escritor (#688), um escritor de comunidade que o próprio diário cortou não conta como admitido. A admissão automática (#701) não cobre um aparelho desconectado porque ele não grava escritor novo: entradas, criações e manutenção recusam (testes de `devices-ops.test.js`).
 - [x] Regressões (regra removida, teste rodado, regra de volta): sem a recusa do aparelho desconectado em `disconnectPlan`, falham 2 testes de `devices.test.js` e 2 de `devices-member.test.js`; sem a regra da manutenção desligada, falha o teste 3 de `devices-ops.test.js`; com o `hello` renomeando sempre, falha o teste 5 de `devices.test.js`; sem a exigência da passkey, o teste 2 de `session-devices.test.js` quebra (a reconexão passa); sem a troca de chave no navegador, falha o teste 6 de `devices-ops.test.js`.
 - [x] Regressões da revisão, com as bibliotecas de c8ef9b55 e os testes novos: em `devices.test.js` falham 2 (a marca repetida e o plano de "Aparelhos anteriores", 92/95 asserções); em `devices-member.test.js` falham 3 (a marca baixada de 100 para 0 e as entradas e criações por conta própria, 59/71); em `devices-ops.test.js` o teste da marca repetida falha (2/6) e o das entradas recusadas falha e deixa o aparelho voltar sozinho (o diário passa de 9 para 14 registros e `device.reconnect` responde "este aparelho está conectado"). Sem a chamada de `scheduleDeviceCheck`, o teste do comprimento novo em `session-upkeep.test.js` esgota o tempo esperando `devices.changed`.
 - [x] Regressões da segunda revisão: com a recusa depois da sincronização interna desligada, o teste do `detach()` em `devices-session.test.js` falha (o diário passa de 4 para 6 registros, 20/23 asserções); com `refuseOffDevice` lendo o estado como antes (erro vira `off: false`), o teste da leitura que falha em `devices-ops.test.js` falha: as entradas seguem e o diário passa para 9 registros (64/70 asserções).

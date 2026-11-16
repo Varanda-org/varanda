@@ -1366,7 +1366,8 @@ test('an admit waits for every counted writer of the member', async (t) => {
   t.is((await lastRecord(a, group)).type, 'group-header', 'no admit written')
 })
 
-test('an admitted member with a writer the admit did not list is requested again and can be admitted again', async (t) => {
+// Owner decision (#350): the diary's admission covers its new devices.
+test('an admitted member\'s writer the admit did not list is covered by it, and a new admit lists it', async (t) => {
   const { a, b } = await pair()
   const { group } = await ops.groupCreate(a.ctx, { name: 'Fechada', join: 'approval' })
   await shareGroupCore(a, b, group)
@@ -1380,11 +1381,10 @@ test('an admitted member with a writer the admit did not list is requested again
   const second = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex }), grp.groupPost({ text: 'outro' })])
   await shareGroupCore(b, a, second)
   await shareDiary(b, a)
-  t.alike((await ops.groupRead(a.ctx, { group })).items.map((p) => p.hidden), [true], 'the unlisted writer stays hidden')
-  const requests = await ops.groupRequests(a.ctx, { group })
-  t.alike(requests.requests.map((r) => r.member), [b.ownHex], 'listed for the admins')
+  t.alike((await ops.groupRead(a.ctx, { group })).items.map((p) => p.hidden), [false], 'the new device posts without a new admit')
+  t.is((await ops.groupRequests(a.ctx, { group })).total, 0, 'nothing for the admins')
   t.alike(await ops.groupAdmit(a.ctx, { group, member: b.ownHex, on: true }), { ok: true })
-  t.alike((await lastRecord(a, group)).cuts.map((c) => c.writer), [w, second].sort())
+  t.alike((await lastRecord(a, group)).cuts.map((c) => c.writer), [w, second].sort(), 'an admit still lists every held counted writer')
   t.is((await ops.groupRequests(a.ctx, { group })).total, 0)
 })
 

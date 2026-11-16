@@ -101,6 +101,7 @@ import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
 import { MusicPlayerCard } from './MusicPlayerCard'
 import { MediaGrid } from './MediaGrid'
+import { videoPair } from '../media/plan'
 import { PollCard } from './PollCard'
 import { EventCard } from './EventCard'
 import { tap } from './haptics'
@@ -252,6 +253,8 @@ function PostRowView ({
   // Video is the post's picture, so it sits where photos do; sound-only players stay below.
   // Only the stored card decides its slot, so opening the caption never remounts the player.
   const videoAbove = ownLink && embed.provider === 'youtube'
+  // A posted video has its own controls, so it leaves the body's hidden layer too, or no screen reader reaches it.
+  const videoOut = hasMedia && videoPair(media) !== null
   // The card already shows this link, so its raw address is hidden from the shown text only.
   const body = useMemo(() => (ownLink && typeof text === 'string' ? textWithoutHrefs(text, (href) => sameMusicPage(href, preview.url)) : text), [ownLink, text, preview])
   const hasText = typeof body === 'string' && body !== ''
@@ -573,7 +576,7 @@ function PostRowView ({
           onPress={openTap}
           onLongPress={bodyLongPress}
           delayLongPress={350}
-          tabIndex={videoAbove ? -1 : undefined}
+          tabIndex={videoAbove || videoOut ? -1 : undefined}
           {...a11yOpen}
         >
           <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
@@ -593,7 +596,7 @@ function PostRowView ({
   // The player takes its own touches outside the row's open area, so the plain caption follows it out.
   // The body label speaks the caption before the player; this copy is for sight and touch only,
   // hidden from web screen readers by aria-hidden and from native ones by the other two props.
-  const textUnder = videoAbove && hasText && !textOut ? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>{textNode}</View> : null
+  const textUnder = (videoAbove || videoOut) && hasText && !textOut ? <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>{textNode}</View> : null
   const previewsBody = previewLines.length === 0 && moreText === ''
     ? null
     : (
@@ -752,11 +755,12 @@ function PostRowView ({
                       )
                     : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
                   : null}
-              {mediaNode}
-              {textOut || videoAbove ? null : textNode}
+              {videoOut ? null : mediaNode}
+              {textOut || videoAbove || videoOut ? null : textNode}
             </View>
           </Pressable>
           {videoAbove ? previewNode : null}
+          {videoOut ? mediaNode : null}
           {textUnder}
           {textOut ? textNode : null}
           <ClampControl control={control} onPress={otherPress(toggle)} />

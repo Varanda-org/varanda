@@ -195,7 +195,7 @@ function AccountCard ({ ownKey, profile, onPress }) {
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, markVerified, recheckPhone }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, markVerified, recheckPhone, termsBeforeCreate = null }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -696,7 +696,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
             : <Page><Soft>Carregando…</Soft></Page>}
         </View>
         <View style={shown('conta')}>
-          <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} onPhoneRecheck={recheckPhone} />
+          <Identidade active={ready && screen === 'conta'} embedded view='conta' onInfo={onInfo} onPhoneRecheck={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
         </View>
         {/* Kept mounted like the others; it drops a shown recovery code as
             soon as it is not the active screen. */}
@@ -834,7 +834,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           <Sincronizar embedded onOpenConnection={() => onNavigate('conexao')} />
         </View>
         <View style={shown('identidade')}>
-          <Identidade active={ready && screen === 'identidade'} embedded view='tecnica' onInfo={onInfo} />
+          <Identidade active={ready && screen === 'identidade'} embedded view='tecnica' onInfo={onInfo} termsBeforeCreate={termsBeforeCreate} />
         </View>
       </>
       )

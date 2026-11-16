@@ -539,6 +539,13 @@ test('avatar: profile.set pair -> real seeder: /media bytes, /index/member and /
   t.is(validateRecord(blocks[2], 2), null)
   t.is(validateRecord(blocks[3], 3), null)
 
+  // Every feed.read item carries the author's newest avatar.
+  await web.request('post.create', { text: 'com foto' })
+  const feed = await web.request('feed.read', {})
+  const mine = feed.items.filter((i) => i.author === webKey)
+  t.ok(mine.length > 0)
+  for (const item of mine) t.alike(item.avatar, avatar, 'feed.read item avatar')
+
   await web.request('sync.stop')
   t.alike(internal, [], 'no internal error')
 })

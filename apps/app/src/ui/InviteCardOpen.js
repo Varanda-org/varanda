@@ -1,6 +1,7 @@
 // The signup invite card, opened before the intro cards on a first visit
 // (App.js decides when, through inviteCardCopy.js openingGate). Entrar goes
-// on to the terms gate as the intro's last card would; Como funciona shows
+// on as the intro's last card would (hosted: to Entrar, with the Terms after
+// it or before Criar conta; otherwise the terms gate); Como funciona shows
 // the intro cards and comes back here; Agora não hides the card for this
 // load only. The welcome stage and header around the card are decoration and
 // app copy; the name, message and username are peer text and are rendered

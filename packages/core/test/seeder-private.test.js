@@ -100,6 +100,7 @@ test('a private group is admitted, served raw and indexed without a name; box mi
   const g = seeder.indexGroup(G)
   t.is(g.header.visibility, 'private')
   t.is(g.header.name, null, 'no name for a private group')
+  t.is(seeder._groupServed.get(G).rootScanned, 0, 'a private root is never scanned')
   t.ok(g.writers.some((w) => w.key === W && w.diary === B.key), 'the writers as for a public group')
   await until(() => seeder.indexGroupSearch('cadeiras').complete, { name: 'busca completa' })
   t.alike(seeder.indexGroupSearch('cadeiras').groups.map((r) => r.group), [P], 'the search lists only the public group')

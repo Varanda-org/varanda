@@ -150,7 +150,8 @@ test('ForwardSheet: sequential sends with fwd plans, no automatic retry', (t) =>
   t.ok(src.includes('await runForward('), 'one awaited forward at a time')
   t.ok(src.includes('forwardPlan(source, target)'), 'each destination planned by forwardPlan')
   t.ok(src.includes("<Pill label='Tentar de novo' onPress={() => retry(row.key)}"), 'retry only on a tap')
-  t.ok(src.includes('if (busy || !canRetry(entry)) return'), 'a retry needs an uncertain kept request and nothing in flight')
+  t.ok(src.includes('if (busy || !retryable(entry)) return'), 'a retry needs an uncertain kept request and nothing in flight')
+  t.ok(src.includes('const retryable = (entry) => (pageMode ? canRetryPage(entry) : canRetry(entry))'))
   t.absent(/setTimeout|setInterval/.test(src), 'no timer that could resend')
   t.is((src.match(/retryForward\(/g) || []).length, 1, 'one retry call site')
 })
@@ -182,9 +183,9 @@ test('ForwardSheet: the selection is locked while the audience question shows', 
 
 test('ForwardSheet: a failed list shows its error and a reload; partial groups say so', (t) => {
   const src = sheetSrc()
-  t.ok(src.includes('loadForwardDestinations(request)'))
+  t.ok(src.includes('loadForwardDestinations(request, { groups: !pageMode })'))
   t.ok(src.includes("<Pill label='Carregar de novo' onPress={() => setReload((n) => n + 1)} />"), 'manual reload of a read')
-  t.ok(src.includes('[open, request, resolveMany, reload]'), 'the reload reruns the load')
+  t.ok(src.includes('[open, request, pageMode, resolveMany, reload]'), 'the reload reruns the load')
   t.ok(src.includes("const PARTIAL_NOTE = 'Alguns grupos não puderam ser carregados.'"))
   t.absent(src.includes('.catch(() => null)'), 'no failure turned into an empty list')
 })
@@ -211,4 +212,103 @@ test('ForwardSheet: media bytes stay device-local and peer text is escaped', (t)
   for (const word of ['lida', 'entregue', 'digitando']) t.absent(src.includes(word), word)
   t.absent(src.includes(String.fromCharCode(0x2014)))
   t.absent(readFileSync(__filename, 'utf8').includes(String.fromCharCode(0x2014)))
+})
+
+test('destinations load: more goes on from the cursor, one row per conversation, groups kept', async (t) => {
+  const { loadForwardDestinations, loadMoreForwardDestinations } = await load()
+  const page = (i, peers, next) => ({ conversations: peers.map((peer) => ({ peer, folder: 'inbox', preview: 'x', at: at(9 - i) })), next })
+  const info = { [COMM_OK]: async () => ({ name: 'Bairro', incomplete: false, groups: [{ group: GROUP_PUB, name: 'Geral', general: true, visibility: 'public', role: 'member', last: null }] }) }
+  const dmPages = [
+    page(0, [PEER_A], { page: 1 }),
+    page(1, [PEER_B], { page: 2 }),
+    page(2, [PEER_C, PEER_A], null)
+  ]
+  const { request, calls } = fakeRequest({ dmPages, info })
+  const first = await loadForwardDestinations(request, { pages: 2 })
+  t.alike(first.more, { page: 2 }, 'the cursor after the last page read')
+  t.alike(first.rows.filter((r) => r.kind === 'dm').map((r) => r.peer), [PEER_A, PEER_B])
+  const next = await loadMoreForwardDestinations(request, first, { pages: 2 })
+  t.alike(calls.filter((c) => c[0] === 'dm.list').map((c) => c[1].before || null), [null, { page: 1 }, { page: 2 }], 'more reads from the cursor on')
+  t.alike(next.rows.filter((r) => r.kind === 'dm').map((r) => r.peer), [PEER_A, PEER_B, PEER_C], 'a conversation already listed is not listed twice')
+  t.ok(next.rows.some((r) => r.key === 'group:' + GROUP_PUB), 'the groups stay')
+  t.is(next.more, null, 'the end of the inbox')
+  t.is(await loadMoreForwardDestinations(request, next), next, 'nothing more to read')
+  t.is(calls.filter((c) => c[0] === 'community.list').length, 1, 'more reads no community')
+  const failing = fakeRequest({ dmPages, dmFail: true, info: {} })
+  await t.exception(loadMoreForwardDestinations(failing.request, first), /falhou dm/)
+  t.alike(first.more, { page: 2 }, 'a failed read leaves what was read as it was')
+})
+
+test('destinations load as a page: Conversas only, no community read', async (t) => {
+  const { loadForwardDestinations } = await load()
+  const { request, calls } = fakeRequest({ dmPages: [{ conversations: [{ peer: PEER_A, folder: 'inbox', preview: 'x', at: at(1) }], next: null }], info: { [COMM_OK]: async () => ({ name: 'Bairro', groups: [] }) } })
+  const r = await loadForwardDestinations(request, { groups: false })
+  t.alike(r.rows.map((x) => x.key), ['dm:' + PEER_A])
+  t.absent(calls.some((c) => c[0] === 'community.list' || c[0] === 'community.info'))
+  t.is(r.partial, false)
+})
+
+test('page forward: text only, the items left out counted', async (t) => {
+  const { pageForwardSource } = await load()
+  t.alike(pageForwardSource({ kind: 'dm', text: 'oi', media: [dmItem, { unavailable: true }] }), { source: { kind: 'dm', text: 'oi', media: [] }, left: 1 })
+  t.alike(pageForwardSource({ kind: 'dm', text: 'oi', media: [] }), { source: { kind: 'dm', text: 'oi', media: [] }, left: 0 })
+  t.is(pageForwardSource({ kind: 'dm', text: '', media: [dmItem] }), null, 'a photo alone has nothing a page can forward')
+  t.is(pageForwardSource({ kind: 'group', visibility: 'public', text: 'oi', media: [] }), null)
+  t.is(pageForwardSource(null), null)
+})
+
+test('page forward: an uncertain send re-puts the same signed draft on a tap, never drafts or signs again', async (t) => {
+  const { forwardPlan, runForward, pageForwardSource, canRetryPage, retryPageForward } = await load()
+  const { pageDmClient, PAGE_DM_UNSURE } = await import('../src/dm-screen.js')
+  const PAGE = '9'.repeat(64)
+  const calls = []
+  let sendsLeft = 1
+  const node = async (method, params) => {
+    calls.push([method, params])
+    if (method === 'dm.pageDraft') return { id: 'ab'.repeat(16), digest: 'cd'.repeat(32), at: 1 }
+    if (method === 'dm.pageSend') {
+      if (sendsLeft-- > 0) throw Object.assign(new Error(PAGE_DM_UNSURE), { uncertain: true })
+      return { id: params.id, at: 2 }
+    }
+    throw new Error('método ' + method)
+  }
+  let signs = 0
+  const sign = async () => { signs++; return { signature: 'ef'.repeat(64), expiresAt: 1800000000000 } }
+  const request = pageDmClient({ request: node, sign, page: PAGE })
+  const { source } = pageForwardSource({ kind: 'dm', text: 'oi', media: [dmItem] })
+  const target = { kind: 'dm', to: PEER_A }
+  const plan = forwardPlan(source, target)
+  t.is(plan.uploads.length, 0, 'nothing to upload')
+  const r = await runForward({ plan, target, request, uncertain: (err) => err.uncertain === true })
+  t.is(r.phase, 'uncertain')
+  t.alike(calls[0], ['dm.pageDraft', { page: PAGE, kind: 'msg', to: PEER_A, text: 'oi', fwd: 1 }], 'one page draft with fwd: 1 and no media')
+  const entry = { state: 'uncertain', retry: r.error.retry }
+  t.ok(canRetryPage(entry))
+  t.absent(canRetryPage({ state: 'uncertain', op: r.op }), 'a kept dm.send op is no page retry')
+  const again = await retryPageForward({ retry: entry.retry })
+  t.is(again.phase, 'done')
+  t.alike(calls.map((c) => c[0]), ['dm.pageDraft', 'dm.pageSend', 'dm.pageSend'], 'the retry only re-puts')
+  t.alike(calls[2][1], calls[1][1], 'the same signed draft')
+  t.is(signs, 1, 'signed once')
+  t.is((await retryPageForward({})).phase, 'failed', 'nothing kept, nothing sent')
+  const failed = await retryPageForward({ retry: async () => { throw new Error('rascunho expirado') } })
+  t.is(failed.phase, 'failed')
+  const unsure = await retryPageForward({ retry: async () => { throw Object.assign(new Error(PAGE_DM_UNSURE), { uncertain: true }) } })
+  t.is(unsure.phase, 'uncertain')
+  t.is(typeof unsure.retry, 'function', 'still uncertain: the same re-put stays')
+})
+
+test('ForwardSheet as a page: the page client, its re-put kept, the left-out note, Carregar mais', (t) => {
+  const src = sheetSrc()
+  t.ok(src.includes('const request = pageMode ? pageRequest : node.request'))
+  t.ok(src.includes("{ retry: r.phase === 'uncertain' && r.error && typeof r.error.retry === 'function' ? r.error.retry : null }"), 'a page keeps only the re-put')
+  t.ok(src.includes('const p = await retryPageForward({ retry: entry.retry, uncertain: unsure })'))
+  t.ok(src.includes('{!started && pageMode && mediaLeft > 0 ? <View style={styles.pad}><Soft>{PAGE_MEDIA_LEFT}</Soft></View> : null}'))
+  t.ok(src.includes("<Pill label='Carregar mais' onPress={loadMore} pending={moreLoad.pending} />"))
+  t.ok(src.includes('if (genRef.current !== gen || loadedRef.current !== loaded) return'), 'a late more answer is dropped')
+  const mensagem = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(mensagem.includes('const canForward = unlocked\n'), 'Encaminhar shows acting as a page')
+  t.ok(mensagem.includes('{...(pageKey !== null ? { request: dm, mediaLeft: pageForward !== null ? pageForward.left : 0 } : {})}'), 'the page client goes to the sheet')
+  t.ok(mensagem.includes('(pageKey === null || pageForwardSource(forwardSource) !== null)'), 'no page forward of a message without text')
+  t.ok(mensagem.includes('useEffect(() => { setForwarding(null) }, [pageKey])'), 'a change of acting identity closes the sheet')
 })

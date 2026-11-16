@@ -403,6 +403,9 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
         zero(row)
       }
     }
+    // A K2 whose announcement was lost with a failed K1 save, before or
+    // across a restart: K1 says where the page went, so K2 goes out.
+    for (const p of [...pages.values()]) if (p.movedTo !== null) announceMoved(p.movedTo)
     if (url !== null && !closed) {
       try {
         noisePair = loadNoisePair()
@@ -463,7 +466,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
         foldFollow(p, seq, record)
         foldTerminal(p, record)
       }
-      if (row !== null && !p.stateLost && p.terminal !== null && p.movedTo === null && !p.closed) recoverTerminal(p, entries)
+      if (row !== null && p.terminal !== null && p.movedTo === null && !p.closed) recoverTerminal(p, entries)
       if (!p.paused && foreign(p)) pause(p)
     } catch (err) {
       pages.delete(key)
@@ -1120,17 +1123,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       p.wipeAfter = { key: to, length: MOVE_GENESIS }
     }
     // K2 is announced only once K1 says where the page went.
-    const announceK2 = () => {
-      const p2 = pages.get(to)
-      if (p2 === undefined || p2.announced) return
-      p2.announced = true
-      try {
-        saveState(p2)
-      } catch {
-        log({ event: 'page-announce', state: 'incompleto' })
-      }
-      linkAdd(p2)
-    }
+    const announceK2 = () => announceMoved(to)
     // K2 created by an earlier run of this move whose answer was uncertain
     // (never announced, no terminal record on K1 yet): the resend reuses it.
     const createK2 = async () => {
@@ -1154,7 +1147,12 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       } catch (err) {
         // K2 exists by now: a K1 found paused at this append falls back to
         // the detached statement.
-        if (err.code !== 'pausada') throw err.code === 'INVALID_RECORD' ? fail('invalido') : err
+        if (err.code !== 'pausada') {
+          // page-moved is on K1 but its state save failed: K2 is announced
+          // anyway, or K1's wipe and K2's push would wait for ever.
+          if (p.terminal === 'movida') announceK2()
+          throw err.code === 'INVALID_RECORD' ? fail('invalido') : err
+        }
         return pausedMove(p, false)
       }
     }, { orPaused: (p) => pausedMove(p, true) })
@@ -1167,6 +1165,18 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       out.record = movedRecord
     }
     return out
+  }
+
+  function announceMoved (key) {
+    const p2 = pages.get(key)
+    if (p2 === undefined || p2.announced) return
+    p2.announced = true
+    try {
+      saveState(p2)
+    } catch {
+      log({ event: 'page-announce', state: 'incompleto' })
+    }
+    linkAdd(p2)
   }
 
   // A moved K1's or a closed page's secrets leave page-keys on its chain,

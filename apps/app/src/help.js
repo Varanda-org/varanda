@@ -69,7 +69,7 @@ export const HELP = Object.freeze({
       'Aceitar ou recusar não avisa a outra pessoa.',
       'Não há confirmação de leitura.',
       'Bloquear interrompe as mensagens nos seus aparelhos.',
-      'Apagar remove a conversa só nos seus aparelhos.',
+      'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
       'A linha Comunidades serve para achar e criar comunidades.'
     ])
