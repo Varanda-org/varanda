@@ -218,3 +218,58 @@ test('reply preview lines: one line each, sanitized, blank and bad entries dropp
   t.is(ctrl.length, 1)
   t.ok(!ctrl[0].text.includes('‮'), 'a bidi override does not reach the screen')
 })
+
+test('comment props: tag pill, reply quote and the level-driven reply label', (t) => {
+  t.ok(/level, tag, replyQuote/.test(post), 'PostRow takes level, tag and replyQuote')
+  t.ok(post.includes("typeof tag === 'string' ? displayText(tag).trim()"), 'the tag goes through displayText')
+  t.ok(post.includes('tagText || null,'), 'the tag is part of the accessibility label')
+  t.ok(post.includes('{tagText ? <Text style={styles.tag}'), 'the tag pill is drawn after the name')
+  t.ok(post.includes("import { ReplyPreview } from './ReplyPreview'") && post.includes('<ReplyPreview'), 'the quote uses ReplyPreview')
+  t.ok(post.indexOf('{quoteShown') < post.indexOf('\n                : replyToName\n'), 'the quote takes the slot of the reply chip and replaces it')
+  t.ok(post.includes("(level === 'post' ? 'comentar na publicação de ' : 'responder a ') + title"), 'only level post says comentar; undefined keeps responder a')
+  t.absent(/level\s*=\s*replyToName|replyToName\s*\?\s*'comment'/.test(post), 'the level is never inferred from replyToName')
+  t.ok(post.includes('quoteSpoken || (replyToName !== null'), 'screen readers hear the quote in the body label, the hidden layer does not speak it')
+  t.ok(post.includes("'respondendo a ' + (quoteName ? quoteName + ': ' : '') + quoteText(replyQuote.text)"), 'the spoken quote is sanitized like the drawn one')
+})
+
+test('reply quote: screen readers reach its tap through a body action, beside activate', (t) => {
+  const { compileFunction } = require('node:vm')
+  const from = post.indexOf('  const bodyA11y = quotePress')
+  const to = post.indexOf('  const bodyParts = [', from)
+  t.ok(from >= 0 && to > from)
+  const make = (quotePress, a11yOpen) => compileFunction(post.slice(from, to) + '\nreturn bodyA11y', ['quotePress', 'a11yOpen'])(quotePress, a11yOpen)
+  const calls = []
+  const event = (actionName) => ({ nativeEvent: { actionName } })
+  const open = { onAccessibilityTap: () => calls.push('tap'), accessibilityActions: [{ name: 'activate' }], onAccessibilityAction: (e) => calls.push('open:' + e.nativeEvent.actionName) }
+  const both = make(() => calls.push('quote'), open)
+  t.alike(both.accessibilityActions, [{ name: 'activate' }, { name: 'mostrar a mensagem respondida', label: 'mostrar a mensagem respondida' }])
+  t.is(both.onAccessibilityTap, open.onAccessibilityTap, 'the VoiceOver open stays')
+  both.onAccessibilityAction(event('mostrar a mensagem respondida'))
+  both.onAccessibilityAction(event('activate'))
+  t.alike(calls, ['quote', 'open:activate'], 'each action reaches its own handler')
+  const alone = make(() => calls.push('quote2'), null)
+  t.alike(alone.accessibilityActions, [{ name: 'mostrar a mensagem respondida', label: 'mostrar a mensagem respondida' }])
+  alone.onAccessibilityAction(event('activate'))
+  alone.onAccessibilityAction(event('mostrar a mensagem respondida'))
+  t.is(calls[calls.length - 1], 'quote2')
+  t.is(make(undefined, open), open, 'no quote tap, the open actions unchanged')
+  t.is(make(undefined, null), null)
+  t.ok(post.includes("accessibilityHint={open ? 'abre a conversa' : undefined}\n            {...bodyA11y}"), 'on the body element')
+  t.is(post.split('{...a11yOpen}').length - 1, 2, 'the hidden text and time keep the plain open actions')
+})
+
+test('the body of a row with no open is never announced as disabled', (t) => {
+  t.absent(post.includes('mostrarRespondida'), 'VoiceOver speaks the action name, so it is words')
+  const from = post.indexOf('<View style={styles.body} onLayout={measureCaption}>')
+  const to = post.indexOf('{...bodyA11y}', from)
+  const body = post.slice(from, to)
+  t.ok(from >= 0 && to > from)
+  t.absent(/\bdisabled=/.test(body), 'a thread row (no open) with a reply quote or nothing at all is not dimmed')
+  t.ok(body.includes("accessibilityRole={open ? 'link' : 'text'}"), 'with no open it is plain text')
+  t.ok(body.includes('onPress={openTap}') && post.includes('const fn = (f) => (typeof f === \'function\' ? f : undefined)'), 'with no open, openTap is undefined and a tap does nothing')
+})
+
+test('the block gate masks the reply quote as it masks the quote', (t) => {
+  const gate = post.slice(post.indexOf('function BlockGate (props) {'), post.indexOf('export const PostRow = memo(BlockGate)'))
+  t.ok(gate.includes('<PostRowView {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />'))
+})

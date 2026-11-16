@@ -2018,9 +2018,9 @@ function Member () {
       try { h.go(-d) } catch {}
     }
   }, [commitStack])
-  const openThread = useCallback(({ ref, seed } = {}) => {
+  const openThread = useCallback(({ ref, seed, focus } = {}) => {
     setComposeSignal(null)
-    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
+    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null, focus: focus || null } })
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })

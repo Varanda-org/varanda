@@ -75,6 +75,7 @@ import { canSavePost, saveNotice, unsaveNotice } from '../savedView'
 import { useBlocks } from '../blocksProvider'
 import { blockedRowView } from '../memberBlocks'
 import { canShare, copyText, shareUrl } from '../share'
+import { quoteText } from '../chatPreview'
 import { shareNav } from '../shareNav'
 import { replyChip } from '../threadRows'
 import { whoOf } from '../who'
@@ -83,6 +84,7 @@ import { usePostSheet } from './PostSheetHost'
 import { Avatar } from './Avatar'
 import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
+import { ReplyPreview } from './ReplyPreview'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
 import { MusicPlayerCard } from './MusicPlayerCard'
@@ -213,7 +215,7 @@ function usePerfRow (key) {
 }
 
 function PostRowView ({
-  author, name, username, avatar, at, text, replyToName, replyPreviews, media, preview, persistMedia = true, now,
+  author, name, username, avatar, at, text, replyToName, level, tag, replyQuote, replyPreviews, media, preview, persistMedia = true, now,
   quote, repostedBy, counts, liked, reposted, pending, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
@@ -500,9 +502,29 @@ function PostRowView ({
   const bar = fn(onReply) || fn(onRepost) || fn(onQuote) || fn(onLike) || href !== null
   // Composed label for the post body element: author, reply-to, text, date.
   // The avatar link already provides profile access, so name here is context.
+  const tagText = typeof tag === 'string' ? displayText(tag).trim() : ''
+  const quoteShown = replyQuote && typeof replyQuote === 'object'
+  const quotePress = quoteShown ? otherPress(replyQuote.onPress) : undefined
+  // The quote is drawn inside the hidden visual layer, so the body label speaks it.
+  const quoteName = quoteShown && typeof replyQuote.name === 'string' ? displayText(replyQuote.name).trim() : ''
+  const quoteSpoken = quoteShown ? 'respondendo a ' + (quoteName ? quoteName + ': ' : '') + quoteText(replyQuote.text) : null
+  // ...and its tap, unreachable there, is a custom action on the body,
+  // beside the 'activate' that opens. iOS names the action by `name` and
+  // ignores `label`, so the name is the spoken words.
+  const bodyA11y = quotePress
+    ? {
+        ...a11yOpen,
+        accessibilityActions: (a11yOpen ? a11yOpen.accessibilityActions : []).concat([{ name: 'mostrar a mensagem respondida', label: 'mostrar a mensagem respondida' }]),
+        onAccessibilityAction: (event) => {
+          if (event.nativeEvent.actionName === 'mostrar a mensagem respondida') quotePress()
+          else if (a11yOpen) a11yOpen.onAccessibilityAction(event)
+        }
+      }
+    : a11yOpen
   const bodyParts = [
     title,
-    replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null,
+    tagText || null,
+    quoteSpoken || (replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null),
     shownText,
     spokenTime
   ].filter(Boolean)
@@ -610,16 +632,17 @@ function PostRowView ({
             All visual children are hidden from accessibility; sighted users
             interact with them directly (name, reply-to and text tap targets). */}
         <View style={styles.body} onLayout={measureCaption}>
+          {/* Never disabled: a thread row has no open, and a disabled body
+              would be announced as dimmed; with no handler its taps do nothing. */}
           <Pressable
             onPress={openTap}
             onLongPress={bodyLongPress}
             delayLongPress={350}
-            disabled={!open && !bodyLongPress}
             accessible
             accessibilityRole={open ? 'link' : 'text'}
             accessibilityLabel={label}
             accessibilityHint={open ? 'abre a conversa' : undefined}
-            {...a11yOpen}
+            {...bodyA11y}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
               <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headPad }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
@@ -635,6 +658,7 @@ function PostRowView ({
                 >
                   <Text style={styles.name} numberOfLines={1}>{title}</Text>
                 </Pressable>
+                {tagText ? <Text style={styles.tag} numberOfLines={1}>{tagText}</Text> : null}
                 {handle
                   ? (
                     <Pressable
@@ -664,22 +688,32 @@ function PostRowView ({
                   <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
                 </Pressable>
               </View>
-              {replyToName
-                ? openParent
-                  ? (
-                    <Pressable
-                      accessibilityRole='link'
-                      accessibilityLabel={replyLabel}
-                      onPress={openParent}
-                      onLongPress={bodyLongPress}
-                      delayLongPress={350}
-                      style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
-                    >
-                      <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
-                    </Pressable>
-                    )
-                  : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
-                : null}
+              {quoteShown
+                ? (
+                  <ReplyPreview
+                    name={replyQuote.name}
+                    text={replyQuote.text}
+                    senderKey={replyQuote.senderKey}
+                    onPress={quotePress}
+                    lines={2}
+                  />
+                  )
+                : replyToName
+                  ? openParent
+                    ? (
+                      <Pressable
+                        accessibilityRole='link'
+                        accessibilityLabel={replyLabel}
+                        onPress={openParent}
+                        onLongPress={bodyLongPress}
+                        delayLongPress={350}
+                        style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
+                      >
+                        <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                      </Pressable>
+                      )
+                    : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                  : null}
               {mediaNode}
               {textOut || videoAbove ? null : textNode}
             </View>
@@ -733,7 +767,7 @@ function PostRowView ({
               <View style={styles.bar}>
                 {fn(onReply)
                   ? (
-                    <Action label={'responder a ' + title} onPress={otherPress(onReply)} count={countOf(counts, 'replies')}>
+                    <Action label={(level === 'post' ? 'comentar na publicação de ' : 'responder a ') + title} onPress={otherPress(onReply)} count={countOf(counts, 'replies')}>
                       <Icon name='resposta' size={ICON} color={colors.soft} />
                     </Action>
                     )
@@ -885,7 +919,7 @@ function BlockGate (props) {
   const onBlock = blocks.available && typeof props.onReport === 'function'
     ? () => blocks.ask({ author: props.author, name: props.name, username: props.username })
     : undefined
-  return <PostRowView {...props} quote={view.quote} onBlock={onBlock} />
+  return <PostRowView {...props} quote={view.quote} replyQuote={view.replyQuote} onBlock={onBlock} />
 }
 
 export const PostRow = memo(BlockGate)
@@ -942,6 +976,16 @@ const makeStyles = (colors) => StyleSheet.create({
     minWidth: layout.hit,
     marginVertical: -6,
     justifyContent: 'center'
+  },
+  tag: {
+    ...type.meta,
+    color: colors.accent,
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
+    marginLeft: space.sm,
+    overflow: 'hidden',
+    flexShrink: 0
   },
   replyChipText: { ...type.meta, color: colors.soft, flexShrink: 1 },
   previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
