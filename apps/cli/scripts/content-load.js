@@ -266,8 +266,9 @@ async function runContentLoad (opts) {
   const { createClient, parseMessage, MAX_MESSAGE } = require('@varanda/rpc')
   const { createIssuedCert, createUsernameRecord, createSeederCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
   const { Seeder } = require('@varanda/core/lib/seeder')
-  const { createBrowserNode } = require('@varanda/web-member/lib/node')
-  const { memoryNodeStorage } = require('@varanda/web-member/lib/node-storage')
+  // apps/cli does not depend on packages/web-member, so it is reached by path.
+  const { createBrowserNode } = require('../../../packages/web-member/lib/node')
+  const { memoryNodeStorage } = require('../../../packages/web-member/lib/node-storage')
   const { planDataset, MIN_BLOCKS } = require('../lib/lab-dataset-plan')
   const { startSeedWs } = require('../lib/seed-ws')
   const { runDataset } = require('./lab-dataset')

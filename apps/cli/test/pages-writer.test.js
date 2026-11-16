@@ -1238,3 +1238,67 @@ test('pages-writer: an unsigned page-moved from a leaked key pauses the page but
   t.is(w2.info(page.key).movedTo, null, 'an unsigned page-moved moves nothing')
   await t.exception(w2.append(page.key, [postRecord({ text: 'x' })]), /pausada/, 'paused, not movida: the owner can still close or move')
 })
+
+// K1's state save fails right after page-moved landed (the state path is a
+// directory, so the rename is refused). Returns what the tests look at.
+async function failedMoveSetup (t, { online }) {
+  const { bootstrap } = await testnet(t)
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  let seederWs
+  if (online) {
+    const { seeder } = await startSeeder(t, bootstrap, ctx)
+    const server = await startSeedWs({ port: 0, seeder })
+    t.teardown(() => server.close(), { force: true })
+    seederWs = 'http://127.0.0.1:' + server.port
+  }
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, seederWs })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'falha')
+  await writer.createPage(page.args)
+  if (online) await until(() => writer.connected(), { name: 'link up', timeoutMs: 20000 })
+  const move = moveFor(ctx, keys, page, 'falha', writer.info(page.key).length, 2)
+  const file = path.join(dir, 'pages-store', page.key + '.json')
+  const old = fs.readFileSync(file)
+  fs.unlinkSync(file)
+  fs.mkdirSync(file)
+  let err = null
+  try { await writer.movePage(move.args) } catch (e) { err = e }
+  t.ok(err !== null, 'the move is refused: its K1 state save failed')
+  return { bootstrap, ctx, dir, keys, writer, page, move, file, old, seederWs }
+}
+
+test('pages-writer: a K1 state save that fails right after page-moved still announces K2 and wipes K1 once it is pushed', async (t) => {
+  t.timeout(240000)
+  const s = await failedMoveSetup(t, { online: true })
+  t.is(s.writer.info(s.move.next.key).announced, true, 'K2 is announced')
+  const gone = await until(() => s.keys.get(s.page.key) === null, { name: 'K1 wiped', timeoutMs: 30000 }).catch(() => false)
+  t.ok(gone, "K1's secrets go once K2 is on the seeder")
+})
+
+for (const lost of [false, true]) {
+  test('pages-writer: a failed K1 save after page-moved is wiped after a reopen with ' + (lost ? 'the K1 state file lost' : 'the old K1 state'), async (t) => {
+    t.timeout(240000)
+    const s = await failedMoveSetup(t, { online: false })
+    await s.writer.close()
+    fs.rmdirSync(s.file)
+    if (!lost) fs.writeFileSync(s.file, s.old, { mode: 0o600 })
+    // K2's announcement was lost too.
+    const k2 = path.join(s.dir, 'pages-store', s.move.next.key + '.json')
+    const st = JSON.parse(fs.readFileSync(k2, 'utf8'))
+    st.announced = false
+    fs.writeFileSync(k2, JSON.stringify(st), { mode: 0o600 })
+
+    const { seeder } = await startSeeder(t, s.bootstrap, s.ctx)
+    const server = await startSeedWs({ port: 0, seeder })
+    t.teardown(() => server.close(), { force: true })
+    const writer = createPagesWriter({ dir: s.dir, keys: s.keys, association: s.ctx.association, seederWs: 'http://127.0.0.1:' + server.port })
+    t.teardown(() => writer.close(), { force: true })
+    await writer.ready()
+    t.is(writer.info(s.move.next.key).announced, true, 'K2 is announced again')
+    const gone = await until(() => s.keys.get(s.page.key) === null, { name: 'K1 wiped', timeoutMs: 30000 }).catch(() => false)
+    t.ok(gone, "K1's secrets go once K2 is on the seeder")
+  })
+}
