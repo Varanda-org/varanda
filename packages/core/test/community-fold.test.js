@@ -2673,6 +2673,81 @@ test('group-cut: mark order and arrival give one result, a gap is reported (#350
   t.alike(cutsOf(holed), [[wX, 3]])
 })
 
+// An own-writer cut is final, also for a device the admission covers
+// automatically ("Admits list their writers").
+test('group-cut and automatic admission: a cut device is never covered past its cut, the others stay covered, a hole changes nothing (#350)', (t) => {
+  const wX2 = K(0x4021)
+  const wX3 = K(0x4022)
+  const THUMB = [{ emoji: '\u{1f44d}', count: 1, by: [X] }]
+  const setup = ({ marks = null, extra = null } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(X, wX).add(Y, wY)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(10) }))
+    const target = gpost(g, wX, 11)
+    g.add(X, wX2, { at: AT(12) })
+    gpost(g, wX2, 13)
+    gpost(g, wX2, 14)
+    gpost(g, wX2, 15)
+    g.push(wX2, groupReact({ target, emoji: '\u{1f44d}', at: AT(16) }))
+    gpost(g, wY, 17)
+    if (extra) extra(g, target)
+    const input = g.input()
+    if (marks !== null) input.marks = new Map(marks)
+    return { r: buildGroup(input), target }
+  }
+  const reactionsOf = (r, ref) => r.posts.find((p) => p.writer === ref.writer && p.seq === ref.seq).reactions
+
+  let { r, target } = setup()
+  t.alike(shown(r), [wX + ':1', wX2 + ':1', wX2 + ':2', wX2 + ':3'], 'control: the admission covers the new device')
+  t.alike(reactionsOf(r, target), THUMB)
+  t.ok(r.liveWriters.has(wX2))
+  t.ok(r.requests.includes(Y), 'Y was never admitted')
+
+  // 1. The cut device: nothing from its cut on, whatever is appended or admitted later.
+  const later = (g) => {
+    gpost(g, wX2, 18)
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(19) }))
+    g.push(G1, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: g.len(wX) }, { writer: wX2, seq: 1 }], at: AT(20) }))
+    gpost(g, wX2, 21)
+  }
+  ;({ r, target } = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }]]], extra: later }))
+  t.alike(shown(r), [wX + ':1', wX2 + ':1'], 'the cut device keeps only what is below its cut')
+  t.is(reactionsOf(r, target), undefined, 'its side record past the cut never counts')
+  t.absent(r.liveWriters.has(wX2), 'nothing it appends counts')
+  t.ok(r.liveWriters.has(wX))
+  t.is(r.members.get(X), 'member')
+  for (const cut of [0, 1]) {
+    ;({ r } = setup({ marks: [[X, [{ writer: wX2, cut, seq: 1 }]]], extra: later }))
+    t.alike(shown(r), [wX + ':1'], 'cut ' + cut + ': nothing of the device counts')
+    t.absent(r.liveWriters.has(wX2))
+  }
+
+  // 2. Another device of the same diary cut: a new device stays covered.
+  const newer = (g) => {
+    g.add(X, wX3, { at: AT(18) })
+    gpost(g, wX3, 19)
+  }
+  ;({ r, target } = setup({ marks: [[X, [{ writer: wX, cut: 1, seq: 1 }]]], extra: newer }))
+  t.alike(shown(r), [wX2 + ':1', wX2 + ':2', wX2 + ':3', wX3 + ':1'], 'the cut writer stops; the covered devices go on')
+  t.ok(r.liveWriters.has(wX2))
+  t.ok(r.liveWriters.has(wX3))
+  t.absent(r.liveWriters.has(wX))
+  t.absent(r.requests.includes(X), 'the admission still covers the new device')
+
+  // 3. A hole in the marks: reported, and the cover is what it is without it.
+  const plain = setup({ extra: newer }).r
+  const holed = setup({ marks: [[X, [{ gap: true }]], [Y, [{ gap: true }]]], extra: newer }).r
+  t.alike([...holed.cutUnknown].sort(), [X, Y].sort(), 'both holes are reported')
+  t.alike(shown(holed), shown(plain), 'a hole covers nothing more and hides nothing')
+  t.alike([...holed.liveWriters].sort(), [...plain.liveWriters].sort())
+  t.alike(holed.requests, plain.requests, 'a diary never admitted stays a request')
+  const cutHoled = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }, { gap: true }]]], extra: later }).r
+  const cutOnly = setup({ marks: [[X, [{ writer: wX2, cut: 2, seq: 1 }]]], extra: later }).r
+  t.alike(shown(cutHoled), shown(cutOnly), 'a hole next to a cut changes nothing')
+  t.alike([...cutHoled.liveWriters].sort(), [...cutOnly.liveWriters].sort())
+})
+
 test('group-cut: a creator mark on its own non-root writer cuts it, root marks keep their meaning (#350)', (t) => {
   const wZ = K(0x9000)
   const setup = ({ writerCut = null, rootCut = null } = {}) => {
