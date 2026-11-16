@@ -500,6 +500,7 @@ test('dm.thread: a peer reusing the cursor id cannot pull "load older" back', as
   await certify(storage, kp, assoc)
   const prf = crypto.randomBytes(32)
   await engine.unlock(prf)
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const box = await dmBoxKeyPairFromPrf(prf, 1)
   // um, dois (peer), três (own, id X), quatro (own), then the peer's cinco
@@ -566,6 +567,7 @@ test('a top-up under an announced key that yields no stamp keeps the unspent wal
   const kp = crypto.keyPair()
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const before = await storage.readJson('dmStamps')
   // Two keys in a row announced and no stamp issued under either: a real
@@ -654,6 +656,7 @@ async function sendingEngine (t, { stamps = 2, failPut = false, options = {} } =
   t.teardown(() => engine.close(), { force: true })
   await certify(storage, kp, assoc)
   await engine.unlock(prf)
+  await engine.loaded()
   const local = await opener(prf)
   const kid = 'ab'.repeat(8)
   await store.writeDmStamps(storage, {
@@ -711,6 +714,7 @@ test('a throwing ctl put and its later unlock flush each emit dm.sending first',
   link.failPut = false
   calls.length = 0
   await engine.unlock(prf)
+  await engine.loaded()
   await engine.idle()
   t.alike(calls, [['dm.sending', {}], ['put']], 'unlock announces the queued stamped ctl before putting it')
   t.alike(await store.readDmCtlQueue(storage), [])
@@ -726,6 +730,7 @@ test('no dm.sending or put when send and ctl flush have no stamps', async (t) =>
   t.alike(calls, [], 'an unstamped ctl stays queued without an event')
   engine.lock()
   await engine.unlock(prf)
+  await engine.loaded()
   await engine.idle()
   t.alike(calls, [], 'unlock without stamps still emits nothing')
 })
@@ -755,6 +760,7 @@ test('a send whose local filing failed files on the retry without a re-put', asy
   const own = hex(kp.publicKey)
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const to = crypto.keyPair()
   const toBox = hex((await dmBoxKeyPairFromPrf(crypto.randomBytes(32), 1)).publicKey)
@@ -777,6 +783,7 @@ test('a failed top-up backs off 60 s, not 10 minutes', async (t) => {
   // its own (default) 60 s back-off.
   const { engine, sockets } = engineFor(t, seeder, { limits: { topUpRetryMs: 100 } })
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   const kp = crypto.keyPair()
   t.is(await engine.topUp(kp), 0)
   await engine.idle()
@@ -1060,6 +1067,7 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   const kp = crypto.keyPair()
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   const own = hex(kp.publicKey)
   const to = hex(crypto.keyPair().publicKey)
   const putErr = async (args) => (await errorOf(engine.putMedia(own, kp, { to, ...args }))).message
@@ -1133,6 +1141,7 @@ test('dm putMedia: one sealed blob per destination, even after an uncertain send
   const own = hex(kp.publicKey)
   await certify(storage, kp, assoc)
   await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
   t.ok((await engine.topUp(kp, { force: true })) > 0)
   const first = hex(crypto.keyPair().publicKey)
   const second = hex(crypto.keyPair().publicKey)
@@ -1279,6 +1288,7 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   const other = create({ storage, association: s.association, ...options })
   t.teardown(() => other.close(), { force: true })
   await other.unlock(s.prf)
+  await other.loaded()
   t.is((await other.pull(s.own)).added, 1, 'the self copy is ingested by another device')
   t.alike((await other.thread(s.own, { peer: s.peer })).messages[0].card, card)
   const opened = await other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })
@@ -1286,6 +1296,7 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   t.is(gets.length, 1, 'the thumbnail was fetched and verified')
   other.lock()
   await other.unlock(s.prf)
+  await other.loaded()
   t.alike((await other.thread(s.own, { peer: s.peer })).messages[0].card, card)
   t.ok(b4a.equals((await other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' })).bytes, bytes))
   t.is(gets.length, 1, 'the reopened cache supplies the thumbnail')
@@ -1773,6 +1784,7 @@ async function reloaded (t, s) {
   const engine = engineWithDmLink(s.link)({ storage: s.storage, association: s.association, emit: (name, data) => s.calls.push([name, data]) })
   t.teardown(() => engine.close(), { force: true })
   await engine.unlock(s.prf)
+  await engine.loaded()
   return engine
 }
 
@@ -1863,6 +1875,7 @@ test('dm.react: a lock keeps the stored op sealed for the next unlock; a reset d
   t.is((await reactPending(s.storage)).length, 1, 'kept, like the ctl queue')
   t.is((await errorOf(react('\u{1f44d}'))).message, LOCKED)
   await s.engine.unlock(s.prf)
+  await s.engine.loaded()
   s.link.offline = false
   t.alike(await react('\u{1f44d}'), { ok: true })
   t.is(puts(), 4)
@@ -1919,6 +1932,7 @@ test('dm.react: a restore after a lock waits for a save still writing, so the la
   await until(() => release !== null)
   s.engine.lock()
   await s.engine.unlock(s.prf)
+  await s.engine.loaded()
   const retry = errorOf(react('❤️'))
   // Event-loop turns, not time: without the wait the restore reads kv here.
   for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve))
@@ -2033,6 +2047,7 @@ async function visitEngine (t, pool, assoc, { stamps = 8, limits = {}, visitsDue
   t.teardown(() => engine.close(), { force: true })
   await certify(storage, kp, assoc)
   await engine.unlock(prf)
+  await engine.loaded()
   const local = await opener(prf)
   const kid = 'ab'.repeat(8)
   await store.writeDmStamps(storage, {
