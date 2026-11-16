@@ -1,0 +1,264 @@
+'use strict'
+
+// The composer's "Publicar também na web" box (src/postShareCompose.js): who
+// is offered it, the single post.share, and the words after. No network.
+const test = require('brittle')
+const fs = require('fs')
+const path = require('path')
+
+const load = () => import('../src/postShareCompose.js')
+
+const AUTHOR = 'ab'.repeat(32)
+const SRC = path.join(__dirname, '../src')
+const read = (file) => fs.readFileSync(path.join(SRC, file), 'utf8')
+
+function caller (answer) {
+  const calls = []
+  const call = async (method, params) => {
+    calls.push([method, params])
+    if (answer instanceof Error) throw answer
+    return answer
+  }
+  return { calls, call }
+}
+
+function rpcError (code, message, uncertain = false) {
+  return Object.assign(new Error(message), { code, uncertain })
+}
+
+test('webShareOffered is true only for a plain post with the box on', async (t) => {
+  const { webShareOffered } = await load()
+  const base = { enabled: true, online: true, author: AUTHOR }
+  t.is(webShareOffered(base), true)
+  t.is(webShareOffered({ enabled: true, author: AUTHOR }), true, 'online unknown is fine')
+  t.is(webShareOffered({ ...base, author: AUTHOR.toUpperCase() }), true)
+  t.is(webShareOffered(), false)
+  t.is(webShareOffered({ ...base, enabled: undefined }), false)
+  t.is(webShareOffered({ ...base, enabled: 'yes' }), false)
+  t.is(webShareOffered({ ...base, online: false }), false)
+  for (const bad of [undefined, null, 'abc', 'zz'.repeat(32), AUTHOR + 'a', 7]) {
+    t.is(webShareOffered({ ...base, author: bad }), false, 'author ' + String(bad))
+  }
+  for (const key of ['page', 'moment', 'reply', 'quote', 'poll', 'event']) {
+    t.is(webShareOffered({ ...base, [key]: true }), false, key)
+    t.is(webShareOffered({ ...base, [key]: { id: 1 } }), false, key + ' object')
+  }
+})
+
+test('webShareRef builds a lowercase ref from a key and a seq', async (t) => {
+  const { webShareRef } = await load()
+  t.is(webShareRef(AUTHOR, 4), AUTHOR + ':4')
+  t.is(webShareRef(AUTHOR.toUpperCase(), 4), AUTHOR + ':4')
+  for (const seq of [0, -1, null, undefined, 1.5, '3', NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    t.is(webShareRef(AUTHOR, seq), null, 'seq ' + String(seq))
+  }
+  t.is(webShareRef('nope', 4), null)
+  t.is(webShareRef(null, 4), null)
+})
+
+test('shareNew sends one post.share and returns the ref and the result', async (t) => {
+  const { shareNew } = await load()
+  const c = caller({ shareSeq: 9, created: true })
+  t.alike(await shareNew(c.call, AUTHOR, 5), {
+    ref: AUTHOR + ':5',
+    result: { state: 'on', shareSeq: 9, message: '' }
+  })
+  t.alike(c.calls, [['post.share', { to: AUTHOR + ':5' }]])
+})
+
+test('shareNew maps failures and never rejects or retries', async (t) => {
+  const { shareNew } = await load()
+  const lost = caller(rpcError('INTERNAL', 'timeout', true))
+  const a = await shareNew(lost.call, AUTHOR, 5)
+  t.is(a.result.state, 'uncertain')
+  t.is(a.result.shareSeq, null)
+  t.is(lost.calls.length, 1, 'one call, no retry')
+
+  const refused = caller(rpcError('USAGE', 'limite de publicações na web atingido'))
+  const b = await shareNew(refused.call, AUTHOR, 5)
+  t.is(b.result.state, 'error')
+  t.is(refused.calls.length, 1)
+
+  const none = caller({ shareSeq: 1, created: true })
+  t.alike(await shareNew(none.call, AUTHOR, null), { ref: null, result: null })
+  t.is(none.calls.length, 0, 'no call without a seq')
+
+  const bad = await shareNew(null, AUTHOR, 5)
+  t.ok(bad.result && bad.result.state, 'a missing call still resolves')
+})
+
+test('webShareAfter words each outcome, and only "on" says sent', async (t) => {
+  const { webShareAfter, WEB_SHARE_SENT, WEB_SHARE_UNKNOWN, WEB_SHARE_FAILED, WEB_SHARE_NO_REF } = await load()
+  const ref = AUTHOR + ':5'
+  t.is(webShareAfter(null), null)
+  t.is(webShareAfter(undefined), null)
+  t.is(webShareAfter('x'), null)
+  const noRef = { ref: null, notice: '', toast: WEB_SHARE_NO_REF }
+  t.alike(webShareAfter({ ref: null, result: null }), noRef)
+  t.alike(webShareAfter({ ref, result: null }), noRef)
+  t.alike(webShareAfter({ ref: 5, result: { state: 'on' } }), noRef)
+  t.alike(webShareAfter({ ref, result: { state: 'on', shareSeq: 2, message: '' } }), { ref, notice: WEB_SHARE_SENT, toast: '' })
+  const unknown = webShareAfter({ ref, result: { state: 'uncertain', shareSeq: null, message: 'x' } })
+  t.alike(unknown, { ref, notice: WEB_SHARE_UNKNOWN, toast: '' })
+  t.absent(unknown.notice.includes('Enviado'))
+  const failed = webShareAfter({ ref, result: { state: 'error', shareSeq: null, message: 'Você chegou ao limite de publicações na web.' } })
+  t.alike(failed, { ref, notice: WEB_SHARE_FAILED + ' Você chegou ao limite de publicações na web.', toast: '' })
+  t.absent(failed.notice.includes('Enviado'))
+  t.alike(webShareAfter({ ref, result: { state: 'error', message: '' } }), { ref, notice: WEB_SHARE_FAILED, toast: '' })
+})
+
+test('webShareAfter calls an unknown state unknown and drops the generic reason', async (t) => {
+  const { webShareAfter, WEB_SHARE_UNKNOWN, WEB_SHARE_FAILED } = await load()
+  const ref = AUTHOR + ':5'
+  t.is(WEB_SHARE_UNKNOWN, 'A publicação saiu. Não deu para confirmar o envio para a web.')
+  t.alike(webShareAfter({ ref, result: { state: undefined } }), { ref, notice: WEB_SHARE_UNKNOWN, toast: '' })
+  t.alike(webShareAfter({ ref, result: { state: 'weird', message: 'x' } }), { ref, notice: WEB_SHARE_UNKNOWN, toast: '' })
+  t.alike(webShareAfter({ ref, result: {} }), { ref, notice: WEB_SHARE_UNKNOWN, toast: '' })
+  t.is(webShareAfter({ ref, result: { state: 'error', message: 'Não deu para publicar na web.' } }).notice, WEB_SHARE_FAILED)
+  t.is(webShareAfter({ ref, result: { state: 'error', message: 7 } }).notice, WEB_SHARE_FAILED)
+})
+
+test('shareNew still resolves when publish itself throws', async (t) => {
+  const { shareNew } = await load()
+  const { UNCERTAIN_MESSAGE } = await import('../src/postShare.js')
+  // A revoked proxy throws in Array.isArray, inside publish's answer check,
+  // outside its own try: the only way publish rejects.
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  const calls = []
+  const call = async (method, params) => { calls.push([method, params]); return proxy }
+  t.alike(await shareNew(call, AUTHOR, 5), {
+    ref: AUTHOR + ':5',
+    result: { state: 'uncertain', shareSeq: null, message: UNCERTAIN_MESSAGE }
+  })
+  t.is(calls.length, 1, 'one call, no retry')
+})
+
+test('firstReadView: the first read decides the words, never claiming more than it knows', async (t) => {
+  const m = await load()
+  const { firstReadView, WEB_SHARE_SENT, WEB_SHARE_UNKNOWN, WEB_SHARE_FAILED, REOPEN_FOR_LINK, REOPEN_TO_CHECK } = m
+  const { UNCERTAIN_MESSAGE } = await import('../src/postShare.js')
+  const REASON = WEB_SHARE_FAILED + ' Você chegou ao limite de publicações na web.'
+  const leads = ['', WEB_SHARE_SENT, WEB_SHARE_UNKNOWN, WEB_SHARE_FAILED, REASON]
+  const reads = {
+    on: { state: 'on', shareSeq: 3, message: '' },
+    off: { state: 'off', shareSeq: null, message: '' },
+    uncertain: { state: 'uncertain', shareSeq: null, message: UNCERTAIN_MESSAGE },
+    error: { state: 'error', shareSeq: null, message: 'Não deu para ver se esta publicação está na web.' },
+    malformed: null
+  }
+  const expected = {
+    on: [
+      { phase: 'on', note: '', error: '' },
+      { phase: 'on', note: WEB_SHARE_SENT, error: '' },
+      { phase: 'on', note: WEB_SHARE_SENT, error: '' },
+      { phase: 'on', note: WEB_SHARE_SENT, error: '' },
+      { phase: 'on', note: WEB_SHARE_SENT, error: '' }
+    ],
+    off: [
+      { phase: 'off', note: '', error: '' },
+      { phase: 'off', note: '', error: '' },
+      { phase: 'off', note: WEB_SHARE_FAILED, error: '' },
+      { phase: 'off', note: WEB_SHARE_FAILED, error: '' },
+      { phase: 'off', note: REASON, error: '' }
+    ],
+    uncertain: [
+      { phase: 'unknown', note: UNCERTAIN_MESSAGE, error: '' },
+      { phase: 'unknown', note: WEB_SHARE_SENT + ' ' + REOPEN_FOR_LINK, error: '' },
+      { phase: 'unknown', note: WEB_SHARE_UNKNOWN + ' ' + REOPEN_TO_CHECK, error: '' },
+      { phase: 'unknown', note: WEB_SHARE_UNKNOWN + ' ' + REOPEN_TO_CHECK, error: '' },
+      { phase: 'unknown', note: WEB_SHARE_UNKNOWN + ' ' + REOPEN_TO_CHECK, error: '' }
+    ],
+    error: leads.map((lead) => ({ phase: 'unknown', note: lead, error: reads.error.message }))
+  }
+  expected.malformed = expected.uncertain
+  for (const [name, r] of Object.entries(reads)) {
+    leads.forEach((lead, i) => {
+      const label = name + ' read, lead ' + (i === 0 ? 'none' : lead.slice(0, 30))
+      const view = firstReadView(lead, r)
+      t.alike(view, expected[name][i], label)
+      if (view.phase === 'on' || view.phase === 'off') t.absent(view.note.includes('Não deu para confirmar'), label + ': no doubt on a known state')
+      if (view.phase === 'off') t.absent(view.note.includes('Enviado'), label + ': off never says sent')
+    })
+  }
+  t.is(firstReadView(WEB_SHARE_UNKNOWN, reads.on).note, WEB_SHARE_SENT, 'a live share after an unknown write says sent')
+  t.is(firstReadView(REASON, reads.on).note, WEB_SHARE_SENT, 'a live share after a refusal says sent')
+  for (const bad of [undefined, 'x', 7, []]) {
+    t.alike(firstReadView('', bad).phase, 'unknown', 'malformed ' + JSON.stringify(bad))
+  }
+  t.alike(firstReadView(undefined, reads.on), { phase: 'on', note: '', error: '' }, 'a non-string notice is no notice')
+  const r = { state: 'on', shareSeq: 1, message: '' }
+  t.not(firstReadView('', r), r, 'a new object')
+})
+
+test('the sent notice matches the publish sheet, and the module stays pure', async (t) => {
+  const { WEB_SHARE_SENT, WEB_SHARE_LABEL } = await load()
+  t.is(WEB_SHARE_LABEL, 'Publicar também na web')
+  t.ok(read('ui/PostShareSheet.js').includes(WEB_SHARE_SENT), 'same words as POST_SHARE_SENT')
+  const source = read('postShareCompose.js')
+  t.absent(source.includes(String.fromCharCode(0x2014)), 'no em dash')
+  t.absent(source.includes('Platform.OS'))
+  t.absent(/\b(?:window|document|navigator|localStorage|sessionStorage)\./.test(source))
+  const imports = source.split('\n').filter((line) => /^\s*import\b/.test(line))
+  t.alike(imports, ["import { UNCERTAIN_MESSAGE, publish } from './postShare.js'"])
+})
+
+// Publicar.js is JSX the tests cannot load: its wiring is checked as text.
+function publicarBody (src, head) {
+  const at = src.indexOf(head)
+  if (at < 0) return null
+  const end = src.indexOf('\n  }\n', at)
+  return src.slice(at, end)
+}
+
+test('Publicar shows the box as a checkbox, unticked, with the consent only when ticked', (t) => {
+  const src = read('screens/Publicar.js')
+  t.ok(src.includes("accessibilityRole='checkbox' accessibilityState={{ checked: webShare,"), 'a checkbox reading webShare')
+  t.ok(src.includes('{webShare ? <Soft>{POST_SHARE_CONSENT}</Soft> : null}'), 'the consent shows only while ticked')
+  t.ok(src.includes('const [webShare, setWebShare] = useState(false)'), 'unticked to begin with')
+  t.ok(src.includes('if (!open || !webShareOk) setWebShare(false)'), 'a close or a state without the box unticks it')
+})
+
+test('Publicar offers the box only for a plain own post', (t) => {
+  const src = read('screens/Publicar.js')
+  const at = src.indexOf('webShareOffered({')
+  t.ok(at > 0)
+  const offer = src.slice(at, src.indexOf('})', at))
+  for (const part of ['reply: !!reply', 'quote: !!quote', 'poll: pollDraft !== null', 'event: eventDraft !== null', 'moment: momentMode', 'page: asPage !== null || locked', 'online: node.online', 'enabled: postPublic.enabled']) {
+    t.ok(offer.includes(part), part)
+  }
+  t.ok(src.includes('const webOn = webShare && webShareOk'), 'a tick is void the moment the box stops being offered')
+  t.ok(src.includes('const sentWeb = webOn && !sentReply && !sentQuote'), 'a reply or quote never shares')
+})
+
+test('Publicar unticks after every post and when shared content arrives', (t) => {
+  const src = read('screens/Publicar.js')
+  const from = src.indexOf('appliedShareRef.current = shared.id')
+  const to = src.indexOf('const current = textRef.current', from)
+  t.ok(from > 0 && to > from)
+  t.ok(src.slice(from, to).includes('setWebShare(false)'), 'shared text or files never inherit a tick')
+  const at = src.indexOf('  const published = (sent,')
+  const end = src.indexOf('\n  // Keeps the post', at)
+  t.ok(at > 0 && end > at)
+  t.ok(src.slice(at, end).includes('setWebShare(false)'), 'the tick never outlives its post')
+})
+
+test('a failed share never repeats the generic publish error of the sheet', async (t) => {
+  const { webShareAfter, WEB_SHARE_FAILED } = await load()
+  const { errorState } = await import('../src/postShare.js')
+  const generic = errorState(Object.assign(new Error('algo novo'), { code: 'USAGE' }), 'publish')
+  t.is(generic.state, 'error')
+  t.is(webShareAfter({ ref: AUTHOR + ':5', result: generic }).notice, WEB_SHARE_FAILED)
+})
+
+test('Publicar shares once after the post, never from the outbox, a poll, an event or a page', (t) => {
+  const src = read('screens/Publicar.js')
+  t.ok(src.includes('!sentWeb && canQueue'), 'a ticked post never falls back to the outbox')
+  t.is(src.split('shareNew(').length - 1, 2, 'one share after post.create, one after an uncertain post is found')
+  for (const head of ['  const queue = async (', '  const sendPoll = async (', '  const sendEvent = async (', '  const sendAsPage = async (']) {
+    const body = publicarBody(src, head)
+    t.ok(body, head.trim() + ' found')
+    t.absent(body && body.includes('shareNew'), head.trim() + ' never shares')
+  }
+  t.absent(src.includes("'post.share'"), 'the screen never sends post.share itself')
+})
