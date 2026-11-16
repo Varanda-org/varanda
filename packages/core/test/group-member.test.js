@@ -353,3 +353,16 @@ test('unheldCountedWriters follows the slot walk (#350)', (t) => {
   t.alike(member.unheldCountedWriters(slotLoaded({ cut: 1, drop: [ws[0]] }), X), [ws[0]], 'and so is an unheld frozen writer')
   t.alike(member.unheldCountedWriters(slotLoaded({ cut: 0, drop: [ws[0]] }), X), [], 'a released writer is never awaited')
 })
+
+test('groupCuts: an admit or a ban never names a writer past the diary\'s cut on it (#350)', (t) => {
+  const { X, ws } = slot
+  // ws[0] holds two blocks and is cut at 3, past what it holds: a post it
+  // adds at seq 2 still counts, so a probe keeps it among the cuts.
+  const loaded = slotLoaded({ cut: 3 })
+  const w0 = loaded.logs.find((l) => l.key === ws[0])
+  w0.signed = 6
+  const signed = member.groupCuts(loaded, X, { signed: true })
+  t.alike(signed.find((c) => c.writer === ws[0]), { writer: ws[0], seq: 3 }, 'the signed length past the cut stops at the cut')
+  t.alike(member.groupCuts(loaded, X).find((c) => c.writer === ws[0]), { writer: ws[0], seq: 2 }, 'a local length below the cut stays')
+  t.alike(member.groupCuts(slotLoaded(), X).find((c) => c.writer === ws[1]), { writer: ws[1], seq: 2 }, 'control: an uncut writer at its length')
+})

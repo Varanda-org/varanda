@@ -2041,13 +2041,21 @@ async function makeGroupRoom (ctx, identity, group, need = 1) {
 }
 
 // buildGroup does not list the writers it counted. A probe post asks the
-// same fold (rejoin binding and the writer cap) so a cut names only those.
+// same fold (rejoin binding and the writer cap) so a cut names only those,
+// never past the diary's own cut on a writer (#350): a frozen writer cut
+// past its local length still takes the probe, and its signed length may
+// be past the cut.
 function groupCuts (loaded, member, { signed = false } = {}) {
   const accepted = new Set(probePosts(loaded).map((p) => p.writer))
+  const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
   return loaded.logs.filter((l) => accepted.has(l.key) && l.diary === member)
     .sort((a, b) => a.key.localeCompare(b.key))
     .slice(0, groups.MAX_GROUP_CUTS)
-    .map((l) => ({ writer: l.key, seq: cutLength(l, signed) }))
+    .map((l) => {
+      const seq = cutLength(l, signed)
+      const cut = cuts.get(l.key)
+      return { writer: l.key, seq: Number.isSafeInteger(cut) && cut < seq ? cut : seq }
+    })
 }
 
 // A positive admission or grant covers only records written after it: the
@@ -4005,5 +4013,6 @@ module.exports = {
   communityGroups,
   // Pure helpers over a loaded group, for tests.
   countedCuts,
+  groupCuts,
   unheldCountedWriters
 }
