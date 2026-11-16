@@ -1233,19 +1233,26 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return store.writeDmStamps(storage, { items: items.map((s) => ({ kid: s.kid, ...local.seal({ token: s.token, sig: s.sig }) })), kids })
   }
 
-  // The ctl queue as base64 strings (sealed envelopes or encoded drops);
-  // kv holds each sealed under the local key. Throws while locked.
+  // The ctl queue as { b, p } items: b a base64 string (a sealed envelope or
+  // an encoded drop), p the group drawn for a held page's ctl (randomPrefix),
+  // absent on the own queue and on an item queued before it. kv holds each
+  // sealed under the local key. Throws while locked.
   async function readQueue (ctx = personal) {
     const out = []
     for (const item of await store.readDmCtlQueue(storage, ctx.prefix)) {
       const v = ctx.local.open(item)
-      if (v !== null && typeof v.b === 'string') out.push(v.b)
+      if (v === null || typeof v.b !== 'string') continue
+      out.push(isPrefix(v.p) ? { b: v.b, p: v.p } : { b: v.b })
     }
     return out
   }
 
   function writeQueue (list, ctx = personal) {
-    return store.writeDmCtlQueue(storage, list.map((b) => ctx.local.seal({ b })), ctx.prefix)
+    return store.writeDmCtlQueue(storage, list.map((x) => ctx.local.seal(x.p === undefined ? { b: x.b } : { b: x.b, p: x.p })), ctx.prefix)
+  }
+
+  function isPrefix (x) {
+    return Number.isSafeInteger(x) && x >= 0 && x < 2 ** dm.DM_BUCKET_BITS_MAX
   }
 
   // Takes n stamps at once (all or none) -> [{ kid, token, sig }] or null.
@@ -1364,13 +1371,25 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
   }
 
-  // The prefix a ctl of this store is put with: the own box's. A held
-  // page's ctl goes untagged: only its admins put drops sealed to its box,
-  // so its bucket would point the seeder at the Página (every holder asks
-  // every bucket, so it still arrives).
-  function ctxPrefix (ctx) {
-    if (ctx.page !== null || box === null) return null
-    return prefixOf(box.publicKey)
+  // The prefix a queued ctl is put with: an own ctl the own box's; a held
+  // page's ctl the random group drawn when it was queued (randomPrefix), so
+  // it looks like any envelope and every holder, asking every group, still
+  // gets it. One queued before that has none and stays untagged, the shape
+  // its first put may already have on the seeder.
+  function ctxPrefix (ctx, item) {
+    if (ctx.page !== null) return item.p === undefined ? null : item.p
+    return box === null ? null : prefixOf(box.publicKey)
+  }
+
+  // A group for a drop sealed to a held page's box, drawn once per drop by
+  // the caller, which keeps it for every retry. Uniform and never derived
+  // from anything the seeder sees nor from the own or the page's bucket,
+  // which would tie the drop back to the Página; leaving those two out of
+  // the draw would be a tell of its own.
+  function randomPrefix () {
+    const b = b4a.alloc(1)
+    sodium.randombytes_buf(b)
+    return b[0] >> (8 - dm.DM_BUCKET_BITS_MAX)
   }
 
   // ---- sending ----
@@ -1477,12 +1496,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     let link = null
     try {
       while (queue.length > 0) {
-        let bytes = b4a.from(queue[0], 'base64')
+        let bytes = b4a.from(queue[0].b, 'base64')
         if (bytes.byteLength !== dm.DM_DROP_BYTES) {
           const stamps = await takeStamps(1)
           if (stamps === null) return
           bytes = dropOf(bytes, stamps[0])
-          queue = [b4a.toString(bytes, 'base64'), ...queue.slice(1)]
+          queue = [{ ...queue[0], b: b4a.toString(bytes, 'base64') }, ...queue.slice(1)]
           await writeQueue(queue, ctx)
         }
         if (link === null) link = await openDmLink(linkOpts)
@@ -1490,7 +1509,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         // item stays queued for the next unlock.
         if (gen !== generation || !unlocked()) return
         emit('dm.sending', {})
-        const r = await link.put(bytes, ctxPrefix(ctx))
+        const r = await link.put(bytes, ctxPrefix(ctx, queue[0]))
         if (!r.ok && r.reason !== 'invalido') return
         if (!r.ok) log('aviso: 1 estado de conversa recusado pelo semeador')
         queue = queue.slice(1)
@@ -1933,7 +1952,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
             }
             for (const p of along) if (after > p.cursor.after) await movePageCursor(p, after)
           }
-          if (page.next === null || page.items.length === 0) return
+          if (page.next === null) {
+            // At the pool's end each scan of the pass saw everything the
+            // pool still holds above its cursor, and seqs never go back: one
+            // left below the own cursor joins it, so it asks no pass again.
+            if (gen !== generation) throw new UsageError(LOCKED)
+            for (const p of along) if (p.cursor.after < cursor) await movePageCursor(p, cursor)
+            return
+          }
+          if (page.items.length === 0) return
           if (read >= L.budgetBytes) {
             incomplete = true
             return
@@ -2574,7 +2601,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       }
       if (!ctx.local.hasOp(b.id)) await ctx.local.append([{ t: 'ctl', id: b.id, op: b.op, peer: b.peer, at: b.at, filedAt: ctx.local.nextFiled() }])
       if (d.queued !== true) {
-        const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed }), ctx.prefix))
+        if (d.prefix === undefined) d.prefix = randomPrefix()
+        const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed, p: d.prefix }), ctx.prefix))
         d.queued = true
         if (dropped > 0) log('aviso: ' + dropped + ' estados de conversa antigos descartados da fila')
       }
@@ -2612,8 +2640,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         id: b.id,
         at: b.at,
         drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
-        // The self copy goes untagged, as the page's ctls do (ctxPrefix).
-        prefixes: [prefixOf(d.box), null],
+        // The self copy goes with a random group, kept on the entry for every
+        // retry, as the page's ctls do (ctxPrefix).
+        prefixes: [prefixOf(d.box), randomPrefix()],
         acked: [false, false],
         row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
         blobs: [],
@@ -2653,9 +2682,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // stamped or not.
   async function stillQueued (ctx, sealedB64) {
     const target = b4a.from(sealedB64, 'base64')
-    for (const item of await readQueue(ctx)) {
-      if (item === sealedB64) return true
-      const drop = dm.decodeDrop(b4a.from(item, 'base64'))
+    for (const { b } of await readQueue(ctx)) {
+      if (b === sealedB64) return true
+      const drop = dm.decodeDrop(b4a.from(b, 'base64'))
       if (drop !== null && b4a.equals(drop.sealed, target)) return true
     }
     return false

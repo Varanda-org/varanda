@@ -8,8 +8,9 @@ Branch `feat/dm-pool-buckets`. O conjunto de envelopes de mensagens diretas e o 
 - O semeador escolhe os bits pela contagem de diários servidos: 0 abaixo de 1.000, 1 de 1.000 a 1.999, mais um a cada dobro, 6 a partir de 32.000. Cada grupo tem cerca de 500 pessoas ou mais.
 - Canais novos `'varanda/dm/2'` e `'varanda/visit/2'`; os canais v1 não mudam um byte. O semeador abre com os seus bits no handshake e o aparelho abre com 0.
 - Marca no armazenamento: byte de cima do `receivedAt` de cada registro (0 é sem marca; senão `(1 << bits) | grupo`). Vale nos dois sentidos entre bits diferentes (`m = min(bits da entrada, bits do pedido)`), e um envelope sem marca serve a qualquer pedido.
-- Quem envia põe a cópia do destinatário no grupo do destinatário e a cópia própria no grupo de quem envia. Quem lê e não cuida de nenhuma Página pede só o próprio grupo. Decisão da rodada 5 (mantenedor): um aparelho que cuida de qualquer Página pede todos os grupos em todo pedido, no pull e no pull de Visitas, decidido pelas Páginas que guarda (não por as leituras delas abrirem). Pedir só os grupos de uma Página entregaria ao semeador qual Página roda naquela conexão. Pelo mesmo motivo, os envelopes lacrados para a caixa de uma Página por quem cuida dela (as mudanças das conversas dela e a cópia própria das respostas dela) vão sem grupo.
+- Quem envia põe a cópia do destinatário no grupo do destinatário e a cópia própria no grupo de quem envia. Quem lê e não cuida de nenhuma Página pede só o próprio grupo. Decisão da rodada 5 (mantenedor): um aparelho que cuida de qualquer Página pede todos os grupos em todo pedido, no pull e no pull de Visitas, decidido pelas Páginas que guarda (não por as leituras delas abrirem). Pedir só os grupos de uma Página entregaria ao semeador qual Página roda naquela conexão. Pelo mesmo motivo, os envelopes lacrados para a caixa de uma Página por quem cuida dela (as mudanças das conversas dela e a cópia própria das respostas dela) não vão no grupo da Página (a rodada 9 trocou "sem grupo" por um grupo sorteado, abaixo).
 - Decisão da rodada 7 (mantenedor): a cópia própria e as mudanças das conversas próprias de quem cuida de uma Página continuam no grupo próprio. O risco que isso deixa está em "Riscos que ficam".
+- Decisão da rodada 9 (mantenedor): os envelopes lacrados para a caixa de uma Página por quem cuida dela vão com um grupo sorteado pelo gerador criptográfico, uma vez por envelope, e guardado com ele (na fila de mudanças e na entrada da resposta), para que uma nova tentativa repita o mesmo grupo. O sorteio é uniforme entre os 64 grupos e nunca sai de algo que o semeador vê nem do grupo próprio ou do da Página. Sem grupo, eles se destacariam como envelopes de Página e chegariam a todos os aparelhos; no grupo próprio, ligariam a Página ao grupo de quem cuida dela. Quem cuida pede todos os grupos, então a entrega não muda. Uma mudança que já estava na fila antes desta versão não tem grupo sorteado e continua sem grupo.
 - O pull de quem cuida de Página lê primeiro as mensagens próprias: uma passada a partir do cursor próprio, com as Páginas em dia indo junto. Depois, se o orçamento não acabou e alguma Página está atrás (adoção, geração nova, importação antiga), uma passada de recuperação a partir do mais antigo desses cursores. Uma leitura só entra numa passada se o seu cursor está no início dela ou acima; arquiva só o que está acima do seu cursor, e o cursor vai até o último item lido, nunca para trás. As duas passadas dividem o orçamento: onde ele corta, cada cursor fica no último item que a sua leitura viu, e a recuperação continua no pull seguinte, depois da passada própria.
 
 ## Desvios aceitos em relação ao desenho
@@ -24,11 +25,11 @@ Branch `feat/dm-pool-buckets`. O conjunto de envelopes de mensagens diretas e o 
 - Um semeador alterado pode anunciar mais bits, até 6, e dividir o conjunto em grupos menores. Os aparelhos não conferem a contagem honesta.
 - Envelopes postos por versões anteriores não têm marca e continuam baixados por todos.
 - Com mais de 6 bits anunciados, o aparelho volta ao v1.
-- Rodada 7: o pedido de todos os grupos diz ao semeador que o aparelho cuida de alguma Página, e a cópia própria e as mudanças próprias desse aparelho vão no grupo próprio. Cruzando horário e endereço de internet com os rosters públicos (os `dm-key`s dos admins ele consegue pôr em grupos), um semeador poderia descobrir qual Página o aparelho cuida.
+- Rodada 7: o pedido de todos os grupos diz ao semeador que o aparelho cuida de alguma Página, e a cópia própria e as mudanças próprias desse aparelho vão no grupo próprio. Cruzando horário e endereço de internet com os rosters públicos (os `dm-key`s dos admins ele consegue pôr em grupos), um semeador poderia descobrir qual Página o aparelho cuida. Como a lista de quem cuida de cada Página é pública, isso diz também de quem são as mensagens da Página. O grupo sorteado da rodada 9 não piora isso.
 
 ## Nota para quem opera
 
-Atualize os semeadores antes do app. Um app novo num semeador antigo usa o v1 (sem grupo); um app antigo num semeador novo usa o v1 e baixa tudo. O texto legal mudou (Termos e Privacidade); a versão dos Termos não foi subida neste PR e o digest de `apps/app/test/legal.test.js` falha até a manutenção subir `LEGAL_VERSION` e `TERMS_VERSION`. Digest novo: `0c55d9c43f5753ecd9d03f2152173a410187146c8f99b17769139d63d0dc6bb6`. O texto da Privacidade agora diz "a partir de 1.000 contas", "grupos de até 1/64 das contas", que quem cuida de uma Página pede todos os grupos, que as cópias das respostas da Página e das mudanças nas conversas dela vão sem grupo, e que um semeador que observe horário e endereço de internet poderia descobrir de qual Página o aparelho cuida.
+Atualize os semeadores antes do app. Um app novo num semeador antigo usa o v1 (sem grupo); um app antigo num semeador novo usa o v1 e baixa tudo. O texto legal mudou (Termos e Privacidade); a versão dos Termos não foi subida neste PR e o digest de `apps/app/test/legal.test.js` falha até a manutenção subir `LEGAL_VERSION` e `TERMS_VERSION`. Digest novo (terceira rodada): `af5cfeed21a8d40febcbec9e2759ff110fb71475679d1bff86900ea2bfbd2055`. O texto da Privacidade agora diz "a partir de 1.000 contas", "grupos de até 1/64 das contas", que quem cuida de uma Página pede todos os grupos, que as cópias das respostas da Página e das mudanças nas conversas dela vão com um número de grupo sorteado, para parecerem um envelope qualquer, e que um semeador que observe horário e endereço de internet poderia descobrir de qual Página o aparelho cuida e, como a lista de quem cuida de cada Página é pública, que essas mensagens são de quem cuida.
 
 ## Testes
 
@@ -83,10 +84,38 @@ Com todo o `dm.js` do commit revisado (9f07f89f) e os testes novos: `page-dm.tes
 
 `apps/app/test/legal.test.js`: 48/49, só o digest fixo falha (esperado, a versão dos Termos fica com a manutenção).
 
+## Terceira rodada de correções da revisão (2026-11-16)
+
+Em `packages/web-member/lib/dm.js`:
+
+- Rodada 9: as mudanças de uma Página e a cópia própria de uma resposta da Página vão com um grupo sorteado (`randomPrefix`, `sodium.randombytes_buf`, 6 bits). A fila de mudanças guarda itens `{ b, p }`, com `p` sorteado uma vez quando a mudança entra na fila (`pageSend`); `flushCtlQueue` põe com esse `p`, e o carimbo regravado o mantém. A cópia própria da resposta leva o grupo em `prefixes` da entrada, que `deliver` reusa a cada nova tentativa. Um item da fila de antes desta versão (sem `p`) continua sem grupo e não ganha sorteio. As mudanças, cópias próprias e reações próprias continuam no grupo próprio; a mensagem de um membro para uma Página continua no grupo da Página.
+- P3-1: quando uma passada chega ao fim do conjunto, as leituras de Página que ficaram abaixo do cursor próprio sobem até ele, então a recuperação não volta a ser pedida.
+- P3-2 (só documento) e P3-3: "Limites conhecidos", "Riscos que ficam", o fragmento do changelog e a seção 11 de `docs/protocol.md` agora falam da Página atrasada que espera as mensagens próprias, da adoção como momento que liga o aparelho à Página e da troca da própria `dm-key`.
+- Privacidade (`apps/app/src/legal.js`, página do site renderizada de novo) e a linha de `docs/design.md` dizem que essas cópias vão com um número de grupo sorteado e que a lista de quem cuida de cada Página é pública.
+- Testes de grupo saíram de `page-dm.test.js` para `packages/web-member/test/page-dm-buckets.test.js`; o que os dois usam foi para `test/helpers/page-dm.js`.
+
+| Arquivo | Testes novos | Resultado | Sem a correção |
+|---|---|---|---|
+| `packages/web-member/test/page-dm-buckets.test.js` | "drops sealed to a Página box go with a random group drawn per drop..." (substitui o teste "untagged"; 10 sorteios) | 16/16 (101 asserções), 2,8 s | sorteio trocado por `null` (comportamento antigo): este e os dois seguintes falham, 10 asserções. Grupo próprio no lugar do sorteio: 2 asserções falham ("not one fixed group", "not the holder's own bucket") |
+| idem | "a Página drop whose put failed goes out again with the group drawn the first time" | idem | sorteio novo a cada put (na fila e na cópia própria): 2 asserções falham |
+| idem | "a second holder files the Página reply copy and the Página ctl a holder put with random groups" | idem | falha com `null` (acima) |
+| idem | "a catch-up that reaches the pool end with nothing left brings the Página cursor up to the own one" | idem | sem a subida no fim do conjunto (P3-1): 2 asserções falham |
+| idem | "two Páginas, one caught up and one behind: no cursor moves backwards across budget-limited pulls" | idem | sem a guarda `after > p.cursor.after`: falha (o cursor da Página em dia voltava para trás) |
+| idem | "a holder whose Página scan fails still asks every bucket" | idem | `asksAll` tirado das leituras de Página: falha |
+| idem | "a budget stop in the own pass asks no catch-up on that pull" | idem | sem `!incomplete`: falha (a recuperação era pedida no mesmo pull) |
+| idem | "a lock and an unlock while a Página ctl flush opens its link put each ctl once, with its group" (duas mudanças na fila, bloqueio e desbloqueio durante a abertura do link) | idem | checagem do `flushCtlQueue` só com `!unlocked()` (sem a geração), ou tirada: 3 puts em vez de 2 |
+| idem | "a lock during the Página catch-up writes nothing for the Página" | idem | passa com qualquer das checagens de bloqueio da passada tirada: o armazenamento da Página recusa sozinho quando bloqueado. Fica como guarda do comportamento |
+| idem | "a lock as the Página catch-up reaches the pool end leaves its cursor at the last item it read" | idem | falha (sem `LOCKED`, cursor da Página em 3 em vez de 2) só com as três checagens tiradas juntas: a da geração depois dos itens, a do fim do conjunto e a de `movePageCursor`. Tirando uma ou duas, as outras seguram |
+
+Os testes de grupo movidos sem mudança (6 testes, 45 asserções) passam no arquivo novo como passavam no antigo. `page-dm.test.js` sem eles: 19/19 (213 asserções, as mesmas dos 19 testes de antes), 68 s. `packages/web-member/test/dm.test.js` (a fila de mudanças mudou de formato): 74/74 (751 asserções), 110 s. `apps/app/test/legal.test.js`: 48/49, só o digest fixo falha (esperado).
+
 ## Limites conhecidos (não corrigidos)
 
 - Depois de uma troca pública de geração de uma Página, quem cuida dela começa a recuperação do pull seguinte em `after: 0`, e quem cuida de outras Páginas não. Um semeador que acompanhe o diário da Página pode ligar esses aparelhos a ela. Já era assim antes dos grupos.
 - Uma recuperação a partir de 0 relê o conjunto em vários pulls, um orçamento por pull. As mensagens próprias não esperam por ela, porque a passada própria vem antes em cada pull.
+- O contrário vale também: enquanto as mensagens próprias atrasadas ocupam o orçamento, as mensagens novas de uma Página atrasada esperam por elas.
+- Adotar uma Página é outro momento que liga o aparelho a ela: o aparelho passa a pedir todos os grupos e faz uma recuperação a partir de `after: 0`, perto da mudança pública do roster.
+- Depois de trocar a própria `dm-key`, um aparelho que não cuida de Página muda de grupo, num momento que o diário mostra com data.
 
 - Um aparelho que abre v1 e v2 ao mesmo tempo ganha o dobro de orçamento de páginas e de puts por canal; as senhas de postagem continuam limitando os puts.
 - Um byte de cima corrompido no carregamento de um registro vira "sem marca": inofensivo (o envelope é servido a todos).
