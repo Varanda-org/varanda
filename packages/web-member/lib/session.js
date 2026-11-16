@@ -3431,17 +3431,26 @@ function createBrowserSession ({
     })
     if (state === 'current') {
       if (!trackingOwn()) dmRecheck = true
-      if ((await store.readDmKey(storage)) === null) await store.writeDmKey(storage, gen)
-      // Only a write made in this session can still be waiting for its push
-      // (an earlier dm.enable whose push failed); a fresh start pushes nothing.
-      if (localLength !== null) await pushAfterWrite()
+      const held = await store.readDmKey(storage)
+      if (held === null) await store.writeDmKey(storage, gen)
+      // A write made in this session, or a dm-key append whose push the
+      // seeder never confirmed (kv push, kept across sessions), still waits
+      // for its push; any other fresh start pushes nothing.
+      const marked = held !== null && held.push !== undefined
+      if (localLength !== null || marked) await pushAfterWrite()
+      if (marked && !unpushed) await store.writeDmKey(storage, held.gen)
       return { box, gen, seq: null }
     }
     await ensureCaughtUp(epoch)
     const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
     if (r.seq !== null) wrote(r.seq)
-    await store.writeDmKey(storage, gen)
+    const held = await store.readDmKey(storage)
+    const push = r.seq !== null ? r.seq + 1 : (held !== null && held.push !== undefined ? held.push : null)
+    // Marked before the push, so a push that fails or never ends leaves it
+    // for the next dm.enable.
+    await store.writeDmKey(storage, gen, push)
     await pushAfterWrite()
+    if (push !== null && !unpushed) await store.writeDmKey(storage, gen)
     return r
   }
 
