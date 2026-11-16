@@ -69,6 +69,7 @@ const GLYPHS = {
   filtro: 'filter',
   grade: 'grid',
   lista: 'list',
+  enquete: 'bar-chart-2',
   mapa: 'map',
   estrela: 'star',
   cat_casa: 'home',

@@ -329,7 +329,7 @@ test('an uncertain post stays as a faded own bubble, frees the composer and bloc
 
 test('Grupo: bubbles with Responder, Copiar, Esconder, Banir and Denunciar under can(), and a real reply', async (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes('groupRows(rawItems, ownKey, now)') && src.includes('[rawItems, ownKey, today]'), 'rows come from groupRows and follow the day')
+  t.ok(src.includes('groupRows(chatItems, ownKey, now)') && src.includes('[chatItems, ownKey, today]'), 'rows come from groupRows and follow the day')
   t.ok(src.includes('<Bubble') && !src.includes('GroupMessageRow'), 'messages are bubbles')
   t.ok(src.includes("label: 'Responder'") && src.includes('setReplyKey(row.key)'), 'Responder sets the reply target')
   t.ok(src.includes("label: 'Copiar'"))
@@ -521,7 +521,7 @@ test('Grupo marks the group seen from one place, never from load, loadOlder or r
   t.absent(newest.includes('group.seen') || newest.includes('markSeen'), 'not from readNewest')
 })
 
-test('Grupo marks up to the newest painted row, never past it', async (t) => {
+test('Grupo marks up to the newest message of the read, never past it', async (t) => {
   const src = screen('Grupo.js')
   const mark = src.slice(src.indexOf('const markSeen = useCallback('), src.indexOf('const load = useCallback('))
   t.ok(mark.includes("request('group.seen', { group, upTo })"), 'sends the cut-off')
@@ -530,19 +530,18 @@ test('Grupo marks up to the newest painted row, never past it', async (t) => {
   t.ok(mark.indexOf('if (upTo === null) return') !== -1 && mark.indexOf('if (upTo === null) return') < call, 'no cut-off: no request')
   t.absent(mark.includes('{ group })'), 'never a bare mark')
   const cut = src.slice(src.indexOf('const last = '), src.indexOf('const visible = node.visible !== false'))
-  t.ok(cut.includes('rows[rows.length - 1]'), 'newest painted row')
-  t.ok(cut.includes('cutRef.current = '), 'assigned every render')
-  t.ok(cut.includes('{ at: last.at, writer: last.writer, seq: last.seq }'), 'cut-off shape')
-  t.absent(cut.includes('rawItems') || cut.includes('hidden'), 'painted rows only, hidden ones kept')
+  t.ok(cut.includes('const seenAt = seenCut(rawItems)'), 'newest raw item: a topic reply the chat hides still counts')
+  t.ok(cut.includes('cutRef.current = seenAt'), 'assigned every render')
+  t.absent(cut.includes('{ at: last.at, writer: last.writer, seq: last.seq }'), 'not the last painted row')
 })
 
 test('Grupo marks only what shows: visible, on top, a reader, the latest read painted', async (t) => {
   const src = screen('Grupo.js')
   t.ok(src.includes('const visible = node.visible !== false'), 'follows the app visibility, as Mensagem')
-  const effect = src.slice(src.indexOf('const visible = node.visible !== false'), src.indexOf('}, [asPage.page, visible, isTop, reader, lastId, loadedAt, loadError, markSeen])'))
+  const effect = src.slice(src.indexOf('const visible = node.visible !== false'), src.indexOf('}, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, markSeen])'))
   t.ok(effect.includes('if (asPage.page) return'), 'reading as a page never marks')
-  t.ok(effect.includes("if (!visible || !isTop || !reader || lastId === null || loadedAt === null || loadError !== '') return"), 'hidden, buried, non-reader, empty, unloaded or failed: no mark')
-  t.ok(src.indexOf('const lastId = ') < src.indexOf('const visible = node.visible !== false'), 'keyed on the newest message on screen, so any paint marks')
+  t.ok(effect.includes("if (!visible || !isTop || !reader || seenKey === null || loadedAt === null || loadError !== '') return"), 'hidden, buried, non-reader, empty, unloaded or failed: no mark')
+  t.ok(src.indexOf('const seenKey = ') < src.indexOf('const visible = node.visible !== false'), 'keyed on the newest message of the read, so any new one marks')
   t.ok(effect.includes('if (paintedRef.current !== seqRef.current) return'), 'a read in flight: no mark')
   t.ok(effect.indexOf('markSeen()') > effect.indexOf('if (paintedRef.current !== seqRef.current) return'), 'marks after both gates')
   t.absent(effect.includes('loadRef.current()'), 'no reload on uncover: the older pages stay')

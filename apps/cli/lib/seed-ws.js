@@ -163,6 +163,19 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   the author's fas newest first (at most 20 rows), the rows, cursor and
 //   flags of /index/follows/<author>/seguidores without `kind`; seq and at
 //   point at the fan's own block. Rebuilt here field by field.
+// - /index/poll/<author>/<seq> -> Seeder#indexPoll: `{ totals: [n, ...],
+//   indexing, complete }`, the claimed votes per option of the diary poll
+//   post <seq> of <author> (2..4 integers; `[]` while the author's own diary
+//   is still being indexed, with complete false). Totals are claims: a
+//   client shows them as such and verifies 'quem votou' itself. A post that
+//   is not a live poll post (deleted included) is the generic 404.
+// - /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>] -> Seeder#indexPollVoters:
+//   `{ items: [{ key, seq, at }], next, total, authors, indexing, complete }`,
+//   the voters whose live pick is <pick> (0..3), newest first (at most 20
+//   rows), the rows, cursor and flags of /index/fans without `author`; seq
+//   and at point at the voter's own `choice` block, which the node peeks
+//   and verifies. A pick the poll has no option for is a 404. Rebuilt here
+//   field by field.
 // - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
 //   seq | null, indexing }`, the author's live follow block of target.
 //   Both rebuilt here field by field; both spend the index budget.
@@ -396,6 +409,10 @@ const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
 const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
 const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const FAN_ROWS_MAX = 20
+const INDEX_POLL_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})$/
+const INDEX_POLL_VOTERS_RE = /^\/index\/poll\/([0-9a-f]{64})\/([1-9][0-9]{0,14})\/([0-3])(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
+// Same value as POLL_MAX in @varanda/core/lib/records.js.
+const POLL_OPTIONS_MAX = 4
 // Same value as MAX_TOP_FRIENDS in @varanda/core/lib/records.js.
 const TOP_FRIENDS_MAX = 8
 const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
@@ -853,6 +870,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexFollowSeq', [m[1], m[2]], followSeqBody]
     m = INDEX_FANS_RE.exec(url)
     if (m) return ['indexFans', [m[1], m[2] === undefined ? null : m[2]], fansBody]
+    m = INDEX_POLL_RE.exec(url)
+    if (m) return ['indexPoll', [m[1], Number(m[2])], pollBody]
+    m = INDEX_POLL_VOTERS_RE.exec(url)
+    if (m) return ['indexPollVoters', [m[1], Number(m[2]), Number(m[3]), m[4] === undefined ? null : m[4]], pollVotersBody]
     // Without a public origin the Feira has no public surface at all.
     if (origin === null) return null
     m = INDEX_FEIRA_AUTHOR_RE.exec(url)
@@ -968,6 +989,43 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       cursor = { atMs: next.atMs, key: next.key }
     }
     return { author, items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
+  }
+
+  // Claimed totals: at most POLL_OPTIONS_MAX non-negative integers.
+  function pollBody ({ totals, indexing, complete }) {
+    if (!Array.isArray(totals) || totals.length > POLL_OPTIONS_MAX) throw new Error('index')
+    const counts = totals.map((n) => {
+      if (!Number.isSafeInteger(n) || n < 0) throw new Error('index')
+      return n
+    })
+    return { totals: counts, indexing: indexing === true, complete: complete === true }
+  }
+
+  // The voter rows of one pick, checked as the client checks them: a
+  // malformed row or a duplicate key is a 404.
+  function pollVotersBody ({ items, next, total, authors, indexing, complete }) {
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    const hintOk = (n) => n === null || seqOk(n)
+    if (!Array.isArray(items) || items.length > FAN_ROWS_MAX) throw new Error('index')
+    if (!Number.isSafeInteger(total) || total < items.length || authors === null || typeof authors !== 'object') throw new Error('index')
+    const seen = new Set()
+    const rows = items.map(({ key, seq, at }) => {
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || seen.has(key) || !seqOk(seq) || typeof at !== 'string' || at.length > 32) throw new Error('index')
+      seen.add(key)
+      return { key, seq, at }
+    })
+    const hints = {}
+    for (const key of seen) {
+      const h = authors[key]
+      if (h === null || typeof h !== 'object' || !hintOk(h.profileSeq) || !hintOk(h.usernameSeq)) throw new Error('index')
+      hints[key] = { profileSeq: h.profileSeq, usernameSeq: h.usernameSeq }
+    }
+    let cursor = null
+    if (next !== null) {
+      if (typeof next !== 'object' || !Number.isSafeInteger(next.atMs) || next.atMs < 0 || typeof next.key !== 'string' || !HEX64_RE.test(next.key)) throw new Error('index')
+      cursor = { atMs: next.atMs, key: next.key }
+    }
+    return { items: rows, next: cursor, total, authors: hints, indexing: indexing === true, complete: complete === true }
   }
 
   function followSeqBody ({ seq, indexing }) {
@@ -1869,6 +1927,8 @@ module.exports = {
   INDEX_SCRAPS_RE,
   INDEX_PROFILE_RE,
   INDEX_FANS_RE,
+  INDEX_POLL_RE,
+  INDEX_POLL_VOTERS_RE,
   INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,

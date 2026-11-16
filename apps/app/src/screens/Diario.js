@@ -254,6 +254,7 @@ function postOf (author, seq, record) {
     quote: record.quote || null,
     preview: record.preview || null,
     media: Array.isArray(record.media) && record.media.length > 0 ? record.media : null,
+    ...(Array.isArray(record.poll) ? { poll: record.poll } : {}),
     name: null,
     username: null
   }

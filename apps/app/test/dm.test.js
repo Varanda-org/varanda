@@ -448,10 +448,13 @@ test('chat screens end the player band at the composer', (t) => {
     t.ok(src.includes("import { EmbedBandBottom } from '../ui/screenVisible'"), file + ': imports the band context')
     t.ok(src.includes('<EmbedBandBottom.Provider value={composer ? band : null}>'), file + ': the list gets the band')
     const opens = src.indexOf('<EmbedBandBottom.Provider')
-    const list = src.indexOf('<RefreshableList')
+    // Grupo draws a second list (Tópicos) before the chat one: the chat list is the first after the provider opens.
+    const list = src.indexOf('<RefreshableList', opens)
     const closes = src.indexOf('</EmbedBandBottom.Provider>')
     t.ok(opens !== -1 && opens < list && list < closes, file + ': the list sits inside the band provider')
-    t.ok(src.includes('{composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}'), file + ': the composer sits in a measured wrapper')
+    // Grupo hides the chat composer on its Tópicos tab.
+    const wrapper = file.endsWith('Grupo.js') ? '{composer && !inTopics ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}' : '{composer ? <View ref={composerBox} collapsable={false}>{composer}</View> : null}'
+    t.ok(src.includes(wrapper), file + ': the composer sits in a measured wrapper')
     t.ok(src.includes('const composerBox = useRef(null)'), file + ': the wrapper ref')
     const start = src.indexOf('const band = useMemo(')
     const memo = start === -1 ? '' : src.slice(start, src.indexOf('}), [])', start))

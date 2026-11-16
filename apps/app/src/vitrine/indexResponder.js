@@ -284,12 +284,52 @@ function feiraIndex (segments, request) {
   return { ...flags, items, next: page.next, authors }
 }
 
+// Enquetes: pointers and totals read from the live choice records (the
+// seeder's claim, like the testimonial route). The last in-range choice of each
+// voter counts and a null pick withdraws it (packages/core/lib/polls.js).
+function pollIndex (author, seqText, pickText, cursorText) {
+  if (!isKey(author) || !/^[1-9][0-9]{0,14}$/.test(seqText || '')) notFound()
+  const seq = Number(seqText)
+  const live = liveEntries()
+  const root = live.find((e) => e.author === author && e.seq === seq && e.record.type === 'post' && Array.isArray(e.record.poll))
+  if (!root) notFound()
+  const count = root.record.poll.length
+  const picks = new Map()
+  for (const e of live.filter((x) => x.record.type === 'choice' && x.record.to.author === author && x.record.to.seq === seq).sort((a, b) => a.seq - b.seq)) {
+    const pick = e.record.pick
+    if (pick === null) picks.delete(e.author)
+    else if (pick < count) picks.set(e.author, { pick, seq: e.seq, at: e.record.at })
+  }
+  if (pickText === undefined) {
+    const totals = new Array(count).fill(0)
+    for (const v of picks.values()) totals[v.pick]++
+    return { ...flags, totals }
+  }
+  if (!/^[0-3]$/.test(pickText) || Number(pickText) >= count) notFound()
+  let after = null
+  if (cursorText !== undefined) {
+    if (!/^[0-9]+\.[0-9a-f]{64}$/.test(cursorText)) notFound()
+    const [atMs, key] = cursorText.split('.')
+    after = { atMs: Number(atMs), key }
+  }
+  const rows = [...picks].filter(([, v]) => v.pick === Number(pickText)).map(([key, v]) => ({ key, seq: v.seq, at: v.at }))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
+  const remaining = rows.filter((r) => after === null || Date.parse(r.at) < after.atMs || (Date.parse(r.at) === after.atMs && r.key > after.key))
+  const items = remaining.slice(0, 20)
+  const last = items[items.length - 1]
+  return { ...flags, items, next: remaining.length > 20 ? { atMs: Date.parse(last.at), key: last.key } : null, total: rows.length, authors: authorsOf(items.map((r) => r.key)) }
+}
+
 // Only fixture references are returned: screens verify them through diary.peek.
 export function vitrineIndex (url, request) {
   let path
   try { path = new URL(url, 'https://vitrine.invalid').pathname } catch { notFound() }
   const segments = path.split('/')
   if (segments[1] === 'index' && segments[2] === 'feira') return feiraIndex(segments.slice(3), request)
+  if (segments[1] === 'index' && segments[2] === 'poll') {
+    if (segments.length < 5 || segments.length > 7) notFound()
+    return pollIndex(segments[3], segments[4], segments[5], segments[6])
+  }
   const [, index, route, key, part, cursor, ...extra] = segments
   if (index !== 'index' || !key || extra.length) notFound()
 

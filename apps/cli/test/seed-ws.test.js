@@ -3555,3 +3555,122 @@ test('startSeedWs /index/fans: rows are rebuilt field by field, a malformed answ
   t.is(thrown.status, 404)
   t.absent(thrown.body.toString().includes('segredo'))
 })
+
+// Enquetes: /index/poll/<author>/<seq> and
+// /index/poll/<author>/<seq>/<pick>[/<atMs>.<key>].
+function pollSeeder () {
+  const stub = indexSeeder()
+  stub.indexPoll = async (author, seq) => {
+    stub.calls.push(['indexPoll', author, seq])
+    return author === A ? { totals: [2, 0, 1], indexing: false, complete: true } : null
+  }
+  stub.indexPollVoters = async (author, seq, pick, cursor) => {
+    stub.calls.push(['indexPollVoters', author, seq, pick, cursor])
+    return author === A ? votersOf() : null
+  }
+  return stub
+}
+
+function votersOf () {
+  return { items: [{ key: B, seq: 3, at: '2026-03-01T12:00:00.000Z' }], next: null, total: 1, authors: { [B]: { profileSeq: 1, usernameSeq: null } }, indexing: false, complete: true }
+}
+
+test('startSeedWs /index/poll: regexes, parsed arguments, HEAD, malformed paths, 421, 405 and the index bucket', async (t) => {
+  t.timeout(20000)
+  const { INDEX_POLL_RE, INDEX_POLL_VOTERS_RE } = require('../lib/seed-ws')
+  t.is(INDEX_POLL_RE.source, '^\\/index\\/poll\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})$')
+  t.is(INDEX_POLL_VOTERS_RE.source, '^\\/index\\/poll\\/([0-9a-f]{64})\\/([1-9][0-9]{0,14})\\/([0-3])(?:\\/([0-9]{1,16}\\.[0-9a-f]{64}))?$')
+  const seeder = pollSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/poll/' + A + '/7'
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { totals: [2, 0, 1], indexing: false, complete: true })
+  t.alike(seeder.calls.at(-1), ['indexPoll', A, 7], 'the seq is a number')
+  const rows = await mediaRequest(server.port, url + '/1')
+  t.is(rows.status, 200)
+  t.alike(JSON.parse(rows.body.toString()), votersOf())
+  t.alike(seeder.calls.at(-1), ['indexPollVoters', A, 7, 1, null], 'no cursor -> null, the pick is a number')
+  const cursor = '1700000000000.' + B
+  t.is((await mediaRequest(server.port, url + '/3/' + cursor)).status, 200)
+  t.alike(seeder.calls.at(-1), ['indexPollVoters', A, 7, 3, cursor], 'the cursor is passed as the raw string')
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/poll/' + 'f'.repeat(64) + '/7')).status, 404, 'an unknown author')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  t.is((await mediaRequest(server.port, url, { method: 'POST' })).status, 405)
+  const s1 = await startSeedWs({ port: 0, seeder: pollSeeder(), index: { rate: 0, burst: 1 } })
+  t.teardown(() => s1.close(), { force: true })
+  t.is((await mediaRequest(s1.port, url)).status, 200, 'poll spends a token')
+  t.is((await mediaRequest(s1.port, '/index/member/' + A)).status, 503, 'the shared index bucket is empty')
+
+  const quiet = pollSeeder()
+  const s2 = await startSeedWs({ port: 0, seeder: quiet })
+  t.teardown(() => s2.close(), { force: true })
+  for (const u of ['/index/poll', '/index/poll/', '/index/poll/' + A, '/index/poll/' + A + '/', '/index/poll/' + A.toUpperCase() + '/7', '/index/poll/' + A.slice(1) + '/7',
+    url + '/', url + '?x=1', '/index/poll/' + A + '/0', '/index/poll/' + A + '/07', '/index/poll/' + A + '/1.5', '/index/poll/' + A + '/' + '9'.repeat(16),
+    url + '/4', url + '/-1', url + '/01', url + '/10', url + '/x', url + '/1/', url + '/1/x', url + '/1/' + '9'.repeat(17) + '.' + B, url + '/1/1700000000000' + B,
+    url + '/1/1700000000000.' + B.toUpperCase(), url + '/1/1700000000000.' + B + '.7', url + '/1/.' + B, url + '/1/' + cursor + '/', url + '/1/' + cursor + '?x=1']) {
+    t.is((await mediaRequest(s2.port, u)).status, 404, u.slice(11, 70) + ' -> 404')
+  }
+  t.is(quiet.calls.length, 0, 'malformed paths never reach the seeder')
+})
+
+test('startSeedWs /index/poll: totals and rows are rebuilt field by field, a malformed answer is 404, the worst case fits', async (t) => {
+  t.timeout(20000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number('9'.repeat(15))
+  const seeder = pollSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/poll/' + A + '/7'
+  seeder.indexPoll = async () => ({ totals: [1, 2], indexing: 'yes', complete: 1, extra: 'segredo', voters: [B] })
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), { totals: [1, 2], indexing: false, complete: false }, 'only the known fields leave')
+  seeder.indexPoll = async () => ({ totals: [], indexing: true, complete: false })
+  t.alike(JSON.parse((await mediaRequest(server.port, url)).body.toString()), { totals: [], indexing: true, complete: false }, 'no totals while the author is pending')
+  seeder.indexPoll = async () => ({ totals: [big, big, big, big], indexing: true, complete: false })
+  const worstTotals = await mediaRequest(server.port, url)
+  t.is(worstTotals.status, 200)
+  t.ok(worstTotals.body.byteLength <= INDEX_MAX_BODY)
+  for (const totals of [[1, 2, 3, 4, 5], [-1], [1.5], ['1'], [null], 'x', null, { 0: 1 }, [Number.MAX_SAFE_INTEGER + 1]]) {
+    seeder.indexPoll = async () => ({ totals, indexing: false, complete: true })
+    t.is((await mediaRequest(server.port, url)).status, 404, 'totals ' + JSON.stringify(totals))
+  }
+
+  const rowsUrl = url + '/2'
+  seeder.indexPollVoters = async () => ({ ...votersOf(), author: A, kind: 'x', items: [{ key: B, seq: 3, at: '2026-03-01T12:00:00.000Z', text: 'segredo' }], authors: { [B]: { profileSeq: 1, usernameSeq: null, name: 'segredo' } } })
+  const rows = await mediaRequest(server.port, rowsUrl)
+  t.is(rows.status, 200)
+  t.alike(JSON.parse(rows.body.toString()), votersOf(), 'only the known fields leave')
+  const items = []
+  const authors = {}
+  for (let i = 0; i < 20; i++) {
+    items.push({ key: hex(i + 1), seq: big, at: '+275760-09-13T00:00:00.000Z' })
+    authors[hex(i + 1)] = { profileSeq: big, usernameSeq: big }
+  }
+  const worst = { items, next: { atMs: big, key: hex(20) }, total: big, authors, indexing: true, complete: false }
+  seeder.indexPollVoters = async () => worst
+  const w = await mediaRequest(server.port, rowsUrl)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  const row = votersOf().items[0]
+  for (const bad of [
+    { items: [row, row] }, { items: [{ ...row, seq: 0 }] }, { items: [{ ...row, at: 1700000000000 }] }, { items: [{ ...row, key: 'x' }] },
+    { items: [...items, { ...row, key: hex(99) }] }, { total: 0 }, { authors: {} }, { authors: { [B]: { profileSeq: 0, usernameSeq: null } } },
+    { next: '1.' + B }, { next: { atMs: -1, key: B } }, { items: 'x' }
+  ]) {
+    seeder.indexPollVoters = async () => ({ ...votersOf(), ...bad })
+    t.is((await mediaRequest(server.port, rowsUrl)).status, 404, JSON.stringify(bad).slice(0, 60))
+  }
+  seeder.indexPoll = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+})

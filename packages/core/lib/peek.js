@@ -134,7 +134,7 @@ function diaryPeek (input) {
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
+      result.posts.push({ kind: 'post', seq, at: post.at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}) })
     }
     // Reposts in effect (the last operation per target wins, as in the feed).
     // The tail is contiguous up to the top, so an undo of a repost in it is in
@@ -238,7 +238,7 @@ function buildPeekPage ({ diaries, limit, after = null, hidden = null, batchOf =
         const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
         const replyTo = post.replyTo ? { author: post.replyTo.author, seq: post.replyTo.seq } : null
         const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, round }
+        item = { kind: 'post', author: key, name, avatar: avatar ? { ...avatar } : null, username, seq, at, text: post.text, replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), round }
       }
       // The batch orders the page but never leaves it: items and cursors keep their shape.
       const slot = { round, batch, at, author: key, item }

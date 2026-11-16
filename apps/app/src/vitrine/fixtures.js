@@ -197,6 +197,29 @@ export const groups = ['Geral', 'Passeios de bicicleta', 'Geral', 'Organização
   }
 })
 
+// Fóruns e enquetes: the public group 'Geral' of the reading club (2) holds
+// two topics, the first with a poll, and replies under both. A topic is a
+// root post named in `topics`; `choices` are the group-choice votes.
+const forumRoot = (n, member, minute, text) => ({ writer: key(300 + n), diary: member.author, seq: 2, at: at(5, 13, minute), text, replyTo: null, hidden: false, media: null, name: member.name, username: member.username })
+const forumItems = [
+  forumRoot(0, members[2], 20, 'Qual livro vamos ler no próximo mês?'),
+  { ...forumRoot(1, members[4], 25, 'Voto em contos: dá para ler um por dia.'), replyTo: { writer: key(300), seq: 2 } },
+  { ...forumRoot(2, members[1], 28, 'Romance, para ter tempo de mergulhar.'), replyTo: { writer: key(300), seq: 2 } },
+  forumRoot(3, members[3], 30, 'Sugestões de encontros ao ar livre'),
+  { ...forumRoot(4, members[2], 35, 'Um piquenique no parque, com leitura em voz alta.'), replyTo: { writer: key(303), seq: 2 } }
+]
+groups[2].items.push(...forumItems)
+groups[2].topics = [
+  { writer: key(300), seq: 2, poll: ['Contos', 'Romance', 'Poesia'] },
+  { writer: key(303), seq: 2, poll: null }
+]
+groups[2].choices = [
+  { writer: key(300), seq: 2, diary: members[2].author, pick: 0 },
+  { writer: key(300), seq: 2, diary: members[4].author, pick: 0 },
+  { writer: key(300), seq: 2, diary: members[1].author, pick: 1 },
+  { writer: key(300), seq: 2, diary: members[4].author, pick: 2 }
+]
+
 const postTexts = [
   'Um café na varanda para começar o dia. ☕',
   'O passeio de sábado está combinado! @lia_oliveira, vem com a gente?',
@@ -282,7 +305,12 @@ const topicPosts = [
   photoPost(members[3], 81, at(5, 14, 30), 'Que saudade da festajunina do bairro, com a turma toda reunida.', null)
 ]
 
-export const feed = [...baseFeed, ...photoPosts, ...topicPosts]
+// Enquete do diário: a poll post of the own diary (record key set type, text,
+// at, replyTo, poll) with public votes in the choice records below.
+export const pollPostRef = { author: own, seq: 60 }
+const pollPost = { ...photoPost(members[0], 60, at(5, 14, 40), 'Qual o melhor horário para o próximo mutirão da horta?', null), poll: ['Sábado de manhã', 'Sábado à tarde', 'Domingo'] }
+
+export const feed = [...baseFeed, ...photoPosts, ...topicPosts, pollPost]
 
 const ownPost = (n) => feed.filter((post) => post.author === own)[n]
 
@@ -511,4 +539,14 @@ export const fanRecords = [
   { author: own, seq: 50, record: { type: 'top-friends', keys: [members[4].author, members[1].author], at: at(5, 11) } }
 ]
 
-export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords], sealed, listings, rates }
+// Votos da enquete do diário (docs/protocol.md): choice records in each
+// voter's own diary; João changes his mind, so only the last one counts.
+export const choiceRecords = [
+  { author: members[1].author, seq: 110, record: { type: 'choice', to: pollPostRef, pick: 2, at: at(5, 14, 45) } },
+  { author: members[1].author, seq: 111, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 50) } },
+  { author: members[2].author, seq: 110, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 46) } },
+  { author: members[4].author, seq: 110, record: { type: 'choice', to: pollPostRef, pick: 1, at: at(5, 14, 47) } },
+  { author: own, seq: 61, record: { type: 'choice', to: pollPostRef, pick: 0, at: at(5, 14, 48) } }
+]
+
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords, ...choiceRecords], sealed, listings, rates }

@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1851,6 +1851,87 @@ test('fansUrl and validFans: cursor like the followers, rows and flags checked',
   t.is(validFans({ ...body, items: [{ ...row, key: A }] }, A), null, 'never itself')
   t.is(validFans({ ...body, total: 0 }, A), null)
   t.alike(await fetchFans('nope', null, {}), { ok: false, reason: 'invalid-input' })
+})
+
+test('pollUrl and pollVotersUrl: inputs checked, never a dropped cursor', async (t) => {
+  const { pollUrl, pollVotersUrl } = await load()
+  t.is(pollUrl(A.toUpperCase(), 5), '/index/poll/' + A + '/5')
+  t.is(pollUrl(A, 0), null)
+  t.is(pollUrl(A, 1.5), null)
+  t.is(pollUrl(A, '5'), null)
+  t.is(pollUrl('nope', 5), null)
+  t.is(pollVotersUrl(A, 5, 2), '/index/poll/' + A + '/5/2')
+  t.is(pollVotersUrl(A, 5, 0, { atMs: 7, key: B }), '/index/poll/' + A + '/5/0/7.' + B)
+  for (const pick of [-1, 4, '1', null, 0.5]) t.is(pollVotersUrl(A, 5, pick), null, 'pick ' + String(pick))
+  t.is(pollVotersUrl(A, 5, 0, 'x'), null, 'a bad cursor is null, not dropped')
+  t.is(pollVotersUrl(A, 5, 0, { atMs: 0, key: B }), '/index/poll/' + A + '/5/0/0.' + B, 'atMs 0')
+  t.is(pollVotersUrl(A, 5, 0, { atMs: 7, key: B, x: 1 }), null)
+  t.is(pollVotersUrl(A, 0, 0), null)
+})
+
+test('validPoll: exact keys, 2 to 4 counts, the expected size', async (t) => {
+  const { validPoll, fetchPoll } = await load()
+  const body = { totals: [3, 0, 1], indexing: false, complete: true }
+  t.alike(validPoll(body), body)
+  t.alike(validPoll(body, 3), body)
+  t.is(validPoll(body, 2), null, 'size differs from the poll')
+  const indexing = { totals: [], indexing: true, complete: false }
+  t.alike(validPoll(indexing), indexing, 'no totals while the seeder indexes')
+  t.alike(validPoll(indexing, 3), indexing, 'whatever the expected size')
+  for (const bad of [{ totals: [], indexing: false, complete: true }, { totals: [], indexing: false, complete: false }, { totals: [], indexing: true, complete: true }]) {
+    t.is(validPoll(bad), null, 'empty totals only while indexing: ' + JSON.stringify(bad))
+  }
+  const fresh = validPoll(body)
+  fresh.totals[0] = 9
+  t.is(body.totals[0], 3, 'a copy is returned')
+  for (const bad of [{ ...body, totals: [1] }, { ...body, totals: [1, 2, 3, 4, 5] }, { ...body, totals: [1, -1] }, { ...body, totals: [1, 1.5] }, { ...body, totals: [1, '2'] }, { ...body, totals: [1, null] }, { ...body, totals: { 0: 1, 1: 2, length: 2 } }, { ...body, totals: [1, 2], x: 1 }, { ...body, indexing: 'no' }, { totals: [1, 2], indexing: false }, { ...body, totals: Object.assign([1, 0, 2], { 1: undefined }) }, null, [], 'x']) {
+    t.is(validPoll(bad), null, JSON.stringify(bad))
+  }
+  t.alike(await fetchPoll('nope', 5, 3, {}), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchPoll(A, 0, 3, {}), { ok: false, reason: 'invalid-input' })
+  for (const bad of [undefined, 1, 5, 2.5, '3', null]) t.alike(await fetchPoll(A, 5, bad, {}), { ok: false, reason: 'invalid-input' }, 'the option count is required: ' + String(bad))
+  const answer = (totals) => ({ fetch: json({ totals, indexing: false, complete: true }) })
+  t.alike(await fetchPoll(A, 5, 3, answer([3, 0, 1])), { ok: true, value: { totals: [3, 0, 1], indexing: false, complete: true } })
+  t.alike(await fetchPoll(A, 5, 3, answer([3, 0, 1, 2])), { ok: false, reason: 'malformed' }, 'a 3-option poll with 4 totals is rejected')
+  t.alike(await fetchPoll(A, 5, 3, answer([3, 0])), { ok: false, reason: 'malformed' }, 'and one with 2')
+})
+
+test('validPollVoters: pointers only, newest first, next names the last row', async (t) => {
+  const { validPollVoters, fetchPollVoters } = await load()
+  const row = (key, at, seq = 3) => ({ key, seq, at })
+  const r1 = row(B, '2026-01-02T00:00:00.000Z')
+  const r2 = row(C, '2026-01-01T00:00:00.000Z', 4)
+  const hints = { [B]: { profileSeq: 3, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: 5 } }
+  const body = { items: [r1, r2], next: null, total: 2, authors: hints, indexing: false, complete: true }
+  t.alike(validPollVoters(body), body)
+  const empty = { items: [], next: null, total: 0, authors: {}, indexing: true, complete: false }
+  t.alike(validPollVoters(empty), empty, 'an empty page while indexing')
+  t.is(validPollVoters({ ...body, items: [r2, r1] }), null, 'oldest first')
+  t.is(validPollVoters({ ...body, items: [r1, { ...r2, key: B }] }), null, 'a duplicate key')
+  t.is(validPollVoters({ ...body, items: [r1, { ...r2, extra: 1 }] }), null)
+  t.is(validPollVoters({ ...body, items: [{ ...r1, seq: 0 }] }), null)
+  t.is(validPollVoters({ ...body, items: [{ ...r1, at: '2026-01-02' }] }), null)
+  t.is(validPollVoters({ ...body, items: [{ ...r1, key: 'zz' }] }), null)
+  t.is(validPollVoters({ ...body, authors: {} }), null, 'a hint missing for an item')
+  t.is(validPollVoters({ ...body, authors: { ...hints, [A]: hints[B] } }), null, 'a hint for no item')
+  t.is(validPollVoters({ ...body, authors: { [B]: hints[B], [C]: { profileSeq: 0, usernameSeq: null } } }), null, 'a bad hint')
+  t.is(validPollVoters({ ...body, authors: { [B]: hints[B], [C]: { profileSeq: null } } }), null, 'a hint with missing keys')
+  const noAuthors = { ...body }
+  delete noAuthors.authors
+  t.is(validPollVoters(noAuthors), null, 'no authors key')
+  t.is(validPollVoters({ ...body, total: 1 }), null, 'total below the rows')
+  t.is(validPollVoters({ ...body, items: Array.from({ length: 21 }, (_, i) => row(i.toString(16).padStart(64, '0'), '2026-01-02T00:00:00.000Z')), total: 21 }), null, 'over a page')
+  const next = { atMs: Date.parse(r2.at), key: C }
+  t.alike(validPollVoters({ ...body, next, total: 9 }).next, next)
+  const drawn = validPollVoters({ ...body, next, total: 9 })
+  drawn.authors[B].profileSeq = 99
+  t.is(body.authors[B].profileSeq, 3, 'a copy is returned')
+  t.is(validPollVoters({ ...body, next: { atMs: Date.parse(r2.at), key: B }, total: 9 }), null, 'next must name the last row')
+  t.is(validPollVoters({ ...body, items: [], next, total: 9 }), null, 'a cursor with no rows')
+  t.is(validPollVoters({ ...body, next: { atMs: 1, key: C, x: 1 } }), null)
+  t.is(validPollVoters(body, { atMs: Date.parse(r1.at), key: B }), null, 'a row at or before the request cursor')
+  t.ok(validPollVoters({ ...body, items: [r2], authors: { [C]: hints[C] }, total: 2 }, { atMs: Date.parse(r1.at), key: B }), 'after the request cursor')
+  t.alike(await fetchPollVoters(A, 5, 4, null, {}), { ok: false, reason: 'invalid-input' })
 })
 
 // A roda answer asked for A:5, a reply under the comment B:3 of the post C:1.

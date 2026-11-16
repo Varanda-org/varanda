@@ -146,6 +146,23 @@ test('group create, idempotent join, list, info and members expose every field',
   t.alike(m.session.internal, [])
 })
 
+test('foruns e enquetes are refused on the core node, never ignored, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await person(t)
+  const { group } = await m.call('group.create', { name: 'Horta', join: 'open', community: await communityOf(m) })
+  await m.call('group.post', { group, text: 'um' })
+  const target = { writer: group, seq: 1 }
+  const before = await m.call('group.read', { group })
+  t.alike(await failure(m.call('group.post', { group, text: 'tópico', topic: true })), NO)
+  t.alike(await failure(m.call('group.post', { group, text: 'tópico', topic: true, poll: ['a', 'b'] })), NO)
+  t.alike(await failure(m.call('group.read', { group, marks: true })), NO)
+  t.alike(await failure(m.call('group.read', { group, topic: target })), NO)
+  t.alike(await failure(m.call('group.choose', { group, target, pick: 0 })), NO)
+  t.alike(await failure(m.call('group.topics', { group })), NO)
+  t.alike(await failure(m.call('group.voters', { group, target })), NO)
+  t.alike(await m.call('group.read', { group }), before, 'nothing written')
+})
+
 test('group.post fwd 1 on the core node writes a forward that reads back as fwd 1', async (t) => {
   const m = await person(t)
   const community = await communityOf(m)

@@ -30,13 +30,15 @@
 // opens as the Fãs segment of 'seguindo' (params.segment 'fas'), another
 // person's as this screen. 'melhores-amigos' (the own top friends editor)
 // takes no key.
+// 'topico' (one topic of a public group) is keyed by the root ref
+// '<writer hex64>:<seq>' and requires params.group (the group's hex64 key).
 // The stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
@@ -68,6 +70,11 @@ export function validEntry (entry) {
     if (params === undefined) return true
     if (!params || typeof params !== 'object' || Array.isArray(params)) return false
     return params.page === undefined || isAuthorKey(params.page)
+  }
+  if (entry.screen === 'topico') {
+    const params = entry.params
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return false
+    return isRef(entry.key) && isAuthorKey(params.group)
   }
   if (entry.screen === 'avaliar') {
     const params = entry.params

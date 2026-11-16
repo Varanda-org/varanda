@@ -166,6 +166,7 @@ function fakeReader (posts) {
       text: p.text,
       hasMedia: p.hasMedia === true,
       hasQuote: p.hasQuote === true,
+      hasPoll: p.hasPoll === true,
       textCp: Array.from(p.text).length,
       contentHash: p.contentHash || hashOf(p.text)
     }
@@ -261,7 +262,7 @@ test('cold bank keeps a spam report open with frio; the panel projection has the
   t.alike(env.worker.suggestionOf(r.id), { sugestao: null, semelhanca: null, vizinhos: 0, motivo: 'frio', modo: 'auto' })
   t.is(env.worker.suggestionOf(rid()), null)
   t.alike(env.embed.calls, [SPAM + ' extra'], 'embed received the reader text, never the quote')
-  t.alike(env.worker.verifiedOf(r.id), { texto: SPAM + ' extra', midia: false, citacao: false })
+  t.alike(env.worker.verifiedOf(r.id), { texto: SPAM + ' extra', midia: false, citacao: false, enquete: false })
   cleanLogs(t, env.logs)
 })
 
@@ -345,7 +346,7 @@ test('assedio and ilegal posts are read and cached but never embedded nor learne
   t.is(env.ledger.get(il.id).code, 'ilegal')
   t.is(env.ledger.get(as.id).code, 'contexto')
   t.is(env.ledger.get(acct.id).code, 'conta')
-  t.alike(env.worker.verifiedOf(il.id), { texto: SPAM + ' novo', midia: false, citacao: false })
+  t.alike(env.worker.verifiedOf(il.id), { texto: SPAM + ' novo', midia: false, citacao: false, enquete: false })
   t.is(env.ledger.read(il.id).embedding, null)
   t.is(env.worker.verifiedOf(acct.id), null)
   t.is(env.moderation.decideCalls.length, 0)
@@ -371,11 +372,37 @@ test('a quote-post and a post with media stay aberta, are not embedded and are n
   t.is(env.embed.calls.length, 0)
   t.is(env.ledger.get(q.id).code, 'citacao')
   t.is(env.ledger.get(m.id).code, 'midia')
-  t.alike(env.worker.verifiedOf(q.id), { texto: SPAM + ' novo', midia: false, citacao: true })
+  t.alike(env.worker.verifiedOf(q.id), { texto: SPAM + ' novo', midia: false, citacao: true, enquete: false })
   t.is(env.moderation.decideCalls.length, 0)
   const size = env.exemplars.size()
   env.worker.onHumanDecision(env.moderation.human(q.id, 'bloquear'))
   env.worker.onHumanDecision(env.moderation.human(m.id, 'descartar'))
+  await env.worker.runOnce()
+  t.is(env.exemplars.size(), size, 'nothing learned')
+  cleanLogs(t, env.logs)
+})
+
+test('a poll post (options in the text) stays aberta for a person, is not embedded, not learned and never refused for length', async (t) => {
+  const env = setup(t, { mode: 'auto' })
+  env.warm()
+  const short = env.report({}, { text: SPAM + ' novo\nSim\nN\u00e3o', hasPoll: true })
+  const long = env.report({}, { text: (SPAM + ' ').repeat(80) + '\nSim\nN\u00e3o', hasPoll: true })
+  env.worker.onReport(short)
+  env.worker.onReport(long)
+  await env.worker.idle()
+  t.is(env.embed.calls.length, 0, 'never embedded')
+  t.is(env.ledger.get(short.id).code, 'enquete', 'held like a quote post: a person decides')
+  t.is(env.ledger.get(long.id).code, 'enquete', 'a poll text beyond the ledger bound is clipped and held, not an error')
+  t.alike(env.worker.verifiedOf(short.id), { texto: SPAM + ' novo\nSim\nN\u00e3o', midia: false, citacao: false, enquete: true }, 'the panel is told it is a poll, not a quote')
+  const kept = env.ledger.read(long.id)
+  t.is(kept.hasPoll, true)
+  t.is(kept.hasQuote, false, 'a poll is not recorded as a quote')
+  t.is(Array.from(kept.text).length, 1000, 'clipped to the ledger bound')
+  t.is(kept.truncated, true)
+  t.is(env.moderation.decideCalls.length, 0)
+  const size = env.exemplars.size()
+  env.worker.onHumanDecision(env.moderation.human(short.id, 'bloquear'))
+  env.worker.onHumanDecision(env.moderation.human(long.id, 'descartar'))
   await env.worker.runOnce()
   t.is(env.exemplars.size(), size, 'nothing learned')
   cleanLogs(t, env.logs)
@@ -528,6 +555,7 @@ test('learning: a human decision writes one exemplar from the cached read even w
     text: SPAM + ' tarde',
     hasMedia: false,
     hasQuote: false,
+    hasPoll: false,
     textCp: 20,
     truncated: false,
     embedding: quantize(fakeEmbed(SPAM + ' tarde'))
@@ -606,6 +634,7 @@ test('a group message report is never read, triaged or learned while a diary rep
     text: SPAM + ' grupo',
     hasMedia: false,
     hasQuote: false,
+    hasPoll: false,
     textCp: Array.from(SPAM + ' grupo').length,
     truncated: false,
     embedding: quantize(fakeEmbed(SPAM + ' grupo'))
@@ -1056,7 +1085,7 @@ test('an exemplar file from another model disables scoring and learning for the 
   t.is(env.ledger.get(r.id).code, 'modelo')
   t.is(env.moderation.decideCalls.length, 0)
   t.ok(env.logs.some((l) => l.reason === 'modelo'))
-  t.alike(w.verifiedOf(r.id), { texto: SPAM + ' novo', midia: false, citacao: false }, 'the text is still cached')
+  t.alike(w.verifiedOf(r.id), { texto: SPAM + ' novo', midia: false, citacao: false, enquete: false }, 'the text is still cached')
   const r2 = env.report({}, { text: SPAM + ' depois' })
   w.onReport(r2)
   await w.idle()

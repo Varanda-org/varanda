@@ -161,6 +161,8 @@ const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
 const FOLLOW_ITEM_KEYS = ['at', 'key', 'seq']
 const FANS_COUNT_KEYS = ['count', 'indexing']
+const POLL_KEYS = ['complete', 'indexing', 'totals']
+const POLL_VOTERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'next', 'total']
 const TOP_KEYS = ['back', 'seq']
 const TOP_MAX = 8
 const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
@@ -195,6 +197,7 @@ const isHex64 = (s) => typeof s === 'string' && HEX64.test(s)
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0
 const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
 const isHint = (n) => n === null || isSeq(n)
+const isPollPick = (n) => Number.isSafeInteger(n) && n >= 0 && n <= 3
 const isFollowKind = (k) => k === 'seguindo' || k === 'seguidores'
 
 function isCanonicalIso (s) {
@@ -377,6 +380,22 @@ export function fansUrl (author, cursor = null) {
   if (a === null) return null
   if (cursor !== null && !isFollowCursor(cursor)) return null
   return resolveUrl('/index/fans/' + a + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
+}
+
+// Enquetes: GET /index/poll/<author>/<seq> answers the totals per option (a
+// seeder claim); .../<pick>[/<cursor>] lists voter pointers for one option,
+// newest first, with the follower-list cursor. An invalid input is null.
+export function pollUrl (author, seq) {
+  const a = inputAuthor(author)
+  if (a === null || !isSeq(seq)) return null
+  return resolveUrl('/index/poll/' + a + '/' + seq)
+}
+
+export function pollVotersUrl (author, seq, pick, cursor = null) {
+  const a = inputAuthor(author)
+  if (a === null || !isSeq(seq) || !isPollPick(pick)) return null
+  if (cursor !== null && !isFollowCursor(cursor)) return null
+  return resolveUrl('/index/poll/' + a + '/' + seq + '/' + pick + (cursor === null ? '' : '/' + cursor.atMs + '.' + cursor.key))
 }
 
 // `segment` is already folded by the caller; it is only checked here.
@@ -1099,6 +1118,61 @@ export function validFans (body, author, cursor = null) {
   return rest
 }
 
+// Poll totals: one count per option (2..4, or `count` when the caller knows
+// the poll), or [] while the seeder is still indexing (indexing true, complete
+// false). Claims only: nothing here is verified.
+export function validPoll (body, count) {
+  if (!hasExactKeys(body, POLL_KEYS) || !isFlags(body)) return null
+  const t = body.totals
+  if (!Array.isArray(t)) return null
+  if (t.length === 0) {
+    if (body.indexing !== true || body.complete !== false) return null
+    return { totals: [], indexing: true, complete: false }
+  }
+  if (t.length < 2 || t.length > 4 || (count !== undefined && t.length !== count)) return null
+  for (let i = 0; i < t.length; i++) if (!Object.prototype.hasOwnProperty.call(t, i) || !isCount(t[i])) return null
+  return { totals: t.slice(), indexing: body.indexing, complete: body.complete }
+}
+
+// Voter pointers of one option: the rows, order, cursor and `next` rules of
+// validFollows, with one author hint per item key (the node verifies each
+// block).
+export function validPollVoters (body, cursor = null) {
+  if (!hasExactKeys(body, POLL_VOTERS_KEYS) || !isFlags(body)) return null
+  const list = body.items
+  if (!Array.isArray(list) || list.length > FOLLOWS_MAX) return null
+  const seen = new Set()
+  const items = []
+  let prev = isFollowCursor(cursor) ? cursor : null
+  for (const it of list) {
+    if (!hasExactKeys(it, FOLLOW_ITEM_KEYS) || !isHex64(it.key)) return null
+    if (!isSeq(it.seq) || !isCanonicalIso(it.at) || seen.has(it.key)) return null
+    const t = followT(it.at)
+    if (prev !== null && !(t < prev.atMs || (t === prev.atMs && it.key > prev.key))) return null
+    prev = { atMs: t, key: it.key }
+    seen.add(it.key)
+    items.push({ key: it.key, seq: it.seq, at: it.at })
+  }
+  if (body.next !== null) {
+    if (!isFollowCursor(body.next) || items.length === 0) return null
+    const last = items[items.length - 1]
+    if (body.next.key !== last.key || body.next.atMs !== followT(last.at)) return null
+  }
+  if (!isCount(body.total) || body.total < items.length) return null
+  const authors = validAuthors(body.authors)
+  if (authors === null) return null
+  const got = Object.keys(authors)
+  if (got.length !== seen.size || !got.every((k) => seen.has(k))) return null
+  return {
+    items,
+    next: body.next === null ? null : { atMs: body.next.atMs, key: body.next.key },
+    total: body.total,
+    authors,
+    indexing: body.indexing,
+    complete: body.complete
+  }
+}
+
 export function validFollowPair (body) {
   if (!hasExactKeys(body, FOLLOW_PAIR_KEYS) || typeof body.indexing !== 'boolean' || !isHint(body.seq)) return null
   return { seq: body.seq, indexing: body.indexing }
@@ -1421,6 +1495,17 @@ export function fetchProfile (author, deps = {}) {
 
 export function fetchFollowPair (author, target, deps = {}) {
   return run(followPairUrl(author, target), validFollowPair, deps)
+}
+
+// `count` is the poll's own option count (2..4, from the verified post): the
+// totals must have exactly that many entries, so the caller always passes it.
+export function fetchPoll (author, seq, count, deps = {}) {
+  const sized = Number.isInteger(count) && count >= 2 && count <= 4
+  return run(sized ? pollUrl(author, seq) : null, (body) => validPoll(body, count), deps)
+}
+
+export function fetchPollVoters (author, seq, pick, cursor = null, deps = {}) {
+  return run(pollVotersUrl(author, seq, pick, cursor), (body) => validPollVoters(body, cursor), deps)
 }
 
 export function fetchFans (author, cursor = null, deps = {}) {

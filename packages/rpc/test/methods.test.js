@@ -18,10 +18,10 @@ const bad = (t, method, params, label) => {
 
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
-    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
+    'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'diary.peek',
     'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
-    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
+    'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
@@ -29,8 +29,8 @@ test('method list and mutating set', (t) => {
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
-    'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
+    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
     'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add'
@@ -2966,4 +2966,121 @@ test('top.set: mutating, up to eight distinct keys, empty clears', (t) => {
   bad(t, 'top.set', { keys: [5] }, 'key type')
   bad(t, 'top.set', { keys: [KEY], extra: 1 }, 'extra field')
   for (const invalid of [null, [], 'params', 1]) bad(t, 'top.set', invalid, 'invalid params object')
+})
+
+test('poll limits', (t) => {
+  const { POLL_MIN, POLL_MAX, MAX_POLL_OPTION, GROUP_MARKED_LIMIT, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX } = require('..')
+  t.alike([POLL_MIN, POLL_MAX, MAX_POLL_OPTION], [2, 4, 60])
+  t.is(GROUP_MARKED_LIMIT, 24)
+  t.ok(GROUP_MARKED_LIMIT < GROUP_LIMIT_MAX)
+  t.is(GROUP_TOPICS_LIMIT, 30)
+  t.is(GROUP_VOTERS_MAX, 900)
+})
+
+test('post.create: optional poll, never with media or a preview, text required', (t) => {
+  const poll = ['Sim', 'Não']
+  ok(t, 'post.create', { text: 'Vamos?', poll }, { text: 'Vamos?', poll })
+  ok(t, 'post.create', { text: 'Qual?', poll: ['a', 'b', 'c', 'd'] })
+  ok(t, 'post.create', { text: 'oi' }, { text: 'oi' })
+  bad(t, 'post.create', { text: '', poll }, 'a poll needs its question')
+  bad(t, 'post.create', { text: 'q', poll: ['a'] }, 'one option')
+  bad(t, 'post.create', { text: 'q', poll: ['a', 'b', 'c', 'd', 'e'] }, 'five options')
+  bad(t, 'post.create', { text: 'q', poll: ['a', ' a'] }, 'duplicate after trim')
+  bad(t, 'post.create', { text: 'q', poll: ['a', 'b'.repeat(61)] }, 'option over the limit')
+  bad(t, 'post.create', { text: 'q', poll: ['a', 'b\nc'] }, 'two-line option')
+  bad(t, 'post.create', { text: 'q', poll: null }, 'null poll')
+  bad(t, 'post.create', { text: 'q', poll: 'a,b' }, 'string poll')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  ok(t, 'post.create', { text: 'q', media })
+  bad(t, 'post.create', { text: 'q', poll, media }, 'poll with media')
+  // Only post.create takes a poll: a reply or a quote never does.
+  bad(t, 'post.reply', { to: KEY + ':1', text: 'q', poll }, 'reply with a poll')
+  bad(t, 'post.quote', { to: KEY + ':1', text: 'q', poll }, 'quote with a poll')
+})
+
+test('choice.set and choice.mine', (t) => {
+  t.ok(isMutating('choice.set'))
+  t.absent(isMutating('choice.mine'))
+  const to = KEY + ':7'
+  for (const pick of [0, 1, 2, 3, null]) ok(t, 'choice.set', { to, pick }, { to, pick })
+  for (const pick of [-1, 4, 1.5, '1', true, undefined]) bad(t, 'choice.set', { to, pick }, 'pick ' + String(pick))
+  bad(t, 'choice.set', { to }, 'missing pick')
+  bad(t, 'choice.set', { pick: 0 }, 'missing to')
+  for (const bad2 of [KEY + ':0', KEY, KEY.toUpperCase() + ':1', KEY + ':01', { author: KEY, seq: 1 }]) {
+    bad(t, 'choice.set', { to: bad2, pick: 0 }, 'to ' + JSON.stringify(bad2))
+    bad(t, 'choice.mine', { to: bad2 }, 'mine to ' + JSON.stringify(bad2))
+  }
+  bad(t, 'choice.set', { to, pick: 0, extra: 1 }, 'extra field')
+  ok(t, 'choice.mine', { to }, { to })
+  bad(t, 'choice.mine', {}, 'missing to')
+  bad(t, 'choice.mine', { to, pick: 0 }, 'pick is not a choice.mine param')
+})
+
+test('group.post: topic and poll', (t) => {
+  const poll = ['Sim', 'Não']
+  ok(t, 'group.post', { group: KEY, text: 'Assunto', topic: true }, { group: KEY, text: 'Assunto', fwd: 0, topic: true })
+  ok(t, 'group.post', { group: KEY, text: 'Assunto', topic: true, poll }, { group: KEY, text: 'Assunto', fwd: 0, topic: true, poll })
+  ok(t, 'group.post', { group: KEY, text: 'oi', topic: false }, { group: KEY, text: 'oi', fwd: 0, topic: false })
+  bad(t, 'group.post', { group: KEY, text: 'q', poll }, 'a poll needs topic: true')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: false, poll }, 'topic false with a poll')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, replyTo: { writer: KEY, seq: 1 } }, 'a topic is a root')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, fwd: 1 }, 'a topic is not a forward')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: 1 }, 'topic is a boolean')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, poll: ['a'] }, 'one option')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, poll: ['a', 'a '] }, 'duplicate after trim')
+  const media = [{ core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: KEY, width: 10, height: 10 }]
+  ok(t, 'group.post', { group: KEY, text: 'Fotos', topic: true, media })
+  bad(t, 'group.post', { group: KEY, text: '', topic: true, media }, 'a topic needs a title')
+  bad(t, 'group.post', { group: KEY, text: '\u200b \u3164', topic: true, media }, 'a topic title cannot be invisible only')
+  bad(t, 'group.post', { group: KEY, text: '   ', topic: true }, 'a topic title cannot be blank')
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, poll, media }, 'poll with media')
+  const sealed = [{ core: KEY, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 1, h: 1, ms: 0 }]
+  ok(t, 'group.post', { group: KEY, text: 'q', media: sealed, sealed: true })
+  bad(t, 'group.post', { group: KEY, text: 'q', topic: true, media: sealed, sealed: true }, 'a sealed post is never a topic')
+})
+
+test('group.read: marks and topic cap the page at GROUP_MARKED_LIMIT', (t) => {
+  const { GROUP_MARKED_LIMIT } = require('..')
+  const root = { writer: KEY, seq: 3 }
+  ok(t, 'group.read', { group: KEY, marks: true }, { group: KEY, limit: GROUP_MARKED_LIMIT, marks: true })
+  ok(t, 'group.read', { group: KEY, topic: root }, { group: KEY, limit: GROUP_MARKED_LIMIT, topic: root })
+  ok(t, 'group.read', { group: KEY, marks: true, limit: GROUP_MARKED_LIMIT }, { group: KEY, limit: GROUP_MARKED_LIMIT, marks: true })
+  ok(t, 'group.read', { group: KEY, marks: true, limit: 5 }, { group: KEY, limit: 5, marks: true })
+  bad(t, 'group.read', { group: KEY, marks: true, limit: GROUP_MARKED_LIMIT + 1 }, 'marked page over the cap')
+  bad(t, 'group.read', { group: KEY, topic: root, limit: GROUP_LIMIT_MAX }, 'topic page over the cap')
+  ok(t, 'group.read', { group: KEY, marks: false }, { group: KEY, limit: GROUP_LIMIT_DEFAULT, marks: false })
+  ok(t, 'group.read', { group: KEY, marks: false, limit: GROUP_LIMIT_MAX })
+  ok(t, 'group.read', { group: KEY }, { group: KEY, limit: GROUP_LIMIT_DEFAULT })
+  bad(t, 'group.read', { group: KEY, marks: 1 }, 'marks is a boolean')
+  for (const topic of [{ writer: KEY }, { writer: KEY, seq: 0 }, KEY + ':1', null]) bad(t, 'group.read', { group: KEY, topic }, 'topic ' + JSON.stringify(topic))
+})
+
+test('group.choose, group.topics and group.voters', (t) => {
+  const { GROUP_TOPICS_LIMIT } = require('..')
+  const target = { writer: KEY, seq: 2 }
+  t.ok(isMutating('group.choose'))
+  t.absent(isMutating('group.topics'))
+  t.absent(isMutating('group.voters'))
+  for (const pick of [0, 3, null]) ok(t, 'group.choose', { group: KEY, target, pick }, { group: KEY, target, pick })
+  for (const pick of [-1, 4, '0', 0.5]) bad(t, 'group.choose', { group: KEY, target, pick }, 'pick ' + String(pick))
+  bad(t, 'group.choose', { group: KEY, target }, 'missing pick')
+  bad(t, 'group.choose', { group: KEY, pick: 0 }, 'missing target')
+  bad(t, 'group.choose', { target, pick: 0 }, 'missing group')
+  bad(t, 'group.choose', { group: KEY, target: { writer: KEY, seq: 0 }, pick: 0 })
+  bad(t, 'group.choose', { group: KEY, target, pick: 0, emoji: '' })
+
+  const AT = '2026-10-28T12:00:00.000Z'
+  const before = { at: AT, writer: KEY, seq: 9 }
+  ok(t, 'group.topics', { group: KEY }, { group: KEY, limit: GROUP_TOPICS_LIMIT })
+  ok(t, 'group.topics', { group: KEY, page: KEY, limit: 1, before }, { group: KEY, page: KEY, limit: 1, before })
+  bad(t, 'group.topics', {}, 'missing group')
+  bad(t, 'group.topics', { group: KEY, limit: 0 })
+  bad(t, 'group.topics', { group: KEY, limit: GROUP_TOPICS_LIMIT + 1 })
+  bad(t, 'group.topics', { group: KEY, before: { at: AT, writer: KEY } })
+  bad(t, 'group.topics', { group: KEY, marks: true })
+
+  ok(t, 'group.voters', { group: KEY, target }, { group: KEY, target })
+  bad(t, 'group.voters', { group: KEY })
+  bad(t, 'group.voters', { target })
+  bad(t, 'group.voters', { group: KEY, target, pick: 0 })
 })

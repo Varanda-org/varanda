@@ -37,6 +37,7 @@ function readFields (extra = {}) {
     text: 'olá\nmundo',
     hasMedia: false,
     hasQuote: true,
+    hasPoll: false,
     textCp: 9,
     truncated: false,
     embedding: new Array(DIM).fill(-3),
@@ -145,7 +146,7 @@ test('putRead, read, readIds, dropRead', (t) => {
   copy.embedding[0] = 5
   t.is(ledger.read(a).embedding[0], -3, 'read returns copies')
   t.alike(ledger.readIds().sort(), [a, b].sort())
-  t.alike(Object.keys(onDisk(dir).reads[a]), ['at', 'target', 'seq', 'contentHash', 'text', 'hasMedia', 'hasQuote', 'textCp', 'truncated', 'embedding'])
+  t.alike(Object.keys(onDisk(dir).reads[a]), ['at', 'target', 'seq', 'contentHash', 'text', 'hasMedia', 'hasQuote', 'hasPoll', 'textCp', 'truncated', 'embedding'])
   throwsCode(t, () => ledger.putRead(rid(), readFields({ embedding: new Array(DIM + 1).fill(0) })), 'pedido-invalido', '385 numbers')
   throwsCode(t, () => ledger.putRead(rid(), readFields({ text: 'a\u0007' })), 'pedido-invalido', 'unclean text')
   throwsCode(t, () => ledger.putRead(rid(), readFields({ seq: 0 })), 'pedido-invalido', 'seq')
@@ -153,11 +154,38 @@ test('putRead, read, readIds, dropRead', (t) => {
   const missing = readFields()
   delete missing.truncated
   throwsCode(t, () => ledger.putRead(rid(), missing), 'pedido-invalido', 'missing key')
+  const noPoll = readFields()
+  delete noPoll.hasPoll
+  throwsCode(t, () => ledger.putRead(rid(), noPoll), 'pedido-invalido', 'a new read must carry hasPoll')
+  throwsCode(t, () => ledger.putRead(rid(), readFields({ hasPoll: 1 })), 'pedido-invalido', 'hasPoll is a boolean')
+  const poll = rid()
+  t.is(ledger.putRead(poll, readFields({ hasQuote: false, hasPoll: true })).hasPoll, true, 'hasPoll is stored truthfully')
+  t.is(ledger.read(poll).hasQuote, false, 'and hasQuote independently')
+  ledger.dropRead(poll)
   c.t += 1000
   t.is(ledger.dropRead(a), true)
   t.is(ledger.dropRead(a), false)
   t.is(ledger.read(a), null)
   t.alike(ledger.readIds(), [b])
+})
+
+test('a row stored before hasPoll existed loads as hasPoll:false; any other shape is corrupt', (t) => {
+  const { dir, c, ledger, open } = setup(t)
+  const id = rid()
+  ledger.putRead(id, readFields({ hasQuote: true }))
+  const obj = onDisk(dir)
+  delete obj.reads[id].hasPoll
+  fs.writeFileSync(filePath(dir), JSON.stringify(obj))
+  const l = open()
+  const r = l.read(id)
+  t.is(r.hasPoll, false, 'upgraded, not refused')
+  t.is(r.hasQuote, true, 'the quote flag (which held every earlier poll post) is untouched')
+  t.is(l.readIds().length, 1, 'the cache is kept')
+  obj.reads[id].hasPoll = 'sim'
+  fs.writeFileSync(filePath(dir), JSON.stringify(obj))
+  c.t = T0 + 9
+  t.is(open().read(id), null, 'a non-boolean hasPoll is corrupt: set aside and started over')
+  t.ok(fs.existsSync(path.join(dir, FILE + '.corrupt-' + (T0 + 9))))
 })
 
 test('caps drop the oldest at', (t) => {

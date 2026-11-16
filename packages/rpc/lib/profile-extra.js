@@ -105,5 +105,6 @@ module.exports = {
   isMoodText,
   isMoodEmoji,
   isInvisibleOnly,
+  scan,
   nullable
 }

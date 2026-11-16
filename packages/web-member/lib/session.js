@@ -331,6 +331,7 @@ const { groupKeyPairFromPrf, outboxKeyFromPrf } = require('./passkey')
 const { sealOutbox, openOutbox, WRONG_AUTHOR: OUTBOX_WRONG_AUTHOR } = require('./outbox-seal')
 const { createGroupKeys } = require('./group-keys')
 const { checkSeederUrl } = require('./seeder-url')
+const { pollOptions } = require('@varanda/core/lib/polls')
 const { createDmEngine, MOMENT_PHOTO_GONE, BLOCKED: DM_BLOCKED, NO_PAGE_KEY, KEY_MISMATCH: DM_KEY_MISMATCH, USE_PAGE_DRAFT: DM_USE_PAGE_DRAFT } = require('./dm')
 const { applyBlock, blockedKeys } = require('@varanda/core/lib/member-block')
 const { createSeenSync, groupApplier } = require('./seen-sync')
@@ -349,6 +350,11 @@ const FAN_SELF = 'não pode ser fã de si'
 const TOP_SELF = 'não pode listar a si entre os melhores amigos'
 const FAN_PAGE = 'páginas não têm fãs'
 const TOP_PAGE = 'páginas não entram nos melhores amigos'
+// Foruns e enquetes (docs/rpc.md): a vote names a live poll post and one of
+// its options; topics and group polls live in public groups only.
+const CHOICE_NOT_POLL = 'a publicação não é uma enquete'
+const CHOICE_PICK_INVALID = 'opção inválida'
+const FORUM_PUBLIC = 'fóruns e enquetes só em grupo público'
 const SCRAP_FOLLOWING = 'esta pessoa só recebe recados de quem ela segue'
 const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
 const SCRAP_INDEX_MAX_CHARS = 64 * 1024
@@ -3043,26 +3049,65 @@ function createBrowserSession ({
   async function refusePages (keys, message) {
     const deadline = Date.now() + peekTimeoutMs
     const reads = []
-    for (const key of keys) {
-      for (;;) {
-        const ms = deadline - Date.now()
-        if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
-        if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) {
-          await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, ms)))
-          continue
-        }
-        try {
-          reads.push(await diaryPeekWithin({ author: key, seqs: [1, 2] }, ms))
-          break
-        } catch (err) {
-          // A slot taken between the check and the peek: wait again.
-          if (err === null || typeof err !== 'object' || err.code !== 'USAGE' || err.message !== DIARY_PEEK_BUSY) throw err
-          await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, Math.max(1, deadline - Date.now()))))
-        }
-      }
-    }
+    for (const key of keys) reads.push(await peekBefore(key, [1, 2], deadline))
     if (reads.some((r) => r.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster'))) throw new UsageError(message)
     if (reads.some((r) => [1, 2].some((q) => q < r.length && r.missing.includes(q)))) throw new Error(SEEDER_UNAVAILABLE)
+  }
+
+  // One diary.peek of `seqs` of `author` before `deadline`, waiting for a
+  // free slot (the app's own peeks count) instead of failing 'ocupado';
+  // SEEDER_UNAVAILABLE once the deadline is reached.
+  async function peekBefore (author, seqs, deadline) {
+    for (;;) {
+      const ms = deadline - Date.now()
+      if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+      if (diaryPeeksInFlight >= MAX_DIARY_PEEKS) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, ms)))
+        continue
+      }
+      try {
+        return await diaryPeekWithin({ author, seqs }, ms)
+      } catch (err) {
+        // A slot taken between the check and the peek: wait again.
+        if (err === null || typeof err !== 'object' || err.code !== 'USAGE' || err.message !== DIARY_PEEK_BUSY) throw err
+        await new Promise((resolve) => setTimeout(resolve, Math.min(PEEK_SLOT_POLL_MS, Math.max(1, deadline - Date.now()))))
+      }
+    }
+  }
+
+  // Enquetes: refuses a vote on a post the local fold knows deleted (the own
+  // diary, a followed one or any replica held here, tombstones read raw as
+  // page.read does): a peek of such a block is missing at once (readPeek), so
+  // it would read as SEEDER_UNAVAILABLE. A diary not held here is left to
+  // checkPoll. Runs on the chain (withCores).
+  async function refuseDeletedPoll (to) {
+    let read
+    try {
+      read = await withCores((c) => member.logReadRaw(c, { author: to.author }))
+    } catch (err) {
+      if (messageOf(err) === NO_LOCAL_DATA) return
+      throw err
+    }
+    const entries = read.entries.slice().sort((a, b) => a.seq - b.seq)
+    if (deletedSeqs(entries).has(to.seq)) throw new UsageError(CHOICE_NOT_POLL)
+  }
+
+  // Enquetes: refuses a vote unless block `to.seq` of `to.author`, peeked,
+  // is a poll post with an option `pick`. Fails closed: an unread block
+  // inside the diary (a deleted one too) is SEEDER_UNAVAILABLE. RESIDUAL: a
+  // deleted poll whose bytes the seeder still serves, of a diary not held
+  // here (refuseDeletedPoll), passes; the seeder index and every reader
+  // count no vote on a deleted post (protocol, "Seeder poll index").
+  async function checkPoll (to, pick) {
+    const p = await peekBefore(to.author, [to.seq], Date.now() + peekTimeoutMs)
+    const e = p.entries.find((x) => x.seq === to.seq)
+    if (e === undefined) {
+      if (to.seq < p.length) throw new Error(SEEDER_UNAVAILABLE)
+      throw new UsageError(CHOICE_NOT_POLL)
+    }
+    const options = pollOptions(e.record, to.seq)
+    if (options === null) throw new UsageError(CHOICE_NOT_POLL)
+    if (!(pick < options.length)) throw new UsageError(CHOICE_PICK_INVALID)
   }
 
   // The DM engine opens each box with its in-memory pair; nothing else
@@ -3855,10 +3900,10 @@ function createBrowserSession ({
 
     // `media` (optional): descriptors from mediaUpload, verified by
     // member-ops against the own declared media cores before the append.
-    'post.create': serial(async ({ text, media, preview }, epoch) => {
+    'post.create': serial(async ({ text, media, preview, poll }, epoch) => {
       await requireUnlocked()
       await ensureCaughtUp(epoch)
-      const r = await withStore((c) => member.postCreate(c, { text, media, preview }))
+      const r = await withStore((c) => member.postCreate(c, { text, media, preview, poll }))
       wrote(r.seq)
       await pushAfterWrite()
       return { seq: r.seq, ref: r.ref }
@@ -4243,6 +4288,45 @@ function createBrowserSession ({
       })({})
     },
 
+    // Enquetes (docs/rpc.md): a public vote, a `choice` record in the own
+    // diary. A pick peeks the poll post first (checkPoll: a live poll, pick
+    // one of its options) and refuses a blocked author; a withdrawal (pick
+    // null) needs no read, as fan.set off, so a vote on a poll deleted since
+    // can still be withdrawn. Appended like fan.set, never retried. -> { seq }.
+    'choice.set': async ({ to: rawTo, pick }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const parsed = parseRef(rawTo)
+      if (parsed === null || parsed.seq < 1) throw new UsageError('referência inválida')
+      const to = { author: parsed.author.toLowerCase(), seq: parsed.seq }
+      const refuse = async () => {
+        if (pick !== null && (await member.memberBlocks(storage)).has(to.author)) throw new UsageError(DM_BLOCKED)
+      }
+      await serial(async () => {
+        await requireUnlocked()
+        await refuse()
+        if (pick !== null) await refuseDeletedPoll(to)
+      })({})
+      try {
+        if (pick !== null) await checkPoll(to, pick)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await refuse()
+        await ensureCaughtUp(epoch)
+        const r = await profileExtraWrite((c) => member.choiceSet(c, { to, pick }))
+        return { seq: r.seq }
+      })({})
+    },
+
+    // The own live pick on a diary poll, from the own diary alone.
+    'choice.mine': serial(({ to: rawTo }) => {
+      const parsed = parseRef(rawTo)
+      if (parsed === null || parsed.seq < 1) throw new UsageError('referência inválida')
+      return withCores((c) => member.choiceMine(c, { to: { author: parsed.author.toLowerCase(), seq: parsed.seq } }))
+    }),
+
     'top.set': async ({ keys: rawKeys }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const keys = rawKeys.map((k) => k.toLowerCase())
@@ -4541,6 +4625,8 @@ function createBrowserSession ({
     'group.leave': groupWrite(member.groupLeave),
     'group.post': groupWrite(member.groupPost),
     'group.read': serial((params) => {
+      // A page's groups are private: no topics there.
+      if (params.page !== undefined && (params.marks !== undefined || params.topic !== undefined)) throw new UsageError(FORUM_PUBLIC)
       if (params.page !== undefined) return pageGroupOp(member.pageGroupRead, params)
       return withCores((c) => member.groupRead(c, params))
     }),
@@ -4561,6 +4647,14 @@ function createBrowserSession ({
     'group.hide': groupWrite(member.groupHide, GROUP_AND_COMMUNITY),
     'group.react': groupWrite(member.groupReact),
     'group.reactors': serial((params) => withCores((c) => member.groupReactors(c, params))),
+    // Foruns e enquetes (docs/rpc.md): public groups only, so a page's
+    // (private) groups list no topics.
+    'group.choose': groupWrite(member.groupChoose),
+    'group.topics': serial((params) => {
+      if (params.page !== undefined) throw new UsageError(FORUM_PUBLIC)
+      return withCores((c) => member.groupTopics(c, params))
+    }),
+    'group.voters': serial((params) => withCores((c) => member.groupVoters(c, params))),
     'group.meta': groupWrite(member.groupMeta),
     // Through the caller's CW when it acts for the community, as group.admit.
     'group.invitePolicy': groupWrite(member.groupInvitePolicy, GROUP_AND_COMMUNITY),

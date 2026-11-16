@@ -159,7 +159,7 @@ test('gifQueue: at most N tasks at once, all run', async (t) => {
 test('the attach sheet shows GIF only with the capability, and stages the picked file', (t) => {
   const sheet = src('ui/AttachSheet.js')
   t.ok(sheet.includes("o.planned !== true || (o.key === 'gif' && gif === true)"), 'the GIF row is gated')
-  t.ok(sheet.includes('attachOptions({ gif }).map('))
+  t.ok(sheet.includes('attachOptions({ gif, poll }).map('))
   t.ok(sheet.includes('boundedFile(given !== null ? source : await encodeFile(source))'), 'a picked GIF is bounded again, never re-encoded')
   const composer = src('ui/ChatComposer.js')
   t.ok(composer.includes('gif={gifReady}'))

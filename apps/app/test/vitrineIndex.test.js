@@ -58,7 +58,10 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.profileUrl(f.own), c.validProfile],
     [c.profileUrl(f.members[2].author), c.validProfile],
     [c.followPairUrl(f.own, f.members[1].author), c.validFollowPair],
-    [c.fansUrl(f.own), (b) => c.validFans(b, f.own)]
+    [c.fansUrl(f.own), (b) => c.validFans(b, f.own)],
+    [c.pollUrl(f.own, 60), (b) => c.validPoll(b, 3)],
+    [c.pollVotersUrl(f.own, 60, 0), (b) => c.validPollVoters(b)],
+    [c.pollVotersUrl(f.own, 60, 2), (b) => c.validPollVoters(b)]
   ]
   for (const [url, validate] of cases) {
     t.ok(url, 'builder accepts the fixture input')
@@ -586,6 +589,27 @@ test('the profile route answers the fan count and the top friends with one pendi
   t.is(typeof body.top.back[back], 'number')
   t.is(body.top.back[pending], null, 'one pick does not follow back')
   t.is(c.validProfile(respond(c.profileUrl(f.members[2].author))).top, null)
+})
+
+test('poll route: totals and voter pointers follow the live choice records', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const poll = { author: f.own, seq: 60 }
+  t.alike(c.validPoll(respond(c.pollUrl(poll.author, poll.seq)), 3).totals, [3, 1, 0], 'the seeded votes: the last choice of each voter')
+  const zero = c.validPollVoters(respond(c.pollVotersUrl(poll.author, poll.seq, 0)))
+  t.is(zero.total, 3)
+  t.alike(zero.items.map((i) => i.key).sort(), [f.own, f.members[1].author, f.members[2].author].sort())
+  t.is(zero.next, null)
+  t.is(c.validPollVoters(respond(c.pollVotersUrl(poll.author, poll.seq, 2))).total, 0)
+  await request('choice.set', { to: `${f.own}:60`, pick: 2 })
+  t.alike(c.validPoll(respond(c.pollUrl(poll.author, poll.seq)), 3).totals, [2, 1, 1], 'a new vote shows')
+  await request('choice.set', { to: `${f.own}:60`, pick: null })
+  t.alike(c.validPoll(respond(c.pollUrl(poll.author, poll.seq)), 3).totals, [2, 1, 0], 'a withdrawal shows')
+  const first = c.validPollVoters(respond(c.pollVotersUrl(poll.author, poll.seq, 0)))
+  const page = respond(c.pollVotersUrl(poll.author, poll.seq, 0, { atMs: Date.parse(first.items[0].at), key: first.items[0].key }))
+  t.ok(c.validPollVoters(page, { atMs: Date.parse(first.items[0].at), key: first.items[0].key }), 'a cursor page validates')
+  for (const url of ['/index/poll/' + f.own + '/3', '/index/poll/' + f.own + '/60/3', '/index/poll/' + f.own + '/60/x', '/index/poll/' + f.own + '/60/0/zz', '/index/poll/' + f.own, '/index/poll/' + f.own + '/60/0/1.' + f.own + '/x', '/index/poll/nope/60', '/index/poll/' + f.own + '/1000000000000000', '/index/poll/' + f.own + '/1000000000000000/0']) {
+    t.exception(() => respond(url), url + ' is not found')
+  }
 })
 
 test('the roda route answers the seeder shape: root, top and the subtree parents first', async (t) => {

@@ -10,6 +10,7 @@ const IC = require('./invite-card')
 const { isMomentMusic } = require('./music')
 const { isReaction } = require('./reaction')
 const PX = require('./profile-extra')
+const { isPoll, isPick } = require('./poll')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -317,6 +318,24 @@ function isDmCard (card) {
 function postCross (given, value) {
   if (hasOwn(value, 'media') && (hasOwn(value, 'preview') || hasOwn(value, 'card'))) return 'parâmetro inválido: media'
   if (!hasOwn(value, 'media') && charLength(value.text) < 1) return 'parâmetro inválido: text'
+  return null
+}
+
+// post.create `poll`: the poll post key set carries no media and no link
+// card, and a poll always has its question as text.
+function postPollCross (given, value) {
+  if (hasOwn(value, 'poll') && (hasOwn(value, 'media') || hasOwn(value, 'preview'))) return 'parâmetro inválido: poll'
+  return postCross(given, value)
+}
+
+// group.post `topic` and `poll`: a topic is a public root post (no replyTo,
+// not a forward, not sealed) with a text for its title; a poll goes only on
+// a new topic, with no media and no card.
+function groupTopicCross (given, value) {
+  const topic = value.topic === true
+  if (topic && (hasOwn(value, 'replyTo') || value.fwd === 1 || value.sealed === true)) return 'parâmetro inválido: topic'
+  if (topic && (charLength(value.text) < 1 || PX.isInvisibleOnly(value.text))) return 'parâmetro inválido: text'
+  if (hasOwn(value, 'poll') && (!topic || hasOwn(value, 'media') || hasOwn(value, 'card'))) return 'parâmetro inválido: poll'
   return null
 }
 
@@ -1110,10 +1129,12 @@ const SPECS = {
   // Tombstones the caller's own profile version, or the compatibility pair
   // it belongs to (docs/rpc.md 5.34).
   'profile.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  // `poll` (docs/rpc.md): POLL_MIN..POLL_MAX options, never with media or a
+  // preview; the post is written with the poll key set.
   'post.create': {
-    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
+    fields: { text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard), poll: opt(isPoll) },
     mutating: true,
-    cross: postCross
+    cross: postPollCross
   },
   'post.reply': {
     fields: { to: req((v) => isRef(v, 1)), text: req(str(0, L.MAX_TEXT)), media: opt(isPostMedia), preview: opt(isPublicCard) },
@@ -1133,6 +1154,15 @@ const SPECS = {
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'engagement.read': { fields: { refs: req(isRefList) } },
+  // A public vote on a diary poll (docs/rpc.md): a `choice` record in the
+  // caller's diary naming the poll post; pick null withdraws the vote.
+  // Whether `to` is a poll and pick one of its options is the node's check.
+  // Result { seq }.
+  'choice.set': { fields: { to: req((v) => isRef(v, 1)), pick: req(isPick) }, mutating: true },
+  // The caller's own live pick on a diary poll, from its own diary only.
+  // Result { pick: integer | null, seq: integer | null } (seq of the live
+  // choice record, null when there is none).
+  'choice.mine': { fields: { to: req((v) => isRef(v, 1)) } },
   'listing.create': {
     fields: {
       kind: req(F.isKind),
@@ -1279,9 +1309,14 @@ const SPECS = {
   'group.join': { fields: { group: req(isKey), community: opt(isKey) }, mutating: true },
   'group.leave': { fields: { group: req(isKey) }, mutating: true },
   'group.post': {
-    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool) },
+    // `topic: true` also writes a `group-topic` side record on the new post,
+    // and `poll` a `group-poll` on it (docs/rpc.md); public groups only, the
+    // node refuses both in a private group.
+    fields: { group: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0), media: opt(isGroupMediaList), card: opt((v) => isGroupCard(v, false) || isGroupCard(v, true)), sealed: opt(isBool), topic: opt(isBool), poll: opt(isPoll) },
     mutating: true,
     cross: (given, value) => {
+      const topic = groupTopicCross(given, value)
+      if (topic !== null) return topic
       if (value.sealed === true && !hasOwn(value, 'media') && !hasOwn(value, 'card')) return 'parâmetro inválido: sealed'
       if (value.media && !value.media.every((item) => (item.mime === 'application/octet-stream') === (value.sealed === true))) return 'parâmetro inválido: media'
       if (value.card && !isGroupCard(value.card, value.sealed === true)) return 'parâmetro inválido: card'
@@ -1294,7 +1329,21 @@ const SPECS = {
       page: opt(isKey),
       limit: opt(int(1, L.GROUP_LIMIT_MAX), L.GROUP_LIMIT_DEFAULT),
       // Exclusive group-order cursor; absent = the newest page.
-      before: opt(isGroupCursor)
+      before: opt(isGroupCursor),
+      // `marks: true` adds `topic: null | { writer, seq, poll }` to every
+      // item, the topic root the item opens or belongs to (docs/rpc.md).
+      marks: opt(isBool),
+      // The thread of one topic root: the root and its replies, marked as
+      // with `marks`, plus the page's `poll` summary.
+      topic: opt(isGroupRef)
+    },
+    // A marked page holds at most GROUP_MARKED_LIMIT items: an absent limit
+    // becomes that, a larger one is refused. The unmarked default is kept.
+    cross: (given, value) => {
+      if (value.marks !== true && !hasOwn(value, 'topic')) return null
+      if (!hasOwn(given, 'limit')) value.limit = L.GROUP_MARKED_LIMIT
+      else if (value.limit > L.GROUP_MARKED_LIMIT) return 'parâmetro inválido: limit'
+      return null
     }
   },
   // A private-group post sealed for a page (docs/rpc.md 5.114); writes
@@ -1342,6 +1391,25 @@ const SPECS = {
   // Who reacted to a group-post: { reactions: [{ emoji, count, by }] }, by up
   // to GROUP_REACTORS_MAX diary keys per emoji in causal order (5.118).
   'group.reactors': { fields: { group: req(isKey), target: req(isGroupRef) } },
+  // A vote on the poll of a visible topic root (docs/rpc.md): a
+  // `group-choice` side record; pick null withdraws it. Public groups only.
+  'group.choose': { fields: { group: req(isKey), target: req(isGroupRef), pick: req(isPick) }, mutating: true },
+  // The group's topics, newest root first by creation time (a reply does not
+  // bump a topic): { items: [{ writer, diary, seq, at, text, name, username,
+  // hidden, replies, last, poll }], next, incomplete }, poll null or
+  // { options, totals, mine }.
+  'group.topics': {
+    fields: {
+      group: req(isKey),
+      page: opt(isKey),
+      limit: opt(int(1, L.GROUP_TOPICS_LIMIT), L.GROUP_TOPICS_LIMIT),
+      // Exclusive cursor: the group-order position of the oldest root held.
+      before: opt(isGroupCursor)
+    }
+  },
+  // Who voted on a topic's poll: { voters: [{ pick, count, by }] }, by up to
+  // GROUP_VOTERS_MAX diary keys per option in causal order.
+  'group.voters': { fields: { group: req(isKey), target: req(isGroupRef) } },
   // Communities (docs/rpc.md 5.57 to 5.70): hold the groups, named by their root key.
   // community.link was removed in protocol v2 (docs/rpc.md 5.58): an unknown method.
   'community.create': { fields: { name: req(str(1, L.MAX_GROUP_NAME)), join: req(isGroupJoin) }, mutating: true },

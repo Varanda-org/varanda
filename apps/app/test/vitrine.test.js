@@ -87,6 +87,11 @@ const resultKeys = {
   'group.leave': ['state'],
   'group.hide': ['ok'],
   'group.react': ['ok'],
+  'group.choose': ['ok'],
+  'group.topics': ['items', 'next', 'incomplete'],
+  'group.voters': ['voters'],
+  'choice.set': ['seq'],
+  'choice.mine': ['pick', 'seq'],
   'group.reactors': ['reactions'],
   'group.rekey': ['group', 'epoch'],
   'group.members': ['members', 'total'],
@@ -172,6 +177,7 @@ async function answer (t, request, method, params) {
   t.ok(validateResponse({ v: 1, id: 1, ok: true, result }).ok, method + ' success envelope')
   let expected = resultKeys[method]
   if (method === 'username.add' && !result.changed) expected = ['changed', 'username']
+  if (method === 'group.read' && params.topic) expected = [...expected, 'poll']
   if (method === 'sync.status' && result.state === 'running') expected = ['state', 'runId', 'once']
   if (method === 'page.sign') {
     if (['accept', 'remove', 'offer', 'transfer-accept', 'close'].includes(params.action)) expected = ['record']
@@ -200,7 +206,7 @@ test('vitrine fixtures cover the assessment scenarios deterministically', async 
   t.is(new Set(f.conversations.map((c) => c.peer)).size, 8)
   t.is(f.communities.length, 3)
   t.is(f.groups.length, 5)
-  t.is(f.feed.length, 41, '36 base posts, one more photo post and 4 topic posts')
+  t.is(f.feed.length, 42, '36 base posts, one more photo post, 4 topic posts and a poll post')
   t.is(f.notices.length, 10)
   for (const p of [...f.members, ...f.pages]) {
     t.ok(/^[0-9a-f]{64}$/.test(p.author))
@@ -279,7 +285,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   }
   const feed = await answer(t, request, 'feed.read', {})
   for (const row of feed.items) {
-    keys(t, row, ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media'])
+    keys(t, row, ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : [])])
     if (row.quote) keys(t, row.quote, ['author', 'seq'])
     if (row.media) for (const media of row.media) keys(t, media, ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
   }
@@ -572,6 +578,7 @@ const destructive = ['identity.create', 'identity.install', 'identity.clear', 'i
 
 function samples (f) {
   const group = f.groups[3].group
+  const forum = f.groups[2]
   const community = f.communities[1].community
   const member = f.members[2].author
   const to = `${f.own}:3`
@@ -693,6 +700,11 @@ function samples (f) {
     'group.react': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 }, emoji: '👍' },
     'group.reactors': { group, target: { writer: f.groups[3].items[0].writer, seq: 2 } },
     'group.rekey': { group },
+    'group.topics': { group: forum.group },
+    'group.voters': { group: forum.group, target: { writer: forum.topics[0].writer, seq: forum.topics[0].seq } },
+    'group.choose': { group: forum.group, target: { writer: forum.topics[0].writer, seq: forum.topics[0].seq }, pick: 1 },
+    'choice.set': { to: `${f.own}:60`, pick: 1 },
+    'choice.mine': { to: `${f.own}:60` },
     'community.create': { name: 'Amigos da praça', join: 'open' },
     'community.list': {},
     'community.info': { community },
@@ -1645,4 +1657,97 @@ test('the demo feed shows the hashtag posts, so a tag can be tapped there', asyn
   t.ok(tagged.length >= 2, 'feed.read lists posts with a #festajunina tag segment')
   t.ok(feed.items.some((p) => p.text === 'Que saudade da festajunina do bairro, com a turma toda reunida.'), 'the bare-word post is in the feed too')
   t.absent(f.noticePosts.some((p) => typeof p.text === 'string' && p.text.includes('#festajunina')), 'not hidden among the notice posts')
+})
+
+test('the diary poll: post.create poll, choice.set, choice.mine and the index route agree', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const ref = `${f.own}:60`
+  const post = (await call('feed.read', {})).items.find((p) => p.author === f.own && p.seq === 60)
+  t.alike(post.poll, ['Sábado de manhã', 'Sábado à tarde', 'Domingo'])
+  t.alike(await call('choice.mine', { to: ref }), { pick: 0, seq: 61 }, 'the seeded own vote')
+  const seq = (await call('choice.set', { to: ref, pick: 2 })).seq
+  t.alike(await call('choice.mine', { to: ref }), { pick: 2, seq })
+  const withdrawn = (await call('choice.set', { to: ref, pick: null })).seq
+  t.alike(await call('choice.mine', { to: ref }), { pick: null, seq: null }, 'null withdraws')
+  t.ok(withdrawn > seq)
+  await refused(t, request, 'choice.set', { to: ref, pick: 3 }, 'USAGE', 'opção inválida')
+  await refused(t, request, 'choice.set', { to: `${f.own}:3`, pick: 0 }, 'USAGE', 'a publicação não é uma enquete')
+  t.alike(await call('choice.mine', { to: `${f.own}:3` }), { pick: null, seq: null }, 'choice.mine reads the own diary alone, as the web node')
+  await call('choice.set', { to: `${f.own}:3`, pick: null })
+  const made = await call('post.create', { text: 'Café ou chá?', poll: ['Café', 'Chá'] })
+  const created = (await call('feed.read', {})).items.find((p) => p.seq === made.seq)
+  t.alike(created.poll, ['Café', 'Chá'])
+  await call('choice.set', { to: made.ref, pick: 1 })
+  t.alike(await call('choice.mine', { to: made.ref }), { pick: 1, seq: made.seq + 1 })
+  const peek = await call('diary.peek', { author: f.own, seqs: [made.seq] })
+  t.alike(peek.entries[0].record.poll, ['Café', 'Chá'])
+  keys(t, peek.entries[0].record, ['type', 'text', 'at', 'replyTo', 'poll'])
+})
+
+test('forum topics: group.topics, marks, topic reads, group.choose and group.voters', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const g = f.groups[2]
+  const [one, two] = g.topics
+  const target = { writer: one.writer, seq: one.seq }
+  const plain = await call('group.read', { group: g.group })
+  for (const row of plain.items) t.absent(Object.hasOwn(row, 'topic'), 'the default read is unmarked')
+  const marked = await call('group.read', { group: g.group, marks: true })
+  const rowOf = (writer) => marked.items.find((i) => i.writer === writer)
+  t.alike(rowOf(one.writer).topic, { writer: one.writer, seq: 2, poll: true })
+  t.alike(rowOf(two.writer).topic, { writer: two.writer, seq: 2, poll: false })
+  t.alike(rowOf(g.items[0].writer).topic, null, 'an ordinary chat message is no topic')
+  t.alike(rowOf(g.items[g.items.length - 2].writer).topic, { writer: two.writer, seq: 2, poll: false }, 'the reply belongs to its root')
+  const thread = await call('group.read', { group: g.group, topic: target })
+  t.is(thread.items.length, 3)
+  t.alike(thread.poll, { options: ['Contos', 'Romance', 'Poesia'], totals: [1, 1, 1], mine: null }, 'the last vote of each voter counts')
+  await refused(t, request, 'group.read', { group: g.group, topic: { writer: g.items[0].writer, seq: 2 } }, 'USAGE')
+  const topics = await call('group.topics', { group: g.group })
+  t.alike(topics.items.map((x) => [x.writer, x.replies]), [[two.writer, 1], [one.writer, 2]], 'newest root first')
+  for (const row of topics.items) keys(t, row, ['writer', 'diary', 'seq', 'at', 'text', 'name', 'username', 'hidden', 'replies', 'last', 'poll'])
+  t.is(topics.items[0].poll, null)
+  t.alike(topics.items[1].poll.totals, [1, 1, 1])
+  await call('group.choose', { group: g.group, target, pick: 1 })
+  t.alike((await call('group.topics', { group: g.group })).items[1].poll, { options: ['Contos', 'Romance', 'Poesia'], totals: [1, 2, 1], mine: 1 })
+  const voters = await call('group.voters', { group: g.group, target })
+  t.alike(voters.voters.map((v) => [v.pick, v.count]), [[0, 1], [1, 2], [2, 1]])
+  t.ok(voters.voters[1].by.includes(f.own))
+  await call('group.choose', { group: g.group, target, pick: null })
+  t.is((await call('group.topics', { group: g.group })).items[1].poll.mine, null)
+  await refused(t, request, 'group.choose', { group: g.group, target, pick: 3 }, 'USAGE')
+  await refused(t, request, 'group.choose', { group: g.group, target: { writer: two.writer, seq: 2 }, pick: 0 }, 'USAGE')
+  await refused(t, request, 'group.voters', { group: g.group, target: { writer: two.writer, seq: 2 } }, 'USAGE')
+  await refused(t, request, 'group.topics', { group: f.groups[3].group }, 'USAGE')
+  await refused(t, request, 'group.post', { group: f.groups[3].group, text: 'Pauta', topic: true }, 'USAGE', 'fóruns e enquetes só em grupo público')
+  await refused(t, request, 'group.topics', { group: f.groups[3].group }, 'USAGE', 'fóruns e enquetes só em grupo público')
+  const made = await call('group.post', { group: g.group, text: 'Pauta do próximo encontro', topic: true, poll: ['Domingo', 'Sábado'] })
+  const fresh = (await call('group.topics', { group: g.group })).items[0]
+  t.alike([fresh.seq, fresh.replies, fresh.poll.totals], [made.seq, 0, [0, 0]])
+  const marks = await call('group.read', { group: g.group, marks: true, limit: 1 })
+  t.alike(marks.items[0].topic, { writer: fresh.writer, seq: made.seq, poll: true })
+  t.alike(Object.keys(thread), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'state'], 'the topic read keeps the real key order')
+})
+
+test('forum topics: a hidden root loses its poll, marker and votes, as the real handler', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const g = f.groups[2]
+  const [one] = g.topics
+  const target = { writer: one.writer, seq: one.seq }
+  await call('group.hide', { group: g.group, target, on: true })
+  const topics = await call('group.topics', { group: g.group })
+  const row = topics.items.find((x) => x.writer === one.writer)
+  t.alike([row.hidden, row.text, row.poll], [true, '', null])
+  const thread = await call('group.read', { group: g.group, topic: target })
+  t.is(thread.poll, null, 'the topic read of a hidden root has no poll')
+  t.alike(Object.keys(thread), ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'poll', 'state'])
+  const marked = await call('group.read', { group: g.group, marks: true })
+  t.is(marked.items.find((i) => i.writer === one.writer && i.seq === one.seq).topic, null, 'the hidden root has no marker')
+  await refused(t, request, 'group.voters', { group: g.group, target }, 'USAGE', 'mensagem não encontrada')
+  await refused(t, request, 'group.choose', { group: g.group, target, pick: 0 }, 'USAGE', 'mensagem não encontrada')
+  await refused(t, request, 'group.voters', { group: g.group, target: { writer: g.topics[1].writer, seq: g.topics[1].seq } }, 'USAGE', 'enquete não encontrada')
 })

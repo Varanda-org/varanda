@@ -658,6 +658,8 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       replyToName: parentRef ? replyNameOf(parentProfile) : null,
       media: item.media || null,
       preview: item.preview || null,
+      // A diary post only: the poll card asks the seeder and the own diary.
+      ...(diaryPost && Array.isArray(item.poll) ? { poll: item.poll } : {}),
       persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)),
       now,
       quote,
@@ -754,6 +756,7 @@ export function seedItem (seed, ref) {
     quote: seed.quote || null,
     media: Array.isArray(seed.media) && seed.media.length > 0 ? seed.media : null,
     preview: seed.preview && typeof seed.preview === 'object' ? seed.preview : null,
+    ...(Array.isArray(seed.poll) ? { poll: seed.poll } : {}),
     name: typeof seed.name === 'string' ? seed.name : null,
     username: typeof seed.username === 'string' ? seed.username : null,
     avatar: avatarOf(seed.avatar)
