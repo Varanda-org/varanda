@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ff3469502cc9d7dc7544958fee6bf6d65c7b0384203ece320b30f242d81be287', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'b880888ae89214d6f5d614fed34a25f51ecde1d5848c661fbe05d03ad026f887', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -879,11 +879,13 @@ test('legal: version 72 describes connected devices and the periodic key change'
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   for (const doc of [TERMS, PRIVACY]) {
     t.ok(doc.sections.some(({ heading }) => heading === 'Aparelhos conectados'), 'a section for it')
-    t.ok(text(doc).includes('a cada 7 dias ou a cada 1000 mensagens'), 'the periodic key change')
+    t.ok(text(doc).includes('num grupo pequeno, a cada 7 dias ou 1000 mensagens, o que vier antes; num grupo grande, com intervalos maiores'), 'the periodic key change')
+    t.ok(text(doc).includes('Um grupo parado não troca a chave.'), 'an idle group does not rotate')
     t.ok(text(doc).includes('"Aparelhos conectados"'), 'names the screen')
     t.absent(text(doc).includes('\u2014'), 'no em dash')
   }
-  t.ok(text(PRIVACY).includes('O nome vai cifrado com uma chave da sua passkey, e só os aparelhos da conta conseguem lê-lo.'), 'the name is encrypted')
-  t.ok(text(PRIVACY).includes('vê só o número aleatório'), 'holders see only the random id')
+  t.ok(text(PRIVACY).includes('dentro de um registro cifrado com uma chave da sua passkey: só os aparelhos da conta conseguem abri-lo.'), 'the record is encrypted')
+  t.ok(text(PRIVACY).includes('não o número, o nome nem os grupos'), 'holders see neither the id, the name nor the groups')
+  t.ok(text(PRIVACY).includes('o app não tem como apagá-los, e o corte é definitivo'), 'records and cuts cannot be deleted')
   t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
 })

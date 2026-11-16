@@ -47,7 +47,7 @@ export const TERMS = {
       paragraphs: [
         'Cada aparelho em que você entra com a sua passkey ganha um nome e um número de identificação aleatório, que o app grava no seu diário. Em Ajustes, "Aparelhos conectados" lista os aparelhos da conta.',
         'Se você perder um aparelho, toque em "Desconectar" ao lado dele. O Varanda corta o que aquele aparelho escreve em todas as comunidades e grupos e, num grupo privado, troca a chave do grupo para que o aparelho não leia o que vier depois. O aparelho desconectado esquece a sessão guardada e fica trancado até alguém entrar de novo com a passkey. Os dados que já estavam nele continuam lá.',
-        'Nos grupos privados, a chave também é trocada de tempos em tempos, a cada 7 dias ou a cada 1000 mensagens, mesmo que ninguém saia do grupo.'
+        'Nos grupos privados, a chave também é trocada de tempos em tempos enquanto o grupo está em uso, mesmo que ninguém saia: num grupo pequeno, a cada 7 dias ou 1000 mensagens, o que vier antes; num grupo grande, com intervalos maiores. Um grupo parado não troca a chave.'
       ]
     },
     {
@@ -263,9 +263,9 @@ export const PRIVACY = {
     {
       heading: 'Aparelhos conectados',
       paragraphs: [
-        'Cada aparelho da conta tem um número de identificação aleatório e um nome, como "Pixel 8" ou "Chrome no Mac", gravados no seu próprio diário. O nome vai cifrado com uma chave da sua passkey, e só os aparelhos da conta conseguem lê-lo. Quem guarda o diário, como os semeadores e quem segue você, vê só o número aleatório.',
-        'Em Ajustes, "Aparelhos conectados" lista os aparelhos da conta, e "Desconectar" corta os escritores daquele aparelho em todas as comunidades e grupos, com o corte registrado no diário. Num grupo privado, a chave do grupo é trocada. Nos grupos privados a chave também é trocada de tempos em tempos, a cada 7 dias ou a cada 1000 mensagens.',
-        'O aparelho desconectado esquece a sessão guardada e trava até a passkey. Os dados locais ficam no aparelho. Esses registros ficam no diário e seguem as mesmas regras de exclusão do resto do diário.'
+        'Cada aparelho da conta tem um número de identificação aleatório e um nome, como "Pixel 8" ou "Chrome no Mac". O app grava os dois no seu próprio diário, dentro de um registro cifrado com uma chave da sua passkey: só os aparelhos da conta conseguem abri-lo. Quem guarda o diário, como os semeadores e quem segue você, vê apenas que a sua conta gravou um registro desse tipo e a data dele, não o número, o nome nem os grupos. O número também fica guardado no próprio aparelho.',
+        'Em Ajustes, "Aparelhos conectados" lista os aparelhos da conta, e "Desconectar" corta os escritores daquele aparelho em todas as comunidades e grupos. Cada corte fica no diário como uma marca pública, com o grupo ou a comunidade, o escritor cortado e o ponto do corte. Num grupo privado, a chave do grupo é trocada. Nos grupos privados a chave também é trocada de tempos em tempos enquanto o grupo está em uso: num grupo pequeno, a cada 7 dias ou 1000 mensagens, o que vier antes; num grupo grande, com intervalos maiores. Um grupo parado não troca a chave.',
+        'O aparelho desconectado esquece a sessão guardada e trava até a passkey. Os dados locais ficam no aparelho. Os registros de aparelho e as marcas de corte ficam no diário: o app não tem como apagá-los, e o corte é definitivo, para que o que o aparelho escreveu depois dele nunca volte a valer. Ao excluir a conta, vale o que está em "Seus direitos e os limites do P2P" para o diário inteiro.'
       ]
     },
     {
