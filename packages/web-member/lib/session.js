@@ -155,9 +155,15 @@
 // reload or a new connection from the next own-synced), and once per
 // arming by a 'settled' report after the passes ran out; a failed pass or
 // a failed root queues another within the bound; a 'group-writer' (a writer
-// core stored for the first time, once per key and at most
-// MAX_UPKEEP_WRITERS keys per session) arms afresh, so the distributor
-// plans after the new device's writer arrived; while armed, a
+// core stored for the first time in a PRIVATE group this device writes in:
+// the event says both; once per key and at most MAX_UPKEEP_WRITERS keys per
+// session) arms afresh, so the distributor plans after the new device's
+// writer arrived. A public group has no keys to hand over and a device with
+// no writer there cannot write key blocks, so those events arm nothing;
+// the device's own enrolment follows its own length and 'groups-changed'.
+// A boxless writer of a private group whose root is not held yet (a join
+// before the root arrived) stays a transient 'unheld' skip, so the arming
+// lives until the root's 'groups-changed' plans the rebox; while armed, a
 // 'groups-changed' (the root or writer a skipped root waited for) queues
 // another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
 // most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
@@ -507,8 +513,9 @@ const MAX_UPKEEP_PASSES = 3
 const UPKEEP_DELAY_MS = 1500
 // Per arming, whatever progress or a 'settled' report granted since.
 const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
-// Writer keys whose 'group-writer' armed the upkeep, per session.
-const MAX_UPKEEP_WRITERS = 512
+// Writer keys whose 'group-writer' armed the upkeep, per session: only a
+// private group the device writes in arms it (sync.js tells which).
+const MAX_UPKEEP_WRITERS = 64
 // The longest the upkeep trusts the precheck before planning in full again.
 const UPKEEP_FULL_MAX_AGE_MS = 10 * 60 * 1000
 // The lease (see the header): the gap after an idle end, how long a run
@@ -1380,14 +1387,18 @@ function createBrowserSession ({
               case 'group-writer':
                 // A writer stored after the pass that planned on the own
                 // length its join made (or another diary's entitled
-                // writer): a fresh arming, once per writer key.
-                if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
-                  upkeepWriters.add(ev.writer)
-                  armUpkeep(upkeepLength)
-                } else if (typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
-                  // Not armed for (a once or internal run, the key cap,
-                  // locked): a later echo still plans the shares in full.
-                  upkeepFull = true
+                // writer): a fresh arming, once per writer key. Only a
+                // private group this device writes in can have keys to
+                // hand to it; anything else changes no plan.
+                if (ev.private === true && ev.own === true && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                  if (!once && !internal && keyPair !== null && groupPrf !== null && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
+                    upkeepWriters.add(ev.writer)
+                    armUpkeep(upkeepLength)
+                  } else {
+                    // Not armed for (a once or internal run, the key cap,
+                    // locked): a later echo still plans the shares in full.
+                    upkeepFull = true
+                  }
                 }
                 return
               case 'group-synced':

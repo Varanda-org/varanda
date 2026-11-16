@@ -5722,7 +5722,48 @@ function diaryBinds (ownEntries, root, writer) {
   return groupJoinHistory(ownEntries, root).some((j) => j.on === true && j.writer === writer)
 }
 
-// -> { enrol: [{ root, kind, community, repair? }], share: [{ group,
+// A bound own writer of a private group that still writes (no leave of its
+// own, not unbound since) and whose header box is not this device's: null
+// from a join before the root arrived, or a box this device does not hold.
+// While locked only a boxless header is certain.
+function needsRebox (ctx, base, g) {
+  const key = g.own.key
+  const core = g.cores.get(key)
+  if (core === undefined || hasLeave(core.entries)) return false
+  const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === key).pop()
+  if (last === undefined || !last.on) return false
+  const box = boxHexOf(ctx)
+  const have = boxOfWriter(g, key)
+  return box === null ? have === null : have !== box
+}
+
+// Whether the own writer `entry` of a root this device does not hold yet is
+// a boxless one still writing (the pending join): it will need a rebox when
+// the root arrives. Never throws.
+async function boxlessUnheld (ctx, entry) {
+  try {
+    const core = await readGroupCore(ctx, entry.key)
+    if (core === null || core.length === 0 || hasLeave(core.entries)) return false
+    const header = core.entries[0].record
+    return header !== null && typeof header === 'object' && header.type === 'group-writer' && (header.box === null || header.box === undefined)
+  } catch {
+    return false
+  }
+}
+
+// What the automatic rebox accepts of the fold's answer for the own diary: a
+// diary the fold does not list or lists as left (its only writer is the one
+// that never counts) as long as no counted leave of the diary exists, a
+// member or a request through another device; never banned or blocked.
+function reboxStatus (fold, ownHex) {
+  if (fold.built.bans.has(ownHex) || fold.diaries.get(ownHex) === null) return false
+  const st = statusOf(fold, ownHex)
+  if (st === 'banned') return false
+  if (st === null || st === 'left') return !(fold.built.lastLeave instanceof Map && fold.built.lastLeave.has(ownHex))
+  return true
+}
+
+// -> { enrol: [{ root, kind, community, repair?, rebox? }], share: [{ group,
 // writer }], skipped: [{ root, reason, transient }] }, read-only. A
 // hand-off the write step would refuse (an orphan, a parent not held or
 // blocked, blocks that would not fit the log) is skipped, not planned. Candidates are only
@@ -5735,7 +5776,9 @@ function diaryBinds (ownEntries, root, writer) {
 // failed after the kv entry was written). The join reuses that writer
 // (ownPending) only when this device derives its key ('foreign'
 // otherwise), and binding it spends a slot like a new writer would (the
-// seeder never saw it), so the reserve applies the same way.
+// seeder never saw it), so the reserve applies the same way. The other
+// exception is a rebox (`rebox: true`): a bound writer of a private group
+// that never counts for lack of this device's box (needsRebox).
 async function deviceUpkeepPlan (ctx) {
   return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
     const entries = await store.readGroupWriters(ctx.storage)
@@ -5744,11 +5787,15 @@ async function deviceUpkeepPlan (ctx) {
     const skipped = []
     const groups = []
     const repairs = new Set()
+    const reboxes = []
     for (const key of diaryGroupKeys(base.ownEntries)) {
       if (base.mod.blocked.has(key)) continue
       const entry = listed.get(key)
       if (entry !== undefined) {
-        if (diaryBinds(base.ownEntries, key, entry.key)) continue
+        if (diaryBinds(base.ownEntries, key, entry.key)) {
+          if (entry.kind !== 'community') reboxes.push(key)
+          continue
+        }
         // Only a writer this device derives is reused by the join.
         if (groupKeyPairOf(ctx) === null) {
           skipped.push(skip(key, 'locked'))
@@ -5786,6 +5833,28 @@ async function deviceUpkeepPlan (ctx) {
       if (reason === null && g.private && boxHexOf(ctx) === null) reason = 'locked'
       if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community))) reason = 'community-first'
       if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, ...(repairs.has(key) ? { repair: true } : {}) })
+      else skipped.push(skip(key, reason))
+    }
+    // A writer the diary binds in a private group whose header box is not
+    // this device's (a join before the root arrived): the fold never counts
+    // it, so a boxed one takes its place through the same join.
+    for (const key of reboxes) {
+      const g = await loadGroup(ctx, base, key)
+      if (g === null) {
+        // A join before the root arrived: the root's arrival is what this
+        // waits for, so the session keeps the arming for its groups-changed.
+        if (await boxlessUnheld(ctx, listed.get(key))) skipped.push(skip(key, 'unheld'))
+        continue
+      }
+      if (!g.private || g.own === null || g.own.key === key || !needsRebox(ctx, base, g)) continue
+      let reason = null
+      if (boxHexOf(ctx) === null) reason = 'locked'
+      else if (g.built.orphan) reason = 'orphan'
+      else if (g.community === null || g.c === null) reason = 'community-first'
+      else if (!reboxStatus(g, ownHex)) reason = 'status'
+      if (reason === null) reason = autoEnrolRoom(g, ownHex)
+      if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community))) reason = 'community-first'
+      if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, rebox: true })
       else skipped.push(skip(key, reason))
     }
     const share = []
