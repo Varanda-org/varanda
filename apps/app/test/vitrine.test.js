@@ -41,7 +41,7 @@ const resultKeys = {
   'seen.sign': ['signature', 'prevHash'],
   'outbox.seal': ['box'],
   'outbox.open': ['to', 'text'],
-  'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'caughtUp'],
+  'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'testimonialsChanged', 'caughtUp'],
   'report.sign': ['signature'],
   'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],
@@ -135,7 +135,8 @@ const resultKeys = {
   'profile.read': ['profiles', 'missing'],
   'diary.peek': ['key', 'length', 'entries', 'invalid', 'missing', 'profile', 'username', 'certDate'],
   'testimonial.write': ['seq', 'ref'],
-  'testimonial.pending': ['items', 'incomplete'],
+  'testimonial.pending': ['items', 'kept', 'incomplete'],
+  'testimonial.decide': ['changed'],
   'testimonial.show': ['seq', 'ref'],
   'testimonial.delete': ['seq', 'deleted'],
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
@@ -607,6 +608,7 @@ function samples (f) {
     'diary.peek': { author: f.own, seqs: [3] },
     'testimonial.write': { to: member, text: 'Uma vizinha de muitas conversas boas.' },
     'testimonial.pending': {},
+    'testimonial.decide': { from: f.members[4].author, seq: 60, state: 'kept' },
     'testimonial.show': { from: f.members[4].author, seq: 60 },
     'testimonial.delete': { to: `${f.own}:38` },
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
@@ -1283,6 +1285,14 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   const pending = await call('testimonial.pending', {})
   t.alike(pending.items.map((i) => [i.from, i.seq]), [[bia, 60]], 'only the pending block, never a shown one')
   for (const item of pending.items) keys(t, item, ['from', 'seq', 'text', 'at'])
+  t.alike((await call('testimonial.pending', {})).kept, [], 'nothing kept yet')
+  await refused(t, request, 'testimonial.decide', { from: f.own, seq: 60, state: 'kept' }, 'USAGE', 'referência inválida')
+  await refused(t, request, 'testimonial.decide', { from: bia, seq: 60, state: 'nope' }, 'USAGE', 'parâmetro inválido: state')
+  t.alike(await call('testimonial.decide', { from: bia, seq: 60, state: 'kept' }), { changed: true })
+  t.alike(await call('testimonial.decide', { from: bia, seq: 60, state: 'kept' }), { changed: false }, 'same decision changes nothing')
+  t.alike((await call('testimonial.pending', {})).items, [], 'a kept one leaves the pending list')
+  t.alike((await call('testimonial.pending', {})).kept.map((i) => [i.from, i.seq]), [[bia, 60]])
+  t.alike(await call('testimonial.decide', { from: bia, seq: 60, state: 'declined', ifNew: true }), { changed: false }, 'ifNew keeps the decision')
   await refused(t, request, 'testimonial.show', { from: joao, seq: 3 }, 'USAGE', 'depoimento não encontrado')
   const shown = await call('testimonial.show', { from: bia, seq: 60 })
   t.alike(await call('testimonial.show', { from: bia, seq: 60 }), shown, 'showing again writes nothing')
@@ -1296,6 +1306,7 @@ test('depoimentos: fixtures validate, pending is shown, removed and revoked', as
   t.alike(await call('testimonial.delete', { to: shown.ref }), removed, 'a removed show answers its tombstone')
   t.alike((await call('diary.peek', { author: f.own, seqs: [shown.seq] })).missing, [shown.seq])
   t.alike((await call('testimonial.pending', {})).items, [], 'a removed show never returns to pending')
+  t.alike((await call('testimonial.pending', {})).kept.map((i) => [i.from, i.seq]), [[bia, 60]], 'a kept one returns to kept after its show is removed')
 
   // Lia revokes the one she wrote to João: João's show of it turns invalid.
   await refused(t, request, 'testimonial.delete', { to: `${f.own}:38`, about: cecilia }, 'USAGE', 'referência inválida')

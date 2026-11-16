@@ -841,6 +841,9 @@ function createSession ({
     'testimonial.delete': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
+    'testimonial.decide': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
 
     // A momento's photo lives in the browser node's anonymous blob pool
     // (docs/rpc.md 5.113): refused the same way, nothing opened.

@@ -64,8 +64,8 @@ function sealB64 (id, doc) {
   return b4a.toString(seenBlob.seal(doc, keyOf(id)), 'base64')
 }
 
-function docOf (id, { dm = [], own = [], pages = {}, groups = [], blocks = [], gen = 1 } = {}) {
-  return { gen, member: id.own, association: id.association, avisos: { own, pages }, dm, groups, blocks }
+function docOf (id, { dm = [], own = [], pages = {}, groups = [], blocks = [], testimonials = [], gen = 1 } = {}) {
+  return { gen, member: id.own, association: id.association, avisos: { own, pages }, dm, groups, blocks, testimonials }
 }
 
 // Every kv write of `storage` from now on.
@@ -862,7 +862,7 @@ test('session: seen.sign and seen.merge open no diary core; locked refuses and w
 
   const remote = sealB64(s.id, docOf(s.id, { dm: [{ token: tok(1), t: 10 }] }))
   const r = await s.web.request('seen.merge', { blob: remote, avisos: { own: [tok(2)] }, unchanged: false })
-  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'pending'])
+  t.alike(Object.keys(r).sort(), ['avisos', 'blocksChanged', 'caughtUp', 'dmChanged', 'groupChanged', 'pending', 'testimonialsChanged'])
   t.is(r.dmChanged, true)
   t.alike(r.avisos, { own: [tok(2)], pages: {} })
   const w = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
@@ -1058,4 +1058,143 @@ test('session: block.set wakes a seen pass, and a reset device gets the list bac
   const r = await s.web.request('seen.merge', { blob: signed.blob, avisos: { own: [] }, unchanged: false })
   t.is(r.blocksChanged, true)
   t.alike((await s.web.request('block.list')).keys, [X])
+})
+
+const writerKey = (i) => (0x80 + i).toString(16).padStart(64, '0')
+
+// Seals plaintext bytes as the service would hold them.
+function sealPlain (id, plain) {
+  const out = b4a.alloc(seenBlob.SEEN_BLOB_BYTES)
+  const nonce = out.subarray(0, seenBlob.SEEN_NONCE_BYTES)
+  sodium.randombytes_buf(nonce)
+  sodium.crypto_secretbox_easy(out.subarray(seenBlob.SEEN_NONCE_BYTES), plain, nonce, keyOf(id))
+  return b4a.toString(out, 'base64')
+}
+
+function plainOf (id, b64) {
+  const bytes = b4a.from(b64, 'base64')
+  const plain = b4a.alloc(seenBlob.SEEN_BLOB_BYTES - seenBlob.SEEN_NONCE_BYTES - seenBlob.SEEN_MAC_BYTES)
+  const ok = sodium.crypto_secretbox_open_easy(plain, bytes.subarray(seenBlob.SEEN_NONCE_BYTES), bytes.subarray(0, seenBlob.SEEN_NONCE_BYTES), keyOf(id))
+  return ok ? plain : null
+}
+
+// A version 2 document: the version 3 encoding of a document with no
+// testimonials, minus its nTestimonials byte (offset 77, zero).
+function sealV2 (id, doc) {
+  const v3 = seenBlob.encode(doc)
+  const v2 = b4a.concat([v3.subarray(0, 77), v3.subarray(78), b4a.alloc(1)])
+  v2[0] = 2
+  return sealPlain(id, v2)
+}
+
+test('testimonials: a keep on one device reaches the other once, and a newer decline wins back', async (t) => {
+  const id = identity()
+  const a = device(id)
+  const b = device(id)
+  const W = writerKey(1)
+
+  await store.writeTestimonialDecisions(a.storage, id.own, [{ from: W, seq: 2, state: 'kept', t: 100 }])
+  let r = await a.merge({})
+  t.is(r.pending, true, 'not on the service yet')
+  t.is(r.testimonialsChanged, false, 'nothing new for this device')
+  const written = (await a.sign('write')).blob
+  t.alike(openB64(id, written).testimonials, [{ from: W, seq: 2, state: 'kept', t: 100 }], 'sealed in the document')
+  r = await a.merge({ blob: written })
+  t.is(r.pending, false)
+
+  r = await b.merge({ blob: written })
+  t.is(r.testimonialsChanged, true)
+  t.alike(await store.readTestimonialDecisions(b.storage, id.own), [{ from: W, seq: 2, state: 'kept', t: 100 }])
+  t.is(r.pending, false, 'nothing to send back')
+  r = await b.merge({ blob: written })
+  t.is(r.testimonialsChanged, false, 'reported once')
+  r = await b.merge({ unchanged: true })
+  t.is(r.testimonialsChanged, false, 'and not again on an unchanged pass')
+
+  await store.writeTestimonialDecisions(b.storage, id.own, [{ from: W, seq: 2, state: 'declined', t: 200 }])
+  r = await b.merge({ unchanged: true })
+  t.is(r.pending, true)
+  const declined = (await b.sign('write')).blob
+  r = await a.merge({ blob: declined })
+  t.is(r.testimonialsChanged, true)
+  t.alike(await store.readTestimonialDecisions(a.storage, id.own), [{ from: W, seq: 2, state: 'declined', t: 200 }], 'the newer decline wins')
+  t.is(r.pending, false)
+})
+
+test('testimonials: a remote that lacks a local entry, or holds an older one, never undoes it', async (t) => {
+  const id = identity()
+  const d = device(id)
+  const W = writerKey(1)
+  const held = [{ from: W, seq: 2, state: 'kept', t: 500 }, { from: W, seq: 3, state: 'declined', t: 600 }]
+  await store.writeTestimonialDecisions(d.storage, id.own, held)
+  const remote = sealB64(id, docOf(id, { testimonials: [{ from: W, seq: 2, state: 'declined', t: 100 }] }))
+  const r = await d.merge({ blob: remote })
+  t.is(r.testimonialsChanged, false)
+  t.is(r.pending, true, 'the local entries go up')
+  t.alike(await store.readTestimonialDecisions(d.storage, id.own), held, 'both kept as they were')
+  t.alike(openB64(id, (await d.sign('write')).blob).testimonials, held, 'and written')
+})
+
+test('testimonials: a version 2 document merges, and the next write is version 3', async (t) => {
+  const id = identity()
+  const d = device(id)
+  const W = writerKey(1)
+  await store.writeTestimonialDecisions(d.storage, id.own, [{ from: W, seq: 2, state: 'kept', t: 100 }])
+  const old = sealV2(id, docOf(id, { dm: [{ token: tok(1), t: 10 }], blocks: [{ key: blockKey(1), on: true, t: 50 }] }))
+  t.is(plainOf(id, old)[0], 2, 'built as version 2')
+  t.alike(openB64(id, old).testimonials, [], 'reads with no testimonials')
+  const r = await d.merge({ blob: old })
+  t.is(r.dmChanged, true, 'the version 2 content applies')
+  t.is(r.blocksChanged, true)
+  t.is(r.testimonialsChanged, false, 'nothing new')
+  t.is(r.pending, true, 'the decision goes up in the new format')
+  const w = (await d.sign('write')).blob
+  t.is(plainOf(id, w)[0], 3, 'written as version 3')
+  t.alike(openB64(id, w).testimonials, [{ from: W, seq: 2, state: 'kept', t: 100 }])
+  t.alike(await store.readTestimonialDecisions(d.storage, id.own), [{ from: W, seq: 2, state: 'kept', t: 100 }])
+})
+
+test('testimonials: a newer-format document, remote or local, is untouched', async (t) => {
+  const id = identity()
+  const W = writerKey(1)
+  const held = [{ from: W, seq: 2, state: 'kept', t: 100 }]
+
+  const remoteDevice = device(id)
+  await store.writeTestimonialDecisions(remoteDevice.storage, id.own, held)
+  const plain = seenBlob.encode(docOf(id, { testimonials: [{ from: W, seq: 2, state: 'declined', t: 900 }] }))
+  plain[0] = seenBlob.SEEN_VERSION + 1
+  const writes = spyWrites(remoteDevice.storage)
+  const r = await remoteDevice.merge({ blob: sealPlain(id, plain) })
+  t.is(r.testimonialsChanged, false)
+  t.is(r.pending, false)
+  t.alike(writes, [], 'nothing written')
+  t.alike(await store.readTestimonialDecisions(remoteDevice.storage, id.own), held)
+
+  const localDevice = device(id)
+  await store.writeTestimonialDecisions(localDevice.storage, id.own, held)
+  await store.writeSeenLocal(localDevice.storage, id.own, sealPlain(id, plain))
+  const lw = spyWrites(localDevice.storage)
+  const l = await localDevice.merge({ blob: sealB64(id, docOf(id, { testimonials: [{ from: W, seq: 3, state: 'kept', t: 900 }] })) })
+  t.is(l.testimonialsChanged, false)
+  t.alike(lw, [], 'nothing written')
+  t.alike(await store.readTestimonialDecisions(localDevice.storage, id.own), held)
+})
+
+test('session: testimonial.decide wakes a seen pass, reset clears it, and the document brings it back', async (t) => {
+  t.timeout(60000)
+  const s = await sessionNode(t)
+  const W = writerKey(1)
+  t.alike(await s.web.request('testimonial.decide', { from: W, seq: 2, state: 'kept' }), { changed: true })
+  await until(() => s.web.events.some((e) => e.name === 'seen.changed'), 10000)
+  t.ok(s.web.events.some((e) => e.name === 'seen.changed'), 'the pass is woken')
+  const signed = await s.web.request('seen.sign', { nonce: NONCE, action: 'write' })
+  t.alike(openB64(s.id, signed.blob).testimonials.map((e) => [e.from, e.seq, e.state]), [[W, 2, 'kept']])
+
+  await s.node.reset()
+  t.is(await s.storage.readJson('testimonialDecisions'), null, 'reset deletes the list')
+  await s.node.setKeyPair(s.id.keyPair, { prf: s.prf })
+  await s.web.request('identity.create')
+  const r = await s.web.request('seen.merge', { blob: signed.blob, avisos: { own: [] }, unchanged: false })
+  t.is(r.testimonialsChanged, true)
+  t.alike((await store.readTestimonialDecisions(s.storage, s.key)).map((e) => [e.from, e.seq, e.state]), [[W, 2, 'kept']])
 })

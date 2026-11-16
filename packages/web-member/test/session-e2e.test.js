@@ -428,7 +428,7 @@ test('depoimentos: write, pending, show, remove, revoke and forged shows end to 
   t.alike([byFrom.get(A.key).seq, byFrom.get(A.key).text, byFrom.get(A.key).at], [w1.seq, T1, rec1.at])
   t.alike([byFrom.get(E.key).seq, byFrom.get(E.key).text], [1, TE], 'other gen, hash mismatch and C\'s omitted')
   t.ok(asked.every((u) => u.startsWith('http://127.0.0.1:')), 'the index of its own seeder')
-  t.alike(await req(C, 'testimonial.pending', {}), { items: [], incomplete: false }, 'C opens none: E 4 is sealed to B\'s key, A 2 is addressed to B')
+  t.alike(await req(C, 'testimonial.pending', {}), { items: [], kept: [], incomplete: false }, 'C opens none: E 4 is sealed to B\'s key, A 2 is addressed to B')
 
   // Showing someone else's, a forged one or a missing one is not found.
   const NOT_FOUND = { code: 'USAGE', message: 'depoimento não encontrado' }
@@ -575,16 +575,16 @@ test('testimonial.pending: a malformed index answer is unavailable, an incomplet
   t.ok(pulled <= 256 * 1024 + 3 * 64 * 1024, 'read stops near the cap (' + pulled + ' bytes)')
 
   answer = { shown: [], pending: [], indexing: false, complete: true }
-  t.alike(await web.request('testimonial.pending', {}), { items: [], incomplete: false }, 'an empty, complete inbox')
+  t.alike(await web.request('testimonial.pending', {}), { items: [], kept: [], incomplete: false }, 'an empty, complete inbox')
   answer = { shown: [], pending: [], indexing: true, complete: true }
-  t.alike(await web.request('testimonial.pending', {}), { items: [], incomplete: true }, 'still indexing')
+  t.alike(await web.request('testimonial.pending', {}), { items: [], kept: [], incomplete: true }, 'still indexing')
   answer = { shown: [], pending: [], indexing: false, complete: false }
-  t.alike(await web.request('testimonial.pending', {}), { items: [], incomplete: true }, 'index not complete')
+  t.alike(await web.request('testimonial.pending', {}), { items: [], kept: [], incomplete: true }, 'index not complete')
 
   // A writer block the node cannot read (no seeder link: the peek fails)
   // is skipped and marks the answer incomplete, never an empty inbox.
   answer = { shown: [], pending: [{ from: 'ab'.repeat(32), seq: 1 }], indexing: false, complete: true }
-  t.alike(await web.request('testimonial.pending', {}), { items: [], incomplete: true }, 'a failed writer read')
+  t.alike(await web.request('testimonial.pending', {}), { items: [], kept: [], incomplete: true }, 'a failed writer read')
 })
 
 test('testimonial.delete: removing a show tombstones 9 live shows of one writer in chunks, the target last', async (t) => {
