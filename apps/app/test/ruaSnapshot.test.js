@@ -189,6 +189,10 @@ test('the snapshot write is guarded by cacheGeneration and debounced', (t) => {
   t.ok(write.includes('buildSnapshot('))
   t.ok(/const SNAPSHOT_DEBOUNCE_MS = 2000/.test(CODE))
   t.ok(/blocked: latest\.blocked/.test(write), 'the block list in force')
+  // The folded rows (feedFold.js) are for the screen: the snapshot stores the
+  // feed items, and feedSnapshot.js decides which originals go with them.
+  t.ok(write.includes('const all = latest.feed.items'), 'raw feed items, not the folded rows')
+  t.absent(/\bfold/.test(write.slice(0, write.indexOf('writeSnapshotRef.current = writeSnapshot'))), 'nothing folded is written')
 })
 
 test('the snapshot is read and written on every platform: previewCapable gates only the App.js preview', (t) => {
@@ -354,6 +358,8 @@ test('ARuaPreview sends nothing: no request, no fetch, no handler', (t) => {
   t.ok(region.includes("perfMarks().mark('preview-shown')"))
   t.ok(region.includes('<TopBar title=') && region.includes('<RefreshableList'))
   t.ok(region.includes('<StatusBar style={statusBarStyle(scheme)} />'), 'sets the status bar as the splash did')
+  t.ok(region.includes('pendingOf: view.pending') && region.includes('pending: () => false'), 'it folds with what the snapshot holds and asks for nothing')
+  t.absent(/\bingest\b|foldNeeds/.test(region), 'no fold read')
 })
 
 test('previewBinding checks installation and association, not the owner', (t) => {

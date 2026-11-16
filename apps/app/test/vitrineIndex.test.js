@@ -26,6 +26,8 @@ test('every index route and cursor returns a deterministic validated fixture bod
   const cases = [
     [c.postUrl(ref), (b) => c.validPostIndex(b, ref)],
     [c.postUrl(ref, cursor), (b) => c.validPostIndex(b, ref)],
+    [c.rodaUrl(refOf(reply)), (b) => c.validRoda(b, refOf(reply))],
+    [c.rodaUrl(refOf(reply), cursor), (b) => c.validRoda(b, refOf(reply))],
     [c.countsUrl(f.feed.slice(0, 31).map(refOf)), (b) => c.validCounts(b, f.feed.slice(0, 31).map(refOf))],
     [c.memberUrl(f.own), c.validMemberIndex],
     [c.memberUrl(f.own, 5), (b) => c.validMemberIndex(b, 5)],
@@ -273,7 +275,7 @@ test('the index client statically imports only the enable check and guards the r
   const imports = [...code.matchAll(/\bimport\s+[^\n]+from\s+['"]([^'"]*vitrine\/[^'"]+)['"]/g)].map((m) => m[1])
   t.alike(imports, ['./vitrine/enabled.js'])
   t.ok(/const VITRINE = vitrineEnabled\(\{ EXPO_PUBLIC_VARANDA_VITRINE: process\.env\.EXPO_PUBLIC_VARANDA_VITRINE \}, typeof __DEV__ !== 'undefined' && __DEV__\)/.test(code))
-  t.ok(/if \(VITRINE\) \{\s*const \{ vitrineIndex: respond \} = require\('\.\/vitrine\/indexResponder'\)/.test(code))
+  t.ok(/if \(typeof __DEV__ !== 'undefined' && __DEV__ && process\.env\.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE\) \{\s*const { vitrineIndex: respond \} = require\('\.\/vitrine\/indexResponder'\)/.test(code))
   t.is((code.match(/require\('\.\/vitrine\/indexResponder'\)/g) || []).length, 1)
   t.ok(/async function getJson \(url, deps = \{\}\) \{\s*if \(VITRINE\) return vitrineIndex\(url\)/.test(code))
 })
@@ -310,6 +312,7 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
   const ref = refOf(f.feed[0])
   const calls = [
     () => c.fetchPost(ref, null, deps),
+    () => c.fetchRoda(refOf(f.noticePosts.find((p) => p.replyTo)), null, deps),
     () => c.fetchCounts([ref], deps),
     () => c.fetchMember(f.own, null, deps),
     () => c.fetchTopic('praca', null, deps),
@@ -328,7 +331,7 @@ test('Vitrine fetchers bypass HTTP and the scheduler, and map unknown fixtures t
     for (const call of calls) t.is((await call()).ok, true, 'validated result without HTTP or timers')
   }
   const unknown = 'f'.repeat(64)
-  for (const result of [await c.fetchPost(unknown + ':3', null, deps), await c.fetchMember(unknown, null, deps), await c.fetchGroup(unknown, null, deps), await c.fetchCommunity(unknown, deps)]) {
+  for (const result of [await c.fetchPost(unknown + ':3', null, deps), await c.fetchRoda(unknown + ':3', null, deps), await c.fetchRoda(ref, null, deps), await c.fetchMember(unknown, null, deps), await c.fetchGroup(unknown, null, deps), await c.fetchCommunity(unknown, deps)]) {
     t.alike(result, { ok: false, reason: 'not-found' })
   }
   t.alike(await c.fetchPost('invalid', null, deps), { ok: false, reason: 'invalid-input' })
@@ -571,4 +574,63 @@ test('the topic route answers folded hashtag tokens, including a post with the b
   t.ok(respond('/index/topic/ceu', undefined).items.some((ref) => textOf(ref).includes('#Céu')), 'case and accents fold away')
   t.ok(respond('/index/topic/festajunina+paodequeijo', undefined).items.map(textOf).every((x) => /pãodequeijo/.test(x) && /festajunina/.test(x)), 'a phrase needs every token')
   t.is(respond('/index/topic/naoexiste', undefined).items.length, 0)
+})
+
+test('the roda route answers the seeder shape: root, top and the subtree parents first', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const posts = [...f.feed, ...f.noticePosts]
+  for (const reply of posts.filter((p) => p.replyTo)) {
+    const asked = refOf(reply)
+    const body = respond(c.rodaUrl(asked))
+    t.ok(c.validRoda(body, asked), asked + ' passes validRoda')
+    let top = reply
+    while (posts.find((p) => refOf(p) === refOf(top.replyTo)).replyTo) top = posts.find((p) => refOf(p) === refOf(top.replyTo))
+    t.is(body.top, refOf(top))
+    t.is(body.root, refOf(top.replyTo))
+    t.is(body.total, body.items.length)
+  }
+  t.exception(() => respond(c.rodaUrl(refOf(f.feed[0]))), /not-found/, 'a post that is not a reply')
+  t.exception(() => respond(c.rodaUrl('f'.repeat(64) + ':3')), /not-found/, 'an unknown post')
+  t.exception(() => respond('/index/roda/' + f.feed[0].author + '/1234567890123456'), /not-found/, 'a seq past the route grammar')
+  t.exception(() => respond(c.rodaUrl(refOf(posts.find((p) => p.replyTo))) + '/x'), /not-found/, 'a bad cursor')
+
+  // A deeper tree, added to the fixtures only while a fresh responder loads.
+  const root = f.feed[0]
+  const hex = (n) => n.toString(16).padStart(2, '0').repeat(32)
+  const at = (ms) => new Date(Date.parse('2026-11-05T00:00:00.000Z') + ms).toISOString()
+  const reply = (author, seq, ms, to) => ({ author, seq, at: at(ms), text: 'roda', replyTo: { author: to.author, seq: to.seq } })
+  const top = reply(hex(0x50), 1, 1000, root)
+  const c1 = reply(hex(0x60), 1, 5000, top)
+  const c3 = reply(hex(0x40), 1, 5000, top)
+  const c2 = reply(hex(0x30), 1, 2000, c1)
+  const c4 = reply(hex(0x30), 2, 9000, c2)
+  const flat = Array.from({ length: 51 }, (_, i) => reply(hex(0x70), i + 1, 20000 + i, top))
+  const extra = [top, c1, c2, c3, c4, ...flat]
+  f.feed.push(...extra)
+  let fresh
+  try {
+    fresh = (await import('../src/vitrine/indexResponder.js?roda=1')).vitrineIndex
+  } finally {
+    f.feed.splice(f.feed.length - extra.length, extra.length)
+  }
+  const first = fresh(c.rodaUrl(refOf(c4)))
+  t.ok(c.validRoda(first, refOf(c4)), 'the first page passes validRoda')
+  t.is(first.root, refOf(root))
+  t.is(first.top, refOf(top))
+  t.is(first.total, 55)
+  t.is(first.items.length, 50)
+  t.alike(first.items.slice(0, 4), [
+    { ref: refOf(c3), to: refOf(top) },
+    { ref: refOf(c1), to: refOf(top) },
+    { ref: refOf(c2), to: refOf(c1) },
+    { ref: refOf(c4), to: refOf(c2) }
+  ], 'equal times by author, a child dated before its parent still after it')
+  t.alike(Object.keys(first.authors).sort(), [...new Set([c4, root, top, ...extra.slice(0, 50)].map((p) => p.author))].sort())
+  t.is(first.next, Date.parse(flat[45].at) + '.' + flat[45].author + '.' + flat[45].seq, 'next names the last row')
+  const second = fresh(c.rodaUrl(refOf(c4), first.next))
+  t.ok(c.validRoda(second, refOf(c4)), 'the second page passes validRoda')
+  t.alike(second.items, flat.slice(46).map((p) => ({ ref: refOf(p), to: refOf(top) })))
+  t.is(second.next, null)
+  t.is(second.total, 55)
+  t.alike(fresh(c.rodaUrl(refOf(top))).items, first.items, 'asked for the comment itself')
 })

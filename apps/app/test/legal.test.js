@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 56)
+  t.is(LEGAL_VERSION, 58)
   t.is(LEGAL_DATE, '15/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 56, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 58, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -23,7 +23,7 @@ test('legal: this version describes music covers as never stored', async (t) => 
   const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   for (const required of [
     'só mostrar o cartão não faz pedidos',
-    'num momento, só depois que o trecho começa a tocar; numa publicação, o adesivo de música pede a capa só enquanto está na tela',
+    'num momento, só depois que o trecho começa a tocar; numa publicação, só depois do seu toque no cartão',
     'Sem capa, o app mostra um quadro com o símbolo de música'
   ]) t.ok(terms.includes(required), required)
   const section = (heading) => PRIVACY.sections.find((s) => s.heading === heading).paragraphs.join(' ')
@@ -65,7 +65,7 @@ test('legal: version 39 describes music through the account service', async (t) 
     'só mostrar o cartão não faz pedido ao Audius nem ao serviço de conta',
     'O app nunca carrega um quadro do Audius'
   ]) t.ok(section('Música do Audius').includes(required), required)
-  t.ok(section('Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe e, com Tocar música sozinha ligada, para pedir e tocar o trecho ou a faixa de uma publicação, e a capa, enquanto o adesivo está na tela, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
+  t.ok(section('Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe, inclusive a de uma publicação em que você toca, e para pedir a capa depois desse toque, a base legal proposta é execução de contrato, Art. 7º, V, ainda sujeita a parecer jurídico'))
   for (const required of [
     'Na música do Audius, o serviço de conta não guarda a busca nem o áudio',
     'Os metadados dos itens e os tickets ficam só na memória e desaparecem ao reiniciar o serviço',
@@ -118,23 +118,15 @@ test('legal: version 46 sends a momento reaction as a private message', async (t
   ]) t.ok(privacy.includes(required), 'privacy: ' + required)
 })
 
-test('legal: version 47 plays post music by itself while the sticker is visible', async (t) => {
+test('legal: version 47 sentences on post video sound, momento music and covers still hold', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const terms = TERMS.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   for (const required of [
-    'Numa publicação, um trecho de 15 segundos ou uma faixa inteira aparece como um adesivo de música, que mostra também o gênero e o ano, quando o Audius os informa.',
-    'Quando o adesivo fica visível na tela que você está olhando e nenhum outro áudio ou player está ativo, o app pede a música ao serviço de conta sem um toque à parte, e ela toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.',
-    'No app para Android e iPhone, a música nunca começa sozinha com um leitor de tela ligado.',
-    'A música para quando a publicação sai da tela, quando você muda de tela ou sai do app.',
-    'Tocar no adesivo enquanto a música toca, ou no botão de som do adesivo, de um vídeo de publicação ou de um momento, silencia o som: a música das publicações não começa sozinha, e o som dos vídeos das publicações e a música e o som dos vídeos dos momentos ficam mudos, até você ativar o som de novo, tocar num adesivo de novo ou abrir o app outra vez (na web, recarregar a página). Essa escolha fica só na memória do app, neste aparelho, e não é enviada a ninguém.',
     'Num vídeo de publicação, os controles do próprio vídeo também podem ligar o som daquele vídeo.',
     'Num momento aberto com o som silenciado, o app só pede o trecho quando você ativa o som.',
-    'Você pode desligar isso em Ajustes, em Tocar música sozinha: desligado, só mostrar o cartão não faz pedidos e, para ouvir, você precisa tocar.',
-    'Uma playlist sempre espera o seu toque.',
     'O Audius continua recebendo só o endereço da associação.',
     'o serviço de conta busca a capa da faixa ou da playlist',
-    'maior enquanto você escolhe o trecho',
-    'numa publicação, o adesivo de música pede a capa só enquanto está na tela, depois que a música foi pedida, sozinha ou no seu toque, e o cartão que espera um toque, só depois do seu toque.'
+    'maior enquanto você escolhe o trecho'
   ]) t.ok(terms.includes(required), 'terms: ' + required)
   for (const gone of [
     'silencia a música das publicações até você tocar',
@@ -145,9 +137,7 @@ test('legal: version 47 plays post music by itself while the sticker is visible'
   const privacy = PRIVACY.sections.find((s) => s.heading === 'Música do Audius').paragraphs.join(' ')
   for (const required of [
     'quem compõe uma publicação pode buscar no Audius ou colar um link dele, e quem lê pode ouvir.',
-    'Numa publicação com um trecho ou uma faixa, enquanto Tocar música sozinha estiver ligado em Ajustes, o app pede a música ao serviço de conta quando o adesivo fica visível, sem um toque: o serviço fica sabendo que a sua conta pediu aquela faixa, o que indica que o seu aparelho mostrou aquela publicação.',
-    'Com a opção desligada, com a música silenciada, e sempre numa playlist, só mostrar o cartão não faz pedido ao Audius nem ao serviço de conta.',
-    'o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque. Num momento aberto com o som silenciado, o app só pede o trecho quando você ativa o som. A escolha de silenciar o som fica só na memória do app, neste aparelho, e não é enviada a ninguém.',
+    'o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque. Num momento aberto com o som silenciado, o app só pede o trecho quando você ativa o som.',
     'o serviço de conta pede a capa ao servidor de imagens indicado pelo Audius'
   ]) t.ok(privacy.includes(required), 'privacy: ' + required)
   for (const gone of [
@@ -216,7 +206,7 @@ test('legal: version 51 preloads music players before the card appears', async (
       'No máximo quatro players ficam carregados ao mesmo tempo, e menos (nunca menos de dois) depois que o sistema fecha players por falta de memória',
       'Um player em que você não tocou continua carregado',
       'quando você troca de aba, abre outra tela, um menu, um painel ou uma foto ampliada',
-      'Um player em que você tocou fecha nesses casos e quando outro áudio do Varanda começa',
+      'Um player em que você tocou fecha nesses casos, quando outro áudio do Varanda começa',
       'Todo player fecha quando o aplicativo é bloqueado ou vai para segundo plano',
       'ou quando um cartão mais perto precisa do lugar dele'
     ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
@@ -243,6 +233,55 @@ test('legal: version 52 shows a provider cover until the player loads and fetche
   for (const doc of [TERMS, PRIVACY]) {
     t.absent(text(doc).includes('ou o serviço de conta na versão web hospedada, também fala com o endereço de imagem'), doc.title + ': the service is not limited to the provider image domains')
   }
+})
+
+test('legal: version 53 makes post music wait for a tap, stops it off screen and keeps the sound mute on the device', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const section = (doc, heading) => doc.sections.find((s) => s.heading === heading).paragraphs.join(' ')
+  const terms = section(TERMS, 'Música do Audius')
+  for (const required of [
+    'Numa publicação, um trecho de 15 segundos, uma faixa inteira ou uma playlist aparece como um cartão que espera o seu toque, e a música nunca começa sozinha: só mostrar o cartão não faz pedidos ao serviço de conta nem ao Audius, e o app pede a música só quando você toca no cartão.',
+    'Depois do seu toque, uma faixa ou uma playlist pausa, e um trecho para, pouco depois de a publicação sair da parte visível da tela, e um pedido que ainda está carregando é cancelado; a música não volta a tocar sozinha.',
+    'Ela também para quando você muda de tela ou sai do app.',
+    'O botão de som de um vídeo de publicação ou de um momento (Silenciar som e Ativar som) silencia o som: o som dos vídeos das publicações e a música e o som dos vídeos dos momentos ficam mudos até você ativar o som de novo.',
+    'Essa escolha fica guardada neste aparelho, num pequeno arquivo do app no Android e no iPhone e no armazenamento local do navegador (localStorage) na web, continua valendo depois de fechar e abrir o app ou recarregar a página e não é enviada a ninguém.',
+    'Ela não silencia um cartão de música do Audius em que você toca nem os players de YouTube, SoundCloud, Spotify e Apple Music.',
+    'num momento, só depois que o trecho começa a tocar; numa publicação, só depois do seu toque no cartão.',
+    'Num momento, se a associação ligar a música nos momentos, ver um momento com música, inclusive um seu, já pede o trecho de 15 segundos ao serviço de conta, sem um toque à parte; o trecho toca em seguida, a não ser que o navegador só deixe tocar som depois de um toque.'
+  ]) t.ok(terms.includes(required), 'terms: ' + required)
+  const privacy = section(PRIVACY, 'Música do Audius')
+  for (const required of [
+    'Numa publicação, com um trecho, uma faixa ou uma playlist, só mostrar o cartão não faz pedido ao Audius nem ao serviço de conta: o app pede a música, e depois a capa, só quando você toca no cartão.',
+    'A escolha de silenciar o som fica guardada neste aparelho, num pequeno arquivo do app no Android e no iPhone e no armazenamento local do navegador (localStorage) na web, continua valendo depois de fechar e abrir o app ou recarregar a página, até você ativar o som de novo, e não é enviada a ninguém.',
+    'Ela não silencia um cartão de música do Audius em que você toca nem os players de YouTube, SoundCloud, Spotify e Apple Music.'
+  ]) t.ok(privacy.includes(required), 'privacy: ' + required)
+  t.ok(section(PRIVACY, 'Finalidades e bases legais propostas').includes('Música do Audius: para buscar, anexar e ouvir a música que você escolhe, inclusive a de uma publicação em que você toca, e para pedir a capa depois desse toque, a base legal proposta é execução de contrato'), 'privacy: legal basis needs a tap for post music')
+  for (const doc of [TERMS, PRIVACY]) {
+    for (const required of [
+      'Um player em que você tocou fecha nesses casos, quando outro áudio do Varanda começa e pouco depois de o cartão sair da parte visível da lista: o Varanda não consegue pausar o player, então o fecha, e, quando você volta ao cartão, ele mostra a capa e um player novo, sem som.',
+      'No app para Android e iPhone, um player em tela cheia continua aberto. Fora da tela cheia, quando a tela gira ou a janela muda de retrato para paisagem ou de volta, como pode acontecer na versão web, no iPad e em aparelhos Android de tela grande, um player em que você tocou pode continuar aberto depois de o cartão sair da parte visível da lista, até outro player começar, você bloquear o aparelho ou trocar de tela.',
+      'Com um leitor de tela ligado, um player que esteve na parte visível da lista conta como um player em que você tocou.',
+      'Um player em que você não tocou continua carregado',
+      'O som que você iniciou pode continuar enquanto o player está aberto, inclusive em tela cheia e no pouco tempo entre o cartão sair da parte visível da lista e o player fechar.'
+    ]) t.ok(text(doc).includes(required), doc.title + ': ' + required)
+    for (const gone of [
+      'Tocar música sozinha',
+      'adesivo de música',
+      'adesivo',
+      'abrir o app outra vez',
+      'Essa escolha fica só na memória do app, neste aparelho, e não é enviada a ninguém.',
+      'A escolha de silenciar o som fica só na memória do app, neste aparelho, e não é enviada a ninguém.',
+      'fica só na memória do app',
+      'Uma playlist sempre espera o seu toque.',
+      'Um player em que você tocou fecha nesses casos e quando outro áudio do Varanda começa.',
+      'enquanto o player está aberto.'
+    ]) t.absent(text(doc).includes(gone), doc.title + ': no ' + gone)
+  }
+  const { termsDecision } = await import('../src/terms.js')
+  const member = 'ab'.repeat(32)
+  const record = { v: 1, version: 52, members: { [member]: { acceptedAt: '2026-11-14T12:00:00.000Z', synced: true } } }
+  t.is(termsDecision({ record, version: LEGAL_VERSION, member, hosted: false }), 'updated', 'an acceptance of version 52 asks again')
 })
 
 test('legal: version 29 has no tolerance for abuse, a real contact, a content license and the age check on the app', async (t) => {
@@ -324,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '749a50029cb7065576d29787a0e6dc60b79120f2e6d68dc3b09eb05ded78e14c', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '65cae4c72386b1a6a8e725a0f7f4e8be8157a9886732692ac82b4dab83ad6b33', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -550,7 +589,7 @@ test('Privacidade: Posts salvos diz do pedido ao semeador, do backup e do Sair',
   t.ok(p.includes('continua no aparelho depois de Sair'), 'stays after Sair')
 })
 
-test('legal: version 55 describes recados', async (t) => {
+test('legal: version 57 describes recados', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(all(TERMS).includes('Um recado é um texto público que você deixa na página de outra pessoa'))
@@ -559,7 +598,7 @@ test('legal: version 55 describes recados', async (t) => {
   t.ok(all(PRIVACY).includes('Tirar um recado da sua página e escolher quem pode deixar recado também são registros publicados no seu diário público, visíveis para qualquer pessoa'), 'hide and wall records are public')
 })
 
-test('legal: version 56 describes the rich profile and the Sorte do dia', async (t) => {
+test('legal: version 58 describes the rich profile and the Sorte do dia', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const all = (d) => d.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(all(TERMS).includes('Em Editar perfil você pode preencher, se quiser, um Sobre mim'))
@@ -683,4 +722,21 @@ test('legal: version 48 describes the public page of a post', async (t) => {
     'pode guardar o endereço pedido e o endereço de internet (IP)',
     'ficam fora do controle da associação'
   ]) t.ok(page(PRIVACY).includes(required), 'privacy: ' + required)
+})
+
+test('legal: version 55 lets the recipient keep or refuse a depoimento', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'também pode guardá-lo só para si ou recusá-lo: nos dois casos nada é publicado',
+    'vê apenas que ele foi enviado, não a escolha de quem recebeu'
+  ]) t.ok(text(TERMS).includes(required), 'terms: ' + required)
+  for (const required of [
+    'Se não escolhe, nada é publicado no diário dela.',
+    'também não publica nada e não avisa quem escreveu',
+    'fica guardada só nos seus aparelhos e no bloco cifrado descrito no parágrafo sobre o que você viu (vistos)',
+    'guardados só para você ou recusados',
+    'a chave pública de quem escreveu, o número do registro, a escolha e a hora, até os 64 guardados e os 64 recusados mais recentes',
+    'o texto do depoimento nunca vai no bloco'
+  ]) t.ok(text(PRIVACY).includes(required), 'privacy: ' + required)
 })

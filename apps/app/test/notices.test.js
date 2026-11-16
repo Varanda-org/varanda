@@ -8,6 +8,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   const {
     EMPTY_TITLE,
     EMPTY_TEXT,
+    PAGE_EMPTY_TEXT,
     NOTICES_OFFLINE_MESSAGE,
     NOTICES_UNSUPPORTED_MESSAGE,
     ACTIVITY_QUIET_TEXT,
@@ -18,7 +19,8 @@ test('the fixed texts are the approved Portuguese', async (t) => {
     SEEN_MAX
   } = await load()
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
-  t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, responder, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.')
+  t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, comentar, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.')
+  t.is(PAGE_EMPTY_TEXT, 'Quando alguém seguir a página, comentar, citar ou mencionar o @nome dela, aparece aqui.')
   t.is(NOTICES_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(NOTICES_UNSUPPORTED_MESSAGE, 'Os Avisos ainda não estão disponíveis nesta associação.')
   t.is(ACTIVITY_QUIET_TEXT, 'O semeador desta associação ainda só envia avisos de quem seguiu você.')
@@ -939,13 +941,13 @@ test('page seen ids share the stored text and never collide with the person', as
   const personal = [d(1), d(2)]
   const pageIds = [d(3), d(4)]
   const otherIds = [d(5)]
-  let text = writeSeenNamespace(serializeSeen(OWN, personal), ns, pageIds)
-  text = writeSeenNamespace(text, other, otherIds)
+  let text = writeSeenNamespace(serializeSeen(OWN, personal), ns, pageIds, OWN)
+  text = writeSeenNamespace(text, other, otherIds, OWN)
 
   t.alike(parseSeen(text, OWN), personal)
   t.alike(parseSeenNamespace(text, OWN), personal)
-  t.alike(parseSeenNamespace(text, ns), pageIds)
-  t.alike(parseSeenNamespace(text, other), otherIds)
+  t.alike(parseSeenNamespace(text, ns, OWN), pageIds)
+  t.alike(parseSeenNamespace(text, other, OWN), otherIds)
   t.alike(parseSeen(text, ns), [], 'the page namespace is not a personal own key')
   t.alike(parseSeen(text, OWN), personal)
   t.is(JSON.parse(text).own, OWN)
@@ -957,16 +959,16 @@ test('page seen ids share the stored text and never collide with the person', as
   const pageRows = Object.freeze([tok(3), tok(1)])
   t.is(hasNew(personRows, parseSeen(text, OWN)), true, 'a page token is still unseen for the person')
   t.is(hasNew([tok(1)], parseSeen(text, OWN)), false)
-  t.is(hasNew(pageRows, parseSeenNamespace(text, ns)), true, 'a personal token is still unseen for the page')
-  t.is(hasNew([tok(3), tok(4)], parseSeenNamespace(text, ns)), false)
-  t.is(hasNew([tok(5)], parseSeenNamespace(text, other)), false)
-  t.is(hasNew([tok(3)], parseSeenNamespace(text, other)), true, 'another page does not see this page')
+  t.is(hasNew(pageRows, parseSeenNamespace(text, ns, OWN)), true, 'a personal token is still unseen for the page')
+  t.is(hasNew([tok(3), tok(4)], parseSeenNamespace(text, ns, OWN)), false)
+  t.is(hasNew([tok(5)], parseSeenNamespace(text, other, OWN)), false)
+  t.is(hasNew([tok(3)], parseSeenNamespace(text, other, OWN)), true, 'another page does not see this page')
 
   // A later personal write keeps every page list.
   const next = writeSeenNamespace(text, OWN, [d(1), d(9)])
   t.alike(parseSeen(next, OWN), [d(1), d(9)])
-  t.alike(parseSeenNamespace(next, ns), pageIds)
-  t.alike(parseSeenNamespace(next, other), otherIds)
+  t.alike(parseSeenNamespace(next, ns, OWN), pageIds)
+  t.alike(parseSeenNamespace(next, other, OWN), otherIds)
   t.is(hasPageSeenNamespaces(serializeSeen(OWN, personal)), false)
   t.is(hasPageSeenNamespaces(next), true)
   t.is(hasPageSeenNamespaces('nope'), false)
@@ -978,12 +980,32 @@ test('page seen ids share the stored text and never collide with the person', as
 
   // A v1 blob of follower keys is not copied into the shared document.
   const v1 = JSON.stringify({ v: 1, own: OWN, ids: [OWN + ':4', PAGE + ':1'] })
-  const dropped = writeSeenNamespace(v1, ns, pageIds)
+  const dropped = writeSeenNamespace(v1, ns, pageIds, OWN)
   t.alike(parseSeen(dropped, OWN), [])
-  t.alike(parseSeenNamespace(dropped, ns), pageIds)
+  t.alike(parseSeenNamespace(dropped, ns, OWN), pageIds)
   t.is(dropped.includes(OWN + ':4'), false)
   t.is(dropped.includes(PAGE + ':1'), false)
   t.is(dropped.includes(PAGE), false, 'the other key was only in the discarded v1 ids')
+})
+
+test('a page seen list is split by identity, and an old unowned one is read once', async (t) => {
+  const { serializeSeen, parseSeen, parseSeenNamespace, writeSeenNamespace, pageSeenNamespace } = await load()
+  const ns = pageSeenNamespace(PAGE)
+  const B = 'cd'.repeat(32)
+  const text = writeSeenNamespace(serializeSeen(OWN, [d(1)]), ns, [d(3)], OWN)
+  t.alike(parseSeenNamespace(text, ns, OWN), [d(3)])
+  t.alike(parseSeenNamespace(text, ns, B), [], 'another identity never reads it')
+  const byB = writeSeenNamespace(text, ns, [d(7)], B)
+  t.alike(parseSeenNamespace(byB, ns, B), [d(7)])
+  t.alike(parseSeenNamespace(byB, ns, OWN), [], 'and never writes into it')
+  t.alike(parseSeen(byB, OWN), [], 'the other identity entry is replaced, as a personal write does')
+  t.is(writeSeenNamespace(text, ns, [d(9)]), text, 'no identity: nothing written')
+  // Before the split: a page list with no own is adopted, marks kept.
+  const legacy = JSON.stringify({ v: 3, own: '', ids: [], pages: { [ns]: [d(4)] } })
+  t.alike(parseSeenNamespace(legacy, ns, B), [d(4)])
+  const adopted = writeSeenNamespace(legacy, ns, [d(4), d(5)], B)
+  t.is(JSON.parse(adopted).own, B)
+  t.alike(parseSeenNamespace(adopted, ns, OWN), [])
 })
 
 const avatarDescriptor = () => Object.freeze({

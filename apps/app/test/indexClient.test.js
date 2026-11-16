@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -1826,4 +1826,184 @@ test('profileUrl and validProfile: tolerant of unknown keys, strict on known one
     t.is(validProfile(bad), null, JSON.stringify(bad))
   }
   t.alike(await fetchProfile('nope'), { ok: false, reason: 'invalid-input' })
+})
+
+// A roda answer asked for A:5, a reply under the comment B:3 of the post C:1.
+const RODA_CURSOR = '1761000000000.' + C + '.8'
+function rodaBody (over = {}) {
+  return {
+    ref: REF,
+    root: C + ':1',
+    top: B + ':3',
+    items: [{ ref: REF, to: B + ':3' }, { ref: C + ':8', to: REF }],
+    next: RODA_CURSOR,
+    total: 7,
+    authors: {
+      [A]: { profileSeq: 1, usernameSeq: null },
+      [B]: { profileSeq: null, usernameSeq: 2 },
+      [C]: { profileSeq: null, usernameSeq: null }
+    },
+    indexing: false,
+    complete: true,
+    ...over
+  }
+}
+
+test('rodaUrl: exact path, input lowercased, everything else refused', async (t) => {
+  const { rodaUrl } = await load()
+  t.is(rodaUrl(REF), '/index/roda/' + A + '/5')
+  t.is(rodaUrl(REF.toUpperCase()), '/index/roda/' + A + '/5', 'input lowercased')
+  t.is(rodaUrl(REF, CURSOR), '/index/roda/' + A + '/5/' + CURSOR)
+  for (const bad of [A + ':0', A + ':05', A, A + ':1/..', 'zz'.repeat(32) + ':1', null, 7, A + ':1234567890123456']) {
+    t.is(rodaUrl(bad), null, 'ref ' + String(bad))
+  }
+  t.is(rodaUrl(A + ':123456789012345'), '/index/roda/' + A + '/123456789012345', '15 digits, as the seeder route')
+  for (const bad of ['x', '1.' + B + '.0', '1.' + B.toUpperCase() + '.1', '12345678901234567.' + B + '.1', CURSOR + '/x', 5]) {
+    t.is(rodaUrl(REF, bad), null, 'cursor ' + String(bad))
+  }
+})
+
+test('validRoda: the exact shape, returned as a fresh copy', async (t) => {
+  const { validRoda, RODA_MAX } = await load()
+  t.is(RODA_MAX, 50)
+  const body = rodaBody()
+  const v = validRoda(body, REF)
+  t.alike(v, rodaBody())
+  t.not(v, body)
+  t.not(v.items, body.items)
+  t.not(v.items[0], body.items[0])
+  t.not(v.authors, body.authors)
+  t.not(v.authors[A], body.authors[A])
+  body.items[0].to = 'changed'
+  body.authors[A].profileSeq = 99
+  t.is(v.items[0].to, B + ':3', 'the copy does not track the input')
+  t.is(v.authors[A].profileSeq, 1)
+  t.ok(validRoda(rodaBody({ ref: B + ':3', items: [], next: null, total: 0, authors: { [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }), B + ':3'), 'asked for the comment itself, no replies yet')
+  const fifty = Array.from({ length: 50 }, (_, i) => ({ ref: A + ':' + (i + 10), to: B + ':3' }))
+  t.ok(validRoda(rodaBody({ items: fifty, next: null, total: 50 }), REF), '50 rows')
+})
+
+test('fetchRoda: request options, the exact shape and a 404 from an older seeder', async (t) => {
+  const { fetchRoda } = await load()
+  const calls = []
+  const fetch = async (url, opts) => {
+    calls.push({ url, opts })
+    return response(JSON.stringify(rodaBody()))
+  }
+  const res = await fetchRoda(REF.toUpperCase(), CURSOR, { fetch })
+  t.is(res.ok, true)
+  t.alike(res.value, rodaBody())
+  t.is(calls[0].url, '/index/roda/' + A + '/5/' + CURSOR)
+  t.is(calls[0].opts.method, 'GET')
+  t.is(calls[0].opts.credentials, 'omit')
+  t.is(calls[0].opts.redirect, 'error')
+  t.is(calls[0].opts.cache, 'no-store')
+  t.ok(calls[0].opts.signal, 'abortable')
+  t.alike(await fetchRoda(REF, null, { fetch: async () => response('{}', { status: 404 }) }), { ok: false, reason: 'not-found' })
+  t.alike(await fetchRoda(REF, null, { fetch: async () => response('{}', { status: 503 }) }), { ok: false, reason: 'status' })
+  t.alike(await fetchRoda(REF, null, { fetch: async () => response('x'.repeat(65537)) }), { ok: false, reason: 'too-large' })
+  let called = false
+  t.alike(await fetchRoda('nope', null, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchRoda(REF, 'x', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+})
+
+test('fetchRoda rejects anything outside the contract', async (t) => {
+  const { fetchRoda } = await load()
+  const top = B + ':3'
+  const many = Array.from({ length: 51 }, (_, i) => ({ ref: A + ':' + (i + 10), to: top }))
+  const bad = [
+    ['extra key', { extra: true }],
+    ['wrong ref', { ref: B + ':5' }],
+    ['ref upper case', { ref: REF.toUpperCase() }],
+    ['root equal to top', { root: top, items: [], next: null, authors: { [A]: rodaBody().authors[A], [B]: rodaBody().authors[B] } }],
+    ['ref equal to root', { root: REF, top: C + ':1', items: [], next: null, authors: { [A]: rodaBody().authors[A], [C]: rodaBody().authors[C] } }],
+    ['bad root', { root: C + ':0' }],
+    ['bad top', { top: 'x' }],
+    ['51 items', { items: many, next: null, total: 51 }],
+    ['items not an array', { items: {} }],
+    ['duplicate item', { items: [{ ref: REF, to: top }, { ref: REF, to: top }], next: null }],
+    ['item equal to top', { items: [{ ref: top, to: REF }], next: null }],
+    ['item equal to root', { items: [{ ref: C + ':1', to: top }], next: null }],
+    ['item ref equal to its to', { items: [{ ref: REF, to: REF }], next: null }],
+    ['item answering the root', { items: [{ ref: REF, to: C + ':1' }], next: null }],
+    ['child before its parent', { items: [{ ref: C + ':8', to: REF }, { ref: REF, to: top }], next: '1.' + A + '.5' }],
+    ['item extra key', { items: [{ ref: REF, to: top, at: 1 }], next: null }],
+    ['item missing to', { items: [{ ref: REF }], next: null }],
+    ['item bad ref', { items: [{ ref: A + ':0', to: top }], next: null }],
+    ['bad cursor', { next: 'x' }],
+    ['cursor with a bad time naming the last row', { next: 'abc.' + C + '.8' }],
+    ['cursor naming another row', { next: '1761000000000.' + A + '.5' }],
+    ['cursor on an empty page', { items: [], next: CURSOR, authors: { [A]: { profileSeq: 1, usernameSeq: null }, [B]: { profileSeq: null, usernameSeq: 2 }, [C]: { profileSeq: null, usernameSeq: null } } }],
+    ['total below length', { total: 1 }],
+    ['total not a count', { total: -1 }],
+    ['indexing not boolean', { indexing: 'no' }],
+    ['complete not boolean', { complete: 1 }],
+    ['authors missing one', { authors: { [A]: { profileSeq: 1, usernameSeq: null }, [C]: { profileSeq: null, usernameSeq: null } } }],
+    ['authors with an unrelated key', { authors: { ...rodaBody().authors, ['12'.repeat(32)]: { profileSeq: null, usernameSeq: null } } }],
+    ['authors upper case', { authors: { ...rodaBody().authors, [A.toUpperCase()]: { profileSeq: 1, usernameSeq: null } } }],
+    ['authors bad hint', { authors: { ...rodaBody().authors, [A]: { profileSeq: 0, usernameSeq: null } } }],
+    ['authors not an object', { authors: [] }]
+  ]
+  for (const [name, over] of bad) {
+    t.alike(await fetchRoda(REF, null, { fetch: json(rodaBody(over)) }), { ok: false, reason: 'malformed' }, name)
+  }
+  const missing = rodaBody()
+  delete missing.top
+  t.is((await fetchRoda(REF, null, { fetch: json(missing) })).reason, 'malformed', 'missing key')
+  for (const body of ['null', '[]', 'not json']) {
+    t.is((await fetchRoda(REF, null, { fetch: async () => response(body) })).reason, 'malformed', body)
+  }
+})
+
+test('fetchRoda shares the scheduler: a 429 on it cools every index request', async (t) => {
+  const m = await load()
+  const { clock } = m
+  const t0 = clock.now()
+  const { calls, fetch } = recorder(clock, (url, n) => {
+    if (n === 1) return tooMany('5')
+    return url.startsWith('/index/roda/') ? response(JSON.stringify(rodaBody())) : response(JSON.stringify(postBody()))
+  })
+  const deps = { ...clock.deps, fetch }
+  const roda = m.fetchRoda(REF, null, deps)
+  const post = clock.later(1000).then(() => m.fetchPost(REF, null, deps))
+  const [a, b] = await clock.run(Promise.all([roda, post]))
+  t.is(a.ok, true, 'retried after the cooldown')
+  t.is(b.ok, true)
+  t.is(calls.length, 3)
+  for (const c of calls.slice(1)) t.ok(c.at >= t0 + 5000, 'no request during the cooldown: ' + (c.at - t0))
+
+  const m2 = await load()
+  let out = 0
+  let maxOut = 0
+  const timed = recorder(m2.clock, async () => {
+    out++
+    maxOut = Math.max(maxOut, out)
+    await m2.clock.later(100)
+    out--
+    return response(JSON.stringify(rodaBody()))
+  })
+  const deps2 = { ...m2.clock.deps, fetch: timed.fetch }
+  const results = await m2.clock.run(Promise.all(Array.from({ length: 24 }, () => m2.fetchRoda(REF, null, deps2))))
+  t.ok(results.every((r) => r.ok), 'all settle ok')
+  t.ok(maxOut <= 2, 'at most 2 in flight: ' + maxOut)
+  let worst = 0
+  for (const c of timed.calls) worst = Math.max(worst, timed.calls.filter((d) => d.at >= c.at && d.at < c.at + 10000).length)
+  t.ok(worst <= 18, 'starts per rolling 10 s: ' + worst)
+})
+
+test('fetchRoda with an installation set goes to that origin only', async (t) => {
+  const { rodaUrl, fetchRoda } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => setInstallation(null))
+  t.ok(setInstallation('https://example.test'))
+  const O = 'https://example.test'
+  t.is(rodaUrl(REF, CURSOR), O + '/index/roda/' + A + '/5/' + CURSOR)
+  t.is(rodaUrl('bad'), null)
+  const urls = []
+  const res = await fetchRoda(REF, null, { fetch: async (url) => { urls.push(url); return response(JSON.stringify(rodaBody())) } })
+  t.is(res.ok, true)
+  t.alike(urls, [O + '/index/roda/' + A + '/5'])
+  setInstallation(null)
+  t.is(rodaUrl(REF), '/index/roda/' + A + '/5', 'relative again once cleared')
 })

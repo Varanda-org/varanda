@@ -7,7 +7,7 @@
 
 import { useCallback, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, useWindowDimensions } from 'react-native'
-import { acceptMeasurement, clampPlan, refine } from '../postClamp.js'
+import { clampPlan, measurementToStore, refine } from '../postClamp.js'
 import { TEXT_CAP } from './Sheet'
 import { useStyles } from './ThemeProvider'
 import { layout, space, type } from './theme'
@@ -28,9 +28,15 @@ const CONTROL_LABELS = {
 // line, whose links and mentions must stay tappable.
 const verticalHitSlop = Math.max(0, (layout.hit - type.more.lineHeight) / 2)
 
+// The caption width the clamp assumes before a measurement, so a row can skip
+// storing a measurement that matches it.
+export function captionEstimate (windowWidth) {
+  return Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP
+}
+
 export function useClamp ({ text, hasMedia, width, forceExpanded } = {}) {
   const { width: windowWidth, fontScale } = useWindowDimensions()
-  const defaultWidth = Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP
+  const defaultWidth = captionEstimate(windowWidth)
   const textWidth = Number.isFinite(width) && width > 0 ? width : defaultWidth
   const [expanded, setExpanded] = useState(false)
   const [measuredLines, setMeasuredLines] = useState(undefined)
@@ -68,14 +74,20 @@ export function useClamp ({ text, hasMedia, width, forceExpanded } = {}) {
   // The cap this render paints. The callback closes over it, so an event
   // from the cut text is not read as a later, uncapped measurement.
   const renderedCap = view.lines
+  const planLines = plan.lines
+  const planControl = plan.control
 
   const onTextLayout = useCallback((event) => {
     if (generation.current !== layoutGeneration) return
     const lines = event && event.nativeEvent && event.nativeEvent.lines
     if (!Array.isArray(lines)) return
     const count = lines.length
-    setMeasuredLines((prev) => acceptMeasurement({ prev, count, renderedCap }))
-  }, [layoutGeneration, renderedCap])
+    // The updater reads prev, so two events before a render never use a stale one.
+    setMeasuredLines((prev) => {
+      const next = measurementToStore({ plan: { lines: planLines, control: planControl }, prev, count, renderedCap })
+      return next === undefined ? prev : next
+    })
+  }, [layoutGeneration, renderedCap, planLines, planControl])
 
   const toggle = useCallback(() => {
     setExpanded((value) => !value)

@@ -418,19 +418,40 @@ test('scheduler: online with no recent pass runs at once', async (t) => {
   t.alike(runs, ['online'])
 })
 
-test('snapshotBefore takes the snapshot once, right before the first merge', async (t) => {
-  const { snapshotBefore } = await load()
-  let n = 0
-  const calls = []
-  const { request, snap } = snapshotBefore(async (m) => { calls.push([m, snap.value]); return {} }, 'seen.merge', () => ++n)
+test('snapshotOnAnswer takes the versions when a merge answers with caughtUp', async (t) => {
+  const { snapshotOnAnswer } = await load()
+  const g = 'a'.repeat(64)
+  const h = 'b'.repeat(64)
+  let state = { epoch: 1, versions: { [g]: 1, [h]: 1 } }
+  const answers = [{}, { caughtUp: [] }, { caughtUp: [g, 'nope'] }]
+  const { request, snap } = snapshotOnAnswer(async (m) => {
+    // A post lands in g while the merge runs: version 2 before the answer.
+    if (m === 'seen.merge') state = { epoch: 1, versions: { ...state.versions, [g]: state.versions[g] + 1 } }
+    return m === 'seen.merge' ? answers.shift() : {}
+  }, 'seen.merge', () => state)
   await request('seen.sign', {})
-  t.is(snap.taken, false)
-  t.is(n, 0)
+  t.is(snap.versions, null)
   await request('seen.merge', {})
   await request('seen.merge', {})
-  t.is(n, 1)
-  t.is(snap.value, 1)
-  t.alike(calls, [['seen.sign', null], ['seen.merge', 1], ['seen.merge', 1]])
+  t.is(snap.versions, null, 'no caughtUp: nothing taken')
+  await request('seen.merge', {})
+  t.alike(snap, { epoch: 1, versions: { [g]: 4 } }, 'the version held at the answer, listed keys only')
+})
+
+test('a post that lands during the merge loses the groups dot when the merge settles', async (t) => {
+  const { snapshotOnAnswer, ackCaughtUp } = await load()
+  const g = 'a'.repeat(64)
+  let versions = { [g]: 1 }
+  const { request, snap } = snapshotOnAnswer(async () => {
+    versions = { [g]: 2 }
+    return { caughtUp: [g] }
+  }, 'seen.merge', () => ({ epoch: 1, versions }))
+  await request('seen.merge', {})
+  const cur = ackCaughtUp({ epoch: 1, map: { [g]: 1 } }, [g], { epoch: snap.epoch, versions: snap.versions })
+  const badge = Object.keys(versions).some((k) => versions[k] !== (cur.map[k] || 0))
+  t.is(badge, false, 'the tab dot follows the merged state')
+  versions = { [g]: 3 }
+  t.is(Object.keys(versions).some((k) => versions[k] !== (cur.map[k] || 0)), true, 'a post after the answer keeps it')
 })
 
 test('ackCaughtUp acknowledges caughtUp groups at the snapshot versions of the same epoch', async (t) => {
@@ -596,4 +617,16 @@ test('blocksChanged: any merge of the pass that brought a change reports it', as
     merges: [res(true, { blocksChanged: true }), res(false)]
   })
   t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).blocksChanged, true)
+})
+
+test('testimonialsChanged: any merge of the pass that brought a change reports it', async (t) => {
+  const { runSeenPass } = await load()
+  const quiet = harness({ read: { hash: null, blob: null }, finish: [], merges: [res(false)] })
+  t.is((await runSeenPass({ member: MEMBER, request: quiet.request, http: quiet.http, avisos: AVISOS })).testimonialsChanged, false)
+  const h = harness({
+    read: { hash: null, blob: null },
+    finish: [{ ok: true, hash: 'hh' }],
+    merges: [res(true, { testimonialsChanged: true }), res(false)]
+  })
+  t.is((await runSeenPass({ member: MEMBER, request: h.request, http: h.http, avisos: AVISOS })).testimonialsChanged, true)
 })

@@ -42,6 +42,42 @@ test('Caddyfile: CSP unchanged, scripts only from self', (t) => {
   t.is(directive('media-src'), "media-src 'self' blob:", 'media-src: self and blob: only (voice playback from local copies)')
 })
 
+// The security headers live in one snippet, imported by the site block and
+// by handle_errors: Caddy defers the header block (it deletes Server) until
+// the response is written, and an error (file_server 404, rate_limit 429,
+// proxy 502) is answered without that writer, so without handle_errors those
+// responses would go out with no CSP, nosniff or frame-ancestors.
+test('Caddyfile: security headers in one snippet, imported by the site and by handle_errors', (t) => {
+  const snippet = block('(cabecalhos_seguranca) {')
+  t.ok(snippet.length > 0, 'snippet (cabecalhos_seguranca)')
+  t.is(lines.filter((l) => l.trim() === '(cabecalhos_seguranca) {').length, 1, 'defined once')
+  t.is(snippet[0], '(cabecalhos_seguranca) {', 'top-level snippet, outside the site block')
+  const text = snippet.map((l) => l.trim())
+  t.ok(text.includes('Content-Security-Policy "' + CSP + '"'), 'the CSP is in the snippet')
+  t.ok(text.includes('X-Content-Type-Options "nosniff"'), 'nosniff is in the snippet')
+  t.ok(text.includes('X-Frame-Options "DENY"'), 'X-Frame-Options is in the snippet')
+  t.ok(text.includes('Strict-Transport-Security "max-age=31536000"'), 'HSTS is in the snippet')
+  t.ok(text.includes('Referrer-Policy "no-referrer"'), 'Referrer-Policy is in the snippet')
+  t.ok(text.includes('Permissions-Policy "camera=(), microphone=(self), geolocation=()"'), 'Permissions-Policy is in the snippet')
+  t.ok(text.includes('-Server'), 'Server removed in the snippet')
+  for (const h of ['Content-Security-Policy', 'X-Content-Type-Options', 'X-Frame-Options', 'Strict-Transport-Security', 'Referrer-Policy', 'Permissions-Policy']) {
+    t.is(lines.filter((l) => new RegExp('^\\s*' + h + '\\s').test(l)).length, 1, h + ' set only once in the file')
+  }
+  const siteStart = lines.findIndex((l) => l.startsWith('{$VARANDA_DOMAIN}'))
+  t.ok(siteStart > lines.indexOf('(cabecalhos_seguranca) {'), 'snippet defined before the site block')
+  const imports = lines.map((l, i) => [l, i]).filter(([l]) => l.trim() === 'import cabecalhos_seguranca')
+  t.is(imports.length, 2, 'imported exactly twice')
+  t.ok(imports.some(([l, i]) => l === '\timport cabecalhos_seguranca' && i > siteStart), 'imported at the top level of the site block')
+  t.is(count('handle_errors'), 1, 'one handle_errors')
+  const errors = block('handle_errors {')
+  t.is(errors[0], '\thandle_errors {', 'site-level handle_errors')
+  t.alike(errors.slice(1, -1).map((l) => l.trim()), ['import cabecalhos_seguranca'], 'handle_errors only imports the security headers')
+  t.ok(siteStart !== -1 && lines.indexOf('\thandle_errors {') > siteStart, 'handle_errors inside the site block')
+  // The 404 no-store is set before the error and stays on the response.
+  t.ok(lines.some((l) => l.trim() === 'header @ausenteArquivo Cache-Control "no-store"'), 'missing file 404 keeps no-store')
+  t.ok(lines.some((l) => l.trim() === 'header @ausenteApp Cache-Control "no-store"'), 'missing index.html 404 keeps no-store')
+})
+
 test('Caddyfile: camera off, microphone only for self', (t) => {
   t.is(count('camera=()'), 1, 'camera=() exactly once')
   t.is(count('camera=('), 1, 'no other camera allowlist')

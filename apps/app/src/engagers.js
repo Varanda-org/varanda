@@ -111,7 +111,7 @@ export function listView (opts) {
   const { hosted, online, unsupported, phase, rows, next, unconfirmed, error, kind, total, indexing, complete } = isPlain(opts) ? opts : {}
   const count = Array.isArray(rows) ? rows.length : 0
   if (hosted !== true) {
-    return { view: 'web-only', title: 'Só na versão web', body: 'Quem curtiu e quem republicou aparece na versão web, com internet.' }
+    return { view: 'web-only', title: 'Curtidas indisponíveis', body: 'Quem curtiu e quem republicou aparece no site da associação ou no app ligado à instalação, com internet.' }
   }
   // On a hosted connection the web is not a fallback for a refused list.
   if (unsupported === true) {

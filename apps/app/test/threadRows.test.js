@@ -1,5 +1,5 @@
-// Reply-list rows (threadRows.js): one level of depth, stable keys, and
-// cheap reply previews taken only from a list already loaded.
+// Reply row helpers (threadRows.js): labels, chips and merges. A Rua's
+// comment previews are feedFold.js now.
 'use strict'
 
 const test = require('brittle')
@@ -47,221 +47,17 @@ test('parseRef, target and sameTarget keep their checks', async (t) => {
 
 test('row module imports the thread helpers and does not fetch', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../src/threadRows.js'), 'utf8')
-  t.ok(src.includes("import { parseRef, target } from './thread.js'"))
+  t.ok(src.includes("import { parseRef } from './thread.js'"))
   t.is(src.includes("from 'react'"), false)
   t.is(src.includes('react-native'), false)
   t.is(src.includes("from 'node:"), false)
 })
 
-test('threadRows lays out one level, flags unknown counts and keeps keys', async (t) => {
-  const { threadRows, childLabel } = await load()
-  const parent = post(A, 1, { text: 'pai' })
-  const child = post(C, 3, { text: 'filha', replyTo: { author: A, seq: 1 }, name: 'Lia' })
-  const otherChild = post(B, 8, { text: 'outra filha', replyTo: { author: A, seq: 1 } })
-  const nested = post(D, 4, { text: 'neta', replyTo: { author: C, seq: 3 } })
-  const parentRef = refOf(A, 1)
-  const childRef = refOf(C, 3)
-  const children = new Map([
-    [parentRef, [child]],
-    [childRef, [nested]]
-  ])
-  const counts = new Map([
-    [parentRef, { replies: 2, likes: 0, reposts: 0, quotes: 0 }],
-    [childRef, { replies: 4, likes: 0, reposts: 0, quotes: 0 }]
-  ])
-  const rows = threadRows({
-    replies: [parent],
-    children,
-    counts,
-    open: new Set([parentRef]),
-    more: new Map([[parentRef, true]])
-  })
-  t.alike(rows.map((r) => r.kind), ['reply', 'expander', 'reply', 'more'])
-  t.alike(rows.map((r) => r.key), [
-    'reply:' + parentRef,
-    'expander:' + parentRef,
-    'reply:' + childRef,
-    'more:' + parentRef
-  ])
-  t.is(rows[0].item, parent)
-  t.is(rows[0].depth, 0)
-  t.is(rows[0].deeper, 0, 'a direct reply expands in place')
-  t.is(rows[1].parent, parent)
-  t.is(rows[1].count, 2)
-  t.is(rows[1].open, true)
-  t.is(childLabel(rows[1].count, rows[1].open), 'Ocultar respostas')
-  t.is(rows[2].depth, 1)
-  t.is(rows[2].item, child)
-  t.is(rows[2].deeper, 4, 'the grandchild count, not an inlined row')
-  t.is(rows[3].parent, parent)
-  t.is(rows.some((r) => r.item === nested), false)
-  t.is(rows.filter((r) => r.kind === 'expander').length, 1)
-  t.ok(rows.every((r) => r.kind !== 'reply' || r.depth === 0 || r.depth === 1))
-
-  const closed = threadRows({ replies: [parent], children, counts, open: {}, more: {} })
-  t.alike(closed.map((r) => r.key), ['reply:' + parentRef, 'expander:' + parentRef])
-  t.is(closed[0].key, rows[0].key)
-  t.is(closed[1].key, rows[1].key)
-  t.is(closed[1].open, false)
-  t.is(closed[1].count, 2)
-  t.is(childLabel(closed[1].count, closed[1].open), 'Ver 2 respostas')
-
-  const added = threadRows({
-    replies: [parent],
-    children: new Map([[parentRef, [child, otherChild]], [childRef, [nested]]]),
-    counts,
-    open: new Set([parentRef]),
-    more: new Map([[parentRef, true]])
-  })
-  t.is(added[0].key, rows[0].key)
-  t.is(added[1].key, rows[1].key)
-  t.is(added[2].key, rows[2].key)
-  t.is(added[3].depth, 1)
-  t.is(added[3].deeper, 0)
-  t.is(added[4].key, rows[3].key)
-
-  const fromLoaded = threadRows({
-    replies: [parent],
-    children: new Map([[parentRef, [child]], [childRef, [nested, nested]]]),
-    counts: new Map([[parentRef, 1]]),
-    open: { [parentRef]: true },
-    more: {}
-  })
-  t.is(fromLoaded.find((r) => r.depth === 1).deeper, 1, 'duplicate grandchild counts once')
-  t.is(fromLoaded.some((r) => r.item === nested), false)
-
-  const hidden = threadRows({
-    replies: [parent],
-    children,
-    counts: { [parentRef]: 2 },
-    open: {},
-    more: { [parentRef]: true }
-  })
-  t.alike(hidden.map((r) => r.kind), ['reply', 'expander', 'more'])
-  const notMore = threadRows({
-    replies: [parent],
-    counts: { [parentRef]: 2 },
-    open: {},
-    more: { [parentRef]: 1 }
-  })
-  t.alike(notMore.map((r) => r.kind), ['reply', 'expander'])
-})
-
-test('unknown counts open the expander and a missing count does not', async (t) => {
-  const { threadRows, childLabel } = await load()
-  const unknown = post(A, 1)
-  const nullReplies = post(B, 2)
-  const zero = post(C, 3)
-  const absent = post(D, 4)
-  const refU = refOf(A, 1)
-  const refN = refOf(B, 2)
-  const refZ = refOf(C, 3)
-  const refA = refOf(D, 4)
-  const loaded = post(A, 9, { text: 'carregada' })
-  const rows = threadRows({
-    replies: [unknown, nullReplies, zero, absent],
-    children: {
-      [refU]: [loaded],
-      [refN]: [loaded],
-      [refZ]: [loaded],
-      [refA]: [loaded]
-    },
-    counts: {
-      [refU]: null,
-      [refN]: { replies: null, likes: 0, reposts: 0, quotes: 0 },
-      [refZ]: { replies: 0, likes: 1, reposts: 0, quotes: 0 }
-    },
-    open: {},
-    more: {}
-  })
-  t.alike(rows.map((r) => [r.kind, r.kind === 'reply' ? r.item : r.count]), [
-    ['reply', unknown],
-    ['expander', null],
-    ['reply', nullReplies],
-    ['expander', null],
-    ['reply', zero],
-    ['reply', absent]
-  ])
-  t.is(rows[1].open, false)
-  t.is(childLabel(rows[1].count, rows[1].open), 'Ver respostas')
-  t.is(rows.some((r) => r.item === loaded), false, 'closed threads do not leak loaded children')
-
-  const opened = threadRows({
-    replies: [unknown],
-    children: { [refU]: [loaded, { text: 'sem ref' }] },
-    counts: { [refU]: null },
-    open: { [refU]: true },
-    more: {}
-  })
-  t.alike(opened.map((r) => r.kind), ['reply', 'expander', 'reply'])
-  t.is(opened[1].count, null)
-  t.is(opened[1].open, true)
-  t.is(opened[2].item, loaded)
-  t.is(opened[2].depth, 1)
-  t.is(opened[2].deeper, 0)
-  t.is(childLabel(opened[1].count, opened[1].open), 'Ocultar respostas')
-
-  const refLoaded = refOf(A, 9)
-  const nested = post(D, 4, { replyTo: { author: A, seq: 9 } })
-  const unknownDeep = threadRows({
-    replies: [unknown],
-    children: { [refU]: [loaded], [refLoaded]: [nested] },
-    counts: { [refU]: 1, [refLoaded]: null },
-    open: { [refU]: true },
-    more: {}
-  })
-  t.is(unknownDeep.filter((r) => r.kind === 'expander').length, 1)
-  t.is(unknownDeep[2].depth, 1)
-  t.is(unknownDeep[2].deeper, null, 'unknown but flagged stays null, which is not 0')
-  t.is(unknownDeep.some((r) => r.item === nested), false)
-
-  const staleZero = threadRows({
-    replies: [unknown],
-    children: { [refU]: [loaded], [refLoaded]: [nested] },
-    counts: { [refU]: 1, [refLoaded]: 0 },
-    open: { [refU]: true },
-    more: {}
-  })
-  t.is(staleZero[2].deeper, 1, 'a loaded grandchild still counts when the index says 0')
-
-  const zeroOpen = threadRows({
-    replies: [zero],
-    children: { [refZ]: [loaded] },
-    counts: { [refZ]: 0 },
-    open: { [refZ]: true },
-    more: {}
-  })
-  t.alike(zeroOpen.map((r) => r.kind), ['reply', 'expander', 'reply'])
-  t.is(zeroOpen[1].count, 0)
-  t.is(zeroOpen[1].open, true)
-  t.is(zeroOpen[2].item, loaded)
-})
-
-test('threadRows drops a duplicate ref and keeps every key unique', async (t) => {
-  const { threadRows } = await load()
-  const first = post(A, 1, { text: 'primeiro' })
-  const again = post(A, 1, { text: 'de novo' })
-  const child = post(B, 2, { text: 'um' })
-  const childAgain = post(B, 2, { text: 'dois' })
-  const parentRef = refOf(A, 1)
-  const replies = [first, again]
-  const rows = threadRows({
-    replies,
-    children: { [parentRef]: [child, childAgain, first] },
-    counts: { [parentRef]: 3 },
-    open: { [parentRef]: true },
-    more: {}
-  })
-  t.is(replies.length, 2, 'the input list is not rewritten')
-  t.alike(rows.map((r) => r.kind), ['reply', 'expander', 'reply'])
-  t.is(rows[0].item, first)
-  t.is(rows[1].count, 3)
-  t.is(rows[2].item, child)
-  t.is(rows[2].depth, 1)
-  t.is(new Set(rows.map((r) => r.key)).size, rows.length)
-  t.alike(threadRows(), [])
-  t.alike(threadRows(null), [])
-  t.alike(threadRows({ replies: [null, { text: 'x' }] }), [])
+test('the thread layout lives in roda.js: no nested reply rows here', async (t) => {
+  const mod = await load()
+  t.is(mod.threadRows, undefined, 'commentRows (roda.js) lays out comments and rodas')
+  t.is(mod.deeperOf, undefined)
+  t.alike(Object.keys(mod).sort(), ['childLabel', 'compareAtSeq', 'mergeChildren', 'replyChip', 'withOwnReply'])
 })
 
 test('mergeChildren dedupes by ref, orders by at, author, seq and returns a new map', async (t) => {
@@ -356,100 +152,107 @@ test('replyChip prefers @username, then the name, then a bare label', async (t) 
   t.is(replyChip({ name: 'Ana\u0001' }).includes('\u0001'), false)
 })
 
-test('cheapReplies takes distant loaded replies and skips the near window', async (t) => {
-  const { cheapReplies } = await load()
-  const parent = post(A, 1, { text: 'foco' })
-  const near = []
-  for (let i = 0; i < 5; i++) {
-    near.push(post(B, i + 1, { replyTo: { author: A, seq: 1 }, text: 'perto' + i, name: 'Perto' }))
+// Conversa's rowProps with a row cache (Conversa.js loads react-native, so
+// the function runs from its source text with stubbed imports).
+function sourceFn (src, name) {
+  let start = src.indexOf('\nexport function ' + name + ' (')
+  if (start >= 0) start += '\nexport '.length
+  else {
+    start = src.indexOf('\nfunction ' + name + ' (')
+    if (start < 0) throw new Error('no function ' + name)
+    start += 1
   }
-  const other = post(C, 1, { replyTo: { author: D, seq: 1 }, text: 'outra', name: 'Outra' })
-  const far1 = post(C, 2, { replyTo: { author: A, seq: 1 }, text: 'longe\u0001', name: 'Lia\u202e' })
-  const far2 = post(C, 3, { replyTo: refOf(A, 1), text: 'a\nb', name: null, username: 'lia' })
-  const far3 = post(C, 4, { replyTo: { author: A, seq: 1 }, text: 'extra', name: 'Extra' })
-  const items = [parent, ...near, other, far1, far2, far3]
-  const out = cheapReplies(items, refOf(A, 1))
-  t.is(out.length, 2, 'default max is 2')
-  t.alike(out.map((r) => r.key), [refOf(C, 2), refOf(C, 3)])
-  t.is(out[0].name, 'Lia\ufffd')
-  t.is(out[0].text, 'longe\ufffd')
-  t.is(out[0].name.includes('\u202e'), false)
-  t.is(out[0].text.includes('\u0001'), false)
-  t.is(out[1].name, 'lia')
-  t.is(out[1].text, 'a\nb', 'a line break in the post text stays')
-  t.is(out.some((r) => r.text.startsWith('perto')), false, 'distance 1 to 5 is inside the default window')
-  t.is(out.some((r) => r.key === refOf(C, 1)), false, 'a far row aimed at another post is not a reply here')
-  t.is(typeof out.then, 'undefined')
+  const open = src.indexOf('{', src.indexOf(')', start))
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1)
+  }
+  throw new Error('unbalanced ' + name)
+}
 
-  const custom = cheapReplies(items, refOf(A, 1), { skipNear: 0, max: 1 })
-  t.alike(custom, [{ key: refOf(B, 1), name: 'Perto', text: 'perto0' }])
+async function cachedRowProps () {
+  const conversa = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  const { cachedRow } = await import('../src/namesCache.js')
+  const { canDeletePost } = await import('../src/postActions.js')
+  // eslint-disable-next-line no-new-func
+  return new Function(
+    'cachedRow', 'canDeletePost', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'postAt',
+    [sourceFn(conversa, 'refOf'), sourceFn(conversa, 'identityOf'), sourceFn(conversa, 'canDeleteHere'), sourceFn(conversa, 'rowProps'), 'return rowProps'].join('\n')
+  )(cachedRow, canDeletePost, () => null, () => null, () => null, () => null, (p) => (p ? p.name : null), () => null)
+}
 
-  const upper = cheapReplies(items, refOf(A, 1).toUpperCase(), { max: 1 })
-  t.is(upper[0].key, refOf(C, 2))
+const engOf = (over = {}) => ({ counts: new Map(), state: { liked: new Set(), reposted: new Set() }, pending: new Map(), toggle () {}, ...over })
 
-  t.alike(cheapReplies([far1, far2, far3], refOf(A, 1)), [], 'no parent row, so distance is unknown')
-  t.alike(cheapReplies(items, 'nope'), [])
-  t.alike(cheapReplies(null, refOf(A, 1)), [])
-  t.alike(cheapReplies(items, refOf(A, 1), { max: 0 }), [], 'a max of 0 is a cap, not the default')
-  t.alike(cheapReplies([...items, far1], refOf(A, 1), { max: 4 }).map((r) => r.key), [refOf(C, 2), refOf(C, 3), refOf(C, 4)])
+test('Conversa rowProps: a cached row keeps its props until what it shows changes', async (t) => {
+  const rowProps = await cachedRowProps()
+  const cache = new Map()
+  const item = post(B, 2, { replyTo: { author: C, seq: 1 } })
+  const names = { profileOf: () => null }
+  const calls = []
+  const handlersA = { onOpenThread () {}, onOpenMember () {}, onReply: (x) => calls.push(['old', x.ref]), onDelete: () => calls.push('old delete') }
+  const base = { item, names, peeked: null, now: 1, ownKey: B, follows: null, cache, rowKey: 'r' }
+  const eng = engOf()
+  const first = rowProps({ ...base, eng, handlers: handlersA })
+  t.is(rowProps({ ...base, eng, handlers: { ...handlersA } }), first, 'a new handlers object alone keeps the props')
+  t.is(rowProps({ ...base, eng, handlers: handlersA, extra: { replyToName: null, onOpenParent: undefined } }) === first, false, 'extra values are inputs')
 
-  const ghost = post(A, 1, { text: 'copia' })
-  const echo = post(B, 6, { replyTo: { author: A, seq: 1 }, text: 'eco', name: 'Eco' })
-  const gap = Array.from({ length: 6 }, (_, i) => post(D, i + 30, { text: 'g' }))
-  t.alike(cheapReplies([ghost, ...gap, parent, echo], refOf(A, 1)), [], 'near a later copy of the parent is still near')
+  // Handlers of a later render run, though the props object is the old one.
+  const handlersB = { ...handlersA, onReply: (x) => calls.push(['new', x.ref]), onDelete: () => calls.push('new delete') }
+  const same = rowProps({ ...base, eng, handlers: handlersB })
+  same.onReply()
+  same.onDelete()
+  t.alike(calls, [['new', B + ':2'], 'new delete'], 'reply and delete call the newest handlers')
 
-  const above = post(B, 9, { replyTo: { author: A, seq: 1 }, text: 'acima', name: 'Bo' })
-  const below = post(C, 9, { replyTo: { author: A, seq: 1 }, text: 'abaixo', name: 'Ca' })
-  const pads = Array.from({ length: 9 }, (_, i) => post(D, i + 1, { text: 'p' }))
-  const after = Array.from({ length: 6 }, (_, i) => post(D, i + 20, { text: 'q' }))
-  const beside = post(B, 7, { replyTo: { author: A, seq: 1 }, text: 'colada', name: 'Bo' })
-  const found = cheapReplies([above, ...pads, parent, beside, ...after, below], refOf(A, 1), { skipNear: 5, max: 3 })
-  t.alike(found.map((r) => r.text), ['acima', 'abaixo'])
+  const liked = engOf({ state: { liked: new Set([B + ':2']), reposted: new Set() } })
+  const afterLike = rowProps({ ...base, eng: liked, handlers: handlersB })
+  t.ok(afterLike !== same && afterLike.liked === true, 'a reaction rebuilds the row')
+  const counted = engOf({ state: liked.state, counts: new Map([[B + ':2', { replies: 1, likes: 1, reposts: 0, quotes: 0 }]]) })
+  const withCounts = rowProps({ ...base, eng: counted, handlers: handlersB })
+  t.ok(withCounts !== afterLike && withCounts.counts.likes === 1, 'new counts rebuild the row')
+  const refetched = engOf({ state: liked.state, counts: new Map([[B + ':2', { replies: 1, likes: 1, reposts: 0, quotes: 0 }]]) })
+  t.is(rowProps({ ...base, eng: refetched, handlers: handlersB }), withCounts, 'equal counts in new objects keep the props')
 
-  const textReply = post(C, 21, { replyTo: { author: A, seq: 1 }, text: 'texto', name: 'Ca' })
-  const gap6 = Array.from({ length: 6 }, (_, i) => post(D, i + 60, { text: 'r' }))
-  const wrapper = { ...post(D, 50, { text: '' }), kind: 'repost', to: { author: A, seq: 1 } }
-  t.alike(cheapReplies([wrapper, ...gap6, textReply], refOf(A, 1)).map((r) => r.text), ['texto'],
-    'a repost row of the parent marks where the parent is')
-  const photo1 = post(B, 20, { replyTo: { author: A, seq: 1 }, text: '  ', name: 'Foto' })
-  const photo2 = post(B, 21, { replyTo: { author: A, seq: 1 }, text: '', name: 'Foto' })
-  t.alike(cheapReplies([parent, ...gap6, photo1, photo2, textReply], refOf(A, 1)).map((r) => r.text), ['texto'],
-    'photo-only replies do not use up the slots')
-  const wrapReply = { ...post(C, 20, { replyTo: { author: A, seq: 1 }, text: 'nao' }), kind: 'repost', to: { author: D, seq: 99 } }
-  t.alike(cheapReplies([parent, ...gap6, wrapReply, textReply], refOf(A, 1)).map((r) => r.text), ['texto'],
-    'a repost wrapper is not a reply')
+  const toggles = []
+  const live = engOf({ state: liked.state, counts: refetched.counts, toggle: (kind, ref) => toggles.push([kind, ref]) })
+  rowProps({ ...base, eng: live, handlers: handlersB }).onLike()
+  t.alike(toggles, [['like', B + ':2']], 'like toggles on the newest engagement')
+
+  const named = rowProps({ ...base, eng: live, handlers: handlersB, names: { profileOf: (k) => (k === C ? { name: 'Cida' } : null) } })
+  t.ok(named.replyToName === 'Cida', 'a profile learned later rebuilds the reply chip')
+  const noDelete = rowProps({ ...base, eng: live, handlers: { ...handlersB, onDelete: undefined }, names: { profileOf: (k) => (k === C ? { name: 'Cida' } : null) } })
+  t.is(noDelete.onDelete, undefined, 'a handler no longer offered drops its button')
+
+  const uncached = rowProps({ ...base, cache: undefined, eng: live, handlers: handlersB })
+  t.ok(uncached !== rowProps({ ...base, cache: undefined, eng: live, handlers: handlersB }), 'without a cache every call builds')
 })
 
-test('cheapRepliesMap: one walk for many parents, cheapReplies rules kept', async (t) => {
-  const { cheapReplies, cheapRepliesMap } = await import('../src/threadRows.js')
-  const A = 'a'.repeat(64)
-  const B = 'b'.repeat(64)
-  const C = 'c'.repeat(64)
-  const row = (author, seq, extra = {}) => ({ kind: 'post', author, seq, at: '2026-10-20T10:00:00.000Z', text: author[0] + seq, name: 'N' + seq, ...extra })
-  const pad = (from) => Array.from({ length: 7 }, (_, i) => row(C, from + i))
-  const list = [
-    row(A, 1),
-    ...pad(100),
-    row(B, 1, { replyTo: { author: A, seq: 1 } }),
-    row(B, 2, { replyTo: A.toUpperCase() + ':1' }),
-    row(B, 3, { replyTo: { author: A, seq: 1 }, text: '' }),
-    { ...row(B, 4, { replyTo: { author: A, seq: 1 } }), kind: 'repost', to: { author: A, seq: 2 } },
-    row(B, 8, { replyTo: { author: A, seq: 2 } }),
-    ...pad(200),
-    row(B, 5, { replyTo: { author: A, seq: 2 } }),
-    row(B, 1, { replyTo: { author: A, seq: 1 } }),
-    row(B, 6, { replyTo: { author: A, seq: 1 } }),
-    row(B, 7, { replyTo: { author: A, seq: 3 } })
-  ]
-  const map = cheapRepliesMap(list, [A + ':1', A.toUpperCase() + ':2', A + ':3', 'nada', B + ':1'])
-  const keys = (lines) => (lines || []).map((l) => l.key)
-  t.alike(keys(map.get(A + ':1')), [B + ':1', B + ':2'], 'two lines in list order, a blank skipped')
-  t.alike(keys(map.get(A + ':2')), [B + ':5'], 'a repost row places its original; the reply beside it is a row')
-  t.alike(map.get(A + ':3'), [], 'a parent that is not in the list gets no lines')
-  t.alike(map.get(B + ':1'), [], 'no reply, no lines')
-  t.ok(!map.has('nada') && map.size === 4, 'an invalid ref is left out')
-  t.alike(cheapReplies(list, A.toUpperCase() + ':1'), map.get(A + ':1'), 'cheapReplies is the one-ref case')
-  t.alike(cheapRepliesMap(list, []), new Map())
-  t.alike(cheapRepliesMap(null, [A + ':1']).get(A + ':1'), [])
-  t.alike(keys(cheapRepliesMap(list, [A + ':1'], { max: 3 }).get(A + ':1')), [B + ':1', B + ':2', B + ':6'], 'a repeat of a shown key is skipped')
+test('Conversa rowProps: repost and quoting rows keep their props over the same peeks', async (t) => {
+  const conversa = fs.readFileSync(path.join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  const { cachedRow } = await import('../src/namesCache.js')
+  const { canDelete } = await import('../src/deletion.js')
+  const { assembleMember } = await import('../src/thread.js')
+  const memoLine = conversa.split('\n').find((line) => line.startsWith('const postsByPeek = ')) || ''
+  // eslint-disable-next-line no-new-func
+  const { rowProps, postAt } = new Function(
+    'cachedRow', 'canDelete', 'postLink', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'assembleMember',
+    [memoLine, sourceFn(conversa, 'refOf'), sourceFn(conversa, 'parseRef'), sourceFn(conversa, 'postAt'), sourceFn(conversa, 'identityOf'), sourceFn(conversa, 'rowProps'), 'return { rowProps, postAt }'].join('\n')
+  )(cachedRow, canDelete, () => null, () => null, () => null, () => null, () => null, assembleMember)
+  const at = '2026-11-01T10:00:00.000Z'
+  const peeked = new Map([[C, { key: C, entries: [{ seq: 1, record: { type: 'post', text: 'original', at, replyTo: null } }], profile: null, username: null }]])
+  const cache = new Map()
+  const names = { profileOf: () => null }
+  const handlers = { onOpenThread () {}, onOpenMember () {} }
+  const base = { names, peeked, now: 1, ownKey: A, follows: null, eng: null, handlers, cache }
+  // Membro's repost row: the original comes from postAt on every render.
+  const repost = () => rowProps({ ...base, item: postAt(peeked, C + ':1'), extra: { repostedBy: null }, rowKey: 'repost:3' })
+  t.is(repost(), repost(), 'a repost row keeps its props')
+  const quoting = post(B, 2, { quote: { author: C, seq: 1 } })
+  const quoted = () => rowProps({ ...base, item: quoting, rowKey: 'post:2' })
+  const first = quoted()
+  t.is(first.quote.text, 'original', 'the quote shows the original')
+  t.is(quoted(), first, 'a quoting row keeps its props')
+  // A merged peek is a new object: the row shows what it now holds.
+  peeked.set(C, { ...peeked.get(C), entries: [{ seq: 1, record: { type: 'post', text: 'original', at, replyTo: null } }] })
+  t.ok(quoted() !== first, 'a new peek rebuilds the row')
 })

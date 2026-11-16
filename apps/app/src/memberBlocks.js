@@ -31,13 +31,21 @@ export function blockedSetOf (answer) {
   return new Set(keys.filter((key) => typeof key === 'string' && HEX64.test(key)))
 }
 
+// The text of a reply quote whose message cannot be shown, as Conversa words a
+// missing one.
+export const UNAVAILABLE_REPLY_QUOTE = 'Mensagem indisponível'
+
 // What a PostRow draws: null for a post by a blocked author or a repost by one,
-// else the row's quote, which reads as unavailable when its author is blocked.
-export function blockedRowView ({ author, repostedBy, quote }, has) {
+// else the row's quote and reply quote, each of which reads as unavailable
+// when its author is blocked.
+export function blockedRowView ({ author, repostedBy, quote, replyQuote }, has) {
   if (has(author)) return null
   if (repostedBy && has(repostedBy.author)) return null
-  if (!quote || !has(quote.author)) return { quote }
-  return { quote: { author: quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, preview: null, persist: false, missing: true, onOpen: quote.onOpen } }
+  const shownReply = replyQuote && typeof replyQuote.senderKey === 'string' && has(replyQuote.senderKey)
+    ? { name: null, text: UNAVAILABLE_REPLY_QUOTE, senderKey: undefined, onPress: undefined }
+    : replyQuote
+  if (!quote || !has(quote.author)) return { quote, replyQuote: shownReply }
+  return { quote: { author: quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, preview: null, persist: false, missing: true, onOpen: quote.onOpen }, replyQuote: shownReply }
 }
 
 // Rows that carry the person in `key`: notices, followers and following. The

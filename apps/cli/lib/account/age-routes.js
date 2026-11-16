@@ -5,6 +5,7 @@ const { verifyAge } = require('@varanda/core/lib/age')
 const { createAgeVerified, createAgeSince } = require('@varanda/core/lib/age-proof')
 const { isCanonicalIso } = require('@varanda/core/lib/cert')
 const { inviteId, CODE_RE } = require('./invites-store')
+const { staleUnlinked, AGE_UNLINKED_TTL_MS } = require('./age-store')
 const { isAppRequest, ageReturnUrl } = require('./app-return')
 
 // Hosted age verification with Didit (mounted by ./server.js):
@@ -31,7 +32,9 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 //     the node treats a member certificate dated in that window as already
 //     verified, on any device. An age store, age-check.json or directory
 //     floor that cannot answer is the usual 503 indisponivel, never a null: null tells the node
-//     to drop the since it holds, so it is kept for the cases above. A
+//     to drop the since it holds, so it is kept for the cases above. A floor
+//     that failed at start is recomputed by a later request (retryingFloor,
+//     at most every 30 s), and each failure is logged once per episode. A
 //     separate route because installed apps parse the policy strictly.
 //   - start mints a single-use nonce for a member key with no proof and no
 //     directory link (the key may be a fresh passkey that is not linked yet),
@@ -107,6 +110,10 @@ function createFailureToken (reason) {
   return reason === 'entrada' || /^http-4\d\d$/.test(String(reason)) ? 'indisponivel' : 'resultado-incerto'
 }
 const CLEANUP_DELAYS_MS = Object.freeze([30 * 1000, 120 * 1000, 600 * 1000])
+// Forgets per sweep pass: each one rewrites age.json through the store's
+// queue, so a backlog is worked off over several hourly passes instead of
+// holding the queue for one long pass.
+const SWEEP_MAX = 200
 
 // The start of the UTC day after the one holding `iso`.
 function nextUtcDay (iso) {
@@ -149,19 +156,29 @@ function createAgeRoutes ({
   issuer = null,
   ageCheck = null,
   directoryFloor = null,
-  cleanupDelays = CLEANUP_DELAYS_MS
+  linking = () => false,
+  cleanupDelays = CLEANUP_DELAYS_MS,
+  sweepMax = SWEEP_MAX
 }) {
   const { send, redirect, readJsonBody, checkPost, RouteError, refuse, keyedWindow, fixedWindow } = http
   if (didit !== null && (typeof didit.createSession !== 'function' || typeof didit.decision !== 'function' || typeof didit.deleteSession !== 'function')) {
     throw new TypeError('didit inválido')
   }
   if (!Number.isSafeInteger(dailyLimit) || dailyLimit < 1) throw new TypeError('ageDailyLimit must be a positive integer')
+  if (!Number.isSafeInteger(sweepMax) || sweepMax < 1) throw new TypeError('sweepMax must be a positive integer')
   if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be a canonical ISO timestamp')
   if (issuer !== null && (typeof issuer !== 'object' || !issuer.keyPair || !issuer.cert)) throw new TypeError('issuer must be { keyPair, cert } or null')
-  if (ageCheck !== null && (typeof ageCheck !== 'object' || (ageCheck.ok === true && ageCheck.enabledAt !== null && !isCanonicalIso(ageCheck.enabledAt)))) {
+  // Each floor is a result, or a function giving the current result (a
+  // retryingFloor of ./age-check-state.js, so a floor that failed at start
+  // can recover without a restart).
+  const checkOf = typeof ageCheck === 'function' ? ageCheck : () => ageCheck
+  const floorOf = typeof directoryFloor === 'function' ? directoryFloor : () => directoryFloor
+  const checkAtStart = checkOf()
+  const floorAtStart = floorOf()
+  if (checkAtStart !== null && (typeof checkAtStart !== 'object' || (checkAtStart.ok === true && checkAtStart.enabledAt !== null && !isCanonicalIso(checkAtStart.enabledAt)))) {
     throw new TypeError('ageCheck must be a settleAgeCheck result or null')
   }
-  if (directoryFloor !== null && (typeof directoryFloor !== 'object' || (directoryFloor.ok === true && directoryFloor.floor !== null && !isCanonicalIso(directoryFloor.floor)))) {
+  if (floorAtStart !== null && (typeof floorAtStart !== 'object' || (floorAtStart.ok === true && floorAtStart.floor !== null && !isCanonicalIso(floorAtStart.floor)))) {
     throw new TypeError('directoryFloor must be a directoryFloor result or null')
   }
 
@@ -197,6 +214,56 @@ function createAgeRoutes ({
   const creating = new Map()
   // Abandoned sessions reach the provider's deletion even with no traffic.
   if (on) setInterval(sweep, 3600 * 1000).unref()
+
+  // A band is kept for a key that links; one that never links is forgotten 30
+  // days after checkedAt (AGE_UNLINKED_TTL_MS), whether the person gave up or
+  // the cap refused the unsigned name step. Never a linked member, a page, a
+  // deleted account (the deletion sweep owns it) or a link in flight; a store
+  // that cannot answer for any of them keeps the record. Once at start, then
+  // hourly, one pass at a time, through the store's own queue, at most
+  // sweepMax forgets a pass (the next pass takes the rest). Logs counts only.
+  function heldKey (member) {
+    try {
+      return store.status(member).linked || store.pageStatus(member) !== null || store.deletedAt(member) !== null || linking(member) === true
+    } catch {
+      return true
+    }
+  }
+  let sweeping = null
+  function sweepRecords () {
+    if (!on) return Promise.resolve(0)
+    if (sweeping !== null) return sweeping
+    sweeping = (async () => {
+      let keys
+      try {
+        keys = staleUnlinked(ages.entries(), { held: heldKey, now: now(), ttlMs: AGE_UNLINKED_TTL_MS })
+      } catch {
+        return 0
+      }
+      let done = 0
+      let failed = 0
+      let tried = 0
+      for (const member of keys) {
+        if (tried >= sweepMax) break
+        // A link may have started since the list was read.
+        if (heldKey(member)) continue
+        tried++
+        try {
+          if ((await ages.forget(member)).changed) done++
+        } catch {
+          failed++
+        }
+      }
+      if (done > 0) log({ event: 'idade', reason: 'varridas', count: done })
+      if (failed > 0) log({ event: 'idade', reason: 'varredura-falhou', count: failed })
+      return done
+    })().finally(() => { sweeping = null })
+    return sweeping
+  }
+  if (on) {
+    setTimeout(sweepRecords, 0).unref()
+    setInterval(sweepRecords, 3600 * 1000).unref()
+  }
 
   function slotOf (member, app) {
     return (app ? 'app:' : 'web:') + member
@@ -357,25 +424,33 @@ function createAgeRoutes ({
   // was turned on, or than the latest certificate of an unbanded link, would
   // vouch for certificates issued while it was not really on. A failing
   // store, age-check.json or directory floor refuses instead: null would
-  // tell the node to drop the since it already holds.
+  // tell the node to drop the since it already holds. Each failure logs once
+  // per episode (a request that finds it working again re-arms the line), so
+  // a store that stays down does not write a line per request.
   let checkLogged = false
+  let storageLogged = false
   function effectiveSince () {
     if (!on || since === null || issuer === null) return null
-    if ((ageCheck !== null && ageCheck.ok !== true) || (directoryFloor !== null && directoryFloor.ok !== true)) {
+    const check = checkOf()
+    const floor = floorOf()
+    if ((check !== null && check.ok !== true) || (floor !== null && floor.ok !== true)) {
       if (!checkLogged) log({ event: 'idade', reason: 'estado-indisponivel' })
       checkLogged = true
       throw refuse('indisponivel')
     }
+    checkLogged = false
     let first
     try {
       first = ages.earliest()
     } catch {
-      log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+      if (!storageLogged) log({ event: 'idade', reason: 'armazenamento-indisponivel' })
+      storageLogged = true
       throw refuse('indisponivel')
     }
+    storageLogged = false
     if (first === null) return null
     let effective = since
-    const floors = [nextUtcDay(first), ageCheck === null ? null : ageCheck.enabledAt, directoryFloor === null ? null : directoryFloor.floor]
+    const floors = [nextUtcDay(first), check === null ? null : check.enabledAt, floor === null ? null : floor.floor]
     for (const floor of floors) {
       if (floor !== null && floor > effective) effective = floor
     }
@@ -616,7 +691,7 @@ function createAgeRoutes ({
     return { nonces: nonces.size, sessions: sessions.size }
   }
 
-  return { owns, handle, required, verified, stats }
+  return { owns, handle, required, verified, stats, sweepRecords }
 }
 
 module.exports = {

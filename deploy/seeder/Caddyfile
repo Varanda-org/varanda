@@ -22,9 +22,12 @@
 	}
 }
 
-{$VARANDA_DOMAIN} {
-	encode zstd gzip
-
+# Os cabeçalhos de segurança, definidos uma vez só e importados pelo site e
+# pelo handle_errors abaixo. O '-Server' adia o bloco inteiro até a resposta
+# ser escrita, e um erro (o 404 do file_server, um 429 do rate_limit, um 502
+# do proxy) não passa por esse escritor: sem o handle_errors, esses erros
+# sairiam sem CSP, nosniff e frame-ancestors.
+(cabecalhos_seguranca) {
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		# 'wasm-unsafe-eval' só permite compilar WebAssembly (os hashes do
@@ -42,6 +45,19 @@
 		# O microfone só na própria origem, para gravar mensagens de voz.
 		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
 		-Server
+	}
+}
+
+{$VARANDA_DOMAIN} {
+	encode zstd gzip
+
+	import cabecalhos_seguranca
+
+	# Uma resposta de erro recebe os mesmos cabeçalhos de segurança. O
+	# Cache-Control no-store de @ausenteArquivo e @ausenteApp já foi posto
+	# antes do erro e continua na resposta.
+	handle_errors {
+		import cabecalhos_seguranca
 	}
 
 	# Cache. Tudo o que sai de /srv/web (index.html, sw.js, varanda-node.js,

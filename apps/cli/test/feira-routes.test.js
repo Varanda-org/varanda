@@ -391,6 +391,52 @@ test('signup: a Feira code passes the invite check and consumes one Feira row, n
   t.absent(s.logs.join('\n').includes(a) || s.logs.join('\n').includes(b), 'no code in the logs')
 })
 
+test('signup: unsigned starts on codes of one owner hold none of the weekly Feira cap', async (t) => {
+  const s = await setup(t, { perWeek: 1 })
+  const seller = member()
+  await linkDirect(s, seller, 'ana')
+  s.listings.set(seller.hex + '/3', listingOf(seller.hex, 3))
+  const codes = []
+  for (let i = 0; i < 4; i++) codes.push((await feiraStart(s, seller.hex, 3)).body.code)
+  const names = ['bia', 'caio', 'duda']
+  const starts = await Promise.all(codes.slice(0, 3).map((c, i) => startWith(s, member(), names[i], c)))
+  t.alike(starts.map((r) => r.status), [200, 200, 200], 'an unsigned start holds no slot')
+  const newcomer = member()
+  const done = await linkWith(s, newcomer, 'edu', codes[3])
+  t.is(done.cert.member, newcomer.hex, 'the signed finish still sees the whole cap')
+  t.is(s.feiraStore.count().used, 1)
+  t.is(s.invites.check(inviteId(codes[1])), 'convite-invalido', 'the link used the one slot')
+})
+
+test('signup: two finishes in flight for the last Feira slot, exactly one links', async (t) => {
+  const s = await setup(t, { perWeek: 1 })
+  const seller = member()
+  await linkDirect(s, seller, 'ana')
+  s.listings.set(seller.hex + '/3', listingOf(seller.hex, 3))
+  const a = (await feiraStart(s, seller.hex, 3)).body.code
+  const b = (await feiraStart(s, seller.hex, 3)).body.code
+  // The first link waits in store.finish until the second finish is in too
+  // (a second store.finish, or a refusal that settles it).
+  let open
+  const gate = new Promise((resolve) => { open = resolve })
+  const finish = s.store.finish
+  let calls = 0
+  s.store.finish = async (...args) => {
+    if (++calls >= 2) open()
+    await gate
+    return finish(...args)
+  }
+  const runs = [linkWith(s, member(), 'bia', a), linkWith(s, member(), 'caio', b)]
+  for (const p of runs) p.then(open, open)
+  const res = await Promise.allSettled(runs)
+  s.store.finish = finish
+  t.is(res.filter((r) => r.status === 'fulfilled').length, 1, 'one link')
+  const lost = res.filter((r) => r.status === 'rejected')
+  t.alike(lost.map((r) => r.reason.token), ['convite-invalido'], 'the other is refused at finish')
+  t.is(calls, 1, 'the refused finish never reached the directory')
+  t.is(s.feiraStore.count().used, 1, 'one Feira row used')
+})
+
 test('Excluir conta: the sweep forgets the member in both invite files', async (t) => {
   const dir = path.join(tmpDir(t), 'account')
   const primary = openInvitesStore(dir, { perWeek: 2 })

@@ -41,10 +41,6 @@
 // pasted link; cards other people send still show. The choice lives in the
 // same previewPrefStore() (../previewBuild) the composers read, so it reaches
 // them and survives a restart on every platform.
-// Tocar música sozinha (src/postMusic.js), right above it: off, a post's
-// Audius track or snippet plays only on a tap, in the full card. The choice
-// lives in musicAutoStore() (../musicAutoStore), and setMusicAutoEnabled
-// tells the mounted posts at once.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
@@ -76,8 +72,6 @@ import { BLOCK_TEXTS } from '../memberBlocks'
 import { pagesOn } from '../pageGate'
 import { PREVIEW_PREF_LABEL, previewsEnabled, setPreviewsEnabled } from '../previewPref'
 import { previewPrefStore } from '../previewBuild'
-import { MUSIC_AUTO_PREF_LABEL, MUSIC_AUTO_PREF_NOTE, musicAutoEnabled, setMusicAutoEnabled } from '../postMusic'
-import { musicAutoStore } from '../musicAutoStore'
 import { buildInfo, fetchDeployedCommit, versionDetails, versionLines } from '../version'
 import { runningRelease } from '../runningRelease'
 import { installationOrigin } from '../installation'
@@ -211,12 +205,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const togglePreviews = () => {
     const next = !previews
     if (setPreviewsEnabled(prefStore, next)) setPreviews(next)
-  }
-  const musicStore = musicAutoStore()
-  const [musicAuto, setMusicAuto] = useState(() => musicAutoEnabled(musicStore))
-  const toggleMusicAuto = () => {
-    const next = !musicAuto
-    if (setMusicAutoEnabled(musicStore, next)) setMusicAuto(next)
   }
   const [confirm, setConfirm] = useState(null) // null | 'sair' | 'recomecar'
   const exit = useAction()
@@ -503,9 +491,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
-              <View style={styles.rowDivider}>
-                <SwitchRow label={MUSIC_AUTO_PREF_LABEL} caption={MUSIC_AUTO_PREF_NOTE} value={musicAuto} onValueChange={toggleMusicAuto} />
-              </View>
               <View style={styles.rowDivider}>
                 <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
               </View>

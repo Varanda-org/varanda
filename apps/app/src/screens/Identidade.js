@@ -263,7 +263,7 @@ function accepted (key, record) {
   noteDate(key, record.date)
 }
 
-function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, setup = false, onChanged, onLinked, onInviteChanged, onPhoneRecheck, feira = null }) {
+function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, setup = false, onChanged, onLinked, onInviteChanged, onPhoneRecheck, onRead, feira = null }) {
   const node = useNode()
   const styles = useStyles(makeStyles)
   // The onboarding uses large full-width buttons, Ajustes keeps its compact card.
@@ -340,6 +340,12 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
   useEffect(() => { if (active) load() }, [active, load])
 
   const cur = acct !== null && acct.key === publicKey ? acct : null
+  // The shell keeps the splash over 'Escolha seu @nome' until the account
+  // state of this key is read (src/setupInfoKnown.js).
+  const acctRead = cur !== null || acctError !== ''
+  useEffect(() => {
+    if (acctRead && typeof onRead === 'function') onRead(publicKey)
+  }, [onRead, acctRead, publicKey])
   const status = cur === null ? null : cur.status
   const linked = status !== null && status.linked === true
 
@@ -697,7 +703,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
 // onStepHeld: true while a step must be finished on this screen (a code that
 // opened the root, a creation awaiting 'concluir'), so the shell keeps a post
 // preview from replacing it; false otherwise and on unmount.
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, onInfo, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, invite = null, feira = null }) {
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, initialInfo = null, onInfo, onInfoError, onAccountRead, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, invite = null, feira = null }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -706,7 +712,9 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   const pkStatus = passkey !== null ? passkey.status : null
   const locked = passkey !== null && (pkStatus === null || pkStatus.unlocked !== true)
   const generation = passkey !== null ? passkey.generation : 0
-  const [info, setInfo] = useState(null)
+  // The shell's node.info (manual setup without passkey), so the step does
+  // not read it again behind a short loading state.
+  const [info, setInfo] = useState(initialInfo)
   const [identity, setIdentity] = useState(null)
   const [loadError, setLoadError] = useState('')
   const [certText, setCertText] = useState('')
@@ -789,11 +797,18 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       setLoadError('')
     } catch (err) {
       setLoadError(errorText(err))
+      // The shell's splash waits for an answer (coverBoot infoKnown): an
+      // error must reach it now, not after the step's patience runs out.
+      if (notify && typeof onInfoError === 'function') onInfoError(errorText(err))
     }
-  }, [node.request, onInfo])
+  }, [node.request, onInfo, onInfoError])
 
   // An unlock, lock or reset changed the identity: what was read is stale.
+  // Not on mount, where initialInfo is the fresh read.
+  const mountGeneration = useRef(generation)
   useEffect(() => {
+    if (mountGeneration.current === generation) return
+    mountGeneration.current = null
     setInfo(null)
     setIdentity(null)
     setLoadError('')
@@ -1472,6 +1487,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
             onChanged={refresh}
             onLinked={setup ? onLinked : undefined}
             onPhoneRecheck={onPhoneRecheck}
+            onRead={setup ? onAccountRead : undefined}
             feira={feira}
             onInviteChanged={onInviteChanged}
           />

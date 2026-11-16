@@ -21,14 +21,14 @@ const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-pro
 const { signTerms, TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { openAccountStore, phoneSub } = require('../lib/account/store')
-const { openAgeStore } = require('../lib/account/age-store')
+const { openAgeStore, staleUnlinked, AGE_UNLINKED_TTL_MS } = require('../lib/account/age-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
 const { pairInvites } = require('../lib/account/invites-pair')
 const { FEIRA_AGE_DAILY, FEIRA_AGE_PATH } = require('../lib/account/age-routes')
 const { createDidit } = require('../lib/account/didit')
 const { createAccountServer, COOKIE } = require('../lib/account/server')
 const { createAgeRoutes } = require('../lib/account/age-routes')
-const { settleAgeCheck, readAgeCheck, startAgeCheck, directoryFloor } = require('../lib/account/age-check-state')
+const { settleAgeCheck, readAgeCheck, startAgeCheck, directoryFloor, retryingFloor, RETRY_MS } = require('../lib/account/age-check-state')
 const { readEnv } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
 const { startFakeDidit, loopbackFetch, SESSION_TOKEN } = require('./helpers/fake-didit')
@@ -530,6 +530,88 @@ test('age directory floor: a directory or age store that cannot answer at start 
   const failingAges = { get () { throw new Error('indisponivel') } }
   t.alike(directoryFloor(s.store, failingAges), { ok: false }, 'an age store that cannot answer')
   t.alike(directoryFloor({ exportLinks: () => [{ member: s.linked.hex, linkedAt: 'x' }] }, s.ages), { ok: false }, 'a malformed date')
+})
+
+const STATE_LOGGED = JSON.stringify({ event: 'idade', reason: 'estado-indisponivel' })
+
+test('age since route: an age-check.json unreadable at start recovers on a later request, with no restart', async (t) => {
+  const dir = path.join(tmpDir(t), 'state')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'age-check.json')
+  fs.writeFileSync(file, 'not json')
+  const clock = { offset: 0 }
+  const now = () => Date.now() + clock.offset
+  const compute = () => settleAgeCheck(dir, { on: true, since: SINCE })
+  const first = compute()
+  t.alike(first, { ok: false })
+  const s = await setup(t, { since: SINCE, ageCheck: retryingFloor(first, compute, { now }) })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  t.is((await s.api('GET', '/account/age/since')).status, 503, 'down at start')
+  fs.writeFileSync(file, JSON.stringify({ v: 1, on: true, enabledAt: SINCE }))
+  t.is((await s.api('GET', '/account/age/since')).status, 503, 'not before the retry delay')
+  clock.offset = RETRY_MS + 1000
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200, 'recovered without a restart')
+  t.is(r.body.since.since, SINCE)
+  t.is(s.logs.filter((l) => l === STATE_LOGGED).length, 1, 'one log line for the episode')
+})
+
+test('age since route: a directory that cannot answer at start recovers on a later request, never lowering the since', async (t) => {
+  const clock = { offset: 0 }
+  const now = () => Date.now() + clock.offset
+  const down = { exportLinks () { throw new Error('indisponivel') } }
+  let broken = true
+  const s = await setup(t, {
+    since: SINCE,
+    floor: (store, ages) => retryingFloor(directoryFloor(down, ages), () => directoryFloor(broken ? down : store, ages), { now })
+  })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  t.is((await s.api('GET', '/account/age/since')).status, 503)
+  broken = false
+  clock.offset = RETRY_MS + 1000
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200)
+  const linkedAt = s.store.exportLinks().find((l) => l.member === s.linked.hex).linkedAt
+  t.is(r.body.since.since, new Date(Date.parse(linkedAt) + 1).toISOString(), 'the recomputed floor still covers the unbanded link')
+})
+
+test('age since route: a floor still failing at the retry stays a 503, retried at most once per delay', async (t) => {
+  let calls = 0
+  const clock = { offset: 0 }
+  const now = () => Date.now() + clock.offset
+  const get = retryingFloor({ ok: false }, () => { calls++; return { ok: false } }, { now })
+  for (let i = 0; i < 5; i++) t.alike(get(), { ok: false })
+  t.is(calls, 0, 'no retry inside the delay')
+  clock.offset = RETRY_MS + 1
+  get(); get()
+  t.is(calls, 1, 'one retry per delay')
+  const ok = retryingFloor({ ok: false }, () => ({ ok: true, floor: null }), { now })
+  clock.offset += 2 * RETRY_MS
+  t.alike(ok(), { ok: true, floor: null })
+  t.alike(retryingFloor({ ok: true, floor: null }, () => { throw new Error('never') }, { now })(), { ok: true, floor: null }, 'an ok floor is kept as it is')
+  const throwing = retryingFloor({ ok: false }, () => { throw new Error('x') }, { now })
+  clock.offset += 2 * RETRY_MS
+  t.alike(throwing(), { ok: false }, 'a compute that throws stays failed')
+})
+
+test('age since route: a failing age store logs once per episode, and again after a recovery and a new failure', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  await s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const real = s.ages.earliest
+  let down = true
+  s.ages.earliest = () => {
+    if (down) throw Object.assign(new Error('indisponivel'), { code: 'indisponivel' })
+    return real()
+  }
+  const LINE = JSON.stringify({ event: 'idade', reason: 'armazenamento-indisponivel' })
+  const count = () => s.logs.filter((l) => l === LINE).length
+  for (let i = 0; i < 4; i++) t.is((await s.api('GET', '/account/age/since')).status, 503)
+  t.is(count(), 1, 'one line for four requests')
+  down = false
+  t.is((await s.api('GET', '/account/age/since')).status, 200, 'recovered')
+  down = true
+  for (let i = 0; i < 3; i++) t.is((await s.api('GET', '/account/age/since')).status, 503)
+  t.is(count(), 2, 'a new episode logs again')
 })
 
 test('age check state: an off start that cannot record the off period throws; an on start does not', (t) => {
@@ -1434,4 +1516,213 @@ test('Excluir conta: a deleted key opens no Didit session, and an open one is cl
   t.is(again.status, 409)
   t.alike(again.body, { error: 'conta-excluida' })
   t.is(s.creates().length, createsBefore, 'no new paid session')
+})
+
+// Owner decision (2026-11-15): a refusal for a full member cap forgets the
+// band of the key that was refused, so the attempt leaves nothing behind.
+test('age record: a cap that fills between the age check and the link forgets the refused key\'s band', async (t) => {
+  const s = await setup(t, { phone: true, maxMembers: 2 })
+  const m = member()
+  const other = member()
+  const keep = member()
+  await s.ages.record({ member: m.hex, band: '18+', method: 'didit' })
+  await s.ages.record({ member: keep.hex, band: '16-17', method: 'didit' })
+  t.ok(s.ages.get(m.hex) !== null, 'banded before the link')
+  let fill = null
+  const err = await linkByPhone({
+    origin: s.base,
+    member: m.hex,
+    username: 'bia',
+    sign: async (fields) => {
+      if (fields.action) return signPhone({ ...fields, association: s.iss.association }, m.kp)
+      // The last seat goes to someone else after the phone check, before the finish.
+      fill = linkDirect(s.store, s.iss, other, 'caio')
+      await fill
+      return signAccountLink({ ...fields, association: s.iss.association }, m.kp)
+    },
+    onResponse: (r) => { if (typeof r.request.phone === 'string') s.numbers.push(r.request.phone) }
+  }).then(() => null, (e) => e)
+  t.ok(err !== null, 'the finish was refused')
+  t.ok(fill !== null, 'the cap was filled between the steps')
+  t.is(err.token, 'lista-de-espera')
+  t.is(s.ages.get(m.hex), null, 'the refused key\'s age record is gone')
+  t.ok(s.ages.get(keep.hex) !== null, 'nobody else\'s record is touched')
+  t.absent(ageFile(s).members[m.hex], 'and gone from age.json')
+  t.absent(s.store.status(m.hex).linked, 'no account was created')
+})
+
+test('age record: a cap already full at the phone send forgets the refused key\'s band', async (t) => {
+  const s = await setup(t, { phone: true, maxMembers: 1 })
+  const m = member()
+  await s.ages.record({ member: m.hex, band: '18+', method: 'didit' })
+  const r = await phoneStep(s, m, 'send', { phone: '+5511987654321' })
+  t.is(r.status, 503)
+  t.alike(r.body, { error: 'lista-de-espera' })
+  t.is(s.ages.get(m.hex), null, 'the refused key\'s age record is gone')
+  // The linked member is not a new member: the cap never refuses it, and its band stays.
+  await s.ages.record({ member: s.linked.hex, band: '18+', method: 'didit' })
+  const own = await phoneStep(s, s.linked, 'send', { phone: '+5511987654321' })
+  t.not(own.body.error, 'lista-de-espera')
+  t.ok(s.ages.get(s.linked.hex) !== null, 'a linked member keeps its band')
+})
+
+test('age record: a refusal that cannot forget the band still refuses and logs, without the key', async (t) => {
+  const s = await setup(t, { phone: true, maxMembers: 1 })
+  const m = member()
+  await s.ages.record({ member: m.hex, band: '18+', method: 'didit' })
+  s.c.guardOk = false
+  const r = await phoneStep(s, m, 'send', { phone: '+5511987654321' })
+  t.is(r.status, 503)
+  t.alike(r.body, { error: 'lista-de-espera' })
+  t.ok(s.logs.includes(JSON.stringify({ event: 'idade', reason: 'esquecer-falhou' })))
+  t.absent(s.logs.join('\n').includes(m.hex))
+})
+
+test('age store: an age.json unreadable at start recovers through heal(), and fail() stays final', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, 'age.json')
+  fs.writeFileSync(file, 'not json')
+  const ages = openAgeStore(dir)
+  t.absent(ages.available(), 'unavailable at start')
+  t.exception(() => ages.earliest(), /indisponivel/)
+  t.is(await ages.heal(), false, 'still unreadable')
+  t.is(fs.readFileSync(file, 'utf8'), 'not json', 'never rewritten while invalid')
+  const m = member().hex
+  fs.writeFileSync(file, JSON.stringify({ v: 1, members: { [m]: { band: '18+', method: 'didit', checkedAt: BEFORE } } }))
+  t.is(await ages.heal(), true, 'the recovery is reported (startHeal logs reparado)')
+  t.ok(ages.available(), 'recovered without a restart')
+  t.is(ages.earliest(), BEFORE)
+  t.ok(ages.verified(m))
+  ages.fail()
+  fs.writeFileSync(file, JSON.stringify({ v: 1, members: {} }))
+  t.is(await ages.heal(), false)
+  t.absent(ages.available(), 'fail() (the lock was lost) is never undone')
+})
+
+test('age since route: an age.json that went unreadable answers 503 and the route recovers once the file does', async (t) => {
+  const s = await setup(t, { since: SINCE })
+  const m = member().hex
+  await s.ages.record({ member: m, band: '18+', method: 'didit', checkedAt: BEFORE })
+  const file = path.join(s.dir, 'age.json')
+  fs.writeFileSync(file, 'not json')
+  await s.ages.heal()
+  t.is((await s.api('GET', '/account/age/since')).status, 503, 'down while unreadable')
+  fs.writeFileSync(file, JSON.stringify({ v: 1, members: { [m]: { band: '18+', method: 'didit', checkedAt: BEFORE } } }))
+  await s.ages.heal()
+  const r = await s.api('GET', '/account/age/since')
+  t.is(r.status, 200, 'back with no restart')
+  t.is(r.body.since.since, SINCE)
+})
+
+const DAY = 24 * 3600 * 1000
+
+class RouteError extends Error {
+  constructor (token, status) { super(token); this.token = token; this.status = status }
+}
+
+test('age sweep: staleUnlinked keeps what is held and what is not older than 30 days', (t) => {
+  t.is(AGE_UNLINKED_TTL_MS, 30 * DAY)
+  const now = Date.parse('2026-11-15T12:00:00.000Z')
+  const at = (ms) => new Date(now - ms).toISOString()
+  const entries = [
+    { member: 'old', checkedAt: at(30 * DAY + 1) },
+    { member: 'edge', checkedAt: at(30 * DAY) },
+    { member: 'young', checkedAt: at(29 * DAY) },
+    { member: 'held', checkedAt: at(90 * DAY) }
+  ]
+  t.alike(staleUnlinked(entries, { held: (m) => m === 'held', now }), ['old'])
+  t.alike(staleUnlinked([], { held: () => false, now }), [])
+  let threw = null
+  try { staleUnlinked(entries, { now }) } catch (err) { threw = err }
+  t.ok(threw instanceof TypeError, 'held is required')
+})
+
+// The routes over the real stores of setup(), with the members the sweep must
+// keep: a linked member, a page, an account being deleted and a link in flight.
+async function sweepSetup (t) {
+  const s = await setup(t)
+  const pageKey = member().hex
+  const deleting = member().hex
+  const inFlight = member().hex
+  const store = {
+    status: (m) => s.store.status(m),
+    pageStatus: (m) => (m === pageKey ? { username: 'pagina' } : s.store.pageStatus(m)),
+    deletedAt: (m) => (m === deleting ? '2026-11-01T00:00:00.000Z' : s.store.deletedAt(m))
+  }
+  const sent = []
+  const routes = (extra = {}) => createAgeRoutes({
+    association: s.iss.association,
+    origin: ORIGIN,
+    store,
+    didit: { createSession: async () => {}, decision: async () => {}, deleteSession: async () => {} },
+    ages: s.ages,
+    log: (e) => sent.push(JSON.stringify(e)),
+    now: s.c.now,
+    linking: (m) => m === inFlight,
+    http: { send () {}, RouteError, refuse: (token) => new RouteError(token, 404), keyedWindow: () => () => true, fixedWindow: () => () => true },
+    ...extra
+  })
+  const old = (days) => new Date(s.c.now() - days * DAY).toISOString()
+  return { s, sent, routes, pageKey, deleting, inFlight, old }
+}
+
+test('age sweep: forgets an unlinked key older than 30 days, keeps a younger one, a linked member, a page, a deleting account and a link in flight', async (t) => {
+  const { s, sent, routes, pageKey, deleting, inFlight, old } = await sweepSetup(t)
+  const gone = member().hex
+  const young = member().hex
+  const rec = (m, days) => s.ages.record({ member: m, band: '18+', method: 'didit', checkedAt: old(days) })
+  await rec(gone, 31)
+  await rec(young, 29)
+  await rec(s.linked.hex, 400)
+  await rec(pageKey, 400)
+  await rec(deleting, 400)
+  await rec(inFlight, 400)
+  const n = await routes().sweepRecords()
+  t.is(n, 1)
+  t.is(s.ages.get(gone), null, 'unlinked and older than 30 days: forgotten')
+  t.ok(s.ages.get(young) !== null, 'younger: kept')
+  for (const m of [s.linked.hex, pageKey, deleting, inFlight]) t.ok(s.ages.get(m) !== null, 'held: kept')
+  t.absent(ageFile(s).members[gone], 'gone from age.json')
+  t.alike(sent, [JSON.stringify({ event: 'idade', reason: 'varridas', count: 1 })], 'a count and no key')
+  t.absent(sent.join('\n').includes(gone))
+  t.is(await routes().sweepRecords(), 0, 'nothing left to do')
+})
+
+test('age sweep: a pass forgets at most sweepMax keys, and a later pass takes the rest', async (t) => {
+  const { s, routes, old } = await sweepSetup(t)
+  const keys = [member().hex, member().hex, member().hex]
+  for (const m of keys) await s.ages.record({ member: m, band: '18+', method: 'didit', checkedAt: old(40) })
+  t.is(await routes({ sweepMax: 2 }).sweepRecords(), 2, 'one pass stops at sweepMax')
+  await routes({ sweepMax: 2 }).sweepRecords()
+  t.alike(keys.filter((m) => s.ages.get(m) !== null), [], 'a later pass takes the rest')
+  t.exception.all(() => routes({ sweepMax: 0 }), /sweepMax/)
+})
+
+test('age sweep: does nothing while the age store is unavailable, and a forget that fails is counted without the key and retried', async (t) => {
+  const { s, sent, routes, old } = await sweepSetup(t)
+  const gone = member().hex
+  await s.ages.record({ member: gone, band: '18+', method: 'didit', checkedAt: old(40) })
+  s.c.guardOk = false
+  t.is(await routes().sweepRecords(), 0)
+  t.ok(s.ages.get(gone) !== null, 'the record is still there')
+  t.alike(sent, [JSON.stringify({ event: 'idade', reason: 'varredura-falhou', count: 1 })])
+  t.absent(sent.join('\n').includes(gone), 'no key in the log')
+  s.c.guardOk = true
+  t.is(await routes().sweepRecords(), 1, 'the next pass retries')
+  t.is(s.ages.get(gone), null)
+
+  const down = await sweepSetup(t)
+  await down.s.ages.record({ member: member().hex, band: '18+', method: 'didit', checkedAt: down.old(40) })
+  down.s.ages.fail()
+  t.is(await down.routes().sweepRecords(), 0)
+  t.alike(down.sent, [], 'an unavailable store logs nothing')
+})
+
+test('age sweep: a store that cannot answer for a key keeps its record', async (t) => {
+  const { s, routes, old } = await sweepSetup(t)
+  const m = member().hex
+  await s.ages.record({ member: m, band: '18+', method: 'didit', checkedAt: old(60) })
+  t.is(await routes({ store: { status () { throw new Error('indisponivel') } } }).sweepRecords(), 0)
+  t.ok(s.ages.get(m) !== null)
 })

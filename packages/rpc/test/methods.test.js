@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { MAX_TESTIMONIAL, MAX_SCRAP, TESTIMONIAL_PENDING_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
+const { MAX_TESTIMONIAL, MAX_SCRAP, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, MAX_MESSAGE, MAX_ID, utf8ByteLength } = require('..')
 const { createServerDispatcher, validateResponse, validateParams, METHODS, MUTATING, isMutating, MAX_NAME, MAX_BIO, MAX_TEXT, LOG_LIMIT_MAX, FEED_LIMIT_MAX, PEEK_LIMIT_MAX, NOTICES_LIMIT_DEFAULT, NOTICES_LIMIT_MAX, PROFILE_LIMIT_MAX, ENGAGEMENT_LIMIT_MAX, PEEK_SEQS_MAX, PEEK_TIMEOUT_MS, GROUP_LIMIT_DEFAULT, GROUP_LIMIT_MAX, GROUP_MEMBERS_LIMIT_MAX, MAX_GROUP_NAME, DM_THREAD_LIMIT_MAX } = require('..')
 
 const KEY = 'ab'.repeat(32)
@@ -23,23 +23,52 @@ test('method list and mutating set', (t) => {
     'group.admin', 'group.admit', 'group.ban', 'group.create', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moments.read', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
     'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
-    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
+    'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'username.add'
   ])
 })
 
 test('testimonial limits', (t) => {
   t.is(MAX_TESTIMONIAL, 400)
   t.is(TESTIMONIAL_PENDING_MAX, 64)
+  t.is(TESTIMONIAL_KEPT_MAX, 64)
+  t.is(TESTIMONIAL_DECLINED_MAX, 64)
+})
+
+test('testimonial.decide: kept or declined, u32 seq, optional boolean ifNew', (t) => {
+  t.ok(isMutating('testimonial.decide'))
+  ok(t, 'testimonial.decide', { from: KEY, seq: 1, state: 'kept' }, { from: KEY, seq: 1, state: 'kept', ifNew: false })
+  ok(t, 'testimonial.decide', { from: KEY, seq: 4294967295, state: 'declined', ifNew: true }, { from: KEY, seq: 4294967295, state: 'declined', ifNew: true })
+  ok(t, 'testimonial.decide', { from: KEY, seq: 2, state: 'declined', ifNew: false })
+  for (const field of ['from', 'seq', 'state']) {
+    const missing = { from: KEY, seq: 1, state: 'kept' }
+    delete missing[field]
+    bad(t, 'testimonial.decide', missing, 'missing ' + field)
+  }
+  for (const state of ['hidden', 'shown', 'KEPT', '', null, undefined, 1, true]) {
+    bad(t, 'testimonial.decide', { from: KEY, seq: 1, state }, 'state ' + JSON.stringify(state))
+  }
+  for (const seq of [0, -1, 1.5, 4294967296, Number.MAX_SAFE_INTEGER, '1', null]) {
+    bad(t, 'testimonial.decide', { from: KEY, seq, state: 'kept' }, 'seq ' + String(seq))
+  }
+  for (const from of ['', KEY.toUpperCase(), 'ab'.repeat(31), KEY + ':1', null, 1]) {
+    bad(t, 'testimonial.decide', { from, seq: 1, state: 'kept' })
+  }
+  for (const ifNew of [1, 0, 'true', null, {}]) {
+    bad(t, 'testimonial.decide', { from: KEY, seq: 1, state: 'kept', ifNew }, 'ifNew ' + JSON.stringify(ifNew))
+  }
+  for (const extra of ['extra', 'nonce', 't', 'at', 'on']) {
+    bad(t, 'testimonial.decide', { from: KEY, seq: 1, state: 'kept', [extra]: KEY }, 'extra ' + extra)
+  }
 })
 
 const TESTIMONIAL_PARAMS = [
@@ -116,7 +145,7 @@ test('testimonial results survive RPC response validation', async (t) => {
   const row = { from: KEY, seq, text: '😀'.repeat(400), at: '+275760-09-13T00:00:00.000Z' }
   const results = {
     'testimonial.write': [{ seq, ref: KEY + ':' + seq }],
-    'testimonial.pending': [{ items: [], incomplete: false }, { items: [], incomplete: true }, { items: Array.from({ length: 64 }, () => ({ ...row })), incomplete: false }],
+    'testimonial.pending': [{ items: [], kept: [], incomplete: false }, { items: [], kept: [], incomplete: true }, { items: Array.from({ length: 64 }, () => ({ ...row })), kept: Array.from({ length: 64 }, () => ({ ...row })), incomplete: false }],
     'testimonial.show': [{ seq, ref: KEY + ':' + seq }],
     'testimonial.delete': [{ seq, deleted: [1] }]
   }
@@ -139,7 +168,7 @@ test('testimonial results survive RPC response validation', async (t) => {
       }
       if (method === 'testimonial.pending' && result.items.length === 64) {
         const bytes = utf8ByteLength(JSON.stringify(message))
-        t.is(bytes, 111689, 'maximal four-byte texts, keys, seqs, dates, incomplete flag and envelope')
+        t.is(bytes, 223314, 'maximal pending and kept lists: four-byte texts, keys, seqs, dates, incomplete flag and envelope')
         t.ok(bytes < MAX_MESSAGE, 'pending result fits MAX_MESSAGE')
       }
       dispatcher.close()
@@ -1882,6 +1911,43 @@ test('identity.recoveryLookup', (t) => {
   for (const s of ['CD'.repeat(32), 'cd'.repeat(31), '', null]) bad(t, 'identity.recoveryLookup', { kind: 'passkey', secret: s }, 'bad secret')
   bad(t, 'identity.recoveryLookup', { ...pk, member: KEY }, 'extra key')
   bad(t, 'identity.recoveryLookup', { secret: 'cd'.repeat(32) }, 'missing kind')
+})
+
+test('outbox.seal and outbox.open', (t) => {
+  t.absent(isMutating('outbox.seal'))
+  t.absent(isMutating('outbox.open'))
+  const at = '2026-11-15T12:00:00.000Z'
+  const post = { id: '0123456789abcdef', author: KEY, association: 'cd'.repeat(32), kind: 'post', to: null, text: 'oi\nalguém', writtenAt: at }
+  const reply = { ...post, kind: 'reply', to: KEY + ':7' }
+  ok(t, 'outbox.seal', post, post)
+  ok(t, 'outbox.seal', reply, reply)
+  ok(t, 'outbox.seal', { ...post, text: 'x'.repeat(MAX_TEXT) })
+  ok(t, 'outbox.seal', { ...post, text: '\ud800' }, { ...post, text: '\ud800' })
+  bad(t, 'outbox.seal', { ...post, to: KEY + ':7' }, 'post with a target')
+  bad(t, 'outbox.seal', { ...reply, to: null }, 'reply without a target')
+  for (const to of [KEY + ':0', KEY, 'AB'.repeat(32) + ':1', '']) bad(t, 'outbox.seal', { ...reply, to }, 'bad target')
+  for (const id of ['0123456789abcde', '0123456789ABCDEF', '0123456789abcdef0', 1]) bad(t, 'outbox.seal', { ...post, id }, 'bad id')
+  for (const kind of ['quote', '', null]) bad(t, 'outbox.seal', { ...post, kind }, 'bad kind')
+  for (const text of ['', 'x'.repeat(MAX_TEXT + 1), 'a\u202eb', 'a\u0000b', 'a\u2028b', 'a\u0085b', null]) bad(t, 'outbox.seal', { ...post, text }, 'bad text')
+  for (const writtenAt of ['', 'ontem', 'x'.repeat(33), 0]) bad(t, 'outbox.seal', { ...post, writtenAt }, 'bad writtenAt')
+  for (const k of ['author', 'association']) bad(t, 'outbox.seal', { ...post, [k]: 'AB'.repeat(32) }, 'bad ' + k)
+  for (const k of Object.keys(post)) {
+    const { [k]: _, ...rest } = post
+    bad(t, 'outbox.seal', rest, 'missing ' + k)
+  }
+  bad(t, 'outbox.seal', { ...post, box: 'AAAA' }, 'extra key')
+
+  const { to: _to, text: _text, ...fields } = post
+  const open = { box: 'A'.repeat(8736), ...fields }
+  ok(t, 'outbox.open', open, open)
+  ok(t, 'outbox.open', { ...open, box: 'ab-_' })
+  for (const box of ['A'.repeat(8740), 'A'.repeat(8737), 'A'.repeat(5), '', 'AB+/', 'AB==', 1]) bad(t, 'outbox.open', { ...open, box }, 'bad box')
+  bad(t, 'outbox.open', { ...open, text: 'oi' }, 'extra text')
+  bad(t, 'outbox.open', { ...open, to: null }, 'extra to')
+  for (const k of Object.keys(open)) {
+    const { [k]: _, ...rest } = open
+    bad(t, 'outbox.open', rest, 'missing ' + k)
+  }
 })
 
 test('identity.recoveryOpen', (t) => {

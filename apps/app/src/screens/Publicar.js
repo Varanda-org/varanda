@@ -15,14 +15,14 @@
 // EXIF/GPS; GIFs as they are) and kept ONLY in this page (bytes in memory, a blob: thumbnail): no
 // network, no node call. Privacy by construction: the media core is public
 // (the seeder serves any range of it), so nothing is uploaded before the
-// person presses Publicar; removing an item or closing the composer before
-// that discards it with nothing uploaded. On Publicar the items are uploaded
+// person presses Publicar; removing an item or 'Descartar' before that
+// discards it with nothing uploaded (closing the composer keeps the photos). On Publicar the items are uploaded
 // one at a time (progress per item), then post.create / post.reply carries
 // their descriptors; text may then be empty. If an upload fails, the post is
 // not sent, the descriptors already obtained are kept (a new Publicar does
 // not upload them again) and the item shows 'falhou · tentar de novo'.
 // Bytes already uploaded cannot be taken back: if Publicar was pressed and
-// the upload or the post then failed, closing the composer leaves those
+// the upload or the post then failed, discarding the draft leaves those
 // blocks unused but public in the own media core. Media is never queued in
 // the outbox (it is text-only): offline, attaching is disabled.
 // A share (`shared`) uses the same local encode and may attach while
@@ -47,11 +47,12 @@
 // in the Diário and discards it: never sent again.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { AccessibilityInfo, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { AccessibilityInfo, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
 import { mergeSuggestions } from '../mentionTargets'
+import { handoffSettled, settledAfter } from '../replyHandoff'
 import { useMemberSearch } from '../useMemberSearch'
 import { MentionSuggest } from '../ui/MentionSuggest'
 import { sha256 } from '@noble/hashes/sha2.js'
@@ -96,10 +97,11 @@ import { MusicPicker } from '../ui/MusicPicker'
 import { useMusicAvailable } from '../ui/MusicPlayerCard'
 import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
-import { refusalOf } from '../wordCheck'
+import { previewRefusal, refusalOf } from '../wordCheck'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { tap } from '../ui/haptics'
-import { useKeyboardAvoidEnabled } from '../ui/keyboardAvoid'
+import { KeyboardLift } from '../ui/KeyboardLift'
+import { measureField } from '../ui/fieldMeasure'
 import { layout, space, type } from '../ui/theme'
 import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -383,9 +385,14 @@ export function momentFieldHeight (contentHeight) {
   return Math.min(MOMENT_MAX_HEIGHT, Math.max(MOMENT_MIN_HEIGHT, Math.ceil(contentHeight) + 2))
 }
 // react-native-web keeps a multiline field at its first height (its first
-// line then shows half cut past five lines): there the height follows the
-// content. iOS and Android grow the field themselves.
+// line then shows half cut past five lines) and fires onContentSizeChange
+// only when typing grows it, never when deleting shrinks it: there the height
+// follows the content, read from the textarea (../ui/fieldMeasure), so it
+// grows and shrinks. iOS and Android grow the field themselves.
 const GROW_BY_CONTENT = Platform.OS === 'web'
+// The post field never shrinks below this, and has no maximum: the sheet
+// scrolls.
+const POST_MIN_HEIGHT = 120
 
 // requestAnimationFrame is a global on iOS, Android and the web alike.
 const nextFrame = (fn) => (typeof globalThis.requestAnimationFrame === 'function' ? globalThis.requestAnimationFrame(fn) : setTimeout(fn, 16))
@@ -569,26 +576,8 @@ function useKeepInView (on, caretAtEnd = null, givenFieldRef = null) {
 
 export function SheetKeyboard ({ children }) {
   const styles = useStyles(makeStyles)
-  const ref = useRef(null)
-  const avoidKeyboard = useKeyboardAvoidEnabled()
-  const [top, setTop] = useState(0)
-  const measure = useCallback(() => {
-    const view = ref.current
-    if (!view || typeof view.measureInWindow !== 'function') return
-    view.measureInWindow((x, y) => { if (Number.isFinite(y)) setTop((was) => (was === y ? was : y)) })
-  }, [])
-  useEffect(() => {
-    const sub = Keyboard.addListener('keyboardDidShow', measure)
-    return () => { if (sub && typeof sub.remove === 'function') sub.remove() }
-  }, [measure])
   if (IOS_SCROLL_INSETS) return <View style={styles.flex}>{children}</View>
-  return (
-    <View ref={ref} style={styles.flex} onLayout={measure} collapsable={false}>
-      <KeyboardAvoidingView style={styles.flex} behavior='padding' keyboardVerticalOffset={top} enabled={avoidKeyboard}>
-        {children}
-      </KeyboardAvoidingView>
-    </View>
-  )
+  return <KeyboardLift remeasureOnKeyboard>{children}</KeyboardLift>
 }
 
 // Clock slack when an uncertain send is matched by its `at` timestamp. The
@@ -675,23 +664,30 @@ const ATTACH_AFTER_OPEN_MS = 700
 // `shared` (optional) prefills this post once per id. `onSharedDone(id)`
 // releases the shell's copy of the files. A lock unmounts this screen, so
 // done is skipped then and the shell hands the same share back after unlock.
-export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
+// A send in flight cannot be closed: the upload and the post.create that
+// follow it run to the end, so no Cancelar, swipe, backdrop or back button
+// (the draft stays after a failure, and Cancelar is back).
+const noop = () => {}
+
+export default function Publicar ({ open, reply: replyProp, quote = null, momentRequest = 0, me, onClose, onClearReply, onClearQuote, onPublished, onReplyDraft, busyRef = null, shared = null, onSharedDone = () => {}, onSharedTaken = () => {} }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const reply = quote ? null : replyProp
   const node = useNode()
   const outbox = useOutbox()
   const [text, setText] = useState('')
-  const [replyDrafts, setReplyDrafts] = useState(new Set())
-  const replyDraftsRef = useRef(replyDrafts)
+  // Serials only grow and one hand-off is active at a time, so the highest
+  // settled one stands for all older ones.
+  const [lastSettled, setLastSettled] = useState(0)
+  const lastSettledRef = useRef(lastSettled)
   const hasReplyDraft = reply && typeof reply.draft === 'string'
-  const replyDraftPending = open && hasReplyDraft && !replyDrafts.has(reply.handoff)
+  const replyDraftPending = open && hasReplyDraft && !handoffSettled(lastSettled, reply.handoff)
   const settleReplyDraft = (accepted) => {
-    const prior = replyDraftsRef.current
-    if (prior.has(reply.handoff)) return
-    const next = new Set(prior).add(reply.handoff)
-    replyDraftsRef.current = next
-    setReplyDrafts(next)
+    const prior = lastSettledRef.current
+    if (handoffSettled(prior, reply.handoff)) return
+    const next = settledAfter(prior, reply.handoff)
+    lastSettledRef.current = next
+    setLastSettled(next)
     if (onReplyDraft) onReplyDraft(accepted)
   }
 
@@ -751,6 +747,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const genRef = useRef(0)
   // True while Publicar uploads the items (one send at a time).
   const uploadingRef = useRef(false)
+  // While the node seals a post for the outbox: no second send meanwhile.
+  const queueingRef = useRef(false)
   const [uploading, setUploading] = useState(false)
   const media = node.media && typeof node.media.upload === 'function' ? node.media : null
   const mediaOnline = node.online !== false
@@ -819,6 +817,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const frozen = locked || pageSending
   const openRef = useRef(open)
   openRef.current = open
+  // Bumped on every close: what settles later knows the composer it began in
+  // is gone.
+  const closesRef = useRef(0)
+  useEffect(() => {
+    if (!open) closesRef.current++
+  }, [open])
   const asPageRef = useRef(asPage)
   asPageRef.current = asPage
   const canAttach = typeof pickImages === 'function' && (media !== null || asPage !== null)
@@ -983,11 +987,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setItems((list) => list.filter((item) => !gone.has(item.id)))
   }
 
-  // Closing the composer discards the pending items (the text draft stays);
-  // a late encode or upload result of a discarded item is ignored. Nothing
-  // was uploaded unless Publicar was pressed (see the header). A page post
-  // being sent or waiting for its retry keeps its photos with its text: only
-  // 'Descartar' frees them (or the send settling, see settledAsPage).
+  // Closing the composer (Cancelar, swipe, the backdrop) keeps the text and
+  // the photos or video together, as a page post always did: only 'Descartar'
+  // frees them (or the send settling, see settledAsPage). Nothing was
+  // uploaded unless Publicar was pressed (see the header). The music choice is
+  // dropped and resolves again from a link left in the text.
   useEffect(() => {
     if (open) return
     setEmojiOpen(false)
@@ -999,10 +1003,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     setMusicDraft(null)
     musicTried.current.clear()
-    genRef.current++
-    removeItems(Array.from(liveRef.current))
-    video.draft.clear()
-  }, [open, video.draft])
+  }, [open])
 
   useEffect(() => () => {
     genRef.current++
@@ -1026,7 +1027,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
 
   // Uploads, on Publicar only, the items that have no descriptor yet, one at
   // a time. -> the descriptors in item order, or null when it stopped (an
-  // upload failed, the item was removed or the composer was closed).
+  // upload failed, the item was removed or the composer was unmounted or
+  // discarded). Closing the sheet never stops it: while a send is in flight
+  // the sheet cannot be closed (see dismissable below).
   const uploadAll = async (list, page = null) => {
     const gen = genRef.current
     const out = []
@@ -1241,11 +1244,17 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null)
   }
 
-  // Keeps the post in the outbox (the reply target verbatim). True when it
-  // was stored; otherwise the draft stays with the reason.
-  const queue = (sent, sentReply) => {
+  // Keeps the post in the outbox (the reply target verbatim), sealed by the
+  // node before it is stored. True when it was stored; otherwise the draft
+  // stays with the reason. onPublished only while this composer is still
+  // mounted and open since the seal began: a seal that settles after it
+  // closed (even if it was opened again) reports nothing.
+  const queue = async (sent, sentReply) => {
+    if (queueingRef.current) return false
+    queueingRef.current = true
+    const closes = closesRef.current
     try {
-      outbox.add({
+      await outbox.add({
         author: self.publicKey,
         association: node.config.association,
         kind: sentReply ? 'reply' : 'post',
@@ -1255,9 +1264,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     } catch (err) {
       setCheckError(errorText(err))
       return false
+    } finally {
+      queueingRef.current = false
     }
     setText((current) => (current === sent ? '' : current))
-    onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    if (mountedRef.current && openRef.current && closesRef.current === closes) {
+      onPublished(sentReply ? 'queued-reply' : 'queued-post', sentReply ? sentReply.ref : null)
+    }
     return true
   }
 
@@ -1340,12 +1353,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const send = async () => {
-    if (busy || uploadingRef.current || video.draft.state.phase === 'preparing') return
+    if (busy || uploadingRef.current || queueingRef.current || video.draft.state.phase === 'preparing') return
     setCheckError('')
     // Before every path below (photos, the outbox, a page's signature). The
     // draft is kept, so the person can edit it. A signed post waiting for its
     // retry passed this when it was first sent.
-    const refused = pageRetryRef.current === null ? refusalOf(text) : ''
+    const refused = pageRetryRef.current === null ? (refusalOf(text) || previewRefusal(linkDraft.view)) : ''
     if (refused !== '') {
       setCheckError(refused)
       return
@@ -1378,7 +1391,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
       if (sentMedia === null) return
     } else if (offlineQueue && !sentQuote && sentMusic === null) {
-      queue(sent, sentReply)
+      await queue(sent, sentReply)
       return
     }
     // The node stamps `at` from the same clock: a match must be this send's.
@@ -1434,7 +1447,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // post waits in the outbox (text only: a post with photos or a quote
     // stays here).
     if (sentMusic === null && sentMedia === null && !sentQuote && canQueue && raw && raw.uncertain !== true && raw.message === GATE_MESSAGE) {
-      if (queue(sent, sentReply)) action.clearError()
+      if (await queue(sent, sentReply)) action.clearError()
       return
     }
     if (!r.uncertain) return
@@ -1476,6 +1489,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Locked: the draft is what was signed and waits for its retry. Frozen
   // also covers a page send in flight.
   const held = busy || frozen
+  // The owner's own Back handling (the browser's, over a pushed screen) must
+  // not close the sheet around a send in flight either.
+  const sending = busy || moment.pending
+  useEffect(() => {
+    if (!busyRef) return undefined
+    busyRef.current = sending
+    return () => { busyRef.current = false }
+  }, [busyRef, sending])
   const videoOff = held || hasVideo || items.some((item) => item.status === 'encoding')
   // One launch per handoff serial; attachRef reads the latest attach when the timer fires.
   const attachedHandoffRef = useRef(null)
@@ -1519,6 +1540,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const handleMomentText = moment.setText
   const handleDiscardMoment = moment.reset
   const postDraft = text !== '' || hasMedia
+  // The only way to drop a post draft on purpose: Cancelar never does.
+  const discardPost = () => {
+    if (held) return
+    genRef.current++
+    removeItems(Array.from(liveRef.current))
+    video.draft.clear()
+    setMusicDraft(null)
+    musicTried.current.clear()
+    setText('')
+    setNote('')
+    setCheckError('')
+    action.clearError()
+  }
   const momentCount = momentLength(moment.text)
   const momentStatus = composeStatus({ error: !!moment.error, locked: !moment.unlocked || node.online === false, media: !!(moment.photo.note || moment.note), draft: !!postDraft })
   const momentAnnouncement = useCounterAnnouncement(open && momentMode, momentCount, MOMENT_TEXT_MAX)
@@ -1579,8 +1613,27 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setText(value)
     postView.defer()
   }
+  // The post field's measured height (web only; null until measured or when
+  // there is no measurement). The ref keeps a repeated value from calling the
+  // setter on every keystroke.
+  const [postHeight, setPostHeight] = useState(null)
+  const postHeightRef = useRef(null)
+  useLayoutEffect(() => {
+    if (!GROW_BY_CONTENT || momentMode || !open) return
+    const measured = measureField(inputRef.current, POST_MIN_HEIGHT, Infinity)
+    if (measured === postHeightRef.current) return
+    postHeightRef.current = measured
+    setPostHeight(measured)
+  }, [text, momentMode, open])
   const [momentHeight, setMomentHeight] = useState(MOMENT_MIN_HEIGHT)
   useEffect(() => { if (moment.text === '') setMomentHeight(MOMENT_MIN_HEIGHT) }, [moment.text])
+  // Measured after every change, before the paint, so the box also shrinks
+  // when text is deleted (+ 2 for the border).
+  useLayoutEffect(() => {
+    if (!GROW_BY_CONTENT || !momentMode) return
+    const measured = measureField(momentView.fieldRef.current, MOMENT_MIN_HEIGHT, MOMENT_MAX_HEIGHT, 2)
+    if (measured !== null) setMomentHeight((was) => (was === measured ? was : measured))
+  }, [moment.text, momentMode])
   const growMoment = GROW_BY_CONTENT
     ? (e) => {
         const size = e && e.nativeEvent && e.nativeEvent.contentSize
@@ -1604,8 +1657,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     const useReplyDraft = () => {
       if (held) return
-      genRef.current++
-      removeItems(Array.from(liveRef.current))
+      discardPost()
       setText(reply.draft)
       settleReplyDraft(true)
     }
@@ -1624,7 +1676,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     return (
       <Sheet
         open={open}
-        onClose={onClose}
+        onClose={moment.pending ? noop : onClose}
+        dismissable={!moment.pending}
+        left={moment.pending ? null : undefined}
         grabber
         right={<Pill label='Publicar' filled onPress={sendMoment} pending={moment.pending} disabled={!moment.valid} maxFontSizeMultiplier={TEXT_CAP} />}
       >
@@ -1723,7 +1777,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   return (
     <Sheet
       open={open}
-      onClose={onClose}
+      onClose={busy ? noop : onClose}
+      dismissable={!busy}
+      left={busy ? null : undefined}
       grabber
       right={<Pill label={pillLabel} filled onPress={send} pending={busy} disabled={!valid} maxFontSizeMultiplier={TEXT_CAP} />}
     >
@@ -1820,7 +1876,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               </Text>
               <TextInput
                 ref={inputRef}
-                style={styles.input}
+                style={[styles.input, GROW_BY_CONTENT && postHeight !== null && { height: postHeight }]}
                 value={text}
                 onChangeText={typePost}
                 onLayout={postView.at('field')}
@@ -1992,6 +2048,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 <View style={styles.retryRow}>
                   <Btn label='Descartar' secondary onPress={discardRetry} disabled={busy} />
                 </View>
+              </View>
+              )
+            : null}
+          {!locked && (postDraft || musicDraft !== null)
+            ? (
+              <View style={styles.retryRow}>
+                <Btn label='Descartar' secondary onPress={discardPost} disabled={held} />
               </View>
               )
             : null}
@@ -2245,7 +2308,7 @@ const makeStyles = (colors) => StyleSheet.create({
   input: {
     ...type.compose,
     color: colors.ink,
-    minHeight: 120,
+    minHeight: POST_MIN_HEIGHT,
     paddingTop: 8,
     borderWidth: 0,
     backgroundColor: 'transparent',

@@ -3,7 +3,7 @@
 const { utf8ByteLength, charLength } = require('./text')
 const L = require('./limits')
 const { DM_MEDIA_KEYS, DM_CARD_KEYS } = require('./dm-budget')
-const { cardUrlHost, cardTextLength, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
+const { cardUrlHost, cardTextLength, isCardForbiddenChar, MAX_CARD_TITLE, MAX_CARD_DESC, MAX_CARD_IMAGE_BYTES } = require('./link-card')
 const { MAX_AUDIO_MS } = require('./audio-bounds')
 const F = require('./feira')
 const IC = require('./invite-card')
@@ -563,6 +563,40 @@ function recoverySecretCross (given, value) {
   return null
 }
 
+// outbox.seal / outbox.open (docs/rpc.md 5.124 and 5.125): the fields of an
+// app outbox item, as apps/app/src/outbox.js reviveItem checks them (a leaf
+// module this package cannot import). The text rule is the diary's (C0
+// except LF, DEL, C1, U+2028/9 and the bidi controls refused); writtenAt is
+// what Date.parse reads, at most MAX_ISO chars.
+const OUTBOX_ID_RE = /^[0-9a-f]{16}$/
+const OUTBOX_BOX_RE = /^[A-Za-z0-9_-]+$/
+// base64url of a 24-byte nonce, a 16-byte MAC and the largest plaintext:
+// 254 bytes of fixed fields, 6 bytes per text char (a lone surrogate as
+// \udXXX) and 6 per writtenAt char, under 6 * MAX_TEXT + 512
+// (packages/web-member/lib/outbox-seal.js BOX_MAX).
+const OUTBOX_BOX_MAX = Math.ceil((24 + 16 + 6 * L.MAX_TEXT + 512) * 4 / 3)
+
+const isOutboxId = (v) => typeof v === 'string' && OUTBOX_ID_RE.test(v)
+const isOutboxKind = (v) => v === 'post' || v === 'reply'
+const isOutboxTarget = (v) => v === null || isRef(v, 1)
+const isOutboxWrittenAt = (v) => typeof v === 'string' && v.length >= 1 && v.length <= MAX_ISO && !Number.isNaN(Date.parse(v))
+const isOutboxBox = (v) => typeof v === 'string' && v.length <= OUTBOX_BOX_MAX && v.length % 4 !== 1 && OUTBOX_BOX_RE.test(v)
+
+function isOutboxText (v) {
+  if (typeof v !== 'string') return false
+  const n = charLength(v)
+  if (n < 1 || n > L.MAX_TEXT) return false
+  for (const ch of v) {
+    if (isCardForbiddenChar(ch.codePointAt(0), true)) return false
+  }
+  return true
+}
+
+// A post has no target; a reply targets a ref.
+function outboxTargetCross (given, value) {
+  return (value.kind === 'post') === (value.to === null) ? null : 'parâmetro inválido: to'
+}
+
 // community.leave's force: true skips every wait of the creator's leave, a
 // list only the waits it names.
 const LEAVE_WAITS = ['root', 'groups', 'devices']
@@ -895,9 +929,22 @@ const SPECS = {
     }
   },
   'testimonial.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_TESTIMONIAL)) }, mutating: true },
-  // Result { items: [{ from, seq, text, at }], incomplete: boolean } (5.100).
+  // Result { items: [{ from, seq, text, at }], kept: [{ from, seq, text, at }],
+  // incomplete: boolean } (5.100).
   'testimonial.pending': { fields: none },
   'testimonial.show': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  // Keeps a received testimonial privately or declines it; the decision syncs
+  // across the member's devices in the seen document. ifNew records it only
+  // when none is held for that testimonial.
+  'testimonial.decide': {
+    fields: {
+      from: req(isKey),
+      seq: req(int(1, 4294967295)),
+      state: req((v) => v === 'kept' || v === 'declined'),
+      ifNew: opt(isBool, false)
+    },
+    mutating: true
+  },
   'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
   // Recados (docs/rpc.md): `replyTo` is the ref of the scrap being answered.
   'scrap.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_SCRAP)), replyTo: opt((v) => isRef(v, 1)) }, mutating: true },
@@ -1569,6 +1616,32 @@ const SPECS = {
       userId: req(isKey)
     },
     mutating: true
+  },
+  // Browser node only, the page's and the in-app worklet's (docs/rpc.md 5.124
+  // and 5.125), never the node session or varanda-serve. Neither changes
+  // stored state. The clear text and target travel only in seal's params
+  // and open's result, never in an error or a log.
+  'outbox.seal': {
+    fields: {
+      id: req(isOutboxId),
+      author: req(isKey),
+      association: req(isKey),
+      kind: req(isOutboxKind),
+      to: req(isOutboxTarget),
+      text: req(isOutboxText),
+      writtenAt: req(isOutboxWrittenAt)
+    },
+    cross: outboxTargetCross
+  },
+  'outbox.open': {
+    fields: {
+      box: req(isOutboxBox),
+      id: req(isOutboxId),
+      author: req(isKey),
+      association: req(isKey),
+      kind: req(isOutboxKind),
+      writtenAt: req(isOutboxWrittenAt)
+    }
   },
   'media.uploadFile': {
     fields: {

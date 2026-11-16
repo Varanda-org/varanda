@@ -60,7 +60,7 @@ test('the write sheet keeps Enviar above the keyboard', (t) => {
 
 test('the write sheet carries the approval note and 400 chars', (t) => {
   const screen = read('screens/Depoimentos.js')
-  t.ok(screen.includes("'Só aparece no perfil depois que a pessoa aprovar.'"), 'approval note')
+  t.ok(screen.includes("'Só aparece no perfil se a pessoa escolher mostrar. Você vê só que foi enviado.'"), 'approval note')
   t.ok(screen.includes('<Soft>{APPROVAL_NOTE}</Soft>'), 'note rendered in the sheet')
   t.ok(screen.includes('TESTIMONIAL_TEXT_MAX = 400'), '400 code points')
   // maxLength counts UTF-16 units on the web: 400 code points of emoji take 800.
@@ -85,13 +85,28 @@ test('everything is gated on node.hosted, never Platform.OS', (t) => {
   t.ok(read('screens/Membro.js').includes("const canTestimonial = node.hosted === true && full && !own && !isPage && typeof ownKey === 'string'"), 'Membro write gate')
 })
 
-test("'Agora não' writes no record", (t) => {
+test('a received depoimento has three choices, decided on the node', (t) => {
   const screen = read('screens/Depoimentos.js')
-  const body = callbackBody(screen, 'notNow')
-  t.ok(body, 'notNow handler found')
-  t.absent(/testimonial\.|request\(/.test(body), 'no testimonial.* call and no request')
-  t.ok(body.includes('hideTestimonial(row.ref)'), 'hides on this device')
-  t.ok(screen.includes("<Pill small icon='fechar' accessibilityLabel='Agora não' onPress={() => data.notNow(row)} />"), 'the pill calls notNow')
+  t.absent(screen.includes('Agora não'), "no 'Agora não' left")
+  const body = callbackBody(screen, 'decide')
+  t.ok(body, 'decide handler found')
+  t.ok(body.includes("await request('testimonial.decide', { from: row.from, seq: row.seq, state: decision })"), 'one testimonial.decide with the right params')
+  t.absent(body.includes('hideTestimonial'), 'no hide store write')
+  t.ok(body.includes('setOverride(row.ref, decision)') && body.includes('m.get(row.ref) !== decision'), 'optimistic override, dropped on failure only while still this decision')
+  t.ok(body.includes('setDecideError(failureText(err))'), 'the failure text (uncertain included) is shown')
+  t.ok(body.indexOf('testimonialsChanged()') > body.indexOf("await request('testimonial.decide'"), 'testimonialsChanged after the request')
+  t.absent(/for \(|while \(|catch[^}]*request\(/.test(body), 'never sent again by itself')
+  t.ok(screen.includes("<Pill small label='Guardar só para mim' onPress={() => data.decide(row, 'kept')} />"), 'Guardar só para mim, no confirmation')
+  t.ok(screen.includes("<Pill small label='Recusar' onPress={() => setDeclining(row)} />"), 'Recusar opens the sheet')
+  t.ok(screen.includes('title={DECLINE_TITLE}') && screen.includes("confirmLabel='Recusar'") && screen.includes("data.decide(declining, 'declined', { rethrow: true })"), 'Recusar confirmation sheet')
+  t.ok(screen.includes("export const DECLINE_TITLE = 'Recusar depoimento?'"), 'sheet title')
+  t.ok(screen.includes("'some da sua lista em todos os seus aparelhos. Quem escreveu não fica sabendo.'"), 'sheet body')
+  t.ok(screen.includes("label: 'Guardados'") && screen.includes("export const KEPT_NOTE = 'Só você vê. Quem escreveu não fica sabendo.'"), 'Guardados section and note')
+  t.ok(screen.indexOf("label: 'Para aprovar'") < screen.indexOf("label: 'Guardados'") && screen.indexOf("label: 'Guardados'") < screen.indexOf("label: 'No seu perfil'"), 'Guardados between the other two')
+  t.ok(screen.includes('migrateHidden({ load: loadList, clear: clearTestimonialHidden, request, allowed })') && screen.includes('migrationStarted'), 'legacy hides migrate once per session')
+  t.ok(screen.includes('if (!migrationStarted && !pendingIncomplete(r)) {\n          migrationStarted = true'), 'an incomplete answer does not start the migration')
+  t.ok(screen.includes("const allowed = new Set(rows.map((p) => p.from + ':' + p.seq))"), 'only this account\'s undecided refs migrate')
+  t.ok(screen.includes('sentMeta(time)'), "Enviados shows only 'Enviado'")
   t.ok(screen.includes("<Pill small label='Mostrar no perfil' filled"), 'Mostrar no perfil is the filled pill')
   t.ok(screen.includes("request('testimonial.show', { from: row.from, seq: row.seq })"), 'show by testimonial.show')
   const diario = read('screens/Diario.js')
@@ -104,28 +119,23 @@ test('the hide store pair exists with the same exports', (t) => {
     const rel = 'testimonialHideStore.' + platform + '.js'
     t.ok(existsSync(join(SRC, rel)), rel)
     const src = read(rel)
-    t.ok(src.includes('export const loadTestimonialHidden') && src.includes('export const hideTestimonial'), rel + ': exports')
+    t.ok(src.includes('export const loadTestimonialHidden') && src.includes('export const clearTestimonialHidden'), rel + ': exports')
+    t.absent(src.includes('hideTestimonial'), rel + ': no hide writer left')
     t.ok(src.includes("from './testimonialHide.js'"), rel + ': shared logic')
   }
   t.absent(existsSync(join(SRC, 'testimonialHideStore.js')), 'no shared file that would shadow the pair')
 })
 
-test('hide ids, list cleaning and visiblePending', async (t) => {
-  const { HIDDEN_MAX, isHideId, hiddenListOf, withHidden, visiblePending } = await loadHide()
+test('hide ids and list cleaning', async (t) => {
+  const { HIDDEN_MAX, isHideId, hiddenListOf } = await loadHide()
   t.ok(isHideId(A + ':1'))
   for (const bad of [A, A + ':0', A + ':01', A.toUpperCase() + ':1', 'ab:1', A + ':99999999999999999', 42, null]) t.absent(isHideId(bad), String(bad))
   t.alike(hiddenListOf([A + ':1', 'x', A + ':1', B + ':2']), [A + ':1', B + ':2'])
   t.alike(hiddenListOf('nope'), [])
-  t.alike(withHidden([A + ':1', B + ':2'], A + ':1'), [B + ':2', A + ':1'], 'a repeat moves to the newest end')
-  t.alike(withHidden([A + ':1'], 'bad'), [A + ':1'])
   const many = Array.from({ length: HIDDEN_MAX + 5 }, (_, i) => A + ':' + (i + 1))
   const kept = hiddenListOf(many)
   t.is(kept.length, HIDDEN_MAX)
   t.is(kept[kept.length - 1], A + ':' + (HIDDEN_MAX + 5), 'the newest kept')
-  const rows = [{ ref: A + ':1' }, { ref: B + ':2' }, null, { ref: 3 }]
-  t.alike(visiblePending(rows, [A + ':1']), [{ ref: B + ':2' }])
-  t.alike(visiblePending(rows, new Set()), [{ ref: A + ':1' }, { ref: B + ':2' }])
-  t.alike(visiblePending(null, []), [])
 })
 
 test('web hide store: localStorage, malformed data, failed writes', async (t) => {
@@ -147,12 +157,14 @@ test('web hide store: localStorage, malformed data, failed writes', async (t) =>
   raw = null
   const store = await import('../src/testimonialHideStore.web.js')
   t.alike(await store.loadTestimonialHidden(), [])
-  t.is(await store.hideTestimonial(A + ':3'), true)
-  t.alike(JSON.parse(raw), [A + ':3'])
-  t.is(await store.hideTestimonial('bad'), false, 'an invalid id is refused')
+  raw = JSON.stringify([A + ':3'])
+  const filled = createTestimonialHideStore({ read: () => raw, write: (v) => { raw = v } })
+  t.alike(await filled.load(), [A + ':3'])
+  t.is(await filled.clear(), true)
+  t.is(raw, '[]')
   fail = true
-  t.is(await store.hideTestimonial(B + ':4'), false, 'a failed write says so')
-  t.alike(await store.loadTestimonialHidden(), [A + ':3', B + ':4'], 'memory keeps the hide for this session')
+  t.is(await store.clearTestimonialHidden(), false, 'a failed write says so')
+  t.alike(await store.loadTestimonialHidden(), [], 'memory is cleared for this session')
   t.ok(keys.every((k) => k === STORAGE_KEY))
 })
 
@@ -197,11 +209,13 @@ function compilePlain (src, name, consts) {
 test('the own tab starts with the approval row and Enviados, then every row newest first', (t) => {
   const screen = read('screens/Depoimentos.js')
   const pendingLabel = (n) => 'Depoimentos para aprovar (' + n + ')'
-  const tabItems = compilePlain(screen, 'tabItems', { pendingLabel, SENT_LABEL: 'Enviados' })
+  const tabItems = compilePlain(screen, 'tabItems', { pendingLabel, keptLabel: (n) => 'Depoimentos guardados (' + n + ')', SENT_LABEL: 'Enviados' })
   t.ok(tabItems, 'tabItems found')
   const rows = [{ ref: B + ':9' }, { ref: A + ':4' }]
   const own = tabItems({ rows, pendingCount: 2, own: true, canOpen: true })
   t.alike(own.map((i) => i.kind + ':' + (i.label || i.row.ref)), ['link:Depoimentos para aprovar (2)', 'link:Enviados', 'row:' + B + ':9', 'row:' + A + ':4'], 'pinned row, Enviados, rows in order')
+  t.alike(tabItems({ rows, pendingCount: 2, keptCount: 3, own: true, canOpen: true }).slice(0, 3).map((i) => i.label), ['Depoimentos para aprovar (2)', 'Depoimentos guardados (3)', 'Enviados'], 'kept link after the pending one')
+  t.alike(tabItems({ rows, keptCount: 3, own: false, canOpen: true }).map((i) => i.kind), ['row', 'row'], 'no kept link on another profile')
   t.alike(tabItems({ rows: [], pendingCount: 0, own: true, canOpen: true }).map((i) => i.label), ['Enviados'], 'Enviados always on the own tab, no approval row at 0')
   t.alike(tabItems({ rows, pendingCount: 3, own: false, canOpen: true }).map((i) => i.kind), ['row', 'row'], 'no own links on another profile')
   t.alike(tabItems({ rows, own: true, failed: true, error: 'x', canOpen: true }).map((i) => i.kind), ['link', 'retry', 'row', 'row'], 'a failed reload keeps its retry')
@@ -402,9 +416,9 @@ test('the tab links are full-width 44 pt rows with labels, never wrapping pills'
   t.ok(/linkText: \{[^}]*flex: 1 \}/.test(screen) && !/linkText: \{[^}]*numberOfLines/.test(screen), 'label wraps, never cut')
 })
 
-test("'Agora não' refreshes every instance", (t) => {
-  const body = callbackBody(read('screens/Depoimentos.js'), 'notNow')
-  t.ok(body.indexOf('testimonialsChanged()') > body.indexOf('await hideTestimonial(row.ref)'), 'testimonialsChanged after the hide')
+test('the seen pass refreshes the lists when a decision came from another device', (t) => {
+  const app = readFileSync(join(SRC, '../App.js'), 'utf8')
+  t.ok(app.includes('if (result.testimonialsChanged) testimonialsChanged()'), 'App.js calls testimonialsChanged')
 })
 
 test('Enviados names wrap to two lines and Retirar names the person', (t) => {
@@ -433,7 +447,7 @@ test('write sheet: code point counter and Enviar off past 400', (t) => {
   t.ok(membro.includes('name={displayText(who.title)}'), 'Membro passes the name')
   t.absent(membro.includes('writeTitle') || membro.includes('retractTitle'), 'Membro: no title with a name')
   t.ok(membro.includes('title={RETRACT_TITLE}') && membro.includes('body={retractBody(displayText(who.title))}'), 'Membro: fixed retract title, named body')
-  t.ok(membro.includes("onToast('Depoimento enviado. Aparece quando a pessoa aprovar.')"), 'toast after a send')
+  t.ok(membro.includes("onToast('Depoimento enviado. Só aparece no perfil se a pessoa escolher mostrar.')"), 'toast after a send')
 })
 
 test('the viewer never reports themself: own depoimento offers Retirar', (t) => {
