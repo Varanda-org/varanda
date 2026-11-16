@@ -309,7 +309,7 @@ const PERF = perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VAR
 const marks = createMarks({ enabled: PERF })
 export function perfMarks () { return marks }
 let vitrine = null
-if (VITRINE) {
+if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   const { fixtures } = require('./vitrine/fixtures')
   const { createVitrineRequest } = require('./vitrine/request')
   const { saveTermsRecord } = require('./termsStore')

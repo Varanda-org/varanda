@@ -43,7 +43,7 @@ import { MAX_MEDIA_DIMENSION, MAX_MEDIA_ITEM_BLOCKS, MAX_VIDEO_DIMENSION, MAX_VI
 
 const VITRINE = vitrineEnabled({ EXPO_PUBLIC_VARANDA_VITRINE: process.env.EXPO_PUBLIC_VARANDA_VITRINE }, typeof __DEV__ !== 'undefined' && __DEV__)
 let vitrineGet
-if (VITRINE) {
+if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   vitrineGet = require('../vitrine/publicMedia').vitrineMediaResponse
 }
 
