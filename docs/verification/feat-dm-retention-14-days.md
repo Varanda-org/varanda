@@ -36,7 +36,7 @@ Cada arquivo rodado sozinho com `node <arquivo>`.
 | `apps/cli/test/cli.test.js` | 5 | 1336 | o `HELP` com 2147483648 falha contra o texto novo |
 | `apps/cli/test/readme-help.test.js` | 1 | 2 | idem |
 | `apps/cli/test/blob-seeder.test.js` | 5 | 101 | passa nos dois casos |
-| `apps/app/test/legal.test.js` | 49 | passa | o digest (`published text is pinned to its acceptance version`) falha sem os textos novos; Termos e Política na versão 68 |
+| `apps/app/test/legal.test.js` | 49 | passa | o digest (`published text is pinned to its acceptance version`) falha sem os textos novos; Termos e Política na versão 69 |
 | `apps/app/test/help.test.js` | 15 | 541 | falha sem o texto novo |
 | `apps/app/test/momentosScreen.test.js` | 167 | 1362 | falha sem o texto novo (`OWN_NOTE`) |
 | `apps/site/test/legal.test.js` | 7 | 115 | falha se as páginas não forem geradas de novo |
@@ -59,7 +59,7 @@ Cada arquivo rodado sozinho com `node <arquivo>`.
 
 ## Termos
 
-`TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) sobem para 68, com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo. Quem já aceitou a versão 67 vê o pedido de aceite de novo.
+`TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) sobem para 69, com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo. Quem já aceitou a versão 68 vê o pedido de aceite de novo.
 
 ## Conferência em aparelho
 
