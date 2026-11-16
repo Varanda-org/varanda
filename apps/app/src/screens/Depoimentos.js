@@ -53,6 +53,9 @@ export const APPROVAL_NOTE = 'Só aparece no perfil se a pessoa escolher mostrar
 // Own log pages read for 'Enviados' (LOG_LIMIT_MAX blocks each) per read:
 // the first load and each 'Ver mais'.
 const SENT_PAGES = 8
+// Retries of the scroll to a section whose title was not laid out yet.
+const SECTION_TRIES = 5
+const SECTION_RETRY_MS = 50
 // Show pointers the seeder index carries per owner (docs/rpc.md 5.100).
 const SHOWN_POINTERS_MAX = 64
 // The own tab's way into the screen, where the sent ones are managed.
@@ -159,15 +162,26 @@ export function emptyBody ({ own, canWrite }) {
 // The tab's rows, in order: on the own profile the pinned approval row
 // (N > 0) and 'Enviados'; a failed read that kept rows on screen, with its
 // retry; then every shown depoimento, newest first (rowsFrom's order).
-export function tabItems ({ rows, pendingCount = 0, keptCount = 0, own, failed = false, error = null, canOpen = false }) {
+export function tabItems ({ rows, pendingCount = 0, keptCount = 0, sentCount = 0, sentFailed = false, own, failed = false, error = null, pendingError = null, canOpen = false }) {
   const items = []
   if (own && pendingCount > 0 && canOpen) items.push({ kind: 'link', key: 'l:pending', label: pendingLabel(pendingCount), icon: 'mensagem' })
   if (own && keptCount > 0 && canOpen) items.push({ kind: 'link', key: 'l:kept', label: keptLabel(keptCount), icon: 'olho' })
-  if (own && canOpen) items.push({ kind: 'link', key: 'l:sent', label: SENT_LABEL, icon: 'encaminhar' })
+  // Only when something was sent, or the read failed (the screen says why
+  // and retries); the tap opens the screen at that section.
+  if (own && (sentCount > 0 || sentFailed) && canOpen) items.push({ kind: 'link', key: 'l:sent', label: SENT_LABEL, icon: 'encaminhar', section: 'sent' })
+  // Without the messages key the approval read fails: say so, with a retry.
+  if (own && typeof pendingError === 'string' && pendingError.length > 0) items.push({ kind: 'retry', key: 'e:pending', text: pendingError })
   const list = Array.isArray(rows) ? rows : []
   if (failed && list.length > 0) items.push({ kind: 'retry', key: 'e:shown', text: error })
   for (const row of list) items.push({ kind: 'row', key: 's:' + row.ref, row })
   return items
+}
+
+// The list index of a section's title, for the scroll the stack entry's
+// `section` param asks for, or -1.
+export function sectionIndex (items, section) {
+  if (section !== 'sent' || !Array.isArray(items)) return -1
+  return items.findIndex((i) => i && i.key === 't:sent')
 }
 
 // The own live block among the index pointers, as the ref to delete, or
@@ -176,10 +190,17 @@ export function tabItems ({ rows, pendingCount = 0, keptCount = 0, own, failed =
 // block (a show, or a depoimento to someone else).
 export function ownBlockRef (index, ownKey) {
   if (!index || typeof ownKey !== 'string' || !HEX64.test(ownKey)) return null
-  const shown = Array.isArray(index.shown) ? index.shown.find((r) => r && r.from === ownKey) : null
-  if (shown) return ownKey + ':' + shown.wseq
-  const pending = Array.isArray(index.pending) ? index.pending.find((r) => r && r.from === ownKey) : null
-  return pending ? ownKey + ':' + pending.seq : null
+  // A duplicated depoimento leaves several own blocks: the newest one is the
+  // live one, so a hostile seeder listing an older block first cannot make
+  // 'Retirar' target it.
+  let best = -1
+  for (const [list, field] of [[index.shown, 'wseq'], [index.pending, 'seq']]) {
+    if (!Array.isArray(list)) continue
+    for (const r of list) {
+      if (r && r.from === ownKey && Number.isSafeInteger(r[field]) && r[field] > best) best = r[field]
+    }
+  }
+  return best < 0 ? null : ownKey + ':' + best
 }
 
 // Profile sections reload after a show, a removal or a write elsewhere.
@@ -278,8 +299,9 @@ async function readShown (request, owner) {
 
 // Up to SENT_PAGES own log pages from `start` (undefined: the newest).
 // `before` is the cursor for 'Ver mais' while more of the log remains,
-// null once it ended.
-async function readSentPages (request, start) {
+// null once it ended. `until(pages)` true stops early: the profile only
+// asks whether anything was sent.
+async function readSentPages (request, start, until = null) {
   const pages = []
   let before = start
   for (let i = 0; i < SENT_PAGES; i++) {
@@ -288,6 +310,7 @@ async function readSentPages (request, start) {
     const seqs = [...(page.entries || []).map((e) => e.seq), ...(page.invalid || []).map((e) => e.seq)]
     if (!(page.entriesTruncated > 0) || seqs.length === 0) return { pages, before: null }
     before = Math.min(...seqs)
+    if (until !== null && until(pages)) break
   }
   return { pages, before }
 }
@@ -295,8 +318,10 @@ async function readSentPages (request, start) {
 // The data behind the profile tab or the screen. `withPending` (own key)
 // also reads testimonial.pending (the legacy device hide list is read only
 // once, for the migration into node decisions); `withSent` the own
-// sent blocks. Nothing runs unless the node is hosted.
-export function useTestimonials (owner, { ownKey = null, withPending = false, withSent = false, tick = 0, active = true } = {}) {
+// sent blocks, and with `sentProbe` only until one is found (the profile's
+// 'Enviados' row shows only when something was sent). Nothing runs unless
+// the node is hosted.
+export function useTestimonials (owner, { ownKey = null, withPending = false, withSent = false, sentProbe = false, tick = 0, active = true } = {}) {
   const node = useNode()
   const { request } = node
   // A ref: the names context changes whenever a profile resolves, and the
@@ -367,18 +392,19 @@ export function useTestimonials (owner, { ownKey = null, withPending = false, wi
       }))
     }
     if (withSent && typeof ownKey === 'string') {
-      tasks.push(readSentPages(request, undefined).then((log) => {
+      const until = sentProbe ? (pages) => sentRows(pages, ownKey).length > 0 : null
+      tasks.push(readSentPages(request, undefined, until).then((log) => {
         if (!live()) return
         sentLogRef.current = log
         const rows = sentRows(log.pages, ownKey)
         setSent({ rows, error: null, loaded: true, more: log.before !== null, loadingMore: false })
-        resolve(rows.map((r) => r.to))
+        if (!sentProbe) resolve(rows.map((r) => r.to))
       }, (err) => {
         if (live()) setSent((s) => ({ ...s, error: errorText(err), loaded: true, loadingMore: false }))
       }))
     }
     await Promise.all(tasks)
-  }, [enabled, request, owner, ownKey, withPending, withSent])
+  }, [enabled, request, owner, ownKey, withPending, withSent, sentProbe])
 
   // 'Ver mais' at the end of 'Enviados': the next SENT_PAGES pages of the
   // own log, only on that press (never on scroll), until the log ends.
@@ -624,7 +650,7 @@ export function useTestimonialTab ({ data, own, ownKey, ownerName, canWrite, onO
   // empty or shorter list read as everything.
   const failed = enabled && typeof data.error === 'string' && data.error.length > 0
   const items = enabled
-    ? tabItems({ rows, pendingCount: own ? data.pending.length : 0, keptCount: own && Array.isArray(data.kept) ? data.kept.length : 0, own, failed, error: data.error, canOpen: typeof onOpenAll === 'function' })
+    ? tabItems({ rows, pendingCount: own ? data.pending.length : 0, keptCount: own && Array.isArray(data.kept) ? data.kept.length : 0, sentCount: own && Array.isArray(data.sent) ? data.sent.length : 0, sentFailed: own && typeof data.sentError === 'string' && data.sentError.length > 0, own, failed, error: data.error, pendingError: own ? data.pendingError : null, canOpen: typeof onOpenAll === 'function' })
     : []
   const retractRef = own || !enabled ? null : ownBlockRef(data.index, typeof ownKey === 'string' ? ownKey.toLowerCase() : null)
   const handleRetry = enabled ? data.reload : undefined
@@ -637,7 +663,7 @@ export function useTestimonialTab ({ data, own, ownKey, ownerName, canWrite, onO
         <Pressable
           accessibilityRole='link'
           accessibilityLabel={item.label}
-          onPress={onOpenAll}
+          onPress={() => onOpenAll(item.section)}
           style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}
         >
           {item.icon ? <Icon name={item.icon} size={20} color={colors.accent} /> : null}
@@ -740,6 +766,45 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
   const [showing, setShowing] = useState(null)
   const [showError, setShowError] = useState(null)
   const [declining, setDeclining] = useState(null)
+  const listRef = useRef(null)
+  const itemsRef = useRef([])
+  const userScrolled = useRef(false)
+  const tries = useRef(0)
+  const wantSection = entry.params && typeof entry.params.section === 'string' ? entry.params.section : null
+  // 'Enviados' on the profile opens here: the list scrolls to that section
+  // once the sent rows loaded, and again while rows above it still arrive,
+  // until the person scrolls.
+  const scrollToSection = useCallback(() => {
+    if (userScrolled.current) return
+    const index = sectionIndex(itemsRef.current, wantSection)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    try { list.scrollToIndex({ index, animated: false, viewPosition: 0 }) } catch {}
+  }, [wantSection])
+  // The title is past the rendered rows: jump near it by the average row
+  // height, then try again once those rows are laid out.
+  const handleIndexFailed = useCallback(({ index, averageItemLength }) => {
+    const list = listRef.current
+    if (!list || userScrolled.current || tries.current >= SECTION_TRIES) return
+    tries.current++
+    try { list.scrollToOffset({ offset: Math.max(0, averageItemLength * index), animated: false }) } catch {}
+    setTimeout(scrollToSection, SECTION_RETRY_MS)
+  }, [scrollToSection])
+  // On the web the rows are measured after the retries above can run out:
+  // a new content size means more rows are laid out, so try again.
+  const handleContentSize = useCallback(() => {
+    if (wantSection === null || userScrolled.current) return
+    tries.current = 0
+    scrollToSection()
+  }, [wantSection, scrollToSection])
+  const handleUserScroll = useCallback(() => { userScrolled.current = true }, [])
+  const rowsAbove = data.rows.length + data.pending.length + (Array.isArray(data.kept) ? data.kept.length : 0)
+  useEffect(() => {
+    if (wantSection === null || !data.sentLoaded || data.sent.length === 0) return
+    tries.current = 0
+    const id = setTimeout(scrollToSection, 0)
+    return () => clearTimeout(id)
+  }, [wantSection, data.sentLoaded, data.sent.length, rowsAbove, scrollToSection])
 
   useEffect(() => {
     if (data.rows.length > 0 && names) names.resolveMany(data.rows.map((r) => r.from))
@@ -809,6 +874,7 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
   }
   if (own && data.sentError) items.push({ kind: 'error', key: 'e:sent', text: data.sentError })
 
+  itemsRef.current = items
   const handleMoreSent = data.loadMoreSent
   const handleRetry = data.reload
   const renderItem = ({ item }) => {
@@ -865,6 +931,10 @@ export default function Depoimentos ({ entry, ownKey, onBack, onOpenMember, onRe
       {bar}
       <RefreshableList
         perfId='depoimentos'
+        listRef={listRef}
+        onScrollToIndexFailed={handleIndexFailed}
+        onContentSizeChange={handleContentSize}
+        onUserScroll={handleUserScroll}
         data={items}
         keyExtractor={(item) => item.key}
         renderItem={renderItem}

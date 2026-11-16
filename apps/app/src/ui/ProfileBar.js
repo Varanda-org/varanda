@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, StyleSheet, Text, View } from 'react-native'
-import { pinnedTabOffset, profileBarState, tabsPinned } from '../profileBar'
+import { pinnedTabOffset, profileBarRestPlan, profileBarSnap, profileBarState, tabsPinned } from '../profileBar'
 import { Icon } from './Icon'
 import { SunsetBand } from './SunsetBand'
 import { PressScale } from './PressScale'
@@ -19,6 +19,7 @@ import { useStyles } from './ThemeProvider'
 import { TEXT_CAP } from './Sheet'
 
 export const BAR = 44
+const REST_MS = 160
 
 export function useProfileBar (bandHeight, { controlsBottom = bandHeight, tabsTop = null, topInset = 0 } = {}) {
   const opacity = useRef(new Animated.Value(0)).current
@@ -28,6 +29,9 @@ export function useProfileBar (bandHeight, { controlsBottom = bandHeight, tabsTo
   const pinnedNow = useRef(false)
   const reduce = useRef(false)
   const lastY = useRef(0)
+  const list = useRef(null)
+  const rest = useRef(null)
+  const dragging = useRef(false)
 
   const apply = useCallback((y) => {
     lastY.current = y
@@ -69,9 +73,33 @@ export function useProfileBar (bandHeight, { controlsBottom = bandHeight, tabsTo
     }
   }, [apply])
 
-  const handleScrollFrame = useCallback(({ y }) => apply(y), [apply])
+  // The list reports frames, not drag or momentum ends, so a pause in frames is
+  // the rest. Reduce motion has no partial state, but gliding to an end is
+  // still harmless and keeps the header from resting half hidden.
+  const snapRest = useCallback((y, scrollTo) => {
+    const target = profileBarSnap(y, bandHeight, controlsBottom)
+    if (target !== null) scrollTo(target)
+  }, [bandHeight, controlsBottom])
+  useEffect(() => () => clearTimeout(rest.current), [])
+  // Re-plans the rest timer: never while a finger is down; after a drag ends
+  // it snaps once frames stop, and momentum frames keep re-arming it.
+  const plan = useCallback((y) => {
+    clearTimeout(rest.current)
+    if (profileBarRestPlan(dragging.current, y, bandHeight, controlsBottom) !== 'arm') return
+    rest.current = setTimeout(() => {
+      snapRest(lastY.current, (offset) => list.current?.current?.scrollToOffset?.({ offset, animated: true }))
+    }, REST_MS)
+  }, [bandHeight, controlsBottom, snapRest])
+  const handleScrollFrame = useCallback(({ y }) => {
+    apply(y)
+    plan(y)
+  }, [apply, plan])
+  const handleDragState = useCallback((active) => {
+    dragging.current = active === true
+    plan(lastY.current)
+  }, [plan])
   const pinnedOffset = useCallback(() => pinnedTabOffset(lastY.current, tabsTop, topInset + BAR), [tabsTop, topInset])
-  return { opacity, interactive, pinned, handleScrollFrame, pinnedOffset }
+  return { opacity, interactive, pinned, handleScrollFrame, pinnedOffset, list, handleDragState }
 }
 
 // onSelect for the pinned tabs copy: swapping the list data alone would keep
@@ -79,6 +107,9 @@ export function useProfileBar (bandHeight, { controlsBottom = bandHeight, tabsTo
 // RefreshableList's listRef (the FlatList). The header's own tabs keep onSelect.
 export function usePinnedTabSelect (bar, listRef, selected, onSelect) {
   const pending = useRef(null)
+  // An effect, not the render body: a discarded render must not leave the bar
+  // pointing at a list that never mounted.
+  useEffect(() => { bar.list.current = listRef }, [bar.list, listRef])
   useEffect(() => {
     const p = pending.current
     if (p === null || p.id !== selected) return

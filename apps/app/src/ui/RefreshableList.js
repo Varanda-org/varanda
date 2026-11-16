@@ -137,6 +137,8 @@ export function RefreshableList ({
   onScrollFrame,
   onContentSizeChange,
   onUserScroll,
+  onDragState,
+  onScrollToIndexFailed,
   onViewableItemsChanged
 }) {
   const styles = useStyles(makeStyles)
@@ -719,6 +721,21 @@ export function RefreshableList ({
     if (!busy.current) hide()
   }, [hide])
 
+  // Whether a finger is on the list, for callers that must not act on a pause
+  // in scroll frames while it is held. Native reports the scroll view's drag
+  // events; web has no such events, so its touch handlers report the same.
+  const dragState = useRef(onDragState)
+  dragState.current = onDragState
+  const dragBegin = useCallback(() => dragState.current?.(true), [])
+  const dragEnd = useCallback(() => dragState.current?.(false), [])
+  const touchStartDrag = useCallback((e) => { onTouchStart(e); dragBegin() }, [onTouchStart, dragBegin])
+  const touchEndDrag = useCallback((e) => {
+    onTouchEnd(e)
+    if (!e.nativeEvent.touches || e.nativeEvent.touches.length === 0) dragEnd()
+  }, [onTouchEnd, dragEnd])
+  const touchCancelDrag = useCallback(() => { onTouchCancel(); dragEnd() }, [onTouchCancel, dragEnd])
+  const nativeDragBegin = useCallback(() => { notifyUserScroll(); dragBegin() }, [notifyUserScroll, dragBegin])
+
   // The caller's footer (spinner, end text, error with retry), then, only
   // while paused after dry pages, a note and the by-hand 'carregar mais'.
   const footer = (
@@ -748,10 +765,10 @@ export function RefreshableList ({
   return (
     <View
       style={styles.wrap}
-      onTouchStart={web ? onTouchStart : undefined}
+      onTouchStart={web ? touchStartDrag : undefined}
       onTouchMove={web ? onTouchMove : undefined}
-      onTouchEnd={web ? onTouchEnd : undefined}
-      onTouchCancel={web ? onTouchCancel : undefined}
+      onTouchEnd={web ? touchEndDrag : undefined}
+      onTouchCancel={web ? touchCancelDrag : undefined}
     >
       {web
         ? (
@@ -788,9 +805,11 @@ export function RefreshableList ({
             contentContainerStyle={contentContainerStyle}
             onEndReached={check}
             onEndReachedThreshold={END_THRESHOLD}
+            onScrollToIndexFailed={onScrollToIndexFailed}
             keyboardShouldPersistTaps='handled'
             onScroll={onScroll}
-            onScrollBeginDrag={web ? undefined : notifyUserScroll}
+            onScrollBeginDrag={web ? undefined : nativeDragBegin}
+            onScrollEndDrag={web ? undefined : dragEnd}
             onContentSizeChange={handleContentSizeChange}
             onLayout={onLayout}
             scrollEventThrottle={16}

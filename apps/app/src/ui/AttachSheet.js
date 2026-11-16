@@ -17,7 +17,8 @@
 // here, so every staged file passed the same check.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { pickImages } from '../media/attach'
+import { pickImage, pickImages } from '../media/attach'
+import { pickPlan } from '../pickLimit'
 import { encodeFile } from '../media/encode'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { MAX_MEDIA_PER_MESSAGE } from '../media/plan'
@@ -59,7 +60,7 @@ let lastId = 0
 // -> { items, pick, remove, clear, files, ready, busy, note }
 // items: [{ id, status: 'encoding' | 'ready' | 'invalid', thumb, file, error }]
 // files: the ready files in order ({ bytes, mime, width, height }).
-export function useChatAttachments () {
+export function useChatAttachments ({ limit } = {}) {
   const [items, setItems] = useState([])
   const [note, setNote] = useState('')
   const liveRef = useRef(new Set())
@@ -104,7 +105,13 @@ export function useChatAttachments () {
       picked = [given]
     } else {
       try {
-        picked = await pickImages(MAX_MEDIA_PER_MESSAGE)
+        const plan = pickPlan(MAX_MEDIA_PER_MESSAGE, limit)
+        if (plan.single) {
+          const one = await pickImage()
+          picked = one ? [one] : []
+        } else {
+          picked = await pickImages(plan.count)
+        }
       } catch {
         return
       }
@@ -144,7 +151,7 @@ export function useChatAttachments () {
       if (thumb !== null) thumbsRef.current.set(id, thumb)
       patch(id, { status: 'ready', file, thumb })
     }
-  }, [])
+  }, [limit])
 
   const files = items.filter((item) => item.status === 'ready').map((item) => item.file)
   const busy = items.some((item) => item.status === 'encoding')

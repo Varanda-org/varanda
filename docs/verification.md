@@ -6009,7 +6009,7 @@ Ainda falta a um humano, em aparelho real:
 Limites desta caminhada:
 
 - Na Vitrine, as comunidades e os membros são fictícios e sempre respondem; o tempo das leituras em série de `community.members` num nó real fica para o laboratório.
-- A lista de Membros continua só para criador e administradores; quem não administra chega à conversa privada pelo grupo e pelas publicações.
+- A lista de Membros continua só para criador e administradores, por decisão do dono do produto na #447; quem não administra chega à conversa privada pelo grupo e pelas publicações.
 
 
 ## 122. Depoimentos no perfil (PR feat/depoimentos)
@@ -6725,7 +6725,6 @@ Limites desta caminhada:
 
 - Nenhuma caixa acima foi marcada nesta documentação.
 - Quando o semeador não manda a dica de Página (um semeador antigo, `pageHintOf` em `apps/app/src/indexClient.js`) e o `page.read` responde `NOT_FOUND` (o diário está noutro lugar), o autor é tratado como pessoa e a conversa abre como antes, com o chip. É o padrão decidido: falhar aberto, para uma pessoa nunca ficar sem mensagem quando o semeador demora.
-- Um autor desconhecido sem nome nem @nome não fica guardado como Página (`namesCache.js`), então a ação pode continuar aparecendo até o nome chegar. A conferência no toque continua valendo.
 
 ## 140. Conversa abre na mensagem mais nova (PR fix/conversation-newest-and-send)
 

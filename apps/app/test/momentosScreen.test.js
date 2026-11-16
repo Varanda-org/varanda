@@ -294,8 +294,8 @@ test('round 3, 2: pruneRings moves each ring start back by the items dropped bef
 test('round 3, 3: a moment request opens the composer as the person', (t) => {
   const app = read('App.js')
   const body = fnBody(app, 'const openMomentComposer = () =>')
-  t.ok(body.includes('actingAs.me()'), 'page identity cleared for the open')
-  t.ok(body.indexOf('actingAs.me()') < body.indexOf('setComposer('), 'before the composer opens')
+  t.ok(body.includes('actingAs.enterMoment()'), 'page identity cleared for the open (enterMoment switches to the person)')
+  t.ok(body.indexOf('actingAs.enterMoment()') < body.indexOf('setComposer('), 'before the composer opens')
 })
 
 test('round 4, 1: a create that finishes after a close never closes another composer', (t) => {

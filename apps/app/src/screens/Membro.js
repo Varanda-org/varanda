@@ -1357,6 +1357,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
           loadMoreError={!!moreError}
           atEnd={(atEnd && !seeded) || mural || depo}
           onScrollFrame={bar.handleScrollFrame}
+          onDragState={bar.handleDragState}
           listRef={listRef}
         />
         <ProfileBar bar={bar} topInset={insets.top} title={displayText(who.title)} onBack={onBack} tabs={<Segmented options={tabs} selected={shownTab} onSelect={selectPinnedTab} />} />

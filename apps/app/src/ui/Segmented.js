@@ -1,10 +1,16 @@
 // Full-width underline tabs (Fotos, Posts, ...). One is selected, marked by a
 // 2 pt accent line; each tab is a 44 pt tall touch target.
 
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { useState } from 'react'
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { tap } from './haptics'
 import { useStyles } from './ThemeProvider'
 import { layout, space, type } from './theme'
+import { segmentedFit } from './segmentedFit'
+
+// adjustsFontSizeToFit is a native Text prop that react-native-web ignores:
+// only the web needs the fixed tight size, phones keep shrinking per label.
+const SHRINKS = Platform.OS !== 'web'
 
 // options: [{ id, label }]. Three tabs at large text get narrow. Shrinking
 // fits each label on its own, so three tabs would show three sizes: with
@@ -22,8 +28,10 @@ export function Segmented ({ options, selected, onSelect }) {
   const styles = useStyles(makeStyles)
   const list = Array.isArray(options) ? options : []
   const cap = segmentedCap(list.length)
+  const [width, setWidth] = useState(0)
+  const fit = segmentedFit(width, list.length, SHRINKS)
   return (
-    <View style={styles.wrap} accessibilityRole='tablist'>
+    <View style={styles.wrap} accessibilityRole='tablist' onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
       {list.map((option) => {
         const on = option.id === selected
         return (
@@ -37,9 +45,9 @@ export function Segmented ({ options, selected, onSelect }) {
               if (!on) tap('select')
               onSelect(option.id)
             }}
-            style={({ pressed }) => [styles.tab, on && styles.tabOn, pressed && styles.pressed]}
+            style={({ pressed }) => [styles.tab, fit.tight && { paddingHorizontal: fit.paddingHorizontal }, on && styles.tabOn, pressed && styles.pressed]}
           >
-            <Text style={[styles.label, on && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={cap} adjustsFontSizeToFit minimumFontScale={0.7}>{option.label}</Text>
+            <Text style={[styles.label, fit.tight && { fontSize: fit.fontSize }, on && styles.labelOn]} numberOfLines={1} maxFontSizeMultiplier={cap} adjustsFontSizeToFit minimumFontScale={0.7}>{option.label}</Text>
           </Pressable>
         )
       })}

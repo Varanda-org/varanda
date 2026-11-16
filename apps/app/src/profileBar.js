@@ -1,10 +1,24 @@
+// The fade band: the bar is hidden at from and fully shown from to. Shared by
+// the state and the snap so they cannot drift. null: unmeasured header.
+function profileBarBand (bandHeight, controlsBottom) {
+  if (!Number.isFinite(bandHeight) || bandHeight <= 0 || !Number.isFinite(controlsBottom) || controlsBottom <= 0) return null
+  const to = Math.min(0.85 * bandHeight, Math.max(1, controlsBottom - 4))
+  return { from: Math.max(0, to - 0.4 * bandHeight), to }
+}
+
+// Where a scroll that came to rest at y should glide so the bar is not left
+// half faded: the nearer end of the band. null: outside it, or invalid.
+export function profileBarSnap (y, bandHeight, controlsBottom = bandHeight) {
+  const band = profileBarBand(bandHeight, controlsBottom)
+  if (band === null || !Number.isFinite(y) || !(y > band.from && y < band.to)) return null
+  return y - band.from < band.to - y ? band.from : band.to
+}
+
 // Finish the handoff before the header's controls leave the viewport.
 export function profileBarState (y, bandHeight, reduce, controlsBottom = bandHeight) {
-  if (!Number.isFinite(y) || !Number.isFinite(bandHeight) || bandHeight <= 0 || !Number.isFinite(controlsBottom) || controlsBottom <= 0) {
-    return { opacity: 0, interactive: false }
-  }
-  const to = Math.min(0.85 * bandHeight, Math.max(1, controlsBottom - 4))
-  const from = Math.max(0, to - 0.4 * bandHeight)
+  const band = Number.isFinite(y) ? profileBarBand(bandHeight, controlsBottom) : null
+  if (band === null) return { opacity: 0, interactive: false }
+  const { from, to } = band
   const interactive = y >= to
   const opacity = reduce
     ? (interactive ? 1 : 0)
@@ -37,4 +51,11 @@ export function pinnedContentStyle (style, viewport, tabsTop, barHeight) {
   if (!Number.isFinite(viewport) || viewport <= 0 || !Number.isFinite(tabsTop) || tabsTop <= 0 || !Number.isFinite(barHeight) || barHeight <= 0) return style
   const floor = Math.ceil(viewport + Math.max(0, tabsTop - barHeight)) + 1
   return Number.isFinite(base) && base >= floor ? style : { ...style, minHeight: floor }
+}
+
+// What the rest timer does on a scroll frame or a drag end: arm it only with
+// no finger on the list and the offset inside the band, else clear it.
+export function profileBarRestPlan (dragging, y, bandHeight, controlsBottom = bandHeight) {
+  if (dragging) return 'clear'
+  return profileBarSnap(y, bandHeight, controlsBottom) === null ? 'clear' : 'arm'
 }

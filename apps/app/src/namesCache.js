@@ -48,6 +48,15 @@ export function applySeed (known, value) {
   return merged
 }
 
+// The entry for a key no seed named but whose page hint says Página
+// (`hint`: { page, closed, moved } or null): kept without a name so the page
+// flag is there before the name arrives, and a later seed merges into it.
+// No hint, or a person hint, makes none (no hint means person).
+export function pageOnlyEntry (hint) {
+  if (!hint || hint.page !== true) return null
+  return { name: null, username: null, bio: null, avatar: undefined, loaded: false, ...hint }
+}
+
 // A profile.read entry: a null removes what a seed said (username included),
 // and an omitted avatar (an older node) reads as none.
 export function authoritative (p) {

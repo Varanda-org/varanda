@@ -29,14 +29,17 @@ export function createActingAs () {
     return state
   }
 
+  // The page a momento's composer set aside (see enterMoment).
+  let saved = null
+
   const get = () => state
-  const me = () => commit(ME)
+  const toMe = () => commit(ME)
 
   // A bad key or a closed page never becomes the acting identity: the next
   // post would be signed for a page nobody can write to.
-  function asPage ({ key, name, username, closed } = {}) {
+  function toPage ({ key, name, username, closed } = {}) {
     const k = typeof key === 'string' ? key.toLowerCase() : ''
-    if (!KEY_RE.test(k) || closed === true) return me()
+    if (!KEY_RE.test(k) || closed === true) return toMe()
     return commit(Object.freeze({
       kind: 'page',
       key: k,
@@ -62,10 +65,34 @@ export function createActingAs () {
     return () => { listeners.delete(fn) }
   }
 
+  // Any choice made outside the momento's composer flow, 'Você' included,
+  // drops the page it set aside.
+  function me () {
+    saved = null
+    return toMe()
+  }
+  function asPage (page) {
+    saved = null
+    return toPage(page)
+  }
   const set = (next) => (next && next.kind === 'page' ? asPage(next) : me())
 
-  return { get, set, me, asPage, isPage, label, subscribe, reset: me }
+  // A momento is the person's own, so opening its composer sets the identity
+  // back to the person; closing it puts the page back, unless an identity was
+  // chosen meanwhile. A new account (reset) forgets the saved one.
+  function enterMoment () {
+    if (saved === null && state.kind === 'page') saved = state
+    return toMe()
+  }
+  function leaveMoment () {
+    const back = saved
+    saved = null
+    return back !== null && state.kind === 'me' ? toPage(back) : state
+  }
+  const reset = me
+
+  return { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment }
 }
 
 const shared = createActingAs()
-export const { get, set, me, asPage, isPage, label, subscribe, reset } = shared
+export const { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment } = shared

@@ -16,6 +16,16 @@ const AV = {
 }
 const AV2 = { ...AV, core: 'ee'.repeat(32) }
 
+test('a nameless Página hint is kept and a later name merges in', async (t) => {
+  const { pageOnlyEntry, applySeed } = await load()
+  t.is(pageOnlyEntry(null), null, 'no hint means person')
+  t.is(pageOnlyEntry({ page: false, closed: false, moved: false }), null, 'a person hint keeps nothing')
+  const entry = pageOnlyEntry({ page: true, closed: false, moved: true })
+  t.alike(entry, { name: null, username: null, bio: null, avatar: undefined, loaded: false, page: true, closed: false, moved: true })
+  t.is(applySeed(entry, { name: 'Casa' }).name, 'Casa', 'a later name merges in')
+  t.is(applySeed({ ...entry, name: 'Casa' }, { name: null }), null, 'a nameless seed never overwrites a name')
+})
+
 test('seeds merge name, username and bio as before', async (t) => {
   const { applySeed } = await load()
   t.is(applySeed(null, {}), null, 'empty seed for a new key')

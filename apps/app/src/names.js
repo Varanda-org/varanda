@@ -45,7 +45,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, pageOnlyEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
 import { fetchMember } from './indexClient'
 import { diaryPeekSlots } from './engagement'
 import { createNamePeeker, foldRead, peekApply } from './namesPeek'
@@ -160,6 +160,7 @@ export function NamesProvider ({ children }) {
       const hint = pageHintFields(fieldsOf(value), known)
       const had = known && known.page === true
       const same = merged === null && known !== null && (hint === null ? !had : had ? hint.page && hint.closed === known.closed && hint.moved === known.moved : !hint.page)
+      if (merged === null && known === null) merged = pageOnlyEntry(hint)
       if (merged === null && !(known !== null && !same)) continue
       if (merged === null) merged = { ...known }
       if (hint !== null) Object.assign(merged, hint)
