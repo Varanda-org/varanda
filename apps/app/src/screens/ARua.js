@@ -1944,6 +1944,7 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
     <View style={styles.flex}>
       <DeletePrompt del={del} />
       <RefreshableList
+        perfId='rua-page'
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
         data={rows}
@@ -2686,6 +2687,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     <View style={styles.flex}>
       <DeletePrompt del={del} />
       <RefreshableList
+        perfId='rua'
         listRef={listRef}
         onViewableItemsChanged={onViewableItemsChanged}
         data={rows}

@@ -43,13 +43,14 @@ import * as actingStore from '../actingAs'
 import { actAs } from '../pages'
 import { pagesCore } from '../pageGate'
 import { coreActor } from '../pageCore'
-import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
+import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useVisibleNow } from '../ui'
 import { BranchLink } from '../ui/BranchLink'
 import { OfflineNote } from '../ui/OfflineNote'
 import { PostRow } from '../ui/PostRow'
 import { ReplyBar } from '../ui/ReplyBar'
 import { useKeyboardAvoidEnabled, useKeyboardOpen } from '../ui/keyboardAvoid'
 import { EmbedBandBottom } from '../ui/screenVisible'
+import { cachedRow, pruneRows } from '../namesCache'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { SwipeReply } from '../ui/SwipeReply'
@@ -253,11 +254,22 @@ export async function peekAll (request, plan, peeked, alive = () => true) {
 }
 
 // The post item at `ref` from the peeked map (src/thread.js rules), or null.
+// Kept per peek object (mergePeek replaces it, never edits it), so the same
+// entries give the same item and a cached row's inputs stay identical.
+const postsByPeek = new WeakMap()
 export function postAt (peeked, ref) {
   const r = parseRef(ref)
   if (r === null) return null
+  const peek = peeked instanceof Map ? peeked.get(r.author) : null
+  const memo = peek !== null && typeof peek === 'object' ? (postsByPeek.get(peek) || new Map()) : null
+  if (memo !== null && memo.has(r.seq)) return memo.get(r.seq)
   const { items } = assembleMember({ author: r.author, index: { posts: [r.seq] }, peeked })
-  return items.length === 1 && items[0].kind === 'post' ? items[0] : null
+  const post = items.length === 1 && items[0].kind === 'post' ? items[0] : null
+  if (memo !== null) {
+    memo.set(r.seq, post)
+    postsByPeek.set(peek, memo)
+  }
+  return post
 }
 
 // Names learned from the peeks (the verified profile/username fields only).
@@ -360,11 +372,13 @@ export function useDelete ({ request, node, onToast, onDeleted, recheck, onUncer
     if (r.ok) {
       setTarget(null)
       notify('publicação apagada')
-      // onDeleted finds the parent in the screen's own copy to lower its
-      // count, so the copies are dropped only after it.
+      // onDeleted and the Conversas below find the parent in their own copy
+      // of the replies sent here to lower its count, so those copies are
+      // dropped only after both have run.
       try {
         await onDeleted(target)
       } finally {
+        announceDeleted(refs)
         forgetOwnReplies(refs)
       }
     } else if (r.uncertain) {
@@ -546,7 +560,7 @@ export function useEngagement ({ request, node, onToast }) {
     }
   }, [request, onToast, readOwn])
 
-  return { state, counts, pending, reset, readOwn, readCounts, setCount, toggle }
+  return useMemo(() => ({ state, counts, pending, reset, readOwn, readCounts, setCount, toggle }), [state, counts, pending, reset, readOwn, readCounts, setCount, toggle])
 }
 
 // Names prefer the verified peek; avatars prefer the authoritative cache.
@@ -561,81 +575,138 @@ export function identityOf (names, author, item) {
 }
 
 // The PostRow props for an assembled (or seed) post item. `extra` overrides
-// (repostedBy, onOpenReposter, replyToName...).
-export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {} }) {
-  const { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply, onQuote, onReport, onDelete, onMessage } = handlers
+// (repostedBy, onOpenReposter, replyToName...). With a `cache` (a Map from
+// useThreadRowCache) and a string `rowKey`, the same props object comes back
+// while what the row shows is unchanged, so a memoized PostRow skips its
+// render; its callbacks read the newest handlers and engagement at call time.
+export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, handlers, extra = {}, cache, rowKey }) {
+  const offers = Object.keys(handlers).filter((k) => typeof handlers[k] === 'function')
+  const has = (k) => offers.includes(k)
   const ref = refOf(item.author, item.seq)
-  const who = identityOf(names, item.author, item)
-  const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
-  let quote = null
-  if (item.quote) {
-    const qref = refOf(item.quote.author, item.quote.seq)
-    const q = peeked ? postAt(peeked, qref) : null
-    if (q) {
-      const qwho = identityOf(names, q.author, q)
-      quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => onOpenThread({ ref: qref, seed: q }), onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
-    } else {
-      quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => onOpenThread({ ref: qref }) }
+  const authorProfile = names.profileOf(item.author)
+  const qref = item.quote ? refOf(item.quote.author, item.quote.seq) : null
+  const q = qref !== null && peeked ? postAt(peeked, qref) : null
+  const qProfile = q ? names.profileOf(q.author) : null
+  const parentProfile = item.replyTo ? names.profileOf(item.replyTo.author) : null
+  const acting = actingPageKey()
+  const origin = installationOrigin() || globalThis.location?.origin || null
+  const build = (live) => {
+    const who = identityOf(names, item.author, item)
+    const hasSeq = Number.isSafeInteger(item.seq) && item.seq >= 1
+    let quote = null
+    if (item.quote) {
+      if (q) {
+        const qwho = identityOf(names, q.author, q)
+        quote = { author: q.author, name: qwho.name, username: qwho.username, avatar: qwho.avatar, at: q.at, text: q.text, media: q.media, preview: q.preview || null, persist: q.author === ownKey || (follows !== null && follows.has(q.author)), missing: false, onOpen: () => live.handlers.onOpenThread({ ref: qref, seed: q }), onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: q.author, username: qwho.username }) : undefined }
+      } else {
+        quote = { author: item.quote.author, name: null, username: null, avatar: null, at: null, text: null, media: null, persist: false, missing: true, onOpen: () => live.handlers.onOpenThread({ ref: qref }) }
+      }
+    }
+    const parentRef = item.replyTo ? refOf(item.replyTo.author, item.replyTo.seq) : null
+    const onMessage = (author, options) => live.handlers.onMessage(author, options)
+    const reportable = has('onReport') && typeof ownKey === 'string' && item.author !== ownKey && hasSeq
+    // Someone else's post, not a page's: PostRow adds the hosted check.
+    const messageable = has('onMessage') && typeof ownKey === 'string' && hasSeq &&
+      String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)
+    // The seeder's public page shows diary posts only. Chats, groups and
+    // moments never come through here and are not kind 'post'; a page's diary
+    // is told apart by its profile.
+    const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)
+    const authorKey = String(item.author).toLowerCase()
+    const postRef = diaryPost ? authorKey + ':' + item.seq : null
+    const link = postRef !== null ? postLink(installationOrigin() || globalThis.location?.origin || null, postRef) : null
+    // The member's own diary only, never the page acted as: the writer refuses
+    // a post-share for any diary but the caller's own. Membro passes a repost's
+    // original with extra.repostedBy.
+    const publishable = postRef !== null && typeof ownKey === 'string' && authorKey === ownKey.toLowerCase() &&
+      authorKey !== actingPageKey() && (extra.repostedBy === undefined || extra.repostedBy === null)
+    return {
+      author: item.author,
+      name: who.name,
+      username: who.username,
+      avatar: who.avatar,
+      at: item.at,
+      text: item.text,
+      replyToName: parentRef ? replyNameOf(parentProfile) : null,
+      media: item.media || null,
+      preview: item.preview || null,
+      persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)),
+      now,
+      quote,
+      repostedBy: null,
+      counts: eng && eng.counts.has(ref) ? eng.counts.get(ref) : null,
+      liked: !!eng && eng.state.liked.has(ref),
+      reposted: !!eng && eng.state.reposted.has(ref),
+      pending: eng && eng.pending.has(ref) ? eng.pending.get(ref) : null,
+      onOpen: hasSeq ? () => live.handlers.onOpenThread({ ref, seed: item }) : undefined,
+      onOpenAuthor: () => live.handlers.onOpenMember(item.author, who),
+      onOpenMention: has('onOpenMention') ? (u) => live.handlers.onOpenMention(u, { author: item.author, username: who.username }) : undefined,
+      onOpenParent: parentRef ? () => live.handlers.onOpenThread({ ref: parentRef }) : undefined,
+      onOpenReposter: undefined,
+      onReply: hasSeq && has('onReply') ? () => live.handlers.onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
+      onQuote: hasSeq && has('onQuote') ? () => live.handlers.onQuote({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
+      onOpenLikes: eng && hasSeq && has('onOpenEngagers') ? () => live.handlers.onOpenEngagers({ ref, kind: 'likes' }) : undefined,
+      onOpenReposts: eng && hasSeq && has('onOpenEngagers') ? () => live.handlers.onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
+      onLike: eng && hasSeq ? () => live.eng.toggle('like', ref) : undefined,
+      onRepost: eng && hasSeq ? () => live.eng.toggle('repost', ref) : undefined,
+      onReport: reportable ? () => live.handlers.onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
+      onDelete: hasSeq && has('onDelete') && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null, acting)
+        ? () => live.handlers.onDelete({ ref, seq: item.seq })
+        : undefined,
+      seq: hasSeq ? item.seq : undefined,
+      onMessage: messageable ? onMessage : undefined,
+      // Before ...extra, so a link a caller passes (an offer's) keeps winning.
+      link,
+      publishable,
+      ...extra
     }
   }
-  const parentRef = item.replyTo ? refOf(item.replyTo.author, item.replyTo.seq) : null
-  const reportable = typeof onReport === 'function' && typeof ownKey === 'string' && item.author !== ownKey && hasSeq
-  // Someone else's post, not a page's: PostRow adds the hosted check.
-  const authorProfile = names.profileOf(item.author)
-  const messageable = typeof onMessage === 'function' && typeof ownKey === 'string' && hasSeq &&
-    String(item.author).toLowerCase() !== ownKey.toLowerCase() && !(authorProfile && authorProfile.page === true)
-  // The seeder's public page shows diary posts only. Chats, groups and
-  // moments never come through here and are not kind 'post'; a page's diary
-  // is told apart by its profile.
-  const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)
-  const authorKey = String(item.author).toLowerCase()
-  const postRef = diaryPost ? authorKey + ':' + item.seq : null
-  const link = postRef !== null ? postLink(installationOrigin() || globalThis.location?.origin || null, postRef) : null
-  // The member's own diary only, never the page acted as: the writer refuses
-  // a post-share for any diary but the caller's own. Membro passes a repost's
-  // original with extra.repostedBy.
-  const publishable = postRef !== null && typeof ownKey === 'string' && authorKey === ownKey.toLowerCase() &&
-    authorKey !== actingPageKey() && (extra.repostedBy === undefined || extra.repostedBy === null)
-  return {
-    author: item.author,
-    name: who.name,
-    username: who.username,
-    avatar: who.avatar,
-    at: item.at,
-    text: item.text,
-    replyToName: parentRef ? replyNameOf(names.profileOf(item.replyTo.author)) : null,
-    media: item.media || null,
-    preview: item.preview || null,
-    persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)),
+  const latest = { handlers, eng }
+  if (!(cache instanceof Map) || typeof rowKey !== 'string') return build(latest)
+  // Everything the props are derived from, by identity. Handlers are not
+  // here (the live box carries them); only which are offered, since that
+  // adds or removes a button.
+  const counts = eng && eng.counts.has(ref) ? eng.counts.get(ref) : null
+  const inputs = {
+    item,
     now,
-    quote,
-    repostedBy: null,
-    counts: eng && eng.counts.has(ref) ? eng.counts.get(ref) : null,
+    ownKey,
+    follows,
+    eng: !!eng,
+    // By value: a refetch answers with new objects for the same numbers.
+    counts: counts !== null && typeof counts === 'object',
+    replies: counts ? counts.replies : null,
+    likes: counts ? counts.likes : null,
+    reposts: counts ? counts.reposts : null,
+    quotes: counts ? counts.quotes : null,
     liked: !!eng && eng.state.liked.has(ref),
     reposted: !!eng && eng.state.reposted.has(ref),
     pending: eng && eng.pending.has(ref) ? eng.pending.get(ref) : null,
-    onOpen: hasSeq ? () => onOpenThread({ ref, seed: item }) : undefined,
-    onOpenAuthor: () => onOpenMember(item.author, who),
-    onOpenMention: typeof onOpenMention === 'function' ? (u) => onOpenMention(u, { author: item.author, username: who.username }) : undefined,
-    onOpenParent: parentRef ? () => onOpenThread({ ref: parentRef }) : undefined,
-    onOpenReposter: undefined,
-    onReply: hasSeq && typeof onReply === 'function' ? () => onReply({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
-    onQuote: hasSeq && typeof onQuote === 'function' ? () => onQuote({ ref, name: who.name, username: who.username, text: item.text }) : undefined,
-    onOpenLikes: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'likes' }) : undefined,
-    onOpenReposts: eng && hasSeq && typeof onOpenEngagers === 'function' ? () => onOpenEngagers({ ref, kind: 'reposts' }) : undefined,
-    onLike: eng && hasSeq ? () => eng.toggle('like', ref) : undefined,
-    onRepost: eng && hasSeq ? () => eng.toggle('repost', ref) : undefined,
-    onReport: reportable ? () => onReport({ author: item.author, name: who.name, username: who.username, seq: item.seq, text: item.text }) : undefined,
-    onDelete: hasSeq && typeof onDelete === 'function' && canDelete(item, typeof ownKey === 'string' ? ownKey.toLowerCase() : null, actingPageKey())
-      ? () => onDelete({ ref, seq: item.seq })
-      : undefined,
-    seq: hasSeq ? item.seq : undefined,
-    onMessage: messageable ? onMessage : undefined,
-    // Before ...extra, so a link a caller passes (an offer's) keeps winning.
-    link,
-    publishable,
-    ...extra
+    authorProfile,
+    quoteOriginal: q,
+    quoteProfile: qProfile,
+    parentProfile,
+    acting,
+    origin,
+    offers: offers.join(),
+    ...Object.fromEntries(Object.entries(extra || {}).map(([k, v]) => ['extra.' + k, v]))
   }
+  return cachedRow(cache, rowKey, inputs, latest, build)
+}
+
+// The rowProps cache of one list. Every render hands `latest` ({ handlers,
+// eng }) to all cached rows, also those the list does not render again, so a
+// tap never runs a handler of an older render; rows that left `keys` are
+// dropped after the commit.
+export function useThreadRowCache (keys, latest) {
+  const cache = useRef(null)
+  if (cache.current === null) cache.current = new Map()
+  for (const row of cache.current.values()) Object.assign(row.live, latest)
+  const joined = keys.join('\n')
+  useEffect(() => {
+    pruneRows(cache.current, joined === '' ? [] : joined.split('\n'))
+  }, [joined])
+  return cache.current
 }
 
 // A seed (the feed item tapped) as a post item, or null.
@@ -714,6 +785,14 @@ function dropOwnReplies (cache, refs) {
   }
 }
 
+// A Conversa kept open under a newer one never sees a deletion made above it:
+// each mounted copy listens here and drops the post from its own lists.
+const deletionListeners = new Set()
+
+function announceDeleted (refs) {
+  for (const listener of deletionListeners) listener(refs)
+}
+
 // Each mounted Conversa keeps its own copy of the replies it sent; a deletion
 // anywhere (Diário, A Rua, another Conversa) must reach every copy, or a
 // refresh merges the deleted reply back.
@@ -781,11 +860,9 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
-  const now = useNow(60000)
+  const now = useVisibleNow(60000)
   const bottomPad = useBottomPad()
-  const insets = useSafeAreaInsets()
   const avoidKeyboard = useKeyboardAvoidEnabled()
-  const keyboardOpen = useKeyboardOpen()
   // A row under the reply bar is not seen, and measureInWindow reports
   // clipped rows unclipped, so the list tells its cards where the bar
   // starts. Measured on every check: the keyboard moves the bar.
@@ -862,6 +939,8 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
+  const focalRef = useRef(focal)
+  focalRef.current = focal
   const commit = useCallback((patch) => {
     viewRef.current = { ...viewRef.current, ...patch }
     setView(viewRef.current)
@@ -1288,6 +1367,75 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
     if (typeof scrollRef.current === 'function') scrollRef.current(key, true)
   }, [jumpTick])
 
+  // Drops a deleted post from this screen's own copies (the comments, the
+  // open rodas, the replies sent from here) and lowers its parent's count.
+  // Runs for a deletion made here and, through announceDeleted, for one made
+  // on another screen above this one in the stack, which would otherwise
+  // show the reply until a reload. Nothing found here means nothing to do.
+  const dropDeleted = useRef(null)
+  dropDeleted.current = (ref, force = false) => {
+    const cur = viewRef.current
+    const gone = (item) => refOf(item.author, item.seq) === ref
+    const [author, seqText] = ref.split(':')
+    const known = peekedRef.current.get(author)
+    // A quote of the deleted post must not keep showing its text.
+    const quoted = !!known && known.entries.some((e) => e.seq === Number(seqText))
+    const wasComment = cur.comments.some(gone)
+    const held = [...rodasRef.current.values()].some((roda) => roda.replies.some(gone)) || [...ownReplies.current.values()].some((items) => items.some(gone))
+    if (!force && !held && !quoted && !wasComment) return
+    // A load started before the deletion would bring the row back.
+    genRef.current += 1
+    if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
+    const deleted = cur.comments.find(gone) || [...rodasRef.current.values()].flatMap((roda) => roda.replies).find(gone) || [...ownReplies.current.values()].flat().find(gone) || null
+    let parentKey = null
+    let remaining = 0
+    if (deleted !== null && deleted.replyTo) {
+      parentKey = refOf(deleted.replyTo.author, deleted.replyTo.seq)
+      const count = eng.counts.get(parentKey)
+      remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
+      setCount(parentKey, { ...count, replies: remaining })
+    }
+    const kept = new Map()
+    const emptied = []
+    for (const [top, roda] of rodasRef.current) {
+      // A deleted comment takes its roda with it.
+      if (top === ref) continue
+      if (!roda.replies.some(gone)) {
+        kept.set(top, roda)
+        continue
+      }
+      // Its replies leave too, as on the server (removePost drops the
+      // deleted post's edges): the gate keeps only rows still chained to top.
+      const replies = assembleRoda({ top, held: roda.replies.filter((item) => !gone(item)) }).replies
+      const total = Number.isSafeInteger(roda.total) ? Math.max(0, roda.total - (roda.replies.length - replies.length)) : roda.total
+      kept.set(top, { ...roda, replies, total })
+      const direct = parentKey === top ? remaining : (eng.counts.get(top) && Number.isSafeInteger(eng.counts.get(top).replies) ? eng.counts.get(top).replies : 0)
+      if (replies.length === 0 && direct === 0) emptied.push(top)
+    }
+    putRodas(kept)
+    if (emptied.length > 0) {
+      setOpen((previous) => {
+        const next = new Set(previous)
+        for (const top of emptied) next.delete(top)
+        return next
+      })
+    }
+    for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => !gone(item)))
+    ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => !gone(item))]))
+    commit({
+      comments: cur.comments.filter((item) => !gone(item)),
+      meta: wasComment && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
+      // The loads invalidated above never clear their own flags.
+      loadingMore: false,
+      refreshing: false
+    })
+  }
+  useEffect(() => {
+    // The main post of an older screen (its root once known) is left to its own flow.
+    const listener = (refs) => { for (const ref of refs) if (ref !== (viewRef.current.root || focalRef.current)) dropDeleted.current(ref) }
+    deletionListeners.add(listener)
+    return () => { deletionListeners.delete(listener) }
+  }, [])
   const del = useDelete({
     request,
     node,
@@ -1305,59 +1453,30 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
         onBack()
         return
       }
-      // A quote of the deleted post must not keep showing its text.
-      const [author, seqText] = t.ref.split(':')
-      const known = peekedRef.current.get(author)
-      if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
-      const gone = (item) => refOf(item.author, item.seq) === t.ref
-      const wasComment = cur.comments.some(gone)
-      const deleted = cur.comments.find(gone) || [...rodasRef.current.values()].flatMap((roda) => roda.replies).find(gone) || null
-      let parentKey = null
-      let remaining = 0
-      if (deleted !== null && deleted.replyTo) {
-        parentKey = refOf(deleted.replyTo.author, deleted.replyTo.seq)
-        const count = eng.counts.get(parentKey)
-        remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
-        setCount(parentKey, { ...count, replies: remaining })
-      }
-      const kept = new Map()
-      const emptied = []
-      for (const [top, roda] of rodasRef.current) {
-        // A deleted comment takes its roda with it.
-        if (top === t.ref) continue
-        if (!roda.replies.some(gone)) {
-          kept.set(top, roda)
-          continue
-        }
-        // Its replies leave too, as on the server (removePost drops the
-        // deleted post's edges): the gate keeps only rows still chained to top.
-        const replies = assembleRoda({ top, held: roda.replies.filter((item) => !gone(item)) }).replies
-        const total = Number.isSafeInteger(roda.total) ? Math.max(0, roda.total - (roda.replies.length - replies.length)) : roda.total
-        kept.set(top, { ...roda, replies, total })
-        const direct = parentKey === top ? remaining : (eng.counts.get(top) && Number.isSafeInteger(eng.counts.get(top).replies) ? eng.counts.get(top).replies : 0)
-        if (replies.length === 0 && direct === 0) emptied.push(top)
-      }
-      putRodas(kept)
-      if (emptied.length > 0) {
-        setOpen((previous) => {
-          const next = new Set(previous)
-          for (const top of emptied) next.delete(top)
-          return next
-        })
-      }
-      for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => !gone(item)))
-      ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => !gone(item))]))
-      commit({
-        comments: cur.comments.filter((item) => !gone(item)),
-        meta: wasComment && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
-        // The loads invalidated above never clear their own flags.
-        loadingMore: false,
-        refreshing: false
-      })
+      dropDeleted.current(t.ref, true)
     }
   })
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage }
-  const props = (item, extra) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra })
+  const props = (item, extra, rowKey) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra, cache: rowKey === undefined ? undefined : rowCache, rowKey })
+  // Before the offline return: hooks run on every render.
+  const shownRodas = useMemo(() => new Map([...rodas].map(([key, roda]) => [key, rodaOrder(roda.replies, key)])), [rodas])
+  const rows = commentRows({
+    comments: view.comments,
+    rodas: shownRodas,
+    open,
+    counts: eng.counts,
+    totals: new Map([...rodas].filter(([, roda]) => roda.loaded && Number.isSafeInteger(roda.total)).map(([key, roda]) => [key, roda.total])),
+    more: rodaMore({ open, rodas, errors: rodaErrors, busy: rodaBusy }),
+    errors: rodaErrors,
+    // An orphan's top-most message is not the post's author.
+    postAuthor: view.post && view.status === 'ok' ? view.post.author : null
+  })
+  const rowCache = useThreadRowCache(rows.map((row) => row.key), { handlers, eng: full ? eng : null })
+  // One renderItem for the list's life: the cells re-render on extraData, and
+  // the post rows whose cached props did not change skip their render.
+  const renderRef = useRef(null)
+  const renderItem = useCallback(({ item: row }) => renderRef.current(row), [])
+  const extra = useMemo(() => ({ eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, profileOf: names.profileOf }), [eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, names.profileOf])
 
   const title = 'Comentários'
   const top = <TopBar title={title} onBack={onBack} />
@@ -1457,18 +1576,6 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       setSending(false)
     }
   }
-  const shownRodas = new Map([...rodas].map(([key, roda]) => [key, rodaOrder(roda.replies, key)]))
-  const rows = commentRows({
-    comments,
-    rodas: shownRodas,
-    open,
-    counts: eng.counts,
-    totals: new Map([...rodas].filter(([, roda]) => roda.loaded && Number.isSafeInteger(roda.total)).map(([key, roda]) => [key, roda.total])),
-    more: rodaMore({ open, rodas, errors: rodaErrors, busy: rodaBusy }),
-    errors: rodaErrors,
-    // An orphan's top-most message is not the post's author.
-    postAuthor: view.post && status === 'ok' ? view.post.author : null
-  })
   // Same pattern as the chat's quote jump (Mensagem.js): scrollToIndex
   // throws for a row it cannot place, and the first offset can be an
   // estimate, so it is tried again after a moment before the flash. `quiet`:
@@ -1550,7 +1657,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
     quotes.current.set(row.key, value)
     return value
   }
-  const renderThreadRow = (row) => {
+  renderRef.current = (row) => {
     if (row.kind === 'toggle') {
       const key = refOf(row.parent.author, row.parent.seq)
       return <View style={styles.branchAction}><BranchLink label={row.label} expanded={row.open} onPress={() => toggleRoda(row)} pending={rodaBusy.has(key)} /></View>
@@ -1573,7 +1680,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
         <View style={styles.child}>
           <SwipeReply disabled={swipeOff(row.item)} onReply={swipeTo(row.item)}>
             <View style={styles.rowBox}>
-              <PostRow {...props(row.item, THREAD_ROW)} level='reply' tag={tag} replyQuote={quoteOf(row)} />
+              <PostRow {...props(row.item, THREAD_ROW, row.key)} level='reply' tag={tag} replyQuote={quoteOf(row)} />
               {flashOf(row)}
             </View>
           </SwipeReply>
@@ -1583,7 +1690,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
     return (
       <SwipeReply disabled={swipeOff(row.item)} onReply={swipeTo(row.item)}>
         <View style={styles.rowBox}>
-          <PostRow {...props(row.item, THREAD_ROW)} level='comment' tag={tag} />
+          <PostRow {...props(row.item, THREAD_ROW, row.key)} level='comment' tag={tag} />
           {flashOf(row)}
         </View>
       </SwipeReply>
@@ -1661,10 +1768,11 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
       <View style={styles.flex}>
         <EmbedBandBottom.Provider value={full || sending ? band : null}>
           <RefreshableList
+            perfId='conversa'
             data={phase === 'ready' ? rows : []}
             keyExtractor={(row) => row.key}
-            renderItem={({ item: row }) => renderThreadRow(row)}
-            extraData={{ eng, follows, now, rodas, rodaBusy, rodaErrors, profileOf: names.profileOf, flashKey, sending }}
+            renderItem={renderItem}
+            extraData={extra}
             listRef={listRef}
             ListHeaderComponent={header}
             ListEmptyComponent={phase === 'loading' ? <Skeleton /> : null}
@@ -1694,10 +1802,7 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
           success clears the text instead of a remounted copy. */}
       {full || sending
         ? (
-          // The open keyboard already covers the gesture bar: its inset would
-          // leave a band between the bar and the keyboard. The page background
-          // shows around the floating pill, so the padding keeps it off the edges.
-          <View ref={barBox} collapsable={false} style={[styles.barWrap, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>
+          <ReplyDock barBox={barBox} style={styles.barWrap}>
             <ReplyBar
               key={focal}
               target={target}
@@ -1715,10 +1820,25 @@ export default function Conversa ({ entry, ownKey, me, onBack, onReply, onQuote,
               note={note}
               focusSignal={focusSignal}
             />
-          </View>
+          </ReplyDock>
           )
         : null}
     </KeyboardAvoidingView>
+  )
+}
+
+// The reply bar's wrapper owns the keyboard state, so opening or closing the
+// keyboard renders the bar, not the thread list.
+// The open keyboard already covers the gesture bar: its inset would leave a
+// band between the bar and the keyboard. The page background shows around
+// the floating pill, so the padding keeps it off the edges.
+export function ReplyDock ({ barBox, style, children }) {
+  const insets = useSafeAreaInsets()
+  const keyboardOpen = useKeyboardOpen()
+  return (
+    <View ref={barBox} collapsable={false} style={[style, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>
+      {children}
+    </View>
   )
 }
 

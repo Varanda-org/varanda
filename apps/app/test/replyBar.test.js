@@ -203,13 +203,14 @@ function handoff (onReplyDraft = () => {}) {
   const seedSource = between(publicar, '    if (!replyDraftPending)', '\n  }, [replyDraftPending')
   const keepSource = between(publicar, '    const keepDraft =', '    const useReplyDraft =')
   const acceptSource = between(publicar, '    const useReplyDraft =', '    return (\n      <Sheet open={open}')
-  const build = new Function('reply', 'open', 'held', 'hasMedia', 'text', 'replyDrafts', 'replyDraftsRef', 'setReplyDrafts', 'onReplyDraft', 'setText', 'onClearReply', 'onClose', 'genRef', 'removeItems', 'liveRef', // eslint-disable-line no-new-func
+  const build = new Function('reply', 'open', 'held', 'hasMedia', 'text', 'replyDrafts', 'replyDraftsRef', 'setReplyDrafts', 'onReplyDraft', 'setText', 'onClearReply', 'onClose', 'genRef', 'removeItems', 'liveRef', 'discardPost', // eslint-disable-line no-new-func
     [pendingSource, conflictSource, settleSource, keepSource, acceptSource].join('\n') +
     '\nreturn { pending: replyDraftPending, conflict: replyDraftConflict, keepDraft, useReplyDraft, seed: () => {' + seedSource + '} }')
-  const state = { text: '', clears: 0, closes: 0, removed: [], genRef: { current: 0 } }
+  const state = { text: '', clears: 0, closes: 0, discards: 0, removed: [], genRef: { current: 0 } }
   const render = (reply, { open = true, held = false, hasMedia = false } = {}) => build(reply, open, held, hasMedia, state.text, replyDrafts, replyDraftsRef,
     (v) => { replyDrafts = v }, (v) => { results.push(v); onReplyDraft(v) }, (v) => { state.text = v },
-    () => { state.clears++ }, () => { state.closes++ }, state.genRef, (ids) => state.removed.push(...ids), { current: new Set([1]) })
+    () => { state.clears++ }, () => { state.closes++ }, state.genRef, (ids) => state.removed.push(...ids), { current: new Set([1]) },
+    () => { state.genRef.current++; state.removed.push(1); state.discards++ })
   return { render, state, results }
 }
 
@@ -295,6 +296,7 @@ test('accepting a conflict replaces attachments and text only when not held', (t
   t.is(h.state.text, reply.draft)
   t.alike(h.results, [true])
   t.alike(h.state.removed, [1])
+  t.is(h.state.discards, 1, 'through discardPost, which also frees the video and the music')
   t.absent(h.render(reply).pending)
 })
 

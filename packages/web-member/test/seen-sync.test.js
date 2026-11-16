@@ -708,6 +708,110 @@ test('caughtUp leaves out a community that is incomplete or has a group that is 
   t.alike(r.caughtUp, [general, community], 'control: the full community')
 })
 
+test('caughtUp leaves out a moved group with nothing readable here', async (t) => {
+  const { a, community, general, posts, id, d } = await world(t)
+  await d.merge({ blob: sealB64(id, docOf(id, { groups: [markOf(general, posts[1])] })) })
+  const back = await store.readGroupSeen(a.storage)
+  const real = ops.communityInfo
+  t.teardown(() => { ops.communityInfo = real })
+  // A private group whose key has not arrived: a reader row, unread 0 and no
+  // post this node can list.
+  ops.communityInfo = async (c, p) => {
+    const info = await real(c, p)
+    return { ...info, groups: info.groups.map((g) => g.group === general ? { ...g, last: null, unread: 0 } : g) }
+  }
+  const r = await d.merge({ blob: sealB64(id, docOf(id, { groups: [markOf(general, posts[2])] })) })
+  t.is(r.groupChanged, true)
+  t.alike(r.caughtUp, [], 'neither the group nor its community')
+  ops.communityInfo = real
+  await store.writeGroupSeen(a.storage, back)
+  const control = await d.merge({ blob: sealB64(id, docOf(id, { groups: [markOf(general, posts[2])] })) })
+  t.alike(control.caughtUp, [general, community], 'control: readable, caught up')
+})
+
+test('a batch of dm marks larger than the window keeps its newest marks', async (t) => {
+  const id = identity()
+  const d = device(id, {})
+  await store.writeDmSeen(d.storage, [tok(1)])
+  const w = await d.sign('write')
+  await d.merge({ blob: w.blob })
+  // 737 marks between two syncs, their tokens in descending order so a cut
+  // by token would keep the oldest.
+  const batch = []
+  for (let i = 0; i < 737; i++) batch.push(tok(100000 - i))
+  await store.writeDmSeen(d.storage, [tok(1), ...batch])
+  const doc = openB64(id, (await d.sign('write')).blob)
+  t.is(doc.dm.length, seenBlob.SYNC_DM_MAX)
+  t.alike(doc.dm.map((e) => e.token), batch.slice(-seenBlob.SYNC_DM_MAX), 'the newest marks, newest last')
+  const times = doc.dm.map((e) => e.t)
+  t.ok(times.every((x, i) => i === 0 || x > times[i - 1]), 'one second each, no tie')
+})
+
+test('with the local dm list full, old remote marks never push out a local read', async (t) => {
+  const id = identity()
+  const d = device(id)
+  const ids = []
+  for (let i = 0; i < store.MAX_DM_SEEN; i++) ids.push(tok(i + 1))
+  await store.writeDmSeen(d.storage, ids)
+  const old = []
+  for (let i = 0; i < 10; i++) old.push({ token: tok(90001 + i), t: 5 + i })
+  const r = await d.merge({ blob: sealB64(id, docOf(id, { dm: old })) })
+  const kept = await store.readDmSeen(d.storage)
+  t.is(kept.length, store.MAX_DM_SEEN)
+  t.alike(kept.slice().sort(), ids.slice().sort(), 'every local read stays')
+  t.is(r.dmChanged, false, 'nothing reached the list')
+  const again = await d.merge({ unchanged: true })
+  t.is(again.dmChanged, false, 'and the next pass does not report a change either')
+})
+
+test('a notice token the window cut is not stamped new when offered again', async (t) => {
+  const id = identity()
+  const d = device(id, {})
+  const realNow = Date.now
+  t.teardown(() => { Date.now = realNow })
+  const old = tok(1)
+  let r = await d.merge({ avisos: { own: [old], pages: { ['page:' + 'cd'.repeat(32)]: [tok(2)] } } })
+  t.ok(r.avisos.own.includes(old))
+  const newer = []
+  for (let i = 0; i < seenBlob.SYNC_AVISOS_MAX; i++) newer.push(tok(1000 + i))
+  const pageNewer = []
+  for (let i = 0; i < seenBlob.SYNC_PAGE_TOKENS_MAX; i++) pageNewer.push(tok(5000 + i))
+  Date.now = () => realNow() + 10000
+  r = await d.merge({ avisos: { own: newer, pages: { ['page:' + 'cd'.repeat(32)]: pageNewer } } })
+  t.absent(r.avisos.own.includes(old), 'cut by the newer marks')
+  Date.now = () => realNow() + 20000
+  // A reload: Avisos offers the old row again.
+  r = await d.merge({ avisos: { own: [old], pages: { ['page:' + 'cd'.repeat(32)]: [tok(2)] } } })
+  t.absent(r.avisos.own.includes(old), 'not back as a new mark')
+  t.alike(r.avisos.own.slice().sort(), newer.slice().sort(), 'every newer mark stays')
+  t.absent(r.avisos.pages['page:' + 'cd'.repeat(32)].includes(tok(2)), 'a page token too')
+  const held = await store.readSeenHeld(d.storage, id.own)
+  t.is(held.length, store.SEEN_HELD_MAX, 'kv holds a fixed number of entries')
+  t.is(await store.readSeenHeld(d.storage, 'ef'.repeat(32)), null, 'bound to the own key')
+  // A token never seen before still goes in.
+  r = await d.merge({ avisos: { own: [tok(9)] } })
+  t.ok(r.avisos.own.includes(tok(9)))
+})
+
+test('kv seenHeld exists padded from the first merge and keeps a whole batch of cut tokens', async (t) => {
+  const id = identity()
+  const d = device(id, {})
+  const realNow = Date.now
+  t.teardown(() => { Date.now = realNow })
+  await d.merge({})
+  const first = await store.readSeenHeld(d.storage, id.own)
+  t.is(first && first.length, store.SEEN_HELD_MAX, 'present before any cut, at the fixed size')
+  const old = []
+  for (let i = 0; i < seenBlob.SYNC_AVISOS_MAX; i++) old.push(tok(20000 + i))
+  await d.merge({ avisos: { own: old } })
+  const newer = []
+  for (let i = 0; i < seenBlob.SYNC_AVISOS_MAX; i++) newer.push(tok(30000 + i))
+  Date.now = () => realNow() + 10000
+  await d.merge({ avisos: { own: newer } })
+  const held = new Set(await store.readSeenHeld(d.storage, id.own))
+  t.is(old.filter((tk) => held.has(tk)).length, old.length, 'all 256 cut in one call are held')
+})
+
 // ---- the session (lib/session.js through lib/node.js) ----
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'

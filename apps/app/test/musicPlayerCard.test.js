@@ -5,6 +5,12 @@ const fs = require('fs')
 const path = require('path')
 const { displayText } = require('@varanda/rpc')
 const source = fs.readFileSync(path.join(__dirname, '../src/ui/MusicPlayerCard.js'), 'utf8')
+// The real member key the provider hands the card (node.js loads React, so
+// only this pure function is taken from its text).
+const nodeSource = fs.readFileSync(path.join(__dirname, '../src/node.js'), 'utf8')
+const memberKeyOfText = nodeSource.slice(nodeSource.indexOf('export function memberKeyOf'), nodeSource.indexOf('function useHandle')).replace('export ', '')
+// eslint-disable-next-line no-new-func
+const memberKeyOf = new Function(memberKeyOfText + '\nreturn memberKeyOf')()
 
 // Like musicPicker.test, execute the controller with account and stream
 // doubles. Native media modules and the public network never load in Node.
@@ -14,7 +20,7 @@ async function helpers (stubs = {}) {
   const deps = { ...music, ...playback, ...stubs }
   const body = source.slice(source.indexOf('export const musicPlayerIdle'), source.indexOf('export function useMusicAvailable')).replace(/\bexport /g, '')
   // eslint-disable-next-line no-new-func
-  return new Function(...Object.keys(deps), body + '\nreturn { musicPlayerIdle, AUTO_SEEK_MS, musicPlayerTime, createMusicPlayback }')(...Object.values(deps))
+  return new Function(...Object.keys(deps), body + '\nreturn { musicPlayerIdle, musicLeaves, AUTO_SEEK_MS, musicPlayerTime, createMusicPlayback }')(...Object.values(deps))
 }
 
 const track = (id = 'abc', duration = 90) => ({ id, title: 'Faixa ' + id, artist: 'Artista', duration, url: 'https://audius.co/artist/' + id })
@@ -84,6 +90,7 @@ async function ui (stubs = {}) {
   const { transformSync } = require('@babel/core')
   const music = await import('../src/music.js')
   const media = await import('../src/media/chatMedia.js')
+  const live = await import('../src/embedLive.js')
   const slots = []
   const effects = []
   let cursor = 0
@@ -121,9 +128,19 @@ async function ui (stubs = {}) {
     tap: () => {},
     StyleSheet: { create: (value) => value, hairlineWidth: 1 },
     useStyles: (makeStyles) => makeStyles({ accent: 'accent', accentInk: 'accentInk', bg: 'bg', soft: 'soft' }),
-    layout: { hit: 44 },
+    layout: { hit: 44, topBar: 64, tabBar: 49 },
     radius: { sm: 8 },
     space: {},
+    useContext: () => true,
+    TabBarShown: {},
+    useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
+    useWindowDimensions: () => ({ width: 400, height: 800 }),
+    VISIBILITY_MS: live.VISIBILITY_MS,
+    OPEN_GRACE_MS: live.OPEN_GRACE_MS,
+    mostlyHidden: live.mostlyHidden,
+    setInterval,
+    clearInterval,
+    Date,
     ...stubs
   }
   const input = source.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
@@ -148,7 +165,7 @@ test('idle cards use stored safe text, make no requests and mount the node reade
   const calls = []
   const unexpected = () => { calls.push('request'); throw new Error('idle request') }
   const opened = []
-  const h = await ui({ useHosted: () => true, useNode: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected, openExternal: (url) => opened.push(url) })
+  const h = await ui({ useHosted: () => true, useNodeHandle: unexpected, useMemberKey: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected, openExternal: (url) => opened.push(url) })
   const card = { title: 'Título\u202e', desc: 'Artista\u0007', url: track().url + '#varanda-musica=s:abc:30' }
   const music = { kind: 'snippet', id: 'abc', start: 30 }
   const props = { card, music }
@@ -252,7 +269,7 @@ test('the round button keeps every accessible name', async (t) => {
 test('the idle card still names Audius and draws no cover request', async (t) => {
   const calls = []
   const unexpected = () => { calls.push('request'); throw new Error('idle request') }
-  const h = await ui({ useNode: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected })
+  const h = await ui({ useNodeHandle: unexpected, useMemberKey: unexpected, audiusReady: unexpected, audiusItem: unexpected, audiusPlay: unexpected, createStreamPlayer: unexpected })
   const card = { title: 'Título\u202e', desc: 'Artista\u0007' }
   const tree = h.MusicCardView({ card, music: { kind: 'track' } })
   const row = tree.children[0]
@@ -421,7 +438,8 @@ test('the tap reads the own lowercase key and unmount aborts the active request'
   const calls = []
   let options
   const h = await ui({
-    useNode: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey: 'AB'.repeat(32) } } }),
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer' }),
+    useMemberKey: () => memberKeyOf({ status: { publicKey: 'AB'.repeat(32) } }),
     audiusReady: async () => true,
     audiusItem: async (kind, id, opts) => { options = opts; calls.push([kind, id]); return item.promise },
     audiusPlay: () => calls.push('ticket')
@@ -455,9 +473,10 @@ test('the idle card asks no cover and shows the tile', async (t) => {
 test('after the tap the card asks the cover for the answered item only', async (t) => {
   const item = deferred()
   const covers = []
-  const session = { hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey: 'AB'.repeat(32) } } }
+  const session = { hosted: true, accountOrigin: 'account-origin', request: 'signer' }
   const h = await ui({
-    useNode: () => session,
+    useNodeHandle: () => session,
+    useMemberKey: () => memberKeyOf({ status: { publicKey: 'AB'.repeat(32) } }),
     useMusicCover: (...args) => { covers.push(args); return args[1] && args[1].cover === true ? 'data:image/png;base64,AAAA' : null },
     audiusReady: async () => true,
     audiusItem: async () => item.promise,
@@ -488,7 +507,8 @@ test('an account change never asks a cover for the new member', async (t) => {
   const covers = []
   let publicKey = 'AB'.repeat(32)
   const h = await ui({
-    useNode: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer', passkey: { status: { publicKey } } }),
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer' }),
+    useMemberKey: () => memberKeyOf({ status: { publicKey } }),
     useMusicCover: (...args) => { covers.push(args); return null },
     audiusReady: async () => true,
     audiusItem: async () => pending.promise,
@@ -1291,8 +1311,11 @@ test('shared player source keeps IO behind the tap and all provider text escaped
   t.ok(source.includes('job.controller.abort()'))
   t.is([...source.matchAll(/useMusicCover\(/g)].length, 1, 'one cover request, inside the active player')
   t.ok(source.indexOf('useMusicCover(') > source.indexOf('function ActiveMusicPlayer'))
-  t.is([...source.matchAll(/useNode\(\)/g)].length, 1)
-  t.ok(source.indexOf('useNode()') > source.indexOf('function ActiveMusicPlayer'))
+  t.absent(/useNode\(\)/.test(source), 'rows read the handle, not the node value')
+  t.is([...source.matchAll(/useNodeHandle\(\)/g)].length, 1)
+  t.ok(source.indexOf('useNodeHandle()') > source.indexOf('function ActiveMusicPlayer'))
+  t.is([...source.matchAll(/useMemberKey\(\)/g)].length, 1)
+  t.ok(source.indexOf('useMemberKey()') > source.indexOf('function ActiveMusicPlayer'))
   t.ok(source.includes('if (!queue.done) start(epoch, true)'), 'automatic start only on queue ended')
   t.is([...source.matchAll(/start\(epoch/g)].length, 3, 'only press, explicit queue step and ended call start')
   t.is([...source.matchAll(/await (?:job\.)?player\.play\(\)/g)].length, 3, 'start, resume and explicit scrub are the only play paths')
@@ -1300,4 +1323,224 @@ test('shared player source keeps IO behind the tap and all provider text escaped
   t.ok(source.includes("name: 'increment'") && source.includes("name: 'decrement'"))
   t.ok(source.includes('PanResponder.create('))
   t.ok(source.includes('snippetEndMs(music.start, track?.duration) - music.start * 1000'))
+})
+
+test('musicLeaves: a playing track or playlist pauses, a snippet or a request stops', async (t) => {
+  const { musicLeaves } = await helpers()
+  t.is(musicLeaves('playing', 'track'), 'pause')
+  t.is(musicLeaves('playing', 'playlist'), 'pause')
+  t.is(musicLeaves('playing', 'snippet'), 'stop')
+  for (const kind of ['track', 'playlist', 'snippet']) {
+    t.is(musicLeaves('loading', kind), 'stop', 'loading ' + kind)
+    t.is(musicLeaves('paused', kind), null, 'paused ' + kind)
+    t.is(musicLeaves('idle', kind), null, 'idle ' + kind)
+  }
+  t.is(musicLeaves('playing', 'other'), null)
+})
+
+// Mounts a tapped card, lets its request settle and runs the visibility effect
+// with a fake clock and interval; the view answers through `measure`.
+async function scrolled (t, { music = { kind: 'track', id: 'abc' }, item, measure } = {}) {
+  let clock = 1000
+  const intervals = []
+  const calls = []
+  const players = []
+  let memo
+  const view = { measureInWindow: (fn) => measure.current(fn) }
+  const h = await ui({
+    useNodeHandle: () => ({ hosted: true, accountOrigin: 'account-origin', request: 'signer' }),
+    useMemberKey: () => memberKeyOf({ status: { publicKey: 'AB'.repeat(32) } }),
+    useMemo: (fn) => memo || (memo = fn()),
+    audiusReady: async () => true,
+    audiusItem: item || (async (kind, id) => track(id)),
+    audiusPlay: async () => { calls.push(['ticket']); return answer },
+    createStreamPlayer: () => {
+      calls.push(['create'])
+      const listeners = new Set()
+      const errors = new Set()
+      const player = {
+        seek: async (ms) => calls.push(['seek', ms]),
+        play: async () => calls.push(['play']),
+        pause: () => calls.push(['pause']),
+        release: () => calls.push(['release']),
+        onProgress: (fn) => { listeners.add(fn); return () => listeners.delete(fn) },
+        onError: (fn) => { errors.add(fn); return () => errors.delete(fn) },
+        progress: (update) => { for (const fn of [...listeners]) fn(update) },
+        error: (error) => { for (const fn of [...errors]) fn(error) }
+      }
+      players.push(player)
+      return player
+    },
+    setInterval: (fn, ms) => { intervals.push({ fn, ms, live: true }); return intervals.length },
+    clearInterval: (id) => { intervals[id - 1].live = false },
+    Date: { now: () => clock, parse: Date.parse }
+  })
+  const card = { title: 'Stored', desc: 'Peer', url: track().url }
+  const epoch = (await import('../src/media/chatMedia.js')).playbackEpoch()
+  const render = () => { h.reset(); h.effects.length = 0; return h.ActiveMusicPlayer({ card, music, epoch }) }
+  render()
+  const unmount = h.effects[0]()
+  t.teardown(unmount)
+  await flush()
+  await flush()
+  const el = render()
+  el.props.frame.current = view
+  const off = h.effects[1]()
+  t.teardown(() => { if (off) off() })
+  const tick = (ms) => {
+    clock += ms
+    for (const one of intervals) if (one.live) one.fn()
+  }
+  return { el, off, tick, calls, players, intervals, state: () => render().props.state }
+}
+
+const hiddenAnswer = (fn) => fn(0, -1000, 300, 80)
+const visibleAnswer = (fn) => fn(0, 200, 300, 80)
+
+test('scrolled away, a playing track pauses after the grace and never resumes', async (t) => {
+  const measure = { current: hiddenAnswer }
+  const s = await scrolled(t, { measure })
+  t.is(s.state().phase, 'playing')
+  t.is(s.intervals[0]?.ms, 500, 'checks every VISIBILITY_MS')
+  s.tick(500)
+  s.tick(500)
+  t.is(s.state().phase, 'playing', 'nothing within the 2 s grace')
+  t.absent(s.calls.some((c) => c[0] === 'pause'))
+  s.tick(1000)
+  t.is(s.state().phase, 'paused', 'the first hidden answer after the grace pauses')
+  t.is(s.calls.filter((c) => c[0] === 'pause').length, 1)
+  t.absent(s.calls.some((c) => c[0] === 'release'), 'the player and its place are kept')
+  const plays = s.calls.filter((c) => c[0] === 'play').length
+  measure.current = visibleAnswer
+  s.tick(500)
+  s.tick(500)
+  measure.current = hiddenAnswer
+  s.tick(500)
+  t.is(s.calls.filter((c) => c[0] === 'play').length, plays, 'nothing restarts when visible again')
+  t.is(s.state().phase, 'paused')
+})
+
+test('a visible playing track keeps playing', async (t) => {
+  const s = await scrolled(t, { measure: { current: visibleAnswer } })
+  for (let i = 0; i < 8; i++) s.tick(500)
+  t.is(s.state().phase, 'playing')
+  t.absent(s.calls.some((c) => c[0] === 'pause'))
+})
+
+test('scrolled away, a snippet stops', async (t) => {
+  const s = await scrolled(t, { music: { kind: 'snippet', id: 'abc', start: 30 }, measure: { current: hiddenAnswer } })
+  t.is(s.state().phase, 'playing')
+  s.tick(2500)
+  t.is(s.state().phase, 'idle')
+  t.ok(s.calls.some((c) => c[0] === 'release'), 'the snippet player is released')
+})
+
+test('scrolled away, a pending request stops', async (t) => {
+  let signal
+  const s = await scrolled(t, { item: async (kind, id, opts) => { signal = opts.signal; return new Promise(() => {}) }, measure: { current: hiddenAnswer } })
+  t.is(s.state().phase, 'loading')
+  s.tick(1000)
+  t.is(s.state().phase, 'loading', 'not within the grace')
+  s.tick(1500)
+  t.is(s.state().phase, 'idle')
+  t.ok(signal.aborted, 'the request is aborted')
+  t.absent(s.calls.some((c) => c[0] === 'ticket'))
+})
+
+test('a late answer after a pause or after the check ended does nothing', async (t) => {
+  let pending = null
+  const s = await scrolled(t, { measure: { current: (fn) => { pending = fn } } })
+  s.tick(2500)
+  s.el.props.onPress()
+  await flush()
+  t.is(s.state().phase, 'paused')
+  const before = s.calls.length
+  if (pending) hiddenAnswer(pending)
+  await flush()
+  t.is(s.calls.length, before, 'a paused player is never pressed again')
+  t.is(s.state().phase, 'paused')
+
+  let late = null
+  const other = await scrolled(t, { measure: { current: (fn) => { late = fn } } })
+  other.tick(2500)
+  if (other.off) other.off()
+  if (late) hiddenAnswer(late)
+  t.is(other.state().phase, 'playing', 'an answer from an ended check run does not apply')
+})
+
+test('an unmeasurable or unanswered view counts as hidden', async (t) => {
+  const gone = await scrolled(t, { measure: { current: visibleAnswer } })
+  gone.el.props.frame.current = null
+  gone.tick(2500)
+  t.is(gone.state().phase, 'paused', 'no view')
+  const throws = await scrolled(t, { measure: { current: () => { throw new Error('gone') } } })
+  throws.tick(2500)
+  t.is(throws.state().phase, 'paused', 'measuring throws')
+  const silent = await scrolled(t, { measure: { current: () => {} } })
+  silent.tick(2500)
+  t.is(silent.state().phase, 'playing', 'a first unanswered measure waits')
+  silent.tick(500)
+  t.is(silent.state().phase, 'paused', 'still unanswered a tick later')
+})
+
+test('a track that ended or was refused just before the hidden answer starts nothing', async (t) => {
+  const finishes = [(p) => p.progress({ ms: 90000, ended: true, playing: false }), (p) => p.error({ name: 'NotAllowedError' })]
+  for (const finish of finishes) {
+    const s = await scrolled(t, { measure: { current: hiddenAnswer } })
+    finish(s.players[0])
+    const before = s.calls.length
+    s.tick(2500)
+    await flush()
+    await flush()
+    t.is(s.calls.length, before, 'no create, ticket, seek or play off screen')
+  }
+})
+
+test('the visibility rule source pins', (t) => {
+  t.ok(source.includes("import { OPEN_GRACE_MS, VISIBILITY_MS, mostlyHidden } from '../embedLive'"))
+  t.ok(source.includes('}, VISIBILITY_MS)'))
+  t.ok(source.includes('Date.now() - startedAt < OPEN_GRACE_MS'))
+  t.ok(source.includes('mostlyHidden(x, y, w, h, top, bottom, win.width)'))
+  t.ok(source.includes('<View ref={frame} collapsable={false} style={styles.card}>'))
+  t.ok(source.includes("const sounding = state.phase === 'playing' || state.phase === 'loading'"))
+  t.ok(source.includes('}, [sounding, playback,'), 'loading to playing does not restart the grace')
+  const effect = source.slice(source.indexOf('const sounding ='), source.indexOf('if (!enabled || state.fallback)'))
+  t.absent(effect.includes('.press('), 'leaving never presses')
+  t.absent(/soundMute/.test(source), 'the card leaves the session mute alone')
+})
+
+test('nothing under src imports the removed autoplay sticker or its switch', (t) => {
+  const files = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith('.js')) files.push(full)
+    }
+  }
+  walk(path.join(__dirname, '../src'))
+  t.ok(files.length > 10)
+  const importers = files.filter((file) => /from '[^']*(?:postMusic|PostMusic|musicAutoStore)'/.test(fs.readFileSync(file, 'utf8')))
+  t.alike(importers, [])
+  for (const gone of ['ui/PostMusic.js', 'postMusic.js', 'musicAutoStore.native.js', 'musicAutoStore.web.js']) {
+    t.absent(fs.existsSync(path.join(__dirname, '../src', gone)), gone + ' is gone')
+  }
+})
+
+// Moved from postMusicCard.test.js, which covered the removed sticker.
+test('screen reader modules and the rows that read them', (t) => {
+  const withoutComments = (src) => src.replace(/("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, (m, str) => str || ' ')
+  const read = (...p) => fs.readFileSync(path.join(__dirname, '../src', ...p), 'utf8')
+  const exportsOf = (file) => [...withoutComments(read('ui', file)).matchAll(/export function (\w+)/g)].map((m) => m[1]).sort()
+  t.alike(exportsOf('screenReader.native.js'), ['screenReaderKnown', 'screenReaderOn'])
+  t.alike(exportsOf('screenReader.web.js'), exportsOf('screenReader.native.js'), 'the same names on both platforms')
+  const web = withoutComments(read('ui', 'screenReader.web.js'))
+  t.absent(web.includes('AccessibilityInfo'), 'the web never asks react-native-web, which always answers true')
+  const native = withoutComments(read('ui', 'screenReader.native.js'))
+  t.ok(native.includes('AccessibilityInfo.isScreenReaderEnabled()'))
+  t.ok(native.includes("AccessibilityInfo.addEventListener('screenReaderChanged'"))
+  const row = withoutComments(read('ui', 'PostRow.js'))
+  t.ok(row.includes("import { screenReaderOn } from './screenReader'"))
+  t.absent(row.includes('isScreenReaderEnabled'), 'PostRow no longer asks by itself')
+  t.ok(row.includes('if (screenReaderOn()) {'), 'the double tap still yields to a screen reader')
 })

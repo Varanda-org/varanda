@@ -1,4 +1,4 @@
-/* global __DEV__, requestAnimationFrame */
+/* global __DEV__, cancelAnimationFrame, requestAnimationFrame */
 // The one list A Rua, Diário and Seguindo use: a FlatList with
 // pull-to-refresh, infinite scroll, scroll-to-top on a signal and an optional
 // "new items" pill. Native refreshes through RefreshControl; on the web
@@ -41,17 +41,18 @@
 // Empty and short lists stay pullable: the gesture is on the wrapper, not on
 // the content height.
 
-import { createElement, isValidElement, useCallback, useEffect, useRef, useState } from 'react'
+import { Profiler, createElement, isValidElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { Animated, FlatList, Platform, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native'
 import { EMPTY_WHEEL, MIN_SPIN_MS, PULL_THRESHOLD, WHEEL_DECAY_MS, pullDecision, pullState, spinRemaining, wheelPullState } from '../pull'
 import { endStep, nearListEnd, spanEnd } from '../paging'
-import { perfMarks, useNode } from '../node'
-import { createFrameStats, frameLine, monotonicNow, perfEnabled } from '../perfMarks'
+import { useNodeHandle } from '../node'
+import { beginRenderPhase, bootMark, bootMarkOnce, createFrameStats, endRenderPhase, frameLine, frameSummary, monotonicNow, onRenderProfile, perfEnabled, perfOn, rowStatsLine } from '../perfMarks'
+import { SETTLE_MS, claimScroll, createScrollDriver, scrollWanted } from '../perfScroll'
 import { Spinner } from './index'
 import { Icon } from './Icon'
 import { NewItemsPill } from './States'
 import { EmbedRow, keptRowKeys, orphanCuts, renderScroll, rowKeyOf, rowOrder, touchedNow, useEmbedHost } from './EmbedLayer'
-import { EmbedHost } from './screenVisible'
+import { EmbedHost, PerfListId, ScreenVisible } from './screenVisible'
 import { motion, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
@@ -131,6 +132,7 @@ export function RefreshableList ({
   newItems,
   newItemsTop,
   listRef,
+  perfId,
   keepVisiblePosition = false,
   onScrollFrame,
   onContentSizeChange,
@@ -139,7 +141,7 @@ export function RefreshableList ({
 }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
-  const node = useNode()
+  const node = useNodeHandle()
   const syncNow = node && node.syncNow
   // Loaded players live in a layer of the list's own scroll content, not in
   // their rows (./EmbedLayer): a row this list unmounts keeps its player.
@@ -156,6 +158,83 @@ export function RefreshableList ({
   userScroll.current = onUserScroll
   const notifyUserScroll = useCallback(() => {
     if (typeof userScroll.current === 'function') userScroll.current()
+  }, [])
+  // Dev perf only: the first rows mark and the scripted scroll (src/perfScroll).
+  const profiled = (node) => perfOn && perfId ? <PerfListId.Provider value={perfId}><Profiler id={'list:' + perfId} onRender={onRenderProfile}>{node}</Profiler></PerfListId.Provider> : node
+  const hasRows = Array.isArray(data) && data.length > 0
+  const perfIdRef = useRef(perfId)
+  perfIdRef.current = perfId
+  // perfOn never changes while the app runs, so this hook call is stable.
+  const screenVisible = perfOn ? useContext(ScreenVisible) : false
+  // Started once per mount and never restarted: rows that empty and come back
+  // (a refresh) would otherwise send the scroll back to the top mid-run. It
+  // waits for the list's screen to be the visible one (a hidden tab with a
+  // cached snapshot has rows too), and the per-launch claim is taken only
+  // when the scroll starts, so a list that is never shown never spends it.
+  // Hidden before the start: the wait is dropped and begins again when shown.
+  // Hidden mid-run: the run is stopped and discarded (no run=scroll line).
+  // Both hold with no rows too (a hidden tab mid-refresh).
+  const scripted = useRef(null)
+  useEffect(() => {
+    if (!perfOn || !perfId) return undefined
+    if (hasRows) bootMarkOnce('first-rows:' + perfId)
+    const current = scripted.current
+    if (!screenVisible) {
+      if (current !== null && current.timer !== null) {
+        clearTimeout(current.timer)
+        scripted.current = null
+      } else if (current !== null && current.driver !== null) {
+        current.driver.stop()
+        current.driver = null
+        endFrames()
+        rowStatsLine(perfId)
+        endRenderPhase()
+        console.log('perf: scroll-aborted list=' + perfId + ' hidden')
+      }
+      return undefined
+    }
+    if (!hasRows || current !== null || !scrollWanted(perfId, perfOn)) return undefined
+    const run = { timer: null, driver: null }
+    scripted.current = run
+    run.timer = setTimeout(() => {
+      run.timer = null
+      if (!claimScroll(perfId)) return
+      run.driver = createScrollDriver({
+        now: monotonicNow,
+        raf: (fn) => requestAnimationFrame(fn),
+        cancel: (h) => cancelAnimationFrame(h),
+        scrollTo: (offset) => {
+          // Keeps one frames sample over the whole run, clamped stretches too.
+          sampleFrames()
+          if (list.current) list.current.scrollToOffset({ offset, animated: false })
+        },
+        notify: notifyUserScroll,
+        max: () => Math.max(0, metrics.current.content - metrics.current.layout),
+        onSegment: (i, seg) => console.log('perf: scroll-segment ' + i + ' ' + (seg.dir > 0 ? 'down' : 'up')),
+        onDone: () => {
+          run.driver = null
+          console.log('perf: frames ' + frameLine(endFrames()) + ' list=' + perfId + ' run=scroll ' + rowStatsLine(perfId))
+          endRenderPhase()
+          bootMark('scroll-done:' + perfId)
+        }
+      })
+      bootMark('scroll-start:' + perfId)
+      endFrames()
+      // Drops the row counts from before the scroll, so the run's line covers the run only.
+      rowStatsLine(perfId)
+      beginRenderPhase('scroll:' + perfId)
+      run.driver.start()
+    }, SETTLE_MS)
+    return undefined
+  }, [hasRows, perfId, screenVisible, notifyUserScroll])
+  useEffect(() => () => {
+    const run = scripted.current
+    if (run === null) return
+    if (run.timer !== null) clearTimeout(run.timer)
+    if (run.driver !== null) {
+      run.driver.stop()
+      endRenderPhase()
+    }
   }, [])
   const userTouch = useRef(false)
   const userWheelAt = useRef(null)
@@ -469,11 +548,15 @@ export function RefreshableList ({
       // Frames past the last scroll event (plus one at 60 Hz) are idle.
       const s = frames.current.stop(framesLastEvent.current + FRAME_TAIL_MS)
       if (s === null || s.count === 0) return
-      perfMarks().mark('frames', frameLine(s))
-      // Printed at once too: a long scroll session would push it out of the
-      // marks ring before the next report (dev perf builds only).
-      console.log('perf: frames ' + frameLine(s))
+      console.log('perf: frames ' + frameLine(s) + ' list=' + (perfIdRef.current || '-') + ' ' + rowStatsLine(perfIdRef.current))
     }, FRAMES_IDLE_MS)
+  }, [])
+  // Stops the sampler now (the scripted scroll's end) and gives its summary.
+  const endFrames = useCallback(() => {
+    if (framesTimer.current) clearTimeout(framesTimer.current)
+    framesTimer.current = null
+    const s = frames.current === null ? null : frames.current.stop()
+    return s === null ? frameSummary([]) : s
   }, [])
   useEffect(() => () => {
     if (framesTimer.current) clearTimeout(framesTimer.current)
@@ -688,37 +771,39 @@ export function RefreshableList ({
           )
         : null}
       <EmbedHost.Provider value={host}>
-        <FlatList
-          ref={setList}
-          style={styles.list}
-          data={data}
-          renderItem={renderRow}
-          keyExtractor={keyExtractor}
-          extraData={extraData}
-          initialNumToRender={FIRST_ROWS}
-          maxToRenderPerBatch={ROWS_PER_BATCH}
-          windowSize={WINDOW_SCREENS}
-          ListHeaderComponent={ListHeaderComponent}
-          ListFooterComponent={footer}
-          ListEmptyComponent={ListEmptyComponent}
-          contentContainerStyle={contentContainerStyle}
-          onEndReached={check}
-          onEndReachedThreshold={END_THRESHOLD}
-          keyboardShouldPersistTaps='handled'
-          onScroll={onScroll}
-          onScrollBeginDrag={web ? undefined : notifyUserScroll}
-          onContentSizeChange={handleContentSizeChange}
-          onLayout={onLayout}
-          scrollEventThrottle={16}
-          dataSet={{ pull: 'y' }}
-          maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
-          onViewableItemsChanged={trackViewable ? onViewable : undefined}
-          viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
-          renderScrollComponent={renderScroll}
-          refreshControl={web
-            ? undefined
-            : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
-        />
+        {profiled(
+          <FlatList
+            ref={setList}
+            style={styles.list}
+            data={data}
+            renderItem={renderRow}
+            keyExtractor={keyExtractor}
+            extraData={extraData}
+            initialNumToRender={FIRST_ROWS}
+            maxToRenderPerBatch={ROWS_PER_BATCH}
+            windowSize={WINDOW_SCREENS}
+            ListHeaderComponent={ListHeaderComponent}
+            ListFooterComponent={footer}
+            ListEmptyComponent={ListEmptyComponent}
+            contentContainerStyle={contentContainerStyle}
+            onEndReached={check}
+            onEndReachedThreshold={END_THRESHOLD}
+            keyboardShouldPersistTaps='handled'
+            onScroll={onScroll}
+            onScrollBeginDrag={web ? undefined : notifyUserScroll}
+            onContentSizeChange={handleContentSizeChange}
+            onLayout={onLayout}
+            scrollEventThrottle={16}
+            dataSet={{ pull: 'y' }}
+            maintainVisibleContentPosition={keepVisiblePosition ? KEEP_VISIBLE : undefined}
+            onViewableItemsChanged={trackViewable ? onViewable : undefined}
+            viewabilityConfig={trackViewable ? VIEWABILITY_CONFIG : undefined}
+            renderScrollComponent={renderScroll}
+            refreshControl={web
+              ? undefined
+              : <RefreshControl refreshing={!!refreshing || spinning} onRefresh={runRefresh} tintColor={colors.accent} colors={[colors.accent]} progressBackgroundColor={colors.card} />}
+          />
+        )}
       </EmbedHost.Provider>
       {web && showIndicator
         ? (

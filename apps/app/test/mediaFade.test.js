@@ -19,14 +19,17 @@ test('a photo fades from 0 to 1 over motion.fast when it loads', (t) => {
   t.ok(fade.includes('opacity.setValue(toValue)'), 'reduced motion sets 1 at once')
   t.ok(fade.includes('toValue,'), 'timing target is 1')
   t.ok(fade.includes('duration,'), 'timing uses that duration')
-  t.ok(fade.includes('useNativeDriver: false'), 'web has no native driver')
+  t.ok(src.includes("const NATIVE_DRIVER = Platform.OS !== 'web'"), 'native driver everywhere but the web')
+  t.ok(fade.includes('useNativeDriver: NATIVE_DRIVER'), 'the fade runs on the native driver where there is one')
+  t.absent(fade.includes('useNativeDriver: false'), 'no fixed JS driver')
   t.ok(fade.includes('isInteraction: false'), 'a feed of fades does not hold the list window')
   t.ok(fade.includes('run.start()'), 'the timing runs')
-  t.ok(fade.includes('react-native-web has no native driver'), 'the JS driver names the missing API')
+  t.ok(src.includes('react-native-web has no native driver'), 'the web fallback names the missing API')
   const child = src.slice(src.indexOf('function FadingPhoto'), src.indexOf('export function MediaView'))
   t.ok(child.includes('new Animated.Value(reduceMotion ? 1 : 0)'), 'starts at 0')
   t.ok(child.includes('new Animated.Value(reduceMotion ? 1 : 0)'), 'a new photo is hidden unless motion is reduced')
-  t.ok(src.includes('opacity.setValue(1)'), 'a late reduced-motion setting snaps to 1')
+  t.ok(src.includes('opacity.stopAnimation(() => opacity.setValue(1))'), 'a late reduced-motion setting snaps to 1 after the stop has synced')
+  t.absent(/fadeRun\.current\.stop\(\)\s*\n\s*fadeRun\.current = null\s*\n\s*\}\s*\n\s*opacity\.setValue\(1\)/.test(src), 'no setValue(1) right after the stop')
   t.ok(child.includes('onLoad={reveal}'), 'the fade starts when the bitmap loads')
   t.ok(src.includes("Platform.OS === 'android' ? { fadeDuration: 0 } : null"), 'Android\'s own fade stays off')
   t.ok(src.includes('the web warns if it is passed through'), 'the Platform.OS check names the web warning')
@@ -44,7 +47,7 @@ test('fade does not change load, keep or retry', (t) => {
   t.absent(loader.includes('Animated'), 'the loader does not fade')
   t.absent(loader.includes('opacity'), 'the loader does not fade')
   t.absent(loader.includes('motion.fast'), 'the loader does not time the fade')
-  t.ok(src.includes('const canFetch = !keptOnly && node !== null && node.hosted === true'))
+  t.ok(src.includes('const canFetch = !keptOnly && hosted === true'))
   t.ok(src.includes('keptStore.keptUrl(kind, author, d)'))
   t.ok(src.includes("keptOnlyUrl('posts', author, descriptor, persist)"))
   t.ok(src.includes("if (keptOnly) return kept !== null ? { state: 'ok', url: kept, retry: undefined } : { state: 'loading', url: null, retry: undefined }"))
@@ -109,6 +112,7 @@ function loadFadingPhoto () {
     Animated,
     motion: { fast: 150 },
     imageFadeOff: null,
+    NATIVE_DRIVER: true,
     useStyles: () => ({}),
     makeStyles: () => ({}),
     useRef: (init) => ({ current: init }),
@@ -138,6 +142,7 @@ test('loading the bitmap brings the photo to full opacity', (t) => {
   image.props.onLoad()
   t.is(timings.length, 1, 'one fade per load')
   t.is(timings[0].duration, 150, 'the fade lasts motion.fast')
+  t.is(timings[0].useNativeDriver, true, 'the fade uses the driver constant')
   t.is(opacity.value, 1, 'the load handler reveals the photo')
   const reduced = loadFadingPhoto()
   const still = findType(reduced.FadingPhoto({ url: 'blob:b', fit: 'cover', reduceMotion: true }), 'Animated.Image')

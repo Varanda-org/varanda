@@ -1,16 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { ActivityIndicator, PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { ActivityIndicator, PanResponder, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { audiusItem, audiusPlay, audiusReady } from '../account'
 import { MUSIC_FULL_LIST_TEXT, MUSIC_SEEK_TEXT, MUSIC_SOURCE, SNIPPET_BADGE, clampStart, musicErrorText, musicOriginOf, musicPartialText, queueIdle, queueStep, seekReached, snippetEndMs, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
-import { useHosted, useNode } from '../node'
+import { useHosted, useMemberKey, useNodeHandle } from '../node'
 import { openExternal } from '../openExternal'
+import { OPEN_GRACE_MS, VISIBILITY_MS, mostlyHidden } from '../embedLive'
 import { LinkCard } from './LinkCard'
 import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
 import { tap } from './haptics'
+import { TabBarShown } from './tabBarShown'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space } from './theme'
 import { useMusicCover } from './useMusicCover'
@@ -19,6 +22,16 @@ import { useMusicCover } from './useMusicCover'
 const WEB = Platform.OS === 'web'
 
 export const musicPlayerIdle = { item: null, queue: queueIdle, phase: 'idle', ms: 0, error: '', fallback: false, blocked: false }
+
+// A paused track keeps its place for the next tap; a snippet has no place to
+// keep, and a pending request would start sound off screen.
+export function musicLeaves (phase, kind) {
+  if (phase === 'loading') return 'stop'
+  if (phase !== 'playing') return null
+  if (kind === 'track' || kind === 'playlist') return 'pause'
+  if (kind === 'snippet') return 'stop'
+  return null
+}
 
 // A browser may load no metadata before a gesture, and the stream's own seek
 // wait is far longer: an automatic attempt gives up early and waits for a tap.
@@ -186,17 +199,30 @@ export function createMusicPlayback (session, music, notify) {
     }
   }
 
+  function pause () {
+    current.phase = 'paused'
+    clearTimeout(current.timer)
+    current.player.pause()
+    // A paused holder would keep playback busy and hold off music elsewhere.
+    if (current.unclaim) { current.unclaim(); current.unclaim = null }
+    publish({ phase: 'paused' })
+  }
+
+  // Unlike press(), never falls through to a start or a resume: a row that
+  // left the screen must not begin sound there.
+  function leave () {
+    if (!live) return
+    const action = musicLeaves(state.phase, music.kind)
+    if (action === 'stop') stop()
+    else if (action === 'pause' && current && current.player) pause()
+  }
+
   async function press (epoch = playbackEpoch(), attempt) {
     if (!live || epoch !== playbackEpoch()) return
     if (current && state.phase === 'loading') return stop()
     if (current && state.phase === 'playing') {
       if (snippet) return stop()
-      current.phase = 'paused'
-      clearTimeout(current.timer)
-      current.player.pause()
-      // A paused holder would keep playback busy and hold off music elsewhere.
-      if (current.unclaim) { current.unclaim(); current.unclaim = null }
-      publish({ phase: 'paused' })
+      pause()
       return
     }
     if (current && state.phase === 'paused' && Date.parse(ticket.expiresAt) > Date.now()) {
@@ -259,7 +285,7 @@ export function createMusicPlayback (session, music, notify) {
     ticket = null
   }
 
-  return { press, pressStep, pressSeek, stop, release }
+  return { press, pressStep, pressSeek, stop, leave, release }
 }
 
 export function useMusicAvailable (node, member, refreshKey) {
@@ -295,15 +321,17 @@ function MusicPlayerEntry ({ card, music, onLongPress }) {
 }
 
 function ActiveMusicPlayer ({ card, music, onLongPress, epoch }) {
-  const node = useNode()
-  const member = node.passkey && node.passkey.status && typeof node.passkey.status.publicKey === 'string'
-    ? node.passkey.status.publicKey.toLowerCase()
-    : null
+  const node = useNodeHandle()
+  const member = useMemberKey()
   const enabled = musicOriginOf(node) !== null
   const origin = node.accountOrigin || musicOriginOf(node)
   const request = node.request
   const [state, setState] = useState(musicPlayerIdle)
   const initialTap = useRef(true)
+  const frame = useRef(null)
+  const insets = useSafeAreaInsets()
+  const win = useWindowDimensions()
+  const tabBarShown = useContext(TabBarShown)
   const playback = useMemo(() => {
     // The reset effect below lands on the next render. Stamp the playback
     // that produced this state so the render that first sees a new account
@@ -317,6 +345,39 @@ function ActiveMusicPlayer ({ card, music, onLongPress, epoch }) {
     if (initialTap.current) { initialTap.current = false; playback.press(epoch) }
     return () => playback.release()
   }, [playback, epoch])
+  const sounding = state.phase === 'playing' || state.phase === 'loading'
+  useEffect(() => {
+    if (!sounding) return undefined
+    // The feed rule: nothing keeps sounding from a row scrolled mostly away,
+    // with 2 s for a just-tapped row to settle. Nothing resumes by itself.
+    const top = insets.top + layout.topBar
+    const bottom = win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0))
+    const startedAt = Date.now()
+    // An answer from an earlier run (the row settled, the layout changed)
+    // must not act on this one.
+    let armed = true
+    let pending = false
+    const timer = setInterval(() => {
+      if (Date.now() - startedAt < OPEN_GRACE_MS) return
+      const view = frame.current
+      if (!view || typeof view.measureInWindow !== 'function') return playback.leave()
+      // A measure still unanswered a tick later counts as hidden.
+      if (pending) playback.leave()
+      pending = true
+      try {
+        view.measureInWindow((x, y, w, h) => {
+          pending = false
+          if (armed && mostlyHidden(x, y, w, h, top, bottom, win.width)) playback.leave()
+        })
+      } catch {
+        playback.leave()
+      }
+    }, VISIBILITY_MS)
+    return () => {
+      armed = false
+      clearInterval(timer)
+    }
+  }, [sounding, playback, insets.top, insets.bottom, win.height, win.width, tabBarShown])
   // Protocol rule: nothing before the tap. After it the card may ask the
   // association for the cover and shows it while it is active; the cover is
   // never stored. The item is the answer to the tap's request, and only when
@@ -325,10 +386,10 @@ function ActiveMusicPlayer ({ card, music, onLongPress, epoch }) {
   const samePlayback = owned && owned.member === member && owned.origin === origin && owned.kind === music.kind && owned.id === music.id && owned.start === music.start
   const cover = useMusicCover(music.kind === 'playlist' ? 'playlist' : 'track', samePlayback ? state.item : null, { member, origin, request })
   if (!enabled || state.fallback) return <LinkCard card={card} onLongPress={onLongPress} />
-  return <MusicCardView card={card} music={music} onLongPress={onLongPress} coverUri={cover} state={state} onPress={() => playback.press()} onStep={(type) => playback.pressStep(type)} onSeek={(ms) => playback.pressSeek(ms)} />
+  return <MusicCardView frame={frame} card={card} music={music} onLongPress={onLongPress} coverUri={cover} state={state} onPress={() => playback.press()} onStep={(type) => playback.pressStep(type)} onSeek={(ms) => playback.pressSeek(ms)} />
 }
 
-function MusicCardView ({ card, music, onLongPress, coverUri, state = musicPlayerIdle, onPress, onStep, onSeek }) {
+function MusicCardView ({ frame, card, music, onLongPress, coverUri, state = musicPlayerIdle, onPress, onStep, onSeek }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const [expanded, setExpanded] = useState(false)
@@ -344,7 +405,8 @@ function MusicCardView ({ card, music, onLongPress, coverUri, state = musicPlaye
   const label = phase === 'loading' ? 'Cancelar' : phase === 'playing' ? (snippet ? 'Parar trecho' : 'Pausar') : error ? 'Tentar de novo' : snippet ? 'Ouvir trecho' : playlist ? 'Ouvir playlist' : 'Ouvir'
   const Title = typeof onLongPress === 'function' ? Pressable : View
   return (
-    <View style={styles.card}>
+    // Android drops a layout-only view, and measureInWindow would never answer.
+    <View ref={frame} collapsable={false} style={styles.card}>
       <View style={styles.row}>
         <MusicCover size={56} uri={coverUri} />
         <Title style={styles.details} {...(typeof onLongPress === 'function' ? { onLongPress, delayLongPress: 350 } : null)}>

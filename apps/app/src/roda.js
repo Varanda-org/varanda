@@ -350,8 +350,8 @@ export function commentRows ({ comments, rodas, open, counts, totals, more, erro
 // Swipe to reply stays off where the row's own content takes horizontal
 // drags: the carousel of 2 or more media is a horizontal pager
 // (ui/MediaCarousel.js), and the music player's scrubber is a PanResponder
-// that never refuses termination (ui/MusicPlayerCard.js, reached from PostRow
-// through PostMusic, which PostRow draws only for a post without media). A
+// that never refuses termination (ui/MusicPlayerCard.js, which PostRow draws
+// for a post without media whose link carries a music ref). A
 // row without a seq is still being sent and has nothing to answer.
 export function canSwipeReply (item) {
   if (!isPlain(item) || !isSeq(item.seq)) return false

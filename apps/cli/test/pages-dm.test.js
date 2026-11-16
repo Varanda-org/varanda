@@ -41,6 +41,10 @@ const sodium = require(require.resolve('sodium-universal', { paths: [coreDir] })
 
 const ORIGIN = 'https://varanda.test'
 const PAGE_KEYS = 'cd'.repeat(32)
+// Below the runner's 180 s file limit (scripts/run-tests.js): a test that
+// stalls fails here by name instead of the whole file being killed silently.
+// The whole file takes well under a minute; the margin is for a loaded machine.
+const TEST_TIMEOUT_MS = 150000
 
 function noop () {}
 
@@ -434,7 +438,7 @@ function scanFor (dir, needle) {
 }
 
 test('pages-dm: the service cannot open a member message to the page once its keys moved to devices', async (t) => {
-  t.timeout(400000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const made = await s.create(ana, 'padaria')
@@ -488,7 +492,7 @@ test('pages-dm: the service cannot open a member message to the page once its ke
 })
 
 test('pages-dm: a legacy page keeps its old rows read only until dm-box, which seals them with the old secret to the owner, publishes gen 2 and keeps only the sealed bundle', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -580,7 +584,7 @@ test('pages-dm: a legacy page keeps its old rows read only until dm-box, which s
 })
 
 test('pages-dm: shares per member, the invite share, dm-sign, and a removed admin who must rotate and is refused', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const bia = await s.newMember('bia')
@@ -667,7 +671,7 @@ test('pages-dm: shares per member, the invite share, dm-sign, and a removed admi
 })
 
 test('pages-dm: dm-box-share: an admin only adds a missing share, the owner replaces any', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const bia = await s.newMember('bia')
@@ -705,7 +709,7 @@ test('pages-dm: dm-box-share: an admin only adds a missing share, the owner repl
 })
 
 test('pages-dm: of two concurrent dm-box with the same expectedGen exactly one wins', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -719,7 +723,7 @@ test('pages-dm: of two concurrent dm-box with the same expectedGen exactly one w
 })
 
 test('pages-dm: the legacy bundle is recorded before the secret goes and survives a crash between the two', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { afterLegacyPersist: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -748,7 +752,7 @@ test('pages-dm: the legacy bundle is recorded before the secret goes and survive
 })
 
 test('pages-dm: the refresh tick re-appends the stored dm-key once it leaves the window', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -795,7 +799,7 @@ test('pages-dm: dm-sign is rate limited per page and per host', async (t) => {
 })
 
 test('pages-dm: a remove whose rotation crashed fails closed until its resend or a start completes it', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const crash = { before: false, after: false }
   const hooks = {
     beforePublish: async () => { if (crash.before) throw new Error('crash') },
@@ -861,7 +865,7 @@ test('pages-dm: a remove whose rotation crashed fails closed until its resend or
 })
 
 test('pages-dm: dm-box persisted but not published completes on the resend of the same request', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { beforePublish: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -883,7 +887,7 @@ test('pages-dm: dm-box persisted but not published completes on the resend of th
 })
 
 test('pages-dm: a legacy cleanup cut between the rows and the secret finishes, keyed off the bundle', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { afterRowsDropped: () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -902,7 +906,7 @@ test('pages-dm: a legacy cleanup cut between the rows and the secret finishes, k
 })
 
 test('pages-dm: a move carries the box to K2 as its gen 1 with the shares, also after a crash and resend', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -945,7 +949,7 @@ test('pages-dm: a move carries the box to K2 as its gen 1 with the shares, also 
 })
 
 test('pages-dm: while a rotation is pending a remove and an invite share are refused; once it completes, the remove seals for exactly expectedGen + 1', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const ctl = { crash: false, gate: null, paused: null }
   const hooks = {
     beforePublish: async () => {
@@ -1023,7 +1027,7 @@ test('pages-dm: while a rotation is pending a remove and an invite share are ref
 })
 
 test('pages-dm: a dm-box-share replayed after a restart answers from its spent nonce and never overwrites a newer share', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -1041,7 +1045,7 @@ test('pages-dm: a dm-box-share replayed after a restart answers from its spent n
 })
 
 test('pages-dm: a legacy cleanup cut after promotion survives a further rotation and finishes at the next start', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { afterLegacyPersist: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -1071,7 +1075,7 @@ test('pages-dm: a legacy cleanup cut after promotion survives a further rotation
 })
 
 test('pages-dm: a page with a pending rotation it cannot publish can still move; K2 starts at gen 1 with its shares', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = false
   const s = await setup(t, { hooks: { beforePublish: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -1098,7 +1102,7 @@ test('pages-dm: a page with a pending rotation it cannot publish can still move;
 })
 
 test('pages-dm: chunks written before a crash without their record are removed; the next dm-box seals a fresh bundle', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { afterBundleChunks: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -1124,7 +1128,7 @@ test('pages-dm: chunks written before a crash without their record are removed; 
 })
 
 test('pages-dm: the legacy bundle holds every old row and op, no cap; rotations and a remove keep it; a transfer hides it from the new owner; done removes it', async (t) => {
-  t.timeout(400000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const bia = await s.newMember('bia')
@@ -1201,7 +1205,7 @@ test('pages-dm: the legacy bundle holds every old row and op, no cap; rotations 
 })
 
 test('pages-dm: a close removes the legacy bundle', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -1214,7 +1218,7 @@ test('pages-dm: a close removes the legacy bundle', async (t) => {
 })
 
 test('pages-dm: a move before dm-legacy-done carries the bundle to K2, readable there by its member, also after a restart', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
   const ana = await s.newMember('ana')
   const page = (await s.create(ana, 'padaria')).page
@@ -1249,7 +1253,7 @@ test('pages-dm: a move before dm-legacy-done carries the bundle to K2, readable 
 })
 
 test('pages-dm: a first dm-box that never published does not block a move; the bundle rides alone in a gen 0 row', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { beforePublish: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -1287,7 +1291,7 @@ test('pages-dm: a first dm-box that never published does not block a move; the b
 })
 
 test('pages-dm: a gen 0 page with a first rotation pending moves without a dmBox; done on a bundle-only row leaves no dm', async (t) => {
-  t.timeout(300000)
+  t.timeout(TEST_TIMEOUT_MS)
   let crash = true
   const s = await setup(t, { hooks: { beforePublish: async () => { if (crash) throw new Error('crash') } } })
   const ana = await s.newMember('ana')
@@ -1314,7 +1318,7 @@ test('pages-dm: a gen 0 page with a first rotation pending moves without a dmBox
 })
 
 test('page group-post routes accept numeric forward flags and pass them to the writer', async (t) => {
-  t.timeout(200000)
+  t.timeout(TEST_TIMEOUT_MS)
   const posts = []
   const group = 'ab'.repeat(32)
   const s = await setup(t, {

@@ -861,3 +861,16 @@ test('source: a voice note shows the time left while playing and the total when 
   t.ok(src.includes('durationLabel(playing ? left : total)'), 'playing shows left, paused shows the total')
   t.ok(src.includes('const shown = Math.min(pos, total > 0 ? total : rpc.MAX_AUDIO_MS)') && src.includes(': durationLabel(shown)'), 'an unknown total keeps the elapsed time')
 })
+
+test('source: the black photo viewer sets light status bar icons before its Modal shows and gives them back on close', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/ui/ChatMedia.js'), 'utf8')
+  const viewer = src.slice(src.indexOf('function Viewer ('), src.indexOf('export function ChatMedia ('))
+  t.ok(src.includes("import { StatusBar, setStatusBarStyle } from 'expo-status-bar'"), 'the shared status bar')
+  t.ok(viewer.includes('statusBarTranslucent'), 'the viewer draws under the status bar')
+  t.absent(viewer.includes('<StatusBar'), 'none inside the Modal: its window copies the style once when shown')
+  const at = src.indexOf('const openPhoto = (uri, ratio) =>')
+  const open = src.slice(at, at + 200)
+  t.ok(open.indexOf("setStatusBarStyle('light', false)") > 0 && open.indexOf("setStatusBarStyle('light', false)") < open.indexOf('setOpen(uri)'), 'set before the Modal turns visible')
+  t.ok(src.includes("{open !== null ? <StatusBar style='light' /> : null}"), 'held on the stack only while a photo is open, so closing restores the screen style')
+  t.ok(src.indexOf("<StatusBar style='light' />") < src.indexOf('<Viewer uri={open}'), 'mounted outside the Modal')
+})

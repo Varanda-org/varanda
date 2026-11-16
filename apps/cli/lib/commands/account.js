@@ -23,7 +23,7 @@ const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
 const { openAgeStore } = require('../account/age-store')
-const { startAgeCheck, directoryFloor } = require('../account/age-check-state')
+const { startAgeCheck, settleAgeCheck, directoryFloor, retryingFloor } = require('../account/age-check-state')
 const { createDidit } = require('../account/didit')
 const { createPhoneClient } = require('../account/phone-client')
 const { openPhoneStore, FILE: PHONE_FILE } = require('../account/phone-store')
@@ -991,11 +991,15 @@ async function serve (flags, env) {
     // service; an on start that cannot read it stays up and the since route
     // answers 503.
     const ageOn = didit !== null && ages !== null
-    const ageCheck = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: () => lock.owned() })
-    if (!ageCheck.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    const ageCheckStart = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: () => lock.owned() })
+    if (!ageCheckStart.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
     // Read once, before any link of this run (all of them banded).
-    const ageDirectoryFloor = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
-    if (ageDirectoryFloor !== null && !ageDirectoryFloor.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    const ageDirectoryStart = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
+    if (ageDirectoryStart !== null && !ageDirectoryStart.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
+    // A floor that failed here is recomputed by a later since request (at
+    // most every 30 s), so the route recovers with the file, not a restart.
+    const ageCheck = ageOn ? retryingFloor(ageCheckStart, () => settleAgeCheck(flags.dataDir, { on: true, since: ageSince, guard: () => lock.owned() })) : ageCheckStart
+    const ageDirectoryFloor = ageDirectoryStart === null ? null : retryingFloor(ageDirectoryStart, () => directoryFloor(store, ages))
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
     if (triageConfig === null) log({ event: 'triage', reason: 'desligada' })

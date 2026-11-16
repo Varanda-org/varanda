@@ -11,6 +11,8 @@
 | [app.md](app.md) | pt-BR | O que o aplicativo faz hoje, as telas, o nó no app contra o cliente web, o que ficou fora do piloto. |
 | [ios-gate.md](ios-gate.md) | inglês | A prova de que o nó real roda no worklet Bare do app no simulador iOS: como é montado, os passos, a evidência e os riscos restantes. |
 | [verification.md](verification.md) | inglês | A verificação de ponta a ponta do monorepo: CLI, navegador pelo `varanda-serve` e simulador iOS sincronizando entre si, a DHT pública, as checagens de vazamento, o que não foi verificado e as correções da auditoria de segurança. |
+| [verification/](verification/README.md) | pt-BR | A verificação de cada PR depois das seções numeradas de verification.md, um arquivo por branch, sem número de seção. |
+| [changelog/](changelog/README.md) | pt-BR | As entradas do changelog que ainda não foram juntadas ao [CHANGELOG.md](../CHANGELOG.md), uma por PR, e o formato delas. |
 | [site.md](site.md) | pt-BR | O site estático (varanda.app): como ver, atualizar e publicar na GitHub Pages, os passos de domínio e DNS que só o usuário faz, e a verificação depois de publicar. |
 | [performance.md](performance.md) | pt-BR | Desempenho do carregamento de A Rua, Diário, perfis e Conversas: o conjunto de dados D1, as ferramentas de medição (nó, laboratório, Chrome, emulador e simulador), as metas provisórias e o ciclo de medição. |
 | [seeder-capacity.md](seeder-capacity.md) | inglês | Medição em loopback, numa só máquina, de onde o semeador começa a recusar leitores (1, 16, 32 e 64 clientes): os comandos, as tabelas, os custos internos e os limites que o operador pode subir. Não é promessa de capacidade. |

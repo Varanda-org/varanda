@@ -23,6 +23,23 @@ export function planSave ({ name, bio, draft, current }) {
   return { firstPlain, needsUpload, params }
 }
 
+// The text a Perfil form starts from when it opens: the fields the person
+// edited and left (closing the sheet never discards them, only a successful
+// save does), the saved profile for every field not edited. The draft holds
+// only edited fields, so a field never typed in follows the saved profile
+// (another Perfil instance may have saved it since).
+export function startFields (kept, current) {
+  const c = current || {}
+  const k = kept && typeof kept === 'object' ? kept : {}
+  return { name: typeof k.name === 'string' ? k.name : c.name || '', bio: typeof k.bio === 'string' ? k.bio : c.bio || '' }
+}
+
+// The kept draft only when it was typed under this identity: a Perfil that
+// outlives an identity change must not show the other person's text.
+export function draftFor (kept, key) {
+  return kept && typeof kept === 'object' && kept.key === key ? kept : null
+}
+
 // Whether the own profile read back (profile.read) shows `sent` as saved.
 export function confirmSaved (sent, mine) {
   if (!mine || typeof mine !== 'object' || !sent) return false
