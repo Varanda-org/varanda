@@ -52,13 +52,17 @@ Testes novos ou mudados na rodada de revisão, cada um conferido desfazendo a co
 | `dm.test.js` | "a delete op pulled from another own device compacts too" (agora: relógio do irmão adiantado antes do desbloqueio, `counts.compact === 1` e depois `=== 2` exatos) | sem o gatilho do caminho do pull | falha |
 | `page-dm.test.js` | "a deleted Página conversation is compacted when the page store opens and by the hourly pass" | passagem horária só do armazenamento próprio; sem a faxina na abertura da loja da Página | falha nos dois casos (tempo esgotado esperando os blocos) |
 
-Resultados desta rodada: `dm-store.test.js` 43/43 (306 asserções), `dm.test.js` 71/71 (739), `page-dm.test.js` 20/20 (219). O resumo (`summaryFor`) fica igual depois da compactação (teste novo). O teste fixado de `apps/app/test/legal.test.js` falha como esperado, porque a frase da Privacidade mudou e a versão dos Termos não sobe aqui; o resumo novo é `f1cd96eeab6fc46cab7d8060668af84b81008d9e511e1126914e209b6dcbb1e8`.
+Resultados desta rodada: `dm-store.test.js` 43/43 (306 asserções), `dm.test.js` 71/71 (739), `page-dm.test.js` 20/20 (219). O resumo (`summaryFor`) fica igual depois da compactação (teste novo). O teste fixado de `apps/app/test/legal.test.js` passa com a versão 68 e o resumo `6ff88155881cce6900040b0b25678265f21b03f73fc64e502ab9a355254284f5`.
 
 Itens da revisão não feitos, como limites conhecidos: (7) a ordem da deduplicação ao arquivar, inofensiva; e os casos de queda do armazenamento no meio de um `core.clear`, além do que está dito em `docs/protocol.md` (o que o núcleo confirmou é esquecido e o resto é tentado de novo na passagem seguinte). A faxina só roda com o app aberto, e a Política de Privacidade diz isso.
 
 Resultados da primeira rodada: `dm-store.test.js` 37/37 (278 asserções), `dm.test.js` 70/70 (736 asserções). Os demais arquivos conferidos para não regredir, cada um sozinho: `dm-summary.test.js`, `dm-memo.test.js`, `page-dm.test.js`, `dm-e2e.test.js`, `session-dm-unlock.test.js`, `resume.test.js`, `apps/app/test/help.test.js`, `apps/app/test/chatActions.test.js`, `apps/app/test/dm.test.js` e `apps/site/test/legal.test.js` (a página do site foi gerada de novo com `node apps/site/scripts/render-legal.js`).
 
 As lojas das Páginas usam a mesma faxina e agora têm teste próprio (`page-dm.test.js`).
+
+## Termos
+
+`TERMS_VERSION` (`packages/core/lib/terms.js`) e `LEGAL_VERSION` (`apps/app/src/legal.js`) sobem para 68, com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo (`node apps/site/scripts/render-legal.js`). Quem já aceitou a versão 67 vê o pedido de aceite de novo.
 
 ## Para conferir à mão num aparelho
 
@@ -68,6 +72,6 @@ Ordem: Android (build de debug), simulador iOS, depois web e PWA. Registrar apar
 - [ ] A confirmação "Apagar esta conversa?" mostra o texto novo (sai dos seus aparelhos, texto e fotos saem da memória em até 15 dias, a outra pessoa continua com a cópia dela). Pendente.
 - [ ] Segundo aparelho da mesma passkey: depois de um `dm.pull`, a conversa some e a faxina roda sem erro no registro. Pendente.
 - [ ] Depois do prazo (adiantar o relógio do aparelho de teste), reabrir o app e conferir que a lista de Conversas segue igual e que nenhuma mensagem apagada volta. Pendente.
-- [ ] Termos e Privacidade: a frase nova aparece na Política de Privacidade, no app e na página do site. Pendente (depende da versão subida no pouso).
+- [ ] Termos e Privacidade: a frase nova aparece na Política de Privacidade, no app e na página do site. Pendente (Termos e Política na versão 68).
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` (ou `npm test -- --affected=origin/main`) e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
