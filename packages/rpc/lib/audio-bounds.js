@@ -384,7 +384,8 @@ function aacConfig (b, esds) {
 
 // An AudioSpecificConfig in b[at, end) -> { rate, samples }: the core
 // sampling rate and the samples one access unit decodes to at that rate, or
-// null when it names no AAC core (AAC_CORE_TYPES) or runs past end.
+// null when it names no AAC core (AAC_CORE_TYPES), runs past end or, under
+// SBR or PS, names an output rate other than the core rate or twice it.
 function aacFrame (b, at, end) {
   let bit = at * 8
   let short = false

@@ -697,7 +697,7 @@ test('audioBounds: the sample entry carries one AAC or Opus configuration', (t) 
   t.is(one(opus(esds())), null, 'an esds in an Opus entry')
 })
 
-test('audioBounds: an AAC decoder plays the samples as long as they say', (t) => {
+test('audioBounds: an AAC decoder plays the samples no longer than they say', (t) => {
   const aac = (config, { timescale = 44100, runs = [[130, 1024]] } = {}) =>
     audioBounds(file({ mvhd: mvhd0(1000, 0), tracks: [{ entries: [mp4a(esds(0x40, 0x05, config))], timescale, runs }] }))
   const ms = Math.round(130 * 1024 * 1000 / 44100)
