@@ -49,6 +49,8 @@ const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
 const POST_SHARE_WEB_ONLY = 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
+// The bounded update of the writer cores before device.disconnect.
+const DEVICE_REFRESH_MS = 15000
 
 // ---- error mapping (A6) ----
 
@@ -288,6 +290,7 @@ function createSession ({
   // (the member certificate) is append-only, so only `memberCert: true` is cached.
   let ownKey = null
   let certKnown = false
+  let deviceOffSent = false // the last devices.changed `off` sent (none sent: false)
 
   // A run's events carry the connection epoch it started in: once that
   // connection is detached, a run still unwinding reports to nobody, not to
@@ -309,12 +312,18 @@ function createSession ({
 
   // ---- sync runs ----
 
-  function startRun ({ once, timeoutMs }) {
+  // `internal`: a run the node starts for itself (the device.disconnect
+  // refresh): no sync.started, sync.event or sync.stopped, and its end never
+  // touches the user's sync intent. Warnings still go out.
+  function startRun ({ once, timeoutMs, internal = false }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
     const epoch = connection
     const { signal, abort } = createAbort()
-    const r = { runId, once, abort, reason: null, done: null }
+    const r = { runId, once, internal, abort, reason: null, done: null }
+    const syncEvent = (event, data) => {
+      if (!internal) send(event, data, epoch)
+    }
     run = r
     // A burst of downloads in one group (a writer catching up block by
     // block) becomes one groups.changed per group.
@@ -342,7 +351,7 @@ function createSession ({
       grown.add(group)
       if (grownTimer === null) grownTimer = setTimeout(flushGrown, GROUPS_CHANGED_MS)
     }
-    send('sync.started', { runId, once }, epoch)
+    syncEvent('sync.started', { runId, once })
     r.done = (async () => {
       let result = null
       let error = null
@@ -367,7 +376,7 @@ function createSession ({
               return
             }
             const text = formatEvent(ev)
-            if (text !== null) send('sync.event', { runId, line: line(text) }, epoch)
+            if (text !== null) syncEvent('sync.event', { runId, line: line(text) })
           },
           signal,
           storeOptions: currentStoreOptions()
@@ -382,9 +391,9 @@ function createSession ({
       if (run === r) run = null
       if (error !== null) {
         if (codeOf(error) === 'LOCKED') enterErrorState()
-        syncIntent = null
+        if (!internal) syncIntent = null
         warning('erro: ' + toRpcError(error, reportInternal).message, epoch)
-        send('sync.stopped', { runId, reason: 'error' }, epoch)
+        syncEvent('sync.stopped', { runId, reason: 'error' })
         return
       }
       let reason = r.reason
@@ -398,7 +407,7 @@ function createSession ({
       }
       const data = { runId, reason }
       if (once) data.result = capSyncResult(result)
-      send('sync.stopped', data, epoch)
+      syncEvent('sync.stopped', data)
     })()
     return runId
   }
@@ -499,8 +508,36 @@ function createSession ({
     return publicKey
   }
 
+  // ---- connected devices ----
+
+  // devices.changed when a device.* call sees this device's state differ
+  // from the last one sent (none sent: false, connected).
+  function noteDeviceOff (off, epoch) {
+    if (typeof off !== 'boolean' || off === deviceOffSent) return
+    deviceOffSent = off
+    send('devices.changed', { off }, epoch)
+  }
+
+  // Before device.disconnect marks the writers: one bounded internal once
+  // run (at most DEVICE_REFRESH_MS, whatever the user's sync state) brings
+  // the writer cores up to what the peers hold, so the marks keep what the
+  // lost device wrote before the call. A user's run is preempted as by any
+  // write and restarted after the call (restartWhenIdle). Skipped while the
+  // app is backgrounded, closed or in the error state. A run aborted before
+  // its end (detach, or a stop from outside) refuses as the web node does:
+  // a mark is never raised, so marks over a partial refresh would cut the
+  // lost device short for good. A plain timeout of the bound proceeds.
+  async function refreshGroupCores (epoch) {
+    if (closed || errorState || suspended) return
+    if (run !== null) await stopRun('preempted')
+    startRun({ once: true, timeoutMs: DEVICE_REFRESH_MS, internal: true })
+    const r = run
+    if (r !== null) await r.done
+    if (epoch !== connection || closed || (r !== null && r.reason !== null)) throw rpcError('USAGE', 'conexão encerrada')
+  }
+
   function syncState () {
-    return run === null ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
+    return run === null || run.internal ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
   }
 
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
@@ -903,6 +940,31 @@ function createSession ({
     }),
     'visits.note': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
+    // Aparelhos conectados (docs/rpc.md 5.151 to 5.154).
+    'device.hello': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.deviceHello(c, params))
+      noteDeviceOff(r.off, epoch)
+      return r
+    }),
+    'device.list': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.deviceList(c))
+      noteDeviceOff(r.off, epoch)
+      return r
+    }),
+    'device.disconnect': serial(async (params, epoch) => {
+      // The refusals first, so a refused call starts no run.
+      const { pairs } = await withStore((c) => member.deviceDisconnect(c, params, { write: false }))
+      if (pairs > 0) await refreshGroupCores(epoch)
+      const r = await withStore((c) => member.deviceDisconnect(c, params))
+      for (const group of r.groups) send('groups.changed', { group }, epoch)
+      return { cut: r.cut, empty: r.empty }
+    }),
+    'device.reconnect': serial(async (params, epoch) => {
+      const r = await withStore((c) => member.deviceReconnect(c, params))
+      noteDeviceOff(false, epoch)
+      return r
     }),
 
     // Foruns e enquetes (docs/rpc.md): a vote checks the poll post with a

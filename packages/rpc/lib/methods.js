@@ -1642,6 +1642,20 @@ const SPECS = {
   // Result { refs: ['<author>:<seq>'] }, oldest first, at most MOMENT_SEEN_MAX
   // (5.150).
   'moments.seen': { fields: none },
+  // Connected devices (5.151 to 5.154). The node stores the name trimmed
+  // and NFC (1 to 40 characters, the invite card name rule) and refuses
+  // anything else; disconnect takes exactly one of `id` and `previous`.
+  'device.hello': { fields: { name: req(str(1, 200)) }, mutating: true },
+  'device.list': { fields: none },
+  'device.disconnect': {
+    fields: { id: opt(isKey), previous: opt((v) => v === true) },
+    mutating: true,
+    cross (given, value) {
+      if (hasOwn(value, 'id') === hasOwn(value, 'previous')) return 'informe id ou previous'
+      return null
+    }
+  },
+  'device.reconnect': { fields: { name: req(str(1, 200)) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,
@@ -1682,7 +1696,9 @@ const SPECS = {
     },
     mutating: true
   },
-  'identity.clear': { fields: none, mutating: true },
+  // keepMedia: the lock keeps the sealed cache of opened direct message
+  // media; any other relock wipes it (docs/rpc.md 5.51).
+  'identity.clear': { fields: { keepMedia: opt(isBool) }, mutating: true },
   'identity.status': { fields: none },
   'identity.reset': { fields: none, mutating: true },
   'identity.forget': { fields: none, mutating: true },

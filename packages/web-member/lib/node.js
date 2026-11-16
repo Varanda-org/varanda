@@ -19,8 +19,11 @@
 //   await node.setKeyPair({ publicKey, secretKey }, { media, prf })  // unlock, in memory only;
 //                                // media: this device's media core pair (optional)
 //                                // prf: passkey PRF bytes for group keys (optional)
+//                                // fresh: true after a passkey ceremony in this open,
+//                                // not a kept session (device.reconnect needs it)
 //                                // copied on unlock, zero-filled on lock
 //   await node.clearKeyPair()    // lock (both pairs zero-filled)
+//   await node.clearKeyPair({ keepMedia: true })   // and keep the opened DM media
 //   await node.identityStatus()  // { exists, publicKey, legacy, unlocked, synced }
 //   await node.reset()           // delete the diary, the media cores and the pending
 //                                // follows, and lock; config and follows stay
@@ -128,7 +131,7 @@ function createBrowserNode ({ storage, ...options } = {}) {
     connect,
     close,
     setKeyPair: (keyPair, options) => session.setKeyPair(keyPair, options),
-    clearKeyPair: () => session.clearKeyPair(),
+    clearKeyPair: (options) => session.clearKeyPair(options),
     mediaUpload: (args) => session.mediaUpload(args),
     dmPutMedia: (args) => session.dmPutMedia(args),
     dmReadMedia: (args) => session.dmReadMedia(args),

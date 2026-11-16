@@ -10,7 +10,7 @@
 //
 //   const host = createIdentityHost({ session, storage, hkdf, randomBytes })
 //   host.install({ prf, credentialId, userId, rpId, resumed }) -> { publicKey, resumed }
-//   host.clear() / host.reset() / host.forget() / host.sessionSaved() -> {}
+//   host.clear({ keepMedia? }) / host.reset() / host.forget() / host.sessionSaved() -> {}
 //   host.status() -> docs/rpc.md 5.52
 //   host.recoveryLookup({ kind, secret, code }) -> { lookupId }     (5.91)
 //   host.recoveryOpen({ blob, member }) -> { prf }                  (5.92)
@@ -182,9 +182,9 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       // the PRF the session opens the direct message store under this
       // passkey's key, and a store of another key is replaced by an empty
       // one (lib/dm-store.js unlock): a wrong passkey must not erase the
-      // stored identity's messages.
+      // stored identity's messages, nor its opened media.
       if (otherDiary(await session.identityStatus(), publicKey)) {
-        await session.clearKeyPair().catch(() => {})
+        await session.clearKeyPair({ keepMedia: true }).catch(() => {})
         throw usage(store.MISMATCH)
       }
       // setKeyPair copies both pairs and the PRF synchronously: the local
@@ -216,11 +216,13 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     }
   })
 
-  const clear = serial(async () => {
+  // The lock keeps the opened direct message media, sealed; the host's
+  // rollbacks of an unlock leave keepMedia out and wipe them (5.51).
+  const clear = serial(async ({ keepMedia = false } = {}) => {
     current = null
     dropRoot()
     dropPending()
-    await session.clearKeyPair()
+    await session.clearKeyPair(keepMedia === true ? { keepMedia: true } : undefined)
     return {}
   })
 
@@ -404,7 +406,7 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     recoveryWrap,
     recoveryBind,
     close,
-    clear: () => clear(),
+    clear: (params) => clear(params),
     status: () => status(),
     reset: () => reset(),
     forget: () => forget(),

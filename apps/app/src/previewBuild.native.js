@@ -4,11 +4,13 @@
 // PAGE_TIMEOUT_MS and PAGE_CAP bytes of text/html; the page is read inertly
 // by preview.js extractPreview (nothing is run or loaded), then its og:image
 // the same way (IMAGE_CAP, an image type confirmed by its leading bytes).
-// No redirect is ever used: the device cannot check where a name resolves,
-// so a link that redirects (a shortener, or a public page sending to an
-// intranet page the sender's network reaches) gets no preview, and an
-// og:image that redirects gets no thumbnail. The web proxy instead follows
-// up to 3 redirects, checking each address.
+// The device never follows a redirect: it cannot check where a name
+// resolves. A link that redirects (a shortener, or a public page sending to
+// an intranet page the sender's network reaches) goes to the account
+// service's proxy instead when the app is tied to the association's
+// installation (previewService.js), which follows up to 3 redirects,
+// checking each address; otherwise it gets no preview. An og:image that
+// redirects gets no thumbnail.
 // A music link keeps its cover even though providers serve it from their own
 // image domains: a fixed list of the provider's names (musicEmbed.js
 // coverImageAllowed). A single YouTube video is read at its canonical watch
@@ -24,8 +26,10 @@ import rpc from '@varanda/rpc'
 import { fetch as expoFetch } from 'expo/fetch'
 import { extractPreview } from './preview.js'
 import { coverImageAllowed, coverTarget, fallbackCard } from './musicEmbed.js'
+import { previewViaService } from './previewService.js'
 
 const { cardUrlHost, youtubeCoverUrl } = rpc
+const REDIRECTED = Symbol('redirected')
 const PAGE_TIMEOUT_MS = 5000
 const PAGE_CAP = 512 * 1024
 const IMAGE_CAP = 256 * 1024
@@ -88,7 +92,13 @@ async function readBody (res, cap, stop) {
   return out
 }
 
-// One GET under the caps, never through a redirect -> Uint8Array, or null.
+// A 3xx, an opaque manual redirect, or one the transport followed anyway.
+function movedOn (res, url) {
+  return res.status === 0 || res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400) || redirected(res, url)
+}
+
+// One GET under the caps, never through a redirect -> Uint8Array, REDIRECTED,
+// or null.
 async function getCapped (url, { fetchImpl, signal, cap, types, accept }) {
   if (cardUrlHost(url) === null || (signal && signal.aborted)) return null
   const ctl = new AbortController()
@@ -103,7 +113,11 @@ async function getCapped (url, { fetchImpl, signal, cap, types, accept }) {
       headers: { accept },
       signal: ctl.signal
     })
-    if (!res || res.status !== 200 || redirected(res, url) || !types.includes(typeOf(res))) {
+    if (res && movedOn(res, url)) {
+      stop()
+      return REDIRECTED
+    }
+    if (!res || res.status !== 200 || !types.includes(typeOf(res))) {
       stop()
       return null
     }
@@ -166,13 +180,19 @@ async function getImage (url, fetchImpl, signal) {
 }
 
 // `fetch` defaults to expo/fetch, whose body is a stream (React Native's
-// global fetch buffers the whole body first); only tests replace it.
-export async function buildPreview (url, { signal, fetch: fetchImpl = expoFetch } = {}) {
+// global fetch buffers the whole body first); only tests replace it and
+// `account`. member, request and origin are previewService.js's.
+export async function buildPreview (url, { signal, fetch: fetchImpl = expoFetch, member, request, origin, account } = {}) {
   try {
     if (typeof fetchImpl !== 'function' || cardUrlHost(url) === null) return null
     const target = coverTarget(url) || url
     if (cardUrlHost(target) === null) return null
-    const page = await getCapped(target, { fetchImpl, signal, cap: PAGE_CAP, types: PAGE_TYPES, accept: 'text/html' })
+    let page = await getCapped(target, { fetchImpl, signal, cap: PAGE_CAP, types: PAGE_TYPES, accept: 'text/html' })
+    if (page === REDIRECTED) {
+      const served = await previewViaService(url, { signal, member, request, origin, account })
+      if (served !== null) return served
+      page = null
+    }
     const found = page === null ? null : extractPreview(utf8(page), target)
     if (signal && signal.aborted) return null
     let image = null

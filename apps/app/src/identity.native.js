@@ -1082,11 +1082,13 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     }
   }
 
-  // Memory only: the stored session survives it (the next start resumes).
+  // Memory only: the stored session and the opened direct message media
+  // survive it (the next start resumes). The relocks after a failed unlock
+  // leave keepMedia out and wipe those media (rpc.md 5.51).
   function lock () {
     invalidate()
     dropRecovery()
-    return request('identity.clear')
+    return request('identity.clear', { keepMedia: true })
   }
 
   // The pending creation and the refused passkeys stay: they describe the
