@@ -163,7 +163,7 @@ test('round 8: html and body never pan or bounce after a screen push', (t) => {
 // encodeFile refuses every other type before decoding, and the web picker
 // offers the same four, so a video type or image/* would list Varanda for a
 // share it cannot post.
-test('manifest share_target receives photos, GIFs, text and links', (t) => {
+test('manifest share_target receives photos, GIFs, one MP4 video, text and links', (t) => {
   const share = manifest.share_target
   t.alike(share, {
     action: '/compartilhar',
@@ -174,7 +174,7 @@ test('manifest share_target receives photos, GIFs, text and links', (t) => {
       text: 'text',
       url: 'url',
       files: [
-        { name: 'fotos', accept: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] }
+        { name: 'fotos', accept: ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4'] }
       ]
     }
   })
@@ -186,8 +186,8 @@ test('manifest share_target receives photos, GIFs, text and links', (t) => {
     else if (accept != null) accepted.push(accept)
   }
   t.ok(accepted.length > 0, 'at least one accepted file type')
+  t.alike(accepted.filter((mime) => String(mime).startsWith('video/')), ['video/mp4'], 'MP4 the only video, the one the browser composer takes as it is')
   for (const mime of accepted) {
-    t.absent(String(mime).startsWith('video/'), mime)
-    t.absent(mime === 'image/*', mime)
+    t.absent(mime === 'image/*' || mime === 'video/*', mime)
   }
 })

@@ -35,6 +35,9 @@ enum ShareStore {
 
   static let maxFiles = 10
   static let maxBytes: Int64 = 50 * 1024 * 1024
+  // A shared video is copied as it is and re-encoded to the post limits in
+  // the composer (src/media/videoPrep), so this only bounds the copy.
+  static let maxVideoBytes: Int64 = 512 * 1024 * 1024
   static let maxText = 4000
   // A manifest holds at most three 4000 unit texts and ten short entries.
   static let maxManifestBytes: Int64 = 1024 * 1024
@@ -53,6 +56,7 @@ enum ShareStore {
   private static let inboxNamePattern = try! NSRegularExpression(pattern: "^[0-9]{1,3}\\.[A-Za-z0-9]{1,5}$")
   // What a stored share may name a file; the JS side checks the same shape.
   private static let fileNamePattern = try! NSRegularExpression(pattern: "^[0-9]{1,2}\\.(jpg|png|gif|webp|heic|img)$")
+  private static let videoNamePattern = try! NSRegularExpression(pattern: "^[0-9]{1,2}\\.(mp4|mov)$")
 
   // peek, release and sweep never overlap: an import in progress owns its
   // <id>.tmp directory until the rename.
@@ -74,6 +78,7 @@ enum ShareStore {
     let text: String
     let url: String
     let total: Int
+    let videos: Int
     let files: [StoredFile]
   }
 
@@ -95,6 +100,7 @@ enum ShareStore {
       "text": share.text,
       "url": share.url,
       "total": share.total,
+      "videos": share.videos,
       "files": share.files.map { file -> [String: Any] in
         let fileURL = dir.appendingPathComponent(file.name, isDirectory: false)
         return [
@@ -198,12 +204,23 @@ enum ShareStore {
     do {
       try fm.createDirectory(at: tmp, withIntermediateDirectories: false)
       var stored: [StoredFile] = []
+      var offeredVideos = 0
       for name in manifest.files.prefix(maxFiles) {
-        if let file = try admit(entry.appendingPathComponent(name, isDirectory: false), into: tmp, index: stored.count) {
+        let source = entry.appendingPathComponent(name, isDirectory: false)
+        if isVideoName(name) {
+          offeredVideos += 1
+          // One video, as a post holds one.
+          if stored.contains(where: { $0.mime.hasPrefix("video/") }) { continue }
+          if let file = try admitVideo(source, into: tmp, index: stored.count) {
+            stored.append(file)
+          }
+        } else if let file = try admit(source, into: tmp, index: stored.count) {
           stored.append(file)
         }
       }
-      let total = max(manifest.total, manifest.files.count, stored.count)
+      let photos = stored.filter { !$0.mime.hasPrefix("video/") }.count
+      let total = max(manifest.total, manifest.files.count - offeredVideos, photos)
+      let videos = max(manifest.videos, offeredVideos)
       if manifest.title.isEmpty && manifest.text.isEmpty && manifest.url.isEmpty && stored.isEmpty {
         // Nothing the composer could show.
         remove(tmp)
@@ -217,6 +234,7 @@ enum ShareStore {
         text: manifest.text,
         url: manifest.url,
         total: total,
+        videos: videos,
         files: stored
       )
       try writeManifest(share, in: tmp)
@@ -268,6 +286,58 @@ enum ShareStore {
       throw error
     }
     return StoredFile(name: name, mime: image.mime, width: image.width, height: image.height)
+  }
+
+  // The extension names a video by the type its sender registered; the type
+  // kept is the one sniffed from the copy (isoMedia).
+  private static func isVideoName(_ name: String) -> Bool {
+    let lower = name.lowercased()
+    return lower.hasSuffix(".mp4") || lower.hasSuffix(".mov")
+  }
+
+  // Like admit, for the one video: a regular file of at most maxVideoBytes
+  // that starts with an ISO media ftyp box. Its sizes and length come from the
+  // composer's encode, so none are read here and none are stored.
+  private static func admitVideo(_ source: URL, into dir: URL, index: Int) throws -> StoredFile? {
+    guard let attrs = try? fm.attributesOfItem(atPath: source.path),
+          attrs[.type] as? FileAttributeType == .typeRegular,
+          let size = (attrs[.size] as? NSNumber)?.int64Value,
+          size > 0, size <= maxVideoBytes else { return nil }
+    let part = dir.appendingPathComponent(String(index) + ".part", isDirectory: false)
+    do {
+      try fm.copyItem(at: source, to: part)
+    } catch {
+      remove(part)
+      throw error
+    }
+    guard let copiedAttrs = try? fm.attributesOfItem(atPath: part.path),
+          copiedAttrs[.type] as? FileAttributeType == .typeRegular,
+          let copied = copiedAttrs[.size] as? NSNumber,
+          copied.int64Value > 0, copied.int64Value <= maxVideoBytes,
+          let mime = isoMedia(part) else {
+      remove(part)
+      return nil
+    }
+    let name = String(index) + (mime == "video/quicktime" ? ".mov" : ".mp4")
+    let target = dir.appendingPathComponent(name, isDirectory: false)
+    do {
+      try fm.moveItem(at: part, to: target)
+    } catch {
+      remove(part)
+      throw error
+    }
+    return StoredFile(name: name, mime: mime, width: 0, height: 0)
+  }
+
+  // An ftyp box first: QuickTime for the "qt  " brand, MP4 for any other.
+  private static func isoMedia(_ url: URL) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    guard let head = try? handle.read(upToCount: 12), head.count == 12 else { return nil }
+    let bytes = [UInt8](head)
+    let size = (UInt32(bytes[0]) << 24) | (UInt32(bytes[1]) << 16) | (UInt32(bytes[2]) << 8) | UInt32(bytes[3])
+    guard String(decoding: bytes[4..<8], as: UTF8.self) == "ftyp", size >= 16 else { return nil }
+    return String(decoding: bytes[8..<12], as: UTF8.self) == "qt  " ? "video/quicktime" : "video/mp4"
   }
 
   private struct Probe {
@@ -362,11 +432,16 @@ enum ShareStore {
     var files: [StoredFile] = []
     for item in list {
       guard let entry = item as? [String: Any],
-            let name = entry["name"] as? String, matches(fileNamePattern, name),
-            let mime = entry["mime"] as? String, mime.hasPrefix("image/"),
-            let width = int(entry["width"]), width > 0,
-            let height = int(entry["height"]), height > 0,
+            let name = entry["name"] as? String,
+            let mime = entry["mime"] as? String,
+            let width = int(entry["width"]),
+            let height = int(entry["height"]),
             isFile(dir.appendingPathComponent(name, isDirectory: false)) else { return nil }
+      if mime.hasPrefix("video/") {
+        guard matches(videoNamePattern, name), width >= 0, height >= 0 else { return nil }
+      } else {
+        guard matches(fileNamePattern, name), mime.hasPrefix("image/"), width > 0, height > 0 else { return nil }
+      }
       files.append(StoredFile(name: name, mime: mime, width: width, height: height))
     }
     return Share(
@@ -375,7 +450,8 @@ enum ShareStore {
       title: cut(json["title"] as? String ?? ""),
       text: cut(json["text"] as? String ?? ""),
       url: cut(json["url"] as? String ?? ""),
-      total: max(total, files.count),
+      total: max(total, files.filter { !$0.mime.hasPrefix("video/") }.count),
+      videos: max(int(json["videos"]) ?? 0, files.filter { $0.mime.hasPrefix("video/") }.count),
       files: files
     )
   }
@@ -389,6 +465,7 @@ enum ShareStore {
     let text: String
     let url: String
     let total: Int
+    let videos: Int
     let files: [String]
   }
 
@@ -407,6 +484,7 @@ enum ShareStore {
       names.append(name)
     }
     let total = int(json["total"]).map { max($0, 0) } ?? names.count
+    let videos = int(json["videos"]).map { max($0, 0) } ?? 0
     return InboxManifest(
       id: id,
       at: at,
@@ -414,6 +492,7 @@ enum ShareStore {
       text: cut(json["text"] as? String ?? ""),
       url: cut(json["url"] as? String ?? ""),
       total: total,
+      videos: videos,
       files: names
     )
   }
@@ -428,6 +507,7 @@ enum ShareStore {
       "text": share.text,
       "url": share.url,
       "total": share.total,
+      "videos": share.videos,
       "files": share.files.map { file -> [String: Any] in
         ["name": file.name, "mime": file.mime, "width": file.width, "height": file.height]
       }

@@ -8,6 +8,8 @@ try {
 const ID_RE = /^[0-9]{13}-[0-9a-f]{32}$/
 const TEXT_MAX = 4000
 const FILE_MAX = 10
+const IMAGE_NAME = /^[0-9]{1,2}\.(jpg|png|gif|webp|heic|img)$/
+const VIDEO_NAME = /^[0-9]{1,2}\.(mp4|mov)$/
 
 export function isAvailable () {
   return native !== null
@@ -26,6 +28,10 @@ function cutText (value) {
   const next = value.charCodeAt(end)
   if (tail >= 0xd800 && tail <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1
   return value.slice(0, end)
+}
+
+function isVideo (mimeType) {
+  return /^video\//i.test(mimeType)
 }
 
 function positiveInt (n) {
@@ -52,8 +58,10 @@ function fileOf (entry, id) {
   const segments = path.split('/')
   if (segments.some(segment => segment === '.' || segment === '..')) return null
   if (segments.at(-3) !== 'varanda-share' || segments.at(-2) !== id) return null
-  if (!/^[0-9]{1,2}\.(jpg|png|gif|webp|heic|img)$/.test(segments.at(-1))) return null
   if (typeof mimeType !== 'string') return null
+  // A video carries no sizes: src/media/videoPrep reads them from its bytes.
+  if (isVideo(mimeType)) return VIDEO_NAME.test(segments.at(-1)) ? { uri, mimeType } : null
+  if (!IMAGE_NAME.test(segments.at(-1))) return null
   if (!positiveInt(entry.width) || !positiveInt(entry.height)) return null
   return { uri, mimeType, width: entry.width, height: entry.height }
 }
@@ -70,8 +78,13 @@ function normalize (answer) {
       if (file) files.push(file)
     }
   }
-  let total = Number.isSafeInteger(answer.total) ? answer.total : files.length
-  if (total < files.length) total = files.length
+  // total counts the photos offered, videos the videos.
+  const photos = files.filter((file) => !isVideo(file.mimeType)).length
+  let total = Number.isSafeInteger(answer.total) ? answer.total : photos
+  if (total < photos) total = photos
+  const kept = files.length - photos
+  let videos = Number.isSafeInteger(answer.videos) ? answer.videos : kept
+  if (videos < kept) videos = kept
   return {
     id,
     at: answer.at,
@@ -79,6 +92,7 @@ function normalize (answer) {
     text: cutText(answer.text),
     url: cutText(answer.url),
     total,
+    videos,
     files
   }
 }

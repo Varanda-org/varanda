@@ -5,8 +5,9 @@ import UniformTypeIdentifiers
 // The iOS share sheet entry. It copies what was shared into the app group
 // inbox (Library/Caches/share-inbox/<id>/, manifest.json last) and tells the
 // person to open Varanda; the app imports the inbox whenever it becomes
-// active (modules/share-intake/ios/ShareIntakeModule.swift). Images are never
-// decoded here, since an extension has little memory, and nothing is logged.
+// active (modules/share-intake/ios/ShareIntakeModule.swift). Images and the
+// one video a post holds are never decoded here, since an extension has little
+// memory, and nothing is logged.
 final class ShareViewController: UIViewController {
   private static let appGroup = "group.app.varanda"
   private static let inboxPath = "Library/Caches/share-inbox"
@@ -14,6 +15,9 @@ final class ShareViewController: UIViewController {
   private static let manifestTmp = "manifest.json.tmp"
   private static let maxFiles = 10
   private static let maxBytes: Int64 = 50 * 1024 * 1024
+  // The composer re-encodes a video to the post limits, so this only bounds
+  // the copy (ShareStore.maxVideoBytes).
+  private static let maxVideoBytes: Int64 = 512 * 1024 * 1024
   private static let maxText = 4000
   private static let gifType = "com.compuserve.gif"
   // A provider that never answers must not leave the sheet open.
@@ -30,6 +34,7 @@ final class ShareViewController: UIViewController {
 
   private enum Kind {
     case image(index: Int)
+    case video
     case url(index: Int)
     case text(index: Int)
   }
@@ -85,6 +90,8 @@ final class ShareViewController: UIViewController {
     var kinds: [(NSItemProvider, Kind)] = []
     var total = 0
     var images = 0
+    var videos = 0
+    var movie: NSItemProvider?
     for (index, provider) in providers.enumerated() {
       if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
         total += 1
@@ -92,11 +99,19 @@ final class ShareViewController: UIViewController {
           kinds.append((provider, .image(index: images)))
           images += 1
         }
+      } else if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
+        videos += 1
+        if movie == nil { movie = provider }
       } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
         kinds.append((provider, .url(index: index)))
       } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
         kinds.append((provider, .text(index: index)))
       }
+    }
+    // A post holds one video or photos, and photos win, so a video next to a
+    // photo is only counted.
+    if let movie = movie, images == 0 {
+      kinds.append((movie, .video))
     }
     guard !kinds.isEmpty || !title.isEmpty,
           let id = Self.newId(),
@@ -111,6 +126,8 @@ final class ShareViewController: UIViewController {
       switch kind {
       case .image(let index):
         loadImage(provider, index: index, into: entry) { group.leave() }
+      case .video:
+        loadVideo(provider, into: entry) { group.leave() }
       case .url(let index):
         loadURL(provider, index: index) { group.leave() }
       case .text(let index):
@@ -122,7 +139,7 @@ final class ShareViewController: UIViewController {
     let settle = { [weak self] in
       guard let self = self, !settled else { return }
       settled = true
-      self.complete(id: id, entry: entry, total: total, title: title)
+      self.complete(id: id, entry: entry, total: total, videos: videos, title: title)
     }
     group.notify(queue: .main, execute: settle)
     DispatchQueue.main.asyncAfter(deadline: .now() + Self.watchdogSeconds, execute: settle)
@@ -141,7 +158,7 @@ final class ShareViewController: UIViewController {
       if let url = url {
         // A file that is too big or cannot be copied is skipped, never read
         // whole into memory, where it could end the extension.
-        if self.copyFile(url, to: target) {
+        if self.copyFile(url, to: target, maxBytes: Self.maxBytes) {
           self.record(Saved(index: index, name: name, mime: mime))
         }
         done()
@@ -159,6 +176,23 @@ final class ShareViewController: UIViewController {
         }
         done()
       }
+    }
+  }
+
+  // Only a file is taken, never bytes in memory. The name follows the type the
+  // provider offers; the app checks the file is MP4 or QuickTime before it
+  // keeps it (ShareStore.admitVideo).
+  private func loadVideo(_ provider: NSItemProvider, into entry: URL, done: @escaping () -> Void) {
+    let typeId = Self.videoType(provider)
+    let quickTime = UTType(typeId)?.conforms(to: .quickTimeMovie) ?? false
+    let name = quickTime ? "0.mov" : "0.mp4"
+    let mime = quickTime ? "video/quicktime" : "video/mp4"
+    let target = entry.appendingPathComponent(name, isDirectory: false)
+    provider.loadFileRepresentation(forTypeIdentifier: typeId) { [weak self] url, _ in
+      if let self = self, let url = url, self.copyFile(url, to: target, maxBytes: Self.maxVideoBytes) {
+        self.record(Saved(index: 0, name: name, mime: mime))
+      }
+      done()
     }
   }
 
@@ -236,7 +270,7 @@ final class ShareViewController: UIViewController {
     return entry
   }
 
-  private func complete(id: String, entry: URL, total: Int, title: String) {
+  private func complete(id: String, entry: URL, total: Int, videos: Int, title: String) {
     lock.lock()
     let files = saved.sorted { $0.index < $1.index }
     let text = Self.cut(texts.keys.sorted().compactMap { texts[$0] }.joined(separator: "\n"))
@@ -255,7 +289,8 @@ final class ShareViewController: UIViewController {
       "title": title,
       "text": text,
       "url": url,
-      "total": max(total, files.count),
+      "total": max(total, files.filter { !$0.mime.hasPrefix("video/") }.count),
+      "videos": videos,
       "files": files.map { ["name": $0.name, "mime": $0.mime] }
     ]
     do {
@@ -290,11 +325,11 @@ final class ShareViewController: UIViewController {
 
   // Copies a regular file of at most maxBytes; a partial copy is removed.
   // Only the size and the type are read, no timestamp (PrivacyInfo.xcprivacy).
-  private func copyFile(_ source: URL, to target: URL) -> Bool {
+  private func copyFile(_ source: URL, to target: URL, maxBytes: Int64) -> Bool {
     guard let values = try? source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
           values.isRegularFile == true,
           let size = values.fileSize,
-          size > 0, Int64(size) <= Self.maxBytes else { return false }
+          size > 0, Int64(size) <= maxBytes else { return false }
     do {
       try fm.copyItem(at: source, to: target)
       return true
@@ -333,6 +368,15 @@ final class ShareViewController: UIViewController {
       if let type = UTType(id), type.conforms(to: .image) { return id }
     }
     return UTType.image.identifier
+  }
+
+  // MP4 or QuickTime as the provider registered it, then any movie, which the
+  // provider hands over in a type of its choosing.
+  private static func videoType(_ provider: NSItemProvider) -> String {
+    for id in provider.registeredTypeIdentifiers {
+      if let type = UTType(id), type.conforms(to: .mpeg4Movie) || type.conforms(to: .quickTimeMovie) { return id }
+    }
+    return UTType.movie.identifier
   }
 
   private static func fileExtension(_ mime: String) -> String {
