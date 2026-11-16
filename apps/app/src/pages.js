@@ -72,7 +72,11 @@ export const TEXTS = Object.freeze({
   'rotacao-necessaria': 'A chave da página está sendo trocada; tente de novo em instantes',
   sequencia: 'Alguém publicou antes; toque para enviar de novo',
   'aguardando-chave': 'aguardando nova chave',
-  privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho'
+  privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho',
+  // The account service's word check (apps/cli/lib/account/word-check.js):
+  // the app checks the same list first, so this shows only when the service
+  // has a term this build does not.
+  'termo-recusado': 'Não dá para publicar: o texto tem um termo que o Varanda não permite em conteúdo público. Edite o texto e tente de novo.'
 })
 
 export function pageError (code, nextChangeAt) {

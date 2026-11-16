@@ -1,6 +1,7 @@
 'use strict'
 
-// The on-device word check (src/wordCheck.js, src/blockedTerms.js) and where
+// The on-device word check (src/wordCheck.js, the list and rule in
+// @varanda/rpc lib/blocked-terms.js and lib/word-check.js) and where
 // the screens call it. ES modules loaded through import(). The matching rules
 // use a made-up list, and the real list is only read from its module, so this
 // file never spells a listed term.
@@ -9,7 +10,8 @@ const fs = require('fs')
 const path = require('path')
 
 const load = () => import('../src/wordCheck.js')
-const loadList = async () => (await import('../src/blockedTerms.js')).BLOCKED_TERMS
+const loadList = async () => require('@varanda/rpc').BLOCKED_TERMS
+const RPC_LIB = path.join(__dirname, '../../../packages/rpc/lib')
 const SRC = path.join(__dirname, '../src')
 const screen = (name) => fs.readFileSync(path.join(SRC, 'screens', name), 'utf8')
 
@@ -173,12 +175,16 @@ test('the app\'s own legal and help texts are not refused', async (t) => {
 
 test('the check stays on the device and leaves no trace', (t) => {
   const check = fs.readFileSync(path.join(SRC, 'wordCheck.js'), 'utf8')
-  const list = fs.readFileSync(path.join(SRC, 'blockedTerms.js'), 'utf8')
+  const list = fs.readFileSync(path.join(RPC_LIB, 'blocked-terms.js'), 'utf8')
+  const rule = fs.readFileSync(path.join(RPC_LIB, 'word-check.js'), 'utf8')
   const imports = [...check.matchAll(/^import .* from '(.*)'$/gm)].map((m) => m[1])
-  t.alike(imports, ['./blockedTerms.js', './search.js'], 'imports only its list and the folding')
-  t.absent(/^import /m.test(list), 'the list imports nothing')
-  for (const word of ['console.', 'fetch(', 'request(', 'Storage', 'Platform', 'XMLHttpRequest', 'navigator']) {
-    t.absent(check.includes(word), 'no ' + word)
+  t.alike(imports, ['@varanda/rpc', './search.js'], 'imports only the list and rule and the folding')
+  t.absent(/require\(/.test(list), 'the list requires nothing')
+  t.alike([...rule.matchAll(/require\('(.*)'\)/g)].map((m) => m[1]), ['./blocked-terms'], 'the rule requires only the list')
+  for (const source of [check, rule]) {
+    for (const word of ['console.', 'fetch(', 'request(', 'Storage', 'Platform', 'XMLHttpRequest', 'navigator']) {
+      t.absent(source.includes(word), 'no ' + word)
+    }
   }
 })
 
