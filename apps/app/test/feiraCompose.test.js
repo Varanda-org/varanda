@@ -38,6 +38,22 @@ test('feiraCompose: stepped creation keeps the fields, preview and publication c
   t.ok(src.includes("<Btn label='Continuar editando' block secondary onPress={() => setConfirmLeave(false)} />"))
 })
 
+test('feiraCompose: a refusal or a save lowers the keyboard and the bar hugs an open keyboard', (t) => {
+  const create = source('src/screens/Anunciar.js')
+  const edit = source('src/screens/AnuncioEditar.js')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(create), 'Anunciar imports Keyboard')
+  t.ok(/import \{[^}]*\bKeyboard\b[^}]*\} from 'react-native'/.test(edit), 'AnuncioEditar imports Keyboard')
+  const advance = create.slice(create.indexOf('const advance = () => {'), create.indexOf('// Descriptors are valid'))
+  const failure = advance.match(/if \(problem\) \{([\s\S]*?)\n {4}\}/)
+  t.ok(failure && failure[1].includes('Keyboard.dismiss()'), 'a refusal lowers the keyboard')
+  const save = edit.slice(edit.indexOf('const save = async () => {'), edit.indexOf('const retry = async () => {'))
+  t.ok(save.includes('Keyboard.dismiss()') && save.indexOf('Keyboard.dismiss()') < save.indexOf('sendingRef.current = true'), 'save lowers the keyboard before sending')
+  for (const src of [create, edit]) {
+    t.ok(src.includes("import { useKeyboardOpen } from '../ui/keyboardAvoid'") && src.includes('const keyboardOpen = useKeyboardOpen()'), 'the screen tracks the keyboard')
+    t.ok(src.includes('{ paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }'), 'an open keyboard drops the bottom inset')
+  }
+})
+
 test('feiraCompose: failed advance keeps errors visible beside the actions and at the field', (t) => {
   const src = source('src/screens/Anunciar.js')
   const advance = src.slice(src.indexOf('const advance = () => {'), src.indexOf('// Descriptors are valid'))
@@ -601,8 +617,8 @@ test('feiraCompose: Anunciar and AnuncioEditar use the photo grid, a thin progre
     t.ok(src.includes('pickImages(MAX_PHOTOS)') && !/expo-camera/.test(src), 'library picker, no camera')
   }
   t.ok(create.includes("accessibilityRole='progressbar'") && create.includes('(index + 1) / STEPS.length'), 'progress bar from the step count')
-  t.ok(create.indexOf('<View style={[styles.bar, { paddingBottom: insets.bottom + space.md }]}>') > create.indexOf('</ScrollView>'), 'Continuar sits in a bar below the scroll')
-  t.ok(/<View style=\{\[styles\.bar, \{ paddingBottom: insets\.bottom \+ space\.md \}\]\}>\s+\{error !== '' \? <ErrorText>\{error\}<\/ErrorText> : null\}\s+<Btn label='Salvar' block onPress=\{save\}/.test(edit), 'Salvar is in the sticky bar, under the repeated error')
+  t.ok(create.indexOf('<View style={[styles.bar, { paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }]}>') > create.indexOf('</ScrollView>'), 'Continuar sits in a bar below the scroll')
+  t.ok(/<View style=\{\[styles\.bar, \{ paddingBottom: keyboardOpen \? space\.md : insets\.bottom \+ space\.md \}\]\}>\s+\{error !== '' \? <ErrorText>\{error\}<\/ErrorText> : null\}\s+<Btn label='Salvar' block onPress=\{save\}/.test(edit), 'Salvar is in the sticky bar, under the repeated error')
   t.ok(edit.indexOf("label='Salvar'") > edit.indexOf('</ScrollView>'), 'Salvar sits below the scroll')
   t.is(edit.split("label='Salvar'").length, 2, 'one Salvar button')
   t.is(create.split("label='Publicar anúncio'").length, 2, 'one Publicar button')
@@ -613,7 +629,7 @@ test('feiraCompose: the sticky bars follow the keyboard and clear the bottom saf
   const edit = source('src/screens/AnuncioEditar.js')
   for (const src of [create, edit]) {
     t.ok(src.includes("import { KeyboardForm } from './Perfil'"), 'shared keyboard wrapper')
-    t.ok(src.includes('{ paddingBottom: insets.bottom + space.md }'), 'bar padding uses the bottom inset')
+    t.ok(src.includes('{ paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }'), 'bar padding uses the bottom inset when the keyboard is closed')
     t.ok(src.includes('const insets = useSafeAreaInsets()'), 'insets come from the safe area hook')
   }
   t.ok(create.includes('</KeyboardForm>') && edit.includes('</KeyboardForm>'), 'wrapper is closed')

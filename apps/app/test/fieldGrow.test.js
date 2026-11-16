@@ -100,3 +100,34 @@ test('the composers measure the field after every text change on the web, before
   t.ok(post.includes('measureField(momentView.fieldRef.current, MOMENT_MIN_HEIGHT, MOMENT_MAX_HEIGHT, 2)'), 'momento field')
   t.is(post.match(/\bPOST_MIN_HEIGHT\b/g).length, 3, 'one minimum for the style and the measurement')
 })
+
+test('fieldBounds gives a form field its least and most height', async (t) => {
+  const { fieldBounds } = await import('../src/ui/fieldHeight.js')
+  t.alike(fieldBounds(4), { minHeight: 108, maxHeight: 152 })
+  t.alike(fieldBounds(3), { minHeight: 86, maxHeight: 152 })
+  t.alike(fieldBounds(6), { minHeight: 152, maxHeight: 152 })
+  t.alike(fieldBounds(8), { minHeight: 196, maxHeight: 196 }, 'a field taller than the cap keeps its own lines')
+})
+
+test('fieldFull is true once the laid out height reaches the maximum', async (t) => {
+  const { fieldFull } = await import('../src/ui/fieldHeight.js')
+  t.is(fieldFull(152, 152), true)
+  t.is(fieldFull(151.6, 152), true, 'rounding of the layout')
+  t.is(fieldFull(151, 152), false)
+  t.is(fieldFull(0, 152), false)
+  t.is(fieldFull(undefined, 152), false)
+})
+
+test('the shared Field caps a multiline input and scrolls its text only when full', (t) => {
+  const ui = read('ui/index.js')
+  const start = ui.indexOf('export function Field')
+  const end = ui.indexOf('const makeStyles', start)
+  t.ok(start > 0 && end > start, 'the Field source is found')
+  const field = ui.slice(start, end)
+  t.ok(field.includes("multiline && { ...bounds, textAlignVertical: 'top' }"))
+  t.ok(field.includes('scrollEnabled={grows ? full : undefined}'))
+  t.ok(field.includes('onLayout={grows ? (event) => setLaidOut(event.nativeEvent.layout.height) : undefined}'))
+  t.absent(field.includes('minHeight: lines * 22 + 20'), 'no uncapped minimum left')
+  t.ok(/import \{[^}]*\bfieldBounds\b[^}]*\bfieldFull\b[^}]*\} from '\.\/fieldHeight'/.test(ui))
+  t.ok(ui.includes("import { GROWS_ITSELF } from './fieldMeasure'"))
+})
