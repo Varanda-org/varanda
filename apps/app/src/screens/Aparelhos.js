@@ -77,6 +77,8 @@ export default function Aparelhos ({ active }) {
   const [failed, setFailed] = useState(false)
   // null, 'previous' or a device id: what the open sheet would disconnect.
   const [target, setTarget] = useState(null)
+  // What the sheet last asked about, kept so the closing sheet keeps its text.
+  const [asked, setAsked] = useState(null)
   const [done, setDone] = useState('')
   const [partly, setPartly] = useState('')
   const ready = node.phase === 'ready'
@@ -110,7 +112,7 @@ export default function Aparelhos ({ active }) {
 
   const view = shapeList(state.list)
   const loading = listNull && !failed
-  const copy = confirmCopy(target)
+  const copy = confirmCopy(asked)
 
   const close = () => { if (!act.pending) { act.clearError(); setTarget(null) } }
   const disconnect = async () => {
@@ -127,7 +129,7 @@ export default function Aparelhos ({ active }) {
       load()
     }
   }
-  const ask = (which) => { act.clearError(); setDone(''); setPartly(''); setTarget(which) }
+  const ask = (which) => { act.clearError(); setDone(''); setPartly(''); setAsked(which); setTarget(which) }
   // Off: this device cannot disconnect others until it connects again.
   const off = view.off || state.off
   const blocked = node.online === false || off
