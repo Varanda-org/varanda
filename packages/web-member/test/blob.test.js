@@ -71,7 +71,9 @@ function png (size) {
   return out
 }
 
-async function blobSeeder (t, { signer, blobBudget = 10000, partialMs, now } = {}) {
+// copyBudget: the weekly copy allowance per diary; null is a seeder from
+// before the copy kind, which does not answer it.
+async function blobSeeder (t, { signer, blobBudget = 10000, copyBudget = null, partialMs, now } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const dmRsa = rsaKey()
@@ -98,6 +100,8 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs, now } = {
     blobProofs: [],
     // Blob stamp issues answered (a refused one included).
     blobIssues: 0,
+    // Copy stamp issues answered, and the daily blob issues they never touch.
+    copyIssues: 0,
     gets: [],
     blobBudget,
     // tamper(frame, index) -> frame: the HTTP route serves what it returns.
@@ -111,6 +115,7 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs, now } = {
     connections: 0
   }
   const issued = new Map()
+  const issuedCopy = new Map()
   wss.on('connection', (ws) => {
     seeder.connections++
     const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
@@ -135,7 +140,20 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs, now } = {
             issued.set(diary, n + 1)
             return true
           }
-        }
+        },
+        ...(copyBudget === null
+          ? {}
+          : {
+              copyBudget: {
+                take (diary) {
+                  seeder.copyIssues++
+                  const n = issuedCopy.get(diary) || 0
+                  if (n >= copyBudget) return false
+                  issuedCopy.set(diary, n + 1)
+                  return true
+                }
+              }
+            })
       })
       attachBlob(noise, {
         role: 'seeder',
@@ -1495,4 +1513,91 @@ test('a top-up resolves only once the key check time is stored', async (t) => {
   t.is(await client.topUp(identity, { force: true }), 0, 'the key is current and the wallet full')
   const checked = await base.readJson('blobKeyCheck')
   t.ok(checked !== null && checked.at > Date.now() - 60000, 'stored before the key check resolved')
+})
+
+test('a copy source buys copy stamps in batches, spends no daily stamp and its stamps put a blob', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 100 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 5 })
+  t.is(source.exhausted, false)
+  t.is(source.bought, 0, 'nothing is bought before the first take')
+
+  const first = await source.take(2)
+  t.is(first.length, 2)
+  t.is(source.bought, 5, 'a whole batch is bought at once')
+  t.is(seeder.copyIssues, 5)
+  const connections = seeder.connections
+  const more = await source.take(3)
+  t.is(more.length, 3, 'the rest of the batch is spent first')
+  t.is(seeder.connections, connections, 'no new link for stamps already bought')
+  t.is(seeder.copyIssues, 5)
+  t.is(new Set([...first, ...more].map((s) => s.token)).size, 5, 'every stamp is its own')
+
+  const next = await source.take(7)
+  t.is(next.length, 7, 'a take larger than the batch buys what it needs')
+  t.is(source.bought, 12)
+
+  t.is(seeder.blobIssues, 0, 'the daily blob allowance was never asked')
+  t.is(await client.walletSize(), 0, 'the daily wallet is untouched')
+
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  await client.send(sealed, identity, source)
+  t.is(seeder.puts.length, 2, 'the copy stamps pay the chunks on the blob pool')
+  t.is(seeder.blobIssues, 0, 'still no daily stamp')
+  const got = await fetchBlob(sealed.descriptor, seeder.origin, { mime: 'image/png' })
+  t.ok(b4a.equals(got.bytes, plain), 'the blob reads back')
+})
+
+test('a copy source whose weekly allowance ends keeps what it bought and then fails without asking again', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 3 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 2 })
+  t.is((await source.take(2)).length, 2)
+  t.is(source.exhausted, false)
+
+  const err = await source.take(5).then(() => null, (e) => e)
+  t.is(err && err.message, 'o limite semanal de cópia de conversas acabou')
+  t.is(source.exhausted, true, 'the caller can tell the allowance ended')
+  t.is(source.bought, 3, 'the stamps bought before the limit still count')
+  t.is(seeder.copyIssues, 4, 'three issued and one refused')
+  const connections = seeder.connections
+  const again = await source.take(2).then(() => null, (e) => e)
+  t.is(again && again.message, 'o limite semanal de cópia de conversas acabou', 'the failure is final for this copy')
+  t.is(seeder.connections, connections, 'no request is repeated')
+  t.is(seeder.copyIssues, 4)
+  t.is((await source.take(1)).length, 1, 'the one stamp left over is still spent')
+  t.is(seeder.blobIssues, 0, 'the daily allowance was never asked')
+})
+
+test('a copy source on a seeder from before the copy kind fails with its own reason and the daily wallet still works', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder)
+  const source = client.copySource(identity, { batch: 4 })
+  const err = await source.take(1).then(() => null, (e) => e)
+  t.is(err && err.message, 'o semeador não oferece a cópia de conversas')
+  t.is(source.exhausted, false, 'not the weekly allowance: the seeder never offered one')
+  t.is(source.bought, 0)
+  t.is(seeder.copyIssues, 0)
+  const connections = seeder.connections
+  const again = await source.take(1).then(() => null, (e) => e)
+  t.is(again && again.message, 'o semeador não oferece a cópia de conversas', 'the failure sticks')
+  t.is(seeder.connections, connections, 'the key is not asked again')
+
+  // What the history copy does next (dm-copy.js): stamp from the daily wallet.
+  const plain = png(coreBlob.BLOB_CHUNK_BYTES + 10)
+  const sealed = sealBlob(plain)
+  await client.send(sealed, identity)
+  t.ok(seeder.blobIssues > 0, 'the daily allowance backs the blob')
+  const got = await fetchBlob(sealed.descriptor, seeder.origin, { mime: 'image/png' })
+  t.ok(b4a.equals(got.bytes, plain), 'the blob reads back')
 })

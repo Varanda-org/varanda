@@ -22,11 +22,18 @@
 | `packages/core/test/dm-stamp-net.test.js` | 26/26 | |
 | `packages/core/test/seeder-dm.test.js` | 13/13 | |
 | `packages/core/test/activity.test.js` | 9/9 | |
-| `packages/web-member/test/dm-copy-e2e.test.js` | 32 asserções, 2 testes (~97 s) | com a importação desligada, o teste 1 espera `dm.copyImported` e estoura em 170 s (falha, como exigido) |
+| `packages/web-member/test/dm-copy-e2e.test.js` | 52 asserções, 3 testes (~128 s) | com a importação desligada, o teste 1 espera `dm.copyImported` e estoura em 170 s (falha, como exigido) |
+| `dm-copy-e2e.test.js`, teste "the conversations of a Página come along" | 20 asserções (~35 s) | sem o arquivamento dos pendentes (`settle` nunca arquiva): `tempo esgotado: copyImported after adoption`; sem guardar o armazém de uma Página não adotada (`hold` sem efeito): falha em "its conversations wait sealed" e depois no mesmo tempo esgotado |
+| `packages/web-member/test/blob.test.js` | 46 testes, 399 asserções (eram 43 e 364) | ver as três linhas abaixo |
+| `blob.test.js`, "a copy source buys copy stamps in batches..." | 16 asserções | pedindo selo `blob` em vez de `copy`: falham 4 asserções (contagem de selos de cópia e "the daily blob allowance was never asked", "still no daily stamp") |
+| `blob.test.js`, "a copy source whose weekly allowance ends..." | 11 asserções | sem marcar `exhausted` no `teto`: falham 8 asserções (mensagem do limite semanal, `exhausted`, `bought`) |
+| `blob.test.js`, "a copy source on a seeder from before the copy kind..." | 8 asserções | sem a falha pegajosa (`failure = err`): falha em "the key is not asked again" |
 | `apps/app/test/historyCopy.test.js` | 5/5 (40 asserções) | |
 | `apps/app/test/help.test.js`, `platformGate.test.js`, `conversas*.test.js`, `legal.test.js` | passam | |
 
-Não coberto por teste: importação de armazém de Página (adotada e pendente) e testes unitários de `copySource` em `blob.js`, incluindo o recuo para o semeador antigo.
+O seeder de teste do `blob.test.js` ganhou a opção `copyBudget` (nulo é um semeador de antes do tipo `copy`, que não responde). O teste do semeador antigo cobre a falha de `copySource` e o selo diário que passa a pagar o blob.
+
+Não coberto por teste: o `dm-copy.js` inteiro contra um semeador sem o tipo `copy` (texto e manifesto na cota diária, fotos de fora). O e2e de cota esgotada exercita o recuo dos textos, mas com um semeador que oferece o tipo.
 
 ## Conferências no aparelho (pendentes)
 
