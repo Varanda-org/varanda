@@ -18,6 +18,8 @@ const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { startHealth, metricsText } = require('../lib/health')
 const { listLines, dmOption } = require('../lib/commands/seed')
 const { loadOrCreate, publicPart, createPostageFile, ROTATE_MS, MAX_AGE_MS } = require('../lib/dm-postage-file')
+const { STAMP_TOKEN_RETENTION_MS } = require('@varanda/core/lib/dm')
+const { VISIT_TOKEN_RETENTION_MS } = require('@varanda/core/lib/dm-pool')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const HEX64_ANYWHERE = /[0-9a-f]{64}/i
@@ -524,6 +526,13 @@ test('dm-postage file: rotation every 7 days, at most 2 keys, v1 or corrupt fail
   fs.writeFileSync(file, '{"v":2,"keys":[]}')
   t.exception.all(() => loadOrCreate(dataDir, { now: at }), /dm-postage inválido/)
   t.is(fs.readFileSync(file, 'utf8'), '{"v":2,"keys":[]}', 'a corrupt file is not overwritten')
+})
+
+test('dm-postage file: a key is accepted no longer than any pool remembers a spent stamp', (t) => {
+  t.is(MAX_AGE_MS, 14 * 86400000)
+  // The dm and blob pools default to max(retention, STAMP_TOKEN_RETENTION_MS).
+  t.ok(MAX_AGE_MS <= STAMP_TOKEN_RETENTION_MS, 'the dm and blob pool token retention covers the acceptance window')
+  t.ok(MAX_AGE_MS <= VISIT_TOKEN_RETENTION_MS, 'the visit pool token retention covers it')
 })
 
 test('dm-postage file: get() rotates once the current key is due', async (t) => {

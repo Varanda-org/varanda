@@ -125,6 +125,24 @@ test('DM card thumbnail: index \'card\' keys apart from the photos and reaches t
   t.alike(node.reads, [{ kind: 'dm', from: FROM, id: id(1), index: 'card' }], 'the node gets index card')
 })
 
+test('a Página\'s DM item keys apart from the same message read as the person and reaches the node with its page', async (t) => {
+  const { chatMediaKey, createChatMedia } = await load()
+  const PAGE = 'e5'.repeat(32)
+  const pageRef = (n, index = 0) => ({ ...dmRef(n, index), page: PAGE })
+  t.is(chatMediaKey(ME, pageRef(1)), ME + '|dm|' + PAGE + '|' + FROM + '|' + id(1) + '|0')
+  t.not(chatMediaKey(ME, pageRef(1)), chatMediaKey(ME, dmRef(1)), 'never the personal entry')
+  t.is(chatMediaKey(ME, { ...dmRef(1), page: null }), chatMediaKey(ME, dmRef(1)), 'a null page is the person')
+  for (const bad of [PAGE.toUpperCase(), PAGE.slice(1), '', 1]) t.is(chatMediaKey(ME, { ...dmRef(1), page: bad }), null, 'page ' + String(bad) + ' refused')
+  const media = createChatMedia()
+  const node = webNode()
+  const d = display()
+  await media.sourceFor(pageRef(1, 'card'), { node, identity: ME, display: d })
+  await media.sourceFor(dmRef(1, 'card'), { node, identity: ME, display: d })
+  t.alike(node.reads, [{ kind: 'dm', from: FROM, id: id(1), index: 'card', page: PAGE }, { kind: 'dm', from: FROM, id: id(1), index: 'card' }], 'two reads, the page one carries it')
+  await media.bytesFor(pageRef(2), { node, identity: ME })
+  t.alike(node.reads[2], { kind: 'dm', from: FROM, id: id(2), index: 0, page: PAGE }, 'bytesFor (a forward) reads from the page too')
+})
+
 test('cache hit: the same ref is read once', async (t) => {
   const { createChatMedia } = await load()
   const media = createChatMedia()

@@ -515,28 +515,91 @@ test('an approval group hides posts before the admit cut', (t) => {
   t.alike(visible(g), [wX + ':2', wX + ':3'], 'a backlog writer the admit does not list stays hidden')
   t.is(g.members.get(X), 'member')
   t.is(g.members.get(Y), 'requested')
-  t.alike(g.requests, [X, Y], 'an admitted diary with an uncovered writer is listed for the admins')
+  t.alike(g.requests, [Y], 'the backlog writer is covered from its next record, so X is no request')
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 0 }], at: AT(7) }))
   const g2 = buildGroup(w.input())
   t.alike(visible(g2), [wX + ':2', wX2 + ':1', wX + ':3'], 'a new admit listing the writer admits it')
   t.alike(g2.requests, [Y])
 })
 
-test('a writer created after the admit stays hidden until an admit lists it', (t) => {
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('a writer created after the admit is covered by it', (t) => {
   const w = world({ join: 'approval' }).add(X, wX)
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
   post(w, wX, 2)
   w.add(X, wX2, { at: AT(3) })
+  const empty = buildGroup(w.input())
+  t.alike(empty.requests, [], 'a new device with no record is no request')
+  t.ok(empty.liveWriters.has(wX2))
   post(w, wX2, 4)
   const g = buildGroup(w.input())
-  t.alike(visible(g), [wX + ':1'])
+  t.alike(visible(g), [wX + ':1', wX2 + ':1'], 'its posts show without a new admit')
   t.is(g.members.get(X), 'member')
-  t.alike(g.requests, [X])
+  t.alike(g.requests, [])
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(5) }))
   post(w, wX2, 6)
   const g2 = buildGroup(w.input())
-  t.alike(visible(g2), [wX + ':1', wX2 + ':1', wX2 + ':2'])
+  t.alike(visible(g2), [wX + ':1', wX2 + ':1', wX2 + ':2'], 'an admit listing it changes nothing')
   t.alike(g2.requests, [])
+})
+
+test('a new device counts from the admission on: earlier records, withdrawals and re-admits', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX).add(X, wX2)
+  post(w, wX2, 1)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
+  post(w, wX2, 3)
+  let g = buildGroup(w.input())
+  t.alike(visible(g), [wX2 + ':2'], 'the record before the admit stays hidden')
+  t.is(g.members.get(X), 'member')
+  t.alike(g.requests, [])
+  w.push(G, groupAdmit({ member: X, on: false, cuts: [{ writer: wX, seq: 1 }], at: AT(4) }))
+  post(w, wX2, 5)
+  g = buildGroup(w.input())
+  t.alike(visible(g), [], 'a withdrawal hides every writer from seq 0')
+  t.is(g.members.get(X), 'requested')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(6) }))
+  post(w, wX2, 7)
+  g = buildGroup(w.input())
+  t.alike(visible(g), [wX2 + ':4'], 'a re-admit listing only the other writer covers the device from after it')
+  t.is(g.members.get(X), 'member')
+  t.alike(g.requests, [])
+})
+
+test('after a leave only a writer whose rejoin names it is covered, by an admit of the new generation', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX).add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(1) }))
+  const leave = w.push(wX, groupLeave({ at: AT(2) }))
+  const wNew = K(0x403)
+  w.add(X, wNew, { rejoin: leave, at: AT(3) })
+  post(w, wNew, 4)
+  const before = buildGroup(w.input())
+  t.alike(visible(before), [], 'the old admit covers no writer of the new generation')
+  t.is(before.members.get(X), 'requested')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(5) }))
+  post(w, wNew, 6)
+  post(w, wX2, 7)
+  const after = buildGroup(w.input())
+  t.is(after.members.get(X), 'member')
+  t.alike(visible(after), [wNew + ':2'], 'the rejoined writer from the re-admit on; the device from before the leave never')
+  t.alike(after.requests, [X], 'the old device keeps the diary in front of the admins')
+})
+
+test('a new device during a ban stays banned, also after an unban that does not list it', (t) => {
+  const w = world({ join: 'approval' }).add(A, wA).add(X, wX)
+  w.push(G, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 0 }], at: AT(1) }))
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(2) }))
+  const ban = w.push(wA, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(3) }))
+  w.add(X, wX2, { at: AT(4) })
+  post(w, wX2, 5)
+  let g = buildGroup(w.input())
+  t.is(g.members.get(X), 'banned')
+  t.alike(visible(g), [])
+  w.push(wA, groupBan({ member: X, on: false, cuts: [{ writer: wX, seq: 1 }], lifts: ban, at: AT(6) }))
+  post(w, wX2, 7)
+  g = buildGroup(w.input())
+  t.alike(visible(g), [], 'the unban never listed the device')
+  t.alike(g.bans.get(X), ban, 'still liftable')
 })
 
 test('an admit withdrawal still covers unlisted writers from seq 0', (t) => {
@@ -2530,6 +2593,32 @@ test('reactions by non-members, banned or departed diaries are ignored', (t) => 
   t.is(reactionsOf(g, p), undefined)
 })
 
+// Owner decision (#350): a new device's side records count from seq 1, as
+// under an admit listing it with cut 1; its posts keep the automatic cut.
+test('a new device that only reacts has its reactions counted, also once it posts, until the diary leaves', (t) => {
+  const THUMB = [{ emoji: THUMBS, count: 1, by: [X] }]
+  const w = world({ join: 'approval' }).add(X, wX)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+  const p = post(w, G, 2)
+  const q = post(w, G, 3)
+  w.add(X, wX2, { at: AT(4) })
+  react(w, wX2, p, THUMBS, 5)
+  react(w, wX2, q, THUMBS, 6)
+  let g = buildGroup(w.input())
+  t.alike(reactionsOf(g, p), THUMB, 'a reaction with no record before it on its core')
+  t.alike(reactionsOf(g, q), THUMB)
+  post(w, wX2, 7)
+  g = buildGroup(w.input())
+  t.alike(reactionsOf(g, p), THUMB, 'still counted once the device posts')
+  t.alike(reactionsOf(g, q), THUMB)
+  t.ok(visible(g).includes(wX2 + ':3'), 'its post after the admit shows')
+  w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(8) }))
+  g = buildGroup(w.input())
+  t.is(g.members.get(X), 'left')
+  t.is(reactionsOf(g, p), undefined, 'not once the diary has left')
+  t.is(reactionsOf(g, q), undefined)
+})
+
 test('reactions to hidden, unknown or future targets are ignored', (t) => {
   const w = world().add(X, wX).add(Y, wY)
   const p1 = post(w, wY, 1)
@@ -2908,6 +2997,80 @@ test('a topic mark on a reply or an unknown post is ignored', (t) => {
   t.absent('topic' in postOf(g, p))
   t.ok(g.posts.every((x) => !('thread' in x) && !('topic' in x)), 'plain posts keep their exact keys')
   t.alike(visible(g), [wY + ':1', wY + ':2'], 'side records never become posts')
+})
+
+// #350: each admit covers the writers of its own generation, so leaving
+// keeps a covered device's earlier records exactly as a listed writer's.
+test('a device the admit covers keeps its records from before a leave, as a listed one; a rejoin needs a new admit', (t) => {
+  const THUMB = [{ emoji: THUMBS, count: 1, by: [X] }]
+  const leaveFrom = (leaver) => {
+    const w = world({ join: 'approval' }).add(X, wX)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+    const p = post(w, G, 2)
+    w.add(X, wX2, { at: AT(3) })
+    const listed = post(w, wX, 4)
+    const covered = post(w, wX2, 5)
+    topic(w, wX, listed, 6)
+    topic(w, wX2, covered, 7)
+    react(w, wX2, p, THUMBS, 8)
+    const g = buildGroup(w.input())
+    t.alike(visible(g), [G + ':2', wX + ':1', wX2 + ':1'])
+    t.alike(postOf(g, covered).topic, { poll: null })
+    t.alike(reactionsOf(g, p), THUMB)
+    const leave = w.push(leaver, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(9) }))
+    return { w, p, listed, covered, leave, g: buildGroup(w.input()) }
+  }
+  const fromListed = leaveFrom(wX)
+  t.is(fromListed.g.members.get(X), 'left')
+  t.alike(visible(fromListed.g), [G + ':2', wX + ':1'], 'the listed writer that left keeps its post')
+  t.alike(postOf(fromListed.g, fromListed.listed).topic, { poll: null })
+  t.is(reactionsOf(fromListed.g, fromListed.p), undefined, 'a reaction needs a member now')
+
+  const { w, p, covered, leave, g } = leaveFrom(wX2)
+  t.is(g.members.get(X), 'left')
+  t.alike(visible(g), [G + ':2', wX2 + ':1'], 'the covered writer that left keeps its post too')
+  t.alike(postOf(g, covered).topic, { poll: null }, 'and its topic mark')
+  t.is(reactionsOf(g, p), undefined, 'a reaction needs a member now')
+
+  const wN = K(0x405)
+  w.add(X, wN, { rejoin: leave, at: AT(10) })
+  post(w, wN, 11)
+  let r = buildGroup(w.input())
+  t.is(r.members.get(X), 'requested', 'the old admit covers no writer of the next generation')
+  t.alike(r.requests, [X])
+  t.alike(visible(r), [G + ':2', wX2 + ':1'], 'the earlier post still stays')
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX2, seq: w.len(wX2) }], at: AT(12) }))
+  post(w, wN, 13)
+  const wN2 = K(0x406)
+  w.add(X, wN2, { rejoin: leave, at: AT(14) })
+  post(w, wN2, 15)
+  r = buildGroup(w.input())
+  t.is(r.members.get(X), 'member')
+  t.alike(visible(r), [G + ':2', wX2 + ':1', wN + ':2', wN2 + ':1'], 'the new admit covers its generation from the admit on; the earlier post stays')
+})
+
+test('a writer generation follows the whole rejoin chain when leaves cut only their own writer', (t) => {
+  const w = world({ join: 'approval' }).add(X, wX)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
+  const all = [wX]
+  let cur = wX
+  for (let k = 1; k <= 3; k++) {
+    const s = 10 * k
+    const leave = w.push(cur, groupLeave({ cuts: [{ writer: cur, seq: w.len(cur) }], at: AT(s) }))
+    const back = K(0x410 + k)
+    w.add(X, back, { rejoin: leave, at: AT(s + 1) })
+    all.push(back)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: all.map((x) => ({ writer: x, seq: w.len(x) })), at: AT(s + 2) }))
+    const device = K(0x420 + k)
+    w.add(X, device, { rejoin: leave, at: AT(s + 3) })
+    post(w, device, s + 4)
+    const g = buildGroup(w.input())
+    t.is(g.members.get(X), 'member', 'cycle ' + k)
+    t.ok(visible(g).includes(device + ':1'), 'cycle ' + k + ': the re-admit covers the new device')
+    t.absent(g.requests.includes(X), 'cycle ' + k)
+    all.push(device)
+    cur = back
+  }
 })
 
 test('replies and replies to replies belong to the topic thread', (t) => {

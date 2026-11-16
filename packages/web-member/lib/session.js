@@ -155,9 +155,21 @@
 // reload or a new connection from the next own-synced), and once per
 // arming by a 'settled' report after the passes ran out; a failed pass or
 // a failed root queues another within the bound; a 'group-writer' (a writer
-// core stored for the first time, once per key and at most
-// MAX_UPKEEP_WRITERS keys per session) arms afresh, so the distributor
-// plans after the new device's writer arrived; while armed, a
+// core stored for the first time, either in a PRIVATE group this device
+// writes in, or bound by the own diary, i.e. another device's writer: the
+// event says so; once per key and at most MAX_UPKEEP_WRITERS keys per
+// session) arms afresh, so the distributor plans after the new device's
+// writer arrived and a new device enrols once the account's writer it waited
+// for is held. Any other writer (a public group or a foreign diary without an
+// own writer there) has no keys to hand over and changes no plan, so it arms
+// nothing. Where the event is not armed for (cap, locked, once run) a
+// private group with an own writer still leaves upkeepFull set, and
+// `private` is false while the root's visibility is unknown, which the
+// 10-minute full-plan age (UPKEEP_FULL_MAX_AGE_MS) covers.
+// A boxless writer of a root not held yet (a join before the root arrived;
+// the root's visibility is unknown, so a public one too) stays a transient
+// 'unheld' skip, so the arming lives until the root's 'groups-changed' plans
+// the rebox; while armed, a
 // 'groups-changed' (the root or writer a skipped root waited for) queues
 // another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
 // most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
@@ -313,6 +325,7 @@ const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-pro
 const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { createRekeyGate, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
@@ -507,8 +520,9 @@ const MAX_UPKEEP_PASSES = 3
 const UPKEEP_DELAY_MS = 1500
 // Per arming, whatever progress or a 'settled' report granted since.
 const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
-// Writer keys whose 'group-writer' armed the upkeep, per session.
-const MAX_UPKEEP_WRITERS = 512
+// Writer keys whose 'group-writer' armed the upkeep, per session: only a
+// private group the device writes in arms it (sync.js tells which).
+const MAX_UPKEEP_WRITERS = 64
 // The longest the upkeep trusts the precheck before planning in full again.
 const UPKEEP_FULL_MAX_AGE_MS = 10 * 60 * 1000
 // The lease (see the header): the gap after an idle end, how long a run
@@ -834,6 +848,8 @@ function readyWithin (ready, ms) {
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
 // upkeepDelayMs: the device upkeep's coalescing delay (tests).
 // upkeepFullMaxAgeMs: the age after which it plans in full again (tests).
+// rekeyClock, rekeyRandom: the clock (ms) and random source of the
+// periodic rotation of private groups' keys (tests).
 // hkdf: the HKDF of passkey.js for every key derived from the PRF of
 // setKeyPair (group box, group writer and direct message keys); absent, it
 // is WebCrypto's. The Bare worklet passes its own: its WebCrypto has none.
@@ -864,6 +880,8 @@ function createBrowserSession ({
   noClear = false,
   upkeepDelayMs = UPKEEP_DELAY_MS,
   upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
+  rekeyClock = Date.now,
+  rekeyRandom = Math.random,
   fetchMedia = (...args) => globalThis.fetch(...args),
   hkdf,
   dmUnlockHook = null,
@@ -1047,6 +1065,19 @@ function createBrowserSession ({
   let upkeepFull = false
   let upkeepFullAt = 0
   let upkeepQuick = false
+  // The periodic rotation (periodicRekeyStep): the per-group check limit,
+  // a limit on the groups-changed that start a rotation-only pass, the
+  // timer that starts one when a group becomes due, and that pass's own
+  // coalescing timer.
+  const rekeyGate = createRekeyGate({ now: rekeyClock, random: rekeyRandom })
+  const rekeyTriggers = createRekeyGate({ now: rekeyClock })
+  let rekeyTimer = null
+  let rekeyTimerAt = null
+  let rekeyPassTimer = null
+  let rekeyQueued = false
+  const rekeyDeferred = new Set()
+  let rekeyDeferTimer = null
+  let rekeyDeferAt = Infinity
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -1376,18 +1407,27 @@ function createBrowserSession ({
                 // even the next echo of a local write plans in full.
                 if (!once && !internal) upkeepFull = true
                 if (!once && !internal && upkeepRoom()) scheduleUpkeep()
+                // A grown group may make its epoch due (periodicRekeyStep):
+                // a rotation-only pass, at most once an hour per group.
+                if (!once && !internal && typeof ev.group === 'string') rekeyGrew(ev.group)
                 return
               case 'group-writer':
                 // A writer stored after the pass that planned on the own
                 // length its join made (or another diary's entitled
-                // writer): a fresh arming, once per writer key.
-                if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
-                  upkeepWriters.add(ev.writer)
-                  armUpkeep(upkeepLength)
-                } else if (typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
-                  // Not armed for (a once or internal run, the key cap,
-                  // locked): a later echo still plans the shares in full.
-                  upkeepFull = true
+                // writer): a fresh arming, once per writer key. Only a
+                // private group this device writes in can have keys to
+                // hand to it, and a writer the own diary binds (another
+                // device of the account) is what a new device waits for to
+                // enrol; anything else changes no plan.
+                if ((ev.account === true || (ev.private === true && ev.own === true)) && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                  if (!once && !internal && keyPair !== null && groupPrf !== null && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
+                    upkeepWriters.add(ev.writer)
+                    armUpkeep(upkeepLength)
+                  } else {
+                    // Not armed for (a once or internal run, the key cap,
+                    // locked): a later echo still plans the shares in full.
+                    upkeepFull = true
+                  }
                 }
                 return
               case 'group-synced':
@@ -2371,6 +2411,147 @@ function createBrowserSession ({
     upkeepFull = false
     upkeepFullAt = 0
     upkeepQuick = false
+    clearRekeyTimer()
+  }
+
+  // ---- the periodic rotation of private groups' keys ----
+  // (docs/protocol.md "Rotation", @varanda/core lib/group-rekey.js)
+
+  function clearRekeyTimer () {
+    if (rekeyTimer !== null) clearTimeout(rekeyTimer)
+    if (rekeyPassTimer !== null) clearTimeout(rekeyPassTimer)
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
+    rekeyTimer = null
+    rekeyTimerAt = null
+    rekeyPassTimer = null
+    rekeyDeferTimer = null
+    rekeyDeferAt = Infinity
+    rekeyDeferred.clear()
+  }
+
+  // Runs a rotation-only pass when the earliest group not due yet becomes
+  // due, never sooner than the check limit (a group checked now is skipped
+  // until then).
+  function armRekeyTimer (at) {
+    const now = rekeyClock()
+    const delay = Math.min(Math.max(at - now, REKEY_CHECK_MS), 0x7fffffff)
+    if (closed || (rekeyTimerAt !== null && rekeyTimerAt <= now + delay)) return
+    if (rekeyTimer !== null) clearTimeout(rekeyTimer)
+    rekeyTimerAt = now + delay
+    rekeyTimer = setTimeout(() => {
+      rekeyTimer = null
+      rekeyTimerAt = null
+      scheduleRekey()
+    }, delay)
+  }
+
+  // A group that grew starts a rotation-only pass at most once an hour;
+  // growth inside its hour is kept and starts one when the hour ends, on a
+  // single timer.
+  function rekeyGrew (group) {
+    if (closed || keyPair === null || groupPrf === null) return
+    if (rekeyTriggers.ready(group)) {
+      rekeyTriggers.checked(group)
+      scheduleRekey()
+      return
+    }
+    rekeyDeferred.add(group)
+    const at = rekeyTriggers.readyAt(group)
+    if (rekeyDeferTimer !== null && rekeyDeferAt <= at) return
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
+    rekeyDeferAt = at
+    rekeyDeferTimer = setTimeout(() => {
+      rekeyDeferTimer = null
+      rekeyDeferAt = Infinity
+      const groups = [...rekeyDeferred]
+      rekeyDeferred.clear()
+      for (const g of groups) rekeyGrew(g)
+    }, Math.min(Math.max(at - rekeyClock(), 0), 0x7fffffff))
+  }
+
+  // A rotation-only pass outside the upkeep's armings: it leaves their
+  // bounds and disarming alone, and stops the run only to rotate.
+  function scheduleRekey () {
+    if (rekeyQueued || rekeyPassTimer !== null || closed || keyPair === null || groupPrf === null) return
+    rekeyPassTimer = setTimeout(() => {
+      rekeyPassTimer = null
+      if (closed || rekeyQueued) return
+      rekeyQueued = true
+      rekeyOnly({}).catch(noop)
+    }, upkeepDelayMs)
+  }
+
+  // withCores without its fallback: a plan the running sync cannot serve
+  // from its own cores is skipped (null), so the rotation-only pass stops
+  // the run only to write. The upkeep pass and the due timer check later.
+  async function withLentCores (fn) {
+    const r = run
+    if (r === null) return withStore(fn)
+    const api = await readyWithin(r.ready, readerWaitMs)
+    if (api === NOT_READY || api === null || !api.hold()) return null
+    try {
+      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group } })
+    } catch (err) {
+      if (member.isNeedsExclusive(err)) return null
+      throw err
+    } finally {
+      api.release()
+    }
+  }
+
+  const rekeyOnly = serial(async (_, epoch, generation) => {
+    rekeyQueued = false
+    if (closed || keyPair === null || groupPrf === null) return
+    try { checkGroupOperation(epoch, generation) } catch { return }
+    // The app's recovery run is never preempted: the next trigger checks.
+    if (run !== null && run.once) return
+    if (!(await store.diaryExists(storage))) return
+    groupWriting = true
+    try {
+      await periodicRekeyStep(epoch, generation, withLentCores)
+    } finally {
+      groupWriting = false
+      for (const pair of groupPairs) zeroPair(pair)
+      groupPairs.clear()
+    }
+  })
+
+  // Inside an upkeep pass: plans on the run's cores which private groups
+  // this device distributes in have a due epoch, then rotates them through
+  // the write gate like the shares. Each group is checked at most once per
+  // REKEY_CHECK_MS, whatever the outcome; a failure waits for the next check
+  // and is never a warning: the group keeps its epoch, nothing is pending.
+  async function periodicRekeyStep (epoch, generation, read = withCores) {
+    try {
+      const now = rekeyClock()
+      const jitter = (group, kid) => rekeyGate.jitter(group, kid)
+      const plan = await read((c) => member.periodicRekeyPlan(c, { now, ready: (group) => rekeyGate.ready(group), jitter }))
+      if (plan === null) return
+      for (const group of plan.checked) rekeyGate.checked(group)
+      if (plan.next !== null) armRekeyTimer(plan.next)
+      if (plan.rekey.length === 0) return
+      const planned = plan.rekey.map((x) => x.group)
+      checkGroupOperation(epoch, generation)
+      await ensureCaughtUp(epoch, [...new Set(plan.rekey.map((x) => x.writer))], generation)
+      // What a step wrote before it threw is announced and pushed too.
+      let changed = []
+      await withStore(async (c) => {
+        checkGroupOperation(epoch, generation)
+        const lengths = await ownCoreLengths(planned)
+        try {
+          await member.periodicRekey(c, { groups: planned, now, jitter })
+        } finally {
+          const after = await ownCoreLengths(planned)
+          changed = plan.rekey.filter((x) => lengths.get(x.writer) !== after.get(x.writer)).map((x) => x.group)
+          await noteWrittenRoots(changed)
+        }
+      }).catch(noop)
+      for (const group of changed) send('groups.changed', { group }, epoch)
+      if (changed.length > 0) {
+        checkGroupOperation(epoch, generation)
+        await pushAfterWrite()
+      }
+    } catch {}
   }
 
   // The pass never calls another serial handler and never runs inside
@@ -2490,6 +2671,7 @@ function createBrowserSession ({
         checkGroupOperation(epoch, generation)
         await pushAfterWrite()
       }
+      await periodicRekeyStep(epoch, generation)
       if (arrived) scheduleUpkeep()
       else if (failed > 0) {
         // A root that failed is tried again within the bound.
@@ -3412,17 +3594,26 @@ function createBrowserSession ({
     })
     if (state === 'current') {
       if (!trackingOwn()) dmRecheck = true
-      if ((await store.readDmKey(storage)) === null) await store.writeDmKey(storage, gen)
-      // Only a write made in this session can still be waiting for its push
-      // (an earlier dm.enable whose push failed); a fresh start pushes nothing.
-      if (localLength !== null) await pushAfterWrite()
+      const held = await store.readDmKey(storage)
+      if (held === null) await store.writeDmKey(storage, gen)
+      // A write made in this session, or a dm-key append whose push the
+      // seeder never confirmed (kv push, kept across sessions), still waits
+      // for its push; any other fresh start pushes nothing.
+      const marked = held !== null && held.push !== undefined
+      if (localLength !== null || marked) await pushAfterWrite()
+      if (marked && !unpushed) await store.writeDmKey(storage, held.gen)
       return { box, gen, seq: null }
     }
     await ensureCaughtUp(epoch)
     const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
     if (r.seq !== null) wrote(r.seq)
-    await store.writeDmKey(storage, gen)
+    const held = await store.readDmKey(storage)
+    const push = r.seq !== null ? r.seq + 1 : (held !== null && held.push !== undefined ? held.push : null)
+    // Marked before the push, so a push that fails or never ends leaves it
+    // for the next dm.enable.
+    await store.writeDmKey(storage, gen, push)
     await pushAfterWrite()
+    if (push !== null && !unpushed) await store.writeDmKey(storage, gen)
     return r
   }
 
@@ -5743,14 +5934,15 @@ function createBrowserSession ({
   }
 
   // The plaintext of item `index` of a kept message -> { bytes, mime }, for
-  // the page only (never over RPC: a photo is far above MAX_MESSAGE).
-  function dmReadMedia ({ from, id, index } = {}) {
+  // the page only (never over RPC: a photo is far above MAX_MESSAGE). page:
+  // a message of that Página's conversations held on this device.
+  function dmReadMedia ({ from, id, index, page } = {}) {
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
         const ident = identityTarget
         const own = await dmIdentity({}, ident)
-        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index }))
+        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index, page }))
       } catch (err) {
         if (err instanceof TypeError) throw err
         throw toRpcError(err, reportInternal)

@@ -32,7 +32,7 @@ Branch `feat/dm-pool-buckets`. O conjunto de envelopes de mensagens diretas e o 
 
 ## Nota para quem opera
 
-Atualize os semeadores antes do app. Um app novo num semeador antigo usa o v1 (sem grupo); um app antigo num semeador novo usa o v1 e baixa tudo. O texto legal mudou (Termos e Privacidade); a versão dos Termos não foi subida neste PR e o digest de `apps/app/test/legal.test.js` falha até a manutenção subir `LEGAL_VERSION` e `TERMS_VERSION`. Digest novo (terceira rodada): `af5cfeed21a8d40febcbec9e2759ff110fb71475679d1bff86900ea2bfbd2055`. O texto da Privacidade agora diz "a partir de 1.000 contas", "grupos de até 1/64 das contas", que quem cuida de uma Página pede todos os grupos, que as cópias das respostas da Página e das mudanças nas conversas dela vão com um número de grupo sorteado, para parecerem um envelope qualquer, e que um semeador que observe horário e endereço de internet poderia descobrir de qual Página o aparelho cuida e, como a lista de quem cuida de cada Página é pública, que essas mensagens são de quem cuida.
+Atualize os semeadores antes do app. Um app novo num semeador antigo usa o v1 (sem grupo); um app antigo num semeador novo usa o v1 e baixa tudo. O texto legal mudou (Termos e Privacidade); `LEGAL_VERSION` e `TERMS_VERSION` sobem para 73 (depois da 72 da `feat/dm-retention-14-days`, com os 14 dias), com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo. Quem já aceitou aceita de novo. O texto da Privacidade agora diz "a partir de 1.000 contas", "grupos de até 1/64 das contas", que quem cuida de uma Página pede todos os grupos, que as cópias das respostas da Página e das mudanças nas conversas dela vão com um número de grupo sorteado, para parecerem um envelope qualquer, e que um semeador que observe horário e endereço de internet poderia descobrir de qual Página o aparelho cuida e, como a lista de quem cuida de cada Página é pública, que essas mensagens são de quem cuida.
 
 ## Testes
 
@@ -85,7 +85,7 @@ Em `packages/web-member/lib/dm.js`:
 
 Com todo o `dm.js` do commit revisado (9f07f89f) e os testes novos: `page-dm.test.js` 20/26 (13 asserções falham; só o teste da adoção passa), `dm.test.js` 73/74 (2 falham).
 
-`apps/app/test/legal.test.js`: 48/49, só o digest fixo falha (esperado, a versão dos Termos fica com a manutenção).
+`apps/app/test/legal.test.js`: 48/49 na época, só o digest fixo falhava; depois do merge da `main` e da versão 73, 50/50.
 
 ## Terceira rodada de correções da revisão (2026-11-16)
 

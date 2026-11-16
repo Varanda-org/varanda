@@ -95,6 +95,7 @@ const { validateDescriptor, validateMediaHeader, latestMediaCores, followSet, ha
 const { latestUsername, heldUsernames } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
+const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
 const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
@@ -2261,6 +2262,7 @@ async function gatherLogs (ctx) {
     })
     slots.push(read === null ? { key, reason: 'no-cert' } : { key, read })
   }
+  await warmLogs([own, ...slots.filter((s) => s.read).map((s) => ({ key: s.key, entries: s.read.entries }))], association)
   // A snapshot adopted during the reads (the run is live) decides the answer.
   const final = await moderation(ctx.storage, association)
   checkOwnDiary(ctx)
@@ -2328,6 +2330,8 @@ async function profileRead (ctx, { authors }) {
   for (const key of keys) {
     if (key !== own.key && HEX64.test(key)) reads.set(key, await replicaRead(ctx, key, mod))
   }
+  const logs = [...reads].filter(([, read]) => read !== null).map(([key, read]) => ({ key, entries: read.entries }))
+  await warmLogs(own.entries === null ? logs : [own, ...logs], association)
   // A snapshot adopted during the reads (the run is live) decides the answer.
   const final = await moderation(ctx.storage, association)
   if (own.entries !== null) checkOwnDiary(ctx)
@@ -4640,6 +4644,90 @@ async function groupRekey (ctx, { group }) {
   })
 }
 
+// ---- periodic rotation (docs/protocol.md "Rotation", @varanda/core
+// lib/group-rekey.js): the session's upkeep plans it and writes it. ----
+
+const rekeyPolicy = require('@varanda/core/lib/group-rekey')
+
+// The policy's decision for `g` on this device's distributor writer `own`.
+// jitter(group, epoch) -> [0, 1), fixed per epoch by the caller.
+async function periodicDecision (ctx, g, own, now, jitter) {
+  const epoch = g.built.epoch
+  const logs = [...g.cores].map(([key, c]) => ({ key, entries: c.entries }))
+  const facts = rekeyPolicy.epochFacts({ logs, counted: g.built.writers, root: g.group, epoch })
+  const held = await withGroupCore(ctx, own.key, async (core) => ({ length: core.length, bytes: core.byteLength }))
+  if (held === null) return { due: false, at: null, reason: 'unheld' }
+  const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }
+  const entitled = entitledOf(g)
+  return rekeyPolicy.rekeyDue({
+    rekeyPending: g.built.rekeyPending,
+    epoch,
+    ...facts,
+    entitled: entitled.size,
+    cutUnknown: rekeyPolicy.cutUnknownEntitled({ cutUnknown: g.built.cutUnknown, writers: g.input.writers, entitled }),
+    ownEpoch: epoch !== null && g.mine.has(epoch.writer),
+    now,
+    jitter: epoch === null ? 0 : jitter(g.group, epoch),
+    log: { length: held.length, bytes: held.bytes, maxBlocks: limits.maxLogBlocks, maxBytes: limits.maxLogBytes }
+  })
+}
+
+// -> { rekey: [{ group, writer }], checked: [group], next }, read-only: the
+// private groups this unlocked device distributes in whose epoch is due.
+// ready(group) is the caller's check limit; `checked` lists the groups
+// decided, for the caller to mark; `next` is the earliest moment (ms) a
+// group not due yet becomes due, or null.
+async function periodicRekeyPlan (ctx, { now = Date.now(), ready = () => true, jitter = () => 0 } = {}) {
+  const out = { rekey: [], checked: [], next: null }
+  const h = holderOf(ctx)
+  if (h === null || !h.unlocked) return out
+  return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
+    const seen = new Set()
+    for (const e of await store.readGroupWriters(ctx.storage)) {
+      if (e.kind === 'community' || seen.has(e.group) || base.mod.blocked.has(e.group) || !ready(e.group)) continue
+      seen.add(e.group)
+      const g = await loadGroup(ctx, base, e.group)
+      if (g === null || !g.private || g.built.orphan || g.built.community === null || g.c === null) continue
+      const own = distributorOf(g, ownHex)
+      if (own === null) continue
+      out.checked.push(e.group)
+      const d = await periodicDecision(ctx, g, own, now, jitter)
+      if (d.due) out.rekey.push({ group: e.group, writer: own.key })
+      else if (d.at !== null && (out.next === null || d.at < out.next)) out.next = d.at
+    }
+    return out
+  })
+}
+
+// -> { rotated: [group], failed: [{ group, message }] }. Each group is
+// decided again on the current storage (another distributor's epoch may
+// have arrived since the plan), then rotated by group.rekey's path: the
+// history first, then rotateGroup with its eligibility probe and log check,
+// so nothing is written that would leave a sender rekey-pending. Best
+// effort: a failure is reported, never retried here.
+async function periodicRekey (ctx, { groups = [], now = Date.now(), jitter = () => 0 } = {}) {
+  needGroupKeys(ctx)
+  const rotated = []
+  const failed = []
+  for (const group of upkeepKeys(groups, 'group')) {
+    try {
+      const epoch = await withGroup(ctx, group, true, async ({ ownHex, base, g }) => {
+        const own = g.private ? distributorOf(g, ownHex) : null
+        if (own === null || !(await periodicDecision(ctx, g, own, now, jitter)).due) return null
+        // As group.rekey: a failed history hand-off stops the rotation, and
+        // the next check tries both again.
+        await shareHistory(ctx, g, ownHex)
+        return rotateGroup(ctx, await loadGroup(ctx, base, group), ownHex)
+      })
+      if (epoch !== null) rotated.push(group)
+    } catch (err) {
+      if (isNeedsExclusive(err) || isLocked(err)) throw err
+      failed.push({ group, message: err && typeof err.message === 'string' ? err.message : String(err) })
+    }
+  }
+  return { rotated, failed }
+}
+
 // ---- communities (docs/rpc.md 5.57, 5.59, 5.60, 5.62 to 5.69) ----
 // A community C is a root whose header kind is `community`, stored as a
 // group core; each member device writes one community writer (CW: a
@@ -5698,9 +5786,12 @@ function autoEnrolStatus (fold, ownHex) {
 // A group writer counts only when its community writer is admitted
 // (admittedCws): a CW waiting for an admin would leave a new group writer
 // that counts only if an admin ever admits it, a slot spent meanwhile. A
-// community this plan enrols first gets a CW the fold admits at once only
-// when it is open or the diary created it. Geral follows the same rule: the
-// upkeep joins it as a group, never through community.join's Geral step.
+// community this plan enrols first is trusted to admit the new CW at once
+// only when it is open or the diary created it; in an approval community
+// the admission of the diary covers it too (#350), but its groups wait for
+// a later run (`community-first` is transient), when the fold shows it.
+// Geral follows the same rule: the upkeep joins it as a group, never
+// through community.join's Geral step.
 function parentAdmits (c, ownHex, planned) {
   const admitted = c.built.admittedCws instanceof Set ? c.built.admittedCws : new Set()
   if (planned) return c.built.join === 'open' || c.built.creator === ownHex
@@ -5722,7 +5813,55 @@ function diaryBinds (ownEntries, root, writer) {
   return groupJoinHistory(ownEntries, root).some((j) => j.on === true && j.writer === writer)
 }
 
-// -> { enrol: [{ root, kind, community, repair? }], share: [{ group,
+// A bound own writer of a private group that still writes (no leave of its
+// own, not unbound since) and whose header box is null (a join before the
+// root arrived). A writer with another box is counted by the fold, so only
+// an explicit tap replaces it.
+function needsRebox (ctx, base, g) {
+  const key = g.own.key
+  const core = g.cores.get(key)
+  if (core === undefined || hasLeave(core.entries)) return false
+  const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === key).pop()
+  if (last === undefined || !last.on) return false
+  return boxOfWriter(g, key) === null
+}
+
+// Local evidence of a leave or unbind written on another device: the own
+// diary turned off a writer other than this device's. Its writer core may
+// not have arrived, so the fold alone cannot say the diary left.
+function leftElsewhere (base, g) {
+  return groupJoinHistory(base.ownEntries, g.group).some((j) => j.on === false && j.writer !== g.own.key)
+}
+
+// Whether the own writer `entry` of a root this device does not hold yet is
+// a boxless one still writing (the pending join): it will need a rebox when
+// the root arrives. The root's visibility is unknown until then, so a public
+// group's writer (always boxless) is waited for too: only the arming is kept,
+// and nothing is planned once the root is held and public. Never throws.
+async function boxlessUnheld (ctx, entry) {
+  try {
+    const core = await readGroupCore(ctx, entry.key)
+    if (core === null || core.length === 0 || hasLeave(core.entries)) return false
+    const header = core.entries[0].record
+    return header !== null && typeof header === 'object' && header.type === 'group-writer' && (header.box === null || header.box === undefined)
+  } catch {
+    return false
+  }
+}
+
+// What the automatic rebox accepts of the fold's answer for the own diary: a
+// diary the fold does not list or lists as left (its only writer is the one
+// that never counts) as long as no counted leave of the diary exists, a
+// member or a request through another device; never banned or blocked.
+function reboxStatus (fold, ownHex) {
+  if (fold.built.bans.has(ownHex) || fold.diaries.get(ownHex) === null) return false
+  const st = statusOf(fold, ownHex)
+  if (st === 'banned') return false
+  if (st === null || st === 'left') return !(fold.built.lastLeave instanceof Map && fold.built.lastLeave.has(ownHex))
+  return true
+}
+
+// -> { enrol: [{ root, kind, community, repair?, rebox? }], share: [{ group,
 // writer }], skipped: [{ root, reason, transient }] }, read-only. A
 // hand-off the write step would refuse (an orphan, a parent not held or
 // blocked, blocks that would not fit the log) is skipped, not planned. Candidates are only
@@ -5735,7 +5874,9 @@ function diaryBinds (ownEntries, root, writer) {
 // failed after the kv entry was written). The join reuses that writer
 // (ownPending) only when this device derives its key ('foreign'
 // otherwise), and binding it spends a slot like a new writer would (the
-// seeder never saw it), so the reserve applies the same way.
+// seeder never saw it), so the reserve applies the same way. The other
+// exception is a rebox (`rebox: true`): a bound writer of a private group
+// that never counts for lack of this device's box (needsRebox).
 async function deviceUpkeepPlan (ctx) {
   return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
     const entries = await store.readGroupWriters(ctx.storage)
@@ -5744,11 +5885,15 @@ async function deviceUpkeepPlan (ctx) {
     const skipped = []
     const groups = []
     const repairs = new Set()
+    const reboxes = []
     for (const key of diaryGroupKeys(base.ownEntries)) {
       if (base.mod.blocked.has(key)) continue
       const entry = listed.get(key)
       if (entry !== undefined) {
-        if (diaryBinds(base.ownEntries, key, entry.key)) continue
+        if (diaryBinds(base.ownEntries, key, entry.key)) {
+          if (entry.kind !== 'community') reboxes.push(key)
+          continue
+        }
         // Only a writer this device derives is reused by the join.
         if (groupKeyPairOf(ctx) === null) {
           skipped.push(skip(key, 'locked'))
@@ -5788,6 +5933,28 @@ async function deviceUpkeepPlan (ctx) {
       if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, ...(repairs.has(key) ? { repair: true } : {}) })
       else skipped.push(skip(key, reason))
     }
+    // A writer the diary binds in a private group whose header box is not
+    // this device's (a join before the root arrived): the fold never counts
+    // it, so a boxed one takes its place through the same join.
+    for (const key of reboxes) {
+      const g = await loadGroup(ctx, base, key)
+      if (g === null) {
+        // A join before the root arrived: the root's arrival is what this
+        // waits for, so the session keeps the arming for its groups-changed.
+        if (await boxlessUnheld(ctx, listed.get(key))) skipped.push(skip(key, 'unheld'))
+        continue
+      }
+      if (!g.private || g.own === null || g.own.key === key || !needsRebox(ctx, base, g)) continue
+      let reason = null
+      if (boxHexOf(ctx) === null) reason = 'locked'
+      else if (g.built.orphan) reason = 'orphan'
+      else if (g.community === null || g.c === null) reason = 'community-first'
+      else if (!reboxStatus(g, ownHex) || leftElsewhere(base, g)) reason = 'status'
+      if (reason === null) reason = autoEnrolRoom(g, ownHex)
+      if (reason === null && !parentAdmits(g.c, ownHex, planned.has(g.community))) reason = 'community-first'
+      if (reason === null) enrol.push({ root: key, kind: 'group', community: g.community, rebox: true })
+      else skipped.push(skip(key, reason))
+    }
     const share = []
     for (const e of entries) {
       if (e.kind === 'community') continue
@@ -5814,10 +5981,12 @@ async function deviceUpkeepPlan (ctx) {
 }
 
 // True when the own diary binds a root this device has no diary-bound own
-// writer for, exactly the enrol and repair candidates of deviceUpkeepPlan,
-// ignoring moderation: it may answer true for a blocked root, never false
-// when the plan could enrol. It cannot see the distributor share step, so
-// a false answer means no enrol and no repair, not an empty share list.
+// writer for, the enrol and repair candidates of deviceUpkeepPlan, ignoring
+// moderation: it may answer true for a blocked root, never false when the
+// plan could enrol or repair. It cannot see the distributor share step, nor
+// a rebox (that needs the boxes of a held root), so a false answer means no
+// enrol and no repair, not an empty share list; the session's
+// 'groups-changed' forces a full plan, which finds the rebox.
 // The session decides when the full plan runs. Only the own diary and the
 // kv writer list are read: a second Hypercore on a group core the live
 // sync holds would corrupt it (see withIdentity).
@@ -6124,6 +6293,8 @@ module.exports = {
   groupMeta,
   groupInvitePolicy,
   groupRekey,
+  periodicRekeyPlan,
+  periodicRekey,
   canSealTo,
   groupRead,
   pageGroupRead,

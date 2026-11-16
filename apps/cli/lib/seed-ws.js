@@ -209,7 +209,7 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 // (even an empty '?') are all the same 404 'não encontrado' with no-store,
 // so the answer never says whether the id exists. No auth and no cookie are
 // read or set; a hit is 200 application/octet-stream, nosniff, with
-// Cache-Control: private, max-age=604800 (the pool keeps a blob 7 days), so
+// Cache-Control: private, max-age=604800 (7 days, shorter than the 14 the pool keeps a blob), so
 // a shared cache never keeps it. Host first (421), other methods 405. The
 // load is the /media budget itself (its in-flight cap and its token bucket,
 // shared), so the socket cap below stays right. Nothing is logged: no id, no

@@ -22,6 +22,9 @@ function cert (member) {
 }
 const post = (text, at, replyTo = null) => ({ type: 'post', text, at, replyTo })
 const profile = (name, at = AT) => ({ type: 'profile', name, bio: '', at })
+const AVATAR = { core: 'e'.repeat(64), mime: 'image/webp', start: 3, blocks: 2, bytes: 40000, sha256: 'f'.repeat(64), width: 512, height: 512 }
+const AVATAR2 = { ...AVATAR, start: 9, sha256: '1'.repeat(64) }
+const withAvatar = (name, avatar, at = AT) => ({ type: 'profile', name, bio: '', at, avatar })
 const iso = (ms) => new Date(ms).toISOString()
 
 test('constants and shortKey', async (t) => {
@@ -559,8 +562,8 @@ test('every item has a kind; post items carry quote', async (t) => {
   ]
   const { items } = buildFeed({ logs, now: NOW })
   t.alike(items.map((i) => i.kind), ['post', 'post', 'post'])
-  t.alike(items[0], { kind: 'post', author: KB, name: null, username: null, seq: 1, at: T1, text: 'b1', replyTo: null, quote: null, media: null, preview: null })
-  t.alike(items[1], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 2, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 1 }, media: null, preview: null })
+  t.alike(items[0], { kind: 'post', author: KB, name: null, avatar: null, username: null, seq: 1, at: T1, text: 'b1', replyTo: null, quote: null, media: null, preview: null })
+  t.alike(items[1], { kind: 'post', author: KA, name: 'Ana', avatar: null, username: null, seq: 2, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 1 }, media: null, preview: null })
   t.ok(items[1].quote !== q.quote, 'quote is a copy')
   t.alike(items[2].replyTo, { author: KB, seq: 1 })
   t.is(items[2].quote, null)
@@ -575,7 +578,7 @@ test('repost items appear and disappear with on/off', async (t) => {
   const base = [{ seq: 0, record: cert(KA) }, { seq: 1, record: profile('Ana') }]
   const feed = (entries) => buildFeed({ logs: [{ key: KA, entries: base.concat(entries) }], now: NOW }).items
   t.alike(feed([{ seq: 2, record: repost(KB, 4, true, T2) }]), [
-    { kind: 'repost', author: KA, name: 'Ana', username: null, seq: 2, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null }
+    { kind: 'repost', author: KA, name: 'Ana', avatar: null, username: null, seq: 2, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null }
   ])
   t.alike(feed([{ seq: 2, record: repost(KB, 4, true, T2) }, { seq: 3, record: repost(KB, 4, false, T3) }]), [], 'off removes it')
   const again = feed([{ seq: 2, record: repost(KB, 4, true, T1) }, { seq: 3, record: repost(KB, 4, false, T2) }, { seq: 4, record: repost(KB, 4, true, T3) }])
@@ -612,7 +615,7 @@ test('formatFeedItem: repost one-liner and quote marker', async (t) => {
   const r = { kind: 'repost', author: KA, name: 'Ana\u001b[2J', username: null, seq: 5, at: T2, to: { author: KB, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null }
   t.is(formatFeedItem(r), '[' + T2 + '] Ana\\u{1b}[2J (aaaaaaaa) #5 republicou bbbbbbbb#4')
   t.is(formatFeedItem(r, { width: 80 }).split('\n').length, 1)
-  const q = { kind: 'post', author: KA, name: 'Ana', username: null, seq: 6, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 4 }, media: null, preview: null }
+  const q = { kind: 'post', author: KA, name: 'Ana', avatar: null, username: null, seq: 6, at: T2, text: 'olha', replyTo: null, quote: { author: KB, seq: 4 }, media: null, preview: null }
   t.is(formatFeedItem(q), '[' + T2 + '] Ana (aaaaaaaa) #6 cita bbbbbbbb#4\n  olha')
 })
 
@@ -637,7 +640,7 @@ test('a deleted post, reply and quote vanish from the feed', (t) => {
   t.is(JSON.stringify(logs), before, 'inputs unchanged')
   t.alike(future, [])
   t.is(items.length, 1)
-  t.alike(items[0], { kind: 'post', author: KA, name: 'Ana', username: null, seq: 5, at: T3, text: 'fica', replyTo: null, quote: null, media: null, preview: null })
+  t.alike(items[0], { kind: 'post', author: KA, name: 'Ana', avatar: null, username: null, seq: 5, at: T3, text: 'fica', replyTo: null, quote: null, media: null, preview: null })
   // Partial, unordered entries: the tombstone still hides its target.
   const partial = [
     { seq: 8, record: tombstone(4) },
@@ -698,10 +701,10 @@ test('a repost of a deleted target vanishes only when that log was supplied', (t
   const { items } = buildFeed({ logs: [{ key: KA, entries: author }, { key: KB, entries: other }], now: NOW })
   const label = (i) => i.kind === 'repost' ? 'r' : i.text
   t.alike(items.map(label), ['vivo', 'resposta', 'r', 'citação'])
-  t.alike(items[0], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: T2, text: 'vivo', replyTo: null, quote: null, media: null, preview: null })
+  t.alike(items[0], { kind: 'post', author: KA, name: null, avatar: null, username: null, seq: 2, at: T2, text: 'vivo', replyTo: null, quote: null, media: null, preview: null })
   t.is(items[1].text, 'resposta')
   t.alike(items[1].replyTo, { author: KA, seq: 1 })
-  t.alike(items[2], { kind: 'repost', author: KB, name: null, username: null, seq: 2, at: T3, to: { author: KC, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null })
+  t.alike(items[2], { kind: 'repost', author: KB, name: null, avatar: null, username: null, seq: 2, at: T3, to: { author: KC, seq: 4 }, text: null, replyTo: null, quote: null, media: null, preview: null })
   t.is(items[3].text, 'citação')
   t.alike(items[3].quote, { author: KA, seq: 1 })
   t.not(items[3].quote, quote.quote)
@@ -838,7 +841,7 @@ test('feed carries poll only on poll posts and leaves other items untouched', (t
   const bySeq = Object.fromEntries(items.map((i) => [i.seq, i]))
   t.alike(bySeq[1].poll, options)
   t.not(bySeq[1].poll, options)
-  t.alike(bySeq[2], { kind: 'post', author: KA, name: null, username: null, seq: 2, at: AT, text: 'comum', replyTo: null, quote: null, media: null, preview: null })
+  t.alike(bySeq[2], { kind: 'post', author: KA, name: null, avatar: null, username: null, seq: 2, at: AT, text: 'comum', replyTo: null, quote: null, media: null, preview: null })
   t.is(Object.keys(bySeq[2]).includes('poll'), false)
 })
 
@@ -927,7 +930,9 @@ function oracleFeed ({ logs, association, limit = Infinity, now = Date.now(), re
   const logOf = new Map()
   for (const log of prepared) {
     const { key, copied } = log
-    const name = (latestProfile(copied) || {}).name || null
+    const profile = latestProfile(copied) || {}
+    const name = profile.name || null
+    const avatarOf = () => (profile.avatar ? { ...profile.avatar } : null)
     const from = items.length
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
@@ -937,7 +942,7 @@ function oracleFeed ({ logs, association, limit = Infinity, now = Date.now(), re
       }
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      items.push({ kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
+      items.push({ kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null })
     }
     for (const [ref, { seq, at }] of engagementState(copied).reposted) {
       if (Date.parse(at) - now > MAX_FUTURE_MS) {
@@ -945,7 +950,7 @@ function oracleFeed ({ logs, association, limit = Infinity, now = Date.now(), re
         continue
       }
       if (deletedRefs.has(ref)) continue
-      items.push({ kind: 'repost', author: key, name, username: null, seq, at, to: parseRef(ref), text: null, replyTo: null, quote: null, media: null, preview: null })
+      items.push({ kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to: parseRef(ref), text: null, replyTo: null, quote: null, media: null, preview: null })
     }
     for (let i = from; i < items.length; i++) logOf.set(items[i], log)
   }
@@ -1003,7 +1008,8 @@ function mixedLogs () {
     { seq: 23, record: profile('Ana Maria') },
     { seq: 24, record: tombstone(23) },
     { seq: 25, record: username('outra', KB) },
-    { seq: 26, record: post('mesmo instante', T2) }
+    { seq: 26, record: post('mesmo instante', T2) },
+    { seq: 27, record: withAvatar('Ana Foto', AVATAR2, T3) }
   ]
   const b = [
     { seq: 0, record: cert(KB) },
@@ -1050,12 +1056,13 @@ test('buildFeed returns the same bytes as the per-walker oracle', (t) => {
   t.ok(all.items.length > 8, 'the mixed log yields items')
   t.ok(all.future.length > 0, 'and future refs')
   t.ok(all.items.some((i) => i.username === 'ana'), 'a verified username')
+  t.ok(all.items.some((i) => i.avatar !== null) && all.items.some((i) => i.avatar === null), 'avatars and plain profiles')
   t.ok(all.items.some((i) => i.text === 'shifty'), 'the getter post')
   same({ limit: 3 }, 'limit 3')
   same({ revokedIssuers: new Set([issuer]) }, 'revoked issuer')
   same({ association: 'f'.repeat(64) }, 'another association')
   for (const item of all.items) same({ before: { at: item.at, author: item.author, seq: item.seq }, limit: 4 }, 'before ' + item.author.slice(0, 4) + '#' + item.seq)
-  for (const item of all.items) t.alike(Object.keys(item), ['kind', 'author', 'name', 'username', 'seq', 'at', item.kind === 'post' ? 'text' : 'to', ...(item.kind === 'post' ? ['replyTo', 'quote', 'media', 'preview'] : ['text', 'replyTo', 'quote', 'media', 'preview'])], 'no extra fields')
+  for (const item of all.items) t.alike(Object.keys(item), ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', item.kind === 'post' ? 'text' : 'to', ...(item.kind === 'post' ? ['replyTo', 'quote', 'media', 'preview'] : ['text', 'replyTo', 'quote', 'media', 'preview'])], 'no extra fields')
 })
 
 test('buildFeed copies each entry once, raw blocks that share its record included', (t) => {
@@ -1088,4 +1095,37 @@ test('buildFeed copies each entry once, raw blocks that share its record include
   t.is(run([{ key: KA, entries, raw }]), objects(raw), 'raw blocks reuse the entry copy')
   const other = raw.map((e) => ({ seq: e.seq, record: e.record === null ? null : { ...e.record } }))
   t.is(run([{ key: KA, entries, raw: other }]), objects(entries) + objects(other), 'distinct raw objects are copied themselves')
+})
+
+test('every item carries the avatar of the newest valid profile, the one its name comes from', (t) => {
+  const log = (key, records) => ({ key, entries: [{ seq: 0, record: cert(key) }, ...records.map((record, i) => ({ seq: i + 1, record }))] })
+  const feed = (logs) => buildFeed({ logs, now: NOW }).items
+  const of = (items, key) => items.filter((i) => i.author === key)
+  // newest profile has an avatar: posts and reposts carry a copy of it
+  const withPhoto = feed([log(KA, [profile('Ana'), withAvatar('Ana', AVATAR), post('oi', T1), repost(KB, 1, true, T2)])])
+  t.is(withPhoto.length, 2)
+  for (const item of withPhoto) {
+    t.is(item.name, 'Ana')
+    t.alike(item.avatar, AVATAR, item.kind)
+  }
+  t.not(withPhoto[0].avatar, withPhoto[1].avatar, 'no two items share one object')
+  // an older avatar is replaced by a newer one
+  t.alike(feed([log(KA, [withAvatar('Ana', AVATAR), withAvatar('Ana', AVATAR2), post('oi', T1)])])[0].avatar, AVATAR2)
+  // a newer plain profile removes it: null, not the older photo
+  const removed = feed([log(KA, [withAvatar('Ana', AVATAR), profile('Ana B'), post('oi', T1), repost(KB, 1, true, T2)])])
+  t.is(removed.length, 2)
+  for (const item of removed) {
+    t.is(item.name, 'Ana B')
+    t.is(item.avatar, null, item.kind)
+  }
+  // no profile at all
+  for (const item of of(feed([log(KB, [post('b', T1)])]), KB)) t.is(item.avatar, null)
+  // an invalid avatar makes the profile record invalid: it is not the newest valid one
+  const bad = feed([log(KA, [withAvatar('Ana', AVATAR), withAvatar('Ana', { ...AVATAR, width: 100 }), post('oi', T1)])])
+  t.is(bad[0].name, 'Ana')
+  t.alike(bad[0].avatar, AVATAR)
+  // each author carries its own avatar
+  const two = feed([log(KA, [withAvatar('Ana', AVATAR), post('a', T1)]), log(KB, [profile('Bia'), post('b', T2)])])
+  t.alike(of(two, KA)[0].avatar, AVATAR)
+  t.is(of(two, KB)[0].avatar, null)
 })

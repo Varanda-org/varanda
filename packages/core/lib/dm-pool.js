@@ -42,7 +42,8 @@
 // whose key is still live. Entries without a kid go on age alone, so
 // tokenRetentionMs must still cover the key acceptance window (the seeder
 // rotates its key every 7 days and accepts the current and the previous
-// kid: 14 days, the default 2 * retentionMs).
+// kid: 14 days, STAMP_TOKEN_RETENTION_MS, the default, never below
+// retentionMs).
 //
 // A sweep that expires records drops them from the index at once but
 // rewrites log.bin only when the expired records exceed 1/8 of the log or
@@ -67,16 +68,16 @@ const hcrypto = require('hypercore-crypto')
 const fs = require('#fs')
 const path = require('#path')
 const { writeJsonAtomic } = require('./store')
-const { DM_DROP_BYTES, DM_POOL_MAX, DM_RETENTION_MS, decodeDrop } = require('./dm')
+const { DM_DROP_BYTES, DM_POOL_MAX, DM_RETENTION_MS, STAMP_TOKEN_RETENTION_MS, decodeDrop } = require('./dm')
 
 const POOL_DIR = 'dm-pool'
 const VISIT_POOL_DIR = 'visit-pool'
 // The visit pool keeps pings for 3 days (a visit is news of the week, not
 // mail), but remembers each spent stamp as long as the DM pool does
-// (2 * DM_RETENTION_MS, its default): a stamp forgotten early here would be
-// spendable again in the DM pool, whose spentElsewhere asks this pool.
+// (STAMP_TOKEN_RETENTION_MS, its default): a stamp forgotten early here would
+// be spendable again in the DM pool, whose spentElsewhere asks this pool.
 const VISIT_RETENTION_MS = 3 * 86400000
-const VISIT_TOKEN_RETENTION_MS = 2 * DM_RETENTION_MS
+const VISIT_TOKEN_RETENTION_MS = STAMP_TOKEN_RETENTION_MS
 const POOL_NAME = /^[a-z][a-z0-9-]{0,31}$/
 const LOG_FILE = 'log.bin'
 const HEAD_FILE = 'head.json'
@@ -186,7 +187,7 @@ function createDmPool (opts = {}) {
     name = POOL_DIR,
     now = Date.now,
     retentionMs = DM_RETENTION_MS,
-    tokenRetentionMs = 2 * retentionMs,
+    tokenRetentionMs = Math.max(retentionMs, STAMP_TOKEN_RETENTION_MS),
     max = DM_POOL_MAX,
     verifyStamp,
     onStored = noop,

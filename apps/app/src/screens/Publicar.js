@@ -68,7 +68,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
-import { actAs, pagesMedia, pagesOrigin, pagesStart } from '../pages'
+import { actAs, pagesList, pagesMedia, pagesOrigin, pagesStart } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
@@ -881,7 +881,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       let rows
       try {
         const member = await memberKeyOf(nodeRequest, nodeRef.current)
-        const data = await actAs(nodeRef.current, { member, action: 'list' })
+        const acting = actingStore.get()
+        const flagged = nodeRef.current.pageMismatch instanceof Set ? [...nodeRef.current.pageMismatch] : []
+        const data = await pagesList(nodeRef.current, { member, also: acting.kind === 'page' ? [acting.key, ...flagged] : flagged })
         rows = [...(Array.isArray(data.owned) ? data.owned : []), ...(Array.isArray(data.admin) ? data.admin : [])]
           .filter((p) => p && PAGE_KEY.test(p.page) && p.closed !== true && !p.movedTo)
           .map((p) => p.page)

@@ -1719,7 +1719,7 @@ test('log.read', (t) => {
 })
 
 test('feed.read', (t) => {
-  ok(t, 'feed.read', {}, { limit: 26 })
+  ok(t, 'feed.read', {}, { limit: 25 })
   ok(t, 'feed.read', { limit: FEED_LIMIT_MAX }, { limit: FEED_LIMIT_MAX })
   bad(t, 'feed.read', { limit: FEED_LIMIT_MAX + 1 })
   bad(t, 'feed.read', { limit: 0 })
@@ -1730,7 +1730,7 @@ test('feed.read', (t) => {
 test('feed.read before', (t) => {
   const before = { at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'feed.read', { limit: 5, before }, { limit: 5, before })
-  ok(t, 'feed.read', { before }, { limit: 26, before })
+  ok(t, 'feed.read', { before }, { limit: 25, before })
   bad(t, 'feed.read', { before: { ...before, seq: 0 } }, 'seq 0')
   bad(t, 'feed.read', { before: { ...before, seq: 1.5 } }, 'seq 1.5')
   for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 1, '']) {
@@ -2047,6 +2047,10 @@ test('media.readFile', (t) => {
     delete p[k]
     t.is(validateParams('media.readFile', p).message, 'parâmetro obrigatório: ' + k)
   }
+  const PAGE = 'ef'.repeat(32)
+  ok(t, 'media.readFile', { ...dm, page: PAGE }, { ...dm, page: PAGE })
+  ok(t, 'media.readFile', { ...dm, index: 'card', page: PAGE })
+  for (const page of [PAGE.toUpperCase(), PAGE.slice(1), '', null, 1]) bad(t, 'media.readFile', { ...dm, page }, 'bad page')
   const item = { core: KEY, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 10, h: 10, ms: 0 }
   const group = { kind: 'group', diary: KEY, item }
   ok(t, 'media.readFile', group, group)
@@ -2060,6 +2064,8 @@ test('media.readFile', (t) => {
   bad(t, 'media.readFile', { ...group, diary: 'x' }, 'bad diary')
   bad(t, 'media.readFile', { ...dm, diary: KEY }, 'dm with a group field')
   bad(t, 'media.readFile', { ...group, index: 0 }, 'group with a dm field')
+  bad(t, 'media.readFile', { ...group, page: PAGE }, 'group with a page')
+  t.is(validateParams('media.readFile', { ...group, page: PAGE }).message, 'parâmetro desconhecido')
   const moment = { kind: 'moment', author: KEY, seq: 1 }
   ok(t, 'media.readFile', moment, moment)
   ok(t, 'media.readFile', { ...moment, seq: Number.MAX_SAFE_INTEGER })
@@ -2078,7 +2084,7 @@ test('media.readFile', (t) => {
   for (const seq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '1', null]) {
     bad(t, 'media.readFile', { ...moment, seq })
   }
-  for (const [k, value] of Object.entries({ from: KEY, id: ID, index: 0, diary: KEY, item, extra: true })) {
+  for (const [k, value] of Object.entries({ from: KEY, id: ID, index: 0, page: PAGE, diary: KEY, item, extra: true })) {
     bad(t, 'media.readFile', { ...moment, [k]: value }, 'moment with ' + k)
   }
   bad(t, 'media.readFile', { ...dm, kind: 'moment' }, 'moment with only dm fields')
@@ -2475,7 +2481,7 @@ test('page.* (Páginas)', (t) => {
 
   const keys = []
   for (let i = 0; i < 64; i++) keys.push(i.toString(16).padStart(2, '0').repeat(32))
-  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 26 })
+  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 25 })
   ok(t, 'page.feed', { page: KEY, keys, limit: FEED_LIMIT_MAX })
   ok(t, 'page.feed', { page: KEY, keys, limit: 1 })
   bad(t, 'page.feed', { page: KEY, keys: [...keys, 'ff'.repeat(32)] }, '65th feed key')

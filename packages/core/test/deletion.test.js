@@ -1067,6 +1067,74 @@ test('downloadExceptPages: a page whose roster and close were tombstoned (a leak
   t.ok(await holds(r.core, [2, 4]), 'and both page-* blocks are kept')
 })
 
+test('downloadExceptPages remember: a page post read once is not fetched again from a stale peer by the next download, after a reopen', async (t) => {
+  const store = await openCorestore(t, tmpDir(t))
+  const source = store.get({ name: 'page-stale' })
+  await source.ready()
+  // The stale peer still holds the deleted post at 3.
+  const PAGE = [genesis, post(1), pageRoster(2), post(3), post(4), del(5, 3), post(6)]
+  for (const { record } of PAGE) await source.append(encode(record))
+  const dir = tmpDir(t)
+  let r = await replica(t, source.key, dir)
+  let fetched = new Set()
+  r.core.on('download', (index) => fetched.add(index))
+  let l = link(t, r.store, store)
+  let handle = downloadExceptPages(r.core, new Set([3]), { remember: true })
+  await until(() => holds(r.core, [0, 1, 2, 4, 5, 6]), { name: 'the live blocks' })
+  await until(() => fetched.has(3), { name: 'the deleted post read once' })
+  await handle.update(new Set([3]))
+  await handle.idle()
+  await until(async () => !(await r.core.has(3)), { name: 'the deleted post cleared' })
+  handle.destroy()
+  l.destroy()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await r.store.closeOnce()
+
+  // The next run: the same replica reopened, the stale peer connected again.
+  r = await replica(t, source.key, dir)
+  fetched = new Set()
+  r.core.on('download', (index) => fetched.add(index))
+  l = link(t, r.store, store)
+  handle = downloadExceptPages(r.core, new Set([3]), { remember: true })
+  t.teardown(() => handle.destroy())
+  await source.append(encode(post(7)))
+  await until(() => r.core.has(7), { name: 'a new block' })
+  await handle.idle()
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.absent(fetched.has(3), 'the deleted post is not fetched again')
+  t.absent(await r.core.has(3), 'nor held')
+})
+
+test('downloadExceptPages: a burst of downloads joins the refresh already queued instead of re-reading every target per block', async (t) => {
+  const { EventEmitter } = require('node:events')
+  const core = new EventEmitter()
+  const targets = Array.from({ length: 50 }, (_, i) => 10 + i)
+  let calls = 0
+  let release = null
+  const gate = new Promise((resolve) => { release = resolve })
+  const guard = {
+    page: () => true,
+    async excludable (deleted) {
+      calls++
+      await gate
+      return new Set()
+    }
+  }
+  const updates = []
+  const make = () => ({ update: async (skip) => { updates.push(skip.size); return [] }, destroy () {} })
+  const handle = downloadExceptPages(core, new Set(targets), { make, guard })
+  t.teardown(() => handle.destroy())
+  // The first refresh is still reading; every target named arrives meanwhile.
+  await new Promise((resolve) => setImmediate(resolve))
+  for (const seq of targets) core.emit('download', seq)
+  const joined = handle.update(new Set(targets))
+  release()
+  await joined
+  await handle.idle()
+  t.is(calls, 2, 'the first refresh and one joined refresh, not one per block (' + calls + ')')
+  t.is(updates.length, 1, 'the joined refresh updates the ranges once')
+})
+
 test('downloadExceptPages: a person whose block 2 was deleted is never treated as a page; a stale peer is not asked for deleted posts', async (t) => {
   const store = await openCorestore(t, tmpDir(t))
   const source = store.get({ name: 'person' })

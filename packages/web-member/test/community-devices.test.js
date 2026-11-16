@@ -153,7 +153,8 @@ test('a blocklisted diary-bound root is left out', async (t) => {
   t.alike((await ops.communityList(d.ctx)).communities, [], 'left out')
 })
 
-test('approval community: a second device of an admitted member writes in the community, not yet in Geral', async (t) => {
+// Owner decision (#350): the diary's admission covers its new devices.
+test('approval community: a second device of an admitted member writes in the community and in Geral', async (t) => {
   const { a, members: [b], community, general } = await world(t, 1, { join: 'approval' })
   await ops.communityJoin(b.ctx, { community })
   await share(b, a, [await ownWriter(b, community), await ownWriter(b, general)])
@@ -166,7 +167,7 @@ test('approval community: a second device of an admitted member writes in the co
   const ci = await ops.communityInfo(d.ctx, { community })
   t.alike([ci.writerHere, ci.canWrite], [true, true], 'a community writer is live when the diary is a member')
   const gi = await ops.groupInfo(d.ctx, { group: general })
-  t.alike([gi.writerHere, gi.canWrite], [true, false], 'the new community writer is not admitted yet')
+  t.alike([gi.writerHere, gi.canWrite], [true, true], 'the admission covers the new community writer')
 
   const cw = (await store.readGroupWriters(d.storage)).find((e) => e.group === community).key
   const writers = (await store.readGroupWriters(d.storage)).length

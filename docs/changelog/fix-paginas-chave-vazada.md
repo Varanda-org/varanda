@@ -1,0 +1,3 @@
+### Corrigido
+
+- Páginas com chave vazada custam menos e mostram o que devem (PR `fix/paginas-chave-vazada`, parte da #352): o índice de nomes não confere de novo uma cópia `page-*` que não muda a dica, o nó core lembra as cópias de `page-close` e `page-moved` que já falharam e agrupa o refresh do download, e quem segue uma Página no nó core não baixa de novo, depois de reiniciar, os posts apagados que um par desatualizado ainda serve. No navegador, `diary.peek` mostra um bloco `page-*` com lápide, como a leitura completa. Sem mudança de formato, RPC nem Termos. Verificação em `docs/verification/fix-paginas-chave-vazada.md`.
