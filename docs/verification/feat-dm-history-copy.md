@@ -31,9 +31,29 @@
 | `apps/app/test/historyCopy.test.js` | 5/5 (40 asserções) | |
 | `apps/app/test/help.test.js`, `platformGate.test.js`, `conversas*.test.js`, `legal.test.js` | passam | |
 
+Revisão da PR 5 (correções, cada teste novo conferido sem a sua correção):
+
+| Arquivo | Testes novos / contagem | Sem a correção |
+|---|---|---|
+| `packages/web-member/test/dm-copy-unit.test.js` | 4 testes, 37 asserções | `cleanRow` sem as checagens estritas (texto, hora ISO, `mine`, `peer`, bloqueio): falham 11 asserções do teste 1 e as 2 do teste 2; `checkLimits` vazio: falham 4 asserções do teste 4; a validação de `shownAt` (teste 3) não foi conferida removendo-a |
+| `packages/web-member/test/dm-copy-e2e-2.test.js` | 2 testes, 27 asserções (~78 s) | Página vazia sem a correção do armazém vazio: estoura `copyImported` (P1); foto pagando com a cota diária: falham "no photo", "left out" e "not re-put"; sem `shownAt` na criação das linhas: falham "shown as on the maker" e "a received message too"; marcas de visto na ordem errada: falha "own marks stay last" |
+| `packages/web-member/test/dm-copy-e2e-3.test.js` | 2 testes, 12 asserções (~88 s) | falha de pedaço tratada como final (sem `Soft`): falham 3 asserções do teste 1; aviso anotado depois do cursor: o teste 2 estoura `copyImported after unlock` |
+| `packages/core/test/dm-fold.test.js` | 34 testes, 566 asserções (era 33) | sem `shownAt` na dobra: falham 2 asserções do teste novo |
+| `packages/web-member/test/dm-copy-e2e.test.js` | asserção nova: o próprio aviso não busca nada | |
+| `apps/app/test/historyCopy.test.js` | 5/5, 43 asserções | os textos novos (fotos de Página, cota de cópia, duração) falham sem a troca |
+
+Importação em um só trabalho: a remoção da junção em `importAll` não foi pega pelo teste 2 do `dm-copy-e2e-2` (a contagem de avisos continuou 1, porque o dedupe também a segura); o teste vale como regressão do resultado, não do mecanismo.
+
 O seeder de teste do `blob.test.js` ganhou a opção `copyBudget` (nulo é um semeador de antes do tipo `copy`, que não responde). O teste do semeador antigo cobre a falha de `copySource` e o selo diário que passa a pagar o blob.
 
-Não coberto por teste: o `dm-copy.js` inteiro contra um semeador sem o tipo `copy` (texto e manifesto na cota diária, fotos de fora). O e2e de cota esgotada exercita o recuo dos textos, mas com um semeador que oferece o tipo.
+O `dm-copy-e2e-2` cobre a falha do selo `copy` no semeador real (o selo lança erro): fotos de fora, texto inteiro, descritor original intacto. Parte e manifesto ainda recuam para a cota diária nesse caso, para a cópia completar com um semeador antigo; só as fotos nunca gastam a cota diária.
+
+Limites conhecidos (não corrigidos de propósito):
+
+- Se várias fotos de uma mensagem batem no limite no meio, todas contam como de fora.
+- Selos de cópia comprados e não usados se perdem numa nova tentativa que falha antes de usá-los (uma nova tentativa na mesma sessão reaproveita os quadros e não compra outro).
+- O ganho de custo do dedupe com `Set` na importação e a chamada de `checkLimits` dentro de `run` não têm teste de comportamento próprio (só pelo e2e e pelo teste unitário de `checkLimits`).
+- Quem tem o segredo da caixa abre o histórico inteiro, e o aviso é lacrado só para a geração atual da caixa (ver `docs/protocol.md`, riscos residuais).
 
 ## Conferências no aparelho (pendentes)
 
@@ -43,4 +63,6 @@ Não coberto por teste: o `dm-copy.js` inteiro contra um semeador sem o tipo `co
 
 ## Operador
 
-Implante o semeador antes do app. O semeador cria `copy-stamps.json` ao primeiro pedido de selo `copy`; sem ele, um app novo recua para a cota diária de blobs nos textos e deixa as fotos de fora.
+Implante o semeador antes do app. O semeador cria `copy-stamps.json` ao primeiro pedido de selo `copy`; sem ele, um app novo recua para a cota diária de blobs nos textos e deixa as fotos de fora (as fotos nunca usam a cota diária).
+
+O selo `copy` é um selo de blob: 8192 por conta e semana, pagos pelo semeador. Dimensione `--blob-bytes` para isso: uma cópia completa de uma conta com muitas fotos consome essa cota inteira de blobs, e os avisos de cópia têm o próprio balde de erros (`issues.copy`).

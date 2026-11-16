@@ -18,9 +18,11 @@
 //      way; last, a v7 pointer drop (kind 'copy', signed by the identity key,
 //      sealed to the own box, one dm stamp) is put to the dm pool.
 //   3. Blob stamps come from the copy source first (the seeder's weekly copy
-//      allowance, ./blob.js copySource) and from the daily blob wallet when
-//      the seeder does not answer the kind; a photo is left out, never paid
-//      from the daily wallet, once the weekly allowance itself ended.
+//      allowance, ./blob.js copySource). A photo is paid from it only: when
+//      it cannot be used (ended, an older seeder, no answer, any failure)
+//      the photo is left out and counted, never paid from the daily wallet.
+//      The text parts and the manifest must go, so they fall back to the
+//      daily wallet.
 //   A failed call is a normal error and repeats nothing by itself. The user's
 //   retry in the same unlock keeps the copy id, the photos already put (only
 //   their new descriptors are kept), and the sealed parts, manifest and
@@ -58,7 +60,7 @@ const hcrypto = require('hypercore-crypto')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const blobCore = require('@varanda/core/lib/blob')
-const { nowIso } = require('@varanda/core/lib/records')
+const { nowIso, isCanonicalIso } = require('@varanda/core/lib/records')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealBlob, fetchBlob } = require('./blob')
@@ -67,6 +69,7 @@ const store = require('./node-store')
 
 const COPY_BUSY = 'cópia de conversas já em andamento'
 const NOTHING = 'não há conversas para copiar'
+const TOO_BIG = 'as conversas são grandes demais para copiar de uma vez'
 const COPY_FAILED = 'não deu para copiar as conversas: tente de novo'
 const NO_STAMPS = 'o limite de envio de hoje acabou'
 const LOCKED = store.LOCKED
@@ -88,6 +91,7 @@ const TEXT_MAX = 4000
 const MADE_MAX = 16
 const IMPORTED_MAX = 64
 const TODO_MAX = 8
+const FAILS_MAX = 3
 const PREFETCH_BYTES_MAX = 64 * 1048576
 const CHUNK_ROWS = 500
 const HEX32 = /^[0-9a-f]{32}$/
@@ -104,6 +108,11 @@ function wipe (b) {
 class LeftOut extends Error {}
 // A manifest, part or blob that will never import.
 class Dead extends Error {}
+// A part (or the manifest) that is gone or does not verify now: the todo
+// stays for a later pull, and ends after FAILS_MAX pulls that failed so.
+class Soft extends Error {}
+// The unlock or the generation changed under an import.
+class Stop extends Error {}
 
 function exactKeys (o, keys) {
   if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
@@ -136,6 +145,75 @@ function idList (v) {
   return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && HEX32.test(x)) : []
 }
 
+// A bundle row -> { row, n, seen, c } as the local store would hold it, or
+// null. self: the diary key of the store (the page's for a Página). blocked:
+// the senders the store drops on receipt (moderation).
+function cleanRow (r, self, blocked) {
+  if (r === null || typeof r !== 'object' || Array.isArray(r) || !isCount(r.n)) return null
+  const { n, seen, c, ...row } = r
+  if ((seen !== undefined && seen !== true) || (c !== undefined && c !== 1)) return null
+  if (row.t !== 'msg' && row.t !== 'ctl' && row.t !== 'rx') return null
+  if (!validRow({ ...row, filedAt: 0 })) return null
+  if (row.peer === self) return null
+  // The same shape a received message or reaction has (core dm.js validText,
+  // a canonical ISO time), and the same moderation block.
+  if (!isCanonicalIso(row.at)) return null
+  if (row.t === 'msg') {
+    if (row.text.length > TEXT_MAX || !dm.validText(row.text, Array.isArray(row.media) && row.media.length > 0)) return null
+    if (row.mine !== (row.from === self)) return null
+    if (!row.mine && (row.peer !== row.from || blocked.has(row.from))) return null
+  } else if (row.t === 'rx') {
+    if (row.mine !== (row.from === self)) return null
+    if (!row.mine && blocked.has(row.from)) return null
+  }
+  return { row, n, seen: seen === true, c: c === 1 }
+}
+
+const LIMITS = Object.freeze({ rows: ROWS_MAX, parts: PARTS_MAX, stores: STORES_MAX, manifest: PART_PLAIN_MAX })
+
+// What the reader accepts (rows and parts per store, stores, a manifest of at
+// most `manifest` bytes), checked before anything is spent on `rowSets`, one
+// array of rows per store. The parts are counted on the rows as they are held:
+// a photo swapped in later changes a row by a few bytes.
+function checkLimits (rowSets, limits = LIMITS) {
+  let stores = 0
+  let parts = 0
+  for (const rows of rowSets) {
+    if (rows.length === 0) continue
+    stores++
+    const n = cutRows(rows).length
+    if (rows.length > limits.rows || n > limits.parts) throw new UsageError(TOO_BIG)
+    parts += n
+  }
+  if (stores > limits.stores || manifestBytes(stores, parts) > limits.manifest) throw new UsageError(TOO_BIG)
+}
+
+// The largest manifest for that many stores and parts: every descriptor and
+// count at its widest.
+function manifestBytes (stores, parts) {
+  const d = JSON.stringify({ id: '0'.repeat(64), key: '0'.repeat(64), nonce: '0'.repeat(48), chunks: 257, bytes: 8421504, sha256: '0'.repeat(64) })
+  const page = JSON.stringify({ page: '0'.repeat(64), parts: [], rows: ROWS_MAX, ops: ROWS_MAX })
+  return 128 + stores * (page.length + 1) + parts * (d.length + 1)
+}
+
+function cutRows (rows) {
+  const cuts = []
+  let cur = []
+  let size = 0
+  for (const row of rows) {
+    const n = b4a.byteLength(JSON.stringify(row)) + 1
+    if (size + n > PART_BYTES && cur.length > 0) {
+      cuts.push(cur)
+      cur = []
+      size = 0
+    }
+    cur.push(row)
+    size += n
+  }
+  if (cur.length > 0) cuts.push(cur)
+  return cuts
+}
+
 // env: the engine's pieces (see createDmEngine in ./dm.js).
 function createDmCopy (env) {
   const { storage, local, blobs } = env
@@ -143,6 +221,9 @@ function createDmCopy (env) {
   // The copy being retried by the user in this unlock (see the header).
   let attempt = null
   let stateLock = Promise.resolve()
+  // The running import job (importAll) and whether a call joined it.
+  let importing = null
+  let again = false
 
   function withState (fn) {
     const p = stateLock.then(fn)
@@ -161,7 +242,7 @@ function createDmCopy (env) {
     return {
       made: idList(v.made).slice(-MADE_MAX),
       imported: idList(v.imported).slice(-IMPORTED_MAX),
-      todo: (Array.isArray(v.todo) ? v.todo.filter(validTodo) : []).slice(0, TODO_MAX).map((t) => ({ id: t.id, copy: plainDescriptor(t.copy), seen: t.seen }))
+      todo: (Array.isArray(v.todo) ? v.todo.filter(validTodo) : []).slice(0, TODO_MAX).map((t) => ({ id: t.id, copy: plainDescriptor(t.copy), seen: t.seen, fails: isCount(t.fails) ? Math.min(t.fails, FAILS_MAX) : 0 }))
     }
   }
 
@@ -219,18 +300,12 @@ function createDmCopy (env) {
     }
   }
 
-  // A photo: the weekly copy allowance, else the daily wallet only when the
-  // seeder never answered the copy kind; left out (LeftOut) otherwise.
+  // A photo: the weekly copy allowance only. When it cannot be used (it
+  // ended, an older seeder, no answer, any failure) the photo is left out
+  // (LeftOut); a copy never spends the daily blob wallet on a photo.
   async function stampPhoto (sealed, keyPair, source) {
     try {
       await blobs.stamp(sealed, keyPair, source)
-      return
-    } catch (err) {
-      if (!(err instanceof UsageError)) throw err
-      if (source.exhausted) throw new LeftOut()
-    }
-    try {
-      await blobs.stamp(sealed, keyPair)
     } catch (err) {
       if (err instanceof UsageError) throw new LeftOut()
       throw err
@@ -305,6 +380,7 @@ function createDmCopy (env) {
         snaps.push({ ...h, snap: cutSnap(h.ctx.local.snapshot()), seenTokens: new Set(await store.readDmSeen(storage, h.ctx.prefix)) })
       }
       if (snaps.every((h) => h.snap.messages.length + h.snap.ops.length + h.snap.reactions.length === 0)) throw new UsageError(NOTHING)
+      checkLimits(snaps.map((h) => itemsOfStore(h, new Map()).rows))
 
       // The photos of the own store, newest first.
       const cands = []
@@ -374,6 +450,7 @@ function createDmCopy (env) {
       }
       checkGen(gen)
       a.stores = buildStores(snaps, a.photos)
+      if (a.stores.some((s) => s.parts.length > PARTS_MAX)) throw new UsageError(TOO_BIG)
       a.counts = { photos, notCached, leftOut }
     }
     const total = a.total
@@ -436,58 +513,52 @@ function createDmCopy (env) {
     return { id: a.id, messages, photos: a.counts.photos, notCached: a.counts.notCached, leftOut: a.counts.leftOut }
   }
 
-  // Rows in filing order with n, the photos that travelled swapped in, then
-  // cut into sealed parts. The row is the store's own plain row without
-  // filedAt (never a key of the store), plus n, seen (a received message
-  // marked seen here) and c (its photos travelled).
+  // The rows of one held store in filing order with n, the photos that
+  // travelled swapped in. Each is the store's own plain row without filedAt
+  // (never a key of the store), plus n, seen (a received message marked seen
+  // here), c (its photos travelled) and, on a message, shownAt: the time this
+  // device shows it (the one it imported, else when it filed it).
+  function itemsOfStore (h, photoMap) {
+    const rows = []
+    let msgs = 0
+    let ops = 0
+    for (const r of rowsOf(h.snap)) {
+      const row = { ...r }
+      delete row.filedAt
+      const item = { ...row, n: rows.length }
+      if (r.t === 'msg') {
+        msgs++
+        const shown = r.shownAt !== undefined ? r.shownAt : r.filedAt
+        if (Number.isSafeInteger(shown) && shown >= 0) item.shownAt = shown
+        const entry = photoMap.get(r.from + '\n' + r.id)
+        if (h.page === null && entry !== undefined && entry.media !== null) {
+          if (Array.isArray(r.media)) item.media = entry.media.map((d) => ({ ...d }))
+          else if (r.card && r.card.image) item.card = copyLinkCard(r.card, () => ({ ...entry.media[0] }))
+          item.c = 1
+        }
+        if (!r.mine && h.seenTokens.has(h.ctx.local.seenToken(dmFold.seenKey(r.from, r.id)))) item.seen = true
+      } else {
+        ops++
+      }
+      rows.push(item)
+    }
+    return { rows, msgs, ops }
+  }
+
+  // Cut into sealed parts. A store with no rows is left out of the manifest:
+  // the reader refuses a store without parts.
   function buildStores (snaps, photoMap) {
     const out = []
     for (const h of snaps) {
-      const rows = []
-      let msgs = 0
-      let ops = 0
-      for (const r of rowsOf(h.snap)) {
-        const row = { ...r }
-        delete row.filedAt
-        const item = { ...row, n: rows.length }
-        if (r.t === 'msg') {
-          msgs++
-          const entry = photoMap.get(r.from + '\n' + r.id)
-          if (h.page === null && entry !== undefined && entry.media !== null) {
-            if (Array.isArray(r.media)) item.media = entry.media.map((d) => ({ ...d }))
-            else if (r.card && r.card.image) item.card = copyLinkCard(r.card, () => ({ ...entry.media[0] }))
-            item.c = 1
-          }
-          if (!r.mine && h.seenTokens.has(h.ctx.local.seenToken(dmFold.seenKey(r.from, r.id)))) item.seen = true
-        } else {
-          ops++
-        }
-        rows.push(item)
-      }
-      out.push({ page: h.page, rows: msgs, ops, parts: rows.length === 0 ? [] : splitParts(h.page, rows) })
+      const { rows, msgs, ops } = itemsOfStore(h, photoMap)
+      if (rows.length === 0) continue
+      out.push({ page: h.page, rows: msgs, ops, parts: splitParts(h.page, rows) })
     }
     return out
   }
 
   function splitParts (page, rows) {
-    const parts = []
-    let cur = []
-    let size = 0
-    const flush = () => {
-      if (cur.length === 0) return
-      const json = JSON.stringify({ v: 1, page, rows: cur })
-      parts.push({ sealed: sealBlob(b4a.from(json, 'utf8')), desc: null })
-      cur = []
-      size = 0
-    }
-    for (const row of rows) {
-      const n = b4a.byteLength(JSON.stringify(row)) + 1
-      if (size + n > PART_BYTES) flush()
-      cur.push(row)
-      size += n
-    }
-    flush()
-    return parts
+    return cutRows(rows).map((cur) => ({ sealed: sealBlob(b4a.from(JSON.stringify({ v: 1, page, rows: cur }), 'utf8')), desc: null }))
   }
 
   // ---- importing a copy ----
@@ -501,19 +572,23 @@ function createDmCopy (env) {
         if (!HEX32.test(p.id) || !blobCore.validateBlobDescriptor(p.copy)) continue
         if (s.made.includes(p.id) || s.imported.includes(p.id) || s.todo.some((t) => t.id === p.id)) continue
         if (s.todo.length >= TODO_MAX) s.todo.shift()
-        s.todo.push({ id: p.id, copy: plainDescriptor(p.copy), seen: Date.now() })
+        s.todo.push({ id: p.id, copy: plainDescriptor(p.copy), seen: Date.now(), fails: 0 })
       }
     })
   }
 
-  async function fetchJson (desc) {
+  // A manifest that is gone (404) ends the copy; a part that is gone or does
+  // not verify, or a manifest that does not verify (a seeder restarting, a
+  // proxy rewriting a body), is Soft: the todo waits for a later pull.
+  async function fetchJson (desc, part) {
     if (!blobCore.validateBlobDescriptor(desc) || desc.bytes - blobCore.BLOB_MAC_BYTES > PART_PLAIN_MAX) throw new Dead()
     let r
     try {
       r = await fetchBlob(plainDescriptor(desc), env.blobOrigin, { mime: 'application/json', fetch: env.fetchImpl, limits: env.fetchLimits })
     } catch (err) {
       const msg = err && err.message
-      if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Dead()
+      if (msg === MEDIA_GONE && !part) throw new Dead()
+      if (msg === MEDIA_GONE || msg === BAD_MEDIA) throw new Soft()
       throw err
     }
     try {
@@ -539,29 +614,10 @@ function createDmCopy (env) {
     return true
   }
 
-  // A bundle row -> { row, n, seen, c } as the local store would hold it,
-  // or null. self: the diary key of the store (the page's for a Página).
-  function cleanRow (r, self) {
-    if (r === null || typeof r !== 'object' || Array.isArray(r) || !isCount(r.n)) return null
-    const { n, seen, c, ...row } = r
-    if ((seen !== undefined && seen !== true) || (c !== undefined && c !== 1)) return null
-    if (row.t !== 'msg' && row.t !== 'ctl' && row.t !== 'rx') return null
-    if (!validRow({ ...row, filedAt: 0 })) return null
-    if (row.peer === self) return null
-    if (row.t === 'msg') {
-      if (typeof row.text !== 'string' || row.text.length > TEXT_MAX) return null
-      if (row.mine !== (row.from === self)) return null
-      if (!row.mine && row.peer !== row.from) return null
-    } else if (row.t === 'rx') {
-      if (row.mine !== (row.from === self)) return null
-    }
-    return { row, n, seen: seen === true, c: c === 1 }
-  }
-
   // The filing time everything imported goes below: older than every row
   // the store held, like the Página legacy bundle's (./dm.js legacyHorizon).
-  function horizonOf (lc) {
-    const { messages, ops, reactions } = lc.snapshot()
+  function horizonOf (lc, snap) {
+    const { messages, ops, reactions } = snap
     let min = lc.nextFiled()
     for (const r of [...messages, ...ops, ...reactions]) if (Number.isFinite(r.filedAt) && r.filedAt < min) min = r.filedAt
     return min
@@ -569,13 +625,13 @@ function createDmCopy (env) {
 
   // Files the rows of one store -> { messages, ops, reactions, skipped,
   // fresh } (fresh: the message rows filed now whose photos travelled).
-  async function fileRows (ctx, self, rawRows) {
+  async function fileRows (ctx, self, rawRows, blocked) {
     const lc = ctx.local
     const items = []
     const taken = new Set()
     let skipped = 0
     for (const r of rawRows) {
-      const c = cleanRow(r, self)
+      const c = cleanRow(r, self, blocked)
       if (c === null || taken.has(c.n)) {
         skipped++
         continue
@@ -584,7 +640,13 @@ function createDmCopy (env) {
       items.push(c)
     }
     items.sort((x, y) => x.n - y.n)
-    const horizon = horizonOf(lc)
+    // One scan of the store, then sets: a lookup per row (lc.hasMessage and
+    // its kin scan every row) would take quadratic time on a large store.
+    const snap = lc.snapshot()
+    const haveMsg = new Set(snap.messages.map((m) => m.from + '\n' + m.id))
+    const haveOp = new Set(snap.ops.map((o) => o.id))
+    const haveRx = new Set(snap.reactions.map((x) => x.from + '\n' + x.id))
+    const horizon = horizonOf(lc, snap)
     const out = []
     const keys = new Set()
     const seenIds = []
@@ -599,21 +661,30 @@ function createDmCopy (env) {
       if (keys.has(k)) continue
       keys.add(k)
       if (row.t === 'msg') {
-        if (lc.hasMessage(row.from, row.id)) continue
+        if (haveMsg.has(row.from + '\n' + row.id)) continue
+        haveMsg.add(row.from + '\n' + row.id)
         messages++
         if (seen && !row.mine) seenIds.push(lc.seenToken(dmFold.seenKey(row.from, row.id)))
         if (c && itemsOf(row).length > 0) fresh.push({ ...row, filedAt })
       } else if (row.t === 'ctl') {
-        if (lc.hasOp(row.id)) continue
+        if (haveOp.has(row.id)) continue
+        haveOp.add(row.id)
         ops++
       } else {
-        if (lc.hasReaction(row.from, row.id)) continue
+        if (haveRx.has(row.from + '\n' + row.id)) continue
+        haveRx.add(row.from + '\n' + row.id)
         reactions++
       }
       out.push({ ...row, filedAt })
     }
     for (let i = 0; i < out.length; i += CHUNK_ROWS) await lc.append(out.slice(i, i + CHUNK_ROWS))
-    if (seenIds.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...seenIds], ctx.prefix)
+    if (seenIds.length > 0) {
+      // First in the list (newest last, the cap drops the front): about
+      // 5000 imported marks never evict the device's own recent ones.
+      const existing = await store.readDmSeen(storage, ctx.prefix)
+      const have = new Set(existing)
+      await store.writeDmSeen(storage, [...seenIds.filter((id) => !have.has(id)), ...existing], ctx.prefix)
+    }
     return { messages, ops, reactions, skipped, fresh }
   }
 
@@ -660,11 +731,14 @@ function createDmCopy (env) {
       }
       const k = b4a.toString(hcrypto.randomBytes(8), 'hex')
       while (items.length >= PEND_MAX) await store.deleteCopyPendEntry(storage, items.shift().k)
+      // The index first: a crash after it leaves an entry settle() finds
+      // incomplete and deletes with its pieces, where pieces written first
+      // would be left with nothing that deletes them.
+      await store.writeCopyPend(storage, [...(await store.readCopyPend(storage)), { k, n }])
       await store.writeCopyPiece(storage, k, 'meta', local.seal({ id, page, seen: Date.now() }))
       for (let i = 0; i < n; i++) {
         await store.writeCopyPiece(storage, k, i, local.sealBytes(bytes.subarray(i * PIECE_BYTES, (i + 1) * PIECE_BYTES)))
       }
-      await store.writeCopyPend(storage, [...(await store.readCopyPend(storage)), { k, n }])
     } finally {
       wipe(bytes)
     }
@@ -675,6 +749,7 @@ function createDmCopy (env) {
   async function settle () {
     let messages = 0
     let any = false
+    const mod = await env.moderation()
     for (const e of await store.readCopyPend(storage)) {
       const meta = await readPendMeta(e.k)
       if (meta === null || Date.now() - meta.seen > dm.DM_RETENTION_MS) {
@@ -713,7 +788,7 @@ function createDmCopy (env) {
       } catch {
         continue
       }
-      const f = await fileRows(ctx, meta.page, rows)
+      const f = await fileRows(ctx, meta.page, rows, mod.association)
       await store.deleteCopyPendEntry(storage, e.k)
       messages += f.messages
       if (f.messages + f.ops + f.reactions > 0) {
@@ -724,23 +799,33 @@ function createDmCopy (env) {
     return any ? messages : -1
   }
 
-  async function importOne (own, t) {
-    const manifest = await fetchJson(t.copy)
+  // A lock or a reset since the import began stops the rest of it.
+  function alive (gen) {
+    if (gen !== env.generation() || !env.unlocked()) throw new Stop()
+  }
+
+  async function importOne (own, t, gen) {
+    alive(gen)
+    const manifest = await fetchJson(t.copy, false)
     if (!validManifest(manifest, t.id)) throw new Dead()
     const bundles = []
     for (const s of manifest.stores) {
       const rows = []
       for (const d of s.parts) {
-        const part = await fetchJson(d)
+        alive(gen)
+        const part = await fetchJson(d, true)
         if (!exactKeys(part, ['v', 'page', 'rows']) || part.v !== 1 || part.page !== s.page || !Array.isArray(part.rows)) throw new Dead()
         for (const r of part.rows) rows.push(r)
         if (rows.length > ROWS_MAX) throw new Dead()
       }
       bundles.push({ page: s.page, rows })
     }
+    alive(gen)
+    const mod = await env.moderation()
     let messages = 0
     let filed = 0
     for (const b of bundles) {
+      alive(gen)
       let ctx = null
       if (b.page === null) ctx = env.personal
       else if (env.pages.get(b.page) !== null) {
@@ -754,7 +839,7 @@ function createDmCopy (env) {
         await hold(t.id, b.page, b.rows)
         continue
       }
-      const f = await fileRows(ctx, b.page === null ? own : b.page, b.rows)
+      const f = await fileRows(ctx, b.page === null ? own : b.page, b.rows, b.page === null ? mod.blocked : mod.association)
       messages += f.messages
       filed += f.messages + f.ops + f.reactions
       if (f.messages + f.ops + f.reactions > 0) env.emit('dm.changed', b.page === null ? { added: f.messages } : { added: f.messages, page: b.page })
@@ -766,7 +851,30 @@ function createDmCopy (env) {
   // Imports the todo pointers, oldest first, then settles the held-back
   // Página stores. Never throws: a failure that is not final keeps its todo
   // for the next pull.
-  async function importAll (own) {
+  // One job at a time: a call while one runs joins it, and the running job
+  // goes over the todo once more when it ends, so a pointer noted meanwhile
+  // is not left for a later pull. The caller does not have to wait for it.
+  function importAll (own) {
+    if (importing !== null) {
+      again = true
+      return importing
+    }
+    const job = (async () => {
+      try {
+        do {
+          again = false
+          await importPass(own)
+        } while (again && env.unlocked())
+      } finally {
+        importing = null
+        again = false
+      }
+    })()
+    importing = job
+    return job
+  }
+
+  async function importPass (own) {
     const gen = env.generation()
     if (env.blobOrigin === null) return
     let total = 0
@@ -781,13 +889,28 @@ function createDmCopy (env) {
         }
         let r
         try {
-          r = await importOne(own, t)
+          r = await importOne(own, t, gen)
         } catch (err) {
+          if (err instanceof Stop) return
           if (err instanceof Dead) {
             await updateState((st) => {
               st.todo = st.todo.filter((x) => x.id !== t.id)
               if (!st.imported.includes(t.id)) st.imported.push(t.id)
             })
+            continue
+          }
+          if (err instanceof Soft) {
+            // The next pull tries again; the third pull that fails so ends it.
+            await updateState((st) => {
+              const x = st.todo.find((y) => y.id === t.id)
+              if (x === undefined) return
+              x.fails = Math.min(x.fails + 1, FAILS_MAX)
+              if (x.fails >= FAILS_MAX) {
+                st.todo = st.todo.filter((y) => y.id !== t.id)
+                if (!st.imported.includes(t.id)) st.imported.push(t.id)
+              }
+            })
+            env.log('aviso: cópia de conversas de outro aparelho ainda não importada')
             continue
           }
           env.log('aviso: cópia de conversas de outro aparelho ainda não importada')
@@ -826,4 +949,4 @@ function createDmCopy (env) {
   }
 }
 
-module.exports = { createDmCopy, COPY_BUSY, NOTHING, COPY_FAILED, PART_BYTES }
+module.exports = { createDmCopy, cleanRow, checkLimits, manifestBytes, LIMITS, COPY_BUSY, NOTHING, COPY_FAILED, TOO_BIG, PART_BYTES }

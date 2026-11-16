@@ -667,7 +667,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, digest: m.digest })),
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, shownAt: m.shownAt, digest: m.digest })),
       reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
@@ -1835,8 +1835,6 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     let incomplete = false
     let link = null
     let scans = []
-    // History copy pointers seen in this pull (./dm-copy.js).
-    const pointers = []
     try {
       try {
         link = await openDmLink(linkOpts)
@@ -1856,6 +1854,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         const ops = [...local.ops()]
         const mod = await moderation()
         const missed = []
+        // History copy pointers of this page (./dm-copy.js).
+        const pointers = []
         for (const item of page.items) {
           read += item.bytes.byteLength
           const row = openItem(own, item.bytes, ops, rows, mod)
@@ -1881,6 +1881,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           }
         }
         for (const p of along) await filePageItems(p, missed, mod)
+        // Noted (sealed in kv) before the cursor passes this page: a lock or
+        // a kill after the cursor write would otherwise lose the pointer.
+        if (pointers.length > 0) await copy.note(pointers)
         if (page.items.length > 0) {
           cursor = page.items[page.items.length - 1].seq
           await store.writeDmCursor(storage, cursor)
@@ -1914,18 +1917,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     } finally {
       pulling = false
       if (link !== null) link.close()
-      // The import is reads and local filing only and never fails the pull.
-      // A pointer is noted first, so one the cursor passed is not lost.
-      try {
-        if (gen === generation && unlocked()) {
-          await copy.note(pointers)
-          await copy.importAll(own)
-        }
-      } catch {}
       if (added > 0 || applied > 0) emit('dm.changed', { added })
       for (const p of scans) {
         if (p.added > 0 || p.applied > 0) emit('dm.changed', { added: p.added, page: p.page })
       }
+      // The import (the pointers were noted page by page above) is reads and
+      // local filing only: one job at a time, tracked by idle(), and the pull
+      // does not wait for it.
+      if (gen === generation && unlocked()) track(copy.importAll(own).catch(noop))
     }
     return { added, cursor, incomplete }
   }
@@ -2988,6 +2987,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     refusal,
     unconfirmed,
     folded,
+    moderation,
     openMedia
   })
 

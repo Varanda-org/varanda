@@ -798,6 +798,7 @@ module.exports = Object.freeze({
     SEALED_BYTES: DM_SEALED_BYTES
   }),
   isWellFormed,
+  validText,
   validBody,
   newMessageId,
   newDropId,

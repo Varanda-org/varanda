@@ -13,6 +13,8 @@ test('the option and the sheet say what goes, for whom, how long and the weekly 
   const text = m.COPY_POINTS.join(' ')
   t.ok(text.includes('texto') && text.includes('fotos'), 'what goes')
   t.ok(text.includes('Páginas que você administra'), 'the Páginas')
+  t.ok(text.includes('As fotos das Páginas não vão'), 'Página photos do not travel')
+  t.ok(text.includes('30 a 50 minutos') && !text.includes('alguns minutos'), 'an honest duration')
   t.ok(text.includes('mesma passkey'), 'for whom')
   t.ok(text.includes('14 dias'), 'how long the other device has')
   t.ok(text.includes('cota semanal'), 'the weekly allowance')
@@ -26,8 +28,9 @@ test('the result lines count messages, photos and both kinds of photo left out',
   t.alike(resultLines({ messages: 12, photos: 3, notCached: 2, leftOut: 1 }), [
     'Pronto: 12 mensagens copiadas e 3 fotos.',
     '2 fotos não estavam guardadas neste aparelho e ficou de fora.',
-    '1 foto ficou de fora porque a cota da semana acabou. Você pode copiar de novo na semana que vem.'
+    '1 foto ficou de fora porque a cota de cópia de fotos acabou ou o semeador não a oferece. Uma nova cópia começa de novo pelas fotos mais recentes.'
   ])
+  t.absent(resultLines({ messages: 1, photos: 0, notCached: 0, leftOut: 2 }).join(' ').includes('semana que vem'), 'no promise that the oldest photos come later')
   t.alike(resultLines(null), ['A cópia terminou.'])
   t.alike(resultLines({ messages: -1, photos: 0 }), ['A cópia terminou.'])
 })

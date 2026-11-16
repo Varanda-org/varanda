@@ -129,6 +129,9 @@ const VISIT_UNREADABLE = 'dados de visitas ilegíveis'
 const ROW_BUCKET = 1024
 const CACHE_BYTES_MAX = 256 * 1048576
 
+// The most a row's shownAt (ms) may be: the fold's own time bound.
+const SHOWN_MAX = 8.64e15
+
 function isCount (n, max) {
   return Number.isSafeInteger(n) && n >= 1 && n <= max
 }
@@ -166,6 +169,7 @@ function validRow (r) {
   if (r.t === 'rx') return validReactionRow(r)
   if (r.t !== 'msg') return false
   if (r.legacy !== undefined && r.legacy !== true) return false
+  if (r.shownAt !== undefined && !(Number.isSafeInteger(r.shownAt) && r.shownAt >= 0 && r.shownAt <= SHOWN_MAX)) return false
   if (r.digest !== undefined && !HEX64.test(r.digest)) return false
   if ((r.replyFrom === undefined) !== (r.replyDigest === undefined)) return false
   if (r.replyFrom !== undefined && (r.replyTo === null || !HEX64.test(r.replyFrom) || !HEX64.test(r.replyDigest))) return false
@@ -205,6 +209,7 @@ function plainRow (r) {
   }
   if (typeof r.digest === 'string' && HEX64.test(r.digest)) out.digest = r.digest
   if (r.legacy === true) out.legacy = true
+  if (r.shownAt !== undefined) out.shownAt = r.shownAt
   if (r.moment !== undefined && validMomentRow(r)) out.moment = r.moment
   return out
 }

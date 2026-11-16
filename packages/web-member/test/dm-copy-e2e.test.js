@@ -1,7 +1,7 @@
 'use strict'
 
 // Copying the conversation history to another device (docs/protocol.md
-// section 11, docs/rpc.md 5.150): the real Seeder (dm and blob pools, the
+// section 11, docs/rpc.md 5.151): the real Seeder (dm and blob pools, the
 // copy stamp kind) behind a WebSocket server and real browser nodes. Device
 // A makes the copy; device A2 of the same passkey imports it after the
 // seeder's pool lost the original drops (what a sweep does). Local DHT and
@@ -166,7 +166,10 @@ test('a history copy made on one device is imported by another of the same passk
 
   // A skips the pointer it made: with its cursor rewound it files nothing new.
   await store.writeDmCursor(A.storage, 0)
+  const getsBeforeA = host.blobGets
   await A.web.request('dm.pull')
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  t.is(host.blobGets, getsBeforeA, 'the maker fetched nothing: it skipped its own pointer')
   t.alike(textsOf(await A.web.request('dm.thread', { peer: P.key })), ['oi', 'resposta', 'segunda'])
   t.absent(A.web.events.some((e) => e.name === 'dm.copyImported'), 'no import notice on the maker')
 

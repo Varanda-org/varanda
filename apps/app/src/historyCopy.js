@@ -12,11 +12,11 @@ export const COPY_ROW_LABEL = 'Copiar conversas para outro aparelho'
 export const COPY_ROW_HINT = 'Leva o texto e as fotos guardadas aqui.'
 export const COPY_TITLE = 'Copiar conversas'
 export const COPY_POINTS = Object.freeze([
-  'Vai o texto das conversas e as fotos guardadas neste aparelho, também das Páginas que você administra.',
+  'Vai o texto das conversas, também o das Páginas que você administra, e as fotos guardadas neste aparelho. As fotos das Páginas não vão.',
   'Só os seus aparelhos que entram com a mesma passkey conseguem abrir a cópia. Ela fica lacrada com a sua chave.',
   'O outro aparelho tem ' + COPY_DAYS + ' dias para abrir a Varanda e receber. Depois a cópia some.',
-  'A cópia usa a cota semanal de fotos do semeador. Se a cota acabar, as fotos mais antigas ficam de fora e o texto vai inteiro.',
-  'Pode demorar alguns minutos. Deixe o app aberto até terminar.'
+  'As fotos usam a cota semanal de cópia do semeador, das mais recentes para as mais antigas. Se a cota acabar, ou se o semeador não oferecer a cópia de fotos, elas ficam de fora e o texto vai inteiro.',
+  'Só o texto leva poucos minutos. Com a cota de fotos inteira, leva de 30 a 50 minutos. Deixe o app aberto até terminar.'
 ])
 export const COPY_START = 'Copiar agora'
 export const COPY_AGAIN = 'Tentar de novo'
@@ -50,7 +50,7 @@ export function resultLines (result) {
     lines.push(plural(result.notCached, 'foto não estava guardada', 'fotos não estavam guardadas') + ' neste aparelho e ficou de fora.')
   }
   if (isCount(result.leftOut) && result.leftOut > 0) {
-    lines.push(plural(result.leftOut, 'foto ficou de fora', 'fotos ficaram de fora') + ' porque a cota da semana acabou. Você pode copiar de novo na semana que vem.')
+    lines.push(plural(result.leftOut, 'foto ficou de fora', 'fotos ficaram de fora') + ' porque a cota de cópia de fotos acabou ou o semeador não a oferece. Uma nova cópia começa de novo pelas fotos mais recentes.')
   }
   return lines
 }
