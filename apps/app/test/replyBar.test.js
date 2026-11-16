@@ -34,10 +34,11 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   for (const text of ['Escreva uma resposta', 'cancelar resposta', 'Responder', 'abrir editor completo']) t.ok(src.includes(text), text)
   t.ok(src.includes("accessibilityLabel='cancelar resposta'"))
   t.ok(src.includes("accessibilityLabel='abrir editor completo'"))
-  t.ok(src.includes("accessibilityLabel='Responder'"))
+  t.ok(src.includes('accessibilityLabel={sendLabel}'))
+  t.ok(src.includes("sendLabel = 'Responder' }"), 'the send label defaults to Responder')
   const line = between(src, '<View style={styles.line}>', '\n      </View>\n      {/*')
-  t.ok(line.includes('<TextInput') && line.includes("accessibilityLabel='Responder'"), 'the pill and the send share one line')
-  t.ok(line.indexOf('<TextInput') < line.indexOf("accessibilityLabel='Responder'"))
+  t.ok(line.includes('<TextInput') && line.includes('accessibilityLabel={sendLabel}'), 'the pill and the send share one line')
+  t.ok(line.indexOf('<TextInput') < line.indexOf('accessibilityLabel={sendLabel}'))
   t.ok(line.includes("accessibilityLabel='abrir editor completo'"), 'expand stays on that line')
   t.ok(src.includes("import { Avatar } from './Avatar'") && src.includes('size={28}') && src.includes('{me ? '), 'the member avatar leads the pill')
   t.ok(src.includes("<Icon name='imagem' size={18} color={colors.soft} />") && src.includes("accessibilityLabel='adicionar foto'"), 'plain photo icon')
@@ -45,7 +46,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.ok(src.includes('me = null, nonFocalTarget = false') && src.includes('onAttach'), 'new props')
   t.ok(src.includes('{expanded && target\n'), 'target row only when expanded')
   t.is(src.split('<TextInput').length - 1, 1, 'one input instance in both states')
-  t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<TextInput') && src.indexOf('<TextInput') < src.indexOf("accessibilityLabel='Responder'"), 'target above the input, send after the pill')
+  t.ok(src.indexOf('<View style={styles.target}>') < src.indexOf('<TextInput') && src.indexOf('<TextInput') < src.indexOf('accessibilityLabel={sendLabel}'), 'target above the input, send after the pill')
   t.ok(src.includes("bar: { paddingTop: space.sm, gap: space.xs, backgroundColor: 'transparent' }") && src.includes('radius.bubble'), 'transparent bar, round pill')
   t.absent(line.includes('{length}/1000'), 'the counter sits under the line, so the field keeps its width at large text')
   t.ok(src.includes("counter: { ...type.counter, color: colors.soft, alignSelf: 'flex-end' }"))
@@ -57,7 +58,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.absent(src.includes('Pill'), 'the tools are plain icons, with no outlined circles')
   const field = between(line, '<View style={[styles.pill', '\n        </View>\n        {hasText')
   t.ok(field.includes('<TextInput') && field.includes("accessibilityLabel='abrir editor completo'") && field.includes("accessibilityLabel='cancelar resposta'"), 'expand and cancel sit inside the pill')
-  t.absent(field.includes("accessibilityLabel='Responder'"), 'send sits beside the pill')
+  t.absent(field.includes('accessibilityLabel={sendLabel}'), 'send sits beside the pill')
   t.ok(src.includes('style={[styles.input, webInputReset, { height: Math.min(height, maxHeight), maxHeight }]}'), 'no browser focus ring inside the rounded field')
   t.ok(src.includes('pillFocused: { borderColor: colors.accent }'), 'focus shows on the pill')
   t.ok(src.includes('backgroundColor: colors.inputOff'))
@@ -95,7 +96,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
 
 test('a blur never moves photo or expand: send shows on text alone', (t) => {
   t.ok(src.includes("const hasText = text.trim() !== ''"), 'send condition reads only the text')
-  const sendBlock = src.slice(src.lastIndexOf('{', src.indexOf("accessibilityLabel='Responder'")), src.indexOf("accessibilityLabel='Responder'"))
+  const sendBlock = src.slice(src.lastIndexOf('{', src.indexOf('accessibilityLabel={sendLabel}')), src.indexOf('accessibilityLabel={sendLabel}'))
   t.ok(sendBlock.startsWith('{hasText\n'), 'send renders under hasText')
   t.absent(/focused|expanded/.test(sendBlock), 'focus cannot add or remove send')
 })
@@ -437,6 +438,17 @@ test('locking during a handoff drops its stash without restoring account content
   t.is(await pending, false)
   t.is(h.state.composer.reply, null)
   t.is(h.context.replyDraftStash.current, null)
+})
+
+test('the field text comes from the placeholder prop, defaulting to the old text', () => {
+  const sig = src.slice(src.indexOf('export function ReplyBar'), src.indexOf('\n', src.indexOf('export function ReplyBar')))
+  const field = between(src, '<TextInput', 'onChangeText')
+  const field2 = between(src, 'multiline', 'placeholderTextColor')
+  return Promise.resolve().then(() => {
+    if (!sig.includes("placeholder = 'Escreva uma resposta'")) throw new Error('default placeholder')
+    if (!field2.includes('placeholder={placeholder}') || !field2.includes('accessibilityLabel={placeholder}')) throw new Error('field uses prop')
+    if (field.length === 0) throw new Error('no field')
+  })
 })
 
 test('a reply opened during the hand-off is not replaced by the older parked target', async (t) => {

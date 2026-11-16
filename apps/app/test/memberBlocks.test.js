@@ -34,7 +34,7 @@ test('a row by a blocked author, or reposted by one, draws nothing', async (t) =
   const { blockedRowView } = await load()
   t.is(blockedRowView({ author: A }, hasOf(A)), null)
   t.is(blockedRowView({ author: B, repostedBy: { author: A } }, hasOf(A)), null)
-  t.alike(blockedRowView({ author: B, repostedBy: null, quote: null }, hasOf(A)), { quote: null })
+  t.alike(blockedRowView({ author: B, repostedBy: null, quote: null }, hasOf(A)), { quote: null, replyQuote: undefined })
 })
 
 test('a quote of a blocked author reads as unavailable and carries nothing of theirs', async (t) => {
@@ -44,6 +44,24 @@ test('a quote of a blocked author reads as unavailable and carries nothing of th
   const masked = blockedRowView({ author: B, quote }, hasOf(A)).quote
   t.alike(masked, { author: A, name: null, username: null, avatar: null, at: null, text: null, media: null, preview: null, persist: false, missing: true, onOpen })
   t.is(blockedRowView({ author: B, quote }, hasOf(C)).quote, quote, 'another author: untouched')
+})
+
+test('a reply quote of a blocked person reads as unavailable, with no name, sender or tap', async (t) => {
+  const { blockedRowView, UNAVAILABLE_REPLY_QUOTE } = await load()
+  const replyQuote = { name: 'Ana', text: 'segredo', senderKey: A, ref: A + ':5', onPress: () => {} }
+  const view = blockedRowView({ author: B, replyQuote }, hasOf(A))
+  t.alike(view.replyQuote, { name: null, text: 'Mensagem indisponível', senderKey: undefined, onPress: undefined })
+  t.is(UNAVAILABLE_REPLY_QUOTE, 'Mensagem indisponível')
+  t.is(view.quote, undefined)
+  t.is(blockedRowView({ author: B, replyQuote }, hasOf(C)).replyQuote, replyQuote, 'another sender: the same object')
+  const missing = { name: null, text: 'Mensagem indisponível', senderKey: undefined, ref: A + ':5', onPress: () => {} }
+  t.is(blockedRowView({ author: B, replyQuote: missing }, hasOf(A)).replyQuote, missing, 'a missing quote names no one already')
+  const quote = { author: A, text: 'x', onOpen: () => {} }
+  const both = blockedRowView({ author: B, quote, replyQuote }, hasOf(A))
+  t.is(both.quote.missing, true)
+  t.is(both.replyQuote.text, 'Mensagem indisponível', 'both are masked together')
+  const conversa = require('fs').readFileSync(require('path').join(__dirname, '../src/screens/Conversa.js'), 'utf8')
+  t.ok(conversa.includes("const MISSING_QUOTE = '" + UNAVAILABLE_REPLY_QUOTE + "'"), 'the same words as a quote the screen could not read')
 })
 
 test('rows of a blocked person go, the array stays the same when nothing does', async (t) => {

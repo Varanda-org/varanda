@@ -1853,7 +1853,7 @@ function Member () {
     lastSentRef.current = lastSent.n
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
-    showToast(lastSent.kind === 'reply' ? 'resposta publicada' : 'publicado')
+    showToast('publicado')
   }, [lastSent])
 
   // The follows changed (here or on another device, node.followsVersion): A
@@ -1930,7 +1930,7 @@ function Member () {
     if (kind === 'queued-post' || kind === 'queued-reply') return showToast('Vai sair quando a conexão voltar.')
     setVersion((v) => v + 1)
     setPeekVersion((v) => v + 1)
-    showToast(kind === 'reply' || kind === 'quick-reply' ? 'resposta publicada' : 'publicado')
+    showToast('publicado')
   }
   const startQuote = (q) => setComposer({ open: true, reply: null, quote: q })
 
@@ -2022,9 +2022,9 @@ function Member () {
       try { h.go(-d) } catch {}
     }
   }, [commitStack])
-  const openThread = useCallback(({ ref, seed } = {}) => {
+  const openThread = useCallback(({ ref, seed, focus } = {}) => {
     setComposeSignal(null)
-    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null } })
+    pushScreen({ screen: 'conversa', key: ref, params: { seed: seed || null, focus: focus || null } })
   }, [pushScreen])
   const openEngagers = useCallback(({ ref, kind } = {}) => {
     pushScreen({ screen: 'curtidas', key: ref, params: { kind: kind === 'reposts' ? 'reposts' : 'likes' } })

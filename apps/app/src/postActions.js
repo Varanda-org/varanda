@@ -124,7 +124,7 @@ export function shareLink (item, caps) {
 
 export function primaryActions (item, caps) {
   const actions = [
-    action('reply', 'resposta', 'Responder'),
+    action('reply', 'resposta', item && item.replyTo ? 'Responder' : 'Comentar'),
     action('repost', 'republicar', 'Republicar'),
     action('like', 'coracao', 'Curtir')
   ]

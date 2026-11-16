@@ -1,32 +1,39 @@
-// Conversa: a post with its parent and ALL its replies, pushed above the
-// tabs (App.js screen stack, entry { screen: 'conversa', key: ref, params:
-// { seed } }). On the hosted web the seeder index (src/indexClient.js) says
-// where to look (the parent ref, the replies paged with its cursor, seq hints
-// and counts) and every post shown is fetched and verified by the node with
-// diary.peek, then assembled by src/thread.js (a reply is kept only if its
-// own signed replyTo is this post). engagement.read runs BEFORE the peeks
-// (it preempts sync; the peeks then follow one at a time). Natively, or
-// offline, only the row the person tapped (the seed) shows, with a note.
+// Conversa: a thread as comments, pushed above the tabs (App.js screen stack,
+// entry { screen: 'conversa', key: ref, params: { seed, focus } }). The key
+// may be any post of the thread: src/rodaLoad.js resolveRoot finds its root
+// (the only main post) and the comment holding it. Two levels only: the
+// root's direct replies are the comments, and under each comment its roda
+// (src/roda.js), every reply of its subtree shown flat with a quote of the
+// message it answers. No row opens another thread. On the hosted web the
+// seeder index (src/indexClient.js) says where to look and every post shown
+// is fetched and verified by the node with diary.peek: a comment passes
+// src/thread.js assembleThread (signed replyTo is the root), a roda reply
+// passes assembleRoda (signed replyTo chains to its comment). engagement.read
+// runs BEFORE the peeks of each page (it preempts sync; the peeks then follow
+// one at a time). Natively, or offline, only the row the person tapped (the
+// seed) shows, with a note.
 //
 // The peek, follow and like/repost helpers are exported for Membro.js.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
+import { AccessibilityInfo, KeyboardAvoidingView, StyleSheet, Text, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { readFollowKeys } from '../follow'
 import { useNames } from '../names'
-import { fetchCounts, fetchMember, fetchPost, COUNTS_MAX } from '../indexClient'
+import { fetchCounts, fetchMember, fetchPost, fetchRoda, COUNTS_MAX } from '../indexClient'
 import { assembleMember, assembleThread, planPeeks } from '../thread'
-import { childLabel, mergeChildren, quietNext, threadRows, withOwnReply } from '../threadRows'
+import { mergeChildren, withOwnReply } from '../threadRows'
+import { AUTHOR_TAG, assembleRoda, canSwipeReply, commentOrder, commentRows, commentsTitle, rodaOrder, withAnchor } from '../roda'
+import { SEEK_PAGES, resolveRoot, seekTarget } from '../rodaLoad'
+import { isRef } from '../nav'
 import { quickReplyPlan, sendTextReply } from '../replySend'
 import { hasLink } from '../links'
 import { refusalOf } from '../wordCheck'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
 import { noteLocalWrite } from '../localWrites'
 import { registerLocalCache, cacheGeneration } from '../localCaches'
-import { parentLabel } from '../parentLabel'
 import { replyNameOf, whoOf } from '../who'
 import { avatarOf, pickAvatar } from '../media/avatar'
 import { isPageRef } from '../deletion'
@@ -48,6 +55,7 @@ import { EmbedBandBottom } from '../ui/screenVisible'
 import { cachedRow, pruneRows } from '../namesCache'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
+import { SwipeReply } from '../ui/SwipeReply'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { revokeDeletedMedia } from '../media/cache'
@@ -62,7 +70,14 @@ const BUSY_RETRIES = 3
 const NOT_HOSTED_NOTE = 'Conversa completa disponível na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: a conversa completa aparece quando a conexão voltar.'
 const PARENT_GONE_NOTE = 'A publicação respondida está indisponível.'
+const CUT_NOTE = 'O começo desta conversa está mais acima e não pôde ser mostrado.'
+const MISSING_QUOTE = 'Mensagem indisponível'
+const RODA_ERROR = 'Não foi possível carregar as respostas.'
 const HINT_AUTHORS_MAX = 10
+const OUTSIDE_NOTE = 'Mensagem fora do trecho carregado'
+const JUMP_RETRY_MS = 120
+const ANCHOR_TRIES = 4
+const FLASH_MS = 900
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -576,10 +591,6 @@ export function useEngagement ({ request, node, onToast }) {
   return useMemo(() => ({ state, counts, pending, reset, readOwn, readCounts, setCount, toggle }), [state, counts, pending, reset, readOwn, readCounts, setCount, toggle])
 }
 
-// Depth-zero replies hide the chip of the focal parent; one object, so the
-// row's cached props stay equal across renders.
-const DEPTH_ZERO = { replyToName: null, onOpenParent: undefined }
-
 // Names prefer the verified peek; avatars prefer the authoritative cache.
 // Raw strings: PostRow escapes them.
 export function identityOf (names, author, item) {
@@ -760,7 +771,32 @@ async function quotePlan (items, peeked, known, alive) {
   return planWithHints(refs, known, alive)
 }
 
-// Only posts just signed on this device enter this cache.
+// The open rodas that get a 'Ver mais respostas' row: one with a next page,
+// and one whose first load never landed (a delete or a lost connection
+// dropped it), which would otherwise stay open and empty with nothing to tap.
+function rodaMore ({ open, rodas, errors, busy }) {
+  const more = new Map()
+  for (const key of open) {
+    if (errors.has(key)) continue
+    const roda = rodas.get(key)
+    if (roda && roda.loaded ? typeof roda.next === 'string' : !busy.has(key)) more.set(key, true)
+  }
+  return more
+}
+
+// The row the screen was opened for, once its root is known: { top, target,
+// proven }, or null. The opener's focus is only its word, so it counts as
+// unproven until the verified roda holds the target.
+export function anchorOf (res, focusRef, focusTop) {
+  if (!res || res.status !== 'ok') return null
+  if (isRef(res.top) && isRef(res.target)) return { top: res.top, target: res.target, proven: res.proven === true }
+  if (res.top === null && isRef(focusTop) && isRef(focusRef)) return { top: focusTop, target: focusRef, proven: false }
+  return null
+}
+
+// Only posts just signed on this device enter this cache. Keyed the way the
+// screen holds them: a comment under the root's ref, a reply under the ref of
+// the comment whose roda holds it, so a deep own reply lands once, in its roda.
 const ownReplyCache = new Map()
 registerLocalCache({ wipe: () => ownReplyCache.clear() })
 
@@ -807,39 +843,42 @@ function ownFor (parentKey, own) {
   return (own.get(parentKey) || []).reduce(withOwnReply, ownReplyCache.get(parentKey) || [])
 }
 
-export function branchView (replies, counts, children, own) {
-  const branches = new Map(children)
-  const floor = new Map(counts)
-  for (const parent of replies) {
-    const key = refOf(parent.author, parent.seq)
-    const direct = ownFor(key, own).reduce(withOwnReply, children.get(key) || [])
-    const items = []
-    const seen = new Set([key])
-    const append = (item) => {
-      const ref = refOf(item.author, item.seq)
-      if (seen.has(ref)) return
-      seen.add(ref)
-      items.push(item)
-      for (const reply of ownFor(ref, own)) append(reply)
-    }
-    for (const item of direct) append(item)
-    branches.set(key, items)
-    if (items.length > 0) {
-      const count = counts.get(key)
-      floor.set(key, { ...count, replies: Math.max(count && Number.isSafeInteger(count.replies) ? count.replies : 0, items.length) })
-    }
-  }
-  return { children: branches, counts: floor }
+const refsOf = (items) => items.map((item) => refOf(item.author, item.seq))
+
+// Comments already on screen keep their place: a later page only appends the
+// ones not shown yet (the anchor comment, or an own one sent here).
+function appendComments (shown, page) {
+  const seen = new Set(refsOf(shown))
+  return shown.concat(page.filter((item) => !seen.has(refOf(item.author, item.seq))))
 }
+
+// The comment whose roda holds `ref`: `ref` itself for a comment, null when
+// it is not on screen.
+function topOf (ref, comments, rodas) {
+  if (comments.some((item) => refOf(item.author, item.seq) === ref)) return ref
+  for (const [top, roda] of rodas) {
+    if (roda.replies.some((item) => refOf(item.author, item.seq) === ref)) return top
+  }
+  return null
+}
+
+// No row inside the thread pushes another Conversa: the comment level is
+// drawn by the list itself, and the quote above a reply says what it answers.
+const THREAD_ROW = { onOpen: undefined, onOpenParent: undefined, replyToName: null }
+// The tapped row before its thread is known keeps its chip, without the tap.
+const SEED_ROW = { onOpen: undefined, onOpenParent: undefined }
 
 const INITIAL = {
   phase: 'loading', // 'loading' | 'ready' | 'error'
   error: '',
-  meta: null, // { indexing, complete, repliesTotal }
-  parentGone: false, // the index lists a parent that cannot be shown
-  parent: null,
+  meta: null, // { indexing, complete, repliesTotal } of the root
+  resolved: null, // the resolveRoot result the thread was built from
+  root: null, // the main post's ref
+  status: null, // 'ok' | 'orphan' (the root answers a post that cannot be read)
+  cut: false, // orphan: the climb stopped at its limit, not at a missing parent
+  proven: false, // signed records tie the root to the target (resolveRoot, showAnchor)
   post: null,
-  replies: [],
+  comments: [],
   unavailable: 0,
   next: null,
   loadingMore: false,
@@ -870,32 +909,55 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       node.measureInWindow((x, y, w, h) => done(Number.isFinite(y) && y > 0 && h > 0 ? y : null))
     }
   }), [])
+  // The post the screen was opened for: any post of the thread.
   const focal = entry.key
   const seed = useMemo(() => seedItem(entry.params ? entry.params.seed : null, focal), [entry, focal])
+  // focus { ref, top }: the opener already knows focal is the root. Only the
+  // top's shape is taken here; the comment is placed only once its signed
+  // replyTo is the root.
+  const focus = entry.params && entry.params.focus && typeof entry.params.focus === 'object' ? entry.params.focus : null
+  const focusTop = focus !== null && isRef(focus.top) ? focus.top : null
+  const focusRef = focus !== null && isRef(focus.ref) ? focus.ref : null
+  const seedIsRoot = seed !== null && (seed.replyTo === null || focus !== null)
   const full = !!node.hosted && node.online !== false
   const { request } = node
   const { learnMany, resolveMany } = names
   const eng = useEngagement({ request, node, onToast })
   const { follows, load: loadFollows } = useFollowSet(request)
   const [view, setView] = useState(INITIAL)
-  const [parentHeight, setParentHeight] = useState(null)
-  const [parentLabelHeight, setParentLabelHeight] = useState(0)
   const [open, setOpen] = useState(new Set())
-  const [children, setChildren] = useState(new Map())
-  const [childNext, setChildNext] = useState(new Map())
-  const [childErrors, setChildErrors] = useState(new Map())
-  const [childBusy, setChildBusy] = useState(new Set())
+  // comment ref -> { replies, waiting, mode, complete, total, next, loaded }
+  const [rodas, setRodas] = useState(new Map())
+  const [rodaErrors, setRodaErrors] = useState(new Map())
+  const [rodaBusy, setRodaBusy] = useState(new Set())
   const [replyTarget, setReplyTarget] = useState(null)
   const [focusSignal, setFocusSignal] = useState(undefined)
   const [note, setNote] = useState('')
   const [sending, setSending] = useState(false)
   const sendingRef = useRef(false)
-  const childRequests = useRef(new Map())
-  // Bumped when the open branches are dropped, so a page still in flight
-  // cannot land in, or release, the branch that replaced it.
+  const rodaRequests = useRef(new Map())
+  // Bumped when the open rodas are dropped, so a page still in flight
+  // cannot land in, or release, the roda that replaced it.
   const branchGen = useRef(0)
-  const childrenRef = useRef(children)
-  childrenRef.current = children
+  const rodasRef = useRef(rodas)
+  const putRodas = useCallback((next) => {
+    rodasRef.current = next
+    setRodas(next)
+  }, [])
+  // The first roda page resolveRoot already fetched, used once by its comment.
+  const rodaSeed = useRef(null)
+  const resolvedRef = useRef(null)
+  // The anchor of the next ready load, shown once.
+  const anchorRef = useRef(null)
+  const listRef = useRef(null)
+  const rowsRef = useRef([])
+  const [flashKey, setFlashKey] = useState(null)
+  const jumpTimer = useRef(null)
+  const flashTimer = useRef(null)
+  const pendingJump = useRef(null)
+  const [jumpTick, setJumpTick] = useState(0)
+  const scrollRef = useRef(null)
+  const quotes = useRef(new Map())
   const ownReplies = useRef(new Map())
   useEffect(() => {
     ownReplyCopies.add(ownReplies)
@@ -903,7 +965,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   }, [])
   const openRef = useRef(open)
   openRef.current = open
-  const loadChildrenRef = useRef(null)
+  const loadRodaRef = useRef(null)
   const replyDraft = useRef({ focal, text: '' })
   if (replyDraft.current.focal !== focal) replyDraft.current = { focal, text: '' }
   const sessionRef = useRef(0)
@@ -912,8 +974,6 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const peekedRef = useRef(new Map())
   const followsRef = useRef(Promise.resolve(new Set()))
   const genRef = useRef(0)
-  // A quiet read supersedes only another quiet read: bumping genRef would cancel a branch page in flight.
-  const quietRef = useRef(0)
   const focalRef = useRef(focal)
   focalRef.current = focal
   const commit = useCallback((patch) => {
@@ -924,18 +984,29 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   useEffect(() => {
     sessionRef.current += 1
     setOpen(new Set())
-    setChildren(new Map())
-    setChildNext(new Map())
-    setChildBusy(new Set())
-    setChildErrors(new Map())
-    childRequests.current.clear()
+    putRodas(new Map())
+    setRodaBusy(new Set())
+    setRodaErrors(new Map())
+    rodaRequests.current.clear()
     branchGen.current += 1
     ownReplies.current.clear()
+    resolvedRef.current = null
+    rodaSeed.current = null
+    anchorRef.current = null
+    pendingJump.current = null
+    clearTimeout(jumpTimer.current)
+    clearTimeout(flashTimer.current)
+    setFlashKey(null)
+    quotes.current.clear()
     setReplyTarget(null)
     setFocusSignal(undefined)
     setNote('')
     return () => { sessionRef.current += 1 }
-  }, [focal])
+  }, [focal, putRodas])
+  useEffect(() => () => {
+    clearTimeout(jumpTimer.current)
+    clearTimeout(flashTimer.current)
+  }, [])
 
   const targetReply = useCallback((target) => {
     if (sendingRef.current) return
@@ -943,107 +1014,149 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     setNote('')
     setFocusSignal((signal) => (signal || 0) + 1)
   }, [])
+  // Waits for the root: until then the bar cannot tell a comment from a reply.
+  const root = view.root
   useEffect(() => {
-    if (full && composeSignal && composeSignal !== lastCompose.current && composeSignal.target.ref === focal) {
+    if (full && root !== null && composeSignal && composeSignal !== lastCompose.current && composeSignal.target.ref === focal) {
       lastCompose.current = composeSignal
       targetReply(composeSignal.target)
       if (typeof onComposeSeen === 'function') onComposeSeen()
     }
-  }, [composeSignal, focal, full, targetReply, onComposeSeen])
+  }, [composeSignal, focal, root, full, targetReply, onComposeSeen])
 
   const { readOwn, readCounts, setCount, reset } = eng
-  const load = useCallback(async (refreshing = false, quiet = false) => {
-    if (quiet && (viewRef.current.phase !== 'ready' || viewRef.current.next !== null || viewRef.current.loadingMore || viewRef.current.refreshing)) return
-    const loadedChildren = [...childrenRef.current.values()].flat()
-    const mine = quiet ? genRef.current : ++genRef.current
-    const quietId = quiet ? ++quietRef.current : 0
-    const alive = () => mine === genRef.current && (!quiet || quietId === quietRef.current)
+  const load = useCallback(async (refreshing = false) => {
+    const mine = ++genRef.current
+    const alive = () => mine === genRef.current
     let undoReset = null
-    if (!quiet) commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL })
+    commit(refreshing ? { refreshing: true, error: '' } : { ...INITIAL })
+    const failed = (reason) => commit({
+      phase: refreshing && viewRef.current.phase === 'ready' ? 'ready' : 'error',
+      refreshing: false,
+      loadingMore: false,
+      error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : reason === 'not-found' || reason === 'unavailable' ? 'Esta conversa não está disponível.' : 'Não foi possível abrir a conversa.'
+    })
     try {
-      let res = await fetchPost(focal)
+      const peeked = new Map()
+      // No seed is passed: the root's own read costs nothing extra, since
+      // its index answer and its peek are reused below, and a seed is only
+      // what the feed showed.
+      const read = async (refs, hints) => {
+        await peekAll(request, planPeeks({ refs, authors: hints }), peeked, alive)
+        return new Map(refs.map((ref) => [ref, postAt(peeked, ref)]))
+      }
+      const held = resolvedRef.current
+      const fresh = held === null || held.focal !== focal
+      let res = fresh ? await resolveRoot({ key: focal }, { fetchPost, fetchRoda, read }) : held.res
       if (!alive()) return
-      if (!res.ok && (res.reason === 'network' || res.reason === 'timeout')) {
+      // Read-only, so the first open tries once more after a lost connection.
+      if (fresh && res.status === 'error' && (res.reason === 'network' || res.reason === 'timeout')) {
         await sleep(SEEDER_RETRY_MS)
         if (!alive()) return
-        res = await fetchPost(focal)
+        res = await resolveRoot({ key: focal }, { fetchPost, fetchRoda, read })
         if (!alive()) return
       }
-      if (!res.ok) {
-        if (quiet) return
-        commit({ phase: (refreshing || quiet) && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : res.reason === 'not-found' ? 'Esta conversa não está disponível.' : 'Não foi possível abrir a conversa.' })
+      if (res.status !== 'ok' && res.status !== 'orphan') {
+        failed(res.reason)
         return
       }
-      const index = res.value
-      const branchRefs = loadedChildren.map((item) => refOf(item.author, item.seq))
-      const refs = [focal].concat(index.parent ? [index.parent] : [], index.replies, branchRefs, quiet ? viewRef.current.replies.map((item) => refOf(item.author, item.seq)) : [])
+      if (fresh) resolvedRef.current = { focal, res }
+      const rootRef = res.root
+      let index = fresh && res.index ? res.index : null
+      if (index === null) {
+        let r = await fetchPost(rootRef)
+        if (!alive()) return
+        if (!r.ok && (r.reason === 'network' || r.reason === 'timeout')) {
+          await sleep(SEEDER_RETRY_MS)
+          if (!alive()) return
+          r = await fetchPost(rootRef)
+          if (!alive()) return
+        }
+        if (!r.ok) {
+          failed(r.reason)
+          return
+        }
+        index = r.value
+      }
+      const anchor = res.top || focusTop
+      const extra = anchor !== null && anchor !== rootRef && !index.replies.includes(anchor) ? [anchor] : []
+      const refs = [rootRef].concat(index.replies, extra)
       // engagement.read first: it preempts sync, so it goes before the peeks.
-      if (refreshing && !quiet) undoReset = reset()
+      if (refreshing) undoReset = reset()
       await readOwn(refs, alive)
       if (!alive()) return
       followsRef.current = loadFollows()
-      const peeked = new Map()
-      await peekAll(request, planPeeks({ refs, authors: index.authors }), peeked, alive)
+      const hints = { ...(fresh && res.page ? res.page.authors : {}), ...index.authors }
+      await peekAll(request, planPeeks({ refs: refs.filter((ref) => postAt(peeked, ref) === null), authors: hints }), peeked, alive)
       if (!alive()) return
-      const { parent, post, replies, unavailable } = assembleThread({ focal, index, peeked })
+      const { parent, post, replies, unavailable } = assembleThread({ focal: rootRef, index, peeked })
+      // The anchor's index page may come later: read now, placed only when
+      // its signed replyTo is the root.
+      const anchored = extra.length > 0 ? postAt(peeked, anchor) : null
+      const page = anchored !== null && anchored.replyTo && refOf(anchored.replyTo.author, anchored.replyTo.seq) === rootRef ? replies.concat([anchored]) : replies
       const followSet = await followsRef.current
       if (!alive()) return
-      await peekAll(request, await quotePlan([parent, post].concat(replies, loadedChildren, quiet ? viewRef.current.replies : []), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
+      // Only an own post whose signed replyTo is the root is a comment: the
+      // cache key can be a comment that is now an orphan's top-most message.
+      const ownComments = ownFor(rootRef, ownReplies.current).filter((item) => !!item.replyTo && refOf(item.replyTo.author, item.replyTo.seq) === rootRef)
+      await peekAll(request, await quotePlan([post].concat(page, ownComments), peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
       if (!alive()) return
       peekedRef.current = peeked
       learnPeeked(learnMany, peeked)
-      resolveMany([...new Set([post, parent].concat(replies).filter(Boolean).flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
-      setCount(focal, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
+      resolveMany([...new Set([post].concat(page).filter(Boolean).flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
+      setCount(rootRef, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
       if (refreshing) {
-        childrenRef.current = new Map()
-        setChildren(new Map())
-        setChildNext(new Map())
-        setChildErrors(new Map())
-        childRequests.current.clear()
+        putRodas(new Map())
+        setRodaErrors(new Map())
+        rodaRequests.current.clear()
         branchGen.current += 1
-        setChildBusy(new Set())
+        setRodaBusy(new Set())
+        // A page from before the refresh never paints a roda opened after it.
+        rodaSeed.current = null
       }
       pruneOwnReplies(index.replies, ownReplies.current)
-      const shown = ownFor(focal, ownReplies.current).reduce(withOwnReply, quiet ? replies.reduce(withOwnReply, viewRef.current.replies) : replies)
-      const unavailableNow = unavailable - (index.parent && !parent ? 1 : 0)
-      const nextAfter = quiet
-        ? quietNext({ indexNext: index.next, total: index.repliesTotal, loaded: shown.length, unavailable: Math.max(viewRef.current.unavailable, unavailableNow) })
-        : index.next
+      const comments = withAnchor(commentOrder(ownComments.reduce(withOwnReply, page), { follows: followSet, ownKey }), anchor)
+      // A refresh keeps an unconfirmed root unconfirmed: its check runs again.
+      if (!refreshing || viewRef.current.proven !== true) anchorRef.current = anchorOf(res, focusRef, focusTop)
       commit({
         phase: 'ready',
         error: '',
         refreshing: false,
         meta: { indexing: index.indexing, complete: index.complete, repliesTotal: index.repliesTotal },
-        parent,
+        resolved: res,
+        root: rootRef,
+        status: res.status,
+        cut: res.cut === true,
+        proven: res.status === 'orphan' || res.proven === true,
         post,
-        replies: shown,
-        // An unavailable parent is not counted as an unavailable reply.
-        parentGone: !!index.parent && !parent,
-        unavailable: unavailableNow,
-        next: quiet ? nextAfter : index.next,
+        comments,
+        // The root's own parent is the orphan note, not an unavailable comment.
+        unavailable: unavailable - (index.parent && !parent ? 1 : 0),
+        next: index.next,
         loadingMore: false,
         moreError: ''
       })
-      if (refreshing) for (const key of openRef.current) loadChildrenRef.current(key)
-      readCounts((parent ? [refOf(parent.author, parent.seq)] : []).concat(replies.map((r) => refOf(r.author, r.seq)), branchRefs), alive)
+      if (fresh && res.top && res.page) rodaSeed.current = { top: res.top, page: res.page }
+      if (refreshing) for (const key of openRef.current) loadRodaRef.current(key)
+      readCounts(refsOf(comments), alive)
     } catch (err) {
-      if (!alive() || quiet) return
+      if (!alive()) return
       if (undoReset) undoReset()
-      commit({ phase: (refreshing || quiet) && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
+      commit({ phase: refreshing && viewRef.current.phase === 'ready' ? 'ready' : 'error', refreshing: false, loadingMore: false, error: refreshing && viewRef.current.phase === 'ready' ? 'Não foi possível atualizar a conversa.' : isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
-  }, [focal, request, commit, readOwn, readCounts, setCount, reset, loadFollows, learnMany, resolveMany, ownKey])
+  }, [focal, focusRef, focusTop, request, commit, putRodas, readOwn, readCounts, setCount, reset, loadFollows, learnMany, resolveMany, ownKey])
 
   const loadMore = useCallback(async () => {
     const current = viewRef.current
-    if (current.phase !== 'ready' || current.loadingMore || current.refreshing || current.next === null) return
+    if (current.phase !== 'ready' || current.loadingMore || current.refreshing || current.next === null || current.root === null) return
     const mine = genRef.current
     const alive = () => mine === genRef.current
     commit({ loadingMore: true, moreError: '' })
     try {
-      const res = await fetchPost(focal, current.next)
+      const res = await fetchPost(current.root, current.next)
       if (!alive()) return
       if (!res.ok) {
-        commit({ loadingMore: false, moreError: 'Não foi possível carregar mais respostas.' })
+        commit({ loadingMore: false, moreError: 'Não foi possível carregar mais comentários.' })
         return
       }
       const index = res.value
@@ -1053,7 +1166,7 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       await peekAll(request, planPeeks({ refs: index.replies, authors: index.authors }), peeked, alive)
       if (!alive()) return
       // The parent was counted with the first page.
-      const page = assembleThread({ focal, index: { ...index, parent: null }, peeked })
+      const page = assembleThread({ focal: current.root, index: { ...index, parent: null }, peeked })
       const followSet = await followsRef.current
       if (!alive()) return
       await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
@@ -1061,91 +1174,214 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       learnPeeked(learnMany, peeked)
       resolveMany([...new Set(page.replies.flatMap((i) => i.quote ? [i.author, i.quote.author] : [i.author]))])
       pruneOwnReplies(index.replies, ownReplies.current)
-      const seen = new Set(viewRef.current.replies.map((r) => refOf(r.author, r.seq)))
-      const fresh = page.replies.filter((r) => !seen.has(refOf(r.author, r.seq)))
+      const before = viewRef.current.comments
+      const comments = appendComments(before, commentOrder(page.replies, { follows: followSet, ownKey }))
       commit({
-        replies: viewRef.current.replies.concat(fresh),
+        comments,
         unavailable: viewRef.current.unavailable + page.unavailable,
         next: index.next === current.next ? null : index.next,
         meta: { indexing: index.indexing, complete: index.complete, repliesTotal: index.repliesTotal },
         loadingMore: false
       })
-      readCounts(fresh.map((r) => refOf(r.author, r.seq)), alive)
+      readCounts(refsOf(comments.slice(before.length)), alive)
     } catch (err) {
       if (alive()) commit({ loadingMore: false, moreError: isSeederDown(err) ? 'Sem conexão com o servidor agora.' : errorText(err) })
     }
-  }, [focal, request, commit, readOwn, readCounts, learnMany, resolveMany, ownKey])
+  }, [request, commit, readOwn, readCounts, learnMany, resolveMany, ownKey])
 
-  const loadChildren = async (parentKey, cursor = null) => {
+  // One page of the roda of comment `top`. A seeder without /index/roda
+  // (404, 'not-found') gives the comment's direct replies only, paged by its
+  // post index: no walk down from here. Every row passes assembleRoda first.
+  // -> { next } once the page landed, null when it did not (failed, stale or
+  // already in flight), for seekTarget.
+  const loadRoda = async (top, cursor = null) => {
     const mine = genRef.current
     const branch = branchGen.current
-    const held = childRequests.current.get(parentKey)
-    if (!full || (held && held.mine === mine && held.branch === branch)) return
+    const held = rodaRequests.current.get(top)
+    if (!full || (held && held.mine === mine && held.branch === branch)) return null
     const token = { mine, branch }
-    childRequests.current.set(parentKey, token)
-    setChildBusy((previous) => new Set(previous).add(parentKey))
-    setChildErrors((previous) => {
+    rodaRequests.current.set(top, token)
+    setRodaBusy((previous) => new Set(previous).add(top))
+    setRodaErrors((previous) => {
       const next = new Map(previous)
-      next.delete(parentKey)
+      next.delete(top)
       return next
     })
     const alive = () => mine === genRef.current && branch === branchGen.current
     try {
-      const res = await fetchPost(parentKey, cursor)
-      if (!alive()) return
-      if (!res.ok) throw new Error('Não foi possível carregar as respostas.')
-      const index = res.value
-      const refs = [parentKey].concat(index.replies)
-      await readOwn(refs, alive)
-      if (!alive()) return
-      const peeked = peekedRef.current
-      await peekAll(request, planPeeks({ refs, authors: index.authors }), peeked, alive)
-      if (!alive()) return
-      const page = assembleThread({ focal: parentKey, index, peeked })
-      const followSet = await followsRef.current
-      if (!alive()) return
-      await peekAll(request, await quotePlan(page.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: index.authors, peeked }), alive), peeked, alive)
-      if (!alive()) return
-      learnPeeked(learnMany, peeked)
-      resolveMany([...new Set(page.replies.flatMap((item) => item.quote ? [item.author, item.quote.author] : [item.author]))])
-      pruneOwnReplies(index.replies, ownReplies.current)
-      const items = ownFor(parentKey, ownReplies.current).reduce(withOwnReply, page.replies)
-      setChildren((previous) => mergeChildren(previous, parentKey, items))
-      setChildNext((previous) => new Map(previous).set(parentKey, index.next === cursor ? null : index.next))
-      setCount(parentKey, { replies: index.repliesTotal, likes: index.likes, reposts: index.reposts, quotes: index.quotesTotal })
-      readCounts(items.map((item) => refOf(item.author, item.seq)), alive)
-    } catch (err) {
-      if (alive()) {
-        setChildErrors((previous) => new Map(previous).set(parentKey, errorText(err)))
-        setChildNext((previous) => {
-          const next = new Map(previous)
-          next.delete(parentKey)
-          return next
-        })
+      const prior = rodasRef.current.get(top)
+      let mode = prior && prior.loaded ? prior.mode : 'roda'
+      let page = null
+      if (mode === 'roda') {
+        const seeded = cursor === null && rodaSeed.current !== null && rodaSeed.current.top === top ? rodaSeed.current.page : null
+        if (seeded !== null) rodaSeed.current = null
+        const res = seeded !== null ? { ok: true, value: seeded } : await fetchRoda(top, cursor)
+        if (!alive()) return null
+        if (res.ok && res.value.top === top) page = { items: res.value.items.map((it) => it.ref), authors: res.value.authors, next: res.value.next, total: res.value.total, complete: res.value.complete }
+        // Another top: the seeder sees this comment deeper in a thread whose
+        // start this screen could not reach. Its direct replies still show.
+        else if (cursor === null && (res.ok || res.reason === 'not-found')) mode = 'direct'
+        else throw new Error(RODA_ERROR)
       }
+      if (mode === 'direct') {
+        const res = await fetchPost(top, cursor)
+        if (!alive()) return null
+        if (!res.ok) throw new Error(RODA_ERROR)
+        page = { items: res.value.replies, authors: res.value.authors, next: res.value.next, total: res.value.repliesTotal, complete: res.value.complete }
+      }
+      await readOwn(page.items, alive)
+      if (!alive()) return null
+      const peeked = peekedRef.current
+      await peekAll(request, planPeeks({ refs: page.items, authors: page.authors }), peeked, alive)
+      if (!alive()) return null
+      const next = page.next === cursor ? null : page.next
+      const before = rodasRef.current.get(top)
+      const out = assembleRoda({
+        top,
+        index: { items: page.items },
+        peeked,
+        held: before ? before.replies : [],
+        own: ownFor(top, ownReplies.current),
+        waiting: before ? before.waiting : [],
+        last: next === null
+      })
+      const followSet = await followsRef.current
+      if (!alive()) return null
+      await peekAll(request, await quotePlan(out.replies, peeked, knownAuthors({ ownKey, follows: followSet, hinted: page.authors, peeked }), alive), peeked, alive)
+      if (!alive()) return null
+      learnPeeked(learnMany, peeked)
+      // Rows from earlier pages already had their names and counts asked.
+      const shownBefore = new Set(refsOf(before ? before.replies : []))
+      const added = out.replies.filter((item) => !shownBefore.has(refOf(item.author, item.seq)))
+      resolveMany([...new Set(added.flatMap((item) => item.quote ? [item.author, item.quote.author] : [item.author]))])
+      pruneOwnReplies(page.items, ownReplies.current)
+      // Read again: a reply sent during the quote peeks joined the roda after `before`.
+      const latest = rodasRef.current.get(top)
+      const known = new Set(refsOf((before ? before.replies : []).concat(out.replies)))
+      const sent = latest ? latest.replies.filter((item) => !known.has(refOf(item.author, item.seq))) : []
+      putRodas(new Map(rodasRef.current).set(top, {
+        replies: out.replies.concat(sent),
+        waiting: out.waiting,
+        mode,
+        complete: page.complete,
+        total: page.total,
+        next,
+        loaded: true
+      }))
+      readCounts(refsOf(added), alive)
+      return { next }
+    } catch (err) {
+      // The cursor that failed: the retry asks for the same page.
+      if (alive()) setRodaErrors((previous) => new Map(previous).set(top, { text: errorText(err), cursor }))
+      return null
     } finally {
-      if (childRequests.current.get(parentKey) === token) {
-        childRequests.current.delete(parentKey)
-        setChildBusy((previous) => {
+      if (rodaRequests.current.get(top) === token) {
+        rodaRequests.current.delete(top)
+        setRodaBusy((previous) => {
           const next = new Set(previous)
-          next.delete(parentKey)
+          next.delete(top)
           return next
         })
       }
     }
   }
 
-  loadChildrenRef.current = loadChildren
+  loadRodaRef.current = loadRoda
 
-  const toggleChildren = (row) => {
-    const parentKey = refOf(row.parent.author, row.parent.seq)
+  const toggleRoda = (row) => {
+    const top = refOf(row.parent.author, row.parent.seq)
     setOpen((previous) => {
       const next = new Set(previous)
-      if (row.open) next.delete(parentKey)
-      else next.add(parentKey)
+      if (row.open) next.delete(top)
+      else next.add(top)
       return next
     })
-    if (!row.open && !childNext.has(parentKey)) loadChildren(parentKey)
+    const roda = rodasRef.current.get(top)
+    if (!row.open && !(roda && roda.loaded)) loadRoda(top)
+  }
+
+  // Opens the roda holding the anchor and pages it (seekTarget) until the
+  // target shows, then scrolls to it; not found, the roda stays open with its
+  // 'Ver mais respostas'. A target no verified roda holds, under an unproven
+  // root, gets its own signed climb: a seeder can pair a post with an
+  // unrelated conversation. Until one of them confirms it, an unproven root
+  // is never left on screen as the target's conversation.
+  const showAnchor = async (anchor) => {
+    const { top, target, proven } = anchor
+    const mine = genRef.current
+    const session = sessionRef.current
+    const alive = () => mine === genRef.current
+    // A load or a delete meanwhile ended this run without a verdict: the next
+    // ready load runs the check again.
+    const stale = () => {
+      if (!proven && sessionRef.current === session && anchorRef.current === null) anchorRef.current = anchor
+    }
+    const held = (ref) => {
+      const roda = rodasRef.current.get(top)
+      return !!roda && roda.replies.some((item) => refOf(item.author, item.seq) === ref)
+    }
+    const confirm = () => {
+      const kept = resolvedRef.current
+      if (kept && kept.focal === focal && kept.res) resolvedRef.current = { focal, res: { ...kept.res, proven: true } }
+      commit({ proven: true })
+    }
+    const dropRodas = () => {
+      setOpen(new Set())
+      putRodas(new Map())
+      setRodaErrors(new Map())
+      setRodaBusy(new Set())
+      rodaRequests.current.clear()
+      branchGen.current += 1
+      rodaSeed.current = null
+    }
+    // A roda shows only under its comment, and the comment only once its signed replyTo is the root.
+    const shown = viewRef.current.comments.some((item) => refOf(item.author, item.seq) === top)
+    let found = false
+    if (!shown) found = false
+    else if (target === top) found = true
+    else {
+      setOpen((previous) => new Set(previous).add(top))
+      // Its first page is the one resolveRoot fetched, when it gave one.
+      const first = await loadRoda(top)
+      if (!alive()) return stale()
+      found = held(target)
+      if (!found && first !== null && first.next !== null) {
+        const seek = await seekTarget({ target, cursor: first.next, maxPages: SEEK_PAGES }, { loadPage: (cursor) => loadRoda(top, cursor), has: held })
+        if (!alive()) return stale()
+        found = seek.found
+      }
+    }
+    if (found) {
+      if (!proven) confirm()
+      pendingJump.current = (target === top ? 'comment:' : 'reply:') + target
+      setJumpTick((tick) => tick + 1)
+      return
+    }
+    if (proven) return
+    const peeked = peekedRef.current
+    const read = async (refs, hints) => {
+      await peekAll(request, planPeeks({ refs, authors: hints }), peeked, alive)
+      return new Map(refs.map((ref) => [ref, postAt(peeked, ref)]))
+    }
+    const climbed = await resolveRoot({ key: target, climbOnly: true }, { fetchPost, fetchRoda, read })
+    if (!alive()) return stale()
+    if (climbed.status === 'error') {
+      // The climb is read-only, but it is not repeated here: the error's own
+      // retry opens the post again from the start, check included.
+      resolvedRef.current = null
+      dropRodas()
+      commit({ ...INITIAL, phase: 'error', error: climbed.reason === 'not-found' || climbed.reason === 'unavailable' ? 'Esta conversa não está disponível.' : 'Não foi possível abrir a conversa.' })
+      return
+    }
+    if (climbed.status === 'ok' && climbed.root === viewRef.current.root) return confirm()
+    // A climb cut at its hop limit still ends at a signed ancestor of the
+    // target: when that is the comment, or a row its verified roda holds, the
+    // target is under the root shown, and the cut view would only lose it.
+    if (climbed.status === 'orphan' && climbed.cut === true && shown && (climbed.root === top || held(climbed.root))) return confirm()
+    // Its signed chain leads to another conversation: that one is shown.
+    resolvedRef.current = { focal, res: climbed }
+    dropRodas()
+    load(false)
   }
 
   useEffect(() => {
@@ -1153,58 +1389,87 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     else loadFollows()
     return () => { genRef.current += 1 }
   }, [full, load, loadFollows])
+  // After the ready view rendered, so the roda it opens starts from that view.
+  useEffect(() => {
+    if (view.phase !== 'ready' || view.refreshing || anchorRef.current === null) return
+    const anchor = anchorRef.current
+    anchorRef.current = null
+    showAnchor(anchor)
+  }, [view])
+  // After the render that holds the anchor's rows: an index read sooner misses them.
+  useEffect(() => {
+    const key = pendingJump.current
+    if (key === null) return
+    pendingJump.current = null
+    if (typeof scrollRef.current === 'function') scrollRef.current(key, true)
+  }, [jumpTick])
 
-  // Drops a deleted post from this screen's own copies (the view, the open
-  // branches, the replies sent from here) and lowers its parent's count.
+  // Drops a deleted post from this screen's own copies (the comments, the
+  // open rodas, the replies sent from here) and lowers its parent's count.
   // Runs for a deletion made here and, through announceDeleted, for one made
   // on another screen above this one in the stack, which would otherwise
   // show the reply until a reload. Nothing found here means nothing to do.
   const dropDeleted = useRef(null)
   dropDeleted.current = (ref, force = false) => {
-    const shown = viewRef.current
-    const held = [...childrenRef.current.values(), ...ownReplies.current.values()].some((items) => items.some((item) => refOf(item.author, item.seq) === ref))
+    const cur = viewRef.current
+    const gone = (item) => refOf(item.author, item.seq) === ref
     const [author, seqText] = ref.split(':')
     const known = peekedRef.current.get(author)
     // A quote of the deleted post must not keep showing its text.
     const quoted = !!known && known.entries.some((e) => e.seq === Number(seqText))
-    const wasReply = shown.replies.some((r) => refOf(r.author, r.seq) === ref)
-    if (!force && !held && !quoted && !wasReply && !(shown.parent && refOf(shown.parent.author, shown.parent.seq) === ref)) return
+    const wasComment = cur.comments.some(gone)
+    const held = [...rodasRef.current.values()].some((roda) => roda.replies.some(gone)) || [...ownReplies.current.values()].some((items) => items.some(gone))
+    if (!force && !held && !quoted && !wasComment) return
     // A load started before the deletion would bring the row back.
     genRef.current += 1
     if (known) peekedRef.current.set(author, { ...known, entries: known.entries.filter((e) => e.seq !== Number(seqText)) })
-    const parents = new Set()
-    // A reply shown under the focal post counts against the focal post.
-    if (wasReply) parents.add(focalRef.current)
-    for (const [key, items] of [...childrenRef.current, ...ownReplies.current, ...ownReplyCache]) {
-      if (items.some((item) => refOf(item.author, item.seq) === ref)) parents.add(key)
+    const deleted = cur.comments.find(gone) || [...rodasRef.current.values()].flatMap((roda) => roda.replies).find(gone) || [...ownReplies.current.values()].flat().find(gone) || null
+    let parentKey = null
+    let remaining = 0
+    if (deleted !== null && deleted.replyTo) {
+      parentKey = refOf(deleted.replyTo.author, deleted.replyTo.seq)
+      const count = eng.counts.get(parentKey)
+      remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
+      setCount(parentKey, { ...count, replies: remaining })
     }
-    for (const key of parents) {
-      const count = eng.counts.get(key)
-      const remaining = Math.max(0, (count && Number.isSafeInteger(count.replies) ? count.replies : 0) - 1)
-      setCount(key, { ...count, replies: remaining })
-      if (remaining === 0 && !(childrenRef.current.get(key) || []).concat(ownFor(key, ownReplies.current)).some((item) => refOf(item.author, item.seq) !== ref)) {
-        setOpen((previous) => {
-          const next = new Set(previous)
-          next.delete(key)
-          return next
-        })
+    const kept = new Map()
+    const emptied = []
+    for (const [top, roda] of rodasRef.current) {
+      // A deleted comment takes its roda with it.
+      if (top === ref) continue
+      if (!roda.replies.some(gone)) {
+        kept.set(top, roda)
+        continue
       }
+      // Its replies leave too, as on the server (removePost drops the
+      // deleted post's edges): the gate keeps only rows still chained to top.
+      const replies = assembleRoda({ top, held: roda.replies.filter((item) => !gone(item)) }).replies
+      const total = Number.isSafeInteger(roda.total) ? Math.max(0, roda.total - (roda.replies.length - replies.length)) : roda.total
+      kept.set(top, { ...roda, replies, total })
+      const direct = parentKey === top ? remaining : (eng.counts.get(top) && Number.isSafeInteger(eng.counts.get(top).replies) ? eng.counts.get(top).replies : 0)
+      if (replies.length === 0 && direct === 0) emptied.push(top)
     }
-    for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => refOf(item.author, item.seq) !== ref))
-    setChildren((previous) => new Map([...previous].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== ref)])))
-    ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => refOf(item.author, item.seq) !== ref)]))
-    const cur = viewRef.current
+    putRodas(kept)
+    if (emptied.length > 0) {
+      setOpen((previous) => {
+        const next = new Set(previous)
+        for (const top of emptied) next.delete(top)
+        return next
+      })
+    }
+    for (const [key, items] of ownReplyCache) ownReplyCache.set(key, items.filter((item) => !gone(item)))
+    ownReplies.current = new Map([...ownReplies.current].map(([key, items]) => [key, items.filter((item) => !gone(item))]))
     commit({
-      replies: cur.replies.filter((r) => refOf(r.author, r.seq) !== ref),
-      parent: cur.parent && refOf(cur.parent.author, cur.parent.seq) === ref ? null : cur.parent,
-      meta: wasReply && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
+      comments: cur.comments.filter((item) => !gone(item)),
+      meta: wasComment && cur.meta ? { ...cur.meta, repliesTotal: Math.max(0, cur.meta.repliesTotal - 1) } : cur.meta,
       // The loads invalidated above never clear their own flags.
       loadingMore: false,
       refreshing: false
     })
   }
   useEffect(() => {
-    const listener = (refs) => { for (const ref of refs) if (ref !== focalRef.current) dropDeleted.current(ref) }
+    // The main post of an older screen (its root once known) is left to its own flow.
+    const listener = (refs) => { for (const ref of refs) if (ref !== (viewRef.current.root || focalRef.current)) dropDeleted.current(ref) }
     deletionListeners.add(listener)
     return () => { deletionListeners.delete(listener) }
   }, [])
@@ -1220,7 +1485,8 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       if (typeof onDeletedPost === 'function') onDeletedPost()
       // Cached photos of the deleted post go too, wherever they were shown.
       revokeDeletedMedia(request, [t.seq])
-      if (t.ref === focal) {
+      const cur = viewRef.current
+      if (t.ref === (cur.root || focal)) {
         onBack()
         return
       }
@@ -1230,17 +1496,26 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const handlers = { onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onReply: full ? targetReply : onReply, onQuote, onReport, onDelete: del.offered ? del.ask : undefined, onMessage, onNotice: onToast }
   const props = (item, extra, rowKey) => rowProps({ item, names, peeked: peekedRef.current, now, ownKey, follows, eng: full ? eng : null, handlers, extra, cache: rowKey === undefined ? undefined : rowCache, rowKey })
   // Before the offline return: hooks run on every render.
-  const childMore = new Map([...open].map((key) => [key, !childNext.has(key) || childNext.get(key) !== null]))
-  const branches = branchView(view.replies, eng.counts, children, ownReplies.current)
-  const rows = threadRows({ replies: view.replies, ...branches, open, more: childMore })
+  const shownRodas = useMemo(() => new Map([...rodas].map(([key, roda]) => [key, rodaOrder(roda.replies, key)])), [rodas])
+  const rows = commentRows({
+    comments: view.comments,
+    rodas: shownRodas,
+    open,
+    counts: eng.counts,
+    totals: new Map([...rodas].filter(([, roda]) => roda.loaded && Number.isSafeInteger(roda.total)).map(([key, roda]) => [key, roda.total])),
+    more: rodaMore({ open, rodas, errors: rodaErrors, busy: rodaBusy }),
+    errors: rodaErrors,
+    // An orphan's top-most message is not the post's author.
+    postAuthor: view.post && view.status === 'ok' ? view.post.author : null
+  })
   const rowCache = useThreadRowCache(rows.map((row) => row.key), { handlers, eng: full ? eng : null })
   // One renderItem for the list's life: the cells re-render on extraData, and
   // the post rows whose cached props did not change skip their render.
   const renderRef = useRef(null)
   const renderItem = useCallback(({ item: row }) => renderRef.current(row), [])
-  const extra = useMemo(() => ({ eng, follows, now, childBusy, childErrors, childNext, styles, profileOf: names.profileOf }), [eng, follows, now, childBusy, childErrors, childNext, styles, names.profileOf])
+  const extra = useMemo(() => ({ eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, profileOf: names.profileOf }), [eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, names.profileOf])
 
-  const title = 'Conversa'
+  const title = 'Comentários'
   const top = <TopBar title={title} onBack={onBack} />
 
   // A send in flight keeps the thread and its bar mounted: a bar remounted
@@ -1252,25 +1527,33 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
         <DeletePrompt del={del} />
         <OfflineNote />
         <View style={styles.flex}>
-          {seed ? <PostRow {...props(seed)} expanded /> : null}
+          {seed
+            ? seed.replyTo
+              ? <PostRow {...props(seed, SEED_ROW)} level='comment' />
+              : <PostRow {...props(seed, SEED_ROW)} level='post' expanded />
+            : null}
           <View style={styles.note}><Soft>{node.hosted ? OFFLINE_NOTE : NOT_HOSTED_NOTE}</Soft></View>
         </View>
       </View>
     )
   }
 
-  const { phase, error, meta, parent, replies, unavailable, next, loadingMore, moreError, refreshing } = view
-  const post = view.post || (phase !== 'ready' ? seed : null)
-  const focalTarget = { ref: focal, ...(post ? identityOf(names, post.author, post) : {}), text: post ? post.text : '' }
-  const target = replyTarget || focalTarget
-  const expandReply = async (draft, target = replyTarget || focalTarget, attach) => {
-    if (typeof onReply !== 'function') return false
+  const { phase, error, meta, status, comments, unavailable, next, loadingMore, moreError, refreshing } = view
+  const post = view.post || (phase !== 'ready' && seedIsRoot ? seed : null)
+  const rootKey = root || (seedIsRoot ? focal : null)
+  // An unconfirmed root is not where a reply goes by default; a row tapped
+  // for a reply is signed and checked on its own.
+  const rootTarget = rootKey === null || (root !== null && view.proven !== true) ? null : { ref: rootKey, ...(post ? identityOf(names, post.author, post) : {}), text: post ? post.text : '' }
+  const target = replyTarget || rootTarget
+  const toRoot = target !== null && target.ref === rootKey
+  const expandReply = async (draft, target = replyTarget || rootTarget, attach) => {
+    if (typeof onReply !== 'function' || !target) return false
     const accepted = await onReply(attach ? { ...target, draft, attach } : { ...target, draft })
     if (accepted === true && replyDraft.current.focal === focal && replyDraft.current.text === draft) replyDraft.current.text = ''
     return accepted
   }
   const sendReply = async (text) => {
-    if (sendingRef.current) return false
+    if (sendingRef.current || !target) return false
     const refusal = refusalOf(text)
     const plan = quickReplyPlan({ text, nodeReady: full, actingAsPage: actingPageKey() !== null, hasLink: hasLink(text), refusal })
     if (plan.kind === 'empty') return false
@@ -1285,11 +1568,19 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
     const session = sessionRef.current
     const cacheEpoch = cacheGeneration()
     const at = new Date().toISOString()
+    // Where the reply will show, decided now: the view may change meanwhile.
+    // A deep message no loaded roda holds: the comment resolveRoot found for
+    // it, when shown; else none, and the reply shows once its roda loads.
+    const shownView = viewRef.current
+    const resolvedTop = shownView.resolved && shownView.resolved.status === 'ok' && shownView.resolved.target === target.ref ? shownView.resolved.top : null
+    const holder = toRoot
+      ? target.ref
+      : topOf(target.ref, shownView.comments, rodasRef.current) || (resolvedTop !== null && shownView.comments.some((c) => refOf(c.author, c.seq) === resolvedTop) ? resolvedTop : null)
     try {
       const result = await sendTextReply({ request, text, replyTo: target.ref })
       const sent = result.ok ? parseRef(result.ref) : null
       const item = sent ? { kind: 'post', ...sent, at, text, replyTo: parseRef(target.ref), ...identityOf(names, sent.author) } : null
-      if (item && cacheEpoch === cacheGeneration()) cacheOwnReply(target.ref, item)
+      if (item && holder !== null && cacheEpoch === cacheGeneration()) cacheOwnReply(holder, item)
       if (result.ok && replyDraft.current.focal === focal && replyDraft.current.text === text) replyDraft.current.text = ''
       if (result.ok && typeof onPublished === 'function') onPublished('quick-reply', target.ref)
       if (session !== sessionRef.current) return result.ok
@@ -1300,82 +1591,185 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
           : errorText(result.error)))
         return false
       }
-      ownReplies.current = mergeChildren(ownReplies.current, target.ref, [item])
-      if (target.ref === focal) commit({ replies: withOwnReply(viewRef.current.replies, item) })
-      else {
-        setChildren((previous) => mergeChildren(previous, target.ref, [item]))
-        const branches = branchView(viewRef.current.replies, eng.counts, childrenRef.current, ownReplies.current)
-        const parentKey = viewRef.current.replies.map((reply) => refOf(reply.author, reply.seq)).find((key) =>
-          (branches.children.get(key) || []).some((child) => refOf(child.author, child.seq) === target.ref))
-        setOpen((previous) => new Set(previous).add(parentKey || target.ref))
+      if (holder !== null) ownReplies.current = mergeChildren(ownReplies.current, holder, [item])
+      // An own comment goes first, as own comments do in each page. The
+      // header count rises with it, as a delete lowers it.
+      if (toRoot) {
+        const meta = viewRef.current.meta
+        commit({ comments: [item].concat(viewRef.current.comments), meta: meta ? { ...meta, repliesTotal: meta.repliesTotal + 1 } : meta })
+      } else if (holder !== null) {
+        const roda = rodasRef.current.get(holder)
+        putRodas(new Map(rodasRef.current).set(holder, roda
+          ? { ...roda, replies: roda.replies.concat([item]) }
+          : { replies: [item], waiting: [], mode: 'roda', complete: true, total: null, next: null, loaded: false }))
+        setOpen((previous) => new Set(previous).add(holder))
+        if (!roda || !roda.loaded) loadRoda(holder)
       }
       const count = eng.counts.get(target.ref)
       setCount(target.ref, { ...count, replies: (count && Number.isSafeInteger(count.replies) ? count.replies : 0) + 1 })
-      if (viewRef.current.next === null) load(false, true)
       return true
     } finally {
       sendingRef.current = false
       setSending(false)
     }
   }
-  renderRef.current = (row) => {
-    if (row.kind === 'expander') {
-      const key = refOf(row.parent.author, row.parent.seq)
-      return <View style={styles.branchAction}><BranchLink label={childLabel(row.count, row.open)} expanded={row.open} onPress={() => toggleChildren(row)} pending={childBusy.has(key)} /></View>
+  // Same pattern as the chat's quote jump (Mensagem.js): scrollToIndex
+  // throws for a row it cannot place, and the first offset can be an
+  // estimate, so it is tried again after a moment before the flash. `quiet`:
+  // the anchor, whose miss leaves the roda open with nothing announced.
+  const scrollToKey = (key, quiet = false) => {
+    clearTimeout(jumpTimer.current)
+    clearTimeout(flashTimer.current)
+    setFlashKey(null)
+    const missing = () => {
+      if (quiet) return
+      AccessibilityInfo.announceForAccessibility(OUTSIDE_NOTE)
+      if (typeof onToast === 'function') onToast(OUTSIDE_NOTE)
     }
-    if (row.kind === 'more') {
+    const start = rowsRef.current.findIndex((row) => row.key === key)
+    const list = listRef.current
+    if (start < 0 || !list || typeof list.scrollToIndex !== 'function') return missing()
+    // Brings the last row the list can place into view, so the cells after it mount.
+    const towardEnd = (below) => {
+      for (let at = below - 1; at >= 0; at--) {
+        try {
+          list.scrollToIndex({ index: at, animated: false, viewPosition: 1 })
+          return
+        } catch {}
+      }
+    }
+    const jump = (index, tries) => {
+      try {
+        list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
+      } catch {
+        // The anchor's row lands in the same commit as its jump, before the
+        // list measured it: tried again a few times before a quiet miss.
+        if (!quiet || tries >= ANCHOR_TRIES) return missing()
+        towardEnd(index)
+        jumpTimer.current = setTimeout(() => {
+          if (listRef.current !== list) return
+          const again = rowsRef.current.findIndex((row) => row.key === key)
+          if (again < 0) return missing()
+          jump(again, tries + 1)
+        }, JUMP_RETRY_MS)
+        return
+      }
+      jumpTimer.current = setTimeout(() => {
+        if (listRef.current !== list) return
+        // A page can land in between and shift the index.
+        const at = rowsRef.current.findIndex((row) => row.key === key)
+        if (at < 0) return missing()
+        try {
+          list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
+          setFlashKey(key)
+          flashTimer.current = setTimeout(() => setFlashKey(null), FLASH_MS)
+        } catch {
+          missing()
+        }
+      }, JUMP_RETRY_MS)
+    }
+    jump(start, 1)
+  }
+  rowsRef.current = rows
+  scrollRef.current = scrollToKey
+  const swipeOff = (item) => !full || sending || !canSwipeReply(item)
+  const swipeTo = (item) => () => {
+    const who = identityOf(names, item.author, item)
+    targetReply({ ref: refOf(item.author, item.seq), name: who.name, username: who.username, text: item.text })
+  }
+  const flashOf = (row) => flashKey === row.key ? <View pointerEvents='none' style={styles.flash} /> : null
+  // PostRow is memoized: the same quote keeps the same object across renders,
+  // and its tap reads the latest scroll helper through scrollRef.
+  const quoteOf = (row) => {
+    const q = row.quote
+    if (!q) return undefined
+    const name = q.missing ? null : whoOf(identityOf(names, q.author, q)).title
+    const text = q.missing ? MISSING_QUOTE : q.text
+    const senderKey = q.missing ? undefined : q.author
+    const ref = q.ref
+    const held = quotes.current.get(row.key)
+    if (held && held.name === name && held.text === text && held.senderKey === senderKey && held.ref === ref) return held
+    // A quote never answers the comment itself (rodaQuote), so it is a reply row.
+    const value = { name, text, senderKey, ref, onPress: () => scrollRef.current('reply:' + ref) }
+    quotes.current.set(row.key, value)
+    return value
+  }
+  renderRef.current = (row) => {
+    if (row.kind === 'toggle') {
       const key = refOf(row.parent.author, row.parent.seq)
+      return <View style={styles.branchAction}><BranchLink label={row.label} expanded={row.open} onPress={() => toggleRoda(row)} pending={rodaBusy.has(key)} /></View>
+    }
+    if (row.kind === 'more' || row.kind === 'error') {
+      const key = refOf(row.parent.author, row.parent.seq)
+      const failure = rodaErrors.get(key)
       return (
-        <View style={[styles.child, styles.branchAction, childErrors.has(key) && styles.branchError]}>
-          {childErrors.has(key)
-            ? <><ErrorText>{displayText(childErrors.get(key))}</ErrorText><BranchLink label='Tentar de novo' onPress={() => loadChildren(key)} pending={childBusy.has(key)} /></>
-            : <BranchLink label='Ver mais respostas' onPress={() => loadChildren(key, childNext.get(key))} pending={childBusy.has(key)} />}
+        <View style={[styles.child, styles.branchAction, row.kind === 'error' && styles.branchError]}>
+          {row.kind === 'error'
+            ? <><ErrorText>{displayText(failure ? failure.text : RODA_ERROR)}</ErrorText><BranchLink label='Tentar de novo' onPress={() => loadRoda(key, failure ? failure.cursor : null)} pending={rodaBusy.has(key)} /></>
+            : <BranchLink label='Ver mais respostas' onPress={() => loadRoda(key, rodas.has(key) && rodas.get(key).loaded ? rodas.get(key).next : null)} pending={rodaBusy.has(key)} />}
+        </View>
+      )
+    }
+    const tag = row.isAuthor ? AUTHOR_TAG : undefined
+    // The reply icon stays: the swipe is a shortcut, never the only way.
+    if (row.kind === 'reply') {
+      return (
+        <View style={styles.child}>
+          <SwipeReply disabled={swipeOff(row.item)} onReply={swipeTo(row.item)}>
+            <View style={styles.rowBox}>
+              <PostRow {...props(row.item, THREAD_ROW, row.key)} level='reply' tag={tag} replyQuote={quoteOf(row)} />
+              {flashOf(row)}
+            </View>
+          </SwipeReply>
         </View>
       )
     }
     return (
-      <View style={row.depth === 1 ? styles.child : undefined}>
-        <PostRow {...props(row.item, row.depth === 0 ? DEPTH_ZERO : undefined, row.key)} />
-        {row.depth === 1 && row.deeper !== 0
-          ? <View style={styles.branchAction}><BranchLink label='Ver conversa' onPress={() => onOpenThread({ ref: refOf(row.item.author, row.item.seq), seed: row.item })} /></View>
-          : null}
-      </View>
+      <SwipeReply disabled={swipeOff(row.item)} onReply={swipeTo(row.item)}>
+        <View style={styles.rowBox}>
+          <PostRow {...props(row.item, THREAD_ROW, row.key)} level='comment' tag={tag} />
+          {flashOf(row)}
+        </View>
+      </SwipeReply>
     )
   }
+  // A roda the seeder cut, or direct replies only (a seeder without
+  // /index/roda) where one of them has replies of its own.
+  const rodaGaps = [...rodas].some(([, roda]) => roda.loaded && (roda.complete === false || (roda.mode === 'direct' && roda.replies.some((item) => {
+    const count = eng.counts.get(refOf(item.author, item.seq))
+    return !!count && Number.isSafeInteger(count.replies) && count.replies > 0
+  }))))
   const notes = []
   if (error && phase === 'ready') notes.push(error)
-  if (view.parentGone) notes.push(PARENT_GONE_NOTE)
+  if (phase === 'ready' && status === 'orphan') notes.push(view.cut ? CUT_NOTE : PARENT_GONE_NOTE)
   if (meta && meta.indexing) notes.push('Ainda montando a conversa completa…')
-  else if (meta && meta.complete === false) notes.push('Algumas respostas podem faltar.')
-  const hasReplies = (meta ? meta.repliesTotal : 0) > 0 || replies.length > 0
-  if (unavailable > 0) notes.push(unavailable === 1 ? '1 resposta indisponível' : String(unavailable) + ' respostas indisponíveis')
+  else if ((meta && meta.complete === false) || rodaGaps) notes.push('Algumas respostas podem faltar.')
+  const hasReplies = (meta ? meta.repliesTotal : 0) > 0 || comments.length > 0
+  if (unavailable > 0) notes.push(unavailable === 1 ? '1 comentário indisponível' : String(unavailable) + ' comentários indisponíveis')
 
   const header = (
     <View style={styles.header}>
-      {parent
-        ? (
-          <>
-            {/* Outside the dimmed box: the label is the context, not part of the faded post. */}
-            <View onLayout={(e) => setParentLabelHeight(e.nativeEvent.layout.height)}>
-              <Text style={styles.parentLabel}>{parentLabel(identityOf(names, parent.author, parent))}</Text>
-            </View>
-            <View style={styles.parent} onLayout={(e) => setParentHeight(e.nativeEvent.layout.height)}>
-              <PostRow {...props(parent)} />
-            </View>
-          </>
-          )
-        : null}
-      {post
+      {post && (phase !== 'ready' || status === 'ok')
         ? (
           <View style={styles.focal}>
-            <PostRow expanded {...props(post, parent ? { onOpenParent: () => onOpenThread({ ref: refOf(parent.author, parent.seq), seed: parent }), replyToName: whoOf(identityOf(names, parent.author, parent)).title } : {})} />
+            <PostRow expanded level='post' {...props(post, THREAD_ROW)} />
             {/* After the row: PostRow paints an opaque bg, and later siblings paint on top. */}
             <View pointerEvents='none' style={styles.accentBar} />
           </View>
           )
         : null}
-      {parent && post && parentHeight !== null
-        ? <View pointerEvents='none' accessible={false} style={[styles.connector, { top: 60 + parentLabelHeight, height: parentHeight - 48 }]} />
+      {/* The top-most message that could be read, with its replies under it. */}
+      {post && phase === 'ready' && status === 'orphan'
+        ? <PostRow level='comment' {...props(post, THREAD_ROW)} />
+        : null}
+      {/* A reply tapped in a feed: its thread's main post is still on its way. */}
+      {phase !== 'ready' && seed && !seedIsRoot
+        ? (
+          <>
+            {phase === 'loading' ? <Skeleton rows={1} /> : null}
+            <PostRow level='comment' {...props(seed, SEED_ROW)} />
+          </>
+          )
         : null}
       {phase === 'ready' && !view.post
         ? <View style={styles.note}><Soft>Esta publicação não pôde ser verificada agora.</Soft></View>
@@ -1383,14 +1777,14 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       {phase === 'error'
         ? <ErrorState message={displayText(error)} onRetry={() => load(false)} />
         : null}
-      {/* No "0 respostas" header over an empty thread; the notes still show. */}
+      {/* No "0 comentários" header over an empty thread; the notes still show. */}
       {phase === 'ready' && (hasReplies || notes.length > 0)
         ? (
           <View style={styles.repliesHead}>
             {hasReplies
               ? (
                 <Text style={styles.repliesTitle} accessibilityRole='header'>
-                  {Math.max(meta ? meta.repliesTotal : 0, replies.length) === 1 ? '1 resposta' : String(Math.max(meta ? meta.repliesTotal : 0, replies.length)) + ' respostas'}
+                  {commentsTitle(Math.max(meta ? meta.repliesTotal : 0, comments.length))}
                 </Text>
                 )
               : null}
@@ -1416,13 +1810,14 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
             keyExtractor={(row) => row.key}
             renderItem={renderItem}
             extraData={extra}
+            listRef={listRef}
             ListHeaderComponent={header}
             ListEmptyComponent={phase === 'loading' ? <Skeleton /> : null}
             ListFooterComponent={phase === 'ready'
               ? (
                 <ListFooter
                   loading={loadingMore}
-                  atEnd={next === null && replies.length > 0}
+                  atEnd={next === null && comments.length > 0}
                   endText='Isso é tudo nesta conversa.'
                   error={moreError}
                   onRetry={loadMore}
@@ -1454,10 +1849,12 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
               onExpand={expandReply}
               onAttach={(draft) => expandReply(draft, undefined, 'photo')}
               me={me}
-              nonFocalTarget={replyTarget !== null && replyTarget.ref !== focal}
+              nonFocalTarget={replyTarget !== null && !toRoot}
+              placeholder={toRoot ? 'Escreva um comentário' : undefined}
+              sendLabel={toRoot ? 'Comentar' : undefined}
               onClearTarget={() => setReplyTarget(null)}
               busy={sending}
-              disabled={!post && !replyTarget}
+              disabled={!target || (!post && !replyTarget)}
               note={note}
               focusSignal={focusSignal}
             />
@@ -1493,13 +1890,11 @@ const makeStyles = (colors) => StyleSheet.create({
   branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' },
   branchError: { paddingTop: space.sm },
   header: { position: 'relative' },
-  // Its height is measured, and the connector starts below it.
-  parentLabel: { ...type.replyMark, color: colors.soft, paddingHorizontal: 16, paddingTop: space.sm },
-  parent: { opacity: 0.72 },
   focal: { position: 'relative' },
   accentBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: colors.accent },
-  // Avatar centre x is 36 (paddingHorizontal 16 + 40 / 2); starts 4 below the parent avatar (16 + 40).
-  connector: { position: 'absolute', left: 35, top: 60, width: 2, backgroundColor: colors.line },
+  rowBox: { position: 'relative' },
+  // Over the row: PostRow paints an opaque bg, so a tint under it would not show.
+  flash: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: colors.accent, opacity: 0.12 },
   repliesHead: { paddingHorizontal: 16, paddingVertical: 12, gap: 4, borderBottomWidth: 1, borderBottomColor: colors.line },
   repliesTitle: { ...type.section, color: colors.soft }
 })

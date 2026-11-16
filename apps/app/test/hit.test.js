@@ -38,7 +38,7 @@ test('PostRow head targets take their hit area from hitSlopFor, never a fixed 4 
   const post = fs.readFileSync(path.join(__dirname, '../src/ui/PostRow.js'), 'utf8')
   const head = post.slice(post.indexOf('return (\n    <View style={styles.row}'), post.indexOf('<View style={[styles.headActions'))
   const slops = [...head.matchAll(/hitSlop=\{([^}]*)\}/g)].map((m) => m[1])
-  t.alike(slops, ['repostedSlop', 'repostedFollowSlop', 'avatarSlop', 'nameSlop', 'metaSlop', 'metaSlop'], 'reposted line, seguir, avatar, name, @handle, date')
+  t.alike(slops, ['repostedSlop', 'repostedFollowSlop', 'repostedSlop', 'avatarSlop', 'nameSlop', 'metaSlop', 'metaSlop'], 'reposted line, seguir, comentou line, avatar, name, @handle, date')
   t.ok(post.includes("import { hitSlopFor } from '../hit'"))
   t.is(post.split('hitSlopFor(').length - 1, 5, 'one computed slop per target kind')
   t.ok(post.includes('paddingTop: ROW_PAD_TOP') && post.includes('marginBottom: REPOSTED_GAP'), 'the room the slop may use is the same value the layout uses')

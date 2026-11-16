@@ -16,7 +16,7 @@ const SEND = 40
 const PAD_V = (SEND - LINE_HEIGHT) / 2
 const MIN_HEIGHT = SEND
 
-export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTarget, busy = false, disabled = false, note = '', focusSignal, draft = '', onDraftChange, me = null, nonFocalTarget = false }) {
+export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTarget, busy = false, disabled = false, note = '', focusSignal, draft = '', onDraftChange, me = null, nonFocalTarget = false, placeholder = 'Escreva uma resposta', sendLabel = 'Responder' }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const { fontScale } = useWindowDimensions()
@@ -99,8 +99,8 @@ export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTa
               onChangeText={setText}
               editable={!off}
               multiline
-              placeholder='Escreva uma resposta'
-              accessibilityLabel='Escreva uma resposta'
+              placeholder={placeholder}
+              accessibilityLabel={placeholder}
               placeholderTextColor={colors.placeholder}
               maxFontSizeMultiplier={TEXT_CAP}
               onContentSizeChange={grow}
@@ -136,7 +136,7 @@ export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTa
           ? (
             <Pressable
               accessibilityRole='button'
-              accessibilityLabel='Responder'
+              accessibilityLabel={sendLabel}
               accessibilityState={{ disabled: sendOff, busy: action.pending }}
               disabled={sendOff}
               onPress={send}
