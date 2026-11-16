@@ -1306,6 +1306,61 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   t.is((await errorOf(other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, LOCKED)
 })
 
+test('a photo still downloading when its conversation is deleted is not cached afterwards', async (t) => {
+  const blob = require('@varanda/core/lib/blob')
+  const blobPath = require.resolve('../lib/blob')
+  const realBlob = require(blobPath)
+  const frames = new Map()
+  const gate = { held: false, release: null, wait: null }
+  const options = {
+    mediaOrigin: 'http://127.0.0.1',
+    fetch: async (url) => {
+      if (gate.held) await gate.wait
+      return new Response(frames.get(url), { status: frames.has(url) ? 200 : 404 })
+    }
+  }
+  require.cache[blobPath].exports = {
+    ...realBlob,
+    createBlobClient: () => ({
+      async send (sealed) {
+        for (let i = 0; i < sealed.descriptor.chunks; i++) {
+          const frame = blob.encodeChunk({ id: sealed.id, index: i, count: sealed.descriptor.chunks, kid: b4a.alloc(8), sig: b4a.alloc(dmCore.DROP.SIG_BYTES), token: b4a.alloc(32), bytes: sealed.cipher.subarray(i * blob.BLOB_CHUNK_BYTES, (i + 1) * blob.BLOB_CHUNK_BYTES) })
+          frames.set('http://127.0.0.1/blob/' + sealed.descriptor.id + '/' + i, frame)
+        }
+        sealed.acked.fill(true)
+      },
+      walletSize: async () => 1000,
+      topUp: async () => 0
+    })
+  }
+  let s
+  try { s = await sendingEngine(t, { stamps: 4, options }) } finally { require.cache[blobPath].exports = realBlob }
+  const drops = []
+  s.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
+  s.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
+  const bytes = new Uint8Array([255, 216, 255, 192, 0, 17, 8, 0, 48, 0, 64, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1, 255, 218, 0, 2, 255, 217])
+  const image = await s.engine.putMedia(s.own, s.kp, { bytes: new Uint8Array(bytes), mime: 'image/jpeg', width: 64, height: 48, to: s.peer })
+  const sent = await s.engine.send(s.own, s.kp, { to: s.peer, text: 'link', card: { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image } }, s.recipientBox)
+
+  const storage = memoryNodeStorage()
+  const other = engineWithDmLink(s.link)({ storage, association: s.association, ...options })
+  t.teardown(() => other.close(), { force: true })
+  await other.unlock(s.prf)
+  await other.loaded()
+  t.is((await other.pull(s.own)).added, 1, 'the self copy is ingested by another device')
+  const cached = async () => ((await storage.readJson('dmMediaIndex')) || { items: [] }).items.length
+
+  gate.held = true
+  gate.wait = new Promise((resolve) => { gate.release = resolve })
+  const reading = other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }).catch(() => null)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await other.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  gate.release()
+  await reading
+  await other.idle()
+  t.is(await cached(), 0, 'nothing was cached for the deleted message')
+})
+
 test('dm.react: two stamps and two puts as one dm.send; a no-op sends nothing; a missing target or no stamps refuses', async (t) => {
   const { engine, storage, calls, own, kp, peer, recipientBox, send } = await sendingEngine(t, { stamps: 6 })
   const puts = () => calls.filter((c) => c[0] === 'put').length
@@ -2460,20 +2515,25 @@ test('a delete op pulled from another own device compacts too', async (t) => {
   first.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
   first.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
   await first.send()
-  const other = await sendingEngineSibling(t, first)
+  // The sibling's clock is 40 days ahead from its start (the filing time of
+  // a row is the real one, the compaction age is this clock minus it), so
+  // its unlock pass is the first and the hourly window is still closed when
+  // it pulls: only the delete op itself can start the second pass.
+  const other = await sendingEngineSibling(t, first, 40 * DAY)
+  await other.engine.idle()
+  t.is(other.counts.compact, 1, 'the unlock pass')
   // Both drops of the send and the ctl: the other device files the self copy and the delete together.
   await first.engine.set(first.own, first.kp, { peer: first.peer, state: 'deleted' })
-  other.clock.t += 40 * DAY
   t.is((await other.engine.pull(first.own)).added, 1, 'the self copy is filed')
   await other.engine.idle()
-  t.ok(other.counts.compact >= 2, 'a pass ran for the delete op')
+  t.is(other.counts.compact, 2, 'exactly one more pass, for the delete op')
   t.alike(await localBlocks(other.storage), [false, true], 'the message block is freed past the bound')
   t.is((await other.engine.thread(first.own, { peer: first.peer })).messages.length, 0)
 })
 
 // Another device of the same passkey and identity on the same pool stand-in.
-async function sendingEngineSibling (t, first) {
-  const clock = { t: Date.now() }
+async function sendingEngineSibling (t, first, ahead = 0) {
+  const clock = { t: Date.now() + ahead }
   const counts = { compact: 0, media: 0 }
   const storage = memoryNodeStorage()
   const engine = engineWithDmLink(first.link)({ storage, association: first.association, limits: { now: () => clock.t }, createStore: compactSpy(counts) })

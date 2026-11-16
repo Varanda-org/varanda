@@ -132,10 +132,18 @@ const LOCKED = 'identidade bloqueada: entre com a passkey'
 const VISIT_UNREADABLE = 'dados de visitas ilegíveis'
 const ROW_BUCKET = 1024
 // A row hidden by "Apagar conversa" is freed from the core only once its
-// drop can no longer come back from the pool (DM_RETENTION_MS there, plus a
-// day of clock slack): a self copy of an own message is pulled after it was
-// filed, and a cleared row would let it be filed again, after the delete.
-const COMPACT_AFTER_MS = DM_RETENTION_MS + 86400000
+// drop can no longer come back from the pool: a self copy of an own message
+// is pulled after it was filed, and a cursor reset (a Página key rotation or
+// adoption, a lost or invalid dmCursor) pulls the whole pool again, and a
+// cleared row would let either be filed again, after the delete. The wait
+// covers the longest retention any seeder may run (14 days), whatever this
+// client's own constant says, plus a day of clock slack.
+const COMPACT_AFTER_MS = Math.max(DM_RETENTION_MS, 14 * 86400000) + 86400000
+// core.clear ranges one pass may issue: the first pass after the upgrade does
+// not hold the store queue for long, the hourly pass frees the rest.
+const COMPACT_RANGES_MAX = 256
+// The fold ignores a filedAt past this (dm-fold.js MAX_TIME).
+const MAX_TIME = 8.64e15
 const CACHE_BYTES_MAX = 256 * 1048576
 
 function isCount (n, max) {
@@ -866,9 +874,18 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   function deleteCutoffs () {
     const cut = new Map()
     for (const r of rows) {
-      if (r.t === 'ctl' && r.op === 'deleted' && !(cut.get(r.peer) >= r.filedAt)) cut.set(r.peer, r.filedAt)
+      if (r.t === 'ctl' && r.op === 'deleted' && Math.abs(r.filedAt) <= MAX_TIME && !(cut.get(r.peer) >= r.filedAt)) cut.set(r.peer, r.filedAt)
     }
     return cut
+  }
+
+  // True when a delete op hides the stored message (from, id): a photo of it
+  // is never shown again, so it is not cached. False while locked or when the
+  // message is not stored.
+  function hiddenByDelete (from, id) {
+    if (rows === null) return false
+    const cut = deleteCutoffs()
+    return rows.some((r) => r.t === 'msg' && r.from === from && r.id === id && r.filedAt <= cut.get(r.peer))
   }
 
   // Runs inside serial(): drops the cache entries named in `names`, any age.
@@ -922,7 +939,10 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
       if (rows === null || gen !== generation) return 0
       const cut = deleteCutoffs()
       if (cut.size === 0) return 0
-      const free = rows.filter((r) => (r.t === 'msg' || r.t === 'rx') && r.filedAt <= cut.get(r.peer) && now - r.filedAt > COMPACT_AFTER_MS && Number.isSafeInteger(blockOf.get(r)))
+      // A legacy Página row has a synthetic filedAt far below any clock (it
+      // is always old), so its own `at` must be old too.
+      const old = (r) => now - r.filedAt > COMPACT_AFTER_MS && (r.legacy !== true || now - Date.parse(r.at) > COMPACT_AFTER_MS)
+      const free = rows.filter((r) => (r.t === 'msg' || r.t === 'rx') && r.filedAt <= cut.get(r.peer) && old(r) && Number.isSafeInteger(blockOf.get(r)))
       if (free.length === 0) return 0
       // Their photos first: a freed row would leave the entry nameless.
       const names = new Set(free.filter((r) => r.t === 'msg' && (r.media != null || r.card != null)).map((r) => mediaName(r.from, r.id)))
@@ -933,7 +953,8 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
       for (const i of indexes) {
         const last = ranges[ranges.length - 1]
         if (last !== undefined && last[1] === i) last[1] = i + 1
-        else ranges.push([i, i + 1])
+        else if (ranges.length < COMPACT_RANGES_MAX) ranges.push([i, i + 1])
+        else break
       }
       const gone = new Set()
       try {
@@ -1133,7 +1154,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     return queue
   }
 
-  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, dropDeletedMedia, compact, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
+  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, dropDeletedMedia, hiddenByDelete, compact, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
 }
 
-module.exports = { createDmStore, COMPACT_AFTER_MS, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }
+module.exports = { createDmStore, COMPACT_AFTER_MS, COMPACT_RANGES_MAX, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }

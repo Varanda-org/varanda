@@ -11,7 +11,7 @@ Liberar os blocos de mensagens apagadas, mas só quando elas já não podem volt
 
 Quando roda (`packages/web-member/lib/dm.js`, `housekeep`): depois que as linhas carregam no desbloqueio; logo depois de um `deleted` arquivado (por `dm.set`, vindo de outro aparelho da mesma passkey no `dm.pull`, ou o `ctl` de uma Página); e no máximo uma vez por hora a partir de um `dm.pull`. As lojas das Páginas têm o mesmo tratamento: rodam quando a loja abre (depois de carregar as linhas) e entram na passagem horária e na de um `deleted` puxado. Uma falha vira o aviso "limpeza local das conversas apagadas não concluída" e nunca quebra o `dm.pull` nem o `dm.set`.
 
-Texto novo para a pessoa: a confirmação "Apagar esta conversa?" (`apps/app/src/screens/Mensagem.js`), a folha de ajuda de Conversas (`apps/app/src/help.js`) e uma frase na Política de Privacidade (`apps/app/src/legal.js`, texto das fotos das mensagens diretas), todas dizendo que o texto e as fotos saem da memória dos aparelhos em até 15 dias e que a outra pessoa continua com a cópia dela. A versão dos Termos e o resumo fixado em `apps/app/test/legal.test.js` são subidos no pouso, não aqui.
+Texto novo para a pessoa: a confirmação "Apagar esta conversa?" (`apps/app/src/screens/Mensagem.js`), a folha de ajuda de Conversas (`apps/app/src/help.js`) e uma frase na Política de Privacidade (`apps/app/src/legal.js`, texto das fotos das mensagens diretas), dizendo que as fotos saem da memória dos aparelhos na hora e o texto na primeira vez que o app abre depois de 15 dias (a faxina só roda com o app aberto), e que a outra pessoa continua com a cópia dela. O botão do menu passou de "Apagar conversa neste aparelho" para "Apagar conversa" (`LABELS.delete` em `apps/app/src/dm.js`). A versão dos Termos e o resumo fixado em `apps/app/test/legal.test.js` são subidos no pouso, não aqui.
 
 Limite conhecido, também em `docs/protocol.md` (seção 11, "Riscos residuais (DM)"): `core.clear` zera os bytes nos armazenamentos deste nó, mas o IndexedDB do navegador ou a memória flash do aparelho podem guardar cópias antigas até compactarem por conta própria. A promessa é "em até 15 dias", não "provado apagado do meio físico".
 
@@ -36,9 +36,29 @@ Cada arquivo sozinho, a partir de `packages/web-member`. Os testes novos do núc
 
 Sem a correção, medido assim: `compact` devolvendo 0 cedo, `dm-store.test.js` passa de 37/37 para 32/37 (falham 5 testes); `dropDeletedMedia` devolvendo 0, para 36/37; `COMPACT_AFTER_MS = 0`, para 34/37; `housekeep` devolvendo cedo, `dm.test.js` passa de 70/70 para 65/70 (falham os 5 testes novos do motor). Depois de cada ensaio o arquivo voltou ao estado final e os testes foram rodados de novo.
 
-Resultados com a mudança: `dm-store.test.js` 37/37 (278 asserções), `dm.test.js` 70/70 (736 asserções). Os demais arquivos conferidos para não regredir, cada um sozinho: `dm-summary.test.js`, `dm-memo.test.js`, `page-dm.test.js`, `dm-e2e.test.js`, `session-dm-unlock.test.js`, `resume.test.js`, `apps/app/test/help.test.js`, `apps/app/test/chatActions.test.js`, `apps/app/test/dm.test.js` e `apps/site/test/legal.test.js` (a página do site foi gerada de novo com `node apps/site/scripts/render-legal.js`).
+### Revisão da PR (correções)
 
-Fora deste PR: as lojas das Páginas foram ligadas à mesma faxina, mas nenhum teste novo apaga uma conversa de Página e confere os blocos; só os testes do motor do próprio membro cobrem a regra.
+Testes novos ou mudados na rodada de revisão, cada um conferido desfazendo a correção, rodando o arquivo e restaurando:
+
+| Arquivo | Teste | Correção desfeita | Sem a correção |
+|---|---|---|---|
+| `dm-store.test.js` | "the wait covers a 14-day seeder retention plus a day..." | `COMPACT_AFTER_MS = DM_RETENTION_MS + 86400000` | falha |
+| `dm-store.test.js` | "a pass issues at most COMPACT_RANGES_MAX clear ranges..." | sem o teto de 256 faixas | falha |
+| `dm-store.test.js` | "a legacy row with an old filedAt but a recent at..." | sem a checagem do `at` da linha legada | falha |
+| `dm-store.test.js` | "a delete op with a filedAt outside the fold range is no cutoff" | sem `Math.abs(filedAt) <= 8.64e15` | falha |
+| `dm-store.test.js` | "hiddenByDelete is true only for..." e "one pass clears several ranges (hidden, visible, hidden)..." | sem efeito a desfazer: cobrem o auxiliar novo e o caso de várias faixas e o resumo, que já funcionavam; o auxiliar é exercitado também pelo teste do motor abaixo | passam (não é regressão de uma correção) |
+| `dm-store.test.js` | teste "photos of a deleted conversation..." (itens `dmMedia/<n>/0` leem null) e renomeado "a lock before the queued task runs..." | só asserções e nome | n/a |
+| `dm.test.js` | "a photo still downloading when its conversation is deleted is not cached afterwards" | sem `hiddenByDelete` em `runOpen` | falha |
+| `dm.test.js` | "a delete op pulled from another own device compacts too" (agora: relógio do irmão adiantado antes do desbloqueio, `counts.compact === 1` e depois `=== 2` exatos) | sem o gatilho do caminho do pull | falha |
+| `page-dm.test.js` | "a deleted Página conversation is compacted when the page store opens and by the hourly pass" | passagem horária só do armazenamento próprio; sem a faxina na abertura da loja da Página | falha nos dois casos (tempo esgotado esperando os blocos) |
+
+Resultados desta rodada: `dm-store.test.js` 43/43 (306 asserções), `dm.test.js` 71/71 (739), `page-dm.test.js` 20/20 (219). O resumo (`summaryFor`) fica igual depois da compactação (teste novo). O teste fixado de `apps/app/test/legal.test.js` falha como esperado, porque a frase da Privacidade mudou e a versão dos Termos não sobe aqui; o resumo novo é `f1cd96eeab6fc46cab7d8060668af84b81008d9e511e1126914e209b6dcbb1e8`.
+
+Itens da revisão não feitos, como limites conhecidos: (7) a ordem da deduplicação ao arquivar, inofensiva; e os casos de queda do armazenamento no meio de um `core.clear`, além do que está dito em `docs/protocol.md` (o que o núcleo confirmou é esquecido e o resto é tentado de novo na passagem seguinte). A faxina só roda com o app aberto, e a Política de Privacidade diz isso.
+
+Resultados da primeira rodada: `dm-store.test.js` 37/37 (278 asserções), `dm.test.js` 70/70 (736 asserções). Os demais arquivos conferidos para não regredir, cada um sozinho: `dm-summary.test.js`, `dm-memo.test.js`, `page-dm.test.js`, `dm-e2e.test.js`, `session-dm-unlock.test.js`, `resume.test.js`, `apps/app/test/help.test.js`, `apps/app/test/chatActions.test.js`, `apps/app/test/dm.test.js` e `apps/site/test/legal.test.js` (a página do site foi gerada de novo com `node apps/site/scripts/render-legal.js`).
+
+As lojas das Páginas usam a mesma faxina e agora têm teste próprio (`page-dm.test.js`).
 
 ## Para conferir à mão num aparelho
 

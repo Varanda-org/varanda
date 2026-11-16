@@ -975,7 +975,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         throw new UsageError(LOCKED)
       }
       try {
-        await local.putMedia(m.from, m.id, out)
+        // A message a delete op hides is never shown again: no cache write.
+        if (!local.hiddenByDelete(m.from, m.id)) await local.putMedia(m.from, m.id, out)
       } catch {
         if (gen === generation) log('aviso: mídia aberta mas não guardada neste aparelho')
       }
@@ -1449,7 +1450,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     entry.plains = null
     if (plains.length > 0) {
       try {
-        await local.putMedia(row.from, row.id, plains)
+        // Deleted while the upload ran: nothing to cache.
+        if (!lc.hiddenByDelete(row.from, row.id)) await local.putMedia(row.from, row.id, plains)
       } catch {}
       plains.forEach(wipe)
     }
