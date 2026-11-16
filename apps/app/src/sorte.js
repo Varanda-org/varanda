@@ -1,5 +1,6 @@
-// Sorte do dia: one bundled line per day, chosen on the device from the local
-// date and a random per-device salt. No network, no account data.
+// Sorte do dia: one bundled line per day, chosen from the local date and the
+// diary's public key, so every device of the same passkey shows the same line.
+// Nothing is stored or sent.
 export const SORTES = Object.freeze([
   'Hoje, uma conversa simples vai valer mais do que parecia.',
   'Alguém perto de você está esperando uma mensagem sua.',
@@ -66,16 +67,10 @@ export const SORTES = Object.freeze([
   'A sorte de hoje é a de quem acredita no próximo.'
 ])
 
-// The salt is generated once per device and kept by the store.
-export function newSalt () {
-  const bytes = new Uint8Array(8)
-  try {
-    globalThis.crypto.getRandomValues(bytes)
-  } catch {
-    // Not secret (it only spreads the lines across devices), so Math.random is fine.
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
-  }
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+// The key is already public; its first 16 hex chars are enough to spread the
+// lines across people.
+export function saltOfKey (publicKey) {
+  return typeof publicKey === 'string' && /^[0-9a-f]{64}$/.test(publicKey) ? publicKey.slice(0, 16) : null
 }
 
 export function isSalt (value) {

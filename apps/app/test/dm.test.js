@@ -25,7 +25,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     decline: 'Recusar',
     block: 'Bloquear mensagens',
     unblock: 'Desbloquear mensagens',
-    delete: 'Apagar conversa neste aparelho',
+    delete: 'Apagar conversa',
     report: 'Denunciar',
     reply: 'Responder',
     message: 'Mensagem',
@@ -394,11 +394,11 @@ test('Mensagem sends a voice note on the blob channel and keeps the photo send s
 test('Mensagem offers Encaminhar and marks forwarded messages without the original author', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
-  t.ok(src.includes('const canForward = pageKey === null && unlocked'), 'never as a page')
+  t.ok(src.includes('const canForward = unlocked\n'), 'also as a page, through the page client (forwardSheet.test.js)')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
   t.ok(src.includes('fwd={fwdOf.get(item.key)}') && src.includes('forwarded={!item.deleted && fwd === 1}'), 'fwd 1 from dm.thread shows the line')
   t.ok(src.includes('media={mediaOf.get(item.key)}') && src.includes('dmForwardSource(item.rawText, media)'), 'expired media maps to an unavailable item')
-  t.ok(src.includes('if (forwardSource !== null) {'), 'no Encaminhar when nothing is left to forward')
+  t.ok(src.includes('if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {'), 'no Encaminhar when nothing is left to forward')
   t.absent(src.includes('media: Array.isArray(media) ? media : []'), 'expired media never becomes a plain text forward')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')

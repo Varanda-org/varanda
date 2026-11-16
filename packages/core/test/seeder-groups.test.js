@@ -16,7 +16,7 @@ const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
 const { groupJoinRecord } = require('../lib/records')
-const { groupPost } = require('../lib/group')
+const { groupPost, groupMeta } = require('../lib/group')
 const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
 const {
   hex,
@@ -1486,4 +1486,122 @@ test('a root creator dropped for quota while a member keeps the root is purged o
   await rejected(second.events, R, 'revoked-issuer')
   t.absent(second.seeder._groups.has(R), 'R not admitted again')
   t.is(first.events.filter((e) => e.event === 'fatal').length + second.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a public group renamed by its root is found by the new name only', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  let R = null
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R = await make('root', groupHeader({ diary: key, name: 'Cadeiras da praia' }), [groupPost({ text: 'oi' }), groupMeta({ name: 'Guarda-sois', join: 'open' })])
+    return [groupJoinRecord({ group: R, writer: R, on: true })]
+  })
+  await admit(A, assoc)
+  await admitted(events, R)
+  await downloaded(seeder, R, 3)
+  await until(() => {
+    const e = seeder._groupServed.get(R)
+    return !e.rootScanning && e.rootScanned === 3 && seeder.indexGroupSearch('guarda').complete
+  }, { name: 'raiz varrida' })
+  t.alike(seeder.indexGroupSearch('guarda').groups.map((r) => [r.group, r.name]), [[R, 'Guarda-sois']], 'found by the new name')
+  t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'not by the old one')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a rename appended after admission is picked up, and a null rename clears the name', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  let R = null
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R = await make('root', groupHeader({ diary: key, name: 'Cadeiras da praia' }), [groupPost({ text: 'oi' })])
+    return [groupJoinRecord({ group: R, writer: R, on: true })]
+  })
+  await admit(A, assoc)
+  await admitted(events, R)
+  await downloaded(seeder, R, 2)
+  await until(() => seeder.indexGroupSearch('cadeiras').complete && seeder.indexGroupSearch('cadeiras').groups.length === 1, { name: 'nome antigo' })
+
+  await A.cores.root.append(b4a.from(JSON.stringify(groupMeta({ name: 'Guarda-sois', join: 'open' }))))
+  await until(() => seeder.indexGroupSearch('guarda').groups.length === 1, { name: 'nome novo' })
+  t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'the old name is gone')
+  t.is(seeder.indexGroup(R).header.name, 'Guarda-sois', 'the group answer has the new name')
+
+  await A.cores.root.append(b4a.from(JSON.stringify(groupMeta({ name: null, join: 'open' }))))
+  await until(() => seeder.indexGroupSearch('guarda').groups.length === 0, { name: 'nome limpo' })
+  t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'not found by the header name either')
+  t.is(seeder.indexGroup(R).header.name, null)
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('public group root scans run one at a time and decode only blocks that contain group-meta', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  const posts = []
+  for (let i = 0; i < 20; i++) posts.push(groupPost({ text: 'post ' + i }))
+  // A post that merely mentions the word passes the prefilter, and the validator drops it.
+  posts.push(groupPost({ text: 'group-meta' }))
+  posts.push(groupMeta({ name: 'Guarda-sois', join: 'open' }))
+  let R1 = null
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R1 = await make('root', groupHeader({ diary: key, name: 'Cadeiras da praia' }), posts)
+    return [groupJoinRecord({ group: R1, writer: R1, on: true })]
+  })
+  let R2 = null
+  const B = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R2 = await make('root', groupHeader({ diary: key, name: 'Barracas' }), posts)
+    return [groupJoinRecord({ group: R2, writer: R2, on: true })]
+  })
+  await admit(A, assoc)
+  await admit(B, assoc)
+  await admitted(events, R1)
+  await admitted(events, R2)
+  for (const R of [R1, R2]) {
+    await downloaded(seeder, R, 23)
+    await until(() => {
+      const e = seeder._groupServed.get(R)
+      return !e.rootScanning && e.rootScanned === 23
+    }, { name: 'raiz varrida' })
+  }
+  t.is(seeder._groupServed.get(R1).rootDecoded, 2, 'only the block that names group-meta and the meta itself are decoded')
+  t.is(seeder.indexGroupSearch('guarda').groups.length, 2, 'both roots renamed')
+
+  // Scan both again at once and watch the reads in flight.
+  let inflight = 0
+  let max = 0
+  for (const R of [R1, R2]) {
+    const e = seeder._groupServed.get(R)
+    const get = e.core.get.bind(e.core)
+    e.core.get = async (...args) => {
+      inflight++
+      max = Math.max(max, inflight)
+      try {
+        return await get(...args)
+      } finally {
+        inflight--
+      }
+    }
+    e.rootScanned = 0
+    e.rootDecoded = 0
+  }
+  seeder._scanRoot(R1, seeder._groupServed.get(R1))
+  seeder._scanRoot(R2, seeder._groupServed.get(R2))
+  await until(() => [R1, R2].every((R) => {
+    const e = seeder._groupServed.get(R)
+    return !e.rootScanning && e.rootScanned === 23
+  }), { name: 'duas varreduras' })
+  t.is(max, 1, 'at most one group root read at a time')
+  t.is(seeder._groupServed.get(R2).rootDecoded, 2)
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })

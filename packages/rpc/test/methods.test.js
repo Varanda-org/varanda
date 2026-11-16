@@ -1719,7 +1719,7 @@ test('log.read', (t) => {
 })
 
 test('feed.read', (t) => {
-  ok(t, 'feed.read', {}, { limit: 26 })
+  ok(t, 'feed.read', {}, { limit: 25 })
   ok(t, 'feed.read', { limit: FEED_LIMIT_MAX }, { limit: FEED_LIMIT_MAX })
   bad(t, 'feed.read', { limit: FEED_LIMIT_MAX + 1 })
   bad(t, 'feed.read', { limit: 0 })
@@ -1730,7 +1730,7 @@ test('feed.read', (t) => {
 test('feed.read before', (t) => {
   const before = { at: '2026-10-24T12:00:00.000Z', author: KEY, seq: 1 }
   ok(t, 'feed.read', { limit: 5, before }, { limit: 5, before })
-  ok(t, 'feed.read', { before }, { limit: 26, before })
+  ok(t, 'feed.read', { before }, { limit: 25, before })
   bad(t, 'feed.read', { before: { ...before, seq: 0 } }, 'seq 0')
   bad(t, 'feed.read', { before: { ...before, seq: 1.5 } }, 'seq 1.5')
   for (const at of ['2026-10-24T12:00:00Z', '2026-10-24', 1, '']) {
@@ -2475,7 +2475,7 @@ test('page.* (Páginas)', (t) => {
 
   const keys = []
   for (let i = 0; i < 64; i++) keys.push(i.toString(16).padStart(2, '0').repeat(32))
-  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 26 })
+  ok(t, 'page.feed', { page: KEY, keys: [KEY] }, { page: KEY, keys: [KEY], limit: 25 })
   ok(t, 'page.feed', { page: KEY, keys, limit: FEED_LIMIT_MAX })
   ok(t, 'page.feed', { page: KEY, keys, limit: 1 })
   bad(t, 'page.feed', { page: KEY, keys: [...keys, 'ff'.repeat(32)] }, '65th feed key')

@@ -20,7 +20,7 @@ test('the fixed texts are the approved Portuguese', async (t) => {
   } = await load()
   t.is(EMPTY_TITLE, 'Ninguém novo por aqui')
   t.is(EMPTY_TEXT, 'Quando alguém começar a seguir você, comentar, citar, mencionar você, curtir ou republicar uma publicação sua, aparece aqui.')
-  t.is(PAGE_EMPTY_TEXT, 'Quando alguém seguir a página, comentar, citar ou mencionar o @nome dela, aparece aqui.')
+  t.is(PAGE_EMPTY_TEXT, 'Quando alguém seguir a página, comentar, citar, mencionar o @nome dela, curtir ou republicar uma publicação dela, aparece aqui.')
   t.is(NOTICES_OFFLINE_MESSAGE, 'Confira sua internet.')
   t.is(NOTICES_UNSUPPORTED_MESSAGE, 'Os Avisos ainda não estão disponíveis nesta associação.')
   t.is(ACTIVITY_QUIET_TEXT, 'O semeador desta associação ainda só envia avisos de quem seguiu você.')
