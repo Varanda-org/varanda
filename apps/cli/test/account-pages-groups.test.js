@@ -90,7 +90,7 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
   await until(() => writer.connected() && pg.connected(), { name: 'links up', timeoutMs: 20000 })
-  const accountServer = createAccountServer({
+  const accountOpts = {
     association,
     origin: ORIGIN,
     google: googleStub(),
@@ -99,7 +99,8 @@ test('account pages groups: the page joins and posts through the routes, a remov
     terms,
     log,
     pages: { keys, writer, pagesStore, dir, pagesGroups: pg, blocklist: { has: () => false }, limits: { reboxEveryMs: 0 } }
-  })
+  }
+  const accountServer = createAccountServer(accountOpts)
   const server = await accountServer.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => server.close(), { force: true })
   const base = 'http://127.0.0.1:' + server.port
@@ -190,6 +191,35 @@ test('account pages groups: the page joins and posts through the routes, a remov
     return r.items.find((p) => p.text === 'pão quente na praça') || null
   }, { name: 'member reads the page post', timeoutMs: 180000, intervalMs: 500 })
   t.is(seen.diary, P, 'the member reads the post from the page diary')
+
+  // A restart forgets the in-memory replay map: the same signed post, resent
+  // to a fresh routes instance over the same stores, answers the seq the
+  // spent-nonce table holds and posts nothing more.
+  {
+    const op = { group: G, text: 'uma vez só' }
+    const { nonce } = await start(ana, 'group-post')
+    const body = { member: ana.hex, nonce, page: P, op, signature: sign(ana, 'group-post', nonce, P, op) }
+    const first = await api('/account/pages/group-post', body)
+    t.is(first.status, 200, JSON.stringify(first.body))
+    const second = createAccountServer(accountOpts)
+    const l2 = await second.listen({ host: '127.0.0.1', port: 0 })
+    t.teardown(() => l2.close(), { force: true })
+    const res = await fetch('http://127.0.0.1:' + l2.port + '/account/pages/group-post', { method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const again = await res.json()
+    t.is(again.seq, first.body.seq, 'the resend after a restart answers the same seq: ' + JSON.stringify(again))
+    t.is(again.replay, true, 'and says it is a replay')
+    await syncOnce(bootstrap, a)
+    const once = (await member.groupRead(a, { group: G })).items.filter((x) => x.text === 'uma vez só')
+    t.is(once.length, 1, 'the group has the post once')
+
+    // A spend that cannot be saved after the post went out is uncertain.
+    const realSpend = pagesStore.spend
+    pagesStore.spend = async () => { throw new Error('falha injetada') }
+    const lost = await act(ana, 'group-post', P, { group: G, text: 'gasto perdido' })
+    pagesStore.spend = realSpend
+    t.is(lost.status, 202, 'a failed spend: ' + JSON.stringify(lost.body))
+    t.is(lost.body.uncertain, true, 'is uncertain')
+  }
 
   const read = await settled(bia, 'group-read', P, { group: G }, 'group read')
   t.is(read.status, 200)

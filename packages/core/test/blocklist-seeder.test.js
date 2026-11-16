@@ -2,12 +2,13 @@
 // newest one it accepts, drops and refuses blocked diaries (and diaries
 // certified by a revoked issuer), and passes the snapshot on to every peer
 // that speaks 'varanda/blocklist/1' while peers from before B2 stay connected.
+// A block also purges the blobs the blocked diary's momentos name.
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
 const b4a = require('b4a')
 const Corestore = require('corestore')
-const { keyPair: signingKeyPair } = require('hypercore-crypto')
+const { keyPair: signingKeyPair, randomBytes } = require('hypercore-crypto')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 const { Seeder } = require('../lib/seeder')
@@ -22,8 +23,10 @@ const {
 const { createSnapshot } = require('../lib/blocklist')
 const { attachBlocklist } = require('../lib/blocklist-net')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord } = require('../lib/records')
+const { memberCertRecord, momentRecord } = require('../lib/records')
 const { writeBlocklist } = require('../lib/store')
+const { createBlobPool } = require('../lib/blob-pool')
+const { encodeChunk, newBlobId } = require('../lib/blob')
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -595,4 +598,112 @@ test('a revocation adopted while a block-0 verdict is in flight drops the diary 
   t.alike(seeder.admittedKeys(), [])
   t.absent(events.some((e) => e.event === 'have' && e.key === author.key), 'no have was broadcast for it')
   t.absent(author.messages.some((m) => m.type === 'have' && m.key === author.key && m.length > 0), 'no have reached the author')
+})
+
+// One-chunk blobs put straight into the seeder's pool directory: the pool
+// checks stamps on a put only, never at load, so no postage key is needed.
+function seedBlobs (dataDir, count) {
+  const pool = createBlobPool({ dir: dataDir, verifyStamp: () => true, sweepMs: 0 })
+  const ids = []
+  for (let i = 0; i < count; i++) {
+    const id = newBlobId()
+    pool.submit(encodeChunk({ id, index: 0, count: 1, kid: b4a.alloc(8, 1), sig: randomBytes(256), token: randomBytes(32), bytes: randomBytes(100) }))
+    ids.push(hex(id))
+  }
+  pool.close()
+  return ids
+}
+
+// A diary whose block 1 is a momento naming the blob `id`.
+function momentBlocksFor (assoc, id) {
+  const media = { id, key: hex(randomBytes(32)), nonce: hex(randomBytes(24)), chunks: 1, bytes: 116, sha256: hex(randomBytes(32)), mime: 'image/jpeg', w: 8, h: 8, ms: 0 }
+  return (key) => [memberCertRecord(createCert({ member: key }, assoc.kp)), momentRecord({ text: 'momento', media }), post('um')]
+}
+
+const noKey = async () => { throw new Error('sem chave') }
+const DM = { postage: { get: noKey }, blobPostage: { get: noKey } }
+
+test('a block purges the blobs its momentos name, at runtime and in step 3, and no other blob', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const [first, second, other] = seedBlobs(dataDir, 3)
+  const blobDir = (id) => path.join(dataDir, 'blobs', id)
+  const one = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, dm: DM })
+  t.is(one.seeder._blob.size, 3)
+  const a = await client(t, bootstrap, assoc, { blocks: momentBlocksFor(assoc, first) })
+  const b = await client(t, bootstrap, assoc, { blocks: momentBlocksFor(assoc, second) })
+  await admit(a, createCert({ member: a.key }, assoc.kp))
+  await admit(b, createCert({ member: b.key }, assoc.kp))
+
+  const mod = makeModerator(assoc, '2026-06-01T00:00:00.000Z')
+  await client(t, bootstrap, assoc, { joinPeer: publicKey, blocklist: { snapshot: snapshot(mod, 1, { blocked: [a.key] }) } })
+  await until(async () => one.seeder.stats().dropping === 0 && !(a.key in readAdmitted(dataDir)) && !(await one.seeder._stored(a.key)), { name: 'purgado' })
+  t.is(one.seeder._blob.info(first), null, 'the blocked momento blob is no longer served')
+  t.absent(fs.existsSync(blobDir(first)), 'nor kept on disk')
+  t.ok(one.seeder._blob.info(second), 'another diary keeps its blob')
+  t.ok(one.seeder._blob.info(other), 'a blob no momento names stays')
+  await one.seeder.close()
+  for (const c of [a, b]) await c.swarm.destroy()
+
+  // A block adopted while the seeder was stopped: step 3, before ready.
+  writeBlocklist(dataDir, snapshot(mod, 2, { blocked: [a.key, b.key] }))
+  const two = await startSeeder(t, bootstrap, dataDir, { dm: DM })
+  t.alike(two.ready.admitted, [])
+  t.is(two.seeder._blob.info(second), null)
+  t.absent(fs.existsSync(blobDir(second)))
+  t.ok(two.seeder._blob.info(other))
+  t.is(two.seeder._blob.size, 1)
+})
+
+test('a blocked diary dropped under another reason still loses its momento blobs', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const [id] = seedBlobs(dataDir, 1)
+  const one = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, dm: DM })
+  const a = await client(t, bootstrap, assoc, { blocks: momentBlocksFor(assoc, id) })
+  await admit(a, createCert({ member: a.key }, assoc.kp))
+  await until(async () => one.seeder._served.has(a.key) && (await one.seeder._stored(a.key)), { name: 'servido' })
+
+  // The gate can settle on revoked-issuer for a key the list also blocks.
+  const isBlocked = one.seeder._isBlocked.bind(one.seeder)
+  one.seeder._isBlocked = (key) => key === a.key || isBlocked(key)
+  one.seeder._drop(a.key, 'revoked-issuer')
+  await until(async () => one.seeder.stats().dropping === 0 && !(await one.seeder._stored(a.key)), { name: 'purgado' })
+  t.is(one.seeder._blob.info(id), null)
+  t.absent(fs.existsSync(path.join(dataDir, 'blobs', id)))
+  await one.seeder.close()
+  await a.swarm.destroy()
+})
+
+test('a momento blob that cannot be removed is fatal, keeps the blocked diary listed, and the next start purges both', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const [id] = seedBlobs(dataDir, 1)
+  const d = path.join(dataDir, 'blobs', id)
+  const one = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, dm: DM })
+  const a = await client(t, bootstrap, assoc, { blocks: momentBlocksFor(assoc, id) })
+  await admit(a, createCert({ member: a.key }, assoc.kp))
+  fs.chmodSync(d, 0o500)
+  t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
+
+  const mod = makeModerator(assoc, '2026-06-01T00:00:00.000Z')
+  await client(t, bootstrap, assoc, { joinPeer: publicKey, blocklist: { snapshot: snapshot(mod, 1, { blocked: [a.key] }) } })
+  await until(() => one.events.some((e) => e.event === 'fatal' && e.key === a.key && e.reason === 'purge-failed'), { name: 'fatal' })
+  t.ok(one.seeder.fatal)
+  await one.seeder.close()
+  await a.swarm.destroy()
+  t.ok(a.key in readAdmitted(dataDir), 'the diary stays listed')
+
+  fs.chmodSync(d, 0o700)
+  const two = await startSeeder(t, bootstrap, dataDir, { dm: DM })
+  t.alike(two.ready.admitted, [])
+  t.absent(a.key in readAdmitted(dataDir))
+  t.absent(fs.existsSync(d), 'the blob is gone')
+  t.absent(await two.seeder._stored(a.key), 'and the diary')
 })

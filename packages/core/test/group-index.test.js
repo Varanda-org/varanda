@@ -321,3 +321,44 @@ test('communities: a group whose creator is not C\'s creator is never attached, 
   t.is(idx.communityOf(G1), C, 'the creator\'s group with the root\'s create is listed')
   t.alike(idx.community(C).groups.map((r) => r.group), [G1])
 })
+
+test('a public group root\'s latest group-meta renames it in the search and the catalogue rows', (t) => {
+  const idx = createGroupIndex()
+  const WR = k('7')
+  idx.setHeader(C, groupHeader({ kind: 'community', diary: D1, name: 'bairro' }))
+  idx.setHeader(G1, header('cadeiras da praia', 'public', C, D1))
+  idx.addWriter(G1, WR, D1, 1)
+  idx.foldRoot(C, groupCreateRecord({ group: G1 }))
+  t.alike(idx.search('cadeiras').groups.map((r) => r.group), [G1])
+
+  t.ok(idx.foldRoot(G1, groupMeta({ name: 'Guarda-sois', join: 'open' })), 'a public group root folds its meta')
+  t.alike(idx.search('guarda').groups.map((r) => r.name), ['Guarda-sois'], 'the new name is found and shown')
+  t.alike(idx.search('cadeiras').groups, [], 'the old name is not')
+  t.is(idx.community(C).groups[0].name, 'Guarda-sois', 'the catalogue row shows the new name')
+  t.is(idx.header(G1).name, 'cadeiras da praia', 'the header keeps its own')
+
+  t.ok(idx.foldRoot(G1, groupMeta({ name: 'Barracas', join: 'open' })))
+  t.alike(idx.search('barracas').groups.map((r) => r.group), [G1], 'the last one wins')
+  t.alike(idx.search('guarda').groups, [])
+
+  t.ok(idx.foldRoot(G1, groupMeta({ name: null, join: 'open' })))
+  t.alike(idx.search('barracas').groups, [], 'a cleared name is not searchable')
+  t.alike(idx.search('cadeiras').groups, [], 'and does not bring the header name back')
+  t.is(idx.community(C).groups[0].name, null, 'its row has no name')
+
+  t.absent(idx.foldRoot(G1, groupCreateRecord({ group: G2 })), 'a group root folds no create')
+  t.ok(idx.resetRoot(G1))
+  t.alike(idx.search('cadeiras').groups.map((r) => r.group), [G1], 'a reset restores the header name')
+  t.is(idx.community(C).groups[0].name, 'cadeiras da praia')
+
+  idx.foldRoot(G1, groupMeta({ name: 'Barracas', join: 'open' }))
+  idx.setHeader(G1, header('cadeiras da praia', 'public', C, D1))
+  t.alike(idx.search('barracas').groups.map((r) => r.group), [G1], 'a header set again keeps the folded name')
+})
+
+test('a private group root ignores a meta', (t) => {
+  const idx = createGroupIndex()
+  idx.setHeader(G1, header('x', 'private'))
+  t.absent(idx.foldRoot(G1, groupMeta({ name: 'Secreto', join: 'open' })))
+  t.alike(idx.search('secreto').groups, [])
+})

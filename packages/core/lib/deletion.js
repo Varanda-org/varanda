@@ -14,6 +14,7 @@
 // tombstone over a block this replica never held is folded as before, and
 // the clear path never clears a page-* block, so a present one stays.
 
+const b4a = require('b4a')
 const { validRecordCopy, decodeBlock, MAX_LOG_BLOCKS, PAGE_KEYS } = require('./records')
 
 const PAGE_TYPES = new Set(Object.keys(PAGE_KEYS))
@@ -598,6 +599,11 @@ const ROSTER_SEQ = 2
 const ROSTER_PROBE_MS = 2000
 const ROSTER_REPROBE_MS = 30000
 const PROBE_POLL_MS = 50
+// pageTargets `remember`: the targets read once as non-page records, kept
+// in the core's user data (uint32 LE seqs, at most MAX_REMEMBERED) so a
+// later download never fetches them back from a stale peer.
+const REMEMBER_KEY = 'varanda/page-read'
+const MAX_REMEMBERED = 4096
 
 // Whether a connected peer advertised block seq (Hypercore: its
 // contiguous range, then its bitfield), and whether any peer is connected.
@@ -656,10 +662,56 @@ async function heldType (core, seq) {
 // cleared one is not fetched back. `wait` false does not wait for a roster
 // probe (it settles later; watch(fn) is told). The guard may outlive one
 // download (the browser follower reopens it), so only its owner destroys it;
-// the peer-add listener also goes once the type is settled.
-function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPROBE_MS } = {}) {
+// the peer-add listener also goes once the type is settled. `remember`
+// keeps the targets read as non-page records in the core's user data, so a
+// later guard (the next run) does not fetch them again: a block's type
+// never changes in a signed log, and a forked replica is purged.
+function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPROBE_MS, remember = false } = {}) {
   let page = null
   const read = new Set()
+  const keeps = remember === true && typeof core.getUserData === 'function' && typeof core.setUserData === 'function'
+  let loaded = keeps ? null : Promise.resolve()
+  let saving = null
+  let dirty = false
+  const load = () => {
+    if (loaded === null) {
+      loaded = (async () => {
+        try {
+          const buf = await core.getUserData(REMEMBER_KEY)
+          if (!buf || buf.byteLength % 4 !== 0) return
+          const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+          for (let i = 0; i < buf.byteLength && read.size < MAX_REMEMBERED; i += 4) read.add(view.getUint32(i, true))
+        } catch {}
+      })()
+    }
+    return loaded
+  }
+  // One write at a time; marks that arrive meanwhile join the next one.
+  const save = () => {
+    if (!keeps) return
+    dirty = true
+    if (saving !== null) return
+    // Cleared in the same tick the loop sees nothing dirty, so a mark
+    // that lands right after is written by a new run, not dropped.
+    saving = Promise.resolve().then(async () => {
+      try {
+        while (dirty) {
+          dirty = false
+          const seqs = sortedSeqs(read).slice(0, MAX_REMEMBERED)
+          const buf = b4a.alloc(seqs.length * 4)
+          const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+          for (let i = 0; i < seqs.length; i++) view.setUint32(i * 4, seqs[i], true)
+          try {
+            await core.setUserData(REMEMBER_KEY, buf)
+          } catch {
+            return
+          }
+        }
+      } finally {
+        saving = null
+      }
+    })
+  }
   let probing = null
   let nextAt = 0
   let timer = null
@@ -736,6 +788,7 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
     },
     async excludable (deleted, { wait = true } = {}) {
       const all = sortedSeqs(deleted)
+      await load()
       if (page === null) {
         for (const seq of PAGE_GENESIS_SEQS) {
           const type = await heldType(core, seq)
@@ -755,11 +808,15 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
       }
       if (page === false) return new Set(all)
       const out = new Set()
+      let learned = false
       for (const seq of all) {
         if (!read.has(seq)) {
           const type = await heldType(core, seq)
           if (type === null) continue
-          if (!isPageType(type)) read.add(seq)
+          if (!isPageType(type) && Number.isSafeInteger(seq) && seq >= 0 && seq <= 0xffffffff) {
+            read.add(seq)
+            learned = true
+          }
           // A deleted block 2 read once settles it, cleared or not.
           if (seq === ROSTER_SEQ && page === null) {
             page = type === 'page-roster'
@@ -768,6 +825,7 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
         }
         out.add(seq)
       }
+      if (learned) save()
       // Until block 2 settles the type, every target stays out: a personal
       // diary never fetches a deleted post from a stale or hostile peer, and
       // a page fetches its targets once the roster lands (downloadExceptPages
@@ -783,17 +841,28 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
 // still in the range, or of a genesis block, recomputes it. Same { update,
 // destroy, idle } as make's handle; the first ranges open once the first
 // read is done, and update(next) waits for the recompute.
-function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null } = {}) {
+function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null, remember = false } = {}) {
   // A guard made here is this download's own; a given one is its caller's.
-  const guard = given !== null ? given : pageTargets(core)
+  const guard = given !== null ? given : pageTargets(core, { remember })
   let wanted = toSet(deleted)
   let waiting = new Set(sortedSeqs(wanted))
   let inner = null
   let destroyed = false
   let unsettled = false // the type was unknown at the last refresh
   let chain = Promise.resolve()
+  // The refresh queued behind the running one: it reads `wanted` when it
+  // starts, so later calls join it instead of each re-reading every target
+  // (a leaked page key can name many).
+  let queued = null
   const refresh = (clear) => {
-    const run = chain.then(async () => {
+    if (queued !== null) {
+      queued.clear = queued.clear || clear
+      return queued.run
+    }
+    const job = { clear, run: null }
+    queued = job
+    job.run = chain.then(async () => {
+      if (queued === job) queued = null
       if (destroyed) return []
       const next = wanted
       const skip = await guard.excludable(next)
@@ -804,12 +873,12 @@ function downloadExceptPages (core, deleted, { make = downloadExcept, guard: giv
       waiting = wait
       if (inner === null) {
         inner = make(core, skip)
-        if (!clear) return []
+        if (!job.clear) return []
       }
       return (await inner.update(skip)) || []
     })
-    chain = run.catch(() => {})
-    return run
+    chain = job.run.catch(() => {})
+    return job.run
   }
   const onDownload = (index) => {
     if (destroyed) return
