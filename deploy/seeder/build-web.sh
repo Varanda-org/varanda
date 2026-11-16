@@ -70,6 +70,13 @@ docker run --rm --init \
 test -f "$src/apps/app/dist/index.html"
 test -f "$src/apps/app/dist/varanda-node.js"
 test -f "$src/apps/app/dist/sw.js"
+# A página carrega a cópia do nó com o nome da sua versão (marca
+# varanda-release do index.html): sem ela, o app publicado não abre.
+versao=$(versao_web "$src/apps/app/dist/index.html")
+if [ -z "$versao" ] || [ ! -f "$src/apps/app/dist/varanda-node-$versao.js" ]; then
+  log 'o build não gerou a marca varanda-release e a cópia varanda-node-<versão>.js'
+  exit 1
+fi
 # O version.json do build é sempre reescrito aqui, do commit conferido: o
 # contêiner roda código das dependências. E nunca através de um link que ele
 # tenha deixado no caminho (o mesmo cuidado de construir_web no deploy.sh).
@@ -92,7 +99,7 @@ fi
 www="$root/deploy/seeder/www"
 mkdir -p "$www"
 find "$www" -mindepth 1 -delete
-cp -R "$root/apps/app/dist/." "$www/"
+copiar_app "$root/apps/app/dist" "$www"
 gravar_associacoes "$www"
 gravar_versao "$www" "$commit"
 test -f "$www/index.html"

@@ -9,7 +9,7 @@ const os = require('os')
 const path = require('path')
 const vm = require('vm')
 const crypto = require('crypto')
-const { finishWeb } = require('../scripts/finish-web')
+const { finishWeb, releaseNodePath } = require('../scripts/finish-web')
 
 const TEMPLATE = path.join(__dirname, '..', 'scripts', 'sw.js')
 const ROOT = process.env.VARANDA_TEST_TMPDIR || fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-sw-'))
@@ -59,6 +59,9 @@ function makeDist () {
   }
   return dir
 }
+
+// The node copy a page of `version` loads (src/client/browser.js nodeScriptUrl).
+const nodeOf = (version) => '/varanda-node-' + version + '.js'
 
 function readWorker (dist) {
   const code = fs.readFileSync(path.join(dist, 'sw.js'), 'utf8')
@@ -229,12 +232,15 @@ test('finishWeb renders the precache list and marks index.html', (t) => {
   const { version, precache } = readWorker(dist)
   t.ok(/^[0-9a-f]{16}$/.test(version), 'version is 16 lowercase hex')
   const urls = precache.map((e) => e.url)
-  for (const u of ['/index.html', BUNDLE, '/varanda-node.js', '/manifest.webmanifest', '/icon-192.png', '/assets/x.ttf', '/favicon.ico']) {
+  for (const u of ['/index.html', BUNDLE, nodeOf(version), '/manifest.webmanifest', '/icon-192.png', '/assets/x.ttf', '/favicon.ico']) {
     t.ok(urls.includes(u), 'precaches ' + u)
   }
-  for (const u of ['/metadata.json', '/sw.js', '/_expo/static/js/web/index.js.map']) {
+  for (const u of ['/metadata.json', '/sw.js', '/_expo/static/js/web/index.js.map', '/varanda-node.js']) {
     t.absent(urls.includes(u), 'does not precache ' + u)
   }
+  t.is(releaseNodePath(version), nodeOf(version))
+  t.ok(fs.readFileSync(path.join(dist, nodeOf(version))).equals(fs.readFileSync(path.join(dist, 'varanda-node.js'))), 'the release copy has the node bytes')
+  t.ok(fs.existsSync(path.join(dist, 'varanda-node.js')), 'the plain name stays for the deploy probe')
   for (const e of precache) {
     // index.html's hash is that of the final file, release meta included.
     t.is(e.sha256, sha256hex(fs.readFileSync(path.join(dist, e.url))), e.url + ' sha256')
@@ -257,10 +263,17 @@ test('a second run is byte-identical; any byte change changes the version', (t) 
   t.is(readWorker(dist).version, v1)
   t.is((html1.toString().match(/varanda-release/g) || []).length, 1, 'still one release meta')
 
+  t.alike(fs.readdirSync(dist).filter((n) => n.startsWith('varanda-node-')), [nodeOf(v1).slice(1)], 'one release copy')
+
   fs.appendFileSync(path.join(dist, BUNDLE), ';')
   quiet(() => finishWeb(dist))
   const v2 = readWorker(dist).version
   t.not(v2, v1, 'bundle byte changes the version')
+  t.alike(fs.readdirSync(dist).filter((n) => n.startsWith('varanda-node-')), [nodeOf(v2).slice(1)], 'the old release copy is replaced')
+
+  fs.appendFileSync(path.join(dist, 'varanda-node.js'), ';')
+  quiet(() => finishWeb(dist))
+  t.not(readWorker(dist).version, v2, 'node byte changes the version')
 
   const tpl = path.join(ROOT, 'sw-template-' + count++ + '.js')
   fs.writeFileSync(tpl, fs.readFileSync(TEMPLATE, 'utf8') + '\n')
@@ -300,6 +313,10 @@ test('finishWeb refuses an incomplete export', (t) => {
     fs.rmSync(path.join(dist, missing))
     t.exception(() => quiet(() => finishWeb(dist)), /falta|nenhum/, 'without ' + missing)
   }
+  const dist = makeDist()
+  fs.rmSync(path.join(dist, 'varanda-node.js'))
+  fs.mkdirSync(path.join(dist, 'varanda-node.js'))
+  t.exception(() => quiet(() => finishWeb(dist)), /varanda-node\.js não é um arquivo comum/, 'a directory named varanda-node.js')
 })
 
 test('install stores every precache path under absolute URLs', async (t) => {
@@ -313,13 +330,13 @@ test('install stores every precache path under absolute URLs', async (t) => {
 test('install fails on the SPA fallback, a changed byte or another release', async (t) => {
   const dist = makeDist()
   quiet(() => finishWeb(dist))
-  const { code } = readWorker(dist)
+  const { code, version } = readWorker(dist)
   const real = serveDist(dist)
 
   const html = loadWorker(code, (p, r) => p === BUNDLE ? real('/nope') : real(p, r))
   await t.exception(lifecycle(html, 'install'), /text\/html/, 'bundle answered as text/html')
 
-  const changed = loadWorker(code, (p, r) => p === '/varanda-node.js'
+  const changed = loadWorker(code, (p, r) => p === nodeOf(version)
     ? new Response('module.exports = "nodf"\n', { headers: { 'content-type': 'text/javascript' } })
     : real(p, r))
   await t.exception(lifecycle(changed, 'install'), /differs/, 'one byte differs')
@@ -438,32 +455,57 @@ test('hashed assets: cache first, a miss goes to the network and is not stored, 
   onlyPrecache(t, w, dist, 'only precache keys after every fetch')
 })
 
-test('/varanda-node.js: network first, cached copy on HTML, 404 or offline', async (t) => {
-  const { w, dist } = await installed()
-  w.server = () => new Response('module.exports = "new"\n', { headers: { 'content-type': 'text/javascript' } })
-  const on = await dispatch(w, ORIGIN + '/varanda-node.js')
-  t.is(await on.res.text(), 'module.exports = "new"\n', 'the live copy online')
-  t.is(await (await w.cache.match(ORIGIN + '/varanda-node.js')).text(), 'module.exports = "node"\n', 'not stored')
+const NEW_NODE = 'module.exports = "new"\n'
+const jsBody = (body) => () => new Response(body, { headers: { 'content-type': 'text/javascript' } })
 
-  w.server = () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } })
-  const html = await dispatch(w, ORIGIN + '/varanda-node.js')
-  t.is(await html.res.text(), 'module.exports = "node"\n', 'the cached copy')
-
-  w.server = status(404)
-  const gone = await dispatch(w, ORIGIN + '/varanda-node.js')
-  t.is(await gone.res.text(), 'module.exports = "node"\n', 'the cached copy on 404')
+// #478 deploy window: while a deploy replaces the files, a navigation gets a
+// 5xx and the worker answers with this release's cached shell, but the server
+// already has the next release's node. The shell must still run its own node.
+test('the cached shell runs the node of its own release while the server has another', async (t) => {
+  const { w, dist, version } = await installed()
+  w.server = (p) => p.startsWith('/varanda-node') ? jsBody(NEW_NODE)() : status(503)()
+  const nav = await dispatch(w, ORIGIN + '/perfil', { mode: 'navigate' })
+  const shell = await nav.res.text()
+  const release = shell.match(/<meta name="varanda-release" content="([0-9a-f]{16})">/)[1]
+  t.is(release, version, 'the cached shell of this release')
+  w.calls.length = 0
+  const node = await dispatch(w, ORIGIN + nodeOf(release))
+  t.is(await node.res.text(), 'module.exports = "node"\n', 'its own node, not the new one')
+  t.is(w.calls.length, 0, 'answered from the verified precache')
 
   w.server = offline
-  const off = await dispatch(w, ORIGIN + '/varanda-node.js')
-  t.is(await off.res.text(), 'module.exports = "node"\n', 'the cached copy offline')
+  const off = await dispatch(w, ORIGIN + nodeOf(release))
+  t.is(await off.res.text(), 'module.exports = "node"\n', 'offline too')
   onlyPrecache(t, w, dist, 'nothing stored')
+})
 
-  const empty = loadWorker(readWorker(dist).code, status(404, 'nada'))
-  t.is((await dispatch(empty, ORIGIN + '/varanda-node.js')).res.status, 404, 'the network 404 when nothing is cached')
-  empty.server = () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } })
-  const html2 = await dispatch(empty, ORIGIN + '/varanda-node.js')
-  t.is(html2.res.status, 503)
-  t.is(await html2.res.text(), 'tipo inesperado', 'HTML with nothing cached')
+// The reverse: a page of the next release (network-first navigation) whose
+// node fetch fails while this release's worker controls it must not get this
+// release's node, under its own name or the plain one.
+test('a page of another release never gets this release\'s node', async (t) => {
+  const { w, dist, version } = await installed()
+  const other = version === 'fedcba9876543210' ? '0123456789abcdef' : 'fedcba9876543210'
+  for (const p of [nodeOf(other), '/varanda-node.js']) {
+    w.server = jsBody(NEW_NODE)
+    const on = await dispatch(w, ORIGIN + p)
+    t.is(await on.res.text(), NEW_NODE, p + ': the network copy online')
+
+    w.server = status(404, 'nada')
+    const gone = await dispatch(w, ORIGIN + p)
+    t.is(gone.res.status, 404, p + ': a 404 is passed on')
+    t.is(await gone.res.text(), 'nada')
+
+    w.server = offline
+    const off = await dispatch(w, ORIGIN + p)
+    t.is(off.res.status, 503, p + ': offline')
+    t.is(await off.res.text(), 'sem conexão')
+
+    w.server = () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } })
+    const html = await dispatch(w, ORIGIN + p)
+    t.is(html.res.status, 503, p + ': HTML refused')
+    t.is(await html.res.text(), 'tipo inesperado')
+  }
+  onlyPrecache(t, w, dist, 'nothing stored')
 })
 
 test('bypassed requests are never intercepted', async (t) => {
@@ -588,8 +630,10 @@ test('nothing cached and offline: 503 sem conexão', async (t) => {
     t.is(res.status, 503)
     t.is(await res.text(), 'sem conexão')
   }
-  const node = await dispatch(w, ORIGIN + '/varanda-node.js')
-  t.is(await node.res.text(), 'sem conexão')
+  for (const p of [nodeOf(readWorker(dist).version), '/varanda-node.js']) {
+    const node = await dispatch(w, ORIGIN + p)
+    t.is(await node.res.text(), 'sem conexão', p)
+  }
 })
 
 test('a store that fails half way (out of quota) drops the release cache', async (t) => {
@@ -602,7 +646,7 @@ test('a store that fails half way (out of quota) drops the release cache', async
     const cache = await open(name)
     const put = cache.put.bind(cache)
     cache.put = async (k, res) => {
-      if ((typeof k === 'string' ? k : k.url).endsWith('/varanda-node.js')) throw new Error('QuotaExceededError')
+      if ((typeof k === 'string' ? k : k.url).endsWith(nodeOf(version))) throw new Error('QuotaExceededError')
       return put(k, res)
     }
     return cache
@@ -664,18 +708,19 @@ test('a poisoned index.html is not the offline navigation fallback', async (t) =
   t.ok((await ok.res.text()).includes('<meta name="varanda-release" content="' + version + '">'), 'the correct copy still answers')
 })
 
-test('a poisoned /varanda-node.js is not the fallback', async (t) => {
-  const { w } = await installed()
-  await poison(w, '/varanda-node.js', 'module.exports = "evil"\n')
+test('a poisoned release node copy is never served', async (t) => {
+  const { w, version } = await installed()
+  const node = nodeOf(version)
+  await poison(w, node, 'module.exports = "evil"\n')
   w.server = offline
-  const off = await dispatch(w, ORIGIN + '/varanda-node.js')
+  const off = await dispatch(w, ORIGIN + node)
   t.is(off.res.status, 503)
   t.is(await off.res.text(), 'sem conexão')
-  t.absent(w.cache.map.has(ORIGIN + '/varanda-node.js'), 'deleted')
+  t.absent(w.cache.map.has(ORIGIN + node), 'deleted')
 
-  await poison(w, '/varanda-node.js', 'module.exports = "evil"\n')
+  await poison(w, node, 'module.exports = "evil"\n')
   w.server = status(404, 'nada')
-  const gone = await dispatch(w, ORIGIN + '/varanda-node.js')
+  const gone = await dispatch(w, ORIGIN + node)
   t.is(gone.res.status, 404, 'the network answer stands')
   t.is(await gone.res.text(), 'nada')
 })
@@ -773,8 +818,9 @@ test('planted headers on a cached bundle are dropped, the worker sets the type',
 // the worker's constants, never with the planted ones.
 test('a replanted bundle with a planted type or charset is served with the constant type and nosniff', async (t) => {
   for (const [label, type] of [['a type with a suffix', 'text/javascriptx'], ['another charset', 'text/javascript; charset=utf-16le'], ['application/javascript', 'application/javascript; charset=utf-16le']]) {
-    for (const p of [BUNDLE, '/varanda-node.js']) {
-      const { w } = await installed()
+    for (const name of [BUNDLE, 'node']) {
+      const { w, version } = await installed()
+      const p = name === 'node' ? nodeOf(version) : name
       w.server = offline
       await replant(w, p, { status: 200, headers: { 'content-type': type, 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' } })
       const { res } = await dispatch(w, ORIGIN + p)
@@ -920,7 +966,7 @@ test('a cached index.html with a missing or weak CSP or nosniff is a miss and is
 })
 
 test('a legitimate bundle stored as text/html (or with no content-type) is poisoned', async (t) => {
-  const { w } = await installed()
+  const { w, version } = await installed()
   await replant(w, BUNDLE, { status: 200, headers: { 'content-type': 'text/html' } })
   w.server = offline
   const off = await dispatch(w, ORIGIN + BUNDLE)
@@ -929,19 +975,19 @@ test('a legitimate bundle stored as text/html (or with no content-type) is poiso
   t.absent(w.cache.map.has(ORIGIN + BUNDLE), 'deleted')
 
   // An ArrayBuffer body gets no default content-type.
-  await replant(w, '/varanda-node.js', { status: 200 })
-  t.is(w.cache.map.get(ORIGIN + '/varanda-node.js').headers.get('content-type'), null)
-  const node = await dispatch(w, ORIGIN + '/varanda-node.js')
+  await replant(w, nodeOf(version), { status: 200 })
+  t.is(w.cache.map.get(ORIGIN + nodeOf(version)).headers.get('content-type'), null)
+  const node = await dispatch(w, ORIGIN + nodeOf(version))
   t.is(await node.res.text(), 'sem conexão')
-  t.absent(w.cache.map.has(ORIGIN + '/varanda-node.js'), 'deleted')
+  t.absent(w.cache.map.has(ORIGIN + nodeOf(version)), 'deleted')
 })
 
 test('correct entries are served offline as fresh 200s with their content-type', async (t) => {
-  const { w, dist } = await installed()
+  const { w, dist, version } = await installed()
   w.server = offline
   const expected = {
     [BUNDLE]: 'text/javascript; charset=utf-8',
-    '/varanda-node.js': 'text/javascript; charset=utf-8',
+    [nodeOf(version)]: 'text/javascript; charset=utf-8',
     '/assets/m.mjs': 'text/javascript; charset=utf-8',
     '/manifest.webmanifest': 'application/manifest+json',
     '/assets/d.json': 'application/json',
