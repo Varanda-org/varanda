@@ -897,3 +897,38 @@ test('roots skipped for good disarm the upkeep', async (t) => {
   await b.web.request('sync.stop')
   t.alike(b.internal, [])
 })
+
+test('a new own length that turns this device off says so once, on the run\'s cores', async (t) => {
+  const devices = require('@varanda/core/lib/devices')
+  const a = await setup(t)
+  await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const storage = await secondStorage(a, [])
+  // B registered earlier; another device then turned its id off.
+  const ctx = { storage, association: a.association, keyPair: a.keyPair }
+  const { id } = await ops.deviceHello(ctx, { name: 'Tablet' })
+  const diary = await store.openDiary(storage, a.keyPair)
+  const k = devices.deviceKey(a.keyPair.secretKey, b4a.from(a.key, 'hex'))
+  try {
+    await store.appendRecord(diary, devices.sealedRecord({ v: 1, id, name: null, on: false, writers: [] }, k))
+  } finally {
+    devices.wipeKey(k)
+    await diary.close()
+  }
+  // No upkeep pass in this test: only the length check can say it.
+  const sync = controlledSync()
+  const b = await setup(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, upkeepDelayMs: 60000 })
+  const changed = () => b.web.events.filter((e) => e.name === 'devices.changed').map((e) => e.data)
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  const length = await diaryLength(b)
+  live.emit({ event: 'own-synced', length })
+  await until(() => changed().length > 0, { name: 'devices.changed', timeoutMs: 5000 })
+  t.alike(changed(), [{ off: true }])
+  live.emit({ event: 'own-synced', length })
+  live.emit({ event: 'own-synced', length: length + 1 })
+  await pause(200)
+  t.alike(changed(), [{ off: true }], 'sent on a change only')
+  t.absent(live.aborted, 'the run was not stopped')
+  t.is(sync.runs.length, 1)
+  await b.web.request('sync.stop')
+})

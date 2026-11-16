@@ -2182,6 +2182,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
     const { store, diary, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     if (visibility !== 'public' && visibility !== 'private') throw new UsageError('visibilidade inválida')
+    await refuseOffDevice(ctx, identity)
     const c = await loadCommunity(ctx, identity, community)
     if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
     const C = c.group
@@ -2243,6 +2244,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
 async function pendingJoin (ctx, { group, local }, identity, member = null, kind = undefined) {
   const { diary, store, ownHex } = identity
   if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+  await refuseOffDevice(ctx, identity)
   const own = local === null ? null : await pendingWriter(store, local)
   if (own !== null && own.leave) throw new UsageError('o grupo ainda não chegou: entre de novo depois da sincronização')
   let writerKey = own === null ? null : local.writer
@@ -2327,6 +2329,7 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   const { diary, store, ownHex } = identity
   const group = loaded.group
   if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+  await refuseOffDevice(ctx, identity)
   // bans, not members: a diary banned before it had a writer is not listed.
   if (loaded.view.bans.has(ownHex)) throw groupPermission()
   // A blocked own diary binds none of its writers in the fold.
@@ -2379,12 +2382,14 @@ async function groupJoin (ctx, { group, community }) {
   const hint = typeof community === 'string' ? community.toLowerCase() : null
   return withGroupOrPending(ctx, group, async (loaded, identity) => {
     if (identity.diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     if (hint !== null && hint !== loaded.header.community) throw new UsageError('o grupo não é dessa comunidade')
     requireParent(loaded)
     if (loaded.cw === null) throw new UsageError('entre na comunidade primeiro')
     return joinLoaded(ctx, identity, loaded, loaded.cw.writer)
   }, async (pending, identity) => {
     if (identity.diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     if (hint === null) throw new UsageError('informe a comunidade do grupo')
     const c = await loadCommunity(ctx, identity, hint)
     if (c === null) throw new UsageError('aguarde a sincronização da comunidade')
@@ -3101,6 +3106,7 @@ async function communityCreate (ctx, { name, join }, { affected = null } = {}) {
   return withIdentity(ctx, async (identity) => {
     const { store, diary, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     const pending = readCreateResume(ctx.dataDir)
     if (pending !== null) {
       // Started (the root has its header) or asked again the same way: the
@@ -3160,6 +3166,7 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
   return withIdentity(ctx, async (identity) => {
     const { diary, store, ownHex } = identity
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    await refuseOffDevice(ctx, identity)
     let c = await loadCommunity(ctx, identity, community)
     const C = community.toLowerCase()
     if (c === null) {
@@ -3953,6 +3960,22 @@ async function withDevices (ctx, fn) {
   })
 }
 
+// A disconnected device binds no new writer by hand either (group.join,
+// community.join, group.create, community.create): only device.reconnect
+// brings it back (rpc.md 5.153). Inside withIdentity, before anything is
+// written.
+async function refuseOffDevice (ctx, identity) {
+  const { diary, ownHex } = identity
+  let key = null
+  try {
+    key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    const view = devices.deviceView(await readAll(diary), key, readDeviceId(ctx.dataDir, ownHex), deviceOwnPairs(ctx.dataDir))
+    if (view.off) throw new UsageError(devices.OFF_REFUSED)
+  } finally {
+    devices.wipeKey(key)
+  }
+}
+
 function deviceName (name) {
   const canonical = devices.canonicalDeviceName(name)
   if (canonical === null) throw new UsageError('nome do aparelho inválido')
@@ -4040,7 +4063,7 @@ async function heldContiguous (store, key) {
 
 // -> { cut, empty, groups }: rpc.md 5.153. The caller updated the writer
 // cores first (bounded). Each linked pair is marked at the contiguous
-// length held here unless already marked at or below it; then, for `id`,
+// length held here unless it already carries a mark (never lowered); then, for `id`,
 // the off record. `groups` lists the roots marked, for the caller's events.
 // Then, best effort, a rotation in each private group this node distributes
 // in (privateSideEffect, as after a ban). A failure after a first write
@@ -4057,8 +4080,8 @@ async function deviceDisconnect (ctx, { id = null, previous = false }, { write =
     let wrote = false
     try {
       for (const pair of plan.pairs) {
+        if (devices.alreadyCut(view.cuts, pair)) continue
         const length = await heldContiguous(identity.store, pair.writer)
-        if (devices.alreadyCut(view.cuts, pair, length)) continue
         await appendRecord(diary, groupCutRecord({ group: pair.group, writer: pair.writer, cut: length }))
         wrote = true
         if (!written.includes(pair.group)) written.push(pair.group)

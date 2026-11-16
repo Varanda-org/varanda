@@ -8,7 +8,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const devices = require('@varanda/core/lib/devices')
-const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord } = require('@varanda/core/lib/records')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
@@ -183,6 +183,13 @@ test('no id and a cut current writer: off until reconnect, which re-enrols the c
   t.is((await ops.deviceList(d.ctx)).off, true)
   t.alike((await ops.deviceUpkeepPlan(d.ctx)).enrol, [])
   t.is(await ops.deviceUpkeepNeeded(d.ctx), false)
+  // No join or create by hand either, and nothing is written.
+  await t.exception(ops.communityJoin(d.ctx, { community }), new RegExp(devices.OFF_REFUSED))
+  await t.exception(ops.groupJoin(d.ctx, { group: general }), new RegExp(devices.OFF_REFUSED))
+  await t.exception(ops.groupJoin(d.ctx, { group: rand(), community }), new RegExp(devices.OFF_REFUSED), 'a group not held yet')
+  await t.exception(ops.groupCreate(d.ctx, { name: 'Feira', join: 'open', community }), new RegExp(devices.OFF_REFUSED))
+  await t.exception(ops.communityCreate(d.ctx, { name: 'Outro', join: 'open' }), new RegExp(devices.OFF_REFUSED))
+  t.is(await diaryLength(d), before, 'still nothing written')
 
   const back = await ops.deviceReconnect(d.ctx, { name: 'Tablet' })
   t.alike(back, { id: back.id, registered: true, off: false })
@@ -212,6 +219,43 @@ test('disconnect half way: the marks written stand and the call says it is incom
   const again = await ops.deviceDisconnect(a.ctx, { id: lost })
   t.is(again.cut, writers.length - 1, 'the call made again marks the rest')
   t.is(cutsOf(await entries(a)).length, writers.length)
+})
+
+// Appends records(key) to the own diary of `s`, `key` the device key.
+async function plant (s, records) {
+  const diary = await store.openDiary(s.storage, s.ctx.keyPair)
+  const key = devices.deviceKey(s.ctx.keyPair.secretKey, b4a.from(s.key, 'hex'))
+  try {
+    for (const record of records(key)) await store.appendRecord(diary, record)
+  } finally {
+    devices.wipeKey(key)
+    await diary.close()
+  }
+}
+
+test('a repeated disconnect never lowers an earlier mark', async (t) => {
+  const a = await setup(t)
+  await ops.deviceHello(a.ctx, { name: 'Celular' })
+  const w = { group: rand(), writer: rand() }
+  const kept = { group: rand(), writer: rand() }
+  const later = { group: rand(), writer: rand() }
+  const lost = rand()
+  // Another device cut W at 100 and lost's writer at 7; none is held here.
+  await plant(a, (key) => [
+    groupJoinRecord({ ...w, on: true }),
+    groupJoinRecord({ ...kept, on: true }),
+    devices.sealedRecord({ v: 1, id: lost, name: 'Perdido', on: true, writers: [kept] }, key),
+    groupCutRecord({ ...w, cut: 100 }),
+    groupCutRecord({ ...kept, cut: 7 }),
+    groupJoinRecord({ ...later, on: true })
+  ])
+  t.alike((await ops.deviceList(a.ctx)).previous, { writers: 1 })
+  t.alike(await ops.deviceDisconnect(a.ctx, { previous: true }), { cut: 1, empty: 1, groups: [later.group] })
+  t.alike(await ops.deviceDisconnect(a.ctx, { id: lost }), { cut: 0, empty: 0, groups: [] })
+  const list = await entries(a)
+  t.alike(cutsOf(list), [{ ...w, cut: 100 }, { ...kept, cut: 7 }, { ...later, cut: 0 }], 'no second mark on a marked pair')
+  t.is(devices.cutMarks(list).get(devices.pairKey(w)), 100)
+  t.is(foldOf(a, list).byId.get(lost).on, false)
 })
 
 test('disconnect rotates the key of a private group this device distributes in, best effort', async (t) => {

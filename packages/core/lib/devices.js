@@ -359,13 +359,16 @@ function listView ({ fold, self, linked, cuts, own }) {
 // The pairs device.disconnect cuts, before the held-length check:
 // { error: OFF_REFUSED | SELF_REFUSED | NOT_FOUND } or { pairs, off }
 // (`off` the id to turn off afterwards, null for `previous`). Never this
-// device's own writers, never a root, only pairs the diary links now. A
-// disconnected device disconnects nothing.
+// device's own writers, never a root, never a pair already marked, only
+// pairs the diary links now. A disconnected device disconnects nothing.
 function disconnectPlan ({ fold, self, id = null, previous = false, linked, own, cuts = new Map() }) {
   if (selfOff({ fold, self, own, cuts })) return { error: OFF_REFUSED }
   const ownKeys = new Set(nonRoot(own).map(pairKey))
   const linkedKeys = new Set(nonRoot(linked).map(pairKey))
-  const take = (list) => nonRoot(list).filter((p) => linkedKeys.has(pairKey(p)) && !ownKeys.has(pairKey(p)))
+  // A pair that already carries a mark is never named (alreadyCut): marking
+  // it again could only lower the earlier mark. For `previous` this also
+  // matches listView, which does not count a marked pair.
+  const take = (list) => nonRoot(list).filter((p) => linkedKeys.has(pairKey(p)) && !ownKeys.has(pairKey(p)) && !cuts.has(pairKey(p)))
   if (previous === true) {
     const mapped = new Set()
     for (const d of fold.byId.values()) for (const p of d.writers) mapped.add(pairKey(p))
@@ -385,10 +388,11 @@ function deviceView (entries, key, self, own) {
   return { fold, cuts, linked: linkedPairs(entries), off: selfOff({ fold, self, own, cuts }) }
 }
 
-// Whether a pair already carries a mark at or below `length`.
-function alreadyCut (cuts, pair, length) {
-  const k = pairKey(pair)
-  return cuts.has(k) && cuts.get(k) <= length
+// Whether a pair already carries a mark: a disconnect never marks it again.
+// cutMarks keeps the lowest mark, so a new one is either ignored or lowers
+// the earlier one, hiding the history the device that cut first kept.
+function alreadyCut (cuts, pair) {
+  return cuts.has(pairKey(pair))
 }
 
 module.exports = {

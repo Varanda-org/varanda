@@ -3259,6 +3259,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     const base = { ownHex, ownEntries: await store.readAll(diary), association, mod }
+    await refuseOffDevice(ctx, base.ownEntries, ownHex)
     const { c, root, member } = await communityForCreate(ctx, base, C)
     const header = buildRecord(() => grp.groupHeader({
       kind: 'group',
@@ -3303,6 +3304,7 @@ async function groupCreate (ctx, { name, join, visibility = 'public', community 
 // `member`: the own live community writer a group writer names; a
 // community writer (`community: true`) names none.
 async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { member = null, community = false } = {}) {
+  await refuseOffDevice(ctx, base.ownEntries, ownHex)
   const core = own === null ? null : await readGroupCore(ctx, own.key)
   // A listed writer the diary has not bound yet is reused (and named by a
   // new join below) only when this device derives it.
@@ -3345,12 +3347,14 @@ async function groupJoin (ctx, { group, community = null }) {
   const hint = community === null || community === undefined ? null : communityKeyOf(community)
   return withGroup(ctx, group, true, async (ids) => {
     const { ownHex, g } = ids
+    await refuseOffDevice(ctx, ids.base.ownEntries, ownHex)
     if (hint !== null && hint !== g.community) throw new UsageError(GROUP_OTHER_COMMUNITY)
     requireParent(g)
     const cw = liveUncutWriter(g.c, ownHex, ids.base.ownEntries)
     if (cw === null || statusOf(g.c, ownHex) !== 'member') throw new UsageError(COMMUNITY_FIRST)
     return joinLoaded(ctx, ids, cw.key)
   }, async (p, ids) => {
+    await refuseOffDevice(ctx, ids.base.ownEntries, ids.ownHex)
     const core = p.own === null ? null : await readGroupCore(ctx, p.own.key)
     // A writer already written answers again without a new one.
     if (core !== null && core.length > 0) return pendingJoin(ctx, p, ids)
@@ -3367,6 +3371,7 @@ async function groupJoin (ctx, { group, community = null }) {
 // The join of a loaded group through a new or listed own writer whose
 // header names `member` (the own community writer).
 async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
+  await refuseOffDevice(ctx, base.ownEntries, ownHex)
   // bans, not members: a diary banned before it had a writer is not listed.
   if (g.built.bans.has(ownHex)) throw new UsageError(GROUP_FORBIDDEN)
   // A blocked own diary binds none of its writers in the fold.
@@ -4876,6 +4881,7 @@ async function communityCreate (ctx, { name, join }) {
   return withCommunityBase(ctx, true, async ({ diary, ownHex, base }) => {
     // Checked before anything is planned or written.
     buildRecord(() => grp.groupHeader({ kind: 'community', diary: ownHex, join, name }))
+    await refuseOffDevice(ctx, base.ownEntries, ownHex)
     const planned = await store.readCommunityCreate(ctx.storage)
     if (planned !== null) {
       if ((planned.name === name && planned.join === join) || await heldLength(ctx, planned.community) > 0) {
@@ -4945,6 +4951,7 @@ function headerRejoin (core) {
 // the upkeep plans Geral as a group, with its own checks.
 async function communityJoin (ctx, { community }, { general: withGeneral = true } = {}) {
   return withCommunity(ctx, community, true, async ({ diary, ownHex, base, c }) => {
+    await refuseOffDevice(ctx, base.ownEntries, ownHex)
     // A root its creator's diary has not bound here yet folds empty: the
     // join waits for the sync like a root not held (the own CW is reused).
     if (c.built.creator === null) {
@@ -5773,8 +5780,9 @@ async function deviceUpkeepPlan (ctx) {
     // no key on. With its id on, a listed writer the own diary cut is a
     // candidate again: the join writes a new writer, which the kv then
     // lists unmarked, so it never loops.
+    // `off: true` lets the session tell the app (devices.changed).
     const device = await deviceStateIn(ctx, base.ownEntries, ownHex)
-    if (device.off) return { enrol: [], share: [], skipped: [] }
+    if (device.off) return { enrol: [], share: [], skipped: [], off: true }
     const recut = (key, writer) => device.self !== null && ownWriterCut(base.ownEntries, key, writer)
     const entries = await store.readGroupWriters(ctx.storage)
     const listed = new Map(entries.map((e) => [e.group, e]))
@@ -6018,6 +6026,14 @@ async function deviceOff (ctx) {
   return withIdentity(ctx, async ({ diary, ownHex }) => ({ off: (await deviceStateIn(ctx, await store.readAll(diary), ownHex)).off }))
 }
 
+// A disconnected device binds no new writer by hand either (group.join,
+// community.join, group.create, community.create): only device.reconnect,
+// after the passkey, brings it back (rpc.md 5.153). Checked before anything
+// is written; `entries` the own diary entries.
+async function refuseOffDevice (ctx, entries, ownHex) {
+  if ((await deviceStateIn(ctx, entries, ownHex)).off) throw new UsageError(devices.OFF_REFUSED)
+}
+
 function canonicalName (name) {
   const canonical = devices.canonicalDeviceName(name)
   if (canonical === null) throw new UsageError('nome do aparelho inválido')
@@ -6100,7 +6116,7 @@ async function heldContiguous (ctx, key) {
 
 // -> { cut, empty, groups }: rpc.md 5.153. The caller updated the writer
 // cores first (bounded). Each linked pair is marked at the contiguous
-// length held here unless already marked at or below it; then, for `id`,
+// length held here unless it already carries a mark (never lowered); then, for `id`,
 // the off record. `groups` lists the roots marked, for the caller's events.
 // Then, best effort, a rotation in each private group this device may
 // distribute in. A failure after a first write throws DEVICE_PARTIAL (the
@@ -6116,8 +6132,8 @@ async function deviceDisconnect (ctx, { id = null, previous = false }, { write =
     let empty = 0
     try {
       for (const pair of plan.pairs) {
+        if (devices.alreadyCut(view.cuts, pair)) continue
         const length = await heldContiguous(ctx, pair.writer)
-        if (devices.alreadyCut(view.cuts, pair, length)) continue
         await appendOwn(ctx, diary, groupCutRecord({ group: pair.group, writer: pair.writer, cut: length }))
         written.push(pair.group)
         cut++

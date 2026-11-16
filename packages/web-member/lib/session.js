@@ -2428,6 +2428,8 @@ function createBrowserSession ({
     const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
     try {
       const { plan, planLength } = await withCores(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      // Sent only on a change, so a pass of an off device never loops.
+      if (plan.off === true && !stale()) noteDeviceOff(true, epoch)
       shareChecked = true
       upkeepFullAt = Date.now()
       // Only what a later sync can bring keeps the arming: a root skipped
@@ -2600,22 +2602,26 @@ function createBrowserSession ({
   // lent its cores yet, cannot hold them or cannot serve the read skips
   // it (never waits for the run's end and never preempts it); the next
   // length, the upkeep or a device.* call reads again.
+  // `deviceCheckLength` is the length last read for good: a skipped or
+  // failed read leaves it, so the same length is read again on its next
+  // report (and the upkeep pass also says off, see upkeep).
   let deviceChecking = false
-  let deviceCheckAgain = false
-  async function deviceCheck () {
+  let deviceCheckNext = null
+  async function deviceCheck (length) {
     if (deviceChecking) {
-      deviceCheckAgain = true
+      deviceCheckNext = length
       return
     }
     deviceChecking = true
     try {
-      do {
-        deviceCheckAgain = false
+      for (let next = length; next !== null; next = deviceCheckNext) {
+        deviceCheckNext = null
         const r = run
         if (closed || keyPair === null || r === null || r.once) return
         const epoch = connection
+        const kp = keyPair
         const api = await readyWithin(r.ready, 0)
-        if (api === NOT_READY || api === null || !api.hold()) return
+        if (api === NOT_READY || api === null || !api.hold()) continue
         let out = null
         try {
           out = await member.deviceOff({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group, opened: undefined, settled: undefined } })
@@ -2624,8 +2630,10 @@ function createBrowserSession ({
         } finally {
           api.release()
         }
-        if (out !== null && run === r) noteDeviceOff(out.off, epoch)
-      } while (deviceCheckAgain)
+        if (out === null || run !== r || keyPair !== kp || epoch !== connection) continue
+        deviceCheckLength = next
+        noteDeviceOff(out.off, epoch)
+      }
     } finally {
       deviceChecking = false
     }
@@ -2633,8 +2641,7 @@ function createBrowserSession ({
 
   function scheduleDeviceCheck (length) {
     if (closed || keyPair === null || length === deviceCheckLength) return
-    deviceCheckLength = length
-    deviceCheck().catch(noop)
+    deviceCheck(length).catch(noop)
   }
 
   // A device write: whatever reached the own diary (part of a disconnect

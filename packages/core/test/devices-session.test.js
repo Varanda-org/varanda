@@ -62,7 +62,8 @@ async function onDiary (ctx, fn) {
 
 const named = (events, name) => events.filter(([e]) => e === name).map(([, d]) => d)
 
-test('session: hello, list and disconnect, with their events', async (t) => {
+// The disconnect waits for its refresh run (up to 15 s with no peer here).
+test('session: hello, list and disconnect, with their events', { timeout: 120000 }, async (t) => {
   const p = await person(t)
   const hello = await p.call('device.hello', { name: 'Celular' })
   t.alike(hello, { id: hello.id, registered: true, off: false })
@@ -82,6 +83,8 @@ test('session: hello, list and disconnect, with their events', async (t) => {
 
   t.alike(await p.call('device.disconnect', { id: lost }), { cut: 1, empty: 1 })
   t.alike(named(p.events, 'groups.changed'), [{ group: pair.group }])
+  t.alike([named(p.events, 'sync.started'), named(p.events, 'sync.stopped')], [[], []], 'the refresh run is internal')
+  t.alike(await p.call('sync.status'), { state: 'idle' }, 'and the user sync intent untouched')
   const e = await p.call('device.disconnect', { id: hello.id }).catch((err) => err)
   t.is(e.code, 'USAGE')
   t.is(e.message, devices.SELF_REFUSED)

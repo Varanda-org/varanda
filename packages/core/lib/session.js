@@ -312,12 +312,18 @@ function createSession ({
 
   // ---- sync runs ----
 
-  function startRun ({ once, timeoutMs }) {
+  // `internal`: a run the node starts for itself (the device.disconnect
+  // refresh): no sync.started, sync.event or sync.stopped, and its end never
+  // touches the user's sync intent. Warnings still go out.
+  function startRun ({ once, timeoutMs, internal = false }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
     const epoch = connection
     const { signal, abort } = createAbort()
-    const r = { runId, once, abort, reason: null, done: null }
+    const r = { runId, once, internal, abort, reason: null, done: null }
+    const syncEvent = (event, data) => {
+      if (!internal) send(event, data, epoch)
+    }
     run = r
     // A burst of downloads in one group (a writer catching up block by
     // block) becomes one groups.changed per group.
@@ -345,7 +351,7 @@ function createSession ({
       grown.add(group)
       if (grownTimer === null) grownTimer = setTimeout(flushGrown, GROUPS_CHANGED_MS)
     }
-    send('sync.started', { runId, once }, epoch)
+    syncEvent('sync.started', { runId, once })
     r.done = (async () => {
       let result = null
       let error = null
@@ -370,7 +376,7 @@ function createSession ({
               return
             }
             const text = formatEvent(ev)
-            if (text !== null) send('sync.event', { runId, line: line(text) }, epoch)
+            if (text !== null) syncEvent('sync.event', { runId, line: line(text) })
           },
           signal,
           storeOptions: currentStoreOptions()
@@ -385,9 +391,9 @@ function createSession ({
       if (run === r) run = null
       if (error !== null) {
         if (codeOf(error) === 'LOCKED') enterErrorState()
-        syncIntent = null
+        if (!internal) syncIntent = null
         warning('erro: ' + toRpcError(error, reportInternal).message, epoch)
-        send('sync.stopped', { runId, reason: 'error' }, epoch)
+        syncEvent('sync.stopped', { runId, reason: 'error' })
         return
       }
       let reason = r.reason
@@ -401,7 +407,7 @@ function createSession ({
       }
       const data = { runId, reason }
       if (once) data.result = capSyncResult(result)
-      send('sync.stopped', data, epoch)
+      syncEvent('sync.stopped', data)
     })()
     return runId
   }
@@ -512,26 +518,22 @@ function createSession ({
     send('devices.changed', { off }, epoch)
   }
 
-  // Before device.disconnect marks the writers: while a continuous run is
-  // wanted, one bounded once run brings the writer cores up to what the
-  // peers hold, so the marks keep what the lost device wrote before the
-  // call. Without a continuous run the node is offline by choice and marks
-  // what it holds.
+  // Before device.disconnect marks the writers: one bounded internal once
+  // run (at most DEVICE_REFRESH_MS, whatever the user's sync state) brings
+  // the writer cores up to what the peers hold, so the marks keep what the
+  // lost device wrote before the call. A user's run is preempted as by any
+  // write and restarted after the call (restartWhenIdle). Skipped while the
+  // app is backgrounded, closed or in the error state.
   async function refreshGroupCores () {
-    if (syncIntent !== 'continuous' || closed || errorState) return
-    const intent = syncIntent
+    if (closed || errorState || suspended) return
     if (run !== null) await stopRun('preempted')
-    startRun({ once: true, timeoutMs: DEVICE_REFRESH_MS })
+    startRun({ once: true, timeoutMs: DEVICE_REFRESH_MS, internal: true })
     const r = run
-    try {
-      if (r !== null) await r.done
-    } finally {
-      if (!errorState && syncIntent === null) syncIntent = intent
-    }
+    if (r !== null) await r.done
   }
 
   function syncState () {
-    return run === null ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
+    return run === null || run.internal ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
   }
 
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----

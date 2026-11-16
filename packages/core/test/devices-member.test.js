@@ -111,7 +111,7 @@ test('disconnect cuts the lost device at the held length, turns it off, then ref
   await t.exception(member.deviceDisconnect(a, { id: lost }), new RegExp(devices.NOT_FOUND), 'an off device is not found')
 
   t.alike(await member.deviceDisconnect(a, { previous: true }), { cut: 1, empty: 1, groups: [old.group] })
-  t.alike(await member.deviceDisconnect(a, { previous: true }), { cut: 0, empty: 0, groups: [] }, 'already cut at that length')
+  t.alike(await member.deviceDisconnect(a, { previous: true }), { cut: 0, empty: 0, groups: [] }, 'already marked')
   const list = await member.deviceList(a)
   t.is(list.previous, null)
   t.alike(list.devices.map((d) => [d.name, d.on, d.writers]), [['Este', true, 0], ['Perdido', false, 0]])
@@ -144,6 +144,33 @@ test('disconnect marks a held writer at its contiguous length', async (t) => {
   t.alike(cuts, [{ group, writer: bw.writer, cut: held }])
 })
 
+test('a repeated disconnect never lowers an earlier mark', async (t) => {
+  const a = await person(t, crypto.keyPair(), 'Ana')
+  await member.deviceHello(a, { name: 'Este' })
+  // Another device cut old writer W at 100 and a writer of `lost` at 7;
+  // this one holds neither (length 0 here).
+  const w = { group: rand(), writer: rand() }
+  const lost = rand()
+  const kept = { group: rand(), writer: rand() }
+  await plantDevice(a, null, null, [w])
+  await plantDevice(a, lost, 'Perdido', [kept])
+  await onDiary(a, async ({ diary }) => {
+    await store.appendRecord(diary, groupCutRecord({ ...w, cut: 100 }))
+    await store.appendRecord(diary, groupCutRecord({ ...kept, cut: 7 }))
+  })
+  const later = { group: rand(), writer: rand() }
+  await plantDevice(a, null, null, [later])
+  t.alike((await member.deviceList(a)).previous, { writers: 1 })
+
+  t.alike(await member.deviceDisconnect(a, { previous: true }), { cut: 1, empty: 1, groups: [later.group] })
+  t.alike(await member.deviceDisconnect(a, { id: lost }), { cut: 0, empty: 0, groups: [] })
+  const after = await onDiary(a, async ({ entries, key }) => ({ marks: devices.cutMarks(entries), cuts: cutsOf(entries), fold: devices.foldDevices(entries, key) }))
+  t.is(after.marks.get(devices.pairKey(w)), 100, 'W keeps the history the first device held')
+  t.is(after.marks.get(devices.pairKey(kept)), 7)
+  t.alike(after.cuts, [{ ...w, cut: 100 }, { ...kept, cut: 7 }, { ...later, cut: 0 }], 'no second mark on a marked pair')
+  t.is(after.fold.byId.get(lost).on, false, 'the id is still turned off')
+})
+
 test('disconnect rotates the key of a private group this node distributes in', async (t) => {
   const a = await person(t, crypto.keyPair(), 'Ana')
   const { group } = await createGroup(a, { name: 'Segredo', join: 'open', visibility: 'private' })
@@ -172,6 +199,7 @@ test('no id and a cut current writer: off, hello registers nothing, only reconne
   t.alike(list.devices, [])
   await t.exception(member.deviceDisconnect(a, { previous: true }), new RegExp(devices.OFF_REFUSED))
   t.alike(await member.deviceOff(a), { off: true })
+  await t.exception(member.communityCreate(a, { name: 'Bairro', join: 'open' }), new RegExp(devices.OFF_REFUSED), 'no id: a create is refused too')
 
   const back = await member.deviceReconnect(a, { name: 'Celular' })
   t.ok(/^[0-9a-f]{64}$/.test(back.id))
@@ -185,10 +213,20 @@ test('no id and a cut current writer: off, hello registers nothing, only reconne
 
 test('an id turned off by another device: hello off, disconnect refused, reconnect gives a new id', async (t) => {
   const a = await person(t, crypto.keyPair(), 'Ana')
+  const { community, group: general } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
   const { id } = await member.deviceHello(a, { name: 'Celular' })
   await onDiary(a, ({ diary, key }) => store.appendRecord(diary, devices.sealedRecord({ v: 1, id, name: null, on: false, writers: [] }, key)))
   t.alike(await member.deviceHello(a, { name: 'Celular' }), { id, registered: false, off: true })
   await t.exception(member.deviceDisconnect(a, { previous: true }), new RegExp(devices.OFF_REFUSED))
+
+  // No join or create by hand either, and nothing is written.
+  const length = await onDiary(a, async ({ entries }) => entries.length)
+  await t.exception(member.communityJoin(a, { community }), new RegExp(devices.OFF_REFUSED))
+  await t.exception(member.groupJoin(a, { group: general }), new RegExp(devices.OFF_REFUSED))
+  await t.exception(member.groupJoin(a, { group: rand(), community }), new RegExp(devices.OFF_REFUSED), 'a group not held yet')
+  await t.exception(member.groupCreate(a, { name: 'Feira', join: 'open', community }), new RegExp(devices.OFF_REFUSED))
+  await t.exception(member.communityCreate(a, { name: 'Outro', join: 'open' }), new RegExp(devices.OFF_REFUSED))
+  t.is(await onDiary(a, async ({ entries }) => entries.length), length, 'nothing written')
   const back = await member.deviceReconnect(a, { name: 'Celular de novo' })
   t.not(back.id, id)
   const list = await member.deviceList(a)
