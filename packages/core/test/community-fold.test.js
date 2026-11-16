@@ -6,7 +6,7 @@ const {
   validateGroupHeader, validateWriterHeader, validateGroupRecord,
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, communityMetaCw, communityDrop, groupKey, groupSealed, groupInvites, communityInvites,
-  buildGroup, buildCommunity
+  groupReact, buildGroup, buildCommunity
 } = require('../lib/group')
 const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
 
@@ -1150,6 +1150,17 @@ test('gate: after leaving C, a G admission covers only writers of the CW generat
   t.absent(shown(r).includes(wX5 + ':1'), 'a writer on a retired CW is never covered')
   t.absent(r.liveWriters.has(wX5))
   t.alike(r.requests, [X], 'it stays uncovered, as without automatic cover')
+  // Side records: a device of the new CW that only reacts counts from seq 1;
+  // one on the retired CW never does.
+  const wX6 = K(0x4014)
+  const target = { writer: wX3, seq: 1 }
+  const reactionsOf = (g) => g.posts.find((p) => p.writer === target.writer && p.seq === target.seq).reactions
+  a.add(X, wX6, { cw: cwX2, at: AT(92) })
+  a.push(wX6, groupReact({ target, emoji: '\u{1f44d}', at: AT(93) }))
+  t.alike(reactionsOf(buildGroup(a.input())), [{ emoji: '\u{1f44d}', count: 1, by: [X] }], 'the reaction of a new device that only reacts counts')
+  a.push(wX6, groupReact({ target, emoji: '', at: AT(94) }))
+  a.push(wX5, groupReact({ target, emoji: '\u{1f44d}', at: AT(95) }))
+  t.is(reactionsOf(buildGroup(a.input())), undefined, 'a reaction on the retired CW never counts')
 })
 
 test('no authority after leaving: a departed admin moderation never counts, with or without a G leave', (t) => {

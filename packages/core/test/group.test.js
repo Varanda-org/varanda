@@ -2593,37 +2593,30 @@ test('reactions by non-members, banned or departed diaries are ignored', (t) => 
   t.is(reactionsOf(g, p), undefined)
 })
 
-// Owner decision (#350): a new device's automatic cut counts its side
-// records too, each at its reactsAt anchor (the record before it on its own
-// core, else the start of the order), so a later record never moves it.
-test('a new device\'s reaction keeps its standing when the device writes more', (t) => {
+// Owner decision (#350): a new device's side records count from seq 1, as
+// under an admit listing it with cut 1; its posts keep the automatic cut.
+test('a new device that only reacts has its reactions counted, also once it posts, until the diary leaves', (t) => {
   const THUMB = [{ emoji: THUMBS, count: 1, by: [X] }]
   const w = world({ join: 'approval' }).add(X, wX)
   w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(1) }))
   const p = post(w, G, 2)
-  w.add(X, wX2, { at: AT(3) })
-  react(w, wX2, p, THUMBS, 4)
-  t.is(reactionsOf(buildGroup(w.input()), p), undefined, 'a reaction before any record of its core sits at the start')
-  post(w, wX2, 5)
+  const q = post(w, G, 3)
+  w.add(X, wX2, { at: AT(4) })
+  react(w, wX2, p, THUMBS, 5)
+  react(w, wX2, q, THUMBS, 6)
   let g = buildGroup(w.input())
-  t.is(reactionsOf(g, p), undefined, 'the same once the device posts')
-  t.ok(visible(g).includes(wX2 + ':2'), 'its post after the admit shows')
-  react(w, wX2, p, THUMBS, 6)
+  t.alike(reactionsOf(g, p), THUMB, 'a reaction with no record before it on its core')
+  t.alike(reactionsOf(g, q), THUMB)
   post(w, wX2, 7)
   g = buildGroup(w.input())
-  t.alike(reactionsOf(g, p), THUMB, 'a reaction after its admitted post counts')
-
-  // A reaction anchored at a post from before the admit.
-  const v = world({ join: 'approval' }).add(X, wX).add(X, wX2)
-  const q = post(v, G, 1)
-  post(v, wX2, 1.5)
-  react(v, wX2, q, THUMBS, 2)
-  v.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(3) }))
-  t.is(reactionsOf(buildGroup(v.input()), q), undefined, 'a reaction before the admit stays unadmitted')
-  post(v, wX2, 4)
-  const h = buildGroup(v.input())
-  t.is(reactionsOf(h, q), undefined, 'also once the device posts')
-  t.alike(visible(h).filter((x) => x.startsWith(wX2)), [wX2 + ':3'], 'only its post after the admit shows')
+  t.alike(reactionsOf(g, p), THUMB, 'still counted once the device posts')
+  t.alike(reactionsOf(g, q), THUMB)
+  t.ok(visible(g).includes(wX2 + ':3'), 'its post after the admit shows')
+  w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(8) }))
+  g = buildGroup(w.input())
+  t.is(g.members.get(X), 'left')
+  t.is(reactionsOf(g, p), undefined, 'not once the diary has left')
+  t.is(reactionsOf(g, q), undefined)
 })
 
 test('reactions to hidden, unknown or future targets are ignored', (t) => {

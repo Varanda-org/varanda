@@ -1070,15 +1070,16 @@ function cutsMap (cuts) {
 // sets the state of every listed writer from its cut on, and of every other
 // writer from `unlisted` (0, or Infinity for an event that skips them). A
 // positive admit may also carry `auto`, the cuts the fold derives for the
-// diary's new devices it does not list (autoAdmit). The state of (writer,
-// seq) is the one of the last event, from index `from`, whose cut is at or
-// below seq.
-function layerAt (events, writer, seq, from = 0) {
+// diary's new devices it does not list (autoAdmit); a side record
+// (`side`) of such a writer counts from seq 1, as under an admit listing it
+// with cut 1. The state of (writer, seq) is the one of the last event, from
+// index `from`, whose cut is at or below seq.
+function layerAt (events, writer, seq, from = 0, side = false) {
   if (!events) return false
   for (let i = events.length - 1; i >= from; i--) {
     const e = events[i]
     let c = e.cuts.get(writer)
-    if (c === undefined) c = e.auto && e.auto.has(writer) ? e.auto.get(writer) : e.unlisted
+    if (c === undefined) c = e.auto && e.auto.has(writer) ? (side ? 1 : e.auto.get(writer)) : e.unlisted
     if (c <= seq) return e.on
   }
   return false
@@ -2404,11 +2405,13 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
   // not retired; in a group, no leave and no rejoin, or a rejoin naming the
   // diary's latest leave) gets, on each positive admit of that generation
   // not listing it, the cut an admin listing it would have written: its
-  // first record (side records included, placed at their reactsAt anchor)
-  // after the admit in causal order, else its next seq. Its records before
-  // the admission stay unadmitted, and a device from before a leave never
-  // comes back. Under a community, leaving it counts too, decided from
-  // headers and the admit's own cuts, never from order positions (a
+  // first record after the admit in causal order, else its next seq. Its
+  // posts before the admission stay unadmitted, and a device from before a
+  // leave never comes back. Its side records (reactions, votes, topic marks)
+  // never become nodes of the order and count from seq 1, as under an admit
+  // listing it with cut 1 (layerAt `side`), still under every other check.
+  // Under a community, leaving it counts too, decided from headers and the
+  // admit's own cuts, never from order positions (a
   // community leave has no causal link to G's admits): never a writer whose
   // CW C retired, and only an admit that lists a G writer of the diary bound
   // to a CW of the same community generation (genOfC) as the writer's CW.
@@ -2429,9 +2432,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       return false
     }
     const seqsOf = new Map()
-    for (const n of order) if (!n.virtual && n.seq >= 1) pushTo(seqsOf, n.writer, { seq: n.seq, pos: n.pos })
-    for (const list of reactsAt.values()) for (const p of list) pushTo(seqsOf, p.writer, { seq: p.seq, pos: p.pos })
-    for (const list of seqsOf.values()) list.sort((a, b) => a.seq - b.seq)
+    for (const n of order) if (!n.virtual && n.seq >= 1) pushTo(seqsOf, n.writer, n)
     const at = (x) => x.pos
     for (const l of kept) {
       const w = l.key
@@ -2440,9 +2441,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
       if (w === G || !list || !autoEligible(w, d)) continue
       const gen = leaves.get(d) || 0
       const mine = seqsOf.get(w) || []
-      let next = 1
-      for (const x of l.records) if (x.seq + 1 > next) next = x.seq + 1
-      for (const x of l.reacts || []) if (x.seq + 1 > next) next = x.seq + 1
+      const next = l.records.length ? l.records[l.records.length - 1].seq + 1 : 1
       for (const e of list) {
         if (!e.on || e.gen < gen || e.cuts.has(w)) continue
         if (cs !== null && !sameCGen(e, w, d)) continue
@@ -2467,7 +2466,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     }
     return out
   }
-  const admittedAt = (d, gen, w, s) => layerAt(admitsFrom(d, gen), w, s)
+  const admittedAt = (d, gen, w, s, side = false) => layerAt(admitsFrom(d, gen), w, s, 0, side)
   const admittedNow = (d, gen) => lastOn(admitsFrom(d, gen))
 
   const posts = []
@@ -2554,7 +2553,7 @@ function foldCore ({ G, header, creator, rootBound, rootEntry, now, C = null, bo
     const future = isFuture(r.at, now)
     if (out || (future && r.type !== 'group-poll' && r.type !== 'group-event') || (!mark && memberNow.get(d) !== 'member')) continue
     if (d !== owner && (layerAt(bans.get(d), n.writer, n.seq) ||
-      (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq) && !adminOf(n) && !adminC(d)))) continue
+      (join === 'approval' && !admittedAt(d, gen, n.writer, n.seq, true) && !adminOf(n) && !adminC(d)))) continue
     const id = r.target.writer + ':' + r.target.seq
     const post = postById.get(id)
     if (post === undefined) continue
