@@ -976,11 +976,12 @@ function createBrowserSession ({
   // yet (dm.pull, dm.pageSecrets, dmReadMedia, the uploads, the visit and
   // testimonial reads) -> the identityTarget each started under. A new PRF
   // read of the same key waits for that identity's calls before it locks
-  // the engine, so they end as chain steps would; a lock, a reset or
-  // another key never waits, and a call still running meets the lock.
+  // the engine, so they end as chain steps would; a lock, a reset, another
+  // key or close() never waits, and a call still running meets the lock.
   const dmCalls = new Map()
-  // Woken whenever identityTarget moves: a wait for dmCalls ends then.
-  const retargetWakes = new Set()
+  // The waits for dmCalls (dmCallsDone), woken whenever identityTarget
+  // moves or the session closes (wakeDmWaits).
+  const dmWaitWakes = new Set()
   // The private answer of a dm.list chain step that must wait off the chain.
   const DM_LIST_MISS = Symbol('dm-list-miss')
   // The identity requests are issued for, moved synchronously when an
@@ -995,9 +996,13 @@ function createBrowserSession ({
   function retarget (hex) {
     if (hex === null || hex !== targetKey) {
       identityTarget++
-      for (const wake of retargetWakes) wake()
+      wakeDmWaits()
     }
     targetKey = hex
+  }
+
+  function wakeDmWaits () {
+    for (const wake of dmWaitWakes) wake()
   }
   // The private-group box key pair and the epoch keys opened this session,
   // in memory only (./group-keys.js): locked with every identity change,
@@ -2755,26 +2760,27 @@ function createBrowserSession ({
   }
 
   // Settles once every dm-key use withDmReady started under `ident` has
-  // settled, or as soon as another identity change is called (retarget):
-  // that one locks at once, so a sign-out never waits for a call and a read
-  // it interrupts returns no plaintext. Awaited on the chain by a setKeyPair
+  // settled, or as soon as another identity change is called (retarget) or
+  // the session closes: those lock at once, so a sign-out or a close never
+  // waits for a call to end (it meets the lock instead) and a read it
+  // interrupts returns no plaintext. Awaited on the chain by a setKeyPair
   // of the same key before it locks the engine: no such call can start
   // while a change is pending (dmUnlocking is set when it is called), and
   // none waits on the chain (an engine call never does, see ./dm.js
   // idle()), so this always ends.
   async function dmCallsDone (ident) {
     while (true) {
-      if (ident !== identityTarget) return
+      if (closed || ident !== identityTarget) return
       const running = []
       for (const [p, i] of dmCalls) if (i === ident) running.push(p)
       if (running.length === 0) return
       let wake = null
       const moved = new Promise((resolve) => { wake = resolve })
-      retargetWakes.add(wake)
+      dmWaitWakes.add(wake)
       try {
         await Promise.race([Promise.allSettled(running), moved])
       } finally {
-        retargetWakes.delete(wake)
+        dmWaitWakes.delete(wake)
       }
     }
   }
@@ -5351,7 +5357,11 @@ function createBrowserSession ({
       noticer.abort()
       noticing = null
       // A dm engine call issued ahead of a new PRF read of the same key ends
-      // first; another key locks at once, as a lock does.
+      // first; another key locks at once, as a lock does. The wait runs on
+      // the chain: a slow pull or putMedia holds this re-read and every
+      // request behind it until the call ends (bounded by the call's link
+      // timeouts), the trade-off chosen so the call ends instead of answering
+      // locked. A lock, a reset, another key or close() ends the wait.
       if (sameKey && dmCalls.size > 0) await dmCallsDone(ident)
       zeroKeyPair()
       // The lock above stops a previous unlock still under way; it settles
@@ -6004,6 +6014,9 @@ function createBrowserSession ({
   function close () {
     if (closing !== null) return closing
     closed = true
+    // A same-key setKeyPair waiting for a dm call goes on to lock the engine
+    // now, so that call meets the lock instead of holding the close.
+    wakeDmWaits()
     syncIntent = null
     resetUpkeep()
     if (seenChangedTimer !== null) clearTimeout(seenChangedTimer)

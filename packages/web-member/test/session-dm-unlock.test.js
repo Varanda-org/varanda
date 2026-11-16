@@ -619,36 +619,41 @@ test('a dm.pull started under one identity never pulls for the identity a reset 
   t.alike(N.internal, [])
 })
 
+// Holds n's next dm.pull inside the engine, past its link page: the
+// blocklist read of its moderation() step.
+function holdPull (n) {
+  const h = { held: false, release: null }
+  const gate = new Promise((resolve) => { h.release = resolve })
+  const readJson = n.storage.readJson
+  let armed = true
+  n.storage.readJson = async (name) => {
+    if (armed && name === 'blocklist' && new Error().stack.includes('moderation')) {
+      armed = false
+      h.held = true
+      await gate
+    }
+    return readJson.call(n.storage, name)
+  }
+  return h
+}
+
+function pullOf (n) {
+  return n.session.handlers['dm.pull']({}).then((r) => ({ r }), (err) => ({ err }))
+}
+
+function settled (p) {
+  const s = { done: false }
+  p.then(() => { s.done = true }, noop)
+  return s
+}
+
 test('a dm.pull running in the engine: a new PRF read of the same key waits for it, a lock never does and the pull meets it', async (t) => {
   t.timeout(240000)
   const { A, B } = await withRows(t, 1)
-  // Holds B's next pull inside the engine, past its link page: the
-  // blocklist read of its moderation() step.
-  const readJson = B.storage.readJson
-  function holdPull () {
-    const h = { held: false, release: null }
-    const gate = new Promise((resolve) => { h.release = resolve })
-    let armed = true
-    B.storage.readJson = async (name) => {
-      if (armed && name === 'blocklist' && new Error().stack.includes('moderation')) {
-        armed = false
-        h.held = true
-        await gate
-      }
-      return readJson.call(B.storage, name)
-    }
-    return h
-  }
-  const pull = () => B.session.handlers['dm.pull']({}).then((r) => ({ r }), (err) => ({ err }))
-  function settled (p) {
-    const s = { done: false }
-    p.then(() => { s.done = true }, noop)
-    return s
-  }
 
   // A new PRF read of the same key waits for the pull issued before it.
-  let h = holdPull()
-  let pulling = pull()
+  let h = holdPull(B)
+  let pulling = pullOf(B)
   await until(() => h.held, 10000)
   const again = B.node.setKeyPair(B.keyPair, { prf: B.prf })
   const refreshed = settled(again)
@@ -666,8 +671,8 @@ test('a dm.pull running in the engine: a new PRF read of the same key waits for 
   // A lock never waits for a call: the pull meets it and files nothing,
   // so the next unlock still finds the message.
   await A.web.request('dm.send', { to: B.key, text: 'mais uma' })
-  h = holdPull()
-  pulling = pull()
+  h = holdPull(B)
+  pulling = pullOf(B)
   await until(() => h.held, 10000)
   const lock = settled(B.node.clearKeyPair())
   await until(() => lock.done, 10000).catch(noop)
@@ -681,8 +686,8 @@ test('a dm.pull running in the engine: a new PRF read of the same key waits for 
   // A lock called while a same-key read waits for a pull ends that wait:
   // it still locks at once.
   await A.web.request('dm.send', { to: B.key, text: 'e outra' })
-  h = holdPull()
-  pulling = pull()
+  h = holdPull(B)
+  pulling = pullOf(B)
   await until(() => h.held, 10000)
   const reread = B.node.setKeyPair(B.keyPair, { prf: B.prf })
   reread.catch(noop)
@@ -697,6 +702,30 @@ test('a dm.pull running in the engine: a new PRF read of the same key waits for 
   t.is(out.err && out.err.message, LOCKED, 'the pull meets the lock')
   await reread.catch(noop)
   t.is((await errorOf(B.web.request('dm.list', {}))).message, LOCKED, 'and the store stays locked')
+  t.alike(B.internal, [])
+})
+
+test('a close called while a new PRF read of the same key waits for a dm.pull locks at once: the pull meets the lock', async (t) => {
+  t.timeout(240000)
+  const { B } = await withRows(t, 1)
+  const h = holdPull(B)
+  const pulling = pullOf(B)
+  await until(() => h.held, 10000)
+  const reread = B.node.setKeyPair(B.keyPair, { prf: B.prf })
+  reread.catch(noop)
+  await sleep(100)
+  const closing = B.session.close()
+  closing.catch(noop)
+  await sleep(300)
+  h.release()
+  const out = await pulling
+  // Fails where the close leaves the re-read waiting for the pull: the pull
+  // ends first and files its message, and the close waits for all of it.
+  t.absent(out.r, 'the pull files nothing')
+  t.is(out.err && out.err.message, LOCKED, 'it meets the lock')
+  await closing
+  await reread.catch(noop)
+  t.is(B.session.state, 'closed')
   t.alike(B.internal, [])
 })
 
@@ -736,6 +765,42 @@ test('a testimonial.write whose lookup runs while a reset and another identity i
   t.is(err && err.message, LOCKED, 'the write issued for A is locked')
   const log = await N.web.request('log.read', {})
   t.is(log.entries.length, before, 'B\'s diary is unchanged')
+  t.absent(log.entries.some((e) => e.record.type === 'testimonial'), 'no testimonial in B\'s diary')
+  t.alike(N.internal, [])
+})
+
+test('a testimonial.write whose identity moves before its first step runs never looks the recipient up', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const to = hex(crypto.randomBytes(32))
+  const answer = { box: hex((await dmBoxKeyPairFromPrf(crypto.randomBytes(32), 1)).publicKey), gen: 1 }
+  let lookups = 0
+  const N = await memberNode(t, assoc, seeder.url, {
+    dmKeyPeek: async (key) => {
+      if (key !== to) throw new Error('sem semeador')
+      lookups++
+      return answer
+    }
+  })
+  const bPair = crypto.keyPair()
+  const B = hex(bPair.publicKey)
+
+  // Issued for A; the reset and B's install are called in the same tick, so
+  // the identity moves before the write's first step runs.
+  const writing = errorOf(N.session.handlers['testimonial.write']({ to, text: 'escrito por A' }))
+  const resetting = N.node.reset()
+  const installing = N.node.setKeyPair(bPair, { prf: crypto.randomBytes(32) })
+  const err = await writing
+  // Fails where the first step runs for whoever is still installed: the
+  // recipient is looked up for A after A was signed out.
+  t.is(err && err.message, LOCKED, 'the write issued for A is locked')
+  t.is(lookups, 0, 'the recipient is never looked up')
+  await resetting
+  await installing
+  await N.web.request('identity.create')
+  await N.web.request('cert.add', { cert: createCert({ member: B }, assoc) })
+  const log = await N.web.request('log.read', {})
   t.absent(log.entries.some((e) => e.record.type === 'testimonial'), 'no testimonial in B\'s diary')
   t.alike(N.internal, [])
 })

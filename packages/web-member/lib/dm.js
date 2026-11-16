@@ -545,7 +545,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // Settles once the own rows of the last unlock that installed its keys
   // are loaded and the work after the load started; rejects when the load
-  // failed (the engine then locked).
+  // failed (the engine then locked). Call it after `await unlock()`: while
+  // an unlock is still deriving its keys, it answers for the previous one.
   function loaded () {
     return ready
   }
