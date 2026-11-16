@@ -231,6 +231,13 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // Split so that standard does not read it as a template placeholder.
     'servido_igual "$' + '{bundle#/}" "$' + '{bundle#/}"',
     'o build não gerou index.html, varanda-node.js e sw.js',
+    // The node copy the page loads (varanda-node-<release>.js) is probed by
+    // the release mark of the www index.html, and the page lands last.
+    'versao=$(versao_web "$www/index.html")',
+    '[ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"',
+    'copiar_app "$base/src/apps/app/dist" "$www"',
+    // The rollback restores the saved www the same way, attributes kept.
+    'copiar_app "$state/www-anterior" "$www" -a',
     // The account service is probed through the domain, and its OAuth client
     // must be configured before anything changes.
     '/account/health',
@@ -279,6 +286,8 @@ test('deploy.sh: executable, required strings and last line', (t) => {
   const wait = fs.readFileSync(SCRIPT, 'utf8').match(/^aguardar_web\(\) \{\n[\s\S]*?^\}\n/m)
   t.ok(wait, 'aguardar_web located')
   t.absent(wait && wait[0].includes('$target'), 'aguardar_web never compares with $target (a rollback must pass)')
+  t.absent(shCode.includes('cp -R "$base/src/apps/app/dist/." "$www/"'), 'www is never filled in directory order')
+  t.absent(shCode.includes('cp -a "$state/www-anterior/." "$www/"'), 'nor restored in directory order by the rollback')
 })
 
 test('deploy.sh: forbidden constructs are absent', (t) => {
@@ -825,6 +834,15 @@ test('deploy.sh: a failing association write leaves the published files untouche
   checkAssocShapes(t, wk)
 })
 
+// A web export as finish-web.js leaves it: index.html marked with the release
+// and the node copy named after it, beside varanda-node.js and sw.js.
+const RELEASE = '0123456789abcdef'
+const RELEASE_NODE = 'varanda-node-' + RELEASE + '.js'
+function writeWebDist (dist) {
+  fs.writeFileSync(path.join(dist, 'index.html'), '<html><head><meta name="varanda-release" content="' + RELEASE + '"></head></html>')
+  for (const f of ['varanda-node.js', RELEASE_NODE, 'sw.js']) fs.writeFileSync(path.join(dist, f), f)
+}
+
 // The manual publication (README) replaces www too: it must render the same
 // files from the same rules, and refuse a malformed value before building.
 test('build-web.sh: writes the association files and refuses malformed values', (t) => {
@@ -838,7 +856,7 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   fs.copyFileSync(WELL_KNOWN, path.join(dir, 'deploy/seeder/well-known.sh'))
   const dist = path.join(dir, 'apps/app/dist')
   fs.mkdirSync(dist, { recursive: true })
-  for (const f of ['index.html', 'varanda-node.js', 'sw.js']) fs.writeFileSync(path.join(dist, f), f)
+  writeWebDist(dist)
   // docker is stubbed: it only records that the build ran.
   const bin = path.join(dir, 'bin')
   fs.mkdirSync(bin)
@@ -863,6 +881,8 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const both = run('VARANDA_ANDROID_CERT_SHA256=' + FAKE_CERT + '\nVARANDA_IOS_APP_ID=' + FAKE_IOS + '\n')
   t.is(both.status, 0, 'publishes with both set: ' + both.stderr)
   t.ok(fs.existsSync(path.join(www, 'index.html')), 'the app is published')
+  t.ok(fs.existsSync(path.join(www, RELEASE_NODE)), 'with the node copy the page loads')
+  t.ok(fs.readFileSync(BUILD, 'utf8').includes('copiar_app "$root/apps/app/dist" "$www"'), 'the page lands last (copiar_app)')
   checkAssocShapes(t, wk)
   const off = run('')
   t.is(off.status, 0, 'publishes with both empty: ' + off.stderr)
@@ -900,7 +920,7 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const stage = path.join(dir, 'stage')
   const stageDist = path.join(stage, 'apps/app/dist')
   fs.mkdirSync(stageDist, { recursive: true })
-  for (const f of ['index.html', 'varanda-node.js', 'sw.js']) fs.writeFileSync(path.join(stageDist, f), f)
+  writeWebDist(stageDist)
   fs.writeFileSync(path.join(stageDist, 'version.json'), '{"v":1,"commit":"planted"}\n')
   const wwwBefore = fs.readdirSync(www).sort()
   const arg = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
@@ -914,6 +934,137 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   const blocked = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
   t.not(blocked.status, 0, 'a directory at dist/version.json fails the build')
   t.ok(fs.statSync(path.join(stageDist, 'version.json')).isDirectory(), 'nothing written through it')
+
+  // The page loads the node copy named by its release mark: a build without
+  // the copy or without the mark is refused, in both modes, before www changes.
+  const NO_COPY = 'o build não gerou a marca varanda-release e a cópia varanda-node-<versão>.js'
+  const published = fs.readFileSync(path.join(www, 'index.html'))
+  fs.rmSync(path.join(dist, RELEASE_NODE))
+  const noCopy = run('')
+  t.not(noCopy.status, 0, 'a build without the release node copy is refused')
+  t.ok(noCopy.stderr.includes(NO_COPY), 'says what is missing')
+  t.ok(fs.readFileSync(path.join(www, 'index.html')).equals(published), 'www untouched')
+  writeWebDist(dist)
+  fs.writeFileSync(path.join(dist, 'index.html'), '<html><head></head></html>')
+  const noMark = run('')
+  t.not(noMark.status, 0, 'a build without the release mark is refused')
+  t.ok(noMark.stderr.includes(NO_COPY), 'says what is missing')
+  t.ok(fs.readFileSync(path.join(www, 'index.html')).equals(published), 'www still untouched')
+  fs.rmSync(path.join(stageDist, 'version.json'), { recursive: true })
+  fs.rmSync(path.join(stageDist, RELEASE_NODE))
+  const argNoCopy = run('', { EXPO_PUBLIC_VARANDA_COMMIT: COMMIT }, [stage])
+  t.not(argNoCopy.status, 0, 'arg mode refuses it too')
+  t.ok(argNoCopy.stderr.includes(NO_COPY), 'and says what is missing')
+})
+
+// The deploy, its rollback and build-web.sh empty www and refill it: the page
+// comes last, after sw.js, so an index.html never lands before the node copy
+// it loads.
+test('well-known.sh: copiar_app copies index.html last and versao_web reads the release mark', (t) => {
+  if (!hasBash(t)) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-copy-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const dist = path.join(dir, 'dist')
+  const www = path.join(dir, 'www')
+  fs.mkdirSync(path.join(dist, '_expo/static/js/web'), { recursive: true })
+  fs.mkdirSync(path.join(dist, '.well-known'))
+  fs.mkdirSync(www)
+  writeWebDist(dist)
+  fs.writeFileSync(path.join(dist, '_expo/static/js/web/index-ab12.js'), 'bundle')
+  fs.writeFileSync(path.join(dist, '.well-known/x'), 'dot')
+  fs.writeFileSync(path.join(dist, 'manifest.webmanifest'), '{}')
+  // cp is wrapped: it records each source in order and its option, and fails
+  // on demand.
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  const order = path.join(dir, 'order')
+  const opts = path.join(dir, 'opts')
+  const failOn = path.join(dir, 'fail-on')
+  fs.writeFileSync(path.join(bin, 'cp'), '#!/bin/sh\n' +
+    'for a; do src=$prev; prev=$a; done\n' +
+    'name=$(basename "$src")\n' +
+    'printf \'%s\\n\' "$name" >> ' + JSON.stringify(order) + '\n' +
+    'printf \'%s\\n\' "$1" >> ' + JSON.stringify(opts) + '\n' +
+    'if [ -f ' + JSON.stringify(failOn) + ' ] && [ "$name" = "$(cat ' + JSON.stringify(failOn) + ')" ]; then exit 1; fi\n' +
+    'exec /bin/cp "$@"\n', { mode: 0o755 })
+  const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH }
+  const sh = (body) => spawnSync('bash', ['-c', 'set -Eeuo pipefail\nlog() { printf "%s\\n" "$*" >&2; }\n' + SOURCE_WELL_KNOWN + body], { encoding: 'utf8', env })
+  const copy = () => sh('copiar_app ' + JSON.stringify(dist) + ' ' + JSON.stringify(www) + '\n')
+
+  const ok = copy()
+  t.is(ok.status, 0, 'copies: ' + ok.stderr)
+  const sources = fs.readFileSync(order, 'utf8').trim().split('\n')
+  t.alike(sources.slice(-2), ['sw.js', 'index.html'], 'sw.js, then index.html, last')
+  t.ok(sources.indexOf(RELEASE_NODE) < sources.indexOf('index.html'), 'the node copy before the page')
+  for (const f of ['index.html', 'sw.js', 'varanda-node.js', RELEASE_NODE, 'manifest.webmanifest', '_expo/static/js/web/index-ab12.js', '.well-known/x']) {
+    t.ok(fs.readFileSync(path.join(www, f)).equals(fs.readFileSync(path.join(dist, f))), 'same bytes: ' + f)
+  }
+  t.alike(fs.readdirSync(www).sort(), fs.readdirSync(dist).sort(), 'nothing more, nothing less')
+  const lines = (file) => fs.readFileSync(file, 'utf8').trim().split('\n')
+  t.alike(lines(opts).filter((o) => o !== '-R'), [], 'cp -R by default')
+
+  fs.rmSync(www, { recursive: true })
+  fs.mkdirSync(www)
+  fs.rmSync(order)
+  fs.writeFileSync(failOn, RELEASE_NODE)
+  const failed = copy()
+  t.not(failed.status, 0, 'a failed copy fails copiar_app')
+  t.absent(fs.existsSync(path.join(www, 'index.html')), 'and the page never lands')
+  fs.rmSync(failOn)
+
+  const reset = () => {
+    fs.rmSync(www, { recursive: true })
+    fs.mkdirSync(www)
+    fs.rmSync(order, { force: true })
+    fs.rmSync(opts, { force: true })
+  }
+  // The rollback restores the saved www with -a: owner, mode and dates stay
+  // (Caddy's ETag follows the date), and the page still lands last.
+  const old = new Date('2001-02-03T04:05:06Z')
+  const dated = ['index.html', 'sw.js', RELEASE_NODE, '_expo/static/js/web/index-ab12.js']
+  for (const f of dated) fs.utimesSync(path.join(dist, f), old, old)
+  reset()
+  const kept = sh('copiar_app ' + JSON.stringify(dist) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.is(kept.status, 0, 'copies with -a: ' + kept.stderr)
+  t.alike(lines(opts).filter((o) => o !== '-a'), [], 'every cp gets -a')
+  t.alike(lines(order).slice(-2), ['sw.js', 'index.html'], 'sw.js, then index.html, last with -a too')
+  for (const f of dated) t.is(fs.statSync(path.join(www, f)).mtimeMs, old.getTime(), 'date kept: ' + f)
+
+  // A saved www without sw.js is restored without one, the page still last,
+  // and an empty one restores nothing, like a copy of the whole folder.
+  fs.renameSync(path.join(dist, 'sw.js'), path.join(dir, 'sw.js'))
+  reset()
+  const noSw = copy()
+  t.is(noSw.status, 0, 'copies without sw.js: ' + noSw.stderr)
+  t.is(lines(order).at(-1), 'index.html', 'the page last')
+  t.absent(fs.existsSync(path.join(www, 'sw.js')), 'and no sw.js appears')
+  fs.renameSync(path.join(dir, 'sw.js'), path.join(dist, 'sw.js'))
+  const empty = path.join(dir, 'empty')
+  fs.mkdirSync(empty)
+  reset()
+  const none = sh('copiar_app ' + JSON.stringify(empty) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.is(none.status, 0, 'an empty source copies: ' + none.stderr)
+  t.alike(fs.readdirSync(www), [], 'nothing')
+  // A missing source (a saved www that is gone) fails, like the cp of the
+  // folder it replaces, and leaves the destination as it was.
+  fs.writeFileSync(path.join(www, 'keep'), 'kept')
+  const gone = sh('copiar_app ' + JSON.stringify(path.join(dir, 'absent')) + ' ' + JSON.stringify(www) + ' -a\n')
+  t.not(gone.status, 0, 'a missing source fails copiar_app')
+  t.alike(fs.readdirSync(www), ['keep'], 'and leaves the destination untouched')
+
+  const read = (file) => sh('versao_web ' + JSON.stringify(file) + '\n')
+  const marked = read(path.join(dist, 'index.html'))
+  t.is(marked.status, 0)
+  t.is(marked.stdout, RELEASE, 'the release of the mark')
+  for (const [label, html] of [['no mark', '<html><head></head></html>'], ['15 hex', '<meta name="varanda-release" content="0123456789abcde">'], ['upper case', '<meta name="varanda-release" content="0123456789ABCDEF">']]) {
+    fs.writeFileSync(path.join(dir, 'index.html'), html)
+    const r = read(path.join(dir, 'index.html'))
+    t.is(r.status, 0, label + ': exits 0')
+    t.is(r.stdout, '', label + ': nothing')
+  }
+  const missing = read(path.join(dir, 'absent.html'))
+  t.is(missing.status, 0, 'a missing index.html exits 0')
+  t.is(missing.stdout, '', 'with nothing')
 })
 
 test('well-known.sh: gravar_versao refuses malformed commits and links', (t) => {

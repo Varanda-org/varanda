@@ -8,6 +8,8 @@ export const SHARE_TTL_MS = 3600000
 export const SHARE_SKEW_MS = 60000
 export const SHARE_ID = /^[0-9]{13}-[0-9a-f]{32}$/
 export const EXPIRED_TEXT = 'o compartilhamento expirou'
+// The web worker could not store a share (src/shareIntake.web.js takeLost).
+export const LOST_TEXT = 'o compartilhamento não coube no espaço do navegador'
 export const EMPTY = Object.freeze({ held: null, phase: 'idle', owner: null, last: null, taken: false })
 
 function clean (value) {
@@ -179,10 +181,59 @@ export function shareStep (state, event) {
     }
   }
 
+  // Publicar loaded the photos and some failed to open: it keeps the files
+  // for a retry and frees them itself. The shell lets go without releasing,
+  // so the next share is read meanwhile.
+  if (event.type === 'loaded') {
+    if (state.phase !== 'shown' || !state.taken || state.held.id !== event.id) return { state, effects: [] }
+    return { state: droppedState(state.held.id), effects: [] }
+  }
+
+  // Publicar no longer needs a share it kept after 'loaded'.
+  if (event.type === 'free') {
+    if (typeof event.id !== 'string' || !SHARE_ID.test(event.id)) return { state, effects: [] }
+    if (state.held !== null && state.held.id === event.id) {
+      return { state: droppedState(state.held.id), effects: [{ type: 'release', id: event.id }] }
+    }
+    return { state, effects: [{ type: 'release', id: event.id }] }
+  }
+
   if (event.type === 'requeue' && state.phase === 'shown' && !state.taken) {
     return { state: { ...state, phase: 'idle' }, effects: [] }
   }
   return { state, effects: [] }
+}
+
+// A size or format refusal fails the same way on every try.
+export function retryableEncode (message) {
+  return typeof message === 'string' && message !== '' && message !== 'formato não aceito' && !message.endsWith('grande demais')
+}
+
+// The ids of a share's photos that failed to open and may work on a retry.
+// None: the share is done now. Some: it is held until each one loads on a
+// retry or leaves the draft (removed, published or discarded).
+export function holdShare (id, failed) {
+  const ids = Array.from(new Set(Array.isArray(failed) ? failed : []))
+  return ids.length === 0 ? { hold: null, done: id } : { hold: { id, ids }, done: null }
+}
+
+export function settleHold (hold, settled) {
+  if (hold === null || !Array.isArray(settled)) return { hold, done: null }
+  const gone = new Set(settled)
+  const ids = hold.ids.filter((x) => !gone.has(x))
+  if (ids.length === hold.ids.length) return { hold, done: null }
+  return ids.length === 0 ? { hold: null, done: hold.id } : { hold: { id: hold.id, ids }, done: null }
+}
+
+// The post text kept across a page load (src/draftKeep.web.js) goes before
+// what is already in the draft, which can only be a share's text applied
+// first. As in mergeDraft, what the person typed is never cut: when both do
+// not fit, the kept text alone stays.
+export function restoreDraft (kept, current, max) {
+  if (typeof kept !== 'string' || kept === '') return current
+  if (typeof current !== 'string' || current.trim() === '' || current === kept) return kept
+  const merged = kept + '\n' + current
+  return Array.from(merged).length <= max ? merged : kept
 }
 
 // The post field has no length cap, so a draft may already be over max: only

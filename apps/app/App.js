@@ -142,6 +142,7 @@ import { TabBar } from './src/ui/TabBar'
 import { TabBarShown } from './src/ui/tabBarShown'
 import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
 import { holdAllEmbeds } from './src/embedLive'
+import { usePreviewsEnabled } from './src/ui/usePreviewsEnabled'
 import { TopBar } from './src/ui/TopBar'
 import { ActionCapsule, TopActions } from './src/ui/TopActions'
 import { StackLayer, stackBusy, useReduceMotion, useStackMotion } from './src/ui/StackLayer'
@@ -785,8 +786,10 @@ function Member () {
     })
     return () => sub.remove()
   }, [])
-  // A lock or the background unloads every player, sheets included.
-  useEffect(() => (locked || backgrounded ? holdAllEmbeds() : undefined), [locked, backgrounded])
+  // A lock or the background unloads every player, sheets included, and so
+  // does "Prévia de links" switched off, for as long as it stays off.
+  const players = usePreviewsEnabled()
+  useEffect(() => (locked || backgrounded || !players ? holdAllEmbeds() : undefined), [locked, backgrounded, players])
   // A lock ends this account's session in the tab: nothing it opened or
   // quoted (the composer's reply or quote, an open Ajustes screen) reaches the
   // next account.
@@ -4195,6 +4198,8 @@ function Member () {
           shared={share.shared}
           onSharedDone={(id) => share.done(id)}
           onSharedTaken={(id) => share.taken(id)}
+          onSharedLoaded={(id) => share.loaded(id)}
+          onSharedFree={(id) => share.free(id)}
           me={me}
           busyRef={composerBusyRef}
           onClose={() => setComposer((c) => ({ ...c, open: false }))}

@@ -155,14 +155,22 @@ function createPostageFile (dataDir, { now = Date.now, name = FILE } = {}) {
       const t = now()
       const before = fileStamp(file)
       if (cached !== null && t < dueAt && before === stamp) return cached
-      const { got, wrote } = load(dataDir, () => t, name)
-      const due = [got.keys[0].createdAt + ROTATE_MS, ...got.keys.slice(1).map((k) => k.createdAt + MAX_AGE_MS)]
-      cached = got
-      dueAt = Math.min(...due)
+      const first = load(dataDir, () => t, name)
+      let got = first.got
       // Only our own write moves the stamp past `before`: a change made by
       // someone else while the file was read keeps the old stamp, so the next
       // get() reads it again.
-      stamp = wrote ? fileStamp(file) : before
+      stamp = before
+      if (first.wrote) {
+        // Another writer may have replaced the file right after our rename:
+        // read it back, so the cache holds what is on disk. The stamp comes
+        // first, so a change landing during the read-back is read next time.
+        stamp = fileStamp(file)
+        got = load(dataDir, () => t, name).got
+      }
+      const due = [got.keys[0].createdAt + ROTATE_MS, ...got.keys.slice(1).map((k) => k.createdAt + MAX_AGE_MS)]
+      cached = got
+      dueAt = Math.min(...due)
       return cached
     }
   }

@@ -9,6 +9,20 @@
 
 export { previewViaService as buildPreview } from './previewService.js'
 
+// The switch flipped in another tab of the site: the browser tells this tab
+// with a storage event, and ./ui/usePreviewsEnabled reads the store again.
+export function onPreviewPrefStorage (fn) {
+  try {
+    const target = globalThis
+    if (typeof fn !== 'function' || typeof target.addEventListener !== 'function') return () => {}
+    const handler = () => fn()
+    target.addEventListener('storage', handler)
+    return () => target.removeEventListener('storage', handler)
+  } catch {
+    return () => {}
+  }
+}
+
 // "Prévia de links" (previewPref.js) in the browser: localStorage.
 export function previewPrefStore () {
   try {

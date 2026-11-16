@@ -41,6 +41,50 @@ test('broken or malformed stores read as on and failed writes report failure', a
   }
 })
 
+test('a successful switch tells its listeners the new value, a failed one tells nobody', async (t) => {
+  const { onPreviewsChange, setPreviewsEnabled } = await load()
+  const heard = []
+  const off = onPreviewsChange((on) => heard.push(on))
+  const broken = onPreviewsChange(() => { throw new Error('listener') })
+  const store = memoryStore()
+  t.is(setPreviewsEnabled(store, false), true, 'a throwing listener does not fail the write')
+  t.is(setPreviewsEnabled(store, true), true)
+  t.is(setPreviewsEnabled(store, 'off'), false)
+  t.is(setPreviewsEnabled({ setItem () { throw new Error('full') } }, false), false)
+  t.alike(heard, [false, true], 'only the written values')
+  off()
+  broken()
+  setPreviewsEnabled(store, false)
+  t.alike(heard, [false, true], 'nothing after unsubscribing')
+  t.is(typeof onPreviewsChange(null), 'function', 'a non-function listener is ignored')
+})
+
+test('web: a storage event from another tab reaches this tab', async (t) => {
+  const { onPreviewPrefStorage } = await import('../src/previewBuild.web.js')
+  const had = { add: Object.hasOwn(globalThis, 'addEventListener'), remove: Object.hasOwn(globalThis, 'removeEventListener') }
+  const saved = { add: globalThis.addEventListener, remove: globalThis.removeEventListener }
+  const added = []
+  const removed = []
+  globalThis.addEventListener = (type, fn) => added.push([type, fn])
+  globalThis.removeEventListener = (type, fn) => removed.push([type, fn])
+  t.teardown(() => {
+    if (had.add) globalThis.addEventListener = saved.add
+    else delete globalThis.addEventListener
+    if (had.remove) globalThis.removeEventListener = saved.remove
+    else delete globalThis.removeEventListener
+  })
+  let heard = 0
+  const off = onPreviewPrefStorage(() => heard++)
+  t.is(added.length, 1)
+  t.is(added[0][0], 'storage')
+  added[0][1]({ key: 'varanda-previas-links' })
+  t.is(heard, 1)
+  off()
+  t.alike(removed, added, 'the same handler is removed')
+  t.is(typeof onPreviewPrefStorage(null), 'function', 'a non-function listener is ignored')
+  t.is(added.length, 1)
+})
+
 test('invalid switch values do not overwrite an explicit opt-out', async (t) => {
   const { previewsEnabled, setPreviewsEnabled } = await load()
   const store = memoryStore()

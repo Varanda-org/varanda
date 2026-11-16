@@ -15,7 +15,7 @@ const MODULE = 'modules/share-intake/android'
 const MODULE_MANIFEST = MODULE + '/src/main/AndroidManifest.xml'
 const APP_MANIFEST = 'android/app/src/main/AndroidManifest.xml'
 const KOTLIN = MODULE + '/src/main/java/app/varanda/shareintake/'
-const KOTLIN_FILES = ['ShareReceiverActivity.kt', 'ShareInbox.kt', 'ShareIntakeModule.kt'].map((name) => KOTLIN + name)
+const KOTLIN_FILES = ['ShareReceiverActivity.kt', 'ShareInbox.kt', 'ShareIntakeModule.kt', 'ShareSweepWorker.kt'].map((name) => KOTLIN + name)
 
 const attrs = (xml, name) => [...xml.matchAll(new RegExp('android:' + name + '="([^"]*)"', 'g'))].map((m) => m[1])
 
@@ -94,10 +94,38 @@ test('MainActivity still has no SEND action', (t) => {
   t.absent(xml.includes('android.intent.action.SEND'), 'SEND and SEND_MULTIPLE stay on the module receiver')
 })
 
-test('the module build.gradle adds no dependency', (t) => {
+// WorkManager only, at the exact version the app already ships through
+// expo-background-task, so the module brings no new library.
+test('the module build.gradle adds only WorkManager, pinned to the app\'s version', (t) => {
   const gradle = read(MODULE + '/build.gradle')
   t.ok(gradle.includes('namespace "app.varanda.shareintake"'))
-  t.absent(/\bdependencies\s*\{/.test(gradle))
+  const blocks = [...gradle.matchAll(/\bdependencies\s*\{([^}]*)\}/g)].map((m) => m[1].trim())
+  t.alike(blocks, ["implementation 'androidx.work:work-runtime-ktx:2.9.1'"], 'one exact dependency')
+  const shipped = fs.readFileSync(path.join(path.dirname(require.resolve('expo-background-task/package.json', { paths: [root] })), 'android/build.gradle'), 'utf8')
+  t.ok(shipped.includes("implementation 'androidx.work:work-runtime-ktx:2.9.1'"), 'the version expo-background-task ships')
+})
+
+// The cache can be emptied by Android before the person reaches the composer,
+// and nothing would say the share was lost. The inbox lives in the app's own
+// storage, so its sweep must run even with the app closed.
+test('the inbox lives outside the cache and is swept with the app closed', (t) => {
+  const inbox = read(KOTLIN + 'ShareInbox.kt')
+  t.ok(inbox.includes('private fun root(context: Context): File = File(context.noBackupFilesDir, DIR)'), 'never cleared by the system nor backed up')
+  t.absent(/File\(context\.(filesDir|dataDir|externalCacheDir|getExternal)/.test(inbox), 'not in backed-up or shared storage')
+  t.ok(inbox.includes('private fun legacyRoot(context: Context): File = File(context.cacheDir, DIR)'), 'the old cache directory')
+  t.ok(/fun newest\(context: Context\): Share\? \{\s*(?:\/\/[^\n]*\s*)?if \(adopt\(context\)\) scheduleSweep\(context\)/.test(inbox), 'a share waiting there through an update is read, and swept with the app closed')
+  t.ok(/fun sweep\(context: Context, maxAgeMs: Double\) \{[^}]*?return\s*adopt\(context\)/.test(inbox), 'and every sweep empties it')
+  t.ok(/private fun adopt\(context: Context\): Boolean \{[\s\S]*?if \(child\.isDirectory && isId\(child\.name\) && File\(child, MANIFEST\)\.isFile\) \{[\s\S]*?if \(!target\.exists\(\) && child\.renameTo\(target\)\) moved = true[\s\S]*?old\.deleteRecursively\(\)\s*return moved/.test(inbox), 'only complete shares move, never over one, and the rest goes')
+  t.ok(/writeManifest\(dir, id, at, title, text, offered\.size, kept\)\s*scheduleSweep\(context\)\s*return id/.test(inbox), 'every stored share schedules the sweep')
+  t.ok(/if \(!dir\.mkdirs\(\)\) return null\s*(?:\/\/[^\n]*\s*)*scheduleSweep\(context\)/.test(inbox), 'and so does every capture before its copy, so a killed one is swept too')
+  t.ok(inbox.includes('enqueueUniqueWork(SWEEP_WORK, ExistingWorkPolicy.REPLACE, request)'), 'one run, moved to after the newest share')
+  t.ok(inbox.includes('private const val SWEEP_DELAY_MS = TTL_MS + 60_000L'))
+  t.ok(inbox.includes('.setInitialDelay(SWEEP_DELAY_MS, TimeUnit.MILLISECONDS)'))
+  const ttl = Number(read('src/sharedIntent.js').match(/export const SHARE_TTL_MS = ([0-9]+)/)[1])
+  t.ok(inbox.includes('const val TTL_MS = ' + ttl.toLocaleString('en-US').replace(/,/g, '_') + 'L'), 'the same TTL as the app')
+  const worker = read(KOTLIN + 'ShareSweepWorker.kt')
+  t.ok(worker.includes('class ShareSweepWorker(context: Context, params: WorkerParameters) : Worker(context, params)'))
+  t.ok(/override fun doWork\(\): Result \{\s*ShareInbox\.sweep\(applicationContext, ShareInbox\.TTL_MS\.toDouble\(\)\)\s*return Result\.success\(\)/.test(worker), 'it sweeps only what is older than the TTL')
 })
 
 test('the Kotlin never logs', (t) => {
