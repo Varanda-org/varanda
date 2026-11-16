@@ -433,7 +433,7 @@ test('a failed read of a cached item misses once and keeps the entry cached', as
     }
   }
   const s = createDmStore({ storage })
-  await s.unlock(key(7))
+  await open(s, key(7))
   await s.putMedia(PEER, ID, [b4a.from('foto-um'), b4a.from('foto-dois')])
   const name = (await base.readJson('dmMediaIndex')).items[0].n
   failing = 'dmMedia/' + name + '/1'
@@ -444,7 +444,7 @@ test('a failed read of a cached item misses once and keeps the entry cached', as
   t.ok(got !== null && b4a.equals(got[1], b4a.from('foto-dois')), 'the next read opens the intact item')
   await s.close()
   const again = createDmStore({ storage })
-  await again.unlock(key(7))
+  await open(again, key(7))
   t.ok(again.hasMedia(PEER, ID), 'and it is cached after a reopen')
   await again.close()
 })
