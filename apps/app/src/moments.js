@@ -90,6 +90,44 @@ export function nextMomentOf (rings, pos) {
   return next ? next.items[next.start] : null
 }
 
+const ringItems = (ring) => (isObject(ring) && Array.isArray(ring.items) ? ring.items : [])
+
+// Up to n momentos after the current one, in the order step('next') walks
+// them: the rest of this ring, then each following ring from its `start`.
+export function aheadMomentsOf (rings, pos, n) {
+  const out = []
+  if (!Array.isArray(rings) || !isObject(pos) || !Number.isInteger(pos.ring) || pos.ring < 0 || !Number.isInteger(n) || n <= 0) return out
+  for (let r = pos.ring; r < rings.length && out.length < n; r++) {
+    const ring = rings[r]
+    const items = ringItems(ring)
+    let from
+    if (r === pos.ring) from = Number.isInteger(pos.item) ? pos.item + 1 : items.length
+    else from = Number.isInteger(ring.start) && ring.start >= 0 ? ring.start : 0
+    for (let i = from; i < items.length && out.length < n; i++) out.push({ author: ring.author, item: items[i] })
+  }
+  return out
+}
+
+// The momento a "prev" step lands on inside the same ring; going back to the
+// previous ring is rare enough not to read ahead for it.
+export function prevMomentOf (rings, pos) {
+  if (!Array.isArray(rings) || !isObject(pos) || !Number.isInteger(pos.ring) || pos.ring < 0) return null
+  const ring = rings[pos.ring]
+  const items = ringItems(ring)
+  const to = nextIndex(pos.item, items.length, 'prev')
+  return to === null ? null : { author: ring.author, item: items[to] }
+}
+
+// What the photo store needs to read and check one momento. An `at` that
+// does not parse makes the item invalid, as expiresIn already counts it expired.
+export function momentRefOf (author, item) {
+  if (typeof author !== 'string' || !isObject(item) || !Number.isSafeInteger(item.seq)) return null
+  const start = new Date(String(item.at)).getTime()
+  if (Number.isNaN(start)) return null
+  const media = isObject(item.media) ? item.media : null
+  return { author, seq: item.seq, expected: { mime: media?.mime, ms: media?.ms }, until: start + MOMENT_MS }
+}
+
 // The PR3 openMessage context for "Responder". `kind` names it a moment in
 // the chip and the sent prefix (privateReply.js), never 'a sua publicação'.
 export function replyContext (moment, author) {

@@ -18,9 +18,28 @@ export const momentMusicIdle = { item: null, phase: 'idle', error: '' }
 
 export const PRELOAD_IDLE_MS = 18000
 
+// A warm and a load for the same track share one item request: the account
+// layer reuses only a settled answer, not one still in flight.
+const itemFlights = new Map()
+const flightKey = (session, id) => session.member + '|' + session.origin + '|' + id
+
+export function warmMomentMusicItem (session, music, { signal } = {}) {
+  const ref = momentMusicOf({ music })
+  if (!ref || session.origin === null) return Promise.resolve()
+  const key = flightKey(session, ref.id)
+  if (itemFlights.has(key)) return itemFlights.get(key).then(() => undefined, () => undefined)
+  const flight = Promise.resolve().then(() => audiusItem('track', ref.id, { ...session, signal, reuse: true }))
+  itemFlights.set(key, flight)
+  const clear = () => { if (itemFlights.get(key) === flight) itemFlights.delete(key) }
+  return flight.then(clear, clear).then(() => undefined, () => undefined)
+}
+
 async function loadMomentMusic (session, ref, { signal, stale, onItem, onTicket, onStream, ready, stream: withStream = true, preload = false }) {
   const opts = { ...session, signal }
-  const item = ready ? ready.item : await audiusItem('track', ref.id, { ...opts, reuse: true })
+  const flight = ready ? null : itemFlights.get(flightKey(session, ref.id))
+  // A warm that failed or was aborted is not this load's answer: ask again.
+  const fetchItem = () => audiusItem('track', ref.id, { ...opts, reuse: true })
+  const item = ready ? ready.item : flight ? await flight.catch(fetchItem) : await fetchItem()
   if (stale()) return null
   onItem?.(item)
   if (clampStart(ref.start, item.duration) !== ref.start) throw new Error(MUSIC_SEEK_TEXT)
@@ -61,6 +80,8 @@ export function prepareMomentMusic (session, music, { epoch = playbackEpoch(), n
   let ready = null
   let failure = null
   let mediaFailed = false
+  let armed = false
+  let upgrading = null
   let settle
   const interrupted = new Promise((resolve, reject) => { settle = { resolve, reject } })
 
@@ -103,14 +124,16 @@ export function prepareMomentMusic (session, music, { epoch = playbackEpoch(), n
         off = player.onError(mediaError)
       }
     })
+  function armIdle () {
+    timer = setTimeout(() => {
+      mediaFailed = true
+      dropPlayer()
+    }, PRELOAD_IDLE_MS)
+  }
+
   const done = Promise.race([loading, interrupted]).then((result) => {
     if (!result || cancelled) return { ok: false, code: 'released' }
-    if (player && !taken) {
-      timer = setTimeout(() => {
-        mediaFailed = true
-        dropPlayer()
-      }, PRELOAD_IDLE_MS)
-    }
+    if (player && !taken) armIdle()
     return { ok: true }
   }, (err) => {
     dropPlayer()
@@ -125,6 +148,25 @@ export function prepareMomentMusic (session, music, { epoch = playbackEpoch(), n
     return { ok: false, code: typeof err?.code === 'string' ? err.code : err?.message }
   })
 
+  function build () {
+    if (taken || cancelled || mediaFailed || failure || player || !ready) return
+    if (!(Date.parse(ready.ticket.expiresAt) > now() + 60000)) return
+    const { url, base } = ready.ticket
+    player = createStreamPlayer(url, { origin: base, preload: 'auto' })
+    off = player.onError(mediaError)
+    const own = player
+    armIdle()
+    upgrading = own.seek(ref.start * 1000).catch((err) => { if (player === own) mediaError(err) })
+  }
+
+  // For a { stream: false } handle: build the player from the kept ticket.
+  // Called before the load settles, it arms itself and builds once done is ok.
+  function upgrade () {
+    if (stream || armed || taken || cancelled) return
+    armed = true
+    done.then((result) => { if (result.ok) build() })
+  }
+
   async function take (signal) {
     if (taken) return null
     taken = true
@@ -134,6 +176,7 @@ export function prepareMomentMusic (session, music, { epoch = playbackEpoch(), n
     if (signal?.aborted) cancel()
     try {
       await done
+      await upgrading
       if (cancelled || epoch !== playbackEpoch()) { cancel(); return null }
       if (failure) return { ok: false, error: failure, item }
       if (!ready || !(Date.parse(ready.ticket.expiresAt) > now() + 60000)) { cancel(); return null }
@@ -153,6 +196,7 @@ export function prepareMomentMusic (session, music, { epoch = playbackEpoch(), n
       return !!ref && !!next && owner.member === session.member && owner.origin === session.origin && owner.request === session.request && ref.id === next.id && ref.start === next.start
     },
     take,
+    upgrade,
     release: () => { if (!taken && !cancelled) cancel() },
     done
   }

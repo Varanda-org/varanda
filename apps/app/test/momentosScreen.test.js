@@ -59,7 +59,9 @@ test('the viewer: text through displayText, reply through canReply and openMessa
   t.ok(src.includes("request('moment.delete', { to: target.ref })"), 'moment.delete')
   t.ok(src.includes('<ConfirmStack'), 'ConfirmStack pattern')
   t.ok(src.includes("export const PHOTO_UNAVAILABLE = 'Foto indisponível'"), 'unavailable photo text')
-  t.ok(src.includes("media.read({ kind: 'moment', author, seq })"), 'photo through node.media.read')
+  t.ok(read('src/momentPhotos.js').includes("media.read({ kind: 'moment', author: ref.author, seq: ref.seq })"), 'the photo store reads node.media.read')
+  t.ok(src.includes('momentPhotosFor(node.media, node.epoch, { urlFromBytes, revokeUrl, adoptVideoFile })'), 'the viewer reads photos through the store')
+  t.absent(code('src/screens/Momentos.js').includes('media.read('), 'never node.media.read directly')
   t.ok(src.includes('holdMsOf(item, musicStarted)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
   t.ok(src.includes('segmentMs(item, photo.ms)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
   t.ok(src.includes('mark(itemKey)'), 'each viewed item marked seen')
@@ -871,7 +873,9 @@ test('visual 4: a new moment starts its caption at the top; text is never mouse-
 test('review 4: an undecodable photo shows Foto indisponível', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Momentos.js'), 'utf8')
   t.ok(src.includes('onError={handlePhotoError}') && src.includes('const handlePhotoError = photo.fail'), 'the Image reports a decode failure')
-  t.ok(src.includes("const fail = useCallback(() => setState((s) => (s.key === key ? { key, phase: 'off', uri: null } : s)), [key])"), 'which turns the photo off')
+  const fail = fnBody(src, 'const fail = useCallback(')
+  t.ok(fail.includes('store.fail(key)'), 'the store keeps it off')
+  t.ok(fail.includes('setState((s) => (s.key === key && s.store === store ? { key, store, ...PHOTO_OFF } : s))'), 'which turns the photo off')
 })
 
 test('visual 4 (iOS XXXL): the caption cap leaves the header and the bar free', (t) => {
@@ -1196,13 +1200,20 @@ function preparedHandle (done = Promise.resolve({ ok: true })) {
     matches: () => true,
     take: () => {},
     releases: 0,
+    upgrades: 0,
     release () { this.releases++ },
+    upgrade () { this.upgrades++ },
     done
   }
 }
 
-async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, covered = false, onStateChange, prepare, seenRefs = [], caption = '' } = {}) {
+const refKey = (ref) => (ref ? ref.author + ':' + ref.seq : '-')
+const IMAGE = { mime: 'image/jpeg' }
+const VIDEO = { mime: 'video/mp4', ms: 8000 }
+
+async function viewerHost ({ music = true, tracks = null, medias = null, policy = true, ready = true, reduce = false, photo = 'ok', media = null, author = A, hosted = true, online = true, unlocked = true, send, muted = false, covered = false, onStateChange, prepare, seenRefs = [], caption = '', realPhotos = false, deferReads = false, warm = null } = {}) {
   const moments = await import('../src/moments.js')
+  const photos = await import('../src/momentPhotos.js')
   const seen = await import('../src/momentSeen.js')
   const soundMute = await import('../src/soundMute.js')
   soundMute.setSoundMuted(false)
@@ -1227,7 +1238,33 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
   const items = (key) => Array.from({ length: tracks ? tracks.length : 2 }, (_, i) => item(i + 1, key)).reverse()
   const data = { phase: 'ready', authors: [{ author: B, items: items(B) }], own: items(A) }
   const seenState = { loaded: true, seen: seenRefs, mark () {} }
-  const env = { node, data, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [], preloads, haptics: [], helpOpen: false }
+  const env = { node, data, reduce, photo, back: 0, policyCalls: 0, opened: [], messages: [], calls, steps: [], preloads, haptics: [], helpOpen: false, wants: [], warms: [], mediaReads: [], storeReads: [], readWaits: new Map(), revoked: [], loadingRenders: 0 }
+  // The read-ahead store: a recording stand-in, or the real one over a fake
+  // node.media (realPhotos) whose answers match each item's media.
+  if (realPhotos) {
+    node.media = {
+      read: (params) => {
+        const key = params.author + ':' + params.seq
+        env.mediaReads.push(key)
+        const expected = medias ? medias[params.seq - 1] : media
+        const got = expected?.mime === 'video/mp4'
+          ? { uri: 'file:///read/' + key, mime: 'video/mp4', w: 4, h: 4, ms: expected.ms }
+          : { bytes: new Uint8Array([1, 2]), mime: 'image/jpeg', w: 4, h: 4, key }
+        // deferReads: each read waits for env.readWaits.get(key)() to answer.
+        if (!deferReads) return Promise.resolve(got)
+        return new Promise((resolve) => { env.readWaits.set(key, () => { env.readWaits.delete(key); resolve(got) }) })
+      }
+    }
+  }
+  let wrapped = null
+  const fakeStore = { want: () => {}, read: () => Promise.resolve({ phase: 'off' }), peek: () => null, fail: () => {}, clear: () => {}, subscribe: () => () => {} }
+  const momentPhotosFor = (mediaArg, epoch, deps) => {
+    const inner = realPhotos ? photos.momentPhotosFor(mediaArg, epoch, { ...deps, setTimer: () => 0, clearTimer: () => {} }) : fakeStore
+    if (wrapped === null || wrapped.inner !== inner) {
+      wrapped = { inner, read: (ref, owner) => { env.storeReads.push(refKey(ref)); return inner.read(ref, owner) }, peek: inner.peek, fail: inner.fail, clear: inner.clear, subscribe: inner.subscribe, want: (owner, refs) => { env.wants.push([owner, refs.map(refKey)]); inner.want(owner, refs) } }
+    }
+    return wrapped
+  }
   class Value {
     constructor (value) { this.value = value }
     setValue (value) { this.value = value }
@@ -1252,6 +1289,18 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
     errorText: (err) => 'erro: ' + err.message,
     whoOf: (await import('../src/who.js')).whoOf,
     ...Object.fromEntries(elements.map((name) => [name, name])),
+    ...photos,
+    momentPhotosFor,
+    urlFromBytes: (bytes, mime) => 'blob:' + mime + ':' + bytes.length + ':' + env.mediaReads.length,
+    revokeUrl: (uri) => env.revoked.push(uri),
+    adoptVideoFile: (uri) => uri.replace('/read/', '/cache/'),
+    warmMomentMusicItem: (session, value, options) => { env.warms.push({ session, music: value, options }); return warm ? warm(session, value, options) : Promise.resolve() },
+    React: {
+      createElement: (type, props, ...children) => {
+        if (props?.accessibilityLabel === 'carregando a foto') env.loadingRenders++
+        return { type, props: props || {}, children: children.flat(Infinity) }
+      }
+    },
     musicOriginOf,
     prepareMomentMusic: (session, music, options) => {
       const handle = prepare ? prepare(session, music, options) : preparedHandle()
@@ -1288,7 +1337,7 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
     relativeTime: () => '',
     openExternal: (url) => env.opened.push(url)
   }
-  const setup = 'useMoments = () => mocked.data; useMomentSeen = () => mocked.seenState; useMotionReduced = () => mocked.env.reduce; useMomentPhoto = () => ({ phase: mocked.env.photo })'
+  const setup = 'useMoments = () => mocked.data; useMomentSeen = () => mocked.seenState; useMotionReduced = () => mocked.env.reduce;' + (realPhotos ? '' : ' useMomentPhoto = () => ({ phase: mocked.env.photo })')
   const host = hookHost(read('src/screens/Momentos.js'), 'Viewer', deps, setup)
   host.render({ entry: { key: author }, ownKey: A, covered, onBack: () => { env.back++ }, onMessage: (...args) => env.messages.push(args) })
   await host.flush()
@@ -1616,6 +1665,277 @@ test('T4: rebuilding nextMusic on an unrelated render does not rerun reconciliat
   t.is(reconciles(), before, 'dependencies use primitives, not the rebuilt nextMusic object')
   t.is(h.preloads.length, 1)
   t.is(h.preloads[0]?.handle.releases, 0)
+})
+
+const lastWant = (h) => h.wants.filter(([owner]) => owner === 'viewer').at(-1)?.[1]
+const warmView = (h) => treeNodes(h.render()).find((n) => n.type === 'View' && n.props['aria-hidden'] === true)
+
+test('T4 photos: the viewer wants the item on screen, two ahead and the previous one, and nothing after closing', async (t) => {
+  const h = await viewerHost({ music: false })
+  t.alike(lastWant(h), [A + ':1', A + ':2', B + ':1', '-'], 'current, two ahead across rings, no previous at the start')
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.alike(lastWant(h), [A + ':2', B + ':1', B + ':2', A + ':1'], 'a step moves the window and lists the previous one')
+  const count = h.wants.length
+  h.render()
+  await h.flush()
+  t.is(h.wants.length, count, 'an unrelated render sends no new list')
+  h.unmount()
+  t.alike(lastWant(h), [], 'closing releases every photo of the viewer')
+})
+
+test('T4 photos: covered, not on top or in the background, only the item on screen is wanted', async (t) => {
+  for (const hide of ['covered', 'top', 'background']) {
+    const h = await viewerHost({ music: false })
+    const props = (extra) => ({ entry: { key: A }, ownKey: A, onBack: () => {}, ...extra })
+    if (hide === 'covered') h.render(props({ covered: true }))
+    if (hide === 'top') h.render(props({ isTop: false }))
+    if (hide === 'background') { h.node.visible = false; h.render() }
+    await h.flush()
+    t.alike(lastWant(h), [A + ':1'], hide + ': current only')
+    h.node.visible = true
+    h.render(props({}))
+    await h.flush()
+    t.alike(lastWant(h), [A + ':1', A + ':2', B + ':1', '-'], hide + ': back to the full window')
+    h.unmount()
+  }
+})
+
+test('T4 photos: a step onto a photo read ahead shows it at once, with no new read and no spinner', async (t) => {
+  const h = await viewerHost({ music: false, realPhotos: true, medias: [IMAGE, IMAGE] })
+  t.teardown(h.unmount)
+  await h.flush()
+  t.is(h.mediaReads.filter((key) => key === A + ':2').length, 1, 'the next photo was read ahead once')
+  const loading = h.env.loadingRenders
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  const tree = h.render()
+  const image = treeNodes(tree).find((n) => n.type === 'Image' && n.props.accessibilityLabel?.startsWith('momento de '))
+  t.ok(image && image.props.source.uri.startsWith('blob:image/jpeg'), 'the photo is in the first render after the step')
+  t.is(h.env.loadingRenders, loading, 'never a loading frame')
+  t.is(h.mediaReads.filter((key) => key === A + ':2').length, 1, 'no additional read')
+})
+
+test('T4 photos: the next photo decodes hidden, never a next video', async (t) => {
+  const h = await viewerHost({ music: false, realPhotos: true, medias: [IMAGE, IMAGE] })
+  await h.flush()
+  const warm = warmView(h)
+  t.ok(warm, 'a hidden copy of the next photo')
+  t.is(warm?.props.pointerEvents, 'none', 'never takes a touch')
+  t.is(warm?.props.accessible, false)
+  t.is(warm?.props.importantForAccessibility, 'no-hide-descendants')
+  t.is(warm?.props.accessibilityElementsHidden, true, 'never read by a screen reader')
+  t.ok([].concat(warm?.props.style).some((style) => style?.opacity === 0), 'invisible')
+  const image = warm?.children.find((n) => n.type === 'Image')
+  t.ok(image?.props.source.uri.startsWith('blob:image/jpeg'), 'the read photo')
+  t.is(image?.props.accessible, false)
+  h.unmount()
+  const video = await viewerHost({ music: false, realPhotos: true, medias: [IMAGE, VIDEO] })
+  await video.flush()
+  t.ok(video.mediaReads.includes(A + ':2'), 'the next video is read ahead')
+  t.absent(warmView(video), 'but never decoded hidden')
+  video.unmount()
+})
+
+test('T4 photos: the hidden next decode comes from the queue, with no read() of the next photo', async (t) => {
+  let changes = 0
+  const h = await viewerHost({ music: false, realPhotos: true, deferReads: true, medias: [IMAGE, IMAGE], onStateChange: () => { changes++ } })
+  t.teardown(h.unmount)
+  t.ok(h.readWaits.has(A + ':1') && h.readWaits.has(A + ':2'), 'the item on screen and the next one are in flight')
+  h.readWaits.get(A + ':1')()
+  await h.flush()
+  t.absent(warmView(h), 'nothing hidden before the next photo settles')
+  const before = changes
+  h.readWaits.get(A + ':2')()
+  for (let i = 0; i < 10; i++) await Promise.resolve()
+  t.ok(changes > before, 'the settled next photo bumps a render on its own')
+  const image = warmView(h)?.children.find((n) => n.type === 'Image')
+  t.ok(image?.props.source.uri.startsWith('blob:image/jpeg'), 'then it decodes hidden')
+  t.alike(h.storeReads.filter((key) => key === A + ':2'), [], 'zero read() calls for the next photo')
+  t.is(h.mediaReads.filter((key) => key === A + ':2').length, 1, 'one media.read, from the queue')
+})
+
+test('T4 photos: at the last momento the list is [current, null, null, previous] and the previous is never decoded hidden', async (t) => {
+  const h = await viewerHost({ music: false, realPhotos: true, medias: [IMAGE, IMAGE] })
+  t.teardown(h.unmount)
+  for (let i = 0; i < 3; i++) {
+    h.button('próximo momento').props.onPress({ nativeEvent: {} })
+    await h.flush()
+  }
+  t.alike(lastWant(h), [B + ':2', '-', '-', B + ':1'], 'padded: the previous one keeps index 3')
+  t.is(h.env.back, 0, 'still open on the last momento')
+  t.absent(warmView(h), 'no hidden decode of the previous photo')
+})
+
+test('T4 photos: covered, nothing is decoded hidden', async (t) => {
+  const h = await viewerHost({ music: false, realPhotos: true, medias: [IMAGE, IMAGE] })
+  t.teardown(h.unmount)
+  await h.flush()
+  t.ok(warmView(h), 'uncovered: the next photo decodes hidden')
+  // Another owner keeps the next photo in the store, so only the viewer's
+  // own gate can hide it.
+  const photos = await import('../src/momentPhotos.js')
+  const store = photos.momentPhotosFor(h.node.media, h.node.epoch, {})
+  store.want('strip', [null, { author: A, seq: 2, expected: { mime: 'image/jpeg' }, until: Date.now() + 24 * 60 * 60 * 1000 }])
+  h.render({ entry: { key: A }, ownKey: A, covered: true, onBack: () => {} })
+  await h.flush()
+  t.is(store.peek(A + ':2')?.phase, 'ok', 'the next photo is still read')
+  t.absent(warmView(h), 'covered: no hidden image')
+  store.want('strip', [])
+})
+
+test('T4 music: no warm-up after a limite-musica answer', async (t) => {
+  const answer = deferred()
+  const h = await viewerHost({ tracks: [null, PRELOAD_TRACKS[1], PRELOAD_TRACKS[2]], prepare: () => preparedHandle(answer.promise) })
+  t.teardown(h.unmount)
+  t.is(h.warms.length, 1, 'the next track is warmed before the answer')
+  answer.resolve({ ok: false, code: 'limite-musica' })
+  await h.flush()
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(h.warms.length, 1, 'the latch stops the warm-up of the new next track')
+})
+
+test('T4 music: a warm-up in flight is aborted on mute and on close', async (t) => {
+  const hung = () => new Promise(() => {})
+  const muted = await viewerHost({ tracks: PRELOAD_TRACKS, warm: hung })
+  const signal = muted.warms[0]?.options?.signal
+  t.ok(signal, 'the warm-up gets an abort signal')
+  t.absent(signal?.aborted)
+  muted.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await muted.flush()
+  t.absent(signal?.aborted, 'a step leaves it running: its item is now on screen')
+  const second = muted.warms[1]?.options?.signal
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  setSoundMuted(true)
+  await muted.flush()
+  t.ok(second?.aborted, 'mute aborts it')
+  t.ok(signal?.aborted, 'and the earlier warm-up still in flight')
+  muted.unmount()
+
+  const closed = await viewerHost({ tracks: PRELOAD_TRACKS, warm: hung })
+  const closing = closed.warms[0]?.options?.signal
+  closed.button('fechar momentos').props.onPress()
+  await closed.flush()
+  t.ok(closing?.aborted, 'close aborts it')
+  closed.unmount()
+
+  const left = await viewerHost({ tracks: PRELOAD_TRACKS, warm: hung })
+  const leaving = left.warms[0]?.options?.signal
+  left.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await left.flush()
+  const leavingNext = left.warms[1]?.options?.signal
+  t.ok(leavingNext, 'a step warms the new next item')
+  left.unmount()
+  t.ok(leaving?.aborted, 'unmount aborts it')
+  t.ok(leavingNext?.aborted, 'and every other warm-up in flight')
+})
+
+test('T4 music: mute then unmute warms the same next item again', async (t) => {
+  const h = await viewerHost({ tracks: PRELOAD_TRACKS, warm: () => new Promise(() => {}) })
+  t.teardown(h.unmount)
+  const first = h.warms[0]?.options?.signal
+  t.alike(h.warms[0]?.music, PRELOAD_TRACKS[1])
+  const { setSoundMuted } = await import('../src/soundMute.js')
+  setSoundMuted(true)
+  await h.flush()
+  t.ok(first?.aborted, 'mute aborts the warm-up in flight')
+  t.is(h.warms.length, 1, 'muted warms nothing')
+  setSoundMuted(false)
+  await h.flush()
+  t.is(h.warms.length, 2, 'the aborted run does not count as warmed')
+  t.alike(h.warms[1]?.music, PRELOAD_TRACKS[1], 'the same next item')
+  t.absent(h.warms[1]?.options?.signal?.aborted, 'with a live signal')
+})
+
+test('T4 music: a session change aborts a warm-up still in flight and warms for the new session', async (t) => {
+  const h = await viewerHost({ tracks: PRELOAD_TRACKS, warm: () => new Promise(() => {}) })
+  t.teardown(h.unmount)
+  const first = h.warms[0]?.options?.signal
+  t.absent(first?.aborted)
+  h.node.epoch = 2
+  h.render()
+  await h.flush()
+  t.ok(first?.aborted, 'another epoch aborts the earlier session\'s warm-up')
+  t.is(h.warms.length, 2, 'and warms the next item again for the new session')
+  t.alike(h.warms[1]?.music, PRELOAD_TRACKS[1])
+  const second = h.warms[1]?.options?.signal
+  t.absent(second?.aborted)
+  h.render({ entry: { key: A }, ownKey: B, onBack: () => {} })
+  await h.flush()
+  t.ok(second?.aborted, 'another own key aborts it too')
+  t.is(h.warms.length, 3)
+  t.is(h.warms[2]?.session.member, B, 'warmed for the new member')
+  t.absent(h.warms[2]?.options?.signal?.aborted)
+})
+
+test('T4 music: no warm-up while covered, not on top, in the background or closing', async (t) => {
+  for (const hide of ['covered', 'top', 'background', 'closed']) {
+    const h = await viewerHost({ tracks: [PRELOAD_TRACKS[0], null, PRELOAD_TRACKS[2]], covered: hide === 'covered' })
+    const props = (extra) => ({ entry: { key: A }, ownKey: A, onBack: () => {}, ...extra })
+    if (hide === 'top') h.render(props({ isTop: false }))
+    if (hide === 'background') { h.node.visible = false; h.render() }
+    if (hide === 'closed') h.button('fechar momentos').props.onPress()
+    if (hide === 'covered') h.render(props({ covered: true }))
+    await h.flush()
+    t.is(h.warms.length, 0, hide + ': the next item has no music yet')
+    h.button('próximo momento').props.onPress({ nativeEvent: {} })
+    await h.flush()
+    t.is(h.warms.length, 0, hide + ': a step onto an item whose next has music warms nothing')
+    h.unmount()
+  }
+  const shown = await viewerHost({ tracks: [PRELOAD_TRACKS[0], null, PRELOAD_TRACKS[2]] })
+  shown.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await shown.flush()
+  t.is(shown.warms.length, 1, 'on top and shown, the same step warms')
+  shown.unmount()
+})
+
+test('T4 music: the next item is warmed before onStart, once, without a preload; never muted or with policy off', async (t) => {
+  const h = await viewerHost({ tracks: PRELOAD_TRACKS })
+  t.is(h.preloads.length, 0, 'no preload before the current audio starts')
+  t.is(h.warms.length, 1, 'the next track item is warmed already')
+  t.alike(h.warms[0]?.music, PRELOAD_TRACKS[1])
+  t.alike(h.warms[0]?.session, { member: A, origin: undefined, request: h.node.request })
+  h.button('próximo momento').props.onPressIn({ nativeEvent: { pageX: 300, pageY: 50 } })
+  h.render()
+  h.button('próximo momento').props.onPressOut()
+  await h.flush()
+  t.is(h.warms.length, 1, 'once per next item')
+  h.button('próximo momento').props.onPress({ nativeEvent: {} })
+  await h.flush()
+  t.is(h.warms.length, 2, 'a step warms the new next item')
+  t.alike(h.warms[1]?.music, PRELOAD_TRACKS[2])
+  h.unmount()
+  const muted = await viewerHost({ tracks: PRELOAD_TRACKS, muted: true })
+  t.is(muted.warms.length, 0, 'muted warms nothing')
+  muted.unmount()
+  const off = await viewerHost({ tracks: PRELOAD_TRACKS, policy: false })
+  t.is(off.warms.length, 0, 'policy off warms nothing')
+  off.unmount()
+})
+
+test('T4 music: a ticket-only preload from the 3 s timer upgrades once when the audio starts', async (t) => {
+  const h = await viewerHost({ tracks: PRELOAD_TRACKS })
+  t.teardown(h.unmount)
+  h.timers.fire(3000)
+  await h.flush()
+  const handle = h.preloads[0]?.handle
+  t.alike(h.preloads[0]?.options, { stream: false })
+  t.is(handle?.upgrades, 0, 'no upgrade while the current audio loads')
+  h.music().props.onStart()
+  await h.flush()
+  t.is(handle?.upgrades, 1, 'the start opens the next audio from the ticket')
+  h.render()
+  await h.flush()
+  t.is(handle?.upgrades, 1, 'exactly once')
+  t.is(h.preloads.length, 1, 'no second preload')
+  const streamed = await viewerHost({ tracks: PRELOAD_TRACKS })
+  streamed.music().props.onUnavailable()
+  await streamed.flush()
+  streamed.music().props.onStart()
+  await streamed.flush()
+  t.is(streamed.preloads[0]?.handle.upgrades, 0, 'a streaming preload is never upgraded')
+  streamed.unmount()
 })
 
 function reactionButtons (h) {
@@ -2976,56 +3296,105 @@ test('the viewer passes one control to the hook and to the player', (t) => {
   t.ok(/handleUnmute: \(\) => \{\s*if \(current\.current\.visit !== visit\) return\s*control\?\.current\?\.unmute\(\)\s*setMuted\(null\)/.test(hook), 'unmute() comes before the state update')
 })
 
-function mediaHarness (answer, { adoptFails = false, urlFails = false, expected = { mime: answer.mime, ms: 15000 } } = {}) {
+// useMomentPhoto over the real read-ahead store. The store owns release:
+// `drop` stands for the viewer's next list without the item (or its close).
+async function mediaHarness (answer, { adoptFails = false, urlFails = false, blobs = false, expected = { mime: answer.mime, ms: 15000 } } = {}) {
+  const { momentRefOf } = await import('../src/moments.js')
+  const { momentPhotosFor, momentPhotoKey } = await import('../src/momentPhotos.js')
   const forgotten = []
   const revoked = []
   const adopted = []
   const urls = []
+  const reads = []
   let answerReady
+  // Every read's resolver, so a case can answer a given seq.
+  const waiting = []
   const media = {
-    read: () => new Promise((resolve) => { answerReady = resolve }),
+    read: (params) => { reads.push(params); return new Promise((resolve) => { answerReady = resolve; waiting.push({ seq: params.seq, resolve }) }) },
     forgetReadFile: (name) => forgotten.push(name)
   }
-  const h = momentHook('useMomentPhoto', 'author, seq, expected', {
-    useNode: () => ({ media }),
-    isObject: (value) => value !== null && typeof value === 'object',
-    IMAGE_MIMES: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
-    wipe: (bytes) => { if (bytes instanceof Uint8Array) bytes.fill(0) },
+  const node = { media, epoch: 1 }
+  const deps = {
     adoptVideoFile: (uri) => { adopted.push(uri); if (adoptFails) throw new Error('move failed'); return 'file:///cache/video.mp4' },
-    urlFromBytes: (bytes, mime) => { urls.push({ bytes: bytes.slice(), mime }); if (urlFails) throw new Error('blob failed'); return 'blob:video' },
-    revokeUrl: (uri) => revoked.push(uri)
+    urlFromBytes: (bytes, mime) => { urls.push({ bytes: bytes.slice(), mime }); if (urlFails) throw new Error('blob failed'); return blobs ? 'blob:' + urls.length : 'blob:video' },
+    revokeUrl: (uri) => revoked.push(uri),
+    setTimer: () => 0,
+    clearTimer: () => {}
+  }
+  const store = momentPhotosFor(media, 1, deps)
+  const h = momentHook('useMomentPhoto', 'author, item', {
+    useNode: () => node,
+    photoStoreOf: (n) => momentPhotosFor(n.media, n.epoch, deps),
+    momentRefOf,
+    momentPhotoKey,
+    PHOTO_OWNER: 'viewer',
+    PHOTO_LOADING: { phase: 'loading', uri: null },
+    PHOTO_OFF: { phase: 'off', uri: null }
   })
-  h.render(A, 1, expected)
+  const item = (seq, media) => ({ seq, at: new Date().toISOString(), media })
+  h.render(A, item(1, expected))
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
   return {
     ...h,
     get value () { return h.value },
+    item,
+    store,
     forgotten,
     revoked,
     adopted,
     urls,
-    async settle () { answerReady(answer); await Promise.resolve(); return h.render() }
+    reads,
+    drop: (...seqs) => store.want('viewer', seqs.map((seq) => momentRefOf(A, item(seq, expected)))),
+    async settle () { answerReady(answer); await flush(); return h.render() },
+    // Answers the oldest unanswered read of seq, without a render.
+    async answerSeq (seq, got = answer) {
+      const at = waiting.findIndex((w) => w.seq === seq)
+      if (at === -1) throw new Error('no read of ' + seq)
+      waiting.splice(at, 1)[0].resolve(typeof got === 'function' ? got() : got)
+      await flush()
+    },
+    pendingSeqs: () => waiting.map((w) => w.seq)
   }
 }
 
-test('native video reads are adopted, forgotten and deleted on exit or item change', async (t) => {
+test('the viewer photo read is held for the viewer only: another owner want() does not drop it', async (t) => {
+  const uri = 'file:///documents/varanda/media-read/' + 'cd'.repeat(16) + '.bin'
+  const h = await mediaHarness({ uri, mime: 'image/jpeg' })
+  await h.settle()
+  t.is(h.value.phase, 'ok')
+  const { momentRefOf } = await import('../src/moments.js')
+  const { momentPhotoKey } = await import('../src/momentPhotos.js')
+  h.store.want('strip', [momentRefOf(B, h.item(9, { mime: 'image/jpeg', ms: 15000 }))])
+  t.is(h.store.peek(momentPhotoKey(A, 1))?.phase, 'ok', 'still held after the strip want()')
+  t.is(h.forgotten.length, 0, 'not forgotten')
+  t.is(h.revoked.length, 0, 'not revoked')
+  h.unmount()
+})
+
+test('native video reads are adopted, forgotten and deleted once the viewer drops the item', async (t) => {
   const uri = 'file:///documents/varanda/media-read/' + 'ab'.repeat(16) + '.bin'
-  const h = mediaHarness({ uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
+  const h = await mediaHarness({ uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
   await h.settle()
   t.is(h.value.phase, 'ok')
   t.is(h.value.ms, 15000)
   t.alike(h.adopted, [uri])
   t.alike(h.forgotten, ['ab'.repeat(16) + '.bin'])
-  h.render(A, 2, { mime: 'video/mp4', ms: 15000 })
-  t.alike(h.revoked, ['file:///cache/video.mp4'], 'changing item deletes its adopted file')
+  h.render(A, h.item(2, { mime: 'video/mp4', ms: 15000 }))
+  t.is(h.revoked.length, 0, 'the hook never releases: the store does')
+  h.drop(2)
+  t.alike(h.revoked, ['file:///cache/video.mp4'], 'a list without the item deletes its adopted file')
   h.unmount()
+  h.drop()
   t.is(h.revoked.length, 1)
-  const photo = mediaHarness({ uri, mime: 'image/jpeg' })
+  const photo = await mediaHarness({ uri, mime: 'image/jpeg' })
   await photo.settle()
   t.is(photo.value.uri, uri, 'photo path is unchanged')
   t.is(photo.adopted.length, 0)
   t.is(photo.forgotten.length, 0, 'photo read file stays until exit')
   photo.unmount()
-  t.is(photo.forgotten.length, 1)
+  t.is(photo.forgotten.length, 0, 'unmount alone releases nothing')
+  photo.drop()
+  t.is(photo.forgotten.length, 1, 'the close of the viewer forgets it')
 })
 
 test('refused, incomplete, failed and late media answers always forget the read file', async (t) => {
@@ -3037,7 +3406,7 @@ test('refused, incomplete, failed and late media answers always forget the read 
     { uri, mime: 'video/mp4', h: 480, ms: 15000 },
     { uri, mime: 'video/mp4', w: 640, h: 480, ms: 0 }
   ]) {
-    const h = mediaHarness(answer)
+    const h = await mediaHarness(answer)
     await h.settle()
     t.is(h.value.phase, 'off')
     t.is(h.forgotten.length, 1)
@@ -3045,13 +3414,14 @@ test('refused, incomplete, failed and late media answers always forget the read 
     h.unmount()
   }
   const answer = { uri, mime: 'video/mp4', w: 640, h: 480, ms: 15000 }
-  const failed = mediaHarness(answer, { adoptFails: true })
+  const failed = await mediaHarness(answer, { adoptFails: true })
   await failed.settle()
   t.is(failed.value.phase, 'off')
   t.is(failed.forgotten.length, 1, 'failed adoption still forgets')
   failed.unmount()
-  const late = mediaHarness(answer)
+  const late = await mediaHarness(answer)
   late.unmount()
+  late.drop()
   await late.settle()
   t.is(late.adopted.length, 0, 'does not adopt after exit')
   t.is(late.forgotten.length, 1, 'late native answer is deleted')
@@ -3062,24 +3432,132 @@ test('web video answers use a typed blob and wipe bytes on every path', async (t
   const bytes = Uint8Array.from([0, 0, 0, 16, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0])
   const answer = () => ({ bytes: bytes.slice(), mime: 'video/mp4', w: 640, h: 480, ms: 15000 })
   const got = answer()
-  const h = mediaHarness(got)
+  const h = await mediaHarness(got)
   await h.settle()
   t.is(h.value.phase, 'ok')
   t.is(h.urls[0].mime, 'video/mp4')
   t.alike(h.urls[0].bytes, bytes, 'URL receives the bytes before wiping')
   t.ok(got.bytes.every((n) => n === 0))
   h.unmount()
+  h.drop()
   t.alike(h.revoked, ['blob:video'])
   for (const mode of ['failed', 'refused', 'late']) {
     const got = answer()
     if (mode === 'refused') got.mime = 'video/other'
-    const h = mediaHarness(got, { urlFails: mode === 'failed' })
-    if (mode === 'late') h.unmount()
+    const h = await mediaHarness(got, { urlFails: mode === 'failed' })
+    if (mode === 'late') { h.unmount(); h.drop() }
     await h.settle()
     t.ok(got.bytes.every((n) => n === 0), mode + ': bytes wiped')
     if (mode !== 'late') t.is(h.value.phase, 'off')
     h.unmount()
   }
+})
+
+test('a settled entry shows on the first render of its item, and a decode failure stays off', async (t) => {
+  const uri = 'file:///documents/varanda/media-read/' + 'cd'.repeat(16) + '.bin'
+  const h = await mediaHarness({ uri, mime: 'image/jpeg' })
+  await h.settle()
+  t.is(h.value.phase, 'ok')
+  // Read ahead by the viewer's list: item 2 settles before it is shown.
+  h.drop(1, 2)
+  await h.settle()
+  t.is(h.reads.length, 2)
+  // The read answers later: this render is the first one of item 2.
+  t.is(h.render(A, h.item(2, { mime: 'image/jpeg', ms: 15000 })).phase, 'ok', 'no loading frame for a settled entry')
+  t.is(h.reads.length, 2, 'no second read')
+  h.value.fail()
+  h.render()
+  t.is(h.value.phase, 'off', 'onError turns it off')
+  t.alike(h.store.peek(A + ':2'), { phase: 'off' }, 'the store keeps it off')
+  h.render(A, h.item(1, { mime: 'image/jpeg', ms: 15000 }))
+  h.render(A, h.item(2, { mime: 'image/jpeg', ms: 15000 }))
+  t.is(h.value.phase, 'off', 'coming back does not read the bad bytes again')
+  t.is(h.reads.length, 2)
+  h.unmount()
+  h.drop()
+})
+
+test('a photo the store dropped and revoked while away shows loading on return, never its dead URL, and is read again', async (t) => {
+  const bytes = () => ({ bytes: new Uint8Array([5, 6]), mime: 'image/jpeg' })
+  const h = await mediaHarness(bytes(), { blobs: true })
+  const fails = []
+  const realFail = h.store.fail
+  h.store.fail = (key) => { fails.push(key); realFail(key) }
+  const photo = (seq) => h.item(seq, { mime: 'image/jpeg', ms: 15000 })
+  h.drop(1, 2, 3)
+  await h.answerSeq(1, bytes)
+  h.render()
+  t.alike([h.value.phase, h.value.uri], ['ok', 'blob:1'], 'item 1 shown')
+  h.render(A, photo(2))
+  h.drop(2, 3, 4, 1)
+  h.render(A, photo(3))
+  h.drop(3, 4, 5, 2)
+  t.ok(h.revoked.includes('blob:1'), 'item 1 was dropped and its URL revoked')
+  h.render(A, photo(2))
+  h.drop(2, 3, 4, 1)
+  const back = h.render(A, photo(1))
+  t.is(back.phase, 'loading', 'the first render back is loading')
+  t.not(back.uri, 'blob:1', 'never the revoked URL')
+  // A late onError from the Image that showed the revoked URL.
+  h.value.fail()
+  h.render()
+  t.alike(fails, [], 'no store.fail')
+  t.is(h.store.peek(A + ':1'), null, 'not cached off')
+  t.ok(h.pendingSeqs().includes(1), 'item 1 is read again')
+  h.drop(1, 2, 3)
+  await h.answerSeq(1, bytes)
+  h.render()
+  t.is(h.value.phase, 'ok', 'shown after the re-read')
+  t.ok(h.value.uri !== null && h.value.uri !== 'blob:1', 'with its new URL')
+  h.unmount()
+  h.drop()
+})
+
+test('a photo dropped while still on screen is read again, never left loading', async (t) => {
+  const bytes = () => ({ bytes: new Uint8Array([5, 6]), mime: 'image/jpeg' })
+  const h = await mediaHarness(bytes(), { blobs: true })
+  await h.answerSeq(1, bytes)
+  h.render()
+  t.alike([h.value.phase, h.value.uri], ['ok', 'blob:1'])
+  h.drop(9)
+  t.alike(h.revoked, ['blob:1'], 'the store released it under the hook')
+  const reads = h.reads.length
+  t.is(h.render().phase, 'loading', 'the dead URL is not shown')
+  t.is(h.reads.length, reads + 1, 'a read starts for it')
+  h.render()
+  t.is(h.reads.length, reads + 1, 'once')
+  await h.answerSeq(1, bytes)
+  h.render()
+  t.alike([h.value.phase, h.value.uri], ['ok', 'blob:2'], 'shown again')
+  h.unmount()
+  h.drop()
+})
+
+test('a late onError for a URL the store no longer holds does not mark the photo off', async (t) => {
+  const bytes = () => ({ bytes: new Uint8Array([5, 6]), mime: 'image/jpeg' })
+  const h = await mediaHarness(bytes(), { blobs: true })
+  await h.answerSeq(1, bytes)
+  h.render()
+  const stale = h.value.fail
+  h.drop(9)
+  h.render()
+  await h.answerSeq(1, bytes)
+  h.render()
+  t.is(h.value.uri, 'blob:2', 'a new URL for the same photo')
+  stale()
+  h.render()
+  t.alike([h.value.phase, h.value.uri], ['ok', 'blob:2'], 'the old source error is ignored')
+  h.value.fail()
+  h.render()
+  t.is(h.value.phase, 'off', 'an error for the URL shown still turns it off')
+  h.unmount()
+  h.drop()
+})
+
+const photoImage = (src) => src.match(/<Image key=\{photo\.uri\} source=\{\{ uri: photo\.uri \}\}[^>]+\/>/)?.[0]
+
+test('the photo Image is keyed by its URL', (t) => {
+  t.ok(photoImage(read('src/screens/Momentos.js'))?.includes('onError={handlePhotoError}'), 'a new URL mounts a new Image, so an old source cannot report')
 })
 
 function playOffered (playback, reduce) {
@@ -3149,7 +3627,7 @@ test('media MIME and video duration must match the item before becoming playable
     [{ mime: 'video/mp4', ms: 15000 }, 'video/mp4', 8000]
   ]) {
     const answer = { mime, ms, w: 640, h: 480, uri: 'file:///cache/read.bin', bytes: Uint8Array.from([1, 2, 3]) }
-    const h = mediaHarness(answer, { expected })
+    const h = await mediaHarness(answer, { expected })
     const item = { media: expected }
     const before = segmentMs(item, h.value.ms)
     await h.settle()
@@ -3162,7 +3640,7 @@ test('media MIME and video duration must match the item before becoming playable
     h.unmount()
   }
   const src = read('src/screens/Momentos.js')
-  t.ok(src.includes('useMomentPhoto(author, item ? item.seq : null, item?.media)'), 'Viewer passes the expected media')
+  t.ok(src.includes('const photo = useMomentPhoto(author, item)') && src.includes('const ref = momentRefOf(author, item)'), 'Viewer passes the item, whose media is the expected one')
   t.ok(src.includes('video ? VIDEO_UNAVAILABLE : PHOTO_UNAVAILABLE'), 'unavailable text uses the item kind')
 })
 
@@ -3201,7 +3679,7 @@ test('Viewer wires every player event and keys the player by item and restart', 
     'onError={handlePhotoError}',
     'onSoundRefused={playback.handleSoundRefused}',
     'onPlayBlocked={playback.handlePlayBlocked}',
-    "key={itemKey + ':' + playback.restartTick}"
+    "key={itemKey + ':' + playback.restartTick + ':' + photo.uri}"
   ]) t.ok(player.includes(prop), prop)
 })
 
