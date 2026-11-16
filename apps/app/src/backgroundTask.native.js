@@ -22,7 +22,7 @@ import * as BackgroundTask from 'expo-background-task'
 import { fetch as expoFetch } from 'expo/fetch'
 import { File, Paths } from 'expo-file-system'
 import { createForegroundGate, lastUseFresh } from './foregroundGate'
-import { runRefresh, shouldRun, BG_MIN_GAP_MS } from './backgroundRefresh'
+import { nothingToRefresh, runRefresh, shouldRun, BG_MIN_GAP_MS } from './backgroundRefresh'
 import { parseSnapshot } from './feedSnapshot'
 import { loadSnapshotText, saveSnapshotText } from './feedSnapshotStore'
 import { loadConfig, loadInstallation, rememberedConfig } from './configStore'
@@ -123,6 +123,10 @@ async function refresh () {
     const c = config && typeof config === 'object' && config.config && typeof config.config === 'object' ? config.config : config
     // Without an owner: runRefresh checks node.info against snapshot.owner.
     const snapshot = c && typeof c === 'object' ? parseSnapshot(loadSnapshotText(), { origin, association: c.association, now: Date.now() }) : null
+    if (nothingToRefresh({ snapshot, config })) {
+      await unregisterBackgroundRefresh()
+      return BackgroundTask.BackgroundTaskResult.Success
+    }
     const lastRunMs = snapshot !== null ? snapshot.savedAt : null
     if (!shouldRun({ snapshot, config, nodeRunning: currentClient() !== null, nowMs: Date.now(), lastRunMs })) {
       return BackgroundTask.BackgroundTaskResult.Success

@@ -7271,7 +7271,7 @@ Caminhada no Android e no iOS, com uma conta que segue gente com fotos (depois d
 Limites desta caminhada:
 
 - Fotos mostradas numa sessão ficam protegidas do corte até a abertura seguinte, então uma sessão longa pode passar de 64 MiB; o corte da abertura seguinte devolve ao limite.
-- Uma foto lida logo antes de um apagamento pode guardar o endereço de um arquivo que o apagamento acabou de remover; ela é buscada de novo no próximo pedido.
+- Corrigido na branch fix/instant-load-leftovers: uma foto lida logo antes de um apagamento não guarda mais o endereço do arquivo removido; o cache de memória descarta essa leitura e busca de novo.
 - Nenhuma caixa acima foi marcada nesta documentação.
 
 ## 157. A Rua começa pela última primeira página (PR perf/feed-snapshot)
@@ -7281,7 +7281,7 @@ A Rua guarda a última primeira página (sem os bloqueados), com nomes, contagen
 O que mudou:
 
 - `feedSnapshot.js` (puro) monta e confere o instantâneo com validação estrita (chaves hex64, inteiros seguros, limites de texto, versão exata). Nada de quem você não segue entra: nem original republicado, nem citação, nem pai de resposta, nem nome. Originais só de autores próprios ou seguidos.
-- `ARua.js` semeia as linhas com `loadedAt` nulo, filtra pela lista de bloqueio assim que ela chega, regrava 2 s depois de cada primeira página nova e depois de apagar (protegido pela geração do cache) e, quando a lista de seguidos chega completa, apaga instantâneo e fotos de quem foi deixado de seguir (`keepOnlyAuthors`). Uma lista parcial não apaga nada. Se a lista de bloqueio não puder ser lida, as linhas do instantâneo não aparecem (falha fechada). Marcas: `rows-snapshot` e `rows-live`.
+- `ARua.js` semeia as linhas com `loadedAt` nulo, filtra pela lista de bloqueio assim que ela chega, regrava 2 s depois de cada primeira página nova e depois de apagar (protegido pela geração do cache) e, quando a lista de seguidos chega completa, apaga instantâneo e fotos de quem foi deixado de seguir (`keepOnlyAuthors`). Uma lista parcial não apaga nada. Até a primeira resposta de `block.list`, e se ela falhar, só as linhas próprias aparecem; as dos outros esperam como marcadores e entram já sem os bloqueados (falha fechada, branch fix/instant-load-leftovers). Marcas: `rows-snapshot` e `rows-live`.
 - Nunca no modo Vitrine nem na A Rua de Página. Em `App.js`, o nome do instantâneo só satisfaz o passo do nome; identidade, certificado, idade e Termos não mudam.
 - Depois de limpar o cache, os conjuntos de autores permitidos e negados são refeitos para o mesmo dono.
 
@@ -7518,7 +7518,7 @@ O que mudou:
 
 - `screenSnapshot.js` (puro): envelope `{ v, kind, origin, association, owner, savedAt, body }`, validade de 14 dias, 256 KiB por tipo, validação estrita. Tipos: `diario` (primeira página do próprio diário), `perfil` (definido nas regras, nenhuma tela usa), `membro` (no máximo 8 autores, o menos recente sai; recusa quem não é seguido), `conversasGrupos` e `comunidades` (nome só de grupo público). Nunca guardado: nada de quem você não segue, Espiadinha, Avisos, linhas de mensagens diretas, prévias, pares, contagens, nomes de grupos privados nem não lidas.
 - Cada tela semeia com `loadedAt` nulo e a leitura ao vivo substitui; grava 2 s depois de uma leitura nova, guardada pela geração do cache. Membro grava só enquanto o autor é seguido e apaga a entrada ao deixar de seguir na própria tela; autor bloqueado, páginas e desconhecidos nunca usam o instantâneo. Conversas e Comunidades não semeiam nem gravam quando agem como Página. Marcas `rows-snapshot:<tela>` e `rows-live:<tela>`.
-- Mudar de instalação com a mesma chave de membro não apaga uma tela já semeada (o armazém já foi limpo).
+- Mudar de instalação, de associação ou de dono tira da tela as linhas semeadas de Diário, Membro, Conversas e Comunidades (branch fix/instant-load-leftovers).
 
 Como verificar, a partir da raiz:
 
@@ -7553,11 +7553,10 @@ Caminhada, primeiro no celular:
 - [ ] Abrir A Rua com fotos no Android e no iOS: as fotos aparecem, e uma foto com bytes adulterados (descritor com `sha256` trocado) não aparece.
 - [ ] Com `EXPO_PUBLIC_VARANDA_PERF=1`, a linha `media-hash` mostra o tempo nativo muito menor que o de JavaScript e `mismatches=0` no teste do bench.
 - [ ] Na web e no PWA, as fotos carregam como antes.
-- [ ] Anúncios e mídia de conversa (`Anuncio.js`, `chatMedia.js`) seguem no caminho noble e funcionam.
+- [ ] Anúncios, mídia de conversa, cartões de link, encaminhamento e denúncia também usam o hash nativo e funcionam (branch fix/instant-load-leftovers).
 
 Limites desta caminhada:
 
-- Os chamadores `Anuncio.js` e `chatMedia.js` continuam no noble.
 - Nenhuma caixa acima foi marcada nesta documentação.
 
 ## 168. Amostrador de quadros da lista, só em desenvolvimento (PR perf/list-tuning)
@@ -7588,7 +7587,7 @@ O que mudou:
 - `backgroundRefresh.js` (puro, dependências injetadas): `shouldRun` só aceita um instantâneo válido da instalação lembrada, nenhum nó rodando e pelo menos `BG_MIN_GAP_MS` (6 h) desde a última vez. `runRefresh` tem prazo de 20 s: sobe o nó com a configuração lembrada, `sync.start { once: true, timeoutMs: 12000, groups: false }`, confere que `node.info` nomeia o dono do instantâneo, lê `block.list`, `follow.list` (precisa vir completa), a primeira página de `feed.read` e os perfis, grava o instantâneo guardado pela geração do cache (página mais antiga primeiro, só originais de republicações levados adiante) e guarda as fotos. Sempre para o nó no fim.
 - `sync.start` ganha `groups: false` (só com `once: true`): a execução não abre núcleos de grupo, não anexa canal de grupo e não pede página de grupo (`docs/rpc.md`).
 - `backgroundTask.native.js`: a tarefa é definida no escopo do módulo (importado antes de `registerRootComponent`) e registrada uma vez, depois da primeira página viva de A Rua de uma sessão hospedada; desregistrada por `wipeLocalCaches` (sair, travar, reiniciar, trocar instalação). `varanda-last-open.json` (em `Paths.cache`) marca o último uso; a tarefa para sem ele ou com mais de 14 dias. Um app aberto cancela a execução em curso (`cancelBackgroundRefresh`) antes de subir o nó, para nunca haver dois worklets; um processo iniciado fora do primeiro plano só inicia o nó no primeiro `active` (`foregroundGate`).
-- Android: os dois módulos entram sozinhos. iOS: `Info.plist` com `UIBackgroundModes` `processing` e `BGTaskSchedulerPermittedIdentifiers`. As duas linhas de `ExpoTaskManager_privacy.bundle` que o `pod install` acrescenta ao `pbxproj` não foram commitadas (decidir na build iOS de produção).
+- Android: os dois módulos entram sozinhos. iOS: `Info.plist` com `UIBackgroundModes` `processing` e `BGTaskSchedulerPermittedIdentifiers`. As duas linhas de `ExpoTaskManager_privacy.bundle` que o `pod install` acrescenta ao `pbxproj` foram commitadas na branch fix/instant-load-leftovers.
 - `docs/design.md` (LGPD) descreve a tarefa de segundo plano e `docs/development.md` os dois módulos e o passo de reconstrução.
 
 Como verificar, a partir da raiz:
@@ -7614,7 +7613,7 @@ Caminhada no Android (aparelho, fora do emulador sem conta) e no iOS, com conta 
 Limites desta caminhada:
 
 - `sessionStore` apaga o item existente se a leitura mais antiga lançou e `setItemAsync` falha (já era assim; travada de mais de 10 s no meio de uma gravação).
-- Se `unregisterTaskAsync` falhar, fica uma tarefa sem nada para atualizar até a próxima fase `ready`.
+- Se `unregisterTaskAsync` falhar, a própria tarefa se desregistra na execução seguinte, quando não acha instantâneo nem configuração (branch fix/instant-load-leftovers).
 - O emulador não entra com conta, então estas caixas pedem um aparelho ou a build de produção.
 - Nenhuma caixa acima foi marcada nesta documentação.
 

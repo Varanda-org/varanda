@@ -87,6 +87,7 @@ import { MAX_RATED_LISTINGS, RATINGS_NOTE, collectRatings, summaryLabel } from '
 import { isSeederDown, knownAuthors, memberKeyOf, learnPeeked, peekAll, planWithHints, postAt, refOf, rowProps, useEngagement, useFollowSet, useThreadRowCache } from './Conversa'
 import { liveBinding } from './ARua'
 import { buildScreenSnapshot, screenWithoutAuthors } from '../screenSnapshot'
+import { sameSnapshotBinding } from './Comunidades'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
 import { cacheGeneration } from '../localCaches'
 
@@ -229,6 +230,14 @@ export function membroSnapshotAllowed ({ author, ownKey, follows, blocked, page,
     blocked !== true && page !== true && acting !== null && typeof acting === 'object' && acting.kind === 'me'
 }
 
+// What a stored seed does for the block list's load state. Stored rows are
+// all someone else's: they wait for the first block.list answer (a block made
+// on another device), and a failed list shows none.
+export function membroSeedStep (blockLoad) {
+  if (blockLoad === 'pending') return 'wait'
+  return blockLoad === 'ok' ? 'go' : 'skip'
+}
+
 // Whether the session may write for `owner`: the passkey identity is that
 // owner, unlocked and not signed out (A Rua's rule). A lock or sign-out wipes
 // the snapshots; a write after it would bring one back.
@@ -298,6 +307,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     verified: false
   }))
   const headerRef = useRef(header)
+  const firstHeaderRef = useRef(header)
   const [profilePending, setProfilePending] = useState(true)
   const [posts, setPosts] = useState(INITIAL_POSTS)
   const postsRef = useRef(posts)
@@ -370,9 +380,18 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
 
   // The seed, once follow.list answered for this load: only a followed
   // author, and only while nothing live replaced the header or the rows.
+  const seedWaitRef = useRef(null)
+  const seedBindingRef = useRef(null)
   const seedSnapshot = useCallback((followSet, alive) => {
     const at = snapRef.current
     if (!alive() || at === null) return
+    const step = membroSeedStep(at.blockLoad)
+    if (step === 'wait') {
+      seedWaitRef.current = { followSet, alive }
+      return
+    }
+    seedWaitRef.current = null
+    if (step !== 'go') return
     const acting = actingAs.get()
     if (!membroSnapshotAllowed({ author, ownKey, follows: followSet, blocked: at.blocked, page: at.page, acting })) return
     const binding = liveBinding(ownKey, at.config)
@@ -380,6 +399,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const snapshot = loadScreenSnapshot('membro', { ...binding, acting })
     const entry = snapshot !== null && Object.prototype.hasOwnProperty.call(snapshot.body.authors, author) ? snapshot.body.authors[author] : null
     if (entry === null) return
+    seedBindingRef.current = binding
     if (!headerRef.current.verified) commitHeader({ ...entry.header, verified: false })
     if (!at.full || postsRef.current.phase !== 'loading') return
     // A quote card reads the peeks only: those rows wait for the live page.
@@ -740,8 +760,26 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     // even one page.read later denies: the snapshot is for people only.
     page: isPage || (seed !== null && seed.page === true) || idxHint !== null || pageRead !== null || (namedPage !== null && typeof namedPage === 'object' && namedPage.page === true),
     config: node.config,
-    passkey: node.passkey
+    passkey: node.passkey,
+    blockLoad: blocks.loadState
   }
+  // A seed held for block.list runs once it answers (seedSnapshot checks the
+  // load is still the same and nothing live came first).
+  useEffect(() => {
+    if (membroSeedStep(blocks.loadState) === 'wait') return
+    const wait = seedWaitRef.current
+    seedWaitRef.current = null
+    if (wait !== null) seedSnapshot(wait.followSet, wait.alive)
+  }, [blocks.loadState, seedSnapshot])
+  // A stored header or rows read for another installation, association or
+  // owner never stay, even with the same key: that store was already wiped.
+  useEffect(() => {
+    const seededWith = seedBindingRef.current
+    if (seededWith === null || sameSnapshotBinding(seededWith, liveBinding(ownKey, node.config))) return
+    seedBindingRef.current = null
+    if (!headerRef.current.verified) commitHeader(firstHeaderRef.current)
+    if (postsRef.current.seeded) commit({ ...INITIAL_POSTS })
+  }, [node.config, ownKey, commit, commitHeader])
   useEffect(() => {
     if (blockedHere) dropSnapshotEntry()
   }, [blockedHere, dropSnapshotEntry])

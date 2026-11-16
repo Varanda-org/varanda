@@ -136,6 +136,20 @@ test('shouldRun: snapshot, binding, node and gap', async (t) => {
   t.absent(shouldRun({ snapshot: { ...snapshot, items: [] }, config, nodeRunning: false, nowMs: now }), 'empty snapshot')
 })
 
+test('nothingToRefresh: only a missing config or snapshot, never a busy node or a recent run', async (t) => {
+  const { nothingToRefresh } = await load()
+  const snapshot = await oldSnapshot()
+  t.absent(nothingToRefresh({ snapshot, config }), 'a bound snapshot keeps the task')
+  t.absent(nothingToRefresh({ snapshot, config: { config } }))
+  t.ok(nothingToRefresh({ snapshot: null, config }), 'no snapshot (wiped)')
+  t.ok(nothingToRefresh({ snapshot, config: null }), 'no remembered config')
+  t.ok(nothingToRefresh({ snapshot, config: { ...config, kind: 'p2p' } }))
+  t.ok(nothingToRefresh({ snapshot, config: { ...config, association: 'ab'.repeat(32) } }), 'another association')
+  t.ok(nothingToRefresh({ snapshot, config: { ...config, installationUrl: 'https://outra.app' } }), 'another installation')
+  t.ok(nothingToRefresh({ snapshot: { ...snapshot, items: [] }, config }), 'empty snapshot')
+  t.ok(nothingToRefresh(), 'no arguments')
+})
+
 test('no snapshot: nothing starts', async (t) => {
   const { runRefresh } = await load()
   const { node, saves, deps } = await base()

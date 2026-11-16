@@ -177,6 +177,28 @@ test('a stored group row is marked in memory only', async (t) => {
   t.alike(Object.keys(built.body.rows[0]).sort(), ['community', 'general', 'group', 'name', 'role'], 'the flag is never stored')
 })
 
+test('stored group rows of another installation, association or owner go (#539)', (t) => {
+  const same = helper(COM, 'sameSnapshotBinding', {})
+  const seedRow = helper(CONV, 'seedRow', {})
+  const seedsFor = helper(CONV, 'seedsFor', { sameSnapshotBinding: same })
+  const keyOf = helper(COM, 'bindingKeyOf', {})
+  const b = { origin: ORIGIN, association: ASSOC, owner: OWN, acting: ME }
+  const live = { community: C1, group: G1, role: 'member' }
+  const rows = [live, seedRow({ community: C1, group: G2, role: 'member', general: false, name: null }, b)]
+  t.is(seedsFor(rows, { ...b }), rows, 'same binding: unchanged')
+  t.alike(seedsFor(rows, { ...b, origin: 'https://outra.app' }), [live], 'another installation, same key')
+  t.alike(seedsFor(rows, { ...b, association: 'ab'.repeat(32) }), [live], 'another association')
+  t.alike(seedsFor(rows, null), [live], 'locked or signed out')
+  t.is(keyOf(b), keyOf({ ...b, acting: PAGE }), 'the key names what sameSnapshotBinding compares')
+  t.not(keyOf(b), keyOf({ ...b, origin: 'https://outra.app' }))
+  t.is(keyOf(null), '')
+  t.ok(/const bindingKey = bindingKeyOf\(binding\)\s*useEffect\(\(\) => \{\s*setState\(\(s\) => \{\s*const rows = seedsFor\(s\.rows, bindingRef\.current\)/.test(groupHook), 'Conversas drops them when the binding changes')
+  t.ok(/rows\.map\(\(r\) => seedRow\(r, binding\)\)/.test(fnText(CONV, 'seededGroups')), 'each stored row knows its binding')
+  t.ok(/seedBinding: snapshotBinding \}/.test(comunidades), 'Comunidades remembers the seed binding')
+  t.ok(/l\.seeded === true && !sameSnapshotBinding\(l\.seedBinding, bindingRef\.current\) \? \{ \.\.\.l, rows: \[\], seeded: false, seedBinding: null \} : l/.test(comunidades), 'and drops the stored rows of another binding')
+  t.ok(/\}, \[bindingKey\]\)/.test(comunidades))
+})
+
 test('the dm.list paging window never drops a stored group row', (t) => {
   t.ok(conversas.includes('const storedGroupIds = useMemo(() => new Set(groups.rows.filter((r) => r.seeded === true).map((r) => r.group)), [groups.rows])'))
   const paged = conversas.slice(conversas.indexOf('const paged = useMemo'))

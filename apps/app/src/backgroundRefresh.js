@@ -75,6 +75,20 @@ export function shouldRun ({ snapshot, config, nodeRunning, nowMs, lastRunMs } =
   }
 }
 
+// Nothing the task could ever refresh: no hosted config, or no snapshot of
+// that installation. A run that finds this removes the task, so a failed
+// unregisterTaskAsync (sign out, lock, wipe) never leaves it running every
+// 6 hours until the next ready phase. A node running or a recent run is not
+// this: the task stays for later.
+export function nothingToRefresh ({ snapshot, config } = {}) {
+  try {
+    const c = hostedConfig(config)
+    return c === null || !boundTo(snapshot, c)
+  } catch {
+    return true
+  }
+}
+
 class Stop extends Error {
   constructor (reason) {
     super(reason)

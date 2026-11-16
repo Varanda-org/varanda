@@ -41,8 +41,10 @@ test('content-load: argument parsing', (t) => {
   t.is(d.rttMs, 0)
   t.alike(d.datasetSize, { members: 20, blocksPerMember: 40 })
   t.is(d.inventory, 0)
+  t.is(d.discovery, true)
   t.is(d.host, '127.0.0.1')
   t.is(d.json, false)
+  t.is(parseArgs(['--no-discovery']).discovery, false)
 
   const o = parseArgs(['--clients', '64', '--duration-ms', '1000', '--rtt-ms', '2000', '--dataset-size', '3x9', '--inventory', '4096', '--host', '::1', '--json'])
   t.is(o.clients, 64)
@@ -57,7 +59,7 @@ test('content-load: argument parsing', (t) => {
     ['--clients', '0'], ['--clients', '65'], ['--clients', '-1'], ['--clients', '1.5'], ['--clients'],
     ['--duration-ms', '999'], ['--duration-ms', '600001'], ['--rtt-ms', '2001'], ['--inventory', '4097'],
     ['--dataset-size', '0x10'], ['--dataset-size', '10'], ['--dataset-size', '3x2'],
-    ['--json', '--json'], ['--clients', '2', '--clients', '3'], ['--url', 'ws://x'], ['--clients=2']
+    ['--json', '--json'], ['--no-discovery', '--no-discovery'], ['--clients', '2', '--clients', '3'], ['--url', 'ws://x'], ['--clients=2']
   ]
   for (const args of bad) t.exception(() => parseArgs(args), ContentLoadUsageError, 'recusa ' + args.join(' '))
 })
@@ -120,6 +122,7 @@ test('content-load: a 2-client 3-second run ends clean', async (t) => {
   t.ok(report.description.includes('loopback'), 'diz que é medição em loopback')
   t.ok(report.description.includes('não é uma medida de capacidade'), 'não é alegação de capacidade')
   t.is(report.clients, 2)
+  t.is(report.discovery, true, 'semeador com descoberta por padrão')
   t.ok(report.opens >= 2, 'cada leitor abriu ao menos uma vez')
   t.alike(Object.keys(report.operations), OPERATIONS)
   for (const op of ['sync.start', 'feed.read', 'profile.read', 'peek.read', 'notices.list', 'index.counts']) {
