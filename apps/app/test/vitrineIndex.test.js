@@ -55,6 +55,8 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)],
     [c.scrapsUrl(f.own), (b) => c.validScraps(b, f.own)],
     [c.scrapsUrl(f.members[2].author), (b) => c.validScraps(b, f.members[2].author)],
+    [c.profileUrl(f.own), c.validProfile],
+    [c.profileUrl(f.members[2].author), c.validProfile],
     [c.followPairUrl(f.own, f.members[1].author), c.validFollowPair]
   ]
   for (const [url, validate] of cases) {

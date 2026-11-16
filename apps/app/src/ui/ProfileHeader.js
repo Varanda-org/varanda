@@ -4,6 +4,9 @@
 // display-safe strings (already through displayText), except `bio`: the raw
 // peer text, which MentionText passes through displayText piece by piece so
 // its links stay tappable, as in a post.
+// `theme` (a profile theme id, or null for the usual sunset band) recolors the
+// band; `mood` and `about` are the rich-profile slots (MoodChip under the bio,
+// AboutCard after the actions). A header without them is unchanged.
 // onTabsLayout gets the tabs slot's { y, height } in the header's own
 // coordinates, so a profile bar can pin a copy of the tabs.
 
@@ -12,11 +15,12 @@ import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
 import { MentionText } from './MentionText'
-import { SunsetBand } from './SunsetBand'
+import { bandTint } from '../profileExtraView.js'
+import { ProfileBand } from './ProfileBand'
 import { PressScale } from './PressScale'
 import { SkeletonRow } from './States'
 import { fonts, layout, radius, space, type } from './theme'
-import { useStyles } from './ThemeProvider'
+import { useStyles, useTheme } from './ThemeProvider'
 
 const STACK_SCALE = 1.3
 
@@ -24,8 +28,12 @@ const STACK_SCALE = 1.3
 // instead of taking a share of the row.
 const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'string' && (typeof el.props.label !== 'string' || el.props.label === '')
 
-export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, onTabsLayout }) {
+export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, theme = null, mood, about, onTabsLayout }) {
   const styles = useStyles(makeStyles)
+  const { scheme } = useTheme()
+  // On a themed band the back disc is the ink color with the band color as the
+  // icon, which keeps the palette's contrast; the sunset band keeps white on the scrim.
+  const tint = bandTint(theme, scheme)
   const { width } = useWindowDimensions()
   const avatarSize = width >= layout.column ? space.xxl * 2 + space.sm : layout.hit * 2
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
@@ -55,7 +63,7 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
   }, [emitTabs])
   return (
     <View onLayout={onRootLayout}>
-      <SunsetBand height={bandHeight}>
+      <ProfileBand height={bandHeight} theme={theme}>
         {/* At the top: the avatar row below rises 44 pt into the band from
             x=16 and is drawn later, so a bottom-left control would get no touches. */}
         {typeof onBack === 'function'
@@ -65,14 +73,14 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
               accessibilityLabel='voltar'
               hitSlop={8}
               onPress={onBack}
-              style={[styles.back, { top: topInset + space.sm }]}
+              style={[styles.back, { top: topInset + space.sm }, tint !== null && { backgroundColor: tint.disc }]}
             >
-              <Icon name='voltar' size={22} color='#ffffff' />
+              <Icon name='voltar' size={22} color={tint !== null ? tint.icon : '#ffffff'} />
             </PressScale>
             )
           : null}
         {bandButtons}
-      </SunsetBand>
+      </ProfileBand>
       {loading
         ? <SkeletonRow />
         : (
@@ -88,6 +96,7 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
               {title ? <Text style={styles.name} accessibilityRole='header'>{title}</Text> : null}
               {subtitle ? <Text style={styles.keyText}>{subtitle}</Text> : null}
               {bio ? <MentionText text={bio} style={styles.bio} /> : null}
+              {mood || null}
               {shownCounts.length > 0
                 ? (
                   <View style={styles.countsRow}>
@@ -134,6 +143,7 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
                   </View>
                   )
                 : null}
+              {about ? <View style={styles.about}>{about}</View> : null}
             </View>
           </>
           )}
@@ -180,6 +190,7 @@ const makeStyles = (colors) => StyleSheet.create({
   data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.lg, paddingBottom: space.md, gap: space.xs },
   name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
+  about: { marginTop: space.md, gap: space.md },
   bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
   countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.lg, rowGap: space.sm, marginTop: space.sm },
   countLink: { maxWidth: '100%', flexShrink: 1, minHeight: layout.hit, justifyContent: 'center' },

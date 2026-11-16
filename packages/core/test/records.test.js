@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1936,4 +1936,65 @@ test('scrap records: recados key sets, text rules and builders', async (t) => {
   await t.exception.all(async () => scrapRecord({ to: K2, text: '' }), /text-length/)
   await t.exception.all(async () => scrapWallRecord({ who: 'x' }), /malformed/)
   await t.exception.all(async () => scrapHideRecord({ from: K1, seq: 0 }), /malformed/)
+})
+
+test('profile-about and mood records: key sets, rules and builders', async (t) => {
+  const { profileAboutRecord, moodRecord, PROFILE_ABOUT_KEYS, MOOD_KEYS, THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = records
+  t.alike([...PROFILE_ABOUT_KEYS], ['type', 'about', 'city', 'work', 'studies', 'interests', 'birthday', 'theme', 'at'])
+  t.alike([...MOOD_KEYS], ['type', 'emoji', 'text', 'at'])
+  t.is(THEME_IDS.length, 8)
+  t.ok(Object.isFrozen(THEME_IDS))
+  t.alike([MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT], [600, 60, 80, 80, 200, 60])
+
+  const full = { type: 'profile-about', about: 'oi\ntchau', city: 'Recife', work: 'Professora', studies: 'Letras', interests: 'forró', birthday: '02-29', theme: THEME_IDS[0], at: AT }
+  t.is(validateRecord(full, 1), null)
+  t.is(validateRecord(full, 0), 'genesis-required')
+  t.alike(profileAboutRecord({ ...full }), full)
+  const empty = { type: 'profile-about', about: null, city: null, work: null, studies: null, interests: null, birthday: null, theme: null, at: AT }
+  t.is(validateRecord(empty, 1), null, 'all null is valid')
+  t.alike(profileAboutRecord({ at: AT }), empty, 'absent fields become null')
+  t.alike(profileAboutRecord({ about: '', city: '', birthday: '', theme: '', at: AT }), empty, "'' becomes null")
+  t.alike(Object.keys(profileAboutRecord({ at: AT })), PROFILE_ABOUT_KEYS)
+
+  t.is(validateRecord({ ...full, extra: 1 }, 1), 'malformed', 'extra key')
+  const noKey = { ...full }
+  delete noKey.theme
+  t.is(validateRecord(noKey, 1), 'malformed', 'every key must be present')
+  for (const [field, max] of [['about', MAX_ABOUT], ['city', MAX_CITY], ['work', MAX_WORK], ['studies', MAX_STUDIES], ['interests', MAX_INTERESTS]]) {
+    t.is(validateRecord({ ...full, [field]: 'a'.repeat(max) }, 1), null, field + ' at limit')
+    t.is(validateRecord({ ...full, [field]: '😀'.repeat(max) }, 1), null, field + ' counts characters')
+    t.is(validateRecord({ ...full, [field]: 'a'.repeat(max + 1) }, 1), 'text-length', field + ' over limit')
+    t.is(validateRecord({ ...full, [field]: '' }, 1), 'text-length', field + ' empty must be null')
+    t.is(validateRecord({ ...full, [field]: '  ' }, 1), 'text-length', field + ' blank')
+    t.is(validateRecord({ ...full, [field]: 'a\u0000b' }, 1), 'text-length', field + ' control')
+    t.is(validateRecord({ ...full, [field]: 'a\ud800b' }, 1), 'text-length', field + ' lone surrogate')
+    t.is(validateRecord({ ...full, [field]: 'a\u202eb' }, 1), 'text-length', field + ' bidi')
+    t.is(validateRecord({ ...full, [field]: 5 }, 1), 'text-length', field + ' type')
+    t.is(validateRecord({ ...full, [field]: 'a\nb' }, 1), field === 'about' ? null : 'text-length', field + ' newline')
+  }
+  for (const birthday of ['01-01', '02-29', '12-31']) t.is(validateRecord({ ...full, birthday }, 1), null, 'birthday ' + birthday)
+  for (const birthday of ['', '13-01', '00-01', '02-30', '04-31', '1-1', '2000-01-01', 5]) t.is(validateRecord({ ...full, birthday }, 1), 'malformed', 'birthday ' + birthday)
+  for (const theme of THEME_IDS) t.is(validateRecord({ ...full, theme }, 1), null, 'theme ' + theme)
+  for (const theme of ['', 'rosa', 'Mar', 5]) t.is(validateRecord({ ...full, theme }, 1), 'malformed', 'theme ' + theme)
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...full, at }, 1), 'date-invalid', 'at ' + at)
+  await t.exception.all(async () => profileAboutRecord({ about: 'a'.repeat(601) }), /text-length/)
+  await t.exception.all(async () => profileAboutRecord({ theme: 'rosa' }), /malformed/)
+
+  const mood = { type: 'mood', emoji: '😀', text: 'feliz', at: AT }
+  t.is(validateRecord(mood, 1), null)
+  t.is(validateRecord(mood, 0), 'genesis-required')
+  t.alike(moodRecord({ emoji: '😀', text: 'feliz', at: AT }), mood)
+  const clear = { type: 'mood', emoji: '', text: '', at: AT }
+  t.is(validateRecord(clear, 1), null, 'both empty clears')
+  t.alike(moodRecord({ at: AT }), clear)
+  t.is(validateRecord({ ...mood, extra: 1 }, 1), 'malformed')
+  const noEmoji = { ...mood }
+  delete noEmoji.emoji
+  t.is(validateRecord(noEmoji, 1), 'malformed')
+  for (const emoji of ['a', '😀😀', 'oi', 5, null, '\u200d']) t.is(validateRecord({ ...mood, emoji }, 1), 'malformed', 'emoji ' + JSON.stringify(emoji))
+  t.is(validateRecord({ ...mood, text: 'a'.repeat(60) }, 1), null)
+  t.is(validateRecord({ ...mood, text: '😀'.repeat(60) }, 1), null, 'counts characters')
+  for (const text of ['a'.repeat(61), 'a\nb', 'a\u0000b', 'a\ud800b', 'a\u202eb', 5, null]) t.is(validateRecord({ ...mood, text }, 1), 'text-length', 'text ' + JSON.stringify(text))
+  for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...mood, at }, 1), 'date-invalid', 'at ' + at)
+  await t.exception.all(async () => moodRecord({ emoji: 'x' }), /malformed/)
 })

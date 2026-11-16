@@ -14,12 +14,16 @@
 // per diary. Admission checks precede mutation: a refused add pauses the
 // caller at that seq, never skipping; complete stays false until it resumes.
 // Quotas count all indexed operations, including off toggles and hints.
+// Perfil rico: the newest live `profile-about` and `mood` seq of each author
+// (profileExtra), like the profile hint: seqs only, a deletion falls back to
+// the previous live block, and each block holds a record slot.
 // Collections are lazy. Budget roughly 250 bytes/record (edge, post/timeline,
 // engager and touched entries, the engagements map, and the profileSeqs,
-// usernameSeqs and copiedSeqs arrays) plus 500 bytes/target (key, target
-// object, map slots and the first used collection): about 500 MB at both
-// defaults, plus small per-diary overhead bounded by the seeder's
-// served-diary limit. The deleted set is held until removeDiary. These are
+// usernameSeqs, copiedSeqs, aboutSeqs and moodSeqs arrays) plus 500
+// bytes/target (key, target object, map slots and the first used
+// collection): about 500 MB at both defaults, plus small per-diary overhead
+// (the five seq arrays start empty on every author entry) bounded by the
+// seeder's served-diary limit. The deleted set is held until removeDiary. These are
 // conservative retained-heap estimates, not a V8/RSS guarantee; collection
 // capacity, string representation and GC headroom vary by runtime. The
 // likers and reposters lists add one edge object per like or repost
@@ -378,7 +382,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // author -> { count, timeline: [seq] asc (posts and reposts currently on),
   // posts: Map<seq, { replyTo, quote }>, reposts: Map<ref, seq> (the on
   // record per target), touched: Map<ref, active edge count>,
-  // profileSeqs, usernameSeqs, copiedSeqs: [seq] asc,
+  // profileSeqs, usernameSeqs, copiedSeqs, aboutSeqs, moodSeqs: [seq] asc,
   // engagements: Map<seq, { type, to }> }
   const authors = new Map()
   // A slower cursor must not resurrect a removed block or its incoming edges.
@@ -415,7 +419,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null }
       authors.set(author, entry)
     }
     return entry
@@ -525,7 +529,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
           type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
-          type !== 'scrap-wall') return false
+          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
       if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
           (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
@@ -545,7 +549,8 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const existing = authors.get(author)
       if (existing && (existing.posts.has(seq) || existing.engagements.has(seq) ||
           indexOfSeq(existing.profileSeqs, seq) !== -1 || indexOfSeq(existing.usernameSeqs, seq) !== -1 ||
-          indexOfSeq(existing.copiedSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
+          indexOfSeq(existing.copiedSeqs, seq) !== -1 || indexOfSeq(existing.aboutSeqs, seq) !== -1 ||
+          indexOfSeq(existing.moodSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
           existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq))) return true
       if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
       // Off operations need no new target; they may free one at the cap.
@@ -633,6 +638,10 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         }
         entry.walls.set(seq, record.who)
         entry.wallSeqs.splice(lowerBoundSeq(entry.wallSeqs, seq), 0, seq)
+      } else if (type === 'profile-about') {
+        entry.aboutSeqs.splice(lowerBoundSeq(entry.aboutSeqs, seq), 0, seq)
+      } else if (type === 'mood') {
+        entry.moodSeqs.splice(lowerBoundSeq(entry.moodSeqs, seq), 0, seq)
       } else if (record.member === author) {
         entry.usernameSeqs.splice(lowerBoundSeq(entry.usernameSeqs, seq), 0, seq)
       } else {
@@ -844,7 +853,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         if (entry.testimonials.size === 0) entry.testimonials = null
         found = true
       }
-      for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs]) {
+      for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs, entry.aboutSeqs, entry.moodSeqs]) {
         const at = indexOfSeq(list, seq)
         if (at === -1) continue
         list.splice(at, 1)
@@ -995,6 +1004,15 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     const entry = authors.get(author)
     if (entry === undefined) return { profileSeq: null, usernameSeq: null }
     return { profileSeq: entry.profileSeqs.at(-1) ?? null, usernameSeq: entry.usernameSeqs.at(-1) ?? null }
+  }
+
+  // Perfil rico pointers of `author`: { about, mood }, the seq of its newest
+  // live `profile-about` and `mood` block, null when it has none. The object
+  // is OPEN: later features add pointers to it and readers ignore keys they
+  // do not know. Only seqs are kept: the node reads and verifies the blocks.
+  function profileExtra (author) {
+    const entry = typeof author === 'string' ? authors.get(author) : undefined
+    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null }
   }
 
   // Totals exclude dropped diaries by construction: removeDiary runs
@@ -1603,7 +1621,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, stats, clear }
 }
 
 module.exports = {

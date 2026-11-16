@@ -860,6 +860,18 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
+    // The rich profile (docs/rpc.md): written by the browser node only, the
+    // same refusal, nothing written.
+    'profile.about': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'profile.mood': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'profile.extra.delete': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     // A momento's photo lives in the browser node's anonymous blob pool
     // (docs/rpc.md 5.113): refused the same way, nothing opened.
     'moment.create': serial(async () => {

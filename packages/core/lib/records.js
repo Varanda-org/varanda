@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira, isMomentMusic, MOMENT_MUSIC_KEYS } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, profileExtra: PX } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -120,6 +120,14 @@ const SCRAP_HIDE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
 const SCRAP_WALL_KEYS = Object.freeze(['type', 'who', 'at'])
 const MAX_SCRAP = 400
 const SCRAP_WALLS = Object.freeze(['following', 'everyone', 'nobody'])
+// Perfil rico (docs/protocol.md): the profile record stays as it is so older
+// readers keep name and photo. `profile-about` carries every key, null when
+// empty (latest wins); `mood` is an emoji and a short text, both '' to clear
+// it (latest wins), shown by readers for 24 hours. The rules are the shared
+// ones of @varanda/rpc (lib/profile-extra.js).
+const PROFILE_ABOUT_KEYS = Object.freeze(['type', 'about', 'city', 'work', 'studies', 'interests', 'birthday', 'theme', 'at'])
+const MOOD_KEYS = Object.freeze(['type', 'emoji', 'text', 'at'])
+const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
 // hours. The media item has the DM media item shape (packages/rpc
@@ -539,7 +547,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -624,6 +632,19 @@ function check (record, seq) {
   }
   if (type === 'scrap-wall') {
     if (!hasExactKeys(record, SCRAP_WALL_KEYS) || !SCRAP_WALLS.includes(record.who)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'profile-about') {
+    if (!hasExactKeys(record, PROFILE_ABOUT_KEYS)) return 'malformed'
+    const { about, city, work, studies, interests, birthday, theme } = record
+    if (!PX.nullable(PX.isAbout)(about) || !PX.nullable(PX.isCity)(city) || !PX.nullable(PX.isWork)(work) ||
+      !PX.nullable(PX.isStudies)(studies) || !PX.nullable(PX.isInterests)(interests)) return 'text-length'
+    if (!PX.nullable(PX.isBirthday)(birthday) || !PX.nullable(PX.isThemeId)(theme)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'mood') {
+    if (!hasExactKeys(record, MOOD_KEYS) || !PX.isMoodEmoji(record.emoji)) return 'malformed'
+    if (!PX.isMoodText(record.text)) return 'text-length'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'moment') {
@@ -789,6 +810,27 @@ function scrapHideRecord ({ from, seq, at = nowIso() } = {}) {
 
 function scrapWallRecord ({ who, at = nowIso() } = {}) {
   return build({ type: 'scrap-wall', who, at }, 1)
+}
+
+// An empty field is null, whatever way the caller says it (absent, null or '').
+const orNull = (v) => (v === undefined || v === '' ? null : v)
+
+function profileAboutRecord ({ about, city, work, studies, interests, birthday, theme, at = nowIso() } = {}) {
+  return build({
+    type: 'profile-about',
+    about: orNull(about),
+    city: orNull(city),
+    work: orNull(work),
+    studies: orNull(studies),
+    interests: orNull(interests),
+    birthday: orNull(birthday),
+    theme: orNull(theme),
+    at
+  }, 1)
+}
+
+function moodRecord ({ emoji = '', text = '', at = nowIso() } = {}) {
+  return build({ type: 'mood', emoji, text, at }, 1)
 }
 
 // `media` and `music` are copied with exactly their keys (anything else is
@@ -1052,6 +1094,15 @@ module.exports = {
   SCRAP_WALL_KEYS,
   MAX_SCRAP,
   SCRAP_WALLS,
+  PROFILE_ABOUT_KEYS,
+  MOOD_KEYS,
+  THEME_IDS,
+  MAX_ABOUT,
+  MAX_CITY,
+  MAX_WORK,
+  MAX_STUDIES,
+  MAX_INTERESTS,
+  MAX_MOOD_TEXT,
   MIN_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_PLAIN,
   MAX_TESTIMONIAL_SEALED,
@@ -1105,6 +1156,8 @@ module.exports = {
   scrapRecord,
   scrapHideRecord,
   scrapWallRecord,
+  profileAboutRecord,
+  moodRecord,
   momentRecord,
   deleteRecord,
   deleteRecords,

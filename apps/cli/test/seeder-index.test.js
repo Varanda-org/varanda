@@ -2216,6 +2216,68 @@ test('indexScraps and indexFollowSeq: wall, hides, reply exception, unfollow, de
   t.is(seeder.indexFollowSeq(O, W), null)
 })
 
+test('indexProfile: newest about and mood pointers, deletes, fail closed while indexing, held, blocked and purged', async (t) => {
+  const { profileAboutRecord, moodRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const V = authorKey(2)
+  const ofO = [profileAboutRecord({ about: 'um', at: at(0) }), moodRecord({ emoji: '🙂', text: 'oi', at: at(1) })]
+  const ofV = [moodRecord({ emoji: '🎉', text: '', at: at(2) })]
+  const { seeder, diary } = scanFixture()
+  const all = [[O, ofO], [V, ofV]]
+  const entries = new Map(all.map(([key, records]) => [key, scannable(seeder, diary(key, records.length, (seq) => records[seq - 1]))]))
+  const pass = async () => {
+    for (const [key] of all) {
+      const entry = entries.get(key)
+      if (!entry || entry.dropped) continue
+      await seeder._runScan(key, entry)
+      seeder._onGrow(key, entry, entry.core.contiguousLength)
+    }
+    await settleIndex(seeder)
+  }
+  const grow = async (key, records, more) => {
+    records.push(...more)
+    entries.get(key).core.contiguousLength = records.length + 1
+    await pass()
+  }
+  await pass()
+  t.alike(seeder.indexProfile(O), { about: 1, mood: 2, indexing: false, complete: true })
+  t.alike(seeder.indexProfile(V), { about: null, mood: 1, indexing: false, complete: true }, 'each author has its own pointers')
+  t.is(seeder.indexProfile('f'.repeat(64)), null, 'an author not served is unknown')
+  t.is(seeder.indexProfile('nope'), null)
+
+  await grow(O, ofO, [profileAboutRecord({ about: 'dois', at: at(3) })]) // 3
+  t.is(seeder.indexProfile(O).about, 3, 'the newest block wins')
+  await grow(O, ofO, [deleteRecord({ seq: 3, at: at(4) })]) // 4
+  t.is(seeder.indexProfile(O).about, 1, 'a deleted block falls back to the previous one')
+  await grow(O, ofO, [deleteRecord({ seq: 2, at: at(5) })]) // 5
+  t.alike(seeder.indexProfile(O), { about: 1, mood: null, indexing: false, complete: true })
+
+  seeder._rebuildIndex()
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, indexing: true, complete: false }, 'between a rebuild and the re-index: fail closed')
+  await settleIndex(seeder)
+  t.alike(seeder.indexProfile(O), { about: 1, mood: null, indexing: false, complete: true }, 'the same after a rebuild')
+
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, indexing: true, complete: false }, 'a paused diary: no pointer')
+  owner.indexPaused = false
+  owner.core.contiguousLength++
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, indexing: true, complete: false }, 'a diary behind its present length: no pointer')
+  owner.core.contiguousLength--
+  t.is(seeder.indexProfile(O).about, 1, 'caught up: the pointer again')
+
+  owner.searchHold = 1
+  t.is(seeder.indexProfile(O), null, 'a held author is unknown')
+  owner.searchHold = 0
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexProfile(O), null, 'a blocked author is unknown')
+  seeder._isBlocked = () => false
+  t.is(seeder.indexProfile(V).mood, 1, 'another author is unaffected')
+
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexProfile(O), null, 'a purged author is unknown')
+})
+
 test('indexScraps: the caps count admitted writers only and pages carry exclusive cursors', async (t) => {
   const { scrapRecord, followRecord } = require('@varanda/core/lib/records')
   const O = authorKey(1)

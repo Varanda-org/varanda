@@ -146,6 +146,14 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   (as in /index/post) and `next` the same shape or null; any other
 //   segment after the owner is 400 'pedido inválido', never 404, so a
 //   client tells a bad cursor from an unknown owner.
+// - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
+//   mood: seq | null, indexing, complete }`, the author's newest live
+//   profile-about and mood blocks (perfil rico). The object is open: later
+//   features add pointers and readers ignore keys they do not know, so
+//   profileBody keeps only the keys it lists. While the author's own diary
+//   is still being indexed or scanned (fail closed) both are null, indexing
+//   is true and complete is false; otherwise complete is true and indexing
+//   is the global flag. Pointers only; the node verifies.
 // - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
 //   seq | null, indexing }`, the author's live follow block of target.
 //   Both rebuilt here field by field; both spend the index budget.
@@ -376,6 +384,7 @@ const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9
 // Any path below an owner's recados that INDEX_SCRAPS_RE refuses: a
 // malformed cursor (400).
 const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
+const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
 const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
 const SCRAP_ROWS_MAX = 50
 const SCRAP_HIDES_MAX = 1000
@@ -825,6 +834,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     // The atMs of a cursor fits 16 digits but must stay a safe integer.
     if (m && (m[2] === undefined || Number.isSafeInteger(Number(m[2].split('.')[0])))) return ['indexScraps', [m[1], m[2] === undefined ? null : m[2]], scrapsBody]
     if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_PROFILE_RE.exec(url)
+    if (m) return ['indexProfile', [m[1]], profileBody]
     m = INDEX_FOLLOW_RE.exec(url)
     if (m) return ['indexFollowSeq', [m[1], m[2]], followSeqBody]
     // Without a public origin the Feira has no public surface at all.
@@ -890,6 +901,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       indexing: indexing === true,
       complete: complete === true
     }
+  }
+
+  // The pointer keys known so far; a new key is added here when its feature
+  // ships, an unknown one is never echoed.
+  function profileBody ({ about, mood, indexing, complete }) {
+    const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
+    if (!seqOk(about) || !seqOk(mood)) throw new Error('index')
+    return { about, mood, indexing: indexing === true, complete: complete === true }
   }
 
   function followSeqBody ({ seq, indexing }) {
@@ -1789,6 +1808,7 @@ module.exports = {
   INDEX_FOLLOWS_RE,
   INDEX_TESTIMONIALS_RE,
   INDEX_SCRAPS_RE,
+  INDEX_PROFILE_RE,
   INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,

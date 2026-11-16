@@ -61,6 +61,8 @@ const {
   scrapRecord,
   scrapHideRecord,
   scrapWallRecord,
+  profileAboutRecord,
+  moodRecord,
   momentRecord,
   postShareRecord,
   MAX_TESTIMONIAL,
@@ -848,7 +850,11 @@ const DELETE_KINDS = {
   // scrapDelete picks the kind from the target, as testimonialDelete does.
   scrap: { other: null, wrong: null },
   'scrap-hide': { other: null, wrong: null },
-  'scrap-wall': { other: null, wrong: null }
+  'scrap-wall': { other: null, wrong: null },
+  // The rich profile records: latest wins, so profileExtraDelete names the
+  // newest live one and recordDelete tombstones every live version.
+  'profile-about': { other: null, wrong: null },
+  mood: { other: null, wrong: null }
 }
 
 // The compat pair profileRecords writes: a plain profile immediately
@@ -937,6 +943,20 @@ async function clearAfterDelete (ctx, diary, ownHex, targets, records) {
   }
 }
 
+// Appends `records` in order, at most APPEND_MAX per append -> the last
+// seq. A failed chunk throws with `written`, the highest block already
+// stored by an earlier chunk, so the caller still counts and pushes it.
+async function appendChunked (ctx, diary, records) {
+  let seq = null
+  try {
+    for (let i = 0; i < records.length; i += APPEND_MAX) seq = await appendAll(ctx, diary, records.slice(i, i + APPEND_MAX))
+  } catch (err) {
+    if (seq !== null && err !== null && typeof err === 'object') err.written = seq
+    throw err
+  }
+  return seq
+}
+
 // Tombstones for the caller's own post or profile block `to` -> { seq, ref,
 // changed, deleted } (docs/rpc.md 5.33, 5.34). A compat pair is one version:
 // both tombstones go in one append. A target already deleted writes nothing,
@@ -976,6 +996,8 @@ async function recordDelete (ctx, kind, { to }) {
     // Every live show of that writer goes: shownRows takes the newest live
     // one, so removing only this one would bring an older one back.
     if (kind === 'testimonial-show') targets = [...new Set([to.seq, ...liveShowSeqs(raw, target.from)])].sort((a, b) => a - b)
+    // Same for the rich profile: latest wins, so every live version goes.
+    if (kind === 'profile-about' || kind === 'mood') targets = [...new Set([to.seq, ...liveSeqsOfType(raw, kind)])].sort((a, b) => a - b)
     if (kind === 'profile') {
       if (target.avatar === undefined && compatPair(target, recordAt(raw, to.seq + 1))) targets = [to.seq, to.seq + 1]
       else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
@@ -1005,14 +1027,16 @@ async function recordDelete (ctx, kind, { to }) {
         ? await appendOwn(ctx, diary, records[0])
         : await store.appendRecords(diary, records, ctx.limits)
     } else {
-      // Only a writer's many shows get here (a post is at most 3 tombstones,
-      // a profile pair 2). One append takes at most APPEND_MAX records, so the
-      // tombstones go in chunks: every other show of that writer first,
-      // newest first, and the targeted show's in the last chunk. A chunk
-      // that fails throws like any failed write and the client never
-      // resends by itself; while any show of that writer remains, the
-      // target is still live (never cleared by sync), so a repeat of the
-      // same ref reads its `from` again and finishes the rest.
+      // Only a writer's many shows or many rich profile versions get here
+      // (a post is at most 3 tombstones, a profile pair 2). One append takes
+      // at most APPEND_MAX records, so the tombstones go in chunks: every
+      // other version first, newest first, and the targeted one's in the
+      // last chunk. A chunk that fails throws like any failed write and the
+      // client never resends by itself; while any show of that writer
+      // remains, the target is still live (never cleared by sync), so a
+      // repeat of the same ref reads its `from` again and finishes the rest.
+      // A rich profile target is the newest version, so until the last
+      // chunk readers still see it, and a repeat names it again.
       // Ordered by each record's own target, as a target may have several.
       const order = records.map((r, i) => i).sort((a, b) => {
         const sa = records[a].seq
@@ -1022,12 +1046,7 @@ async function recordDelete (ctx, kind, { to }) {
         if (sb === to.seq) return -1
         return sb - sa
       })
-      for (let i = 0; i < order.length; i += APPEND_MAX) {
-        const chunk = order.slice(i, i + APPEND_MAX).map((j) => records[j])
-        seq = chunk.length === 1
-          ? await appendOwn(ctx, diary, chunk[0])
-          : await store.appendRecords(diary, chunk, ctx.limits)
-      }
+      seq = await appendChunked(ctx, diary, order.map((j) => records[j]))
     }
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
@@ -1441,6 +1460,84 @@ async function scrapDelete (ctx, { seq }) {
     return target.type
   })
   return recordDelete(ctx, kind, { to })
+}
+
+// ---- perfil rico (docs/protocol.md, docs/rpc.md) ----
+
+// Appends `record` (a profile-about or a mood) and tombstones every earlier
+// live version of its type, so a version the author replaced cannot show
+// again on a reader that missed the newer one. With up to APPEND_MAX - 1
+// earlier versions everything is one append, the new record last. With more,
+// the oldest tombstones go first in chunks and the newest earlier version's
+// tombstone goes with the new record in the final append: a failed chunk
+// leaves that version showing, never an older one or none, and a repeat
+// finds fewer live versions and converges. A failed chunk throws with
+// `written` (appendChunked). -> { seq, ref }.
+async function publishLatest (ctx, record) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const prior = liveSeqsOfType(await store.readRaw(diary), record.type)
+    const at = nowIso()
+    const tombs = prior.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
+    const cut = Math.max(0, tombs.length - (APPEND_MAX - 1))
+    let written = null
+    let seq
+    try {
+      if (cut > 0) written = await appendChunked(ctx, diary, tombs.slice(0, cut))
+      seq = await appendChunked(ctx, diary, [...tombs.slice(cut), record])
+    } catch (err) {
+      if (written !== null && err !== null && typeof err === 'object' && !Number.isSafeInteger(err.written)) err.written = written
+      throw err
+    }
+    if (prior.length > 0) await clearAfterDelete(ctx, diary, ownHex, prior, tombs)
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// Appends the own `profile-about` record: all seven fields, null for empty,
+// the newest one replaces the older (publishLatest). A bad field is
+// 'registro inválido: <reason>' (the session has already checked the
+// shapes). -> { seq, ref }.
+async function profileAbout (ctx, { about, city, work, studies, interests, birthday, theme }) {
+  return publishLatest(ctx, buildRecord(() => profileAboutRecord({ about, city, work, studies, interests, birthday, theme })))
+}
+
+// Appends the own `mood` record (publishLatest); both fields '' clear it.
+// -> { seq, ref }.
+async function moodSet (ctx, { emoji, text = '' }) {
+  return publishLatest(ctx, buildRecord(() => moodRecord({ emoji, text })))
+}
+
+const NOTHING_TO_DELETE = 'nada para apagar'
+
+// The seqs of the live (not tombstoned) blocks of `type` in the own diary's
+// raw entries, ascending.
+function liveSeqsOfType (raw, type) {
+  const deleted = deletedSeqs(raw)
+  const out = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === type) out.push(seq)
+  }
+  return out
+}
+
+// Tombstones every live `profile-about` (kind 'about') or `mood` (kind
+// 'mood') of the own diary, so no older version shows again ->
+// recordDelete's { seq, ref, changed, deleted }. With none live it answers
+// NOTHING_TO_DELETE and writes nothing.
+async function profileExtraDelete (ctx, { kind }) {
+  const type = kind === 'about' ? 'profile-about' : kind === 'mood' ? 'mood' : null
+  if (type === null) throw new UsageError('parâmetro inválido: kind')
+  let to = null
+  await withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const live = liveSeqsOfType(await store.readRaw(diary), type)
+    if (live.length === 0) throw new UsageError(NOTHING_TO_DELETE)
+    to = { author: ownHex, seq: live[live.length - 1] }
+  })
+  return recordDelete(ctx, type, { to })
 }
 
 // ---- media ----
@@ -5619,6 +5716,9 @@ module.exports = {
   scrapHide,
   scrapWall,
   scrapDelete,
+  profileAbout,
+  moodSet,
+  profileExtraDelete,
   momentCreate,
   momentDelete,
   momentsRead,

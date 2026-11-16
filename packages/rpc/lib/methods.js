@@ -9,6 +9,7 @@ const F = require('./feira')
 const IC = require('./invite-card')
 const { isMomentMusic } = require('./music')
 const { isReaction } = require('./reaction')
+const PX = require('./profile-extra')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -135,6 +136,8 @@ const GROUP_JOINS = ['open', 'approval']
 const isGroupJoin = (v) => typeof v === 'string' && GROUP_JOINS.includes(v)
 const SCRAP_WALLS = ['following', 'everyone', 'nobody']
 const isScrapWall = (v) => typeof v === 'string' && SCRAP_WALLS.includes(v)
+const PROFILE_EXTRA_KINDS = ['about', 'mood']
+const isProfileExtraKind = (v) => typeof v === 'string' && PROFILE_EXTRA_KINDS.includes(v)
 const isGroupVisibility = (v) => v === 'public' || v === 'private'
 
 // post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors,
@@ -948,6 +951,26 @@ const SPECS = {
   'scrap.hide': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
   'scrap.wall': { fields: { who: req(isScrapWall) }, mutating: true },
   'scrap.delete': { fields: { seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  // Rich profile (docs/rpc.md): all seven fields are always sent, null for
+  // empty, and the newest record replaces the older one. `profile.mood` with
+  // both fields empty clears the mood.
+  'profile.about': {
+    fields: {
+      about: req(PX.nullable(PX.isAbout)),
+      city: req(PX.nullable(PX.isCity)),
+      work: req(PX.nullable(PX.isWork)),
+      studies: req(PX.nullable(PX.isStudies)),
+      interests: req(PX.nullable(PX.isInterests)),
+      birthday: req(PX.nullable(PX.isBirthday)),
+      theme: req(PX.nullable(PX.isThemeId))
+    },
+    mutating: true
+  },
+  'profile.mood': { fields: { emoji: req(PX.isMoodEmoji), text: opt(PX.isMoodText, '') }, mutating: true },
+  // Tombstones every live `profile-about` ('about') or `mood` ('mood') of
+  // the caller's diary, so no older version shows again. Result { seq,
+  // deleted } as scrap.delete.
+  'profile.extra.delete': { fields: { kind: req(isProfileExtraKind) }, mutating: true },
   'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
   'moments.read': { fields: none },
   // The momento a v5 reaction names, while it is showing (docs/rpc.md

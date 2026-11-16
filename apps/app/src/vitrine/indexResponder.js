@@ -390,6 +390,15 @@ export function vitrineIndex (url, request) {
     return scrapsIndex(key, part)
   }
 
+  if (route === 'profile' && part === undefined) {
+    requireProfile(key)
+    const latest = (type) => {
+      const rows = liveEntries().filter((e) => e.author === key && e.record.type === type)
+      return rows.length === 0 ? null : Math.max(...rows.map((e) => e.seq))
+    }
+    return { about: latest('profile-about'), mood: latest('mood'), ...flags }
+  }
+
   if (route === 'follow' && cursor === undefined) {
     if (!isKey(key) || !isKey(part)) notFound()
     requireProfile(key)

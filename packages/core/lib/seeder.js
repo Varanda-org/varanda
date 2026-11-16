@@ -284,7 +284,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -6057,6 +6057,26 @@ class Seeder {
         return { scraps: [], hides: page.hides, wall: page.wall, next: null, indexing: flags.indexing, complete: false }
       }
       return { scraps: page.rows, hides: page.hides, wall: page.wall, next: page.next, indexing: flags.indexing, complete: flags.complete && !page.truncated && !v.held }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/profile/<author>: pointers to the author's perfil rico blocks,
+  // { about: seq | null, mood: seq | null, indexing, complete } (engagement-index.js
+  // profileExtra): the newest live `profile-about` and `mood` block. The
+  // object is OPEN: later features add pointers and readers ignore keys they
+  // do not know. Null when the author is not visible or held (_searchHeld).
+  // Fails closed while the author's own diary is not fully indexed and
+  // scanned (the newest block may be missing, a tombstone not yet applied):
+  // both pointers null, indexing true and complete false. Seqs only: the node reads and
+  // verifies the blocks.
+  indexProfile (authorHex) {
+    try {
+      if (!this._indexVisible(authorHex) || this._searchHeld(authorHex)) return null
+      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, indexing: true, complete: false }
+      const { about, mood } = this._index.profileExtra(authorHex)
+      return { about, mood, indexing: this._indexFlags().indexing, complete: true }
     } catch {
       return null
     }

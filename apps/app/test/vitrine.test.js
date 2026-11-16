@@ -143,6 +143,9 @@ const resultKeys = {
   'scrap.hide': ['seq', 'ref'],
   'scrap.wall': ['seq', 'ref'],
   'scrap.delete': ['seq', 'deleted'],
+  'profile.about': ['seq', 'ref'],
+  'profile.mood': ['seq', 'ref'],
+  'profile.extra.delete': ['seq', 'deleted'],
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
   'moments.read': ['authors', 'own', 'past'],
@@ -619,6 +622,9 @@ function samples (f) {
     'scrap.hide': { from: f.members[1].author, seq: 90 },
     'scrap.wall': { who: 'everyone' },
     'scrap.delete': { seq: 49 },
+    'profile.about': { about: 'Café, livros e encontros na praça.', city: 'Curitiba', work: null, studies: null, interests: null, birthday: '05-20', theme: 'varanda' },
+    'profile.mood': { emoji: '☕', text: 'Café na praça' },
+    'profile.extra.delete': { kind: 'about' },
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
     'moment.create': { text: 'Bom dia, praça!', media: f.diaryRecords.find((e) => e.record.type === 'moment').record.media },
     'moments.read': {},
@@ -744,6 +750,8 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     const request = createVitrineRequest(f)
     // moment.create takes only an item the media handle just prepared.
     const given = method === 'moment.create' ? { ...params[method], media: await request.media.putMoment({ bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]), mime: 'image/jpeg', width: 640, height: 480 }) } : params[method]
+    // profile.extra.delete needs a live record; the own fixture diary has none.
+    if (method === 'profile.extra.delete') await request('profile.about', params['profile.about'])
     if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
     else await answer(t, request, method, given)
   }
@@ -780,6 +788,23 @@ test('a published link card reaches the diary and A Rua', async (t) => {
   const { seq } = await call('post.create', { text: 'sem cartão' })
   t.absent('preview' in (await call('log.read', { limit: 1 })).entries[0].record)
   t.is((await own(seq)).preview, null)
+})
+
+test('profile.extra.delete tombstones every live version of its kind and refuses when none is live', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const about = samples(f)['profile.about']
+  const one = await call('profile.about', about)
+  const mood = await call('profile.mood', { emoji: '☕' })
+  const two = await call('profile.about', { ...about, city: null })
+  const r = await call('profile.extra.delete', { kind: 'about' })
+  t.alike(r.deleted, [one.seq, two.seq])
+  const tail = (await call('log.read', { limit: 2 })).entries
+  t.alike(tail.map((e) => [e.seq, e.record.type, e.record.seq]), [[r.seq - 1, 'delete', one.seq], [r.seq, 'delete', two.seq]])
+  await refused(t, request, 'profile.extra.delete', { kind: 'about' }, 'USAGE', 'nada para apagar')
+  t.alike((await call('profile.extra.delete', { kind: 'mood' })).deleted, [mood.seq])
+  await refused(t, request, 'profile.extra.delete', { kind: 'mood' }, 'USAGE', 'nada para apagar')
 })
 
 test('diary writes, tombstones, reactions, follows and profile changes are visible locally', async (t) => {

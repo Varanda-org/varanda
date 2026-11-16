@@ -344,6 +344,13 @@ export function scrapsUrl (owner, cursor = null) {
   return resolveUrl('/index/scraps/' + o + (cursor === null ? '' : '/' + cursor))
 }
 
+// Perfil rico: GET /index/profile/<author>. An open object of pointers; a
+// later change adds keys, so a reader ignores the ones it does not know.
+export function profileUrl (author) {
+  const a = inputAuthor(author)
+  return a === null ? null : resolveUrl('/index/profile/' + a)
+}
+
 export function followPairUrl (author, target) {
   const a = inputAuthor(author)
   const b = inputAuthor(target)
@@ -1039,6 +1046,18 @@ export function validScraps (body, owner, cursor = null) {
   return { rows, hides: body.hides.slice(), wall: body.wall, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
 }
 
+// Tolerant: unknown keys are ignored, the known ones are checked. `about` and
+// `mood` are the seq of the author's latest profile-about and mood record, or
+// null (a key a seeder does not send yet reads as null). The node re-reads
+// the record itself.
+export function validProfile (body) {
+  if (!isPlain(body) || !isFlags(body)) return null
+  const about = body.about === undefined ? null : body.about
+  const mood = body.mood === undefined ? null : body.mood
+  if (!isHint(about) || !isHint(mood)) return null
+  return { about, mood, indexing: body.indexing, complete: body.complete }
+}
+
 export function validFollowPair (body) {
   if (!hasExactKeys(body, FOLLOW_PAIR_KEYS) || typeof body.indexing !== 'boolean' || !isHint(body.seq)) return null
   return { seq: body.seq, indexing: body.indexing }
@@ -1353,6 +1372,10 @@ export function fetchScraps (owner, cursor = null, deps = {}) {
   const url = scrapsUrl(owner, cursor)
   const o = url === null ? null : inputAuthor(owner)
   return run(url, (body) => validScraps(body, o, cursor), deps)
+}
+
+export function fetchProfile (author, deps = {}) {
+  return run(profileUrl(author), validProfile, deps)
 }
 
 export function fetchFollowPair (author, target, deps = {}) {

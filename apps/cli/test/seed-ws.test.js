@@ -3366,3 +3366,69 @@ test('startSeedWs /index/scraps and /index/follow: malformed answers are 404, th
   t.is(busy.status, 503, 'the shared index bucket is empty')
   t.is(busy.headers['retry-after'], '1')
 })
+
+// /index/profile/<author>: the perfil rico pointers, rebuilt key by key.
+test('startSeedWs /index/profile: regex, pointers only, HEAD, 404, 421, 405 and the index bucket', async (t) => {
+  t.timeout(20000)
+  const { INDEX_PROFILE_RE } = require('../lib/seed-ws')
+  t.is(INDEX_PROFILE_RE.source, '^\\/index\\/profile\\/([0-9a-f]{64})$')
+  const seeder = indexSeeder()
+  seeder.indexProfile = async (author) => {
+    seeder.calls.push(['indexProfile', author])
+    if (author !== A) return null
+    return { about: 3, mood: null, indexing: false, text: 'segredo', extra: 'x' }
+  }
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0, burst: 4 } })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/profile/' + A
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.alike(JSON.parse(got.body.toString()), { about: 3, mood: null, indexing: false, complete: false }, 'only the known keys leave')
+  t.alike(seeder.calls.at(-1), ['indexProfile', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.body.byteLength, 0)
+  t.is((await mediaRequest(server.port, '/index/profile/' + 'f'.repeat(64))).status, 404, 'an unknown author')
+  seeder.calls.length = 0
+  for (const u of ['/index/profile', '/index/profile/', '/index/profile/' + 'a'.repeat(63), '/index/profile/' + 'A'.repeat(64), url + '/', url + '/1', url + '?x=1']) {
+    const r = await mediaRequest(server.port, u)
+    t.is(r.status, 404, u + ' -> 404')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE']) {
+    const r = await mediaRequest(server.port, url, { method })
+    t.is(r.status, 405, method + ' -> 405')
+    t.is(r.headers.allow, 'GET, HEAD')
+  }
+})
+
+test('startSeedWs /index/profile: a malformed answer, a throw or a missing method are 404; it spends the index bucket', async (t) => {
+  t.timeout(20000)
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/profile/' + A
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  const big = Number.MAX_SAFE_INTEGER
+  seeder.indexProfile = async () => ({ about: big, mood: big, indexing: true })
+  const worst = await mediaRequest(server.port, url)
+  t.is(worst.status, 200)
+  t.alike(JSON.parse(worst.body.toString()), { about: big, mood: big, indexing: true, complete: false })
+  for (const answer of [{ about: 0, mood: null, indexing: false }, { about: null, mood: 1.5, indexing: false }, { about: '3', mood: null, indexing: false },
+    { about: undefined, mood: null, indexing: false }, { about: -1, mood: null, indexing: false }]) {
+    seeder.indexProfile = async () => answer
+    t.is((await mediaRequest(server.port, url)).status, 404, JSON.stringify(answer))
+  }
+  seeder.indexProfile = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+
+  const s2 = await startSeedWs({ port: 0, seeder: Object.assign(indexSeeder(), { indexProfile: async () => ({ about: null, mood: null, indexing: false }) }), index: { rate: 0, burst: 1 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'profile spends a token')
+  const busy = await mediaRequest(s2.port, '/index/member/' + A)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+})
