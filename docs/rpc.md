@@ -453,7 +453,7 @@ Who started following the caller and whom the caller does not follow yet ("follo
 
 ### 5.30 `invite.sign`
 
-- Params: `{ action, nonce }`, nothing else: `action` is `'issue'` (mint one invite, `POST /account/invites/finish`) or `'summary'` (read the member's own weekly allowance, `POST /account/invites/summary`; mints nothing). The action is one of the signed lines, so a signature for one action never verifies as the other; `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/invites/start`).
+- Params: `{ action, nonce }`, nothing else: `action` is `'issue'` (mint one invite, `POST /account/invites/finish`) or `'summary'` (read the member's own weekly allowance, `POST /account/invites/summary`; mints nothing; the same `'summary'` signature also proves the member at `POST /account/terms/held/finish`, with its own nonce from `POST /account/terms/held/start`, see the signed statements list in protocol.md). The action is one of the signed lines, so a signature for one action never verifies as the other; `nonce` matches `/^[A-Za-z0-9_-]{43,128}$/` (the account service's base64url nonce from `POST /account/invites/start`).
 - The caller never passes the member, the association or any bytes: the node fills in `member` = its own diary key and `association` = its configured association, and signs exactly the UTF-8 bytes of these five lines joined by LF (`0x0a`), no trailing LF, no date (`invitePayload`, `packages/core/lib/invite.js`):
 
   ```

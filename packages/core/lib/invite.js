@@ -11,7 +11,9 @@
 // Hypercore block signature, and vice versa.
 //
 // The action field lets one prefix cover several requests: 'issue' asks to
-// mint one invite, 'summary' only reads the member's own weekly allowance.
+// mint one invite, 'summary' proves the member's key for reads of its own
+// data: the weekly invite allowance, member sessions and
+// /account/terms/held/finish.
 // The action is one of the signed lines, so a signature for one action never
 // verifies as another. The statement carries NO date (the account service
 // records its own) and nothing about the invited person.
