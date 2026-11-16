@@ -111,6 +111,8 @@ function liveLogCopies ({ key, entries, raw: rawBlocks }, { association, revoked
 // seq } of an item, or null) keeps only the items strictly before it in feed
 // order, so a caller pages backwards from the oldest item it holds; the
 // `limit` newest of those are returned. `future` is never paged.
+// Every item has `avatar`: the descriptor of the newest valid profile (the one
+// `name` comes from), or null when it is plain or there is none.
 // Every item has `kind`: 'post' ({ ..., text, replyTo, quote, media }, never
 // both replyTo and quote) or 'repost' ({ ..., to, text: null, replyTo: null,
 // quote: null, media: null, preview: null }, seq/at of the latest `on` record for `to`).
@@ -143,7 +145,10 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
   }
   for (const log of prepared) {
     const { key, copied } = log
-    const name = (latestProfileOfCopies(copied) || {}).name || null
+    const profile = latestProfileOfCopies(copied) || {}
+    const name = profile.name || null
+    // Same newest profile as `name`; a copy per item so no two share an object.
+    const avatarOf = () => (profile.avatar ? { ...profile.avatar } : null)
     for (const { seq, record: post } of copied) {
       if (post === null || post.type !== 'post') continue
       const t = Date.parse(post.at)
@@ -154,7 +159,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       // `media`: a copy of the post's descriptors, or null when it has none.
       const media = Array.isArray(post.media) ? post.media.map((d) => ({ ...d })) : null
       const quote = post.quote ? { author: post.quote.author, seq: post.quote.seq } : null
-      rows.push({ t, log, item: { kind: 'post', author: key, name, username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post) } })
+      rows.push({ t, log, item: { kind: 'post', author: key, name, avatar: avatarOf(), username: null, seq, at: post.at, text: post.text, replyTo: post.replyTo, quote, media, preview: post.preview ? copyLinkCard(post.preview, (d) => ({ ...d })) : null, ...(Array.isArray(post.poll) ? { poll: post.poll.slice() } : {}), ...postEventOf(post) } })
     }
     for (const [ref, { seq, at }] of engagementOfCopies(copied).reposted) {
       const t = Date.parse(at)
@@ -167,7 +172,7 @@ function buildFeed ({ logs, association, limit = Infinity, now = Date.now(), rev
       if (deletedRefs.has(ref)) continue
       const to = parseRef(ref)
       if (hidden !== null && hidden.has(to.author)) continue
-      rows.push({ t, log, item: { kind: 'repost', author: key, name, username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null } })
+      rows.push({ t, log, item: { kind: 'repost', author: key, name, avatar: avatarOf(), username: null, seq, at, to, text: null, replyTo: null, quote: null, media: null, preview: null } })
     }
   }
   // Numeric time order: string order breaks for negative-year ISO dates.

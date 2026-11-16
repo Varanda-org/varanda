@@ -100,9 +100,10 @@ const EVICTS = Symbol('varanda.evictsOnClear')
 // after ready, before any session exists, and sessions inherit it.
 function evictOnClear (core) {
   const state = core.core
-  if (state === null || state === undefined || state[EVICTS] === true) return core
+  if (state !== null && state !== undefined && state[EVICTS] === true) return core
+  const sessions = holdsEvictionContract(core)
+  if (sessions === null) return disableBlockCache(core)
   const clear = state.clear
-  const sessions = state.sessions || core.sessions
   state.clear = async function (start, end, cleared) {
     evictRange(sessions, start, end)
     try {
@@ -113,6 +114,41 @@ function evictOnClear (core) {
   }
   if (core.cache) core.cache = heldOnlyCache(core.cache, state)
   state[EVICTS] = true
+  return core
+}
+
+// The shape of the Hypercore 10.38.2 internals the wrap above reads. Returns
+// the shared sessions list, or null when a piece is missing or changed shape
+// (a Hypercore bump): then the cache must not stay on without eviction. A
+// shape check cannot see that clear stopped going through core.core.clear or
+// that get stopped caching on this.cache: the version tripwire in
+// delete-purge.test.js covers behaviour changes.
+function holdsEvictionContract (core) {
+  const state = core.core
+  if (state === null || typeof state !== 'object') return null
+  if (typeof state.clear !== 'function') return null
+  if (state.bitfield === null || typeof state.bitfield !== 'object' || typeof state.bitfield.get !== 'function') return null
+  const sessions = state.sessions || core.sessions
+  if (!Array.isArray(sessions)) return null
+  const cache = core.cache
+  if (cache !== null && cache !== undefined) {
+    if (typeof cache !== 'object' || typeof cache.get !== 'function' || typeof cache.set !== 'function' ||
+        typeof cache.delete !== 'function' || typeof cache.has !== 'function' || typeof cache.keys !== 'function' ||
+        typeof cache.clear !== 'function') return null
+  }
+  return sessions
+}
+
+// Fail closed: without a verified eviction a cleared block could be served
+// from memory, so the root and every session it has already handed out lose
+// the cache. A session() without a cache option inherits the root's (null)
+// cache; session({ cache: true }) would get a fresh one (nothing here does).
+function disableBlockCache (core) {
+  core.cache = null
+  const lists = [core.core && core.core.sessions, core.sessions]
+  for (const list of lists) {
+    if (Array.isArray(list)) for (const s of list) s.cache = null
+  }
   return core
 }
 
@@ -2189,6 +2225,7 @@ async function deletePhoneProofs (storage) {
 }
 
 module.exports = {
+  evictOnClear,
   readAgeVerified,
   writeAgeVerified,
   readAgeSince,

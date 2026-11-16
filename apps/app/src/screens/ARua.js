@@ -53,6 +53,7 @@ import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
+import { feedSeeds } from '../feedSeeds'
 import { commentedLabel, foldFeed, foldNeeds, previewName } from '../feedFold'
 import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
@@ -1861,7 +1862,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       } else {
         const items = Array.isArray(read.items) ? read.items : []
         commit({ items: resetWith(items), loadedAt: Date.now(), loading: false, incomplete: read.incomplete === true })
-        learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+        // Name only: page.feed's avatar can be an older head profile.
+        learnMany(feedSeeds(items, { avatar: false }))
         resolveMany(items.map((i) => i.author))
         // The page's follows are not the member's: their photos are kept
         // only for authors the member follows (persistOf).
@@ -2164,7 +2166,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const { request, ackFresh } = node
   const { learnMany, resolveMany, seedMany } = names
   const learnPage = useCallback((items) => {
-    learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+    learnMany(feedSeeds(items))
     resolveMany(items.map((i) => i.author))
     resolveMany(items.filter((i) => i.replyTo).map((i) => i.replyTo.author))
   }, [learnMany, resolveMany])

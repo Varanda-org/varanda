@@ -39,7 +39,10 @@ const FUTURE_SLACK_MS = 24 * 60 * 60 * 1000
 
 // Per row at most: its own ref, a repost target or a quote or a reply
 // parent, and one level further (what that original quotes or replies to).
-const MAX_ENTRIES = 4 * FEED_LIMIT_DEFAULT
+// Parse bounds: snapshots saved before feed items carried avatar (26 rows)
+// still parse. Saving keeps at most FEED_LIMIT_DEFAULT rows.
+const PARSE_ROWS = 26
+const MAX_ENTRIES = 4 * PARSE_ROWS
 const MAX_ORIGIN = 2048
 const MAX_AT = 32
 // Caps in UTF-16 units: a character is at most two.
@@ -386,7 +389,7 @@ export function buildSnapshot ({ origin, association, owner, items, cursor, prof
 }
 
 function refList (v) {
-  if (!Array.isArray(v) || v.length > FEED_LIMIT_DEFAULT) return null
+  if (!Array.isArray(v) || v.length > PARSE_ROWS) return null
   if (!v.every(isRef) || new Set(v).size !== v.length) return null
   return v.slice()
 }
@@ -421,11 +424,11 @@ export function parseSnapshot (text, { origin, association, owner, now = Date.no
     if (now - s.savedAt > SNAPSHOT_MAX_AGE_MS || s.savedAt - now > FUTURE_SLACK_MS) return null
     const cursor = s.cursor === null ? null : cursorOf(s.cursor)
     if (s.cursor !== null && cursor === null) return null
-    if (!Array.isArray(s.items) || s.items.length > FEED_LIMIT_DEFAULT) return null
+    if (!Array.isArray(s.items) || s.items.length > PARSE_ROWS) return null
     const items = s.items.map((i) => itemOf(i, true))
     if (items.includes(null)) return null
     const names = mapOf(s.names, MAX_ENTRIES, isHex64, (e) => nameEntryOf(e, true))
-    const counts = mapOf(s.counts, FEED_LIMIT_DEFAULT, isRef, countsOf)
+    const counts = mapOf(s.counts, PARSE_ROWS, isRef, countsOf)
     const originals = mapOf(s.originals, MAX_ENTRIES, isRef, (e, ref) => originalOf(e, ref, true))
     const liked = refList(s.liked)
     const reposted = refList(s.reposted)
