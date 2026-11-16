@@ -33,6 +33,8 @@ Cada arquivo rodou sozinho (`node apps/app/test/<arquivo>`) nesta branch e, com 
 | `shareTargetAndroid.test.js` | 11/11, 121/121 | falha (dependência, `noBackupFilesDir`, `ShareSweepWorker.kt` ausente) |
 | `draftKeep.test.js` | 7/7, 51/51 | não carrega (`draftKeep.web.js` não existe) |
 | `platformGate.test.js` | 6/6, 752/752 | (sem mudança) |
+| `shareIntakeModule.test.js` | 17/17 | o pino "só `globalThis.caches`" passa a aceitar `location` e `history` de `takeLost` |
+| `musicDraft.test.js` | passa | os recortes do `Publicar.js` acompanham o novo parâmetro de `addFiles` e o bloco do rascunho fora do trecho de `attachVideo` |
 
 ## Nos aparelhos
 

@@ -1237,6 +1237,15 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     } catch (err) { setNote(err.message) }
   }
 
+  // Done after unmount would drop the shell's files: a lock unmounts Publicar
+  // and hands the same share back once the screen is mounted again.
+  const mountedRef = useRef(false)
+  const appliedShareRef = useRef(null)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
   // The plain post text survives the reload a web share brings (the PWA
   // share target loads the app again, src/draftKeep.web.js), for this
   // account only. Defined before the share effect: a share applied in the
@@ -1263,14 +1272,6 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
   }, [keepOwner])
 
-  // Done after unmount would drop the shell's files: a lock unmounts Publicar
-  // and hands the same share back once the screen is mounted again.
-  const mountedRef = useRef(false)
-  const appliedShareRef = useRef(null)
-  useEffect(() => {
-    mountedRef.current = true
-    return () => { mountedRef.current = false }
-  }, [])
   useEffect(() => {
     if (!(open && shared && shared.id !== appliedShareRef.current && !frozen && !busy && !moment.pending)) return
     appliedShareRef.current = shared.id
