@@ -160,6 +160,24 @@ test('the depoimento methods are refused on the node session, nothing written', 
   t.alike(await failure(m.call('testimonial.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
 })
 
+test('the recado methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'oi' })), NO)
+  t.alike(await failure(m.call('scrap.write', { to: m.publicKey, text: 'eu' })), NO, 'self too: nothing is looked at')
+  t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'de volta', replyTo: OTHER + ':2' })), NO)
+  t.alike(await failure(m.call('scrap.hide', { from: OTHER, seq: 3 })), NO)
+  t.alike(await failure(m.call('scrap.wall', { who: 'everyone' })), NO)
+  t.alike(await failure(m.call('scrap.delete', { seq: 1 })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('scrap.wall', { who: 'everyone', extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('scrap.wall', { who: 'todos' })), { code: 'USAGE', message: 'parâmetro inválido: who' })
+  t.alike(await failure(m.call('scrap.write', { to: OTHER, text: 'x'.repeat(401) })), { code: 'USAGE', message: 'parâmetro inválido: text' })
+})
+
 test('the dispatcher rejects unknown params on the new methods', async (t) => {
   const m = await member(t)
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }

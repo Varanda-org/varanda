@@ -20,6 +20,7 @@ const MAX_NAME = 80
 const MAX_BIO = 280
 const MAX_TEXT = 1000
 const MAX_TESTIMONIAL = 400
+const MAX_SCRAP = 400
 const TESTIMONIAL_PENDING_MAX = 64
 // Testimonial decisions synced in the member's seen document: kept and
 // declined each keep their newest entries (packages/core/lib/seen-blob.js).
@@ -191,6 +192,7 @@ module.exports = {
   MAX_BIO,
   MAX_TEXT,
   MAX_TESTIMONIAL,
+  MAX_SCRAP,
   TESTIMONIAL_PENDING_MAX,
   TESTIMONIAL_KEPT_MAX,
   TESTIMONIAL_DECLINED_MAX,

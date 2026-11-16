@@ -14,6 +14,7 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
       return respond(url)
     } catch (err) {
       if (err.reason === 'not-found') throw new Failure('not-found')
+      if (err.reason === 'status') throw new Failure('status')
       throw err
     }
   }
@@ -112,6 +113,9 @@ export const GROUP_SEARCH_MAX = 20
 export const COMMUNITY_GROUPS_MAX = 32
 export const TESTIMONIALS_MAX = 64
 export const GROUP_NAME_MAX = 80
+export const SCRAPS_MAX = 50
+export const SCRAP_HIDES_MAX = 1000
+export const SCRAP_PER_WRITER_MAX = 20
 // Must equal PAGE in packages/core/lib/feira-index.js.
 export const FEIRA_MAX = 30
 export const MAX_IN_FLIGHT = 2
@@ -160,6 +164,10 @@ const FOLLOW_CURSOR_KEYS = ['atMs', 'key']
 const TESTIMONIALS_KEYS = ['complete', 'indexing', 'pending', 'shown']
 const SHOWN_KEYS = ['from', 'seq', 'wseq']
 const PENDING_KEYS = ['from', 'seq']
+const SCRAPS_KEYS = ['complete', 'hides', 'indexing', 'next', 'scraps', 'wall']
+const SCRAP_ROW_KEYS = ['author', 'followSeq', 'seq']
+const FOLLOW_PAIR_KEYS = ['indexing', 'seq']
+const SCRAP_CURSOR = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/
 const FEIRA_KEYS = ['authors', 'complete', 'indexing', 'items', 'next']
 const FEIRA_ITEM_KEYS = ['editSeq', 'ref', 'status', 'statusSeq']
 const FEIRA_RATING_KEYS = ['ref']
@@ -324,6 +332,23 @@ export function followCountsUrl (author) {
 export function testimonialsUrl (owner) {
   const o = inputAuthor(owner)
   return o === null ? null : resolveUrl('/index/testimonials/' + o)
+}
+
+// Recados: GET /index/scraps/<owner>[/<cursor>] and
+// GET /index/follow/<author>/<target>. The seeder only points; the node
+// re-reads every pointer.
+export function scrapsUrl (owner, cursor = null) {
+  const o = inputAuthor(owner)
+  if (o === null) return null
+  if (cursor !== null && (typeof cursor !== 'string' || !SCRAP_CURSOR.test(cursor))) return null
+  return resolveUrl('/index/scraps/' + o + (cursor === null ? '' : '/' + cursor))
+}
+
+export function followPairUrl (author, target) {
+  const a = inputAuthor(author)
+  const b = inputAuthor(target)
+  if (a === null || b === null) return null
+  return resolveUrl('/index/follow/' + a + '/' + b)
 }
 
 // An invalid cursor is null, never dropped: dropping it would silently
@@ -981,6 +1006,44 @@ export function validTestimonials (body, owner = null) {
   return { shown, pending, indexing: body.indexing, complete: body.complete }
 }
 
+// Pointer rows for readPointers: `scraps` is mapped to `rows`.
+// `owner` is required; `cursor` is the one asked for: a `next` equal to it
+// would page forever, so it is dropped and the read is marked incomplete.
+export function validScraps (body, owner, cursor = null) {
+  if (!isHex64(owner)) return null
+  if (!hasExactKeys(body, SCRAPS_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.scraps) || body.scraps.length > SCRAPS_MAX) return null
+  if (!Array.isArray(body.hides) || body.hides.length > SCRAP_HIDES_MAX) return null
+  if (!isHint(body.wall)) return null
+  if (body.next !== null && (typeof body.next !== 'string' || !SCRAP_CURSOR.test(body.next))) return null
+  const seen = new Set()
+  const perAuthor = new Map()
+  const rows = []
+  for (const row of body.scraps) {
+    if (!hasExactKeys(row, SCRAP_ROW_KEYS) || !isHex64(row.author) || row.author === owner) return null
+    if (!isSeq(row.seq) || !isHint(row.followSeq)) return null
+    const ref = row.author + ':' + row.seq
+    if (seen.has(ref)) return null
+    seen.add(ref)
+    const n = (perAuthor.get(row.author) || 0) + 1
+    if (n > SCRAP_PER_WRITER_MAX) return null
+    perAuthor.set(row.author, n)
+    rows.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+  }
+  const hideSeen = new Set()
+  for (const h of body.hides) {
+    if (!isSeq(h) || hideSeen.has(h)) return null
+    hideSeen.add(h)
+  }
+  const stuck = body.next !== null && body.next === cursor
+  return { rows, hides: body.hides.slice(), wall: body.wall, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
+}
+
+export function validFollowPair (body) {
+  if (!hasExactKeys(body, FOLLOW_PAIR_KEYS) || typeof body.indexing !== 'boolean' || !isHint(body.seq)) return null
+  return { seq: body.seq, indexing: body.indexing }
+}
+
 // The follow index order: the time clamped at 0, newest first, then key.
 function followT (at) {
   const t = Date.parse(at)
@@ -1284,6 +1347,16 @@ export function fetchTestimonials (owner, deps = {}) {
   const url = testimonialsUrl(owner)
   const o = url === null ? null : inputAuthor(owner)
   return run(url, (body) => validTestimonials(body, o), deps)
+}
+
+export function fetchScraps (owner, cursor = null, deps = {}) {
+  const url = scrapsUrl(owner, cursor)
+  const o = url === null ? null : inputAuthor(owner)
+  return run(url, (body) => validScraps(body, o, cursor), deps)
+}
+
+export function fetchFollowPair (author, target, deps = {}) {
+  return run(followPairUrl(author, target), validFollowPair, deps)
 }
 
 export function fetchFollows (author, kind, cursor = null, deps = {}) {

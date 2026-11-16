@@ -52,7 +52,10 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
     [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
     [c.testimonialsUrl(f.own), (b) => c.validTestimonials(b, f.own)],
-    [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)]
+    [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)],
+    [c.scrapsUrl(f.own), (b) => c.validScraps(b, f.own)],
+    [c.scrapsUrl(f.members[2].author), (b) => c.validScraps(b, f.members[2].author)],
+    [c.followPairUrl(f.own, f.members[1].author), c.validFollowPair]
   ]
   for (const [url, validate] of cases) {
     t.ok(url, 'builder accepts the fixture input')
@@ -61,8 +64,8 @@ test('every index route and cursor returns a deterministic validated fixture bod
     t.alike(respond(url), body, 'deterministic')
     t.alike(respond('https://example.invalid' + url + '?ignored=1#fragment'), body, 'origin and query ignored')
     t.alike(respond(url.slice(1)), body, 'relative path')
-    body.complete = false
-    t.is(respond(url).complete, true, 'fresh response')
+    body.indexing = true
+    t.is(respond(url).indexing, false, 'fresh response')
   }
 })
 
@@ -357,6 +360,57 @@ test('the testimonials route answers pointers from the live Vitrine state', asyn
   t.alike(respond(c.testimonialsUrl(joao)).shown, [], 'a revoked writer block hides the show')
   const written = await request('testimonial.write', { to: cecilia, text: 'Obrigada pelas mudas!' })
   t.alike(respond(c.testimonialsUrl(cecilia)).pending, [{ from: f.own, seq: written.seq }])
+})
+
+test('the recados routes answer admitted pointers, hides, the wall and the follow seq', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const [joao, cecilia, andre, bia] = [f.members[1].author, f.members[2].author, f.members[3].author, f.members[4].author]
+  const own = () => respond(c.scrapsUrl(f.own))
+  const rows = own().scraps
+  t.is(rows.length, 3, 'two followed writers and one reply')
+  t.alike(rows.find((r) => r.author === joao), { author: joao, seq: 90, followSeq: 7 })
+  t.alike(rows.find((r) => r.author === cecilia), { author: cecilia, seq: 90, followSeq: 8 })
+  t.alike(rows.find((r) => r.author === bia), { author: bia, seq: 90, followSeq: null }, 'admitted by the reply exception')
+  t.alike(own().hides, [])
+  t.is(own().wall, null)
+  t.alike(respond(c.scrapsUrl(joao)).scraps.map((r) => r.author), [], "João follows nobody, so Lia's recado is not admitted")
+  t.alike(respond(c.scrapsUrl(andre)), { scraps: [], hides: [], wall: null, next: null, indexing: false, complete: true })
+  t.alike(respond(c.followPairUrl(f.own, joao)), { seq: 7, indexing: false })
+  t.alike(respond(c.followPairUrl(f.own, bia)), { seq: null, indexing: false })
+  const walled = respond(c.scrapsUrl(cecilia))
+  t.alike(walled.scraps.map((r) => r.author + ':' + r.seq), [bia + ':91', andre + ':90'], 'everyone may write, the hidden one is left out')
+  t.alike(walled.scraps.map((r) => r.followSeq), [null, null])
+  t.alike([walled.hides, walled.wall], [[92], 91])
+  t.exception(() => respond('/index/scraps/' + f.own + '/abc'), /status/, 'a malformed cursor is a 400')
+  t.exception(() => respond('/index/scraps/' + f.own + '/01'), /status/)
+  t.exception(() => respond(c.scrapsUrl('f'.repeat(64))), /not-found/)
+  t.exception(() => respond('/index/follow/' + f.own), /not-found/)
+  t.exception(() => respond(c.followPairUrl('f'.repeat(64), joao)), /not-found/)
+})
+
+test('the recados routes follow the live Vitrine state and page with a cursor', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const [joao, cecilia, bia] = [f.members[1].author, f.members[2].author, f.members[4].author]
+  const rows = () => respond(c.scrapsUrl(f.own)).scraps.map((r) => r.author + ':' + r.seq)
+  t.alike(rows(), [bia + ':90', cecilia + ':90', joao + ':90'])
+  await request('scrap.wall', { who: 'nobody' })
+  t.alike(rows(), [], 'nobody shows nothing')
+  t.ok(respond(c.scrapsUrl(f.own)).wall > 0)
+  await request('scrap.wall', { who: 'following' })
+  await request('scrap.hide', { from: bia, seq: 90 })
+  t.alike(rows(), [cecilia + ':90', joao + ':90'], 'a hidden reply leaves the page')
+  t.is(respond(c.scrapsUrl(f.own)).hides.length, 1)
+  await request('follow.remove', { key: cecilia })
+  t.alike(rows(), [joao + ':90'], 'an unfollowed writer is no longer admitted')
+  const written = await request('scrap.write', { to: joao, text: 'Oi, João!' })
+  await request('scrap.delete', { seq: 49 })
+  t.ok(written.seq > 49)
+  t.alike(respond(c.followPairUrl(f.own, cecilia)), { seq: null, indexing: false })
+
+  const wide = respond(c.scrapsUrl(cecilia))
+  t.is(wide.next, null, 'one page holds them all')
+  t.alike(respond('/index/scraps/' + cecilia + '/1').scraps, wide.scraps.slice(1), 'the cursor is an offset into the admitted rows')
+  t.alike(respond('/index/scraps/' + cecilia + '/50').scraps, [], 'past the end is empty')
 })
 
 test('release bundles and development without the opt-in retain HTTP behavior', async (t) => {

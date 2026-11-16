@@ -4,7 +4,7 @@ import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineCo
 import { largeFeed } from './large.js'
 import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'
 
-const { validateParams, RpcError, feira, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX } = rpc
+const { isRef, validateParams, RpcError, feira, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX } = rpc
 let currentFeira = null
 let currentLive = null
 
@@ -1022,6 +1022,42 @@ export function createVitrineRequest (fixtures, options) {
       const existing = logs.get(data.own).find((e) => e.record.type === 'testimonial-show' && e.record.from === from && e.record.seq === seq && !deleted.has(`${data.own}:${e.seq}`))
       if (existing) return { seq: existing.seq, ref: `${data.own}:${existing.seq}` }
       return append({ type: 'testimonial-show', from, seq, text: opened.text, nonce: opened.nonce, at: stamp() })
+    },
+    // Recados (docs/protocol.md): records in the own diary; the page owner's
+    // wall and hides are read at the seeder, never here.
+    'scrap.write': ({ to, text, replyTo }) => {
+      if (typeof to !== 'string' || typeof text !== 'string') refuse('USAGE', 'registro inválido: malformed')
+      if (to === data.own) refuse('USAGE', 'não pode deixar recado para si')
+      if (!profileOf(to) && !conversationOf(to)) refuse('USAGE', 'a pessoa ainda não recebe mensagens')
+      const length = [...text].length
+      if (length < 1 || length > 400 || badText(text)) refuse('USAGE', 'registro inválido: malformed')
+      let target = null
+      if (replyTo !== undefined && replyTo !== null) {
+        if (typeof replyTo !== 'string' || !isRef(replyTo)) refuse('USAGE', 'referência inválida')
+        const { author, seq } = targetOf(replyTo)
+        const entry = liveEntry(author, seq)
+        if (author !== to || !entry || entry.record.type !== 'scrap' || entry.record.to !== data.own) refuse('USAGE', 'referência inválida')
+        target = { author, seq }
+      }
+      return append({ type: 'scrap', to, text, replyTo: target, at: stamp() })
+    },
+    'scrap.hide': ({ from, seq }) => {
+      if (from === data.own) refuse('USAGE', 'não pode tirar o próprio recado da sua página')
+      const entry = liveEntry(from, seq)
+      if (!entry || entry.record.type !== 'scrap' || entry.record.to !== data.own) refuse('USAGE', 'recado não encontrado')
+      return append({ type: 'scrap-hide', from, seq, at: stamp() })
+    },
+    'scrap.wall': ({ who }) => {
+      if (!['following', 'everyone', 'nobody'].includes(who)) refuse('USAGE', 'registro inválido: malformed')
+      return append({ type: 'scrap-wall', who, at: stamp() })
+    },
+    'scrap.delete': ({ seq }) => {
+      if (deleted.has(`${data.own}:${seq}`)) return { seq: deleted.get(`${data.own}:${seq}`).seq, deleted: [seq] }
+      const entry = liveEntry(data.own, seq)
+      if (!entry || entry.record.type !== 'scrap') refuse('USAGE', 'referência inválida')
+      const tombstone = append({ type: 'delete', seq, at: stamp() })
+      deleted.set(`${data.own}:${seq}`, tombstone)
+      return { seq: tombstone.seq, deleted: [seq] }
     },
     'testimonial.delete': ({ to, about }) => {
       const target = targetOf(to)

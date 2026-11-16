@@ -845,6 +845,21 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
+    // Recados read the page owner's wall through the seeder index and
+    // diary.peek (docs/rpc.md): refused the same way, nothing opened.
+    'scrap.write': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'scrap.hide': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'scrap.wall': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'scrap.delete': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     // A momento's photo lives in the browser node's anonymous blob pool
     // (docs/rpc.md 5.113): refused the same way, nothing opened.
     'moment.create': serial(async () => {

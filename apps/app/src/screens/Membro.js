@@ -270,7 +270,7 @@ export default function Membro (props) {
   return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
 }
 
-function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onToast, onTabChange }) {
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -925,6 +925,15 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       </PressScale>
       )
     : null
+  const recadosRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenRecados === 'function'
+    ? (
+      <PressScale accessibilityRole='link' accessibilityLabel='Recados' onPress={() => onOpenRecados(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='recado' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Recados</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
+      </PressScale>
+      )
+    : null
   const ratingsRow = ratingsHosted && !(isPage && lifecycle.moved) && rated && rated.summary.count > 0
     ? (
       <View style={styles.listings}>
@@ -1065,7 +1074,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         topInset={insets.top}
         onBack={full && bar.interactive ? undefined : onBack}
         bandButtons={null}
-        rows={blockedHere ? null : <>{listingsRow}{ratingsRow}</>}
+        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{ratingsRow}</>}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}
         subtitle={who.subtitle ? displayText(who.subtitle) : null}

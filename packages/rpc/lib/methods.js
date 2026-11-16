@@ -133,6 +133,8 @@ function isGroupRef (v) {
 
 const GROUP_JOINS = ['open', 'approval']
 const isGroupJoin = (v) => typeof v === 'string' && GROUP_JOINS.includes(v)
+const SCRAP_WALLS = ['following', 'everyone', 'nobody']
+const isScrapWall = (v) => typeof v === 'string' && SCRAP_WALLS.includes(v)
 const isGroupVisibility = (v) => v === 'public' || v === 'private'
 
 // post.create / post.reply / post.quote `media`: 1..MAX_MEDIA_PER_POST descriptors,
@@ -941,6 +943,11 @@ const SPECS = {
     mutating: true
   },
   'testimonial.delete': { fields: { to: req((v) => isRef(v, 1)), about: opt(isKey) }, mutating: true },
+  // Recados (docs/rpc.md): `replyTo` is the ref of the scrap being answered.
+  'scrap.write': { fields: { to: req(isKey), text: req(str(1, L.MAX_SCRAP)), replyTo: opt((v) => isRef(v, 1)) }, mutating: true },
+  'scrap.hide': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'scrap.wall': { fields: { who: req(isScrapWall) }, mutating: true },
+  'scrap.delete': { fields: { seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
   'moment.create': { fields: { text: req(str(0, 200)), media: req(isMomentMediaItem), music: opt(isMomentMusic) }, mutating: true },
   'moments.read': { fields: none },
   // The momento a v5 reaction names, while it is showing (docs/rpc.md

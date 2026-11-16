@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 56
+export const LEGAL_VERSION = 57
 export const LEGAL_DATE = '15/11/2026'
-export const REVIEW_NOTE = 'Versão 56, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 57, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -54,6 +54,7 @@ export const TERMS = {
       paragraphs: [
         'O que você publica continua sendo seu. Você só pode publicar o que tem direito de publicar e responde pelo que publica.',
         'Para a rede funcionar, ao publicar você autoriza a associação, e quem a suceder na manutenção do Varanda, de graça, sem exclusividade e em todo o mundo, a guardar, copiar, converter, transmitir e mostrar esse conteúdo nos semeadores, nos serviços e nos apps e sites do Varanda, e a usá-lo na moderação e no atendimento de pedidos legais. Você também autoriza os outros membros a guardar, repassar, mostrar, citar e republicar esse conteúdo pelo app, como a rede P2P exige.',
+        'Um recado é um texto público que você deixa na página de outra pessoa. Ele fica no seu próprio diário, como qualquer publicação, e aparece na página de quem o recebeu. Quem é dono da página escolhe quem pode escrever (Quem eu sigo, por padrão, Todos ou Ninguém) e pode tirar um recado da sua página, mas ele continua no diário de quem o escreveu até essa pessoa apagá-lo. Quem escreveu pode apagar o recado quando quiser.',
         'Essa autorização não alcança o conteúdo cifrado das mensagens diretas e dos grupos privados, exceto o que alguém enviar numa denúncia. Ela termina quando você apaga o conteúdo ou exclui a conta, respeitados os Limites da exclusão e o que a associação precisa guardar para moderação e pedidos legais.'
       ]
     },
@@ -185,7 +186,8 @@ export const PRIVACY = {
         'Uma reação a um momento é enviada como uma mensagem direta a quem o publicou: leva o emoji, o número do registro do momento no diário dessa pessoa, a hora e a sua conta como remetente, cifrados como qualquer mensagem direta. Nada da foto ou do vídeo é copiado. A conversa mostra uma prévia pequena só enquanto o app ainda mostra o momento. A reação gasta selos de envio como uma mensagem e não pode ser removida. Um app que não foi atualizado não a mostra, e as conversas das páginas não a guardam.',
         'A formatação do texto das conversas (negrito, itálico, riscado, código e spoiler) é só apresentação: as marcações viajam dentro do texto, com a mesma proteção do resto da mensagem, e nada sobre elas é guardado à parte. O spoiler só cobre o trecho na tela; quem recebe a mensagem recebe o texto inteiro.',
         'Os posts que você salva em Posts salvos ficam só no seu aparelho, como uma lista de referências (de quem é, qual é a publicação e quando você salvou), sem o texto de ninguém e sem avisar a pessoa. A lista não é enviada a ninguém. Quando você abre a tela, o app pede essas publicações ao semeador para conferi-las no diário de quem escreveu, e, como esse pedido vai pela conexão em que o app já se identificou com a sua conta, o semeador pode associar essas publicações à sua conta. No celular, a lista pode entrar no backup do próprio aparelho (o iCloud, no iPhone). Ela continua no aparelho depois de Sair e só é esquecida quando a conta é removida do aparelho.',
-        'Na versão web hospedada e no app instalado, tocar numa hashtag (#palavra) numa publicação pública abre a tela Assunto. Ao abrir a página de uma hashtag, e de novo quando o app reconecta com ela aberta, o app pede ao semeador as publicações com essa palavra, e o semeador vê a palavra e o endereço da conexão. Depois, o app relê essas publicações para conferi-las no diário de quem escreveu, e, como esse pedido vai pela conexão em que o app já se identificou com a sua conta, o semeador pode associar a palavra e essas publicações à sua conta. O semeador não registra nada por esse pedido. Se o serviço falhar ao atender o pedido, o registro de erros do servidor web pode guardar o endereço pedido, que contém a palavra, e o endereço da conexão. Nada é guardado no aparelho por isso.'
+        'Na versão web hospedada e no app instalado, tocar numa hashtag (#palavra) numa publicação pública abre a tela Assunto. Ao abrir a página de uma hashtag, e de novo quando o app reconecta com ela aberta, o app pede ao semeador as publicações com essa palavra, e o semeador vê a palavra e o endereço da conexão. Depois, o app relê essas publicações para conferi-las no diário de quem escreveu, e, como esse pedido vai pela conexão em que o app já se identificou com a sua conta, o semeador pode associar a palavra e essas publicações à sua conta. O semeador não registra nada por esse pedido. Se o serviço falhar ao atender o pedido, o registro de erros do servidor web pode guardar o endereço pedido, que contém a palavra, e o endereço da conexão. Nada é guardado no aparelho por isso.',
+        'Na versão web hospedada e no app instalado, os recados são públicos: cada um fica no diário de quem o escreveu, e a página de quem o recebe mostra só os que essa pessoa deixa aparecer. Quem é dono da página escolhe quem pode escrever (Quem eu sigo, por padrão, Todos ou Ninguém) e pode tirar um recado da página, mas ele continua no diário de quem o escreveu até essa pessoa apagá-lo. Tirar um recado da sua página e escolher quem pode deixar recado também são registros publicados no seu diário público, visíveis para qualquer pessoa. Quando você abre uma página de recados, ou o app confere quem pode escrever, o app pede ao semeador os registros dessa página e o vínculo de seguir entre as duas contas e, como esse pedido vai pela conexão em que o app já se identificou com a sua conta, o semeador pode associar essas leituras à sua conta.'
       ]
     },
     {

@@ -137,6 +137,18 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   block, `from` / `wseq` and pending rows a writer's testimonial block.
 //   Pointers only, rebuilt here field by field: the text and the sealed
 //   box never leave the seeder; the node reads and verifies every block.
+// - /index/scraps/<owner>[/<cursor>] -> Seeder#indexScraps: `{ scraps:
+//   [{ author, seq, followSeq }], hides: [seq], wall: seq | null, next,
+//   indexing, complete }` (at most 50 rows, newest first; at most 1000
+//   hides). The seeder applies the owner's wall policy, hides, the reply
+//   exception and the caps at read time; followSeq is the owner's follow
+//   block for that writer or null. The cursor is `<atMs>.<author>.<seq>`
+//   (as in /index/post) and `next` the same shape or null; any other
+//   segment after the owner is 400 'pedido inválido', never 404, so a
+//   client tells a bad cursor from an unknown owner.
+// - /index/follow/<author>/<target> -> Seeder#indexFollowSeq: `{ seq:
+//   seq | null, indexing }`, the author's live follow block of target.
+//   Both rebuilt here field by field; both spend the index budget.
 // Answers are JSON (no-store, nosniff) of at most INDEX_MAX_BODY bytes by
 // construction (page sizes bound every list; apps/cli/test/seed-ws.test.js
 // proves the worst case); HEAD sends the headers only. Load has its own
@@ -360,6 +372,14 @@ const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const INDEX_TESTIMONIALS_RE = /^\/index\/testimonials\/([0-9a-f]{64})$/
 const TESTIMONIAL_ROWS_MAX = 64
+const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
+// Any path below an owner's recados that INDEX_SCRAPS_RE refuses: a
+// malformed cursor (400).
+const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
+const INDEX_FOLLOW_RE = /^\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/
+const SCRAP_ROWS_MAX = 50
+const SCRAP_HIDES_MAX = 1000
+const BAD_REQUEST = 'pedido inválido\n'
 // Feira: uf (lower case on the wire), city key, kind, category, then optional
 // title words as in INDEX_TOPIC_RE and an optional cursor as in INDEX_POST_RE.
 const INDEX_FEIRA_RE = /^\/index\/feira\/([a-z]{2})\/([a-z0-9]+(?:-[a-z0-9]+)*)\/(todos|produto|servico|procura)\/(todas|[a-z]{2,16})(?:\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7}))?(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
@@ -367,6 +387,8 @@ const INDEX_FEIRA_AUTHOR_RE = /^\/index\/feira\/autor\/([0-9a-f]{64})(?:\/([0-9]
 const INDEX_FEIRA_RATINGS_RE = /^\/index\/feira\/avaliacoes\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const FEIRA_CITY_MIN = 2
 const FEIRA_CITY_MAX = 48
+const SCRAP_CURSOR_RE = /^[0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}$/
+const BAD_CURSOR = Symbol('bad cursor')
 const INDEX_MAX_IN_FLIGHT = 16
 const INDEX_RATE = 32
 const INDEX_BURST = 64
@@ -799,6 +821,12 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexFollows', [m[1], m[2], m[3] === undefined ? null : m[3]]]
     m = INDEX_TESTIMONIALS_RE.exec(url)
     if (m) return ['indexTestimonials', [m[1]], testimonialsBody]
+    m = INDEX_SCRAPS_RE.exec(url)
+    // The atMs of a cursor fits 16 digits but must stay a safe integer.
+    if (m && (m[2] === undefined || Number.isSafeInteger(Number(m[2].split('.')[0])))) return ['indexScraps', [m[1], m[2] === undefined ? null : m[2]], scrapsBody]
+    if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_FOLLOW_RE.exec(url)
+    if (m) return ['indexFollowSeq', [m[1], m[2]], followSeqBody]
     // Without a public origin the Feira has no public surface at all.
     if (origin === null) return null
     m = INDEX_FEIRA_AUTHOR_RE.exec(url)
@@ -835,6 +863,38 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       indexing: indexing === true,
       complete: complete === true
     }
+  }
+
+  // Only the pointer fields, checked as the client checks them: an
+  // unexpected row, a duplicate or a cursor of another shape is a 404.
+  function scrapsBody ({ scraps, hides, wall, next, indexing, complete }) {
+    if (!Array.isArray(scraps) || !Array.isArray(hides) || scraps.length > SCRAP_ROWS_MAX || hides.length > SCRAP_HIDES_MAX) throw new Error('index')
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (wall !== null && !seqOk(wall)) throw new Error('index')
+    if (next !== null && (typeof next !== 'string' || !SCRAP_CURSOR_RE.test(next))) throw new Error('index')
+    const seen = new Set()
+    return {
+      scraps: scraps.map(({ author, seq, followSeq }) => {
+        if (typeof author !== 'string' || !HEX64_RE.test(author) || !seqOk(seq) || (followSeq !== null && !seqOk(followSeq))) throw new Error('index')
+        const ref = author + ':' + seq
+        if (seen.has(ref)) throw new Error('index')
+        seen.add(ref)
+        return { author, seq, followSeq }
+      }),
+      hides: hides.map((seq) => {
+        if (!seqOk(seq)) throw new Error('index')
+        return seq
+      }),
+      wall,
+      next,
+      indexing: indexing === true,
+      complete: complete === true
+    }
+  }
+
+  function followSeqBody ({ seq, indexing }) {
+    if (seq !== null && !(Number.isSafeInteger(seq) && seq >= 1)) throw new Error('index')
+    return { seq, indexing: indexing === true }
   }
 
   // The seeder's group answers flattened into the wire shape. The root
@@ -1573,6 +1633,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
       const call = indexCall(req.url)
       if (call === null) return send(res, 404, NOT_FOUND)
+      if (call === BAD_CURSOR) return send(res, 400, BAD_REQUEST)
       return serveIndex(req, res, call).catch(() => res.destroy())
     }
     // Without a token this branch does not exist: the path falls through to
@@ -1727,6 +1788,8 @@ module.exports = {
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,
   INDEX_TESTIMONIALS_RE,
+  INDEX_SCRAPS_RE,
+  INDEX_FOLLOW_RE,
   INDEX_FEIRA_RE,
   INDEX_FEIRA_AUTHOR_RE,
   INDEX_FEIRA_RATINGS_RE,

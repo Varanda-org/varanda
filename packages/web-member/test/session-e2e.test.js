@@ -668,3 +668,142 @@ test('testimonial.delete: a failed later chunk leaves the target live, so a repe
   const left = raw.filter((e) => e.seq >= 1 && e.seq <= 9 && !gone.has(e.seq))
   t.alike(left.map((e) => e.seq), [], 'no show of that writer remains')
 })
+
+// The seeder's /index/scraps and /index/follow routes answered by the real
+// in-process Seeder (Seeder#indexScraps, Seeder#indexFollowSeq), as
+// apps/cli/lib/seed-ws.js serves them; null is the route's 404.
+// doctor.fn(url, body), when set, rewrites an answer (a hostile seeder).
+function scrapIndex (seeder, doctor = {}) {
+  return async (url) => {
+    let m = /\/index\/scraps\/([0-9a-f]{64})$/.exec(url)
+    let body = null
+    if (m !== null) body = seeder.indexScraps(m[1])
+    m = /\/index\/follow\/([0-9a-f]{64})\/([0-9a-f]{64})$/.exec(url)
+    if (m !== null) body = seeder.indexFollowSeq(m[1], m[2])
+    if (typeof doctor.fn === 'function') body = doctor.fn(url, body)
+    if (body === null) return new Response('não encontrado', { status: 404 })
+    return new Response(JSON.stringify(body), { status: 200 })
+  }
+}
+
+test('recados: write, reply back without a mutual follow, hide, delete and wall changes end to end', async (t) => {
+  t.timeout(600000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const assoc = { kp, hex: hex(kp.publicKey) }
+  const { seeder, url } = await seederStack(t, bootstrap, assoc)
+  const doctor = {}
+  const fetchMedia = scrapIndex(seeder, doctor)
+  const A = await testimonialNode(t, { assoc, url, fetchMedia, name: 'Ana' })
+  const B = await testimonialNode(t, { assoc, url, fetchMedia, name: 'Bia' })
+  const FOLLOWING = { code: 'USAGE', message: 'esta pessoa só recebe recados de quem ela segue' }
+  const NOBODY = { code: 'USAGE', message: 'esta pessoa não está recebendo recados' }
+  const types = async (n) => (await n.web.request('log.read', {})).entries.map((e) => e.record.type)
+  // Until the seeder indexes the evidence the node answers 'semeador
+  // indisponível': only that answer is retried; anything else (a write
+  // where a refusal is expected included) settles at once.
+  const settle = async (n, params, name) => {
+    const deadline = Date.now() + 90000
+    for (;;) {
+      try {
+        return { result: await n.web.request('scrap.write', params) }
+      } catch (err) {
+        if (err.message !== 'semeador indisponível') return { error: { code: err.code, message: err.message } }
+      }
+      if (Date.now() > deadline) throw new Error('tempo esgotado: ' + name)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+  }
+  const refused = async (n, params, want, name) => t.alike(await settle(n, params, name), { error: want }, name)
+  const written = async (n, params, name) => {
+    const r = await settle(n, params, name)
+    t.ok(r.result !== undefined, name + ': ' + JSON.stringify(r.error))
+    return r.result
+  }
+
+  t.alike(await failureOf(A.web.request('scrap.write', { to: A.key, text: 'eu mesma' })), { code: 'USAGE', message: 'não pode deixar recado para si' })
+  await eventually(() => A.web.request('diary.peek', { author: B.key, seqs: [1] }), (r) => r.entries.length === 1, 'B served')
+  await eventually(() => B.web.request('diary.peek', { author: A.key, seqs: [1] }), (r) => r.entries.length === 1, 'A served')
+
+  // B follows A, A does not follow B; both walls are the default 'following'.
+  await B.web.request('follow.add', { key: A.key })
+  await refused(B, { to: A.key, text: 'oi Ana' }, FOLLOWING, 'A does not follow B')
+  t.alike(await types(B), ['member-cert', 'profile', 'follow'], 'nothing written by the refusal')
+
+  // A writes on B's page: B follows A, proven by B's own follow block.
+  const w1 = await written(A, { to: B.key, text: 'oi Bia, tudo bem?' }, 'A writes to B')
+  t.alike(w1, { seq: 2, ref: A.key + ':2' })
+  const rec1 = (await A.web.request('log.read', {})).entries[2].record
+  t.alike([rec1.type, rec1.to, rec1.text, rec1.replyTo], ['scrap', B.key, 'oi Bia, tudo bem?', null])
+
+  // B answers on A's page without being followed: the reply exception.
+  t.alike(await failureOf(B.web.request('scrap.write', { to: A.key, text: 'x', replyTo: A.key + ':1' })), { code: 'USAGE', message: 'referência inválida' }, 'a reply to a block that is no scrap')
+  t.alike(await failureOf(B.web.request('scrap.write', { to: A.key, text: 'x', replyTo: A.key + ':40' })), { code: 'NOT_FOUND', message: 'semeador indisponível' }, 'a reply past A\'s diary cannot be told from one not replicated yet')
+  const r1 = await written(B, { to: A.key, text: 'tudo ótimo!', replyTo: w1.ref }, 'B replies on A\'s page')
+  const rec2 = (await B.web.request('log.read', {})).entries[r1.seq].record
+  t.alike([rec2.type, rec2.to, rec2.replyTo], ['scrap', A.key, { author: A.key, seq: w1.seq }])
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && p.scraps.some((s) => s.author === B.key && s.seq === r1.seq), 'the reply is on A\'s page')
+  await refused(B, { to: A.key, text: 'de novo' }, FOLLOWING, 'a plain scrap is still refused')
+
+  // A hides the reply: it leaves A's page.
+  const hide = await A.web.request('scrap.hide', { from: B.key, seq: r1.seq })
+  t.alike(hide, { seq: w1.seq + 1, ref: A.key + ':' + (w1.seq + 1) })
+  t.alike(await A.web.request('scrap.hide', { from: B.key, seq: r1.seq }), hide, 'no second hide')
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && p.hides.includes(hide.seq) && p.scraps.length === 0, 'hidden on A\'s page')
+
+  // A closes its page to everyone, even a reply.
+  const closedWall = await A.web.request('scrap.wall', { who: 'nobody' })
+  // Waited for first, so a reply the old wall would admit is never written.
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && p.wall === closedWall.seq, 'A\'s wall indexed')
+  await refused(B, { to: A.key, text: 'outra resposta', replyTo: w1.ref }, NOBODY, 'nobody')
+  // Then opens it to everyone: B writes without being followed.
+  const open = await A.web.request('scrap.wall', { who: 'everyone' })
+  t.is(open.seq, closedWall.seq + 1)
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && p.wall === open.seq, 'A\'s open wall indexed')
+  const w2 = await written(B, { to: A.key, text: 'agora pode!' }, 'everyone')
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && p.wall === open.seq && p.scraps.some((s) => s.author === B.key && s.seq === w2.seq), 'B\'s scrap on A\'s page')
+
+  // B deletes its scrap; a repeat answers the same tombstone.
+  const del = await B.web.request('scrap.delete', { seq: w2.seq })
+  t.alike(del, { seq: w2.seq + 1, deleted: [w2.seq] })
+  t.alike(await B.web.request('scrap.delete', { seq: w2.seq }), del)
+  t.alike(await failureOf(B.web.request('scrap.delete', { seq: 1 })), { code: 'USAGE', message: 'referência inválida' }, 'B\'s profile is no recado')
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && !p.scraps.some((s) => s.author === B.key && s.seq === w2.seq), 'gone from A\'s page')
+
+  // Back to the default wall by deleting the walls: B is refused again.
+  await A.web.request('scrap.delete', { seq: open.seq })
+  await A.web.request('scrap.delete', { seq: closedWall.seq })
+  await eventually(async () => seeder.indexScraps(A.key), (p) => p !== null && p.wall === null, 'no wall indexed')
+  await refused(B, { to: A.key, text: 'ainda posso?' }, FOLLOWING, 'the default wall again')
+
+  // A hostile seeder: every pointer that does not verify is unavailable,
+  // never a write. B's diary gets a follow of another key and its unfollow.
+  const OTHER = 'ab'.repeat(32)
+  await B.web.request('follow.add', { key: OTHER })
+  await eventually(() => B.web.request('log.read', {}), (l) => l.entries.some((e) => e.record.type === 'follow' && e.record.key === OTHER), 'B follows another key')
+  await B.web.request('follow.remove', { key: OTHER })
+  const bLog = await eventually(() => B.web.request('log.read', {}), (l) => l.entries.some((e) => e.record.type === 'follow' && e.record.key === OTHER && e.record.on === false), 'B unfollows it')
+  const seqOf = (match) => bLog.entries.find((e) => match(e.record)).seq
+  const followA = seqOf((r) => r.type === 'follow' && r.key === A.key && r.on === true)
+  const otherKey = seqOf((r) => r.type === 'follow' && r.key === OTHER && r.on === true)
+  const unfollow = seqOf((r) => r.type === 'follow' && r.key === OTHER && r.on === false)
+  const UNAVAILABLE = { code: 'NOT_FOUND', message: 'semeador indisponível' }
+  const aBefore = await types(A)
+  const toB = { to: B.key, text: 'teste' }
+  const follow = (seq, indexing = false) => (u, body) => u.includes('/index/follow/') ? { seq, indexing } : body
+  for (const [name, fn] of [
+    ['the follow pointer at a profile', follow(1)],
+    ['the follow pointer at a follow of another key', follow(otherKey)],
+    ['the follow pointer at an unfollow', follow(unfollow)],
+    ['no follow while indexing', follow(null, true)],
+    ['the wall pointer at a follow', (u, body) => u.includes('/index/scraps/') ? { ...body, wall: followA } : body]
+  ]) {
+    doctor.fn = fn
+    t.alike(await failureOf(A.web.request('scrap.write', toB)), UNAVAILABLE, name)
+  }
+  doctor.fn = follow(followA)
+  t.ok(Number.isSafeInteger((await A.web.request('scrap.write', toB)).seq), 'the true follow pointer admits A')
+  doctor.fn = null
+  t.alike((await types(A)).length, aBefore.length + 1, 'only the admitted write was written')
+  t.alike([A.internal, B.internal], [[], []], 'no internal error')
+})

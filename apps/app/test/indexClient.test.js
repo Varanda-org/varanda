@@ -1516,6 +1516,136 @@ test('validTestimonials: exact shape, lowercase keys, positive seqs, caps and no
   t.is(own.pending[0].seq, 6, 'pending copied')
 })
 
+const scrapsBody = (over = {}) => ({
+  scraps: [{ author: B, seq: 9, followSeq: 4 }, { author: C, seq: 7, followSeq: null }],
+  hides: [3, 2],
+  wall: 5,
+  next: null,
+  indexing: false,
+  complete: true,
+  ...over
+})
+
+test('scrapsUrl and followPairUrl: exact paths, lowercase keys, bad input is null', async (t) => {
+  const { scrapsUrl, followPairUrl, fetchScraps, fetchFollowPair, SCRAPS_MAX, SCRAP_HIDES_MAX } = await load()
+  t.is(SCRAPS_MAX, 50)
+  t.is(SCRAP_HIDES_MAX, 1000)
+  t.is(scrapsUrl(A), '/index/scraps/' + A)
+  t.is(scrapsUrl(A.toUpperCase(), '50'), '/index/scraps/' + A + '/50')
+  for (const owner of [A + 'a', 'zz'.repeat(32), A + '/x', '', null, 7]) t.is(scrapsUrl(owner), null, 'owner ' + String(owner))
+  for (const cursor of ['', 'a/b', '../x', '.', '..', '.x', 'a?b', 'x'.repeat(129), 5, {}, [], Symbol('x')]) t.is(scrapsUrl(A, cursor), null, 'cursor ' + String(cursor))
+  t.is(followPairUrl(A, B), '/index/follow/' + A + '/' + B)
+  t.is(followPairUrl(A.toUpperCase(), B.toUpperCase()), '/index/follow/' + A + '/' + B)
+  for (const [x, y] of [[A, 'nope'], ['nope', B], [A, null], [null, null], [A + 'a', B]]) t.is(followPairUrl(x, y), null)
+  let called = false
+  t.alike(await fetchScraps('nope', null, { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchFollowPair(A, 'nope', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.absent(called, 'no request for bad input')
+})
+
+test('validScraps: exact shape, hex writers, int ranges, caps and no repeats', async (t) => {
+  const { validScraps } = await load()
+  t.alike(validScraps(scrapsBody(), A), { rows: scrapsBody().scraps, hides: [3, 2], wall: 5, next: null, indexing: false, complete: true })
+  t.is(validScraps(scrapsBody({ wall: null, next: 'abc.def-1', scraps: [], hides: [] }), A).wall, null)
+  const full = []
+  for (let i = 1; i <= 50; i++) full.push({ author: i.toString(16).padStart(64, '0'), seq: i, followSeq: null })
+  t.ok(validScraps(scrapsBody({ scraps: full }), A), '50 rows pass')
+  const hides = []
+  for (let i = 1; i <= 1000; i++) hides.push(i)
+  t.ok(validScraps(scrapsBody({ hides }), A), '1000 hides pass')
+  const missing = scrapsBody()
+  delete missing.hides
+  const row = (r) => scrapsBody({ scraps: [r] })
+  const bad = [
+    scrapsBody({ extra: 1 }),
+    missing,
+    scrapsBody({ indexing: 'no' }),
+    scrapsBody({ complete: null }),
+    scrapsBody({ scraps: null }),
+    scrapsBody({ scraps: {} }),
+    scrapsBody({ hides: 'x' }),
+    scrapsBody({ scraps: full.concat([{ author: C, seq: 51, followSeq: null }]) }),
+    scrapsBody({ hides: hides.concat([1001]) }),
+    scrapsBody({ wall: 0 }),
+    scrapsBody({ wall: '5' }),
+    scrapsBody({ wall: 1.5 }),
+    scrapsBody({ wall: undefined }),
+    scrapsBody({ next: 7 }),
+    scrapsBody({ next: 'a/b' }),
+    scrapsBody({ next: '.' }),
+    scrapsBody({ next: '..' }),
+    scrapsBody({ next: '' }),
+    scrapsBody({ hides: [0] }),
+    scrapsBody({ hides: [-1] }),
+    scrapsBody({ hides: ['1'] }),
+    scrapsBody({ hides: [1.5] }),
+    scrapsBody({ hides: [Number.MAX_SAFE_INTEGER + 1] }),
+    scrapsBody({ hides: [2, 2] }),
+    row({ author: B, seq: 1 }),
+    row({ author: B, seq: 1, followSeq: null, text: 'oi' }),
+    row({ author: B.toUpperCase(), seq: 1, followSeq: null }),
+    row({ author: B + 'a', seq: 1, followSeq: null }),
+    row({ author: 'zz'.repeat(32), seq: 1, followSeq: null }),
+    row({ author: A, seq: 1, followSeq: null }),
+    row({ author: B, seq: 0, followSeq: null }),
+    row({ author: B, seq: 1.5, followSeq: null }),
+    row({ author: B, seq: '1', followSeq: null }),
+    row({ author: B, seq: Number.MAX_SAFE_INTEGER + 1, followSeq: null }),
+    row({ author: B, seq: 1, followSeq: 0 }),
+    row({ author: B, seq: 1, followSeq: '2' }),
+    row({ author: B, seq: 1, followSeq: undefined }),
+    row(null),
+    row([]),
+    scrapsBody({ scraps: [{ author: B, seq: 1, followSeq: null }, { author: B, seq: 1, followSeq: 2 }] }),
+    null,
+    []
+  ]
+  for (const body of bad) t.is(validScraps(body, A), null, JSON.stringify(body).slice(0, 120))
+  for (const o of [null, undefined, '', 'nope', B.toUpperCase()]) t.is(validScraps(scrapsBody(), o), null, 'owner ' + String(o))
+  const many = []
+  for (let i = 1; i <= 21; i++) many.push({ author: B, seq: i, followSeq: null })
+  t.is(validScraps(scrapsBody({ scraps: many }), A), null, '21 rows of one author')
+  t.ok(validScraps(scrapsBody({ scraps: many.slice(0, 20).concat([{ author: C, seq: 1, followSeq: null }]) }), A), '20 per author pass')
+  const stuck = validScraps(scrapsBody({ next: 'abc' }), A, 'abc')
+  t.is(stuck.next, null, 'a next equal to the cursor stops paging')
+  t.is(stuck.complete, false, 'and marks the read incomplete')
+  t.is(validScraps(scrapsBody({ next: 'abd' }), A, 'abc').next, 'abd')
+  const own = scrapsBody()
+  const copy = validScraps(own, A)
+  copy.rows[0].seq = 99
+  copy.hides[0] = 99
+  t.is(own.scraps[0].seq, 9, 'rows copied')
+  t.is(own.hides[0], 3, 'hides copied')
+})
+
+test('validFollowPair: exact keys, seq null or positive int', async (t) => {
+  const { validFollowPair } = await load()
+  t.alike(validFollowPair({ seq: 4, indexing: false }), { seq: 4, indexing: false })
+  t.alike(validFollowPair({ seq: null, indexing: true }), { seq: null, indexing: true })
+  for (const body of [{ seq: 0, indexing: false }, { seq: '4', indexing: false }, { seq: 1.5, indexing: false }, { seq: -1, indexing: false }, { seq: Number.MAX_SAFE_INTEGER + 1, indexing: false }, { seq: 4 }, { indexing: false }, { seq: undefined, indexing: false }, { seq: 4, indexing: 'no' }, { seq: 4, indexing: false, complete: true }, null, [], 'x']) {
+    t.is(validFollowPair(body), null, JSON.stringify(body))
+  }
+})
+
+test('fetchScraps and fetchFollowPair: request, contract and malformed answers', async (t) => {
+  const { fetchScraps, fetchFollowPair } = await load()
+  const calls = []
+  const res = await fetchScraps(A.toUpperCase(), null, { fetch: async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(scrapsBody())) } })
+  t.is(res.ok, true)
+  t.alike(res.value.rows, scrapsBody().scraps)
+  t.is(calls[0].url, '/index/scraps/' + A)
+  t.is(calls[0].opts.method, 'GET')
+  const own = await fetchScraps(A, null, { fetch: async () => response(JSON.stringify(scrapsBody({ scraps: [{ author: A, seq: 1, followSeq: null }] }))) })
+  t.alike(own, { ok: false, reason: 'malformed' }, 'the owner is never a writer')
+  const paged = await fetchScraps(A, 'abc', { fetch: async (url) => { calls.push({ url }); return response(JSON.stringify(scrapsBody({ next: 'abc' }))) } })
+  t.alike([paged.value.next, paged.value.complete], [null, false], 'a next that repeats the cursor stops')
+  t.is(calls[calls.length - 1].url, '/index/scraps/' + A + '/abc')
+  const pair = await fetchFollowPair(A, B, { fetch: async (url) => { calls.push({ url }); return response(JSON.stringify({ seq: 3, indexing: false })) } })
+  t.alike(pair, { ok: true, value: { seq: 3, indexing: false } })
+  t.is(calls[calls.length - 1].url, '/index/follow/' + A + '/' + B)
+  t.alike(await fetchFollowPair(A, B, { fetch: async () => response(JSON.stringify({ seq: 0, indexing: false })) }), { ok: false, reason: 'malformed' })
+})
+
 test('fetchTestimonials: request options, contract and transport', async (t) => {
   const { fetchTestimonials } = await load()
   const calls = []

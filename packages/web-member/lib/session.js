@@ -340,6 +340,14 @@ const HEX64 = /^[0-9a-fA-F]{64}$/
 const TESTIMONIAL_SELF = 'não pode escrever um depoimento para si'
 // The pointer answer is keys and seqs only: far below this.
 const TESTIMONIAL_INDEX_MAX_CHARS = 256 * 1024
+// Recados (docs/rpc.md): the wall check's refusals, and caps on the two
+// seeder answers it reads (50 rows and 1000 hides fit in about 25 KB).
+const SCRAP_SELF = 'não pode deixar recado para si'
+const SCRAP_PAGE = 'páginas não recebem recados'
+const SCRAP_FOLLOWING = 'esta pessoa só recebe recados de quem ela segue'
+const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
+const SCRAP_INDEX_MAX_CHARS = 64 * 1024
+const FOLLOW_INDEX_MAX_CHARS = 1024
 
 // A seeder index body read with a cap: a streamed body is cut off (and the
 // stream cancelled) past `max` bytes, so a seeder cannot make the node buffer
@@ -2867,6 +2875,127 @@ function createBrowserSession ({
     return { pointers: out, incomplete }
   }
 
+  // ---- recados (docs/rpc.md) ----
+
+  // GET <path> on this node's own seeder (testimonialPointers' origin rule
+  // and cap) -> the parsed JSON object. Anything else, a 404 for an owner
+  // the seeder does not show included, is SEEDER_UNAVAILABLE.
+  async function seederIndexJson (path, max, timeoutMs = peekTimeoutMs) {
+    let ws
+    try {
+      ws = new URL(cfg.seederUrl)
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    }
+    const loopback = ws.hostname === '127.0.0.1' || ws.hostname === 'localhost' || ws.hostname === '[::1]'
+    if (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && loopback)) throw new Error(SEEDER_UNAVAILABLE)
+    const url = (ws.protocol === 'wss:' ? 'https://' : 'http://') + ws.host + path
+    const ctl = new AbortController()
+    const timer = setTimeout(() => ctl.abort(), Math.max(1, timeoutMs))
+    let body
+    try {
+      const res = await fetchMedia(url, { cache: 'no-store', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: ctl.signal })
+      if (!res || res.status !== 200 || res.redirected === true) throw new Error(SEEDER_UNAVAILABLE)
+      body = JSON.parse(await boundedIndexText(res, max))
+    } catch {
+      throw new Error(SEEDER_UNAVAILABLE)
+    } finally {
+      clearTimeout(timer)
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error(SEEDER_UNAVAILABLE)
+    return body
+  }
+
+  const isSeq = (n) => Number.isSafeInteger(n) && n >= 1
+  // scrap.write's evidence deadline: 12 s with the default peek timeout.
+  const scrapEvidenceMs = Math.min(12000, 2 * peekTimeoutMs)
+
+  // Whether `owner`'s wall takes a scrap from `writer` now, with public
+  // evidence only, read off the chain: the seeder names the owner's wall
+  // block and (under 'following') the owner's follow block for the writer;
+  // each is a pointer, peeked and checked here. Returns when admitted;
+  // throws a USAGE refusal when the verified evidence excludes the writer,
+  // and SEEDER_UNAVAILABLE (or the peek's own NOT_FOUND) when evidence
+  // cannot be read or does not verify (a hostile seeder fails closed, never
+  // open). The seeder can only withhold a newer wall, as it can withhold any
+  // block; readers apply the wall again when they show the page.
+  // reply: the parsed replyTo, already checked to name `owner`; it must be a
+  // live scrap of the owner addressed to the writer, and under 'following'
+  // it admits the writer (the reply exception). Whether the writer already
+  // answered that original is not checked here: readers (lib/scraps.js and
+  // the seeder) admit only the first reply per original.
+  // The whole check runs under one deadline (scrapEvidenceMs, well under the
+  // client's timeout): past it the answer is SEEDER_UNAVAILABLE and the
+  // caller writes nothing; a late read is left to settle on its own.
+  async function scrapAdmits (writer, owner, reply) {
+    const deadline = Date.now() + scrapEvidenceMs
+    let timer = null
+    const late = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(SEEDER_UNAVAILABLE)), scrapEvidenceMs)
+    })
+    const work = scrapEvidence(writer, owner, reply, deadline)
+    try {
+      return await Promise.race([work, late])
+    } finally {
+      clearTimeout(timer)
+      work.catch(() => {})
+    }
+  }
+
+  async function scrapEvidence (writer, owner, reply, deadline) {
+    const left = () => {
+      const ms = deadline - Date.now()
+      if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+      return ms
+    }
+    const followPath = '/index/follow/' + owner + '/' + writer
+    // Without a reply the follow pointer may be needed: asked beside the
+    // wall, not after it.
+    const early = reply === null ? seederIndexJson(followPath, FOLLOW_INDEX_MAX_CHARS, left()) : null
+    if (early !== null) early.catch(() => {})
+    const index = await seederIndexJson('/index/scraps/' + owner, SCRAP_INDEX_MAX_CHARS, left())
+    const wallSeq = index.wall
+    if (wallSeq !== null && !isSeq(wallSeq)) throw new Error(SEEDER_UNAVAILABLE)
+    // Blocks 1 and 2 tell a page diary (a page-roster there) from a person's.
+    const wanted = new Set([1, 2])
+    if (wallSeq !== null) wanted.add(wallSeq)
+    if (reply !== null) wanted.add(reply.seq)
+    const r = await diaryPeekWithin({ author: owner, seqs: [...wanted].sort((a, b) => a - b) }, Math.min(peekTimeoutMs, left()))
+    const at = (seq) => r.entries.find((e) => e.seq === seq)
+    if (r.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster')) throw new UsageError(SCRAP_PAGE)
+    // Fails closed: an unread block 1 or 2 inside the diary may be a page's
+    // roster. RESIDUAL: a person whose block 1 or 2 is deleted and cleared
+    // reads the same way, so writing to them answers unavailable.
+    if ([1, 2].some((q) => q < r.length && r.missing.includes(q))) throw new Error(SEEDER_UNAVAILABLE)
+    let who = 'following'
+    if (wallSeq !== null) {
+      const e = at(wallSeq)
+      if (e === undefined || e.record.type !== 'scrap-wall') throw new Error(SEEDER_UNAVAILABLE)
+      who = e.record.who
+    }
+    if (reply !== null) {
+      const e = at(reply.seq)
+      // Not a valid record: not a scrap. Missing or past the length read so
+      // far (not replicated yet, not served in time, or deleted and
+      // cleared) cannot be told apart from absent: unavailable.
+      if (e === undefined && r.invalid.includes(reply.seq)) throw new UsageError('referência inválida')
+      if (e === undefined) throw new Error(SEEDER_UNAVAILABLE)
+      if (e.record.type !== 'scrap' || e.record.to !== writer) throw new UsageError('referência inválida')
+    }
+    if (who === 'nobody') throw new UsageError(SCRAP_NOBODY)
+    if (who === 'everyone' || reply !== null) return
+    const f = await (early !== null ? early : seederIndexJson(followPath, FOLLOW_INDEX_MAX_CHARS, left()))
+    if (f.seq === null) {
+      // A refusal never rests on an index still catching up.
+      if (f.indexing === true) throw new Error(SEEDER_UNAVAILABLE)
+      throw new UsageError(SCRAP_FOLLOWING)
+    }
+    if (!isSeq(f.seq)) throw new Error(SEEDER_UNAVAILABLE)
+    const p = await diaryPeekWithin({ author: owner, seqs: [f.seq] }, Math.min(peekTimeoutMs, left()))
+    const e = p.entries.find((x) => x.seq === f.seq)
+    if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
+  }
+
   // The DM engine opens each box with its in-memory pair; nothing else
   // sees the key.
   function openTestimonial (box, gen) {
@@ -3921,6 +4050,75 @@ function createBrowserSession ({
 
     'testimonial.delete': serial(async ({ to, about }, epoch) => {
       const r = await recordDelete(member.testimonialDelete, { to, about }, epoch)
+      return { seq: r.seq, deleted: r.deleted }
+    }),
+
+    // Recados (docs/rpc.md): self, a person this member blocked and a bad
+    // record are refused before any read; the owner's wall is then checked
+    // off the chain (scrapAdmits), and the write runs on the chain like
+    // post.create, refused again for self and a block. Never retried.
+    'scrap.write': async ({ to, text, replyTo }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      let reply = null
+      if (replyTo !== undefined) {
+        reply = parseRef(replyTo)
+        if (reply === null || reply.seq < 1) throw new UsageError('referência inválida')
+      }
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(SCRAP_SELF)
+        if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      const writer = await serial(async () => {
+        const own = await requireUnlocked()
+        await refuse(own)
+        return own
+      })({})
+      if (reply !== null && reply.author !== key) throw new UsageError('referência inválida')
+      try {
+        member.scrapDraft({ to: key, text, replyTo: reply })
+        await scrapAdmits(writer, key, reply)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.scrapWrite(c, { to: key, text, replyTo: reply, writer }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    // The page owner's records: appended on the chain like post.create; one
+    // already in effect answers it and writes nothing.
+    'scrap.hide': serial(async ({ from, seq }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.scrapHide(c, { from, seq }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    'scrap.wall': serial(async ({ who }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.scrapWall(c, { who }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
+      return { seq: r.seq, ref: r.ref }
+    }),
+
+    // The testimonial.delete path and result: the own scrap, scrap-hide or
+    // scrap-wall at `seq`.
+    'scrap.delete': serial(async ({ seq }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await withStore((c) => member.scrapDelete(c, { seq }))
+      if (r.changed) wrote(r.seq)
+      await pushAfterWrite()
       return { seq: r.seq, deleted: r.deleted }
     }),
 

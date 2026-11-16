@@ -183,6 +183,7 @@ import Membro, { canConverseWithPage } from './src/screens/Membro'
 import { tagTarget } from './src/hashtagNav'
 import { HashtagContext } from './src/ui/MentionText'
 import AssuntoScreen from './src/screens/Assunto'
+import RecadosScreen from './src/screens/Recados'
 import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
 import SalvosScreen from './src/screens/Salvos'
 import MomentosScreen from './src/screens/Momentos'
@@ -236,6 +237,7 @@ const Depoimentos = memo(DepoimentosScreen)
 const Momentos = memo(MomentosScreen)
 const Salvos = memo(SalvosScreen)
 const Assunto = memo(AssuntoScreen)
+const Recados = memo(RecadosScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -2072,6 +2074,10 @@ function Member () {
     clearTimeout(toastTimer.current); setToast(null)
     pushScreen({ screen: 'momentos', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
+  const openRecados = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
   const openTestimonials = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: {} })
@@ -3539,6 +3545,7 @@ function Member () {
       handlePageCreated: (pageKey) => openMember(pageKey, { page: true }),
       handleOpenPageSettings: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? (key) => pushScreen({ screen: 'paginaajustes', key }) : undefined,
       handleOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined,
+      handleOpenRecados: node.hosted === true ? openRecados : undefined,
       handleComposeSeen: () => setComposeSignal(null),
       handleOpenInvite: (link) => link.kind === 'grupo' ? openGroup(link.key) : openCommunity(link.key),
       handleConversar: ({ peer, draft, card }) => openMessage(peer, { draft, card })
@@ -3563,6 +3570,7 @@ function Member () {
       onOpenPageSettings: h.handleOpenPageSettings,
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
+      onOpenRecados: h.handleOpenRecados,
       onOpenListings: h.handleOpenListings
     }
     // Pushed screens, plus the one sliding out after a pop under its old index
@@ -3600,6 +3608,13 @@ function Member () {
         return (
           <StackLayer key={i + ':momentos:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Momentos entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} covered={covered} onBack={goBack} onOpenMember={openMember} onMessage={openMessage} onCreate={h.handleOpenMomentComposer} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'recados') {
+        return (
+          <StackLayer key={i + ':recados:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Recados entry={entry} ownKey={ownKey} onBack={goBack} onOpenMember={openMember} onReport={setReport} onToast={h.handleShowToast} />
           </StackLayer>
         )
       }
@@ -3981,6 +3996,7 @@ function Member () {
                       onOpenTestimonials={openTestimonials}
                       onOpenMomentos={openMomentos}
                       onOpenSalvos={openSalvos}
+                      onOpenRecados={h.handleOpenRecados}
                     />
                   )}
                 </ScreenVisible.Provider>
