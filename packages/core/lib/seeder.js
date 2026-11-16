@@ -4435,22 +4435,30 @@ class Seeder {
   // (docs/protocol.md section 10, "Protocol v2 admission and scan"):
   // group-meta and group-create (only the community's creator creates
   // groups, so no other core is read). Only after the header verified
-  // locally, so the root's kind is known; a group root is not scanned. One
-  // pass at a time per root; growth during a pass runs another.
+  // locally, so the root's kind is known. A public group's root folds only
+  // its group-meta (a rename); a private root seals its meta and is not
+  // scanned. One pass at a time per root; growth during a pass runs another.
   _scanRoot (key, entry) {
     if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
     const header = this._groupIndex.header(key)
-    if (header === null || header.kind !== 'community') return
+    if (header === null || !this._rootScanned(header)) return
+    const community = header.kind === 'community'
     if (entry.rootScanned === 0) {
       this._groupIndex.resetRoot(key)
       entry.rootScanned = 1
     }
     this._scanGroupCore(key, entry, (block, i) => {
       const t = block.type
-      if (t !== 'group-meta' && t !== 'group-create') return
-      if (validateGroupRecord(block, i, { root: true, community: true }) !== null) return
+      if (t !== 'group-meta' && (t !== 'group-create' || !community)) return
+      if (validateGroupRecord(block, i, { root: true, community }) !== null) return
       this._groupIndex.foldRoot(key, block)
     })
+  }
+
+  // Whether a root with this header is scanned: a community's, and a public
+  // group's.
+  _rootScanned (header) {
+    return header.kind === 'community' || (header.kind === 'group' && header.visibility === 'public')
   }
 
   _scanGroupCore (key, entry, fold) {
@@ -6756,7 +6764,7 @@ class Seeder {
     if (!this._ready || this._closing) return true
     for (const k of this._groupReserved.keys()) if (this._groupReservedCounts(k)) return true
     if (this._groupDeferredFor(null) || this._groupFullFor(null)) return true
-    for (const [k, e] of this._groupServed) if (this._groupHeaderPending(k, e)) return true
+    for (const [k, e] of this._groupServed) if (this._groupHeaderPending(k, e) || this._rootScanBehind(k)) return true
     for (const [key, entry] of this._served) {
       if (!entry.dropped && this._groupScanCounts(key, entry)) return true
     }
@@ -6848,14 +6856,14 @@ class Seeder {
     }
   }
 
-  // Whether a served community root still has catalogue records to fold
-  // (_scanRoot).
+  // Whether a served community root still has catalogue records to fold, or
+  // a public group root renames (_scanRoot).
   _rootScanBehind (key) {
     const e = this._groupServed.get(key)
     if (!e || e.dropped || e.group !== key || !e.headerOk) return false
-    // A group root is never scanned: its cursor stays at 0.
+    // A private group root is never scanned: its cursor stays at 0.
     const header = this._groupIndex.header(key)
-    if (header === null || header.kind !== 'community') return false
+    if (header === null || !this._rootScanned(header)) return false
     return e.rootScanning || e.rootScanned < e.core.contiguousLength
   }
 
@@ -6977,8 +6985,9 @@ class Seeder {
     }
   }
 
-  // GET /index/group-search/<segment>: public groups whose header name
-  // matches, each with that name as the root header wrote it (peer text,
+  // GET /index/group-search/<segment>: public groups whose name matches
+  // (the root's latest group-meta name, else its header's), each with that
+  // name (peer text,
   // rendered by the client through displayText), served roots only, never a
   // blocked one; null for a malformed segment. Nothing about the query is
   // logged.

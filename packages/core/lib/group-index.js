@@ -88,6 +88,19 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { meta: null, metaJoin: null, metaSeen: false }
   }
 
+  // The name a public group shows and is found by: the last group-meta its
+  // root folded (null clears it), else its header's. A hint only: no
+  // authority check, as for a community's name.
+  function groupName (g) {
+    if (g.header === null || g.header.visibility !== 'public') return null
+    return g.metaSeen ? g.meta : g.header.name
+  }
+
+  function retoken (g) {
+    const n = g.header !== null && g.header.kind === 'group' ? groupName(g) : (g.header !== null ? g.header.name : null)
+    g.tokens = typeof n === 'string' ? foldTokens(n) : []
+  }
+
   function dropCreates (root) {
     return creates.delete(root)
   }
@@ -220,7 +233,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       }
       const shownName = visibility === 'public' && typeof name === 'string' ? name : null
       g.header = { kind, visibility, join, diary, name: shownName, community, member }
-      g.tokens = shownName === null ? [] : foldTokens(shownName)
+      retoken(g)
       return true
     } catch {
       return false
@@ -324,7 +337,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         if (!shown(visible, group)) continue
         const members = new Set()
         for (const w of g.writers.values()) if (!w.left) members.add(w.diary)
-        hits.push({ group, name: g.header.name, rank: g.tokens.join(' ') === exact ? 0 : 1, members: members.size })
+        hits.push({ group, name: groupName(g), rank: g.tokens.join(' ') === exact ? 0 : 1, members: members.size })
       }
       hits.sort((a, b) => a.rank - b.rank || b.members - a.members || cmp(a.group, b.group))
       return {
@@ -343,15 +356,20 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
   function foldRoot (root, record) {
     try {
       const g = groups.get(root)
-      if (!g || g.header === null || g.header.kind !== 'community' || record === null || typeof record !== 'object') return false
+      if (!g || g.header === null || record === null || typeof record !== 'object') return false
+      // A public group's root folds only its renames; a private root seals
+      // its meta, so it folds nothing.
+      const publicGroup = g.header.kind === 'group' && g.header.visibility === 'public'
+      if (g.header.kind !== 'community' && !publicGroup) return false
       if (record.type === 'group-meta' && (record.name === null || typeof record.name === 'string')) {
         // A cleared name (null) wins too: it hides the header's.
         g.meta = record.name
         g.metaJoin = record.join === 'open' || record.join === 'approval' ? record.join : g.metaJoin
         g.metaSeen = true
+        if (publicGroup) retoken(g)
         return true
       }
-      if (record.type === 'group-create') {
+      if (record.type === 'group-create' && !publicGroup) {
         if (!isHex64(record.group) || record.group === root) return false
         let set = creates.get(root)
         if (set === undefined) {
@@ -376,6 +394,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       if (!g) return false
       Object.assign(g, rootState())
       dropCreates(root)
+      retoken(g)
       return true
     } catch {
       return false
@@ -461,7 +480,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
           group: G,
           visibility: priv ? 'private' : 'public',
           join: g.header.join,
-          name: priv ? null : g.header.name,
+          name: priv ? null : groupName(g),
           writerCount: priv ? null : memberCount(g, null)
         })
       }

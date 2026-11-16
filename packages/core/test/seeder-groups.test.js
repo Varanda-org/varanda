@@ -16,7 +16,7 @@ const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
 const { groupJoinRecord } = require('../lib/records')
-const { groupPost } = require('../lib/group')
+const { groupPost, groupMeta } = require('../lib/group')
 const { groupHeader, writerHeader } = require('./helpers/seeder-groups')
 const {
   hex,
@@ -1486,4 +1486,28 @@ test('a root creator dropped for quota while a member keeps the root is purged o
   await rejected(second.events, R, 'revoked-issuer')
   t.absent(second.seeder._groups.has(R), 'R not admitted again')
   t.is(first.events.filter((e) => e.event === 'fatal').length + second.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a public group renamed by its root is found by the new name only', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  let R = null
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R = await make('root', groupHeader({ diary: key, name: 'Cadeiras da praia' }), [groupPost({ text: 'oi' }), groupMeta({ name: 'Guarda-sois', join: 'open' })])
+    return [groupJoinRecord({ group: R, writer: R, on: true })]
+  })
+  await admit(A, assoc)
+  await admitted(events, R)
+  await downloaded(seeder, R, 3)
+  await until(() => {
+    const e = seeder._groupServed.get(R)
+    return !e.rootScanning && e.rootScanned === 3 && seeder.indexGroupSearch('guarda').complete
+  }, { name: 'raiz varrida' })
+  t.alike(seeder.indexGroupSearch('guarda').groups.map((r) => [r.group, r.name]), [[R, 'Guarda-sois']], 'found by the new name')
+  t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'not by the old one')
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
