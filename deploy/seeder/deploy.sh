@@ -825,10 +825,11 @@ voltar() {
     log "volta: sem registro da versão anterior; confira se $previous é o commit que rodava"
   fi
   if [ "$www_trocado" = 1 ]; then
-    # www é um bind mount: troca-se o conteúdo, nunca o diretório.
+    # www é um bind mount: troca-se o conteúdo, nunca o diretório. A página
+    # anterior também entra por último, depois do nó dela (copiar_app).
     if ! { mkdir -p "$www" \
       && find "$www" -mindepth 1 -delete \
-      && cp -a "$state/www-anterior/." "$www/"; }; then
+      && copiar_app "$state/www-anterior" "$www" -a; }; then
       falhas=$((falhas + 1))
       log "volta: restaurar deploy/seeder/www falhou (a cópia está em $state/www-anterior)"
     fi

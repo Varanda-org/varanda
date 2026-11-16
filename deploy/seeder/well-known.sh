@@ -132,22 +132,28 @@ versao_web() {
   fi
 }
 
-# Copia o app gerado em $1 (o dist) para $2, um www já vazio, com o index.html
-# por último, depois do sw.js: quando a página aparece, tudo o que ela carrega
-# (o bundle com hash, a cópia do nó da versão) já está lá. Na ordem do
-# diretório, um index.html novo podia chegar antes do próprio nó e mostrar o
-# erro de conexão. Qualquer cópia que falhe retorna 1.
+# Copia o app em $1 (o dist, ou a cópia de www guardada para a volta) para
+# $2, um www já vazio, com o index.html por último, depois do sw.js: quando a
+# página aparece, tudo o que ela carrega (o bundle com hash, a cópia do nó da
+# versão) já está lá. Na ordem do diretório, uma página podia chegar antes do
+# próprio nó e mostrar o erro de conexão. $3 é a opção do cp: -R por padrão;
+# a volta passa -a, para manter dono, modo e data da cópia guardada. Um
+# sw.js ou index.html ausente fica ausente, como numa cópia da pasta inteira.
+# Qualquer cópia que falhe retorna 1.
 copiar_app() {
-  local dist=$1 destino=$2 p
+  local dist=$1 destino=$2 opcao=${3:--R} p f
   (
-    shopt -s dotglob
+    shopt -s dotglob nullglob
     for p in "$dist"/*; do
       case ${p##*/} in
         index.html | sw.js) ;;
-        *) cp -R "$p" "$destino/" || exit 1 ;;
+        *) cp "$opcao" "$p" "$destino/" || exit 1 ;;
       esac
     done
   ) || return 1
-  cp -R "$dist/sw.js" "$destino/sw.js" || return 1
-  cp -R "$dist/index.html" "$destino/index.html"
+  for f in sw.js index.html; do
+    if [ -e "$dist/$f" ] || [ -L "$dist/$f" ]; then
+      cp "$opcao" "$dist/$f" "$destino/$f" || return 1
+    fi
+  done
 }
