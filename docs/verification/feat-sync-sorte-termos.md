@@ -27,12 +27,12 @@ Conferência no aparelho:
 - [ ] Depois de abrir o app, a chave antiga `varanda-sorte` (navegador) e o arquivo `varanda-sorte.txt` (celular) não existem mais: pendente.
 - [ ] Aparelho compartilhado, A já aceitou: B aperta Entrar e a pergunta ao serviço (ou o portão) roda para B; B aperta Criar conta e o portão de criação aparece primeiro: pendente.
 - [ ] App instalado com a instalação hospedada, no emulador Android e no simulador iOS (celular primeiro): o mesmo fluxo de Entrar, pergunta ao serviço e portão: pendente.
-- [ ] Recomeçar, ou Excluir conta, seguido de Entrar na mesma carga da página: o portão aparece: pendente.
+- [ ] Recomeçar, ou Excluir conta, seguido de Entrar na mesma carga da página: o portão aparece, também quando o aceite já estava neste aparelho ao carregar a página (o serviço não é consultado de novo): pendente.
 - [ ] Recarregar durante uma criação pendente (`concluir`): o portão de criação aparece primeiro: pendente.
 - [ ] "Voltar" no portão de criação leva de volta a Entrar: pendente.
 - [ ] Conexão lenta num aparelho que já voltou depois de uma versão nova dos Termos: só a abertura de conexão antes de Entrar, nunca os Termos: pendente.
 - [ ] Entrar num aparelho novo sem diário local: a abertura aparece, nunca um lampejo dos Termos, e fica no máximo 15 segundos enquanto a recuperação busca a chave (depois, no máximo 4 segundos pela resposta do serviço): pendente.
 - [ ] Instalação hospedada, app bloqueado em Entrar: Ajustes não abre (sem o rodapé Conexão, e um bloqueio fecha Ajustes), então criar a conta por Ajustes > Conta e @nome não é um caminho alcançável; o portão de criação passado a Ajustes é só uma defesa, conferida em `apps/app/test/termsCreate.test.js`: pendente.
 - [ ] Código de recuperação num aparelho hospedado novo ("Outras formas de entrar" › código): os Termos aparecem antes de o campo do código abrir; depois de aceitar, o campo abre, a recuperação termina e, na aba de rede, nada chegou a `/account/recovery/*` antes do aceite: pendente.
-- [ ] Entrar num aparelho sem registro da versão atual, com o portão na tela: na aba de rede, nenhum pedido a `/account/invites/*` nem a `/account/passkey/*` sai antes de aceitar, e o app não chama `dm.list` no nó; só saem `/account/terms/held/*`, a leitura pública `/account/status` e a leitura de admissão: pendente.
+- [ ] Entrar num aparelho sem registro da versão atual, com o portão na tela: na aba de rede, nenhum pedido a `/account/invites/*` nem a `/account/passkey/*` sai antes de aceitar, e o app não chama `dm.list` no nó; só saem `/account/terms/held/*`, a leitura pública `/account/status`, a leitura de admissão e, quando a passkey é uma passkey extra de recuperação, `POST /account/recovery/fetch` (só o identificador; nada vai a `/account/recovery/start` nem a `/account/recovery/put`): pendente.
 - [ ] Sorte do dia perto da meia-noite em dois aparelhos em fusos diferentes: pode diferir, de propósito (data local): pendente.

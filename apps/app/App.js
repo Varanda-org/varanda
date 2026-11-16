@@ -904,8 +904,9 @@ function Member () {
   }, [decision, member, terms.claim, bindTerms])
   // After Entrar: did this member accept LEGAL_VERSION on another device?
   // One question per member#version per page load (src/terms.js heldKey),
-  // never forgotten, not even by Recomeçar: a reset here must not come back
-  // from the service in the same page load. While it is young the splash
+  // never forgotten. Recomeçar settles it as none (dropTermsAndSync): a reset
+  // here must not come back from the service in the same page load, even for
+  // a member accepted on this device before it loaded. While it is young the splash
   // stands in for the gate (gateDecision); termsOk stays the raw decision.
   const termsHeld = useRef(new Map())
   const [, setHeldTick] = useState(0)
@@ -1564,6 +1565,10 @@ function Member () {
   const dropTermsAndSync = useCallback((m) => {
     dropTermsMember(m)
     if (typeof m !== 'string') return
+    // A member accepted here at load never asked the service: without this,
+    // Entrar would now ask and take the old acceptance back. heldSettle only
+    // moves an 'asking' entry, so a check in flight lands on this and stops.
+    termsHeld.current.set(heldKey(m, LEGAL_VERSION), { state: 'none' })
     // The account left this device: so does its list of saved posts.
     forgetSavedFor(m)
     // And the event reminders it set (fire and forget).
