@@ -638,7 +638,10 @@ test('identity: lock during the install relocks without saving', async (t) => {
   release.resolve()
   t.is((await unlocking).code, 'CANCELLED')
   t.is(store.log.length, 0)
-  t.is(client.methods().filter((m) => m === 'identity.clear').length, 2, 'lock plus the relock')
+  const clears = client.calls.filter((c) => c.method === 'identity.clear')
+  t.is(clears.length, 2, 'lock plus the relock')
+  t.alike(clears[0].params, { keepMedia: true }, 'the lock keeps the opened direct message media')
+  t.is(clears[1].params, undefined, 'the relock of the cancelled unlock wipes them')
 })
 
 test('session store: clearAll deletes the indexed session, of one rp.id when given', async (t) => {

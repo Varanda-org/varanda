@@ -36,8 +36,9 @@
 // local key (MEDIA_KEY_DOMAIN); <name> is a keyed hash of the sender and the
 // message id, so kv names say nothing about who sent what. kv dmMediaIndex
 // = { v: 1, items: [{ n: name, c: count, b: bytes }] } lists them, oldest
-// first, so wipeCache() finds every entry without the key (lock and reset
-// run it after the key is gone). The plaintext bytes of all entries stay
+// first, so wipeCache() finds every entry without the key (sign-out and
+// reset run it after the key is gone; a lock keeps the cache, and an unlock
+// under another key wipes it). The plaintext bytes of all entries stay
 // within CACHE_BYTES_MAX: a write past it evicts the oldest entries first,
 // and an item set larger than the whole budget is not cached at all. The
 // message row keeps the descriptors only; the 7-day pool sweep does not
@@ -750,7 +751,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   }
 
   // -> the items' plaintext (fresh buffers the caller owns), or null when
-  // not cached or any entry fails to open; throws while locked.
+  // not cached, any entry fails to open or a read fails; throws while locked.
   function getMedia (from, id) {
     const gen = generation
     return serial(async () => {
@@ -761,8 +762,15 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
       if (entry === undefined || entry.w === true) return null
       const out = []
       for (let i = 0; i < entry.c; i++) {
-        let v = null
-        try { v = await storage.readJson(entryPrefix + name + '/' + i) } catch {}
+        let v
+        try {
+          v = await storage.readJson(entryPrefix + name + '/' + i)
+        } catch {
+          // A read that failed says nothing about the item: this read falls
+          // back to the network and the entry stays cached for the next one.
+          for (const b of out) b.fill(0)
+          return null
+        }
         const plain = openEntry(v)
         if (plain === null) {
           for (const b of out) b.fill(0)
@@ -821,8 +829,8 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     return true
   }
 
-  // Deletes every cached item and the summary; needs no key (lock, sign-out
-  // and reset). Queued behind every write already issued.
+  // Deletes every cached item and the summary; needs no key (sign-out and
+  // reset). Queued behind every write already issued.
   function wipeCache () {
     dropSummaryWrite()
     return serial(async () => {

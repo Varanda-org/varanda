@@ -21,6 +21,7 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, WebSocketServer } = require('ws')
 const { testnet, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
+const { jpegHead, pngHead } = require('./helpers/photo')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { wsStream } = require('../lib/ws-stream')
@@ -70,10 +71,12 @@ async function deadPort () {
   return port
 }
 
-// n deterministic bytes and their SHA-256.
-function image (n, seed = 1) {
+// n deterministic bytes under an image header the node accepts (a 640 x 480
+// JPEG unless `head` says otherwise), and their SHA-256.
+function image (n, seed = 1, head = jpegHead) {
   const bytes = new Uint8Array(n)
   for (let i = 0; i < n; i++) bytes[i] = (i * 13 + seed) & 0xff
+  head(bytes)
   return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') }
 }
 
@@ -187,7 +190,9 @@ test('mediaUpload: refused locked or without a media key; arguments checked befo
     ['zero width', { bytes, width: 0 }],
     ['fractional height', { bytes, height: 1.5 }],
     ['huge width', { bytes, width: 16385 }],
-    ['string height', { bytes, height: '480' }]
+    ['string height', { bytes, height: '480' }],
+    ['a public photo that is not the image it claims', { bytes: new Uint8Array(100).fill(7) }],
+    ['a PNG labelled JPEG', { bytes: pngHead(new Uint8Array(100)) }]
   ]) {
     t.exception.all(() => upload(s.node, bytes, args), /mídia inválida/, label)
   }
@@ -218,14 +223,14 @@ test('mediaUpload stores the item, declares the core once, and a post carries th
   t.alike(log1.entries.map((e) => e.seq), [0, 1])
   t.alike([log1.entries[1].record.type, log1.entries[1].record.key], ['media-core', d1.core], 'the declaration was appended')
 
-  const b = image(500, 9)
+  const b = image(500, 9, (bytes) => pngHead(bytes, 20, 25))
   const d2 = await upload(s.node, b.bytes, { mime: 'image/png', width: 20, height: 25 })
   t.alike([d2.core, d2.start, d2.blocks, d2.bytes, d2.mime], [d1.core, 4, 1, 500, 'image/png'], 'the second item follows the first in the same core')
   t.alike((await readItem(s.storage, d2)).bytes, b4a.from(b.bytes))
   t.alike((await s.web.request('log.read', {})).entries.map((e) => e.seq), [0, 1], 'no second declaration')
 
   // The caller's bytes may change afterwards: the session hashed its copy.
-  const c = image(10, 5)
+  const c = image(30, 5)
   const bytesC = b4a.from(c.bytes)
   const d3 = await upload(s.node, bytesC)
   bytesC.fill(0)
@@ -292,9 +297,12 @@ test('profile.set with an uploaded avatar returns the second block of the pair; 
   t.alike(read.profiles[0].avatar, avatar)
   t.is(read.profiles[0].name, 'Bia')
 
-  const other = await upload(s.node, image(2000, 4).bytes, { mime: 'image/webp', width: 512, height: 512 })
+  // A real WebP, but 256 x 256 under a 512 x 512 descriptor.
+  const small = webp512()
+  small.writeUInt32LE((255 | (255 << 14)) >>> 0, 21)
+  const other = await upload(s.node, small, { mime: 'image/webp', width: 512, height: 512 })
   const err = await errorOf(s.web.request('profile.set', { name: 'Bia', avatar: other }))
-  t.alike([err && err.code, err && err.message], ['USAGE', BAD_MEDIA], 'bytes that are not a still image')
+  t.alike([err && err.code, err && err.message], ['USAGE', BAD_MEDIA], 'bytes that are not a still image of the declared size')
   t.is((await s.web.request('log.read', {})).entries.length, 4, 'nothing appended')
   t.alike(s.internal, [], 'no internal error')
 })
@@ -686,7 +694,7 @@ test('reset removes the media cores, the pending follows and the migration marke
   t.alike(log.entries.map((e) => [e.seq, e.record.type]), [[0, 'member-cert'], [1, 'follow'], [2, 'follow']], 'the confirmed follows reached the new diary')
   t.alike(log.entries.slice(1).map((e) => [e.record.key, e.record.on]), [['ab'.repeat(32), true], ['cd'.repeat(32), true]])
   t.ok(await s.storage.readJson('followsMigrated'))
-  const again = await upload(s.node, image(10).bytes)
+  const again = await upload(s.node, image(30).bytes)
   t.alike([again.core, again.start], [d.core, 1], 'a fresh media core for the same device key')
   t.alike(s.internal, [], 'no internal error')
 })
@@ -831,7 +839,7 @@ test('mediaUpload of a short video into a full media core: MEDIA_FULL, one appen
   const keyPair = crypto.keyPair()
   const mediaKeyPair = crypto.keyPair()
   const first = await certified(t, { storage, assoc, keyPair, mediaKeyPair, port: 1 })
-  await upload(first.node, image(10).bytes)
+  await upload(first.node, image(30).bytes)
   await first.node.close()
   const core = await store.openMediaCore(storage, mediaKeyPair)
   const filler = Array.from({ length: MAX_MEDIA_BLOCKS - 1 - core.length }, () => b4a.alloc(1))

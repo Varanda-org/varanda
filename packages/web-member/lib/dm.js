@@ -55,8 +55,8 @@
 // lock drops every waiting one. A blob gone (404) or that does not
 // verify, with nothing cached, shows as media { unavailable: true } while
 // the text still shows. Only reads are ever repeated, never a put. lock()
-// forgets the sealed blobs; wipeMedia() (lock, sign-out, reset) deletes the
-// cache as well.
+// forgets the sealed blobs; wipeMedia() (sign-out, reset, a failed unlock;
+// not a lock) deletes the cache as well.
 //
 // Páginas (docs/rpc.md 5.114): the page secrets this identity holds live in
 // ./page-dm.js. Each held page has its own local store (./dm-store.js under
@@ -511,8 +511,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     gone.clear()
   }
 
-  // Lock, sign-out and reset: the plaintext cache and every list summary go
-  // too (needs no key).
+  // Sign-out, reset and a failed unlock (a lock keeps them): the sealed
+  // media cache and every list summary go too (needs no key).
   function wipeMedia () {
     forgetAllBlobs()
     dropQueued(false, LOCKED)

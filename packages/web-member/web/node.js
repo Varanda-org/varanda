@@ -611,12 +611,12 @@ function createIdentity (node, storage, sessionStore, idb) {
       // the PRF the session opens the direct message store under this
       // passkey's key, and a store of another key is replaced by an empty
       // one (lib/dm-store.js unlock): a wrong passkey must not erase the
-      // stored identity's messages.
+      // stored identity's messages, nor its opened media.
       const before = await node.identityStatus()
       if (stale(gen, rec)) throw cancelled()
       if (otherDiary(before, publicKey)) {
         dropRoot()
-        await node.clearKeyPair().catch(() => {})
+        await node.clearKeyPair({ keepMedia: true }).catch(() => {})
         throw mismatch(before)
       }
       // setKeyPair copies both pairs and the PRF (group writer keys derive
@@ -1384,12 +1384,13 @@ function createIdentity (node, storage, sessionStore, idb) {
     return out
   }
 
-  // A memory-only lock: the stored session survives it (the next start()
-  // resumes). 'Sair' is signOut().
+  // A memory-only lock: the stored session and the sealed cache of opened
+  // direct message media survive it (the next start() resumes). 'Sair' is
+  // signOut().
   function lock () {
     invalidate()
     resumed = false
-    return node.clearKeyPair()
+    return node.clearKeyPair({ keepMedia: true })
   }
 
   // Deletes the stored session: the record, or failing that the database.
