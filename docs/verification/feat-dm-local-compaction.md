@@ -68,10 +68,12 @@ As lojas das Páginas usam a mesma faxina e agora têm teste próprio (`page-dm.
 
 Ordem: Android (build de debug), simulador iOS, depois web e PWA. Registrar aparelho, sistema e, na web, o navegador, e o resultado de cada item.
 
-- [ ] Apagar uma conversa com fotos abertas: a foto some do cache na hora (reabrir uma conversa nova com a mesma pessoa não a mostra), e a conversa some da lista. Android, iOS, web, PWA: pendente.
-- [ ] A confirmação "Apagar esta conversa?" mostra o texto novo (sai dos seus aparelhos, texto e fotos saem da memória em até 15 dias, a outra pessoa continua com a cópia dela). Pendente.
-- [ ] Segundo aparelho da mesma passkey: depois de um `dm.pull`, a conversa some e a faxina roda sem erro no registro. Pendente.
-- [ ] Depois do prazo (adiantar o relógio do aparelho de teste), reabrir o app e conferir que a lista de Conversas segue igual e que nenhuma mensagem apagada volta. Pendente.
-- [ ] Termos e Privacidade: a frase nova aparece na Política de Privacidade, no app e na página do site. Pendente (Termos e Política na versão 68).
+Conferido em 16/11/2026 com a demonstração (`EXPO_PUBLIC_VARANDA_VITRINE=1`, Metro do branch): Android 16 no emulador (AVD varanda-api36-parity, build de debug `app.varanda.debug`), iOS 26.2 no simulador iPhone 17 Pro e web no navegador embutido do Claude (Chromium). A demonstração usa dados fixos e não roda o nó, então os itens que dependem da faxina de verdade ficam para uma conta de teste, na lista do operador (#224).
+
+- [ ] Apagar uma conversa com fotos abertas: a foto some do cache na hora (reabrir uma conversa nova com a mesma pessoa não a mostra), e a conversa some da lista. Não conferido aqui (precisa do nó de verdade); vai para o #224.
+- [x] O menu da conversa mostra "Apagar conversa", e a confirmação "Apagar esta conversa?" mostra o texto novo ("A conversa sai dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir. A outra pessoa continua com a cópia dela."). Android, iOS e web: ok, cancelado sem apagar. A ajuda "Como funcionam as Conversas" traz a frase nova sobre Apagar nas três: ok.
+- [ ] Segundo aparelho da mesma passkey: depois de um `dm.pull`, a conversa some e a faxina roda sem erro no registro. Não conferido aqui; vai para o #224.
+- [ ] Depois do prazo (adiantar o relógio do aparelho de teste), reabrir o app e conferir que a lista de Conversas segue igual e que nenhuma mensagem apagada volta. Não conferido aqui; vai para o #224.
+- [x] Termos e Privacidade: a frase nova ("Depois de Apagar conversa, o aparelho apaga da memória dele as fotos guardadas...") aparece na Política de Privacidade versão 68 no Android e na web, e em `apps/site/public/privacidade/index.html`. iOS não conferido (mesmo módulo `legal.js`).
 
 Na raiz, na ordem da CI, `npm run lint`, `npm test` (ou `npm test -- --affected=origin/main`) e `npm run demo` têm de passar. A demo termina com `DEMO OK`.
