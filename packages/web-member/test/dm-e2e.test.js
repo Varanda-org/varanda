@@ -197,7 +197,7 @@ test('dm end to end against the real seeder', async (t) => {
   assertNoMemberKey(t, host, [A, B, C], 'after restart')
 })
 
-test('dm media end to end: photo with caption and photo only, the sealed cache outlives the pool, a lock wipes it', async (t) => {
+test('dm media end to end: photo with caption and photo only, the sealed cache outlives the pool and a lock, Sair wipes it', async (t) => {
   t.timeout(170000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
@@ -281,9 +281,19 @@ test('dm media end to end: photo with caption and photo only, the sealed cache o
   t.absent(entry.includes(b4a.toString(photo.subarray(0, 300), 'base64').slice(0, 40)), 'no plaintext at rest')
   t.absent(JSON.stringify(index).includes(sent.id) || JSON.stringify(index).includes(A.key), 'no id or sender in kv names')
 
-  // A lock wipes the cache: after the next unlock the swept photo is gone.
+  // A lock keeps the sealed cache: after the next unlock the swept photo
+  // still opens, with nothing downloaded.
+  await B.node.clearKeyPair({ keepMedia: true })
+  t.alike(await B.storage.readJson('dmMediaIndex'), index, 'the lock kept the index')
+  await B.node.setKeyPair(B.keyPair, { prf: B.prf })
+  const kept = host.blobGets
+  t.ok(b4a.equals((await B.node.dmReadMedia({ from: A.key, id: sent.id, index: 0 })).bytes, photo), 'the swept photo opens after the unlock')
+  t.is(host.blobGets, kept, 'from the kept cache')
+
+  // Every other clearKeyPair (Sair, a failed unlock) wipes it: after the
+  // next unlock the swept photo is gone.
   await B.node.clearKeyPair()
-  t.is(await B.storage.readJson('dmMediaIndex'), null, 'the lock wiped the index')
+  t.is(await B.storage.readJson('dmMediaIndex'), null, 'Sair wiped the index')
   t.is(await B.storage.readJson('dmMedia/' + index.items[0].n + '/0'), null, 'and the entry')
   await B.node.setKeyPair(B.keyPair, { prf: B.prf })
   t.is((await rejection(B.node.dmReadMedia({ from: A.key, id: sent.id, index: 0 }))).message, 'mídia indisponível')
@@ -343,9 +353,9 @@ test('dm media from a stranger: a request fetches nothing until a tap, an accept
   }
   t.is(host.blobGets, gets + 6, 'nothing fetched twice')
 
-  // Lock still wipes what the lazy opens cached.
+  // Sair still wipes what the lazy opens cached.
   await B.node.clearKeyPair()
-  t.is(await B.storage.readJson('dmMediaIndex'), null, 'the lock wiped the cache')
+  t.is(await B.storage.readJson('dmMediaIndex'), null, 'Sair wiped the cache')
 })
 
 test('dm media failures: a failed put keeps the photo for its retry, a short read stays retryable, a lock while caching returns no bytes', async (t) => {
@@ -401,17 +411,21 @@ test('dm media failures: a failed put keeps the photo for its retry, a short rea
   t.alike(th.messages.map((m) => m.media), [[item2]], 'the media stays retryable, not unavailable')
   t.ok(b4a.equals((await B.node.dmReadMedia({ from: A.key, id: sentShort.id, index: 0 })).bytes, photo2), 'the next read opens it')
 
-  // A lock while the opened photo is being cached: no bytes come back.
+  // A lock while the opened photo is being cached: no bytes come back, and
+  // what the lock kept of the item opens the photo after the next unlock.
   let locking = null
   onCache = async () => {
-    locking = B.node.clearKeyPair()
+    locking = B.node.clearKeyPair({ keepMedia: true })
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   const locked = await rejection(B.node.dmReadMedia({ from: A.key, id: sentLock.id, index: 0 }))
   t.ok(locking !== null, 'the lock ran during the cache write')
   t.ok(locked !== null, 'the read returns no plaintext')
   await locking
-  t.is(await B.storage.readJson('dmMediaIndex'), null, 'and the lock wiped the cache')
+  await B.node.setKeyPair(B.keyPair, { prf: B.prf })
+  t.ok(b4a.equals((await B.node.dmReadMedia({ from: A.key, id: sentLock.id, index: 0 })).bytes, photo), 'the photo opens after the unlock')
+  await B.node.clearKeyPair()
+  t.is(await B.storage.readJson('dmMediaIndex'), null, 'and Sair wipes the cache')
 })
 
 test('dm reaction end to end: shown on both sides, naming the digest sender and receiver store for the message', async (t) => {
