@@ -120,7 +120,7 @@ const TITLES = {
   excluir: 'Excluir conta'
 }
 
-const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola. Prévias que outras pessoas enviam continuam aparecendo.'
+const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
 
 // Decided by what exists, not by the platform: a store from the shell, the
 // browser's storage, or memory for this session.
