@@ -1541,26 +1541,6 @@ function walkSlots (walks) {
   return { slot, voided }
 }
 
-// The `diary:writer` pairs whose latest join (by diary seq) is off.
-function unboundPairs (joins) {
-  const last = new Map()
-  if (!(joins instanceof Map)) return new Set()
-  for (const [d, list] of joins) {
-    if (!isHex64(d) || !Array.isArray(list)) continue
-    for (let i = 0; i < list.length; i++) {
-      const j = plainCopy(list[i])
-      if (j === null || typeof j.on !== 'boolean' || !isHex64(j.writer)) continue
-      const seq = Number.isSafeInteger(j.seq) && j.seq >= 0 ? j.seq : Infinity
-      const pair = d + ':' + j.writer
-      const prev = last.get(pair)
-      if (prev === undefined || seq > prev.seq || (seq === prev.seq && !j.on)) last.set(pair, { seq, on: j.on })
-    }
-  }
-  const out = new Set()
-  for (const [pair, j] of last) if (!j.on) out.add(pair)
-  return out
-}
-
 // One result row per diary of the walks: how many writers it holds live and
 // frozen and how many it released in this root (nodes derive the room left).
 function walkCounts (walks) {
@@ -1837,14 +1817,12 @@ function bindCores (input, asCommunity) {
   const rootEntry = { key: G, diary: creator, rejoin: null, at: header.at, ...splitReacts(rootRecords) }
   const { valid, rejected } = checkRejoins(candidates, rootEntry, voided)
   // Every writer a walk counts or released must be held, frozen and
-  // released ones included (a seeder hiding one would hide the leave it
-  // holds); a writer no walk counts is never awaited. In a private group a
-  // released writer its diary unbound is not: it is the boxless writer a
-  // node replaced, which seeders and sync refuse (header-invalid).
-  const unbound = priv ? unboundPairs(joins) : new Set()
-  for (const [pair, sl] of slot) {
+  // released ones included, whatever its diary's latest join says (a seeder
+  // hiding one would hide the leave it holds); a writer no walk counts is
+  // never awaited. A held writer whose header does not match the group's
+  // kind (a replaced boxless writer) is rejected above, never awaited.
+  for (const pair of slot.keys()) {
     const w = pair.slice(65)
-    if (sl.released && unbound.has(pair)) continue
     if (!valid.has(w) && !rejected.has(w) && !invalid.has(w) && !uncounted.has(w)) incomplete = true
   }
   const capped = [...valid.values()]

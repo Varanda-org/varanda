@@ -539,6 +539,35 @@ test('a diary cut below its own leave keeps the diary left and the removal (#350
   }
 })
 
+test('a released writer whose join is off is awaited in a private group: a node without it never folds past its leave (#350)', (t) => {
+  // X leaves through its boxed writer wX, then turns wX off and cuts it at
+  // 0. A node that does not hold wX must not take the fold as complete
+  // without the leave.
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(7) }))
+  w.joins.get(X).push({ writer: wX, on: false, seq: 3 })
+  const marks = new Map([[X, [{ writer: wX, cut: 0, seq: 4 }]]])
+  const full = buildGroup(w.input(w.reader(wY), { marks }))
+  t.ok(full.released.has(wX), 'wX is released')
+  t.is(full.members.get(X), 'left', 'with wX held, the leave counts')
+  t.is(full.incomplete, false)
+  const input = w.input(w.reader(wY), { marks })
+  const g = buildGroup({ ...input, writers: input.writers.filter((l) => l.key !== wX) })
+  t.is(g.incomplete, true, 'without wX the fold waits for it')
+  t.absent(g.writers.has(wX))
+  // A replaced boxless writer is still rejected by its header once held.
+  const b = pworld()
+  const boxless = K(0x4ff)
+  b.add(X, boxless, { box: false })
+  b.joins.get(X).push({ writer: boxless, on: false, seq: 3 })
+  const bmarks = new Map([[X, [{ writer: boxless, cut: 0, seq: 4 }]]])
+  const held = buildGroup(b.input(b.reader(wY), { marks: bmarks }))
+  t.is(held.incomplete, false, 'a held boxless header is rejected, never awaited')
+  t.absent(held.writers.has(boxless))
+})
+
 test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {
   const rotated = (ref) => {
     const w = pworld()
