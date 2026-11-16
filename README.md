@@ -798,7 +798,12 @@ Desligadas por padrão. Para ligar, defina em `deploy/seeder/.env` (reinicie o s
 - `VARANDA_PAGE_KEYS`: 64 hex minúsculos, gerados com `openssl rand -hex 32`. Sem ela, o serviço não abre o arquivo de chaves nem o escritor das páginas, e o registro mostra `paginas desligada`.
 - `VARANDA_SEEDER_WS`: `ws://127.0.0.1:<porta>`, a porta de WebSocket do semeador (`VARANDA_WS_PORT`). Obrigatória com a chave.
 
-Guarde `VARANDA_PAGE_KEYS` junto com o backup do volume `account-data`: sem ela, o `page-keys.json` não abre. Um arquivo que não abre com a chave dada faz o serviço subir sem páginas e registrar `paginas indisponivel`, sem reescrever nada.
+Backup e restauração da chave:
+
+1. O valor mora em `/etc/varanda/varanda.env` (servidor atualizado por imagem) ou em `deploy/seeder/.env`. É uma chave de dados deste servidor: não se sela nem se divide com outro servidor (veja "Segredos", acima).
+2. Guarde-o à parte e junto com cada backup do volume `account-data`, em cofre separado do volume. O `page-keys.json` não abre sem o valor, e o valor sozinho não serve sem o arquivo.
+3. Ao restaurar, ponha o `page-keys.json` no volume e o mesmo valor no `.env`, e reinicie o serviço `account`. Confira no registro: `{ event: 'paginas', reason: 'ligada' }` quer dizer que abriu. `reason: 'indisponivel'` quer dizer que as páginas não abriram: pode ser o `page-keys.json` que não abre com a chave dada, o `pages.json` que não abre ou a trava do serviço perdida. Nada é reescrito, o serviço sobe sem páginas, e nenhum valor é impresso. Se foi a chave, confira o valor do `.env` contra o cofre.
+4. Trocar o valor não é suportado: uma chave nova não abre o arquivo antigo. Para mudar de servidor, leve o valor e o arquivo juntos.
 
 Ao iniciar, o serviço de conta encerra no diretório as páginas que não têm diário de página nem registro de administração (uma criação interrompida entre a reserva do @nome e o diário); o log traz `{ event: 'paginas', reason: 'orfas-encerradas', count }`, e `orfas-pendentes` se a limpeza falhou. `VARANDA_NO_PAGE_MIGRATE=1` vale só para o nó core.
 
@@ -814,7 +819,7 @@ Regras de operação:
 
 - As páginas dividem o inventário do semeador, com no máximo 256 páginas no total.
 - Uma página pode publicar fotos nas publicações e seguir outras contas, por ação do dono ou de um administrador.
-- Encerrar a página é definitivo: o @nome fica reservado e nunca é emitido de novo. O serviço continua servindo a página encerrada, só para leitura, e apaga as chaves dela depois que o semeador recebeu o encerramento (isso é refeito depois de um reinício). Cada dono faz no máximo 2 encerramentos ou mudanças de chave a cada 24 h (contagem em memória, zera ao reiniciar). Para uma chave vazada, `mod block` da chave da página é o remédio do operador.
+- Encerrar a página é definitivo: o @nome fica reservado e nunca é emitido de novo. O serviço continua servindo a página encerrada, só para leitura, e apaga as chaves dela depois que o semeador recebeu o encerramento (isso é refeito depois de um reinício). Cada dono faz no máximo 2 encerramentos ou mudanças de chave a cada 24 h (a contagem fica no `pages.json` e vale também depois de um reinício). Para uma chave vazada, `mod block` da chave da página é o remédio do operador.
 - Mudar a chave de uma página publica uma declaração sucessora, assinada pela chave antiga, que aponta para a nova. Quem segue a página vê a troca nessa declaração.
 - Páginas em comunidades ficam ligadas sempre que as páginas estão ligadas. Não há interruptor separado. O serviço não guarda a chave das mensagens nem a caixa dos grupos privados da página: assina somente os digests das Conversas e acrescenta blocos de grupo já selados, sem ver o conteúdo. A caixa privada fica nos aparelhos administradores. É exceção a época antiga conhecida pelo serviço antes da renovação da caixa. O serviço ainda lê os avisos endereçados à página em nome de quem a administra. Termos e Política na versão 34.
 - Um nó core administra páginas com uma chave de delegado guardada no aparelho. A CLI usa `VARANDA_ACCOUNT_ORIGIN` (https) e o `varanda-serve --account-origin https://<host>` liga as Páginas no app servido por ele. O `VARANDA_NO_PAGE_MIGRATE=1` desliga o acompanhamento automático da chave nova de uma página nos aparelhos de quem segue.

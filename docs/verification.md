@@ -5204,7 +5204,7 @@ Roteiro do protocolo e do nó para fotos e GIFs em mensagens privadas (corpo int
 Regras que os passos conferem:
 
 - Uma mensagem só de texto continua no corpo v1, byte por byte; uma mensagem com mídia vai no v2 (um conjunto exato de chaves, prefixo de assinatura próprio), com 1 a 4 itens de ids distintos, texto vazio só com mídia, e o texto que cabe diminui a cada item.
-- As chaves de mídia chegam só à interface dona da conversa, em `dm.thread`; nenhum evento, registro ou outro aparelho as recebe. O cache de mídia aberta fica cifrado sob a chave local, até 256 MiB (o mais antigo sai primeiro), e é apagado ao bloquear, ao sair e ao zerar.
+- As chaves de mídia chegam só à interface dona da conversa, em `dm.thread`; nenhum evento, registro ou outro aparelho as recebe. O cache de mídia aberta fica cifrado sob a chave local, até 256 MiB (o mais antigo sai primeiro), continua ao bloquear e é apagado ao sair, ao zerar e ao desbloquear com outra identidade (`docs/verification/fix-chat-media-leftovers-app.md`).
 - Numa conversa da pasta de pedidos, nada é baixado sozinho: a mídia só desce num toque (leitura explícita) ou depois de aceitar; no máximo 2 aberturas ao mesmo tempo.
 - O envio sobe todos os pedaços antes de mandar a mensagem; uma falha de envio de mídia é um erro comum, nunca incerto, e nada é repetido sozinho.
 - A Página guarda e devolve aos administradores os itens recebidos, nunca busca o blob, e responde só em texto.
@@ -5214,7 +5214,7 @@ Passos (marcar só depois de executar e guardar o registro):
 
 - [ ] Dois membros no laboratório hospedado: mandar uma foto com legenda e uma só foto; as duas chegam, `dm.thread` traz os itens com a chave, e nenhum evento `dm.changed` carrega item.
 - [ ] Esvaziar o conjunto de blobs do semeador depois de abrir a foto: ela continua abrindo pelo cache; uma foto nunca aberta passa a `{ unavailable: true }` e o texto continua.
-- [ ] Bloquear a identidade e desbloquear: o cache de mídia foi apagado e a foto abre de novo pelo semeador (se ainda estiver lá).
+- [ ] Bloquear a identidade e desbloquear: a foto abre do cache, sem pedir ao semeador. Depois de Sair e entrar de novo, o cache foi apagado e a foto abre de novo pelo semeador (se ainda estiver lá).
 - [ ] Uma pessoa desconhecida manda várias fotos: abrir o pedido não baixa nada (observar `/blob` no semeador); um toque baixa só aquela; aceitar a conversa abre as outras, no máximo 2 por vez.
 - [ ] Uma mensagem com mídia para uma Página aparece aos administradores com os itens, e a resposta da Página sai em texto (corpo v1).
 - [ ] Uma denúncia de conversa com anexo chega ao painel com "com mídia", a imagem abre só com a sessão de moderador, e um anexo de 2 MiB recebe 413; uma denúncia v1 antiga ainda confere.
@@ -5227,7 +5227,7 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 Limites desta caminhada:
 
 - O app anexa e mostra mídia nas mensagens (veja a seção 107); esta caminhada exercita só o nó, o semeador e a RPC.
-- A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o tempo limite de 10 s; se a autorização assinada nos cabeçalhos, antes de ler o corpo, já vale, esta caminhada não confere.
+- A rota de anexo tem 4 vagas globais que corpos lentos e anônimos podem ocupar até o prazo do corpo do anexo (cerca de 17 s, `docs/verification/fix-chat-media-leftovers.md`); se a autorização assinada nos cabeçalhos, antes de ler o corpo, já vale, esta caminhada não confere.
 - Nenhuma caixa acima foi executada nesta documentação.
 
 ## 106. Fotos nos grupos públicos e privados: protocolo, nó e RPC (PR feat/group-media-protocol)
@@ -5286,7 +5286,7 @@ Regras que os passos conferem:
 
 - O clipe do compositor abre "Anexar" com uma só linha, "Foto" ("da galeria, até 4"). GIF por busca e áudio não aparecem, nem desabilitados.
 - Até 4 imagens por mensagem, legenda opcional; nada sai do aparelho antes de tocar em enviar. Uma foto é reencodada sem EXIF nem GPS; um GIF vai como está.
-- Mensagem direta: a foto sai cifrada pelo canal de blobs, sob um id aleatório, e some do semeador em 7 dias; quem abriu guarda a cópia cifrada no cache local, apagado ao bloquear a identidade, em Sair e em Recomeçar.
+- Mensagem direta: a foto sai cifrada pelo canal de blobs, sob um id aleatório, e some do semeador em 7 dias; quem abriu guarda a cópia cifrada no cache local, que continua ao bloquear a identidade e é apagado em Sair e em Recomeçar.
 - Grupo público: a foto vem pela rota `/media` do semeador, como as fotos das publicações. Grupo privado: só o nó decifra; o app nunca busca o item privado por HTTP.
 - Uma foto que não chega mostra "Mídia indisponível" e o texto da mensagem continua.
 - Denúncia de mensagem direta ou de grupo privado com foto: a primeira imagem aparece em "Imagem que será enviada" antes do envio, como JPEG de até 700 KB; acima disso, "A imagem não coube e não foi enviada.". A denúncia de grupo público aponta para a mensagem, sem imagem.
@@ -5301,7 +5301,7 @@ Passos (marcar só depois de executar e guardar o registro), primeiro no Android
 - [ ] Android: mandar um GIF sem legenda numa mensagem direta; ele chega animado.
 - [ ] Android: postar uma foto num grupo público e outra num grupo privado; as duas aparecem para o outro membro. A foto privada, lida na rota `/media` do semeador, são bytes cifrados (não começa com `FF D8 FF`).
 - [ ] Android: denunciar uma mensagem direta com foto; a tela mostra "Imagem que será enviada" com a imagem, e o painel de moderação recebe a denúncia com a imagem marcada como "não conferida".
-- [ ] Android: depois de abrir uma foto de mensagem direta, bloquear a identidade e desbloquear; a foto abre de novo pelo semeador (o cache local foi apagado). Em Sair, idem.
+- [ ] Android: depois de abrir uma foto de mensagem direta, bloquear a identidade e desbloquear; a foto abre do cache local, sem pedir ao semeador. Depois de Sair e entrar de novo, a foto abre de novo pelo semeador (o cache local foi apagado).
 - [ ] Android: uma foto de mensagem direta com mais de 7 dias (ou com o conjunto de blobs esvaziado no laboratório), nunca aberta, mostra "Mídia indisponível".
 - [ ] iOS (simulador): repetir os passos do Android acima, num build feito depois de `npm run prepare:native -w apps/app`, e anotar se a foto abre pelo fetch do worklet Bare.
 - [ ] Chrome (web hospedada): repetir os passos acima; na aba Rede, a foto de grupo privado não gera pedido do app à rota `/media` fora do nó, e a foto de mensagem direta vai só a `/blob` na origem do semeador.
@@ -5531,7 +5531,6 @@ Como verificar, a partir da raiz (só os arquivos desta área):
 
 Limites desta caminhada:
 
-- O laboratório hospedado (`apps/cli/scripts/hosted-lab.js`) ainda não liga a busca de GIFs, e o serviço recusa um provedor em loopback; os passos com duas pessoas usam uma instalação de teste com um provedor falso público.
 - Nenhuma caixa acima foi executada nesta documentação.
 
 ## 112. Aviso push de mensagem nova não aparece no aparelho que enviou (PR fix/dm-wake-self-notification)
@@ -5810,7 +5809,7 @@ Prévia de links, primeiro no Android (build de debug, emulador ou aparelho, fei
 - [ ] Web: Ajustes, desligar "Prévia de links"; colar um link não faz pedido a `/account/preview` (aba Rede); os cartões recebidos continuam aparecendo.
 - [ ] Web: com o cartão no rascunho, anexar uma foto; o cartão some.
 - [ ] Web: com `VARANDA_PREVIEW=0` no serviço de conta, `GET /account/preview/policy` responde `{ enabled: false }`, colar um link não monta cartão e não sai pedido a `/account/preview`.
-- [ ] Celular: um link encurtado (que redireciona, por exemplo um bit.ly) não monta cartão e a mensagem sai como texto simples; na web o mesmo link monta o cartão com o endereço final (o serviço segue até 3 redirecionamentos conferidos).
+- [ ] Celular: um link encurtado (que redireciona, por exemplo um bit.ly) monta o cartão pelo serviço de conta, com o endereço final, quando o app está ligado à instalação da associação; sem ela, a mensagem sai como texto simples (`docs/verification/fix-chat-media-leftovers-app.md`). Na web o mesmo link monta o cartão com o endereço final (o serviço segue até 3 redirecionamentos conferidos).
 - [ ] PWA instalado: repetir a mensagem direta com cartão e a conferência da aba Rede de quem recebe.
 
 Passada visual completa desta rodada, pelo ciclo de [design-review.md](design-review.md):
@@ -5834,7 +5833,7 @@ Entrada nativa real (caixa separada: não é parte da revisão visual):
 Limites desta caminhada:
 
 - Nenhuma caixa acima foi executada nesta documentação.
-- No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 24) diz isso.
+- No app nativo, quem monta a prévia é o aparelho de quem envia, que fala direto com o site do link e expõe a ele o próprio endereço de rede; a Política (versão 24) diz isso. Quando o site responde com um redirecionamento, o aparelho ligado à instalação pede a prévia ao serviço de conta (Política versão 67).
 
 ## 118. Mensagens diretas e grupos privados no app instalado (PR fix/native-dm-unlock)
 
@@ -8125,7 +8124,7 @@ Uma publicação, resposta ou citação aceita exatamente o par `[capa JPEG, ví
 
 Não há comparação de fotos, GIFs ou vídeos com listas de hashes de material ilegal conhecido antes de exibir ou repassar.
 
-Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário, mas não os blobs de momentos; quem reteve o descritor público pode abri-los até expirarem. Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
+Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário e os blobs que os momentos dele nomeiam (`docs/verification/fix-short-video-leftovers.md`). Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
 
 Cobertura automatizada:
 
@@ -8177,7 +8176,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
 - [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
 - [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
-- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
+- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento deixa de abrir com um descritor guardado depois do bloqueio e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
 
 ## 182. Reprodução de vídeos curtos em publicações e momentos
@@ -8562,7 +8561,7 @@ Quando o clipe está pronto, "ver em tela cheia" aparece num botão redondo no c
 
 Um toque, dois toques ou Enter/Espaço sobre o player com foco na web não abrem a publicação nem curtem o post. O quadro impede que o clique e as teclas Enter e Espaço cheguem ao post e recebe o toque. As outras teclas seguem para o app: Escape com o player em foco continua voltando para a tela anterior.
 
-O mural continua mostrando a capa que abre a publicação. Momentos não mudam e anúncios da Feira continuam sem vídeo. Leitores de tela ficam fora desta verificação. A imagem da capa e suas marcas já ficam ocultas para eles, mas o botão da capa mantém o rótulo "vídeo de N segundos". O código não oculta explicitamente os controles do player dentro do post.
+O mural continua mostrando a capa que abre a publicação. Momentos não mudam e anúncios da Feira continuam sem vídeo. Leitores de tela ficaram fora desta verificação. Foram conferidos depois, com TalkBack e com o teclado na web, em `docs/verification/fix-short-video-leftovers.md`, que tirou o vídeo da camada oculta do post e devolve o foco ao player quando o controle tocado some.
 
 Como verificar, a partir da raiz:
 

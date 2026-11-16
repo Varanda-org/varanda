@@ -111,6 +111,7 @@ const PAGE_MIGRATE_RETRYABLE = new Set(['unreadable', 'locked', 'failed'])
 const PAGE_MIGRATED_FILE = 'page-migrated.json'
 const MAX_PAGE_MIGRATED = 4096
 const MAX_PAGE_LATE = 64
+const MAX_PAGE_BAD = 4096
 // What scanPageAt keeps (page-origin only at block 3).
 const PAGE_SCAN_TYPES = new Set(['page-close', 'page-moved', 'page-origin'])
 const REDISCOVER_ONCE_MS = 1000
@@ -402,9 +403,11 @@ function sameSet (a, b) {
 // from the first deletion on it is downloadExcept, which never asks a stale
 // peer for a deleted block. Same { update, destroy, idle } as downloadExcept.
 // A page diary keeps an unheld tombstone target in the range until it is
-// read once (lib/deletion.js downloadExceptPages, docs/protocol.md §12).
+// read once (lib/deletion.js downloadExceptPages, docs/protocol.md §12); the
+// targets read as posts are remembered in the replica, so a stale peer is
+// not asked for them again on the next run.
 function followRange (core, deleted) {
-  if (deleted.size > 0) return downloadExceptPages(core, deleted)
+  if (deleted.size > 0) return downloadExceptPages(core, deleted, { remember: true })
   const linear = core.download({ start: 0, end: -1, linear: true })
   let except = null
   let destroyed = false
@@ -413,7 +416,7 @@ function followRange (core, deleted) {
       if (destroyed) return []
       if (except !== null) return except.update(next)
       linear.destroy()
-      except = downloadExceptPages(core, next)
+      except = downloadExceptPages(core, next, { remember: true })
       return except.update(next)
     },
     destroy () {
@@ -1674,6 +1677,7 @@ async function runSync ({
   // -> true when block i is held and is a page-close or page-moved that
   // verifies (kept in pageRecs).
   async function scanPageAt (entry, core, i, opts) {
+    if (entry.pageBad.has(i)) return false
     if (!(await core.has(i))) return false
     let record = null
     try {
@@ -1681,10 +1685,16 @@ async function runSync ({
     } catch {}
     if (record === null || typeof record !== 'object') return false
     if (i === 3 && record.type === 'page-origin') entry.originRec = { seq: 3, record }
-    if ((record.type === 'page-moved' || record.type === 'page-close') && verifiedEnd(record, entry.key, opts)) {
+    if (record.type !== 'page-moved' && record.type !== 'page-close') return false
+    const reason = endFailure(record, entry.key, opts)
+    if (reason === null) {
       entry.pageRecs = [{ seq: i, record }]
       return true
     }
+    // Revocation is checked last (lib/page.js): any other failure never
+    // verifies later, so a rewound walk does not check that copy again.
+    // A throw is not a verdict on the block and is not remembered.
+    if (reason !== 'revoked-issuer' && reason !== 'error' && entry.pageBad.size < MAX_PAGE_BAD) entry.pageBad.add(i)
     return false
   }
 
@@ -1722,11 +1732,19 @@ async function runSync ({
   }
 
   function verifiedEnd (record, key, opts) {
+    return endFailure(record, key, opts) === null
+  }
+
+  // -> null when the page-close or page-moved verifies for key, else the
+  // failure reason.
+  function endFailure (record, key, opts) {
     try {
       const verify = record.type === 'page-moved' ? verifyMoved : record.type === 'page-close' ? verifyClose : null
-      return verify !== null && verify(record, key, association, opts).ok === true
+      if (verify === null) return 'malformed'
+      const res = verify(record, key, association, opts)
+      return res.ok === true ? null : String(res.reason)
     } catch {
-      return false
+      return 'error'
     }
   }
 
@@ -4697,6 +4715,7 @@ async function runSync ({
         pageLate: new Set(), // holes below pageScan filled since, at most MAX_PAGE_LATE
         pageRewinds: 0, // pageLate overflows: a walk that saw one keeps the rewound cursor
         pageRecs: [], // [{ seq, record }]: the first verified page-close or page-moved
+        pageBad: new Set(), // seqs of page-close / page-moved copies that never verify, at most MAX_PAGE_BAD
         originRec: null, // { seq: 3, record } when block 3 is a page-origin
         migrating: null, // { again } while a page migration check runs
         migrateDone: false // a verified move was handled in this run
