@@ -479,7 +479,7 @@ test('a key block past a diary cut stays readable, never sendable (#350)', (t) =
   let { g, E2 } = hist(null)
   t.is(kidOf(g.epoch), kidOf(E2))
   t.alike(g.posts.map((p) => p.text), ['p8', 'p9', 'p10'])
-  for (const cut of [0, 1, 2]) {
+  for (const cut of [1, 2]) {
     ;({ g } = hist(cut))
     t.alike(g.posts.map((p) => p.text), ['p8', 'p9'], 'cut ' + cut + ': the history others sealed stays readable, the cut writer post past the cut does not count')
     t.is(g.sealed, 0, 'cut ' + cut)
@@ -487,6 +487,14 @@ test('a key block past a diary cut stays readable, never sendable (#350)', (t) =
     t.is(g.rekeyPending, true, 'cut ' + cut)
     t.is(g.removals.length, 1, 'cut ' + cut + ': the removal the block covered still counts')
   }
+  // Cut 0 releases the writer: not even its key block counts, so what was
+  // sealed under it stays sealed (the slot walk, #350).
+  ;({ g } = hist(0))
+  t.alike(g.posts.map((p) => p.text), [], 'cut 0: nothing sealed under a released writer opens')
+  t.is(g.sealed, 2, 'cut 0')
+  t.is(g.epoch, null, 'cut 0: the epoch no longer sends')
+  t.is(g.rekeyPending, true, 'cut 0')
+  t.is(g.removals.length, 1, 'cut 0: the removal itself still counts')
 })
 
 test('a key block citing a cut community writer stays readable (#350)', (t) => {
@@ -522,13 +530,19 @@ test('a diary cut below its own leave keeps the diary left and the removal (#350
     return { E2, g: buildGroup(w.input(w.reader(wY), extra)) }
   }
   const control = unleave(null)
-  for (const cut of [0, 1]) {
-    const { g, E2 } = unleave(cut)
-    t.is(g.members.get(X), 'left', 'cut ' + cut)
-    t.alike(g.removals, control.g.removals, 'cut ' + cut + ': the leave is still a requirement')
-    t.is(kidOf(g.epoch), kidOf(E2), 'cut ' + cut + ': the rotation covering it stays the one to send under')
-    t.alike(g.entitled, control.g.entitled)
-  }
+  const { g, E2 } = unleave(1)
+  t.is(g.members.get(X), 'left', 'cut 1')
+  t.alike(g.removals, control.g.removals, 'cut 1: the leave is still a requirement')
+  t.is(kidOf(g.epoch), kidOf(E2), 'cut 1: the rotation covering it stays the one to send under')
+  t.alike(g.entitled, control.g.entitled)
+  // Cut 0 releases the writer that holds the leave: nothing of it counts,
+  // the leave included, so the diary is back through its other writer.
+  // Honest nodes never cut 0 a writer that holds a leave (the slot walk,
+  // #350).
+  const released = unleave(0).g
+  t.is(released.members.get(X), 'member', 'cut 0: the leave is gone with its writer')
+  t.alike(released.removals, [], 'cut 0: no leave to cover')
+  t.ok(released.entitled.includes(wX2), 'cut 0: the other writer is entitled again')
 })
 
 test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {
@@ -2573,4 +2587,43 @@ test('last never names a sealed reaction', (t) => {
   const g = buildGroup(w.input(w.reader(wX)))
   t.alike(g.last, p)
   t.alike(g.posts[0].reactions, [{ emoji: '\u{1f44d}', count: 1, by: [Y] }])
+})
+
+test('slot walk: an old boxless writer holds its slot until a cut 0 releases it (#350)', (t) => {
+  const boxless = K(0x4ff)
+  const more = []
+  for (let i = 0; i < 6; i++) more.push(K(0x410 + i))
+  const ninth = K(0x420)
+  // X binds wX (seq 1), a boxless writer (seq 2) and six more (seq 3 to 8),
+  // then maybe cuts the boxless one at 0 (seq 9) before a 9th (seq 10).
+  const build = (release) => {
+    const w = pworld()
+    w.add(X, boxless, { box: false })
+    for (const k of more) w.add(X, k)
+    w.add(X, ninth)
+    w.joins.get(X)[w.joins.get(X).length - 1].seq = 10
+    const marks = release ? new Map([[X, [{ writer: boxless, cut: 0, seq: 9 }]]]) : new Map()
+    return buildGroup(w.input(w.reader(wX), { marks }))
+  }
+  let g = build(false)
+  t.absent(g.writers.has(boxless), 'the boxless writer is no candidate')
+  t.absent(g.writers.has(ninth), 'but it holds its slot: the 9th does not count')
+  t.alike(g.slots.get(X), { live: 8, frozen: 0, released: 0 })
+  g = build(true)
+  t.ok(g.writers.has(ninth), 'released with cut 0, its slot goes to the 9th')
+  t.alike(g.slots.get(X), { live: 8, frozen: 0, released: 1 })
+})
+
+test('slot walk: a cut on an entitled writer asks for a new key, the frozen writer is entitled to none (#350)', (t) => {
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 10)
+  const control = buildGroup(w.input(w.reader(wY)))
+  t.ok(control.entitled.includes(wX))
+  t.is(control.rekeyPending, false)
+  const g = buildGroup(w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut: w.len(wX), seq: 5 }]]]) }))
+  t.ok(g.frozen.has(wX), 'cut at its length: frozen')
+  t.alike(g.posts.map((p) => p.text), control.posts.map((p) => p.text), 'nothing it sealed is lost')
+  t.absent(g.entitled.includes(wX), 'no new epoch for the frozen writer')
+  t.is(g.rekeyPending, true, 'the epoch it holds must rotate')
+  t.is(g.epoch, null, 'and no longer sends')
 })

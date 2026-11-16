@@ -503,7 +503,7 @@ test('emptyCommunity, unbound root and wrong kinds', (t) => {
   const e = buildCommunity({})
   t.is(e.rootAuthority, false)
   t.alike(e.dropped, [])
-  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'members', 'name', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
+  t.alike(Object.keys(e).sort(), ['admins', 'bans', 'created', 'creator', 'general', 'groups', 'incomplete', 'join', 'kind', 'last', 'lastLeave', 'cwDemote', 'rootAuthority', 'creatorConfirmSeq', 'leaveOf', 'leaveSetOf', 'confirmedLeaveOf', 'admittedCws', 'leaves', 'liveWriters', 'authorityWriters', 'cuts', 'cutUnknown', 'frozen', 'slots', 'members', 'name', 'requests', 'writers', 'dropped', 'memberInvite'].sort())
 
   const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], admins: [A], creates: [{ by: Z, group: G1 }], bindRoot: false })
   const c = comm(C)
@@ -2395,11 +2395,15 @@ test('group-cut on an own writer: its records from the cut on stop counting (#35
   r = setup([[X, [{ writer: wX, cut: 3, seq: 1 }, { writer: wX, cut: 2, seq: 2 }, { writer: wX, cut: 9, seq: 3 }]]])
   t.alike(cutsOf(r), [[wX, 2]], 'the lowest cut wins')
 
-  for (const cut of [0, 1]) {
-    r = setup([[X, [{ writer: wX, cut, seq: 1 }]]])
-    t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut ' + cut + ': nothing past block 0')
-    t.ok(r.writers.has(wX), 'cut ' + cut + ': block 0 stays')
-  }
+  r = setup([[X, [{ writer: wX, cut: 1, seq: 1 }]]])
+  t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut 1: nothing past block 0')
+  t.ok(r.writers.has(wX), 'cut 1: block 0 stays')
+  t.ok(r.frozen.has(wX), 'cut 1: the writer is frozen')
+  r = setup([[X, [{ writer: wX, cut: 0, seq: 1 }]]])
+  t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut 0: nothing of the writer')
+  t.absent(r.writers.has(wX), 'cut 0 takes even block 0: the writer is released')
+  t.absent(r.frozen.has(wX))
+  t.is(r.members.get(X), 'member', 'cut 0: the diary stays a member on its other writer')
 
   r = setup([[Y, [{ writer: wX, cut: 0, seq: 1 }]]])
   t.alike(shown(r), all, 'a mark in another diary does nothing')
@@ -2478,7 +2482,8 @@ test('group-cut: accepted limit, a diary that cuts its own writer below its own 
   for (const opts of [{ cut: 1, demote: false }, { cut: 1 }, { cut: 1, ban: true }, { cut: 0, ban: true }]) {
     const r = setup(opts)
     const label = JSON.stringify(opts) + ': '
-    t.alike(cutsOf(r), [[wA, opts.cut]], label + 'the cut is the marked cut')
+    // A released writer (cut 0) is no candidate at all, so it names no cut.
+    t.alike(cutsOf(r), opts.cut === 0 ? [] : [[wA, opts.cut]], label + 'the cut is the marked cut')
     t.not(r.members.get(X), 'banned', label + 'its ban past the cut no longer counts')
     t.not(r.members.get(Y), 'member', label + 'nor its admit')
   }
@@ -2534,7 +2539,7 @@ test('group-cut: a cut is final, an admit with a far cut never voids it (#350)',
   }
 })
 
-test('group-cut: a cut never undoes a leave nor the rejoin naming it (#350)', (t) => {
+test('group-cut: a cut at 1 or more never undoes a leave nor the rejoin naming it, cut 0 does (#350)', (t) => {
   const wX2 = K(0x4001)
   const leave = (cut) => {
     const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
@@ -2549,12 +2554,18 @@ test('group-cut: a cut never undoes a leave nor the rejoin naming it (#350)', (t
   }
   const control = leave(null)
   t.is(control.members.get(X), 'left')
-  for (const cut of [0, 1, 2]) {
+  for (const cut of [1, 2]) {
     const r = leave(cut)
     t.is(r.members.get(X), 'left', 'cut ' + cut + ': the diary stays left')
     t.ok(r.leaves.has(X), 'cut ' + cut + ': its leave still counts')
     t.alike(shown(r), shown(control), 'cut ' + cut + ': nothing after the leave comes back')
   }
+  // Cut 0 releases the writer, leave included (honest nodes never cut 0 a
+  // writer that holds a leave): the diary is back on its other writer.
+  const released = leave(0)
+  t.is(released.members.get(X), 'member', 'cut 0: the leave goes with its writer')
+  t.absent(released.leaves.has(X))
+  t.alike(shown(released), [wX2 + ':1', wX2 + ':2'], 'cut 0: the other writer counts in full')
 
   const rejoin = (cut) => {
     const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
@@ -2566,12 +2577,18 @@ test('group-cut: a cut never undoes a leave nor the rejoin naming it (#350)', (t
     if (cut !== null) g.mark(X, wX, cut)
     return buildGroup(g.input())
   }
-  for (const cut of [null, 0, 1]) {
+  for (const cut of [null, 1]) {
     const r = rejoin(cut)
     t.is(r.members.get(X), 'member', 'cut ' + cut + ': the rejoin stands')
     t.is(r.incomplete, false, 'cut ' + cut + ': the leave it names is never missing')
     t.alike(shown(r), [wX2 + ':1'])
   }
+  // A rejoin naming a leave on a released writer names nothing that counts:
+  // the new writer is rejected, and the fold never waits for the leave.
+  const r = rejoin(0)
+  t.not(r.members.get(X), 'member', 'cut 0: the rejoin names a released writer')
+  t.alike(shown(r), [], 'cut 0: nothing of the rejoined writer counts')
+  t.is(r.incomplete, false, 'cut 0: nothing is missing')
 })
 
 test('group-cut: mark order and arrival give one result, a gap is reported (#350)', (t) => {
@@ -2598,6 +2615,8 @@ test('group-cut: mark order and arrival give one result, a gap is reported (#350
   const holed = build([{ writer: wX, cut: 3, seq: 1 }, { gap: true }])
   t.alike([...holed.cutUnknown], [X], 'a hole in the diary is reported without cutting')
   t.alike(cutsOf(holed), [[wX, 3]])
+  t.is(r.incomplete, false)
+  t.is(holed.incomplete, true, 'a hole in a diary that binds a writer leaves the slots unsure: incomplete')
 })
 
 test('group-cut: a creator mark on its own non-root writer cuts it, root marks keep their meaning (#350)', (t) => {
@@ -3170,4 +3189,99 @@ test('memberInvite: a returning creator sets it on its CW once the root lost its
   t.is(comm(C).memberInvite, true, 'a root record past its cut never counts')
   C.push(cwZ3, communityInvites({ on: false, at: AT(61) }))
   t.is(comm(C).memberInvite, false, 'the creator CW of the return does')
+})
+
+test('slot walk: a 9th writer counts after a diary cut froze or released one, never without (#350)', (t) => {
+  const ws = []
+  for (let i = 0; i < 8; i++) ws.push(K(0x4100 + i))
+  const ninth = K(0x4200)
+  const setup = (cut = null, { drop = [] } = {}) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    for (let i = 0; i < ws.length; i++) {
+      g.add(X, ws[i])
+      gpost(g, ws[i], 10 + i)
+    }
+    if (cut !== null) g.mark(X, ws[0], cut)
+    g.add(X, ninth)
+    gpost(g, ninth, 30)
+    return buildGroup(g.input({ drop }))
+  }
+  let r = setup()
+  t.absent(r.writers.has(ninth), 'no cut: the 9th never counts')
+  t.absent(shown(r).includes(ninth + ':1'))
+  t.is(r.incomplete, false, 'and the fold never waits for it')
+  t.alike(r.slots.get(X), { live: 8, frozen: 0, released: 0 })
+  t.is(setup(null, { drop: [ninth] }).incomplete, false, 'an unheld writer past the cap is never missing')
+
+  r = setup(2)
+  t.ok(r.writers.has(ws[0]), 'cut at its length: the writer still counts')
+  t.ok(r.frozen.has(ws[0]), 'and is frozen')
+  t.absent(r.liveWriters.has(ws[0]), 'nothing it appends counts')
+  t.ok(shown(r).includes(ws[0] + ':1'), 'its post below the cut stays')
+  t.ok(r.writers.has(ninth), 'the 9th joined after the freeze counts')
+  t.ok(r.liveWriters.has(ninth))
+  t.ok(shown(r).includes(ninth + ':1'))
+  t.alike(r.slots.get(X), { live: 8, frozen: 1, released: 0 })
+  t.is(r.incomplete, false)
+  t.is(setup(2, { drop: [ws[0]] }).incomplete, true, 'an unheld frozen writer leaves the fold incomplete')
+
+  r = setup(1)
+  t.ok(r.frozen.has(ws[0]))
+  t.absent(shown(r).includes(ws[0] + ':1'), 'a post from the cut on does not show')
+
+  r = setup(0)
+  t.absent(r.writers.has(ws[0]), 'cut 0: the writer is released')
+  t.absent(r.frozen.has(ws[0]))
+  t.ok(r.writers.has(ninth), 'the 9th joined after the release counts')
+  t.alike(r.slots.get(X), { live: 8, frozen: 0, released: 1 })
+  t.is(setup(0, { drop: [ws[0]] }).incomplete, false, 'an unheld released writer is never missing')
+})
+
+test('slot walk: cuts at the exact length change no member and no post (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const setup = (cut) => {
+    const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }, { diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1, join: 'approval' })
+    g.add(A, wA).add(X, wX).add(X, wX2).add(Y, wY)
+    g.push(G1, groupAdmin({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(5) }))
+    g.push(wA, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+    const p = gpost(g, wX, 7)
+    gpost(g, wX2, 8)
+    g.push(wA, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(9) }))
+    gpost(g, wY, 10)
+    g.push(wA, groupHide({ target: p, on: true, seen: p, at: AT(11) }))
+    // Each device that stops writes nothing more: the diary cuts it at the
+    // length it has.
+    if (cut) {
+      g.mark(A, wA, g.len(wA))
+      g.mark(X, wX, g.len(wX))
+    }
+    return buildGroup(g.input())
+  }
+  const before = setup(false)
+  const after = setup(true)
+  t.alike([...after.members].sort(), [...before.members].sort(), 'the same members')
+  t.alike(shown(after), shown(before), 'the same posts')
+  t.alike(sorted(after.admins), sorted(before.admins), 'the same admins')
+  t.alike(sorted(after.frozen), [wA, wX].sort(), 'the cut writers are frozen')
+  t.absent(after.authorityWriters.has(wA), 'a frozen writer acts no more')
+})
+
+test('slot walk: a frozen writer keeps its leave and its rejoin target (#350)', (t) => {
+  const wX2 = K(0x4001)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  const g = groupIn(C, { key: G1 })
+  g.add(X, wX)
+  gpost(g, wX, 5)
+  const L = g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(6) }))
+  g.mark(X, wX, g.len(wX))
+  g.add(X, wX2, { rejoin: L, at: AT(7) })
+  gpost(g, wX2, 8)
+  const r = buildGroup(g.input())
+  t.ok(r.frozen.has(wX), 'the writer holding the leave is frozen')
+  t.is(r.members.get(X), 'member', 'the rejoin naming its leave stands')
+  t.alike(shown(r), [wX + ':1', wX2 + ':1'], 'the post below the leave and the cut stays')
+  t.is(r.incomplete, false)
+  t.is(buildGroup(g.input({ drop: [wX] })).incomplete, true, 'the fold waits for the frozen writer and its leave')
 })

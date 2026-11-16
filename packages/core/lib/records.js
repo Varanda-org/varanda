@@ -55,6 +55,10 @@ const MAX_GROUPS_PER_COMMUNITY = 32
 const MAX_GROUP_CUTS = 16
 // Writers one diary may count in a group; also the cuts of a group-leave.
 const MAX_GROUP_WRITERS_PER_DIARY = 8
+// The slot walk (lib/group.js slotWalk, #350): per diary and group, the
+// writers a diary cut may freeze (R) and release (K) over its whole log.
+const MAX_FROZEN_WRITERS_PER_DIARY = 8
+const MAX_WRITER_RELEASES_PER_DIARY = 16
 const MAX_GROUP_NAME = 80
 // Profile avatar: one square still image in this device's media core.
 const AVATAR_SIDE = 512
@@ -1164,6 +1168,8 @@ module.exports = {
   MAX_GROUP_CUTS,
   MAX_GROUP_NAME,
   MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_FROZEN_WRITERS_PER_DIARY,
+  MAX_WRITER_RELEASES_PER_DIARY,
   TYPES,
   PAGE_KEYS,
   MAX_PAGE_ADMINS,
