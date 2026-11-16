@@ -63,4 +63,8 @@ Cada arquivo rodado sozinho com `node <arquivo>`.
 
 ## Conferência em aparelho
 
-Pendente: a nota do Momento ("O momento sai dos servidores em até 14 dias.") e a ajuda das conversas no Android, no iOS e na web.
+Conferido em 16/11/2026 com a demonstração (`EXPO_PUBLIC_VARANDA_VITRINE=1`, Metro do branch), no Android 16 no emulador (build de debug `app.varanda.debug`), no iOS 26.2 no simulador iPhone 17 Pro e na web no navegador embutido do Claude (Chromium):
+
+- A ajuda das conversas diz que a associação guarda os envelopes lacrados por 14 dias: Android e iOS, ok.
+- A nota do Momento ("O momento sai dos servidores em até 14 dias."): Android e web, ok. No iOS não foi capturada, porque o visor avança sozinho antes do toque.
+- O que depende do semeador de verdade (envelopes e mídia que duram 14 dias, o teto de 40000 envelopes e 4 GiB) fica para a lista do operador (#224).
