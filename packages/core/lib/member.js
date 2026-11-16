@@ -4037,6 +4037,7 @@ module.exports = {
   groupInvitePolicy,
   groupRekey,
   periodicRekey,
+  localGroups,
   communityCreate,
   communityJoin,
   communityLeave,

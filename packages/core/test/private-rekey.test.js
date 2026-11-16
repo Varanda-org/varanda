@@ -254,10 +254,14 @@ test('core session: a community\'s growth never reaches the check', async (t) =>
   t.alike(calls[1].groups, [group], 'only the group: a community is never checked, so never marked')
   await until(() => started(link) === 3, { name: 'a sincronização volta' })
 
-  // The community alone, again and again: no check, no stop.
+  // The community alone, again and again, and an entry the check drops
+  // (no valid writer): no check, no stop.
+  const malformed = 'cd'.repeat(32)
+  store.writeGroups(a.dataDir, [...store.readGroups(a.dataDir), { group: malformed, writer: 'x', nonce: 'y' }])
   offset += 2 * REKEY_CHECK_MS
   for (let i = 0; i < 3; i++) {
     live.onEvent({ event: 'group-downloaded', key: community, group: community, length: 6 + i })
+    live.onEvent({ event: 'group-downloaded', key: malformed, group: malformed, length: 1 + i })
     await settle(150)
   }
   live.onEvent({ event: 'group-downloaded', key: group, group, length: 9 })
@@ -265,5 +269,5 @@ test('core session: a community\'s growth never reaches the check', async (t) =>
   t.alike(calls[2].groups, [group])
   await until(() => started(link) === 4, { name: 'a sincronização volta de novo' })
   await link.call('sync.stop')
-  t.is(calls.length, 3, 'the community\'s growth stopped the run never')
+  t.is(calls.length, 3, 'the community\'s growth and the dropped entry\'s stopped the run never')
 })

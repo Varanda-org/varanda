@@ -465,15 +465,24 @@ test('session: a grown group starts a rotation-only pass on the run\'s cores, at
   await until(async () => firstBlocks(await coreRecords(a, group)) === 2, { name: 'the rotation', timeoutMs: 10000 })
   t.is(spy.length, 2, 'one pass for the growth')
 
-  // Two more growths 2 s before that hour ends: one pass, when it ends.
+  // 5 s before that hour ends, another group grows twice: its first growth
+  // starts a pass, its second waits a full hour.
   await live()
-  offset += grew + REKEY_CHECK_MS - 2000 - clock()
+  offset += grew + REKEY_CHECK_MS - 5000 - clock()
+  const other = 'cd'.repeat(32)
+  sync.last().emit({ event: 'groups-changed', group: other })
+  await until(() => spy.length === 3, { name: 'the other group\'s pass', timeoutMs: 10000 })
+  await live()
+  sync.last().emit({ event: 'groups-changed', group: other })
+
+  // Two more growths of the group, deferred after the other's: one pass,
+  // when the group's hour ends, not the other's.
   sync.last().emit({ event: 'groups-changed', group })
   await pause(100)
   sync.last().emit({ event: 'groups-changed', group })
-  await until(() => spy.length === 3, { name: 'the pass when the hour ends', timeoutMs: 10000 })
-  t.ok(spy[2].now >= grew + REKEY_CHECK_MS, 'not before the hour ends')
+  await until(() => spy.length === 4, { name: 'the pass when the hour ends', timeoutMs: 10000 })
+  t.ok(spy[3].now >= grew + REKEY_CHECK_MS, 'not before the hour ends')
   await a.web.request('sync.stop')
-  t.is(spy.length, 3, 'two growths, one pass')
+  t.is(spy.length, 4, 'two growths, one pass')
   t.is(firstBlocks(await coreRecords(a, group)), 2, 'still rotated once')
 })

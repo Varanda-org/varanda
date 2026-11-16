@@ -1064,6 +1064,7 @@ function createBrowserSession ({
   let rekeyQueued = false
   const rekeyDeferred = new Set()
   let rekeyDeferTimer = null
+  let rekeyDeferAt = Infinity
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -2405,6 +2406,7 @@ function createBrowserSession ({
     rekeyTimerAt = null
     rekeyPassTimer = null
     rekeyDeferTimer = null
+    rekeyDeferAt = Infinity
     rekeyDeferred.clear()
   }
 
@@ -2435,11 +2437,13 @@ function createBrowserSession ({
       return
     }
     rekeyDeferred.add(group)
-    if (rekeyDeferTimer !== null) return
-    let at = Infinity
-    for (const g of rekeyDeferred) at = Math.min(at, rekeyTriggers.readyAt(g))
+    const at = rekeyTriggers.readyAt(group)
+    if (rekeyDeferTimer !== null && rekeyDeferAt <= at) return
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
+    rekeyDeferAt = at
     rekeyDeferTimer = setTimeout(() => {
       rekeyDeferTimer = null
+      rekeyDeferAt = Infinity
       const groups = [...rekeyDeferred]
       rekeyDeferred.clear()
       for (const g of groups) rekeyGrew(g)

@@ -25,7 +25,7 @@ const path = require('#path')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
-const { readConfig, readFollows, storeExists, readGroups } = require('./store')
+const { readConfig, readFollows, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
 const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
@@ -310,6 +310,7 @@ function createSession ({
   let rekeyStart = false
   const rekeyDeferred = new Set()
   let rekeyDeferTimer = null
+  let rekeyDeferAt = Infinity
   // Groups a check found public: never private, never checked again.
   const rekeyPublic = new Set()
 
@@ -482,10 +483,7 @@ function createSession ({
   // the store.
   function checkable (groups) {
     if (groups.length === 0) return []
-    const local = new Set()
-    for (const g of readGroups(dataDir)) {
-      if (g && typeof g.group === 'string' && g.kind !== 'community') local.add(g.group.toLowerCase())
-    }
+    const local = new Set(member.localGroups(dataDir).filter((g) => g.kind !== 'community').map((g) => g.group))
     const out = []
     for (const g of groups) {
       const key = typeof g === 'string' ? g.toLowerCase() : ''
@@ -495,12 +493,16 @@ function createSession ({
   }
 
   function armRekeyDeferred () {
-    if (rekeyDeferTimer !== null || rekeyDeferred.size === 0) return
+    if (rekeyDeferred.size === 0) return
     let at = Infinity
     for (const g of rekeyDeferred) at = Math.min(at, rekeyGate.readyAt(g))
+    if (rekeyDeferTimer !== null && rekeyDeferAt <= at) return
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
+    rekeyDeferAt = at
     const delay = Math.min(Math.max(at - rekeyGate.now(), 0), 0x7fffffff)
     rekeyDeferTimer = setTimeout(() => {
       rekeyDeferTimer = null
+      rekeyDeferAt = Infinity
       const groups = [...rekeyDeferred]
       rekeyDeferred.clear()
       wantRekey(groups)
@@ -528,6 +530,7 @@ function createSession ({
     rekeyTimer = null
     rekeyDueTimer = null
     rekeyDeferTimer = null
+    rekeyDeferAt = Infinity
     rekeyWanted.clear()
     rekeyDeferred.clear()
     rekeyAll = false
