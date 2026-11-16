@@ -1274,7 +1274,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     const peeked = peekedRef.current
     const post = shownPost(item, peeked, seeded ? seedOriginalsRef.current : null)
     if (post === null) return null
-    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} />
+    return <PostRow {...rowProps({ item: withHeader(post), names, peeked, now, ownKey, follows, eng, handlers, extra: item.kind === 'repost' ? { repostedBy: memberWho } : NO_EXTRA, cache: rowCache, rowKey: postKey(item) })} level={post.replyTo ? 'comment' : 'post'} />
   }
   renderRef.current = depo ? testimonialTab.renderItem : mural ? renderMural : renderPost
 

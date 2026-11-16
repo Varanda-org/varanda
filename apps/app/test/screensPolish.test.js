@@ -71,7 +71,7 @@ test('incomplete counts keep their explanation in a shared info button', async (
   }
   t.ok(src.includes('{incomplete ? <Soft>incompleto: algumas publicações podem não ter chegado.</Soft> : null}'), 'the separate publication warning stays')
   const { HELP } = await import('../src/help.js')
-  t.is(HELP.rua.paragraphs[2], 'Os números de curtidas e respostas podem chegar incompletos. Eles não mudam o que foi publicado.', 'the general feed help keeps its distinct sentence')
+  t.is(HELP.rua.paragraphs[2], 'Os números de curtidas e comentários podem chegar incompletos. Eles não mudam o que foi publicado.', 'the general feed help keeps its distinct sentence')
 })
 
 test('shell toast has a 44 point action and extends action lifetime for large text', (t) => {

@@ -14,7 +14,9 @@ export const VIDEO_LINE = 'Vídeo disponível na Varanda'
 
 export const A11Y_OPEN = 'Abrir publicação'
 export const A11Y_PROFILE = 'Ver perfil'
-export const A11Y_REPLY = 'Responder'
+export const A11Y_REPLY = 'Comentar'
+// The previewed post is itself an answer, so answering it is a reply to a comment.
+export const A11Y_ANSWER = 'Responder'
 export const A11Y_REPOST = 'Republicar'
 export const A11Y_LIKE = 'Curtir'
 export const A11Y_MORE = 'Mais opções'

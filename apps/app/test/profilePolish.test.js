@@ -36,6 +36,10 @@ test('profiles show a skeleton header and rows on the first load', (t) => {
   for (const src of [diary, member]) t.ok(src.includes('<View>{[0, 1, 2].map((row) => <SkeletonRow key={row} />)}</View>'))
 })
 
+test('member rows say comentar on a post and responder on a comment', (t) => {
+  t.ok(read('screens/Membro.js').includes("level={post.replyTo ? 'comment' : 'post'} />"))
+})
+
 test('header actions and the sticky bar use press feedback', (t) => {
   const header = read('ui/ProfileHeader.js')
   t.ok(/<PressScale[\s\S]*?onPress={onBack}/.test(header))
