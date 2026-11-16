@@ -50,10 +50,17 @@
 //   must pass mediaBounds whatever mime the sender named). A body is never
 //   buffered past BLOB_FRAME_BYTES. Returns bytes in memory, never a remote URL. The GETs are
 //   paced (GET_BURST, then one every GET_PACE_MS) under the seeder's shared
-//   /media budget. A 429 or 503 on a read waits its Retry-After (at most
-//   RETRY_AFTER_MAX_MS, RETRY_DEFAULT_MS without one) and retries that chunk
-//   at most GET_RETRIES times; any other failure, a 404 included, is a
-//   normal error at once. Only these reads are ever retried, never a put.
+//   /media budget, at most GET_WINDOW of them in flight, launched in chunk
+//   order; the first failure launches no further chunk and, once the ones in
+//   flight settle, the lowest failing chunk's error is thrown (a chunk above
+//   a failed one gives up its retries at once and its GET in flight is
+//   aborted). A 429 or 503
+//   on a read waits its Retry-After (at most RETRY_AFTER_MAX_MS,
+//   RETRY_DEFAULT_MS without one) and retries that chunk at most
+//   GET_RETRIES times; any other failure, a 404 included, is a normal error
+//   at once. Only these reads are ever retried, never a put. Each GET
+//   attempt, headers and body together, ends after GET_TIMEOUT_MS as a
+//   transient failure (NO_SEEDER), not retried here.
 //   The GETs bypass the HTTP cache (cache: 'no-store'): the caller's sealed
 //   plaintext cache is the only local copy, and ciphertext must not sit in
 //   the browser's cache for the pool's 7 days.
@@ -98,9 +105,21 @@ const FORCE_MARGIN = 8
 // client); a download stays well under it.
 const GET_BURST = 32
 const GET_PACE_MS = 63
+// One GET at a time paid a full round trip per 32 KiB chunk. The seeder
+// answers at most 16 /media responses at once (VARANDA_MEDIA_MAX_IN_FLIGHT,
+// docs/seeder-capacity.md) for every client together, so a download keeps
+// only 4 in flight: most of the round-trip saving, without one reader
+// filling the seeder's slots.
+const GET_WINDOW = 4
 const GET_RETRIES = 3
 const RETRY_AFTER_MAX_MS = 10000
 const RETRY_DEFAULT_MS = 1000
+// A GET that answered but never finished its body would otherwise hold its
+// cipher buffer and connection forever; 30 s matches the native fetch
+// (apps/app/worklet/bare-fetch.js), counted over the headers and the body.
+const GET_TIMEOUT_MS = 30000
+// setTimeout fires at once past this, which would fail every GET.
+const MAX_TIMER_MS = 2147483647
 
 const TOO_BIG = 'mídia grande demais'
 const BAD_MEDIA = 'mídia inválida'
@@ -590,19 +609,99 @@ function retryDelay (res, L) {
   return Math.min(ms, L.retryAfterMaxMs)
 }
 
-// pace(): resolves when the next GET may go out.
-async function getFrame (doFetch, url, L, pace) {
-  let res
-  for (let attempt = 0; ; attempt++) {
-    await pace()
-    try {
-      res = await doFetch(url, { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' })
-    } catch {
-      throw new UsageError(NO_SEEDER)
+function halted (halt) {
+  return halt !== undefined && halt.stop()
+}
+
+// sleep(ms), cut short once halt.stop() turns true. halt.wake(fn) calls fn on
+// every failure and returns its unsubscribe; the timer is always cleared.
+function pause (ms, halt) {
+  if (halt === undefined) return sleep(ms)
+  return new Promise((resolve) => {
+    let timer = null
+    let off = noop
+    const done = () => {
+      clearTimeout(timer)
+      off()
+      resolve()
     }
-    if ((res.status !== 429 && res.status !== 503) || attempt >= L.getRetries) break
-    await sleep(retryDelay(res, L))
+    off = halt.wake(() => { if (halt.stop()) done() })
+    timer = setTimeout(done, ms)
+  })
+}
+
+// One GET attempt's deadline: after ms, or on abort() (a halted chunk), its
+// signal is aborted and race(p) rejects with NO_SEEDER, so the run settles
+// even when the fetch or the body stream ignores the signal. Expiry rejects
+// before the signal aborts, so a timeout always reads as NO_SEEDER, which
+// keeps the media retryable instead of marked gone. end() clears the timer;
+// an attempt that did not finish its frame also aborts its signal, so an
+// unread body (a 404, a 429 before its retry) does not hold the connection.
+function attemptDeadline (ms) {
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null
+  let fire = noop
+  const expired = new Promise((resolve, reject) => { fire = reject })
+  expired.catch(noop)
+  let fired = false
+  const abort = () => {
+    if (fired) return
+    fired = true
+    fire(new UsageError(NO_SEEDER))
+    if (ctrl !== null) try { ctrl.abort() } catch {}
   }
+  const timer = setTimeout(abort, ms)
+  return {
+    signal: ctrl === null ? undefined : ctrl.signal,
+    race: (p) => Promise.race([p, expired]),
+    abort,
+    end (ok) {
+      clearTimeout(timer)
+      if (!ok) abort()
+    }
+  }
+}
+
+// pace(halt): resolves when the next GET may go out. halt (optional): { stop,
+// wake }; once stop() is true the chunk's error can no longer be the one
+// thrown, so no GET goes out for it, not even the first, a 429 or 503 is not
+// retried and its Retry-After is not waited out. The error thrown then is
+// never surfaced. Each attempt has its own L.getTimeoutMs deadline over the
+// headers and the body; a timed-out attempt is not retried here (only a 429
+// or 503 is), and halting a chunk aborts its GET still in flight.
+async function getFrame (doFetch, url, L, pace, halt) {
+  for (let attempt = 0; ; attempt++) {
+    await pace(halt)
+    if (halted(halt)) throw new UsageError(NO_SEEDER)
+    const deadline = attemptDeadline(L.getTimeoutMs)
+    const off = halt === undefined ? noop : halt.wake(() => { if (halt.stop()) deadline.abort() })
+    let ok = false
+    let wait
+    try {
+      let res
+      try {
+        res = await deadline.race(doFetch(url, { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store', signal: deadline.signal }))
+      } catch {
+        throw new UsageError(NO_SEEDER)
+      }
+      if ((res.status !== 429 && res.status !== 503) || attempt >= L.getRetries) {
+        const body = await deadline.race(frameBody(res))
+        ok = true
+        return body
+      }
+      wait = retryDelay(res, L)
+    } finally {
+      off()
+      deadline.end(ok)
+    }
+    if (halted(halt)) throw new UsageError(NO_SEEDER)
+    await pause(wait, halt)
+    if (halted(halt)) throw new UsageError(NO_SEEDER)
+  }
+}
+
+// The frame of a final answer: its status and length checked, its body read
+// under the cap.
+async function frameBody (res) {
   if (res.status === 404) throw new UsageError(NOT_FOUND)
   if (res.status === 429) throw new UsageError(SEEDER_RATE)
   if (res.status !== 200 || res.redirected === true) throw new UsageError(NO_SEEDER)
@@ -652,8 +751,11 @@ async function readCapped (res, sized) {
 
 // descriptor: { id, key, nonce, chunks, bytes, sha256 } from a sealed DM.
 // opts.mime: the type the message names; an image type (or none) must pass
-// mediaBounds. opts.fetch and opts.limits (getBurst, getPaceMs, getRetries,
-// retryAfterMaxMs, retryDefaultMs): tests only. Resolves { bytes, bounds }.
+// mediaBounds. opts.fetch and opts.limits (getBurst, getPaceMs, getWindow,
+// getRetries, retryAfterMaxMs, retryDefaultMs, getTimeoutMs): tests only. Resolves
+// { bytes, bounds }. Chunks are fetched getWindow at a time (GET_WINDOW, kept
+// small because the seeder's 16 responses in flight are shared by all
+// clients); the hash and the open still wait for every chunk.
 async function fetchBlob (descriptor, seederHttpOrigin, { mime, fetch: doFetch = globalThis.fetch, limits = {} } = {}) {
   if (!blob.validateBlobDescriptor(descriptor)) throw new UsageError(BAD_MEDIA)
   if (descriptor.bytes - BLOB_MAC_BYTES > BLOB_MAX_PLAIN) throw new UsageError(BAD_MEDIA)
@@ -662,27 +764,49 @@ async function fetchBlob (descriptor, seederHttpOrigin, { mime, fetch: doFetch =
   const L = {
     getBurst: GET_BURST,
     getPaceMs: GET_PACE_MS,
+    getWindow: GET_WINDOW,
     getRetries: GET_RETRIES,
     retryAfterMaxMs: RETRY_AFTER_MAX_MS,
     retryDefaultMs: RETRY_DEFAULT_MS,
+    getTimeoutMs: GET_TIMEOUT_MS,
     ...(limits || {})
   }
+  if (!Number.isInteger(L.getTimeoutMs) || L.getTimeoutMs <= 0 || L.getTimeoutMs > MAX_TIMER_MS) L.getTimeoutMs = GET_TIMEOUT_MS
+  const inFlight = Number.isInteger(L.getWindow) ? Math.max(1, L.getWindow) : GET_WINDOW
   let sent = 0
   let last = 0
+  let turns = Promise.resolve()
   // Past the burst, one GET per getPaceMs counted from the previous GET, so
-  // a slow answer or a retry wait is not paid twice.
-  const pace = async () => {
-    if (sent >= L.getBurst && L.getPaceMs > 0) {
-      const wait = last + L.getPaceMs - Date.now()
-      if (wait > 0) await sleep(wait)
-    }
-    sent++
-    last = Date.now()
+  // a slow answer or a retry wait is not paid twice. Chained so concurrent
+  // chunks and retries each take the next slot in the order they ask. A
+  // halted chunk sends nothing, so its slot ends at once and is not counted:
+  // the slots queued behind it do not wait for a GET that never goes out.
+  const pace = (halt) => {
+    turns = turns.then(async () => {
+      if (halted(halt)) return
+      if (sent >= L.getBurst && L.getPaceMs > 0) {
+        const wait = last + L.getPaceMs - Date.now()
+        if (wait > 0) await pause(wait, halt)
+        if (halted(halt)) return
+      }
+      sent++
+      last = Date.now()
+    })
+    return turns
   }
   const { id, chunks, bytes } = descriptor
   const cipher = b4a.alloc(bytes)
-  for (let index = 0; index < chunks; index++) {
-    const chunk = blob.decodeChunk(await getFrame(doFetch, origin + '/blob/' + id + '/' + index, L, pace))
+  let failed = null
+  const wakers = new Set()
+  const wake = (fn) => {
+    wakers.add(fn)
+    return () => wakers.delete(fn)
+  }
+  const getChunk = async (index) => {
+    // Only a lower failed chunk stops this one: a chunk below a failure keeps
+    // retrying, since its own outcome may still be the error thrown.
+    const halt = { stop: () => failed !== null && failed.index < index, wake }
+    const chunk = blob.decodeChunk(await getFrame(doFetch, origin + '/blob/' + id + '/' + index, L, pace, halt))
     if (chunk === null || b4a.toString(chunk.id, 'hex') !== id || chunk.index !== index || chunk.count !== chunks) {
       throw new UsageError(BAD_MEDIA)
     }
@@ -692,6 +816,27 @@ async function fetchBlob (descriptor, seederHttpOrigin, { mime, fetch: doFetch =
     }
     cipher.set(chunk.bytes.subarray(0, take), index * BLOB_CHUNK_BYTES)
   }
+  let next = 0
+  // Each lane takes the next chunk in index order. The lowest failing index
+  // wins, not the first to fail, so the error a caller maps does not depend
+  // on which answer came back first.
+  const lane = async () => {
+    while (failed === null && next < chunks) {
+      const index = next++
+      try {
+        await getChunk(index)
+      } catch (err) {
+        if (failed === null || index < failed.index) {
+          failed = { index, err }
+          for (const fn of [...wakers]) fn()
+        }
+      }
+    }
+  }
+  const lanes = []
+  for (let i = 0; i < Math.min(inFlight, chunks); i++) lanes.push(lane())
+  await Promise.all(lanes)
+  if (failed !== null) throw failed.err
   if (b4a.toString(sha256(cipher), 'hex') !== descriptor.sha256) throw new UsageError(BAD_MEDIA)
 
   const key = b4a.from(descriptor.key, 'hex')
@@ -752,5 +897,7 @@ module.exports = {
   ROTATION_MS,
   GET_BURST,
   GET_PACE_MS,
-  GET_RETRIES
+  GET_WINDOW,
+  GET_RETRIES,
+  GET_TIMEOUT_MS
 }

@@ -7,9 +7,13 @@
 //
 // The photo comes only from the node (node.media.read kind 'moment'): a blob
 // the node fetched from the seeder and decrypted with the record's public
-// key. A gone blob (expired, deleted, never reached the seeder) reads 'Foto
-// indisponível', never an error banner. The text is the author's, so it goes
-// through displayText.
+// key. It is read through the read-ahead store (src/momentPhotos.js), which
+// keeps the item on screen, the two after it and the one before it, so a step
+// shows the next photo at once; the store owns every URL and read file and
+// releases them once no list names them (the ones off screen also after its
+// max age). A gone blob (expired, deleted, never
+// reached the seeder) reads 'Foto indisponível', never an error banner. The
+// text is the author's, so it goes through displayText.
 //
 // Tap the right half: next; the left half: previous; hold: pause; swipe down
 // or the close button: close. Photos advance after five seconds (15 with
@@ -34,7 +38,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { holdMsOf, momentMusicOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
+import { aheadMomentsOf, holdMsOf, momentMusicOf, momentRefOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, prevMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
+import { IMAGE_MIMES, momentPhotoKey, momentPhotosFor } from '../momentPhotos'
 import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
 import { momentSwipe, swipeRelease, swipeTotal } from '../momentSwipe'
 import { QUICK, reactionName } from '../reactions'
@@ -42,7 +47,7 @@ import { audiusPolicy, audiusReady } from '../account'
 import { musicOriginOf } from '../music'
 import { soundMuted, setSoundMuted, onSoundMute, SOUND_MUTE_LABEL, SOUND_UNMUTE_LABEL } from '../soundMute'
 import { openExternal } from '../openExternal'
-import { MomentMusic, prepareMomentMusic } from '../ui/MomentMusic'
+import { MomentMusic, prepareMomentMusic, warmMomentMusicItem } from '../ui/MomentMusic'
 import { liveAuthors, liveItems, momentsOf } from '../momentSeen'
 import { bindMomentSeen, loadMomentSeen, markMomentSeen, migrateMomentSeenOnce, onMomentSeen } from '../momentSeenStore'
 import { adoptVideoFile, revokeUrl, urlFromBytes } from '../media/display'
@@ -73,7 +78,8 @@ export const DELETE_BODY = 'O momento deixa de aparecer para quem segue você. C
 export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'
 export const NONE_TEXT = 'Nenhum momento agora.'
 const OFF_TEXT = 'Momentos disponíveis no app hospedado.'
-const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+// Owner of the viewer's photo reads: another owner's want() must not end them.
+const PHOTO_OWNER = 'viewer'
 // A drag down past this many points (or a quick flick) closes the viewer.
 const CLOSE_DRAG = 100
 const TAP_SLOP = 10
@@ -87,8 +93,6 @@ export const EXPIRY_TICK_MS = 15000
 export const MENU_SETTLE_MS = 1000
 export const MUSIC_START_WAIT_MS = 3000
 export const LINK_HOLD_GRACE_MS = 1000
-
-const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
 
 // A failure text for a mutating request: an uncertain one may have been
 // applied, so it says to check before trying again.
@@ -244,89 +248,70 @@ export function autoAdvanceOn (reduce) {
   return reduce === false
 }
 
-function wipe (bytes) {
-  try { if (bytes instanceof Uint8Array) bytes.fill(0) } catch {}
+// One store per node.media and epoch: a lock, sign-out or another identity
+// clears the old one, so no photo of the last session survives.
+function photoStoreOf (node) {
+  return momentPhotosFor(node.media, node.epoch, { urlFromBytes, revokeUrl, adoptVideoFile })
 }
 
-// The media of author:seq -> { phase: 'loading' | 'ok' | 'off', uri }. The
-// URL is released when the item changes or the viewer closes.
-function useMomentPhoto (author, seq, expected) {
+const PHOTO_LOADING = { phase: 'loading', uri: null }
+const PHOTO_OFF = { phase: 'off', uri: null }
+
+// The media of an author's item -> { phase: 'loading' | 'ok' | 'off', uri }.
+// The store owns the URL: the hook never releases it.
+function useMomentPhoto (author, item) {
   const node = useNode()
-  const media = node.media && typeof node.media.read === 'function' ? node.media : null
-  const mime = expected?.mime
-  const ms = expected?.ms
-  const key = author + ':' + seq
-  const [state, setState] = useState({ key: null, phase: 'loading', uri: null })
+  const store = photoStoreOf(node)
+  const ref = momentRefOf(author, item)
+  const key = ref === null ? '' : momentPhotoKey(ref.author, ref.seq)
+  const seq = ref?.seq
+  const mime = ref?.expected.mime
+  const ms = ref?.expected.ms
+  const until = ref?.until
+  const [state, setState] = useState({ key: null, store: null, ...PHOTO_LOADING })
+  // The store is the truth for what may be shown: it revokes a URL when it
+  // drops the entry, so an 'ok' kept in state may name a dead URL.
+  const settled = store !== null && key !== '' ? store.peek(key) : null
+  const mine = state.key === key && state.store === store
+  // The store dropped the photo this hook showed: read it again, once per loss.
+  const lost = mine && state.phase === 'ok' && settled === null
+  const [again, setAgain] = useState(0)
   useEffect(() => {
-    if (media === null || typeof author !== 'string' || !Number.isSafeInteger(seq)) {
-      setState({ key, phase: 'off', uri: null })
+    if (lost) setAgain((n) => n + 1)
+  }, [lost])
+  useEffect(() => {
+    if (store === null || key === '') {
+      setState({ key, store, ...PHOTO_OFF })
       return undefined
     }
     let alive = true
-    let release = null
-    setState({ key, phase: 'loading', uri: null })
-    media.read({ kind: 'moment', author, seq }).then((got) => {
-      const forget = () => {
-        if (!isObject(got) || typeof got.uri !== 'string') return
-        const name = got.uri.slice(got.uri.lastIndexOf('/') + 1)
-        try { if (typeof media.forgetReadFile === 'function') media.forgetReadFile(name) } catch {}
-      }
-      const video = isObject(got) && got.mime === 'video/mp4'
-      const valid = isObject(got) && got.mime === mime && (video
-        ? got.ms === ms && [got.w, got.h, got.ms].every((n) => Number.isSafeInteger(n) && n > 0)
-        : IMAGE_MIMES.includes(got.mime))
-      if (!alive || !valid) {
-        forget()
-        if (isObject(got)) wipe(got.bytes)
-        if (alive) setState({ key, phase: 'off', uri: null })
-        return
-      }
-      let uri = null
-      try {
-        if (got.bytes instanceof Uint8Array) {
-          uri = urlFromBytes(got.bytes, got.mime)
-          forget()
-        } else if (typeof got.uri === 'string' && got.uri.startsWith('file://')) {
-          if (video) {
-            uri = adoptVideoFile(got.uri)
-            forget()
-          } else {
-            uri = got.uri
-            release = forget
-          }
-        } else {
-          forget()
-        }
-      } catch {
-        forget()
-      } finally {
-        wipe(got.bytes)
-      }
-      if (typeof uri === 'string' && uri !== '' && release === null) {
-        const shown = uri
-        release = () => revokeUrl(shown)
-      }
-      if (!alive) {
-        if (release) release()
-        release = null
-        return
-      }
-      setState({ key, phase: typeof uri === 'string' && uri !== '' ? 'ok' : 'off', uri, ms: got.ms })
-    }, () => {
-      // NOT_FOUND 'foto indisponível': the blob is gone or the moment ended.
-      if (alive) setState({ key, phase: 'off', uri: null })
+    // Also for a settled entry: read() holds it until the viewer's next list.
+    store.read({ author, seq, expected: { mime, ms }, until }, PHOTO_OWNER).then((got) => {
+      if (alive) setState({ key, store, phase: got.phase, uri: got.phase === 'ok' ? got.uri : null, ms: got.ms })
     })
-    return () => {
-      alive = false
-      if (release) release()
-      release = null
-    }
-  }, [key, author, seq, media, mime, ms])
+    return () => { alive = false }
+  }, [store, key, mime, ms, until, again])
   // Bytes that pass every check but do not decode: 'Foto indisponível', not a
-  // blank moment (the Image's onError).
-  const fail = useCallback(() => setState((s) => (s.key === key ? { key, phase: 'off', uri: null } : s)), [key])
-  const shown = state.key === key ? state : { key, phase: 'loading', uri: null }
-  return { ...shown, fail }
+  // blank moment (the Image's onError). The store keeps 'off' so the next
+  // visit does not read them again. Only for the URL the store still holds:
+  // a late error from a dropped or replaced source says nothing about it.
+  const fail = useCallback((uri) => {
+    const held = store !== null && key !== '' ? store.peek(key) : null
+    if (held === null || held.phase !== 'ok' || held.uri !== uri) return
+    store.fail(key)
+    setState((s) => (s.key === key && s.store === store ? { key, store, ...PHOTO_OFF } : s))
+  }, [store, key])
+  let shown
+  if (store === null || key === '') shown = PHOTO_OFF
+  // An entry read ahead shows on the first render of its item, never a
+  // spinner frame before the effect runs.
+  else if (settled !== null) shown = { phase: settled.phase, uri: settled.phase === 'ok' ? settled.uri : null, ms: settled.ms }
+  // A failed read is not cached by the store: state alone remembers it.
+  else if (mine && state.phase === 'off') shown = PHOTO_OFF
+  else shown = PHOTO_LOADING
+  const shownUri = shown.uri
+  const failShown = useCallback(() => fail(shownUri), [fail, shownUri])
+  return { key, phase: shown.phase, uri: shown.uri, ms: shown.ms, fail: failShown }
 }
 
 // Each visit has its own token: a queued player event or animation completion
@@ -615,7 +600,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   // so the avatar below may persist.
   const author = ring ? ring.author : null
   const mine = author !== null && author === own
-  const photo = useMomentPhoto(author, item ? item.seq : null, item?.media)
+  const photo = useMomentPhoto(author, item)
   const handlePhotoError = photo.fail
   const itemKey = item ? item.ref : ''
   const [reactionStates, setReactionStates] = useState({})
@@ -654,6 +639,46 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const nextMusic = momentMusicOf(nextItem)
   const musicOrigin = musicOriginOf(node)
   const musicOn = useMomentMusicPolicy(node, own, music !== null || nextMusic !== null)
+
+  // Photos are read while the person looks: the item on screen, the two a
+  // step forward reaches and the one a step back reaches. Hidden (under a
+  // sheet, another screen or in the background) only the item on screen.
+  const photoStore = photoStoreOf(node)
+  const photoAhead = isTop && !covered && node.visible !== false
+  const ahead2 = aheadMomentsOf(rings, pos, 2)
+  // Nulls keep their place: the store reads the first entry as the item on
+  // screen and the second as the next one, so the list is always [current,
+  // next, after next, previous], even at the last momento.
+  const wanted = item === null
+    ? []
+    : [{ author, item }].concat(photoAhead ? [ahead2[0] || null, ahead2[1] || null, prevMomentOf(rings, pos)] : []).map((m) => (m ? momentRefOf(m.author, m.item) : null))
+  const wantKey = wanted.map((ref) => (ref ? momentPhotoKey(ref.author, ref.seq) : '-')).join(',')
+  const wantedRef = useRef(wanted)
+  wantedRef.current = wanted
+  const nextRef = photoAhead && wanted.length > 1 ? wanted[1] : null
+  const nextImage = nextRef !== null && IMAGE_MIMES.includes(nextRef.expected.mime)
+  const nextPhotoKey = nextImage ? momentPhotoKey(nextRef.author, nextRef.seq) : ''
+  // Bumped when the queue settles the next photo, so its hidden decode below
+  // renders. No read() of its own: that would start a read past the store's
+  // cap and hold the photo beyond the item on screen.
+  const [, setNextLanded] = useState(0)
+  useEffect(() => {
+    if (photoStore === null || nextPhotoKey === '') return undefined
+    return photoStore.subscribe((key, got) => {
+      if (key === nextPhotoKey && got.phase === 'ok') setNextLanded((n) => n + 1)
+    })
+  }, [photoStore, nextPhotoKey])
+  useEffect(() => {
+    if (photoStore === null) return undefined
+    photoStore.want(PHOTO_OWNER, wantedRef.current)
+  }, [photoStore, wantKey])
+  useEffect(() => {
+    if (photoStore === null) return undefined
+    return () => photoStore.want(PHOTO_OWNER, [])
+  }, [photoStore])
+  const nextSettled = nextPhotoKey !== '' && photoStore !== null ? photoStore.peek(nextPhotoKey) : null
+  const warmUri = nextSettled?.phase === 'ok' ? nextSettled.uri : null
+
   const [musicState, setMusicState] = useState(null)
   const musicStarted = musicOn === true && musicState?.key === itemKey && musicState.phase === 'playing'
   // Opened muted: use photo time until unmuted, then wait up to 3 s for
@@ -698,17 +723,59 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
       // The next momento's audio opens once the current one has started,
       // is unavailable or has none; the service replaces a stale relay at the member cap.
       const handle = prepareMomentMusic({ member: own, origin: musicOrigin, request: node.request }, nextMusic, { stream: streamNext })
-      ahead.current = { key: nextKey, handle, own, origin: musicOrigin, epoch: node.epoch }
+      ahead.current = { key: nextKey, handle, own, origin: musicOrigin, epoch: node.epoch, pair, stream: streamNext, upgraded: false }
       handle.done.then((result) => {
         if (!result.ok && result.code === 'limite-musica') musicQuota.current = true
       })
+    } else if (ahead.current !== null && ahead.current.pair === pair && ahead.current.stream === false && !ahead.current.upgraded && streamNext) {
+      // Opened as a ticket only while the current audio was still loading:
+      // once it started, the next audio opens from that ticket, no new load.
+      ahead.current.upgraded = true
+      ahead.current.handle.upgrade()
     }
   }, [itemKey, nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, covered, node.visible, musicClosed, soundOff, photo.phase, musicSettled, streamNext])
+  // The next track's item answer is fetched as soon as music may play, so
+  // its ticket and audio start from a settled item later. It opens no ticket
+  // or stream, so it waits for neither the photo nor the current audio.
+  // { key, session, abort, done } of the last warm-up, and every warm-up
+  // still in flight: a step can start one while the previous one runs.
+  const warmedMusic = useRef(null)
+  const warmingMusic = useRef(new Set())
+  useEffect(() => {
+    // The limite-musica latch stops the warm-up too: it is a request to the
+    // service that would only be refused again.
+    const allowed = musicOn === true && isTop && !covered && node.visible !== false && !musicClosed && !soundOff && !musicQuota.current
+    const session = own + '|' + musicOrigin + '|' + node.epoch
+    const live = warmingMusic.current
+    // Closed, muted, covered or another session: every warm-up still in
+    // flight stops, and may run again once music may play. A step alone
+    // leaves them running: its item is now the one on screen, whose load
+    // joins it.
+    if (live.size > 0 && (!allowed || [...live].some((run) => run.session !== session))) {
+      for (const run of live) run.abort.abort()
+      live.clear()
+      if (warmedMusic.current !== null && !warmedMusic.current.done) warmedMusic.current = null
+    }
+    if (!allowed || nextItem === null || nextMusic === null) return
+    const warm = nextKey + '|' + session
+    if (warmedMusic.current?.key === warm) return
+    const run = { key: warm, session, abort: new AbortController(), done: false }
+    warmedMusic.current = run
+    live.add(run)
+    const finish = () => {
+      run.done = true
+      live.delete(run)
+    }
+    Promise.resolve(warmMomentMusicItem({ member: own, origin: musicOrigin, request: node.request }, nextItem.music, { signal: run.abort.signal })).then(finish, finish)
+  }, [nextKey, nextMusic?.id, nextMusic?.start, own, musicOrigin, node.epoch, node.request, musicOn, isTop, covered, node.visible, musicClosed, soundOff])
   useEffect(() => () => {
     ahead.current?.handle.release()
     handed.current?.handle.release()
     ahead.current = null
     handed.current = null
+    for (const run of warmingMusic.current) run.abort.abort()
+    warmingMusic.current.clear()
+    warmedMusic.current = null
   }, [])
 
   // Marked seen as soon as it is on screen (synced where the node is hosted,
@@ -1028,8 +1095,8 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     ? () => onOpenMember(author, profile ? { name: profile.name, username: profile.username } : undefined)
     : undefined
 
-  // Items leave (a delete, the 24-hour end): see pruneRings. The photo of a
-  // removed item is released when the shown item changes.
+  // Items leave (a delete, the 24-hour end): see pruneRings. The store
+  // releases the photo of a removed item once the viewer's list drops it.
   const prune = useCallback((keep) => {
     if (rings === null) return
     const r = pruneRings(rings, pos, keep)
@@ -1131,14 +1198,24 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     <View key='stage' style={styles.root} onLayout={(e) => setFrameHeight(e.nativeEvent.layout.height)}>
       <Animated.View style={[styles.flex, { transform: [{ translateY: drag }] }]} {...pan.panHandlers}>
         <View style={styles.stage}>
+          {/* The next photo, already read, decodes at display size out of
+              sight, so a step shows it without a blank frame. Never a video:
+              a hidden player would hold a decoder. */}
+          {warmUri !== null
+            ? (
+              <View style={[styles.photo, styles.warm]} pointerEvents='none' accessible={false} accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>
+                <Image key={warmUri} source={{ uri: warmUri }} style={styles.photo} resizeMode='contain' accessible={false} />
+              </View>
+              )
+            : null}
           {photo.phase === 'ok'
             ? video
               ? (
                 <View style={styles.photo} accessible accessibilityLabel={'momento de ' + name}>
-                  <VideoPlayer key={itemKey + ':' + playback.restartTick} uri={photo.uri} playing={playback.playing} muted={playback.muted || soundOff} controls={false} fit='contain' style={styles.photo} onReady={playback.handleReady} onProgress={playback.handleProgress} onEnd={playback.handleEnd} onError={handlePhotoError} onSoundRefused={playback.handleSoundRefused} onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />
+                  <VideoPlayer key={itemKey + ':' + playback.restartTick + ':' + photo.uri} uri={photo.uri} playing={playback.playing} muted={playback.muted || soundOff} controls={false} fit='contain' style={styles.photo} onReady={playback.handleReady} onProgress={playback.handleProgress} onEnd={playback.handleEnd} onError={handlePhotoError} onSoundRefused={playback.handleSoundRefused} onPlayBlocked={playback.handlePlayBlocked} control={videoControl} />
                 </View>
                 )
-              : <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode='contain' onError={handlePhotoError} accessibilityIgnoresInvertColors accessible accessibilityRole='image' accessibilityLabel={'momento de ' + name} />
+              : <Image key={photo.uri} source={{ uri: photo.uri }} style={styles.photo} resizeMode='contain' onError={handlePhotoError} accessibilityIgnoresInvertColors accessible accessibilityRole='image' accessibilityLabel={'momento de ' + name} />
             : photo.phase === 'loading'
               ? <View style={styles.center}><ActivityIndicator color={colors.ink} accessibilityLabel={video ? 'carregando o vídeo' : 'carregando a foto'} /></View>
               : (
@@ -1340,6 +1417,7 @@ const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1 },
   stage: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000000' },
   photo: { ...StyleSheet.absoluteFillObject },
+  warm: { opacity: 0 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 16 },
   unavailable: { ...type.postName, color: '#ffffff' },
   taps: { ...StyleSheet.absoluteFillObject, flexDirection: 'row' },
