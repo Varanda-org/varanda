@@ -10,7 +10,8 @@
 // the profile and one icon opens the conversation options. Rows are shared
 // Bubbles (tails, day chips, five-minute runs); a long press offers Responder, Copiar,
 // Encaminhar (ui/ForwardSheet, forward.js; a forwarded message shows
-// "Encaminhada" and never its original author) and
+// "Encaminhada" and never its original author; as a page, only the text goes
+// to the page's own conversations) and
 // Denunciar. An @nome in the text opens its profile. Whether the conversation is a request or blocked
 // comes from dm.thread itself (docs/rpc.md 5.78), never from a dm.list page;
 // until the first answer neither the composer nor the request actions show.
@@ -109,7 +110,7 @@ import { ActionsSheet } from '../ui/ActionsSheet'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { ForwardSheet } from '../ui/ForwardSheet'
-import { dmForwardSource } from '../forward'
+import { dmForwardSource, pageForwardSource } from '../forward'
 import { TopBar } from '../ui/TopBar'
 import { memberKeyOf, useActing } from './Conversa'
 
@@ -331,6 +332,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [confirmDelete, setConfirmDelete] = useState(false)
   // { source, refs } of the message the Encaminhar sheet forwards.
   const [forwarding, setForwarding] = useState(null)
+  // A sheet opened as the person never sends as the page, nor the reverse.
+  useEffect(() => { setForwarding(null) }, [pageKey])
   const post = useAction()
   const act = useAction()
   // Offers: the "Fazer oferta" sheet and its value, the offer an Aceitar
@@ -1292,8 +1295,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     (context !== null && draft.trim() === '' ? false : staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
-  // Forwarding writes as the person, never as a page.
-  const canForward = pageKey === null && unlocked
+  // As a page, a forward goes through the page client (dm.pageSend), text
+  // only, to the page's own conversations.
+  const canForward = unlocked
+  const pageForward = pageKey !== null && forwarding ? pageForwardSource(forwarding.source) : null
 
   const rowLive = useRef(null)
   rowLive.current = { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, mentionTap, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct }
@@ -1579,9 +1584,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       <ForwardSheet
         open={forwarding !== null}
         onClose={() => setForwarding(null)}
-        source={forwarding ? forwarding.source : null}
-        refs={forwarding ? forwarding.refs : []}
+        source={pageForward !== null ? pageForward.source : (forwarding ? forwarding.source : null)}
+        refs={pageForward !== null ? [] : (forwarding ? forwarding.refs : [])}
         identity={ownKey}
+        {...(pageKey !== null ? { request: dm, mediaLeft: pageForward !== null ? pageForward.left : 0 } : {})}
       />
       <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
@@ -1666,9 +1672,10 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
     actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
     actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
   }
-  // A message with no text whose media expired has nothing to forward.
+  // A message with no text whose media expired has nothing to forward, and a
+  // page forwards text only.
   const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, media) : null
-  if (forwardSource !== null) {
+  if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {
     actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
   }
   if (!mine && !item.deleted && reportable) {
