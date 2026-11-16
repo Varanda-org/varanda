@@ -98,6 +98,19 @@ test('the title and description of a link preview are checked', async (t) => {
   t.is(findTerm('x', indexTerms([])), null)
 })
 
+test('the card a send will use is the one checked, even if the view is stale', async (t) => {
+  const { previewRefusal, previewRefusalText } = await load()
+  const { linkDraftIdle, linkDraftStep, draftView, freezeSnapshot } = await import('../src/linkCard.js')
+  const term = (await loadList())[0]
+  const url = 'https://exemplo.com.br/a'
+  let state = linkDraftStep(linkDraftIdle(), { type: 'target', url })
+  const stale = draftView(state)
+  state = linkDraftStep(state, { type: 'built', url, data: { url, host: 'exemplo.com.br', title: 'Um título', desc: 'fala de ' + term + ' aqui', thumb: null } })
+  t.is(previewRefusal(stale), '', 'the last render saw no card yet')
+  t.is(previewRefusal(freezeSnapshot(state, url)), previewRefusalText(term), 'the snapshot the send takes is refused')
+  t.is(previewRefusal(freezeSnapshot(state, 'outro texto')), '', 'a text without the link sends no card')
+})
+
 test('what is not text refuses nothing', async (t) => {
   const { findTerm, refusalOf } = await load()
   for (const value of [undefined, null, 7, {}, [], '']) {
@@ -275,10 +288,10 @@ test('a topic title, its poll options and a topic reply are checked like a chat 
 
 test('a link preview is checked before a public post and a public group message', (t) => {
   const publicar = screen('Publicar.js')
-  t.ok(publicar.includes('(refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.view))'), 'Publicar: the draft card is checked with the text')
+  t.ok(publicar.includes('(refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : [])) || previewRefusal(linkDraft.take(text)))'), 'Publicar: the card the send will use is checked with the text')
   const grupo = screen('Grupo.js')
   const press = grupo.slice(grupo.indexOf('const sendDraft = () => {'), grupo.indexOf('if (attachments.items.length > 0 && !asPage.page) {'))
-  t.ok(press.includes('publicGroupPreviewRefusal(visibility, linkDraft.view)'), 'Grupo: a public group checks the draft card')
+  t.ok(press.includes('publicGroupPreviewRefusal(visibility, linkDraft.take(draft))'), 'Grupo: a public group checks the card the send will use')
   t.ok(/setDraftRefusal\(refused\)\s*if \(refused !== ''\) return/.test(press), 'Grupo: a refusal stops the send')
   t.absent(screen('Mensagem.js').includes('wordCheck'), 'Mensagem stays out')
 })

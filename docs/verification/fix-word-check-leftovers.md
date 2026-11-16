@@ -6,7 +6,7 @@ Fecha as sobras da issue #449 (seções 138 e 143 de `docs/verification.md` e `d
 - **App modificado, build antigo e CLI:** o serviço confere o que uma Página publica por ele: nome e bio na criação, publicação, resposta, citação, perfil, anúncio e edição de anúncio (título, texto, cidade e bairro) e mensagem em grupo público, com `termo-recusado` (400), sem gravar nada. O app e a CLI traduzem o token. Publicações de membro são escritas no aparelho e não passam pelo serviço: ficam só com a conferência do app, e a denúncia e a lista assinada respondem pelo resto. O semeador e o protocolo continuam sem a lista.
 - **Fotos e áudio:** limite aceito; a detecção de mídia ilegal depende das listas de hashes e do fluxo com SaferNet e Polícia Federal (issue #79).
 
-Os dois itens que já estavam resolvidos pela #652 (números colados como `termo123` e a prévia de link) não mudam.
+Os dois itens que já estavam resolvidos pela #652 (números colados como `termo123` e a prévia de link) não mudam. A conferência da prévia passou a ler o cartão que o envio usa no PR #668.
 
 Como foi feito:
 
