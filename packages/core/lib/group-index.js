@@ -19,7 +19,8 @@
 // Communities (docs/protocol.md section 10, "Catalogue hints"): a group
 // header names its parent community for good, and only the community's
 // creator creates groups. For each served community root the seeder folds
-// its group-meta and group-create records once, in log order (foldRoot). A
+// its group-meta and group-create records once, in log order (foldRoot); a
+// public group root folds only its group-meta (a rename). A
 // group is attached while its header names C, its header diary is C's
 // creator and C's root holds a create for it. Like everything here it is a
 // hint: lib/group.js judges each create at its position.
@@ -82,8 +83,8 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return g
   }
 
-  // What foldRoot folds from a community root: the last group-meta name and
-  // join (metaSeen once one folded).
+  // What foldRoot folds from a community root or a public group root: the
+  // last group-meta name and join (metaSeen once one folded).
   function rootState () {
     return { meta: null, metaJoin: null, metaSeen: false }
   }
@@ -240,6 +241,16 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
+  // The name a public group root shows (see groupName), or null.
+  function nameOf (group) {
+    try {
+      const g = groups.get(group)
+      return g && g.header !== null && g.header.kind === 'group' ? groupName(g) : null
+    } catch {
+      return null
+    }
+  }
+
   function header (group) {
     const g = groups.get(group)
     return g && g.header ? { ...g.header } : null
@@ -349,10 +360,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
-  // One record of community root `root` (validated by the caller with
-  // validateGroupRecord, in log order, each once): group-meta and
-  // group-create. Anything else, or a root without a community header,
-  // answers false.
+  // One record of root `root` (validated by the caller with
+  // validateGroupRecord, in log order, each once): group-meta and, for a
+  // community root, group-create. Anything else, or a root that is neither
+  // a community nor a public group, answers false.
   function foldRoot (root, record) {
     try {
       const g = groups.get(root)
@@ -479,7 +490,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         rows.push({
           group: G,
           visibility: priv ? 'private' : 'public',
-          join: g.header.join,
+          join: (!priv && g.metaJoin) || g.header.join,
           name: priv ? null : groupName(g),
           writerCount: priv ? null : memberCount(g, null)
         })
@@ -501,7 +512,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, writer, page, groupsOf, search, foldRoot, resetRoot, attached, communityOf, createdIn, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, writer, page, groupsOf, search, foldRoot, resetRoot, attached, communityOf, createdIn, community, clear, stats }
 }
 
 module.exports = {

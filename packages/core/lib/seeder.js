@@ -284,6 +284,7 @@ const ANNOUNCE_BURST = 20
 const MAX_BAD_ANNOUNCES = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
+const GROUP_META_BYTES = b4a.from('group-meta')
 // Record types the engagement index reads from a diary's blocks.
 // Pending verified ratings (_feiraPend): per target listing, per rater
 // (MAX_LISTINGS), per target author, and in total.
@@ -1292,6 +1293,7 @@ class Seeder {
     this._names = this._createNameIndex()
     this._indexResumeQueued = false
     this._indexQueue = Promise.resolve()
+    this._rootScanQueue = Promise.resolve() // public group root scans (the creator's whole log) run one at a time
     this._indexStartup = null
     // Diaries served at start whose first group scan has not ended: a listed
     // root kept at start only provisionally (a member's live join may keep
@@ -4452,7 +4454,7 @@ class Seeder {
       if (t !== 'group-meta' && (t !== 'group-create' || !community)) return
       if (validateGroupRecord(block, i, { root: true, community }) !== null) return
       this._groupIndex.foldRoot(key, block)
-    })
+    }, { queued: !community, needle: community ? null : GROUP_META_BYTES })
   }
 
   // Whether a root with this header is scanned: a community's, and a public
@@ -4461,7 +4463,10 @@ class Seeder {
     return header.kind === 'community' || (header.kind === 'group' && header.visibility === 'public')
   }
 
-  _scanGroupCore (key, entry, fold) {
+  // `queued`: wait for the other queued scans (a group root holds the
+  // creator's whole log). `needle`: raw bytes a block must contain to be
+  // decoded at all (a prefilter; `fold` stays the real check).
+  _scanGroupCore (key, entry, fold, { queued = false, needle = null } = {}) {
     const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
     entry.rootScanning = true
     let failed = false
@@ -4481,6 +4486,7 @@ class Seeder {
         }
         entry.rootScanned = i + 1
         entry.rootReadFailures = 0
+        if (needle !== null && !b4a.includes(raw, needle)) continue
         let block = null
         try {
           block = decodeBlock(raw)
@@ -4489,7 +4495,15 @@ class Seeder {
         fold(block, i)
       }
     }
-    run().catch(noop).then(() => {
+    const start = () => run().catch(noop)
+    let go
+    if (queued) {
+      go = this._rootScanQueue.then(start, start)
+      this._rootScanQueue = go.catch(noop)
+    } else {
+      go = start()
+    }
+    go.then(() => {
       entry.rootScanning = false
       if (stale()) return
       if (failed) return this._retryRootScan(key, entry)
@@ -6764,7 +6778,12 @@ class Seeder {
     if (!this._ready || this._closing) return true
     for (const k of this._groupReserved.keys()) if (this._groupReservedCounts(k)) return true
     if (this._groupDeferredFor(null) || this._groupFullFor(null)) return true
-    for (const [k, e] of this._groupServed) if (this._groupHeaderPending(k, e) || this._rootScanBehind(k)) return true
+    for (const [k, e] of this._groupServed) {
+      if (this._groupHeaderPending(k, e)) return true
+      // A community root scan never changes the search.
+      const h = k === e.group ? this._groupIndex.header(k) : null
+      if (h !== null && h.kind === 'group' && this._rootScanBehind(k)) return true
+    }
     for (const [key, entry] of this._served) {
       if (!entry.dropped && this._groupScanCounts(key, entry)) return true
     }
@@ -6836,6 +6855,8 @@ class Seeder {
       let header = rootServed ? this._groupIndex.header(group) : null
       // No creator unless the header's diary bound the root (_rootBound).
       if (header !== null && !this._rootBound(group, header.diary)) header.diary = null
+      // The renamed name, as the search shows it.
+      if (header !== null && header.kind === 'group' && header.visibility === 'public') header.name = this._groupIndex.nameOf(group)
       let writerServed = false
       for (const [k, e] of this._groupServed) {
         if (k !== group && e.group === group && this._groupCoreVisible(k)) {
@@ -6881,12 +6902,12 @@ class Seeder {
 
   // Whether group root G, named by a create in a community's catalogue, may
   // still change whether it is listed: in admission or its header not
-  // verified yet.
+  // verified yet, or its public root still being scanned for a rename.
   _catalogueRootPending (G) {
     if (this._isBlocked(G)) return false
     if (this._groupIncomplete(G)) return true
     if (!this._groupServed.has(G) && !this._groupReserved.has(G)) return false
-    return !this._groupCoreVisible(G)
+    return !this._groupCoreVisible(G) || this._rootScanBehind(G)
   }
 
   // Whether community root C may be answered: unblocked, served with its

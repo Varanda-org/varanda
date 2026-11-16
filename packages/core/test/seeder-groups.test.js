@@ -1511,3 +1511,32 @@ test('a public group renamed by its root is found by the new name only', async (
   t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'not by the old one')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
+
+test('a rename appended after admission is picked up, and a null rename clears the name', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  let R = null
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    R = await make('root', groupHeader({ diary: key, name: 'Cadeiras da praia' }), [groupPost({ text: 'oi' })])
+    return [groupJoinRecord({ group: R, writer: R, on: true })]
+  })
+  await admit(A, assoc)
+  await admitted(events, R)
+  await downloaded(seeder, R, 2)
+  await until(() => seeder.indexGroupSearch('cadeiras').complete && seeder.indexGroupSearch('cadeiras').groups.length === 1, { name: 'nome antigo' })
+
+  await A.cores.root.append(b4a.from(JSON.stringify(groupMeta({ name: 'Guarda-sois', join: 'open' }))))
+  await until(() => seeder.indexGroupSearch('guarda').groups.length === 1, { name: 'nome novo' })
+  t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'the old name is gone')
+  t.is(seeder.indexGroup(R).header.name, 'Guarda-sois', 'the group answer has the new name')
+
+  await A.cores.root.append(b4a.from(JSON.stringify(groupMeta({ name: null, join: 'open' }))))
+  await until(() => seeder.indexGroupSearch('guarda').groups.length === 0, { name: 'nome limpo' })
+  t.alike(seeder.indexGroupSearch('cadeiras').groups, [], 'not found by the header name either')
+  t.is(seeder.indexGroup(R).header.name, null)
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})

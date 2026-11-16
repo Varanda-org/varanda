@@ -6,7 +6,9 @@ Parte da #350 (item da #241: "Renomear o grupo não aparece na busca do semeador
 
 - O semeador passa a varrer a raiz de um grupo público (cabeçalho `kind: 'group'`, `visibility: 'public'`) atrás de `group-meta`, como já fazia com a raiz de uma comunidade. Só `group-meta` é dobrado, validado com `validateGroupRecord(..., { root: true, community: false })`; `group-create` continua só da comunidade. Raiz privada não é varrida (o meta dela vai selado).
 - `packages/core/lib/group-index.js`: o nome efetivo de um grupo público é o último `group-meta` dobrado (nome nulo limpa: o grupo deixa de ser achado e a linha fica sem nome), senão o do cabeçalho. `search()` e as linhas de `community()` usam esse nome; `setHeader` e `resetRoot` mantêm os tokens coerentes.
-- `packages/core/lib/seeder.js`: `_rootScanBehind` conta a raiz de grupo público em varredura, então `complete` de `indexGroup`, `indexGroupSearch` e das respostas de comunidade só vale com a varredura em dia.
+- `packages/core/lib/seeder.js`: `_rootScanBehind` conta a raiz de grupo público em varredura. `complete` de `indexGroup` e da busca só vale com a varredura em dia (a busca olha só raízes de grupo, não de comunidade), e `/index/community/<C>` também espera a varredura da raiz de cada grupo que o catálogo nomeia (`_catalogueRootPending`).
+- As varreduras de raízes de grupo público rodam uma de cada vez (`_rootScanQueue`) e só decodificam o bloco que contém os bytes `group-meta`; o validador continua sendo a checagem. A raiz de comunidade segue como antes.
+- `indexGroup` e as linhas do catálogo usam o nome e, nas linhas, o `join` do último `group-meta`.
 - `docs/protocol.md` (seção 10): a rota de busca e as linhas do catálogo dizem qual nome valem.
 
 ## Como verificar
