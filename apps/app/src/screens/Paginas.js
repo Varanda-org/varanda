@@ -19,7 +19,7 @@ import { UNNAMED, whoOf } from '../who'
 import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
 import { learnPeeked, peekAll, refOf } from './Conversa'
-import { actAs } from '../pages'
+import { actAs, pagesList } from '../pages'
 import { acceptOp, transferAcceptOp } from '../pageRoster'
 import { pagesCore, pagesOn } from '../pageGate'
 import { ACTOR_NOTE, coreActor } from '../pageCore'
@@ -162,7 +162,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     const seq = ++seqRef.current
     setLoadError('')
     try {
-      const data = await actAs(node, { member, action: 'list', page: '', op: {} })
+      const data = await pagesList(node, { member, also: node.pageMismatch })
       if (seq !== seqRef.current) return
       const next = {
         owned: rows(data.owned),

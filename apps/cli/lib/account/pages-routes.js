@@ -281,9 +281,6 @@ function createPagesRoutes ({
   const audit = []
   const counts = { ok: 0, refused: 0, uncertain: 0 }
   const invites = loadInvites()
-  // '<member>:<nonce>' of the closes and moves charged to the lifecycle cap,
-  // so a resend of the same use is not charged again.
-  const charged = new Map()
   // K1 -> the communities its move left, for a resumed move's re-join on K2.
   const moveLeft = new Map()
 
@@ -625,22 +622,22 @@ function createPagesRoutes ({
     if (got === null || (role === 'owner' && got !== 'owner')) throw refuse('sem-permissao')
   }
 
-  // At most 2 closes or moves per owner per 24 h: a use is charged once,
-  // however often it is resent, and a definite refusal gives it back.
-  function chargeLifecycle (member, nonce) {
-    const id = member + ':' + nonce
-    const t = now()
-    for (const [k, at] of charged) if (t - at >= DAY) charged.delete(k)
-    if (charged.has(id)) return
-    let used = 0
-    for (const [k, at] of charged) if (k.startsWith(member + ':') && t - at < DAY) used++
-    if (used >= 2 || !caps.lifecycle(member)) throw refuse('limite')
-    if (charged.size >= MAX_APPLIED) charged.delete(charged.keys().next().value)
-    charged.set(id, t)
+  // At most 2 closes or moves per owner per 24 h, kept in pages.json so a
+  // restart does not reset it: a use is charged once, however often it is
+  // resent, and a definite refusal gives it back. A store failure refuses.
+  async function chargeLifecycle (member, nonce, page) {
+    try {
+      await pagesStore.charge(member, nonce, page, { limit: 2, extra: () => caps.lifecycle(member) })
+    } catch (err) {
+      if (err && err.code === 'limite') throw refuse('limite')
+      throw refuse('indisponivel')
+    }
   }
 
-  function refundLifecycle (member, nonce, err) {
-    if (!(err instanceof Uncertain)) charged.delete(member + ':' + nonce)
+  async function refundLifecycle (member, nonce, page, err) {
+    if (err instanceof Uncertain) return
+    // A refund that fails keeps the charge: the stricter side.
+    try { await pagesStore.refund(member, nonce, page) } catch {}
   }
 
   function chargeOps (page) {
@@ -1697,12 +1694,12 @@ function createPagesRoutes ({
       if (record.gen !== row.gen + 1) throw refuse('expirado')
       const closeRecord = countersignAs(record, page, 'page-close')
       if (!verifyClose(closeRecord, page, association, { owner: row.owner }).ok) throw refuse('assinatura-invalida')
-      chargeLifecycle(member, nonce)
+      await chargeLifecycle(member, nonce, page)
       let result
       try {
         result = await closeRun(page, member, nonce, row, closeRecord)
       } catch (err) {
-        refundLifecycle(member, nonce, err)
+        await refundLifecycle(member, nonce, page, err)
         throw err
       }
       settle(member, nonce, result)
@@ -1826,7 +1823,7 @@ function createPagesRoutes ({
     const dirMoved = resume && entry !== null && entry.movedTo === to
     if (!dirMoved && (entry === null || typeof entry.username !== 'string')) throw refuse('indisponivel')
     if (depth > MAX_PAGE_MOVES) throw refuse('limite')
-    if (!resume) chargeLifecycle(member, nonce)
+    if (!resume) await chargeLifecycle(member, nonce, page)
     const date = iso(now())
     let res
     let cert
@@ -1880,7 +1877,7 @@ function createPagesRoutes ({
           throw e
         }
       } catch (err) {
-        refundLifecycle(member, nonce, err)
+        await refundLifecycle(member, nonce, page, err)
         throw err
       }
     }
@@ -2459,6 +2456,10 @@ function createPagesRoutes ({
       need(row, member, action === 'group-rebox' ? 'owner' : 'admin')
       chargeOps(page)
       const out = await call()
+      // A post or seal is not idempotent in the group, so its nonce is
+      // spent durably: a resend after a restart answers this seq. A failed
+      // spend leaves a post that went out unrecorded: uncertain.
+      if (action === 'group-post' || action === 'group-seal') await after(() => pagesStore.spend(member, nonce, out.seq))
       // The joins and leaves went on the diary through the writer: the ACL
       // follows its length.
       try {

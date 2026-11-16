@@ -173,6 +173,24 @@ function videoSlices (src) {
   }))
 }
 
+test('a screen reader lands on the inline player after the pressed control unmounts', (t) => {
+  const src = read('ui/MediaGrid.js')
+  const { VideoTile: tile } = videoSlices(src)
+  for (const name of ['const start = () => {', 'const retry = () => {', 'const closeFull = () => {']) {
+    const at = tile.indexOf(name)
+    t.ok(at > 0 && tile.slice(at, tile.indexOf('}', at)).includes('refocus.current = true'), name + ' asks for the hand-off')
+  }
+  const effect = tile.slice(tile.indexOf('if (!refocus.current || full) return undefined'), tile.indexOf('}, [clip.phase, full])'))
+  t.ok(effect.length > 0, 'the hand-off runs when the phase or full screen changes')
+  t.ok(effect.includes("clip.phase === 'ready' ? expandRef : clip.phase === 'error' ? retryRef : null"), 'ready lands on full screen, an error on Tentar de novo, loading waits')
+  t.ok(effect.indexOf('refocus.current = false') < effect.indexOf('if (!screenReaderOn()) return undefined'), 'one hand-off per press, even with no reader')
+  t.ok(effect.includes("AccessibilityInfo.sendAccessibilityEvent(target.current, 'focus')"), 'focus moves through the reader')
+  t.ok(effect.includes('return () => clearTimeout(timer)'), 'an unmount cancels it')
+  t.ok(tile.includes("<Pressable ref={expandRef} accessibilityRole='button' accessibilityLabel='ver em tela cheia'"), 'the inline full screen control is the target')
+  t.ok(tile.includes("<Pressable ref={retryRef} accessibilityRole='button' accessibilityLabel='Tentar de novo' onPress={retry}"), 'the inline retry is the error target')
+  t.ok(src.includes("import { screenReaderOn } from './screenReader'"), 'web reports no reader, so its own focus fix stays alone')
+})
+
 test('a video pair keeps one poster and an explicit download lifecycle', (t) => {
   const src = read('ui/MediaGrid.js')
   const { useVideoClip: clip, VideoStage: stage, VideoPoster: poster, VideoViewer: viewer, VideoTile: tile, MediaGrid: grid } = videoSlices(src)
@@ -196,7 +214,10 @@ test('a video pair keeps one poster and an explicit download lifecycle', (t) => 
   t.ok(poster.indexOf('<Pressable') < poster.indexOf('<MediaView'), 'the button wraps the image')
   t.absent(media.includes('onPress'), 'MediaView gets no press')
   t.ok(media.includes('tapRetry={false}'), 'no photo retry inside the video tile')
-  t.ok(/pointerEvents='none' accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>\s*<MediaView/.test(poster), 'the image is announced once, by the button')
+  t.ok(/<View accessibilityElementsHidden importantForAccessibility='no-hide-descendants' aria-hidden>\s*<MediaView/.test(poster), 'the image is announced once, by the button')
+  // Android records a pointerEvents='none' child as hovered but never lets it
+  // send the hover event, so TalkBack's touch exploration skipped the poster.
+  t.absent(/pointerEvents=/.test(poster), 'touch exploration reaches the poster button')
   t.ok(grid.indexOf('if (pair)') < grid.indexOf('mosaicLayout(items.length)'), 'a pair is not laid out as photos')
   t.ok(tile.includes('{full') && tile.includes('<VideoViewer'), 'the viewer mounts only on expand')
   t.ok(grid.includes('<VideoTile') && grid.includes("key={String(author) + ':' + videoId(pair.video)}"), 'one tile owns this author and clip')
@@ -227,7 +248,9 @@ test('a video pair keeps one poster and an explicit download lifecycle', (t) => 
   t.ok(viewer.includes('Tentar de novo'), 'one retry button')
   const failed = viewer.slice(viewer.indexOf("phase === 'error'"), viewer.indexOf('} else {', viewer.indexOf("phase === 'error'")))
   t.is(failed.split('<Pressable').length - 1, 1, 'a single retry button')
-  t.absent(src.includes('setTimeout'), 'no automatic retry')
+  t.is(src.split('setTimeout(').length - 1, 1, 'one timer, the screen reader hand-off')
+  const timer = src.slice(src.indexOf('setTimeout('), src.indexOf('}, READER_FOCUS_MS)'))
+  t.ok(timer.includes("sendAccessibilityEvent(target.current, 'focus')") && !/retry|start|fetch|setAttempt/i.test(timer), 'no automatic retry')
   t.absent(src.includes('retryDelay'), 'no scheduled retry')
   t.absent((clip + stage + poster + viewer + tile).includes('Platform'), 'no platform branch in the video viewer')
   t.absent((clip + stage + poster + viewer + tile).includes('document'), 'no browser API in the video viewer')
