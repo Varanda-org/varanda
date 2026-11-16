@@ -57,6 +57,9 @@
 // which keeps it on the provider's own domains; on the web it opens a new tab
 // that keeps the sandbox.
 //
+// With "Prévia de links" off (./usePreviewsEnabled) no player loads: the
+// card is the stored link card, and a tap opens the link as on any other.
+//
 // Props: embed (embedOf of the link), card (the stored link card) or draft
 // (the composer's draft, with imageUri and onDismiss, its remove button),
 // thumb (as for ./LinkCard), onLongPress, part (optional: tells apart two
@@ -83,10 +86,12 @@ import { EmbedCover } from './EmbedCover'
 import { EmbedFrame } from './EmbedFrame'
 import { Icon } from './Icon'
 import { LINK_CARD_DISMISS, LinkCard } from './LinkCard'
+import { useKeyboardHeight } from './keyboardAvoid'
 import { screenReaderKnown, screenReaderOn } from './screenReader'
 import { EmbedBandBottom, EmbedHost, EmbedRowKey, RowShift, ScreenVisible, SheetDepth } from './screenVisible'
 import { TabBarShown } from './tabBarShown'
 import { useReveal } from './useReveal'
+import { usePreviewsEnabled } from './usePreviewsEnabled'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, space } from './theme'
 
@@ -170,6 +175,8 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   const host = useContext(EmbedHost)
   const rowKey = useContext(EmbedRowKey)
   const shift = useContext(RowShift)
+  const players = usePreviewsEnabled()
+  const keyboard = useKeyboardHeight()
   // '' draws the frame here: the composer's draft and any card outside a
   // list row.
   const key = host && !draft ? embedKey(rowKey, part, embed.embedUrl) : ''
@@ -407,8 +414,11 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     let cancelled = false
     // A pushed screen has no tab bar (TabBarShown), so its band reaches the
     // bottom of the window; with no provider the bar counts, the early side.
+    // The soft keyboard ends it too: the composer's draft, under the keyboard
+    // while the person types, loads no player there. (In an iOS page sheet
+    // the slot is measured from the sheet's top, so the cut is a little low.)
     const top = insets.top + layout.topBar
-    const bottom = win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0))
+    const bottom = Math.min(win.height - (insets.bottom + (tabBarShown ? layout.tabBar : 0)), win.height - keyboard)
     // Each check's answer applies only while it is the latest check, and an
     // answer still missing at the next tick counts as hidden.
     let round = 0
@@ -512,7 +522,7 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
     if (stateRef.current.live) check()
     const timer = setInterval(check, EMBED_TICK_MS)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [active, fits, locked, win.width, win.height, insets.top, insets.bottom, tabBarShown, band])
+  }, [active, fits, locked, win.width, win.height, insets.top, insets.bottom, tabBarShown, band, keyboard])
 
   const data = draft || card
   const url = data && typeof data === 'object' && typeof data.url === 'string' ? data.url : ''
@@ -582,7 +592,8 @@ export function MusicEmbedCard ({ embed: given, card, draft, imageUri, onDismiss
   // no frame is live: a native full-screen player turns the window, and the
   // loaded frame must stay.
   const tooTall = !!draft && !state.live && height > win.height / 3
-  if (tooNarrow || tooTall) {
+  // Off, App.js holds every frame, so none is live here.
+  if (tooNarrow || tooTall || !players) {
     return (
       <View onLayout={onLayout}>
         {plain}
