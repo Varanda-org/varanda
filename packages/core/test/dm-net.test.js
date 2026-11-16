@@ -74,8 +74,11 @@ function randomBytes (n) {
   return out
 }
 
+// Never starts with 0xff, the byte fakePool refuses as invalid: a random first
+// byte made about one run in twenty fail.
 function fakeDrop () {
   const out = randomBytes(DM_DROP_BYTES)
+  if (out[0] === 0xff) out[0] = 0
   return out
 }
 

@@ -58,8 +58,9 @@ Cinco cópias de um arquivo de rede pesado deixam a máquina mais ocupada que o 
 | `core/test/sync.test.js` | Roda o mesmo código de `sync.js` | Nada | sem mudança | 20/20 |
 | `core/test/sync-groups-2.test.js` | Idem | Nada | sem mudança | 20/20 |
 | `core/test/seeder-media.test.js` | O teste "a declared media core with a header naming the diary is admitted, listed, downloaded and readable" também não esperava `headerOk`, ao contrário do teste de leitura do mesmo arquivo; não falhou nas medições | Espera o cabeçalho conferido, como o outro teste do arquivo | 9/84 → 9/84 | 20/20 |
+| `core/test/dm-net.test.js` | Falhou uma vez no `npm test` de entrega, não por carga: `fakeDrop()` são bytes aleatórios e o `fakePool` do teste recusa como inválido o drop cujo primeiro byte é `0xff`, então cada uma das 12 chamadas tinha 1 chance em 256 de receber `invalido` (perto de uma execução em vinte) | `fakeDrop()` nunca começa com `0xff`. Com o primeiro byte forçado a `0xff` em memória, o arquivo falha sem a correção (9/11 testes) e passa com ela (11/11); sozinho, 3 de 3 | 11/87 → 11/87 | não se aplica (aleatório, não carga) |
 
 ## Checagens
 
-- `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo`: PENDENTE.
+- `npm run lint`: passa. `npm test -- --affected=origin/main` (Node 24, 781 arquivos, depois do merge da `main` em 7b5519cd): 780 passam; `core/test/dm-net.test.js` falhou uma vez pela causa aleatória da tabela acima, corrigida, e depois passou sozinho e com o byte forçado. `npm run demo`: `DEMO OK`.
 - Nenhuma pausa fixa nova: as esperas trocadas por eventos estão nos testes 30, 31 e 34 de `sync-groups`; os `t.timeout` novos têm o tempo medido num comentário.
