@@ -462,8 +462,43 @@ function purgeReplica (storage, hex) {
 // clear.
 async function readAll (core) {
   assertOpen(core)
-  const { entries, present } = await presentState(core)
-  return entries.slice(0, present)
+  return settle(core, async () => {
+    const length = core.length
+    const { entries, present } = await presentState(snapshotView(core, length))
+    return { value: entries.slice(0, present), length }
+  })
+}
+
+function snapshotView (core, length) {
+  return { get length () { return length }, has: (i) => core.has(i), get: (i, opts) => core.get(i, opts) }
+}
+
+// A read on a core the live sync run lends races the run: it downloads a
+// tombstone past this read's length snapshot and clears its target while the
+// walk is under way, so the walk meets a hole its snapshot cannot explain and
+// cuts there (only this response; the next read is right). The run clears a
+// target only after it holds the tombstone, so read again, at most twice more,
+// only when a stored block in [snapshot length, core.length) is a valid
+// tombstone. Plain growth costs nothing extra.
+const SETTLE_RETRIES = 2
+
+async function tombstoneSince (core, from) {
+  const end = Math.min(core.length, MAX_LOG_BLOCKS)
+  for (let i = from; i < end; i++) {
+    if (!(await core.has(i))) continue
+    const rec = decodeBlock(await core.get(i, { wait: false, raw: true }))
+    if (rec !== null && rec.type === 'delete' && validateRecord(rec, i) === null) return true
+  }
+  return false
+}
+
+async function settle (core, once) {
+  let result = await once()
+  for (let n = 0; n < SETTLE_RETRIES && core.length > result.length && await tombstoneSince(core, result.length); n++) {
+    assertOpen(core)
+    result = await once()
+  }
+  return result.value
 }
 
 // What a followed diary can show while it downloads newest-first (./sync.js
@@ -481,6 +516,11 @@ async function readAll (core) {
 // tombstone naming a page-close or page-moved never moves it).
 async function readVisible (core) {
   assertOpen(core)
+  return settle(core, () => visibleOnce(core))
+}
+
+// -> { value, length } for settle.
+async function visibleOnce (core) {
   const length = core.length
   // presentState folds holes and blocks that do not decode into the same
   // { record: null }; the view records which blocks this snapshot read.
@@ -498,7 +538,7 @@ async function readVisible (core) {
   const prefix = entries.slice(0, present)
   const rawPrefix = raw.slice(0, present)
   if (present < 1 || present >= length || length > MAX_LOG_BLOCKS || raw.length < length) {
-    return { entries: prefix, raw: rawPrefix, present, tail: length }
+    return { value: { entries: prefix, raw: rawPrefix, present, tail: length }, length }
   }
   let tail = length
   while (tail > present) {
@@ -515,14 +555,14 @@ async function readVisible (core) {
   }
   // Only a block that arrived after presentState can close the gap: the
   // next read shows it.
-  if (tail <= present) return { entries: prefix, raw: rawPrefix, present, tail: length }
+  if (tail <= present) return { value: { entries: prefix, raw: rawPrefix, present, tail: length }, length }
   for (let seq = tail; seq < length; seq++) {
     if (stored.has(seq)) {
       prefix.push(entries[seq])
       rawPrefix.push(raw[seq])
     }
   }
-  return { entries: prefix, raw: rawPrefix, present, tail }
+  return { value: { entries: prefix, raw: rawPrefix, present, tail }, length }
 }
 
 // Every block as decoded up to the same end, tombstones not applied (the
@@ -530,8 +570,11 @@ async function readVisible (core) {
 // { seq, record: null }.
 async function readRaw (core) {
   assertOpen(core)
-  const { raw, present } = await presentState(core)
-  return raw.slice(0, present)
+  return settle(core, async () => {
+    const length = core.length
+    const { raw, present } = await presentState(snapshotView(core, length))
+    return { value: raw.slice(0, present), length }
+  })
 }
 
 // EVERY stored block as decoded, in seq order, holes skipped (not only the
