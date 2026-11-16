@@ -16,7 +16,7 @@ const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { signInvite } = require('@varanda/core/lib/invite')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
-const { createAccountServer, ERROR_STATUS } = require('../lib/account/server')
+const { createAccountServer, ERROR_STATUS, REQUEST_TIMEOUT_MS } = require('../lib/account/server')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { parseAudiusConfig } = require('../lib/account/audius-provider')
 
@@ -27,9 +27,9 @@ const NODE = 'node.audius.test'
 const ART = 'art.audius.test'
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40, 1)])
 const AUDIO = Buffer.from(Array.from({ length: 100 }, (_, i) => i))
-// Longer than the server's REQUEST_TIMEOUT_MS (10 s) plus one check interval.
-const SLOW_CHUNKS = 12
+// Longer than the server's REQUEST_TIMEOUT_MS plus one check interval.
 const SLOW_EVERY_MS = 1000
+const SLOW_CHUNKS = Math.ceil(REQUEST_TIMEOUT_MS / SLOW_EVERY_MS) + 2
 
 function track (id) {
   return {
@@ -305,7 +305,7 @@ test('audius server: an audio response longer than the request timeout is not cu
   const res = await audio(ticket)
   const elapsed = Date.now() - started
   t.is(res.status, 200)
-  t.ok(elapsed > 11000, 'the stream lasted ' + elapsed + ' ms')
+  t.ok(elapsed > REQUEST_TIMEOUT_MS + 1000, 'the stream lasted ' + elapsed + ' ms')
   t.ok(res.complete, 'the whole body arrived')
   t.alike(res.raw, Buffer.from(Array.from({ length: SLOW_CHUNKS }, (_, i) => i)))
   t.is(server.audiusStats().streams, 0, 'the stream slot was released')

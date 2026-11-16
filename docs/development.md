@@ -114,7 +114,7 @@ node bin/varanda-serve.js --data ./data --association <hex> \
 
 Use `--public-dht` instead of `--bootstrap` to opt in to the public DHT. The server prints the URL with the token in the fragment once. Open that URL: the token in the fragment is what puts the page in varanda-serve mode (the tab remembers it), instead of the node in the browser. In that mode the page never loads the browser node (varanda-serve's CSP, `script-src 'self'` without `'wasm-unsafe-eval'`, would block its WebAssembly anyway). Without `--ui`, serve the web build with `npm run web -w apps/app` (Expo dev server) and pass its exact origin with `--origin http://localhost:8081`.
 
-The `dist` directory is ignored by version control. The first export was run on 2026-10-22 (see [verification.md](verification.md)): it reports `Exported: dist`. A full `npm run export:web` now leaves in `apps/app/dist`: `index.html` (with the `varanda-release` meta), `sw.js`, `manifest.webmanifest`, the icons (`icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `apple-touch-icon.png`), `favicon.ico`, `varanda-node.js`, `metadata.json` and the bundle under `_expo/static/js/web/`. A bare `npx expo export --platform web` (as in the commands above) has no `sw.js` and no release meta, so the page it serves never registers a worker.
+The `dist` directory is ignored by version control. The first export was run on 2026-10-22 (see [verification.md](verification.md)): it reports `Exported: dist`. A full `npm run export:web` now leaves in `apps/app/dist`: `index.html` (with the `varanda-release` meta), `sw.js`, `manifest.webmanifest`, the icons (`icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `apple-touch-icon.png`), `favicon.ico`, `varanda-node.js` and its copy `varanda-node-<release>.js` (the name a released page loads, so it only ever runs the node of its own release; only the copy is precached), `metadata.json` and the bundle under `_expo/static/js/web/`. A bare `npx expo export --platform web` (as in the commands above) has no `sw.js` and no release meta, so the page it serves never registers a worker.
 
 ## iOS
 
@@ -227,7 +227,7 @@ O que ele sobe, no mesmo processo:
 
 - uma rede DHT de teste presa a loopback, ou a que `VARANDA_BOOTSTRAP` aponta (precisa ser loopback, por exemplo a de `apps/cli/scripts/local-dht.js`);
 - uma associação e um semeador certificado, com a entrada WebSocket, como `seed --ws-port`;
-- o serviço de conta, com a loja de termos ligada, verificação de celular com SMS simulado e sem verificação de idade (`GET /account/age/policy` responde `{ required: false }`);
+- o serviço de conta, com a loja de termos ligada, verificação de celular com SMS simulado, sem verificação de idade (`GET /account/age/policy` responde `{ required: false }`) e com a busca de GIF ligada num provedor simulado (`apps/cli/scripts/gif-stub.js`: qualquer busca traz as mesmas imagens de uma cor só, sem chave nem rede externa);
 - um só endereço, `http://localhost:<porta>`, que reúne `/varanda.json`, `/seeder`, `/media/*`, `/index/*`, `/account/*` e `/p/*`; o resto vai para o servidor do Expo ou para o `dist` exportado.
 
 ### SMS simulado

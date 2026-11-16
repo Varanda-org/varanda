@@ -9,7 +9,7 @@ const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-lin
 const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
-const { createModRoutes } = require('./mod-routes')
+const { createModRoutes, ANEXO_READ_MAX_MS } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
@@ -76,7 +76,13 @@ const MAX_SOCKETS = 64
 const DEFAULT_RATE = 20
 const DEFAULT_BURST = 100
 const HEADERS_TIMEOUT_MS = 4000
-const REQUEST_TIMEOUT_MS = 10000
+// Long enough for the largest report anexo at the slowest rate its own
+// deadline allows (mod-routes.js). Every other body is at most a few dozen
+// KB and gets BODY_READ_MS from when its route starts reading it, the
+// earlier request timeout, so only the anexo route holds a slow sender's
+// socket past HEADERS_TIMEOUT_MS + BODY_READ_MS.
+const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + ANEXO_READ_MAX_MS
+const BODY_READ_MS = 10000
 const CHECK_INTERVAL_MS = 1000
 const MAX_BODY = 4096
 const COOKIE = '__Host-varanda-link'
@@ -544,8 +550,10 @@ function cookieId (req) {
 }
 
 // At most `max` bytes of JSON forming a plain object; anything else is
-// 'pedido-invalido' (413 when the body is too large).
-function readJsonBody (req, max = MAX_BODY) {
+// 'pedido-invalido' (413 when the body is too large). A body still arriving
+// `deadlineMs` after the read began is cut (408, the request destroyed);
+// null leaves the deadline to the caller (the report anexo's own).
+function readJsonBody (req, max = MAX_BODY, deadlineMs = BODY_READ_MS) {
   return new Promise((resolve, reject) => {
     const declared = Number(req.headers['content-length'])
     if (Number.isFinite(declared) && declared > max) return reject(new RouteError('pedido-invalido', 413))
@@ -555,9 +563,16 @@ function readJsonBody (req, max = MAX_BODY) {
     const finish = (err, value) => {
       if (done) return
       done = true
+      clearTimeout(deadline)
       if (err) reject(err)
       else resolve(value)
     }
+    const deadline = deadlineMs === null
+      ? null
+      : setTimeout(() => {
+        finish(new RouteError('pedido-invalido', 408))
+        req.destroy()
+      }, deadlineMs)
     req.on('data', (chunk) => {
       size += chunk.length
       // Past the limit nothing more is kept; the 413 closes the connection.
@@ -687,7 +702,7 @@ function checkRawPost (req, origin) {
 // `gif` (null: off, the policy answers { enabled: false } and every other
 // /account/gif/* route 404 'feature-off') is a parseGifConfig result of
 // ./gif-routes.js; `gifTransport` ({ request, lookup, allowAddress }) is for
-// tests only, to reach a loopback fake provider.
+// tests and the hosted lab only, to reach a loopback fake provider.
 // `preview` (default true: link previews need no third-party key) turns the
 // /account/preview/* routes of ./preview-routes.js on; false answers the
 // policy { enabled: false } and 404 'feature-off' elsewhere.
@@ -1790,6 +1805,8 @@ module.exports = {
   MAX_SOCKETS,
   DEFAULT_RATE,
   DEFAULT_BURST,
+  REQUEST_TIMEOUT_MS,
+  BODY_READ_MS,
   KEY_FILE,
   CERT_FILE,
   LOCK_FILE,

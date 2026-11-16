@@ -515,7 +515,8 @@ test('share intake: listen and its unsubscribe', async (t) => {
 // here) the web intake is inert, and it never reaches for a page API.
 test('share intake web: inert without Cache Storage, no page APIs', async (t) => {
   const web = await import('../src/shareIntake.web.js')
-  for (const name of ['peek', 'release', 'sweep', 'listen', 'clear']) t.is(typeof web[name], 'function', name)
+  for (const name of ['peek', 'release', 'sweep', 'listen', 'clear', 'takeLost']) t.is(typeof web[name], 'function', name)
+  t.is(web.takeLost(), false, 'no address to read')
   t.is(await web.peek(), null)
   t.is(await web.clear(), undefined)
   t.is(await web.release(ID), undefined)
@@ -527,7 +528,8 @@ test('share intake web: inert without Cache Storage, no page APIs', async (t) =>
   t.is(called, false)
   const src = fs.readFileSync(path.join(__dirname, '../src/shareIntake.web.js'), 'utf8')
   t.is(/\b(window|document|navigator|localStorage|sessionStorage|self)\b/.test(src), false)
-  t.is(src.split('globalThis.').length - 1, src.split('globalThis.caches').length - 1, 'globalThis only for caches')
+  // takeLost reads and rewrites the address the worker redirected to.
+  t.alike([...new Set(src.match(/globalThis\.\w+/g))].sort(), ['globalThis.caches', 'globalThis.history', 'globalThis.location'], 'globalThis for caches, and the address in takeLost')
 })
 
 test('share intake native: listen follows onPending and the app becoming active', async (t) => {

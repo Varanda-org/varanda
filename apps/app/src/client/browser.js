@@ -3,7 +3,8 @@
 // Web, browser node: the node runs in this page. Its code is not in the app
 // bundle (Metro blocks packages/core and packages/web-member): it is the
 // separate script /varanda-node.js (packages/web-member/scripts/build.js
-// --node, written to public/ by `npm run build:node`), loaded once on
+// --node, written to public/ by `npm run build:node`; a released page loads
+// its copy /varanda-node-<release>.js, see nodeScriptUrl), loaded once on
 // demand, which defines VarandaWebNode. The node keeps the diary in
 // IndexedDB but never its secret key: the member's key is derived from the
 // passkey (WebAuthn PRF) on 'entrar' and lives only in the page's memory,
@@ -22,8 +23,28 @@
 import { createClient, parseMessage, EVENTS, MAX_MESSAGE, mediaBounds } from '@varanda/rpc'
 
 const NODE_SCRIPT = '/varanda-node.js'
+const RELEASE_ID = /^[0-9a-f]{16}$/
 
 let loading = null
+
+// The node script for a page of `release`: the copy scripts/finish-web.js
+// names after that release, so a page (also the cached shell the service
+// worker serves while a deploy replaces the files) never runs the node of
+// another release. A page without a release marker (development) loads the
+// plain name.
+export function nodeScriptUrl (release) {
+  return typeof release === 'string' && RELEASE_ID.test(release) ? '/varanda-node-' + release + '.js' : NODE_SCRIPT
+}
+
+// The varanda-release meta, as src/runningRelease.web.js reads it.
+function pageRelease () {
+  try {
+    const meta = document.querySelector('meta[name="varanda-release"]')
+    return meta ? meta.getAttribute('content') : null
+  } catch {
+    return null
+  }
+}
 
 function fail (message) {
   const err = new Error(message)
@@ -43,7 +64,7 @@ function loadNode () {
   if (loading !== null) return loading
   loading = new Promise((resolve, reject) => {
     const script = document.createElement('script')
-    script.src = NODE_SCRIPT
+    script.src = nodeScriptUrl(pageRelease())
     script.async = true
     script.onload = () => {
       const ready = loaded()

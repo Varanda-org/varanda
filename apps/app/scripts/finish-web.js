@@ -4,7 +4,10 @@
 // service worker template (scripts/sw.js) into dist/sw.js with this release's
 // id and precache list, and marks dist/index.html with the same release id
 // (<meta name="varanda-release">) so the worker can refuse an index.html
-// from another release while it installs.
+// from another release while it installs. It also copies varanda-node.js to
+// varanda-node-<release>.js, the name the page loads (src/client/browser.js
+// nodeScriptUrl): a page, cached shell included, then only ever runs the node
+// of its own release, and that copy, not varanda-node.js, is precached.
 // Usage: node scripts/finish-web.js [dist] -> prints one summary line, exit 0/1.
 // Running it twice on the same dist yields byte-identical files.
 
@@ -16,6 +19,11 @@ const VERSION_TOKEN = '__VARANDA_VERSION__'
 const PRECACHE_TOKEN = '__VARANDA_PRECACHE__'
 const RELEASE_META_RE = /<meta name="varanda-release" content="[^"]*">/g
 const EXCLUDED = new Set(['/metadata.json', '/sw.js', '/version.json'])
+const NODE_FILE = '/varanda-node.js'
+// A release copy left by an earlier run: never listed, so a second run hashes
+// the same files, and replaced by this run's copy.
+const RELEASE_NODE_RE = /^\/varanda-node-[0-9a-f]{16}\.js$/
+const releaseNodePath = (version) => '/varanda-node-' + version + '.js'
 
 const sha256hex = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
@@ -32,7 +40,7 @@ function listAssets (distDir) {
       const relPath = rel + '/' + ent.name
       if (ent.isDirectory()) {
         walk(path.join(dir, ent.name), relPath)
-      } else if (ent.isFile() && !EXCLUDED.has(relPath) && !ent.name.endsWith('.map') && !relPath.startsWith('/og/')) {
+      } else if (ent.isFile() && !EXCLUDED.has(relPath) && !RELEASE_NODE_RE.test(relPath) && !ent.name.endsWith('.map') && !relPath.startsWith('/og/')) {
         out.push(relPath)
       }
     }
@@ -99,7 +107,19 @@ function finishWeb (distDir, templateFile = path.join(__dirname, 'sw.js')) {
   // not depend on sw.js, so this hash can go into it.
   const indexEntry = entries.find((e) => e.url === '/index.html')
   if (indexEntry) indexEntry.sha256 = sha256hex(Buffer.from(marked, 'utf8'))
+  // The release copy has the same bytes, so the same hash; the version
+  // covers varanda-node.js under its plain name.
+  const nodePath = releaseNodePath(version)
+  // requireFiles only checks that the name exists: a directory or a link
+  // there is not listed.
+  const nodeEntry = entries.find((e) => e.url === NODE_FILE)
+  if (!nodeEntry) throw new Error('exportação web inválida: varanda-node.js não é um arquivo comum em ' + distDir)
+  nodeEntry.url = nodePath
   const worker = renderWorker(template.toString('utf8'), { version, assets: entries })
+  for (const name of fs.readdirSync(distDir)) {
+    if (RELEASE_NODE_RE.test('/' + name) && '/' + name !== nodePath) fs.rmSync(path.join(distDir, name))
+  }
+  fs.copyFileSync(path.join(distDir, NODE_FILE), path.join(distDir, nodePath))
   fs.writeFileSync(indexFile, marked)
   fs.writeFileSync(path.join(distDir, 'sw.js'), worker)
 
@@ -120,4 +140,4 @@ function main () {
 
 if (require.main === module) main()
 
-module.exports = { listAssets, renderWorker, finishWeb }
+module.exports = { listAssets, renderWorker, finishWeb, releaseNodePath }

@@ -56,6 +56,9 @@ test('Dockerfile.web: version.json comes from the ARG and LICENSE ships with the
   t.ok(webText.includes('printf \'{"v":1,"commit":"%s"}\\n\' "$VARANDA_COMMIT" > /srv/web/version.json'), 'version.json written from the ARG')
   t.ok(/for f in index\.html varanda-node\.js sw\.js; do/.test(finalText), 'the three required files are checked')
   t.ok(finalText.includes('test -f "/srv/web/$f"'), 'each required file must be a regular file')
+  // The node copy the page loads, named by the release mark of index.html.
+  t.ok(finalText.includes('versao=$(sed -n \'s/.*<meta name="varanda-release" content="\\([0-9a-f]\\{16\\}\\)">.*/\\1/p\' /srv/web/index.html | head -n 1)'), 'the release is read from the index.html mark')
+  t.ok(finalText.includes('{ [ -n "$versao" ] && test -f "/srv/web/varanda-node-$versao.js"; }'), 'the release node copy must be a regular file')
   t.ok(finalText.includes('find /srv/web ! -type f ! -type d -print -quit'), 'links and special files are refused')
   t.ok(finalText.includes('rm -rf /srv/web/.well-known'), 'the build .well-known is removed')
   t.ok(finalText.includes('chown -R 0:0 /srv/web'), 'root owns /srv/web, never the build user')

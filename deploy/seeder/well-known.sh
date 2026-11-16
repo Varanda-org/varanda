@@ -4,8 +4,9 @@
 # /.well-known/assetlinks.json e o iOS ao declarado em
 # /.well-known/apple-app-site-association. Lido com source por deploy.sh e por
 # build-web.sh, que publicam www cada um do seu jeito: as regras ficam num só
-# lugar para não divergirem. Quem faz source define log (uma linha por
-# chamada).
+# lugar para não divergirem, como as do version.json, da cópia do app para
+# www e da versão marcada no index.html. Quem faz source define log (uma
+# linha por chamada).
 
 # Lê VARANDA_ANDROID_CERT_SHA256 e VARANDA_IOS_APP_ID do .env em $1 (lidos,
 # nunca executados: a última linha, espaço em volta do = aceito, comentário no
@@ -118,4 +119,44 @@ gravar_versao() {
     log "falha ao gravar $arquivo"
     return 1
   fi
+}
+
+# A versão do app web (16 hex) marcada no index.html em $1 (meta
+# varanda-release, apps/app/scripts/finish-web.js), ou nada sem a marca ou
+# sem o arquivo. A página carrega /varanda-node-<versão>.js, a cópia do nó
+# que o export deixa ao lado de varanda-node.js.
+versao_web() {
+  local re='<meta name="varanda-release" content="([0-9a-f]{16})">'
+  if [ -f "$1" ] && [[ $(<"$1") =~ $re ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# Copia o app em $1 (o dist, ou a cópia de www guardada para a volta) para
+# $2, um www já vazio, com o index.html por último, depois do sw.js: quando a
+# página aparece, tudo o que ela carrega (o bundle com hash, a cópia do nó da
+# versão) já está lá. Na ordem do diretório, uma página podia chegar antes do
+# próprio nó e mostrar o erro de conexão. $3 é a opção do cp: -R por padrão;
+# a volta passa -a, para que cada arquivo e pasta dentro de www mantenha dono,
+# modo e data da cópia guardada (a própria pasta www não muda). Um sw.js ou
+# index.html ausente fica ausente, como numa cópia da pasta inteira; uma
+# origem vazia não copia nada, e uma origem que não é pasta retorna 1, sem
+# tocar no destino. Qualquer cópia que falhe retorna 1.
+copiar_app() {
+  local dist=$1 destino=$2 opcao=${3:--R} p f
+  [ -d "$dist" ] || return 1
+  (
+    shopt -s dotglob nullglob
+    for p in "$dist"/*; do
+      case ${p##*/} in
+        index.html | sw.js) ;;
+        *) cp "$opcao" "$p" "$destino/" || exit 1 ;;
+      esac
+    done
+  ) || return 1
+  for f in sw.js index.html; do
+    if [ -e "$dist/$f" ] || [ -L "$dist/$f" ]; then
+      cp "$opcao" "$dist/$f" "$destino/$f" || return 1
+    fi
+  done
 }

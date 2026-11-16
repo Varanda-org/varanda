@@ -71,7 +71,7 @@ function png (size) {
   return out
 }
 
-async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
+async function blobSeeder (t, { signer, blobBudget = 10000, partialMs, now } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const dmRsa = rsaKey()
@@ -82,6 +82,7 @@ async function blobSeeder (t, { signer, blobBudget = 10000, partialMs } = {}) {
     dir: tmpDir(t),
     sweepMs: 0,
     ...(partialMs === undefined ? {} : { partialMs }),
+    ...(now === undefined ? {} : { now }),
     verifyStamp: (kidHex, token, sig) => kidHex === blobPub.kid && postage.verify(token, sig, blobPub, 'blob')
   })
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
@@ -720,7 +721,10 @@ test('a 503 or 429 read honours Retry-After and retries at most 3 times; a 404 i
 test('a retry puts every frame again: a swept partial blob is refused, a live one completes with repeats', async (t) => {
   t.timeout(120000)
   const assoc = generateAssociationKeyPair()
-  const seeder = await blobSeeder(t, { signer: assoc, partialMs: 1 })
+  // The pool's own clock: the first partial blob ages out on purpose, and the
+  // ones written after the sweep stay live (an aged-out blob takes no frame).
+  let clock = Date.now()
+  const seeder = await blobSeeder(t, { signer: assoc, partialMs: 1000, now: () => clock })
   const identity = crypto.keyPair()
   const client = clientFor(seeder, { wallet: 6, walletLow: 2 })
   t.is(await client.topUp(identity), 6)
@@ -735,7 +739,7 @@ test('a retry puts every frame again: a swept partial blob is refused, a live on
   t.is(err && err.message, 'o semeador está cheio: tente mais tarde')
   t.alike(a.acked, [true, false])
   seeder.refuse = null
-  await new Promise((resolve) => setTimeout(resolve, 10))
+  clock += 1000
   t.is(seeder.pool.sweep(), 1, 'the partial blob is swept')
   const frame0 = a.frames[0]
   seeder.puts.length = 0

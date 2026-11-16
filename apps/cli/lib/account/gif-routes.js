@@ -174,7 +174,8 @@ function nextCursor (json, offset) {
 // `config` is parseGifConfig's result or null (off). `blocklist` ({ has(key) }
 // or null) is the moderation desk's published blocklist. `request`, `lookup` and
 // `allowAddress` default to https.request, dns.lookup and publicAddress;
-// only tests replace them, to reach a loopback fake provider. `maxSpent`
+// only tests and the hosted lab replace them, to reach a loopback fake
+// provider (scripts/gif-stub.js). `maxSpent`
 // (the spent-nonce table cap) is replaced only by tests.
 function createGifRoutes ({
   config = null,
