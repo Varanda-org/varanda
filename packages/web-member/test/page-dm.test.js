@@ -59,12 +59,11 @@ async function wallet (storage) {
 
 // peeks: what the seeder answers for a dm-key (member -> { box, gen } or
 // null); a member not in it fails, as without a seeder.
-async function memberNode (t, assoc, url, extra = {}) {
+async function memberNode (t, assoc, url, { prf = crypto.randomBytes(32), ...extra } = {}) {
   const peeks = new Map()
   const peekCalls = new Map()
   const storage = memoryNodeStorage()
   const keyPair = crypto.keyPair()
-  const prf = crypto.randomBytes(32)
   const node = createBrowserNode({
     storage,
     association: hex(assoc.publicKey),
@@ -1307,4 +1306,73 @@ test('dm.react tells a Página only from a diary held here: a held one is refuse
   clearTimeout(timer)
   t.not(answer, 'waited', 'answered without waiting for a peek of the unheld diary')
   t.is(answer && answer.message, 'mensagem não encontrada', 'past the Página check: the engine answers for the missing message')
+})
+
+// ---- buckets (docs/protocol.md section 11, "Buckets") ----
+
+test('buckets: a held page scans only the buckets of its boxes, on its own and riding along', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS * 2)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6 })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made1 = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: A.box }] })
+  const diary = await pageDiary(t, { assoc, issuer, pageKp, ownerKp: A.keyPair, box: made1.box })
+  await hold(diary, A.storage)
+  await hold(diary, C.storage)
+  const s1 = made1.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: s1.sealed, by: A.key, sig: s1.sig, box: made1.box, groupBox: made1.groupBox, cert: pageCert })
+  await A.web.request('dm.pull')
+  await C.web.request('dm.send', { to: P, text: 'para a 1' })
+  // The own cursor moves past the page's: after the new gen resets the page's
+  // cursor it cannot ride along and catches up on its own.
+  await copyDiary(A, C)
+  await C.web.request('dm.send', { to: A.key, text: 'para voce' })
+  await A.web.request('dm.pull')
+  const made2 = await A.web.request('dm.pageGenerate', { page: P, gen: 2, recipients: [{ member: A.key, box: A.box }] })
+  const s2 = made2.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 2, sealed: s2.sealed, by: A.key, sig: s2.sig, box: made2.box, groupBox: made2.groupBox, cert: pageCert })
+
+  const mine = [A.box, made1.box, made2.box].map((b) => dmCore.bucketPrefix(b))
+  let strangerPrf = null
+  for (;;) {
+    const prf = crypto.randomBytes(32)
+    if (!mine.includes(dmCore.bucketPrefix(hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey)))) {
+      strangerPrf = prf
+      break
+    }
+  }
+  const X = await memberNode(t, assoc, seeder.url, { prf: strangerPrf })
+  await copyDiary(X, C)
+  await C.web.request('dm.send', { to: X.key, text: 'ruido' })
+  await C.web.request('dm.send', { to: P, text: 'ainda para a 1' })
+  t.is(seeder.puts.length, 8, 'four sends, each with a self copy')
+
+  // The page's box set changed: it catches up on its own, from its boxes only.
+  seeder.served = 0
+  seeder.pageQueries.length = 0
+  await A.web.request('dm.pull')
+  const texts = async () => (await A.web.request('dm.thread', { page: P, peer: C.key })).messages.map((m) => m.text)
+  t.alike(await texts(), ['para a 1', 'ainda para a 1'])
+  t.is(seeder.served, 2, 'the two drops sealed to the page; not the stranger\'s, not the sender\'s copies')
+  const asked = new Set(seeder.pageQueries.flatMap((q) => q.buckets))
+  t.ok(asked.has(dmCore.bucketPrefix(made1.box)) && asked.has(dmCore.bucketPrefix(made2.box)), 'both page boxes')
+  t.absent(asked.has(dmCore.bucketPrefix(C.box)), 'never the sender\'s bucket')
+
+  // A later pull: whether the page rides along or catches up, only the
+  // buckets of the own box and the page boxes are asked for.
+  await C.web.request('dm.send', { to: P, text: 'de carona' })
+  seeder.served = 0
+  seeder.pageQueries.length = 0
+  await A.web.request('dm.pull')
+  t.alike(await texts(), ['para a 1', 'ainda para a 1', 'de carona'])
+  t.is(seeder.served, 1, 'one drop downloaded')
+  const later = new Set(seeder.pageQueries.flatMap((q) => q.buckets))
+  for (const b of [A.box, made1.box, made2.box]) t.ok(later.has(dmCore.bucketPrefix(b)), 'the own box and the page boxes are asked for')
+  t.absent(later.has(dmCore.bucketPrefix(C.box)), 'never the sender\'s bucket')
 })

@@ -9,7 +9,7 @@ const path = require('node:path')
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const sodium = require('sodium-universal')
-const { createDmPool, POOL_DIR, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
+const { createDmPool, tagFor, POOL_DIR, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
 const { DM_DROP_BYTES, DM_RETENTION_MS, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
 const { tmpDir } = require('./helpers/tmp')
 
@@ -578,4 +578,99 @@ test('the visit pool keeps pings 3 days but remembers stamps as long as the dm p
   dm.sweep()
   t.absent(visit.hasSpent(hv), 'both pools forget at the same age')
   t.absent(dm.hasSpent(hd))
+})
+
+// ---- buckets (docs/protocol.md section 11, "Buckets") ----
+
+function ids (page) {
+  return page.items.map((it) => it.seq)
+}
+
+test('buckets: the tag survives load and compaction; a record from before has none and matches every bucket', (t) => {
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now, compactAt: 1 })
+  t.is(tagFor(0, 0), 0, 'no tag at 0 bits')
+  t.is(tagFor(3, null), 0, 'no tag for an unknown bucket')
+  t.is(tagFor(3, 5), 13)
+  t.alike(pool.submit(drop(), tagFor(3, 5)), { seq: 1 })
+  t.alike(pool.submit(drop()), { seq: 2 }, 'a v1 put: untagged')
+  t.alike(pool.submit(drop(), tagFor(1, 1)), { seq: 3 })
+  c.t += 10 * DAY
+  t.alike(pool.submit(drop(), tagFor(3, 5)), { seq: 4 })
+  t.alike(pool.submit(drop(), tagFor(3, 2)), { seq: 5 })
+  t.is(pool.sweep(), 3, 'the three old records are swept (and the log compacted)')
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [5], bits: 3 })), [4])
+  pool.close()
+
+  const again = open(t, dir, { now: c.now })
+  t.alike(ids(again.page({ after: 0, limit: 8, buckets: [5], bits: 3 })), [4], 'the tag is read back')
+  t.alike(ids(again.page({ after: 0, limit: 8, buckets: [2], bits: 3 })), [5])
+  t.alike(ids(again.page({ after: 0, limit: 8 })), [4, 5], 'v1 sees all')
+
+  // A log written before the tags: top byte 0 everywhere.
+  const old = tmpDir(t)
+  const p0 = open(t, old, { now: c.now })
+  const d = drop()
+  p0.submit(d)
+  p0.close()
+  const file = path.join(old, POOL_DIR, LOG_FILE)
+  t.is(fs.readFileSync(file)[0], 0, 'an untagged record has a zero top byte')
+  const p1 = open(t, old, { now: c.now })
+  t.alike(ids(p1.page({ after: 0, limit: 8, buckets: [7], bits: 3 })), [1], 'untagged matches every bucket')
+})
+
+test('buckets: matching across different bits, both ways', (t) => {
+  const pool = open(t, tmpDir(t))
+  pool.submit(drop(), tagFor(1, 1)) // seq 1: 1 bit, bucket 1 (the half 4..7 at 3 bits)
+  pool.submit(drop(), tagFor(3, 6)) // seq 2: 3 bits, bucket 6
+  pool.submit(drop(), tagFor(3, 2)) // seq 3: 3 bits, bucket 2 (the half 0 at 1 bit)
+  // A request at 3 bits against a drop tagged at 1 bit.
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [6], bits: 3 })), [1, 2])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [2], bits: 3 })), [3])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0, 7], bits: 3 })), [1], 'bucket 7 is in the same half as 1')
+  // A request at 1 bit against drops tagged at 3 bits.
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [1], bits: 1 })), [1, 2])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0], bits: 1 })), [3])
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0, 1], bits: 1 })), [1, 2, 3])
+  // Bits 0: one bucket, everything.
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0], bits: 0 })), [1, 2, 3])
+})
+
+test('buckets: next and oldest with filtering; an empty page never has a next', (t) => {
+  const pool = open(t, tmpDir(t))
+  for (let i = 0; i < 6; i++) pool.submit(drop(), tagFor(1, i % 2)) // 1 0 1 0 1 0 -> seqs odd are bucket 1... (i=0 -> bucket 0)
+  // seq 1,3,5 are bucket 0; seq 2,4,6 are bucket 1.
+  const p = pool.page({ after: 0, limit: 2, buckets: [1], bits: 1 })
+  t.alike(ids(p), [2, 4])
+  t.is(p.next, 4, 'more matching drops follow')
+  t.is(p.oldest, 1, 'oldest is the pool oldest')
+  const q = pool.page({ after: 4, limit: 2, buckets: [1], bits: 1 })
+  t.alike(ids(q), [6])
+  t.is(q.next, null)
+  const exact = pool.page({ after: 0, limit: 3, buckets: [1], bits: 1 })
+  t.alike(ids(exact), [2, 4, 6])
+  t.is(exact.next, null, 'nothing matching after the limit: no next')
+  const none = pool.page({ after: 0, limit: 8, buckets: [0, 1], bits: 1 })
+  t.is(none.items.length, 6)
+  const emptyTail = pool.page({ after: 6, limit: 8, buckets: [0], bits: 1 })
+  t.alike(emptyTail, { items: [], next: null, oldest: 1 })
+  for (let i = 0; i < 6; i++) {
+    const r = pool.page({ after: i, limit: 1, buckets: [1], bits: 1 })
+    if (r.next !== null) t.ok(r.items.length > 0, 'a next comes with items')
+  }
+  t.exception.all(() => pool.page({ after: 0, limit: 1, buckets: [2], bits: 1 }), /buckets/)
+  t.exception.all(() => pool.page({ after: 0, limit: 1, buckets: [0], bits: 7 }), /buckets/)
+})
+
+test('buckets: a repeated drop keeps its first tag; a bad tag is refused', (t) => {
+  const pool = open(t, tmpDir(t))
+  const d = drop()
+  t.alike(pool.submit(d, tagFor(2, 3)), { seq: 1 })
+  t.alike(pool.submit(d, tagFor(2, 0)), { seq: 1, repeated: true }, 'a repeat with another tag is still a success')
+  t.alike(pool.submit(d), { seq: 1, repeated: true })
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [3], bits: 2 })), [1], 'still the first tag')
+  t.alike(ids(pool.page({ after: 0, limit: 8, buckets: [0], bits: 2 })), [], 'not the second')
+  t.exception.all(() => pool.submit(drop(), 1), /tag/)
+  t.exception.all(() => pool.submit(drop(), 128), /tag/)
 })

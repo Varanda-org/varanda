@@ -1352,6 +1352,26 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     })
   }
 
+  // The 6-bit bucket prefix of a box public key (hex or bytes) for the pool
+  // put and page requests; null for a missing or unusable key (an untagged
+  // put, which matches every bucket).
+  function prefixOf (boxKey) {
+    if (boxKey === null || boxKey === undefined) return null
+    try {
+      return dm.bucketPrefix(boxKey)
+    } catch {
+      return null
+    }
+  }
+
+  // The prefix of the box a ctl of this store is sealed to: the own box, or
+  // the held page's current one.
+  function ctxPrefix (ctx) {
+    if (ctx.page === null) return prefixOf(box.publicKey)
+    const e = pages.get(ctx.page)
+    return e === null ? null : prefixOf(e.dmBox.publicKey)
+  }
+
   // ---- sending ----
 
   function refusal (reason) {
@@ -1380,7 +1400,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         let r
         emit('dm.sending', {})
         try {
-          r = await link.put(entry.drops[i])
+          r = await link.put(entry.drops[i], entry.prefixes === undefined ? null : entry.prefixes[i])
         } catch {
           throw unconfirmed()
         }
@@ -1465,7 +1485,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         }
         if (link === null) link = await openDmLink(linkOpts)
         emit('dm.sending', {})
-        const r = await link.put(bytes)
+        const r = await link.put(bytes, ctxPrefix(ctx))
         if (!r.ok && r.reason !== 'invalido') return
         if (!r.ok) log('aviso: 1 estado de conversa recusado pelo semeador')
         queue = queue.slice(1)
@@ -1579,6 +1599,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       id,
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      prefixes: [prefixOf(recipientBox), prefixOf(box.publicKey)],
       acked: [false, false],
       row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest, ...(moment === null ? {} : { moment }) },
       blobs: sealedBlobs,
@@ -1697,7 +1718,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (d === null || d.byteLength !== dm.DM_DROP_BYTES) return null
       drops.push(d)
     }
-    return { key: m.key, id: m.id, at: m.at, drops, acked: m.acked, row: m.row, rx: { emoji: rx.emoji, rev: rx.rev, digest: rx.digest }, blobs: [], plains: null }
+    // An item stored before the buckets has no prefixes and goes untagged.
+    const prefixes = Array.isArray(m.prefixes) && m.prefixes.length === 2 &&
+      m.prefixes.every((x) => x === null || (Number.isSafeInteger(x) && x >= 0 && x < 64))
+      ? m.prefixes
+      : [null, null]
+    return { key: m.key, id: m.id, at: m.at, drops, prefixes, acked: m.acked, row: m.row, rx: { emoji: rx.emoji, rev: rx.rev, digest: rx.digest }, blobs: [], plains: null }
   }
 
   // Writes the reaction ops of `pending` to kv dmReactPending, in order,
@@ -1712,7 +1738,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       for (const e of pending.values()) {
         if (e.rx === undefined || (e.row === null && e.acked.every(Boolean))) continue
         items.push({
-          meta: local.seal({ key: e.key, id: e.id, at: e.at, acked: e.acked, row: e.row, rx: e.rx }),
+          meta: local.seal({ key: e.key, id: e.id, at: e.at, acked: e.acked, row: e.row, rx: e.rx, prefixes: e.prefixes }),
           drops: e.drops.map((d, i) => e.acked[i] ? null : local.sealBytes(d))
         })
       }
@@ -1756,6 +1782,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       id,
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      prefixes: [prefixOf(recipientBox), prefixOf(box.publicKey)],
       acked: [false, false],
       row: { t: 'rx', id, peer: to, from: own, to, target: t, emoji, rev, at, mine: true },
       rx: { emoji, rev, digest: t.digest },
@@ -1814,6 +1841,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return out
   }
 
+  // The bucket prefixes of one page scan's boxes (current, previous, legacy).
+  // A box that gives none leaves the scan unfiltered, never narrower.
+  function pagePrefixes (p) {
+    const list = p.boxes.map((b) => prefixOf(b.pair.publicKey))
+    return list.some((x) => x === null) ? undefined : list
+  }
+
   // A hex32 digest of a held page's public boxes (current, previous, then
   // legacy): read only, sends always seal to the current one.
   function boxSetOf (e) {
@@ -1843,10 +1877,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       scans = await pageScans()
       // Pages scanned up to where the own cursor stands ride along.
       const along = scans.filter((p) => p.cursor.after === cursor)
+      // Only the buckets of the boxes this pass opens: the own one and the
+      // held pages riding along (a drop is tagged by the box it is sealed to).
+      const lists = [[prefixOf(box.publicKey)], ...along.map(pagePrefixes)]
+      const prefixes = lists.some((l) => l === undefined || l.includes(null)) ? undefined : lists.flat()
       let read = 0
       for (;;) {
         if (gen !== generation) throw new UsageError(LOCKED)
-        const page = await link.page({ after: cursor, limit: L.pageMax })
+        const page = await link.page({ after: cursor, limit: L.pageMax, prefixes })
         const rows = []
         // A copy: this page's ctls join it as they are filed.
         const ops = [...local.ops()]
@@ -1893,7 +1931,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         for (;;) {
           if (gen !== generation) throw new UsageError(LOCKED)
           if (p.stale) break
-          const page = await link.page({ after: p.cursor.after, limit: L.pageMax })
+          const page = await link.page({ after: p.cursor.after, limit: L.pageMax, prefixes: pagePrefixes(p) })
           const mod = await moderation()
           for (const item of page.items) read += item.bytes.byteLength
           await filePageItems(p, page.items.map((item) => item.bytes), mod)
@@ -2109,7 +2147,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       await local.writeVisitSent(visits.pruneSent([...await local.visitSent(), { to, day }], now))
       const delay = Math.max(0, Math.floor(Number(L.visitDelay()) || 0))
       const queued = await local.visitQueue()
-      await local.writeVisitQueue([...queued, { to, day, due: now + delay, sealed: b4a.toString(sealed, 'base64') }])
+      await local.writeVisitQueue([...queued, { to, day, due: now + delay, sealed: b4a.toString(sealed, 'base64'), ...(prefixOf(recipientBox) === null ? {} : { prefix: prefixOf(recipientBox) }) }])
       track(scheduleVisits().catch(noop))
       return { queued: true }
     })
@@ -2211,7 +2249,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         puts++
         let r
         try {
-          r = await link.put(dropOf(b4a.from(q.sealed, 'base64'), stamp))
+          r = await link.put(dropOf(b4a.from(q.sealed, 'base64'), stamp), q.prefix === undefined ? null : q.prefix)
         } catch {
           return
         }
@@ -2323,11 +2361,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         throw new UsageError('sem conexão com o semeador')
       }
       let cursor = await withVisits(() => local.visitCursor())
+      const ownPrefix = prefixOf(box.publicKey)
+      const ownPrefixes = ownPrefix === null ? undefined : [ownPrefix]
       let read = 0
       const floor = visits.dayNumber(since)
       for (;;) {
         if (epoch !== visitEpoch || !unlocked()) break
-        const page = await link.page({ after: cursor, limit: L.pageMax })
+        const page = await link.page({ after: cursor, limit: L.pageMax, prefixes: ownPrefixes })
         let mod
         try {
           mod = await moderationStrict()
@@ -2565,6 +2605,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         id: b.id,
         at: b.at,
         drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+        prefixes: [prefixOf(d.box), prefixOf(e.dmBox.publicKey)],
         acked: [false, false],
         row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
         blobs: [],

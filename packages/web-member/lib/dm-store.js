@@ -915,6 +915,17 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     Number.isSafeInteger(r.due) && r.due >= 0 && typeof r.sealed === 'string' && BASE64.test(r.sealed) &&
     b4a.byteLength(r.sealed, 'base64') === DM_SEALED_BYTES
 
+  // A queued ping keeps the 6-bit bucket prefix of the box it is sealed to
+  // (docs/protocol.md section 11, "Buckets"); one queued before the buckets
+  // has none and goes untagged.
+  const queuedOf = (r) => ({
+    to: r.to,
+    day: r.day,
+    due: r.due,
+    sealed: r.sealed,
+    ...(Number.isSafeInteger(r.prefix) && r.prefix >= 0 && r.prefix < 64 ? { prefix: r.prefix } : {})
+  })
+
   // The filed visitors [{ from, day }]; throws while locked.
   async function visits () {
     return listOf(await readVisit(VISITS), 'rows', validVisitRow, VISIT_ROWS_MAX).map((r) => ({ from: r.from, day: r.day }))
@@ -964,13 +975,13 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   async function visitQueue () {
     const value = await readVisit(VISIT_QUEUE)
     const items = value !== null && Array.isArray(value.items) ? value.items : []
-    return items.filter(validQueued).slice(0, VISIT_QUEUE_MAX).map((r) => ({ to: r.to, day: r.day, due: r.due, sealed: r.sealed }))
+    return items.filter(validQueued).slice(0, VISIT_QUEUE_MAX).map(queuedOf)
   }
 
   // More than VISIT_QUEUE_MAX items keeps the oldest: a ping past the cap is
   // refused by the caller, never one already waiting dropped for it.
   async function writeVisitQueue (items) {
-    const clean = items.filter(validQueued).slice(0, VISIT_QUEUE_MAX).map((r) => ({ to: r.to, day: r.day, due: r.due, sealed: r.sealed }))
+    const clean = items.filter(validQueued).slice(0, VISIT_QUEUE_MAX).map(queuedOf)
     await writeVisit(VISIT_QUEUE, { items: clean })
   }
 
