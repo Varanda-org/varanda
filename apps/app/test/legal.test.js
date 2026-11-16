@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 67)
+  t.is(LEGAL_VERSION, 68)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 67, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 68, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'da42323a279e53c0a578d9959ce9cd4cb863c2a22616bc51a6645a73518e6897', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '78255f5eb3e36d36689ababe76d45b496f460802b6bd293e2377d7e86cc3a6e0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -835,7 +835,22 @@ test('legal: version 65 keeps what another app shares on the device until Public
   t.absent(all.includes('\u2014'), 'no em dash')
 })
 
-test('legal: version 66 shares the Sorte do dia and the acceptance across devices', async (t) => {
+test('legal: version 66 says the account service checks a new @nome and what a page publishes', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const required of [
+    'O serviço de conta aplica a mesma lista a um @nome novo, de pessoa ou de página',
+    'recusa o pedido e não guarda o @nome nem o texto recusado',
+    'Um @nome que você já tem não é conferido de novo'
+  ]) t.ok(all(TERMS).includes(required), 'terms: ' + required)
+  for (const required of [
+    'o serviço de conta confere o texto (publicação, resposta, citação, perfil, anúncio e mensagem em grupo público)',
+    'O texto recusado não é guardado, e o registro da recusa tem só o tipo do pedido e o motivo'
+  ]) t.ok(all(PRIVACY).includes(required), 'privacy: ' + required)
+  t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 67 shares the Sorte do dia and the acceptance across devices', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(PRIVACY).includes('a partir da data local e da chave pública da sua conta, por isso é a mesma em todos os aparelhos em que você entra com a mesma passkey'), 'same Sorte on every device')
@@ -847,7 +862,7 @@ test('legal: version 66 shares the Sorte do dia and the acceptance across device
   t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
 })
 
-test('legal: version 67 keeps the one-time notes from repeating on another device', async (t) => {
+test('legal: version 68 keeps the one-time notes from repeating on another device', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   const marks = 'marcas opacas de que o aviso antes da primeira mensagem a uma Página e o aviso de convite novo já foram mostrados, na mesma janela do Avisos, para que outro aparelho da mesma conta não os mostre de novo; as marcas do bloco são calculadas com uma chave da sua conta, e nem o serviço nem quem lê essas marcas consegue saber a qual Página ou convite elas se referem. O aparelho que mostrou o aviso de uma Página guarda um registro de que já o mostrou (na instalação hospedada, com um nome derivado dessa mesma chave) e o apaga quando você sai da conta.'

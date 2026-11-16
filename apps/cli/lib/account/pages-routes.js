@@ -85,6 +85,7 @@ const { applyDeletes } = require('@varanda/core/lib/deletion')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
 const { feira } = require('@varanda/rpc')
+const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
@@ -124,6 +125,17 @@ const RESERVED = new Set(['admin', 'associacao', 'association', 'ajuda', 'mod', 
   // The Vitrine handles shown in the varanda.app screenshots (see store.js).
   'andre_costa', 'bia_araujo', 'biblioteca_praca', 'cecilia_ramos',
   'horta_do_bairro', 'joao_nascimento', 'lia_oliveira', 'tomas_ferreira'])
+
+// A page's new @nome (create and rename), checked before anything is claimed;
+// store.js validName checks it again when the directory takes it.
+function newUsername (username) {
+  return typeof username === 'string' && isUsername(username) && !RESERVED.has(username) && findTerm(username) === null
+}
+
+// The city and neighbourhood of a listing's place, as the app checks them.
+function placeTexts (place) {
+  return isPlainObject(place) ? [place.city, place.bairro] : []
+}
 
 // Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
@@ -169,7 +181,7 @@ const TERMINAL = ['movida', 'encerrada']
 const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso', 'nome-invalido', 'expirado',
   'assinatura-invalida', 'pedido-invalido', 'pausada', 'encerrada', 'midia-invalida', 'indisponivel', 'termos-pendentes',
   'troca-bloqueada', 'nao-encontrado', 'para-si', 'bloqueou', 'sem-caixa', 'sem-selos', 'resposta-invalida', 'longa-demais',
-  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia'])
+  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia', 'termo-recusado'])
 
 function noop () {}
 
@@ -221,6 +233,13 @@ function createPagesRoutes ({
   http
 } = {}) {
   const { send, sendError, readJsonBody, checkPost, checkRawPost, RouteError, refuse, fromStore, keyedWindow } = http
+
+  // The texts a page publishes through the service pass the app's word check
+  // here too, so a modified or old client cannot skip it (word-check.js).
+  function termFree (...texts) {
+    if (findTerm(...texts) !== null) throw refuse('termo-recusado')
+  }
+
   const on = keys !== null && keys.enabled === true && writer !== null && pagesStore !== null && issuerKeyPair !== null && issuerCert !== null
   // pagesNotices reads the page's notices, pagesDelegate confirms a core
   // node's delegate, pagesDm runs the page's Conversas; pagesGroups is where
@@ -826,13 +845,14 @@ function createPagesRoutes ({
         record.prev !== null || record.at !== roster.at || record.nonce !== roster.nonce || record.nonce !== nonce) {
       throw refuse('pedido-invalido')
     }
-    if (typeof username !== 'string' || !isUsername(username) || RESERVED.has(username)) throw refuse('nome-invalido')
+    if (!newUsername(username)) throw refuse('nome-invalido')
     let profile
     try {
       profile = profileRecords({ name, bio })
     } catch {
       throw refuse('pedido-invalido')
     }
+    termFree(name, bio)
     const prior = claim(member, nonce, hash, false, page, 'create')
     if (prior !== null) return prior
     return once(member, nonce, async () => {
@@ -960,14 +980,17 @@ function createPagesRoutes ({
     try {
       if (action === 'post') {
         if (!exactKeys(op, ['text'], ['media'])) throw refuse('pedido-invalido')
+        termFree(op.text)
         return [postRecord({ text: op.text, media: mediaOf(page, op.media) })]
       }
       if (action === 'reply') {
         if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
+        termFree(op.text)
         return [postRecord({ text: op.text, replyTo: target(op.to), media: mediaOf(page, op.media) })]
       }
       if (action === 'quote') {
         if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
+        termFree(op.text)
         return [postRecord({ text: op.text, quote: target(op.to), media: mediaOf(page, op.media) })]
       }
       if (action === 'like' || action === 'repost') {
@@ -994,6 +1017,7 @@ function createPagesRoutes ({
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
+        termFree(op.title, op.text, ...placeTexts(op.place))
         const record = listingRecord({ kind: op.kind, title: op.title, text: op.text, price: op.price, unit: op.unit, cat: op.cat, place: op.place, media: mediaOf(page, op.media, feira.MAX_LISTING_MEDIA) })
         if (countLive(await writer.readEntries(page)) >= feira.MAX_LISTINGS) throw refuse('limite')
         return [record]
@@ -1001,6 +1025,7 @@ function createPagesRoutes ({
       if (action === 'listing-edit') {
         if (!exactKeys(op, ['to', 'expectedRevision', 'title', 'text', 'price', 'unit', 'cat', 'place', 'media'])) throw refuse('pedido-invalido')
         if (!Number.isSafeInteger(op.expectedRevision) || op.expectedRevision < 0) throw refuse('pedido-invalido')
+        termFree(op.title, op.text, ...placeTexts(op.place))
         const t = ownListingRef(page, op.to)
         const media = op.media === null ? null : mediaOf(page, op.media, feira.MAX_LISTING_MEDIA)
         const entries = await writer.readEntries(page)
@@ -1021,6 +1046,7 @@ function createPagesRoutes ({
       }
       if (action === 'profile') {
         if (!exactKeys(op, ['name', 'bio'], ['avatar'])) throw refuse('pedido-invalido')
+        termFree(op.name, op.bio)
         const avatar = op.avatar === undefined || op.avatar === null ? null : mediaOf(page, [op.avatar])[0]
         return profileRecords({ name: op.name, bio: op.bio, avatar })
       }
@@ -1062,7 +1088,7 @@ function createPagesRoutes ({
     const { member, page, nonce, op, hash } = await statement(body, 'rename', false)
     if (!exactKeys(op, ['username'])) throw refuse('pedido-invalido')
     const username = op.username
-    if (typeof username !== 'string' || !isUsername(username) || RESERVED.has(username)) throw refuse('nome-invalido')
+    if (!newUsername(username)) throw refuse('nome-invalido')
     const prior = claim(member, nonce, hash, false, page, 'rename')
     if (prior !== null) return prior
     return once(member, nonce, () => withLock(page, async () => {

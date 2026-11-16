@@ -211,6 +211,7 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
     media: { upload: async (arg) => { calls.push(['upload', arg]); return upload ? upload(arg) : descriptor(arg, calls.length) } },
     setUploading: () => {},
     offlineQueue: false,
+    webOn: false,
     errorText: (err) => err.message,
     // The word check reads the card through take, and neither flow has one.
     linkDraft: { take: () => null },
@@ -604,8 +605,8 @@ test('a late post success clears only the video that was sent', async (t) => {
   const sent = await stage(draft)
   draft.clear()
   const next = await stage(draft)
-  const published = evaluate('const published = (sent,', 'function (sent, sentReply, sentIds = [], sentQuote = null)', {
-    video: { draft }, tap: () => {}, setPollDraft: () => {}, setEventDraft: () => {}, setMusicDraft: () => {}, musicTried: { current: new Set() }, setText: () => {}, removeItems: () => {}, onPublished: () => {}
+  const published = evaluate('const published = (sent,', 'function (sent, sentReply, sentIds = [], sentQuote = null, web = null)', {
+    video: { draft }, tap: () => {}, setPollDraft: () => {}, setEventDraft: () => {}, setMusicDraft: () => {}, setWebShare: () => {}, musicTried: { current: new Set() }, setText: () => {}, removeItems: () => {}, onPublished: () => {}
   })
   published('', null, [sent])
   t.is(draft.state.file, next)

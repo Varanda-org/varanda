@@ -4,10 +4,10 @@
 // Pure ES module: no React, no Node built-ins and only pure app imports, so
 // Metro bundles it and Node's import() loads it in tests.
 //
-// The search text part (TOKEN_MAX .. searchRank) is a local copy of
-// @varanda/core lib/search-text.js (Metro cannot reach packages/core), pinned
-// by a parity test (test/search.test.js); change both together. It differs
-// only in sharing its folding with wholeTokens, which core does not have.
+// The search text part (TOKEN_MAX .. searchRank) and wholeTokens are a local
+// copy of @varanda/core lib/search-text.js (Metro cannot reach
+// packages/core), pinned by a parity test (test/search.test.js); change both
+// together. The account service's word check folds with core's copy.
 //
 // The seeder's search answer is UNTRUSTED: it only says where to look. A row
 // exists only after diary.peek confirms it: the name comes from the peeked
@@ -130,8 +130,9 @@ export function splitTokens (text) {
   }
 }
 
-// App only (wordCheck.js): every token of the whole `text`, with the same
-// folding but no input bound and no cut, so nothing can hide past either one.
+// The word check only (wordCheck.js): every token of the whole `text`, with
+// the same folding but no input bound and no cut, so nothing can hide past
+// either one.
 export function wholeTokens (text) {
   try {
     return typeof text === 'string' ? foldedTokens(text, Infinity) : []

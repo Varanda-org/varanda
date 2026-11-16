@@ -9,7 +9,7 @@
 const http = require('node:http')
 const nodeCrypto = require('node:crypto')
 const test = require('brittle')
-const { videoBounds } = require('@varanda/rpc')
+const { videoBounds, BLOCKED_TERMS } = require('@varanda/rpc')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
@@ -349,10 +349,10 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
     return { type: 'page-roster', ...f, signature: signRoster(f, m.kp) }
   }
 
-  async function create (m, username) {
+  async function create (m, username, { name = 'Página ' + username, bio = '' } = {}) {
     const { nonce, page } = await start(m, 'create')
     const record = roster(m, page, { gen: 1, owner: m.hex, admins: [], prev: null }, nonce)
-    const op = { username, name: 'Página ' + username, bio: '', roster: { gen: 1, admins: [], prev: null, at: record.at, nonce } }
+    const op = { username, name, bio, roster: { gen: 1, admins: [], prev: null, at: record.at, nonce } }
     const r = await api('POST', '/account/pages/create', { member: m.hex, nonce, page, op, signature: sign(m, 'create', nonce, page, op), record })
     return { ...r, page }
   }
@@ -607,6 +607,61 @@ test('account pages: the Vitrine handles shown on varanda.app are refused as pag
     t.is((await api('GET', '/account/username/' + username)).status, 404, username + ': no name reserved for it')
   }
   t.is(ctx.pagesStore.listFor(owner.hex).owned.length, 0)
+})
+
+// A listed term as text and as an @nome (its words joined by '_'), read from
+// the list so this file never spells one.
+const TERM = BLOCKED_TERMS[0]
+const TERM_NAME = BLOCKED_TERMS.map((term) => term.replace(/ /g, '_')).find((name) => /^[a-z][a-z0-9_]{2,19}$/.test(name) && !/^[0-9a-f]{6}$/.test(name))
+
+test('account pages: the word check refuses a new @nome and what a page publishes with a listed term', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx, api } = s
+  const owner = await s.newMember('dona')
+
+  const named = await s.create(owner, TERM_NAME)
+  t.alike([named.status, named.body], [400, { error: 'nome-invalido' }], 'a new page @nome')
+  t.is(ctx.pagesStore.get(named.page), null, 'no ACL row for it')
+  t.is((await api('GET', '/account/username/' + TERM_NAME)).status, 404, 'no name reserved for it')
+  for (const fields of [{ name: 'Padaria ' + TERM.toUpperCase() }, { bio: 'Pães e ' + TERM + '2024' }]) {
+    const r = await s.create(owner, 'padaria_nova', fields)
+    t.alike([r.status, r.body], [400, { error: 'termo-recusado' }], JSON.stringify(Object.keys(fields)))
+    t.is(ctx.pagesStore.get(r.page), null, 'no ACL row for it')
+  }
+  t.is(ctx.pagesStore.listFor(owner.hex).owned.length, 0, 'no page was made')
+
+  const made = await s.create(owner, 'padaria')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+  const post = await s.act(owner, 'post', K, { text: 'Pão quente às seis' })
+  t.is(post.status, 200, JSON.stringify(post.body))
+  const to = K + ':' + post.body.seq
+  const listing = { kind: 'servico', title: 'Conserto de bicicleta', text: 'Na garagem', price: 5000, unit: 'hora', cat: 'reparos', place: { uf: 'SP', city: 'São Paulo', bairro: null } }
+  const listed = await s.act(owner, 'listing', K, listing)
+  t.is(listed.status, 200, JSON.stringify(listed.body))
+  const edit = { to: K + ':' + listed.body.seq, expectedRevision: 0, title: 'Conserto rápido', text: 'Na garagem', price: 6000, unit: 'hora', cat: 'reparos', place: listing.place, media: null }
+  const length = ctx.writer.info(K).length
+
+  const refused = [
+    ['post', { text: 'Bom dia, ' + TERM }],
+    ['reply', { to, text: TERM }],
+    ['quote', { to, text: 'veja: ' + TERM }],
+    ['profile', { name: TERM, bio: '' }],
+    ['profile', { name: 'Padaria', bio: 'Pães e ' + TERM }],
+    ['listing', { ...listing, title: 'Conserto ' + TERM }],
+    ['listing', { ...listing, text: TERM }],
+    ['listing', { ...listing, place: { uf: 'SP', city: 'São Paulo', bairro: TERM } }],
+    ['listing-edit', { ...edit, text: TERM }],
+    ['listing-edit', { ...edit, place: { uf: 'SP', city: TERM, bairro: null } }]
+  ]
+  for (const [action, op] of refused) {
+    const r = await s.act(owner, action, K, op)
+    t.alike([r.status, r.body], [400, { error: 'termo-recusado' }], action + ' ' + JSON.stringify(Object.keys(op)))
+  }
+  t.is(ctx.writer.info(K).length, length, 'nothing was appended')
+  t.alike((await s.act(owner, 'rename', K, { username: TERM_NAME })).body, { error: 'nome-invalido' }, 'a page rename')
+  t.is((await s.act(owner, 'profile', K, { name: 'Padaria', bio: 'Pão, café e cultura' })).status, 200, 'other text still goes')
 })
 
 test('account pages: an offer to a non-admin of a page with 16 admins is limite', async (t) => {

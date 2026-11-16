@@ -309,6 +309,20 @@ test('sheet source: consent, sent wording, share on its own tap, no em dash or P
   t.absent(read('postShare.js').includes('import '), 'postShare.js takes its call, imports nothing')
 })
 
+test('sheet source: the caller notice is read once per opening and only at the first read', (t) => {
+  const sheet = read('ui/PostShareSheet.js')
+  t.ok(sheet.includes("notice = ''"), 'the optional notice prop')
+  t.ok(sheet.includes('}, [open, target, request])'), 'the notice never re-runs the read')
+  t.ok(sheet.includes("import { firstReadView } from '../postShareCompose'"), 'the first-read words come from the tested pure module')
+  t.ok(sheet.includes('setView(firstReadView(lead, r))'), 'the first read goes through firstReadView')
+  const effect = sheet.slice(sheet.indexOf('useEffect(() => {'), sheet.indexOf('}, [open, target, request])'))
+  const taken = effect.indexOf('const lead = noticeRef.current')
+  t.ok(taken > 0 && taken < effect.indexOf('readShared('), 'the notice is taken at the opening, before the read')
+  t.is(sheet.split('noticeRef.current').length - 1, 2, 'set on render, read once at the opening')
+  const writer = sheet.slice(sheet.indexOf('const write = '), sheet.indexOf('const nav = '))
+  t.absent(/noticeRef|\blead\b/.test(writer), 'writes ignore the notice')
+})
+
 test('context source: a failed probe is asked again when the app is back online or in view', (t) => {
   const src = read('postPublicContext.js')
   t.ok(src.includes('}, [hosted, origin, awake])'), 'the probe effect re-runs when awake changes')

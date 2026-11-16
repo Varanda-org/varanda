@@ -292,3 +292,48 @@ test('nextMomentOf: one next step, including the next ring start', async (t) => 
   t.is(nextMomentOf(null, { ring: 0, item: 0 }), null, 'not loaded')
   t.is(nextMomentOf(rings, { ring: -1, item: 0 }), null, 'no selected ring')
 })
+
+test('aheadMomentsOf: rest of the ring, then the next rings from their start', async (t) => {
+  const { aheadMomentsOf } = await load()
+  const rings = [
+    { author: A, items: [item(1), item(2), item(3)], start: 0 },
+    { author: B, items: [item(4), item(5), item(6)], start: 1 },
+    { author: C, items: [item(7)], start: 0 }
+  ]
+  const seqs = (list) => list.map((m) => m.author.slice(0, 2) + m.item.seq)
+  t.alike(seqs(aheadMomentsOf(rings, { ring: 0, item: 0 }, 1)), ['bb2'], 'inside a ring')
+  t.alike(seqs(aheadMomentsOf(rings, { ring: 0, item: 1 }, 3)), ['bb3', 'cc5', 'cc6'], 'across a ring boundary from start')
+  t.alike(seqs(aheadMomentsOf(rings, { ring: 1, item: 2 }, 5)), ['dd7'], 'near the end')
+  t.alike(aheadMomentsOf(rings, { ring: 2, item: 0 }, 3), [], 'end of rings')
+  t.alike(aheadMomentsOf(rings, { ring: 0, item: 0 }, 0), [], 'n = 0')
+  t.alike(aheadMomentsOf(null, { ring: 0, item: 0 }, 3), [], 'rings null')
+  t.alike(aheadMomentsOf(rings, { ring: -1, item: 0 }, 3), [], 'no selected ring')
+  t.is(aheadMomentsOf(rings, { ring: 0, item: 0 }, 1)[0].item, rings[0].items[1], 'the item itself')
+})
+
+test('prevMomentOf: the previous item of the same ring only', async (t) => {
+  const { prevMomentOf } = await load()
+  const rings = [
+    { author: A, items: [item(1), item(2)], start: 0 },
+    { author: B, items: [item(3), item(4)], start: 1 }
+  ]
+  t.alike(prevMomentOf(rings, { ring: 1, item: 1 }), { author: B, item: rings[1].items[0] })
+  t.is(prevMomentOf(rings, { ring: 1, item: 0 }), null, 'never the previous ring')
+  t.is(prevMomentOf(rings, { ring: 0, item: 0 }), null)
+  t.is(prevMomentOf(null, { ring: 0, item: 1 }), null)
+  t.is(prevMomentOf(rings, { ring: -1, item: 1 }), null)
+})
+
+test('momentRefOf: seq, expected media and expiry', async (t) => {
+  const { momentRefOf, MOMENT_MS } = await load()
+  const at = '2026-11-07T10:00:00.000Z'
+  const photo = { seq: 3, at, media: { mime: 'image/jpeg' } }
+  t.alike(momentRefOf(A, photo), { author: A, seq: 3, expected: { mime: 'image/jpeg', ms: undefined }, until: Date.parse(at) + MOMENT_MS })
+  const video = { seq: 4, at, media: { mime: 'video/mp4', ms: 4200 } }
+  t.alike(momentRefOf(A, video).expected, { mime: 'video/mp4', ms: 4200 })
+  t.alike(momentRefOf(A, { seq: 5, at }).expected, { mime: undefined, ms: undefined }, 'no media')
+  t.is(momentRefOf(A, { seq: 'x', at }), null)
+  t.is(momentRefOf(A, { seq: 1, at: 'nope' }), null, 'an unparseable date is expired')
+  t.is(momentRefOf(null, photo), null)
+  t.is(momentRefOf(A, null), null)
+})

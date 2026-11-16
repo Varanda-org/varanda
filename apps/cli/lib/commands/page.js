@@ -44,7 +44,8 @@ const TEXTS = {
   'nao-encontrado': 'não encontrado',
   'em-andamento': 'pedido ainda em andamento',
   privado: 'grupo privado: publique como a página pelo app',
-  'sem-caixa': 'a página ainda não ativou as Conversas privadas no app'
+  'sem-caixa': 'a página ainda não ativou as Conversas privadas no app',
+  'termo-recusado': 'o texto tem um termo que o Varanda não permite em conteúdo público; edite e tente de novo'
 }
 
 function usage (message) {

@@ -579,7 +579,7 @@ test('feiraCompose: submitEdit conflito keeps the form; uncertain is never resen
 
 test('feiraCompose: a listed term refuses the listing before any upload or send', async (t) => {
   const c = await load()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   const { refusalText } = await import('../src/wordCheck.js')
   const term = BLOCKED_TERMS[0]
   const fields = [{ title: term }, { text: 'Pouco uso, ' + term + '.' }, { city: term + ' do Sul' }, { bairro: term }]

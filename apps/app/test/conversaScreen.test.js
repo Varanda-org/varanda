@@ -250,7 +250,7 @@ test('Conversa send handler: uncertain and plain failures keep text, with one mu
 
 test('Conversa send handler: refusal, link and page plans never mutate', async (t) => {
   const refused = await sending()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   t.is(await refused.send(BLOCKED_TERMS[0]), false)
   t.ok(refused.state.note.includes('não permite'))
   t.is(refused.state.requests.length, 0)
@@ -419,6 +419,51 @@ test('App quick replies refresh feeds without touching a parked composer', (t) =
   published('reply', focal)
   t.is(state.composer.reply, null, 'Publicar still clears its sent context')
   t.is(state.toast, 'publicado', 'a sent reply of either level gets the neutral toast')
+})
+
+test('App opens the web sheet with the composer notice after its own post.share', async (t) => {
+  const { webShareAfter, WEB_SHARE_SENT, WEB_SHARE_UNKNOWN, WEB_SHARE_FAILED, WEB_SHARE_NO_REF } = await import('../src/postShareCompose.js')
+  const ref = A + ':12'
+  const run = (...args) => {
+    const state = { composer: { open: true, reply: null, quote: null }, version: 0, peekVersion: 0, toast: '', opened: [] }
+    const published = handler(app, '  const onPublished =', '  const startQuote =', 'onPublished', {
+      setComposer: (update) => { state.composer = update(state.composer) },
+      setVersion: (update) => { state.version = update(state.version) },
+      setPeekVersion: (update) => { state.peekVersion = update(state.peekVersion) },
+      showToast: (text) => { state.toast = text },
+      share: { requeue: () => {} },
+      webShareAfter,
+      openPostShare: (...opened) => { state.opened.push(opened) }
+    })
+    published(...args)
+    return state
+  }
+  const on = run('post', ref, { ref, result: { state: 'on', shareSeq: 9, message: '' } })
+  t.is(on.toast, 'publicado')
+  t.is(on.composer.open, false, 'the composer closes')
+  t.alike(on.opened, [[ref, WEB_SHARE_SENT]], 'the sheet opens once, for the new post, saying it was sent')
+  const uncertain = run('post', ref, { ref, result: { state: 'uncertain', shareSeq: null, message: 'Sem resposta.' } })
+  t.alike(uncertain.opened, [[ref, WEB_SHARE_UNKNOWN]])
+  t.absent(uncertain.opened[0][1].includes('Enviado'), 'an unknown answer never says it was sent')
+  const failed = run('post', ref, { ref, result: { state: 'error', shareSeq: null, message: 'Recusado.' } })
+  t.is(failed.opened.length, 1)
+  t.ok(failed.opened[0][1].startsWith(WEB_SHARE_FAILED), 'a refusal says it did not go to the web')
+  t.ok(failed.opened[0][1].endsWith('Recusado.'), 'with the node words')
+  const noRef = run('post', ref, { ref: null, result: null })
+  t.is(noRef.opened.length, 0, 'no ref, no sheet')
+  t.is(noRef.toast, WEB_SHARE_NO_REF)
+  t.is(run('post', ref).opened.length, 0, 'an unticked post opens nothing')
+  t.is(run('post', ref, null).toast, 'publicado')
+
+  t.ok(app.includes('notice={shareNotice}'), 'the sheet gets the notice')
+  const opener = app.slice(app.indexOf('  const openPostShare = useCallback('), app.indexOf('}, [])', app.indexOf('  const openPostShare = useCallback(')))
+  t.ok(opener.includes("setShareNotice(typeof notice === 'string' ? notice : '')"), 'every opening sets the notice, so a post row opens with none')
+  const rows = app.indexOf('<PostPublicProvider hosted={node.hosted === true}')
+  const composer = app.indexOf('<Publicar', rows)
+  t.ok(rows > app.indexOf('{coveringBoot ? bootCover : null}') && composer > rows && composer < app.indexOf('</PostPublicProvider>', rows), 'the composer sits inside the provider, after the boot cover')
+  t.is(app.split('<PostPublicProvider').length - 1, 1, 'one provider')
+  const body = app.slice(app.indexOf('  const onPublished ='), app.indexOf('  const startQuote ='))
+  t.absent(body.includes('node.request') || body.includes('post.share') || body.includes('request('), 'the shell sends nothing')
 })
 
 test('App outbox toast is neutral for a queued post or reply', (t) => {
