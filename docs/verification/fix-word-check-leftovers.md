@@ -12,7 +12,7 @@ Como foi feito:
 
 - A lista (`packages/rpc/lib/blocked-terms.js`, antes `apps/app/src/blockedTerms.js`) e a regra (`packages/rpc/lib/word-check.js`, `termInTokens`) ficam em `@varanda/rpc`, que o Metro alcança. A dobra continua de cada lado: `wholeTokens` do app (`apps/app/src/search.js`) e o novo `wholeTokens` de `packages/core/lib/search-text.js`, presos um ao outro pelo teste de paridade de `apps/app/test/search.test.js`.
 - O serviço usa `apps/cli/lib/account/word-check.js` em `store.js` (`validName`), `pages-routes.js` e `pages-groups.js`. O log da recusa é o de sempre: `refused` com o token no vínculo e na troca de @nome de membro, e `pagina` com a ação e o token numa Página. Sem chave, nome, texto ou termo.
-- Termos e Política na versão 64: o parágrafo de conduta dos Termos e a seção Páginas da Política dizem o que o serviço confere e que não guarda o texto recusado.
+- Termos e Política na versão 65: o parágrafo de conduta dos Termos e a seção Páginas da Política dizem o que o serviço confere e que não guarda o texto recusado.
 
 Como verificar, a partir da raiz:
 
@@ -27,7 +27,7 @@ Como verificar, a partir da raiz:
 
 Caminhada no build de debug (Android 5556, simulador iOS iPhone 17 Pro e web em `http://localhost:8102/`), sem conta:
 
-- [ ] O app abre e mostra os Termos na versão 64, com a frase sobre o serviço de conta no parágrafo de conduta e o parágrafo novo em Páginas na Política.
+- [ ] O app abre e mostra os Termos na versão 65, com a frase sobre o serviço de conta no parágrafo de conduta e o parágrafo novo em Páginas na Política.
 - [ ] A conferência no aparelho continua: no rascunho de Publicar (ou onde a tela for alcançável sem conta), um termo da lista mostra a recusa.
 
 Fica para a instalação da associação, com conta (o build de debug não entra com passkey numa instalação de produção; veja a issue #224):
