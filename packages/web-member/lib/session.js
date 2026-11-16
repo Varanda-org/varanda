@@ -317,6 +317,7 @@ const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
 const { applyDecision, readRefs, splitRows } = require('@varanda/core/lib/testimonial-decision')
+const { markMomentSeen, momentSeenRefs } = require('@varanda/core/lib/moment-seen')
 const { createPeeker } = require('./peek')
 const { createNoticer } = require('./notices')
 const { createPageFeeder } = require('./page-feed')
@@ -4240,6 +4241,25 @@ function createBrowserSession ({
       return { changed }
     }),
 
+    // kv only, unlocked only, as testimonial.decide: the momentos the member
+    // has seen sync sealed in the seen document. No core is opened, no record
+    // is written and no network call is made, so no author learns who saw a
+    // momento (momentos have no view counts).
+    'moment.seen': serialDm(async ({ author, seq }) => {
+      const own = await requireUnlocked()
+      const held = await store.readMomentSeen(storage, own)
+      const { entries, changed } = markMomentSeen(held, { author: author.toLowerCase(), seq }, Math.floor(Date.now() / 1000))
+      if (changed) {
+        await store.writeMomentSeen(storage, own, entries)
+        seenChanged()
+      }
+      return { changed }
+    }),
+    'moments.seen': serial(async () => {
+      const own = await requireUnlocked()
+      return { refs: momentSeenRefs(await store.readMomentSeen(storage, own)) }
+    }),
+
     'testimonial.delete': serial(async ({ to, about }, epoch) => {
       const r = await recordDelete(member.testimonialDelete, { to, about }, epoch)
       return { seq: r.seq, deleted: r.deleted }
@@ -5855,6 +5875,7 @@ function createBrowserSession ({
     await store.clearFollowsMigrated(storage)
     await store.writeMemberBlocks(storage, [])
     await store.clearTestimonialDecisions(storage)
+    await store.clearMomentSeen(storage)
     testimonialDead.clear()
     zeroKeyPair()
     // A superseded DM unlock (stopped by the lock above) settles before its

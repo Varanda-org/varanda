@@ -2755,6 +2755,8 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
 
 // --- the cold-start preview (App.js, ../splashGate.js previewAllowed) ---
 // A Rua's saved rows shown where the splash would be while the node boots.
+// Unused while previewCapable is false (../feedSnapshotStore.native.js): it
+// has no Momentos strip yet.
 // It sends nothing and reads nothing from the node: no handler is passed
 // (PostRow then offers no action), each row takes no touch of its own so
 // only the list scrolls, nothing loads more or refreshes, names, counts and

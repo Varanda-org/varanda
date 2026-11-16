@@ -12,6 +12,7 @@ const crypto = require('hypercore-crypto')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const nodeStore = require('../lib/node-store')
+const { MOMENT_SEEN_MAX } = require('@varanda/core/lib/moment-seen')
 
 const DAY = 24 * 60 * 60 * 1000
 
@@ -131,6 +132,40 @@ test('kv testimonialDecisions: round-trips, bound to the own key, cleared', asyn
   await nodeStore.clearTestimonialDecisions(storage)
   t.is(await storage.readJson('testimonialDecisions'), null, 'clear deletes the key')
   t.alike(await nodeStore.readTestimonialDecisions(storage, PUBLIC_KEY), [], 'and reads empty')
+})
+
+test('kv momentSeen: round-trips, bound to the own key, capped, cleared', async (t) => {
+  const storage = memoryNodeStorage()
+  const author = 'ef'.repeat(32)
+  t.alike(await nodeStore.readMomentSeen(storage, PUBLIC_KEY), [], 'absent')
+  const entries = [{ author, seq: 3, t: 20 }, { author, seq: 2, t: 10 }, { author, seq: 3, t: 5 }]
+  await nodeStore.writeMomentSeen(storage, PUBLIC_KEY, entries)
+  t.alike(await nodeStore.readMomentSeen(storage, PUBLIC_KEY), [
+    { author, seq: 2, t: 10 },
+    { author, seq: 3, t: 20 }
+  ], 'round trip, one per moment, oldest first')
+  t.alike(await nodeStore.readMomentSeen(storage, OTHER_KEY), [], 'another own key reads empty')
+  t.alike(await nodeStore.readMomentSeen(storage, 'zz'), [], 'a malformed own key reads empty')
+  t.exception.all(() => nodeStore.writeMomentSeen(storage, 'zz', entries), /chave inválida/, 'a malformed own key is refused on write')
+
+  await storage.writeJson('momentSeen', { v: 1, own: PUBLIC_KEY, entries: [{ author, seq: 0, t: 1 }, 'x', { author: 'zz', seq: 1, t: 1 }, { author, seq: 4, t: 5 }] })
+  t.alike(await nodeStore.readMomentSeen(storage, PUBLIC_KEY), [{ author, seq: 4, t: 5 }], 'bad entries are dropped')
+  for (const bad of [{ v: 2, own: PUBLIC_KEY, entries }, { v: 1, own: PUBLIC_KEY, entries: 'x' }, [entries], 'x', 42]) {
+    await storage.writeJson('momentSeen', bad)
+    t.alike(await nodeStore.readMomentSeen(storage, PUBLIC_KEY), [], 'malformed reads empty')
+  }
+
+  const many = Array.from({ length: MOMENT_SEEN_MAX + 5 }, (_, i) => ({ author, seq: i + 1, t: 100 + i }))
+  await nodeStore.writeMomentSeen(storage, PUBLIC_KEY, many)
+  t.alike(await nodeStore.readMomentSeen(storage, PUBLIC_KEY), many.slice(5), 'the newest ' + MOMENT_SEEN_MAX + ' stay')
+
+  await nodeStore.writeMomentSeen(storage, PUBLIC_KEY, [])
+  t.is(await storage.readJson('momentSeen'), null, 'an empty list deletes the key')
+
+  await nodeStore.writeMomentSeen(storage, PUBLIC_KEY, entries)
+  await nodeStore.clearMomentSeen(storage)
+  t.is(await storage.readJson('momentSeen'), null, 'clear deletes the key')
+  t.alike(await nodeStore.readMomentSeen(storage, PUBLIC_KEY), [], 'and reads empty')
 })
 
 function prfBytes (seed = 7) {
