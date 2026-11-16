@@ -14,12 +14,25 @@ export function previewsEnabled (store) {
   }
 }
 
+const listeners = new Set()
+
+// The players follow the switch at once (./ui/usePreviewsEnabled), not only
+// the cards mounted after it changed.
+export function onPreviewsChange (fn) {
+  if (typeof fn !== 'function') return () => {}
+  listeners.add(fn)
+  return () => { listeners.delete(fn) }
+}
+
 export function setPreviewsEnabled (store, on) {
+  if (typeof on !== 'boolean') return false
   try {
-    if (typeof on !== 'boolean') return false
     store.setItem(KEY, JSON.stringify({ v: 1, enabled: on }))
-    return true
   } catch {
     return false
   }
+  for (const fn of [...listeners]) {
+    try { fn(on) } catch {}
+  }
+  return true
 }

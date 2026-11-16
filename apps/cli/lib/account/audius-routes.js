@@ -37,7 +37,9 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     is given back only when no art host was contacted (the MAX_ART_INFLIGHT
 //     cover slots, apart from the provider's, were full, the member already
 //     had ART_PER_MEMBER covers waiting, or the budget was spent first);
-//     concurrent loads of one cover share one fetch. With exactly
+//     concurrent loads of one cover share one fetch. A fetch that failed
+//     after contacting the art host is answered 503 for ART_RETRY_MS with
+//     no new contact, and that answer gives the use back. With exactly
 //     `?size=480` it answers the 480x480 cover instead, cached apart under
 //     kind:id:480, with the same caps, slots and one art use; an item without
 //     one gets the 150x150 path, and a large miss (oversize, not an image, a
@@ -80,6 +82,10 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     AUDIO_OPENS_PER_DAY per member (then limite-musica) and
 //     OPENS_PER_TICKET per ticket (then the ticket is retired, 404). Bytes
 //     are bounded by TICKET_BYTES per ticket and DAILY_BYTES per member.
+//   - Every unit of the shared budget a member spends (a JSON call, an audio
+//     open, an art host contact of a cover fetch it started) also counts
+//     against its MEMBER_BUDGET_PER_DAY, checked first and never given back
+//     once spent; past it the member gets limite-musica.
 //   - At most config.streams audio relays run in all; past that an open is
 //     503 with Retry-After before anything is counted, and nobody is cut.
 //     A member holds at most STREAMS_PER_MEMBER relays. At that cap a new
@@ -134,6 +140,11 @@ const PLAYS_PER_DAY = 300
 const AUDIO_OPENS_PER_DAY = 1000
 const OPENS_PER_TICKET = 64
 const PROVIDER_PER_DAY = 12000
+// One member's share of the shared budget a day: every unit the member
+// spends counts (its JSON calls, its audio opens and the art host contacts
+// of the cover fetches it starts), never given back once spent, so it takes
+// ten members at their cap to turn music off for everyone until the day ends.
+const MEMBER_BUDGET_PER_DAY = PROVIDER_PER_DAY / 10
 const ARTS_PER_DAY = 600
 const ART_MAX_BYTES = 128 * 1024
 // 128 covers of ART_MAX_BYTES: 16 MiB at worst.
@@ -144,6 +155,11 @@ const MAX_ART_INFLIGHT = 6
 // One member's cover requests waiting on an art host fetch at once: the app
 // loads three at once, and one member cannot hold every cover slot.
 const ART_PER_MEMBER = 3
+// A cover fetch that failed after contacting the art host (an outage, a
+// timeout, a 5xx, throttling) is answered as failed for this long with no
+// new contact: otherwise every appearance of the cover would spend the
+// shared budget again while the host is down.
+const ART_RETRY_MS = 60 * 1000
 const ART_ACCEPT = 'image/jpeg, image/png, image/webp'
 // A size=480 request answers within this, under the app's 25 s art timeout
 // (AUDIUS_ART_TIMEOUT_MS): a lookup and the large fetch may already have
@@ -278,6 +294,7 @@ function createAudiusRoutes ({
     art: refundableWindow(caps.arts ?? ARTS_PER_DAY, DAY_MS, now)
   }
   const budget = refundableWindow(budgetPerDay, DAY_MS, now, 1)
+  const memberBudget = refundableWindow(caps.share ?? MEMBER_BUDGET_PER_DAY, DAY_MS, now)
   const providerCalls = refundableWindow(caps.calls ?? PROVIDER_CALLS_PER_DAY, DAY_MS, now)
   const dailyBytes = byteWindow(caps.dailyBytes ?? DAILY_BYTES, DAY_MS, now)
 
@@ -347,23 +364,28 @@ function createAudiusRoutes ({
   // rules as a redirect hop, and no redirect of its own.
   const openStored = enabled ? createStreamFetch({ request, lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT, maxRedirects: 0 }) : null
 
-  // One provider call against the service-wide daily budget, or a rejection
-  // with a short token ('orcamento' when the budget is spent).
-  function spendBudget () {
-    if (!budget('all')) throw new Error('orcamento')
+  // One provider call against `member`'s share and the service-wide daily
+  // budget, or a rejection with a short token: 'limite' when the member's
+  // share is spent, 'orcamento' when the budget is (the share unit goes back).
+  function spendBudget (member) {
+    if (!memberBudget(member)) throw new Error('limite')
+    if (budget('all')) return
+    memberBudget.giveBack(member)
+    throw new Error('orcamento')
   }
 
   // -> the parsed JSON answer of a provider request for `member`, or a
   // rejection with a short token: 'status' when the provider answered with an
-  // error status, 'limite' when the member's PROVIDER_CALLS_PER_DAY are
-  // spent, anything else when no usable answer came. The member's call is
-  // given back only when the provider is not contacted at all.
+  // error status, 'limite' when the member's PROVIDER_CALLS_PER_DAY or its
+  // budget share are spent, anything else when no usable answer came. The
+  // member's call is given back only when the provider is not contacted at
+  // all.
   async function providerJson (spec, member) {
     if (spec === null) throw new Error('pedido')
     if (inflight >= MAX_INFLIGHT) throw new Error('lotado')
     if (!providerCalls(member)) throw new Error('limite')
     try {
-      spendBudget()
+      spendBudget(member)
     } catch (err) {
       providerCalls.giveBack(member)
       throw err
@@ -654,12 +676,24 @@ function createAudiusRoutes ({
     arts.delete(key)
   }
 
-  function storeArt (key, mime, bytes, href) {
+  // A `failed` row has no bytes either, but answers unavailable() instead of
+  // notFound(), and only for ART_RETRY_MS: the app keeps a 404 for the
+  // session, so a host outage must never look like a missing cover.
+  function storeArt (key, mime, bytes, href, failed = false) {
+    if (failed) {
+      const was = storedArt(key)
+      // A cover held for another href stays: the failed fetch was older.
+      if (was !== null && was.bytes !== null) return
+      // A wide outage must not push good covers out: with the cache full, a
+      // new failure is not remembered.
+      if (was === null && arts.size >= MAX_ART_CACHED) return
+    }
     dropArt(key)
-    const row = { mime, bytes, href, expiresAt: now() + CACHE_TTL_MS, timer: null }
+    const ttl = failed ? ART_RETRY_MS : CACHE_TTL_MS
+    const row = { mime, bytes, href, failed, expiresAt: now() + ttl, timer: null }
     row.timer = setTimer(() => {
       if (arts.get(key) === row) arts.delete(key)
-    }, CACHE_TTL_MS)
+    }, ttl)
     if (row.timer && typeof row.timer.unref === 'function') row.timer.unref()
     arts.set(key, row)
     while (arts.size > MAX_ART_CACHED) dropArt(arts.keys().next().value)
@@ -695,16 +729,17 @@ function createAudiusRoutes ({
   }
 
   // The request of every art hop, first and redirects alike: each contact
-  // with the art host spends one unit of the shared budget, never given
-  // back, and is counted in `state.contacts`. The stream fetch reports a
-  // throw here as a failed request, so the spent budget is also recorded in
-  // `state`.
-  function budgetedRequest (state) {
+  // with the art host spends one unit of the shared budget and of `member`'s
+  // share, never given back, and is counted in `state.contacts`. The stream
+  // fetch reports a throw here as a failed request, so a spent budget or
+  // share is also recorded in `state`.
+  function budgetedRequest (state, member) {
     return (opts) => {
       try {
-        spendBudget()
-      } catch {
+        spendBudget(member)
+      } catch (spent) {
         state.budgetSpent = true
+        if (spent.message === 'limite') state.shareSpent = true
         const err = new Error('orcamento')
         err.budgetSpent = true
         throw err
@@ -714,13 +749,16 @@ function createAudiusRoutes ({
     }
   }
 
-  // One fetch of a cover, shared by every request for `key` while it runs.
-  // Never rejects: -> { row } with the bytes, { missing: true } for a cover
-  // the host does not serve as an image, or { contacted } for any other
-  // failure, `contacted` false only when no art host was reached.
-  async function fetchArt (key, href) {
-    const state = { budgetSpent: false, contacts: 0 }
-    const openArt = createStreamFetch({ request: budgetedRequest(state), lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT })
+  // One fetch of a cover for `member`, shared by every request for `key`
+  // while it runs. Never rejects: -> { row } with the bytes, { missing: true }
+  // for a cover the host does not serve as an image, or { contacted,
+  // shareSpent } for any other failure, `contacted` false only when no art
+  // host was reached and `shareSpent` true when `member`'s budget share ran
+  // out. A failure after a contact, with budget left, is remembered for
+  // ART_RETRY_MS.
+  async function fetchArt (key, href, member) {
+    const state = { budgetSpent: false, shareSpent: false, contacts: 0 }
+    const openArt = createStreamFetch({ request: budgetedRequest(state, member), lookup, allowAddress, firstTarget: httpsTarget, userAgent: USER_AGENT })
     artInflight++
     const started = Date.now()
     let up = null
@@ -740,8 +778,9 @@ function createAudiusRoutes ({
         storeArt(key, null, null, href)
         return { missing: true }
       }
-      log({ event: 'audius', reason: state.budgetSpent ? 'orcamento' : 'indisponivel' })
-      return { contacted: state.contacts > 0 }
+      if (state.contacts > 0 && !state.budgetSpent) storeArt(key, null, null, href, true)
+      if (!state.shareSpent) log({ event: 'audius', reason: state.budgetSpent ? 'orcamento' : 'indisponivel' })
+      return { contacted: state.contacts > 0, shareSpent: state.shareSpent }
     } finally {
       clearTimeout(timer)
       if (up !== null) up.destroy()
@@ -754,6 +793,12 @@ function createAudiusRoutes ({
     }
     storeArt(key, mime, bytes, href)
     return { row: { mime, bytes } }
+  }
+
+  // A remembered failure: answered with no contact, so the use goes back.
+  function failedArt (member) {
+    limits.art.giveBack(member)
+    return unavailable()
   }
 
   function sendArt (res, row) {
@@ -781,6 +826,7 @@ function createAudiusRoutes ({
       hit = null
     }
     if (hit !== null) {
+      if (hit.failed) throw failedArt(member)
       if (hit.bytes === null) throw notFound()
       return sendArt(res, hit)
     }
@@ -809,6 +855,7 @@ function createAudiusRoutes ({
     const hit = storedArt(largeKey)
     if (hit !== null && row !== null && hit.href !== row.artLarge) dropArt(largeKey)
     else if (hit !== null && hit.bytes !== null) return sendArt(res, hit)
+    else if (hit !== null && hit.failed) throw failedArt(member)
     // A remembered large miss with no cached row is the small request, cache
     // first, as plain art answers it: no lookup only to learn the small href.
     else if (hit !== null && row === null) return smallArt(res, member, kind, id)
@@ -837,7 +884,9 @@ function createAudiusRoutes ({
   // { missing, fetched } for a cover the host does not serve as an image,
   // `fetched` false when that miss was already remembered. Throws busy() or
   // unavailable(), giving the art use back only when no art host was
-  // contacted; `keepUse` says this request already had one contacted. Past
+  // contacted; `keepUse` says this request already had one contacted. A
+  // member whose budget share ran out during a fetch it started gets
+  // overLimit() instead; members that joined it get unavailable(). Past
   // `startBy` (a Date.now() instant) no fetch starts and none is joined that
   // started after it, as it could end past the deadline: -> { late: true }.
   async function loadArt (member, key, href, keepUse = false, startBy = Infinity) {
@@ -846,6 +895,10 @@ function createAudiusRoutes ({
     let fetching = running === undefined ? undefined : running.promise
     if (fetching === undefined) {
       const done = storedArt(key)
+      if (done !== null && done.href === href && done.failed) {
+        if (!keepUse) limits.art.giveBack(member)
+        throw unavailable()
+      }
       if (done !== null && done.href === href) return done.bytes === null ? { missing: true, fetched: false } : { row: done }
       if (Date.now() > startBy) return { late: true }
     } else if (running.startedAt > startBy) return { late: true }
@@ -854,9 +907,10 @@ function createAudiusRoutes ({
       if (!keepUse) limits.art.giveBack(member)
       throw busy()
     }
-    if (fetching === undefined) {
+    const startedHere = fetching === undefined
+    if (startedHere) {
       const startedAt = Date.now()
-      fetching = fetchArt(key, href)
+      fetching = fetchArt(key, href, member)
       const entry = { promise: fetching, startedAt }
       pendingArt.set(pending, entry)
       const settled = () => {
@@ -878,7 +932,7 @@ function createAudiusRoutes ({
     // Each failed contact spent the shared budget: keeping the use is what
     // stops one member looping on a failing cover from spending it for all.
     if (!out.contacted && !keepUse) limits.art.giveBack(member)
-    throw unavailable()
+    throw out.shareSpent && startedHere ? overLimit() : unavailable()
   }
 
   function digest (ticket) {
@@ -1038,8 +1092,13 @@ function createAudiusRoutes ({
     if (!limits.audio(member)) throw overLimit()
     row.opens++
     try {
-      spendBudget()
-    } catch {
+      spendBudget(member)
+    } catch (err) {
+      if (err.message === 'limite') {
+        limits.audio.giveBack(member)
+        row.opens--
+        throw overLimit()
+      }
       log({ event: 'audius', reason: 'orcamento' })
       throw unavailable()
     }
@@ -1304,12 +1363,14 @@ module.exports = {
   AUDIO_OPENS_PER_DAY,
   OPENS_PER_TICKET,
   PROVIDER_PER_DAY,
+  MEMBER_BUDGET_PER_DAY,
   PROVIDER_CALLS_PER_DAY,
   ARTS_PER_DAY,
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
   ART_PER_MEMBER,
+  ART_RETRY_MS,
   ART_ANSWER_MS,
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,

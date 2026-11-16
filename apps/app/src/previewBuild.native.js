@@ -204,6 +204,12 @@ export async function buildPreview (url, { signal, fetch: fetchImpl = expoFetch 
   }
 }
 
+// One app process writes the file, through setPreviewsEnabled, which tells
+// its own listeners: nothing else can change it under the app.
+export function onPreviewPrefStorage () {
+  return () => {}
+}
+
 // "Prévia de links" (previewPref.js) on the phone: a small JSON file in the
 // app's document directory, read synchronously like the appearance choice.
 let prefStore = null
