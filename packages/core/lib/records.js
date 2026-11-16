@@ -14,7 +14,7 @@
 
 const b4a = require('b4a')
 const { validLinkCard, validCardImageBytes, copyLinkCard, CARD_IMAGE_MIME } = require('./link-card')
-const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION, isEvent, event: eventRules } = require('@varanda/rpc')
+const { feira, isMomentMusic, MOMENT_MUSIC_KEYS, MAX_TOP_FRIENDS, profileExtra: PX, isPoll, isPick, POLL_MIN, POLL_MAX, MAX_POLL_OPTION, isEvent, event: eventRules, garden } = require('@varanda/rpc')
 
 const MAX_NAME = 80
 const MAX_BIO = 280
@@ -151,6 +151,14 @@ const TOP_FRIENDS_KEYS = Object.freeze(['type', 'keys', 'at'])
 // Visitas, `on` true or false, latest wins. It names nobody: who visited
 // whom is never written to a diary.
 const VISITS_KEYS = Object.freeze(['type', 'on', 'at'])
+// Varandinha (docs/protocol.md): `garden` is the public flag that a diary
+// shows its balcony, latest wins; `garden-state` is the whole balcony after
+// a play session (the pot rules are packages/rpc lib/garden.js), latest
+// wins; `garden-help` is one watering of another member's pot. No text:
+// nothing in them is ever shown as typed by a person.
+const GARDEN_KEYS = Object.freeze(['type', 'on', 'at'])
+const GARDEN_STATE_KEYS = Object.freeze(['type', 'pots', 'n', 'at'])
+const GARDEN_HELP_KEYS = Object.freeze(['type', 'to', 'pot', 'at'])
 const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
@@ -581,7 +589,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -687,6 +695,22 @@ function check (record, seq) {
   }
   if (type === 'visits') {
     if (!hasExactKeys(record, VISITS_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden') {
+    if (!hasExactKeys(record, GARDEN_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // A pot is judged against this record's own date (read once here): a pot
+  // watered after the record that states it was written is malformed.
+  if (type === 'garden-state') {
+    if (!hasExactKeys(record, GARDEN_STATE_KEYS)) return 'malformed'
+    const at = record.at
+    if (!isCanonicalIso(at)) return 'date-invalid'
+    return garden.isPots(record.pots, Date.parse(at)) && garden.isSaveOrdinal(record.n) ? null : 'malformed'
+  }
+  if (type === 'garden-help') {
+    if (!hasExactKeys(record, GARDEN_HELP_KEYS) || !isHex64(record.to) || !garden.isPotIndex(record.pot)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'top-friends') {
@@ -933,6 +957,22 @@ function fanRecord ({ key, on, at = nowIso() } = {}) {
 
 function visitsRecord ({ on, at = nowIso() } = {}) {
   return build({ type: 'visits', on, at }, 1)
+}
+
+function gardenRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'garden', on, at }, 1)
+}
+
+// `pots` is copied one level down (a pot holds only primitives), so the
+// record never shares an object with the caller; anything that is no array
+// or no plain pot is passed through for validation to reject.
+function gardenStateRecord ({ pots, n, at = nowIso() } = {}) {
+  const copy = Array.isArray(pots) ? pots.map((p) => (isPlainObject(p) ? { ...p } : p)) : pots
+  return build({ type: 'garden-state', pots: copy, n, at }, 1)
+}
+
+function gardenHelpRecord ({ to, pot, at = nowIso() } = {}) {
+  return build({ type: 'garden-help', to, pot, at }, 1)
 }
 
 function topFriendsRecord ({ keys, at = nowIso() } = {}) {
@@ -1182,6 +1222,9 @@ module.exports = {
   MOOD_KEYS,
   FAN_KEYS,
   VISITS_KEYS,
+  GARDEN_KEYS,
+  GARDEN_STATE_KEYS,
+  GARDEN_HELP_KEYS,
   TOP_FRIENDS_KEYS,
   MAX_TOP_FRIENDS,
   POST_POLL_KEYS,
@@ -1255,6 +1298,9 @@ module.exports = {
   moodRecord,
   fanRecord,
   visitsRecord,
+  gardenRecord,
+  gardenStateRecord,
+  gardenHelpRecord,
   topFriendsRecord,
   momentRecord,
   deleteRecord,
