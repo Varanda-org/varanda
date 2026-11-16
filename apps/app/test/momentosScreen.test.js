@@ -1139,7 +1139,7 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
 
 const PRELOAD_TRACKS = [{ id: 'abc', start: 30 }, { id: 'def', start: 12 }, { id: 'ghi', start: 0 }]
 
-test('T4: shown music waits for onStart before preloading only the next track and ticket', async (t) => {
+test('T4: shown music waits for onStart before preloading only the next track, ticket and audio', async (t) => {
   const h = await viewerHost({ tracks: PRELOAD_TRACKS })
   t.teardown(h.unmount)
   t.is(h.preloads.length, 0, 'shown snippet owns its loading budget')
@@ -1148,7 +1148,7 @@ test('T4: shown music waits for onStart before preloading only the next track an
   t.is(h.preloads.length, 1, 'one preload immediately after start')
   t.alike(h.preloads[0]?.music, PRELOAD_TRACKS[1])
   t.alike(h.preloads[0]?.session, { member: A, origin: undefined, request: h.node.request })
-  t.alike(h.preloads[0]?.options, { stream: false }, 'no competing audio relay')
+  t.alike(h.preloads[0]?.options, { stream: true }, 'next audio opens ahead after a music momento')
   t.is(h.music().props.prepared, null, 'successor handle is not for the shown item')
   h.button('próximo momento').props.onPressIn({ nativeEvent: { pageX: 300, pageY: 50 } })
   h.render()
@@ -1208,15 +1208,15 @@ test('T4: a sheet covering the viewer preloads nothing and releases the ahead st
   t.is(h.preloads.length, 1, 'the pair is not tried again')
 })
 
-test('T4: shown music after fallback preloads a ticket without a stream', async (t) => {
+test('T4: unavailable music preloads the next audio, the 3 s timer only its ticket', async (t) => {
   for (const fallback of ['unavailable', 'timeout']) {
     const h = await viewerHost({ tracks: PRELOAD_TRACKS })
     t.is(h.preloads.length, 0)
     if (fallback === 'unavailable') h.music().props.onUnavailable()
     else h.timers.fire(3000)
     await h.flush()
-    t.is(h.preloads.length, 1, fallback + ': round 3 allows the POST-only stage')
-    t.alike(h.preloads[0]?.options, { stream: false })
+    t.is(h.preloads.length, 1, fallback + ': the next momento is prepared')
+    t.alike(h.preloads[0]?.options, { stream: fallback === 'unavailable' }, fallback + ': a still loading audio keeps the link and the relays')
     t.is(h.animation()?.duration, 5000, 'fallback duration stays unchanged')
     h.music().props.onStart()
     await h.flush()
@@ -1264,9 +1264,9 @@ test('T4: policy false, pending and unlinked accounts cannot preload', async (t)
 })
 
 test('T4: stepping onto a preload hands the same handle over without release or reload', async (t) => {
-  for (const stream of [true, false]) {
-    const h = await viewerHost({ tracks: [stream ? null : PRELOAD_TRACKS[0], PRELOAD_TRACKS[1]] })
-    if (!stream) h.music().props.onStart()
+  for (const silent of [true, false]) {
+    const h = await viewerHost({ tracks: [silent ? null : PRELOAD_TRACKS[0], PRELOAD_TRACKS[1]] })
+    if (!silent) h.music().props.onStart()
     await h.flush()
     const handle = h.preloads[0]?.handle
     t.ok(handle)
@@ -1349,7 +1349,7 @@ test('T4: oscillating between A, B and C preloads A>B and B>C only once', async 
   await h.flush()
   t.is(h.preloads.length, 2, 'B starting preloads C')
   t.alike(h.preloads[1]?.music, PRELOAD_TRACKS[2])
-  t.alike(h.preloads[1]?.options, { stream: false })
+  t.alike(h.preloads[1]?.options, { stream: true })
   const successor = h.preloads[1]?.handle
   h.button('momento anterior').props.onPress({ nativeEvent: {} })
   await h.flush()
