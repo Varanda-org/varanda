@@ -620,6 +620,7 @@ function engineWithDmLink (link) {
   try {
     transport.openDmLink = async () => {
       if (link.offline) throw new Error('offline')
+      if (link.onOpen) await link.onOpen()
       return link
     }
     delete require.cache[id]
@@ -721,6 +722,15 @@ test('a throwing ctl put and its later unlock flush each emit dm.sending first',
   await engine.idle()
   t.alike(calls, [['dm.sending', {}], ['put']], 'unlock announces the queued stamped ctl before putting it')
   t.alike(await store.readDmCtlQueue(storage), [])
+})
+
+test('a lock while the pull opens its link fails with the locked message, not a TypeError', async (t) => {
+  const { engine, link, own } = await sendingEngine(t)
+  link.onOpen = () => engine.lock()
+  link.page = async () => ({ items: [], next: null, oldest: 0 })
+  const err = await errorOf(engine.pull(own))
+  t.is(err && err.message, LOCKED)
+  t.is(err && err.constructor.name, 'UsageError')
 })
 
 test('no dm.sending or put when send and ctl flush have no stamps', async (t) => {
@@ -2420,6 +2430,22 @@ test('buckets: a seeder without the v2 lane gets v1: untagged puts, the whole po
   t.is((await B.web.request('dm.pull')).added, 1)
   t.is(seeder.pageQueries.length, 0)
   t.is(seeder.served, 2, 'v1 returns the whole pool')
+})
+
+test('buckets: a seeder that opens v2 claiming more than 6 bits is dropped for v1 and the message still arrives', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6, spoofBits: 7 })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await copyDiary(A, B)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.is(seeder.puts.length, 2)
+  t.ok(seeder.putInfos.every((i) => i === null), 'the puts went on v1, untagged')
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.pageQueries.length, 0, 'no page on the lane that claimed 7 bits')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages.map((m) => m.text), ['oi'])
 })
 
 test('buckets: a seeder at 0 bits gets everything tagged as bucket 0 and the pull still delivers', async (t) => {

@@ -76,7 +76,7 @@ function memoryPool (pub) {
 // opts.dropPutAck(n): true -> the n-th put (0-based) is stored and the link
 // is then destroyed before the ack (an uncertain put). opts.budget: stamps
 // per diary (default 1000).
-async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000, bits = null } = {}) {
+async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000, bits = null, spoofBits = null } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const rsa = rsaKey()
@@ -132,6 +132,19 @@ async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000, b
         return r
       }
       attachDm(noise, { role: 'seeder', putRate: 1000, putBurst: 1000, put, page })
+      if (spoofBits !== null) {
+        // A seeder that opens the v2 lane claiming more bits than the app takes.
+        const mux = noise.userData
+        const createChannel = mux.createChannel.bind(mux)
+        mux.createChannel = (o) => {
+          const ch = createChannel(o)
+          if (ch !== null && o.protocol === DM_PROTOCOL_V2) {
+            const open = ch.open.bind(ch)
+            ch.open = () => open(spoofBits)
+          }
+          return ch
+        }
+      }
       if (bits !== null) attachDm(noise, { role: 'seeder', protocol: DM_PROTOCOL_V2, bits, putRate: 1000, putBurst: 1000, put, page })
       attachDmStamp(noise, {
         role: 'seeder',

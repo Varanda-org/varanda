@@ -1367,6 +1367,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The prefix of the box a ctl of this store is sealed to: the own box, or
   // the held page's current one.
   function ctxPrefix (ctx) {
+    // A lock between the awaits of a flush leaves no box: nothing to tag.
+    if (box === null) return null
     if (ctx.page === null) return prefixOf(box.publicKey)
     const e = pages.get(ctx.page)
     return e === null ? null : prefixOf(e.dmBox.publicKey)
@@ -1841,13 +1843,6 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return out
   }
 
-  // The bucket prefixes of one page scan's boxes (current, previous, legacy).
-  // A box that gives none leaves the scan unfiltered, never narrower.
-  function pagePrefixes (p) {
-    const list = p.boxes.map((b) => prefixOf(b.pair.publicKey))
-    return list.some((x) => x === null) ? undefined : list
-  }
-
   // A hex32 digest of a held page's public boxes (current, previous, then
   // legacy): read only, sends always seal to the current one.
   function boxSetOf (e) {
@@ -1874,17 +1869,23 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (err instanceof UsageError) throw err
         throw new UsageError('sem conexão com o semeador')
       }
+      if (box === null) throw new UsageError(LOCKED)
       scans = await pageScans()
-      // Pages scanned up to where the own cursor stands ride along.
-      const along = scans.filter((p) => p.cursor.after === cursor)
-      // Only the buckets of the boxes this pass opens: the own one and the
-      // held pages riding along (a drop is tagged by the box it is sealed to).
-      const lists = [[prefixOf(box.publicKey)], ...along.map(pagePrefixes)]
-      const prefixes = lists.some((l) => l === undefined || l.includes(null)) ? undefined : lists.flat()
+      if (box === null) throw new UsageError(LOCKED)
+      // A device that holds a Página asks every bucket: asking only the
+      // Página's would tell the seeder which Página this connection runs.
+      // One pass from the oldest of its cursors; each scan files only what
+      // is above its own cursor, and afterwards every cursor stands at the
+      // end of what was read.
+      const live = scans.filter((p) => !pageStale(p))
+      const asksAll = scans.length > 0
+      const ownPrefix = prefixOf(box.publicKey)
+      const prefixes = asksAll || ownPrefix === null ? undefined : [ownPrefix]
+      let after = asksAll ? Math.min(cursor, ...live.map((p) => p.cursor.after)) : cursor
       let read = 0
       for (;;) {
         if (gen !== generation) throw new UsageError(LOCKED)
-        const page = await link.page({ after: cursor, limit: L.pageMax, prefixes })
+        const page = await link.page({ after, limit: L.pageMax, prefixes })
         const rows = []
         // A copy: this page's ctls join it as they are filed.
         const ops = [...local.ops()]
@@ -1892,7 +1893,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         const missed = []
         for (const item of page.items) {
           read += item.bytes.byteLength
-          const row = openItem(own, item.bytes, ops, rows, mod)
+          const row = item.seq > cursor ? openItem(own, item.bytes, ops, rows, mod) : null
           if (row !== null) {
             // Filed now, on the monotonic clock: a ctl earlier in this page
             // then counts for the items after it (dm-fold ignores a row
@@ -1900,8 +1901,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
             row.filedAt = local.nextFiled()
             rows.push(row)
             if (row.t === 'ctl') ops.push(row)
-          } else if (along.length > 0) {
-            missed.push(item.bytes)
+          } else if (live.length > 0) {
+            missed.push(item)
           }
         }
         if (gen !== generation) throw new UsageError(LOCKED)
@@ -1912,35 +1913,21 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
             else applied++
           }
         }
-        for (const p of along) await filePageItems(p, missed, mod)
+        for (const p of live) {
+          await filePageItems(p, missed.filter((item) => item.seq > p.cursor.after).map((item) => item.bytes), mod)
+        }
         if (page.items.length > 0) {
-          cursor = page.items[page.items.length - 1].seq
-          await store.writeDmCursor(storage, cursor)
-          for (const p of along) await movePageCursor(p, cursor)
+          after = page.items[page.items.length - 1].seq
+          if (after > cursor) {
+            cursor = after
+            await store.writeDmCursor(storage, cursor)
+          }
+          for (const p of live) if (after > p.cursor.after) await movePageCursor(p, after)
         }
         if (page.next === null || page.items.length === 0) break
         if (read >= L.budgetBytes) {
           incomplete = true
           break
-        }
-      }
-      // The other held pages catch up from their own cursor.
-      for (const p of scans) {
-        if (incomplete) break
-        if (along.includes(p)) continue
-        for (;;) {
-          if (gen !== generation) throw new UsageError(LOCKED)
-          if (p.stale) break
-          const page = await link.page({ after: p.cursor.after, limit: L.pageMax, prefixes: pagePrefixes(p) })
-          const mod = await moderation()
-          for (const item of page.items) read += item.bytes.byteLength
-          await filePageItems(p, page.items.map((item) => item.bytes), mod)
-          if (page.items.length > 0) await movePageCursor(p, page.items[page.items.length - 1].seq)
-          if (page.next === null || page.items.length === 0) break
-          if (read >= L.budgetBytes) {
-            incomplete = true
-            break
-          }
         }
       }
     } finally {
@@ -2361,6 +2348,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         throw new UsageError('sem conexão com o semeador')
       }
       let cursor = await withVisits(() => local.visitCursor())
+      if (box === null) throw new UsageError(LOCKED)
       const ownPrefix = prefixOf(box.publicKey)
       const ownPrefixes = ownPrefix === null ? undefined : [ownPrefix]
       let read = 0

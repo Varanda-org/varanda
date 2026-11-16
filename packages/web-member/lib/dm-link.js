@@ -143,7 +143,9 @@ function lost () {
 // seeder's open): the bucketed one is used when the seeder opened it, else
 // the v1 one (an old seeder rejects the v2 open). A v2 that never answers
 // within the request timeout counts as absent; the v2 handle is then closed
-// and the v1 lane carries the request, so nothing waits longer than before.
+// and the v1 lane carries the request. A v2 open that hangs therefore costs
+// up to one request timeout before v1's own timeout starts (about twice the
+// wait of a v1-only member), still bounded by the link deadline.
 // Resolves the handle to use, or null when neither lane opened.
 function laneChooser (v2, v1, timeoutMs) {
   let chosen = null
