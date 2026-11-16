@@ -50,4 +50,10 @@ Ainda sem medida: celular de verdade e Chrome com CPU 4x.
 
 ## Conferência em aparelho
 
-- [ ] TODO (sessão principal): Espiadinha numa conta que segue quase todos os diários recentes, no Android, no iOS e na web, depois do deploy: a lista mostra linhas sem passar por páginas vazias e sem "carregar mais" logo de cara. Não conferido nesta parte (só Node).
+Modo Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), Metro desta branch na porta 8106, 2026-11-16:
+
+- Android (emulador API 36, build de debug): a Espiadinha abre, rola até o fim e mostra "Isso é tudo por enquanto."; o logcat (`ReactNativeJS`) não mostra erro, só os avisos de ciclo de `require` que já existiam.
+- iOS (simulador iPhone 17 Pro): a Espiadinha abre com as publicações e rola até "Isso é tudo por enquanto.", sem tela vermelha; o Metro não registra erro.
+- Web (localhost:8106, painel do navegador): a Espiadinha rola até "Isso é tudo por enquanto."; o console só mostra os dois `ERR_NAME_NOT_RESOLVED` de `https://vitrine.invalid/p/policy`, o endereço falso das fixtures.
+
+Limite: as páginas da Vitrine vêm completas (`incomplete: false`) e não passam pelo nó do navegador, então nem a cadeia de páginas vazias nem o limite de bytes da ligação aparecem nela. Ficam na lista pós-deploy da #224: a Espiadinha numa conta que segue quase todos os diários recentes, no Android, no iOS e na web (a lista mostra linhas sem páginas vazias e sem "carregar mais" logo de cara), e a Espiadinha e os Avisos abrindo como antes numa conta comum.
