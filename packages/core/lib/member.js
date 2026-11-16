@@ -76,6 +76,7 @@ const { pageLifecycle, cutEntries, originOf, latestDelegate } = require('./page-
 const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('./page-proof')
 const { signTerms } = require('./terms')
 const groupCrypto = require('./group-crypto')
+const rekeyPolicy = require('./group-rekey')
 const { recordBoundRoot } = require('./sync')
 const { COMMUNITY_LIST_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, feira } = require('@varanda/rpc')
 
@@ -2580,6 +2581,65 @@ async function groupRekey (ctx, { group }) {
   }, { secrets: true })
 }
 
+// ---- periodic rotation (docs/protocol.md "Rotation", ./group-rekey.js):
+// the session runs the check, this node writes it. ----
+
+// The policy's decision for `loaded` (with secrets) on distributor core
+// `core`. jitter(group, epoch) -> [0, 1), fixed per epoch by the caller.
+function periodicDecision (loaded, core, now, jitter) {
+  const { view } = loaded
+  const facts = rekeyPolicy.epochFacts({ logs: [loaded.input.root, ...loaded.input.writers], counted: view.writers, root: loaded.group, epoch: view.epoch })
+  const mine = loaded.secrets === null ? new Set() : loaded.secrets.mine
+  return rekeyPolicy.rekeyDue({
+    rekeyPending: view.rekeyPending,
+    epoch: view.epoch,
+    ...facts,
+    entitled: entitledWriters(loaded).size,
+    ownEpoch: view.epoch !== null && mine.has(view.epoch.writer),
+    now,
+    jitter: view.epoch === null ? 0 : jitter(loaded.group, view.epoch),
+    log: { length: core.length, bytes: core.byteLength, maxBlocks: loaded.limits.maxLogBlocks, maxBytes: loaded.limits.maxLogBytes }
+  })
+}
+
+// The periodic check of this node's private groups (`groups`, or every
+// local group): each group ready(group) allows is listed in `checked`
+// whatever the outcome; where this node distributes and the epoch is due,
+// it rotates by group.rekey's path (the history, then rotateEpoch).
+// -> { checked, rotated, failed: [{ group, message }], next } (next: the
+// earliest moment, ms, a group not due yet becomes due, or null). Best
+// effort: a failure is reported, never retried here, and a rotation is
+// written whole or not at all.
+async function periodicRekey (ctx, { groups: wanted = null, now = Date.now(), ready = () => true, jitter = () => 0 } = {}) {
+  const out = { checked: [], rotated: [], failed: [], next: null }
+  const local = localGroups(ctx.dataDir).filter((g) => g.kind !== 'community').map((g) => g.group)
+  const keys = wanted === null
+    ? local
+    : wanted.filter((g) => typeof g === 'string' && local.includes(g.toLowerCase())).map((g) => g.toLowerCase())
+  for (const group of new Set(keys)) {
+    if (!ready(group)) continue
+    out.checked.push(group)
+    try {
+      await withGroup(ctx, group, async (loaded, identity) => {
+        if (!loaded.private || loaded.view.orphan || loaded.view.community === null) return
+        const core = await distributorCore(loaded, identity)
+        if (core === null) return
+        const d = periodicDecision(loaded, core, now, jitter)
+        if (!d.due) {
+          if (d.at !== null && (out.next === null || d.at < out.next)) out.next = d.at
+          return
+        }
+        await keySideEffect(() => handHistory(loaded, core))
+        await rotateEpoch(loaded, core)
+        out.rotated.push(group)
+      }, { secrets: true })
+    } catch (err) {
+      out.failed.push({ group, message: err && typeof err.message === 'string' ? err.message : String(err) })
+    }
+  }
+  return out
+}
+
 function groupAdmit (ctx, params) {
   return groupModerate(ctx, 'groupAdmit', params)
 }
@@ -3969,6 +4029,7 @@ module.exports = {
   groupMeta,
   groupInvitePolicy,
   groupRekey,
+  periodicRekey,
   communityCreate,
   communityJoin,
   communityLeave,

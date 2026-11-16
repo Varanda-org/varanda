@@ -33,6 +33,7 @@ const { safe } = require('./safe')
 const { UsageError } = require('./errors')
 const { verifyInviteCard, isInviteCardExpired } = require('./invite-card')
 const { validBootstrap, isLoopbackAddress, isLoopbackBootstrap } = require('./config')
+const { createRekeyGate, REKEY_CHECK_MS } = require('./group-rekey')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
 const LOCKED_MESSAGE = 'diretório de dados em uso'
@@ -49,6 +50,13 @@ const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
 const POST_SHARE_WEB_ONLY = 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.'
 // How long downloads in a group are gathered into one groups.changed.
 const GROUPS_CHANGED_MS = 50
+// How long after a continuous run starts, or a group grows, the periodic
+// key rotation check waits: it preempts the run, so it is gathered, and a
+// short-lived run never pays for it.
+const REKEY_SESSION_DELAY_MS = 30 * 1000
+// The rekey gate entry that keeps the check at a continuous run's start to
+// once an hour (an app coming back to the foreground restarts the run).
+const REKEY_START = 'start'
 
 // ---- error mapping (A6) ----
 
@@ -239,7 +247,12 @@ function createSession ({
   dhtHost = null,
   allowPublicDht = false,
   storeOptions,
-  onInternalError = noop
+  onInternalError = noop,
+  // The periodic key rotation of private groups (lib/group-rekey.js);
+  // injectable for tests.
+  rekeyClock = Date.now,
+  rekeyRandom = Math.random,
+  rekeyDelayMs = REKEY_SESSION_DELAY_MS
 } = {}) {
   const cfg = checkConfig({ dataDir, association, bootstrap, dhtHost, allowPublicDht })
   const baseStore = storeOptions !== null && typeof storeOptions === 'object' ? { ...storeOptions } : {}
@@ -288,6 +301,12 @@ function createSession ({
   // (the member certificate) is append-only, so only `memberCert: true` is cached.
   let ownKey = null
   let certKnown = false
+  const rekeyGate = createRekeyGate({ now: rekeyClock, random: rekeyRandom })
+  const rekeyWanted = new Set()
+  let rekeyAll = false
+  let rekeyTimer = null
+  let rekeyDueTimer = null
+  let rekeyDueAt = 0
 
   // A run's events carry the connection epoch it started in: once that
   // connection is detached, a run still unwinding reports to nobody, not to
@@ -327,6 +346,7 @@ function createSession ({
       const out = new Set(grown)
       for (const key of grown) for (const group of groupsOf.get(key) || []) out.add(group)
       for (const group of out) send('groups.changed', { group }, epoch)
+      if (!once) wantRekey([...grown])
       grown.clear()
     }
     // Community -> the local groups whose held root names it, from the
@@ -427,6 +447,69 @@ function createSession ({
   function restartWhenIdle (self) {
     if (queued <= self) restartIfWanted()
   }
+
+  // ---- periodic key rotation (lib/group-rekey.js) ----
+
+  // Node-initiated and best effort: only while a continuous run is wanted,
+  // at most one check per group an hour, never retried after a failure
+  // before the next check. `groups` null = every local group.
+  function wantRekey (groups) {
+    if (closed || syncIntent !== 'continuous') return
+    if (groups === null) {
+      rekeyAll = true
+    } else {
+      for (const g of groups) if (rekeyGate.ready(g)) rekeyWanted.add(g)
+    }
+    if (rekeyTimer !== null || (!rekeyAll && rekeyWanted.size === 0)) return
+    rekeyTimer = setTimeout(rekeyPass, rekeyDelayMs)
+    if (typeof rekeyTimer.unref === 'function') rekeyTimer.unref()
+  }
+
+  function armRekeyDue (at) {
+    const delay = Math.min(Math.max(at - rekeyGate.now(), REKEY_CHECK_MS), 0x7fffffff)
+    const fireAt = Date.now() + delay
+    if (rekeyDueTimer !== null && rekeyDueAt <= fireAt) return
+    if (rekeyDueTimer !== null) clearTimeout(rekeyDueTimer)
+    rekeyDueAt = fireAt
+    rekeyDueTimer = setTimeout(() => {
+      rekeyDueTimer = null
+      wantRekey(null)
+    }, delay)
+    if (typeof rekeyDueTimer.unref === 'function') rekeyDueTimer.unref()
+  }
+
+  function clearRekey () {
+    if (rekeyTimer !== null) clearTimeout(rekeyTimer)
+    if (rekeyDueTimer !== null) clearTimeout(rekeyDueTimer)
+    rekeyTimer = null
+    rekeyDueTimer = null
+    rekeyWanted.clear()
+    rekeyAll = false
+  }
+
+  function rekeyPass () {
+    rekeyTimer = null
+    if (closed || syncIntent !== 'continuous') return clearRekey()
+    // Never in the way of a request: try again after the queue drains.
+    if (suspended || queued > 0) return wantRekey([])
+    const groups = rekeyAll ? null : [...rekeyWanted]
+    rekeyWanted.clear()
+    rekeyAll = false
+    rekeyCheck(groups).catch(noop)
+  }
+
+  const rekeyCheck = serial(async (groups, epoch) => {
+    if (syncIntent !== 'continuous') return
+    const r = await withStore((c) => member.periodicRekey(c, {
+      groups,
+      now: rekeyGate.now(),
+      ready: rekeyGate.ready,
+      jitter: rekeyGate.jitter
+    }))
+    for (const g of r.checked) rekeyGate.checked(g)
+    for (const g of r.rotated) send('groups.changed', { group: g }, epoch)
+    if (r.next !== null) armRekeyDue(r.next)
+  })
 
   // ---- serialization ----
 
@@ -1184,6 +1267,10 @@ function createSession ({
       if (run !== null) throw rpcError('USAGE', 'sincronização já em andamento')
       syncIntent = once ? null : 'continuous'
       const runId = startRun({ once, timeoutMs })
+      if (!once && rekeyGate.ready(REKEY_START)) {
+        rekeyGate.checked(REKEY_START)
+        wantRekey(null)
+      }
       return { runId }
     }),
 
@@ -1217,6 +1304,7 @@ function createSession ({
     connection++
     emitter = null
     syncIntent = null
+    clearRekey()
     return stopRun('stopped').then(noop)
   }
 
@@ -1250,6 +1338,7 @@ function createSession ({
     if (closing !== null) return closing
     closed = true
     syncIntent = null
+    clearRekey()
     releaseGate()
     closing = (async () => {
       await chain
