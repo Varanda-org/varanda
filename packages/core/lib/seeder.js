@@ -4356,6 +4356,7 @@ class Seeder {
       expected,
       rootScanned: 0,
       rootScanning: false,
+      rootDecoded: 0, // blocks a root scan decoded (past the group-meta prefilter)
       rootRetry: null, // the retry of a failed root block read (_retryRootScan)
       rootReadFailures: 0
     }
@@ -4487,6 +4488,7 @@ class Seeder {
         entry.rootScanned = i + 1
         entry.rootReadFailures = 0
         if (needle !== null && !b4a.includes(raw, needle)) continue
+        entry.rootDecoded++
         let block = null
         try {
           block = decodeBlock(raw)

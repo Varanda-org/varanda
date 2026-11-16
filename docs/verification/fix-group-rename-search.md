@@ -16,15 +16,24 @@ Parte da #350 (item da #241: "Renomear o grupo não aparece na busca do semeador
 ```sh
 node packages/core/test/group-index.test.js
 node packages/core/test/seeder-groups.test.js
+node packages/core/test/seeder-private.test.js
+node packages/core/test/seeder-communities.test.js
+node packages/core/test/seeder-groups-3.test.js
 npm run lint
 ```
 
 - `group-index.test.js`: "a public group root's latest group-meta renames it in the search and the catalogue rows" e "a private group root ignores a meta".
-- `seeder-groups.test.js`: "a public group renamed by its root is found by the new name only" (DHT local).
+- `seeder-groups.test.js` (DHT local): "a public group renamed by its root is found by the new name only"; "a rename appended after admission is picked up, and a null rename clears the name" (caminho ao vivo); "public group root scans run one at a time and decode only blocks that contain group-meta" (no máximo uma leitura em andamento entre duas raízes, e `rootDecoded` igual a 2 numa raiz de 23 blocos).
+- `seeder-communities.test.js`: "a catalogue row shows the new name of a renamed public group, and is incomplete while that root scan is behind".
+- `seeder-private.test.js`: a raiz privada fica com `rootScanned === 0`.
 
-Resultado com a correção: `group-index.test.js` 14/14 testes e 161/161 asserções; `seeder-groups.test.js` 41/41 testes e 252/252 asserções.
+Resultados (cada arquivo sozinho, com a correção): `group-index` 14/14 testes e 161/161 asserções; `seeder-groups` 43/43 e 262/262; `seeder-private` 4/4 e 34/34; `seeder-communities` 9/9 e 59/59; `seeder-groups-3` 6/6 e 33/33; `npm run lint` limpo.
 
-Sem a correção (só `lib/group-index.js` e `lib/seeder.js` revertidos): `group-index.test.js` 13/14 testes e 151/161 asserções, falhando o teste novo da renomeação (dobrar o meta, nome novo achado, nome antigo sumido, linha do catálogo, último vence, nome nulo, restauração depois de `setHeader`); o teste privado passa. `seeder-groups.test.js` para no teste novo por tempo esgotado ("raiz varrida": a raiz nunca é varrida).
+Sem a correção, revertendo só um trecho de cada vez:
+
+- Sem `|| this._rootScanBehind(G)` em `_catalogueRootPending`: `seeder-communities` 8/9 testes e 58/59 asserções, falha "incomplete while the group root scan is behind".
+- Sem a chamada de `_scanRoot` no `watchContiguous` (caminho ao vivo): `seeder-groups` para por tempo esgotado em "R completo" num teste anterior, que também depende da varredura de crescimento; o teste da renomeação ao vivo não chega a rodar. Foi a falha observada, não uma falha isolada do teste novo.
+- Sem `lib/group-index.js` e `lib/seeder.js` (primeira versão da correção): `group-index` 13/14 testes e 151/161 asserções, e `seeder-groups` para no teste da renomeação por tempo esgotado ("raiz varrida").
 
 ## Não verificado / limites conhecidos
 
