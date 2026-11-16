@@ -616,6 +616,22 @@ test('page hint: only a record that verifies for the author sets it', (t) => {
   t.alike(none.hint(s.P), {}, 'without verifyPage no hint is set')
 })
 
+test('page hint: a copy that cannot change the hint is not verified again', (t) => {
+  const a = hex(1)
+  const seen = []
+  const idx = createNameIndex({ verifyPage: (author, record) => { seen.push(record.type); return true } })
+  idx.note(a, 2, roster(a))
+  for (let seq = 3; seq < 13; seq++) idx.note(a, seq, roster(a))
+  t.alike(seen, ['page-roster'], 'later rosters skip the verify')
+  idx.note(a, 20, closeRecord(a))
+  for (let seq = 21; seq < 31; seq++) idx.note(a, seq, seq % 2 ? closeRecord(a) : movedRecord(a))
+  t.alike(seen, ['page-roster', 'page-close'], 'a close or move after the first end skips the verify')
+  idx.note(a, 15, movedRecord(a))
+  t.alike(seen, ['page-roster', 'page-close', 'page-moved'], 'a lower seq is still verified')
+  t.is(idx.endSeq(a), 15, 'and wins')
+  t.alike(idx.hint(a), { page: true, closed: false, moved: true })
+})
+
 test('page end seq: the lowest verified close or move wins; an unverified one sets none', (t) => {
   const a = hex(1)
   const idx = createNameIndex({ verifyPage: yes })
