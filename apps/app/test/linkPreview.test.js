@@ -308,12 +308,14 @@ test('Ajustes and the composers share previewPrefStore', (t) => {
 
 test('a DM card thumbnail is read by the node with index card', (t) => {
   const card = withoutComments(read('ui', 'LinkCard.js'))
-  t.ok(/thumb\.kind === 'dm'\) return \{ kind: 'dm', from: thumb\.from, id: thumb\.id, index: 'card', item: image \}/.test(card), 'LinkCard builds the DM card ref')
+  t.ok(/return \{ kind: 'dm', from: thumb\.from, id: thumb\.id, index: 'card', \.\.\.page, item: image \}/.test(card), 'LinkCard builds the DM card ref')
+  t.ok(/const page = typeof thumb\.page === 'string' \? \{ page: thumb\.page \} : \{\}/.test(card), 'with the Página when the thumb names one')
   t.ok(card.includes('sourceFor(ref'), 'read through chatMedia sourceFor')
   const msg = withoutComments(read('screens', 'Mensagem.js'))
-  // A page thread (acting as a page) has no page-inbox media read, so its
-  // cards show without the thumbnail.
-  t.ok(/cardThumb=\{item\.deleted \|\| pageKey !== null \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey \}\}/.test(msg), 'Mensagem passes the DM card thumb, never in a page thread')
+  // Acting as a Página, the thumb is read from the Página's store (docs/rpc.md
+  // 5.89 `page`); the identity stays the person's, who holds that store here.
+  t.ok(/const pageOf = pageKey !== null \? \{ page: pageKey \} : \{\}/.test(msg))
+  t.ok(/cardThumb=\{item\.deleted \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey, \.\.\.pageOf \}\}/.test(msg), 'Mensagem passes the DM card thumb, in a Página thread too')
 })
 
 test('no em dash in the link card files', (t) => {

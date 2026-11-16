@@ -251,7 +251,8 @@ async function writeReadFile ({ fs, join, dir, name, bytes, flags }) {
 // media.readFile (docs/rpc.md 5.89, 5.113): opens the chat item or the
 // momento's photo (kind 'moment', { author, seq }) through the session
 // and writes the plaintext with write(bytes) -> name. The DM index may be
-// 'card', resolved by the session with the same checks as a media item. `generation()` changes
+// 'card', resolved by the session with the same checks as a media item; a
+// DM `page` reads from that Página's store on this device. `generation()` changes
 // on every lock: an image opened before a lock never stays on disk after it.
 // -> { name, mime, w, h } (w, h measured from the bytes), plus ms for a voice
 // note or a video (the container's duration, not the item's claim). The plaintext copy
@@ -261,8 +262,11 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
   let opened
   try {
     if (isClosing()) throw closedError()
-    if (params.kind === 'dm') opened = session.dmReadMedia({ from: params.from, id: params.id, index: params.index })
-    else if (params.kind === 'moment') opened = session.momentReadMedia({ author: params.author, seq: params.seq })
+    if (params.kind === 'dm') {
+      const dmParams = { from: params.from, id: params.id, index: params.index }
+      if (params.page !== undefined) dmParams.page = params.page
+      opened = session.dmReadMedia(dmParams)
+    } else if (params.kind === 'moment') opened = session.momentReadMedia({ author: params.author, seq: params.seq })
     else opened = session.groupReadMedia({ diary: params.diary, item: params.item })
   } catch (err) {
     if (err instanceof RpcError) throw err

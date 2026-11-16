@@ -554,7 +554,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
-    return track(Promise.all([local.wipeCache(), dropPageSummaries()]).then(([r]) => r))
+    return track(Promise.all([local.wipeCache(), dropPageSummaries(), wipePageCaches()]).then(([r]) => r))
+  }
+
+  // What readMedia opened as a page goes with the identity's own cache.
+  async function wipePageCaches () {
+    const listed = new Set([...Object.keys(await store.readPageSecrets(storage)), ...await store.readPageStores(storage)])
+    for (const page of listed) await store.wipePageMedia(storage, page)
   }
 
   // The list summaries of every page this device lists (a reset runs it
@@ -874,13 +880,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A thread row's media: the items (cached, or opening in the background
   // now when `auto`), or { unavailable: true } when the blob is gone and
   // nothing is cached. Copies: the caller may hand them out.
-  // A page's media is never opened in the background (no readMedia for a
-  // page): its thread shows the items only.
+  // A page's media is never opened in the background, only by an explicit
+  // readMedia: its thread shows the items only.
   function mediaView (m, auto, ctx = personal) {
     if (!Array.isArray(m.media)) return null
     if (ctx.local.hasMedia(m.from, m.id)) return m.media.map(mediaItem)
+    if (gone.has(ctx.prefix + openKey(m.from, m.id))) return { unavailable: true }
     if (ctx !== personal) return m.media.map(mediaItem)
-    if (gone.has(openKey(m.from, m.id))) return { unavailable: true }
     if (auto) openMedia(m, true).catch(noop)
     return m.media.map(mediaItem)
   }
@@ -919,8 +925,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // background open of the same message. A blob gone or one that does not
   // verify marks the message gone and says so with dm.changed (no item in
   // the event). Any other failure is retried by the next read only.
-  function openMedia (m, background = false) {
-    const k = openKey(m.from, m.id)
+  // ctx: the store that caches the plaintext; its prefix keeps the open and
+  // the gone mark of a page message apart from a personal one.
+  function openMedia (m, background = false, ctx = personal) {
+    const k = ctx.prefix + openKey(m.from, m.id)
     const known = opening.get(k)
     if (known !== undefined) {
       if (!background) known.job.background = false
@@ -931,7 +939,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const p = track(new Promise((resolve, reject) => {
       job.cancel = reject
       job.start = () => {
-        const r = runOpen(m, k, gen)
+        const r = runOpen(m, k, gen, ctx)
         r.then(resolve, reject)
         return r
       }
@@ -947,7 +955,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return p
   }
 
-  function runOpen (m, k, gen) {
+  function runOpen (m, k, gen, ctx) {
     return (async () => {
       if (gen !== generation) throw new UsageError(LOCKED)
       if (blobOrigin === null) throw new UsageError(MEDIA_GONE)
@@ -965,7 +973,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         const msg = err && err.message
         if (gen === generation && (msg === MEDIA_GONE || msg === BAD_MEDIA)) {
           gone.add(k)
-          emit('dm.changed', { added: 0 })
+          emit('dm.changed', ctx.page === null ? { added: 0 } : { added: 0, page: ctx.page })
           throw new UsageError(MEDIA_GONE)
         }
         throw err
@@ -976,7 +984,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       }
       try {
         // A message a delete op hides is never shown again: no cache write.
-        if (!local.hiddenByDelete(m.from, m.id)) await local.putMedia(m.from, m.id, out)
+        if (!ctx.local.hiddenByDelete(m.from, m.id)) await ctx.local.putMedia(m.from, m.id, out)
       } catch {
         if (gen === generation) log('aviso: mídia aberta mas não guardada neste aparelho')
       }
@@ -989,9 +997,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     })()
   }
 
-  // The message (from, id) as the fold keeps it for `own`, or null.
-  async function keptMessage (own, from, id) {
-    const { inbox, requests } = await folded(own)
+  // The message (from, id) as the fold of ctx keeps it for `own`, or null.
+  async function keptMessage (own, from, id, ctx = personal) {
+    const { inbox, requests } = await folded(own, ctx)
     for (const c of [...inbox, ...requests]) {
       const m = c.messages.find((x) => x.from === from && x.id === id)
       if (m !== undefined) return m
@@ -1002,15 +1010,19 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The plaintext of item `index` of a kept message -> { bytes, mime }
   // (bytes: a fresh copy the caller owns). Opens the blob when not cached;
   // a message deleted, blocked, without media or whose blob is gone
-  // answers MEDIA_GONE.
-  async function readMedia (own, { from, id, index }) {
+  // answers MEDIA_GONE. page: a message of that page's conversations, read
+  // from and cached in the page's own store.
+  async function readMedia (own, { from, id, index, page }) {
     requireUnlocked()
     const gen = generation
     if (typeof from !== 'string' || !/^[0-9a-f]{64}$/.test(from) || typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id) ||
-        (index !== 'card' && (!Number.isSafeInteger(index) || index < 0 || index >= dm.DM_MEDIA_MAX))) {
+        (index !== 'card' && (!Number.isSafeInteger(index) || index < 0 || index >= dm.DM_MEDIA_MAX)) ||
+        (page !== undefined && page !== null && (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page)))) {
       throw new TypeError('parâmetros inválidos')
     }
-    const m = await keptMessage(own, from, id)
+    const [self, ctx] = await contextOf(own, page)
+    const lc = ctx.local
+    const m = await keptMessage(self, from, id, ctx)
     if (m === null) throw new UsageError(MEDIA_GONE)
     if (index === 'card') {
       if (!m.card || !m.card.image) throw new UsageError(MEDIA_GONE)
@@ -1019,8 +1031,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const descriptors = messageItems(m)
     if (index >= descriptors.length) throw new UsageError(MEDIA_GONE)
     const mime = descriptors[index].mime
-    if (local.hasMedia(from, id)) {
-      const items = await local.getMedia(from, id)
+    if (lc.hasMedia(from, id)) {
+      const items = await lc.getMedia(from, id)
       if (items !== null && gen !== generation) {
         items.forEach(wipe)
         throw new UsageError(LOCKED)
@@ -1031,9 +1043,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       }
       if (items !== null) items.forEach(wipe)
     }
-    if (gone.has(openKey(from, id))) throw new UsageError(MEDIA_GONE)
-    const items = await openMedia(m)
+    if (gone.has(ctx.prefix + openKey(from, id))) throw new UsageError(MEDIA_GONE)
+    const items = await openMedia(m, false, ctx)
     if (gen !== generation) throw new UsageError(LOCKED)
+    // A page forgotten while its blob opened hands out nothing.
+    if (ctx !== personal && pageStores.get(ctx.page) !== ctx) throw new UsageError(NO_PAGE_KEY)
     const copy = new Uint8Array(items[index].byteLength)
     copy.set(items[index])
     return { bytes: copy, mime }
@@ -2960,6 +2974,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     try {
       const s = pageStores.get(page)
       pageStores.delete(page)
+      // A page adopted again in this unlock starts with no stale marks.
+      const prefix = store.pageDmPrefix(page)
+      for (const k of [...gone]) if (k.startsWith(prefix)) gone.delete(k)
+      for (const k of [...opening.keys()]) if (k.startsWith(prefix)) opening.delete(k)
       if (s !== undefined) {
         foldMemo.delete(s.local)
         try { await s.ready } catch {}
