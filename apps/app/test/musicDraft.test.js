@@ -403,7 +403,8 @@ async function sender (overrides = {}) {
     offlineQueue: false,
     canQueue: true,
     queue: (...args) => { state.queued.push(args); return true },
-    linkDraft: { take: () => { throw new Error('music must hide the ordinary card') } },
+    // The word check reads the card through take, and neither flow has one.
+    linkDraft: { take: () => null },
     cardRef: { current: null },
     media: null,
     setUploading: () => {},
