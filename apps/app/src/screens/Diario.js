@@ -382,7 +382,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   }, [binding])
   const followCounts = useFollowCounts(ownPublicKey, String(refresh) + ':' + pulls)
   // Own depoimentos and the ones waiting for approval (hosted only).
-  const testimonials = useTestimonials(ownPublicKey, { withPending: true, tick: String(refresh) + ':' + pulls, active: active !== false })
+  const testimonials = useTestimonials(ownPublicKey, { ownKey: ownPublicKey, withPending: true, withSent: true, sentProbe: true, tick: String(refresh) + ':' + pulls, active: active !== false })
   // Own live and past moments (hosted only).
   const moments = useMoments({ ownKey: ownPublicKey, active: active !== false, tick: String(refresh) + ':' + pulls })
   const [momentDeleting, setMomentDeleting] = useState(null)
@@ -397,7 +397,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
     data: testimonials,
     own: true,
     ownKey: ownPublicKey,
-    onOpenAll: typeof onOpenTestimonials === 'function' && ownPublicKey ? () => onOpenTestimonials(ownPublicKey) : undefined,
+    onOpenAll: typeof onOpenTestimonials === 'function' && ownPublicKey ? (section) => onOpenTestimonials(ownPublicKey, section) : undefined,
     onOpenMember,
     onReport: typeof onReport === 'function' ? onReport : undefined
   })
@@ -965,6 +965,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         atEnd={data === null || mural || depo ? true : data.atEnd}
         scrollToTopSignal={scrollToTop}
         onScrollFrame={bar.handleScrollFrame}
+        onDragState={bar.handleDragState}
         listRef={listRef}
         newItemsTop={info !== null && bar.interactive ? insets.top + BAR + (bar.pinned && segmentedHeight !== null ? segmentedHeight : 0) + 8 : undefined}
         newItems={{

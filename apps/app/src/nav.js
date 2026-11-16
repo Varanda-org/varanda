@@ -91,7 +91,14 @@ export function validEntry (entry) {
     return isRef(entry.key) && typeof params.offer === 'string' && HEX32.test(params.offer)
   }
   if (entry.screen === 'membro' || entry.screen === 'mensagem' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'depoimentos' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas') return isAuthorKey(entry.key)
+  if (entry.screen === 'depoimentos') {
+    const params = entry.params
+    if (!isAuthorKey(entry.key)) return false
+    if (params === undefined || params === null) return true
+    if (typeof params !== 'object' || Array.isArray(params)) return false
+    return params.section === undefined || params.section === 'sent'
+  }
   if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'pedidos' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos' || entry.screen === 'visitas') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'citacoes') return isRef(entry.key)
   if (entry.screen === 'assunto') return typeof entry.key === 'string' && TAG.test(entry.key)

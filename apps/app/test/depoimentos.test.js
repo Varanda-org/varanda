@@ -212,13 +212,21 @@ test('the own tab starts with the approval row and Enviados, then every row newe
   const tabItems = compilePlain(screen, 'tabItems', { pendingLabel, keptLabel: (n) => 'Depoimentos guardados (' + n + ')', SENT_LABEL: 'Enviados' })
   t.ok(tabItems, 'tabItems found')
   const rows = [{ ref: B + ':9' }, { ref: A + ':4' }]
-  const own = tabItems({ rows, pendingCount: 2, own: true, canOpen: true })
+  const own = tabItems({ rows, pendingCount: 2, sentCount: 1, own: true, canOpen: true })
   t.alike(own.map((i) => i.kind + ':' + (i.label || i.row.ref)), ['link:Depoimentos para aprovar (2)', 'link:Enviados', 'row:' + B + ':9', 'row:' + A + ':4'], 'pinned row, Enviados, rows in order')
-  t.alike(tabItems({ rows, pendingCount: 2, keptCount: 3, own: true, canOpen: true }).slice(0, 3).map((i) => i.label), ['Depoimentos para aprovar (2)', 'Depoimentos guardados (3)', 'Enviados'], 'kept link after the pending one')
+  t.alike(tabItems({ rows, pendingCount: 2, keptCount: 3, sentCount: 1, own: true, canOpen: true }).slice(0, 3).map((i) => i.label), ['Depoimentos para aprovar (2)', 'Depoimentos guardados (3)', 'Enviados'], 'kept link after the pending one')
   t.alike(tabItems({ rows, keptCount: 3, own: false, canOpen: true }).map((i) => i.kind), ['row', 'row'], 'no kept link on another profile')
-  t.alike(tabItems({ rows: [], pendingCount: 0, own: true, canOpen: true }).map((i) => i.label), ['Enviados'], 'Enviados always on the own tab, no approval row at 0')
+  t.alike(tabItems({ rows: [], pendingCount: 0, own: true, canOpen: true }).map((i) => i.label), [], 'no Enviados row when nothing was sent')
+  const sentLink = tabItems({ rows: [], sentCount: 2, own: true, canOpen: true })
+  t.alike(sentLink.map((i) => i.label), ['Enviados'], 'Enviados when something was sent')
+  t.is(sentLink[0].section, 'sent', 'the Enviados row opens the sent section')
+  t.alike(tabItems({ rows: [], sentFailed: true, own: true, canOpen: true }).map((i) => i.label), ['Enviados'], 'a failed sent read keeps the way in')
+  const pe = tabItems({ rows, own: true, pendingError: 'Falhou', canOpen: true })
+  t.alike(pe.map((i) => i.kind), ['retry', 'row', 'row'], 'a failed approval read shows an error row with retry')
+  t.is(pe[0].text, 'Falhou', 'the error text')
+  t.is(tabItems({ rows, own: false, pendingError: 'Falhou' }).length, 2, 'no approval error on another profile')
   t.alike(tabItems({ rows, pendingCount: 3, own: false, canOpen: true }).map((i) => i.kind), ['row', 'row'], 'no own links on another profile')
-  t.alike(tabItems({ rows, own: true, failed: true, error: 'x', canOpen: true }).map((i) => i.kind), ['link', 'retry', 'row', 'row'], 'a failed reload keeps its retry')
+  t.alike(tabItems({ rows, sentCount: 1, own: true, failed: true, error: 'x', canOpen: true }).map((i) => i.kind), ['link', 'retry', 'row', 'row'], 'a failed reload keeps its retry')
   t.is(tabItems({ rows: Array.from({ length: 10 }, (_, i) => ({ ref: A + ':' + (i + 1) })), own: false }).length, 10, 'all shown rows, no cap of three')
   t.ok(screen.includes("export const SENT_LABEL = 'Enviados'"), 'Enviados label')
   t.ok(screen.includes("export const TESTIMONIALS_TAB = { id: 'depoimentos', label: 'Depoimentos' }"), 'the tab')
@@ -321,6 +329,24 @@ test("'Enviados' reads further pages only on 'Ver mais'", async (t) => {
   t.ok(screen.includes("if (data.sentMore) items.push({ kind: 'more', key: 'm:sent' })"), 'Ver mais at the end of Enviados while more remains')
   t.ok(screen.includes('const pages = sentLogRef.current.pages.concat(log.pages)'), 'rows recomputed over every page read')
   t.absent(/onEndReached/.test(screen), 'never on scroll')
+})
+
+test("the profile's 'Enviados' probe stops at the first page with a sent block", async (t) => {
+  const screen = read('screens/Depoimentos.js')
+  const readSentPages = compileFunction(screen, 'readSentPages', { SENT_PAGES: 8, LOG_LIMIT_MAX: 32 })
+  const page = (params, mark) => {
+    const end = params.before === undefined ? 1000 : params.before - 1
+    const seqs = Array.from({ length: 32 }, (_, i) => end - i)
+    return { entries: seqs.map((seq) => ({ seq, sent: seq === mark })), entriesTruncated: end - 32 }
+  }
+  const probe = await readSentPages(async (method, params) => page(params, 930), undefined, (pages) => pages.some((p) => p.entries.some((e) => e.sent)))
+  t.is(probe.pages.length, 3, 'stops on the page holding the first sent block')
+  t.is(probe.before, 1000 - 3 * 32 + 1, 'cursor kept')
+  const none = await readSentPages(async (method, params) => page(params, -1), undefined, () => false)
+  t.is(none.pages.length, 8, 'nothing sent: still bounded by SENT_PAGES')
+  t.ok(screen.includes('const until = sentProbe ? (pages) => sentRows(pages, ownKey).length > 0 : null'), 'probe asks sentRows over every page read')
+  const diario = read('screens/Diario.js')
+  t.ok(diario.includes('useTestimonials(ownPublicKey, { ownKey: ownPublicKey, withPending: true, withSent: true, sentProbe: true,'), 'the own profile reads whether anything was sent')
 })
 
 test('pending authors are resolved', (t) => {
@@ -544,4 +570,22 @@ test('a confirmation keeps its text while it slides out', (t) => {
   const screen = read('screens/Depoimentos.js')
   t.ok(screen.includes('if (open && body) lastBody.current = body') && screen.includes('const shownBody = open ? body : lastBody.current'), 'the last body is held while closing')
   t.ok(screen.includes('{shownBody ? <Soft>{shownBody}</Soft> : null}'), 'and rendered')
+})
+
+test('ownBlockRef picks the newest own block, sectionIndex finds the sent title', (t) => {
+  const screen = read('screens/Depoimentos.js')
+  const ownBlockRef = compilePlain(screen, 'ownBlockRef', { HEX64: /^[0-9a-f]{64}$/ })
+  const sectionIndex = compilePlain(screen, 'sectionIndex', {})
+  t.is(ownBlockRef({ shown: [{ from: A, wseq: 3 }, { from: A, wseq: 9 }, { from: B, wseq: 20 }], pending: [] }, A), A + ':9', 'newest shown wins')
+  t.is(ownBlockRef({ shown: [{ from: A, wseq: 3 }], pending: [{ from: A, seq: 7 }] }, A), A + ':7', 'newest across shown and pending')
+  t.is(ownBlockRef({ shown: [{ from: A, wseq: 'x' }, { from: A, wseq: -1 }], pending: [] }, A), null, 'invalid seqs skipped')
+  t.is(ownBlockRef({ shown: [], pending: [] }, A), null, 'none')
+  t.is(sectionIndex([{ key: 'a' }, { key: 't:sent' }], 'sent'), 1)
+  t.is(sectionIndex([{ key: 'a' }], 'sent'), -1)
+  t.is(sectionIndex([{ key: 't:sent' }], 'other'), -1)
+  t.ok(screen.includes('onScrollToIndexFailed={handleIndexFailed}') && screen.includes('tries.current >= SECTION_TRIES'), 'an unmeasured title is retried, bounded')
+  t.ok(screen.includes('onUserScroll={handleUserScroll}') && screen.includes('if (userScrolled.current) return'), 'the person scrolling stops the section scroll')
+  t.ok(screen.includes('onContentSizeChange={handleContentSize}') && screen.includes('tries.current = 0'), 'rows measured after the retries ran out scroll again')
+  t.ok(screen.includes('}, [wantSection, data.sentLoaded, data.sent.length, rowsAbove, scrollToSection])'), 'rows arriving above the title scroll again')
+  t.ok(read('ui/RefreshableList.js').includes('onScrollToIndexFailed={onScrollToIndexFailed}'), 'the list passes the failure on')
 })

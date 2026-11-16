@@ -205,7 +205,7 @@ function useVideoDraft ({ active, moment = false }) {
 // press after a failure, and the uncertain hold. send() is one explicit
 // attempt; nothing here ever repeats a request.
 function useMomentDraft ({ node, member, open, active }) {
-  const photo = useChatAttachments()
+  const photo = useChatAttachments({ limit: 1 })
   const video = useVideoDraft({ active, moment: true })
   const musicAllowed = useMomentMusicAvailable(node, member, active)
   const musicAvailable = musicAllowed && video.state.phase === 'empty'

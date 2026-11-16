@@ -190,3 +190,40 @@ test('profile bar title stops growing at the header cap so it fits the fixed bar
   t.ok(/title: \{ \.\.\.type\.sheetTitle,/.test(src), 'the title uses the sheetTitle type')
   t.ok(line > 0 && bar > 0 && line * 1.3 < bar, 'a capped title line (' + line + ' pt line at 1.3) fits the ' + bar + ' pt bar row')
 })
+
+test('profile bar snap glides a resting scroll to the nearer end of the band', async (t) => {
+  const { profileBarSnap, profileBarState } = await load()
+  const band = 96
+  const cb = 42
+  const to = Math.min(0.85 * band, Math.max(1, cb - 4))
+  const from = Math.max(0, to - 0.4 * band)
+  t.ok(to > from)
+  t.is(profileBarSnap(from, band, cb), null)
+  t.is(profileBarSnap(to, band, cb), null)
+  t.is(profileBarSnap(from - 5, band, cb), null)
+  t.is(profileBarSnap(to + 50, band, cb), null)
+  t.is(profileBarSnap(-30, band, cb), null)
+  t.is(profileBarSnap(from + 0.25 * (to - from), band, cb), from)
+  t.is(profileBarSnap(from + 0.75 * (to - from), band, cb), to)
+  t.is(profileBarState(profileBarSnap(from + 1, band, cb), band, false, cb).opacity, 0)
+  t.is(profileBarState(profileBarSnap(to - 1, band, cb), band, false, cb).opacity, 1)
+})
+
+test('profile bar snap ignores invalid input', async (t) => {
+  const { profileBarSnap } = await load()
+  t.is(profileBarSnap(NaN, 96, 42), null)
+  t.is(profileBarSnap(20, 0, 42), null)
+  t.is(profileBarSnap(20, 96, 0), null)
+  t.is(profileBarSnap(20, NaN, 42), null)
+  t.is(profileBarSnap(undefined, 96, 42), null)
+})
+
+test('profile bar rest plan snaps only with no finger on the list', async (t) => {
+  const { profileBarRestPlan } = await load()
+  const mid = 25
+  t.is(profileBarRestPlan(true, mid, 96, 42), 'clear')
+  t.is(profileBarRestPlan(false, mid, 96, 42), 'arm')
+  t.is(profileBarRestPlan(false, 0, 96, 42), 'clear')
+  t.is(profileBarRestPlan(false, 500, 96, 42), 'clear')
+  t.is(profileBarRestPlan(false, NaN, 96, 42), 'clear')
+})

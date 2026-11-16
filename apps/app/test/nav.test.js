@@ -357,6 +357,8 @@ test('depoimentos is keyed by a lowercase hex64 owner', async (t) => {
   const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
   t.ok(SCREENS.includes('depoimentos'))
   t.ok(validEntry({ screen: 'depoimentos', key: A }))
+  t.ok(validEntry({ screen: 'depoimentos', key: A, params: { section: 'sent' } }))
+  t.absent(validEntry({ screen: 'depoimentos', key: A, params: { section: 'x' } }))
   const stack = push(EMPTY, { screen: 'depoimentos', key: A })
   t.alike(top(stack), { screen: 'depoimentos', key: A, params: {} })
   t.is(push(stack, { screen: 'depoimentos', key: A }), stack, 'same top is a no-op')

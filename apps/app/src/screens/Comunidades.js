@@ -111,7 +111,7 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, onPress, metaLines
     >
       <Avatar name={avatarName} publicKey={seed} size={48} shape='square' />
       <View style={styles.texts}>
-        <Text style={[styles.name, dot && styles.nameUnread]} numberOfLines={1}>{title}</Text>
+        <Text style={[styles.name, dot && styles.nameUnread]} numberOfLines={2}>{title}</Text>
         {subtitle ? <Text style={styles.meta} numberOfLines={metaLines}>{subtitle}</Text> : null}
       </View>
       {dot ? <View style={styles.dot} /> : null}

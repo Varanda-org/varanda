@@ -2115,9 +2115,9 @@ function Member () {
     if (typeof community !== 'string' || !Array.isArray(groups)) return
     pushScreen({ screen: 'eventos', key: community.toLowerCase(), params: truncated === true ? { groups, truncated: true } : { groups } })
   }, [pushScreen])
-  const openTestimonials = useCallback((key) => {
+  const openTestimonials = useCallback((key, section) => {
     if (typeof key !== 'string') return
-    pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: {} })
+    pushScreen({ screen: 'depoimentos', key: key.toLowerCase(), params: section === 'sent' ? { section } : {} })
   }, [pushScreen])
   const enterAvisos = useCallback(() => {
     if (tabRef.current !== 'avisos') setReturnTab(tabRef.current)
@@ -2979,9 +2979,11 @@ function Member () {
   // back to the person for this open, or Publicar would not offer Momento.
   const openMomentComposer = () => {
     clearStack()
-    actingAs.me()
+    actingAs.enterMoment()
     setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
   }
+  // The page is back once the composer closes, published or cancelled.
+  useEffect(() => { if (!composer.open) actingAs.leaveMoment() }, [composer.open])
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
   // Handlers for the memoized screens, updated on every render of the tabs
   // (see the module comment above).
