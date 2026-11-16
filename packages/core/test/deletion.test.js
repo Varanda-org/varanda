@@ -222,14 +222,26 @@ test('deletedRanges: thousands of survivors and tombstone ranges stay fast and m
   }
 
   const allowed = cores.slice(0, 6)
-  const started = Date.now()
-  const got = deletedRanges(entries, allowed)
-  const elapsed = Date.now() - started
+  // The bound is the pairwise scan on the same data, timed here in the same
+  // process: a load that slows one slows the other, where a fixed number of
+  // milliseconds would not. The best of three keeps a pause in one run from
+  // counting.
+  let got
+  let elapsed = Infinity
+  for (let run = 0; run < 3; run++) {
+    const started = process.hrtime.bigint()
+    got = deletedRanges(entries, allowed)
+    elapsed = Math.min(elapsed, Number(process.hrtime.bigint() - started) / 1e6)
+  }
   const sorted = [...got].sort((a, b) => a.core.localeCompare(b.core) || a.start - b.start)
+  const naiveStarted = process.hrtime.bigint()
   const expected = naive(entries, allowed)
+  const naiveElapsed = Number(process.hrtime.bigint() - naiveStarted) / 1e6
   t.ok(expected.length > 0 && expected.length < TOMBS * 4 * 6 / 8, 'some ranges kept, the overlapping and undeclared ones dropped')
   t.alike(sorted, expected, 'same ranges as the naive scan')
-  t.ok(elapsed < 400, `took ${elapsed} ms`)
+  // About a tenth of the pairwise scan when measured alone; a quadratic
+  // regression would match it.
+  t.ok(elapsed * 3 < naiveElapsed, `took ${elapsed} ms against ${naiveElapsed} ms for the pairwise scan`)
 })
 
 test('deletedRanges: a range overlapping a survivor at either edge is kept out', (t) => {

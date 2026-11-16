@@ -145,6 +145,9 @@ test('an approval community: request, admission with CW cuts, and Geral counts a
 })
 
 test('a community admin bans in a group through its CW; a demoted admin no longer can', async (t) => {
+  // Measured: 13 s alone, 24 to 30 s with five copies of this file running (each
+  // member call opens a store, and the world and five syncs are ~30 of them).
+  t.timeout(90000)
   const { a, others: [b, c], community } = await world(t)
   const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   await sync(a, b, c)
@@ -172,6 +175,8 @@ test('a community admin bans in a group through its CW; a demoted admin no longe
 })
 
 test('a 33rd group is refused with nothing written', async (t) => {
+  // Measured: 7 s alone, 20 to 26 s with five copies running (33 store-opening calls).
+  t.timeout(90000)
   const kp = crypto.keyPair()
   const a = await person(t, kp)
   const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
@@ -185,6 +190,8 @@ test('a 33rd group is refused with nothing written', async (t) => {
 })
 
 test('a community admin hide through the CW stays after the admin is demoted', async (t) => {
+  // Measured: 8 s alone, 20 to 30 s with five copies running (three people, four syncs).
+  t.timeout(90000)
   const { a, others: [b, c], community } = await world(t)
   const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   await sync(a, b, c)
@@ -258,6 +265,8 @@ test('community info lists the catalogue, with null rows for roots not held', as
 })
 
 test('members and requests page like a group', async (t) => {
+  // Measured: 6 s alone, 14 to 25 s with five copies running.
+  t.timeout(90000)
   const { a, others, community } = await world(t, { join: 'approval', names: ['Bia', 'Caio', 'Davi'] })
   const all = await member.communityRequests(a, { community })
   t.is(all.total, 3)
@@ -592,6 +601,8 @@ test('authority comes from the writer: a grant listing only another device refus
 })
 
 test('the members invite flag: the creator on the root, an admin through its CW, a group flag through the CW', async (t) => {
+  // Measured: 7 s alone, 20 s with five copies running.
+  t.timeout(90000)
   const { a, others: [b, c], community } = await world(t)
   const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
   t.is((await member.communityInfo(a, { community })).memberInvite, false)

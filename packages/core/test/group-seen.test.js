@@ -5,7 +5,7 @@ const path = require('node:path')
 const test = require('brittle')
 const member = require('../lib/member')
 const store = require('../lib/store')
-const { exchange, entryOf, rejects, world } = require('./helpers/community-member')
+const { exchange, entryOf, postMany, rejects, world } = require('./helpers/community-member')
 
 const seenFile = (ctx) => path.join(ctx.dataDir, 'group-seen.json')
 
@@ -88,8 +88,11 @@ test('community.info: no last for a non-reader, nothing sealed leaks', async (t)
 
 test('community.info: unread stops at 99, the preview at 140 code points', async (t) => {
   const { a, others: [b], community, geral } = await world(t, { names: ['Bia'] })
-  for (let i = 0; i < 99; i++) await member.groupPost(a, { group: geral, text: 'p' + i })
-  await member.groupPost(a, { group: geral, text: '\u{1F600}'.repeat(150) })
+  // 100 member.groupPost calls (a store open and close each) outlast the 30 s
+  // timeout on a loaded machine; the posts are filler for the cap, not the subject.
+  const texts = Array.from({ length: 99 }, (_, i) => 'p' + i)
+  texts.push('\u{1F600}'.repeat(150))
+  await postMany(a, geral, texts)
   await exchange(a, b)
   const row = await rowOf(b, community, geral)
   t.is(row.unread, 99)

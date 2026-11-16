@@ -449,7 +449,9 @@ function followRange (core, deleted) {
 // writer cores one group may hold, active or on disk), and for writer pages
 // pageRetryMs, pageRefreshMs, groupRequestTimeoutMs), whose defaults are the
 // protocol constants. releaseHook(key) is awaited by the release of a
-// binding diary before its session closes (test-only).
+// binding diary before its session closes, and quarantineHook(key) by a
+// group quarantine read once its core is ready, before it replicates (both
+// test-only).
 async function runSync ({
   dataDir,
   associationKey = null,
@@ -480,6 +482,7 @@ async function runSync ({
   groupRequestTimeoutMs = GROUPS_REQUEST_TIMEOUT_MS,
   inspectHook = null,
   releaseHook = null,
+  quarantineHook = null,
   // true (or VARANDA_NO_CLEAR=1, the rollout kill switch) keeps the bytes of
   // deleted blocks and every unfollowed replica, as before deletion existed;
   // deleted blocks still do not hold the present length back.
@@ -583,7 +586,8 @@ async function runSync ({
   const groupCores = new Map() // foreign writer key -> entry (gating, active, failing, failed)
   const rootVis = new Map() // group -> the visibility its verified root header names ('public' | 'private')
   const groupDiaries = new Map() // diary key -> { core, range, stopFork, stopQuota, want, failed }
-  const qchains = new Map() // key -> the last group quarantine read of that key
+  const qchains = new Map() // key -> the last group quarantine read (or gate open in the main store) of that key
+  const mainOpened = new Map() // binding diary key -> main-store sessions a gate opened, held or not yet
   const revokedDiaries = new Set() // diaries purged in this run for a revoked issuer
   const forkedDiaries = new Set() // binding diaries that forked in this run
   const divergedDiaries = new Set() // binding diaries whose stored blocks were not the gated ones, in this run
@@ -2064,7 +2068,7 @@ async function runSync ({
     let core
     try {
       if (openHook) await openHook(entry.key) // test-only
-      core = await openReplica(store, entry.key)
+      core = await openMain(entry.key, { purgesOnEnd: true })
     } catch (err) {
       if (!ended) log('aviso: falha ao abrir réplica ' + key8(entry.key) + ': ' + err.message)
       return
@@ -3089,20 +3093,22 @@ async function runSync ({
       // A replica the main store opened while this read waited (the same
       // diary binding a CW and a group writer, gated at once) owns the
       // channel: the quarantine would never pair, so the blocks are read
-      // through that replica.
-      const main = mainReplica(key)
-      if (main !== null) {
+      // through that replica. One its owner closes during the read gives
+      // way to the next replica, or to the quarantine.
+      for (let main = mainReplica(key); main !== null; main = mainReplica(key)) {
         const raws = []
         for (const seq of seqs) {
           const raw = await readHeld(main, seq, until)
-          if (raw === null) return null
+          if (raw === null) break
           raws.push(raw)
         }
-        return { raws, length: main.length, byteLength: main.byteLength }
+        if (raws.length === seqs.length) return { raws, length: main.length, byteLength: main.byteLength }
+        if (ending || Date.now() >= until || (!main.closing && !main.closed)) return null
       }
       const core = qstore.get({ key: b4a.from(key, 'hex') })
       try {
         await core.ready()
+        if (quarantineHook) await quarantineHook(key) // test-only
         for (const s of sockets) if (!s.destroyed) core.replicate(s)
         const raws = []
         for (const seq of seqs) {
@@ -3140,7 +3146,41 @@ async function runSync ({
     const d = groupDiaries.get(key)
     const w = groupCores.get(key)
     const core = (d && !d.failed && d.core) || (f && f.core) || (w && w.core) || null
-    return !core || !core.opened || core.closing || core.closed ? null : core
+    if (core && core.opened && !core.closing && !core.closed) return core
+    for (const s of mainOpened.get(key) || []) if (s.opened && !s.closing && !s.closed) return s
+    return null
+  }
+
+  // Protecting a quarantine read from a binding diary another gate opens in
+  // the main store meanwhile: that replica takes the key's channel on the
+  // connection before it is held in groupDiaries, and the quarantine would
+  // wait for a peer that never pairs until its gate times out. The open
+  // waits for the key's quarantine reads, and the next ones read through
+  // the session it returns (mainReplica) until that session closes. A
+  // release or purge of the key that started meanwhile settles first, so
+  // the open never races it, and once the run is ending nothing opens
+  // (-> null) unless the caller purges what it opened then (`purgesOnEnd`,
+  // the follow path): the next run would take an empty stored copy for a
+  // stored diary.
+  function openMain (key, { purgesOnEnd = false } = {}) {
+    const prev = qchains.get(key) || Promise.resolve()
+    const run = prev.catch(noop).then(async () => {
+      await releaseSettled(key)
+      if (ending && !purgesOnEnd) return null
+      const core = await openReplica(store, key)
+      let held = mainOpened.get(key)
+      if (!held) mainOpened.set(key, (held = new Set()))
+      held.add(core)
+      core.once('close', () => {
+        held.delete(core)
+        if (held.size === 0 && mainOpened.get(key) === held) mainOpened.delete(key)
+      })
+      return core
+    })
+    qchains.set(key, run)
+    const done = () => { if (qchains.get(key) === run) qchains.delete(key) }
+    run.then(done, done)
+    return run
   }
 
   function reattachMain (key, sockets) {
@@ -3263,8 +3303,21 @@ async function runSync ({
       } else if (groupDiaries.has(e.diary) && !groupDiaries.get(e.diary).failed) {
         held = groupDiaries.get(e.diary).core
       } else if (await replicaStored(store, e.diary)) {
-        dcore = await openReplica(store, e.diary)
+        dcore = await openMain(e.diary)
+        if (dcore === null) return fail('timeout', false, true)
         held = dcore
+        // A block, fork or divergence that arrived while the open waited
+        // (a blocked diary purged meanwhile was recreated by the open: it
+        // goes, as on the late path of onGroupGate).
+        if (isBlockedKey(e.diary)) {
+          const closed = dcore.close().catch(noop)
+          dcore = null
+          if (!followHolds(e.diary)) purgeStored(e.diary, closed)
+          else track(closed, noop, noop)
+          return fail('blocked', false, true)
+        }
+        if (forkedDiaries.has(e.diary)) return fail('fork', false, true)
+        if (divergedDiaries.has(e.diary)) return fail('not-in-log', false, true)
       } else {
         // A seq past the length learned with block 0 (perhaps from a seeder
         // behind) is waited for until the deadline: a miss is a timeout,
@@ -3561,6 +3614,16 @@ async function runSync ({
     }
     let core = r.core
     let dcore = r.dcore
+    // Ended meanwhile: a core this run created goes (it may hold nothing).
+    const dropOnEnd = () => {
+      e.state = 'failed'
+      e.core = null
+      track((async () => {
+        await core.close()
+        if (!e.wasStored) await purgeKey(e.key)
+      })(), noop, () => { if (!ended) purgeFailed(e.key) })
+    }
+    let openedNothing = false
     try {
       if (!core) {
         e.wasStored = await replicaStored(store, e.key)
@@ -3569,12 +3632,17 @@ async function runSync ({
       }
       if (!dcore && e.diary !== ownHex && !groupDiaries.has(e.diary) && !followHolds(e.diary)) {
         await releaseSettled(e.diary)
-        dcore = await openReplica(store, e.diary)
+        dcore = await openMain(e.diary)
+        openedNothing = dcore === null
       }
     } catch (err) {
       if (core && core !== r.core) await core.close().catch(noop)
       if (!ended) log('aviso: falha ao abrir núcleo de grupo ' + key8(e.key) + ': ' + err.message)
       dropGroupCore(e.key)
+      return
+    }
+    if (openedNothing) {
+      dropOnEnd()
       return
     }
     e.core = core
@@ -3623,14 +3691,8 @@ async function runSync ({
       failGroupCore(e, 'withdrawn', { purge: false })
       return
     }
-    // Ended meanwhile: a core this run created goes (it may hold nothing).
     if (ending) {
-      e.state = 'failed'
-      e.core = null
-      track((async () => {
-        await core.close()
-        if (!e.wasStored) await purgeKey(e.key)
-      })(), noop, () => { if (!ended) purgeFailed(e.key) })
+      dropOnEnd()
       return
     }
     // recheckGroupBoxes skips a writer that is not active yet: a root

@@ -1124,13 +1124,16 @@ test('review shots retries collisions but stops on permanent failures and the re
   const root = mkdtempSync(join(tmpdir(), 'vitrine-shots-'))
   t.teardown(() => rmSync(root, { recursive: true, force: true }))
   const script = join(__dirname, '../scripts/review-shots.sh')
+  // Only a hang guard: the 1000-collision case forks a subshell per name, so
+  // its time follows the load (about 1 s at load 5, past 5 s on a busier machine,
+  // where the child was killed and the status came back null).
   const capture = (out, label) => spawnSync('bash', ['-c', `
     xcrun () {
       if [ "$2" = list ]; then echo '(Booted)'; else echo 'fixture-png' > "$6"; fi
     }
     export -f xcrun
     exec bash "$@"
-  `, 'shots-test', script, 'ios', out, label], { encoding: 'utf8', timeout: 5000 })
+  `, 'shots-test', script, 'ios', out, label], { encoding: 'utf8', timeout: 120000 })
   const out = join(root, 'shots')
   mkdirSync(out)
   writeFileSync(join(out, 'praca-ios-1.png'), 'previous')

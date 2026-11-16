@@ -24,10 +24,9 @@ async function person (t, kp, name = 'Ana', certified = true) {
   return { ...ctx, key: publicKey }
 }
 
-// Corestore replication stays entirely in process, without sockets or a DHT.
-async function exchange (from, to) {
-  const a = await store.openStore(from.dataDir)
-  const b = await store.openStore(to.dataDir)
+// One direction over two open stores: every core `from` holds is copied to
+// `to`, block by block.
+async function pump (a, b) {
   let left
   let right
   try {
@@ -50,15 +49,37 @@ async function exchange (from, to) {
   } finally {
     if (left) left.destroy()
     if (right) right.destroy()
+  }
+}
+
+// Corestore replication stays entirely in process, without sockets or a DHT.
+async function exchange (from, to) {
+  const a = await store.openStore(from.dataDir)
+  const b = await store.openStore(to.dataDir)
+  try {
+    await pump(a, b)
+  } finally {
     await b.close()
     await a.close()
   }
 }
 
-// Everyone ends holding every core anyone holds.
+// Everyone ends holding every core anyone holds: the first person gathers
+// what the others hold, then hands the union back. Each store is opened once
+// and each pair replicates once per direction needed: opening two stores and
+// running a full all-pairs exchange twice made a three-person sync take over
+// a second a pair, and a test with several syncs outlast its timeout on a
+// loaded machine.
 async function sync (...people) {
-  for (const from of people) for (const to of people) if (from !== to) await exchange(from, to)
-  for (const from of people) for (const to of people) if (from !== to) await exchange(from, to)
+  const open = []
+  try {
+    for (const p of people) open.push(await store.openStore(p.dataDir))
+    const [hub, ...rest] = open
+    for (const s of rest) await pump(s, hub)
+    for (const s of rest) await pump(hub, s)
+  } finally {
+    for (const s of open.reverse()) await s.close()
+  }
 }
 
 async function coreEntries (ctx, key) {
@@ -158,6 +179,22 @@ async function rootAppend (ctx, key, record, community) {
   }
 }
 
+// `texts` as posts of a public group this person created, written from its own
+// device through one store: member.groupPost opens and closes a store per
+// call, which a hundred posts cannot afford on a loaded machine. The records
+// are the ones groupPost builds, without its `seen` chain or membership checks:
+// fine for one writer, not for a test about order across writers.
+async function postMany (ctx, group, texts) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = await store.openGroupWriter(s, entryOf(ctx, group).nonce)
+    const validator = (r, seq) => groupLib.validateGroupRecord(r, seq, { root: hex(core.key) === group })
+    for (const text of texts) await store.appendRecord(core, groupLib.groupPost({ text }), { validator })
+  } finally {
+    await s.close()
+  }
+}
+
 async function joinGroup (ctx, group) {
   return member.groupJoin(ctx, { group })
 }
@@ -197,4 +234,4 @@ function finished (t, log, { community, geral, leave }) {
   t.ok(cut >= 0 && conf > cut && off > conf, 'the mark, the group-confirm, then the off join')
 }
 
-module.exports = { hex, leaveNoteFile, person, exchange, sync, coreEntries, entryOf, rejects, world, foldC, leavesOn, texts, otherDevice, rootAppend, joinGroup, deleteOn, cutsOf, leaveThenReturn, finished }
+module.exports = { hex, leaveNoteFile, person, exchange, sync, coreEntries, entryOf, rejects, world, foldC, leavesOn, texts, otherDevice, rootAppend, postMany, joinGroup, deleteOn, cutsOf, leaveThenReturn, finished }
