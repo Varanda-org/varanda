@@ -340,6 +340,7 @@ test('the running lab requires a phone check and finishes sign-up without an age
   t.is(policy.status, 200)
   t.alike(await policy.json(), { required: true })
   t.alike(await (await fetch(base + '/account/age/policy')).json(), { required: false })
+  t.alike(await (await fetch(base + '/account/gif/policy')).json(), { enabled: true }, 'GIF search is on, through the stub provider')
 
   const config = await (await fetch(base + '/varanda.json')).json()
   const kp = crypto.keyPair()
