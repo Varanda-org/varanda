@@ -23,6 +23,7 @@ const { createPasskeyRoutes } = require('./passkey-routes')
 const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, header } = require('./app-return')
 const { createPagesRoutes } = require('./pages-routes')
+const { findTerm } = require('./word-check')
 const { createGifRoutes } = require('./gif-routes')
 const { createPreviewRoutes } = require('./preview-routes')
 const { createAudiusRoutes } = require('./audius-routes')
@@ -1499,6 +1500,8 @@ function createAccountServer ({
     // The age gate waits for the signed finish: this unsigned answer must not
     // tell anyone whether a given key passed the age check.
     if (name !== current.username) {
+      // A new name only: the one held now is never checked again.
+      if (findTerm(name) !== null) throw refuse('nome-invalido')
       if (now() < Date.parse(current.nextChangeAt)) throw refuse('troca-bloqueada', { nextChangeAt: current.nextChangeAt })
       const holder = store.lookup(name)
       if (holder !== null && holder.member !== member) throw refuse('nome-em-uso')

@@ -271,7 +271,7 @@ test('only one match inside both attempt bounds can reconcile', async (t) => {
 
 test('public word refusal prevents every request including the floor read', async (t) => {
   const { sendTextReply } = await load()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   const { refusalOf } = await import('../src/wordCheck.js')
   const text = 'texto ' + BLOCKED_TERMS[0]
   const refused = refusalOf(text)

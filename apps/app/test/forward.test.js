@@ -379,7 +379,7 @@ test('forward.js imports only pure modules and has no em dash', async (t) => {
 
 test('forwardPlan: a listed term is refused only on its way into a public group', async (t) => {
   const { forwardPlan } = await load()
-  const { BLOCKED_TERMS } = await import('../src/blockedTerms.js')
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
   const { refusalText } = await import('../src/wordCheck.js')
   const term = BLOCKED_TERMS[0]
   for (const source of [dmSource({ text: term }), publicSource({ text: term }), postSource({ text: term })]) {
