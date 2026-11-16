@@ -276,7 +276,8 @@ test('a held root the diary never joined (an opened link) is no candidate', asyn
   t.alike(await ops.deviceUpkeepPlan(d.ctx), { enrol: [], share: [], skipped: [] })
 })
 
-test('approval community: a plain member\'s second device writes one CW and waits for the admin in its groups', async (t) => {
+// Owner decision (#350): the diary's admission covers its new devices.
+test('approval community: a plain member\'s second device writes one CW, then enters its groups without an admin', async (t) => {
   const { a, members: [b], community, general } = await world(t, 1, { join: 'approval' })
   const { group: feira } = await ops.groupCreate(a.ctx, { name: 'Feira', join: 'open', community })
   await ops.communityJoin(b.ctx, { community })
@@ -289,7 +290,7 @@ test('approval community: a plain member\'s second device writes one CW and wait
   const d = await secondDevice(t, b, [community, general, feira, await ownWriter(b, community), await ownWriter(b, general), await ownWriter(b, feira)], [a])
   const plan = await ops.deviceUpkeepPlan(d.ctx)
   t.alike(plan.enrol, [{ root: community, kind: 'community', community: null }])
-  t.alike(reasons(plan), [[general, 'community-first'], [feira, 'community-first']], 'a new CW of a plain member is not admitted yet')
+  t.alike(reasons(plan), [[general, 'community-first'], [feira, 'community-first']], 'the groups wait for the new CW to be written')
   const res = await ops.deviceUpkeep(d.ctx, plan)
   t.alike(res.enrolled.map((x) => [x.root, x.kind]), [[community, 'community']])
   t.alike(res.failed, [])
@@ -297,19 +298,21 @@ test('approval community: a plain member\'s second device writes one CW and wait
   t.alike([ci.writerHere, ci.canWrite], [true, true])
   const cw = await ownWriter(d, community)
 
-  const waiting = await ops.deviceUpkeepPlan(d.ctx)
-  t.alike(waiting.enrol, [], 'never a second CW')
-  t.alike(reasons(waiting), [[general, 'community-first'], [feira, 'community-first']], 'Geral waits for the admin too')
-  t.is(await ownWriter(d, community), cw)
+  const next = await ops.deviceUpkeepPlan(d.ctx)
+  t.alike(next.enrol, [{ root: general, kind: 'group', community }, { root: feira, kind: 'group', community }], 'the admission covers the new CW: Geral and Feira follow')
+  t.alike(reasons(next), [])
+  const res2 = await ops.deviceUpkeep(d.ctx, next)
+  t.alike(res2.failed, [])
+  t.is(await ownWriter(d, community), cw, 'never a second CW')
+  const fw = await ownWriter(d, feira)
+  t.ok((await ops.groupInfo(d.ctx, { group: feira })).canWrite)
+  await ops.groupPost(d.ctx, { group: feira, text: 'do segundo aparelho' })
 
-  // The admin admits the new CW: Feira is planned then.
-  await share(d, a, [cw])
-  await syncDiary(d, b)
-  await share(b, a, [])
-  await ops.communityAdmit(a.ctx, { community, member: b.key, on: true })
-  await copyCore(a, d, community)
-  const admitted = await ops.deviceUpkeepPlan(d.ctx)
-  t.alike(admitted.enrol, [{ root: general, kind: 'group', community }, { root: feira, kind: 'group', community }])
+  // The admin sees the post without admitting anything again.
+  await share(d, a, [cw, fw])
+  const read = await ops.groupRead(a.ctx, { group: feira })
+  t.ok(read.items.some((p) => p.text === 'do segundo aparelho' && !p.hidden), 'the post shows to the others')
+  t.alike((await ops.communityRequests(a.ctx, { community })).requests, [], 'no request reappears')
 })
 
 test('the creator\'s second device of an approval community enrols in its groups at once', async (t) => {
