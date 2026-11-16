@@ -9,8 +9,8 @@ const path = require('node:path')
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const sodium = require('sodium-universal')
-const { createDmPool, POOL_DIR, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
-const { DM_DROP_BYTES, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
+const { createDmPool, POOL_DIR, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS, LOG_FILE, HEAD_FILE, SEQ_FILE, RECORD_BYTES } = require('../lib/dm-pool')
+const { DM_DROP_BYTES, DM_RETENTION_MS, DROP, encodeDrop, newDropId, buildInner, sealInner } = require('../lib/dm')
 const { tmpDir } = require('./helpers/tmp')
 
 const DAY = 86400000
@@ -466,4 +466,116 @@ test('a receivedAt more than a day ahead is read as the load time', (t) => {
   c.t += 8 * DAY
   t.is(again.sweep(), 1, 'it expires 7 days after the load, not 30 days later')
   t.is(again.size, 0)
+})
+
+test('a named pool keeps its own files; a bad name is refused', (t) => {
+  const dir = tmpDir(t)
+  const dm = open(t, dir, { max: 1 })
+  const visit = open(t, dir, { name: VISIT_POOL_DIR, max: 1 })
+  const d = drop()
+  t.alike(visit.submit(d), { seq: 1 })
+  t.is(visit.submit(drop()), 'cheio', 'the visit pool is full')
+  t.is(dm.size, 0, 'the dm pool saw nothing')
+  t.alike(dm.page({ after: 0, limit: 8 }).items, [])
+  t.alike(dm.submit(drop()), { seq: 1 }, 'a full visit pool never fills the dm pool')
+  t.ok(fs.existsSync(path.join(dir, VISIT_POOL_DIR, LOG_FILE)))
+  t.is(fs.statSync(path.join(dir, VISIT_POOL_DIR, LOG_FILE)).size, RECORD_BYTES)
+  t.is(fs.statSync(path.join(dir, POOL_DIR, LOG_FILE)).size, RECORD_BYTES)
+  visit.close()
+  const again = open(t, dir, { name: VISIT_POOL_DIR })
+  t.ok(b4a.equals(again.page({ after: 0, limit: 8 }).items[0].bytes, d), 'the visit pool reloads its own log')
+  for (const name of ['', '../x', 'a/b', 'A', '.hidden', 7]) {
+    t.exception.all(() => createDmPool({ dir, verifyStamp, name }), /invalid name/)
+  }
+  t.exception.all(() => createDmPool({ dir, verifyStamp, spentElsewhere: 1 }), /spentElsewhere/)
+})
+
+test('spentElsewhere ties two pools: one stamp pays for one drop across both', (t) => {
+  const dir = tmpDir(t)
+  let visit = null
+  const dm = open(t, dir, { spentElsewhere: (h) => visit.hasSpent(h) })
+  visit = open(t, dir, { name: VISIT_POOL_DIR, spentElsewhere: (h) => dm.hasSpent(h) })
+  const t1 = randomBytes(32)
+  const t2 = randomBytes(32)
+  const v = drop({ token: t1 })
+  t.alike(visit.submit(v), { seq: 1 })
+  t.is(dm.submit(drop({ token: t1 })), null, 'a token spent on a visit is refused for a dm')
+  t.alike(dm.submit(drop({ token: t2 })), { seq: 1 })
+  t.is(visit.submit(drop({ token: t2 })), null, 'a token spent on a dm is refused for a visit')
+  t.alike(visit.submit(v), { seq: 1, repeated: true }, 'an identical retry is still a repeated success')
+  t.is(dm.size, 1)
+  t.is(visit.size, 1)
+  t.is(open(t, tmpDir(t), { spentElsewhere: () => undefined }).submit(drop()), null, 'anything but false refuses')
+})
+
+test('spentElsewhere survives a restart of both pools, both ways', (t) => {
+  const dir = tmpDir(t)
+  const pair = () => {
+    const p = { dm: null, visit: null }
+    p.dm = createDmPool({ dir, verifyStamp, spentElsewhere: (h) => p.visit.hasSpent(h) })
+    p.visit = createDmPool({ dir, verifyStamp, name: VISIT_POOL_DIR, spentElsewhere: (h) => p.dm.hasSpent(h) })
+    return p
+  }
+  const first = pair()
+  const t1 = randomBytes(32)
+  const t2 = randomBytes(32)
+  t.alike(first.visit.submit(drop({ token: t1 })), { seq: 1 })
+  t.alike(first.dm.submit(drop({ token: t2 })), { seq: 1 })
+  first.dm.close()
+  first.visit.close()
+
+  const again = pair()
+  t.teardown(() => {
+    again.dm.close()
+    again.visit.close()
+  })
+  t.is(again.dm.submit(drop({ token: t1 })), null, 'a stamp spent on a visit before the restart pays for no dm')
+  t.is(again.visit.submit(drop({ token: t2 })), null, 'a stamp spent on a dm before the restart pays for no visit')
+  t.is(again.dm.size, 1)
+  t.is(again.visit.size, 1)
+})
+
+test('the visit pool keeps pings 3 days but remembers stamps as long as the dm pool', (t) => {
+  t.is(VISIT_RETENTION_MS, 3 * DAY)
+  t.is(VISIT_TOKEN_RETENTION_MS, 2 * DM_RETENTION_MS, 'the dm pool default token retention')
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const kids = new Set(['00112233aabbccdd'])
+  const isKidAccepted = (kid) => kids.has(kid)
+  let visit = null
+  // The dm pool on its defaults, as the seeder opens it.
+  const dm = open(t, dir, { now: c.now, isKidAccepted, spentElsewhere: (h) => visit.hasSpent(h) })
+  visit = open(t, dir, {
+    name: VISIT_POOL_DIR,
+    now: c.now,
+    isKidAccepted,
+    retentionMs: VISIT_RETENTION_MS,
+    tokenRetentionMs: VISIT_TOKEN_RETENTION_MS,
+    spentElsewhere: (h) => dm.hasSpent(h)
+  })
+  const tv = randomBytes(32)
+  const td = randomBytes(32)
+  t.alike(visit.submit(drop({ token: tv })), { seq: 1 })
+  t.alike(dm.submit(drop({ token: td })), { seq: 1 })
+
+  c.t += 3 * DAY + 1
+  t.is(visit.sweep(), 1, 'the ping goes after 3 days')
+  t.is(dm.sweep(), 0, 'the dm stays its 7 days')
+  t.is(dm.submit(drop({ token: tv })), null, 'the swept ping still holds its stamp against the dm pool')
+
+  kids.clear()
+  c.t = 1700000000000 + VISIT_TOKEN_RETENTION_MS - 1
+  visit.sweep()
+  dm.sweep()
+  const hv = b4a.toString(hcrypto.hash(tv), 'hex')
+  const hd = b4a.toString(hcrypto.hash(td), 'hex')
+  t.ok(visit.hasSpent(hv), 'remembered until the dm pool would forget its own')
+  t.ok(dm.hasSpent(hd))
+  t.is(dm.submit(drop({ token: tv })), null)
+
+  c.t = 1700000000000 + VISIT_TOKEN_RETENTION_MS + 1
+  visit.sweep()
+  dm.sweep()
+  t.absent(visit.hasSpent(hv), 'both pools forget at the same age')
+  t.absent(dm.hasSpent(hd))
 })

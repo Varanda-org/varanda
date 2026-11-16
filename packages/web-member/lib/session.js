@@ -295,6 +295,7 @@ const {
 const { formatEvent, key8 } = require('@varanda/core/lib/sync-format')
 const { safe } = require('@varanda/core/lib/safe')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { visitDay } = require('@varanda/core/lib/visits')
 
 const { signAccountLink } = require('@varanda/core/lib/account-link')
 const { signReport, signDmReport, signListingReport } = require('@varanda/core/lib/report')
@@ -359,6 +360,11 @@ const SCRAP_FOLLOWING = 'esta pessoa só recebe recados de quem ela segue'
 const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
 const SCRAP_INDEX_MAX_CHARS = 64 * 1024
 const FOLLOW_INDEX_MAX_CHARS = 1024
+const VISIT_INDEX_MAX_CHARS = 16 * 1024
+// visits.set { on: true } without private messages enabled (no dm key): a
+// switch on could neither queue a ping nor be pinged. Same text as the
+// app's DMS_OFF_NOTICE (apps/app/src/visits.js).
+const VISITS_DMS_OFF = 'Ative as mensagens privadas para registrar visitas.'
 
 // A seeder index body read with a cap: a streamed body is cut off (and the
 // stream cancelled) past `max` bytes, so a seeder cannot make the node buffer
@@ -1140,7 +1146,11 @@ function createBrowserSession ({
     emit: (event, data) => send(event, data),
     fetch: fetchMedia,
     limits: syncOptions.dm,
-    hkdf
+    hkdf,
+    // A queued visit ping's timer: the own switch is read before any send.
+    visitsDue: () => {
+      if (ownKey !== null) visitPull(ownKey, identityTarget, { pull: false })
+    }
   })
   // The epoch keys of the pages' private groups (./page-groups.js), apart
   // from boxKeys: read and sealed with the page's group box only.
@@ -1194,6 +1204,7 @@ function createBrowserSession ({
         dmLastPull = Date.now()
         await dmEngine.pull(own).catch(noop)
         checkPageKeys().catch(noop)
+        visitPull(own, identityTarget)
       }
       if (keyPair !== null) await dmEngine.topUp(keyPair)
     } catch {}
@@ -2860,6 +2871,72 @@ function createBrowserSession ({
     return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
   }
 
+  // ---- visitas (docs/rpc.md visits.*) ----
+
+  // The day the own switch last went on (the newest `visits` record, when
+  // it says on), or null: off, or a time that does not parse.
+  function visitSince (state) {
+    if (state === null || typeof state !== 'object' || state.on !== true) return null
+    const ms = Date.parse(state.at)
+    return Number.isFinite(ms) ? visitDay(ms) : null
+  }
+
+  // After a dm pull (pull), or when a queued ping is due (the engine's
+  // visitsDue, no pull), never inside a pull and never awaited by one: the
+  // own switch is read off the own diary first, so a switch turned off on
+  // another device of the same passkey reaches this one. While it is on,
+  // the visit pool is pulled (pings dated before the day the switch went on
+  // are never filed) and the due pings go out. Off: the list and the pings
+  // not sent yet are emptied here too, and nothing goes out. One at a
+  // time. Never throws.
+  let visitPullBusy = false
+  function visitPull (own, ident, { pull = true } = {}) {
+    if (visitPullBusy) return
+    visitPullBusy = true
+    ;(async () => {
+      try {
+        const state = await serialDm(async () => {
+          await requireDm()
+          return withCores((c) => member.visitsState(c))
+        })({}, ident)
+        if (state.on !== true) {
+          await dmEngine.visitClear({ queue: true })
+          return
+        }
+        const since = visitSince(state)
+        if (since === null) return
+        // A queue filed under an older on-record (off and on again on
+        // another device) is wiped before anything goes out.
+        await withDmReady(ident, () => dmEngine.visitAdopt(state.seq))
+        if (pull) await withDmReady(ident, () => dmEngine.pullVisits(own, { since, on: state.seq }))
+        await withDmReady(ident, () => dmEngine.flushVisits())
+      } catch {} finally {
+        visitPullBusy = false
+      }
+    })()
+  }
+
+  // Whether `key` takes visit pings now, from public evidence read off the
+  // chain: the seeder names the newest `visits` block of `key`
+  // (/index/profile), a pointer only, so the block is peeked and must say
+  // on; blocks 1 and 2 tell a page from a person and a page takes none.
+  // Fails closed: anything unread or unverified is false. RESIDUAL: the
+  // seeder can point at an older 'on' block it still serves (it can
+  // withhold any newer block); the ping then only reaches a person whose
+  // own node drops it while their switch is off.
+  async function visitTarget (key) {
+    const deadline = Date.now() + peekTimeoutMs
+    const left = Math.max(1, deadline - Date.now())
+    const index = await seederIndexJson('/index/profile/' + key, VISIT_INDEX_MAX_CHARS, left)
+    const seq = index.visits
+    if (!isSeq(seq)) return false
+    const r = await peekBefore(key, [...new Set([1, 2, seq])].sort((a, b) => a - b), deadline)
+    if (r.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster')) return false
+    if ([1, 2].some((q) => q < r.length && r.missing.includes(q))) return false
+    const e = r.entries.find((x) => x.seq === seq)
+    return e !== undefined && e.record.type === 'visits' && e.record.on === true
+  }
+
   // ---- depoimentos (docs/rpc.md 5.100) ----
 
   // GET /index/testimonials/<owner> on this node's own seeder (the media
@@ -4359,6 +4436,83 @@ function createBrowserSession ({
       })({})
     },
 
+    // Visitas (docs/rpc.md visits.*). The switch is a public `visits` record
+    // in the own diary (published like profile.mood); turning it off first
+    // empties the list and the pings not sent yet (needs no dm key), then
+    // writes. Turning it on needs private messages enabled (a dm key). Mutual: pings go out and are filed only while it is on.
+    'visits.set': async ({ on }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        if (on === true && (await store.readDmKey(storage)) === null) throw new UsageError(VISITS_DMS_OFF)
+        if (on !== true) await dmEngine.visitClear({ queue: true })
+        await ensureCaughtUp(epoch)
+        const current = await withCores((c) => member.visitsState(c))
+        if (current.on !== (on === true)) await profileExtraWrite((c) => member.visitsSet(c, { on: on === true }))
+        return { on: on === true }
+      })({})
+    },
+    // sentToday: 0 while the dm keys are not installed (the log is sealed).
+    'visits.state': serialDm(async () => {
+      await requireUnlocked()
+      const { on } = await withCores((c) => member.visitsState(c))
+      const sentToday = dmEngine.unlocked() ? await dmEngine.visitSentToday(Date.now()) : 0
+      return { on, sentToday }
+    }),
+    // Off (here or on another device of the same passkey): nothing is
+    // listed and the stored list and queue are emptied. On: only the rows
+    // dated from the day the switch last went on.
+    'visits.list': serialDm(async () => {
+      await requireUnlocked()
+      const state = await withCores((c) => member.visitsState(c))
+      if (state.on !== true) {
+        await dmEngine.visitClear({ queue: true })
+        return { visits: [] }
+      }
+      const since = visitSince(state)
+      if (since === null) return { visits: [] }
+      const own = await requireDm()
+      return { visits: await dmEngine.visitList(own, Date.now(), { since, on: state.seq }) }
+    }),
+    'visits.clear': serial(async () => {
+      await requireUnlocked()
+      await dmEngine.visitClear({ queue: false })
+      return { ok: true }
+    }),
+    // Queues a quiet ping to `key` only when the own switch is on, dms are
+    // enabled, `key` is not self, a page or blocked, its own switch reads on
+    // (visitTarget, off the chain) and the budgets allow; every check is
+    // repeated on the chain before the queue. A ping that cannot go is
+    // { queued: false }, never an error naming why.
+    'visits.note': async ({ key: rawKey }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = rawKey.toLowerCase()
+      const ident = identityTarget
+      const check = async () => {
+        const own = await requireDm()
+        if (key === own || keyPair === null) return null
+        if ((await store.readDmKey(storage)) === null) return null
+        if ((await member.memberBlocks(storage)).has(key)) return null
+        if (!(await withCores((c) => member.visitsState(c))).on) return null
+        if (!(await dmEngine.visitAllowed(own, key, Date.now())).ok) return null
+        return own
+      }
+      if ((await serialDm(check)({}, ident)) === null) return { queued: false }
+      let box
+      try {
+        if (!(await visitTarget(key))) return { queued: false }
+        box = (await dmLookupOf(key)).box
+      } catch {
+        return { queued: false }
+      }
+      if (typeof box !== 'string') return { queued: false }
+      return serialDm(async () => {
+        const own = await check()
+        if (own === null) return { queued: false }
+        return dmEngine.visitQueue(own, keyPair, { to: key, box, now: Date.now() })
+      })({}, ident)
+    },
+
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
     // momentPutMedia answered in this unlock; published like post.create.
     // A published item is never offered for a second moment.
@@ -4792,6 +4946,7 @@ function createBrowserSession ({
         throw toRpcError(err, reportInternal)
       } finally {
         checkPageKeys().catch(noop)
+        visitPull(own, ident)
       }
     },
 
@@ -5708,6 +5863,7 @@ function createBrowserSession ({
     await dmEngine.idle()
     await dmEngine.dropPageSummaries()
     await store.deleteDmData(storage)
+    await dmEngine.visitClear({ all: true })
     await dmEngine.wipeMedia()
     await store.deleteAgeProofs(storage)
     await store.deletePhoneProofs(storage)

@@ -1113,8 +1113,10 @@ export function validProfile (body) {
   if (!isPlain(body) || !isFlags(body)) return null
   const about = body.about === undefined ? null : body.about
   const mood = body.mood === undefined ? null : body.mood
-  if (!isHint(about) || !isHint(mood)) return null
-  const out = { about, mood, indexing: body.indexing, complete: body.complete }
+  // `visits` is the seq of the author's latest visits record, or null.
+  const visits = body.visits === undefined ? null : body.visits
+  if (!isHint(about) || !isHint(mood) || !isHint(visits)) return null
+  const out = { about, mood, visits, indexing: body.indexing, complete: body.complete }
   // Fãs and Melhores amigos: strict when present, null when absent.
   let fans = null
   if (body.fans !== undefined && body.fans !== null) {

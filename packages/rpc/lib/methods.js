@@ -1590,6 +1590,15 @@ const SPECS = {
       return null
     }
   },
+  // Visitas, browser node only (docs/rpc.md 5.144 onward). visits.set turns
+  // the caller's own switch on or off (off clears the list and the queue at
+  // once); visits.state, visits.list and visits.clear read or empty the local
+  // list; visits.note queues at most one ping to `key`, a diary key.
+  'visits.set': { fields: { on: req(isBool) }, mutating: true },
+  'visits.state': { fields: none },
+  'visits.list': { fields: none },
+  'visits.clear': { fields: none, mutating: true },
+  'visits.note': { fields: { key: req(isKey) }, mutating: true },
   // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
   // a page record and appends nothing; the node fills in member, actor and
   // association, so a caller never chooses the bytes. The exact op of each

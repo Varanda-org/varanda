@@ -1173,6 +1173,7 @@ A member's device cannot find the newest `profile-about` and `mood` of an author
 - **Moderation.** A diary that is not served, not admitted, blocked, held for a pending re-gate or purged has no answer (404), and a diary leaves the index the moment its drop starts, as in section 5 "Seeder engagement index".
 - **Trust model.** Which seq is the newest, and whether one exists, are claims of the seeder. A member node shows only what it re-read with `diary.peek` and checked with the rules of section 2: a seeder can point at an older authentic `profile-about` or `mood` or omit one, never make a forged or invalid one show, and never a `mood` older than 24 hours.
 - **Privacy.** The seeder learns which profiles are opened (the path carries the author key, like the other `/index` routes). It learns no text.
+- **Visitas pointer.** The answer also carries `visits: seq | null`, the highest live `visits` block of the author (section 11, "Visitas"). It is a pointer to a block that may say off; the node peeks it.
 - **Not hosted.** With manual configuration (`varanda-serve`) there is no seeder index, so no perfil rico beyond what the node reads itself.
 
 ### Seeder fan index (Fãs e Melhores amigos; `packages/core/lib/engagement-index.js`, `packages/core/lib/seeder.js`)
@@ -2261,6 +2262,13 @@ Same frame as v1 and v2 (`DM_INNER_BYTES`, no expiry). A person reacts to a mome
 - Size: with the largest certificate, the longest emoji `isReaction` accepts (30 UTF-8 bytes) and `moment` `Number.MAX_SAFE_INTEGER` the frame takes 1061 of the 5120 bytes (`packages/core/test/dm.test.js`, `packages/rpc/test/dm-budget.test.js`).
 - Old readers: a reader from before v5 checks `v` 1 to 4 and its `validBody` rejects any other `v` in its final `else`, so `openInner` returns `null` and the drop is skipped like any drop that does not open. The pull cursor moves past it, so the drop is never recovered after an upgrade: that reader never sees the reaction. There is no fallback message.
 
+### Inner v6: a visit ping
+
+- Keys: exactly `v` (6), `kind` (`'visit'`), `id`, `from`, `to`, `day`, `cert`, in this order (`INNER_KEYS_V6`; `DM_INNER_KEYS_V6` in `dm-budget.js`, re-exported by `@varanda/rpc`). `kind` is `'visit'` only (`DM_VISIT_KIND`), `from !== to`, and `day` is a real UTC calendar day `YYYY-MM-DD` (`isVisitDay`, `lib/visits.js`): no time, no other format, no day that does not exist. It carries no text, no media and no reference. `buildInner({ kind: 'visit', to, day?, id?, cert? }, signKeyPair)` throws on any other field.
+- Signature: Ed25519 by `from` over `utf8(DM_SIG_PREFIX_V6) || the exact JSON bytes`, `DM_SIG_PREFIX_V6 = 'varanda-dm-v6'` followed by LF, its own domain like v5.
+- Opening: a visit opens only with `openInner(buf, own, { association, visit: true })`, and only for its recipient (`mine` is false, there is no self copy). With that flag nothing but a visit opens, and without it a visit never does, so a ping put in the DM pool is dropped by the existing DM code and a message put on the visit lane is never filed as a visit.
+- Old readers: a reader from before v6 skips it as any inner it does not open.
+
 ### Bound replies (inner v2 and v3)
 
 A reply names the message it quotes in `replyTo`. Earlier builds wrote only that message's bare `id`. An `id` is chosen by its sender and is unique only per sender within a thread, and a device without a conversation's older rows files any message whose `(from, id)` it has not stored, so a bare id names neither the quoted sender nor the quoted content: the quote resolves against whichever row with that `id` the reader's device holds.
@@ -2323,8 +2331,33 @@ A drop carries a stamp: a Chaum blind RSA signature (RSA-2048, `e = 65537`) over
 - The seeder logs `{ event: 'dm', reason: 'guardada' | 'cheio' | 'invalido' | 'postage' }` per put (a put over the rate is answered `'ritmo'` by the channel itself) and `{ event: 'dm-stamp', reason }`: counts only, never a key, an address or a bucket.
 - A failed put or page is logged with a fixed reason, never with the error text.
 - A failure of the seeder itself (its postage key file, its disk) is never `invalido`: the put throws, the channel closes without an ack and the member keeps the put as uncertain. Only a drop that is itself bad (frame, stamp, spent token) is `invalido`.
-- `seed --no-dm` attaches neither channel: a member then sees both as unsupported. It also turns off the blob stamp kind, the blob channel and the `/blob` route (section 13).
+- `seed --no-dm` attaches neither channel: a member then sees both as unsupported. It also turns off the blob stamp kind, the blob channel and the `/blob` route (section 13), and the visit lane below.
 - The seeder sees an ephemeral Noise key, an IP address, the time, a fixed-size frame and, on the stamp link, that some diary bought stamps today. It does not see the sender, the recipient, the text, nor which stamp belongs to whom.
+
+### Quiet visit lane `'varanda/visit/1'` (`packages/core/lib/dm-net.js`, `dm-pool.js`, `seeder.js`)
+
+Visit pings travel on their own anonymous channel, never in the DM pool, and never wake anyone.
+
+- `VISIT_PROTOCOL = 'varanda/visit/1'` (`lib/dm.js`) is the channel above under another protocol name: `attachDm(socket, { protocol: VISIT_PROTOCOL, ... })`. The same messages (`put`, `ack`, `page`, `items`), the same exact-key checks, bad-message count and drop format (`DM_DROP_BYTES`, sealed and stamped as a DM drop), and the same rate buckets, kept per channel: a visit channel has its own 8 puts per 60 s and its own page bucket, apart from the DM channel on the same socket. Nothing on it names a diary; the member opens it on its anonymous link with a fresh Noise key, as `'varanda/dm/1'`.
+- The seeder attaches it on every peer next to `'varanda/dm/1'` and backs it with a second pool under `<seeder dir>/visit-pool/`: the same files, format and sweep as `dm-pool/`, nothing shared with it, at most `VISIT_POOL_MAX = 20000` drops (`dm.visitMax`), each kept `VISIT_RETENTION_MS` = 3 days (`lib/dm-pool.js`) instead of the DM pool's 7. A full visit pool answers `'cheio'` to visit puts only; it never refuses a DM put, and a full DM pool never refuses a visit put. The seeder opens it with the DM pool when it starts: a visit pool that fails to open aborts the seeder's start, as a broken DM pool does. It fails closed: a seeder serving DMs without the visit pool's spent tokens could accept a stamp already spent on a visit.
+- Stamps are DM stamps: the same verification (DM keys, DM domain, current or previous kid) and the same spent-token retention: the visit pool remembers a spent token for `VISIT_TOKEN_RETENTION_MS` = `2 * DM_RETENTION_MS` (14 days, the DM pool's own), not twice its shorter record retention, so a swept ping keeps its stamp spent as long as a DM would. A stamp token spent in either pool is refused in the other (`'invalido'`), also after a restart (each pool reloads its tokens), so one stamp pays for one drop across both lanes. A put with a bad stamp is refused and stored in neither pool. An identical ping put again is a repeated success, as in the DM pool.
+- A visit is a v6 inner (`kind: 'visit'`, `lib/dm.js` `validVisit`) and opens only with `openInner(..., { visit: true })`, which the receiver passes for drops pulled from the visit lane only. With the flag nothing but a visit opens, and without it a visit never does: a ping put on the DM lane is dropped unread by the receiver, never filed as a message, and a message put on the visit lane is never filed as a visit.
+- Each socket slot belongs to one lane (`_varandaDm`, `_varandaVisit`): `attachDm` throws when asked for a lane on a slot the other lane holds, so a caller can never get the DM handle back for a visit. The two lanes of a socket share one `close` listener.
+- No wake: a stored visit ping never calls the seeder's `dm.onDrop`, so it never sends the push wake below. Visits cost the seeder disk and a stamp, never a push to every subscription.
+- The seeder logs `{ event: 'visit', reason: 'guardada' | 'cheio' | 'invalido' | 'postage' }` per visit put: counts only, as the `dm` event.
+- `seed --no-dm` turns the lane off with the DM channels. A seeder from before the lane has no pairing for it and rejects the open: the member's `supported` resolves `false`, and the member treats the lane as unsupported on that seeder. A member sends a ping only to a seeder whose visit channel opened, and never falls back to the DM pool.
+- Rollout order: seeders first, then the web node, then the apps, so a sender finds the lane open by the time it uses it.
+
+### Visitas (`packages/core/lib/visits.js`, `records.js`, `apps/cli/lib/seed-ws.js`; web node only)
+
+A person can opt in to "who visited my profile". It is off by default and mutual: a node sends and receives visits only while its own switch is on.
+
+- Public record: `{ "type": "visits", "on": <boolean>, "at": <ISO> }` (`VISITS_KEYS`, builder `visitsRecord({ on, at })`) in the diary. The live record with the highest block wins, so it states the current switch; switching off writes `on: false`. The date `at` is checked like any record date. Old readers skip the type as invalid and never renumber.
+- Pointer: `GET /index/profile/<author>` always carries `visits: seq | null` (an open-object key, section 5 "Seeder profile index"). It is a pointer only: an off block still has a seq, so the node peeks the block, verifies it and checks `on === true`. A deletion falls back to the older block; the seeder can point at an old block or omit one, never make a visit open for a profile whose block says off.
+- Sending (inner v6 above, on the quiet visit lane): only with both switches on (the sender's and the profile's `on === true`); at most `VISIT_DAILY_MAX` = 10 a day; at most one per profile in `VISIT_PROFILE_DAYS` = 7 days; never when it would spend one of the last `VISIT_STAMP_RESERVE` = 5 stamps (a ping needs more than 5 left); a random delay of 5 to 15 minutes after the read; never put in the DM pool, and only to a seeder whose visit channel opened. Future-dated sent rows count against both caps (`canVisit`).
+- Receiving: the node pulls the visit pool and files a visit only when `day` is within one day of the receiver's clock (`visitDayFresh`, `VISIT_DAY_SLACK`), `day` is not earlier than the day of the receiver's own latest `visits { on: true }` record, the sender is not blocked, and the inner `id` is new (dedupe). The local list keeps a visit `VISIT_KEEP_DAYS` = 30 days, at most `VISIT_LIST_MAX` = 50 rows, one row per visitor (`listVisits`), with day precision only. It lives on the device, never in the diary, and is wiped when the switch goes off (docs/rpc.md 5.144 to 5.148).
+- No wake: a visit wakes nobody (quiet visit lane above); it is seen the next time the app pulls.
+- Residual risks, in plain words: a modified client can receive pings without sending its own, because the switch is an honor rule and no server can check it. The seeder already sees which profile a connection reads (the author key is in the path of `/index/profile`), so the lane adds no new knowledge of who looks at whom, but it does not hide it either. Timing can correlate: a seeder that sees a profile read from an anonymous link and, 5 to 15 minutes later, a drop put on the visit lane from the same IP may guess the two belong together. The delay and the fresh Noise key make this harder, not impossible. A modified recipient that polls the visit pool often learns when each ping was sent, to within the 5 to 15 minute delay: the day precision of a visit holds only at rest (the stored list keeps the day) and in the UI, not against the recipient's own node.
 
 ### Multi-device
 
@@ -2372,7 +2405,7 @@ Only the chosen message leaves the device: the report carries that message's pla
 
 ### Push wake
 
-When a drop is stored the seeder may send `{ v: 1, kind: 'dm-wake' }`: no actor, no recipient, a body that names nobody (`Pode haver uma mensagem nova na Varanda`), coalesced to one per 15 minutes and fanned out to every subscription, since the seeder cannot know the recipient. A device suppresses its own wake locally (the sender's device, and an open focused app window), and no server learns the sender.
+When a drop is stored in the DM pool (never a visit ping, see the quiet visit lane) the seeder may send `{ v: 1, kind: 'dm-wake' }`: no actor, no recipient, a body that names nobody (`Pode haver uma mensagem nova na Varanda`), coalesced to one per 15 minutes and fanned out to every subscription, since the seeder cannot know the recipient. A device suppresses its own wake locally (the sender's device, and an open focused app window), and no server learns the sender.
 
 ### Riscos residuais (DM)
 

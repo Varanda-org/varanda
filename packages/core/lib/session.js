@@ -883,6 +883,25 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
+    // Visitas (docs/rpc.md visits.*): pings ride the browser node's dm keys
+    // and visit lane, and the target check needs its peeks; refused the
+    // same way, nothing written.
+    'visits.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'visits.state': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'visits.list': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'visits.clear': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'visits.note': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+
     // Foruns e enquetes (docs/rpc.md): a vote checks the poll post with a
     // peek the core node does not make; refused, nothing written.
     'choice.set': serial(async () => {

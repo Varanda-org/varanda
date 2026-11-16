@@ -48,6 +48,7 @@ import { installationOrigin } from '../installation'
 import { whoOf } from '../who'
 import { fillState, hideFuture, tilesFromLog } from '../mural'
 import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useVisibleNow } from '../ui'
+import { VISITAS_ENTRY_LABEL } from '../visitasView'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
 import { useSaved } from '../savedProvider'
@@ -267,7 +268,7 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onTabChange, onOpenTop }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onOpenVisitas, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const node = useNode()
@@ -774,6 +775,20 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                   >
                     <Icon name='evento' size={20} color={colors.soft} />
                     <Text style={styles.salvosText}>Eventos</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {node.hosted === true && typeof onOpenVisitas === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel={VISITAS_ENTRY_LABEL}
+                    onPress={onOpenVisitas}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='olho' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>{VISITAS_ENTRY_LABEL}</Text>
                     <Icon name='seta' size={20} color={colors.soft} />
                   </Pressable>
                   )

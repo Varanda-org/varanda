@@ -14,6 +14,9 @@
 // `moment`, the seq in the diary of `to`. It counts for unread, order, the
 // caps, folders, cutoffs, replies and v4 reactions like any other message.
 // Only the list preview changes: a fixed label plus the text.
+// A visit ping (inner v6, kind 'visit') is never a message: it creates no
+// thread, no unread mark and no preview, and is never a reaction. It belongs
+// to the list of visitors (lib/visits.js) only.
 
 const { copyLinkCard } = require('./link-card')
 const { DM_REQUESTS_MAX, DM_MESSAGES_PER_PEER } = require('./dm')
@@ -26,6 +29,11 @@ const PREVIEW_GIF = 'GIF'
 const PREVIEW_AUDIO = 'Áudio'
 const PREVIEW_MOMENT = 'Reagiu a um momento'
 const BLOCK_OPS = ['blocked', 'unblocked']
+
+// A row or body of a visit ping, whatever else it carries.
+function isVisit (x) {
+  return x.kind === 'visit' || x.v === 6
+}
 
 function isHex64 (s) {
   return typeof s === 'string' && HEX64.test(s)
@@ -97,7 +105,7 @@ function byNewest (a, b) {
 function reactionsByPeer (self, reactions) {
   const out = new Map()
   for (const r of Array.isArray(reactions) ? reactions : []) {
-    if (r === null || typeof r !== 'object' || typeof r.id !== 'string' || !HEX32.test(r.id)) continue
+    if (r === null || typeof r !== 'object' || isVisit(r) || typeof r.id !== 'string' || !HEX32.test(r.id)) continue
     if (!isHex64(r.from) || !isHex64(r.to) || r.from === r.to) continue
     const peer = r.from === self ? r.to : r.to === self ? r.from : null
     if (peer === null) continue
@@ -203,7 +211,7 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
   const input = Array.isArray(messages) ? messages : []
   for (let i = 0; i < input.length; i++) {
     const m = input[i]
-    if (m === null || typeof m !== 'object' || typeof m.id !== 'string' || !HEX32.test(m.id)) continue
+    if (m === null || typeof m !== 'object' || isVisit(m) || typeof m.id !== 'string' || !HEX32.test(m.id)) continue
     if (!isHex64(m.from) || !isHex64(m.to) || typeof m.text !== 'string') continue
     const at = time(m.at)
     const f = filed(m.filedAt)
@@ -305,7 +313,7 @@ function publicRow (r) {
 // GIF only when every item is one; a voice note is 'Áudio'. A moment
 // reaction keeps its text (the emoji) after a fixed label.
 function previewText (m) {
-  if (m === null || typeof m !== 'object') return ''
+  if (m === null || typeof m !== 'object' || isVisit(m)) return ''
   const text = typeof m.text === 'string' ? m.text : ''
   if (Number.isSafeInteger(m.moment) && m.moment >= 1) return PREVIEW_MOMENT + ' ' + text
   if (text !== '' || !Array.isArray(m.media) || m.media.length === 0) return text

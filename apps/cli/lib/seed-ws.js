@@ -148,14 +148,15 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   client tells a bad cursor from an unknown owner.
 // - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
 //   mood: seq | null, fans: { count, indexing }, top: { seq, back:
-//   { <friend>: seq | null } } | null, indexing, complete }`, the author's
-//   newest live profile-about, mood and top-friends blocks (perfil rico,
-//   melhores amigos), the claimed number of fas and, per listed friend, the
+//   { <friend>: seq | null } } | null, visits: seq | null, indexing,
+//   complete }`, the author's newest live profile-about, mood, top-friends
+//   and visits blocks (perfil rico, melhores amigos, visitas; visits is a
+//   pointer only, the node peeks the block and checks on), the claimed number of fas and, per listed friend, the
 //   friend's live follow block of the author (at most MAX_TOP_FRIENDS). The
 //   object is open: later features add pointers and readers ignore keys they
 //   do not know, so profileBody keeps only the keys it lists. While the
 //   author's own diary is still being indexed or scanned (fail closed)
-//   about, mood and top are null, indexing and fans.indexing are true and
+//   about, mood, top and visits are null, indexing and fans.indexing are true and
 //   complete is false; otherwise complete is true and indexing is the global
 //   flag. Pointers only; the node verifies.
 // - /index/fans/<author>[/<atMs>.<key>] -> Seeder#indexFans: `{ author,
@@ -956,9 +957,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   // The pointer keys known so far; a new key is added here when its feature
   // ships, an unknown one is never echoed.
-  function profileBody ({ about, mood, fans = null, top = null, indexing, complete }) {
+  function profileBody ({ about, mood, fans = null, top = null, visits = null, indexing, complete }) {
     const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
-    if (!seqOk(about) || !seqOk(mood)) throw new Error('index')
+    if (!seqOk(about) || !seqOk(mood) || !seqOk(visits)) throw new Error('index')
     let fanCount = null
     if (fans !== null) {
       if (typeof fans !== 'object' || !Number.isSafeInteger(fans.count) || fans.count < 0) throw new Error('index')
@@ -976,7 +977,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       }
       pointers = { seq: top.seq, back }
     }
-    return { about, mood, fans: fanCount, top: pointers, indexing: indexing === true, complete: complete === true }
+    return { about, mood, fans: fanCount, top: pointers, visits, indexing: indexing === true, complete: complete === true }
   }
 
   // Only the follower-list fields, checked as the client checks them: a

@@ -189,6 +189,7 @@ import RecadosScreen from './src/screens/Recados'
 import DepoimentosScreen, { testimonialsChanged } from './src/screens/Depoimentos'
 import SalvosScreen from './src/screens/Salvos'
 import EventosScreen from './src/screens/Eventos'
+import VisitasScreen from './src/screens/Visitas'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -244,6 +245,7 @@ const Salvos = memo(SalvosScreen)
 const Assunto = memo(AssuntoScreen)
 const Recados = memo(RecadosScreen)
 const Eventos = memo(EventosScreen)
+const Visitas = memo(VisitasScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -2104,6 +2106,7 @@ function Member () {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
+  const openVisitas = useCallback(() => pushScreen({ screen: 'visitas' }), [pushScreen])
   const openEventos = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'eventos', key: key.toLowerCase(), params: {} })
@@ -3581,6 +3584,7 @@ function Member () {
       handleOpenListings: node.hosted === true ? (author) => pushScreen({ screen: 'anuncios', key: author }) : undefined,
       handleOpenRecados: node.hosted === true ? openRecados : undefined,
       handleOpenEventos: node.hosted === true ? openEventos : undefined,
+      handleOpenVisitas: node.hosted === true ? openVisitas : undefined,
       handleOpenAgenda: node.hosted === true ? openAgenda : undefined,
       handleOpenTop: node.hosted === true ? openTop : undefined,
       handleComposeSeen: () => setComposeSignal(null),
@@ -3653,6 +3657,13 @@ function Member () {
         return (
           <StackLayer key={i + ':fas:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Fas entry={entry} ownKey={ownKey} isTop={i === stack.length - 1} active={ready} onBack={goBack} onOpenMember={openMember} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'visitas') {
+        return (
+          <StackLayer key={i + ':visitas:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Visitas active={ready} onBack={goBack} onOpenMember={openMember} />
           </StackLayer>
         )
       }
@@ -4064,6 +4075,7 @@ function Member () {
                       onOpenSalvos={openSalvos}
                       onOpenRecados={h.handleOpenRecados}
                       onOpenEventos={h.handleOpenEventos}
+                      onOpenVisitas={h.handleOpenVisitas}
                       onOpenTop={h.handleOpenTop}
                     />
                   )}

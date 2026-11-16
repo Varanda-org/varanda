@@ -1954,3 +1954,388 @@ test('dm.react: stored ops are merged into a list already holding 32 pending sen
   t.is(puts(), 4, 'its two drops, once')
   t.is((await reactPending(s.storage)).length, 0)
 })
+
+// ---- visitas (the engine over a fake visit lane) ----
+
+const visitsCore = require('@varanda/core/lib/visits')
+
+// A fake visit pool shared by engines: put files the bytes, page reads them.
+function visitPool () {
+  const pool = {
+    entries: [],
+    puts: 0,
+    unsupported: false,
+    failPut: false,
+    refuse: null,
+    dmPuts: 0,
+    link () {
+      return {
+        async put (bytes) {
+          pool.puts++
+          if (pool.failPut) throw new Error('lost ack')
+          if (pool.refuse !== null) return { ok: false, reason: pool.refuse }
+          pool.entries.push({ seq: pool.entries.length + 1, bytes: b4a.from(bytes) })
+          return { ok: true, reason: null }
+        },
+        async page ({ after, limit }) {
+          const rest = pool.entries.filter((e) => e.seq > after)
+          const items = rest.slice(0, limit)
+          return { items, next: rest.length > items.length ? items[items.length - 1].seq : null }
+        },
+        close: noop
+      }
+    }
+  }
+  return pool
+}
+
+// createDmEngine with openVisitLink served by `pool` and openDmLink
+// counting (a visit must never ride the dm channel).
+function engineWithVisitPool (pool) {
+  const transport = require('../lib/dm-link')
+  const originalVisit = transport.openVisitLink
+  const originalDm = transport.openDmLink
+  const id = require.resolve('../lib/dm')
+  const cached = require.cache[id]
+  try {
+    transport.openVisitLink = async () => {
+      if (pool.unsupported) {
+        const err = new Error('semeador sem visitas')
+        err.unsupported = true
+        throw err
+      }
+      return pool.link()
+    }
+    transport.openDmLink = async () => ({
+      async put () { pool.dmPuts++; return { ok: true, reason: null } },
+      async page () { return { items: [], next: null } },
+      close: noop
+    })
+    delete require.cache[id]
+    return require('../lib/dm').createDmEngine
+  } finally {
+    transport.openVisitLink = originalVisit
+    transport.openDmLink = originalDm
+    require.cache[id] = cached
+  }
+}
+
+async function visitEngine (t, pool, assoc, { stamps = 8, limits = {}, visitsDue } = {}) {
+  const storage = memoryNodeStorage()
+  const kp = crypto.keyPair()
+  const prf = crypto.randomBytes(32)
+  const engine = engineWithVisitPool(pool)({
+    storage,
+    association: hex(assoc.publicKey),
+    limits: { visitDelay: () => 0, ...limits },
+    visitsDue
+  })
+  t.teardown(() => engine.close(), { force: true })
+  await certify(storage, kp, assoc)
+  await engine.unlock(prf)
+  const local = await opener(prf)
+  const kid = 'ab'.repeat(8)
+  await store.writeDmStamps(storage, {
+    kids: [kid],
+    items: Array.from({ length: stamps }, () => ({
+      kid,
+      ...local.seal({ token: hex(crypto.randomBytes(32)), sig: b4a.toString(b4a.alloc(dmCore.DROP.SIG_BYTES), 'base64') })
+    }))
+  })
+  return { engine, storage, kp, own: hex(kp.publicKey), box: engine.boxHex().box }
+}
+
+// A ping from `from` to `to` built by hand (a replay, an old day).
+function handPing (from, to, assoc, day) {
+  const cert = createCert({ member: from.own }, assoc)
+  const inner = dmCore.buildInner({ kind: dmCore.DM_VISIT_KIND, to: to.own, day, cert }, from.kp)
+  const sealed = dmCore.sealInner(inner, to.box)
+  return dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.alloc(8), rsaSig: b4a.alloc(dmCore.DROP.SIG_BYTES), token: crypto.randomBytes(32), sealed })
+}
+
+test('visitas: a queued ping goes out on the visit lane with one stamp and no self copy, and files once for the recipient', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: A.own, box: A.box, now }), { queued: false }, 'never to self')
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => pool.puts === 1)
+  await A.engine.idle()
+  t.is(pool.entries.length, 1, 'one put: no self copy')
+  t.is(pool.dmPuts, 0, 'nothing on the dm channel')
+  t.is(await A.engine.walletSize(), 7, 'one stamp spent')
+  t.is(await A.engine.visitSentToday(now), 1)
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: false }, 'the same person twice in a day: refused')
+
+  t.alike(await A.engine.pullVisits(A.own, { since: today }), { added: 0, supported: true }, 'the sender files nothing (no self copy)')
+  t.alike(await B.engine.pullVisits(B.own, { since: today }), { added: 1, supported: true })
+  t.alike(await B.engine.visitList(B.own, now), [{ key: A.own, at: visitsCore.dayMs(today) }])
+  t.alike(await B.engine.pullVisits(B.own, { since: today }), { added: 0, supported: true }, 'the cursor moved')
+  const raw = JSON.stringify(await B.storage.readJson('dmVisits'))
+  t.absent(raw.includes(A.own), 'the list is sealed at rest')
+})
+
+test('visitas: a ping replayed after visits.clear never files the visitor again; stale and pre-switch days are dropped', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  const yesterday = visitsCore.visitDay(now - 86400000)
+  const old = visitsCore.visitDay(now - 3 * 86400000)
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => pool.puts === 1)
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1)
+  await B.engine.visitClear()
+  t.alike(await B.engine.visitList(B.own, now), [], 'cleared')
+  // The same drop put again at a new seq (a replay within the day slack).
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: pool.entries[0].bytes })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'the replay is not filed')
+  t.alike(await B.engine.visitList(B.own, now), [])
+
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, yesterday) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a day before the switch went on is dropped')
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, old) })
+  t.is((await B.engine.pullVisits(B.own, { since: old })).added, 0, 'a stale day is dropped (visitDayFresh)')
+  await store.writeMemberBlocks(B.storage, [{ key: C.own, on: true, t: 1 }])
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a blocked sender is dropped')
+  await store.writeMemberBlocks(B.storage, [])
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1, 'the same sender unblocked files')
+  t.alike((await B.engine.visitList(B.own, now)).map((r) => r.key), [C.own])
+})
+
+test('visitas: the budget keeps the last 5 stamps; an uncertain put is never sent again; no visit lane keeps the queue', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc, { stamps: 6 })
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  pool.unsupported = true
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: C.own, box: C.box, now }), { queued: false }, 'a 6th stamp would be spent: refused')
+  t.is((await A.engine.visitAllowed(A.own, C.own, now)).ok, false)
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, 0, 'a seeder without the lane takes nothing')
+  t.is(pool.dmPuts, 0, 'and nothing falls back to the dm channel')
+  t.is(await A.engine.walletSize(), 6)
+  t.alike(await B.engine.pullVisits(B.own, { since: visitsCore.visitDay(now) }), { added: 0, supported: false })
+
+  pool.unsupported = false
+  pool.failPut = true
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, 1, 'put once')
+  t.is(await A.engine.walletSize(), 5, 'its stamp spent')
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, 1, 'an uncertain put is never sent again')
+  t.is(await A.engine.visitSentToday(now), 1, 'it still counts')
+})
+
+test('visitas: a delayed ping waits for its time; the queue is sealed at rest, and clearing it drops the ping unsent', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc, { limits: { visitDelay: () => 60000 } })
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await A.engine.flushVisits()
+  t.is(pool.puts, 0, 'not due yet')
+  const raw = JSON.stringify(await A.storage.readJson('dmVisitQueue'))
+  t.absent(raw.includes(B.own), 'the queue is sealed at rest')
+  await A.engine.visitClear({ queue: true })
+  t.is(await A.storage.readJson('dmVisitQueue'), null)
+  await A.engine.flushVisits()
+  t.is(pool.puts, 0, 'dropped unsent')
+})
+
+test('visitas: a switch read as off on a second device sends nothing from its queue and empties its list; rows before a new on-day are never listed', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  // The second device: its timer hands over to visitsDue, which reads the
+  // switch (as the session's visitPull) before any send.
+  const sw = { on: true, calls: 0 }
+  const D = await visitEngine(t, pool, assoc, {
+    visitsDue: () => {
+      sw.calls++
+      return sw.on ? D.engine.flushVisits() : D.engine.visitClear({ queue: true })
+    }
+  })
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  const yesterday = visitsCore.visitDay(now - 86400000)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, today) })
+  t.is((await D.engine.pullVisits(D.own, { since: today })).added, 1)
+  t.is((await D.engine.visitList(D.own, now, { since: today })).length, 1)
+
+  sw.on = false
+  t.alike(await D.engine.visitQueue(D.own, D.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => sw.calls >= 1)
+  await D.engine.idle()
+  t.is(pool.puts, 0, 'nothing sent: the timer never flushes past the switch')
+  t.is(await D.storage.readJson('dmVisitQueue'), null, 'the queue is emptied')
+  t.alike(await D.engine.visitList(D.own, now, { since: today }), [], 'the list is emptied')
+
+  // A row from yesterday, then the switch goes on again today.
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, yesterday) })
+  t.is((await D.engine.pullVisits(D.own, { since: yesterday })).added, 1)
+  t.alike(await D.engine.visitList(D.own, now, { since: today }), [], 'a row before the new on-day is not listed')
+  t.alike(await D.engine.visitList(D.own, now), [], 'and it is gone at rest')
+  t.alike(await D.engine.visitList(D.own, now, { since: 'ontem' }), [], 'an invalid since lists nothing')
+})
+
+test('visitas: a put refused with cheio or ritmo gives the stamp back and keeps the ping queued', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  pool.unsupported = true
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await A.engine.idle()
+  pool.unsupported = false
+  for (const reason of ['cheio', 'ritmo']) {
+    pool.refuse = reason
+    const puts = pool.puts
+    await A.engine.flushVisits()
+    await A.engine.idle()
+    t.is(pool.puts, puts + 1, reason + ': put once')
+    t.is(await A.engine.walletSize(), 8, reason + ': the stamp is back')
+    t.is(pool.entries.length, 0)
+  }
+  pool.refuse = null
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.entries.length, 1, 'the ping goes out on a later flush')
+  t.is(await A.engine.walletSize(), 7, 'one stamp spent in all')
+  t.is(await A.engine.visitSentToday(now), 1, 'counted once')
+})
+
+test('visitas: a list filed under an older on-record is wiped with the queue (off and on again on another device)', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const D = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, today) })
+  t.is((await D.engine.pullVisits(D.own, { since: today, on: 5 })).added, 1)
+  t.is((await D.engine.visitList(D.own, now, { since: today, on: 5 })).length, 1, 'the same on-record keeps the list')
+  pool.unsupported = true
+  t.alike(await D.engine.visitQueue(D.own, D.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await D.engine.idle()
+  pool.unsupported = false
+  // The switch went off and on again (seq 7) the same day on another device.
+  t.alike(await D.engine.visitList(D.own, now, { since: today, on: 7 }), [], 'the old rows are wiped')
+  t.is(await D.storage.readJson('dmVisitQueue'), null, 'the old queue is wiped')
+  await D.engine.flushVisits()
+  await D.engine.idle()
+  t.is(pool.puts, 0, 'nothing from the old queue goes out')
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(B, D, assoc, today) })
+  t.is((await D.engine.pullVisits(D.own, { since: today, on: 7 })).added, 1, 'new pings file under the new on-record')
+  t.alike((await D.engine.visitList(D.own, now, { since: today, on: 7 })).map((r) => r.key), [B.own])
+})
+
+test('visitas: a blocks read that fails files and lists nothing (fails closed)', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const C = await visitEngine(t, pool, assoc)
+  const D = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, D, assoc, today) })
+  const readMemberBlocks = store.readMemberBlocks
+  store.readMemberBlocks = async () => { throw new Error('falha de leitura') }
+  try {
+    t.is((await D.engine.pullVisits(D.own, { since: today })).added, 0, 'nothing filed')
+    t.alike(await D.engine.visitList(D.own, now, { since: today }), [], 'nothing listed')
+  } finally {
+    store.readMemberBlocks = readMemberBlocks
+  }
+  t.is((await D.engine.pullVisits(D.own, { since: today })).added, 1, 'filed once the read works')
+  t.is((await D.engine.visitList(D.own, now, { since: today })).length, 1)
+})
+
+test('visitas: a flush puts at most DM_PUT_BURST pings; the rest stay queued with their stamps', async (t) => {
+  const { DM_PUT_BURST } = require('@varanda/core/lib/dm-net')
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc, { stamps: 20 })
+  const now = Date.now()
+  pool.unsupported = true
+  const n = DM_PUT_BURST + 1
+  for (let i = 0; i < n; i++) {
+    const R = await visitEngine(t, pool, assoc)
+    t.alike(await A.engine.visitQueue(A.own, A.kp, { to: R.own, box: R.box, now }), { queued: true })
+  }
+  await A.engine.idle()
+  t.is(pool.puts, 0)
+  pool.unsupported = false
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, DM_PUT_BURST, 'one burst')
+  t.is(await A.engine.walletSize(), 20 - DM_PUT_BURST, 'only the pings put took a stamp')
+  t.is(await A.engine.visitSentToday(now), n, 'all still count')
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  t.is(pool.puts, DM_PUT_BURST + 1, 'the rest go on a later flush')
+  t.is(await A.engine.walletSize(), 20 - n)
+})
+
+test('visitas: a clear between a ping leaving the queue and its put stops the flush before the put', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  pool.unsupported = true
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: C.own, box: C.box, now }), { queued: true })
+  await A.engine.idle()
+  pool.unsupported = false
+  const writeJson = A.storage.writeJson
+  let armed = true
+  A.storage.writeJson = async function (k, v) {
+    const r = await writeJson.call(this, k, v)
+    // The dequeue's write: the switch goes off right then.
+    if (armed && k === 'dmVisitQueue' && v !== null) {
+      armed = false
+      A.engine.visitClear({ queue: true })
+    }
+    return r
+  }
+  await A.engine.flushVisits()
+  await A.engine.idle()
+  A.storage.writeJson = writeJson
+  t.is(pool.puts, 0, 'the dequeued ping is not sent')
+  t.is(await A.engine.walletSize(), 7, 'and nothing more is spent')
+  t.is(await A.storage.readJson('dmVisitQueue'), null)
+})
+
+test('visitas: rows older than 30 days are dropped at rest when the list is read', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const B = await visitEngine(t, pool, assoc)
+  const C = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1)
+  const before = (await B.storage.readJson('dmVisits')).box
+  t.alike(await B.engine.visitList(B.own, now + visitsCore.VISIT_KEEP_DAYS * 86400000), [], 'past 30 days: not listed')
+  t.not((await B.storage.readJson('dmVisits')).box, before, 'rewritten at rest')
+  t.alike(await B.engine.visitList(B.own, now), [], 'and gone, not only hidden')
+})

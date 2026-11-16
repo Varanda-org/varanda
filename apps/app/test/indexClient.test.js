@@ -1819,13 +1819,15 @@ test('profileUrl and validProfile: tolerant of unknown keys, strict on known one
   t.is(profileUrl(A.toUpperCase()), '/index/profile/' + A, 'author lowercased')
   for (const author of [null, undefined, '', 'abc', A + 'a', 7]) t.is(profileUrl(author), null, 'author ' + String(author))
   const flags = { indexing: false, complete: true }
-  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, fans: null, top: null, ...flags })
-  t.alike(validProfile({ ...flags }), { about: null, mood: null, fans: null, top: null, ...flags }, 'missing pointers read as null')
-  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, fans: null, top: null, ...flags }, 'unknown keys ignored')
+  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, visits: null, fans: null, top: null, ...flags })
+  t.alike(validProfile({ ...flags }), { about: null, mood: null, visits: null, fans: null, top: null, ...flags }, 'missing pointers read as null')
+  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, visits: null, fans: null, top: null, ...flags }, 'unknown keys ignored')
+  t.is(validProfile({ visits: 4, ...flags }).visits, 4, 'visits pointer read')
+  for (const bad of [0, '1', 1.5]) t.is(validProfile({ visits: bad, ...flags }), null, 'visits ' + String(bad))
   const K = 'b'.repeat(64)
   const good = { fans: { count: 3, indexing: false }, top: { seq: 5, back: { [K]: 7, ['c'.repeat(64)]: null } } }
-  t.alike(validProfile({ ...good, ...flags }), { about: null, mood: null, ...good, ...flags }, 'fans and top read')
-  t.alike(validProfile({ fans: null, top: null, ...flags }), { about: null, mood: null, fans: null, top: null, ...flags })
+  t.alike(validProfile({ ...good, ...flags }), { about: null, mood: null, visits: null, ...good, ...flags }, 'fans and top read')
+  t.alike(validProfile({ fans: null, top: null, ...flags }), { about: null, mood: null, visits: null, fans: null, top: null, ...flags })
   const many = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [i.toString(16).repeat(64), null]))
   for (const bad of [{ fans: { count: -1, indexing: false } }, { fans: { count: 1.5, indexing: false } }, { fans: { count: 1 } }, { fans: { count: 1, indexing: false, x: 1 } }, { top: { seq: 0, back: {} } }, { top: { seq: 1 } }, { top: { seq: 1, back: { [K.toUpperCase()]: 1 } } }, { top: { seq: 1, back: { [K]: 0 } } }, { top: { seq: 1, back: many } }, { top: { seq: 1, back: {}, x: 1 } }]) {
     t.is(validProfile({ ...bad, ...flags }), null, JSON.stringify(bad))

@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1997,6 +1997,29 @@ test('profile-about and mood records: key sets, rules and builders', async (t) =
   for (const text of ['a'.repeat(61), 'a\nb', 'a\u0000b', 'a\ud800b', 'a\u202eb', 5, null]) t.is(validateRecord({ ...mood, text }, 1), 'text-length', 'text ' + JSON.stringify(text))
   for (const at of ['2026-01-01', 5, null]) t.is(validateRecord({ ...mood, at }, 1), 'date-invalid', 'at ' + at)
   await t.exception.all(async () => moodRecord({ emoji: 'x' }), /malformed/)
+})
+
+test('visits record: key set, rules and builder', async (t) => {
+  const { visitsRecord, VISITS_KEYS } = records
+  t.alike([...VISITS_KEYS], ['type', 'on', 'at'])
+  t.ok(Object.isFrozen(VISITS_KEYS))
+  const rec = { type: 'visits', on: true, at: AT }
+  t.is(validateRecord(rec, 1), null)
+  t.is(validateRecord({ ...rec, on: false }, 1), null)
+  t.is(validateRecord(rec, 0), 'genesis-required')
+  t.alike(visitsRecord({ on: true, at: AT }), rec)
+  t.alike(visitsRecord({ on: false, at: AT }), { ...rec, on: false })
+  for (const on of [1, 0, 'true', null, undefined, {}, []]) t.is(validateRecord({ ...rec, on }, 1), 'malformed', 'on ' + String(on))
+  t.is(validateRecord({ ...rec, extra: 1 }, 1), 'malformed', 'extra key')
+  t.is(validateRecord({ ...rec, key: 'a'.repeat(64) }, 1), 'malformed', 'a visits record names nobody')
+  const noOn = { ...rec }
+  delete noOn.on
+  t.is(validateRecord(noOn, 1), 'malformed', 'missing on')
+  const noAt = { ...rec }
+  delete noAt.at
+  t.is(validateRecord(noAt, 1), 'malformed', 'missing at')
+  for (const at of ['2026-01-01', 5, null, '2026-11-03T12:00:00Z']) t.is(validateRecord({ ...rec, at }, 1), 'date-invalid', 'at ' + at)
+  await t.exception.all(async () => visitsRecord({ on: 'yes' }), /malformed/)
 })
 
 test('fan and top-friends records: key sets, rules and builders', async (t) => {

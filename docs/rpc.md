@@ -1402,6 +1402,37 @@ Eventos. The answer to an event is a vote with two options (0 Vou, 1 Talvez, `nu
 - `group.choose` (5.137) and `group.voters` (5.139) accept the root of a group event: `group.voters` answers two entries, going then maybe. A hidden root answers `'mensagem não encontrada'`, a root with neither poll nor event `'enquete não encontrada'`.
 - `group.read` (5.40) with a `topic` adds `event: null | { writer, seq, title, start, end, place, totals, mine }` at the top level, between `poll` and `state` (key order `items, next, hidden, incomplete, sealed, epoch, poll, event, state`); `null` for a hidden root or a root without an event, `totals` is `[going, maybe]` and `mine` is `0`, `1` or `null`. Its items never carry `event`. The feed and peek items carry the folded `event` on event posts only. The core node strips it.
 
+### 5.144 `visits.set`
+
+Visitas (protocol section 11, "Visitas"). Turns the visit switch on or off. Web node only; the core node answers `USAGE` `'leitura sob demanda só na versão web'`.
+
+- Params: `{ on: boolean }`. Result: `{ on }`.
+- `on: true` writes a `visits` record with `on: true` in the caller's diary (once: asking for the state already held writes nothing new). `on: false` writes `on: false` and wipes the local visit list.
+
+### 5.145 `visits.state`
+
+The switch and today's sending count. Not mutating. Web node only (core: the same `USAGE` as 5.144).
+
+- Params: `{}`. Result: `{ on: boolean, sentToday: integer }`; `sentToday` counts pings sent or queued in the current UTC day, against `VISIT_DAILY_MAX` (10); it is 0 while the private message keys are locked.
+
+### 5.146 `visits.list`
+
+The local list of visitors. Not mutating. Web node only (core: the same `USAGE` as 5.144).
+
+- Params: `{}`. Result: `{ visits: [{ key, at }] }`, newest first, at most `VISIT_LIST_MAX` (50) rows, one per visitor, kept `VISIT_KEEP_DAYS` (30) days. `key` is the visitor's diary key (hex64); `at` is the milliseconds of the UTC visit day (day precision, never the time of the visit). Every filed visitor had their own switch on, and blocked keys are not listed. Rows dated before the day the caller's switch was last turned on are not listed, and the list is empty (and erased) while the switch is off, whichever device turned it off.
+
+### 5.147 `visits.clear`
+
+Empties the local visit list. Mutating (local only). Web node only (core: the same `USAGE` as 5.144).
+
+- Params: `{}`. Result: `{ ok: true }`. Nothing is written to the diary.
+
+### 5.148 `visits.note`
+
+Registers that the caller looked at a profile, so a visit ping may be sent. Mutating. Web node only (core: the same `USAGE` as 5.144).
+
+- Params: `{ key: hex64 }`, a diary key. Result: `{ queued: boolean }`. `queued` is `false` when nothing is queued: the caller's switch is off, private messages are not enabled, the key is the caller's own, a page or a blocked person, the profile's visits switch is not on, or a limit applies (10 a day, one per profile in 7 days, the last 5 stamps kept). At most one ping is queued per call; it is sent after a random 5 to 15 minute delay on the quiet visit lane, never in the DM pool, and wakes nobody. While no seeder has the visit channel open, a queued ping waits in the queue and is never sent another way.
+
 ## 6. Events
 
 | Event | `data` (exact keys) |

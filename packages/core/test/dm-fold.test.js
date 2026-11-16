@@ -636,3 +636,43 @@ test('a moment reaction is an ordinary message with a fixed preview', (t) => {
   t.alike(row.reactions, [{ emoji: THUMBS, mine: true }], 'a v4 reaction still applies to a moment row')
   t.is(previewText(row), 'Reagiu a um momento ❤️')
 })
+
+// A visit ping (inner v6) is never a message (docs/protocol.md section 11).
+function visitRow (peer, min, over = {}) {
+  return { id: id(), from: peer, to: ME, kind: 'visit', v: 6, day: '2026-11-03', at: T(min), filedAt: F(min), ...over }
+}
+
+test('visits: no thread, no unread mark, no preview', (t) => {
+  const visitOnly = run({ messages: [visitRow(ANA, 1), visitRow(BIA, 2)], follows: [ANA] })
+  t.alike(visitOnly, { inbox: [], requests: [] }, 'a visit alone opens no thread, in the inbox or in requests')
+
+  // Shaped like a message too: the kind or the version alone keeps it out.
+  const disguised = [
+    visitRow(ANA, 3, { text: 'oi', replyTo: null }),
+    visitRow(BIA, 4, { text: 'oi', replyTo: null, kind: undefined }),
+    visitRow(CAIO, 5, { text: 'oi', replyTo: null, v: undefined })
+  ]
+  t.alike(run({ messages: disguised, follows: [ANA, BIA, CAIO] }), { inbox: [], requests: [] }, 'a visit carrying text is still no message')
+
+  const m = from(ANA, 10)
+  const r = run({ messages: [m, visitRow(ANA, 20, { text: 'x' })], follows: [ANA], seen: [seenKey(ANA, m.id)] })
+  t.is(r.inbox.length, 1)
+  t.is(r.inbox[0].messages.length, 1, 'only the message')
+  t.is(r.inbox[0].messages[0].id, m.id)
+  t.is(r.inbox[0].unread, false, 'a later visit marks nothing unread')
+  t.is(r.inbox[0].at, T(10), 'nor moves the thread')
+  t.is(tabDot(r), false, 'nor lights the tab')
+
+  t.is(previewText(visitRow(ANA, 1, { text: 'oi' })), '', 'no preview')
+  t.is(previewText({ kind: 'visit', text: 'oi' }), '')
+  t.is(previewText({ v: 6, text: 'oi' }), '')
+})
+
+test('visits: never a reaction', (t) => {
+  const m = to(ANA, 1)
+  const fake = reaction(ANA, ANA, m, HEART, 1, 30, { kind: 'visit' })
+  const r = runR({ messages: [m], follows: [ANA] }, [fake])
+  t.absent(rowOf(r, m).reactions, 'a visit-shaped reaction applies to nothing')
+  const real = reaction(ANA, ANA, m, HEART, 1, 30)
+  t.alike(rowOf(runR({ messages: [m], follows: [ANA] }, [real]), m).reactions, [{ emoji: HEART, mine: false }], 'the control')
+})

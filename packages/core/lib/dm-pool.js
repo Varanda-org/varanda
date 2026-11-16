@@ -43,6 +43,15 @@
 // When log.bin cannot be reopened after the compacted log replaced it, the
 // pool is broken: every later call throws, so nothing is acked onto or
 // served from an orphaned file.
+//
+// The seeder keeps a second pool for the quiet visit lane under
+// <dir>/visit-pool/ (opts.name = VISIT_POOL_DIR): same format, its own
+// files, nothing shared with the DM pool but the stamp keys, with
+// retentionMs VISIT_RETENTION_MS and tokenRetentionMs
+// VISIT_TOKEN_RETENTION_MS. Two pools
+// taking the same stamps are tied by spentElsewhere(h), called with a stamp
+// token hash before a new drop is stored: anything but false refuses it, so one stamp
+// pays for one drop across both pools. hasSpent(h) answers it for the other.
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const fs = require('#fs')
@@ -51,6 +60,14 @@ const { writeJsonAtomic } = require('./store')
 const { DM_DROP_BYTES, DM_POOL_MAX, DM_RETENTION_MS, decodeDrop } = require('./dm')
 
 const POOL_DIR = 'dm-pool'
+const VISIT_POOL_DIR = 'visit-pool'
+// The visit pool keeps pings for 3 days (a visit is news of the week, not
+// mail), but remembers each spent stamp as long as the DM pool does
+// (2 * DM_RETENTION_MS, its default): a stamp forgotten early here would be
+// spendable again in the DM pool, whose spentElsewhere asks this pool.
+const VISIT_RETENTION_MS = 3 * 86400000
+const VISIT_TOKEN_RETENTION_MS = 2 * DM_RETENTION_MS
+const POOL_NAME = /^[a-z][a-z0-9-]{0,31}$/
 const LOG_FILE = 'log.bin'
 const HEAD_FILE = 'head.json'
 const SEQ_FILE = 'seq.json'
@@ -137,6 +154,7 @@ function tokenHash (token) {
 function createDmPool (opts = {}) {
   const {
     dir,
+    name = POOL_DIR,
     now = Date.now,
     retentionMs = DM_RETENTION_MS,
     tokenRetentionMs = 2 * retentionMs,
@@ -144,6 +162,7 @@ function createDmPool (opts = {}) {
     verifyStamp,
     onStored = noop,
     isKidAccepted = () => false,
+    spentElsewhere = () => false,
     log = noop,
     compactAt = DM_POOL_COMPACT_RECORDS,
     // Test hook: called with 'head-written' and 'renamed' inside sweep(); a
@@ -151,6 +170,8 @@ function createDmPool (opts = {}) {
     fault = noop
   } = opts
   if (typeof dir !== 'string' || dir === '') throw new TypeError('invalid dir')
+  if (typeof name !== 'string' || !POOL_NAME.test(name)) throw new TypeError('invalid name')
+  if (typeof spentElsewhere !== 'function') throw new TypeError('spentElsewhere must be a function')
   if (typeof now !== 'function' || typeof verifyStamp !== 'function' || typeof onStored !== 'function' ||
       typeof fault !== 'function' || typeof isKidAccepted !== 'function') {
     throw new TypeError('now, verifyStamp, onStored, isKidAccepted and fault must be functions')
@@ -160,7 +181,7 @@ function createDmPool (opts = {}) {
   if (!Number.isSafeInteger(max) || max < 1) throw new TypeError('invalid max')
   if (!Number.isSafeInteger(compactAt) || compactAt < 1) throw new TypeError('invalid compactAt')
 
-  const poolDir = path.join(dir, POOL_DIR)
+  const poolDir = path.join(dir, name)
   const logFile = path.join(poolDir, LOG_FILE)
   const headFile = path.join(poolDir, HEAD_FILE)
   const seqFile = path.join(poolDir, SEQ_FILE)
@@ -184,6 +205,7 @@ function createDmPool (opts = {}) {
     page,
     sweep,
     close,
+    hasSpent,
     get size () { return entries.length },
     get nextSeq () { return nextSeq },
     get oldestSeq () { return oldestSeq() }
@@ -322,7 +344,7 @@ function createDmPool (opts = {}) {
     } catch {}
     if (!stamped) return null
     const token = tokenHash(drop.token)
-    if (byToken.has(token)) return null
+    if (byToken.has(token) || spentElsewhere(token) !== false) return null
     if (entries.length >= max || nextSeq > MAX_SEQ) return 'cheio'
 
     const receivedAt = Math.max(0, Math.floor(now()))
@@ -478,6 +500,11 @@ function createDmPool (opts = {}) {
     for (const [h, tok] of tokens) byToken.set(h, tok)
   }
 
+  // Whether a stamp token hash (hex) is spent here. Never throws.
+  function hasSpent (h) {
+    return byToken.has(h)
+  }
+
   function close () {
     if (fd === null) return
     fs.closeSync(fd)
@@ -487,6 +514,9 @@ function createDmPool (opts = {}) {
 
 module.exports = {
   POOL_DIR,
+  VISIT_POOL_DIR,
+  VISIT_RETENTION_MS,
+  VISIT_TOKEN_RETENTION_MS,
   LOG_FILE,
   HEAD_FILE,
   SEQ_FILE,

@@ -77,6 +77,7 @@ Confira cada tela nas plataformas do ciclo:
   - Editor de evento: título com contador de 80 caracteres, início, fim opcional e lugar com contador de 120, as mensagens de recusa (título vazio, fim antes do início, intervalo maior que 366 dias, data fora de 2020 a 2100), o texto da publicação obrigatório, e o botão Publicar desligado enquanto inválido, com os campos fora do teclado.
   - Faixa de lembrete: aparece nas 24 horas antes do início, com o título, "começa em N min" ou "começa em N horas" e o botão de dispensar; sem notificação do sistema, e o texto avisa que o lembrete só vale com o app aberto.
   - Agenda (comunidade): os eventos dos grupos públicos da comunidade, por data, com o estado vazio; grupo privado sem a opção de evento.
+- Visitas, só no nó hospedado (Ajustes › Visitas: interruptor, folha de consentimento que abre desligada, lista de visitantes agrupada por dia, estado vazio, aviso de mensagens privadas desativadas ao ligar e aviso de limite diário). Claro e escuro, 375x812 e 1280x800, com texto grande, alvos de 44 pt, sem emoji decorativo; sem contagem de visualizações.
 
 ## Critério de revisão
 

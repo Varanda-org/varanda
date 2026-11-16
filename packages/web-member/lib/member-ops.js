@@ -65,6 +65,7 @@ const {
   moodRecord,
   fanRecord,
   topFriendsRecord,
+  visitsRecord,
   choiceRecord,
   momentRecord,
   postShareRecord,
@@ -1599,6 +1600,29 @@ async function topSet (ctx, { keys }) {
   if (keys.includes(ownHex)) throw new UsageError(TOP_SELF)
   if (keys.some((k) => blocked.has(k) && !listed.has(k))) throw new UsageError(FAN_BLOCKED)
   return publishLatest(ctx, buildRecord(() => topFriendsRecord({ keys })))
+}
+
+// ---- visitas (docs/rpc.md visits.*) ----
+
+// The own switch in effect: the newest live `visits` record of the own
+// diary -> { on, at, seq } ({ on: false, at: null, seq: null } for none).
+async function visitsState (ctx) {
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return { on: false, at: null, seq: null }
+    const raw = await store.readRaw(diary)
+    const live = liveSeqsOfType(raw, 'visits')
+    if (live.length === 0) return { on: false, at: null, seq: null }
+    const seq = live[live.length - 1]
+    const copy = validRecordCopy(raw[seq].record, seq)
+    if (copy === null || typeof copy.on !== 'boolean') return { on: false, at: null, seq: null }
+    return { on: copy.on, at: copy.at, seq }
+  })
+}
+
+// Appends the own `visits` record (publishLatest: every earlier live
+// version is tombstoned). -> { seq, ref }.
+async function visitsSet (ctx, { on }) {
+  return publishLatest(ctx, buildRecord(() => visitsRecord({ on: on === true })))
 }
 
 const NOTHING_TO_DELETE = 'nada para apagar'
@@ -6048,6 +6072,8 @@ module.exports = {
   choiceMine,
   topSet,
   ownTopKeys,
+  visitsState,
+  visitsSet,
   profileExtraDelete,
   momentCreate,
   momentDelete,

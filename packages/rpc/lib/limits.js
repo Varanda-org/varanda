@@ -129,6 +129,16 @@ const EVENT_MAX_SPAN_MS = 366 * 86400000
 // group.events: one page of a group's events, a fixed size whose worst case
 // (maximal texts, titles and places) fits MAX_MESSAGE (test/sizes.test.js).
 const GROUP_EVENTS_LIMIT = 30
+// Visitas (docs/protocol.md): a node sends at most VISIT_DAILY_MAX pings a
+// day and at most one to the same profile in VISIT_PROFILE_DAYS days, and
+// never spends the last VISIT_STAMP_RESERVE of its stamps on one. The list
+// of visitors holds the newest VISIT_LIST_MAX rows and forgets a visit after
+// VISIT_KEEP_DAYS days.
+const VISIT_DAILY_MAX = 10
+const VISIT_PROFILE_DAYS = 7
+const VISIT_STAMP_RESERVE = 5
+const VISIT_LIST_MAX = 50
+const VISIT_KEEP_DAYS = 30
 const MAX_GROUP_NAME = 80 // same value as records.js
 const MAX_GROUP_CUTS = 16
 const MAX_GROUPS_PER_COMMUNITY = 32
@@ -291,6 +301,11 @@ module.exports = {
   EVENT_MAX_MS,
   EVENT_MAX_SPAN_MS,
   GROUP_EVENTS_LIMIT,
+  VISIT_DAILY_MAX,
+  VISIT_PROFILE_DAYS,
+  VISIT_STAMP_RESERVE,
+  VISIT_LIST_MAX,
+  VISIT_KEEP_DAYS,
   MAX_GROUP_NAME,
   MAX_GROUP_CUTS,
   MAX_GROUPS_PER_COMMUNITY,

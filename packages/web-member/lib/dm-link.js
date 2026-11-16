@@ -19,6 +19,12 @@
 // - openBlobLink: the anonymous 'varanda/blob/1' channel (lib/blob-net.js,
 //   member role), shaped like openDmLink: nothing on it names a diary.
 //   put(frame) -> { ok, reason }. A put is never repeated here.
+// - openVisitLink: the quiet visit lane 'varanda/visit/1' (lib/dm-net.js
+//   with protocol VISIT_PROTOCOL), shaped like openDmLink, into the seeder's
+//   separate visit pool that wakes nobody. It resolves only once the channel
+//   opened: a seeder without the lane (an old one, or --no-dm) rejects with
+//   an error whose `unsupported` is true, and the caller then sends no visit
+//   there, never falling back to the dm channel.
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const Hypercore = require('hypercore')
 const crypto = require('hypercore-crypto')
@@ -28,12 +34,13 @@ const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachDm } = require('@varanda/core/lib/dm-net')
 const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
 const { attachBlob } = require('@varanda/core/lib/blob-net')
-const { DM_MAX_MESSAGE } = require('@varanda/core/lib/dm')
+const { DM_MAX_MESSAGE, VISIT_PROTOCOL } = require('@varanda/core/lib/dm')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { guardedWsStream } = require('./ws-stream')
 
 const NO_SEEDER = 'sem conexão com o semeador'
 const SEEDER_BUSY = 'Semeador ocupado; tente novamente em instantes.'
+const VISIT_UNSUPPORTED = 'semeador sem visitas'
 const DM_CONNECT_TIMEOUT_MS = 15000
 const DM_LINK_DEADLINE_MS = 25000
 const DM_STAMP_LINK_DEADLINE_MS = 45000
@@ -163,6 +170,61 @@ async function openDmLink ({ seederUrl, createSocket, association, log = noop, l
   }
 }
 
+function unsupported () {
+  const err = new Error(VISIT_UNSUPPORTED)
+  err.unsupported = true
+  return err
+}
+
+async function openVisitLink ({ seederUrl, createSocket, association, log = noop, limits = {} } = {}) {
+  let visit = null
+  const link = await dial({
+    seederUrl,
+    createSocket,
+    association,
+    log,
+    connectTimeoutMs: limits.connectTimeoutMs,
+    deadlineMs: limits.deadlineMs || DM_LINK_DEADLINE_MS,
+    attach: (noise) => {
+      visit = attachDm(noise, { role: 'member', protocol: VISIT_PROTOCOL, ...(limits.requestTimeoutMs ? { requestTimeoutMs: limits.requestTimeoutMs } : {}) })
+    }
+  })
+  let open = false
+  try {
+    open = (await visit.supported) === true
+  } catch {}
+  if (!open) {
+    // Settled false by a rejected open or by the link ending first: either
+    // way nothing can go on this lane here.
+    const lostFirst = link.noise.destroyed
+    try { visit.close() } catch {}
+    link.noise.destroy()
+    throw lostFirst ? lost() : unsupported()
+  }
+  return {
+    async put (bytes) {
+      try {
+        return await visit.put(bytes)
+      } catch (err) {
+        if (err instanceof TypeError) throw err
+        throw lost()
+      }
+    },
+    async page ({ after, limit }) {
+      try {
+        return await visit.requestPage({ after, limit })
+      } catch (err) {
+        if (err instanceof TypeError) throw err
+        throw lost()
+      }
+    },
+    close () {
+      try { visit.close() } catch {}
+      link.noise.destroy()
+    }
+  }
+}
+
 async function openBlobLink ({ seederUrl, createSocket, association, log = noop, limits = {} } = {}) {
   let blob = null
   const link = await dial({
@@ -239,7 +301,9 @@ module.exports = {
   openDmLink,
   openStampLink,
   openBlobLink,
+  openVisitLink,
   NO_SEEDER,
+  VISIT_UNSUPPORTED,
   DM_LINK_DEADLINE_MS,
   DM_STAMP_LINK_DEADLINE_MS,
   BLOB_LINK_DEADLINE_MS,

@@ -147,6 +147,10 @@ const MOOD_KEYS = Object.freeze(['type', 'emoji', 'text', 'at'])
 // it at fold time.
 const FAN_KEYS = Object.freeze(['type', 'key', 'on', 'at'])
 const TOP_FRIENDS_KEYS = Object.freeze(['type', 'keys', 'at'])
+// Visitas (docs/protocol.md): the public flag that a diary takes part in
+// Visitas, `on` true or false, latest wins. It names nobody: who visited
+// whom is never written to a diary.
+const VISITS_KEYS = Object.freeze(['type', 'on', 'at'])
 const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
@@ -577,7 +581,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -679,6 +683,10 @@ function check (record, seq) {
   }
   if (type === 'fan') {
     if (!hasExactKeys(record, FAN_KEYS) || !isHex64(record.key) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'visits') {
+    if (!hasExactKeys(record, VISITS_KEYS) || typeof record.on !== 'boolean') return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'top-friends') {
@@ -921,6 +929,10 @@ function mediaCoreRecord ({ key, at = nowIso() } = {}) {
 
 function fanRecord ({ key, on, at = nowIso() } = {}) {
   return build({ type: 'fan', key, on, at }, 1)
+}
+
+function visitsRecord ({ on, at = nowIso() } = {}) {
+  return build({ type: 'visits', on, at }, 1)
 }
 
 function topFriendsRecord ({ keys, at = nowIso() } = {}) {
@@ -1169,6 +1181,7 @@ module.exports = {
   PROFILE_ABOUT_KEYS,
   MOOD_KEYS,
   FAN_KEYS,
+  VISITS_KEYS,
   TOP_FRIENDS_KEYS,
   MAX_TOP_FRIENDS,
   POST_POLL_KEYS,
@@ -1241,6 +1254,7 @@ module.exports = {
   profileAboutRecord,
   moodRecord,
   fanRecord,
+  visitsRecord,
   topFriendsRecord,
   momentRecord,
   deleteRecord,

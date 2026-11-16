@@ -3384,7 +3384,7 @@ test('startSeedWs /index/profile: regex, pointers only, HEAD, 404, 421, 405 and 
   const got = await mediaRequest(server.port, url)
   t.is(got.status, 200)
   jsonHeaders(t, got)
-  t.alike(JSON.parse(got.body.toString()), { about: 3, mood: null, fans: null, top: null, indexing: false, complete: false }, 'only the known keys leave')
+  t.alike(JSON.parse(got.body.toString()), { about: 3, mood: null, fans: null, top: null, visits: null, indexing: false, complete: false }, 'only the known keys leave')
   t.alike(seeder.calls.at(-1), ['indexProfile', A])
   const head = await mediaRequest(server.port, url, { method: 'HEAD' })
   t.is(head.status, 200)
@@ -3415,7 +3415,7 @@ test('startSeedWs /index/profile: a malformed answer, a throw or a missing metho
   seeder.indexProfile = async () => ({ about: big, mood: big, indexing: true })
   const worst = await mediaRequest(server.port, url)
   t.is(worst.status, 200)
-  t.alike(JSON.parse(worst.body.toString()), { about: big, mood: big, fans: null, top: null, indexing: true, complete: false })
+  t.alike(JSON.parse(worst.body.toString()), { about: big, mood: big, fans: null, top: null, visits: null, indexing: true, complete: false })
   for (const answer of [{ about: 0, mood: null, indexing: false }, { about: null, mood: 1.5, indexing: false }, { about: '3', mood: null, indexing: false },
     { about: undefined, mood: null, indexing: false }, { about: -1, mood: null, indexing: false }]) {
     seeder.indexProfile = async () => answer
@@ -3443,13 +3443,13 @@ test('startSeedWs /index/profile: fans and top are rebuilt key by key; a malform
   const server = await startSeedWs({ port: 0, seeder })
   t.teardown(() => server.close(), { force: true })
   const url = '/index/profile/' + A
-  seeder.indexProfile = async () => ({ about: 1, mood: null, fans: { count: 2, indexing: true, extra: 'x' }, top: { seq: 4, back: { [B]: 7, [hex(3)]: null }, keys: ['segredo'] }, indexing: false, complete: true })
+  seeder.indexProfile = async () => ({ about: 1, mood: null, fans: { count: 2, indexing: true, extra: 'x' }, top: { seq: 4, back: { [B]: 7, [hex(3)]: null }, keys: ['segredo'] }, visits: 6, indexing: false, complete: true })
   const got = await mediaRequest(server.port, url)
   t.is(got.status, 200)
-  t.alike(JSON.parse(got.body.toString()), { about: 1, mood: null, fans: { count: 2, indexing: true }, top: { seq: 4, back: { [B]: 7, [hex(3)]: null } }, indexing: false, complete: true }, 'only the known keys leave')
+  t.alike(JSON.parse(got.body.toString()), { about: 1, mood: null, fans: { count: 2, indexing: true }, top: { seq: 4, back: { [B]: 7, [hex(3)]: null } }, visits: 6, indexing: false, complete: true }, 'only the known keys leave')
   const back = {}
   for (let i = 0; i < 8; i++) back[hex(i)] = big
-  const worst = { about: big, mood: big, fans: { count: big, indexing: true }, top: { seq: big, back }, indexing: true, complete: false }
+  const worst = { about: big, mood: big, fans: { count: big, indexing: true }, top: { seq: big, back }, visits: big, indexing: true, complete: false }
   seeder.indexProfile = async () => worst
   const w = await mediaRequest(server.port, url)
   t.is(w.status, 200)
@@ -3459,6 +3459,7 @@ test('startSeedWs /index/profile: fans and top are rebuilt key by key; a malform
   for (const bad of [
     { fans: { count: -1, indexing: false } }, { fans: { count: 1.5, indexing: false } }, { fans: { count: '2', indexing: false } }, { fans: 3 },
     { top: { seq: 0, back: {} } }, { top: { seq: 1 } }, { top: { seq: 1, back: null } }, { top: { seq: 1, back: { x: 1 } } },
+    { visits: 0 }, { visits: 1.5 }, { visits: '3' }, { visits: -1 },
     { top: { seq: 1, back: { [B]: 0 } } }, { top: { seq: 1, back: { [B]: '3' } } }, { top: { seq: 1, back: { [B.toUpperCase()]: 1 } } }, { top: { seq: 1, back: nine } }, { top: 'x' }
   ]) {
     seeder.indexProfile = async () => ({ about: null, mood: null, indexing: false, complete: true, ...bad })
