@@ -1756,10 +1756,12 @@ function bindCores (input, asCommunity) {
     // its records from the cut on are dropped before folding, and no record
     // of another diary brings them back. Block 0, every leave (a cut never
     // undoes a leave nor the rejoin naming it) and every key block (kept
-    // valid for reading only, so history stays readable) stay. The cut is
-    // the walk's: a mark the walk ignored (on a writer not bound yet at its
-    // seq, or already released) cuts nothing.
-    const cut = sl.cut
+    // valid for reading only, so history stays readable) stay. The walk
+    // decides the slot, but the records stop at the lowest of its cut and
+    // every mark held: a mark the walk ignored (written before the join it
+    // reads, or seen by a reader whose hole hides that join) still cuts.
+    const held = marks.cuts.get(h.diary)
+    const cut = Math.min(sl.cut, held && held.has(key) ? held.get(key) : Infinity)
     const end = Math.max(cut, 1)
     const records = cut === Infinity ? log.records : log.records.filter((x) => x.seq < end || x.record.type === 'group-leave' || x.record.type === 'group-key')
     // A CW's generation counts its header's rejoin only when the diary's

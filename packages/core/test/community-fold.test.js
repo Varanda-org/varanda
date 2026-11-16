@@ -2404,6 +2404,14 @@ test('group-cut on an own writer: its records from the cut on stop counting (#35
   t.absent(r.writers.has(wX), 'cut 0 takes even block 0: the writer is released')
   t.absent(r.frozen.has(wX))
   t.is(r.members.get(X), 'member', 'cut 0: the diary stays a member on its other writer')
+  // A mark written before the join (seq 0) is one the walk ignores: the
+  // writer keeps its live slot, but the mark still cuts its records.
+  for (const cut of [0, 1]) {
+    r = setup([[X, [{ writer: wX, cut, seq: 0 }]]])
+    t.alike(shown(r), [wX2 + ':1', wY + ':1'], 'cut ' + cut + ' before the join: nothing past block 0')
+    t.ok(r.writers.has(wX), 'cut ' + cut + ' before the join: block 0 stays')
+    t.absent(r.frozen.has(wX), 'cut ' + cut + ' before the join: the walk keeps it live')
+  }
 
   r = setup([[Y, [{ writer: wX, cut: 0, seq: 1 }]]])
   t.alike(shown(r), all, 'a mark in another diary does nothing')
@@ -2617,6 +2625,31 @@ test('group-cut: mark order and arrival give one result, a gap is reported (#350
   t.alike(cutsOf(holed), [[wX, 3]])
   t.is(r.incomplete, false)
   t.is(holed.incomplete, true, 'a hole in a diary that binds a writer leaves the slots unsure: incomplete')
+})
+
+test('group-cut: a reader whose hole hides the join still cuts by the mark it holds (#350)', (t) => {
+  const build = (joins, marks) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    for (let i = 0; i < 4; i++) gpost(g, wX, 10 + i)
+    const input = g.input()
+    input.joins.set(X, joins)
+    input.marks = new Map([[X, marks]])
+    return buildGroup(input)
+  }
+  // Join at seq 1, cut at seq 5, off at 6, on again at 7.
+  const on1 = { writer: wX, on: true, seq: 1 }
+  const off6 = { writer: wX, on: false, seq: 6 }
+  const on7 = { writer: wX, on: true, seq: 7 }
+  const cut5 = { writer: wX, cut: 1, seq: 5 }
+  const full = build([on1, off6, on7], [cut5])
+  t.alike(shown(full), [], 'the full diary: nothing of wX past block 0')
+  t.ok(full.frozen.has(wX))
+  const holed = build([off6, on7], [cut5, { gap: true }])
+  t.alike(shown(holed), shown(full), 'a hole over the join: the held mark still cuts')
+  t.ok(holed.writers.has(wX), 'the walk of the holed reader counts it live')
+  t.is(holed.incomplete, true, 'and the hole leaves the fold incomplete')
 })
 
 test('group-cut: a creator mark on its own non-root writer cuts it, root marks keep their meaning (#350)', (t) => {
