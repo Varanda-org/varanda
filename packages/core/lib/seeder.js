@@ -95,12 +95,13 @@
 // Leaving (a join turned off) NEVER purges: it only marks the writer as
 // left in the group index (lib/group-index.js), so the moderation record of
 // a departed member stays verifiable, and a counted writer whose join is
-// off is still admitted. A writer its diary cut is kept below the cut only
-// (_cutGroupCore): nothing from the cut on is downloaded or stored, and the
-// quota counts what is below it. Purges happen for a dropped or blocked
-// diary, a root its blocked or revoked creator bound, a root key in the
-// blocklist snapshot, a writer its diary cut at 0 (released), a fork or the
-// quota.
+// off is still admitted. A writer its diary cut keeps its blocks below the
+// cut and, past it, only its group-leave and group-key blocks, which the
+// fold still counts (_cutGroupCore): the rest is fetched, read and cleared,
+// and the quota is the whole log's, as for any writer. Purges happen for a
+// dropped or blocked diary, a root its blocked or revoked creator bound, a
+// root key in the blocklist snapshot, a writer its diary cut at 0
+// (released), a fork or the quota.
 // Group keys never travel on the admission channel; members learn writer
 // sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
 //
@@ -909,6 +910,24 @@ function groupWalkCut (walks, group, writer) {
   if (st === 'released') return 0
   if ((st === 'live' || st === 'frozen') && s.cut.has(writer)) return s.cut.get(writer)
   return null
+}
+
+// The blocks of a writer cut at `cut` a seeder keeps in full: those below
+// it, block 0 always.
+function keptBelow (cut) {
+  return Math.max(cut, 1)
+}
+
+// Whether a block past a writer's cut stays at the seeder: a group-leave or
+// a group-key, which the fold keeps past a cut (lib/group.js bindCores).
+function keptPastCut (raw) {
+  if (raw === null || raw === undefined) return false
+  try {
+    const block = decodeBlock(raw)
+    return block !== null && (block.type === 'group-leave' || block.type === 'group-key')
+  } catch {
+    return false
+  }
 }
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
@@ -1784,7 +1803,7 @@ class Seeder {
           core = await openMediaReplica(this.store, key)
           if (core.fork !== 0) reason = 'fork'
           else if (core.contiguousLength === 0) reason = 'no-header'
-          else if (await this._overGroupQuota(core, key === binding.group ? null : binding.cut)) reason = 'quota'
+          else if (this._overQuota(core)) reason = 'quota'
           else ({ reason, raw } = await localGroupVerdict(core, key, binding, this._groupVisibility(binding.group)))
         }
         if (reason === null && (groupSurvivors.length >= this.maxGroupCores || (perGroup.get(binding.group) || 0) >= this.maxGroupWriters)) reason = 'group-full'
@@ -4301,9 +4320,10 @@ class Seeder {
     if (key === group) this._keepGroupHeader(group, decodeBlock(res.raw))
     // Refusals after a fetch are remembered (this join) or backed off, so a
     // rescan does not fetch the same core again. A writer its diary cut is
-    // judged below the cut; its bytes there are known only once it is open.
+    // judged on its whole log too: its leaves and key blocks past the cut
+    // are fetched.
     const cut = key === group ? null : groupWalkCut(entry.groupWalks, group, key)
-    if (cut === null ? this._overQuota(res) : Math.min(res.length, cut) > this.maxLogBlocks || (res.length <= cut && res.byteLength > this.maxLogBytes)) {
+    if (this._overQuota(res)) {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, 'quota', seq)
     }
@@ -4378,7 +4398,7 @@ class Seeder {
     else if (key === group && this._rootsClosed()) late = 'denials-full'
     else if (!this._groupStillWanted(diary, entry, key, group)) late = 'unbound'
     else if (core.fork !== 0) late = 'fork'
-    else if (await this._overGroupQuota(core, writerBinding.cut)) late = 'quota'
+    else if (this._overQuota(core)) late = 'quota'
     if (late === null && this._closing) return
     if (late !== null) {
       await core.close().catch(noop)
@@ -4435,11 +4455,14 @@ class Seeder {
       rootScanning: false,
       rootRetry: null, // the retry of a failed root block read (_retryRootScan)
       rootReadFailures: 0,
-      // A writer its diary cut (binding `cut`): kept below `cut` only;
-      // `clearedTo` the length cleared from the cut up to, `cutting` and
-      // `cutAgain` one pass of _cutGroupCore at a time.
+      // A writer its diary cut (binding `cut`): its blocks below `cut` and
+      // its leaves and key blocks past it (_cutGroupCore); `clearedTo` the
+      // length read and cleared from the cut up to, `pastDownload` the fetch
+      // of the blocks past the cut being read, `cutting` and `cutAgain` one
+      // pass of _cutGroupCore at a time.
       cut: null,
       clearedTo: 0,
+      pastDownload: null,
       cutting: false,
       cutAgain: false
     }
@@ -4447,13 +4470,18 @@ class Seeder {
     if (key !== group && binding && Number.isSafeInteger(binding.cut) && binding.cut >= 1) entry.cut = binding.cut
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
-      if (entry.cut !== null) return this._cutGroupCore(key, entry)
-      if (this._overQuota(core)) this._dropGroup(key, 'quota')
+      if (this._overQuota(core)) return this._dropGroup(key, 'quota')
+      if (entry.cut !== null) this._cutGroupCore(key, entry)
     }
     core.on('append', checkQuota)
-    entry.stopQuota = () => core.off('append', checkQuota)
+    entry.stopQuota = () => {
+      core.off('append', checkQuota)
+      try {
+        if (entry.pastDownload) entry.pastDownload.destroy()
+      } catch {}
+    }
     entry.stopFork = watchFork(core, (reason) => this._dropGroup(key, reason))
-    entry.download = core.download(entry.cut === null ? { start: 0, end: -1 } : { start: 0, end: entry.cut })
+    entry.download = core.download(entry.cut === null ? { start: 0, end: -1 } : { start: 0, end: keptBelow(entry.cut) })
     entry.stopGrow = watchContiguous(core, () => {
       this._gateGroup(key, entry)
       this._scanRoot(key, entry)
@@ -4478,8 +4506,8 @@ class Seeder {
   }
 
   // A lower cut for a served writer (its binding's `cut`, set by the
-  // diary's scan): the download stops at the new cut and what is past it
-  // goes.
+  // diary's scan): the full download stops at the new cut and what is past
+  // it is read again (_cutGroupCore).
   _applyGroupCut (key) {
     const entry = this._groupServed.get(key)
     const b = this._groups.get(key)
@@ -4489,17 +4517,20 @@ class Seeder {
     entry.clearedTo = 0
     try {
       if (entry.download) entry.download.destroy()
+      if (entry.pastDownload) entry.pastDownload.destroy()
     } catch {}
-    entry.download = entry.core.download({ start: 0, end: entry.cut })
+    entry.download = entry.core.download({ start: 0, end: keptBelow(entry.cut) })
     this._cutGroupCore(key, entry)
   }
 
-  // A writer its diary cut is kept below the cut only (docs/protocol.md
-  // section 10): the download ends at the cut, what arrived from the cut on
-  // before it was known is cleared (blocks and the tree nodes no kept block
-  // needs: proofs of the blocks below the cut still verify), and the log
-  // quota counts the blocks below it. One pass at a time; growth during a
-  // pass runs another.
+  // A writer its diary cut (docs/protocol.md section 10) keeps its blocks
+  // below the cut and, from the cut on, its group-leave and group-key
+  // blocks only, which every fold still counts there: a reader fed by
+  // seeders folds as one holding the full log. Each block past the cut is
+  // fetched, read and cleared unless it is one of those (blocks and the
+  // tree nodes no kept block needs: proofs of the kept blocks still
+  // verify). The quota is the whole log's, as for any writer. One pass at a
+  // time; growth or a lower cut during a pass runs another.
   _cutGroupCore (key, entry) {
     if (entry.cutting) {
       entry.cutAgain = true
@@ -4512,38 +4543,46 @@ class Seeder {
         entry.cutAgain = false
         if (stale()) return
         const core = entry.core
-        const to = core.length
-        if (to > entry.cut && to > entry.clearedTo) {
-          await core.clear(entry.cut, to)
-          entry.clearedTo = to
-        }
-        if (stale()) return
-        if (await this._overGroupQuota(core, entry.cut)) {
-          if (!stale()) this._dropGroup(key, 'quota')
+        if (this._overQuota(core)) {
+          this._dropGroup(key, 'quota')
           return
         }
+        const cut = entry.cut
+        const from = Math.max(keptBelow(cut), entry.clearedTo)
+        const to = core.length
+        if (to <= from) continue
+        const range = core.download({ start: from, end: to })
+        entry.pastDownload = range
+        try {
+          await range.done()
+        } finally {
+          if (entry.pastDownload === range) entry.pastDownload = null
+        }
+        if (stale() || entry.cut !== cut) continue
+        let start = -1
+        for (let i = from; i < to; i++) {
+          let raw = null
+          try {
+            raw = await core.get(i, { wait: false, raw: true })
+          } catch {}
+          if (stale()) return
+          if (keptPastCut(raw)) {
+            if (start !== -1) await core.clear(start, i)
+            start = -1
+          } else if (start === -1) {
+            start = i
+          }
+        }
+        if (start !== -1) await core.clear(start, to)
+        if (stale()) return
+        if (entry.cut === cut) entry.clearedTo = to
+        else entry.cutAgain = true
       } while (entry.cutAgain)
     }
     run().catch(noop).then(() => {
       entry.cutting = false
       if (entry.cutAgain && !stale()) this._cutGroupCore(key, entry)
     })
-  }
-
-  // The log quota of a group core; for a writer its diary cut (`cut`), of
-  // its blocks below the cut. Their bytes are known from the local tree
-  // (seek): when it cannot tell, the core is not over.
-  async _overGroupQuota (core, cut = null) {
-    if (!Number.isSafeInteger(cut)) return this._overQuota(core)
-    if (Math.min(core.length, cut) > this.maxLogBlocks) return true
-    if (core.byteLength <= this.maxLogBytes) return false
-    if (core.length <= cut) return true
-    try {
-      const at = await core.seek(this.maxLogBytes, { wait: false })
-      return Array.isArray(at) && at[0] < cut
-    } catch {
-      return false
-    }
   }
 
   // Local re-gate of a served group core, the twin of _gateMedia: block 0

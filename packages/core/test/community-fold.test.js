@@ -2599,6 +2599,34 @@ test('group-cut: a cut at 1 or more never undoes a leave nor the rejoin naming i
   t.is(r.incomplete, false, 'cut 0: nothing is missing')
 })
 
+test('group-cut: a copy held below the cut plus its leave and key blocks folds like the full copy (#350)', (t) => {
+  // wX: header, p1, p2, a leave at seq 3, p4; the diary cuts wX at 2.
+  const build = (keep) => {
+    const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+    const g = groupIn(C, { key: G1 })
+    g.add(X, wX)
+    gpost(g, wX, 10)
+    gpost(g, wX, 11)
+    g.push(wX, groupLeave({ cuts: [{ writer: wX, seq: g.len(wX) }], at: AT(12) }))
+    gpost(g, wX, 13)
+    g.mark(X, wX, 2)
+    const input = g.input()
+    input.writers = input.writers.map((l) => l.key !== wX || keep === null ? l : { ...l, entries: l.entries.filter((e) => keep.includes(e.seq)) })
+    return buildGroup(input)
+  }
+  const full = build(null)
+  t.is(full.members.get(X), 'left', 'the full copy: X left')
+  t.is(full.incomplete, false)
+  const seeded = build([0, 1, 3])
+  t.is(seeded.members.get(X), 'left', 'below the cut plus the leave: X left too')
+  t.is(seeded.incomplete, false)
+  t.alike(shown(seeded), shown(full))
+  t.alike(stable(seeded), stable(full), 'one fold for both copies')
+  // Without the leave the two copies disagree: why seeders keep it.
+  const cutOnly = build([0, 1])
+  t.not(cutOnly.members.get(X), 'left', 'below the cut only: the leave is lost')
+})
+
 test('group-cut: mark order and arrival give one result, a gap is reported (#350)', (t) => {
   const wX2 = K(0x4001)
   const build = (list) => {

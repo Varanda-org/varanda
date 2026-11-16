@@ -17,7 +17,7 @@ const {
   MAX_WRITER_RELEASES_PER_DIARY,
   MAX_GROUPS_PER_DIARY
 } = require('../lib/records')
-const { groupPost } = require('../lib/group')
+const { groupPost, groupLeave } = require('../lib/group')
 const {
   groupHeader,
   writerHeader,
@@ -207,7 +207,7 @@ async function blocksHeld (core, from, to) {
   return out
 }
 
-test('a cut after the download clears from the cut, never downloads past it, and still serves the blocks below with proofs (#350)', async (t) => {
+test('a cut after the download clears from the cut, keeps only leaves and key blocks past it, and serves what it keeps with proofs (#350)', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -229,21 +229,28 @@ test('a cut after the download clears from the cut, never downloads past it, and
   t.is(readGroups(dataDir)[W].cut, 3, 'the cut is persisted with the binding')
   t.ok(seeder._groupServed.has(W), 'the writer stays served')
 
-  // B keeps writing past its cut: nothing of it is downloaded.
+  // B keeps writing past its cut: a post goes, a leave and a key block stay
+  // (the fold counts them past a cut), and so does the next post's gap.
   await B.cores.w.append(b4a.from(JSON.stringify(groupPost({ text: 'depois do corte' }))))
-  await until(() => entry.core.length === 7, { name: 'W cresceu' })
-  await new Promise((resolve) => setTimeout(resolve, 1500))
-  t.alike(await blocksHeld(entry.core, 0, 7), [0, 1, 2], 'nothing past the cut arrives')
+  await B.cores.w.append(b4a.from(JSON.stringify(groupLeave({ cuts: [{ writer: W, seq: 7 }] }))))
+  await B.cores.w.append(b4a.from(JSON.stringify({ type: 'group-key' })))
+  await B.cores.w.append(b4a.from(JSON.stringify(groupPost({ text: 'mais um' }))))
+  await until(async () => entry.core.length === 10 && !entry.cutting && entry.clearedTo === 10, { name: 'W lido depois do corte' })
+  t.alike(await blocksHeld(entry.core, 0, 10), [0, 1, 2, 7, 8], 'below the cut, then the leave and the key block only')
 
-  // B goes; a reader that dials the seeder only verifies blocks below the
-  // cut against the signed length (Hypercore checks each proof).
+  // B goes; a reader that dials the seeder only verifies the kept blocks
+  // against the signed length (Hypercore checks each proof).
   await B.swarm.destroy()
   const r = await reader(t, bootstrap, publicKey)
   const copy = r.store.get({ key: b4a.from(W, 'hex') })
   await copy.ready()
-  await until(() => copy.length === 7, { name: 'comprimento assinado no leitor', timeoutMs: 30000 })
+  await until(() => copy.length === 10, { name: 'comprimento assinado no leitor', timeoutMs: 30000 })
   for (let i = 0; i < 3; i++) t.ok(await copy.get(i, { timeout: 15000 }), 'block ' + i + ' verified from the seeder')
-  await t.exception(copy.get(3, { timeout: 3000 }), 'a block past the cut is not served')
+  const leave = JSON.parse(b4a.toString(await copy.get(7, { timeout: 15000 })))
+  t.is(leave.type, 'group-leave', 'the leave past the cut is served, verified')
+  t.is(JSON.parse(b4a.toString(await copy.get(8, { timeout: 15000 }))).type, 'group-key', 'and the key block')
+  await t.exception(copy.get(3, { timeout: 3000 }), 'a post past the cut is not served')
+  await t.exception(copy.get(9, { timeout: 3000 }), 'nor one after the leave')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
@@ -350,4 +357,37 @@ test('a restart restores a writer at its persisted cut and the scan lowers it or
   t.is(readGroups(dataDir)[W].cut, 2, 'the lower cut is persisted')
   await until(async () => second.seeder._drops.size === 0 && !(W2 in readGroups(dataDir)) && !(await stored(second.seeder, W2)), { name: 'W2 purgado' })
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a cut writer is held to its whole log\'s quota: refused past it at admission, dropped once it grows past it (#350)', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, maxLogBytes: 20000 })
+  // Blocks past a cut are only read at the seeder, never validated: a raw
+  // block near the block limit is enough to cross the byte quota.
+  const big = () => b4a.from(JSON.stringify({ type: 'group-post', text: 'x'.repeat(12000) }))
+
+  // W is cut at 2 and already holds 24 KB past its cut when B is admitted.
+  const { A, B, R, W } = await cutWorld(t, bootstrap, assoc, (R, W) => [groupCutRecord({ group: R, writer: W, cut: 2 })])
+  await B.cores.w.append(big())
+  await B.cores.w.append(big())
+  await admit(A, assoc)
+  await admit(B, assoc)
+  t.is((await rejected(events, W, 'quota')).reason, 'quota', 'refused at admission: the bytes past the cut count')
+  t.absent(seeder._groupServed.has(W))
+
+  // W2, cut at 2 while small, is served; it then grows past the quota.
+  const W2 = await addWriter(B, R, 'w2')
+  await B.diary.append(groupJoinRecord({ group: R, writer: W2, on: true }))
+  await B.diary.append(groupCutRecord({ group: R, writer: W2, cut: 2 }))
+  await admitted(events, W2)
+  await downloaded(seeder, W2, 2)
+  t.ok(seeder._groupServed.has(W2), 'served while within the quota')
+  await B.cores.w2.append(big())
+  await B.cores.w2.append(big())
+  t.is((await rejected(events, W2, 'quota')).reason, 'quota', 'dropped once its log passes the quota')
+  await until(() => !seeder._groupServed.has(W2), { name: 'W2 fora' })
+  t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
