@@ -78,13 +78,18 @@
 // decides who is filed; ./dm.js does.
 //
 // Delete is an op row plus the fold rule (@varanda/core lib/dm-fold.js drops
-// what was filed at or before it): the ciphertext of deleted messages stays
-// in the core until a later compaction, which is not done here.
+// what was filed at or before it). compact() then frees the blocks of the
+// msg and rx rows a delete op hides, once they are older than
+// COMPACT_AFTER_MS (core.clear: the storages zero the bytes; the core's
+// length and the ctl rows stay, the fold needs them as cutoffs), and
+// dropDeletedMedia() drops their cached photos at once. A browser's
+// IndexedDB or the flash may keep old copies of freed bytes until they
+// compact on their own (docs/protocol.md section 11).
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const gc = require('@varanda/core/lib/group-crypto')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
-const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES, DM_REACT_REV_MAX, DM_SEALED_BYTES } = require('@varanda/core/lib/dm')
+const { validDmCard, DM_OPS, DM_AUDIO_MIME, DM_AUDIO_MAX_MS, DM_AUDIO_MAX_BYTES, DM_REACT_REV_MAX, DM_SEALED_BYTES, DM_RETENTION_MS } = require('@varanda/core/lib/dm')
 const { isVisitDay } = require('@varanda/core/lib/visits')
 const { isReaction } = require('@varanda/rpc')
 const sodium = require('./sodium-browser')
@@ -126,6 +131,11 @@ const LOCKED = 'identidade bloqueada: entre com a passkey'
 // A sealed visit value that is unreadable (storage error or does not open).
 const VISIT_UNREADABLE = 'dados de visitas ilegíveis'
 const ROW_BUCKET = 1024
+// A row hidden by "Apagar conversa" is freed from the core only once its
+// drop can no longer come back from the pool (DM_RETENTION_MS there, plus a
+// day of clock slack): a self copy of an own message is pulled after it was
+// filed, and a cleared row would let it be filed again, after the delete.
+const COMPACT_AFTER_MS = DM_RETENTION_MS + 86400000
 const CACHE_BYTES_MAX = 256 * 1048576
 
 function isCount (n, max) {
@@ -267,6 +277,8 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   let key = null
   let corePair = null
   let rows = null
+  // Row object -> its block index in the core (never written into the row).
+  let blockOf = new WeakMap()
   let lastFiled = 0
   let mediaKey = null
   // Names of the cached messages, loaded with the rows.
@@ -307,6 +319,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     mediaKey = null
     corePair = null
     rows = null
+    blockOf = new WeakMap()
     lastFiled = 0
     cached = new Set()
     tokens = new Map()
@@ -479,14 +492,20 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
 
   async function load (gen) {
     let length = 0
+    const blocks = new WeakMap()
     let loaded = await withCore(async (core) => {
       const out = []
       length = core.length
       for (let i = 0; i < length; i++) {
+        // A freed block (compact) reads as null.
         const block = await core.get(i, { wait: false })
         if (block === null || typeof block !== 'object' || block.v !== 1) continue
         const row = gc.openRecord({ nonce: block.nonce, box: block.box }, key)
-        if (row !== null && validRow(row)) out.push(plainRow(row))
+        if (row !== null && validRow(row)) {
+          const plain = plainRow(row)
+          blocks.set(plain, i)
+          out.push(plain)
+        }
       }
       return out
     })
@@ -508,6 +527,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     const index = await readIndex(storage, prefix)
     if (gen !== generation) return
     rows = loaded
+    blockOf = blocks
     coreLength = length
     version++
     mediaKey = crypto.hash([MEDIA_KEY_DOMAIN, key])
@@ -555,13 +575,18 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
       if (!list.every(validRow)) throw new TypeError('linha inválida')
       const clean = list.map(plainRow)
       const blocks = clean.map((r) => ({ v: 1, ...gc.sealRecord(padded(r), key) }))
+      let start = -1
       const ok = await withCore(async (core) => {
+        start = core.length
         await core.append(blocks)
         return true
       })
       if (ok === null) throw new Error('armazenamento de mensagens inválido')
       if (gen !== generation || rows === null) return
-      for (const r of clean) rows.push(r)
+      clean.forEach((r, i) => {
+        blockOf.set(r, start + i)
+        rows.push(r)
+      })
       coreLength += blocks.length
       version++
     })
@@ -834,6 +859,101 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     })
   }
 
+  // ---- compaction ----
+
+  // peer -> the filedAt of the newest `deleted` op, the cutoff of the fold
+  // (@varanda/core lib/dm-fold.js opState); runs with the rows loaded.
+  function deleteCutoffs () {
+    const cut = new Map()
+    for (const r of rows) {
+      if (r.t === 'ctl' && r.op === 'deleted' && !(cut.get(r.peer) >= r.filedAt)) cut.set(r.peer, r.filedAt)
+    }
+    return cut
+  }
+
+  // Runs inside serial(): drops the cache entries named in `names`, any age.
+  // The entries are marked unfinished before their items go, as putMedia
+  // does, so an interrupted drop leaves nothing a wipe cannot find.
+  // -> how many entries went.
+  async function dropEntries (names, gen) {
+    const index = await readIndex(storage, prefix)
+    if (rows === null || gen !== generation) return 0
+    const hit = index.filter((e) => names.has(e.n))
+    if (hit.length === 0) return 0
+    for (const e of hit) cached.delete(e.n)
+    await storage.writeJson(indexName, { v: 1, items: index.map((e) => names.has(e.n) ? { ...e, w: true } : e) })
+    for (const e of hit) {
+      for (let i = 0; i < e.c; i++) {
+        if (rows === null || gen !== generation) return 0
+        await storage.writeJson(entryPrefix + e.n + '/' + i, null)
+      }
+    }
+    if (rows === null || gen !== generation) return 0
+    await storage.writeJson(indexName, { v: 1, items: index.filter((e) => !names.has(e.n)) })
+    return hit.length
+  }
+
+  // Drops the cached photos of every message a delete op hides, whatever
+  // its age: they are never shown again. -> how many entries went; 0 while
+  // locked.
+  function dropDeletedMedia () {
+    const gen = generation
+    return serial(async () => {
+      if (rows === null || gen !== generation) return 0
+      const cut = deleteCutoffs()
+      if (cut.size === 0) return 0
+      const names = new Set()
+      for (const r of rows) {
+        if (r.t === 'msg' && (r.media != null || r.card != null) && r.filedAt <= cut.get(r.peer)) names.add(mediaName(r.from, r.id))
+      }
+      return names.size === 0 ? 0 : dropEntries(names, gen)
+    })
+  }
+
+  // Frees the core blocks of the msg and rx rows a delete op hides once they
+  // are older than COMPACT_AFTER_MS, and forgets them in memory. ctl rows
+  // stay: the fold reads them as cutoffs. Never earlier: until the pool
+  // forgets a drop, a pulled copy of it (the self copy of an own message)
+  // would be filed again after the delete, and the message would come back.
+  // -> how many rows were freed; 0 while locked.
+  function compact (now = Date.now()) {
+    const gen = generation
+    return serial(async () => {
+      if (rows === null || gen !== generation) return 0
+      const cut = deleteCutoffs()
+      if (cut.size === 0) return 0
+      const free = rows.filter((r) => (r.t === 'msg' || r.t === 'rx') && r.filedAt <= cut.get(r.peer) && now - r.filedAt > COMPACT_AFTER_MS && Number.isSafeInteger(blockOf.get(r)))
+      if (free.length === 0) return 0
+      // Their photos first: a freed row would leave the entry nameless.
+      const names = new Set(free.filter((r) => r.t === 'msg' && (r.media != null || r.card != null)).map((r) => mediaName(r.from, r.id)))
+      if (names.size > 0) await dropEntries(names, gen)
+      if (rows === null || gen !== generation) return 0
+      const indexes = free.map((r) => blockOf.get(r)).sort((a, b) => a - b)
+      const ranges = []
+      for (const i of indexes) {
+        const last = ranges[ranges.length - 1]
+        if (last !== undefined && last[1] === i) last[1] = i + 1
+        else ranges.push([i, i + 1])
+      }
+      const gone = new Set()
+      try {
+        await withCore(async (core) => {
+          for (const [start, end] of ranges) {
+            await core.clear(start, end)
+            for (let i = start; i < end; i++) gone.add(i)
+          }
+        })
+      } finally {
+        // Only what the core confirmed is forgotten; the rest is retried.
+        if (gen === generation && rows !== null && gone.size > 0) {
+          rows = rows.filter((r) => !gone.has(blockOf.get(r)))
+          version++
+        }
+      }
+      return free.filter((r) => gone.has(blockOf.get(r))).length
+    })
+  }
+
   // ---- visitas ----
 
   function visitKey () {
@@ -1013,7 +1133,7 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
     return queue
   }
 
-  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
+  return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, dropDeletedMedia, compact, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
 }
 
-module.exports = { createDmStore, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }
+module.exports = { createDmStore, COMPACT_AFTER_MS, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }
