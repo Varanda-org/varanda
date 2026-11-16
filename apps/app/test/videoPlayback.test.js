@@ -341,6 +341,22 @@ test('the web player: refused even muted is blocked, not an error', (t) => {
   t.absent(native.includes('onPlayBlocked?.('), 'the phone player never calls it')
 })
 
+// The press that starts a clip unmounts its control (the poster, "Tentar de
+// novo", full screen and back), so focus fell to the page.
+test('the web player: a named video takes back lost focus, never focus held elsewhere', (t) => {
+  const web = src('VideoPlayer.web.js')
+  t.ok(web.includes("aria-label={typeof label === 'string' && label !== '' ? label : undefined}"), 'the element carries the label as its name')
+  t.ok(web.includes('tabIndex={controls === true ? 0 : undefined}'), 'a player with controls is focusable in every browser')
+  const layout = web.slice(web.indexOf('useLayoutEffect(() => {'), web.indexOf('}, [uri])'))
+  t.ok(layout.includes("if (controls === true && typeof document !== 'undefined' && (document.activeElement === null || document.activeElement === document.body)) {\n      try { el.focus({ preventScroll: true }) } catch {}"), 'focus moves only when it was lost, without scrolling, and only to a player with controls')
+  t.ok(layout.indexOf('el.focus(') > layout.indexOf('el.src = uri'), 'after the source is set')
+  t.ok(layout.indexOf('el.focus(') < layout.indexOf('if (playingRef.current) play()'), 'before the first play')
+  const grid = fs.readFileSync(path.join(__dirname, '../src/ui/MediaGrid.js'), 'utf8')
+  const stage = grid.slice(grid.indexOf('function VideoStage ('), grid.indexOf('function VideoPoster ('))
+  t.ok(stage.includes('label={label}'), 'the stage passes its label to the player')
+  t.is((grid.match(/<VideoStage\n(\s+full\n)?\s+uri=\{clip\.uri\}\n\s+label=\{label\}/g) || []).length, 2, 'inline and full screen stages get the poster label')
+})
+
 // A press calls the player through control in its own handler: a browser that
 // wants a gesture may not count the effect that applies the new props later.
 test('the web player: control plays and unmutes in the press, for the live player only', (t) => {

@@ -12,7 +12,8 @@
 // player of this uri is live: a press calls them in its own handler, because
 // a browser that wants a gesture may not count the effect that applies the
 // new props later.
-// startMs resumes once metadata is ready; inline is ignored here. progress()
+// startMs resumes once metadata is ready; inline is ignored here. label, a
+// string, names the element for screen readers (aria-label). progress()
 // reads the live { ms, durationMs, playing, ended }, or null once gone.
 
 import React, { useEffect, useLayoutEffect, useRef } from 'react'
@@ -36,7 +37,7 @@ const FILL = { width: '100%', height: '100%', display: 'block' }
 // timeupdate may fire every frame in some browsers: keep about 250 ms.
 const TICK_MS = VIDEO_PROGRESS_MS * 0.8
 
-export default function VideoPlayer ({ uri, playing = false, muted = false, controls = false, fit = 'contain', style, startMs = 0, inline = false, onReady, onEnd, onError, onSoundRefused, onProgress, onPlayBlocked, control }) {
+export default function VideoPlayer ({ uri, label, playing = false, muted = false, controls = false, fit = 'contain', style, startMs = 0, inline = false, onReady, onEnd, onError, onSoundRefused, onProgress, onPlayBlocked, control }) {
   const ref = useRef(null)
   const live = useRef(null)
   const controlRef = useRef(control)
@@ -166,6 +167,12 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
       },
       ended: () => el.ended
     }
+    // Every mount follows a press whose control unmounted (the poster,
+    // "Tentar de novo", full screen and back): focus left with it. Take it
+    // only when it was lost, never from another control.
+    if (controls === true && typeof document !== 'undefined' && (document.activeElement === null || document.activeElement === document.body)) {
+      try { el.focus({ preventScroll: true }) } catch {}
+    }
     const ctl = controlRef.current
     const handle = {
       play: () => {
@@ -216,10 +223,12 @@ export default function VideoPlayer ({ uri, playing = false, muted = false, cont
         playsInline
         preload='metadata'
         controls={controls === true}
+        tabIndex={controls === true ? 0 : undefined}
         controlsList='nodownload nofullscreen noremoteplayback'
         disablePictureInPicture
         disableRemotePlayback
         x-webkit-airplay='deny'
+        aria-label={typeof label === 'string' && label !== '' ? label : undefined}
         style={{ ...FILL, objectFit: FITS.has(fit) ? fit : 'contain' }}
       />
     </View>

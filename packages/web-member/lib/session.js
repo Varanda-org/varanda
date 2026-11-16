@@ -155,9 +155,21 @@
 // reload or a new connection from the next own-synced), and once per
 // arming by a 'settled' report after the passes ran out; a failed pass or
 // a failed root queues another within the bound; a 'group-writer' (a writer
-// core stored for the first time, once per key and at most
-// MAX_UPKEEP_WRITERS keys per session) arms afresh, so the distributor
-// plans after the new device's writer arrived; while armed, a
+// core stored for the first time, either in a PRIVATE group this device
+// writes in, or bound by the own diary, i.e. another device's writer: the
+// event says so; once per key and at most MAX_UPKEEP_WRITERS keys per
+// session) arms afresh, so the distributor plans after the new device's
+// writer arrived and a new device enrols once the account's writer it waited
+// for is held. Any other writer (a public group or a foreign diary without an
+// own writer there) has no keys to hand over and changes no plan, so it arms
+// nothing. Where the event is not armed for (cap, locked, once run) a
+// private group with an own writer still leaves upkeepFull set, and
+// `private` is false while the root's visibility is unknown, which the
+// 10-minute full-plan age (UPKEEP_FULL_MAX_AGE_MS) covers.
+// A boxless writer of a root not held yet (a join before the root arrived;
+// the root's visibility is unknown, so a public one too) stays a transient
+// 'unheld' skip, so the arming lives until the root's 'groups-changed' plans
+// the rebox; while armed, a
 // 'groups-changed' (the root or writer a skipped root waited for) queues
 // another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
 // most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
@@ -508,8 +520,9 @@ const MAX_UPKEEP_PASSES = 3
 const UPKEEP_DELAY_MS = 1500
 // Per arming, whatever progress or a 'settled' report granted since.
 const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
-// Writer keys whose 'group-writer' armed the upkeep, per session.
-const MAX_UPKEEP_WRITERS = 512
+// Writer keys whose 'group-writer' armed the upkeep, per session: only a
+// private group the device writes in arms it (sync.js tells which).
+const MAX_UPKEEP_WRITERS = 64
 // The longest the upkeep trusts the precheck before planning in full again.
 const UPKEEP_FULL_MAX_AGE_MS = 10 * 60 * 1000
 // The lease (see the header): the gap after an idle end, how long a run
@@ -1401,14 +1414,20 @@ function createBrowserSession ({
               case 'group-writer':
                 // A writer stored after the pass that planned on the own
                 // length its join made (or another diary's entitled
-                // writer): a fresh arming, once per writer key.
-                if (!once && !internal && keyPair !== null && groupPrf !== null && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer) && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
-                  upkeepWriters.add(ev.writer)
-                  armUpkeep(upkeepLength)
-                } else if (typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
-                  // Not armed for (a once or internal run, the key cap,
-                  // locked): a later echo still plans the shares in full.
-                  upkeepFull = true
+                // writer): a fresh arming, once per writer key. Only a
+                // private group this device writes in can have keys to
+                // hand to it, and a writer the own diary binds (another
+                // device of the account) is what a new device waits for to
+                // enrol; anything else changes no plan.
+                if ((ev.account === true || (ev.private === true && ev.own === true)) && typeof ev.writer === 'string' && HEX64.test(ev.writer) && !upkeepWriters.has(ev.writer)) {
+                  if (!once && !internal && keyPair !== null && groupPrf !== null && upkeepWriters.size < MAX_UPKEEP_WRITERS) {
+                    upkeepWriters.add(ev.writer)
+                    armUpkeep(upkeepLength)
+                  } else {
+                    // Not armed for (a once or internal run, the key cap,
+                    // locked): a later echo still plans the shares in full.
+                    upkeepFull = true
+                  }
                 }
                 return
               case 'group-synced':
@@ -3575,17 +3594,26 @@ function createBrowserSession ({
     })
     if (state === 'current') {
       if (!trackingOwn()) dmRecheck = true
-      if ((await store.readDmKey(storage)) === null) await store.writeDmKey(storage, gen)
-      // Only a write made in this session can still be waiting for its push
-      // (an earlier dm.enable whose push failed); a fresh start pushes nothing.
-      if (localLength !== null) await pushAfterWrite()
+      const held = await store.readDmKey(storage)
+      if (held === null) await store.writeDmKey(storage, gen)
+      // A write made in this session, or a dm-key append whose push the
+      // seeder never confirmed (kv push, kept across sessions), still waits
+      // for its push; any other fresh start pushes nothing.
+      const marked = held !== null && held.push !== undefined
+      if (localLength !== null || marked) await pushAfterWrite()
+      if (marked && !unpushed) await store.writeDmKey(storage, held.gen)
       return { box, gen, seq: null }
     }
     await ensureCaughtUp(epoch)
     const r = await withStore((c) => member.dmKeyEnsure(c, { box, gen }))
     if (r.seq !== null) wrote(r.seq)
-    await store.writeDmKey(storage, gen)
+    const held = await store.readDmKey(storage)
+    const push = r.seq !== null ? r.seq + 1 : (held !== null && held.push !== undefined ? held.push : null)
+    // Marked before the push, so a push that fails or never ends leaves it
+    // for the next dm.enable.
+    await store.writeDmKey(storage, gen, push)
     await pushAfterWrite()
+    if (push !== null && !unpushed) await store.writeDmKey(storage, gen)
     return r
   }
 
