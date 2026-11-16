@@ -1015,12 +1015,14 @@ function m4a ({ ms = 3000, handlers = ['soun'], pad = 0 } = {}) {
   const ascii = (s) => Array.from(s, (c) => c.charCodeAt(0))
   const box = (type, ...parts) => { const body = parts.flat(); return [...be32(8 + body.length), ...ascii(type), ...body] }
   // A real sound track: mdhd timescale 1000, a self-contained data reference,
-  // one mp4a sample entry and a sample table as long as `ms`.
-  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 25, 0, 1, 0, 4, 17, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 2, 18, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(1), be32(ms)), box('stsz', [0, 0, 0, 0], be32(1), be32(1)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(1), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
+  // one mp4a sample entry (AAC at an explicit 1024000 Hz: a 1024-sample
+  // access unit lasts 1 ms) and `ms` samples of one tick; the mdat holds at
+  // least their one byte each.
+  const trak = (h) => box('trak', box('mdia', box('mdhd', new Array(12).fill(0), be32(1000), be32(0), [0, 0, 0, 0]), box('hdlr', [0, 0, 0, 0], be32(0), ascii(h), be32(0), be32(0), be32(0), [0]), box('minf', box('dinf', box('dref', [0, 0, 0, 0], be32(1), box('url ', [0, 0, 0, 1]))), box('stbl', box('stsd', [0, 0, 0, 0], be32(1), box('mp4a', new Array(28).fill(0), box('esds', [0, 0, 0, 0], [3, 28, 0, 1, 0, 4, 20, 64, 21, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 23, 135, 208, 0, 16, 6, 1, 2]))), box('stts', [0, 0, 0, 0], be32(1), be32(ms), be32(1)), box('stsz', [0, 0, 0, 0], be32(1), be32(ms)), box('stsc', [0, 0, 0, 0], be32(1), be32(1), be32(ms), be32(1)), box('stco', [0, 0, 0, 0], be32(1), be32(0))))))
   return b4a.from([
     ...box('ftyp', ascii('M4A '), be32(0), ascii('isom')),
     ...box('moov', box('mvhd', [0, 0, 0, 0], be32(0), be32(0), be32(1000), be32(ms), new Array(80).fill(0)), ...handlers.map(trak)),
-    ...box('mdat', new Array(pad).fill(9))
+    ...box('mdat', new Array(Math.max(pad, ms)).fill(9))
   ])
 }
 
@@ -1304,6 +1306,61 @@ test('DM cards bind their thumbnail to the recipient and survive ingestion, reop
   t.is((await errorOf(s.engine.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, 'mídia indisponível')
   other.lock()
   t.is((await errorOf(other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }))).message, LOCKED)
+})
+
+test('a photo still downloading when its conversation is deleted is not cached afterwards', async (t) => {
+  const blob = require('@varanda/core/lib/blob')
+  const blobPath = require.resolve('../lib/blob')
+  const realBlob = require(blobPath)
+  const frames = new Map()
+  const gate = { held: false, release: null, wait: null }
+  const options = {
+    mediaOrigin: 'http://127.0.0.1',
+    fetch: async (url) => {
+      if (gate.held) await gate.wait
+      return new Response(frames.get(url), { status: frames.has(url) ? 200 : 404 })
+    }
+  }
+  require.cache[blobPath].exports = {
+    ...realBlob,
+    createBlobClient: () => ({
+      async send (sealed) {
+        for (let i = 0; i < sealed.descriptor.chunks; i++) {
+          const frame = blob.encodeChunk({ id: sealed.id, index: i, count: sealed.descriptor.chunks, kid: b4a.alloc(8), sig: b4a.alloc(dmCore.DROP.SIG_BYTES), token: b4a.alloc(32), bytes: sealed.cipher.subarray(i * blob.BLOB_CHUNK_BYTES, (i + 1) * blob.BLOB_CHUNK_BYTES) })
+          frames.set('http://127.0.0.1/blob/' + sealed.descriptor.id + '/' + i, frame)
+        }
+        sealed.acked.fill(true)
+      },
+      walletSize: async () => 1000,
+      topUp: async () => 0
+    })
+  }
+  let s
+  try { s = await sendingEngine(t, { stamps: 4, options }) } finally { require.cache[blobPath].exports = realBlob }
+  const drops = []
+  s.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
+  s.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
+  const bytes = new Uint8Array([255, 216, 255, 192, 0, 17, 8, 0, 48, 0, 64, 3, 1, 17, 0, 2, 17, 1, 3, 17, 1, 255, 218, 0, 2, 255, 217])
+  const image = await s.engine.putMedia(s.own, s.kp, { bytes: new Uint8Array(bytes), mime: 'image/jpeg', width: 64, height: 48, to: s.peer })
+  const sent = await s.engine.send(s.own, s.kp, { to: s.peer, text: 'link', card: { url: 'https://example.org/post', host: 'example.org', title: 'Título', desc: '', image } }, s.recipientBox)
+
+  const storage = memoryNodeStorage()
+  const other = engineWithDmLink(s.link)({ storage, association: s.association, ...options })
+  t.teardown(() => other.close(), { force: true })
+  await other.unlock(s.prf)
+  await other.loaded()
+  t.is((await other.pull(s.own)).added, 1, 'the self copy is ingested by another device')
+  const cached = async () => ((await storage.readJson('dmMediaIndex')) || { items: [] }).items.length
+
+  gate.held = true
+  gate.wait = new Promise((resolve) => { gate.release = resolve })
+  const reading = other.readMedia(s.own, { from: s.own, id: sent.id, index: 'card' }).catch(() => null)
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  await other.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  gate.release()
+  await reading
+  await other.idle()
+  t.is(await cached(), 0, 'nothing was cached for the deleted message')
 })
 
 test('dm.react: two stamps and two puts as one dm.send; a no-op sends nothing; a missing target or no stamps refuses', async (t) => {
@@ -2353,4 +2410,149 @@ test('visitas: rows older than 30 days are dropped at rest when the list is read
   t.alike(await B.engine.visitList(B.own, now + visitsCore.VISIT_KEEP_DAYS * 86400000), [], 'past 30 days: not listed')
   t.not((await B.storage.readJson('dmVisits')).box, before, 'rewritten at rest')
   t.alike(await B.engine.visitList(B.own, now), [], 'and gone, not only hidden')
+})
+
+// ---- local compaction of deleted conversations (lib/dm-store.js compact) ----
+
+const DAY = 86400000
+
+// The own store with its compaction calls counted; failCompact makes them throw.
+function compactSpy (counts, { failCompact = false } = {}) {
+  return (options) => {
+    const s = createDmStore(options)
+    const compact = s.compact
+    const drop = s.dropDeletedMedia
+    s.compact = (now) => {
+      counts.compact++
+      if (failCompact) return Promise.reject(new Error('disco cheio'))
+      return compact(now)
+    }
+    s.dropDeletedMedia = () => {
+      counts.media++
+      return drop()
+    }
+    return s
+  }
+}
+
+// Which blocks of the dm-local core still hold data.
+async function localBlocks (storage) {
+  const core = new Hypercore(storage.core(store.DM_LOCAL), { valueEncoding: 'binary' })
+  await core.ready()
+  const out = []
+  for (let i = 0; i < core.length; i++) out.push((await core.get(i, { wait: false })) !== null)
+  await core.close()
+  return out
+}
+
+async function compactingEngine (t, { failCompact = false } = {}) {
+  const clock = { t: Date.now() }
+  const counts = { compact: 0, media: 0 }
+  const logs = []
+  const s = await sendingEngine(t, {
+    stamps: 6,
+    options: { log: (line) => logs.push(line), limits: { now: () => clock.t }, createStore: compactSpy(counts, { failCompact }) }
+  })
+  s.link.page = async () => ({ items: [], next: null })
+  await s.engine.idle()
+  return { ...s, clock, counts, logs }
+}
+
+test('dm.set deleted compacts the own store, but only past the pool retention; a reload and an hourly pull free aged rows', async (t) => {
+  const s = await compactingEngine(t)
+  t.is(s.counts.compact, 1, 'once the rows loaded')
+  await s.send()
+  await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  await s.engine.idle()
+  t.is(s.counts.compact, 2, 'right after the delete op was filed')
+  t.is(s.counts.media, 2)
+  t.alike(await localBlocks(s.storage), [true, true], 'inside the bound the blocks stay')
+  t.is((await s.engine.thread(s.own, { peer: s.peer })).messages.length, 0, 'hidden by the fold anyway')
+
+  // A long session: nothing pulled yet, an hour later a pull frees what aged.
+  s.clock.t += 2 * DAY
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.is(s.counts.compact, 3, 'a pull past the hour runs a pass')
+  t.alike(await localBlocks(s.storage), [true, true], 'two days: still inside the bound')
+  s.clock.t += 10 * 60000
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.is(s.counts.compact, 3, 'at most once an hour')
+  s.clock.t += 40 * DAY
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.is(s.counts.compact, 4)
+  t.alike(await localBlocks(s.storage), [false, true], 'the message block is freed, the ctl stays')
+})
+
+test('a reload frees the rows of a deleted conversation that aged while the device was locked', async (t) => {
+  const s = await compactingEngine(t)
+  await s.send()
+  await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' })
+  await s.engine.idle()
+  t.alike(await localBlocks(s.storage), [true, true])
+  s.engine.lock()
+  s.clock.t += 40 * DAY
+  await s.engine.unlock(s.prf)
+  await s.engine.loaded()
+  await s.engine.idle()
+  t.alike(await localBlocks(s.storage), [false, true], 'freed once the rows loaded')
+})
+
+test('without a delete op nothing is freed, however old the rows', async (t) => {
+  const s = await compactingEngine(t)
+  await s.send()
+  s.clock.t += 400 * DAY
+  await s.engine.pull(s.own)
+  await s.engine.idle()
+  t.ok(s.counts.compact >= 2)
+  t.alike(await localBlocks(s.storage), [true])
+  t.is((await s.engine.thread(s.own, { peer: s.peer })).messages.length, 1)
+})
+
+test('a delete op pulled from another own device compacts too', async (t) => {
+  const first = await compactingEngine(t)
+  const drops = []
+  first.link.put = async (bytes) => { drops.push(new Uint8Array(bytes)); return { ok: true, reason: null } }
+  first.link.page = async () => ({ items: drops.map((bytes, i) => ({ bytes, seq: i + 1 })), next: null })
+  await first.send()
+  // The sibling's clock is 40 days ahead from its start (the filing time of
+  // a row is the real one, the compaction age is this clock minus it), so
+  // its unlock pass is the first and the hourly window is still closed when
+  // it pulls: only the delete op itself can start the second pass.
+  const other = await sendingEngineSibling(t, first, 40 * DAY)
+  await other.engine.idle()
+  t.is(other.counts.compact, 1, 'the unlock pass')
+  // Both drops of the send and the ctl: the other device files the self copy and the delete together.
+  await first.engine.set(first.own, first.kp, { peer: first.peer, state: 'deleted' })
+  t.is((await other.engine.pull(first.own)).added, 1, 'the self copy is filed')
+  await other.engine.idle()
+  t.is(other.counts.compact, 2, 'exactly one more pass, for the delete op')
+  t.alike(await localBlocks(other.storage), [false, true], 'the message block is freed past the bound')
+  t.is((await other.engine.thread(first.own, { peer: first.peer })).messages.length, 0)
+})
+
+// Another device of the same passkey and identity on the same pool stand-in.
+async function sendingEngineSibling (t, first, ahead = 0) {
+  const clock = { t: Date.now() + ahead }
+  const counts = { compact: 0, media: 0 }
+  const storage = memoryNodeStorage()
+  const engine = engineWithDmLink(first.link)({ storage, association: first.association, limits: { now: () => clock.t }, createStore: compactSpy(counts) })
+  t.teardown(() => engine.close(), { force: true })
+  await engine.unlock(first.prf)
+  await engine.loaded()
+  return { engine, storage, clock, counts }
+}
+
+test('a failing compaction is a warning: dm.set and the pull still succeed', async (t) => {
+  const s = await compactingEngine(t, { failCompact: true })
+  await s.send()
+  t.alike(await s.engine.set(s.own, s.kp, { peer: s.peer, state: 'deleted' }), { ok: true })
+  s.clock.t += 40 * DAY
+  const pulled = await s.engine.pull(s.own)
+  t.is(pulled.incomplete, false)
+  await s.engine.idle()
+  t.ok(s.logs.some((l) => l.startsWith('aviso: limpeza local')), 'warned')
+  t.alike(await localBlocks(s.storage), [true, true], 'nothing was freed')
 })

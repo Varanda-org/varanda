@@ -380,11 +380,11 @@ test('pages lifecycle: close, move, successor and delegate recipients', async (t
   t.ok(verifyMoved(qSucc.body.moved, Q, ctx.association, { owner: eva.hex }).ok, 'the detached statement verifies')
   t.is((await api('GET', '/account/username/quitanda')).body.member, qMoved.to)
 
-  // ---- rate: 2 closes or moves per owner per day (the window is in
-  // memory, and the restart above began a new one) ----
-  for (const name of ['roda', 'rodinha']) t.is((await s.close(ana, await s.create(ana, name))).status, 200)
-  const R3 = await s.create(ana, 'rodona')
-  t.is((await s.close(ana, R3)).body.error, 'limite', 'a third close in a day is refused')
+  // ---- rate: 2 closes or moves per owner per day (kept in pages.json) ----
+  const rita = await s.newMember('rita')
+  for (const name of ['roda', 'rodinha']) t.is((await s.close(rita, await s.create(rita, name))).status, 200)
+  const R3 = await s.create(rita, 'rodona')
+  t.is((await s.close(rita, R3)).body.error, 'limite', 'a third close in a day is refused')
 
   // ---- invite by key to a core node's delegate ----
   const D = await s.create(bia, 'doceria')
@@ -530,4 +530,49 @@ test('pages lifecycle: a close whose group leaves failed is refused before any t
   failures = 0
   t.is((await s.close(ana, P1)).status, 200, 'the close runs once the leaves succeed')
   t.is((await s.close(ana, P2)).status, 200, 'the refused attempt did not use the day cap')
+})
+
+test('pages lifecycle: the 2 per 24 h cap survives a restart, and a charged use resent after it is not charged twice', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx, api } = s
+  const ana = await s.newMember('ana')
+  const [P1, P2, P3] = [await s.create(ana, 'pastelaria'), await s.create(ana, 'barbearia'), await s.create(ana, 'mercearia')]
+  t.is((await s.close(ana, P1)).status, 200)
+  // An uncertain close keeps its charge.
+  const realClose = ctx.writer.closePage
+  ctx.writer.closePage = async () => { throw new Error('falha injetada') }
+  const { nonce } = await s.start(ana, 'close')
+  const f = { page: P2, gen: ctx.pagesStore.get(P2).gen + 1, at: new Date().toISOString(), nonce, actor: ana.hex, association: ctx.association }
+  const body = { member: ana.hex, nonce, page: P2, record: { type: 'page-close', ...f, signature: signClose(f, ana.kp) } }
+  const first = await api('POST', '/account/pages/close', body)
+  ctx.writer.closePage = realClose
+  t.is(first.body.uncertain, true, 'the close is uncertain: ' + JSON.stringify(first.body))
+
+  await s.restart(async () => {})
+  t.is((await s.close(ana, P3)).body.error, 'limite', 'a third use after the restart is refused')
+  // The nonce binds the member and the action, not the page: reusing the
+  // uncertain close's nonce on another page is a new use.
+  const { nonce: n3 } = await s.start(ana, 'close')
+  const crafted = { page: P3, gen: ctx.pagesStore.get(P3).gen + 1, at: new Date().toISOString(), nonce: n3, actor: ana.hex, association: ctx.association }
+  const first3 = await api('POST', '/account/pages/close', { member: ana.hex, nonce: n3, page: P3, record: { type: 'page-close', ...crafted, signature: signClose(crafted, ana.kp) } })
+  t.is(first3.body.error, 'limite', 'a fresh nonce on a third page is refused')
+  const reuse = { ...f, page: P3, gen: ctx.pagesStore.get(P3).gen + 1 }
+  const swapped = await api('POST', '/account/pages/close', { member: ana.hex, nonce, page: P3, record: { type: 'page-close', ...reuse, signature: signClose(reuse, ana.kp) } })
+  t.is(swapped.body.error, 'limite', "an uncertain close's nonce on another page is a new use")
+  await s.restart(async () => {})
+  const again = await api('POST', '/account/pages/close', body)
+  t.is(again.status, 200, 'the resend of the charged use is not charged again: ' + JSON.stringify(again.body))
+})
+
+test('pages lifecycle: a move is charged to the cap that survives a restart', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const [M, P, Q] = [await s.create(ana, 'mercado'), await s.create(ana, 'padaria'), await s.create(ana, 'quitanda')]
+  const moved = await s.move(ana, M)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  t.is((await s.close(ana, P)).status, 200)
+  await s.restart(async () => {})
+  t.is((await s.move(ana, Q)).body.error, 'limite', 'a third use after the restart is refused')
 })

@@ -19,7 +19,7 @@
 import rpc from '@varanda/rpc'
 import { buildRequest, readJson, formatNextChange } from './account.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
-import { isLegacyPage, legacyBundleOf, nextGen, planShares, secretsParams } from './pageSecrets.js'
+import { isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -768,4 +768,55 @@ export function pagesFeedKeys (follows, max = FEED_KEYS) {
     if (!out.includes(f.key)) out.push(f.key)
   }
   return out
+}
+
+// ---- forgetting a page's keys on this device (dm.pageForget) ------------------
+
+// Best effort and never repeated by itself: the keys and the conversations
+// this node holds for a page go. dm.pageLegacyBlocks answers only while the
+// node holds that page's keys, so a page it never held writes nothing. A
+// core node holds none. -> true when the node forgot it.
+export async function pagesDmForget (node, page) {
+  const call = signer(node)
+  if (call === null || pagesDmCoreOnly(node) || !isKey(page)) return false
+  try {
+    await call('dm.pageLegacyBlocks', { page })
+  } catch {
+    return false
+  }
+  try {
+    await call('dm.pageForget', { page })
+    return true
+  } catch {
+    return false
+  }
+}
+
+// The newest 'list' answer applied per account origin and member this
+// session (another origin's list never names this one's pages), and the
+// pages a forget was tried for (each once).
+const listRuns = new Map()
+const forgetTried = new Set()
+let listCalls = 0
+
+// The signed 'list' read. An answer newer than the last one applied for the
+// member also forgets, on this device, the keys of the pages it shows the
+// member no longer runs (pageSecrets.js pagesNoLongerRun); `also` names the
+// acting page and the pages the node flagged. A failed read forgets nothing.
+export async function pagesList (node, { member, also = [] } = {}) {
+  const seq = ++listCalls
+  const runKey = String(pagesOrigin(node)) + ' ' + member
+  const data = await actAs(node, { member, action: 'list', page: '', op: {} })
+  const last = listRuns.get(runKey)
+  if (last !== undefined && last.seq > seq) return data
+  const out = pagesNoLongerRun(data, { before: last ? last.run : [], also, tried: forgetTried })
+  if (out === null) return data
+  listRuns.set(runKey, { seq, run: out.run })
+  for (const page of out.gone) {
+    forgetTried.add(page)
+    pagesDmForget(node, page).then((forgot) => {
+      if (forgot && typeof node.clearPageMismatch === 'function') node.clearPageMismatch(page)
+    }).catch(() => {})
+  }
+  return data
 }

@@ -10,7 +10,7 @@ const net = require('node:net')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { WebSocketServer, WebSocket, createWebSocketStream } = require('ws')
-const { testnet, tmpDir, localSwarmOptions } = require('./helpers/net')
+const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
@@ -484,5 +484,33 @@ test('page.read: a tombstone in the same window as its cleared target never stal
   const elapsed = Date.now() - started
   t.alike([r.gen, r.seq, r.complete], [1, 1, true], 'complete by the roster rule')
   t.ok(elapsed < peekTimeoutMs / 2, 'no wait for the peek deadline (' + elapsed + ' ms)')
+  t.alike(internal, [], 'no internal error')
+})
+
+test('diary.peek of a followed page shows a held page-* block a tombstone names, a deleted post stays missing', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const assoc = association()
+  const issuer = issuerOf(assoc)
+  const stack = await seederStack(t, bootstrap, assoc)
+  const ownerKp = crypto.keyPair()
+  const owner = hex(ownerKp.publicKey)
+  // A leaked key deletes the roster at 2 (no effect, protocol §12) and the
+  // post at 3 (cleared, so the seeder never gets it).
+  const P = await served(t, {
+    assoc,
+    stack,
+    cleared: [3],
+    records: [profileRecord({ name: 'Padaria', bio: '' }), (k) => signed('page-roster', { page: k, gen: 1, owner, admins: [], prev: null, at: AT, nonce: RNONCE, association: assoc.hex }, ownerKp, issuer), postRecord({ text: 'apagado' }), postRecord({ text: 'fica' }), deleteRecord({ seq: 2, at: AT }), deleteRecord({ seq: 3, at: AT })]
+  })
+  const { web, internal } = await browserNode(t, { assoc, seederUrl: stack.url })
+  await web.request('follow.add', { key: P.key })
+  // Downloaded during the run: the tombstones arrive as blocks, not in the
+  // initial scan of a stored replica.
+  await web.request('sync.start', {})
+  await until(() => web.events.some((e) => e.name === 'sync.event' && e.data.line === 'downloaded ' + P.key + ' 7'), { name: 'P baixado', timeoutMs: 60000 })
+  const r = await web.request('diary.peek', { author: P.key, seqs: [2, 3, 4] })
+  t.alike(r.entries.map((e) => [e.seq, e.record.type]), [[2, 'page-roster'], [4, 'post']], 'the roster still shows')
+  t.alike(r.missing, [3], 'the deleted post is missing at once')
   t.alike(internal, [], 'no internal error')
 })

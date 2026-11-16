@@ -55,8 +55,8 @@
 // lock drops every waiting one. A blob gone (404) or that does not
 // verify, with nothing cached, shows as media { unavailable: true } while
 // the text still shows. Only reads are ever repeated, never a put. lock()
-// forgets the sealed blobs; wipeMedia() (lock, sign-out, reset) deletes the
-// cache as well.
+// forgets the sealed blobs; wipeMedia() (sign-out, reset, a failed unlock;
+// not a lock) deletes the cache as well.
 //
 // Páginas (docs/rpc.md 5.114): the page secrets this identity holds live in
 // ./page-dm.js. Each held page has its own local store (./dm-store.js under
@@ -147,6 +147,8 @@ const VISIT_DELAY_SPAN_MS = 10 * 60000
 const VISIT_BURST_WAIT_MS = 60000
 const PREVIEW_MAX = 140
 const TOP_UP_EVERY_MS = 600000
+// A pull starts a local compaction pass at most this often (housekeepDue).
+const COMPACT_EVERY_MS = 3600000
 const PENDING_MAX = 32
 // A failed top-up is tried again after this, not after TOP_UP_EVERY_MS.
 const TOP_UP_RETRY_MS = 60000
@@ -256,7 +258,8 @@ function zeroPair (pair) {
 // limits (tests): issueBurst, issuePaceMs, topUpEveryMs, topUpRetryMs,
 // budgetBytes, pageMax, openMax, cacheBytesMax (./dm-store.js), link
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
-// (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls).
+// (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls),
+// now (the clock the local compaction reads).
 // createStore, fetch and mediaOrigin: tests only.
 function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue } = {}) {
   const L = {
@@ -272,6 +275,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     blob: {},
     fetch: {},
     fold: dmFold.fold,
+    now: Date.now,
     // The delay before a queued visit ping goes out, in ms (tests set it).
     visitDelay: () => VISIT_DELAY_MIN_MS + Math.floor(Math.random() * (VISIT_DELAY_SPAN_MS + 1)),
     // Tests only: the summary write delay and a gate before the own rows load.
@@ -299,6 +303,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   let topping = null
   // The earliest time the next unforced top-up may run.
   let nextTopUp = 0
+  // The earliest time a pull may start the next local compaction pass.
+  let nextCompact = 0
   // Every operation in flight (pull, send, set, seen, top-up): idle() waits
   // for them, so a reset never deletes the store under one.
   const inflight = new Set()
@@ -485,6 +491,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       throw err
     }
     if (gen !== generation || !local.unlocked()) return
+    nextCompact = L.now() + COMPACT_EVERY_MS
+    housekeep(personal, gen)
     // Ctls left from before go out now (a stamped one needs no new stamp),
     // the own queue first, then each held page's.
     if ((await store.readDmCtlQueue(storage)).length > 0) track(flushQueued())
@@ -494,6 +502,29 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
     // Visit pings queued before go out on their own delay.
     track(scheduleVisits().catch(noop))
+  }
+
+  // Local housekeeping for the conversations a delete op hides (dm-store.js
+  // compact): their cached photos go at once, their blocks once they are
+  // older than the pool's retention. Never the network, and never in the
+  // way: it runs apart from the caller and a failure is a warning.
+  function housekeep (ctx, gen) {
+    return track((async () => {
+      try {
+        if (gen !== generation || !ctx.local.unlocked()) return
+        await ctx.local.dropDeletedMedia()
+        await ctx.local.compact(L.now())
+      } catch {
+        if (gen === generation) log('aviso: limpeza local das conversas apagadas não concluída')
+      }
+    })())
+  }
+
+  // At most once an hour, from a pull: a long session frees rows as they age.
+  function housekeepDue (gen, ctxs) {
+    if (gen !== generation || L.now() < nextCompact) return
+    nextCompact = L.now() + COMPACT_EVERY_MS
+    for (const ctx of ctxs) housekeep(ctx, gen)
   }
 
   function lock () {
@@ -516,8 +547,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     gone.clear()
   }
 
-  // Lock, sign-out and reset: the plaintext cache and every list summary go
-  // too (needs no key).
+  // Sign-out, reset and a failed unlock (a lock keeps them): the sealed
+  // media cache and every list summary go too (needs no key).
   function wipeMedia () {
     forgetAllBlobs()
     dropQueued(false, LOCKED)
@@ -608,7 +639,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       // A failed row load drops the store as a failed key stage does, so
       // the next call starts a fresh unlock instead of meeting a dead one.
       const failed = s
-      lc.loaded().catch(() => {
+      const opened = generation
+      lc.loaded().then(() => housekeep(failed, opened), () => {
         if (pageStores.get(page) === failed) {
           pageStores.delete(page)
           foldMemo.delete(failed.local)
@@ -943,7 +975,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         throw new UsageError(LOCKED)
       }
       try {
-        await local.putMedia(m.from, m.id, out)
+        // A message a delete op hides is never shown again: no cache write.
+        if (!local.hiddenByDelete(m.from, m.id)) await local.putMedia(m.from, m.id, out)
       } catch {
         if (gen === generation) log('aviso: mídia aberta mas não guardada neste aparelho')
       }
@@ -1417,7 +1450,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     entry.plains = null
     if (plains.length > 0) {
       try {
-        await local.putMedia(row.from, row.id, plains)
+        // Deleted while the upload ran: nothing to cache.
+        if (!lc.hiddenByDelete(row.from, row.id)) await local.putMedia(row.from, row.id, plains)
       } catch {}
       plains.forEach(wipe)
     }
@@ -1772,6 +1806,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const id = dm.newMessageId()
     const at = nowIso()
     await local.append([{ t: 'ctl', id, op: state, peer, at, filedAt: local.nextFiled() }])
+    if (state === 'deleted') housekeep(personal, generation)
     const inner = dm.buildInner({ kind: 'ctl', id, at, op: state, peer }, keyPair)
     let sealed
     try {
@@ -1873,6 +1908,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
             if (r.t === 'msg') added++
             else applied++
           }
+          // A delete from another own device.
+          if (rows.some((r) => r.t === 'ctl' && r.op === 'deleted')) housekeep(personal, gen)
         }
         for (const p of along) await filePageItems(p, missed, mod)
         if (page.items.length > 0) {
@@ -1913,6 +1950,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (p.added > 0 || p.applied > 0) emit('dm.changed', { added: p.added, page: p.page })
       }
     }
+    housekeepDue(gen, [personal, ...scans.map((p) => p.ctx)])
     return { added, cursor, incomplete }
   }
 
@@ -1956,6 +1994,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (r.t === 'msg') p.added++
       else p.applied++
     }
+    if (rows.some((r) => r.t === 'ctl' && r.op === 'deleted')) housekeep(p.ctx, generation)
   }
 
   // The held pages and their boxes (hex), for the published-key check the
@@ -2526,6 +2565,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         }
       }
       if (!ctx.local.hasOp(b.id)) await ctx.local.append([{ t: 'ctl', id: b.id, op: b.op, peer: b.peer, at: b.at, filedAt: ctx.local.nextFiled() }])
+      if (b.op === 'deleted') housekeep(ctx, generation)
       if (d.queued !== true) {
         const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed }), ctx.prefix))
         d.queued = true
