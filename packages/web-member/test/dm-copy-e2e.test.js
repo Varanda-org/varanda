@@ -93,6 +93,7 @@ test('a history copy made on one device is imported by another of the same passk
   t.is(made.leftOut, 0)
   const progress = A.web.events.filter((e) => e.name === 'dm.copyProgress').map((e) => e.data)
   t.ok(progress.length >= 2 && progress[progress.length - 1].done === progress[progress.length - 1].total, 'progress ran to the end')
+  t.ok(progress.every((p, i) => p.total === progress[0].total && (i === 0 || p.done >= progress[i - 1].done)), 'the total stays put and done never goes back')
   const week = JSON.parse(fs.readFileSync(path.join(host.dataDir, 'copy-stamps.json'), 'utf8'))
   t.ok(Object.keys(week).length > 0, 'the seeder counted the copy against its own weekly file')
 

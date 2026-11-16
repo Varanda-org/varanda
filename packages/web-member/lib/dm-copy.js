@@ -285,13 +285,18 @@ async function fileRows (ctx, storage, self, rawRows, blocked, { pin = null, now
   // of one already filed.
   let span = 0
   for (const r of rawRows) {
-    if (r !== null && typeof r === 'object' && isCount(r.n) && r.n < ROWS_MAX && r.n + 1 > span) span = r.n + 1
-    const c = cleanRow(r, self, blocked)
-    if (c === null || taken.has(c.n)) {
+    const validN = r !== null && typeof r === 'object' && isCount(r.n) && r.n < ROWS_MAX
+    if (validN && r.n + 1 > span) span = r.n + 1
+    // The first raw row with an n owns its slot even when a block drops it, so
+    // an unblock between an interrupted import and its retry cannot hand the
+    // slot to another row.
+    const dup = validN && taken.has(r.n)
+    if (validN) taken.add(r.n)
+    const c = dup ? null : cleanRow(r, self, blocked)
+    if (c === null) {
       skipped++
       continue
     }
-    taken.add(c.n)
     items.push(c)
   }
   items.sort((x, y) => x.n - y.n)
@@ -554,20 +559,29 @@ function createDmCopy (env) {
         else cands.push(m)
       }
       cands.sort((x, y) => y.filedAt - x.filedAt)
-      const total = cands.length + 2
-      a.total = total
-      let done = 0
       // The text goes first: its stamps are taken from the weekly copy
       // allowance before any photo can spend it, and kept in the attempt so a
       // retry reuses them instead of buying again. A large text takes several
-      // batches (each over its own link): between them the unlock is checked
-      // and the sheet leaves "Preparando a cópia".
+      // batches (each over its own link), and each batch is one step of the
+      // progress: between them the unlock is checked and the sheet moves on.
+      // A retry that holds the stamps has no batch.
+      const need = stampsNeeded(rowSets)
+      const batches = a.held === null ? Math.ceil(need / source.chunk) : 0
+      const total = cands.length + 2 + batches
+      a.total = total
+      let done = 0
       if (a.held === null) {
-        a.held = await source.reserve(stampsNeeded(rowSets), () => {
-          if (gen !== env.generation() || !env.unlocked()) return false
+        env.emit('dm.copyProgress', { done, total })
+        const stopped = () => gen !== env.generation() || !env.unlocked()
+        a.held = await source.reserve(need, () => {
+          if (stopped()) return false
+          done++
           env.emit('dm.copyProgress', { done, total })
           return true
-        })
+        }, stopped)
+        // It may have stopped early (the allowance ended): the steps of the
+        // batches not bought are counted as done.
+        done = batches
       }
       checkGen(gen)
       env.emit('dm.copyProgress', { done, total })

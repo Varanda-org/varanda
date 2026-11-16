@@ -528,15 +528,24 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
   // gone, the seeder cannot be reached (an old seeder never answers the
   // kind) or answers badly. reserve(n) is take that gives what it got instead
   // of throwing. `exhausted` says the weekly allowance ended.
+  // take(n, { stop }): stop() is checked before every link and every issue; once
+  // it returns true no further issue is sent and no link opened (the app locked,
+  // so more stamps would only be thrown away). A stopped take ends like any
+  // short purchase, a plain failure that keeps what was bought in the stock, so
+  // reserve hands those stamps over and the source stays ended.
   // Nothing here repeats a request: a batch that fails is a normal error
   // and only the user's next copy asks again.
   function copySource (keyPair, { batch = L.copyBatch } = {}) {
     let stock = []
     let failure = null
+    // A chunk of 0 or a fraction would never shrink what reserve has left.
+    const chunk = Math.max(1, Math.floor(L.copyReserveChunk))
     const source = {
+      // reserve's batch size, so a caller can count the batches.
+      chunk,
       exhausted: false,
       bought: 0,
-      async take (n) {
+      async take (n, { stop = null } = {}) {
         // Stamps already bought are spent first. One failed purchase ends
         // the source for this copy: no request is repeated, and `exhausted`
         // tells the caller whether the weekly allowance ended.
@@ -551,7 +560,8 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
           // after it bought something goes on over a new one. A refusal, the
           // end of the allowance or a link that bought nothing ends it.
           while (stock.length < n) {
-            const { fresh, cut } = await buyCopyStamps(keyPair, Math.max(n - stock.length, batch), source)
+            if (stop !== null && stop()) break
+            const { fresh, cut } = await buyCopyStamps(keyPair, Math.max(n - stock.length, batch), source, stop)
             stock = stock.concat(fresh)
             source.bought += fresh.length
             if (!cut || source.exhausted) break
@@ -572,15 +582,15 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
       // allowance ends or a purchase fails (whatever was bought is handed
       // over, and the source stays ended as take leaves it). Bought in
       // batches of copyReserveChunk, each over its own link; after each,
-      // between(held so far) may return false to stop with what is held.
-      // Never throws.
-      async reserve (n, between = null) {
+      // between(held so far) may return false to stop with what is held, and
+      // stop() ends a purchase in progress (see take). Never throws.
+      async reserve (n, between = null, stop = null) {
         const out = []
         let left = n
         while (left > 0) {
           let got
           try {
-            got = await source.take(Math.min(left, L.copyReserveChunk))
+            got = await source.take(Math.min(left, chunk), { stop })
           } catch {
             out.push(...stock)
             stock = []
@@ -607,7 +617,7 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
   // already bought still count; no link or no key at all throws. cut: the
   // link itself ended (its deadline, a lost socket) rather than the seeder
   // refusing or the allowance ending.
-  async function buyCopyStamps (keyPair, count, source) {
+  async function buyCopyStamps (keyPair, count, source, stop = null) {
     let link
     try {
       link = await openStampLink({ ...linkOpts, limits: { stampDeadlineMs: BLOB_STAMP_LINK_DEADLINE_MS, ...L.link }, keyPair })
@@ -627,6 +637,7 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
       const parsed = postage.parsePublicKey(p)
       if (parsed === null) throw new UsageError(STAMP_FAILED)
       while (fresh.length < count) {
+        if (stop !== null && stop()) break
         if (fresh.length >= L.issueBurst && L.issuePaceMs > 0) await sleep(L.issuePaceMs)
         const token = postage.newToken(parsed.n, 'blob')
         const { blinded, r } = postage.blind(postage.representative(token, 'blob'), parsed.n)

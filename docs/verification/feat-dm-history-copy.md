@@ -63,6 +63,17 @@ Revisão 3 (reexame de 6a104269): a reserva dos selos do texto passou a ser feit
 
 Tempos (`node <arquivo>`, uma vez cada, esta máquina): `blob.test.js` ~57 s; `dm-copy-unit-2` 0,3 s; `dm-copy-unit` 0,1 s; `historyCopy` 0,03 s; `dm-copy-e2e` 74 s; `-2` 65 s; `-3` 73 s; `-4` 60 s.
 
+Revisão 4 (reexame de b9b052dc): um bloqueio ou o desbloqueio (`stop`) passa por `take` e `reserve` até `buyCopyStamps`, que confere antes de cada selo e antes de cada conexão; um `take` interrompido termina como qualquer compra curta (falha simples, os selos comprados ficam e `reserve` os entrega), sem lançar em `reserve`. Cada lote da reserva é um passo do progresso (`total` = mensagens com foto + 2 + lotes; `done` sobe a cada lote e vira o número de lotes ao fim; uma nova tentativa que já guarda os selos não tem lote), e o primeiro evento sai antes da primeira compra. O `n` de toda linha crua com `n` válido é reservado antes do filtro (um bloqueio não passa o lugar a outra linha com o mesmo `n`). O lote da reserva tem no mínimo 1 selo. Os docs dizem "cortada (prazo, conexão perdida)" e registram o limite do `invalido`.
+
+| Arquivo | Testes novos / contagem | Sem a correção |
+|---|---|---|
+| `packages/web-member/test/blob.test.js` | 51 testes, 445 asserções (eram 48 e 414; ~59 s) | sem a conferência de `stop` em `buyCopyStamps`: falham 4 (compra o lote inteiro, 40 emissões); sem ela no laço de `take`: falham 2 ("no link opened"); continuar depois de uma recusa (sem `!cut`): falham 6 do teste da recusa `ruim`; lote sem o mínimo de 1: falham 3 do teste do lote 0 ou fracionário (ele usa `between` para não girar sem fim) |
+| `packages/web-member/test/dm-copy-unit-2.test.js` | 18 testes, 93 asserções (eram 13 e 70; ~0,35 s) | lotes fora do `total`: falham 3 (um em cada teste de progresso); lotes contados também na nova tentativa: falha 1; `stop` não passado a `reserve`: falham 4; `n` reservado só depois do filtro: falham 2 do teste do `n` repetido; `span` só das linhas filtradas: falham 3 do novo teste com a linha bloqueada no maior `n` (o caso do `n` 1 continua passando, como o reexame notou); sem o teto `n >= rows`: falham 3 |
+| `packages/web-member/test/dm-copy-e2e.test.js` | 2 testes, 34 asserções (era 33; ~93 s) | |
+| `apps/app/test/historyCopy.test.js`, `dm-copy-unit.test.js` | 5/5 44 e 4/4 37, iguais | |
+
+A asserção de conexões do teste da reserva em lotes passou a usar um prazo de 1 s por conexão (cabem cerca de 12 selos), o que garante pelo menos 4 conexões para 40 selos em qualquer máquina.
+
 Importação em um só trabalho: a remoção da junção em `importAll` não foi pega pelo teste 2 do `dm-copy-e2e-2` (a contagem de avisos continuou 1, porque o dedupe também a segura); o teste vale como regressão do resultado, não do mecanismo. O mecanismo (uma só tarefa, uma só leitura do registro) é coberto por `dm-copy-unit-2.test.js`, que falha sem a junção.
 
 O seeder de teste do `blob.test.js` ganhou a opção `copyBudget` (nulo é um semeador de antes do tipo `copy`, que não responde). O teste do semeador antigo cobre a falha de `copySource` e o selo diário que passa a pagar o blob.
@@ -77,6 +88,7 @@ Limites conhecidos (não corrigidos de propósito):
 - Uma exclusão ou um bloqueio feito neste aparelho antes de um intervalo offline esconde as mensagens importadas que vieram depois dele (as linhas entram abaixo de tudo o que o aparelho tem).
 - Os selos que sobram da reserva do texto (a estimativa leva um de folga por parte) se perdem; fica menos de uma parte por cópia.
 - Se uma importação é cortada depois de arquivar as linhas e antes de gravar as marcas de visto, a nova tentativa pula as linhas já arquivadas e não regrava essas marcas.
+- O pool responde `invalido` também por outros motivos (um selo gasto, uma repetição diferente), então essa recusa zera também selos guardados que ainda valiam; eles são comprados de novo, e o texto só recua para a cota diária se a cota semanal não bastar.
 - Quem tem o segredo da caixa abre o histórico inteiro, e o aviso é lacrado só para a geração atual da caixa (ver `docs/protocol.md`, riscos residuais).
 
 ## Conferências no aparelho (pendentes)

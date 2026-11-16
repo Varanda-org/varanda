@@ -72,8 +72,9 @@ function png (size) {
 }
 
 // copyBudget: the weekly copy allowance per diary; null is a seeder from
-// before the copy kind, which does not answer it.
-async function blobSeeder (t, { signer, blobBudget = 10000, copyBudget = null, partialMs, now } = {}) {
+// before the copy kind, which does not answer it. copyFailAt: the 1-based copy
+// issue whose budget store throws, which the seeder answers as 'ruim'.
+async function blobSeeder (t, { signer, blobBudget = 10000, copyBudget = null, copyFailAt = 0, partialMs, now } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const dmRsa = rsaKey()
@@ -147,6 +148,7 @@ async function blobSeeder (t, { signer, blobBudget = 10000, copyBudget = null, p
               copyBudget: {
                 take (diary) {
                   seeder.copyIssues++
+                  if (seeder.copyIssues === copyFailAt) throw new Error('store down')
                   const n = issuedCopy.get(diary) || 0
                   if (n >= copyBudget) return false
                   issuedCopy.set(diary, n + 1)
@@ -1600,9 +1602,10 @@ test('a reserve larger than one stamp link goes on over new links, in batches, a
   const assoc = generateAssociationKeyPair()
   const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 200 })
   const identity = crypto.keyPair()
-  // About a dozen stamps fit one link: 40 take several, and a batch of 16 is
-  // itself longer than one.
-  const client = clientFor(seeder, { issueBurst: 2, issuePaceMs: 100, copyReserveChunk: 16, link: { stampDeadlineMs: 1500 } })
+  // A link of 1 s fits at most about 12 stamps (a burst of 2, then one per
+  // 100 ms): a batch of 16 needs two links and 40 need at least four, however
+  // fast the machine.
+  const client = clientFor(seeder, { issueBurst: 2, issuePaceMs: 100, copyReserveChunk: 16, link: { stampDeadlineMs: 1000 } })
   const source = client.copySource(identity, { batch: 8 })
   const seen = []
   const held = await source.reserve(40, (n) => { seen.push(n) })
@@ -1619,6 +1622,86 @@ test('a reserve larger than one stamp link goes on over new links, in batches, a
   const stopped = await client.copySource(identity, { batch: 8 }).reserve(40, () => false)
   t.is(stopped.length, 16, 'one batch, then stop')
   t.ok(seeder.copyIssues <= issued + 16 + 8, 'no stamp bought after the stop')
+})
+
+test('a refusal mid-link ends the source: no stamp after it, no new link, the stamps bought stay', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const identity = crypto.keyPair()
+
+  // 'ruim' on the 5th issue: not a cut link, so nothing goes on over a new one.
+  const bad = await blobSeeder(t, { signer: assoc, copyBudget: 100, copyFailAt: 5 })
+  const badSource = clientFor(bad).copySource(identity, { batch: 8 })
+  const held = await badSource.reserve(20)
+  t.is(held.length, 4, 'the four stamps bought before the refusal are handed over')
+  t.is(bad.connections, 1, 'one link')
+  t.is(bad.copyIssues, 5, 'no issue after the refusal')
+  const err = await badSource.take(1).then(() => null, (e) => e)
+  t.ok(err !== null, 'a later take throws')
+  t.is(badSource.exhausted, false, 'a refusal is not the end of the allowance')
+  t.is(bad.connections, 1, 'no request is repeated')
+  t.is(bad.copyIssues, 5)
+
+  // 'teto' on the 5th issue: the allowance ended.
+  const capped = await blobSeeder(t, { signer: assoc, copyBudget: 4 })
+  const cappedSource = clientFor(capped).copySource(identity, { batch: 8 })
+  t.is((await cappedSource.reserve(20)).length, 4)
+  t.is(capped.connections, 1, 'one link')
+  t.is(capped.copyIssues, 5, 'no issue after the teto')
+  t.is(cappedSource.exhausted, true)
+  const again = await cappedSource.take(1).then(() => null, (e) => e)
+  t.is(again && again.message, 'o limite semanal de cópia de conversas acabou')
+  t.is(capped.copyIssues, 5)
+})
+
+test('a stop() ends the purchase within one issue and opens no new link', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 200 })
+  const identity = crypto.keyPair()
+  const client = clientFor(seeder, { copyReserveChunk: 16 })
+
+  // Turns true after 3 issues, in the middle of the first link.
+  const source = client.copySource(identity, { batch: 8 })
+  const held = await source.reserve(40, null, () => seeder.copyIssues >= 3)
+  t.is(held.length, 3, 'what was bought before the stop is handed over')
+  t.is(seeder.copyIssues, 3, 'no issue after the stop')
+  t.is(seeder.connections, 1, 'no new link')
+  t.is((await source.reserve(1)).length, 0, 'the source stays ended, and reserve never throws')
+  t.is(seeder.copyIssues, 3)
+  t.is(seeder.connections, 1)
+
+  // Already true: not even a link.
+  const before = seeder.connections
+  const none = await client.copySource(identity, { batch: 8 }).reserve(10, null, () => true)
+  t.is(none.length, 0)
+  t.is(seeder.connections, before, 'no link opened')
+  t.is(seeder.copyIssues, 3)
+
+  // take takes the same option and throws like any short purchase.
+  const taker = client.copySource(identity, { batch: 8 })
+  const err = await taker.take(10, { stop: () => true }).then(() => null, (e) => e)
+  t.ok(err !== null)
+  t.is(seeder.connections, before)
+})
+
+test('a reserve chunk of 0 or a fraction still makes progress', async (t) => {
+  t.timeout(20000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await blobSeeder(t, { signer: assoc, copyBudget: 50 })
+  const identity = crypto.keyPair()
+  const zero = clientFor(seeder, { copyReserveChunk: 0 }).copySource(identity, { batch: 4 })
+  t.is(zero.chunk, 1, 'clamped to one stamp')
+  // between ends the loop a spinning reserve would never leave on its own.
+  let calls = 0
+  t.is((await zero.reserve(3, () => ++calls < 50)).length, 3)
+  t.is(calls, 3, 'one batch per stamp')
+  const half = clientFor(seeder, { copyReserveChunk: 2.5 }).copySource(identity, { batch: 4 })
+  t.is(half.chunk, 2)
+  calls = 0
+  t.is((await half.reserve(5, () => ++calls < 50)).length, 5)
+  t.is(calls, 3, 'batches of 2, 2 and 1')
+  t.is(clientFor(seeder).copySource(identity).chunk, 256, 'the real chunk')
 })
 
 test('a copy source on a seeder from before the copy kind fails with its own reason and the daily wallet still works', async (t) => {

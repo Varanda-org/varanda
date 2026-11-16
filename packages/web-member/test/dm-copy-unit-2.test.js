@@ -263,7 +263,7 @@ test('a copy refused late for its size does not upload everything again on a ret
   }
   const counts = { stamps: 0, puts: 0 }
   const blobs = {
-    copySource: () => ({ reserve: async () => [], take: async () => { throw new UsageError('sem selo') } }),
+    copySource: () => ({ chunk: 256, reserve: async () => [], take: async () => { throw new UsageError('sem selo') } }),
     stamp: async () => { counts.stamps++ },
     put: async () => { counts.puts++ }
   }
@@ -326,6 +326,7 @@ async function staleHeldRun (t, failAt) {
   let puts = 0
   const blobs = {
     copySource: () => ({
+      chunk: 256,
       reserve: async () => [{ token: 'held-0' }, { token: 'held-1' }, { token: 'held-2' }],
       take: async (n) => Array.from({ length: n }, (_, i) => ({ token: 'fresh-' + i }))
     }),
@@ -357,13 +358,19 @@ test('between the batches of the reservation the copy shows progress and stops a
   }
   let unlocked = true
   const answers = []
+  const stops = []
   const events = []
   const blobs = {
+    // The text needs 3 stamps: with a chunk of 1, three batches.
     copySource: () => ({
-      reserve: async (n, between) => {
+      chunk: 1,
+      reserve: async (n, between, stop) => {
+        stops.push(stop())
         answers.push(await between(1))
-        unlocked = false
         answers.push(await between(2))
+        unlocked = false
+        stops.push(stop())
+        answers.push(await between(3))
         return []
       }
     }),
@@ -373,8 +380,85 @@ test('between the batches of the reservation the copy shows progress and stops a
   const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, unlocked: () => unlocked, emit: (name, data) => events.push([name, data]) })
   const err = await e.copy.historyCopy(SELF, {}).catch((x) => x)
   t.ok(err instanceof UsageError, 'the lock ends the copy')
-  t.alike(answers, [true, false], 'the reservation goes on while unlocked and stops after a lock')
-  t.alike(events[0], ['dm.copyProgress', { done: 0, total: 2 }], 'the sheet leaves "Preparando a cópia" at the first batch')
+  t.alike(answers, [true, true, false], 'the reservation goes on while unlocked and stops after a lock')
+  t.alike(stops, [false, true], 'the stop predicate is the lock, so a purchase in progress ends at once')
+  t.alike(events, [
+    ['dm.copyProgress', { done: 0, total: 5 }],
+    ['dm.copyProgress', { done: 1, total: 5 }],
+    ['dm.copyProgress', { done: 2, total: 5 }]
+  ], 'one step per batch: total is the 2 fixed steps plus the 3 batches, and done moves after each')
+})
+
+test('the reservation batches are steps of the progress, and the unbought ones count as done when it ends early', async (t) => {
+  const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
+  const local = {
+    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
+    seenToken: () => 'f'.repeat(64),
+    hasMedia: () => false,
+    seal: (v) => v,
+    open: (v) => v
+  }
+  const events = []
+  const blobs = {
+    // 3 stamps in batches of 2: two batches, but the allowance ends after one.
+    copySource: () => ({
+      chunk: 2,
+      reserve: async (n, between) => {
+        await between(2)
+        return [{ token: 'held-0' }, { token: 'held-1' }]
+      },
+      take: async () => { throw new UsageError('sem selo') }
+    }),
+    stamp: async (sealed, keyPair, source) => { await source.take(1) },
+    put: async () => { throw new Error('parou aqui') }
+  }
+  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, emit: (name, data) => events.push(data) })
+  await e.copy.historyCopy(SELF, {}).catch(() => null)
+  t.alike(events, [{ done: 0, total: 4 }, { done: 1, total: 4 }, { done: 2, total: 4 }], 'one step per batch, then done = the batches')
+})
+
+test('a retry that holds the stamps has no batch to count', async (t) => {
+  const media = [{ id: '1'.repeat(64), key: '1'.repeat(64), nonce: '1'.repeat(48), chunks: 1, bytes: 1016, sha256: '1'.repeat(64), mime: 'image/png', w: 64, h: 48 }]
+  const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'foto', replyTo: null, fwd: 0, media, card: null, at: AT, mine: true, filedAt: 1700000000001 }
+  const local = {
+    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
+    seenToken: () => 'f'.repeat(64),
+    hasMedia: () => true,
+    getMedia: async () => [new Uint8Array(1000).fill(1)],
+    seal: (v) => v,
+    open: (v) => v
+  }
+  const events = []
+  let puts = 0
+  let reserves = 0
+  const blobs = {
+    copySource: () => ({
+      chunk: 2,
+      reserve: async (n, between) => {
+        reserves++
+        await between(2)
+        await between(3)
+        return [{ token: 'held-0' }, { token: 'held-1' }, { token: 'held-2' }]
+      },
+      take: async () => { throw new UsageError('sem selo') }
+    }),
+    stamp: async () => {},
+    put: async () => {
+      puts++
+      // The photo fails the first time, then goes; the part stops the run.
+      if (puts === 1) throw new Error('rede caiu')
+      if (puts === 3) throw new Error('parou aqui')
+    }
+  }
+  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, mediaItem: (d) => d, emit: (name, data) => events.push(data) })
+  const first = await e.copy.historyCopy(SELF, {}).catch((x) => x)
+  t.ok(first instanceof Error && first.message === 'rede caiu', 'the photo failed the first call')
+  t.alike(events, [{ done: 0, total: 5 }, { done: 1, total: 5 }, { done: 2, total: 5 }, { done: 2, total: 5 }], 'the photo, the 2 fixed steps and 2 batches')
+  events.length = 0
+  const second = await e.copy.historyCopy(SELF, {}).catch((x) => x)
+  t.ok(second instanceof Error && second.message === 'parou aqui', 'the retry got as far as the part')
+  t.is(reserves, 1, 'the held stamps are reused, not bought again')
+  t.alike(events, [{ done: 0, total: 3 }, { done: 1, total: 3 }], 'no batch: the photo and the 2 fixed steps')
 })
 
 test('a part refused as invalid drops the held stamps: the retry buys fresh ones', async (t) => {
@@ -386,14 +470,18 @@ test('a manifest refused as invalid drops the held stamps too', async (t) => {
 })
 
 test('unblocking a sender between an interrupted import and its retry keeps every filing time unique and in order', async (t) => {
+  await unblockCase(t, 1)
+})
+
+test('the same when the blocked sender\'s row has the largest n', async (t) => {
+  await unblockCase(t, 3)
+})
+
+// The row at index `blockedAt` is the blocked sender's.
+async function unblockCase (t, blockedAt) {
   const OTHER = 'c'.repeat(64)
   const H = 1700000000000
-  const rows = [
-    msg('1', 0),
-    msg('2', 1, { peer: OTHER, from: OTHER }),
-    msg('3', 2),
-    msg('4', 3)
-  ]
+  const rows = ['1', '2', '3', '4'].map((c, i) => (i === blockedAt ? msg(c, i, { peer: OTHER, from: OTHER }) : msg(c, i)))
   const fresh = async () => {
     const s = await openStore(t)
     const { n, ...local } = msg('9', 0)
@@ -423,6 +511,37 @@ test('unblocking a sender between an interrupted import and its retry keeps ever
   t.is(new Set(Object.values(got)).size, 5, 'no two rows share a filing time')
   t.alike(got, times(done), 'each row sits where the uninterrupted import put it')
   t.ok(got[id('1')] < got[id('2')] && got[id('2')] < got[id('3')] && got[id('3')] < got[id('4')], 'the bundle order is kept')
+}
+
+test('a row at n = rows is not valid and files nowhere; the row at rows - 1 is', async (t) => {
+  const s = await withLocalRow(t)
+  const edge = msg('1', LIMITS.rows - 1)
+  const over = msg('2', LIMITS.rows)
+  const first = msg('3', 0)
+  const horizon = Math.min(...s.snapshot().messages.map((m) => m.filedAt))
+  const res = await fileRows({ local: s, prefix: '' }, memoryNodeStorage(), SELF, [first, over, edge], NO_BLOCKS, { pin: memoryPin(), now: NOW })
+  t.is(res.skipped, 1, 'the row at n = rows is skipped')
+  const got = timesOf(s)
+  t.absent(id('2') in got, 'the row at n = rows is not filed')
+  t.ok(id('1') in got && id('3') in got, 'the rows below it are')
+  for (const [k, v] of Object.entries(got)) if (k !== id('9')) t.ok(v < horizon, 'filed below everything the store held')
+  t.ok(got[id('3')] < got[id('1')], 'in n order')
+})
+
+test('two rows sharing an n: the first owns the slot even when a block drops it, so an unblock hands nothing over', async (t) => {
+  const OTHER = 'c'.repeat(64)
+  const s = await withLocalRow(t)
+  const ctx = { local: s, prefix: '' }
+  const pin = memoryPin()
+  // A (blocked sender) and B (valid) both claim n = 0.
+  const rows = [msg('1', 0, { peer: OTHER, from: OTHER }), msg('2', 0), msg('3', 1)]
+  await fileRows(ctx, memoryNodeStorage(), SELF, rows, new Set([OTHER]), { pin, now: NOW })
+  t.alike(Object.keys(timesOf(s)).sort(), [id('3'), id('9')], 'blocked: neither row with the shared n is filed')
+  await fileRows(ctx, memoryNodeStorage(), SELF, rows, NO_BLOCKS, { pin, now: NOW })
+  const got = timesOf(s)
+  t.alike(Object.keys(got).sort(), [id('1'), id('3'), id('9')], 'unblocked: the first row takes its slot, the second stays out')
+  t.is(new Set(Object.values(got)).size, 3, 'no two rows share a filing time')
+  t.ok(got[id('1')] < got[id('3')], 'the bundle order is kept')
 })
 
 // An in-memory blob host: what a seeder serves of the blobs a copy made.
