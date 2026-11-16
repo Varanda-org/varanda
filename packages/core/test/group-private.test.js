@@ -463,6 +463,98 @@ test('a writer its own diary cut is never entitled: the group rotates as after a
   t.alike(buildGroup(w.input(w.reader(wX2), { marks: new Map([[Y, [{ writer: wX, cut: 1, seq: 1 }]]]) })).entitled, [G, wA, wX, wX2, wY].sort(), 'a mark in another diary changes nothing')
 })
 
+test('a key block past a diary cut stays readable, never sendable (#350)', (t) => {
+  // A's device rotates after a removal; members seal under its epoch; A's
+  // diary then cuts that device below the key block.
+  const hist = (cut) => {
+    const w = pworld()
+    const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+    const E2 = w.rotate(wA, [G, wA, wX], { basis: [ban], at: 7 })
+    sealedPost(w, wX, E2, 8)
+    sealedPost(w, G, E2, 9)
+    sealedPost(w, wA, E2, 10)
+    const extra = cut === null ? {} : { marks: new Map([[A, [{ writer: wA, cut, seq: 1 }]]]) }
+    return { w, E2, g: buildGroup(w.input(w.reader(wX), extra)) }
+  }
+  let { g, E2 } = hist(null)
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p9', 'p10'])
+  for (const cut of [0, 1, 2]) {
+    ;({ g } = hist(cut))
+    t.alike(g.posts.map((p) => p.text), ['p8', 'p9'], 'cut ' + cut + ': the history others sealed stays readable, the cut writer post past the cut does not count')
+    t.is(g.sealed, 0, 'cut ' + cut)
+    t.is(g.epoch, null, 'cut ' + cut + ': the epoch no longer sends')
+    t.is(g.rekeyPending, true, 'cut ' + cut)
+    t.is(g.removals.length, 1, 'cut ' + cut + ': the removal the block covered still counts')
+  }
+})
+
+test('a key block citing a cut community writer stays readable (#350)', (t) => {
+  const viaC = (cut) => {
+    const w = pworld({ cadmins: [B] })
+    w.add(B, wB)
+    w.comm.push(cwKey(B), communityBan({ member: K(0xabc), on: true, cuts: [], at: AT(5) }))
+    const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+    const E2 = w.rotate(wB, [G, wA, wB, wX], { basis: [ban], auth: w.cauth(B), at: 7 })
+    sealedPost(w, wX, E2, 8)
+    if (cut !== null) w.comm.mark(B, cwKey(B), cut)
+    return { E2, g: buildGroup(w.input(w.reader(wX))) }
+  }
+  let { g, E2 } = viaC(null)
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.alike(g.posts.map((p) => p.text), ['p8'])
+  ;({ g } = viaC(1))
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'the history stays readable')
+  t.is(g.sealed, 0)
+  t.is(g.epoch, null, 'a cut CW gives no sending authority')
+  t.is(g.rekeyPending, true)
+})
+
+test('a diary cut below its own leave keeps the diary left and the removal (#350)', (t) => {
+  const unleave = (cut) => {
+    const w = pworld()
+    w.add(X, wX2)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+    const L = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(7) }))
+    const E2 = w.rotate(G, [G, wA, wY], { basis: [L], at: 8 })
+    sealedPost(w, wY, E2, 9)
+    const extra = cut === null ? {} : { marks: new Map([[X, [{ writer: wX, cut, seq: 1 }]]]) }
+    return { E2, g: buildGroup(w.input(w.reader(wY), extra)) }
+  }
+  const control = unleave(null)
+  for (const cut of [0, 1]) {
+    const { g, E2 } = unleave(cut)
+    t.is(g.members.get(X), 'left', 'cut ' + cut)
+    t.alike(g.removals, control.g.removals, 'cut ' + cut + ': the leave is still a requirement')
+    t.is(kidOf(g.epoch), kidOf(E2), 'cut ' + cut + ': the rotation covering it stays the one to send under')
+    t.alike(g.entitled, control.g.entitled)
+  }
+})
+
+test('a mark that arrives after the rotation, in any order, gives the same fold (#350)', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  sealedPost(w, wX, E2, 9)
+  // The rotation that leaves wX out, written before this reader holds the mark.
+  const E3 = w.rotate(G, [G, wA, wX2, wY], { at: 10 })
+  sealedPost(w, wX2, E3, 11)
+  const before = buildGroup(w.input(w.reader(wX2)))
+  t.alike(before.posts.map((p) => p.text), ['p8', 'p9', 'p11'], 'without the mark every post counts')
+  const marks = [{ writer: wX, cut: 3, seq: 1 }, { writer: wX, cut: 2, seq: 2 }, { gap: true }]
+  const expected = normalize(buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, marks]]) })))
+  for (const order of [[1, 0, 2], [2, 1, 0], [0, 2, 1]]) {
+    t.is(normalize(buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, order.map((i) => marks[i])]]) }))), expected, 'order ' + order.join(''))
+  }
+  const g = buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, marks]]) }))
+  t.is(kidOf(g.epoch), kidOf(E3))
+  t.alike(cutsOf(g), [[wX, 2]])
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p11'])
+  t.alike([...g.cutUnknown], [X])
+})
+
 test('a community admin receives keys and distributes through auth; a demotion in C ends it, history stays', (t) => {
   const w = cworld()
   const E1 = w.rotate(G, [G, wA, wX], { at: 3 })
