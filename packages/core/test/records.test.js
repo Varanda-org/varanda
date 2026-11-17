@@ -905,7 +905,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -2044,6 +2044,34 @@ test('garden records: old readers skip all three as malformed', async (t) => {
   // None borrows another type's shape.
   t.is(validateRecord({ type: 'garden', key: K2, on: true, at: AT }, 1), 'malformed')
   t.is(validateRecord({ type: 'garden-help', key: K2, on: true, at: AT }, 1), 'malformed')
+})
+
+test('garden phase 2 records: Phase 1 readers skip all three as malformed', async (t) => {
+  // A copy of TYPES before the Barraquinha and the Enfeites: a Phase 1
+  // reader skips each new record as any unknown type and keeps reading the
+  // balcony state in the same diary.
+  const OLD_TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help']
+  const oldReader = (r) => (OLD_TYPES.includes(r.type) ? validateRecord(r, 1) : 'malformed')
+  const pot = { plant: 'tomate', at: AT, water: AT, w: 0 }
+  const phase1 = [
+    { type: 'garden', on: true, at: AT },
+    { type: 'garden-state', pots: [null, pot, null, null, null, null], n: 2, at: AT }
+  ]
+  const recs = [
+    { type: 'garden-decor', items: ['rede', 'gato'], at: AT },
+    { type: 'garden-gift', to: K2, item: 'tomate', at: AT },
+    { type: 'garden-take', from: K2, seq: 7, at: AT }
+  ]
+  for (const r of recs) {
+    t.is(validateRecord(r, 1), null, r.type + ' valid today')
+    t.is(oldReader(r), 'malformed', r.type + ' skipped by a Phase 1 reader')
+  }
+  for (const r of phase1) t.is(oldReader(r), null, r.type + ' beside them still read by a Phase 1 reader')
+  // None borrows another type's shape.
+  t.is(validateRecord({ type: 'garden-gift', to: K2, pot: 0, at: AT }, 1), 'malformed', 'a gift in the help shape')
+  t.is(validateRecord({ type: 'garden-take', to: K2, pot: 0, at: AT }, 1), 'malformed', 'a take in the help shape')
+  t.is(validateRecord({ type: 'garden-decor', on: true, at: AT }, 1), 'malformed', 'a decor in the flag shape')
+  t.is(validateRecord({ type: 'garden-help', to: K2, item: 'tomate', at: AT }, 1), 'malformed', 'a help in the gift shape')
 })
 
 test('fan and top-friends records: key sets, rules and builders', async (t) => {

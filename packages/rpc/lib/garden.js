@@ -41,6 +41,23 @@ const GARDEN_DAY_OFFSET_MS = -10800000
 // The feed's tolerance for a record dated ahead of the reader's clock
 // (packages/core/lib/feed.js).
 const GARDEN_MAX_FUTURE_MS = 86400000
+// Enfeites: ids only, in their canonical order; where each one is drawn is
+// the app's business.
+const GARDEN_DECOR_IDS = Object.freeze(['rede', 'varal', 'gato', 'pisca'])
+// The Barraquinha opens on Saturdays (getUTCDay of the Brasília-shifted
+// instant), and a mimo offered that day can be taken for a week from the
+// start of its day.
+const GARDEN_STALL_WEEKDAY = 6
+const GARDEN_STALL_WINDOW_MS = 7 * GARDEN_DAY_MS
+const GARDEN_GIFTS_DAILY_MAX = 3
+const GARDEN_TAKES_DAILY_MAX = 6
+// Six takes a day across the nine Brasília days that the eight-day take
+// prune (691200000 ms) can touch, so every take an honest writer keeps fits:
+// the bound of the own takes list and of the index takes map.
+const GARDEN_TAKE_ROWS = 54
+const GARDEN_GIFT_ROWS = 12
+const GARDEN_SHELF_ROWS = 8
+const GARDEN_SHELF_SHOWN = 4
 
 const POT_KEYS = Object.freeze(['plant', 'at', 'water', 'w'])
 const PLANT_ACT_KEYS = Object.freeze(['op', 'pot', 'plant'])
@@ -50,6 +67,9 @@ const FOLLOW_KEYS = Object.freeze(['type', 'key', 'on', 'at'])
 const FLAG_KEYS = Object.freeze(['type', 'on', 'at'])
 const STATE_KEYS = Object.freeze(['type', 'pots', 'n', 'at'])
 const HELP_KEYS = Object.freeze(['type', 'to', 'pot', 'at'])
+const DECOR_KEYS = Object.freeze(['type', 'items', 'at'])
+const GIFT_KEYS = Object.freeze(['type', 'to', 'item', 'at'])
+const TAKE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
 
 // Rows a fold reads at most: the index and the peeks hand over far fewer
 // (GARDEN_HELP_ROWS), so a longer list is no honest input and counts nothing.
@@ -544,6 +564,297 @@ function saveOrdinal (prevState, now) {
   return n < GARDEN_SAVES_DAILY_MAX ? n + 1 : null
 }
 
+function isDecorId (v) {
+  return typeof v === 'string' && GARDEN_DECOR_IDS.includes(v)
+}
+
+// Strictly ascending in GARDEN_DECOR_IDS order, so one set of enfeites has
+// exactly one encoding and no id repeats.
+function copyDecor (v) {
+  const list = snapshotArray(v, GARDEN_DECOR_IDS.length)
+  if (list === null) return null
+  let last = -1
+  for (const id of list) {
+    const i = isDecorId(id) ? GARDEN_DECOR_IDS.indexOf(id) : -1
+    if (i <= last) return null
+    last = i
+  }
+  return list
+}
+
+function isDecor (v) {
+  return copyDecor(v) !== null
+}
+
+function isGiftItem (v) {
+  return isPlantId(v)
+}
+
+// The same Brasília shift as gardenDay.
+function stallDay (ms) {
+  if (!isTime(ms)) return false
+  try {
+    return new Date(ms + GARDEN_DAY_OFFSET_MS).getUTCDay() === GARDEN_STALL_WEEKDAY
+  } catch {
+    return false
+  }
+}
+
+// A mimo dated on a Saturday, not past the reader's future tolerance, while
+// the week from the start of its day lasts.
+function offerListable (atMs, now) {
+  if (!isTime(atMs) || !isTime(now) || !stallDay(atMs)) return false
+  if (!(atMs <= now + GARDEN_MAX_FUTURE_MS)) return false
+  const start = dayStart(atMs)
+  return !Number.isNaN(start) && now < start + GARDEN_STALL_WINDOW_MS
+}
+
+// Gives the ripe pot `pot` away: the pot empties exactly as a harvest would,
+// judged by the same ripeness, and the mimo is named by its plant id. No
+// weekday check here (the node's giveAllowed holds it) and no new ordinal.
+function applyGive (state, pot, now, opts) {
+  if (!isTime(now)) return { ok: false, reason: 'invalid' }
+  let pots
+  if (state === null || state === undefined) {
+    pots = emptyPots()
+  } else {
+    pots = copyPots(field(state, 'pots'), now)
+    if (pots === null) return { ok: false, reason: 'state' }
+  }
+  if (!isPotIndex(pot)) return { ok: false, reason: 'pot' }
+  const p = pots[pot]
+  if (p === null) return { ok: false, reason: 'empty' }
+  const received = counts(field(opts, 'received'))
+  const given = counts(field(opts, 'given'))
+  if (!viewOf(p, now, received[pot], given[pot]).ripe) return { ok: false, reason: 'not-ripe' }
+  pots[pot] = null
+  return { ok: true, state: { pots }, item: p.plant }
+}
+
+function followsKey (args, key) {
+  try {
+    const set = field(args, 'follows')
+    return set instanceof Set && Set.prototype.has.call(set, key) === true
+  } catch {
+    return false
+  }
+}
+
+// Whether self may offer a mimo to `to` now. As in helpAllowed, a row dated
+// after today counts as today, so turning the clock back never frees the
+// budget, and unreadable input answers 'invalid', never ok.
+function giveAllowed (args) {
+  const self = field(args, 'self')
+  const to = field(args, 'to')
+  const now = field(args, 'now')
+  const own = ownRows(field(args, 'own'))
+  const today = dayStart(now)
+  if (!isHex64(self) || !isHex64(to) || own === null || Number.isNaN(today)) return { ok: false, reason: 'invalid' }
+  if (to === self) return { ok: false, reason: 'self' }
+  if (!followsKey(args, to)) return { ok: false, reason: 'not-following' }
+  if (!stallDay(now)) return { ok: false, reason: 'closed' }
+  const todays = own.filter((r) => r.atMs >= today)
+  if (todays.some((r) => r.to === to)) return { ok: false, reason: 'same-day' }
+  if (todays.length >= GARDEN_GIFTS_DAILY_MAX) return { ok: false, reason: 'daily' }
+  return { ok: true }
+}
+
+function isSeq (v) {
+  return Number.isSafeInteger(v) && v >= 1
+}
+
+// The own takes rows, or null when the list itself is unreadable. A row
+// naming a gift with an unreadable at still marks that gift taken; it only
+// leaves the daily count.
+function ownTakeRows (v) {
+  const list = snapshotArray(v, FOLD_ROWS_MAX)
+  if (list === null) return null
+  const out = []
+  for (const row of list) {
+    const from = field(row, 'from')
+    const seq = field(row, 'seq')
+    const at = field(row, 'at')
+    const atMs = typeof at === 'number' ? (Number.isSafeInteger(at) ? at : NaN) : isoMs(at)
+    if (isHex64(from) && isSeq(seq)) out.push({ from, seq, atMs })
+  }
+  return out
+}
+
+// A garden-gift record copy, or null.
+function giftOf (record) {
+  const g = snapshot(record, GIFT_KEYS)
+  if (g === null || g.type !== 'garden-gift' || !isHex64(g.to) || !isGiftItem(g.item)) return null
+  const atMs = isoMs(g.at)
+  return Number.isNaN(atMs) ? null : { to: g.to, item: g.item, at: g.at, atMs }
+}
+
+// A garden-take record copy, or null.
+function takeOf (record) {
+  const t = snapshot(record, TAKE_KEYS)
+  if (t === null || t.type !== 'garden-take' || !isHex64(t.from) || !isSeq(t.seq)) return null
+  const atMs = isoMs(t.at)
+  return Number.isNaN(atMs) ? null : { from: t.from, seq: t.seq, at: t.at, atMs }
+}
+
+// Whether self may accept the mimo `gift`, block `seq` of from's diary. The
+// accepter need not follow the giver: the giver chose them. A gift with a
+// non-canonical at is no gift ('not-found').
+function takeAllowed (args) {
+  const self = field(args, 'self')
+  const from = field(args, 'from')
+  const seq = field(args, 'seq')
+  const now = field(args, 'now')
+  const own = ownTakeRows(field(args, 'own'))
+  const today = dayStart(now)
+  if (!isHex64(self) || !isHex64(from) || !isSeq(seq) || own === null || Number.isNaN(today)) return { ok: false, reason: 'invalid' }
+  if (from === self) return { ok: false, reason: 'self' }
+  const g = giftOf(field(args, 'gift'))
+  if (g === null || g.to !== self) return { ok: false, reason: 'not-found' }
+  if (!offerListable(g.atMs, now)) return { ok: false, reason: 'expired' }
+  if (own.some((r) => r.from === from && r.seq === seq)) return { ok: false, reason: 'taken' }
+  if (own.filter((r) => r.atMs >= today).length >= GARDEN_TAKES_DAILY_MAX) return { ok: false, reason: 'daily' }
+  return { ok: true }
+}
+
+// `since` is the seq of the owner's live on flag: a record at or below it was
+// left live by an older join (a Phase 1 leave does not tombstone it), so it
+// never returns after a rejoin. Without a valid since nothing shows.
+function liveSince (seq, since) {
+  return isSeq(seq) && isSeq(since) && seq > since
+}
+
+function foldDecor (args) {
+  const none = { items: [] }
+  const now = field(args, 'now')
+  if (!isTime(now) || !liveSince(field(args, 'seq'), field(args, 'since'))) return none
+  const d = snapshot(field(args, 'record'), DECOR_KEYS)
+  if (d === null || d.type !== 'garden-decor') return none
+  const items = copyDecor(d.items)
+  const atMs = isoMs(d.at)
+  if (items === null || Number.isNaN(atMs) || atMs > now + GARDEN_MAX_FUTURE_MS) return none
+  return { items }
+}
+
+const byText = (a, b) => a < b ? -1 : a > b ? 1 : 0
+
+// A giver can date a gift up to GARDEN_MAX_FUTURE_MS ahead and still be
+// listed, so ranking by the claimed date alone would let a few followers
+// dating ahead own every row of the cut. Rows dated after now come after
+// every row at or before now, nearest to now first, as the engagement index
+// orders helps (gardenRowOrder).
+function pendingOrder (now) {
+  return (a, b) => {
+    const fa = a.atMs > now
+    const fb = b.atMs > now
+    if (fa !== fb) return fa ? 1 : -1
+    if (a.atMs !== b.atMs) return fa ? a.atMs - b.atMs : b.atMs - a.atMs
+    return byText(a.author, b.author) || a.seq - b.seq
+  }
+}
+
+function inSet (set, key) {
+  try {
+    return set instanceof Set && Set.prototype.has.call(set, key) === true
+  } catch {
+    return false
+  }
+}
+
+// The mimos offered to owner that are still open. Each comes from a
+// follower of owner (the follow is the evidence, so a stranger cannot fill
+// the list), one per giver per Brasília day, the lowest seq. That pick is
+// made before the taken pairs are dropped, so taking the first gift of a day
+// never surfaces a second one. The daily cap is the writer's check: a fourth
+// gift that slipped through is not dropped here. An unreadable taken list
+// shows nothing rather than gifts already taken. A follow is one-sided and a
+// giver may backdate a gift to the end of its Saturday, so givers the owner
+// follows (`followed`, a Set) rank before all others: accounts the owner
+// never followed cannot push them out of the cut.
+function foldPending (args) {
+  const empty = { rows: [] }
+  const owner = field(args, 'owner')
+  const now = field(args, 'now')
+  if (!isHex64(owner) || !isTime(now)) return empty
+  const taken = snapshotArray(field(args, 'taken'), FOLD_ROWS_MAX)
+  if (taken === null) return empty
+  const followed = field(args, 'followed')
+  const byDay = new Map()
+  for (const row of rows(field(args, 'gifts'))) {
+    const author = field(row, 'author')
+    const seq = seqOf(row)
+    if (!isHex64(author) || author === owner || seq === null) continue
+    const g = giftOf(field(row, 'record'))
+    if (g === null || g.to !== owner || !offerListable(g.atMs, now)) continue
+    if (!isFollowOf(field(row, 'follow'), owner)) continue
+    const day = dayStart(g.atMs)
+    if (Number.isNaN(day)) continue
+    const key = author + '/' + day
+    const prev = byDay.get(key)
+    if (prev === undefined || seq < prev.seq) byDay.set(key, { author, seq, item: g.item, at: g.at, atMs: g.atMs })
+  }
+  const done = new Set()
+  for (const row of taken) {
+    const from = field(row, 'from')
+    const seq = seqOf(row)
+    if (isHex64(from) && seq !== null) done.add(from + '/' + seq)
+  }
+  const mine = new Map()
+  for (const g of byDay.values()) {
+    if (!mine.has(g.author)) mine.set(g.author, inSet(followed, g.author))
+  }
+  const byDate = pendingOrder(now)
+  const out = [...byDay.values()]
+    .filter((g) => !done.has(g.author + '/' + g.seq))
+    .sort((a, b) => (mine.get(b.author) - mine.get(a.author)) || byDate(a, b))
+    .slice(0, GARDEN_GIFT_ROWS)
+    .map((g) => ({ author: g.author, seq: g.seq, item: g.item, at: g.at }))
+  return { rows: out }
+}
+
+// The owner's Prateleira: the mimos they took since their live flag. A take
+// stands on the gift it names (read from the giver's diary by the caller):
+// a garden-gift to owner, still inside its week. The giver's follow is not
+// needed, the owner's own take is the consent. One row per gift (the lowest
+// take seq), then one per giver per Brasília day of the gift (the lowest
+// gift seq). The daily take cap is the writer's check, not dropped here.
+// An honest diary never keeps more than GARDEN_TAKE_ROWS live takes in the
+// window, so a longer list counts nothing and a reader never has to fetch
+// more gift blocks than that for one balcony.
+function foldShelf (args) {
+  const empty = { rows: [] }
+  const owner = field(args, 'owner')
+  const now = field(args, 'now')
+  const since = field(args, 'since')
+  if (!isHex64(owner) || !isTime(now) || !isSeq(since)) return empty
+  const takes = snapshotArray(field(args, 'takes'), GARDEN_TAKE_ROWS)
+  if (takes === null) return empty
+  const byGift = new Map()
+  for (const row of takes) {
+    const seq = seqOf(row)
+    if (!liveSince(seq, since)) continue
+    const t = takeOf(field(row, 'record'))
+    if (t === null || t.from === owner || t.atMs > now + GARDEN_MAX_FUTURE_MS) continue
+    const g = giftOf(field(row, 'gift'))
+    if (g === null || g.to !== owner || !offerListable(g.atMs, now)) continue
+    const key = t.from + '/' + t.seq
+    const prev = byGift.get(key)
+    if (prev === undefined || seq < prev.seq) byGift.set(key, { seq, from: t.from, gseq: t.seq, item: g.item, at: g.at, atMs: g.atMs })
+  }
+  const byDay = new Map()
+  for (const r of byGift.values()) {
+    const day = dayStart(r.atMs)
+    if (Number.isNaN(day)) continue
+    const key = r.from + '/' + day
+    const prev = byDay.get(key)
+    if (prev === undefined || r.gseq < prev.gseq) byDay.set(key, r)
+  }
+  const out = [...byDay.values()]
+    .sort((a, b) => b.atMs - a.atMs || byText(a.from, b.from) || a.gseq - b.gseq)
+    .slice(0, GARDEN_SHELF_ROWS)
+    .map((r) => ({ seq: r.seq, from: r.from, gseq: r.gseq, item: r.item, at: r.at }))
+  return { rows: out }
+}
+
 module.exports = Object.freeze({
   GARDEN_POTS,
   GARDEN_PLANTS,
@@ -563,6 +874,18 @@ module.exports = Object.freeze({
   GARDEN_DAY_MS,
   GARDEN_DAY_OFFSET_MS,
   GARDEN_MAX_FUTURE_MS,
+  GARDEN_DECOR_IDS,
+  GARDEN_STALL_WEEKDAY,
+  GARDEN_STALL_WINDOW_MS,
+  GARDEN_GIFTS_DAILY_MAX,
+  GARDEN_TAKES_DAILY_MAX,
+  GARDEN_TAKE_ROWS,
+  GARDEN_GIFT_ROWS,
+  GARDEN_SHELF_ROWS,
+  GARDEN_SHELF_SHOWN,
+  DECOR_KEYS,
+  GIFT_KEYS,
+  TAKE_KEYS,
   isPlantId,
   isPotIndex,
   isPot,
@@ -579,5 +902,16 @@ module.exports = Object.freeze({
   foldGiven,
   foldBalcony,
   helpAllowed,
-  saveOrdinal
+  saveOrdinal,
+  isDecorId,
+  isDecor,
+  isGiftItem,
+  stallDay,
+  offerListable,
+  applyGive,
+  giveAllowed,
+  takeAllowed,
+  foldDecor,
+  foldPending,
+  foldShelf
 })
