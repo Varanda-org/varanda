@@ -3356,11 +3356,19 @@ async function syncRun ({
       }
       direct.push(key)
     }
+    // The block 0 kept for a blocked binding diary judges nothing any more
+    // (its cores are purged above) and would only name it. kv goes through
+    // the group kv chain, behind any putGroupCert queued before this sweep.
+    // Never the own diary, which groupCerts never holds.
+    for (const d of [...bindingCerts.keys()]) if (d !== ownHex && isBlockedKey(d)) bindingCerts.delete(d)
+    const certs = groupKv(() => store.dropGroupCerts(storage, (d) => d !== ownHex && isBlockedKey(d)))
+    certs.catch(noop) // awaited below, inside the sweep
     return track(serialSweep(async () => {
       for (const core of cores) await core.close()
       for (const key of direct) {
         if (await store.replicaExists(storage, key)) await store.purgeReplica(storage, key)
       }
+      await certs
     }), noop, () => {
       if (!ended) fail(['falha ao limpar diário bloqueado'])
       else log('aviso: falha ao limpar diário bloqueado')

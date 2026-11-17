@@ -1132,6 +1132,50 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     })
   }
 
+  // Excluir conta (./deletion.js): the pending state that names a deleted
+  // member, which no signature of theirs can ever settle. Only what the
+  // service keeps on its own: owner, admins and the current dm.shares stay,
+  // since the signed roster still names them until the owner's own Remover
+  // (which also rotates the key).
+  function pendingOf (r, member) {
+    return has(r.invites, member) || (r.offer !== null && r.offer.to === member) ||
+      (has(r, 'dm') && (has(r.dm.pending, member) || (r.dm.rotatePending !== null && has(r.dm.rotatePending.shares, member))))
+  }
+
+  function delegatesOf (member) {
+    return Object.keys(state.delegates).filter((k) => k === member || state.delegates[k].diary === member)
+  }
+
+  function holdsMember (member) {
+    needKey(member, 'member')
+    usable()
+    return delegatesOf(member).length > 0 || Object.values(state.pages).some((r) => pendingOf(r, member))
+  }
+
+  // -> whether anything was dropped. One write for every row.
+  function forgetMember (member) {
+    return enqueue(() => {
+      needKey(member, 'member')
+      writable()
+      const change = { pages: {}, delegates: {} }
+      for (const [page, r] of Object.entries(state.pages)) {
+        if (!pendingOf(r, member)) continue
+        const next = copy(r)
+        delete next.invites[member]
+        if (next.offer !== null && next.offer.to === member) next.offer = null
+        if (has(next, 'dm')) {
+          delete next.dm.pending[member]
+          if (next.dm.rotatePending !== null) delete next.dm.rotatePending.shares[member]
+        }
+        change.pages[page] = next
+      }
+      for (const k of delegatesOf(member)) change.delegates[k] = null
+      if (Object.keys(change.pages).length === 0 && Object.keys(change.delegates).length === 0) return false
+      commit(change)
+      return true
+    })
+  }
+
   function stats () {
     usable()
     const out = { pages: 0, closed: 0, moved: 0, paused: 0, admins: 0, invites: 0, offers: 0, writers: 0, delegates: 0, nonces: 0 }
@@ -1186,6 +1230,8 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     spend,
     charge,
     refund,
+    holdsMember,
+    forgetMember,
     stats,
     snapshot () {
       usable()

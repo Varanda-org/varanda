@@ -865,6 +865,32 @@ test('capacity: compensating a claimed unblock that would overflow is lotado', a
   await refusedUnchanged(t, s, s.store.cancel(u.change.id, { by: MOD }), 'compensate claimed unblock')
 })
 
+test('isBlocked and reportIdsAbout follow every change, a reopened store included', async (t) => {
+  const { store, m, open } = setup(t)
+  const target = key()
+  const other = key()
+  t.absent(store.isBlocked(target))
+  t.alike(store.reportIdsAbout(target), [])
+  const a = (await store.add(report(target))).report
+  t.alike(store.reportIdsAbout(target), [a.id], 'a new report is seen at once')
+  const b = (await store.add(report(target))).report
+  await store.add(report(other))
+  t.alike(store.reportIdsAbout(target).sort(), [a.id, b.id].sort())
+  const { change } = await store.decide(a.id, { decision: 'bloquear', by: MOD })
+  t.absent(store.isBlocked(target), 'a pending block is not published yet')
+  await store.pull()
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.isBlocked(target), 'published')
+  t.absent(store.isBlocked(other))
+  const u = await store.unblock(target, { by: MOD })
+  await store.pull()
+  await store.ack({ changeIds: [u.change.id], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.absent(store.isBlocked(target), 'the unblock is seen at once')
+  const again = open()
+  t.alike(again.reportIdsAbout(target).sort(), [a.id, b.id].sort())
+  for (const k of [target, other]) t.is(store.isBlocked(k), store.blocked().some((x) => x.member === k), 'same answer as blocked()')
+})
+
 test('exportRows filters by member; events hold no signature, reporter or note', async (t) => {
   const { store, m, dir } = setup(t)
   const target = key()

@@ -1269,6 +1269,37 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     }
   }
 
+  // Asked per key on every page fold and deletion pass, so each answer is
+  // built once per state: a mutation replaces `state.published` and
+  // `state.reports` (cloneState), never edits them, so their identity is the
+  // revision.
+  let blockedMemo = { snapshot: undefined, set: null }
+  let targetsMemo = { reports: null, ids: null }
+
+  // Same answer as blocked().some((b) => b.member === member).
+  function isBlocked (member) {
+    usable()
+    const snapshot = state.published.snapshot
+    if (blockedMemo.snapshot !== snapshot) blockedMemo = { snapshot, set: blockedSet(snapshot) }
+    return blockedMemo.set.has(member)
+  }
+
+  // The ids of the reports whose target is `member` (exportRows({ member })
+  // ids), for Excluir conta.
+  function reportIdsAbout (member) {
+    usable()
+    if (targetsMemo.reports !== state.reports) {
+      const ids = new Map()
+      for (const r of Object.values(state.reports)) {
+        if (!ids.has(r.target)) ids.set(r.target, [])
+        ids.get(r.target).push(r.id)
+      }
+      targetsMemo = { reports: state.reports, ids }
+    }
+    const got = targetsMemo.ids.get(member)
+    return got === undefined ? [] : got.slice()
+  }
+
   // For the operator (LGPD access requests, legal orders): report rows with
   // their decision fields, optionally only those about `member`.
   function exportRows ({ member } = {}) {
@@ -1331,7 +1362,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, isBlocked, groupKeys, stats, exportRows, reportIdsAbout, humanReversed }
 }
 
 module.exports = {

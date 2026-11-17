@@ -8,7 +8,8 @@
 // while a run is ending, log.read of replicas from a revoked issuer, a once
 // run waiting for a newer snapshot the seeder advertises (G3), and a
 // revocation adopted between the quarantine verdict and block 0 reaching
-// the replica.
+// the replica. A block also drops the binding certificate kept in kv
+// groupCerts for the blocked diary.
 const test = require('brittle')
 const b4a = require('b4a')
 const Hypercore = require('hypercore')
@@ -25,7 +26,7 @@ const { createBrowserNode } = require('../lib/node')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
-const { readBlocklist, writeBlocklist } = require('../lib/node-store')
+const { readBlocklist, writeBlocklist, putGroupCert, readGroupCerts } = require('../lib/node-store')
 
 const OFFLINE_URL = 'ws://127.0.0.1:9/seeder'
 
@@ -581,4 +582,30 @@ test('cert.add and username.add honour the stored snapshot: a revoked issuer is 
   const added = await web.request('username.add', { record: createUsernameRecord({ member: key, username: 'ana' }, good.keyPair, good.cert) })
   t.is(added.changed, true)
   t.is((await web.request('log.read', {})).entries.length, 2)
+})
+
+test('a block drops the kv groupCerts entry of the blocked diary, on adoption and at the next start, and keeps the others', async (t) => {
+  t.timeout(90000)
+  const assoc = association()
+  const mod = moderator(assoc.kp)
+  const A = hex(crypto.randomBytes(32))
+  const B = hex(crypto.randomBytes(32))
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const first = await webNode(t, assoc, seeder.url)
+  for (const d of [A, B]) await putGroupCert(first.storage, d, crypto.randomBytes(40))
+  t.alike([...(await readGroupCerts(first.storage)).keys()].sort(), [A, B].sort())
+
+  seeder.snapshot = snapshot(mod, { blocked: [A] })
+  const stopped = await onceRun(first.web)
+  t.is(stopped.reason, 'done')
+  t.alike((await readBlocklist(first.storage)).snapshot, seeder.snapshot, 'the snapshot was adopted')
+  t.alike([...(await readGroupCerts(first.storage)).keys()], [B], 'only the unblocked diary keeps its certificate')
+  await first.node.close()
+
+  // An entry of an already blocked diary (a stop before the sweep) goes at
+  // the next start, before any connection.
+  await putGroupCert(first.storage, A, crypto.randomBytes(40))
+  const offline = await webNode(t, assoc, OFFLINE_URL, { storage: first.storage, keyPair: first.keyPair, write: false })
+  await onceRun(offline.web, 1500)
+  t.alike([...(await readGroupCerts(first.storage)).keys()], [B], 'the start sweep drops it again')
 })

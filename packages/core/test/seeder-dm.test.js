@@ -16,7 +16,8 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 const { Seeder } = require('../lib/seeder')
-const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createSnapshot } = require('../lib/blocklist')
 const { memberCertRecord } = require('../lib/records')
 const { generateNoiseKeyPair, attachAdmission } = require('../lib/net')
 const { attachDm } = require('../lib/dm-net')
@@ -513,4 +514,47 @@ test('seeder dm: invalid options are refused', (t) => {
   t.exception.all(() => new Seeder({ dm: {} }), /dm.postage.get/)
   t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, stampsPerDay: 0 } }), /stampsPerDay/)
   t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, onDrop: 1 } }), /onDrop/)
+})
+
+test('seeder dm: a blocked diary loses its dm, blob and copy stamp rows, in memory, on disk and after a restart', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const dm = { postage: { get: async () => ({ keys: [K1] }) }, blobPostage: { get: async () => ({ keys: [K2] }) } }
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, assoc, dm)
+  const a = 'a'.repeat(64)
+  const b = 'b'.repeat(64)
+  const c = 'c'.repeat(64)
+  for (const k of [a, b]) {
+    seeder._admitted.set(k, {})
+    t.ok(seeder._takeStamp(k, '2026-11-16'))
+    t.ok(seeder._takeStamp(k, '2026-11-16', 'blob'))
+    t.ok(seeder._takeStamp(k, '2026-W47', 'copy'))
+  }
+  const files = ['dm-stamps.json', 'blob-stamps.json', 'copy-stamps.json']
+  const onDisk = (name) => Object.keys(JSON.parse(fs.readFileSync(path.join(dataDir, name), 'utf8')).days).sort()
+  for (const name of files) t.alike(onDisk(name), [a, b], name + ' holds both rows')
+
+  const kp = hcrypto.keyPair()
+  const mod = { kp, cert: createModeratorCert({ moderator: hex(kp.publicKey), date: '2026-06-01T00:00:00.000Z' }, assoc.kp) }
+  const result = await seeder._offerBlocklist(createSnapshot({ seq: 1, blocked: [a] }, mod.kp, mod.cert), null)
+  t.ok(result.adopted)
+  for (const table of [seeder._dmStamps, seeder._blobStamps, seeder._copyStamps]) t.alike([...table.keys()], [b], 'only the unblocked row stays in memory')
+  for (const name of files) t.alike(onDisk(name), [b], name + ' keeps only the unblocked row')
+  t.alike(seeder._dmStamps.get(b), { '2026-11-16': 1 }, 'the other diary keeps its count')
+  await seeder.close()
+
+  const reread = new Seeder({ dataDir, dm })
+  reread._openDm()
+  t.teardown(() => reread.close())
+  for (const table of [reread._dmStamps, reread._blobStamps, reread._copyStamps]) t.alike([...table.keys()], [b], 'a restart reads no row for the blocked diary')
+  await reread.close()
+
+  // A row of an already blocked diary still on disk (a stop before the
+  // prune) goes at the next start.
+  fs.writeFileSync(path.join(dataDir, 'dm-stamps.json'), JSON.stringify({ v: 2, days: { [a]: { '2026-11-16': 1 }, [c]: { '2026-11-16': 2 } } }))
+  const { seeder: again } = await startSeeder(t, bootstrap, dataDir, assoc, dm)
+  t.alike([...again._dmStamps.keys()], [c], 'the start drops the blocked row')
+  t.alike(onDisk('dm-stamps.json'), [c])
 })

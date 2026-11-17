@@ -66,6 +66,12 @@
 // the methods throw { code: 'indisponivel' }, which callers treat as "do not
 // auto-decide".
 //
+// `strict` (Excluir conta while the triage is off, ./forget.js) never sets a
+// file aside and never creates one: a missing or malformed triage.json or
+// marks log makes the open throw { code: 'indisponivel', file } instead, no
+// rewrite happens at open, and a later write resets the marks log only when
+// it exists.
+//
 // Mutations are synchronous. Errors carry only a token
 // in `code`: pedido-invalido, indisponivel.
 
@@ -347,10 +353,12 @@ function appendLine (file, text) {
   }
 }
 
-function openLedger (dataDir, { now = Date.now } = {}) {
+function openLedger (dataDir, { now = Date.now, strict = false } = {}) {
   refuseSymlinkDir(dataDir)
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
-  fs.chmodSync(dataDir, 0o700)
+  if (!strict) {
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+    fs.chmodSync(dataDir, 0o700)
+  }
   const file = path.join(dataDir, FILE)
   const logFile = path.join(dataDir, LOG_FILE)
   let state = null
@@ -364,6 +372,8 @@ function openLedger (dataDir, { now = Date.now } = {}) {
   function snapshot (next) {
     const token = crypto.randomBytes(8).toString('hex')
     writeJsonAtomic(file, { v: VERSION, log: token, reports: next.reports, reads: next.reads }, 0o600)
+    // A missing log already reads as "nothing since the snapshot".
+    if (strict && !exists(logFile)) return
     const header = JSON.stringify({ log: token }) + '\n'
     try {
       writeTextAtomic(logFile, header)
@@ -377,7 +387,13 @@ function openLedger (dataDir, { now = Date.now } = {}) {
 
   function load () {
     const snap = readState(file)
-    const log = snap.log === null ? null : readLog(logFile, snap.log)
+    let log
+    try {
+      log = snap.log === null ? null : readLog(logFile, snap.log)
+    } catch (err) {
+      err.file = LOG_FILE
+      throw err
+    }
     const reports = snap.reports
     if (log) {
       // One cap pass, not one per line: a sort of 20000 marks per line would
@@ -396,6 +412,7 @@ function openLedger (dataDir, { now = Date.now } = {}) {
     logLines = got.lines
     rewrite = got.rewrite
   } catch (err) {
+    if (strict) throw Object.assign(fail('indisponivel'), { file: err.file || FILE })
     rewrite = true
     state = { reports: dict(), reads: dict() }
     if (err.code !== 'ENOENT') {
@@ -410,7 +427,7 @@ function openLedger (dataDir, { now = Date.now } = {}) {
       }
     }
   }
-  if (rewrite && !failed) {
+  if (rewrite && !failed && !strict) {
     try {
       snapshot(state)
       logLines = 0
@@ -527,6 +544,37 @@ function openLedger (dataDir, { now = Date.now } = {}) {
     return Object.keys(state.reads)
   }
 
+  // Excluir conta: the reads of `target` (a deleted member's diary) and the
+  // marks and reads of `ids` (the reports about it).
+  function heldFor (target, ids) {
+    if (!isLowerHex(target, 32) || !Array.isArray(ids)) throw fail('pedido-invalido')
+    const set = new Set(ids.filter(validId))
+    return {
+      reports: Object.keys(state.reports).filter((id) => set.has(id)),
+      reads: Object.keys(state.reads).filter((id) => set.has(id) || state.reads[id].target === target)
+    }
+  }
+
+  function holdsTarget (target, ids) {
+    usable()
+    const h = heldFor(target, ids)
+    return h.reports.length + h.reads.length > 0
+  }
+
+  // A snapshot write, which also starts a new marks log: a dropped mark
+  // never comes back from triage-marks.jsonl. -> the number of rows dropped.
+  function forgetTarget (target, ids) {
+    usable()
+    const h = heldFor(target, ids)
+    const n = h.reports.length + h.reads.length
+    if (n === 0) return 0
+    const next = { reports: dict(state.reports), reads: dict(state.reads) }
+    for (const id of h.reports) delete next.reports[id]
+    for (const id of h.reads) delete next.reads[id]
+    persist(next)
+    return n
+  }
+
   // Re-applies the caps (they already hold after every write) and folds the
   // marks log into the snapshot; writes only when something was dropped or
   // logged. Returns the number of entries dropped.
@@ -538,7 +586,7 @@ function openLedger (dataDir, { now = Date.now } = {}) {
     return n
   }
 
-  return { get, mark, read, putRead, dropRead, readIds, prune }
+  return { get, mark, read, putRead, dropRead, readIds, holdsTarget, forgetTarget, prune }
 }
 
 module.exports = {

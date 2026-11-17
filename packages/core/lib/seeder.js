@@ -1954,6 +1954,9 @@ class Seeder {
       // still says a list existed.
       this._blocklistHeld = (unreadable || hasUnreadableBlocklist(this.dataDir)) && state.current() === null
       this._blocklist = state
+      // Stamp rows of diaries already blocked: a stop between a snapshot's
+      // save and its prune, or an older build, left them.
+      this._dropBlockedStamps()
       this.qstore = await openQuarantine(this.dataDir)
 
       marks.state = Date.now()
@@ -8372,6 +8375,7 @@ class Seeder {
       else if (k !== g.group && this._isBlocked(g.diary)) this._dropGroup(k, 'blocked')
     }
     for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
+    this._dropBlockedStamps()
     this._dropUnsupportedRoots()
     // Joins held while the list was lost may be admitted now, and so may
     // roots refused for naming a diary the new list no longer blocks.
@@ -9286,6 +9290,30 @@ class Seeder {
       if (k === diary) hasRow = true
     }
     return hasRow || rows < this._dmStampRowsMax()
+  }
+
+  // A blocked diary never gets another stamp (_takeStamp), so its rows only
+  // name it and hold a slot under the row cap until their period ages out:
+  // every row of a diary the current snapshot blocks goes, a file is
+  // rewritten only when it held one, and a failed write keeps file and table
+  // as they were until the next adoption or start.
+  _dropBlockedStamps () {
+    if (this._dmOpts === null || this._blocklist === null) return
+    const kinds = [['dm', this._dmStamps, DM_STAMPS_FILE], ['blob', this._blobStamps, BLOB_STAMPS_FILE], ['copy', this._copyStamps, COPY_STAMPS_FILE]]
+    for (const [kind, rows, file] of kinds) {
+      const next = new Map()
+      for (const [k, row] of rows) if (!this._isBlocked(k)) next.set(k, row)
+      if (next.size === rows.size) continue
+      try {
+        writeJsonAtomic(path.join(this.dataDir, file), { v: 2, days: Object.fromEntries(next) }, 0o600)
+      } catch {
+        this.log({ event: 'warning', reason: kind + '-stamps-prune-failed' })
+        continue
+      }
+      if (kind === 'copy') this._copyStamps = next
+      else if (kind === 'blob') this._blobStamps = next
+      else this._dmStamps = next
+    }
   }
 
   // Room for every diary the seeder may serve, twice over (diaries dropped
