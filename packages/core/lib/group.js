@@ -639,7 +639,9 @@ function groupConfirmHistory (entries, group) {
 
 // A diary's `group-cut` marks for `group` as { writer, cut, seq }, plus
 // { gap: true } when the entries skip a seq (a history read with a hole may
-// miss a mark).
+// miss a mark). A deleted block this replica never read is no gap: only
+// blocks read count, so every replica holding the same blocks agrees
+// (docs/protocol.md "Deletion").
 function groupCutHistory (entries, group) {
   const out = []
   let next = 0

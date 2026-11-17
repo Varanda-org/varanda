@@ -767,7 +767,7 @@ test('a tombstone whose first read fails is learned on a retry, and no length co
   const get = reader.get.bind(reader)
   let thrown = false
   reader.get = async (index, opts) => {
-    if (!thrown && index === tomb && new Error().stack.includes('tombstoneTarget')) {
+    if (!thrown && index === tomb && new Error().stack.includes('arrivedKind')) {
       thrown = true
       throw new Error('read failed')
     }
@@ -814,7 +814,7 @@ test('a tombstone whose reads keep failing stays out of the length after the ret
   let failing = true
   let thrown = 0
   reader.get = async (index, opts) => {
-    if (failing && index === tomb && new Error().stack.includes('tombstoneTarget')) {
+    if (failing && index === tomb && new Error().stack.includes('arrivedKind')) {
       thrown++
       throw new Error('read failed')
     }
@@ -865,7 +865,7 @@ test('a tombstone whose reads keep failing is retried slowly, with no later even
   let failing = true
   let thrown = 0
   reader.get = async (index, opts) => {
-    if (failing && index === tomb && new Error().stack.includes('tombstoneTarget')) {
+    if (failing && index === tomb && new Error().stack.includes('arrivedKind')) {
       thrown++
       throw new Error('read failed')
     }
@@ -949,7 +949,7 @@ test('a step that throws after a failed tombstone read still retries it on a qui
   let readFailed = false
   let walkFailed = false
   reader.get = async (index, opts) => {
-    if (!readFailed && index === tomb && new Error().stack.includes('tombstoneTarget')) {
+    if (!readFailed && index === tomb && new Error().stack.includes('arrivedKind')) {
       readFailed = true
       throw new Error('read failed')
     }

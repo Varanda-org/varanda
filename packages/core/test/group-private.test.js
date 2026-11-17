@@ -11,7 +11,7 @@ const {
   groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites,
   groupReact, replacedWriterCut
 } = require('../lib/group')
-const { community } = require('./helpers/groups')
+const { community, diaryLog } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
 const { cutUnknownEntitled, rekeyDue, REKEY_PERIOD_MS, REKEY_CHECK_MS } = require('../lib/group-rekey')
 
@@ -2721,6 +2721,34 @@ test('last never names a sealed reaction', (t) => {
   const g = buildGroup(w.input(w.reader(wX)))
   t.alike(g.last, p)
   t.alike(g.posts[0].reactions, [{ emoji: '\u{1f44d}', count: 1, by: [Y] }])
+})
+
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+test('a leave still counts for key recipients after its diary deletes the join it closed', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  // X's diary binds both writers, leaves from wX (the leave cuts both),
+  // confirms it and turns wX off.
+  const log = diaryLog()
+  const on1 = log.join(G, wX)
+  log.join(G, wX2)
+  const leave = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(7) }))
+  log.confirm(G, wX, w.logs.get(wX))
+  const fold = () => {
+    const read = log.read(G)
+    return buildGroup(w.input(w.reader(wA), { joins: new Map([...w.joins, [X, read.joins]]), confirms: new Map([[X, read.confirms]]) }))
+  }
+  let g = fold()
+  t.is(g.members.get(X), 'left')
+  t.alike(g.entitled, [G, wA, wY].sort(), 'neither writer of X is a recipient')
+  t.alike(g.removals, [leave], 'the leave is a removal')
+  log.delete(on1)
+  g = fold()
+  t.is(g.members.get(X), 'left', 'still out after the delete')
+  t.alike(g.entitled, [G, wA, wY].sort(), 'and still no recipient')
+  t.alike(g.removals, [leave])
 })
 
 test('slot walk: an old boxless writer holds its slot until a cut 0 releases it (#350)', (t) => {

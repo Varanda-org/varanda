@@ -883,3 +883,73 @@ test('pages-groups: restart, rollback, pruning, caps, partial folds and zeroed s
   const all = await settled(() => pg.leaveAll(page.key), 'leave all')
   t.alike(all, { left: 1, failures: 0, communities: [C] }, 'leaveAll names the communities it left')
 })
+
+test('pages-groups: a group read reads no gap in the cut history of a member diary for a deleted block the page never read', async (t) => {
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const a = await person(t, kp, 'Ana')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Fotos', join: 'open', community })
+  await member.groupPost(a, { group, text: 'fica' })
+  const { seq } = await member.postCreate(a, { text: 'apagado' })
+  await member.postDelete(a, { to: { author: a.key, seq } })
+  const dir = tmpDir(t, 'varanda-account-')
+  const source = await coreStore.openStore(a.dataDir)
+  const target = new Corestore(path.join(dir, 'pages-replicas'))
+  let left
+  let right
+  try {
+    await target.ready()
+    const copies = []
+    for await (const discoveryKey of source.list()) {
+      const from = source.get({ discoveryKey, writable: false })
+      await from.ready()
+      const to = target.get({ key: from.key, writable: false })
+      await to.ready()
+      copies.push({ from, to })
+    }
+    left = source.replicate(true)
+    right = target.replicate(false)
+    left.pipe(right).pipe(left)
+    // Only the blocks Ana still holds: the cleared post never reaches the page.
+    for (const { from, to } of copies) {
+      for (let s = 0; s < from.length; s++) if (await from.has(s)) await to.get(s, { raw: true, timeout: 10000 })
+    }
+    const diary = target.get({ key: b4a.from(a.key, 'hex'), writable: false })
+    await diary.ready()
+    t.absent(await diary.has(seq), 'fixture: the deleted post never reached the page')
+    t.ok(await diary.has(seq + 1), 'fixture: its tombstone did')
+  } finally {
+    if (left) left.destroy()
+    if (right) right.destroy()
+    await target.close()
+    await source.close()
+  }
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'fotos')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
+  t.teardown(() => pg.close(), { force: true })
+  await pg.ready()
+  const real = groupLib.groupCutHistory
+  const seen = []
+  groupLib.groupCutHistory = (entries, g, ...rest) => {
+    const out = real(entries, g, ...rest)
+    if (g === group && entries.some((e) => e.record && e.record.type === 'delete' && e.record.seq === seq)) seen.push(out)
+    return out
+  }
+  try {
+    await pg.groupRead(page.key, group, { limit: 2 })
+  } finally {
+    groupLib.groupCutHistory = real
+  }
+  t.ok(seen.length > 0, 'the read folded Ana\'s diary')
+  t.ok(seen.every((out) => !out.some((m) => m.gap === true)), 'Ana\'s cut history has no gap')
+})

@@ -6,8 +6,11 @@
 
 const {
   groupHeader, writerHeader, groupAdmin, groupLeave,
-  groupCreateRecord, communityAdmit, communityBan, leaveDigest
+  groupCreateRecord, communityAdmit, communityBan, leaveDigest,
+  groupJoinHistory, groupConfirmHistory, groupCutHistory
 } = require('../../lib/group')
+const { groupJoinRecord, groupConfirmRecord, groupCutRecord, deleteRecord, validateRecord } = require('../../lib/records')
+const { applyDeletes } = require('../../lib/deletion')
 
 const K = (n) => n.toString(16).padStart(64, '0')
 const BASE = Date.parse('2026-01-01T00:00:00.000Z')
@@ -205,4 +208,39 @@ function groupIn (C, { key = K(0x100), diary = C.creator, join = 'open', visibil
   return w
 }
 
-module.exports = { K, BASE, AT, NOW, community, groupIn }
+// One diary's own blocks as real records (block 0 stands for its member
+// certificate, which no group reader looks at). `read(group)` gives the
+// joins, confirms and marks the nodes hand the folds: taken from the
+// entries after the deletion fold, as readAll returns them.
+function diaryLog () {
+  const entries = [{ seq: 0, record: null }]
+  let t = 1000
+  const append = (record) => {
+    const seq = entries.length
+    const err = validateRecord(record, seq)
+    if (err !== null) throw new Error('invalid record at ' + seq + ': ' + err)
+    entries.push({ seq, record })
+    return seq
+  }
+  return {
+    entries,
+    join: (group, writer, on = true, rejoin) => append(groupJoinRecord({ group, writer, on, rejoin, at: AT(++t) })),
+    // The diary side of an honest leave: a group-confirm naming the latest
+    // leave on `writer` in `log`, then the off join. -> the confirm's seq.
+    confirm (group, writer, log) {
+      let leave = null
+      for (const e of log.entries) if (e.record && e.record.type === 'group-leave') leave = e
+      const seq = append(groupConfirmRecord({ group, writer, seq: leave.seq, digest: leaveDigest(leave.record), at: AT(++t) }))
+      append(groupJoinRecord({ group, writer, on: false, at: AT(++t) }))
+      return seq
+    },
+    mark: (group, writer, cut) => append(groupCutRecord({ group, writer, cut, at: AT(++t) })),
+    delete: (seq) => append(deleteRecord({ seq, at: AT(++t) })),
+    read (group) {
+      const visible = applyDeletes(entries)
+      return { joins: groupJoinHistory(visible, group), confirms: groupConfirmHistory(visible, group), marks: groupCutHistory(visible, group) }
+    }
+  }
+}
+
+module.exports = { K, BASE, AT, NOW, community, groupIn, diaryLog }
