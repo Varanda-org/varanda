@@ -130,7 +130,11 @@ test('after an unconfirmed on-root leave and a return whose own confirmed leave 
   const cw3 = entryOf(a, community).writer
   await exchange(a, b)
   t.is((await foldC(a, community, [entryOf(b, community).writer, cw2, cw3])).creatorConfirmSeq, Infinity, 'no confirmed leave bounds the root')
-  t.alike(await cutsOf(a), [], 'no mark yet')
+  // The return cut the cw2 it replaced (#350), past the leave it wrote there
+  // so that leave still counts, and marked no root.
+  const cw2Entries = await coreEntries(a, cw2)
+  t.is(cw2Entries[cw2Entries.length - 1].record.type, 'group-leave', 'the return left on cw2')
+  t.alike((await cutsOf(a)).map((m) => [m.group, m.writer, m.cut]), [[community, cw2, cw2Entries.length]], 'only the replacement cut on cw2, at its length: no root mark yet')
   t.alike(await member.communityLeave(a, { community }), { state: 'left' })
   const marks = (await cutsOf(a)).map((m) => [m.group, m.writer])
   t.ok(marks.some(([g, w]) => g === horta && w === horta), 'the later leave marks Horta')

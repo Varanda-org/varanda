@@ -901,8 +901,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   }
 
   // Before a new writer for `group`: at most writersCap writers ever bound
-  // by the page diary in it (the fold keeps the earliest), at most groupsCap
-  // groups and communities with a live join.
+  // by the page diary in it, at most groupsCap groups and communities with a
+  // live join. Every writer ever bound counts, which is stricter than the
+  // fold's slot walk (#350), where a diary cut gives a slot back.
   function roomFor (loaded, page, group) {
     const bound = new Set((loaded.input.joins.get(page) || []).filter((j) => j.on).map((j) => j.writer))
     if (bound.size >= writersCap) throw fail('limite')

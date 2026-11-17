@@ -12,7 +12,7 @@ const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { testnet, until } = require('./helpers/net')
 const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { groupJoinRecord, deleteRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord, deleteRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
@@ -198,6 +198,52 @@ test('a catalogue child paged root only is paged in full once the diary joins it
   const res = await once(b, url, [])
   t.ok(res.ok, 'B once run ok ' + JSON.stringify(res.errors))
   t.ok(((await held(b, W)) || { contiguous: 0 }).contiguous >= 2, 'B fetched W and its post')
+  t.alike(await store.readGroupWriters(b.storage), [], 'B created no writer')
+})
+
+test('a root the diary binds through a writer joined after released slots is fetched (#350)', async (t) => {
+  t.timeout(110000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  const e = await member(assocKp, 'Edu')
+  t.ok((await once(a, url, [])).ok, 'A pushed its diary')
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B fetched the diary')
+  const { community: L } = await ops.communityCreate(e.ctx, { name: 'Largo', join: 'open' })
+  t.ok((await once(e, url, [])).ok, 'E pushed its community')
+  await until(() => indexed(seeder, L, L), { name: 'root indexed' })
+  // Every live slot of A's diary in L taken once, left and released by a
+  // cut 0, then one more writer: only the slot walk read with the cuts
+  // binds L now.
+  const ghost = () => b4a.toString(crypto.keyPair().publicKey, 'hex')
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  try {
+    for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
+      const w = ghost()
+      await store.appendRecord(diary, groupJoinRecord({ group: L, writer: w, on: true }))
+      await store.appendRecord(diary, groupJoinRecord({ group: L, writer: w, on: false }))
+      await store.appendRecord(diary, groupCutRecord({ group: L, writer: w, cut: 0 }))
+    }
+    await store.appendRecord(diary, groupJoinRecord({ group: L, writer: ghost(), on: true }))
+  } finally {
+    await diary.close()
+  }
+  // The writers never reach the seeder, so L's pages stay incomplete and
+  // a once run cannot end: a continuous run, read through its lender.
+  t.ok((await once(a, url, [])).ok, 'A pushed the joins and cuts')
+  const ev = []
+  const ac = new AbortController()
+  const lent = lender()
+  const run = sync(b, url, ev, { signal: ac.signal, reader: lent.reader, groupPageMs: 600000 })
+  try {
+    if (!await waitFor(t, () => (lent.held(L) || { contiguous: 0 }).contiguous > 0, { name: 'B adopted L', timeoutMs: 40000 })) return
+    t.pass('B holds the root its diary binds now')
+  } finally {
+    ac.abort()
+    await run
+  }
   t.alike(await store.readGroupWriters(b.storage), [], 'B created no writer')
 })
 

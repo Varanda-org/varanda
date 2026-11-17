@@ -27,8 +27,8 @@ import { fetchCommunity } from '../indexClient'
 import { relativeTime } from '../format'
 import { readsAs } from '../who'
 import {
-  AS_PAGE_LABEL, COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL,
-  can, communityReserveReached, lastIsOwn, needsReserveConfirm, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
+  AS_PAGE_LABEL, COMMUNITY_JOIN_LABELS, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT, GENERAL_LABEL, OWN_LABEL, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PRIVATE_LABEL,
+  can, communityReserveReached, communitySlots, lastIsOwn, needsReserveConfirm, reserveText, slotRefusal, lastLine, membersLabel, needsDeviceJoin, pageCommunities, pageErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, showNewGroup, unreadLabel, visibilityLabel
 } from '../groups'
 import { pagesOn } from '../pageGate'
 import { actAs, pagesGroup } from '../pages'
@@ -378,7 +378,13 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const doJoin = async () => {
     setJoinNote('')
     setCheck(null)
-    const res = await join.run(() => requestRef.current('community.join', { community }))
+    const res = await join.run(async () => {
+      try {
+        return await requestRef.current('community.join', { community })
+      } catch (err) {
+        throw await slotRefusal(err, () => requestRef.current('community.info', { community }), communitySlots, 'comunidade')
+      }
+    })
     if (res.ok) {
       const v = res.value || {}
       if (v.group) setJoinNote('Você entrou no Geral.')
@@ -405,8 +411,9 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     setJoinNote('')
     setCheck(null)
     // At the reserve the first tap only shows the warning: the slot it would
-    // spend (community or Geral) never comes back. The counts are read fresh:
-    // the rendered ones may predate a writer that just landed.
+    // spend (community or Geral) comes back at best by disconnecting a device.
+    // The counts are read fresh: the rendered ones may predate a writer that
+    // just landed.
     let fresh = info
     if (!reserveConfirm) {
       try {
@@ -417,7 +424,13 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       setReserveConfirm(true)
       return
     }
-    const res = await join.run(() => requestRef.current('community.join', { community }))
+    const res = await join.run(async () => {
+      try {
+        return await requestRef.current('community.join', { community })
+      } catch (err) {
+        throw await slotRefusal(err, () => requestRef.current('community.info', { community }), communitySlots, 'comunidade')
+      }
+    })
     if (res.ok) {
       setDeviceJoinSent(true)
       load()
@@ -554,7 +567,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           ? (
             <View style={styles.block}>
               <Soft>{DEVICE_JOIN_TEXT}</Soft>
-              {reserveConfirm || communityReserveReached(info) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
+              {reserveConfirm || communityReserveReached(info) ? <Soft>{reserveText(communitySlots(info), 'comunidade')}</Soft> : null}
               <Btn label={DEVICE_JOIN_LABEL} onPress={doDeviceJoin} pending={join.pending} disabled={offline} />
               <ErrorText>{join.error}</ErrorText>
             </View>

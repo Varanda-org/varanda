@@ -1174,7 +1174,7 @@ export function createVitrineRequest (fixtures, options) {
     },
     'group.info': ({ group }) => {
       const g = groupOf(group)
-      return { ...groupRow(g), creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1 }
+      return { ...groupRow(g), creator: g.creator, state: active(g) ? 'member' : g.role, orphan: communityOf(g.community).dropped.includes(g.group), visibility: g.visibility, memberInvite: g.memberInvite, writerHere: true, canWrite: active(g) && active(communityOf(g.community)) && !communityOf(g.community).dropped.includes(g.group), writersBound: 1, writersFrozen: 0, frozenRoom: 8 }
     },
     'group.seen': ({ group, upTo }) => {
       const g = groupOf(group)
@@ -1229,7 +1229,11 @@ export function createVitrineRequest (fixtures, options) {
         rootHere: c.creator === data.own,
         authorityHere: active(c) && (c.role === 'admin' || c.role === 'creator'),
         writersBound: 1,
-        generalWritersBound: 1
+        writersFrozen: 0,
+        frozenRoom: 8,
+        generalWritersBound: 1,
+        generalWritersFrozen: 0,
+        generalFrozenRoom: 8
       }
     },
     'feed.read': ({ limit, before }) => ({

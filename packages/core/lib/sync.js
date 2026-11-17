@@ -73,7 +73,7 @@ const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-li
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupConfirmHistory, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupCutHistory, groupConfirmHistory, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
   presentState,
@@ -141,6 +141,12 @@ const GROUP_REQUEST_RATE = GROUPS_RATE / 2
 // Page items whose diary or join seq a gate disproved, per seeder, before
 // this run stops paging that seeder.
 const MAX_BAD_HINTS = 32
+// The cores of one (group, diary) a node holds, as the seeder holds them
+// (#350): the diary's slot walk counts 8 live, 8 frozen and 16 released
+// writers at most, and a frozen or released writer may hold a leave the
+// fold reads. Slots go to the earliest proven joins: only the diary itself
+// can bind a writer past its walk, never a seeder's listing.
+const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
 // Gates in flight per hinted (group, diary) beyond the per-diary cap: a
 // gated writer takes a cap slot only once its gate proves its diary and join.
 const MAX_CAP_CONTENDERS = 2
@@ -383,6 +389,24 @@ function sameSet (a, b) {
   if (a.size !== b.size) return false
   for (const v of a) if (!b.has(v)) return false
   return true
+}
+
+// The groups buildCommunity counts for C from the held root, the held CWs
+// ({ key, diary, entries }) and the binding diaries' entries (diary ->
+// entries), or null while C does not fold. The community fold reads the
+// diaries' cuts, like the group fold.
+function heldCatalogue (community, root, writers, diaries) {
+  const joins = new Map()
+  const marks = new Map()
+  // A creator's confirmed leave bounds the root's creates.
+  const confirms = new Map()
+  for (const [d, entries] of diaries) {
+    joins.set(d, groupJoinHistory(entries, community))
+    marks.set(d, groupCutHistory(entries, community))
+    confirms.set(d, groupConfirmHistory(entries, community))
+  }
+  const view = buildCommunity({ root: { key: community, entries: root.entries }, writers, joins, marks, confirms })
+  return view.creator === null ? null : view.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)
 }
 
 // The download range of a followed diary. While nothing is deleted it is one
@@ -2444,20 +2468,15 @@ async function runSync ({
     }
     const root = logs.find((l) => l.key === community)
     if (!root) return null
-    const joins = new Map()
-    // A creator's confirmed leave bounds the root's creates.
-    const confirms = new Map()
+    const diaries = new Map()
     for (const d of new Set(logs.map((l) => l.diary))) {
       const core = heldBinding(d, null)
       if (core === null) continue
       try {
-        const entries = await readAll(core)
-        joins.set(d, groupJoinHistory(entries, community))
-        confirms.set(d, groupConfirmHistory(entries, community))
+        diaries.set(d, await readAll(core))
       } catch {}
     }
-    const view = buildCommunity({ root: { key: community, entries: root.entries }, writers: logs.filter((l) => l !== root), joins, confirms })
-    return view.creator === null ? null : view.groups.slice(0, MAX_GROUPS_PER_COMMUNITY)
+    return heldCatalogue(community, root, logs.filter((l) => l !== root), diaries)
   }
 
   // The catalogue roots to page, per paged community: the groups its held
@@ -2991,7 +3010,7 @@ async function runSync ({
     // A writer whose proven join lost the cap of its verified diary stays
     // out while that diary is still full.
     if (provenLater.has(gk)) {
-      if (othersHolding(group, provenLater.value(gk), item.key).length >= MAX_GROUP_WRITERS_PER_DIARY) {
+      if (othersHolding(group, provenLater.value(gk), item.key).length >= MAX_GROUP_HELD_PER_DIARY) {
         refuseForCap(group, item.key)
         return
       }
@@ -3006,7 +3025,7 @@ async function runSync ({
       return
     }
     if (groupCores.size >= coreLimit() ||
-        gatesInFlight(group, item.diary) >= MAX_GROUP_WRITERS_PER_DIARY + MAX_CAP_CONTENDERS) {
+        gatesInFlight(group, item.diary) >= MAX_GROUP_HELD_PER_DIARY + MAX_CAP_CONTENDERS) {
       rescanDue.add(group)
       return
     }
@@ -3612,7 +3631,7 @@ async function runSync ({
     // The root is one of its creator's writers and never gives way.
     if (e.key !== e.group) {
       const held = othersHolding(e.group, e.diary, e.key)
-      if (held.length >= MAX_GROUP_WRITERS_PER_DIARY) {
+      if (held.length >= MAX_GROUP_HELD_PER_DIARY) {
         // Protecting the cap from a seeder's one-time listing order: a
         // writer stored in an earlier run, active or only held on disk,
         // gives way to an earlier proven join as one stored in this run
@@ -4957,11 +4976,13 @@ module.exports = {
   readBoundRoots,
   recordBoundRoot,
   runSync,
+  heldCatalogue,
   createRequestPacer,
   GATE_TIMEOUT_MS,
   GATE_MIN_TIMEOUT_MS,
   GATE_RETRY_MS,
   UNVERIFIED_BUDGET_MS,
   GROUP_REQUEST_BURST,
-  GROUP_REQUEST_RATE
+  GROUP_REQUEST_RATE,
+  MAX_GROUP_HELD_PER_DIARY
 }
