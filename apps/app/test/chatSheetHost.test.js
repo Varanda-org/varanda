@@ -60,7 +60,8 @@ test('every screen that renders Bubble sits under a ChatSheetProvider', (t) => {
     t.ok(/<ChatSheetProvider[ >]/.test(src), f + ' mounts it')
   }
   const dm = read('screens/Mensagem.js')
-  t.ok(dm.includes("<ChatSheetProvider key={identity + ':' + props.peer}>"), 'a peer or identity switch remounts the DM sheet with its thread')
+  t.ok(dm.includes("const scope = identity + ':' + props.peer + (typeof props.oldPage === 'string' ? ':' + props.oldPage : '')"))
+  t.ok(dm.includes('<ChatSheetProvider key={scope}>'), 'a peer, identity or old-key switch remounts the DM sheet with its thread')
 })
 
 test('the bubble is not a button: its links and cards are, the chevron stays the only one', (t) => {

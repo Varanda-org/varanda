@@ -8,7 +8,8 @@
 // endpoint stays an allowlisted fcm.googleapis.com URL: only the injected
 // fetch rewrites the origin, so the allowlist is never widened and no socket
 // leaves 127.0.0.1. The members are linked in-process; B opts in with a real
-// diary-key proof and A's follow, reply, like and repost reach B's browser.
+// diary-key proof and A's follow, reply, like and repost reach B's browser, and a quote and an
+// @mention reach each recipient's own subscription.
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -19,7 +20,7 @@ const Hypercore = require('hypercore')
 const { keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
-const { createCert, createSeederCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createCert, createSeederCert, createIssuerCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createSwarm, attachAdmission } = require('@varanda/core/lib/net')
 const { memberCertRecord, postRecord, followRecord, likeRecord, repostRecord, profileRecord } = require('@varanda/core/lib/records')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
@@ -56,7 +57,7 @@ function recent () {
 
 const sha256 = (s) => nodeCrypto.createHash('sha256').update(s).digest()
 const TOPIC_KEY = nodeCrypto.randomBytes(32)
-const topicOf = (actor, seq) => nodeCrypto.createHmac('sha256', TOPIC_KEY).update(actor + ':' + seq).digest('hex').slice(0, 32)
+const topicOf = (actor, seq, recipient) => nodeCrypto.createHmac('sha256', TOPIC_KEY).update(actor + ':' + seq + ':' + recipient).digest('hex').slice(0, 32)
 
 // RFC 8291 decryption written here, independently of web-push.js.
 function decrypt (message, uaPrivate, authB64u) {
@@ -319,15 +320,82 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
   }
   t.is(push.received.length, 4, 'history sent nothing; each live append sent exactly one POST')
   for (const [kind, seq, r] of live) {
-    const got = push.received.filter((x) => x.headers.topic === topicOf(A.key, seq))
+    const got = push.received.filter((x) => x.headers.topic === topicOf(A.key, seq, B.key))
     t.is(got.length, 1, kind + ': one POST')
     t.is(got[0].path, subPath, kind + ': to B\'s subscription')
     t.is(got[0].headers['content-encoding'], 'aes128gcm')
     t.alike(opened(got[0]), { v: 1, kind, body: sentences[kind], actor: A.key, recipient: B.key, ref: r }, kind + ': decrypts with B\'s keys')
   }
-  const lengthOf = (kind) => push.received.find((x) => x.headers.topic === topicOf(A.key, live.find((l) => l[0] === kind)[1])).body.length
+  const lengthOf = (kind) => push.received.find((x) => x.headers.topic === topicOf(A.key, live.find((l) => l[0] === kind)[1], B.key)).body.length
   t.is(lengthOf('follow'), lengthOf('like'), 'a follow and a like have the same ciphertext length')
   t.ok(push.hosts.every((h) => h === 'fcm.googleapis.com'), 'sendPush only ever addressed the allowlisted host')
+
+  // Quote and @mention. C: a second recipient set up the same way as B.
+  // B and C hold issuer-verified usernames the seeder's post notice index
+  // must settle before a mention can match them.
+  const C = await member(t, bootstrap, assoc, publicKey)
+  await admit(C, assoc)
+  await linkDirect(accounts, iss, C, 'caio', '3333333333333333333333', 'caio@example.test')
+  await terms.accept({ member: C.hex, version: TERMS_VERSION, nonce: 'n'.repeat(43), signature: 'b'.repeat(128) })
+  const subC = subscription()
+  t.alike((await toggle(C, 'on', subC)).body, { ok: true, changed: true }, 'C registers with a real proof')
+  const username = (key, name) => createUsernameRecord({ member: key, username: name, date: recent() }, iss.keyPair, iss.cert)
+  await grown(B, username(B.key, 'bianca'))
+  await grown(C, username(C.key, 'caiozinho'))
+  const holds = (name, key) => seeder._postNotices.holders(name, () => true).includes(key)
+  await until(() => holds('bianca', B.key) && holds('caiozinho', C.key), { name: 'nomes verificados' })
+  const subCPath = new URL(subC.endpoint).pathname
+  const PAYLOAD_KEYS = ['actor', 'body', 'kind', 'recipient', 'ref', 'v']
+  async function delivered (seq, recipient, s) {
+    const topic = topicOf(A.key, seq, recipient)
+    await until(() => push.received.some((x) => x.headers.topic === topic), { name: 'POST ' + seq + ' ' + recipient.slice(0, 8), timeoutMs: 30000 })
+    const got = push.received.filter((x) => x.headers.topic === topic)
+    const plain = decrypt(got[0].body, s.uaPrivate, s.auth)
+    return { got, plain, payload: JSON.parse(plain) }
+  }
+  function shape (label, d, text) {
+    t.alike(Object.keys(d.payload).sort(), PAYLOAD_KEYS, label + ': only the payload keys')
+    t.absent(d.plain.includes(text), label + ': the post text never leaves the seeder')
+  }
+
+  // A quote of B's post: 'quote' to B, ref A's quoting post.
+  const mark0 = push.received.length
+  const qText = 'olha que post bom'
+  const q = await grown(A, postRecord({ text: qText, quote: bPost, at: recent() }))
+  let d = await delivered(q, B.key, sub)
+  t.is(d.got.length, 1, 'quote: one POST')
+  t.is(d.got[0].path, subPath, 'quote: to B\'s subscription')
+  t.alike(d.payload, { v: 1, kind: 'quote', body: 'Ana Lima citou seu post', actor: A.key, recipient: B.key, ref: A.key + ':' + q }, 'quote: decrypts with B\'s keys')
+  shape('quote', d, qText)
+
+  // A mention of B's verified username: 'mention' to B.
+  const mText = 'bom dia @bianca'
+  const mn = await grown(A, postRecord({ text: mText, at: recent() }))
+  d = await delivered(mn, B.key, sub)
+  t.is(d.got.length, 1, 'mention: one POST')
+  t.is(d.got[0].path, subPath, 'mention: to B\'s subscription')
+  t.alike(d.payload, { v: 1, kind: 'mention', body: 'Ana Lima mencionou você', actor: A.key, recipient: B.key, ref: A.key + ':' + mn }, 'mention: decrypts with B\'s keys')
+  shape('mention', d, mText)
+
+  // One post quoting B and mentioning C: two POSTs, one per subscription.
+  const bText = 'veja isso @caiozinho'
+  const both = await grown(A, postRecord({ text: bText, quote: { author: B.key, seq: 1 }, at: recent() }))
+  const dB = await delivered(both, B.key, sub)
+  const dC = await delivered(both, C.key, subC)
+  await settle()
+  await delay(300)
+  t.is(dB.got.length, 1, 'quote and mention: one POST to B')
+  t.is(dB.got[0].path, subPath, 'quote and mention: B\'s POST to B\'s subscription')
+  t.alike(dB.payload, { v: 1, kind: 'quote', body: 'Ana Lima citou seu post', actor: A.key, recipient: B.key, ref: A.key + ':' + both }, 'quote and mention: B gets the quote')
+  t.is(dC.got.length, 1, 'quote and mention: one POST to C')
+  t.is(dC.got[0].path, subCPath, 'quote and mention: C\'s POST to C\'s subscription')
+  t.alike(dC.payload, { v: 1, kind: 'mention', body: 'Ana Lima mencionou você', actor: A.key, recipient: C.key, ref: A.key + ':' + both }, 'quote and mention: C gets the mention')
+  shape('quote and mention (B)', dB, bText)
+  shape('quote and mention (C)', dC, bText)
+  t.is(push.received.length - mark0, 4, 'quote, mention and quote plus mention: four POSTs in all')
+  // Past the hour so the extra A-to-B POSTs leave the pair budget whole for
+  // the silent-path checks below.
+  clock.offset += 3600 * 1000
 
   // A follow from A, past the account service's cooldown, as a positive
   // marker: every block appended before it was decided by then.
@@ -335,7 +403,7 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
     await settle()
     clock.offset += COOLDOWN
     const seq = await grown(A, followRecord({ key: B.key, on: true, at: recent() }))
-    const topic = topicOf(A.key, seq)
+    const topic = topicOf(A.key, seq, B.key)
     await until(() => push.received.some((r) => r.headers.topic === topic), { name: 'sentinela ' + seq, timeoutMs: 30000 })
     await settle()
     await delay(300)
@@ -363,7 +431,7 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
   const l2 = await grown(A, likeRecord({ to: bPost, on: true, at: recent() }))
   await until(() => pushes.some((p) => p.actor === A.key && p.seq === l2), { name: 'segunda curtida emitida', timeoutMs: 30000 })
   s = await sentinel()
-  t.alike(topics(mark), [topicOf(A.key, l1), s], 'like on/off/on sent one POST')
+  t.alike(topics(mark), [topicOf(A.key, l1, B.key), s], 'like on/off/on sent one POST')
 
   // A forced index rebuild: silent.
   mark = push.received.length

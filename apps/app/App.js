@@ -35,9 +35,9 @@
 // gets the profile opened.
 // A notification click (hosted web, src/pushClient.web.js) arrives as
 // /?aviso=... at load or as a worker message: held in memory only, it opens
-// Avisos (a follow) or Conversa (a reply, like or repost) for the key it
-// names, or Convidar pessoas (a convite, which names nobody) once the tabs
-// show; nothing is written, followed or retried.
+// Avisos (a follow) or Conversa (a reply, quote, mention, like or repost)
+// for the key it names, or Convidar pessoas (a convite, which names nobody)
+// once the tabs show; nothing is written, followed or retried.
 // A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
 // opens the screen once the tabs show; it is never consent to join.
 // A splash stays until its whole presentation has been seen, in every phase,
@@ -2754,7 +2754,9 @@ function Member () {
       // { draft, card } from a listing's Conversar, shown in the composer only;
       // nothing is sent until the member presses send.
       const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
-      pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
+      // A thread of a key the Página moved from is its own entry, never the new key's thread with the same peer.
+      const oldPage = options && typeof options.oldPage === 'string' ? options.oldPage : null
+      pushScreen({ screen: 'mensagem', key, params: { ...(initial ? { initial } : {}), ...(oldPage ? { oldPage } : {}) } })
     }
     if (!(options && options.context && typeof key === 'string')) {
       pageDmGen.current++
@@ -2863,6 +2865,9 @@ function Member () {
   }, [pushScreen])
   const openRequests = useCallback(() => {
     pushScreen({ screen: 'pedidos' })
+  }, [pushScreen])
+  const openOldKey = useCallback((oldPage) => {
+    pushScreen({ screen: 'pedidos', params: { oldPage } })
   }, [pushScreen])
   // The Conversas top bar: the "+" opens the NovaConversa sheet (the search
   // field lives in the list). A lock, unlock or reset closes it.
@@ -3923,15 +3928,15 @@ function Member () {
       }
       if (entry.screen === 'pedidos') {
         return (
-          <StackLayer key={i + ':pedidos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagens onBack={goBack} onOpenThread={openMessage} />
+          <StackLayer key={i + ':pedidos:' + (entry.params.oldPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagens onBack={goBack} onOpenThread={openMessage} oldPage={entry.params.oldPage || undefined} />
           </StackLayer>
         )
       }
       if (entry.screen === 'mensagem') {
         return (
-          <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={h.handleOpenInvite} onOpenListing={openListing} onAvaliar={openAvaliar} />
+          <StackLayer key={i + ':mensagem:' + entry.key + ':' + (entry.params.oldPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} oldPage={entry.params.oldPage || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={h.handleOpenInvite} onOpenListing={openListing} onAvaliar={openAvaliar} />
           </StackLayer>
         )
       }
@@ -4226,6 +4231,7 @@ function Member () {
                           onOpenThread={openMessage}
                           onOpenCommunities={openCommunities}
                           onOpenRequests={openRequests}
+                          onOpenOldKey={openOldKey}
                           showInbox={dmOpenCount}
                           seenTick={seenTick}
                           composing={convCompose}

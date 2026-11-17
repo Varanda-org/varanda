@@ -142,6 +142,23 @@ export function requestsRow (dmList) {
   }
 }
 
+// A read-only list of a moved Página's old key (pageOldKeys.js). It has no
+// unread mark, so only the Todas chip shows it. The title repeats
+// pageOldKeys.js OLD_KEY_TITLE (a test keeps them equal) because this module
+// may import only who.js and the preview helper.
+const OLD_KEY_ROW_TITLE = 'Conversas da chave antiga'
+
+export function oldKeyRow (key, i) {
+  return {
+    kind: 'old-key',
+    key: 'old-key:' + key,
+    page: key,
+    title: i === 0 ? OLD_KEY_ROW_TITLE : OLD_KEY_ROW_TITLE + ' ' + (i + 1),
+    pinned: true,
+    unread: false
+  }
+}
+
 // How many recent conversation partners the + sheet lists.
 export const RECENT_MAX = 8
 
