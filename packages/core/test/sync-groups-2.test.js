@@ -824,5 +824,6 @@ test('the catalogue fold reads the diaries\' cuts, like the group fold: a creato
     return new Map([[creator, d.entries]])
   }
   t.alike(heldCatalogue(community, root, cws, diary(true)), [geral], 'the cut lets the eighth in: its confirmed leave bounds the root, so the later create does not count')
-  t.alike(heldCatalogue(community, root, cws, diary(false)), [geral, later], 'with no cut the eighth is over the cap and bounds nothing')
+  // The fold lists the groups sorted by key, and the keys are random.
+  t.alike([...heldCatalogue(community, root, cws, diary(false))].sort(), [geral, later].sort(), 'with no cut the eighth is over the cap and bounds nothing')
 })
