@@ -430,7 +430,7 @@ function rawAnexoPost (s, headers, first, { end = false, pathname = '/account/re
   return { req, done }
 }
 
-test('report with anexo: a body without Content-Length is refused before any slot', async (t) => {
+test('report with anexo: a body without Content-Length is refused before it is read', async (t) => {
   const s = await setup(t)
   const body = JSON.stringify(await dmAnexoBody(s, s.ana, s.bia.hex, GIF))
   const chunked = await rawAnexoPost(s, {}, body, { end: true }).done
@@ -441,24 +441,30 @@ test('report with anexo: a body without Content-Length is refused before any slo
   t.is(r.status, 200, r.text)
 })
 
-test('report with anexo: a stalled body is cut and its slot serves the next report', async (t) => {
+test('report with anexo: stalled bodies from senders who never sign do not hold back a valid report, and are cut', async (t) => {
   const s = await setup(t)
   const started = Date.now()
   const stalled = []
-  // Declared long enough (1 MB: a 10 s deadline) that the idle cut acts first.
-  for (let i = 0; i < 4; i++) stalled.push(rawAnexoPost(s, { 'content-length': 1000000 }, '{"kind":"dm"'))
-  // Every slot is held by a body that stopped sending.
+  let settledStalled = 0
+  // Declared near the largest body allowed (a deadline of about 13 s), so
+  // the idle cut acts first; more of them than a cap of four would admit.
+  for (let i = 0; i < 6; i++) {
+    const x = rawAnexoPost(s, { 'content-length': ANEXO_BODY_MAX - 1 }, '{"kind":"dm"')
+    x.done.then(() => { settledStalled++ })
+    stalled.push(x)
+  }
   await settle()
-  const fifth = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
-  t.alike(fifth.body, { error: 'limite' }, 'all four slots taken')
+  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
+  const settledAtAnswer = settledStalled
+  t.is(r.status, 200, 'answered while the stalled bodies hang: ' + r.text)
+  t.alike(s.moderation.get(r.body.id)?.anexo, { sha256: sha256(GIF), mime: 'image/gif', size: GIF.length }, 'stored with its anexo')
+  t.is(settledAtAnswer, 0, 'every stalled body still open when the report was answered')
   const ends = await Promise.all(stalled.map((x) => x.done))
   const elapsed = Date.now() - started
   for (const e of ends) t.ok(e === 'cut' || e.status === 408, 'cut by the server')
   t.ok(elapsed >= 4500, 'after the idle cut (' + elapsed + ' ms)')
-  t.ok(elapsed < 8000, 'before the deadline and the service request timeout (' + elapsed + ' ms)')
-  const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
-  t.is(r.status, 200, r.text)
-  t.alike(s.moderation.get(r.body.id).anexo, { sha256: sha256(GIF), mime: 'image/gif', size: GIF.length }, 'stored with its anexo')
+  t.ok(elapsed < 12000, 'before the deadline and the service request timeout (' + elapsed + ' ms)')
+  t.is(s.moderation.stats().open, 1, 'only the signed report stored')
 })
 
 test('report with anexo: a body that drips past its deadline is cut', async (t) => {
@@ -474,7 +480,7 @@ test('report with anexo: a body that drips past its deadline is cut', async (t) 
   t.ok(end === 'cut' || end.status === 408, 'cut by the server')
   t.ok(elapsed >= 1900 && elapsed < 4500, 'at the deadline (' + elapsed + ' ms)')
   const r = await s.api('POST', '/account/report/anexo', { body: await dmAnexoBody(s, s.ana, s.bia.hex, GIF) })
-  t.is(r.status, 200, 'the slot is free again')
+  t.is(r.status, 200, 'a report lands afterwards')
 })
 
 test('report with anexo: a full-size body sent slowly but inside its deadline is read to the end', async (t) => {
