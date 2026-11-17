@@ -1523,7 +1523,7 @@ Varandinha (protocol section 2, "Varandinha"; section 5, "Seeder Varandinha inde
 
 ### 5.158 `garden.state`
 
-The caller's own balcony as the node reads it from the own diary. Not mutating: it writes nothing and makes no network call. Like `choice.mine`, it needs the identity but not the unlocked key (a locked identity reads too); no identity -> `NOT_FOUND` `'identidade não encontrada'`. Browser node only (core: the same `USAGE` as 5.157).
+The caller's own balcony as the node reads it from the own diary. Not mutating: it writes nothing. Like `choice.mine`, it needs the identity but not the unlocked key (a locked identity reads too); no identity -> `NOT_FOUND` `'identidade não encontrada'`. Unlocked, a node that does not hold what the seeder holds for the own diary (no live continuous run tracks it, and no run of this unlock caught it up without a link loss or an own-behind since) first catches up with the seeder as a write does (section 11): a device behind another device of the same passkey would otherwise read an empty or older balcony and offer to plant it again. That catch-up failing -> `USAGE` `'sincronize com o semeador antes de publicar'`, and nothing is read. Locked, it reads the device's copy as it is, with no network call. Browser node only (core: the same `USAGE` as 5.157).
 
 - Params: `{}`. Result: `{ on, state, savesToday, helpsToday, given }`.
   - `on`: a boolean, the caller's newest live `garden` flag (`false` when there is none).
