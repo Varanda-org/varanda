@@ -101,17 +101,19 @@ test('Grupo wires the existing bubble slots and closes the actions sheet before 
   t.ok(source.includes('reactionOverrides, reactionsDisabled }}'), 'list updates its slots when capability changes')
 })
 
-test('reaction capability disables offline, locked, rekeying and page identities', (t) => {
+test('reaction capability disables offline, locked, rekeying and a page that cannot act', (t) => {
   const expression = source.match(/const reactionsDisabled = (.+)/)[1]
-  const disabled = runInNewContext('(node, meta, asPage, reader, orphan, info, canWriteHere) => ' + expression)
+  const disabled = runInNewContext('(node, meta, asPage, reader, orphan, info, canWriteHere, pageActs) => ' + expression)
   const node = { online: true, passkey: { status: { unlocked: true } } }
-  const check = (n = node, state = 'ok', page = false, reader = true, orphan = false, canWrite = true) => disabled(n, { state }, { page }, reader, orphan, {}, () => canWrite)
+  const check = (n = node, state = 'ok', page = false, reader = true, orphan = false, canWrite = true, acts = false) => disabled(n, { state }, { page }, reader, orphan, {}, () => canWrite, acts)
   t.is(check(), false)
   t.ok(check({ ...node, online: false }))
   t.ok(check({ ...node, passkey: { status: { unlocked: false } } }))
   t.ok(check(node, 'locked'))
   t.ok(check(node, 'rekey-pending'))
-  t.ok(check(node, 'ok', true))
+  t.ok(check(node, 'ok', true), 'a page that cannot act (not a member, or a private group)')
+  t.is(check(node, 'ok', true, true, false, false, true), false, 'a member page in a public group reacts without the person writer')
+  t.ok(check(node, 'locked', true, true, false, true, true))
   t.ok(check(node, 'ok', false, false))
   t.ok(check(node, 'ok', false, true, true))
   t.ok(check(node, 'ok', false, true, false, false))

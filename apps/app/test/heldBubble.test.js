@@ -64,7 +64,7 @@ test('Grupo: a held post leaves only by landing, Dispensar or a seal race, never
   const uncertain = send.slice(send.indexOf('} else if (r.uncertain)'), send.indexOf('} else if (heldCard !== undefined)'))
   t.ok(uncertain.includes('setReplyKey((k) => (k === replyKeyOf ? null : k))'), 'the reply moves into the hold, as in a conversation')
   const page = src.slice(src.indexOf('const pageSend = async'), src.indexOf('// Join or leave as the page'))
-  t.ok(page.includes('() => pageSend(err.retry, text, sentAt, true)'), 'the settle retry is marked')
+  t.ok(page.includes('() => pageSend(err.retry, text, sentAt, true, replyKeyOf)'), 'the settle retry is marked')
   t.ok(page.includes('if (retrying) holdNotLanded('), 'a failed page retry offers the choice again')
   t.ok(page.includes("setDraft((d) => (d.trim() === '' ? text : d))"), 'a seal race hands the text back to the composer')
   t.ok(src.includes("<Pill label='Dispensar' onPress={() => { setCheck(null); if (check.change.action === 'post') setPostHold(null) }} />"), 'Dispensar drops the hold')

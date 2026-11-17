@@ -313,8 +313,11 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
 
   const role = !asPage.page && info && typeof info.role === 'string' ? info.role : null
   const isMember = role === 'creator' || role === 'admin' || role === 'member'
-  // The Agenda reads the public groups only (events are public); never as a page.
-  const agendaAll = hosted && !asPage.page && isMember && typeof onOpenAgenda === 'function'
+  // The Agenda reads the public groups only (events are public). A page reads
+  // them through the service ('group-events'); a private group is never listed
+  // for it (the service answers 'privado'), and a group the page has not joined
+  // only makes the Agenda say it may be incomplete.
+  const agendaAll = hosted && (asPage.page || isMember) && typeof onOpenAgenda === 'function'
     ? groups.filter((g) => g.visibility === 'public' && typeof g.group === 'string' && HEX64.test(g.group)).map((g) => g.group)
     : []
   const agendaGroups = agendaAll.slice(0, 12)

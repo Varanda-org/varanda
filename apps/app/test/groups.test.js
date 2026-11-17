@@ -659,14 +659,37 @@ test('page mode: needs a page identity and the gate', async (t) => {
 
 test('page mode: a page never gets staff controls', async (t) => {
   const { canAsPage, pageCan } = await load()
-  for (const a of ['create', 'ban', 'admit', 'admin', 'hide', 'meta', 'rekey', 'invite', 'invitePolicy']) {
+  for (const a of ['create', 'ban', 'admit', 'admin', 'meta', 'rekey', 'invite', 'invitePolicy']) {
     t.is(canAsPage(a), false, a)
     t.is(pageCan(a, 'creator'), false, a + ' even with a staff role')
+    t.is(pageCan(a, 'member', { own: true }), false, a + ' never opens by own')
   }
+  t.is(canAsPage('hide'), true)
+  t.is(pageCan('hide', 'member', { own: true }), true, 'its own message')
+  t.is(pageCan('hide', 'member', { own: false }), false)
+  t.is(pageCan('hide', 'member'), false, 'not own by default')
+  t.is(pageCan('hide', 'creator', { own: true }), false)
+  t.is(pageCan('hide', 'requested', { own: true }), false)
   t.is(pageCan('post', 'member'), true)
   t.is(pageCan('post', 'requested'), false)
   t.is(pageCan('leave', 'requested'), true)
   t.is(pageCan('leave', 'left'), false)
+})
+
+test('page group ops: drop absent keys, never null', async (t) => {
+  const { pageGroupPostOp, pageGroupReactOp, pageGroupHideOp, pageGroupChoiceOp } = await load()
+  t.alike(pageGroupPostOp({ group: A, text: 'oi' }), { group: A, text: 'oi' })
+  t.alike(pageGroupPostOp({ group: A, text: 'oi', replyTo: null, fwd: 0, media: [], card: null, topic: false, poll: [], event: null }), { group: A, text: 'oi' })
+  const full = pageGroupPostOp({ group: A, text: 'oi', replyTo: { writer: B, seq: 2 }, fwd: 1, media: [{ id: 1 }], card: { url: 'https://x.y' }, topic: true, poll: ['a', 'b'], event: { title: 't', start: 5 } })
+  t.alike(Object.keys(full).sort(), ['card', 'event', 'fwd', 'group', 'media', 'poll', 'replyTo', 'text', 'topic'])
+  const target = { writer: B, seq: 3 }
+  t.alike(pageGroupReactOp({ group: A, target, emoji: '❤️' }), { group: A, target, emoji: '❤️' })
+  t.alike(pageGroupReactOp({ group: A, target }), { group: A, target, emoji: '' }, 'withdraw')
+  t.alike(pageGroupHideOp({ group: A, target, on: true }), { group: A, target, on: true })
+  t.alike(pageGroupHideOp({ group: A, target }), { group: A, target, on: false })
+  t.alike(pageGroupChoiceOp({ group: A, target, pick: 0 }), { group: A, target, pick: 0 })
+  t.alike(pageGroupChoiceOp({ group: A, target, pick: null }), { group: A, target, pick: null })
+  t.alike(pageGroupChoiceOp({ group: A, target, pick: -1 }), { group: A, target, pick: null })
 })
 
 test('page mode: requested shows pedido enviado, unusable answers show nothing', async (t) => {

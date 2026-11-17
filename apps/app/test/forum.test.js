@@ -159,7 +159,7 @@ test('Topico reads older pages with the cursor and gates replies on the thread, 
   const fs = require('fs')
   const path = require('path')
   const src = fs.readFileSync(path.join(__dirname, '../src/screens/Topico.js'), 'utf8')
-  t.ok(/request\('group\.read', \{ group, topic: root, before \}\)/.test(src), 'older page by the cursor')
+  t.ok(/readThread\(\{ group, topic: root, before \}\)/.test(src), 'older page by the cursor')
   t.ok(src.includes('replyAllowed({ loaded: read !== null, rootItem, navRoot })'), 'composer gate')
   t.absent(/isTop && rootItem &&/.test(src), 'the composer no longer needs the root item')
   t.absent(src.includes('claimedTotals'), 'a group poll is folded by the own node: no seeder notice')
