@@ -112,3 +112,54 @@ test('a sparse cut writer: the owner\'s and a fresh reader\'s --once end ok (#35
   t.ok(texts.includes('antes'), 'the post below the cut counts')
   t.absent(texts.includes('depois'), 'the post past the cut does not')
 })
+
+test('the owner confirms a cut writer only once the seeder holds its leave past the cut (#350)', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  const b = await member(assocKp, 'Bia')
+  const { community } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open', community })
+  await ops.groupPost(a.ctx, { group, text: 'oi' })
+  t.ok((await once(a, url, [])).ok, 'creator pushed')
+  await until(() => indexed(seeder, group, group), { name: 'root indexed' })
+  await store.addGroupReplica(b.storage, group)
+  t.ok((await once(b, url, [])).ok, 'B fetched the group and its community')
+  await ops.communityJoin(b.ctx, { community })
+  await ops.groupJoin(b.ctx, { group })
+  await ops.groupPost(b.ctx, { group, text: 'antes' })
+  const w = await ownWriter(b, group)
+  const cut = (await held(b, w)).length
+  await ops.groupPost(b.ctx, { group, text: 'depois' })
+  const length = await offlineLeave(b, group)
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group, writer: w, cut }))
+  } finally {
+    await diary.close()
+  }
+
+  // The seeder holds W below the cut but has not read past it yet.
+  const read = seeder._groupPastRange
+  let resume = null
+  const stalled = new Promise((resolve) => { resume = resolve })
+  seeder._groupPastRange = async function (...args) {
+    await stalled
+    return read.apply(this, args)
+  }
+  const events = []
+  const first = await once(b, url, events, { timeoutMs: 15000 })
+  t.absent(first.ok, 'B\'s run does not confirm W at its cut alone')
+  t.ok(first.errors.join('; ').includes(w + ':push ' + length), 'it waits for W: ' + JSON.stringify(first.errors))
+  t.absent(events.some((e) => e.event === 'group-pushed' && e.key === w), 'and never reports it pushed')
+  t.absent(await seeder._groupServed.get(w).core.has(length - 1), 'control: the seeder lacks the leave')
+
+  resume()
+  const again = []
+  const second = await once(b, url, again)
+  t.ok(second.ok, 'once the seeder reads past the cut the run ends ok: ' + JSON.stringify(second.errors))
+  t.ok(again.some((e) => e.event === 'group-pushed' && e.key === w && e.length === length), 'W reported pushed at its length')
+  t.ok(await seeder._groupServed.get(w).core.has(length - 1), 'with the leave at the seeder')
+})

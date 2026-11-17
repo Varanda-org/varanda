@@ -186,6 +186,10 @@
 //                them on its quarantine channel and store none, and a once
 //                run would end with the group behind. While a confirmation
 //                is pending the pages are asked again (GROUP_PUSH_PAGE_MS).
+//                A writer the own diary cut counts up to the cut, and its
+//                own leaves and key blocks past it must be advertised by
+//                that peer, or served to it on the link, too
+//                (seederHoldsKept).
 //                A seeder from before groups keeps the media rule.
 //   groups       the groups of kv 'groupWriters', plus each key of kv
 //                'groupReplicas' with nothing stored yet (a root asked for
@@ -348,7 +352,7 @@ const {
   downloadExceptPages,
   pageTargets
 } = require('@varanda/core/lib/deletion')
-const { advertisedHeld } = require('@varanda/core/lib/sparse-held')
+const { advertisedHeld, keptPastSeqs, askHeld, peerHolds } = require('@varanda/core/lib/sparse-held')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
 const store = require('./node-store')
@@ -3369,7 +3373,7 @@ async function syncRun ({
   // indexes a tombstone of the own diary deleted (media only; a group core
   // keeps it empty, seederHoldsMedia reads it for both).
   function pushEntry (key, core, event) {
-    const m = { key, core, pushed: -1, stop: null, uploaded: new WeakMap(), event, revoked: new Set() }
+    const m = { key, core, pushed: -1, stop: null, uploaded: new WeakMap(), event, revoked: new Set(), kept: null, keptReading: false }
     const onPeer = () => {
       checkMedia()
       pollMedia()
@@ -3503,13 +3507,53 @@ async function syncRun ({
     return cut === null ? length : Math.min(length, Math.max(cut, 1))
   }
 
+  // The own leaves and key blocks of writer m past its cut, read once per
+  // length (null while that read runs; checkMedia runs again after it).
+  function ownKept (m, cut, length) {
+    const k = m.kept
+    if (k !== null && k.from === cut && k.to === length) return k.seqs
+    if (m.keptReading || ending) return null
+    m.keptReading = true
+    const start = k !== null && k.from === cut && k.to < length ? k.to : cut
+    const before = start === cut ? [] : k.seqs
+    track(keptPastSeqs(m.core, start, length), (seqs) => {
+      m.keptReading = false
+      m.kept = { from: cut, to: length, seqs: before.concat(seqs) }
+      checkMedia()
+    }, () => {
+      m.keptReading = false
+    })
+    return null
+  }
+
+  // Whether the seeder's peer on link l holds every own leave and key block
+  // of writer m past the cut the own diary gave it (advertised, or served
+  // on this link): past the cut a seeder keeps only those, so the writer is
+  // pushed once it holds them. The peer is asked for its bitfield there (a
+  // full core sends no wants of its own); a later check sees the answer.
+  function seederHoldsKept (m, l, length) {
+    if (m.key === m.group || ownCutEntries === null) return true
+    const cut = diaryWriterCut(ownCutEntries, m.group, m.key)
+    if (cut === null || cut >= length) return true
+    const seqs = ownKept(m, cut, Math.min(length, maxLogBlocks))
+    if (seqs === null) return false
+    if (seqs.length === 0) return true
+    for (const peer of m.core.peers) {
+      if (peer.stream !== l.noise) continue
+      if (peerHolds(peer, seqs, m.uploaded.get(peer) || null)) return true
+      askHeld(peer, seqs)
+      return false
+    }
+    return false
+  }
+
   function checkMedia () {
     const l = seederLink()
     if (l === null || ended) return
     for (const m of pushCores()) {
       const length = m.core.length
       if (length < 1 || m.pushed === length) continue
-      if (m.group ? seederHoldsGroup(m, l, pushTarget(m, length)) : seederHoldsMedia(m, l, length)) {
+      if (m.group ? seederHoldsGroup(m, l, pushTarget(m, length)) && seederHoldsKept(m, l, length) : seederHoldsMedia(m, l, length)) {
         m.pushed = length
         emit({ event: m.event, key: m.key, length })
       }

@@ -12,7 +12,12 @@
 // the last page it has in it. Until that answer is here a block the peer
 // holds there reads as not advertised: such a peer has not answered yet,
 // and a goal that trusted it would end before the block came.
+// The owner of a cut writer reads the same per-peer state the other way:
+// a seeder holds its leaves and key blocks past the cut once it advertises
+// them or was served them (askHeld, peerHolds).
 // Browser-safe: no Node built-ins.
+
+const { decodeBlock } = require('./records')
 
 // RemoteBitfield's segment size, the same in Hypercore 10 and 11: a want
 // asks for one segment.
@@ -97,4 +102,51 @@ async function nextHeld (core, from, end) {
   return -1
 }
 
-module.exports = { advertisedHeld, peerAnswered, nextHeld, BITFIELD_SEGMENT }
+// Whether `peer` holds every block in `seqs`: it advertises it, or this
+// core served it to that peer (`served`, a Set of indexes, or null). A
+// peer never announces a block it gets to one that holds it already, so a
+// full copy sees what it served this way only.
+function peerHolds (peer, seqs, served = null) {
+  for (const seq of seqs) {
+    if (seq < peer.remoteContiguousLength) continue
+    if (peer.remoteBitfield.get(seq) !== true && (served === null || !served.has(seq))) return false
+  }
+  return true
+}
+
+// A want handle that never resolves anything: the want stays for the
+// peer's life, so blocks the peer gets there later are announced too.
+const STANDING_WANT = { addWant () {}, removeWant () {} }
+
+// Asks `peer` for its bitfield segments holding `seqs`, once per segment.
+// A full copy sends no wants of its own, and a peer tells a core what it
+// holds past its contiguous range only in answer to one (Hypercore 11 also
+// announces a block it gets only to peers that want its segment, or near
+// the tip). Hypercore internals, as a download range calls them: 10's
+// Peer#_maybeWant takes a range, 11's a want handle.
+function askHeld (peer, seqs) {
+  if (typeof peer._maybeWant !== 'function') return
+  for (const seq of seqs) {
+    if (seq < peer.remoteContiguousLength) continue
+    try {
+      if (peer.wants && typeof peer.wants.add === 'function') peer._maybeWant(seq, STANDING_WANT)
+      else peer._maybeWant(seq, 1)
+    } catch {}
+  }
+}
+
+// The blocks of [from, to) of a full local copy that a seeder keeps past a
+// cut: its group-leave and group-key blocks (seeder.js keptPastCut).
+async function keptPastSeqs (core, from, to) {
+  const out = []
+  for (let seq = from; seq < to; seq++) {
+    let block = null
+    try {
+      block = decodeBlock(await core.get(seq, { wait: false, raw: true }))
+    } catch {}
+    if (block !== null && (block.type === 'group-leave' || block.type === 'group-key')) out.push(seq)
+  }
+  return out
+}
+
+module.exports = { advertisedHeld, peerAnswered, nextHeld, peerHolds, askHeld, keptPastSeqs, BITFIELD_SEGMENT }

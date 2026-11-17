@@ -143,3 +143,48 @@ test('a fresh member fed only by a seeder folds a sparse frozen writer and a rel
   t.absent(full[g1].members.members.some((m) => m.member === b.key), 'control: the leave past the cut counts')
   t.alike(fromSeeder, full, 'the sparse copies fold like the whole ones')
 })
+
+test('the owner of a cut writer counts it pushed only once the seeder holds its leave past the cut (#350)', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const seeder = await startSeeder(t, bootstrap, kp)
+  const a = await person(t, kp, 'Ana')
+  const b = await person(t, kp, 'Bia')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await exchange(a, b)
+  await member.communityJoin(b, { community })
+  await member.groupJoin(b, { group })
+  await member.groupPost(b, { group, text: 'antes' })
+  const w = ownWriter(b, group)
+  const cut = (await writerEntries(b, group)).length
+  await offlineAppend(b, group, groupPost({ text: 'depois' }))
+  const leave = await offlineAppend(b, group, groupLeave({ seen: null, cuts: [{ writer: w, seq: cut + 1 }] }))
+  const s = await store.openStore(b.dataDir)
+  try {
+    await store.appendRecord(await store.openDiary(s), groupCutRecord({ group, writer: w, cut }))
+  } finally {
+    await s.close()
+  }
+  t.ok((await syncOnce(bootstrap, a)).result.ok, 'A pushes its diary and roots')
+
+  // The seeder holds W below the cut but has not read past it yet.
+  const read = seeder._groupPastRange
+  let resume = null
+  const stalled = new Promise((resolve) => { resume = resolve })
+  seeder._groupPastRange = async function (...args) {
+    await stalled
+    return read.apply(this, args)
+  }
+  const first = await syncOnce(bootstrap, b, { timeoutMs: 15000 })
+  const errors = first.result.errors.join('; ')
+  t.absent(first.result.ok, 'B\'s run does not count W pushed at its cut alone')
+  t.ok(errors.includes(w + ':corte ' + leave.seq), 'it waits for the leave: ' + errors)
+  t.absent(await seeder._groupServed.get(w).core.has(leave.seq), 'control: the seeder lacks the leave')
+
+  resume()
+  const second = await syncOnce(bootstrap, b, { timeoutMs: 30000 })
+  t.ok(second.result.ok, 'once the seeder reads past the cut the run ends ok: ' + second.result.errors.join('; '))
+  t.ok(await seeder._groupServed.get(w).core.has(leave.seq), 'with the leave at the seeder')
+})
