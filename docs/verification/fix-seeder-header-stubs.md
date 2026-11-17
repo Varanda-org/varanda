@@ -139,6 +139,42 @@ Depois da junção com a `main` e desta rodada, cada arquivo sozinho (`VARANDA_T
 | `seeder-groups-waits.test.js` | 12/12 | 61/61 |
 | `seeder-groups-cuts.test.js` | 20/20 | 361/361 |
 
+## Rodada de revisão 3
+
+A branch recebeu a `main` de novo (#768, junção limpa). Mudanças em `packages/core/lib/seeder.js`:
+
+- O fim de uma admissão de K não começa mais admissões: `_settleStubRows(key)` só tira linhas. Antes ele reconciliava o diário, e uma admissão que falhava na gravação de `admitted.json` (sem espera, sem recusa, sem linha) começava de novo na hora, em laço, até uma gravação dar certo. Agora essa saída `admission-failed` também espera como um tempo esgotado, como já fazia a falha de um toco.
+- O fim de qualquer admissão de K julga as linhas de K de todos os diários, não só do diário da admissão: a linha de D guardada enquanto a admissão de outro diário estava em andamento sai assim que ela termina, sem esperar a próxima reconciliação de D.
+- A saída dos tocos guardados de uma raiz cujo criador sumiu (`_dropGoneRootStubs`) roda no fim de `_dropUnsupportedRoots`, e não só na adoção da lista. Um criador cujo emissor foi revogado na adoção só sai depois, quando a nova lista o julga de novo; o toco agora sai nesse momento.
+- `_listHeaderStub` usa `_stubRoom(diary, key, group)`, e `_stubRoom` deixa de fora as linhas de D para K sob outro grupo mesmo já saindo. Antes uma linha só de lista movida com o limite cheio perdia a lista (`stub-full`) enquanto a linha antiga ainda saía.
+
+Testes novos em `seeder-groups-header-stubs.test.js` (19 a 22): entrada movida cuja gravação falha (o gancho `admitHook` na etapa `persist`), que espera antes de tentar de novo e se move quando a gravação volta; toco guardado de uma raiz cujo criador tem o emissor revogado e sai depois da adoção; linha só de lista movida com `maxHeaderStubs: 1` enquanto uma saída anterior de K ainda roda; linha de D guardada durante a admissão de K por outro diário, com as passagens de D paradas, que sai quando essa admissão termina.
+
+Remoção de cada correção (desfeita depois; `shasum` de `seeder.js` igual antes e depois), rodando só `seeder-groups-header-stubs.test.js`:
+
+| Mutação | Resultado |
+|---|---|
+| fim da admissão reconcilia o próprio diário e `admission-failed` sem espera (rodada 2) | falha (teste 19, e tempo esgotado em "linha antiga fora" do 22) |
+| só o fim da admissão volta a reconciliar o próprio diário | falha (tempo esgotado em "linha antiga fora") |
+| só `admission-failed` sem espera | falha (tempo esgotado em "K movido para G2") |
+| saída dos tocos de raiz só na adoção, como na rodada 2 | falha (tempo esgotado em "R2 removido") |
+| `_listHeaderStub` com `_stubRoom(diary)` | falha (tempo esgotado em "Kd sob G3") |
+| `_stubRoom` conta a linha movida que já sai | falha (tempo esgotado em "Kd sob G3") |
+| fim da admissão julga só as linhas do próprio diário | falha (tempo esgotado em "linha antiga fora") |
+
+Ficam sem teste próprio: o ramo de restauração da checagem de raiz em `_restoreHeaderStubs` (LOW3) e a guarda `_stubsRestored`.
+
+Depois desta rodada, cada arquivo sozinho (`VARANDA_TEST_CONCURRENCY=1 node <arquivo>`), Node 24.22.1, todos passaram:
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `seeder-groups-header-stubs.test.js` | 22/22 | 142/142 |
+| `seeder-groups.test.js` | 44/44 | 271/271 |
+| `seeder-header-stubs-e2e.test.js` | 1/1 | 9/9 |
+| `seeder-storage-budget.test.js` | 14/14 | 160/160 |
+| `seeder-groups-gone.test.js` | 25/25 | 153/153 |
+| `seeder-groups-waits.test.js` | 12/12 | 61/61 |
+
 ## Pontos em aberto (padrões do responsável)
 
 - Uma entrada desligada (`on: false`) mantém o toco: sair do grupo nunca apaga um núcleo, e os leitores ainda esperam um escritor que saiu.
@@ -155,3 +191,5 @@ Qualquer ordem funciona. O semeador lista tocos só para quem manda a capacidade
 
 - Um semeador pode listar, a cada atualização, todo núcleo que o membro guarda sob cada grupo que ele pagina, sem nunca ser cortado: o membro abre cada um localmente e o pula, sem buscar nem guardar nada. O custo fica limitado a cada atualização (núcleos guardados vezes grupos paginados).
 - Quando a nova entrada de uma chave movida é recusada sem espera, ou espera por outro motivo que não uma vaga de admissão, a linha antiga sai na mesma passagem e o núcleo é apagado; quando a entrada for tentada de novo, K é buscado outra vez (com o autor fora do ar, a entrada fica esperando).
+- Uma linha movida que já sai não conta nos limites para a nova entrada de K, então, enquanto essas saídas demoram (uma limpeza lenta), as linhas guardadas podem passar dos limites pelo número de linhas ainda saindo. Cada saída espera a anterior da mesma chave.
+- Uma entrada movida cuja gravação de `admitted.json` falha perde a linha antiga e, com ela, o núcleo guardado: quando a espera acaba, K é buscado de novo.
