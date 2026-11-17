@@ -40,6 +40,13 @@ const DM_INNER_KEYS_V7 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'copy',
 // Sealed to the own box and signed by the own key under its own domain, with
 // no certificate, as the v7 pointer.
 const DM_INNER_KEYS_V8 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+// v9 is a msg or ctl from a manifest diary (a Hypercore 11 core node): `from`
+// is the diary key, which is the hash of its signer's manifest and so cannot
+// verify a signature, and `signer` is the key that signs. The v2 keys plus
+// `signer`, signed under its own domain.
+const DM_INNER_KEYS_V9 = Object.freeze(['v', 'kind', 'id', 'from', 'signer', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
+// v10 is a reaction from a manifest diary: the v4 keys plus `signer`.
+const DM_INNER_KEYS_V10 = Object.freeze(['v', 'kind', 'id', 'from', 'signer', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
 // The six keys of a blob descriptor (core lib/blob.js), in wire order.
 const DM_BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 // A reaction's target, and a bound reply's replyTo (v2 and v3): the
@@ -128,7 +135,9 @@ const INNER_KEYS_BY_V = new Map([
   [5, DM_INNER_KEYS_V5],
   [6, DM_INNER_KEYS_V6],
   [7, DM_INNER_KEYS_V7],
-  [8, DM_INNER_KEYS_V8]
+  [8, DM_INNER_KEYS_V8],
+  [9, DM_INNER_KEYS_V9],
+  [10, DM_INNER_KEYS_V10]
 ])
 
 function canonicalInnerJson (body) {
@@ -151,9 +160,10 @@ function dmTextBytes (text) {
 }
 
 // fields: { v?, kind?, id?, from?, to?, replyTo?, media?, card?, fwd?, op?,
-// peer?, at?, cert? }; text is ignored. replyTo is measured as given: a
-// bare id, or a bound { from, id, digest }. v 3 measures a Página's inner,
-// which always carries the v2 keys. Returns the dmTextBytes still free
+// peer?, at?, cert?, signer? }; text is ignored. replyTo is measured as
+// given: a bare id, or a bound { from, id, digest }. v 3 measures a Página's
+// inner, which always carries the v2 keys; v 9 (or a signer) the inner of a
+// manifest diary, the v2 keys plus `signer`. Returns the dmTextBytes still free
 // under DM_INNER_BYTES; below zero nothing fits, not even empty text.
 function dmTextBudget (fields = {}) {
   const f = fields !== null && typeof fields === 'object' ? fields : {}
@@ -172,7 +182,12 @@ function dmTextBudget (fields = {}) {
     at: f.at === undefined ? AT_STANDIN : f.at,
     cert: orNull(f.cert)
   }
-  body.v = f.v === 3 ? 3 : innerVersion(body)
+  if (f.v === 9 || f.signer !== undefined) {
+    body.v = 9
+    body.signer = f.signer === undefined ? KEY_STANDIN : f.signer
+  } else {
+    body.v = f.v === 3 ? 3 : innerVersion(body)
+  }
   const framing = DM_INNER_FRAMING_BYTES + (body.v === 3 ? DM_INNER_V3_EXPIRY_BYTES : 0)
   return DM_INNER_BYTES - framing - utf8ByteLength(canonicalInnerJson(body))
 }
@@ -190,6 +205,8 @@ module.exports = {
   DM_INNER_KEYS_V6,
   DM_INNER_KEYS_V7,
   DM_INNER_KEYS_V8,
+  DM_INNER_KEYS_V9,
+  DM_INNER_KEYS_V10,
   DM_BLOB_KEYS,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,

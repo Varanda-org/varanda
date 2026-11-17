@@ -168,7 +168,7 @@ test('a parent whose root is a group header is refused as the node\'s own verdic
   t.ok(await stored(m, gkey), 'the group root still arrives')
 })
 
-test('a writer with a member under a community, or a group writer without one, is refused as header-invalid', async (t) => {
+test('a writer with a member under a community is held as a stub once its join is proven, never refused (#350)', async (t) => {
   t.timeout(90000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
@@ -184,9 +184,8 @@ test('a writer with a member under a community, or a group writer without one, i
   const m = await groupMember(t, kp, gkey)
   const { result, events } = await syncOnce(bootstrap, m, { gateTimeoutMs: 5000 })
   t.ok(result.ok, result.errors.join('; '))
-  const skipped = events.find((ev) => ev.event === 'group-skipped' && ev.key === bkey)
-  t.is(skipped && skipped.reason, 'header-invalid')
-  t.absent(await stored(m, bkey))
+  t.absent(events.some((ev) => ev.event === 'group-skipped' && ev.key === bkey), 'never refused')
+  t.ok(await stored(m, bkey), 'its block 0 is held, so the fold rules on it')
 })
 
 test('the fold\'s catalogue is paged: with 33 root creates the 32 counted groups are fetched', async (t) => {
