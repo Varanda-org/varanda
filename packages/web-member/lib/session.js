@@ -4208,6 +4208,21 @@ function createBrowserSession ({
       return r
     }),
 
+    // The key the app derives its once-marks with (docs/rpc.md 5.151): keyed
+    // by the identity secret like the notice seen tokens, so a mark that
+    // lands in this origin's storage cannot be matched to a Página or invite
+    // by hashing public keys. Answered to the app only, never logged or kept.
+    'seen.onceKey': serial(async () => {
+      await seenOwn()
+      const own = b4a.toString(keyPair.publicKey, 'hex')
+      const digest = crypto.hash([
+        b4a.from('varanda-once-key-v1\n'),
+        keyPair.secretKey.subarray(0, 32),
+        b4a.from(own)
+      ])
+      return { key: b4a.toString(digest, 'hex') }
+    }),
+
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
