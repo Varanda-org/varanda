@@ -318,14 +318,10 @@ export default function Denunciar ({ open, target, onClose, onSent }) {
   )
 }
 
-// A Pill whose wrapper carries the selection state (Pill sets only
-// `disabled` in its own accessibilityState).
+// One of two choices: the Pill itself carries the selected state, which a
+// wrapping View never gave a screen reader.
 function ChoicePill ({ label, selected, onPress }) {
-  return (
-    <View accessibilityState={{ selected }}>
-      <Pill label={label} filled={selected} onPress={onPress} />
-    </View>
-  )
+  return <Pill label={label} filled={selected} selected={selected} onPress={onPress} />
 }
 
 // react-native-web drops accessibilityState (aria-checked carries it) and

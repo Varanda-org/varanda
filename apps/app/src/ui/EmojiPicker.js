@@ -57,12 +57,13 @@ export function EmojiPicker ({ open, onPick }) {
         style={styles.search}
       />
       {hits === null && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs} keyboardShouldPersistTaps='handled'>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs} keyboardShouldPersistTaps='handled' accessibilityRole='tablist'>
           {EMOJI_GROUPS.map((g, i) => (
             <Pressable
               key={g.label}
               accessibilityRole='tab'
               accessibilityState={{ selected: i === group }}
+              aria-selected={i === group}
               onPress={() => setGroup(i)}
               style={[styles.tab, i === group && styles.tabOn]}
             >
@@ -74,7 +75,7 @@ export function EmojiPicker ({ open, onPick }) {
       {/* A new key remounts the grid at the top when its rows change. */}
       <ScrollView key={hits ? 'q:' + query.trim() : 'g:' + group} style={styles.scroll} nestedScrollEnabled keyboardShouldPersistTaps='handled'>
         {shown.length === 0
-          ? <Text style={styles.empty}>Nenhum emoji encontrado</Text>
+          ? <Text style={styles.empty} accessibilityLiveRegion='polite' aria-live='polite'>Nenhum emoji encontrado</Text>
           : (
             <View style={styles.grid}>
               {shown.map((item) => (

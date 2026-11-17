@@ -1857,7 +1857,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           {modeSwitch}
           {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && roster.length > 0
             ? (
-              <View style={styles.asRow} accessibilityRole='radiogroup'>
+              <View style={styles.asRow} accessibilityRole='radiogroup' accessibilityLabel='Publicar como'>
                 <Text style={styles.asLabel}>Publicar como</Text>
                 <Chip label='Você' on={asPage === null} disabled={held} onPress={() => actingStore.me()} />
                 {roster.map((key) => {
@@ -2180,6 +2180,7 @@ function Chip ({ label, on, disabled, onPress }) {
       accessibilityRole='radio'
       accessibilityLabel={label}
       accessibilityState={{ checked: on, disabled }}
+      aria-checked={on}
       disabled={disabled}
       onPress={onPress}
       hitSlop={4}

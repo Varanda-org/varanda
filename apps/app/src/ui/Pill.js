@@ -5,7 +5,9 @@
 // pill that opens a list of choices.
 // `maxFontSizeMultiplier` caps the label, for a pill in a Sheet header whose
 // other controls are capped. `iconFilled` draws the icon's solid shape (a
-// saved star), so the state is not shown by colour alone.
+// saved star), so the state is not shown by colour alone. `selected` (a
+// boolean) is announced as the pill's selected state, for a pill that is one
+// choice of a few (the filled face alone says it to the eye only).
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { PRESSED_OPACITY } from '../pressMotion'
@@ -13,7 +15,7 @@ import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, type } from './theme'
 
-export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, tonal, small }) {
+export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, danger, disabled, pending, accessibilityLabel, maxFontSizeMultiplier, tonal, selected, small }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const iconOnly = typeof label !== 'string' || label === ''
@@ -44,7 +46,7 @@ export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, dange
   return (
     <Pressable
       accessibilityRole='button'
-      accessibilityState={{ disabled: off }}
+      accessibilityState={selected === undefined ? { disabled: off } : { disabled: off, selected: selected === true }}
       // A worded pill is read by its label: with an icon beside it a screen
       // reader otherwise joined both (", Mensagem").
       accessibilityLabel={accessibilityLabel || (iconOnly ? undefined : label)}
