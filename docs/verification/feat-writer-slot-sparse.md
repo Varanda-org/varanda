@@ -25,7 +25,15 @@ Semeador (`packages/core/lib/seeder.js`):
 - Uma entrada recusada antes (`quota`, `header-invalid`) é tentada de novo uma vez a cada corte menor.
 - Escritor sem caixa num grupo privado: `header-invalid` enquanto contado, toco depois de liberado (`groupVerdict(..., released)`, na admissão, na partida, no portão e na reverificação de caixa). Se a liberação some, é julgado de novo e sai.
 
-Documentos: `docs/protocol.md` (bit `CAP_WRITER_CUTS`, entrada de `buildGroup` e `buildCommunity` com `signed`, "Slot walk" e "Writers named by a node" sobre o sem caixa, regra do `auth.seq` em "Diary cuts on own writers" e em "Community distributors", parágrafo novo "Sparse copies", "Cut writers" do semeador reescrito). `docs/rpc.md` não muda: nenhum método nem resultado mudou.
+Metas de conclusão com cópia esparsa (segunda rodada, pontos (a) e (b)):
+
+- `packages/core/lib/sparse-held.js` (novo, roda no Node, no Bare e no navegador): `advertisedHeld(core, end)` é verdadeiro quando algum par conectado já sincronizou, todo par sincronizado já respondeu pelos blocos abaixo de `end` e todo bloco abaixo de `end` que um deles anuncia está guardado. Depois do comprimento contíguo de um par, o bitfield dele só chega como resposta ao pedido de um intervalo de download, então o par conta como respondido quando chegou uma página do bitfield que cobre o intervalo.
+- `diaryWriterCut(entries, G, W)` em `group.js`: o corte que a caminhada do diário dá ao escritor (0 quando liberado, `null` sem corte), igual ao `groupWalkCut` do semeador.
+- Nó core (`sync.js`): na meta de `--once`, um escritor alheio guardado até o anunciado e com buraco depois conta como completo quando `advertisedHeld` vale até `min(comprimento assinado, MAX_LOG_BLOCKS)` (`sparseMet`, conferido de novo a cada `SPARSE_CHECK_MS` = 100 ms enquanto a meta espera). O próprio escritor cortado pelo diário conta como enviado quando o semeador o guarda até `max(corte, 1)`, nunca além do comprimento local; os cortes são lidos do diário quando a sincronização abre os escritores.
+- Nó do navegador (`web-member/lib/sync.js`): as mesmas duas regras (`sparseMet` em `unmetGroupGoals`; `pushTarget` em `checkMedia`), com os cortes relidos a cada varredura do diário (`fold.cutEntries`, `ownCutEntries`), e `checkMedia` roda de novo depois de cada varredura.
+- Serviço de contas (`pages-groups.js`): o `fetch` de um escritor listado termina, antes de `FETCH_TIMEOUT_MS`, quando todo bloco que o semeador anuncia abaixo do comprimento assinado está guardado (conferido a cada 50 ms), e então a cópia conta como completa. Raízes e diários continuam com a regra do contíguo.
+
+Documentos: `docs/protocol.md` (bit `CAP_WRITER_CUTS`, entrada de `buildGroup` e `buildCommunity` com `signed`, "Slot walk" e "Writers named by a node" sobre o sem caixa, regra do `auth.seq` em "Diary cuts on own writers" e em "Community distributors", parágrafo novo "Sparse copies", "Cut writers" do semeador reescrito; na segunda rodada, "Completion goals" com a cópia esparsa, o próprio escritor cortado e o `fetch` do serviço de contas). `docs/rpc.md` não muda: nenhum método nem resultado mudou.
 
 ## Como verificar
 
@@ -47,9 +55,28 @@ Cada arquivo sozinho, a partir da raiz, com `node <arquivo>`, e `npx standard` n
 | `apps/cli/test/pages-groups.test.js` | 3/3 | 153/153 |
 | `apps/cli/test/account-pages-groups.test.js` | 1/1 | 49/49 |
 
+Segunda rodada (depois do merge da `main` com #710, #711, #713 e #714), cada arquivo sozinho:
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `packages/core/test/sync-groups-sparse.test.js` (asserções novas do `--once`) | 1/1 | 14/14 |
+| `packages/web-member/test/sync-groups-sparse.test.js` (novo, DHT local) | 1/1 | 11/11 |
+| `apps/cli/test/pages-groups-sparse.test.js` (novo, DHT local) | 1/1 | 8/8 |
+| `packages/core/test/sync-groups-3.test.js` | 16/16 | 71/71 |
+| `packages/core/test/sync-private.test.js` | 4/4 | 16/16 |
+| `packages/core/test/group-member.test.js` | 13/13 | 151/151 |
+| `packages/core/test/seeder-groups-cuts.test.js` | 14/14 | 327/327 |
+| `packages/web-member/test/sync-groups-2.test.js` | 26/26 | 130/130 |
+| `packages/web-member/test/private-ops.test.js` | 24/24 | 231/231 |
+| `packages/web-member/test/group-memo.test.js` | 11/11 | 60/60 |
+| `apps/cli/test/pages-groups.test.js` | 3/3 | 152/152 (153 na primeira rodada: a asserção sobre a Geral só existe quando a entrada na comunidade também entrou nela, `joined.group`; dá 152 também com o `fetch` novo tirado) |
+| `apps/cli/test/account-pages-groups.test.js` | 1/1 | 49/49 |
+
+`npm run lint` passa.
+
 O teste de ponta a ponta: A cria a comunidade e dois grupos; B escreve nos dois, congela o escritor de G1 no comprimento (dois posts e a saída depois do corte) e libera o de G2 (um post e a saída). Depois que o semeador guarda os dois esparsos, R, novo, sincroniza só com ele: guarda W1 abaixo do corte mais a saída e W2 como toco, e a comunidade e os dois grupos (info, membros e leitura) dobram igual a quando R recebe as cópias inteiras de B.
 
-`apps/cli/lib/account/pages-groups.js` não tem teste próprio da leitura esparsa: usa o mesmo `readHeldBlocks` e a mesma dobra testados acima, e hoje o `fetch` dele marca o grupo como `incomplete` com uma cópia esparsa (ponto (b) abaixo), então a diferença ainda não aparece para quem usa.
+Na segunda rodada ele confere também que o `sync --once` do dono (B) e o do leitor novo (R) terminam `ok` antes do prazo de 30 s. `packages/web-member/test/sync-groups-sparse.test.js` (novo, DHT local e semeador atrás de WebSocket) faz o mesmo no nó do navegador com um escritor congelado: o `--once` de B e o de R terminam `ok`, R guarda o escritor abaixo do corte mais a saída, a saída conta e o post depois do corte não. A saída ali é escrita direto no escritor, como faria um aparelho offline: `group.leave` também desliga a entrada no diário, e esse caso esbarra num problema anterior a este PR (ponto (g) abaixo). `apps/cli/test/pages-groups-sparse.test.js` (novo, arquivo próprio porque `pages-groups.test.js` já usa boa parte do tempo por arquivo do executor): com o semeador guardando esparso o escritor congelado de B, a Página entra na comunidade, entra no grupo e posta, e a leitura dela vem com `incomplete: false`, o post abaixo do corte e sem o de depois. Selar (`group-seal`, grupo privado) passa pela mesma conferência `loaded.partial` e não tem teste próprio aqui.
 
 Não rodados aqui, por regra do brief: a suíte inteira e a demo (a sessão que abriu esta roda a CI de entrega).
 
@@ -87,6 +114,17 @@ Ponta a ponta (`packages/core/test/sync-groups-sparse.test.js`):
 - E1, `readBlocks` em `readCoreParts` (nó core lê os escritores como prefixo): 0/1, 11/12, falha "the sparse copies fold like the whole ones". O semeador e as cópias de R estão certos; só a dobra difere.
 - E2, M1 no semeador (escritores cortados guardados inteiros): tempo esgotado "run condition", o semeador nunca fica esparso.
 
+Segunda rodada, uma mutação por vez (`node <arquivo>` com a mudança tirada, depois restaurada):
+
+| Mutação | Arquivo | Resultado |
+|---|---|---|
+| A1 meta do leitor sem `sparseMet` (nó core) | `packages/core/test/sync-groups-sparse.test.js` | 0/1, 13/14, falha "R's run ends ok before its deadline: tempo esgotado: <W1>:2/5, <W2>:1/4" |
+| A2 meta do próprio escritor no comprimento inteiro (nó core) | o mesmo | 0/1, 13/14, falha "B's run ends ok before its deadline: tempo esgotado: <W1>:5/2, <W2>:4/1" |
+| A3 meta do leitor sem `sparseMet` (navegador) | `packages/web-member/test/sync-groups-sparse.test.js` | 0/1, 10/11, falha "R's run ends ok before its deadline: tempo esgotado: <W>:2/4" |
+| A4 `pushTarget` devolve o comprimento inteiro (navegador) | o mesmo | 0/1, 10/11, falha "B's run ends ok before its deadline: tempo esgotado: <W>:push 4" |
+| B1 o `fetch` do escritor listado como antes | `apps/cli/test/pages-groups-sparse.test.js` | tempo esgotado "group join" (60 s de `indisponivel`) |
+| B2 o `fetch` esparso sem `advertisedHeld` | o mesmo | tempo esgotado "group join" |
+
 ## Decisões tomadas aqui
 
 - A regra do buraco mora na dobra (`bindCores`), não só nos leitores: assim o nó core, o nó do navegador e o serviço de contas dobram igual mesmo com cópias diferentes do mesmo escritor, e um bloco depois de um buraco abaixo do corte nunca conta.
@@ -97,14 +135,19 @@ Ponta a ponta (`packages/core/test/sync-groups-sparse.test.js`):
 - Uma entrada recusada é tentada de novo uma vez a cada corte menor que a caminhada dá ao escritor: um corte faz caber na cota quem não cabia, e a liberação faz o sem caixa valer como toco. O custo é no máximo uma busca do bloco 0 por registro de corte.
 - Um escritor que sai por causa do que guarda fica com a entrada recusada (`groupRefused`), como uma recusa na admissão; sem isso ele seria admitido, buscado e derrubado a cada varredura.
 - A cota do que fica guardado usa `_overQuota` (núcleo inteiro) como atalho: só conta blocos e bytes quando o núcleo inteiro já passa da cota. Os bytes abaixo do corte são lidos um a um só nesse caso.
+- Segunda rodada, (a): o anúncio que conta é o de todo par conectado que já sincronizou, não só o do semeador, e um par que ainda não respondeu pelo intervalo segura a meta. O próprio escritor usa o corte do diário (0 vira 1: o bloco 0 sempre fica), nunca o que o semeador lista.
+- Segunda rodada, (b): só os escritores listados ganham a regra nova no serviço de contas; raiz e diário não são cortados e continuam pelo contíguo. O `fetch` ainda espera no máximo `FETCH_TIMEOUT_MS`; a diferença é terminar antes quando o anunciado já está guardado.
+- (c) As dobras de catálogo (comunidade no índice) não recebem marcas e leem o prefixo, o que continua seguro. Mantido como está.
+- (d) As cotas do lado do leitor usam o comprimento assinado, como já era. Mantido como está.
+- (e) O semeador baixa os blocos depois do corte, até `MAX_LOG_BLOCKS`, só para ler o tipo; os pedaços de 256 limitam o que fica guardado além do mantido, não o que trafega. Mantido como está.
 - O fragmento de changelog de `feat/writer-slot-walk` (que diz que o semeador guarda o escritor inteiro) não foi mexido: é de outro PR; o deste PR diz o comportamento novo.
 
 ## Riscos residuais e pontos em aberto
 
-- (a) Meta de `sync --once` (nó core e nó do navegador): `groupUnmet` quer `max(anunciado, core.length)` blocos contíguos de cada escritor alheio, e o dono de um escritor cortado espera o semeador listar o comprimento inteiro (`pushed`). Com o semeador esparso, nenhum dos dois chega lá, e um `--once` num grupo com escritor cortado só termina pelo tempo limite. Padrão recomendado: dar o escritor por completo quando o contíguo alcança o anunciado e todo bloco que um par conectado anuncia (bitfield) abaixo do comprimento assinado está guardado; para o próprio escritor, comparar com o corte do diário. Não feito aqui: está fora do escopo do brief e mexe nas duas sincronizações.
-- (b) Serviço de contas: `fetch` em `pages-groups.js` dá uma cópia por completa só com o contíguo no comprimento, então um grupo com escritor cortado esparso fica `incomplete` e entrar, postar ou selar pela Página responde `indisponivel`. Padrão recomendado: completa quando todo bloco que o semeador anuncia está guardado.
-- (c) As dobras de catálogo (comunidade no índice) não recebem marcas; leem o prefixo, o que continua seguro. Sem mudança.
-- (d) As cotas do lado do leitor usam o comprimento assinado (já era assim).
-- (e) Banda do semeador: os blocos depois do corte, até `MAX_LOG_BLOCKS`, são baixados só para ler o tipo. Os pedaços de 256 limitam o que fica guardado além do mantido, não o que trafega.
-- (f) Item 4 do lado do leitor: as sincronizações (core e navegador) ainda recusam com `header-invalid` o cabeçalho sem caixa num grupo privado antes de guardá-lo, então um leitor que nunca o teve continua com a dobra `incomplete`, embora o semeador agora mantenha o bloco 0. Padrão recomendado: guardar só o bloco 0 de um escritor sem caixa de grupo privado quando a caminhada do diário dele o libera, e deixar a dobra rejeitá-lo pelo cabeçalho. É uma mudança grande nas duas sincronizações; não feita aqui.
-- O teste de ponta a ponta não confere o resultado `ok` do `sync --once` do leitor, por causa de (a).
+- (a) e (b) feitos na segunda rodada (acima).
+- (c), (d) e (e): decisões mantidas (acima). Riscos que ficam: (c) uma dobra de catálogo vê menos de um CW cortado do que a dobra completa (só o prefixo), nunca mais; (d) um escritor esparso perto da cota de um leitor conta pelo comprimento assinado, não pelo que o leitor guarda; (e) a banda do semeador para um escritor cortado longo continua a do escritor inteiro até `MAX_LOG_BLOCKS`.
+- (f) Não feito: parado para decisão (pedido da rodada). As sincronizações (core e navegador) ainda recusam com `header-invalid` o cabeçalho sem caixa num grupo privado antes de guardá-lo, então um leitor que nunca o teve fica com a dobra `incomplete`, embora o semeador mantenha o toco. Fazer exige que o veredito do portão dependa da caminhada do diário que liga o escritor (o registro de corte 0, não só o bloco de entrada que o I1 admite), levantar a recusa da rodada (`refused`) quando essa caminhada muda, guardar só `[0, 1)`, pular esse escritor em `recheckGroupBoxes`, na revalidação da partida e na meta de conclusão, e decidir o que acontece quando a liberação some (registro de corte apagado). Isso muda as regras de admissão (I1 a I4) nas duas sincronizações.
+- (g) Encontrado na segunda rodada, anterior a este PR (vem da #713): o semeador lista um escritor que o diário desligou com `group.leave` com o seq desse `group-join` `on: false`, e o portão do leitor exige `on: true` naquele seq, então recusa como `unbound` (no navegador, visto no teste: `group-skipped` com `reason: 'unbound'`; no nó core pela leitura do código, `joinVerdict`), cobra como dica ruim do semeador e nunca guarda o escritor. Com o diário guardado, a caminhada espera o escritor e a dobra pode ficar `incomplete`. Não mexido aqui.
+- O "respondeu" de `advertisedHeld` é uma aproximação: uma página de bitfield criada por outra mensagem (um `range` ou um `bitfield` do par) antes da resposta ao pedido faz o par contar como respondido cedo. O efeito é um `--once` terminar antes de um bloco anunciado chegar: a dobra trata a cópia como o prefixo (o que está depois do buraco e não chegou não conta) até a próxima sincronização, sem erro.
+- No nó core, os cortes do próprio diário são lidos uma vez, quando a sincronização abre os escritores: um corte escrito durante a mesma execução só vale na próxima.
+- O dono dá o escritor por enviado no corte; as saídas e os blocos de chave depois do corte podem chegar ao semeador só depois que o `--once` do dono terminou (o semeador os busca quando o dono aparece de novo).
