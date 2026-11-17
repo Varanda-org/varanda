@@ -23,6 +23,29 @@ test('planShares: owner first, each once, members without a dm-key go to missing
   t.alike(planShares({ owner: O, admins: [], boxes: { [O]: 'not a key' } }).missing, [O])
 })
 
+test('planShares and actorBoxOf: a stated box only for a member without a dm-key, well formed', async (t) => {
+  const { planShares, actorBoxOf } = await load()
+  const SIG = 'ab'.repeat(64)
+  const AT = '2026-11-17T12:00:00.000Z'
+  const AB = 'f0'.repeat(32)
+  const entry = { member: A, box: AB, gen: 3, at: AT, sig: SIG }
+  const status = { actorBoxes: [entry, { member: O, box: AB, gen: 1, at: AT, sig: SIG }] }
+  t.alike(actorBoxOf(status, A), { box: AB, proof: { gen: 3, at: AT, sig: SIG } })
+  t.is(actorBoxOf(status, B), null)
+  t.is(actorBoxOf(null, A), null)
+  t.is(actorBoxOf({ actorBoxes: 'x' }, A), null)
+  t.is(actorBoxOf(status, 'x'), null)
+  for (const bad of [{ box: 'x' }, { box: '0'.repeat(63) }, { gen: 0 }, { gen: 1.5 }, { gen: '3' }, { at: '2026-11-17' }, { at: 5 }, { sig: 'x' }, { sig: SIG.toUpperCase() }]) {
+    t.is(actorBoxOf({ actorBoxes: [{ ...entry, ...bad }] }, A), null, 'malformed: ' + JSON.stringify(bad))
+  }
+  t.alike(planShares({ owner: O, admins: [A, B], boxes: { [O]: BOX, [A]: null, [B]: null }, status }), {
+    recipients: [{ member: O, box: BOX }, { member: A, box: AB, proof: { gen: 3, at: AT, sig: SIG } }],
+    missing: [B]
+  }, 'the owner keeps its dm-key, the delegate gets its stated box')
+  t.alike(planShares({ owner: O, admins: [A], boxes: { [O]: BOX, [A]: BOX }, status }).recipients, [{ member: O, box: BOX }, { member: A, box: BOX }], 'a dm-key always wins')
+  t.alike(planShares({ owner: O, admins: [A], boxes: { [O]: BOX, [A]: null } }).missing, [A], 'no status: missing')
+})
+
 test('nextGen: 1 for a new page, 2 for a legacy one, else gen + 1', async (t) => {
   const { nextGen, expectedGen } = await load()
   t.is(nextGen(null), 1)

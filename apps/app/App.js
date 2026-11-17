@@ -91,7 +91,7 @@ import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, once
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
-import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
+import { STATUS_RETRY_MS, ajustesTarget, newReceipt, statusReadDue, statusUpdate } from './src/accountDeletion'
 import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
@@ -857,22 +857,87 @@ function Member () {
   const [scheduledDeletion, setScheduledDeletion] = useState(null)
   const [accountTick, setAccountTick] = useState(0)
   const refreshAccount = useCallback(() => setAccountTick((n) => n + 1), [])
+  // A deletion can be scheduled from elsewhere (Excluir conta sem a passkey,
+  // another device), so the status is read again on the foreground, when the
+  // node comes back online and on a timer while in the foreground: at most
+  // every STATUS_EVERY_MS after a good read, every STATUS_RETRY_MS after a
+  // failed one (statusReadDue), so a read that failed offline or on a 429
+  // does not hide the date for long. One read at a time per member: a
+  // refresh asked during a read (`again`) runs after it. The record is
+  // replaced for another member or node, which drops a late answer.
+  const freshStatusRead = () => ({ goodAt: null, triedAt: null, failed: false, busy: false, queued: false, again: false })
+  const statusRead = useRef(freshStatusRead())
+  const pokeStatus = useCallback(() => {
+    const rec = statusRead.current
+    if (rec.busy || rec.queued || !statusReadDue(rec, Date.now())) return
+    rec.queued = true
+    refreshAccount()
+  }, [refreshAccount])
+  useEffect(() => {
+    if (node.hosted !== true || member === null) return
+    let timer = null
+    const stop = () => { if (timer !== null) clearInterval(timer); timer = null }
+    const run = () => { if (timer === null) timer = setInterval(pokeStatus, STATUS_RETRY_MS) }
+    if (AppState.currentState === 'active') run()
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return stop()
+      run()
+      pokeStatus()
+    })
+    return () => { stop(); sub.remove() }
+  }, [node.hosted, member, pokeStatus])
+  const statusOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = statusOnlineRef.current
+    statusOnlineRef.current = node.online
+    if (was !== false || node.online !== true) return
+    pokeStatus()
+  }, [node.online, pokeStatus])
   const enrolling = useRef(false)
   const [enrolDue, setEnrolDue] = useState(null)
+  // Cleared only for another member or node; a refresh (a schedule, a
+  // cancel, the foreground) keeps what is shown until an answer replaces it.
+  // The first answer for this member is the one that leaves the enrolment due.
+  const statusStart = useRef(true)
+  const deletionShown = useRef({ deletedState: null, scheduledDeletion: null })
   useEffect(() => {
+    statusStart.current = true
+    statusRead.current = freshStatusRead()
+    deletionShown.current = { deletedState: null, scheduledDeletion: null }
     setDeletedState(null)
     setScheduledDeletion(null)
     setEnrolDue(null)
+  }, [node.hosted, member])
+  useEffect(() => {
     if (node.hosted !== true || member === null) return
-    let alive = true
-    accountStatus(member).then((st) => {
-      if (!alive) return
-      setDeletedState(deletedOf(st))
-      setScheduledDeletion(scheduledOf(st))
-      if (st && st.linked === true && typeof st.username === 'string') setEnrolDue({ member, username: st.username })
-    }, () => {})
-    return () => { alive = false }
-  }, [node.hosted, member, accountTick])
+    const rec = statusRead.current
+    rec.queued = false
+    if (rec.busy) {
+      rec.again = true
+      return
+    }
+    rec.busy = true
+    const start = statusStart.current
+    const settle = (st) => {
+      rec.busy = false
+      if (rec !== statusRead.current) return
+      const at = Date.now()
+      rec.triedAt = at
+      rec.failed = st === null
+      if (st !== null) rec.goodAt = at
+      const next = statusUpdate(deletionShown.current, st, { start, member })
+      if (st !== null) statusStart.current = false
+      deletionShown.current = { deletedState: next.deletedState, scheduledDeletion: next.scheduledDeletion }
+      setDeletedState(next.deletedState)
+      setScheduledDeletion(next.scheduledDeletion)
+      if (next.enrolDue !== null) setEnrolDue(next.enrolDue)
+      if (rec.again) {
+        rec.again = false
+        refreshAccount()
+      }
+    }
+    accountStatus(member).then((st) => settle(st && typeof st === 'object' ? st : null), () => settle(null))
+  }, [node.hosted, member, accountTick, refreshAccount])
   const decision = terms.status === 'loading'
     ? 'loading'
     : termsDecision({
@@ -1443,14 +1508,25 @@ function Member () {
   // Excluir conta opened from the explainer: every way out of it (back,
   // Escape, close) returns to the explainer, never to the Ajustes list.
   const [deleteFromAviso, setDeleteFromAviso] = useState(false)
-  useEffect(() => { if (ajustes === null) setDeleteFromAviso(false) }, [ajustes])
+  // Excluir conta sem a passkey opened from Entrar: the same, closing the
+  // sheet, since no account is open there.
+  const [smsFromEntrar, setSmsFromEntrar] = useState(false)
+  useEffect(() => {
+    if (ajustes !== null) return
+    setDeleteFromAviso(false)
+    setSmsFromEntrar(false)
+  }, [ajustes])
+  const openSmsDelete = useCallback(() => {
+    setSmsFromEntrar(true)
+    setAjustes('excluirSms')
+  }, [])
   const openAvisoDelete = useCallback(() => {
     setDeleteFromAviso(true)
     setAjustes('excluir')
   }, [])
   const navigateAjustes = useCallback((screen) => {
-    setAjustes(deleteFromAviso && screen !== 'excluir' ? null : screen)
-  }, [deleteFromAviso])
+    setAjustes(ajustesTarget(screen, { aviso: deleteFromAviso, entrar: smsFromEntrar }))
+  }, [deleteFromAviso, smsFromEntrar])
 
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
@@ -3759,7 +3835,7 @@ function Member () {
             onDismiss: () => { clearPostLink(); setPendingPost(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} termsBeforeCreate={termsBeforeCreate} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} termsBeforeCreate={termsBeforeCreate} onDeleteWithoutPasskey={openSmsDelete} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>

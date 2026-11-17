@@ -14,6 +14,7 @@ const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
 const { openPasskeyStore, countedKeys } = require('../account/passkey-store')
+const { openDeletionRequests } = require('../account/deletion-requests')
 const { openInvitesStore } = require('../account/invites-store')
 const { pairInvites } = require('../account/invites-pair')
 const { createListingReader } = require('../account/feira-read')
@@ -915,6 +916,10 @@ async function serve (flags, env) {
     passkeys = openPasskeyStore(flags.dataDir, { guard: held, log })
     if (!passkeys.available()) log({ event: 'passkeys', reason: 'indisponivel' })
     stopPasskeysHeal = startHeal(passkeys, 'passkeys', log)
+    // The requests of Excluir conta sem a passkey (deletion-requests.json):
+    // the same guard; the file is read on every call, so it needs no heal.
+    const deletionRequests = openDeletionRequests(flags.dataDir, { guard: held, log })
+    if (!deletionRequests.available()) log({ event: 'exclusao', reason: 'pedidos-indisponivel' })
     // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is
     // set: unset, nothing is opened or created. The directory is the
     // single-use authority (isUsed). An invalid file keeps the service up and
@@ -1065,7 +1070,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, guard: held, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, deletionRequests, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, guard: held, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -1564,16 +1569,29 @@ function memberLines (out) {
   ]
 }
 
+// The operator schedules an Excluir conta sem a passkey request only with a
+// live SMS request on file and the owner's message, so the preview shows it.
+function smsRequestOf (dataDir, member) {
+  let ms
+  try {
+    ms = openDeletionRequests(dataDir).requestedAt(member)
+  } catch {
+    throw new Error('deletion-requests.json inválido')
+  }
+  return ms === null ? null : new Date(ms).toISOString()
+}
+
 function previewDeletion (dataDir, by) {
   const target = deleteTarget(openDeleteDirectory(dataDir), by)
   const passkeys = openPasskeyStore(dataDir, { readOnly: true })
   const hold = holdOf(passkeys, target.member)
-  return { ...target, ...factorsOf(dataDir, passkeys, target.member), scheduled: hold === null ? null : hold.runAt, ownsLivePage: livePageOf(dataDir, target.member), written: false }
+  return { ...target, ...factorsOf(dataDir, passkeys, target.member), smsRequest: smsRequestOf(dataDir, target.member), scheduled: hold === null ? null : hold.runAt, ownsLivePage: livePageOf(dataDir, target.member), written: false }
 }
 
 function previewLines (out) {
   return [
     ...memberLines(out),
+    'pedido por SMS: ' + (out.smsRequest === null ? 'nenhum nos últimos 30 dias' : whenLine(out.smsRequest)),
     out.scheduled === null ? 'nenhuma exclusão agendada' : 'exclusão já agendada para ' + whenLine(out.scheduled),
     ...(out.ownsLivePage ? [PAGE_OWNER] : []),
     'nada foi gravado; rode de novo com --yes'

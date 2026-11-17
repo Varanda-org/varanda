@@ -511,6 +511,7 @@ const TESTIMONIAL_DEAD_REF_MAX = 256
 const BAD_PAGE = 'operação de página inválida'
 const PAGE_FEED_BUSY = 'feed de página já em andamento'
 const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
+const ACTOR_BOX_CORE_ONLY = 'caixa de delegado disponível só no nó core'
 const NO_LOCAL_DATA = 'sem dados locais para este diário'
 // page.read (docs/rpc.md 5.85): the bounded read of a page diary this node
 // does not hold peeks blocks 1..3 and this many windows of PEEK_WINDOW seqs,
@@ -1881,6 +1882,13 @@ function createBrowserSession ({
     return run !== null && !run.once && run.ownSynced === true
   }
 
+  // The live continuous run tracks the own diary, or a run of this unlock
+  // caught it up and no link loss or own-behind cleared that since
+  // (holdCopyImports).
+  function ownHeld () {
+    return trackingOwn() || (keyPair !== null && ownCaught === keyPair)
+  }
+
   // A run lost its seeder link less than downTtl ago and no run reported the
   // own diary since (the fast refusal).
   function seederDown () {
@@ -3072,7 +3080,7 @@ function createBrowserSession ({
   // hold the record that turned this device off), so until then an import
   // waits. copyKick gives it with the targets later.
   function feedDevice (v) {
-    if (v.off === true || trackingOwn() || (keyPair !== null && ownCaught === keyPair)) dmEngine.setDevice(v)
+    if (v.off === true || ownHeld()) dmEngine.setDevice(v)
   }
 
   // The live continuous run lost its link or its own diary fell behind: a
@@ -4576,6 +4584,10 @@ function createBrowserSession ({
     'page.register': serial(async () => {
       throw new UsageError(PAGE_REGISTER_CORE_ONLY)
     }),
+    // Nor a delegate's box: dm.lookup finds this identity's own (5.161).
+    'dm.actorBox': serial(async () => {
+      throw new UsageError(ACTOR_BOX_CORE_ONLY)
+    }),
 
     // Signs the push-subscription statement with the in-memory key
     // (docs/rpc.md 5.31), exactly like terms.sign. The session fills in
@@ -5326,8 +5338,14 @@ function createBrowserSession ({
       })({})
     },
 
-    // The own diary alone, as choice.mine: no key needed to read it.
-    'garden.state': serial(() => withCores((c) => member.gardenOwn(c, Date.now()))),
+    // The own diary alone, as choice.mine: no key needed to read it. Unlocked,
+    // a device that does not hold what the seeder holds for it (ownHeld)
+    // first catches up as a write does: a copy behind another device of the
+    // same passkey reads an empty or older balcony and invites a replant.
+    'garden.state': serial(async (_, epoch) => {
+      if (keyPair !== null && !ownHeld()) await ensureCaughtUp(epoch)
+      return withCores((c) => member.gardenOwn(c, Date.now()))
+    }),
 
     // Caught up first, so a second device of the same passkey plays on the
     // freshest state. Helps received are bounded generously (they live in

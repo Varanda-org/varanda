@@ -1993,3 +1993,47 @@ test('passkeyStart with list and passkeyAdd with an assertion: an extra passkey\
     t.is(err.status, 429, 'the status rides along, so the caller can wait instead of giving up')
   }
 })
+
+const caught = (p) => p.then(() => null, (e) => e)
+
+test('deleteSmsSend/deleteSmsCheck: exact shapes, a bad check answer or a bare 5xx is uncertain', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { sent: true }))
+  t.alike(await a.deleteSmsSend({ username: 'ana', phone: '+5511912345678' }), { sent: true })
+  t.ok(calls[0].url.endsWith('/account/delete/sms/send'))
+  t.alike(JSON.parse(calls[0].init.body), { username: 'ana', phone: '+5511912345678' })
+  for (const bad of [{ sent: false }, { sent: true, extra: 1 }, {}]) {
+    stub(t, json(200, bad))
+    await t.exception(a.deleteSmsSend({ username: 'ana', phone: '+5511912345678' }), /serviço indisponível/)
+  }
+  stub(t, { ok: false, status: 429, headers: { get: () => 'text/plain' }, text: async () => 'Too Many Requests' })
+  {
+    const e = await caught(a.deleteSmsSend({ username: 'ana', phone: '+5511912345678' }))
+    t.ok(e !== null && e.code === 'limite-borda' && e.uncertain !== true && /uma hora/.test(e.message), 'the edge\'s bare 429 is named')
+  }
+
+  calls = stub(t, json(200, { requested: true }))
+  t.alike(await a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }), { requested: true })
+  t.ok(calls[0].url.endsWith('/account/delete/sms/check'))
+  t.alike(JSON.parse(calls[0].init.body), { username: 'ana', phone: '+5511912345678', code: '123456' })
+  stub(t, json(400, { error: 'codigo-invalido' }))
+  {
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.code === 'codigo-invalido' && e.uncertain !== true)
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  {
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.code === 'indisponivel' && e.uncertain !== true, 'a refusal before any write')
+  }
+  stub(t, json(503, { error: 'resultado-incerto' }))
+  {
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.uncertain === true)
+  }
+  for (const bad of [{ scheduled: '2026-11-24T12:00:00.000Z' }, { requested: false }, { requested: true, scheduled: '2026-11-24T12:00:00.000Z' }, {}]) {
+    stub(t, json(200, bad))
+    const e = await caught(a.deleteSmsCheck({ username: 'ana', phone: '+5511912345678', code: '123456' }))
+    t.ok(e !== null && e.uncertain === true, 'not the request answer: ' + JSON.stringify(bad))
+  }
+})

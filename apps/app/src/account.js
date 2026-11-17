@@ -1317,6 +1317,29 @@ export const deleteCancelFinish = async ({ member, nonce, signature }) => {
   if (!exactKeys(data, ['cancelled']) || typeof data.cancelled !== 'boolean') throw toError('indisponivel')
   return { cancelled: data.cancelled }
 }
+// Excluir conta sem a passkey (src/accountDeletion.js, apps/cli/lib/account/
+// delete-routes.js). The send answers { sent: true } whether or not the
+// @nome and the number match, so a refusal here is a bad shape, the feature
+// off or a limit. A correct code only files a deletion request (nothing is
+// scheduled until the owner writes to the team): a 5xx without a token may
+// have filed it, and the caller never sends the code again. -> { requested }
+// The edge answers a bare 429 past its per-address limits.
+const DELETE_SMS_MESSAGES = { ...DELETE_MESSAGES, 'limite-borda': 'Muitos pedidos agora. Tente de novo em uma hora.' }
+const DELETE_SMS_BARE = { 429: 'limite-borda' }
+export const deleteSmsSend = async ({ username, phone }) => {
+  const data = await call('POST', '/account/delete/sms/send', { username, phone }, { messages: DELETE_SMS_MESSAGES, bareStatus: DELETE_SMS_BARE })
+  if (!exactKeys(data, ['sent']) || data.sent !== true) throw toError('indisponivel')
+  return { sent: true }
+}
+export const deleteSmsCheck = async ({ username, phone, code }) => {
+  const data = await call('POST', '/account/delete/sms/check', { username, phone, code }, { messages: DELETE_SMS_MESSAGES, bareStatus: DELETE_SMS_BARE, uncertain: true, definite: true })
+  if (!exactKeys(data, ['requested']) || data.requested !== true) {
+    const err = toError('indisponivel')
+    err.uncertain = true
+    throw err
+  }
+  return { requested: true }
+}
 // The passkey enrolment right after the link (src/passkeyEnrol.js): the
 // creation's attestation object, signed at account-link phase 'passkey'.
 // With `list: true` (an extra passkey, src/extraPasskeyKey.js) start also

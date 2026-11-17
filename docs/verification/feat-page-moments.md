@@ -7,7 +7,7 @@
 - `apps/app/src/actingAs.js`, `App.js`: abrir o compositor de Momento deixa de trocar a identidade para a pessoa (`enterMoment` e `leaveMoment` saíram). O momento sai em nome de quem está agindo.
 - `apps/app/src/pageMoment.js`, `screens/Publicar.js`: como Página, o modo Momento fica disponível; a mídia sobe com `moment.putMedia`, como a pessoa, e o envio usa `pagesMoment` no lugar de `moment.create`. Só vai o item que `moment.putMedia` respondeu nesta abertura do compositor, para a Página que está agindo; trocar de identidade, publicar ou descartar o rascunho esquece o item. Um envio incerto trava o rascunho: `Tentar de novo` reenvia o mesmo pedido assinado, uma vez por toque. A fila offline continua só da pessoa.
 - `apps/app/src/screens/Momentos.js`: agindo como a Página, o momento dela tem **Apagar** pela ação `delete` da Página. O comportamento da pessoa não muda; reagir e responder não aparecem no momento da própria Página.
-- `apps/app/src/legal.js`: Termos e Política versão 84, com novo aceite.
+- `apps/app/src/legal.js`: Termos e Política versão 85, com novo aceite.
 
 ## Como verificar
 
