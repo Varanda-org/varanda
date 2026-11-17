@@ -328,3 +328,54 @@ test('a writer refused for its member is not gated again when its diary releases
   t.alike(skipped(events, f.w0.key), ['header-invalid'], 'W0 is refused once: one gate, one fetch of its block 0')
   t.absent(await stored(f.r, f.w0.key), 'and stays refused')
 })
+
+// A private root, and one diary D binding a boxed writer and `count` boxless
+// writers its walk keeps live (never released), in the fake seeder's store.
+async function oneDiary (fake, kp, count) {
+  const root = fake.store.get({ name: 'root' })
+  await root.ready()
+  const group = hex(root.key)
+  const r = await bound(fake.store, kp, group, 'root', { root })
+  await root.append(enc(groupHeader({ community: PARENT, member: PARENT, diary: r.dkey, visibility: 'private', join: 'approval', name: null, box: box() })))
+  const d = fake.store.get({ name: 'diary-shared' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(enc(memberCertRecord(createCert({ member: dkey }, kp))))
+  const writers = []
+  for (let i = 0; i <= count; i++) {
+    const w = fake.store.get({ name: 'writer-shared-' + i })
+    await w.ready()
+    await w.append(enc(writerHeader({ group, diary: dkey, member: PARENT, ...(i === 0 ? { box: box() } : {}) })))
+    await d.append(enc(groupJoinRecord({ group, writer: hex(w.key), on: true })))
+    writers.push({ key: hex(w.key), diary: dkey, length: 1, seq: d.length - 1 })
+  }
+  return { group, diary: dkey, root: { key: group, diary: r.dkey, length: 1, seq: 1 }, boxed: writers[0], bare: writers.slice(1) }
+}
+
+test('writers refused for their box read their held diary\'s walk once, and no lift follows while it stays current (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  let f = null
+  let all = false
+  let armed = false
+  // The boxless writers are listed once the boxed one is held, and with it
+  // D, so each of their gates reads D as this node holds it.
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: (q) => page(q.group === f.group ? sorted(all ? [f.root, f.boxed, ...f.bare] : [f.root, f.boxed]) : [])
+  })
+  f = await oneDiary(fake, kp, 4)
+  const m = await groupMember(t, kp, f.group)
+  let inspect = null
+  const { events } = await runUntil(m, bootstrap, (evs) => {
+    if (!armed && evs.some((ev) => ev.event === 'group-downloaded' && ev.key === f.boxed.key)) {
+      armed = true
+      setTimeout(() => { all = true }, 1500)
+    }
+    return f.bare.every((w) => skipped(evs, w.key).length > 0)
+  }, { pageRefreshMs: 500, inspectHook: (h) => { inspect = h } })
+  for (const w of f.bare) t.alike(skipped(events, w.key), ['header-invalid'], 'a boxless writer is refused once')
+  t.ok(await stored(m, f.boxed.key), 'the boxed writer is held')
+  t.is(inspect.walkReadCount(), 1, 'four refusals read D\'s walk once')
+  t.is(inspect.boxLiftCount(), 0, 'and no lift reads it again')
+})

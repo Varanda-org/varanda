@@ -346,7 +346,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupCutHistory, groupJoins, buildCommunity, diaryGroupKeys, diaryWriterCut, slotWalk, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupCutHistory, groupJoins, buildCommunity, diaryGroupKeys, diaryWriterCut, diaryWalkRecords, walkRecordsCut, slotWalk, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
   presentState,
   presentLength,
@@ -1642,6 +1642,7 @@ async function syncRun ({
   const listedAtStart = new Set() // kv groupReplicas keys when the run started
   const joinCache = new Map() // binding diary -> { core, length, joins } (diaryJoins)
   const boxLifts = new Map() // binding diary -> { again } while liftBoxRefused reads it
+  const walkCache = new Map() // binding diary -> { core, length, stale, records, stop } (diaryWalk)
   const bindingCerts = new Map() // binding diary -> block 0 its accepted core was gated with (kv groupCerts)
   // Diaries the follow path refused or purged as 'revoked-issuer' this run:
   // their replica may be gone, their group cores still have to go.
@@ -3766,6 +3767,7 @@ async function syncRun ({
       raw0: null, // the block 0 the gate accepted
       stub: false, // released with a box that does not match: block 0 alone is held
       boxRefused: false, // refused for its box alone until its diary releases it (liftBoxRefused)
+      boxWalk: null, // the remembered walk that refused it (refuseBox)
       gating: false,
       waiting: false, // a retry of a gate that got no answer is scheduled
       range: null,
@@ -4447,7 +4449,7 @@ async function syncRun ({
       markGroupChanged(ge.group)
       reconcileGroupDiaries()
       // Gated again only once its purge is done.
-      if (ge.boxRefused) liftBoxRefused(ge.diary)
+      if (ge.boxRefused) liftAfterBox(ge)
       evaluate()
     })
   }
@@ -5314,9 +5316,9 @@ async function syncRun ({
     if (isBlockedKey(ge.group)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (overQuota(probe)) return failGroupEntry(ge, 'quota', { purge: false })
     if (stub) {
-      const released = await heldRelease(ge.diary, ge.group, ge.key)
+      const rel = await heldRelease(ge.diary, ge.group, ge.key)
       if (ge.state !== 'pending' || ending) return
-      if (!released) return refuseBox(ge, false)
+      if (!rel.released) return refuseBox(ge, false, rel.walk)
     }
     if (ge.key !== ge.group) {
       // The earliest join the held binding diaries show, for the candidate
@@ -5374,14 +5376,25 @@ async function syncRun ({
   }
 
   // A writer refused for a box that does not match, kept in groupCores
-  // (failed) for liftBoxRefused under the diary its block 0 names. Every
-  // such refusal is followed by one lift, once the entry is failed (here,
-  // or when its purge is done): the diary may have grown between the gate's
-  // read of its walk and this refusal, and that growth found nothing to lift.
-  function refuseBox (ge, purge) {
+  // (failed) for liftBoxRefused under the diary its block 0 names, with the
+  // remembered walk that refused it, if any. Every such refusal is followed
+  // by one lift, once the entry is failed (here, or when its purge is done):
+  // liftAfterBox.
+  function refuseBox (ge, purge, walk = null) {
     if (ge.state === 'failing' || ge.state === 'failed') return
     ge.boxRefused = true
+    ge.boxWalk = walk
     failGroupEntry(ge, 'header-invalid', { purge })
+    liftAfterBox(ge)
+  }
+
+  // The lift after a box refusal: the diary may have grown between the
+  // gate's read of its walk and the refusal, and that growth found nothing
+  // to lift. Skipped while the walk that refused the writer is still the
+  // current one for its diary: the lift would read the same records.
+  function liftAfterBox (ge) {
+    const st = walkCache.get(ge.diary)
+    if (ge.boxWalk && st === ge.boxWalk && !st.stale && st.core === openBinding(ge.diary) && st.length === st.core.length) return
     liftBoxRefused(ge.diary)
   }
 
@@ -5389,19 +5402,43 @@ async function syncRun ({
   // writer `key` of `group` cut 0 (released, or kept at cut 0 past the
   // release cap): the same records and rule as the fold's (group.js
   // bindCores), which then never awaits a writer whose box does not match.
+  // -> { released, walk }: `walk` is the remembered read it answered from.
   async function heldRelease (d, group, key) {
-    return diaryWriterCut(await heldEntries(d), group, key) === 0
+    const read = diaryWalk(d)
+    const walk = walkCache.get(d)
+    const released = walkRecordsCut(await read, group, key) === 0
+    return { released, walk: walk !== undefined && walk.records === read ? walk : null }
   }
 
-  // Binding diary d's entries as this run holds it open, else null.
-  async function heldEntries (d) {
+  // Binding diary d's group-join and group-cut records as this run holds it
+  // open (group.js diaryWalkRecords), else null, read once per length:
+  // writers refused for their box, and the lifts after them, cost one read
+  // of d, not one each. A block that lands below the length marks the read
+  // stale; one that lands without a 'download' event comes with an upgrade,
+  // so the length changes.
+  function diaryWalk (d) {
     const core = openBinding(d)
-    if (core === null || core.fork !== 0) return null
-    try {
-      return await store.readAll(core)
-    } catch {
-      return null
+    let st = walkCache.get(d)
+    if (st !== undefined && st.core === core && !st.stale && st.length === (core && core.length)) return st.records
+    if (st !== undefined) {
+      st.stop()
+      walkCache.delete(d)
     }
+    if (core === null || core.fork !== 0) return Promise.resolve(null)
+    st = { core, length: core.length, stale: false, records: null, stop: noop }
+    const kept = st
+    const onDownload = () => { kept.stale = true }
+    core.on('download', onDownload)
+    st.stop = () => core.off('download', onDownload)
+    st.records = store.readAll(core).then(diaryWalkRecords, () => {
+      if (walkCache.get(d) === kept) {
+        kept.stop()
+        walkCache.delete(d)
+      }
+      return null
+    })
+    walkCache.set(d, st)
+    return st.records
   }
 
   // The writers refused for their box whose diary d, as this run holds it,
@@ -5427,9 +5464,9 @@ async function syncRun ({
     track((async () => {
       for (;;) {
         run.again = false
-        const entries = await heldEntries(d)
+        const records = await diaryWalk(d)
         for (const ge of refused()) {
-          if (diaryWriterCut(entries, ge.group, ge.key) !== 0) continue
+          if (walkRecordsCut(records, ge.group, ge.key) !== 0) continue
           if (ending || groupCores.get(ge.key) !== ge) continue
           groupCores.delete(ge.key)
           const g = groups.get(ge.group)

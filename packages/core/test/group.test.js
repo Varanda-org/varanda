@@ -8,7 +8,8 @@ const {
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
   GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
-  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut,
+  diaryWriterCut, diaryWalkRecords, walkRecordsCut
 } = require('../lib/group')
 const { groupJoinRecord, groupCutRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn, diaryLog } = require('./helpers/groups')
@@ -3626,4 +3627,44 @@ test('slot walk: a diary that deletes its own group-cut or group-join keeps the 
   t.alike(walkView(after.wk), walkView(before.wk), 'the deletes change nothing in the walk')
   t.ok(after.wk.live.has(ws[2]), 'the writer whose join was deleted keeps its slot')
   t.is(after.room, before.room, 'walkHasRoom answers as before')
+})
+
+test('walkRecordsCut answers as diaryWriterCut from the group records alone (#350)', (t) => {
+  const rnd = mulberry32(0x350a)
+  const groups = [G, K(0x110)]
+  const W = (i) => K(0x9100 + i)
+  let checked = 0
+  let differ = 0
+  let cuts = 0
+  let kept = 0
+  let total = 0
+  for (let round = 0; round < 40; round++) {
+    const log = diaryLog()
+    for (let i = 0; i < 40; i++) {
+      const g = groups[Math.floor(rnd() * groups.length)]
+      const w = W(Math.floor(rnd() * 12))
+      const r = rnd()
+      if (r < 0.15 && log.entries.length > 1) log.delete(1 + Math.floor(rnd() * (log.entries.length - 1)))
+      else if (r < 0.6) log.join(g, w, rnd() < 0.85)
+      else log.mark(g, w, rnd() < 0.4 ? 0 : 1 + Math.floor(rnd() * 4))
+    }
+    const entries = log.entries.slice()
+    // Now and then the history as read skips a seq.
+    if (round % 3 === 0) entries.splice(1 + Math.floor(rnd() * (entries.length - 1)), 1)
+    const records = diaryWalkRecords(entries)
+    kept += records.entries.length
+    total += entries.length
+    for (const g of groups) {
+      for (let i = 0; i < 12; i++) {
+        checked++
+        const cut = diaryWriterCut(entries, g, W(i))
+        if (cut !== null) cuts++
+        if (walkRecordsCut(records, g, W(i)) !== cut) differ++
+      }
+    }
+  }
+  t.is(differ, 0, 'the same cut for each of ' + checked + ' writers')
+  t.ok(cuts > 100, cuts + ' of them cut or released')
+  t.ok(kept < total, 'kept ' + kept + ' of ' + total + ' records')
+  t.is(walkRecordsCut(diaryWalkRecords(null), G, W(0)), null, 'nothing read, no cut')
 })

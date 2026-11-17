@@ -893,9 +893,41 @@ function walkHasRoom (joins, marks, G, extra = []) {
 // Never throws.
 function diaryWriterCut (entries, G, W) {
   try {
-    const w = slotWalk(groupJoinHistory(entries, G), groupCutHistory(entries, G), G)
-    if (w.released.has(W)) return 0
-    if ((w.live.has(W) || w.frozen.has(W)) && w.cut.has(W)) return w.cut.get(W)
+    return walkWriterCut(slotWalk(groupJoinHistory(entries, G), groupCutHistory(entries, G), G), W)
+  } catch {}
+  return null
+}
+
+function walkWriterCut (w, W) {
+  if (w.released.has(W)) return 0
+  if ((w.live.has(W) || w.frozen.has(W)) && w.cut.has(W)) return w.cut.get(W)
+  return null
+}
+
+// What diaryWriterCut reads of a diary's records: its group-join and
+// group-cut records. A node keeps these per diary length (walkRecordsCut)
+// instead of every record. Never throws.
+function diaryWalkRecords (entries) {
+  const kept = []
+  try {
+    eachEntry(entries, (seq, record) => {
+      if (validRecordCopyOfType(record, seq, 'group-join') !== null || validRecordCopyOfType(record, seq, 'group-cut') !== null) kept.push({ seq, record })
+    })
+  } catch {}
+  return { entries: kept, walks: new Map() }
+}
+
+// diaryWriterCut(entries, G, W) over diaryWalkRecords(entries): the same
+// cut, each group's walk stepped once. The seqs the kept records skip give
+// a gap mark, which changes no cut. Never throws.
+function walkRecordsCut (records, G, W) {
+  try {
+    let w = records.walks.get(G)
+    if (w === undefined) {
+      w = slotWalk(groupJoinHistory(records.entries, G), groupCutHistory(records.entries, G), G)
+      records.walks.set(G, w)
+    }
+    return walkWriterCut(w, W)
   } catch {}
   return null
 }
@@ -3961,6 +3993,8 @@ module.exports = {
   groupConfirmHistory,
   slotWalk,
   diaryWriterCut,
+  diaryWalkRecords,
+  walkRecordsCut,
   slotWalkState,
   replacedWriterCut,
   retiredWriterCut,

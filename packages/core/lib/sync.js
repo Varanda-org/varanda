@@ -73,7 +73,7 @@ const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-li
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
 const { advertisedHeld, keptPastSeqs, askHeld, peerHolds } = require('./sparse-held')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
@@ -462,7 +462,8 @@ function followRange (core, deleted, { groupBound = false } = {}) {
 // gate) and joinHook(swarm, topics) replaces joinAndFlush. All three are
 // test-only hooks, as are inspectHook (called once with { claimCount(),
 // topicHasPeer(topic), lastClosedPeer(), recomputeCount(), groupTargetCount(),
-// groupCoreCount(), swarmTopicCount(), createMemo(limit)
+// groupCoreCount(), swarmTopicCount(), walkReadCount() and boxLiftCount()
+// (the binding diary walks read and the box lifts run), createMemo(limit)
 // (a gate memory of this run's mode), divergeDiary(key) (the verdict of a
 // binding diary whose stored blocks differ from the gated ones),
 // hardError(msg) and groupDiverged(key) (record a hard error, a group
@@ -558,6 +559,8 @@ async function runSync ({
   const peers = new Set()
   let lastClosedPeer = null // test-only (inspectHook)
   let recomputes = 0 // test-only (inspectHook)
+  let walkReads = 0 // test-only (inspectHook)
+  let boxLiftRuns = 0 // test-only (inspectHook)
   const follows = new Map() // key -> entry
   let followWrites = Promise.resolve() // migrate's follows.json updates, one at a time
   const topicKeys = new Map() // topic hex -> key hex (own diary and follows)
@@ -630,11 +633,12 @@ async function runSync ({
   const provenLater = createMemo(gateLimit) // 'group:key' -> verified diary whose cap its proven join lost
   const joinCache = new Map() // binding diary -> { core, length, joins } read for the per-diary cap
   const failedWriters = createMemo(gateLimit) // 'group:key' accepted, then failed (fork, quota): not gated again
-  // 'group:key' -> { group, key, diary } refused for a box that does not
-  // match its root's visibility (and for nothing else), gated again once the
-  // walk of its diary as held here releases it (liftBoxRefused).
+  // 'group:key' -> { group, key, diary, walk } refused for a box that does
+  // not match its root's visibility (and for nothing else), gated again once
+  // the walk of its diary as held here releases it (liftBoxRefused).
   const boxRefused = createMemo(gateLimit)
   const boxLifts = new Map() // binding diary -> { again } while liftBoxRefused reads it
+  const walkCache = new Map() // binding diary -> { core, length, stale, records, stop } (diaryWalk)
   // Foreign writer key -> { group, diary } of a writer core on disk that
   // holds its per-diary cap slot for the run: stored when the run started,
   // or kept after a quota stop. Mirrors the disk, so it never expires; a
@@ -2254,7 +2258,7 @@ async function runSync ({
       if (e.group !== group || e.key === group || e.state !== 'active' || !e.gatedRaw || e.stub) continue
       if (!boxMismatch(e.gatedRaw, e.key, group, visibility)) continue
       refused.add(groupKey(group, e.key))
-      noteBoxRefused(e, false)
+      noteBoxRefused(e)
       failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
     }
   }
@@ -2930,6 +2934,7 @@ async function runSync ({
     stopGroupDiary(d)
     groupDiaries.delete(key)
     joinCache.delete(key)
+    dropWalk(key)
     const core = d.core
     // Visible to gates before the first await: a gate that found no held
     // entry would otherwise reopen the diary from the store in the window
@@ -3549,8 +3554,9 @@ async function runSync ({
       }
       const verdict = diaryVerdict(e, diaryRaws)
       if (verdict) return fail(verdict)
-      if (stub && !(await heldRelease(e.diary === ownHex ? diary : held, e.group, e.key))) {
-        return { ...(await fail('header-invalid', true)), box: true, boxless: true }
+      if (stub) {
+        const rel = await heldRelease(e.diary, e.diary === ownHex ? diary : held, e.group, e.key)
+        if (rel.released !== true) return { ...(await fail('header-invalid', true)), box: true, boxless: true, walk: rel.walk }
       }
       return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis, stub }
     } catch (err) {
@@ -3577,25 +3583,73 @@ async function runSync ({
     return replicaStored(store, d)
   }
 
-  // Whether the slot walk of binding diary `core`, as this node holds it,
-  // gives writer `key` of `group` cut 0 (released, or kept at cut 0 past the
+  // Whether the slot walk of binding diary d, as `core` holds it, gives
+  // writer `key` of `group` cut 0 (released, or kept at cut 0 past the
   // release cap): the same records and rule as the fold's (group.js
   // bindCores), which then never awaits a writer whose box does not match.
-  async function heldRelease (core, group, key) {
-    if (!core || core.fork !== 0) return false
+  // -> { released, walk }: `walk` is the remembered read it answered from,
+  // if any (diaryWalk).
+  async function heldRelease (d, core, group, key) {
+    if (!core || core.fork !== 0) return { released: false, walk: null }
     try {
-      return diaryWriterCut(await readAll(core), group, key) === 0
+      const read = diaryWalk(d, core)
+      const kept = walkCache.get(d)
+      const released = walkRecordsCut(await read, group, key) === 0
+      return { released, walk: kept !== undefined && kept.records === read ? kept : null }
     } catch {
-      return false
+      return { released: false, walk: null }
     }
   }
 
+  // Binding diary d's group-join and group-cut records as `core` holds them
+  // (group.js diaryWalkRecords), read once per length: writers refused for
+  // their box, and the lifts after them, cost one read of d, not one each.
+  // A block that lands below the length marks the read stale; one that
+  // lands without a 'download' event comes with an upgrade, so the length
+  // changes. Only the core this node keeps open for d is remembered.
+  function diaryWalk (d, core) {
+    let st = walkCache.get(d)
+    if (st !== undefined && st.core === core && !st.stale && st.length === core.length) return st.records
+    if (st !== undefined) dropWalk(d)
+    const read = async () => {
+      walkReads++
+      return diaryWalkRecords(await readAll(core))
+    }
+    if (core !== heldBinding(d, null)) return read()
+    if (walkCache.size >= gateLimit()) dropWalk(walkCache.keys().next().value)
+    st = { core, length: core.length, stale: false, records: null, stop: noop }
+    const kept = st
+    const onDownload = () => { kept.stale = true }
+    core.on('download', onDownload)
+    st.stop = () => core.off('download', onDownload)
+    st.records = read()
+    walkCache.set(d, st)
+    st.records.catch(() => { if (walkCache.get(d) === kept) dropWalk(d) })
+    return st.records
+  }
+
+  function dropWalk (d) {
+    const st = walkCache.get(d)
+    if (st === undefined) return
+    st.stop()
+    walkCache.delete(d)
+  }
+
   // A writer refused for a box that does not match, kept for liftBoxRefused
-  // under the diary its block 0 names. Every such refusal is followed by one
-  // lift: the diary may have grown between the gate's read of its walk and
-  // this note, and that growth found nothing to lift.
-  function noteBoxRefused (e) {
-    boxRefused.add(groupKey(e.group, e.key), { group: e.group, key: e.key, diary: e.diary })
+  // under the diary its block 0 names, with the remembered walk that refused
+  // it, if any. Every such refusal is followed by one lift (liftAfterBox).
+  function noteBoxRefused (e, walk = null) {
+    boxRefused.add(groupKey(e.group, e.key), { group: e.group, key: e.key, diary: e.diary, walk })
+  }
+
+  // The lift after a box refusal: the diary may have grown between the
+  // gate's read of its walk and the refusal, and that growth found nothing
+  // to lift. Skipped while the walk that refused the writer is still the
+  // current one for its diary: the lift would read the same records.
+  function liftAfterBox (b) {
+    const st = walkCache.get(b.diary)
+    if (b.walk !== null && st === b.walk && !st.stale && st.core === heldBinding(b.diary, null) && st.length === st.core.length) return
+    liftBoxRefused(b.diary)
   }
 
   // The writers refused for their box whose diary d, as held here, now
@@ -3621,6 +3675,7 @@ async function runSync ({
     }
     st = { again: false }
     boxLifts.set(d, st)
+    boxLiftRuns++
     const run = st
     ;(async () => {
       do {
@@ -3628,10 +3683,10 @@ async function runSync ({
         // A diary the gate would not read refuses the writer again: no lift.
         const core = heldBinding(d, null)
         if (core === null || core.fork !== 0 || localVerdict(d)) break
-        const entries = await readAll(core)
+        const records = await diaryWalk(d, core)
         if (ending) break
         for (const [gk, b] of [...boxRefused.entries()]) {
-          if (b.diary !== d || groupCores.has(b.key) || diaryWriterCut(entries, b.group, b.key) !== 0) continue
+          if (b.diary !== d || groupCores.has(b.key) || walkRecordsCut(records, b.group, b.key) !== 0) continue
           boxRefused.delete(gk)
           refused.delete(gk)
           failedWriters.delete(gk)
@@ -3818,10 +3873,10 @@ async function runSync ({
           emit({ event: 'group-skipped', key: e.key, reason: r.reason })
           e.state = 'failed'
           refused.add(groupKey(e.group, e.key))
-          if (r.boxless === true) noteBoxRefused(e)
+          if (r.boxless === true) noteBoxRefused(e, r.walk || null)
           dropGroupCore(e.key)
           if ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group') badHint(e.peer, e.hint)
-          if (r.boxless === true) liftBoxRefused(e.diary)
+          if (r.boxless === true) liftAfterBox({ diary: e.diary, walk: r.walk || null })
           return
         }
         // A verdict about the hinted diary judges the hint alone (I2).
@@ -3831,7 +3886,7 @@ async function runSync ({
       // Purged only when it is a stored writer of this group that is now
       // condemned; a quota failure keeps its blocks.
       e.accepted = r.writerHere === true
-      if (r.boxless === true) noteBoxRefused(e)
+      if (r.boxless === true) noteBoxRefused(e, r.walk || null)
       failGroupCore(e, r.reason, { purge: e.accepted && condemning(r.reason) })
       return
     }
@@ -3983,7 +4038,7 @@ async function runSync ({
     // learned during the awaits above is checked against here.
     if (e.key !== e.group && !e.stub && (rootVis.get(e.group) || null) !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, rootVis.get(e.group) || null)) {
       refused.add(groupKey(e.group, e.key))
-      noteBoxRefused(e, false)
+      noteBoxRefused(e)
       failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
       return
     }
@@ -4484,7 +4539,7 @@ async function runSync ({
       failedWriters.add(gk)
       dropGroupCore(e.key)
       const box = boxRefused.value(gk)
-      if (box) liftBoxRefused(box.diary)
+      if (box) liftAfterBox(box)
     }
     if (!purge) {
       e.state = 'failed'
@@ -5002,7 +5057,7 @@ async function runSync ({
     for (const g of groupList) if (ownCommunities.has(g.group)) scanCatalogue(g.group, ownWriters.get(g.writer).core)
 
     qstore = await openQuarantine(dataDir, storeOptions)
-    if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
+    if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, walkReadCount: () => walkReads, boxLiftCount: () => boxLiftRuns, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
 
     // One deadline (item 7): the completion timer and the gate fetches share
     // `deadline`, computed before the startup I/O.
