@@ -202,7 +202,7 @@ const { attachBlob } = require('./blob-net')
 const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
 const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
-const { pushCandidates, pushName } = require('./push-events')
+const { CANCEL_KINDS, pushCancel, pushCandidates, pushName, PUSH_MAX_AGE_MS } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -224,7 +224,7 @@ const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { verifyRoster } = require('./page')
@@ -238,7 +238,7 @@ const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
-const { feira } = require('@varanda/rpc')
+const { feira, mentionTokens, MENTION_MAX } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 const {
@@ -399,6 +399,20 @@ async function momentBlobIds (core) {
 // while a diary declaring thousands of keys holds at most this many cores x
 // MAX_MEDIA_BLOCKS x 2 counter entries, whatever it writes.
 const MEDIA_TRACK_MAX = 2 * MAX_MEDIA_CORES
+// Mentions of a name not yet verified when the push cursor passed the post,
+// kept in memory to push once the name settles (_pushHold). Oldest first out.
+const PUSH_PENDING_MAX = 1024
+// Per actor, its own oldest out first, so one member cannot evict everyone
+// else's waiting mentions.
+const PUSH_PENDING_PER_ACTOR = 32
+// A recall (on: false) cancels only a follow, like or repost this seeder
+// emitted this recently: comfortably above the account service send delay
+// (PUSH_DELAY_MAX_MS, 60 s, apps/cli/lib/account/push-routes.js), after
+// which the push is out and a cancel would drop nothing. Bounded, oldest
+// out first, and never persisted: after a restart the queued push is
+// delivered (no recall), as before recalls existed.
+const PUSH_RECALL_MS = 5 * 60 * 1000
+const PUSH_RECALL_MAX = 4096
 
 // Fresh counters for a core first declared at seq `since`. Sparse (one entry
 // per block actually referenced, never above MAX_MEDIA_BLOCKS), so an honest
@@ -924,6 +938,48 @@ function groupWalkStep (walks, group, e) {
   slotWalkStep(s, e, group)
 }
 
+// One valid group-join or group-cut record at diary seq `i` folded into the
+// entry: a join into the newest join per writer and the root binding (each
+// map keeps by seq), and both into the slot walk of its group.
+function foldGroupRecord (entry, i, r) {
+  if (r.type === 'group-join') {
+    const prev = entry.groupDecls.get(r.writer)
+    if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
+    const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
+    if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
+  }
+  const e = r.type === 'group-join'
+    ? { kind: 'join', writer: r.writer, on: r.on, seq: i }
+    : { kind: 'cut', writer: r.writer, cut: r.cut, seq: i }
+  let events = entry.groupEvents.get(r.group)
+  if (events === undefined) {
+    events = []
+    entry.groupEvents.set(r.group, events)
+  }
+  const s = entry.groupWalks.get(r.group)
+  if (s === undefined || i > s.last) {
+    events.push(e)
+    groupWalkStep(entry.groupWalks, r.group, e)
+    return
+  }
+  // A record the scan passed as a hole (a deleted one fetched once, which
+  // still counts): placed in seq order, and the walk of its group stepped
+  // again from its first record, so the walk is the one a scan that held it
+  // would have built.
+  let lo = 0
+  let hi = events.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (events[mid].seq < i) lo = mid + 1
+    else hi = mid
+  }
+  if (lo < events.length && events[lo].seq === i) return
+  events.splice(lo, 0, e)
+  const fresh = new Map()
+  for (const x of events) groupWalkStep(fresh, r.group, x)
+  entry.groupWalks.set(r.group, fresh.get(r.group))
+}
+
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
 // writeBlocklist), or null.
 function readSnapshot (dataDir, options) {
@@ -1083,10 +1139,53 @@ function eventLines (r) {
   return r.place === '' ? [r.title] : [r.title, r.place]
 }
 
+// The bound group cores (key -> { diary, group, seq } or null) with a count
+// of the bindings naming each diary, so _groupNames, asked for every diary
+// a seeder prepares, is one lookup instead of a walk over every group core.
+class GroupBindings extends Map {
+  constructor () {
+    super()
+    this._byDiary = new Map()
+  }
+
+  set (key, binding) {
+    this._count(super.get(key), -1)
+    super.set(key, binding)
+    this._count(binding, 1)
+    return this
+  }
+
+  delete (key) {
+    if (!super.has(key)) return false
+    this._count(super.get(key), -1)
+    return super.delete(key)
+  }
+
+  clear () {
+    super.clear()
+    this._byDiary.clear()
+  }
+
+  names (diary) {
+    return this._byDiary.has(diary)
+  }
+
+  _count (binding, step) {
+    if (binding === null || binding === undefined || typeof binding.diary !== 'string') return
+    const n = (this._byDiary.get(binding.diary) || 0) + step
+    if (n > 0) this._byDiary.set(binding.diary, n)
+    else this._byDiary.delete(binding.diary)
+  }
+}
+
 // Per-phase startup durations (ms, non-negative integers) from the Date.now()
 // marks taken at the step boundaries of Seeder#start. Pure: no clock.
 function startupPhases (m) {
-  const d = (a, b) => Math.max(0, Math.trunc(b - a))
+  // A missing mark (a non-finite difference) counts as 0.
+  const d = (a, b) => {
+    const ms = Math.trunc(b - a)
+    return Number.isFinite(ms) ? Math.max(0, ms) : 0
+  }
   return {
     configMs: d(m.t0, m.config),
     storeMs: d(m.config, m.store),
@@ -1097,7 +1196,10 @@ function startupPhases (m) {
     prepareMs: d(m.groups, m.prepare),
     swarmMs: d(m.prepare, m.swarm),
     flushMs: d(m.swarm, m.flush),
-    totalMs: d(m.t0, m.flush)
+    totalMs: d(m.t0, m.flush),
+    // From the start to the point where external streams are accepted
+    // (overlaps the phases above; not part of totalMs's sum).
+    acceptingMs: d(m.t0, m.accepting)
   }
 }
 
@@ -1108,7 +1210,9 @@ class Seeder {
   // local block-0 verdict is computed and before it is applied, _gate and
   // _gateGroup) and
   // storeHook() (awaited right after the main store, and
-  // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
+  // its data-dir lock, is acquired) and flushHook() (awaited in start()
+  // once external streams are accepted, right before joinAndFlush; a throw
+  // fails the start) are test-only hooks (no CLI flag), as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
   // maxAnnounces, announceRate, announceBurst, maxBadAnnounces, maxMedia,
   // maxMediaBlocks, maxMediaBytes; defaults = the constants, maxExternal =
@@ -1139,8 +1243,11 @@ class Seeder {
   // purgeHook also see group keys.
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per recipient of each follow, reply, quote, @mention, like or
-  // repost appended to a served diary past its push cursor (push-events.js
-  // shapes the event; a throw is ignored).
+  // repost appended to a served diary past its push cursor, and once with
+  // { op: 'cancel' } for each such follow, like or repost undone there
+  // within PUSH_RECALL_MS of its push (push-events.js shapes both; a throw
+  // is ignored). A mention of a name
+  // nobody verifiably held then pushes when the name settles, within 24 h.
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -1171,6 +1278,7 @@ class Seeder {
     admitHook = null,
     regateHook = null,
     storeHook = null,
+    flushHook = null, // test-only (see above)
     onPush = null,
     dm = null,
     noClear = null,
@@ -1243,6 +1351,7 @@ class Seeder {
     this.admitHook = admitHook
     this.regateHook = regateHook
     this.storeHook = storeHook
+    this.flushHook = flushHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
     this._dmOpts = dmOptions(dm)
@@ -1352,7 +1461,7 @@ class Seeder {
     // Group cores (header comment): bound and dropping bindings, key ->
     // { diary, group, seq }; admitted.json `groups` is the union of both.
     // They share _inflight and _drops with diaries and media.
-    this._groups = new Map()
+    this._groups = new GroupBindings()
     this._groupsDropping = new Map()
     this._groupServed = new Map() // key -> { core, diary, group, download, stopFork, stopGrow, stopQuota, dropped, headerOk, gating, expected }
     this._groupReserved = new Map() // key -> group, holding a group slot mid-admission
@@ -1436,6 +1545,12 @@ class Seeder {
     // the v1, v2 and v3 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
     this._postNotices = this._createPostNoticeIndex()
+    // id (actor:seq:token) -> { actor, seq, token, at, added, post }: never
+    // persisted, so a restart forgets them (no push, the aviso still shows).
+    this._pushPending = new Map()
+    // kind:actor:recipient:ref -> emit time (ms) of each follow, like or
+    // repost pushed, for recalls (PUSH_RECALL_MS).
+    this._pushSent = new Map()
     this._noticeHandles = new Set()
     // Moderation generation: bumped on every adoption that blocks a key or
     // revokes an issuer. A block-0 verdict computed across an await under an
@@ -1447,6 +1562,9 @@ class Seeder {
     this._cert = null
     this._started = false
     this._ready = false
+    // External streams (acceptStream) are served from the end of step 5's
+    // swarm setup, before the DHT join and flush, like swarm peers.
+    this._accepting = false
     this._closing = null
     this._stopRediscovery = null
     this.closed = new Promise((resolve) => { this._resolveClosed = resolve })
@@ -1903,11 +2021,15 @@ class Seeder {
         if (key === binding.group && !this._served.has(binding.diary)) this._indexKeptRoot(key, false)
       }
       // A writer served after its root's header was first recorded in this
-      // loop was gated without the root's visibility.
+      // loop was gated without the root's visibility. Awaited, so a writer
+      // whose box no longer matches is dropped before external streams are
+      // accepted below.
+      const rechecks = []
       for (const group of new Set(groupSurvivors.map(([, binding]) => binding.group))) {
         const visibility = this._groupVisibility(group)
-        if (visibility !== null) this._recheckGroupBoxes(group, visibility)
+        if (visibility !== null) rechecks.push(this._recheckGroupBoxes(group, visibility))
       }
+      await Promise.all(rechecks)
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
       marks.prepare = Date.now()
@@ -1916,6 +2038,12 @@ class Seeder {
       this.swarm = createSwarm({ bootstrap: this.bootstrap, keyPair: this._keyPair, host: this.host })
       marks.swarm = Date.now()
       this.swarm.on('connection', (socket) => this._onConnection(socket))
+      // Every core is re-gated and prepared and the swarm exists: app
+      // clients are served from here, as swarm peers already are during the
+      // flush. A failure from here on goes through close(), which closes
+      // the external streams accepted meanwhile.
+      if (!this._closing) this._accepting = true
+      marks.accepting = Date.now()
       const topics = [
         this.topic,
         ...survivors.map(([, core]) => core.discoveryKey),
@@ -1924,6 +2052,7 @@ class Seeder {
       ]
       const done = this.store.findingPeers()
       try {
+        if (this.flushHook) await this.flushHook()
         await joinAndFlush(this.swarm, topics)
       } finally {
         done()
@@ -1968,6 +2097,12 @@ class Seeder {
 
   mediaKeys () {
     return [...this._media.keys()]
+  }
+
+  // Whether acceptStream would take a stream now: true from the accepting
+  // point of start() (before stats().status turns 'ok') until close().
+  accepting () {
+    return this._accepting === true && !this._closing
   }
 
   // Aggregate state for the health endpoint: counts and sizes only, never a
@@ -2334,10 +2469,13 @@ class Seeder {
       // the map grows no faster than groupDecls; and
       // `groupWalks` the slot walk per group (group -> lib/group.js walk
       // state) over its group-join and group-cut records, which picks the
-      // writers that count (liveGroupJoins).
+      // writers that count (liveGroupJoins), with `groupEvents` those
+      // records per group in seq order, to step a walk again when a deleted
+      // one arrives after the scan passed it.
       groupDecls: new Map(),
       groupBound: new Map(),
       groupWalks: new Map(),
+      groupEvents: new Map(),
       groupLive: new Map(),
       groupRefused: new Map(),
       // Public share hint, rebuilt by every scan from block 1 (in memory
@@ -2385,10 +2523,18 @@ class Seeder {
       // recounts this serve ran and `mediaRecounting` one is running.
       // `pageSeqs` the tombstone targets read as page-* records: never in
       // `deleted` nor `effective` (a delete of one has no effect).
+      // `groupSeqs` the same for group-join, group-confirm and group-cut
+      // records (docs/protocol.md "Deletion"). `grouped` that the diary is
+      // group-bound (it holds a group record, or a group served here names
+      // it), and `pageGuard` the download's tombstone target guard, which
+      // then fetches each unheld target once (_prepareDiary).
       deleted: new Set(),
       tombstones: new Map(),
       effective: null,
       pageSeqs: new Set(),
+      groupSeqs: new Set(),
+      grouped: false,
+      pageGuard: null,
       media: new Map(),
       mediaRefs: new Map(),
       listingRoots: new Map(),
@@ -2524,6 +2670,7 @@ class Seeder {
     } catch {}
     if (stale()) return
     if (state !== null) {
+      if (state.grouped) entry.grouped = true
       for (const { seq, record } of state.raw) {
         const r = record !== null && record.type === 'delete' ? validRecordCopy(record, seq) : null
         if (r === null) continue
@@ -2546,11 +2693,15 @@ class Seeder {
       state = null
     }
     for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
-    // A page diary keeps an unheld tombstone target in the download until
-    // it is read once (lib/deletion.js downloadExceptPages, docs/protocol.md
-    // §12). The held targets are read before the clear below, so a cleared
-    // one is not fetched back.
-    const pageGuard = pageTargets(core)
+    // A page diary, and a group-bound one, keeps an unheld tombstone target
+    // in the download until it is read once (lib/deletion.js
+    // downloadExceptPages, docs/protocol.md §12): a group record is then
+    // kept and folded (_pageArrived), anything else is cleared. The held
+    // targets are read before the clear below, so a cleared one is not
+    // fetched back.
+    if (!entry.grouped && this._groupNames(key)) entry.grouped = true
+    const pageGuard = pageTargets(core, { groupBound: entry.grouped })
+    entry.pageGuard = pageGuard
     if (!this.noClear) {
       try {
         // The roster probe settles later (the download is told): it must not
@@ -2744,6 +2895,7 @@ class Seeder {
     this._served.delete(key)
     this._notices.removeAuthor(key)
     this._postNotices.removeAuthor(key)
+    this._pushForget((e) => e.actor === key)
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
@@ -2922,6 +3074,10 @@ class Seeder {
         if (r !== null) this._notePage(key, entry, i, r)
         continue
       }
+      if (GROUP_HISTORY_TYPES.has(block.type) && (!entry.grouped || entry.gone.has(i)) && validRecordCopy(block, i) !== null) {
+        if (entry.gone.has(i)) this._noteGroupKept(entry, i)
+        else this._markGroupBound(entry)
+      }
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
@@ -2934,17 +3090,12 @@ class Seeder {
       }
       if (block.type === 'group-join') {
         const r = validRecordCopy(block, i)
-        if (r === null) continue
-        const prev = entry.groupDecls.get(r.writer)
-        if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
-        const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
-        if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
-        groupWalkStep(entry.groupWalks, r.group, { kind: 'join', writer: r.writer, on: r.on, seq: i })
+        if (r !== null) foldGroupRecord(entry, i, r)
         continue
       }
       if (block.type === 'group-cut') {
         const r = validRecordCopy(block, i)
-        if (r !== null) groupWalkStep(entry.groupWalks, r.group, { kind: 'cut', writer: r.writer, cut: r.cut, seq: i })
+        if (r !== null) foldGroupRecord(entry, i, r)
         continue
       }
       // Folded here, not in _runIndex: that queue pauses at capacity and
@@ -3308,12 +3459,19 @@ class Seeder {
         return true
       }
     }
+    // A group history target: the delete has no effect either. One not
+    // held yet is folded when it arrives (_pageArrived).
+    if (block !== null && GROUP_HISTORY_TYPES.has(block.type) && validRecordCopy(block, target) !== null) {
+      this._noteGroupKept(entry, target)
+      return true
+    }
     entry.deleted.add(target)
     this._forgetRecent(entry, (r) => r.seq === target)
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
     this._postNotices.removePost(key, target)
+    this._pushForget((e) => e.actor === key && e.seq === target)
     // Removing a block a paused cursor never indexed (the refused one, or a
     // later one) frees nothing, so onFreed never fires: resume this diary's
     // pass so it skips the deleted seq instead of staying paused.
@@ -3386,7 +3544,7 @@ class Seeder {
       const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
       for (let n = seqs.length - 1; n >= 0; n--) {
         const target = entry.tombstones.get(seqs[n])
-        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target)) out.add(target)
+        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target) && !entry.groupSeqs.has(target)) out.add(target)
       }
       entry.effective = out
     }
@@ -3406,17 +3564,53 @@ class Seeder {
     if (skipped || seq < entry.indexed) this._names.note(key, seq, record)
   }
 
+  // A tombstone target read as a valid group history record: kept out of
+  // `deleted` and `effective`, as a page-* record is.
+  _noteGroupKept (entry, seq) {
+    this._markGroupBound(entry)
+    if (entry.groupSeqs.has(seq)) return
+    entry.groupSeqs.add(seq)
+    entry.effective = null
+    entry.deleted.delete(seq)
+  }
+
+  // The diary holds a group record or a served group names it: from now on
+  // its download fetches each unheld tombstone target once (_prepareDiary).
+  _markGroupBound (entry) {
+    if (entry.grouped) return
+    entry.grouped = true
+    if (entry.pageGuard) entry.pageGuard.setGroupBound(true)
+  }
+
+  // Whether a group core served here is bound to `diary` as its writer.
+  _groupNames (diary) {
+    return this._groups.names(diary)
+  }
+
   // A tombstone target below the scan cursor arrived (the scan passed it
-  // as a hole): read it once to learn whether it is a page-* record.
+  // as a hole): read it once to learn whether it is a page-* record or a
+  // group history record. A group-join or group-cut one is folded into the
+  // diary's group bindings and slot walk now, as the scan would have.
   async _pageArrived (key, entry, seq) {
-    if (entry.pageSeqs.has(seq)) return
+    if (entry.pageSeqs.has(seq) || entry.groupSeqs.has(seq)) return
     let raw = null
     try {
       raw = await entry.core.get(seq, { wait: false, raw: true })
     } catch {}
     if (raw === null || entry.dropped || this._closing || this._served.get(key) !== entry) return
     const block = decodeBlock(raw)
-    if (block === null || !isPageType(block.type)) return
+    if (block === null) return
+    if (GROUP_HISTORY_TYPES.has(block.type)) {
+      const r = validRecordCopy(block, seq)
+      if (r === null || entry.groupSeqs.has(seq)) return
+      this._noteGroupKept(entry, seq)
+      if (r.type !== 'group-join' && r.type !== 'group-cut') return
+      foldGroupRecord(entry, seq, r)
+      entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupWalks)
+      this._reconcileGroups(key, entry)
+      return
+    }
+    if (!isPageType(block.type)) return
     const r = validRecordCopy(block, seq)
     if (r !== null) this._notePage(key, entry, seq, r)
   }
@@ -4403,6 +4597,8 @@ class Seeder {
     }
     const writerBinding = { diary: owner, group, seq: ownSeq }
     this._groups.set(key, key === group ? rootBinding : writerBinding)
+    const ownerServed = this._served.get(owner)
+    if (ownerServed && !ownerServed.dropped) this._markGroupBound(ownerServed)
     let core
     let opening = false
     try {
@@ -4724,7 +4920,7 @@ class Seeder {
     }
     this._groupHeaders.set(group, rec)
     this._persist().catch(noop)
-    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility)
+    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility).catch(noop)
   }
 
   // The verified visibility of root G ('public' | 'private'), or null while
@@ -4738,8 +4934,10 @@ class Seeder {
 
   // A writer gated before its root's header was known never had its `box`
   // checked: re-read the block 0 of every gated writer of G and drop a
-  // mismatch with 'header-invalid', as the gate would have.
+  // mismatch with 'header-invalid', as the gate would have. Resolves once
+  // every check has run and any mismatch is dropped (start() awaits it).
   _recheckGroupBoxes (group, visibility) {
+    const checks = []
     for (const [key, entry] of this._groupServed) {
       if (key === group || entry.group !== group || !entry.headerOk || entry.dropped) continue
       const check = async () => {
@@ -4750,11 +4948,12 @@ class Seeder {
         if (raw === null) return null
         return groupVerdict(raw, key, entry.group, entry.diary, visibility)
       }
-      check().then((reason) => {
+      checks.push(check().then((reason) => {
         if (reason === null || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
         this._dropGroup(key, reason)
-      }, noop)
+      }, noop))
     }
+    return Promise.all(checks)
   }
 
   // A blocked group, or one with no core left here, loses its record.
@@ -5210,6 +5409,7 @@ class Seeder {
     return createPostNoticeIndex({
       isMember: (k) => this._admitted.has(k) || this._served.has(k),
       maxAuthors: this.maxServed,
+      onOwnersGained: (token, owners) => this._pushSettle(token, owners),
       verifyUsername: (author, record) => {
         try {
           return cert.verifyUsernameRecord(record, author, this.association).ok === true
@@ -5983,10 +6183,17 @@ class Seeder {
         entry.pushReadFailures = 0
         const block = raw === null ? null : decodeBlock(raw)
         const record = block && validRecordCopy(block, i)
+        // The scan may not have applied this tombstone yet (scans run one at
+        // a time), so a name settling before it would push a deleted post.
+        if (record && record.type === 'delete') this._pushForget((e) => e.actor === key && e.seq === record.seq)
+        // Before any await on this block, so a settle that lands while it is
+        // read still finds the mentions nobody holds yet.
+        const held = record && this.onPush !== null ? this._pushHold(key, i, record, Date.now(), entry) : null
         // Two phases, so a stop while a read is pending never emits part of
         // a block's pushes: A awaits (target posts, the actor name), B only
         // decides and emits, synchronously, then the cursor moves once.
         let survivors = []
+        const decided = []
         let name = null
         let now = 0
         if (record) {
@@ -5998,6 +6205,7 @@ class Seeder {
             // does). A target this replica cannot read yet drops the
             // recipient: a weaker kind would mislabel a reply or a quote.
             for (const c of this._pushCandidatesFor(key, i, record, now)) {
+              decided.push(c.recipient)
               for (const hit of [c, ...c.alternates]) {
                 if (hit.targetSeq !== null) {
                   const target = await this._pushTargetIsPost(c.recipient, hit.targetSeq)
@@ -6009,7 +6217,7 @@ class Seeder {
                 break
               }
             }
-            if (survivors.length > 0) {
+            if (survivors.length > 0 || held !== null) {
               name = await this._pushActorName(key, entry)
               if (!live()) return
             }
@@ -6030,10 +6238,20 @@ class Seeder {
           }
           for (const c of survivors) {
             if (!still.has(c.kind + ':' + c.recipient)) continue
+            this._pushNoteSent(c.kind, key, c.recipient, c.ref)
             try {
               this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
             } catch {}
           }
+        }
+        if (held !== null) this._pushRelease(held, name, decided)
+        // An undone follow, like or repost recalls the push the service may
+        // still hold queued; it needs no target read, so it is decided here.
+        const cancel = record && this.onPush !== null ? this._pushCancelFor(key, i, record, now) : null
+        if (cancel !== null) {
+          try {
+            this.onPush(cancel)
+          } catch {}
         }
         entry.pushNext = i + 1
       }
@@ -6047,16 +6265,6 @@ class Seeder {
   // holding the name now; a revoked issuer's names never match, as on the
   // notices page. A lookup that throws counts as nobody (push-events.js).
   _pushCandidatesFor (key, seq, record, now) {
-    const index = this._postNotices
-    let revoked = null
-    const holders = (token) => {
-      if (!index || typeof index.holders !== 'function') return []
-      if (revoked === null) {
-        const opts = this._certOpts()
-        revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
-      }
-      return index.holders(token, (issuer) => !revoked.has(issuer))
-    }
     return pushCandidates({
       author: key,
       seq,
@@ -6064,8 +6272,175 @@ class Seeder {
       now,
       isMember: (k) => this._admitted.has(k) || this._served.has(k),
       isBlocked: (k) => this._isBlocked(k),
-      holders
+      holders: (token) => this._pushHolders(token)
     })
+  }
+
+  // The members verifiably holding `token` now, a revoked issuer's names
+  // never matching, as on the notices page. A throw counts as nobody.
+  _pushHolders (token) {
+    try {
+      const index = this._postNotices
+      if (!index || typeof index.holders !== 'function') return []
+      const opts = this._certOpts()
+      const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      return index.holders(token, (issuer) => !revoked.has(issuer))
+    } catch {
+      return []
+    }
+  }
+
+  // Records each mention of a valid, recent post whose name nobody holds
+  // now; null when there is none. The entries of one post share `post`,
+  // open while the block is read: a gain reported then waits for
+  // _pushRelease, which knows who the normal path decided for.
+  // `source` is the served entry whose push pass held it: a re-served diary
+  // is a new entry, so what the old one held never pushes (_pushSettleEntry).
+  _pushHold (key, seq, record, now, source = null) {
+    try {
+      if (record.type !== 'post' || typeof record.text !== 'string') return null
+      const at = Date.parse(record.at)
+      if (!Number.isFinite(at) || now - at > PUSH_MAX_AGE_MS) return null
+      let post = null
+      for (const token of mentionTokens(record.text, MENTION_MAX)) {
+        if (this._pushHolders(token).length > 0) continue
+        if (post === null) post = { open: true, name: null, sent: new Set() }
+        const id = key + ':' + seq + ':' + token
+        this._pushPending.delete(id)
+        this._pushPending.set(id, { actor: key, seq, token, at, added: now, post, source })
+        let own = 0
+        let oldest = null
+        for (const [k, e] of this._pushPending) {
+          if (e.actor !== key) continue
+          if (oldest === null) oldest = k
+          own++
+        }
+        if (own > PUSH_PENDING_PER_ACTOR) this._pushPending.delete(oldest)
+        if (this._pushPending.size > PUSH_PENDING_MAX) this._pushPending.delete(this._pushPending.keys().next().value)
+      }
+      return post
+    } catch {
+      return null
+    }
+  }
+
+  // The block passed phase B: every recipient the normal path decided for
+  // (pushed, or dropped so a reply or quote is never relabelled) is done for
+  // this post, and a name gained while the block was read settles now.
+  _pushRelease (post, name, decided) {
+    for (const recipient of decided) post.sent.add(recipient)
+    post.name = name
+    post.open = false
+    const now = Date.now()
+    for (const [id, entry] of [...this._pushPending]) {
+      if (entry.post !== post) continue
+      if (this._pushExpired(entry, now)) this._pushPending.delete(id)
+      else this._pushSettleEntry(id, entry, this._pushHolders(entry.token))
+    }
+  }
+
+  // onOwnersGained of the post notice index: a name just verified for
+  // `owners` settles the mentions of it the push cursor passed unresolved.
+  // Synchronous, like every other emit; a throw in onPush is ignored.
+  _pushSettle (token, owners) {
+    if (this.onPush === null || this._closing || !Array.isArray(owners)) return
+    const now = Date.now()
+    for (const [id, entry] of [...this._pushPending]) {
+      if (this._pushExpired(entry, now)) {
+        this._pushPending.delete(id)
+      } else if (entry.token === token && owners.includes(entry.actor)) {
+        // The author gained the name: the index dropped the post's mention
+        // rows as self-mentions (dropOwnMentions), so no later holder may
+        // get a push without an aviso.
+        this._pushPending.delete(id)
+      } else if (entry.token === token && !entry.post.open) {
+        this._pushSettleEntry(id, entry, owners)
+      }
+    }
+  }
+
+  // By the record's `at`, which is author-supplied, and by when it was
+  // held, so a future `at` cannot keep an entry past the window either.
+  _pushExpired (entry, now) {
+    return now - entry.at > PUSH_MAX_AGE_MS || now - entry.added > PUSH_MAX_AGE_MS
+  }
+
+  // The gates of a mention push (_pushCandidatesFor) on the current state:
+  // a member holding the name under a usable issuer, not the actor, neither
+  // side blocked (a throw counts as blocked), and nothing for this post yet.
+  // The name is the one the block's own pass read (null if it held none).
+  // An entry stays until it expires or is evicted: a name can have several
+  // verified holders settling at different times, and post.sent keeps each
+  // recipient to one push. It goes once the actor holds the name too (the
+  // mention is then a self-mention, with no aviso for anyone).
+  _pushSettleEntry (id, entry, recipients) {
+    const { actor, seq, token, post } = entry
+    // Only while the author is served by the entry that held it (live, as
+    // in _runPush), and a deleted post has no aviso either. A re-served
+    // diary's deleted set may not be rescanned yet, so its old entries are
+    // deleted, never pushed.
+    const source = this._served.get(actor)
+    if (!source || source !== entry.source || !source.gated || source.dropped || source.deleted.has(seq)) {
+      this._pushPending.delete(id)
+      return
+    }
+    const blocked = (k) => {
+      try {
+        return this._isBlocked(k)
+      } catch {
+        return true
+      }
+    }
+    const holders = this._pushHolders(token)
+    if (holders.includes(actor)) {
+      this._pushPending.delete(id)
+      return
+    }
+    for (const recipient of recipients) {
+      if (recipient === actor || post.sent.has(recipient) || !holders.includes(recipient)) continue
+      if (!this._admitted.has(recipient) && !this._served.has(recipient)) continue
+      if (blocked(actor) || blocked(recipient)) continue
+      post.sent.add(recipient)
+      try {
+        this.onPush({ v: 1, kind: 'mention', actor, recipient, seq, ref: actor + ':' + seq, name: post.name })
+      } catch {}
+    }
+  }
+
+  // Deletes the waiting mentions `pred` matches (a dropped actor, a
+  // deleted post).
+  _pushForget (pred) {
+    // A seeder built without the push state (tests use bare prototypes)
+    // holds nothing to forget.
+    if (!(this._pushPending instanceof Map)) return
+    for (const [id, entry] of [...this._pushPending]) {
+      if (pred(entry)) this._pushPending.delete(id)
+    }
+  }
+
+  // Notes a follow, like or repost just emitted, for a recall within
+  // PUSH_RECALL_MS. Oldest out first past PUSH_RECALL_MAX.
+  _pushNoteSent (kind, actor, recipient, ref) {
+    if (!CANCEL_KINDS.includes(kind)) return
+    const id = kind + ':' + actor + ':' + recipient + ':' + ref
+    this._pushSent.delete(id)
+    this._pushSent.set(id, Date.now())
+    if (this._pushSent.size > PUSH_RECALL_MAX) this._pushSent.delete(this._pushSent.keys().next().value)
+  }
+
+  // The cancel one `on: false` record of `key` yields, or null: only for a
+  // push this seeder emitted within PUSH_RECALL_MS, so closing a page (up
+  // to thousands of follow-offs) never floods the relay with cancels of
+  // nothing. A matched cancel goes out even after a block or a lost
+  // membership: it only drops a queued job and carries no content.
+  _pushCancelFor (key, seq, record, now) {
+    const cancel = pushCancel({ author: key, seq, record, now })
+    if (cancel === null) return null
+    const id = cancel.kind + ':' + key + ':' + cancel.recipient + ':' + cancel.ref
+    const at = this._pushSent.get(id)
+    if (at === undefined) return null
+    this._pushSent.delete(id)
+    return Date.now() - at <= PUSH_RECALL_MS ? cancel : null
   }
 
   // The engagement index only checks a reference's shape and keeps targets
@@ -7605,10 +7980,10 @@ class Seeder {
   // Destroying here would be too early: ws's createWebSocketStream
   // terminates the socket in _destroy, so a close frame queued just before
   // never reaches the client. Without onRefuse the stream is destroyed as
-  // before; not-ready/closing refusals always destroy it.
+  // before; not-accepting/closing refusals always destroy it.
   acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null } = {}) {
     rawStream.on('error', noop)
-    if (!this._ready || this._closing) {
+    if (!this._accepting || this._closing) {
       rawStream.destroy()
       return null
     }
@@ -8397,6 +8772,7 @@ class Seeder {
   }
 
   close () {
+    this._accepting = false
     if (this._closing) return this._closing
     this._closing = (async () => {
       if (this._stopRediscovery) this._stopRediscovery()
@@ -8404,6 +8780,8 @@ class Seeder {
       this._served.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
       this._postNotices = createPostNoticeIndex()
+      this._pushPending.clear()
+      this._pushSent.clear()
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
       for (const entry of this._groupServed.values()) this._stopEntry(entry)
@@ -8475,6 +8853,7 @@ Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 
 module.exports = {
   Seeder,
+  GroupBindings,
   startupPhases,
   GATE_TIMEOUT_MS,
   MAX_HANDSHAKE_FRAME,

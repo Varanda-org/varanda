@@ -79,7 +79,9 @@ const {
   presentState,
   presentLength,
   clearDeleted,
-  downloadExceptPages
+  downloadExceptPages,
+  heldKind,
+  foldTargets
 } = require('./deletion')
 const {
   createSwarm,
@@ -368,27 +370,13 @@ async function localGate (core, keyHex, associationHex, revokedIssuers = null) {
   }
 }
 
-// Target seq of the valid tombstone at block seq, null for any other block
-// or a read error (the same checks as tombstoneAt, read once).
-async function tombstoneTarget (core, seq) {
+// lib/deletion.js heldKind, null on a read error.
+async function arrivedKind (core, seq) {
   try {
-    if (!Number.isSafeInteger(seq) || seq < 1 || seq >= core.length || !(await core.has(seq))) return null
-    const copy = validRecordCopy(decodeBlock(await core.get(seq, { wait: false, raw: true })), seq)
-    return copy !== null && copy.type === 'delete' ? copy.seq : null
+    return await heldKind(core, seq)
   } catch {
     return null
   }
-}
-
-// The deletion fold (lib/deletion.js) over tombstones already validated, as
-// seq -> target: highest block first, a tombstone counts unless a counted
-// one deleted it. Equal to deletedSeqs without copying every record again.
-function foldTargets (tombs) {
-  const deleted = new Set()
-  for (const seq of [...tombs.keys()].sort((a, b) => b - a)) {
-    if (!deleted.has(seq)) deleted.add(tombs.get(seq))
-  }
-  return deleted
 }
 
 function sameSet (a, b) {
@@ -402,12 +390,14 @@ function sameSet (a, b) {
 // follower stores blocks out of order and readAll sees a gap until the end);
 // from the first deletion on it is downloadExcept, which never asks a stale
 // peer for a deleted block. Same { update, destroy, idle } as downloadExcept.
-// A page diary keeps an unheld tombstone target in the range until it is
-// read once (lib/deletion.js downloadExceptPages, docs/protocol.md §12); the
-// targets read as posts are remembered in the replica, so a stale peer is
+// A page diary, and a group-bound one (setGroupBound), keeps an unheld
+// tombstone target in the range until it is read once (lib/deletion.js
+// pageTargets, docs/protocol.md §12 and "Deletion"); the targets read as
+// records of no kept type are remembered in the replica, so a stale peer is
 // not asked for them again on the next run.
-function followRange (core, deleted) {
-  if (deleted.size > 0) return downloadExceptPages(core, deleted, { remember: true })
+function followRange (core, deleted, { groupBound = false } = {}) {
+  let bound = groupBound
+  if (deleted.size > 0) return downloadExceptPages(core, deleted, { groupBound: bound, remember: true })
   const linear = core.download({ start: 0, end: -1, linear: true })
   let except = null
   let destroyed = false
@@ -416,8 +406,12 @@ function followRange (core, deleted) {
       if (destroyed) return []
       if (except !== null) return except.update(next)
       linear.destroy()
-      except = downloadExceptPages(core, next, { remember: true })
+      except = downloadExceptPages(core, next, { groupBound: bound, remember: true })
       return except.update(next)
+    },
+    setGroupBound (on) {
+      bound = on === true
+      if (except !== null) except.setGroupBound(bound)
     },
     destroy () {
       if (destroyed) return
@@ -618,6 +612,7 @@ async function runSync ({
   const storedNamer = new Map()
   const namedCount = new Map()
   const quotaListed = createMemo(gateLimit) // writers listed above the log quota whose skip was emitted
+  const joinWaits = new Set() // 'diary:seq' of the deleted join blocks being waited for (withdrawDeletedJoins)
 
   // A bounded memory: when full the oldest entry goes; in long-running mode
   // an entry also expires after pageRefreshMs.
@@ -1317,6 +1312,7 @@ async function runSync ({
   function finish (outcome) {
     if (ending) return
     ending = true
+    flushGroupGrowth()
     discardRegate()
     discardEmptyGroupCores()
     ;(async () => {
@@ -1475,7 +1471,10 @@ async function runSync ({
   //
   // Deletion: the tombstones this replica already holds are folded and the
   // blocks they delete cleared BEFORE anything is downloaded, so a deleted
-  // block is neither served nor fetched again from a stale peer. Every block
+  // block is not served, and is never fetched from a stale peer unless the
+  // diary is a page or group-bound: then a deleted block this replica does
+  // not hold is fetched once, kept if it is a page-* or group history
+  // record and cleared otherwise (followRange). Every block
   // that arrives later is checked for a tombstone (scanArrived), whatever
   // the prefix progress: a fresh replica learns of a deletion even above a
   // hole nobody serves any more, and clears what it fetched meanwhile.
@@ -1492,6 +1491,7 @@ async function runSync ({
     } catch {}
     if (entry.core !== core || ended) return
     entry.tombs = new Map()
+    entry.kept = s !== null ? s.kept : new Set()
     entry.recompute = { core, running: null, again: false }
     if (s !== null) {
       for (const r of s.raw) {
@@ -1510,7 +1510,7 @@ async function runSync ({
     }
     core.on('download', onDownload)
     entry.stopScan = () => core.off('download', onDownload)
-    entry.range = clearing ? followRange(core, entry.deleted) : core.download({ start: 0, end: -1, linear: true })
+    entry.range = clearing ? followRange(core, entry.deleted, { groupBound: (s !== null && s.grouped) || groupNamed(entry.key) }) : core.download({ start: 0, end: -1, linear: true })
     // A block can land without a 'download' event on this session (seen when
     // it comes with the upgrade of an existing replica), so every block the
     // present length passes is scanned too; tracked before onGrow, so a run
@@ -1527,11 +1527,21 @@ async function runSync ({
   }
 
   // A block that arrived: a new tombstone joins entry.tombs, validated once,
-  // and asks for a recompute. Resolves once a recompute that saw it is done.
+  // and asks for a recompute; so does a record of a kept type that a
+  // tombstone targets (the fold gives it back, as deletedSeqs would). A
+  // group history record makes the diary group-bound (followRange).
+  // Resolves once a recompute that saw it is done.
   async function scanArrived (entry, core, index) {
-    const target = await tombstoneTarget(core, index)
-    if (target === null || entry.core !== core || entry.tombs.has(index)) return
-    entry.tombs.set(index, target)
+    const kind = await arrivedKind(core, index)
+    if (kind === null || entry.core !== core || entry.tombs.has(index)) return
+    if (kind.kept) {
+      if (kind.group && entry.range && typeof entry.range.setGroupBound === 'function') entry.range.setGroupBound(true)
+      if (entry.kept.has(index)) return
+      entry.kept.add(index)
+      if (!entry.deleted.has(index)) return
+    } else {
+      entry.tombs.set(index, kind.target)
+    }
     await scheduleRecompute(entry, core)
   }
 
@@ -1566,7 +1576,7 @@ async function runSync ({
   // already held replace the scan above each hole.
   async function recompute (entry, core) {
     recomputes++
-    const deleted = foldTargets(entry.tombs)
+    const deleted = foldTargets(entry.tombs, entry.kept)
     let revived = false
     if (!sameSet(deleted, entry.deleted)) {
       for (const seq of entry.deleted) {
@@ -2704,6 +2714,24 @@ async function runSync ({
     forgetNamer(key)
     storedNamer.set(key, diaryKey)
     namedCount.set(diaryKey, (namedCount.get(diaryKey) || 0) + 1)
+    markGroupBound(diaryKey)
+  }
+
+  // Whether a group core this node holds (stored, or gated in this run)
+  // names diary `key`: the diary is group-bound (docs/protocol.md
+  // "Deletion"), so a deleted block it does not hold is fetched once.
+  function groupNamed (key) {
+    if (namedCount.has(key)) return true
+    for (const e of groupCores.values()) if (e.diary === key && e.state === 'active') return true
+    return false
+  }
+
+  // A followed diary found group-bound: its download fetches each deleted
+  // block it does not hold once (lib/deletion.js pageTargets). A group
+  // diary's download is group-bound from the start.
+  function markGroupBound (key) {
+    const f = follows.get(key)
+    if (f && f.range && typeof f.range.setGroupBound === 'function') f.range.setGroupBound(true)
   }
 
   // -> the diary `key` named, or null.
@@ -3348,11 +3376,13 @@ async function runSync ({
         diaryExpected = { seq: e.seq, raw0: d.raws[0], rawSeq: d.raws[1] }
       }
       if (held) {
-        // Protecting the run from a join its author deleted: the block is
-        // cleared and never fetched again, so waiting for it would hold the
-        // goal until the deadline. The listing is withdrawn, never charged.
+        // A join its author deleted that this node does not hold: the diary
+        // is group-bound, so a peer that still holds the block serves it
+        // once (lib/deletion.js pageTargets). One still missing at the
+        // deadline withdraws the listing, never charged: no peer may hold
+        // it any more.
         if (e.seq > 0 && !(await held.has(e.seq)) && (joinDeleted(e.diary, e.seq) || (held === dcore && (await presentState(held)).deleted.has(e.seq)))) {
-          return fail('withdrawn', false, true)
+          if ((await readHeld(held, e.seq, until)) === null) return fail('withdrawn', false, true)
         }
         diaryRaws = [await readHeld(held, 0, until), await readHeld(held, e.seq, until)]
         if (diaryRaws[0] === null || diaryRaws[1] === null) return fail('timeout')
@@ -3703,12 +3733,6 @@ async function runSync ({
       return
     }
     if (e.diary !== ownHex) noteGroupCert(e.diary, e.diaryRaw)
-    // A join deleted while the gate ran admits nothing (watchGroupDiary
-    // withdraws only writers already active).
-    if (e.key !== e.group && joinDeleted(e.diary, e.seq)) {
-      failGroupCore(e, 'withdrawn', { purge: false })
-      return
-    }
     if (ending) {
       dropOnEnd()
       return
@@ -3721,6 +3745,9 @@ async function runSync ({
       return
     }
     activateGroupCore(e, core)
+    // A join deleted while the gate ran goes through the same wait as one
+    // deleted later (withdrawDeletedJoins).
+    if (e.state === 'active' && e.key !== e.group && joinDeleted(e.diary, e.seq)) withdrawDeletedJoins(e.diary)
   }
 
   function followHolds (key) {
@@ -3752,7 +3779,7 @@ async function runSync ({
       return true
     }
     if (dcore.closing || dcore.closed) return false
-    const d = { core: dcore, range: null, stopFork: null, stopQuota: null, stopGrow: null, stopScan: null, want, failed: false, stopped: false, expected, verifying: false, tombs: new Map(), recompute: null, deleted: new Set(), present: 0, onPresent: null }
+    const d = { core: dcore, range: null, stopFork: null, stopQuota: null, stopGrow: null, stopScan: null, want, failed: false, stopped: false, expected, verifying: false, tombs: new Map(), kept: new Set(), recompute: null, deleted: new Set(), present: 0, onPresent: null }
     groupDiaries.set(key, d)
     const fail = () => {
       if (d.failed) return
@@ -3782,8 +3809,12 @@ async function runSync ({
     d.stopQuota = () => dcore.off('append', check)
     d.stopFork = watchFork(dcore, () => forkDiary(key, d))
     check()
+    d.recheck = () => {
+      verify()
+      evaluate()
+    }
     track(watchGroupDiary(d, dcore, () => {
-      withdrawDeletedJoins(key, d)
+      withdrawDeletedJoins(key)
       refoldBoundBy(key)
       verify()
       evaluate()
@@ -3800,33 +3831,82 @@ async function runSync ({
     return followHolds(key) && !!f.deleted && f.deleted.has(seq)
   }
 
-  // Protecting the run from a member who deletes the join that admitted a
-  // writer: the fold clears that block, so the divergence check could never
-  // read it again (its goal would stay unmet until the deadline) and the
-  // writer would stay bound by a join that no longer exists. The join is
-  // withdrawn: writers it binds go without condemning their blocks and are
-  // not gated again in this run (failedWriters), while block 0 is still
-  // compared with the gated one.
-  function withdrawDeletedJoins (key, d) {
-    if (ended || d.failed) return
-    if (d.expected !== null && d.expected.seq > 0 && d.deleted.has(d.expected.seq)) {
+  // The binding diary core this node holds for `key`: a group diary's or a
+  // followed one's.
+  function bindingCore (key) {
+    const d = groupDiaries.get(key)
+    if (d && !d.failed) return d.core
+    const f = follows.get(key)
+    return followHolds(key) && f.core ? f.core : null
+  }
+
+  // Whether this node holds the join of writer e as the gate read it. A held
+  // group-join is never cleared and group readers ignore its delete
+  // (docs/protocol.md "Deletion"), so the fold still counts it.
+  async function joinHeld (e) {
+    const core = bindingCore(e.diary)
+    if (!core) return false
+    const raw = await readLocal(core, e.seq)
+    return raw !== null && joinVerdict(raw, e.seq, e.group, e.key) === null
+  }
+
+  // How long a deleted join block this node does not hold is waited for.
+  function joinWaitUntil () {
+    return Date.now() + (once ? Math.min(gateTimeoutMs, Math.max(0, deadline - Date.now())) : gateTimeoutMs)
+  }
+
+  // Deleted joins of diary `key` that bind an active writer, or that the
+  // divergence check compares, and that this node does not hold. The diary
+  // is group-bound, so a peer that still holds such a block serves it once
+  // (lib/deletion.js pageTargets); each is waited for up to the gate
+  // timeout. A writer whose join is still missing then is withdrawn: it goes
+  // without condemning its blocks and is not gated again in this run
+  // (failedWriters), and the divergence check compares block 0 alone, so
+  // its goal is never held until the deadline. A join held, or one that
+  // lands meanwhile, keeps its writers bound and is compared as gated.
+  function withdrawDeletedJoins (key) {
+    if (ended) return
+    const d = groupDiaries.get(key)
+    const seqs = new Set()
+    if (d && !d.failed && d.expected !== null && d.expected.seq > 0 && d.deleted.has(d.expected.seq)) seqs.add(d.expected.seq)
+    for (const e of groupCores.values()) {
+      if (e.diary === key && e.key !== e.group && e.state === 'active' && joinDeleted(key, e.seq)) seqs.add(e.seq)
+    }
+    for (const seq of seqs) {
+      const wk = key + ':' + seq
+      const core = bindingCore(key)
+      if (joinWaits.has(wk) || !core) continue
+      joinWaits.add(wk)
+      track(settleDeletedJoin(key, core, seq).finally(() => joinWaits.delete(wk)), noop, noop)
+    }
+  }
+
+  async function settleDeletedJoin (key, core, seq) {
+    if ((await readLocal(core, seq)) === null) await readHeld(core, seq, joinWaitUntil())
+    if (ended) return
+    const held = (await readLocal(core, seq)) !== null
+    const d = groupDiaries.get(key)
+    if (!held && d && !d.failed && d.expected !== null && d.expected.seq === seq && d.deleted.has(seq)) {
       d.expected = { seq: 0, raw0: d.expected.raw0, rawSeq: d.expected.raw0 }
+      d.recheck()
     }
     for (const e of [...groupCores.values()]) {
-      if (e.diary === key && e.key !== e.group && e.state === 'active' && d.deleted.has(e.seq)) {
-        failGroupCore(e, 'withdrawn', { purge: false })
-      }
+      if (e.diary !== key || e.seq !== seq || e.key === e.group || e.state !== 'active') continue
+      if (!joinDeleted(key, seq) || (await joinHeld(e))) continue
+      if (!ended && e.state === 'active') failGroupCore(e, 'withdrawn', { purge: false })
     }
   }
 
   // Protecting deletions from a member who holds the author's diary only for
   // a group binding: the same fold as a followed replica (watchEntry), so a
-  // deleted block is cleared before anything is downloaded, never fetched
-  // again from a stale peer, and a tombstone that arrives later clears what
-  // it targets. Completion and growth are judged on the present length, so
-  // a cleared block never holds a goal open nor hides the joins after it.
-  // Block 0 is never a deletion target, so the divergence check still reads
-  // it; a deleted join block is withdrawn (withdrawDeletedJoins).
+  // deleted block is cleared before anything is downloaded, and a tombstone
+  // that arrives later clears what it targets. The diary is group-bound: a
+  // deleted block this replica does not hold is fetched once, then kept if
+  // it is group history and cleared otherwise (followRange). Completion and
+  // growth are judged on the present length, so a cleared block never holds
+  // a goal open nor hides the joins after it. Block 0 is never a deletion
+  // target, so the divergence check still reads it; a deleted join block
+  // still missing after the wait is withdrawn (withdrawDeletedJoins).
   async function watchGroupDiary (d, dcore, changed) {
     const live = () => !d.failed && !d.stopped && !ended
     // Listening before the fold: a block that lands while presentState walks
@@ -3857,6 +3937,7 @@ async function runSync ({
         if (copy !== null && copy.type === 'delete') d.tombs.set(r.seq, copy.seq)
       }
       d.deleted = s.deleted
+      d.kept = s.kept
       d.present = s.present
     }
     d.recompute = { core: dcore, running: null, again: false }
@@ -3884,7 +3965,7 @@ async function runSync ({
         if (!d.tombs.has(i)) await scanArrived(d, dcore, i)
       }
     })(), noop, noop)
-    d.range = clearing ? followRange(dcore, d.deleted) : dcore.download({ start: 0, end: -1, linear: true })
+    d.range = clearing ? followRange(dcore, d.deleted, { groupBound: true }) : dcore.download({ start: 0, end: -1, linear: true })
     let scanTo = d.present
     d.stopGrow = watchPresent(dcore, () => d.deleted, (length) => {
       if (!live()) return
@@ -4084,6 +4165,8 @@ async function runSync ({
   function activateGroupCore (e, core) {
     e.state = 'active'
     e.accepted = true
+    e.reported = 0
+    markGroupBound(e.diary)
     const check = () => { if (e.core === core) checkGroupQuota(e) }
     core.on('append', check)
     e.stopQuota = () => core.off('append', check)
@@ -4110,6 +4193,10 @@ async function runSync ({
     if (ended || e.state !== 'active') return
     if (checkGroupQuota(e)) return
     if (e.expected === null) {
+      // A length already reported (flushGroupGrowth reported it, then the
+      // growth listener fired for the same blocks) is not reported again.
+      if (length <= (e.reported || 0)) return
+      e.reported = length
       emit({ event: 'group-downloaded', key: e.key, group: e.group, length })
       if (e.key === e.group) noteParentOf(e)
       if (isCommunity(e.group)) scanCatalogue(e.group, e.core)
@@ -4172,6 +4259,17 @@ async function runSync ({
       if (!ended) purgeFailed(e.key)
       else log('aviso: falha ao limpar núcleo de grupo ' + key8(e.key))
     })
+  }
+
+  // The goal is judged on contiguousLength, and the growth listener of a
+  // core may not have fired yet for the last block when an async path ends
+  // the run: the growth not yet reported is reported now.
+  function flushGroupGrowth () {
+    for (const e of groupCores.values()) {
+      if (e.state !== 'active' || !e.core) continue
+      const length = e.core.contiguousLength
+      if (length > (e.reported || 0)) onGroupGrow(e, length)
+    }
   }
 
   // A writer this run created that still holds nothing when it ends goes,
@@ -4706,6 +4804,7 @@ async function runSync ({
         present: 0, // present length (lib/deletion.js) of an open replica
         deleted: new Set(), // the fold over the tombstones it holds
         tombs: new Map(), // seq -> target of each valid tombstone held locally
+        kept: new Set(), // seqs of the held records of a kept type (lib/deletion.js)
         recompute: null, // { core, running, again }: the one pending deletion recompute
         claims: new Map(), // peerKey -> { length } (G1 claims, --once only)
         failedSockets: new Set(), // open sockets of failed fetches for this key (H2, --once)

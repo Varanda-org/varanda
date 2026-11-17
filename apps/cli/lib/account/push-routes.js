@@ -3,7 +3,7 @@
 const nodeCrypto = require('node:crypto')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { endpointHash, verifyPush } = require('@varanda/core/lib/push-proof')
-const { validatePushEvent } = require('@varanda/core/lib/push-events')
+const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
 const { validateDmWake, DM_WAKE_COOLDOWN_MS } = require('@varanda/core/lib/dm-wake')
 const { isAllowedEndpoint, sendPush, PUSH_TTL_S, TOPIC_RE } = require('./web-push')
 const { validEndpoint, validP256dh, validAuth } = require('./push-store')
@@ -26,7 +26,9 @@ const { pushBody, dmWakePayload, inviteDropPayload, deletionPayload } = require(
 //     (VARANDA_PUSH_TOKEN) still gates it because loopback is not trusted
 //     (the /moderation-post rule of apps/cli/lib/seed-ws.js). Every valid
 //     event is answered 202 before any delivery, so the answer never says
-//     whether the recipient has a subscription. The seeder's DM wake
+//     whether the recipient has a subscription. An undone follow, like or
+//     repost ({ v: 1, op: 'cancel' }) recalls that notice while it still
+//     waits for its delay. The seeder's DM wake
 //     ({ v: 1, kind: 'dm-wake' }, packages/core/lib/dm-wake.js) names nobody
 //     and becomes one identical notice to every stored subscription, at most
 //     once per DM_WAKE_COOLDOWN_MS per process: who got a message is never
@@ -55,6 +57,8 @@ const MAX_NONCES = 1000
 const MAX_SEEN = 10000
 const MAX_IN_FLIGHT = 8
 const MAX_QUEUE = 512
+// One notice per actor, recipient, kind and target in this window.
+const COOLDOWN_MS = 600 * 1000
 const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
@@ -112,7 +116,7 @@ function createPushRoutes ({
     // One actor's share of the whole queue: one post can mention several
     // members, so pair and recipient alone let one diary fill MAX_QUEUE.
     actor: keyedWindow(30, 3600 * 1000, now),
-    cooldown: keyedWindow(1, 600 * 1000, now)
+    cooldown: keyedWindow(1, COOLDOWN_MS, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
 
@@ -123,6 +127,10 @@ function createPushRoutes ({
   // record twice (a restart before its cursor was saved).
   const seen = new Set()
   const queue = []
+  // Member notices no device has got yet, oldest first, for cancel: a recall
+  // gives their charges back. Gone once a copy reaches a device, once
+  // refunded, and past COOLDOWN_MS (a recall then gives nothing back).
+  const pending = new Set()
   let inFlight = 0
   let dropped = 0
   // Invite jobs still waiting in the queue, against INVITE_QUEUE_MAX.
@@ -339,6 +347,15 @@ function createPushRoutes ({
       }
       return
     }
+    if (validatePushCancel(event)) {
+      reply(res, 202, {})
+      try {
+        cancel(event)
+      } catch {
+        log({ event: 'push', reason: 'falhou' })
+      }
+      return
+    }
     if (!validatePushEvent(event)) throw refuse('pedido-invalido')
     reply(res, 202, {})
     try {
@@ -359,7 +376,8 @@ function createPushRoutes ({
     // Each reply is its own post, so its seq keeps two replies apart. The
     // cooldown runs first so a repeat never spends the recipient's budget.
     const target = kind === 'reply' ? ref + ' ' + seq : (ref === null ? '' : ref)
-    if (!limits.cooldown(actor + ' ' + recipient + ' ' + kind + ' ' + target)) {
+    const cooldown = actor + ' ' + recipient + ' ' + kind + ' ' + target
+    if (!limits.cooldown(cooldown)) {
       return log({ event: 'push', reason: 'descartado' })
     }
     if (vapid === null || !storeUsable()) return
@@ -380,20 +398,67 @@ function createPushRoutes ({
     limits.actor(actor)
     limits.pair(pairKey)
     limits.recipient(recipient)
+    // Read after every charge, so no window charged here starts after it
+    // (keyedWindow release).
+    const charged = now()
     const status = accounts.status(actor)
     const username = status.linked && typeof status.username === 'string' ? status.username : null
     const body = pushBody({ kind, name: event.name, username })
     const payload = JSON.stringify({ v: 1, kind, body, actor, recipient, ref })
     const topic = nodeCrypto.createHmac('sha256', topicKey).update(id).digest('hex').slice(0, 32)
     const at = now() + delayMs()
+    // Shared by every copy, for cancel.
+    const notice = { kind, actor, recipient, ref, cooldown, pairKey, charged, inFlight: 0, reached: false, cancelled: false }
     for (const subscription of subs) {
       if (queue.length >= MAX_QUEUE) {
         dropped++
         continue
       }
-      enqueue({ recipient, subscription, payload, topic }, at)
+      enqueue({ recipient, subscription, payload, topic, notice }, at)
     }
+    // Past MAX_SEEN the oldest live notice goes too and loses its refund
+    // (accepted: bounded memory over an exact recall).
+    for (const n of pending) {
+      if (n.charged + COOLDOWN_MS > charged && pending.size < MAX_SEEN) break
+      pending.delete(n)
+    }
+    pending.add(notice)
     pump()
+  }
+
+  // Drops the copies of the matching notices that still wait for their
+  // delay; one in flight or sent stays. A notice no device got gives back
+  // its cooldown, so a later redo still notifies, and its budgets, so an
+  // undo loop inside the delay cannot drain a recipient's budget unseen.
+  function cancel ({ kind, actor, recipient, ref }) {
+    const matches = (n) => n !== undefined && !n.cancelled && n.kind === kind && n.actor === actor && n.recipient === recipient && n.ref === ref
+    const recalled = new Set()
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (!matches(queue[i].notice)) continue
+      recalled.add(queue[i].notice)
+      queue.splice(i, 1)
+    }
+    const t = now()
+    for (const n of pending) if (matches(n) && n.charged + COOLDOWN_MS > t) recalled.add(n)
+    if (recalled.size === 0) return log({ event: 'push', reason: 'descartado' })
+    for (const n of recalled) {
+      n.cancelled = true
+      refund(n)
+    }
+    arm()
+    log({ event: 'push', reason: 'cancelado' })
+  }
+
+  // A copy in flight at cancel time may still reach a device, so the refund
+  // waits until it settles (pump calls this again). Leaving `pending` first
+  // makes it happen once.
+  function refund (n) {
+    if (!n.cancelled || n.reached || n.inFlight > 0 || !pending.has(n)) return
+    pending.delete(n)
+    limits.cooldown.release(n.cooldown, n.charged)
+    limits.actor.release(n.actor, n.charged)
+    limits.pair.release(n.pairKey, n.charged)
+    limits.recipient.release(n.recipient, n.charged)
   }
 
   // One global event: no per-actor window or cooldown applies, and a wake
@@ -504,9 +569,14 @@ function createPushRoutes ({
       if (i < 0) break
       const job = queue.splice(i, 1)[0]
       if (job.deadline !== undefined) invitesQueued--
+      if (job.notice !== undefined) job.notice.inFlight++
       inFlight++
       deliverOne(job).finally(() => {
         inFlight--
+        if (job.notice !== undefined) {
+          job.notice.inFlight--
+          refund(job.notice)
+        }
         pump()
       })
     }
@@ -565,7 +635,7 @@ function createPushRoutes ({
     }
   }
 
-  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline }) {
+  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline, notice }) {
     const subscription = current(recipient, queued)
     if (subscription === null) {
       dropped++
@@ -585,6 +655,14 @@ function createPushRoutes ({
       outcome = await send(opts)
     } catch {
       outcome = 'dropped'
+    }
+    // Only 'gone' says the push service refused the copy. 'dropped' also
+    // covers a timeout or a reset after the service may have taken the POST
+    // (sendPush cannot tell them apart), so it counts as reached: refunding
+    // it would let a like/unlike loop during timeouts notify every cycle.
+    if (outcome !== 'gone' && notice !== undefined) {
+      notice.reached = true
+      pending.delete(notice)
     }
     if (outcome === 'ok') return log({ event: 'push', reason: 'enviado' })
     if (outcome === 'gone') {

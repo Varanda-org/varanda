@@ -58,7 +58,7 @@ Limite conhecido: o build de debug (`app.varanda.debug`) não entra com passkey 
 - [ ] A vê o nome de B em "Quem regou".
 - [ ] Uma conta que não segue A é recusada ao regar.
 - [ ] Sair marca os registros do jogo como apagados (`diary.peek`).
-- [ ] Os Termos e a Privacidade estão na versão 77 e pedem novo aceite.
+- [ ] Os Termos e a Privacidade estão na versão 78 e pedem novo aceite.
 - [ ] Núcleo: no `varanda-serve` e no app com configuração manual, a tela não oferece o jogo.
 
 O fluxo com rede é coberto por `packages/web-member/test/garden-e2e.test.js` (PR feat/varandinha-node), com um semeador local.

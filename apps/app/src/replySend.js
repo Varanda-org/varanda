@@ -36,7 +36,11 @@ export function sentMatcher ({ text, replyTo = null, quote = null, media = null 
 export function quickReplyPlan ({ text, nodeReady, actingAsPage, hasLink, refusal }) {
   if (typeof text !== 'string' || text.trim() === '') return { kind: 'empty' }
   if (refusal) return { kind: 'refuse' }
-  if (actingAsPage || !nodeReady || hasLink || [...text].length > 1000) return { kind: 'expand' }
+  // A link card is built by Publicar, and a long text needs that editor too.
+  if (hasLink || [...text].length > 1000) return { kind: 'expand' }
+  // The page diary is the account service, so a quiet local node still sends.
+  if (actingAsPage) return { kind: 'send-page' }
+  if (!nodeReady) return { kind: 'expand' }
   return { kind: 'send' }
 }
 
@@ -83,6 +87,31 @@ export async function sendTextReply ({ request, text, replyTo, lastSeq = null })
       } catch {
         // Keep the mutation's uncertainty when reconciliation also fails.
       }
+    }
+    return { ok: false, ref: null, error }
+  }
+}
+
+// One signed post, never repeated here. An uncertain failure hands back its
+// err.retry (the same signed bytes, same nonce: the service writes it at most
+// once) so the caller can resend on the person's next tap; passing that
+// `retry` sends it instead of a new signature, and its answer settles the
+// same way. An answer without a seq after a retry keeps that retry.
+export async function sendPageTextReply ({ act, retry = null, page, text, replyTo }) {
+  const refused = refusalOf(text)
+  if (refused) return { ok: false, ref: null, error: null, refused }
+  const again = typeof retry === 'function' ? retry : null
+  try {
+    const value = again !== null ? await again() : await act({ to: replyTo, text })
+    const seq = value !== null && typeof value === 'object' ? value.seq : undefined
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      const error = Object.assign(new Error('resposta inesperada'), { uncertain: true })
+      return again !== null ? { ok: false, ref: null, error, retry: again } : { ok: false, ref: null, error }
+    }
+    return { ok: true, ref: page + ':' + seq, error: null }
+  } catch (error) {
+    if (error && error.uncertain === true && typeof error.retry === 'function') {
+      return { ok: false, ref: null, error, retry: error.retry }
     }
     return { ok: false, ref: null, error }
   }

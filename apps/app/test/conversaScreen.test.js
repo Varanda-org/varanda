@@ -83,7 +83,7 @@ test('Conversa: comment copy', (t) => {
   t.ok(src.includes("phase === 'ready' && notes.length > 0"))
   t.ok(src.includes("unavailable === 1 ? '1 comentário indisponível' : String(unavailable) + ' comentários indisponíveis'"))
   t.ok(src.includes("moreError: 'Não foi possível carregar mais comentários.'"))
-  t.ok(src.includes("placeholder={toRoot ? 'Escreva um comentário' : undefined}"), 'the bar default stays for a reply')
+  t.ok(src.includes("(toRoot ? 'Escreva um comentário' : undefined)") && src.includes('placeholder={barPlaceholder}'), 'the bar default stays for a reply')
   t.ok(src.includes("sendLabel={toRoot ? 'Comentar' : undefined}"), 'send reads Comentar on the post, Responder on a comment')
   t.ok(src.includes("else if ((meta && meta.complete === false) || rodaGaps) notes.push('Algumas respostas podem faltar.')"))
   t.ok(src.includes("roda.loaded && (roda.complete === false || (roda.mode === 'direct' && roda.replies.some("), 'a cut roda, or direct replies with replies of their own')
@@ -101,7 +101,7 @@ test('Conversa: full nodes pin ReplyBar and keep the sheet path elsewhere', (t) 
   t.ok(src.includes('onReply: full ? targetReply : onReply'))
   t.ok(src.includes('{full || sending\n        ? (') && src.includes('<ReplyBar'))
   t.is(src.split('<ReplyBar').length - 1, 1)
-  t.ok(src.includes('onClearTarget={() => setReplyTarget(null)}'))
+  t.ok(src.includes('onClearTarget={() => { if (!sendingRef.current) setReplyTarget(null) }}'), 'no target change while a send is in flight')
   t.ok(src.includes('onSend={sendReply}'))
   t.ok(src.includes('renderItem={renderItem}'))
 })
@@ -137,9 +137,12 @@ test('Conversa: compose signals match the opened post and wait for the root', (t
 })
 
 test('Conversa quick sends retain uncertain drafts and delegate expansion acceptance', (t) => {
-  t.ok(src.includes('quickReplyPlan({ text, nodeReady: full, actingAsPage: actingPageKey() !== null, hasLink: hasLink(text), refusal })'))
+  t.ok(src.includes('const pageKey = actingPageKey()'))
+  t.ok(src.includes('quickReplyPlan({ text, nodeReady: full, actingAsPage: pageKey !== null, hasLink: hasLink(text), refusal })'))
   t.ok(src.includes('const refusal = refusalOf(text)'))
-  t.ok(src.includes('if (result.gated) return expandReply(text, target)'))
+  t.ok(src.includes('if (pageKey === null && result.gated) return expandReply(text, target)'))
+  t.ok(src.includes("import { quickReplyPlan, sendPageTextReply, sendTextReply } from '../replySend'"))
+  t.ok(src.includes("act: (op) => actAs(nodeOf(node), { member, action: 'reply', page: pageKey, op })"))
   t.ok(src.includes('result.error.uncertain === true'))
   t.ok(src.includes('result.refused ||'))
   t.ok(src.includes('sendTextReply({ request, text, replyTo: target.ref })'), 'replyTo is the exact message')
@@ -164,6 +167,9 @@ function handler (source, start, end, name, context) {
 }
 
 const refOf = (author, seq) => author + ':' + seq
+const RESEND_NOTE = /const RESEND_NOTE = '([^']+)'/.exec(src)[1]
+const MAYBE_SENT_NOTE = /const MAYBE_SENT_NOTE = '([^']+)'/.exec(src)[1]
+const HELD_RETRY_MS = /const HELD_RETRY_MS = ([0-9 *]+)\n/.exec(src)[1].split('*').reduce((n, f) => n * Number(f), 1)
 
 async function localReplies (registerLocalCache = () => {}) {
   const { withOwnReply } = await import('../src/threadRows.js')
@@ -177,17 +183,25 @@ async function localReplies (registerLocalCache = () => {}) {
 const item = (seq, parent = 4, author = A, parentAuthor = B) => ({ kind: 'post', author, seq, at: '2026-01-01T00:00:0' + (seq % 10) + '.000Z', text: 'resposta ' + seq, replyTo: { author: parentAuthor, seq: parent } })
 
 async function sending (options = {}) {
-  const { quickReplyPlan, sendTextReply } = await import('../src/replySend.js')
+  const { quickReplyPlan, sendTextReply, sendPageTextReply } = await import('../src/replySend.js')
   const { mergeChildren } = await import('../src/threadRows.js')
   const { parseRef } = await import('../src/thread.js')
   const { refusalOf } = await import('../src/wordCheck.js')
   const { hasLink } = await import('../src/links.js')
   const own = await localReplies()
   const ref = options.target || focal
-  const state = { note: '', busy: false, comments: undefined, rodas: options.rodas || new Map(), open: new Set(), published: [], expanded: [], requests: [], loads: [] }
+  const state = { note: '', busy: false, comments: undefined, rodas: options.rodas || new Map(), open: new Set(), published: [], expanded: [], requests: [], loads: [], pageActs: [], resolved: [] }
+  const request = async (method, params) => {
+    state.requests.push({ method, params })
+    if (options.request) return options.request(method, params)
+    if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+    return { ref: A + ':8', seq: 8 }
+  }
+  const node = { request, hosted: true, online: options.full !== false }
   const context = {
     quickReplyPlan,
     sendTextReply,
+    sendPageTextReply: options.sendPageTextReply || sendPageTextReply,
     mergeChildren,
     parseRef,
     refusalOf,
@@ -198,12 +212,30 @@ async function sending (options = {}) {
     target: { ref, name: 'Pessoa' },
     toRoot: ref === focal,
     full: options.full !== false,
-    actingPageKey: () => options.page ? A : null,
+    actingPageKey: typeof options.actingPageKey === 'function' ? options.actingPageKey : () => options.page ? A : null,
+    node,
+    nodeOf: (source) => (typeof source === 'function' ? { request: source } : source),
+    memberKeyOf: async (req, used) => {
+      state.memberOf = used
+      if (typeof options.memberKeyOf === 'function') return options.memberKeyOf(req, used)
+      return B
+    },
+    actAs: async (used, args) => {
+      state.pageActs.push({ node: used, member: args.member, action: args.action, page: args.page, op: args.op })
+      if (typeof options.pageAct === 'function') return options.pageAct(used, args)
+      return { seq: 8 }
+    },
     sendingRef: { current: false },
+    pageRetryRef: { current: null },
+    barTargetRef: { current: ref },
+    RESEND_NOTE,
+    MAYBE_SENT_NOTE,
+    HELD_RETRY_MS,
     sessionRef: { current: 0 },
     ownReplies: { current: new Map() },
     names: {},
-    identityOf: () => ({ name: 'Eu' }),
+    resolveMany: (keys) => state.resolved.push(keys),
+    identityOf: (names, author) => ({ name: 'nome de ' + author.slice(0, 2) }),
     eng: { counts: new Map(options.counts || []) },
     setCount: (key, value) => context.eng.counts.set(key, value),
     viewRef: { current: { root: focal, comments: options.comments || [], resolved: options.resolved || null, meta: options.meta || null } },
@@ -220,12 +252,7 @@ async function sending (options = {}) {
     errorText: (err) => err ? err.message : 'Erro',
     onPublished: (...args) => state.published.push(args),
     expandReply: async (draft, target) => { state.expanded.push({ ...target, draft }); return options.accepted === true },
-    request: async (method, params) => {
-      state.requests.push({ method, params })
-      if (options.request) return options.request(method, params)
-      if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
-      return { ref: A + ':8', seq: 8 }
-    }
+    request
   }
   const send = handler(src, '  const sendReply = async', '  const scrollToKey =', 'sendReply', context)
   return { send, state, context }
@@ -248,21 +275,279 @@ test('Conversa send handler: uncertain and plain failures keep text, with one mu
   }
 })
 
-test('Conversa send handler: refusal, link and page plans never mutate', async (t) => {
+test('Conversa send handler: refusal and links never mutate', async (t) => {
   const refused = await sending()
   const { BLOCKED_TERMS } = require('@varanda/rpc')
   t.is(await refused.send(BLOCKED_TERMS[0]), false)
   t.ok(refused.state.note.includes('não permite'))
   t.is(refused.state.requests.length, 0)
+  t.is(refused.state.pageActs.length, 0)
   for (const options of [{ page: true }, {}, { full: false }]) {
     const { send, state } = await sending(options)
     t.is(await send('https://example.org'), false, 'a rejected handoff keeps the text')
     t.alike(state.expanded, [{ ref: focal, name: 'Pessoa', draft: 'https://example.org' }])
     t.is(state.requests.length, 0)
+    t.is(state.pageActs.length, 0, 'a link still opens Publicar, including as a page')
   }
-  const page = await sending({ page: true, accepted: true })
-  t.is(await page.send('texto sem link'), true)
-  t.is(page.state.requests.length, 0)
+})
+
+test('Conversa send handler: a page replies inline as the page it started as', async (t) => {
+  const who = { key: A }
+  const sent = await sending({
+    actingPageKey: () => who.key,
+    memberKeyOf: async () => { who.key = null; return B }
+  })
+  t.is(await sent.send('texto sem link'), true)
+  t.alike(sent.state.expanded, [])
+  t.is(sent.state.requests.length, 0, 'the page diary is not the local node')
+  t.is(sent.state.pageActs.length, 1)
+  t.alike(sent.state.pageActs[0], {
+    node: sent.context.node,
+    member: B,
+    action: 'reply',
+    page: A,
+    op: { to: focal, text: 'texto sem link' }
+  })
+  t.is(sent.state.memberOf, sent.context.node)
+  t.is(sent.state.comments[0].author, A)
+  t.is(sent.state.comments[0].seq, 8)
+  t.is(sent.state.comments[0].name, 'nome de ' + A.slice(0, 2), 'the row takes the page identity, not the member')
+  t.alike(sent.state.resolved, [[A]], 'the page key is asked of the names cache')
+  t.alike(sent.state.published, [['quick-reply', focal]])
+
+  const quiet = await sending({ page: true, full: false })
+  t.is(await quiet.send('sem no'), true)
+  t.is(quiet.state.pageActs.length, 1, 'a page send does not wait for the local node')
+  t.alike(quiet.state.expanded, [])
+
+  let retried = 0
+  const uncertain = Object.assign(new Error('caiu'), { uncertain: true, retry: () => { retried++ } })
+  const lost = await sending({ page: true, pageAct: async () => { throw uncertain } })
+  t.is(await lost.send('texto da pagina'), false)
+  t.is(lost.state.note, RESEND_NOTE)
+  t.is(lost.state.pageActs.length, 1)
+  t.is(retried, 0)
+  t.alike(lost.state.expanded, [])
+
+  const definite = new Error('Só o dono pode fazer isso')
+  const denied = await sending({ page: true, pageAct: async () => { throw definite } })
+  t.is(await denied.send('texto da pagina'), false)
+  t.is(denied.state.note, 'Só o dono pode fazer isso')
+  t.alike(denied.state.expanded, [])
+
+  const gated = await sending({
+    page: true,
+    accepted: true,
+    sendPageTextReply: async () => ({ ok: false, ref: null, error: new Error('portao'), gated: true })
+  })
+  t.is(await gated.send('texto'), false)
+  t.alike(gated.state.expanded, [], 'a page has no gated handoff')
+  t.is(gated.state.note, 'portao')
+})
+
+test('Conversa send handler: a lost page reply resends the same bytes on the next tap with the same text', async (t) => {
+  let retried = 0
+  let memberCalls = 0
+  const retry = async () => { retried++; return { seq: 12 } }
+  const lost = await sending({
+    page: true,
+    memberKeyOf: async () => { memberCalls++; return B },
+    pageAct: async () => { throw Object.assign(new Error('caiu'), { uncertain: true, retry }) }
+  })
+  t.is(await lost.send('texto da pagina'), false)
+  t.is(retried, 0, 'never resent on its own')
+  t.is(lost.state.pageActs.length, 1)
+  t.is(lost.context.pageRetryRef.current.retry, retry)
+  t.is(await lost.send('texto da pagina'), true)
+  t.is(lost.state.pageActs.length, 1, 'no second signature')
+  t.is(memberCalls, 1)
+  t.is(retried, 1)
+  t.is(lost.context.pageRetryRef.current, null)
+  t.is(lost.state.comments[0].author, A)
+  t.is(lost.state.comments[0].seq, 12, 'the ref comes from the retry seq')
+  t.alike(lost.state.published, [['quick-reply', focal]])
+  t.is(await lost.send('texto da pagina'), false, 'the mock fails every signed send')
+  t.is(retried, 1, 'once settled, the next send signs anew')
+  t.is(lost.state.pageActs.length, 2)
+})
+
+test('Conversa send handler: a changed text or identity drops the lost reply and signs anew', async (t) => {
+  let retried = 0
+  let fail = true
+  const retry = async () => { retried++; return { seq: 12 } }
+  const changed = await sending({
+    page: true,
+    pageAct: async () => {
+      if (fail) throw Object.assign(new Error('caiu'), { uncertain: true, retry })
+      return { seq: 13 }
+    }
+  })
+  t.is(await changed.send('texto da pagina'), false)
+  fail = false
+  t.is(await changed.send('outro texto'), true)
+  t.is(retried, 0, 'the old retry is never called')
+  t.is(changed.state.pageActs.length, 2)
+  t.alike(changed.state.pageActs[1].op, { to: focal, text: 'outro texto' })
+  t.is(changed.state.comments[0].seq, 13)
+  t.ok(changed.context.pageRetryRef.current, 'a different reply that lands leaves the unsettled one held')
+  t.is(changed.context.pageRetryRef.current.text, 'texto da pagina')
+  t.is(await changed.send('texto da pagina'), true)
+  t.is(retried, 1, 'the first reply resends its own bytes')
+  t.is(changed.state.pageActs.length, 2, 'no third signature')
+  t.is(changed.state.comments[0].seq, 12)
+  t.is(changed.context.pageRetryRef.current, null)
+
+  const who = { key: A }
+  fail = true
+  retried = 0
+  const switched = await sending({
+    actingPageKey: () => who.key,
+    pageAct: async () => { throw Object.assign(new Error('caiu'), { uncertain: true, retry }) }
+  })
+  t.is(await switched.send('texto da pagina'), false)
+  t.ok(switched.context.pageRetryRef.current)
+  const kept = switched.context.pageRetryRef.current
+  who.key = null
+  t.is(await switched.send('texto da pagina'), true)
+  t.is(retried, 0, 'the member never resends the page bytes')
+  t.is(switched.state.requests.filter((r) => r.method === 'post.reply').length, 1, 'the member signs its own reply')
+  t.is(switched.context.pageRetryRef.current, kept, 'the page bytes stay keyed to the page')
+  who.key = A
+  t.is(await switched.send('texto da pagina'), true)
+  t.is(retried, 1, 'back as the page, the same text resends the held bytes')
+  t.is(switched.state.pageActs.length, 1)
+  t.is(switched.context.pageRetryRef.current, null)
+})
+
+test('Conversa send handler: a refusal, Publicar or a failure before signing keeps the held page bytes', async (t) => {
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
+  let retried = 0
+  let mode = 'lost'
+  const retry = async () => { retried++; return { seq: 12 } }
+  const run = await sending({
+    page: true,
+    memberKeyOf: async () => {
+      if (mode === 'no-key') throw new Error('Sem chave')
+      return B
+    },
+    pageAct: async () => {
+      if (mode === 'lost') throw Object.assign(new Error('caiu'), { uncertain: true, retry })
+      throw new Error('Só o dono pode fazer isso')
+    }
+  })
+  t.is(await run.send('texto da pagina'), false)
+  const held = run.context.pageRetryRef.current
+  t.ok(held)
+  t.is(await run.send('texto ' + BLOCKED_TERMS[0]), false, 'word refusal')
+  t.is(run.context.pageRetryRef.current, held)
+  t.is(await run.send('https://example.org'), false, 'Publicar declined')
+  t.is(run.context.pageRetryRef.current, held)
+  mode = 'no-key'
+  t.is(await run.send('outro texto'), false, 'member key fails before any signature')
+  t.is(run.context.pageRetryRef.current, held)
+  mode = 'refused'
+  t.is(await run.send('outro texto'), false, 'a definite refusal of the new reply')
+  t.is(run.context.pageRetryRef.current, held)
+  t.is(run.state.pageActs.length, 2)
+  t.is(retried, 0)
+  t.is(await run.send('texto da pagina'), true)
+  t.is(retried, 1, 'the original text still resends the same bytes')
+  t.is(run.state.pageActs.length, 2, 'no new signature')
+  t.is(run.context.pageRetryRef.current, null)
+})
+
+test('Conversa send handler: the resend note shows only on the bar the send started on', async (t) => {
+  const generic = 'A resposta pode ter sido enviada. Confira a conversa antes de enviar de novo.'
+  const lostRetry = () => Object.assign(new Error('caiu'), { uncertain: true, retry: async () => ({ seq: 12 }) })
+  const who = { key: A }
+  const switched = await sending({
+    actingPageKey: () => who.key,
+    pageAct: async () => { who.key = null; throw lostRetry() }
+  })
+  t.is(await switched.send('texto da pagina'), false)
+  t.is(switched.state.note, generic, 'the identity changed mid-send')
+  t.ok(switched.context.pageRetryRef.current, 'the bytes stay held for the page')
+
+  let moved = null
+  const cleared = await sending({
+    page: true,
+    pageAct: async () => { moved.context.barTargetRef.current = null; throw lostRetry() }
+  })
+  moved = cleared
+  t.is(await cleared.send('texto da pagina'), false)
+  t.is(cleared.state.note, generic, 'the target changed mid-send')
+
+  const same = await sending({ page: true, pageAct: async () => { throw lostRetry() } })
+  t.is(await same.send('texto da pagina'), false)
+  t.is(same.state.note, RESEND_NOTE)
+  t.absent(RESEND_NOTE.includes('resposta'), 'neutral for a comment and a reply')
+})
+
+test('Conversa send handler: a definite refusal of the resend settles the held bytes', async (t) => {
+  let retried = 0
+  const run = await sending({
+    page: true,
+    pageAct: async () => { throw Object.assign(new Error('caiu'), { uncertain: true, retry: async () => { retried++; throw new Error('expirou') } }) }
+  })
+  t.is(await run.send('texto da pagina'), false)
+  t.is(await run.send('texto da pagina'), false)
+  t.is(retried, 1)
+  t.is(run.state.note, 'expirou')
+  t.is(run.context.pageRetryRef.current, null)
+})
+
+test('Conversa expandReply keeps the held page bytes and says only the bar resends them', async (t) => {
+  const state = { note: 'antes', replies: [] }
+  const retry = () => {}
+  const context = {
+    onReply: async (value) => { state.replies.push(value); return false },
+    replyTarget: null,
+    rootTarget: { ref: focal },
+    replyDraft: { current: { focal, text: '' } },
+    focal,
+    actingPageKey: () => A,
+    pageRetryRef: { current: { retry, page: A, ref: focal, text: 'texto da pagina', at: Date.now() } },
+    setNote: (value) => { state.note = value },
+    RESEND_NOTE,
+    HELD_RETRY_MS
+  }
+  const expand = handler(src, '  const expandReply = async', '  const scrollToKey =', 'expandReply', context)
+  t.is(await expand('outro texto'), false)
+  t.is(state.note, 'antes', 'a different text says nothing')
+  t.is(await expand('texto da pagina'), false)
+  t.is(state.note, RESEND_NOTE)
+  t.is(context.pageRetryRef.current.retry, retry, 'the held bytes stay for the bar')
+  t.is(state.replies.length, 2)
+})
+
+test('Conversa send handler: a failed member key shows a note and expands nothing', async (t) => {
+  const failed = await sending({
+    page: true,
+    memberKeyOf: async () => { throw new Error('Sem chave') }
+  })
+  t.is(await failed.send('texto da pagina'), false)
+  t.is(failed.state.note, 'Sem chave')
+  t.is(failed.state.pageActs.length, 0, 'nothing is signed')
+  t.alike(failed.state.expanded, [])
+  t.alike(failed.state.published, [])
+  t.is(failed.state.busy, false)
+})
+
+test('Conversa send handler: a switch to the member mid-send keeps the page the send started as', async (t) => {
+  const who = { key: A }
+  const gated = await sending({
+    actingPageKey: () => who.key,
+    accepted: true,
+    pageAct: async () => { who.key = null; throw Object.assign(new Error('portao'), { gated: true }) },
+    sendPageTextReply: async (args) => {
+      try { await args.act({ to: args.replyTo, text: args.text }) } catch (error) { return { ok: false, ref: null, error, gated: true } }
+      return { ok: true, ref: A + ':8' }
+    }
+  })
+  t.is(await gated.send('texto'), false)
+  t.is(gated.state.pageActs[0].page, A, 'the page captured at the start signs')
+  t.alike(gated.state.expanded, [], 'the gate check uses the captured page, not the identity now')
+  t.is(gated.state.note, 'portao')
 })
 
 test('Conversa send handler: the gate hands off the draft and waits for acceptance', async (t) => {
@@ -345,7 +630,7 @@ test('Conversa keeps bar drafts across offline remounts and clears accepted hand
   await sent.send('resposta')
   t.is(sent.context.replyDraft.current.text, '')
   for (const accepted of [false, true]) {
-    const context = { onReply: async () => accepted, replyTarget: null, rootTarget: { ref: focal }, focal, replyDraft: { current: { focal, text: 'rascunho' } } }
+    const context = { onReply: async () => accepted, replyTarget: null, rootTarget: { ref: focal }, focal, replyDraft: { current: { focal, text: 'rascunho' } }, heldRetry: () => null, actingPageKey: () => null }
     const expand = handler(src, '  const expandReply =', '  const sendReply =', 'expandReply', context)
     t.is(await expand('rascunho'), accepted)
     t.is(context.replyDraft.current.text, accepted ? '' : 'rascunho')
@@ -374,7 +659,11 @@ test('Conversa bar respects the safe area and consumes compose intent once', (t)
   t.ok(src.includes('<View ref={barBox} collapsable={false} style={[style, { paddingBottom: keyboardOpen ? 8 : Math.max(8, insets.bottom) }]}>'), 'the inset is dropped while the keyboard is open')
   t.ok(/<ReplyDock barBox=\{barBox\} style=\{styles.barWrap\}>\s*<ReplyBar/.test(src), 'the bar sits in the dock')
   t.ok(src.includes('barWrap: { backgroundColor: colors.bg, paddingHorizontal: space.md, paddingTop: space.sm }'), 'the page shows around the floating pill')
-  t.ok(src.includes('me={me}') && /function ConversaList \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile')
+  t.ok(src.includes('me={barMe}') && /function ConversaList \(\{[^}]*\bme,/.test(src), 'the bar gets the own profile, or the page acted as')
+  t.ok(src.includes('{ name: barPageName, publicKey: barPageKey, picture: barPageAvatar }'), 'as a page the bar shows the page identity')
+  t.ok(src.includes("(toRoot ? 'Comente como ' : 'Responda como ') + barPageName"), 'the field says it replies as the page')
+  t.ok(src.includes('resolveMany([barPageKey])') && src.includes('resolveMany([pageKey])'), 'the page is resolved for the bar and for the sent row')
+  t.ok(src.includes('const noteTargetRef = replyTarget ? replyTarget.ref : null') && src.includes("useEffect(() => { setNote('') }, [noteTargetRef, barPageKey])"), 'a cleared chip or a new identity clears the note')
   t.ok(app.includes('me: tabMe,'), 'App passes the tab profile to screens')
   t.ok(src.includes("onAttach={(draft) => expandReply(draft, undefined, 'photo')}"), 'the photo button expands with attach')
   t.ok(src.includes('nonFocalTarget={replyTarget !== null && !toRoot}'), 'a reply to another row is flagged')
@@ -1819,4 +2108,18 @@ test('Conversa: the seed row stops its skeleton when the load fails', (t) => {
   const header = between('  const header = (', '  // The screen pads')
   t.ok(header.includes("{phase === 'loading' ? <Skeleton rows={1} /> : null}"))
   t.absent(header.includes('            <Skeleton rows={1} />\n'), 'never drawn in the error phase')
+})
+
+test('Conversa drops held page bytes once their nonce can no longer be accepted', async (t) => {
+  t.ok(HELD_RETRY_MS < 600 * 1000, 'shorter than the service nonce life (NONCE_TTL_MS)')
+  const run = await sending({ page: true })
+  const retry = async () => { throw new Error('a stale retry must not run') }
+  run.context.pageRetryRef.current = { retry, page: A, ref: focal, text: 'texto da pagina', at: Date.now() - HELD_RETRY_MS - 1 }
+  run.context.replyDraft.current.text = 'texto da pagina'
+  t.is(await run.send('texto da pagina'), false)
+  t.is(run.state.pageActs.length, 0, 'nothing is signed or resent on that tap')
+  t.is(run.state.note, MAYBE_SENT_NOTE, 'the person is asked to check the conversation')
+  t.is(run.context.pageRetryRef.current, null, 'the dead bytes are dropped')
+  t.is(await run.send('texto da pagina'), true)
+  t.is(run.state.pageActs.length, 1, 'the next tap signs anew')
 })

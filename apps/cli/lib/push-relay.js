@@ -4,7 +4,7 @@
 // service's loopback POST /push-event. Never retries: a lost relay is a lost
 // notice, and the in-app Avisos still show follows. Nothing about an event
 // is logged or kept beyond the dedupe keys.
-const { validatePushEvent } = require('@varanda/core/lib/push-events')
+const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
 const { validateDmWake } = require('@varanda/core/lib/dm-wake')
 
 const DM_WAKE = JSON.stringify({ v: 1, kind: 'dm-wake' })
@@ -81,6 +81,20 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
 
   function send (event) {
     if (closed) return false
+    // An undo recalls a notice still waiting at the account service. It has
+    // no seq to dedupe on, and an identical cancel already waiting is kept
+    // too: it may follow a newer event than the one the first cancel recalls.
+    // Never retried: a cancel dropped here (queue full) or whose POST fails
+    // leaves the push to be delivered.
+    if (validatePushCancel(event)) {
+      if (queue.length >= maxPending) {
+        counts.full++
+        return false
+      }
+      queue.push(JSON.stringify(event))
+      if (!draining) drain()
+      return true
+    }
     if (!validatePushEvent(event)) {
       counts.invalid++
       return false

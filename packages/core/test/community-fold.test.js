@@ -8,7 +8,7 @@ const {
   groupCreateRecord, communityAdmit, communityBan, communityHide, communityMetaCw, communityDrop, groupKey, groupSealed, groupInvites, communityInvites,
   groupReact, buildGroup, buildCommunity
 } = require('../lib/group')
-const { K, AT, NOW, community, groupIn } = require('./helpers/groups')
+const { K, AT, NOW, community, groupIn, diaryLog } = require('./helpers/groups')
 
 const Z = K(0x9)
 const A = K(0x2)
@@ -2130,6 +2130,17 @@ test('groupCutHistory: the marks of a diary for a group, and a gap flag', (t) =>
   t.alike(groupCutHistory([entries[0], entries[2]], G1), [{ writer: G1, cut: 4, seq: 2 }, { gap: true }], 'a hole below a mark')
 })
 
+test('groupCutHistory: a deleted block this replica never read is no gap: only blocks read count', (t) => {
+  const { groupCutHistory } = require('../lib/group')
+  const { groupCutRecord } = require('../lib/records')
+  const entries = [
+    { seq: 0, record: { type: 'member-cert' } },
+    { seq: 1, record: null, deleted: true },
+    { seq: 2, record: groupCutRecord({ group: G1, writer: G1, cut: 4, at: AT(2) }) }
+  ]
+  t.alike(groupCutHistory(entries, G1), [{ writer: G1, cut: 4, seq: 2 }])
+})
+
 test('a returning creator demotes through its CW an admin a thief granted on the root', (t) => {
   const { communityDemote } = require('../lib/group')
   const cwZ2 = K(0x92)
@@ -3422,6 +3433,115 @@ test('memberInvite: a returning creator sets it on its CW once the root lost its
   t.is(comm(C).memberInvite, true, 'a root record past its cut never counts')
   C.push(cwZ3, communityInvites({ on: false, at: AT(61) }))
   t.is(comm(C).memberInvite, false, 'the creator CW of the return does')
+})
+
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+// `log` is the real diary of `d`: its histories replace the fixture's.
+function withDiary (input, d, read) {
+  return { ...input, joins: new Map([...input.joins, [d, read.joins]]), confirms: new Map([...(input.confirms || []), [d, read.confirms]]) }
+}
+
+test('a community leave still counts when its diary deletes the join it closed afterwards', (t) => {
+  const D = K(0xa0)
+  const M = K(0xa1)
+  const cw1 = K(0xa2)
+  const cw2 = K(0xa3)
+  const cwM = K(0xa4)
+  const C = community({ creator: Z, join: 'approval', members: [{ diary: D, cw: cw1, status: 'member' }, { diary: M, cw: cwM, status: 'member' }] })
+  C.addWriter(D, cw2)
+  // D binds two CWs, is admitted and made admin on both, leaves from cw1
+  // (the leave cuts both), confirms it and turns cw1 off; cw2 then bans M.
+  const log = diaryLog()
+  const on1 = log.join(C.key, cw1)
+  log.join(C.key, cw2)
+  C.push(C.key, communityAdmit({ member: D, on: true, cuts: [{ writer: cw1, seq: 1 }, { writer: cw2, seq: 1 }], at: C.at() }))
+  C.push(C.key, groupAdmin({ member: D, on: true, cuts: [{ writer: cw1, seq: 1 }, { writer: cw2, seq: 1 }], at: C.at() }))
+  C.push(cw1, groupLeave({ cuts: [{ writer: cw1, seq: C.len(cw1) }, { writer: cw2, seq: C.len(cw2) }], at: C.at() }))
+  log.confirm(C.key, cw1, C.logs.get(cw1))
+  C.push(cw2, communityBan({ member: M, on: true, cuts: [{ writer: cwM, seq: C.len(cwM) }], at: C.at() }))
+  const view = () => {
+    const c = comm(withDiary(C.input(), D, log.read(C.key)))
+    return { D: c.members.get(D), adminD: c.admins.has(D), M: c.members.get(M), cw2: c.authorityWriters.has(cw2) }
+  }
+  const left = { D: 'left', adminD: false, M: 'member', cw2: false }
+  t.alike(view(), left, 'after the leave D is out and cw2 acts on nothing')
+  const before = log.read(C.key)
+  log.delete(on1)
+  t.alike(log.read(C.key), before, 'the join is still read')
+  t.alike(view(), left, 'a delete of the closed join changes nothing')
+})
+
+// The creator Z leaves from a second CW (the leave cuts the root), confirms
+// it and turns that CW off; the root then grants and creates.
+function creatorLeaveWorld () {
+  const cwZ2 = K(0x92)
+  const C = community({ creator: Z, members: [{ diary: A, cw: cwA, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  const log = diaryLog()
+  log.join(C.key, C.key)
+  const on2 = log.join(C.key, cwZ2)
+  C.push(cwZ2, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }, { writer: cwZ2, seq: C.len(cwZ2) }], at: AT(50) }))
+  const confirm = log.confirm(C.key, cwZ2, C.logs.get(cwZ2))
+  C.push(C.key, groupAdmin({ member: A, on: true, cuts: [{ writer: cwA, seq: C.len(cwA) }], at: AT(55) }))
+  C.push(C.key, groupCreateRecord({ group: G3, at: AT(56) }))
+  const view = () => {
+    const c = comm(withDiary(C.input(), Z, log.read(C.key)))
+    return { groups: c.groups, adminA: c.admins.has(A), rootAuthority: c.rootAuthority }
+  }
+  return { log, on2, confirm, view, key: C.key }
+}
+const ROOT_BOUNDED = { groups: [G1], adminA: false, rootAuthority: false }
+
+test('a deleted group-confirm changes nothing: the creator leave still bounds the root', (t) => {
+  const w = creatorLeaveWorld()
+  t.alike(w.view(), ROOT_BOUNDED, 'the confirmed leave bounds the root')
+  const before = w.log.read(w.key)
+  w.log.delete(w.confirm)
+  t.alike(w.log.read(w.key), before, 'the confirm is still read')
+  t.alike(w.view(), ROOT_BOUNDED, 'the grant and the create after the leave still do not count')
+})
+
+test('a creator leave still counts after its diary deletes the join it closed', (t) => {
+  const w = creatorLeaveWorld()
+  t.alike(w.view(), ROOT_BOUNDED)
+  w.log.delete(w.on2)
+  t.alike(w.view(), ROOT_BOUNDED, 'the grant and the create after the leave still do not count')
+})
+
+test('a deleted group-cut still cuts: the mark keeps the G root cut after the creator returns', (t) => {
+  const cwZ2 = K(0x92)
+  const cwZ3 = K(0x93)
+  const C = community({ creator: Z, members: [{ diary: X, cw: cwX, status: 'member' }, { diary: Y, cw: cwY, status: 'member' }, { diary: A, cw: cwA, status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  C.addWriter(Z, cwZ2)
+  const g = groupIn(C, { key: G1, join: 'approval' })
+  g.add(X, wX).add(Y, wY).add(A, wA)
+  g.push(G1, groupAdmit({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(39) }))
+  g.push(G1, groupAdmit({ member: A, on: true, cuts: [{ writer: wA, seq: 1 }], at: AT(40) }))
+  const log = diaryLog()
+  log.join(C.key, C.key)
+  log.join(G1, G1)
+  log.join(C.key, cwZ2)
+  const L = C.push(cwZ2, groupLeave({ cuts: [{ writer: C.key, seq: C.len(C.key) }, { writer: cwZ2, seq: C.len(cwZ2) }], at: AT(50) }))
+  const mark = log.mark(G1, G1, g.len(G1))
+  log.confirm(C.key, cwZ2, C.logs.get(cwZ2))
+  C.addWriter(Z, cwZ3, { rejoin: L })
+  log.join(C.key, cwZ3, true, L)
+  // Written on the G root after the return.
+  g.push(G1, groupAdmin({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(60) }))
+  g.push(G1, groupBan({ member: A, on: true, cuts: [{ writer: wA, seq: g.len(wA) }], at: AT(63) }))
+  const view = () => {
+    const read = log.read(G1)
+    const input = g.input({ community: withDiary(C.input(), Z, log.read(C.key)) })
+    const r = buildGroup({ ...input, joins: new Map([...input.joins, [Z, read.joins]]), marks: new Map([[Z, read.marks]]) })
+    return { rootCut: r.rootCut, Y: r.members.get(Y), adminY: r.admins.has(Y), A: r.members.get(A) }
+  }
+  const marked = { rootCut: 3, Y: 'member', adminY: false, A: 'member' }
+  t.alike(view(), marked, 'the admit below the cut stands, the grant and the ban above it do not count')
+  const before = log.read(G1)
+  log.delete(mark)
+  t.alike(log.read(G1), before, 'the mark is still read')
+  t.alike(view(), marked, 'the delete changes nothing')
 })
 
 test('slot walk: a 9th writer counts after a diary cut froze or released one, never without (#350)', (t) => {
