@@ -504,19 +504,25 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   let body
   const fromIndex = needIndex && idx.status === 'done'
   if (fromIndex) {
+    // The page joins through the service, as on a held community: the
+    // person's card here would join the person.
     body = (
       <View>
-        <JoinCard
-          title={title}
-          header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
-          join={idx.join}
-          showJoin={joinNote === ''}
-          onJoin={doJoin}
-          pending={join.pending}
-          offline={offline}
-          error={join.error}
-          note={joinNote}
-        />
+        {asPage.page
+          ? <PagePanel node={node} community={community} page={asPage.key} onJoined={openQueued} />
+          : (
+            <JoinCard
+              title={title}
+              header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
+              join={idx.join}
+              showJoin={joinNote === ''}
+              onJoin={doJoin}
+              pending={join.pending}
+              offline={offline}
+              error={join.error}
+              note={joinNote}
+            />
+            )}
         {checkBox}
         <View style={styles.block}>
           {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}

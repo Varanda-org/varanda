@@ -315,3 +315,12 @@ test('a page that joined its community clears the stale refusal and the queued g
   t.ok(comu.includes("pageRoleOf(answer) === 'member' && typeof onJoined === 'function') onJoined()"))
   t.ok(comu.includes('onJoined={openQueued}'))
 })
+
+test('a community read from the index offers a page its own join, never the person join', (t) => {
+  const comu = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidade.js'), 'utf8')
+  const start = comu.indexOf('if (fromIndex) {')
+  const end = comu.indexOf('} else if', start)
+  t.ok(start > 0 && end > start, 'index branch found')
+  const branch = comu.slice(start, end)
+  t.ok(/\{asPage\.page\s+\? <PagePanel node=\{node\} community=\{community\} page=\{asPage\.key\} onJoined=\{openQueued\} \/>\s+: \(\s+<JoinCard/.test(branch), 'page mode shows PagePanel in place of JoinCard')
+})
