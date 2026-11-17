@@ -726,10 +726,12 @@ function mediaBinding (value) {
 // served: only then does blocking or revoking that diary purge the root.
 // `issuer` is the issuer of that diary's verified block-0 certificate, kept
 // with `bound` so a later revocation of it still purges the root after the
-// creator left for another reason (quota, its own drop).
+// creator left for another reason (quota, its own drop). `first` is the seq
+// of that diary's first on:true join of the root, which ranks the root's
+// goneRoots entry among its creator's (_noteGoneRoot).
 function groupBinding (value) {
   if (!isPlainObject(value)) return null
-  const { diary, group, seq, by, bound, issuer, cut, clearedFrom, clearedTo, unsureFrom, unsureTo } = value
+  const { diary, group, seq, by, bound, issuer, first, cut, clearedFrom, clearedTo, unsureFrom, unsureTo } = value
   if (typeof diary !== 'string' || !HEX64.test(diary)) return null
   if (typeof group !== 'string' || !HEX64.test(group)) return null
   if (!Number.isSafeInteger(seq) || seq < 1) return null
@@ -737,6 +739,7 @@ function groupBinding (value) {
   if (typeof by === 'string' && HEX64.test(by)) out.by = by
   if (bound === true) out.bound = true
   if (out.bound === true && typeof issuer === 'string' && HEX64.test(issuer)) out.issuer = issuer
+  if (out.bound === true && Number.isSafeInteger(first) && first >= 0) out.first = first
   // A writer its diary cut is kept below `cut` and, in [clearedFrom,
   // clearedTo), only its leaves and key blocks (_cutGroupCore); cut 0 is a
   // stub. A range that does not fit the cut reads as nothing cleared yet.
@@ -756,18 +759,21 @@ function groupBinding (value) {
   return out
 }
 
-// Sets k -> v in a denial map. At ROOT_CREATORS_MAX entries those whose
-// denial is no longer in force (`lifted(k, v)`) go; one still in force
-// never goes, or a purged root could return. false when the map holds
-// ROOT_DENIALS_HARD entries and nothing was set. Only moderation outcomes
-// (a served diary dropped or refused, a root purged) reach these maps,
-// never an announce.
-function bounded (map, k, v, lifted) {
+// Sets k -> v in a denial map. At `soft` entries those whose denial is no
+// longer in force (`lifted(k, v)`) go; one still in force never goes, or a
+// purged root could return (a root's holder can re-sign its block 0 naming
+// another diary, so only the entry keeps it out). false when the map holds
+// `hard` entries and nothing was set. goneRoots passes its hard bound as
+// `soft` too: it stays above ROOT_CREATORS_MAX for good, and a lifted entry
+// still carries the `bound` of a root a member's join admits again. Never
+// filled from an announce: revokedCreators holds moderation outcomes, and
+// goneRoots the drops of bound roots (_noteGoneRoot, _noteDroppedRoot).
+function bounded (map, k, v, lifted, hard = ROOT_DENIALS_HARD, soft = ROOT_CREATORS_MAX) {
   map.delete(k)
-  if (map.size >= ROOT_CREATORS_MAX) {
+  if (map.size >= soft) {
     for (const [ek, ev] of [...map]) if (lifted(ek, ev)) map.delete(ek)
   }
-  if (map.size >= ROOT_DENIALS_HARD) return false
+  if (map.size >= hard) return false
   map.set(k, v)
   return true
 }
@@ -779,15 +785,25 @@ function goneRootMap (value) {
   const out = new Map()
   if (!isPlainObject(value)) return out
   for (const [k, v] of Object.entries(value)) {
-    if (out.size >= ROOT_DENIALS_HARD) break
+    if (out.size >= GONE_ROOTS_HARD) break
     if (!HEX64.test(k)) continue
     if (typeof v === 'string' && HEX64.test(v)) out.set(k, { creator: v, issuer: null })
     else if (isPlainObject(v) && typeof v.creator === 'string' && HEX64.test(v.creator)) {
       const issuer = typeof v.issuer === 'string' && HEX64.test(v.issuer) ? v.issuer : null
-      out.set(k, { creator: v.creator, issuer })
+      const e = { creator: v.creator, issuer }
+      if (Number.isSafeInteger(v.first) && v.first >= 0) e.first = v.first
+      out.set(k, e)
     }
   }
   return out
+}
+
+// Whether goneRoots entry (ka, first fa) ranks before (kb, fb) among one
+// creator's: the lower first on:true join, an unknown one last, then the key.
+function goneRootBefore (ka, fa, kb, fb) {
+  const a = Number.isSafeInteger(fa) ? fa : Infinity
+  const b = Number.isSafeInteger(fb) ? fb : Infinity
+  return a !== b ? a < b : ka < kb
 }
 
 // A bounded map of hex keys to hex values read from admitted.json (at most
@@ -841,7 +857,8 @@ function issuerOf (cert) {
 // `revokedCreators` (diary -> the issuer of the certificate it was dropped
 // or refused for) and `goneRoots` (root -> { creator, issuer } of the
 // block or revocation that purged it, judged on its own against the current
-// list); the last two absent read as empty.
+// list); the last two absent read as empty. `denialsLost: true` says a
+// denial once found no room in either map (_denialNotKept).
 function readAdmittedFile (dataDir) {
   const data = readJson(path.join(dataDir, ADMITTED_FILE), { v: 1, admitted: {} })
   const admitted = isPlainObject(data) && isPlainObject(data.admitted) ? data.admitted : {}
@@ -856,21 +873,27 @@ function readAdmittedFile (dataDir) {
   const revokedCreators = hexMap(isPlainObject(data) ? data.revokedCreators : null)
   const goneRoots = goneRootMap(isPlainObject(data) ? data.goneRoots : null)
   const groupHeaders = headerRecordMap(isPlainObject(data) ? data.groupHeaders : null)
-  return { admitted, media, groups, revokedCreators, goneRoots, groupHeaders }
+  const denialsLost = isPlainObject(data) && data.denialsLost === true
+  return { admitted, media, groups, revokedCreators, goneRoots, groupHeaders, denialsLost }
 }
 
 // The file as _persist and Seeder.drop write it: `groups`, `revokedCreators`
-// and `goneRoots` only when non-empty, so a seeder without groups keeps its
-// old shape.
-function admittedFile (admitted, media, groups, { revokedCreators = new Map(), goneRoots = new Map(), groupHeaders = new Map() } = {}) {
+// and `goneRoots` only when non-empty and `denialsLost` only when true, so a
+// seeder without groups keeps its old shape (older builds ignore the key).
+function admittedFile (admitted, media, groups, { revokedCreators = new Map(), goneRoots = new Map(), groupHeaders = new Map(), denialsLost = false } = {}) {
   const file = { v: 1, admitted, media }
   if (Object.keys(groups).length > 0) file.groups = groups
   if (revokedCreators.size > 0) file.revokedCreators = Object.fromEntries(revokedCreators)
   if (goneRoots.size > 0) {
     file.goneRoots = {}
-    for (const [k, { creator, issuer }] of goneRoots) file.goneRoots[k] = issuer === null ? { creator } : { creator, issuer }
+    for (const [k, { creator, issuer, first }] of goneRoots) {
+      const e = issuer === null ? { creator } : { creator, issuer }
+      if (Number.isSafeInteger(first)) e.first = first
+      file.goneRoots[k] = e
+    }
   }
   if (groupHeaders.size > 0) file.groupHeaders = Object.fromEntries(groupHeaders)
+  if (denialsLost === true) file.denialsLost = true
   return file
 }
 
@@ -965,9 +988,17 @@ const GROUP_STALL_WINDOW_MS = 10 * 60 * 1000
 // Bound on _revokedCreators and _goneRoots (persisted in admitted.json):
 // past ROOT_CREATORS_MAX denials still in force no group root is admitted
 // (_rootsClosed), and a live denial is never evicted to make room; each
-// map still holds at most ROOT_DENIALS_HARD entries.
+// map still holds at most ROOT_DENIALS_HARD entries. goneRoots counts the
+// distinct creators of its entries recorded with an issuer, and an entry
+// recorded with no revoked issuer (_goneRootHeld) does not count, so
+// goneRoots has its own, larger hard bound: blocks from account deletion are
+// permanent and each blocked creator may have bound up to
+// MAX_GROUPS_PER_DIARY roots. Measured on a laptop SSD, 65536 entries make
+// admitted.json about 10 to 16 MiB, one rewrite about 70 to 85 ms and one
+// load about 65 to 85 ms.
 const ROOT_CREATORS_MAX = 4096
 const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
+const GONE_ROOTS_HARD = 16 * ROOT_CREATORS_MAX
 
 // The joins a diary's group cores are kept for, from its newest join per
 // writer (lib/group.js groupJoins) and its slot walk per group (lib/group.js
@@ -1050,7 +1081,12 @@ function foldGroupRecord (entry, i, r) {
     const prev = entry.groupDecls.get(r.writer)
     if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
     const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
-    if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
+    if (r.on && r.writer === r.group) {
+      if (bound !== undefined) {
+        if (i > bound.seq) bound.seq = i
+        if (i < bound.first) bound.first = i
+      } else entry.groupBound.set(r.writer, { group: r.group, seq: i, first: i })
+    }
   }
   const e = r.type === 'group-join'
     ? { kind: 'join', writer: r.writer, on: r.on, seq: i }
@@ -1701,9 +1737,9 @@ class Seeder {
     this._groupRefusals = new Map() // 'diary:key' -> last refusal logged ('reason:seq')
     this._groupDeferred = new Set() // diaries with a join waiting for an admission slot
     this._groupStalls = new Map() // diary key -> stall budget of _groupScanCounts, kept across _drop/_serve
-    this._goneRoots = new Map() // root key -> { creator, issuer } of the block or revocation that purged it (persisted)
+    this._goneRoots = new Map() // root key -> { creator, issuer, first? } of a dropped bound root; issuer only from a revocation (persisted)
     this._unrecordedRevoked = new Map() // diary -> issuer that _revokedCreators had no room for (this process only)
-    this._denialsLost = false // a denial found no room: roots stay refused until restart (_rootsClosed)
+    this._denialsLost = false // a denial found no room: roots stay refused (_rootsClosed), also after a restart (admitted.json `denialsLost`)
     this._revokedCreators = new Map() // diary -> issuer it was dropped or refused for (persisted, _creatorGone)
     this._groupFetches = new Map() // group key -> quarantine fetch in flight
     this._groupHeaders = new Map() // root key -> headerRecord of a root this seeder verified, while a core of its group is kept (persisted)
@@ -1751,6 +1787,8 @@ class Seeder {
     this._pushQueue = Promise.resolve()
     this._topicResumeQueued = false
     this._writeQueue = Promise.resolve()
+    // The admitted.json write queued and not started yet (_persist).
+    this._persistQueued = null
     // The signed moderation snapshot (blocklist.js createBlocklistState),
     // created in start() once the data-dir lock is held, and the open
     // blocklist channel of every connection (for the C4 fan-out).
@@ -1924,7 +1962,7 @@ class Seeder {
     if (typeof key !== 'string' || !HEX64.test(key)) throw new UsageError('chave inválida')
     const store = await openStore(dataDir)
     try {
-      const { admitted, media, groups, revokedCreators, goneRoots, groupHeaders } = readAdmittedFile(dataDir)
+      const { admitted, media, groups, revokedCreators, goneRoots, groupHeaders, denialsLost } = readAdmittedFile(dataDir)
       const listed = Object.prototype.hasOwnProperty.call(admitted, key)
       const listedMedia = Object.prototype.hasOwnProperty.call(media, key)
       const listedGroup = Object.prototype.hasOwnProperty.call(groups, key)
@@ -1948,7 +1986,7 @@ class Seeder {
         for (const [k, binding] of Object.entries(media)) if (!gone.has(k)) restMedia[k] = binding
         const restGroups = {}
         for (const [k, binding] of Object.entries(groups)) if (!gone.has(k)) restGroups[k] = binding
-        writeJsonAtomic(path.join(dataDir, ADMITTED_FILE), admittedFile(rest, restMedia, restGroups, { revokedCreators, goneRoots, groupHeaders }))
+        writeJsonAtomic(path.join(dataDir, ADMITTED_FILE), admittedFile(rest, restMedia, restGroups, { revokedCreators, goneRoots, groupHeaders, denialsLost }))
       }
       return { key }
     } finally {
@@ -2032,6 +2070,9 @@ class Seeder {
       this._revokedCreators = file.revokedCreators
       this._goneRoots = file.goneRoots
       this._groupHeaders = file.groupHeaders
+      // The roots whose denials were lost are not known, so admission stays
+      // closed until the operator clears the mark with the seeder stopped.
+      if (file.denialsLost) this._denialNotKept('admitted.json')
       for (const [key, binding] of Object.entries(file.groups)) {
         if (HEX64.test(key) && !this._admitted.has(key) && !this._media.has(key)) this._groups.set(key, binding)
       }
@@ -2181,12 +2222,23 @@ class Seeder {
         }
         return false
       }
+      // Roots whose kept entry is in force are judged before any note of
+      // this pass: a note for another root of the same creator may evict
+      // that entry (_noteGoneRoot), and the root must still go.
+      const heldAtStart = new Map()
+      for (const [key, binding] of this._groups) {
+        if (binding !== null && key === binding.group && this._goneRootReason(key) !== null) heldAtStart.set(key, this._goneRootReason(key))
+      }
       for (const [key, binding] of [...this._groups]) {
         let reason = null
         let core = null
         let raw = null
         if (binding === null || !supported(key, binding)) reason = 'unbound'
         else if (this._isBlocked(binding.group)) reason = 'group-blocked'
+        else if (heldAtStart.has(key)) reason = heldAtStart.get(key)
+        // An earlier root of this pass may have recorded a revoked issuer
+        // (_rootGone) that puts this root's kept entry in force.
+        else if (key === binding.group && this._goneRootReason(key) !== null) reason = this._goneRootReason(key)
         else if (key === binding.group && this._rootGone(key) !== null) {
           reason = this._rootGone(key)
           this._noteGoneRoot(key, binding.diary, reason)
@@ -2220,7 +2272,28 @@ class Seeder {
           continue
         }
         if (core !== null) await core.close().catch(noop)
+        this._noteDroppedRoot(key, binding, reason)
         this.log({ event: 'group-rejected', key, diary: binding === null ? null : binding.diary, group: binding === null ? null : binding.group, reason })
+        try {
+          await this._purge(key)
+        } catch {
+          throw new Error('falha ao limpar núcleo de grupo rejeitado: ' + key8(key))
+        }
+        this._groups.delete(key)
+        await this._persist()
+      }
+      // A later root of the pass above may have recorded its creator's
+      // revoked issuer (_rootGone), which puts in force the kept entry of a
+      // root already accepted: it goes like a refused one, before anything
+      // is served.
+      for (let i = groupSurvivors.length - 1; i >= 0; i--) {
+        const [key, binding, core] = groupSurvivors[i]
+        const reason = key === binding.group ? this._goneRootReason(key) : null
+        if (reason === null) continue
+        groupSurvivors.splice(i, 1)
+        await core.close().catch(noop)
+        this._noteDroppedRoot(key, binding, reason)
+        this.log({ event: 'group-rejected', key, diary: binding.diary, group: binding.group, reason })
         try {
           await this._purge(key)
         } catch {
@@ -2708,11 +2781,12 @@ class Seeder {
       // left }) and
       // `groupRefused` the joins whose core failed the gate (writer -> seq),
       // `groupBound` the newest on:true join of each root key G naming G
-      // itself (G -> { group: G, seq }), which keeps binding after a later
-      // on:false or a later on:true join of G into another group: one
+      // itself (G -> { group: G, seq, first }), which keeps binding after a
+      // later on:false or a later on:true join of G into another group: one
       // entry per root key, so a creator cannot unbind its own root (and
       // escape its purge) by naming the root key as a writer elsewhere, and
-      // the map grows no faster than groupDecls; and
+      // the map grows no faster than groupDecls (`first`: the seq of its
+      // first on:true join, which ranks its goneRoots entry); and
       // `groupWalks` the slot walk per group (group -> lib/group.js walk
       // state) over its group-join and group-cut records, which picks the
       // writers that count and keeps the newest on:true join of each
@@ -4284,9 +4358,15 @@ class Seeder {
   }
 
   // Whether no group root may be admitted now: a denial map holds
-  // ROOT_CREATORS_MAX denials still in force, or one denial found no room
-  // at all. Fail closed: an evicted or unrecorded denial would let a purged
-  // root come back through any member's join.
+  // ROOT_CREATORS_MAX denials still in force (goneRoots: the distinct
+  // creators of its entries recorded with an issuer, _goneRootHeld, since a
+  // revocation adds the issuer to every entry of its creator and up to
+  // MAX_GROUPS_PER_DIARY entries name one creator), goneRoots holds
+  // GONE_ROOTS_HARD in force
+  // (the next denial would find no room), or one denial found no room at all
+  // (_denialsLost, kept in admitted.json across restarts). Fail
+  // closed: an evicted or unrecorded denial would let a purged root come back
+  // through any member's join.
   _rootsClosed () {
     if (this._denialsLost) return true
     let n = 0
@@ -4295,9 +4375,13 @@ class Seeder {
       if (n >= ROOT_CREATORS_MAX) return true
     }
     if (this._goneRoots.size < ROOT_CREATORS_MAX) return false
+    const held = new Set()
+    for (const e of this._goneRoots.values()) if (this._goneRootHeld(e)) held.add(e.creator)
+    if (held.size >= ROOT_CREATORS_MAX) return true
+    if (this._goneRoots.size < GONE_ROOTS_HARD) return false
     n = 0
     for (const k of this._goneRoots.keys()) if (this._goneRootReason(k) !== null) n++
-    return n >= ROOT_CREATORS_MAX
+    return n >= GONE_ROOTS_HARD
   }
 
   _denialNotKept (what) {
@@ -4342,17 +4426,82 @@ class Seeder {
     return null
   }
 
+  // Whether goneRoots entry E holds roots back: in force with a recorded
+  // issuer, whether or not that issuer is revoked now. Its creator then
+  // counts once toward ROOT_CREATORS_MAX, however many entries name it
+  // (_rootsClosed). An entry
+  // in force with no recorded issuer (its creator is blocked) is still kept,
+  // as only it refuses the root once the root's key signs a block 0 naming
+  // another diary, but it does not hold roots back (_rootsClosed): blocks
+  // from account deletion are permanent and would otherwise close root
+  // admission for good. Those fill goneRoots up to GONE_ROOTS_HARD instead.
+  _goneRootHeld (e) {
+    if (e.issuer === null) return false
+    return this._isBlocked(e.creator) || (!this._served.has(e.creator) && this._issuerRevoked(e.issuer))
+  }
+
   // A purged root of a gone creator stays refused across restarts while the
   // creator stays gone, whichever member's join names it. The creator's
   // revoked issuer is kept whatever the purge reason, and a known issuer is
   // never replaced by none: a creator both blocked and revoked keeps its
   // roots out once only the block is lifted.
+  //
+  // At most MAX_GROUPS_PER_DIARY entries name one creator, however its roots
+  // came to be bound (a hole fetched late, a binding from an older build, a
+  // root admitted again through wasGone): one block or revocation writes no
+  // more. The kept ones are those with the lowest first on:true join of the
+  // creator (`first`; unknown ranks last, the key breaks ties), whatever the
+  // order they are noted in, except that an entry whose root is bound again
+  // is never evicted. A root past them is still purged, only not
+  // remembered: its key holder could then sign a block 0 naming another,
+  // unblocked diary, which answers to moderation itself.
+  //
+  // An entry naming another creator is never replaced: it is what refuses
+  // the root once that creator is gone again, and a block 0 that still
+  // names this creator is refused by _creatorGone.
   _noteGoneRoot (key, creator, reason) {
     let issuer = this._revokedCreators.get(creator) || this._unrecordedRevoked.get(creator) || null
     const prev = this._goneRoots.get(key)
-    if (issuer === null && prev !== undefined && prev.creator === creator) issuer = prev.issuer
-    if (!bounded(this._goneRoots, key, { creator, issuer }, (k) => this._goneRootReason(k) === null)) this._denialNotKept('goneRoots')
+    if (prev !== undefined && prev.creator !== creator) return
+    const same = prev !== undefined
+    if (issuer === null && same) issuer = prev.issuer
+    const b = this._groups.get(key)
+    let first = b && b.group === key && b.diary === creator && Number.isSafeInteger(b.first) ? b.first : null
+    if (first === null && same && Number.isSafeInteger(prev.first)) first = prev.first
+    if (!same) {
+      // An entry whose root is bound again (admitted with a block 0 naming
+      // another diary) is what refuses that root once this creator is gone,
+      // so it is never the one evicted.
+      let n = 0
+      let last = null
+      for (const [k, e] of this._goneRoots) {
+        if (e.creator !== creator) continue
+        n++
+        if (this._groups.has(k)) continue
+        if (last === null || goneRootBefore(last, this._goneRoots.get(last).first, k, e.first)) last = k
+      }
+      if (n >= MAX_GROUPS_PER_DIARY) {
+        if (last === null || !goneRootBefore(key, first, last, this._goneRoots.get(last).first)) return
+        this._goneRoots.delete(last)
+      }
+    }
+    const entry = { creator, issuer }
+    if (first !== null) entry.first = first
+    if (!bounded(this._goneRoots, key, entry, (k) => this._goneRootReason(k) === null, GONE_ROOTS_HARD, GONE_ROOTS_HARD)) this._denialNotKept('goneRoots')
     this._persist().catch(noop)
+  }
+
+  // A root its creator bound is dropped for any reason (a fork, its quota,
+  // no live join left): a fresh log for its key may come back with a block
+  // 0 naming another diary, so the creator is remembered like a purge,
+  // under the same per-creator bound. No issuer is recorded (only a
+  // revocation of the creator records one, _noteRevokedCreator), so the
+  // entry never counts toward ROOT_CREATORS_MAX through a block alone, and
+  // it refuses the root only while the creator is gone (_goneRootReason).
+  // An entry already kept stays as is.
+  _noteDroppedRoot (key, binding, reason) {
+    if (!binding || binding.group !== key || binding.bound !== true || this._goneRoots.has(key)) return
+    this._noteGoneRoot(key, binding.diary, reason)
   }
 
   // A moderation outcome: diary D, served or listed, was dropped or refused
@@ -4390,9 +4539,12 @@ class Seeder {
     if (!this._revokedCreators) return
     this._unrecordedRevoked.delete(diary)
     let changed = this._revokedCreators.delete(diary)
-    for (const [k, e] of [...this._goneRoots]) {
+    // The entries naming D lose only the stale issuer: one may still refuse
+    // a root admitted again with a block 0 naming another diary, once D is
+    // blocked.
+    for (const e of this._goneRoots.values()) {
       if (e.creator !== diary || e.issuer === null) continue
-      this._goneRoots.delete(k)
+      e.issuer = null
       changed = true
     }
     if (changed) this._persist().catch(noop)
@@ -4557,8 +4709,9 @@ class Seeder {
         seq = own.seq
         // Kept for when this diary is gone: only a root it bound is its
         // content (_rootGone).
-        if (b.bound !== true) {
+        if (b.bound !== true || b.first !== own.first) {
           b.bound = true
+          b.first = own.first
           this._persist().catch(noop)
         }
         // Its block-0 issuer stays with the binding: a revocation adopted
@@ -4881,9 +5034,26 @@ class Seeder {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, verdict, seq)
     }
+    // A root is listed under its creator (the diary its header names).
+    const header = decodeBlock(res.raw)
+    const owner = key === group ? header.diary : diary
+    // A root naming a blocked or revoked diary is that diary's content
+    // (_dropUnsupportedRoots). Backed off rather than remembered: unlike
+    // block 0 and its size, a block or a revocation can be lifted, and
+    // blocklist adoption clears these waits (backoff reason 'blocked').
+    // Judged before its header is kept: a purged root's key can sign a new
+    // block 0, which must not rewrite /index/group or re-judge writers.
+    if (key === group && (this._goneRootReason(key) || this._creatorGone(owner)) !== null) {
+      const gone = this._goneRootReason(key) || this._creatorGone(owner)
+      // A first sighting is still recorded, so members' writers get a
+      // visibility to be judged by; a kept record is never rewritten here.
+      if (!this._groupHeaders.has(group)) this._keepGroupHeader(group, header)
+      this._groupBackoffHit(diary, key, 'blocked')
+      return this._rejectGroup(key, diary, group, gone, seq)
+    }
     // Verified here: a root refused or purged from now on still shows its
     // kind on /index/group while members' writers stay served.
-    if (key === group) this._keepGroupHeader(group, decodeBlock(res.raw))
+    if (key === group) this._keepGroupHeader(group, header)
     // Refusals after a fetch are remembered (this join) or backed off, so a
     // rescan does not fetch the same core again. A writer its diary cut is
     // judged on the blocks it keeps below the cut.
@@ -4896,18 +5066,6 @@ class Seeder {
       return this._rejectGroup(key, diary, group, 'group-full', seq)
     }
 
-    // A root is listed under its creator (the diary its header names).
-    const header = decodeBlock(res.raw)
-    const owner = key === group ? header.diary : diary
-    // A root naming a blocked or revoked diary is that diary's content
-    // (_dropUnsupportedRoots). Backed off rather than remembered: unlike
-    // block 0 and its size, a block or a revocation can be lifted, and
-    // blocklist adoption clears these waits (backoff reason 'blocked').
-    if (key === group && (this._goneRootReason(key) || this._creatorGone(owner)) !== null) {
-      const gone = this._goneRootReason(key) || this._creatorGone(owner)
-      this._groupBackoffHit(diary, key, 'blocked')
-      return this._rejectGroup(key, diary, group, gone, seq)
-    }
     // Until the creator's scan rewrites it (_reconcileGroups), a root
     // admitted through a member's join carries that join's seq only as a
     // placeholder: it is never indexed for the creator.
@@ -4921,12 +5079,14 @@ class Seeder {
     // the diary its header names unless that diary's own join did it.
     // A root purged for its creator and admitted again once the denial was
     // lifted keeps `bound` from that purge, so blocking or revoking the
-    // creator again purges it even before the creator is served.
+    // creator again purges it even before the creator is served. Admitted
+    // with a block 0 naming another diary, it keeps the entry instead.
     const wasGone = key === group ? this._goneRoots.get(key) : undefined
     const rootBinding = { diary: owner, group, seq: ownSeq, by: diary }
     if (wasGone !== undefined && wasGone.creator === owner) {
       rootBinding.bound = true
       if (wasGone.issuer !== null) rootBinding.issuer = wasGone.issuer
+      if (Number.isSafeInteger(wasGone.first)) rootBinding.first = wasGone.first
     }
     const writerBinding = { diary: owner, group, seq: ownSeq }
     if (cut !== null) Object.assign(writerBinding, { cut, clearedFrom: keptBelow(cut), clearedTo: keptBelow(cut) })
@@ -4995,8 +5155,14 @@ class Seeder {
     if (ownerEntry && !ownerEntry.dropped && ownerEntry.gated) this._reconcileGroups(owner, ownerEntry)
     this.log({ event: 'group-admitted', key, diary: owner, group, length: core.contiguousLength })
     // Its denial was lifted: the root is served again and `bound` came back
-    // with it (set above), so the entry is no longer needed.
-    if (key === group && this._goneRoots.delete(key)) this._persist().catch(noop)
+    // with it (set above), so the entry is no longer needed. A block 0 that
+    // now names another diary leaves the entry: the root is judged by it
+    // again (_goneRootReason) once its creator is gone again.
+    const still = key === group ? this._goneRoots.get(key) : undefined
+    if (still !== undefined && still.creator === owner) {
+      this._goneRoots.delete(key)
+      this._persist().catch(noop)
+    }
   }
 
   // Serving a group core: live download, fork watcher, the log quota on
@@ -5540,6 +5706,7 @@ class Seeder {
     if (!entry.headerOk && reason !== 'timeout') this._deleteGroupBackoff(entry.by + ':' + key)
     this._pruneGroupHeader(entry.group)
     const binding = this._groups.get(key)
+    this._noteDroppedRoot(key, binding, reason)
     this._groups.delete(key)
     this._groupsDropping.set(key, binding)
     this._stopEntry(entry)
@@ -5664,6 +5831,11 @@ class Seeder {
   // The purged root stays refused, across restarts, while the creator stays
   // gone (_goneRoots). Members' writers stay under the usual rules.
   _dropUnsupportedRoots () {
+    // First every served root whose kept entry (the root admitted again
+    // with a block 0 naming another diary) is back in force: it already
+    // names the creator, so it is not rewritten, and the notes below may
+    // evict it (_noteGoneRoot) once its root is gone.
+    this._dropHeldRoots()
     for (const [k, g] of [...this._groupServed]) {
       if (k !== g.group) continue
       const gone = this._rootGone(k)
@@ -5671,9 +5843,21 @@ class Seeder {
       this._noteGoneRoot(k, g.diary, gone)
       this._dropGroup(k, gone)
     }
+    // A purge above may record its creator's revoked issuer
+    // (_noteRevokedCreator), which puts in force a kept entry of another
+    // served root naming that creator.
+    this._dropHeldRoots()
     if (this._groupRootStartup !== null) return
     for (const [k, g] of [...this._groupServed]) {
       if (k === g.group && !this._groupSupported(k)) this._dropGroup(k, 'unbound')
+    }
+  }
+
+  _dropHeldRoots () {
+    for (const [k, g] of [...this._groupServed]) {
+      if (k !== g.group) continue
+      const held = this._goneRootReason(k)
+      if (held !== null) this._dropGroup(k, held)
     }
   }
 
@@ -8415,9 +8599,13 @@ class Seeder {
 
   // ONE serialized writer: admitted.json = admitted ∪ dropping, media =
   // media ∪ mediaDropping and groups = groups ∪ groupsDropping (same file,
-  // same write).
+  // same write). Calls made while a write waits in the queue share it: it
+  // reads the state only when it starts, and a full goneRoots makes each
+  // write a synchronous rewrite of several MiB.
   _persist () {
+    if (this._persistQueued !== null) return this._persistQueued
     const write = () => {
+      this._persistQueued = null
       const admitted = {}
       for (const [key, cert] of this._admitted) admitted[key] = cert
       for (const [key, cert] of this._dropping) admitted[key] = cert
@@ -8427,10 +8615,11 @@ class Seeder {
       const groups = {}
       for (const [key, binding] of this._groups) groups[key] = binding
       for (const [key, binding] of this._groupsDropping) groups[key] = binding
-      writeJsonAtomic(path.join(this.dataDir, ADMITTED_FILE), admittedFile(admitted, media, groups, { revokedCreators: this._revokedCreators, goneRoots: this._goneRoots, groupHeaders: this._groupHeaders }))
+      writeJsonAtomic(path.join(this.dataDir, ADMITTED_FILE), admittedFile(admitted, media, groups, { revokedCreators: this._revokedCreators, goneRoots: this._goneRoots, groupHeaders: this._groupHeaders, denialsLost: this._denialsLost }))
     }
     const next = this._writeQueue.then(write, write)
     this._writeQueue = next.catch(noop)
+    this._persistQueued = next
     return next
   }
 
