@@ -20,14 +20,17 @@ Como verificar, a partir da raiz:
 - `node apps/app/test/pageRoster.test.js`: "peopleKeys lists the page, the roster and an offer target, each once" falha sem `peopleKeys`.
 - `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo`.
 
-Caminhada no aparelho (Android primeiro, depois iOS, depois web), ainda não feita:
+Caminhada na web, no laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, navegador sem tela, com W1 e W3 juntos):
 
-- [ ] Ajustes da página no aparelho do dono, com dois administradores: cada linha mostra nome e @nome, e a linha do dono aparece nomeada no aparelho de um administrador.
-- [ ] Remover um administrador: a pergunta cita nome e @nome da pessoa certa; depois da remoção o @nome da página e o nome no topo continuam.
-- [ ] Criar uma página: Páginas já mostra o nome (não "página / sua página") e Ajustes mostra o @nome, sem reabrir.
-- [ ] Aceitar o convite de administração: a linha em "Páginas que você administra" mantém o nome.
-- [ ] Conversas da página, Pedidos de mensagem: quem enviou aparece com o nome que a conversa mostra, não "Pessoa".
-- [ ] Encerrar página: o primeiro aviso diz "Encerrar @nome?".
+- [x] Ajustes da página no aparelho do dono e no de um administrador: cada linha mostra nome e @nome ("Ana Dona @ana_dona · Dono", "Davi Membro @davi_membro · Administrador"), a do dono também no aparelho do administrador.
+- [x] Remover um administrador: "Remover Davi Membro (@davi_membro) da administração da página?"; depois da remoção o @nome da página e o nome no topo continuam.
+- [x] Conversas da página, Pedidos de mensagem: "Caio Membro @caio_membro", não "Pessoa".
+- [x] Páginas: a linha encerrada da chave antiga ficava sem nome na primeira abertura (corrigido acima). Depois da correção, na primeira abertura depois de recarregar, os três aparelhos nomeiam todas as linhas, a chave antiga também.
+- [x] Criar uma página: Páginas já mostra "Feira do Davi @feira_davi" e Ajustes mostra "Agora: @feira_davi", sem reabrir.
+- [x] Aceitar o convite de administração: o convite e, depois de Aceitar, a linha em "Páginas que você administra" mostram "Feira do Davi @feira_davi".
+- [x] Encerrar página: o primeiro aviso diz "Encerrar @feira_davi?".
+
+Android e iOS: os mesmos passos ficam com o Rodrigo, no APK de preview do EAS (o build de debug não entra com passkey).
 
 Limites:
 
