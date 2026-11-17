@@ -61,6 +61,7 @@ test('constants', (t) => {
   t.ok(Object.isFrozen(OPS))
   t.alike([...SNAPSHOT_KEYS], blocklist.SNAPSHOT_KEYS, 'same keys and order as blocklist.js')
   t.is(MAX_CHANGE_IDS, 4096)
+  t.ok(MAX_CHANGE_IDS <= blocklist.MAX_BLOCKED, 'one ack never names more changes than one snapshot holds')
   t.ok(NONCE_RE.test('A-_9'.repeat(32)))
   t.absent(NONCE_RE.test('a'.repeat(42)))
   t.absent(NONCE_RE.test('a'.repeat(129)))

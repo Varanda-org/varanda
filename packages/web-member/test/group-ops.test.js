@@ -914,9 +914,11 @@ test('a group operation reads only that group\'s cores and the diaries binding t
   await shareGroupCore(b, a, wOther)
   await shareDiary(b, a)
   await store.writeFollows(a.storage, [b.ownHex])
-  // Group cores are read with readBlocks, diaries with readAll.
+  // Group roots are read with readBlocks, writers with readHeldBlocks,
+  // diaries with readAll.
   const read = realStore.readAll
   const readBlocks = realStore.readBlocks
+  const readHeldBlocks = realStore.readHeldBlocks
   const lengths = []
   realStore.readAll = async (core) => {
     lengths.push(core.length)
@@ -926,12 +928,17 @@ test('a group operation reads only that group\'s cores and the diaries binding t
     lengths.push(core.length)
     return readBlocks(core)
   }
+  realStore.readHeldBlocks = async (core) => {
+    lengths.push(core.length)
+    return readHeldBlocks(core)
+  }
   let info
   try {
     info = await ops.groupInfo(a.ctx, { group })
   } finally {
     realStore.readAll = read
     realStore.readBlocks = readBlocks
+    realStore.readHeldBlocks = readHeldBlocks
   }
   t.is(info.members, 1, 'B\'s diary binds no core of this group here')
   // The own diary and this group's root: never B's diary nor the writer

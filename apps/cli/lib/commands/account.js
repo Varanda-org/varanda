@@ -35,6 +35,7 @@ const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moder
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { FILE: EXEMPLARS_FILE } = require('../account/ai/exemplar-store')
+const { createTriageForget } = require('../account/ai/forget')
 const { createUsageStats } = require('../account/usage-stats')
 const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
 const { createGroupCheck } = require('../account/group-check')
@@ -894,14 +895,16 @@ async function serve (flags, env) {
     terms = openTermsStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
-    // The recovery entries (recovery.json): the same guard. An invalid file
+    // The recovery entries (recovery.json): every write asks lock.held(),
+    // ours and live by mtime, so a process whose heartbeat fell behind never
+    // writes while another may be taking the lock over. An invalid file
     // leaves only the recovery routes answering 'indisponivel'.
-    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.owned(), log })
+    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.held(), log })
     if (!recovery.available()) log({ event: 'recovery', reason: 'indisponivel' })
     stopRecoveryHeal = startHeal(recovery, 'recovery', log)
-    // The passkey public keys and waiting deletions (passkeys.json): the same
-    // guard. An invalid file leaves Excluir conta and the passkey enrolment
-    // answering 'indisponivel'.
+    // The passkey public keys and waiting deletions (passkeys.json): the
+    // terms guard, lock.owned(). An invalid file leaves Excluir conta and
+    // the passkey enrolment answering 'indisponivel'.
     passkeys = openPasskeyStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!passkeys.available()) log({ event: 'passkeys', reason: 'indisponivel' })
     stopPasskeysHeal = startHeal(passkeys, 'passkeys', log)
@@ -1055,7 +1058,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -1165,7 +1168,7 @@ function storeUnavailable (log, stop) {
 function openPageClients ({ dataDir, env, association, seederWs, moderation, keys, writer, pagesStore, guard, log }) {
   const blocklist = {
     has (key) {
-      return moderation.blocked().some((b) => b.member === key)
+      return moderation.isBlocked(key)
     }
   }
   const revokedIssuers = () => revokedIssuerSet(moderation.pending().published.snapshot)
@@ -1507,6 +1510,10 @@ async function releasePhone (dataDir, member, key, { open = openPhoneStore } = {
 
 module.exports = {
   closeOrphanPages,
+  // The hosted lab (scripts/hosted-lab.js) opens the page clients the same way.
+  openPageClients,
+  pageClientsOf,
+  closePageClients,
   commands: {
     account: { summary: 'serviço de contas', run }
   },

@@ -50,6 +50,7 @@ const {
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
+const { nextHeld } = require('@varanda/core/lib/sparse-held')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
@@ -607,6 +608,30 @@ async function readBlocks (core) {
     const block = await core.get(i, { wait: false, raw: true })
     if (block === null) break
     out.push({ seq: i, record: decodeBlock(block) })
+  }
+  return out
+}
+
+// A group writer's blocks as readBlocks, then past the first hole only the
+// leaves and key blocks held: a seeder clears the rest of a cut writer
+// (#350), and the fold reads past a hole only what a cut keeps.
+async function readHeldBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  let hole = false
+  for (let i = 0; i < limit; i++) {
+    const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
+    if (block === null) {
+      hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
+      continue
+    }
+    const record = decodeBlock(block)
+    if (hole && (record === null || (record.type !== 'group-leave' && record.type !== 'group-key'))) continue
+    out.push({ seq: i, record })
   }
   return out
 }
@@ -1393,6 +1418,20 @@ function putGroupCert (storage, diaryHex, raw0) {
     map.set(key, raw0)
     const entries = [...map].slice(-MAX_GROUP_REPLICAS).map(([d, r]) => [d, b4a.toString(r, 'hex')])
     await storage.writeJson('groupCerts', { v: 1, entries })
+  })
+}
+
+// Removes the groupCerts entries whose diary drop(diaryHex) names (a blocked
+// diary: its cores are purged and its certificate would only name it);
+// rewrites the list only when one went. Resolves the removed diaries.
+function dropGroupCerts (storage, drop) {
+  return withGroupCoreLock(storage, async () => {
+    const map = await readGroupCerts(storage)
+    const removed = [...map.keys()].filter((d) => drop(d))
+    if (removed.length === 0) return removed
+    for (const d of removed) map.delete(d)
+    await storage.writeJson('groupCerts', { v: 1, entries: [...map].map(([d, r]) => [d, b4a.toString(r, 'hex')]) })
+    return removed
   })
 }
 
@@ -2435,6 +2474,7 @@ module.exports = {
   readRaw,
   readHeld,
   readBlocks,
+  readHeldBlocks,
   readBlock0,
   appendRecord,
   appendRecords,
@@ -2485,6 +2525,7 @@ module.exports = {
   readGroupCoreKeys,
   readGroupCerts,
   putGroupCert,
+  dropGroupCerts,
   readBoundRoots,
   addBoundRoot,
   withFollowsLock,

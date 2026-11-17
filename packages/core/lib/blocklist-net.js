@@ -58,8 +58,9 @@ const clock = require('./clock')
 
 const PROTOCOL = 'varanda/blocklist/1'
 // Same bound as MAX_SNAPSHOT_BYTES in blocklist.js (a valid snapshot of
-// MAX_BLOCKED keys is far below it, so the message wrapper fits too).
-const MAX_BLOCKLIST_MESSAGE = 393216
+// MAX_BLOCKED keys is about 75 KB below it, so the 31-byte message wrapper
+// fits too). A literal, so this module does not load blocklist.js.
+const MAX_BLOCKLIST_MESSAGE = 1179648
 const MIN_SNAPSHOT_INTERVAL_MS = 10000 // incoming snapshot messages per connection
 const MAX_BAD_BLOCKLIST = 5 // the maxBad-th bad message drops the peer
 // Our own snapshot sends are spaced a quarter longer than the receiver's

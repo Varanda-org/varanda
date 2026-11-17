@@ -55,10 +55,16 @@ const { jsonLine } = require('@varanda/core/lib/safe')
 const mod = require('./commands/mod')
 
 const REQUEST_TIMEOUT_MS = 10000
+// pull answers and ack bodies carry a whole snapshot (up to about 1.5 MiB):
+// the service gives an ack body up to about 14.6 s to arrive
+// (account/mod-routes.js ACK_READ_MAX_MS), so the whole request gets that
+// plus room for the answer and the store write.
+const TRANSFER_TIMEOUT_MS = 30000
 const BODY_CAP = 524288
-// D1: at most MAX_PENDING (1000) changes of ~140 bytes plus one snapshot of
-// up to MAX_SNAPSHOT_BYTES (393216) bytes.
-const PULL_BODY_CAP = 1048576
+// D1: at most MAX_PENDING (1000) changes of at most ~220 bytes (64-character
+// ids) plus one snapshot of up to MAX_SNAPSHOT_BYTES (1179648) bytes: 1.5 MiB
+// leaves about 170 KB of room.
+const PULL_BODY_CAP = 1572864
 const MAX_CHANGES = 1000
 // --yes (cron) signs at most this many new (human) blocks per run.
 const MAX_UNATTENDED_BLOCKS = 100
@@ -153,9 +159,9 @@ async function readCapped (res, cap) {
 
 // -> { status, value } with value the parsed JSON; throws UNAVAILABLE when
 // the server cannot be reached in time, INVALID for anything but bounded JSON.
-async function request (fetch, url, { body = null, cap = BODY_CAP } = {}) {
+async function request (fetch, url, { body = null, cap = BODY_CAP, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     let res
     try {
@@ -248,7 +254,7 @@ async function pull (ctx) {
   const nonce = await challenge(ctx, 'pull')
   const signature = sign(ctx, nonce, 'pull', canonicalBody('pull'))
   const body = JSON.stringify({ cert: ctx.certificate, nonce, signature })
-  const { status, value } = await request(ctx.fetch, ctx.server + '/account/mod/api/pull', { body, cap: PULL_BODY_CAP })
+  const { status, value } = await request(ctx.fetch, ctx.server + '/account/mod/api/pull', { body, cap: PULL_BODY_CAP, timeoutMs: TRANSFER_TIMEOUT_MS })
   if (status !== 200) throw refused(value)
   const result = checkPull(value, ctx.association)
   if (result === null) throw new Error(INVALID)
@@ -259,7 +265,7 @@ async function ack (ctx, changeIds, snapshot) {
   const nonce = await challenge(ctx, 'ack')
   const signature = sign(ctx, nonce, 'ack', canonicalBody('ack', { changeIds, snapshot }))
   const body = JSON.stringify({ cert: ctx.certificate, nonce, signature, changeIds, snapshot: canonicalSnapshot(snapshot) })
-  const { status, value } = await request(ctx.fetch, ctx.server + '/account/mod/api/ack', { body })
+  const { status, value } = await request(ctx.fetch, ctx.server + '/account/mod/api/ack', { body, timeoutMs: TRANSFER_TIMEOUT_MS })
   if (status === 409 && isPlainObject(value) && value.error === 'defasado') {
     throw new Error('o servidor tem uma lista mais nova; restaure o backup')
   }
@@ -436,4 +442,4 @@ async function signPublishAck (ctx, dir, changeIds, opts, done, edits = {}) {
   return done('aplicado', changeIds, snapshot, 'aplicado: seq ' + snapshot.seq + ', ' + snapshot.blocked.length + ' chaves bloqueadas')
 }
 
-module.exports = { apply, checkServer, checkMode, REQUEST_TIMEOUT_MS, BODY_CAP, PULL_BODY_CAP, MAX_CHANGES, MAX_UNATTENDED_BLOCKS }
+module.exports = { apply, checkServer, checkMode, REQUEST_TIMEOUT_MS, TRANSFER_TIMEOUT_MS, BODY_CAP, PULL_BODY_CAP, MAX_CHANGES, MAX_UNATTENDED_BLOCKS }

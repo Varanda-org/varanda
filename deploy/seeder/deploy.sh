@@ -754,15 +754,69 @@ construir_web() {
 # Publica em www o app que construir_web gerou e conferiu. Fica para depois
 # do build da imagem: se ele falhar, o site nunca serviu o app novo.
 publicar_web() {
-  local base="$root/.deploy-build"
-  # www é um bind mount: troca-se o conteúdo, nunca o diretório.
-  www_trocado=1
-  find "$www" -mindepth 1 -delete
-  copiar_app "$base/src/apps/app/dist" "$www"
-  publicar_associacoes
+  local base="$root/.deploy-build" novo="$root/.deploy-www"
+  # O app inteiro primeiro ao lado, com as associações e o version.json, e
+  # só então em www (mesclar_www): o Caddy nunca serve um www vazio.
+  rm -rf "$novo"
+  mkdir -m 0755 "$novo"
+  copiar_app "$base/src/apps/app/dist" "$novo"
+  gravar_associacoes "$novo"
   # Root refaz os bytes a partir do $target conferido; nunca os lê da cópia.
-  gravar_versao "$www" "$target"
-  rm -rf "$base"
+  gravar_versao "$novo" "$target"
+  www_trocado=1
+  mesclar_www "$novo" "$www"
+  rm -rf "$novo" "$base"
+}
+
+# Põe em $2 (www, um bind mount: troca-se o conteúdo, nunca o diretório) o
+# conteúdo de $1, que fica intacto. Nada é apagado antes: cada arquivo entra
+# por uma cópia ao lado e um rename, que é atômico, primeiro tudo o que a
+# página carrega, depois sw.js e por último index.html; só então sai o que $1
+# não tem. Quem pede um arquivo no meio da troca recebe a versão antiga ou a
+# nova dele, nunca um 404 de um www vazio. $1 é um caminho absoluto.
+mesclar_www() {
+  local novo=$1 destino=$2
+  (
+    # Chamada dentro de um `if !` (a volta), o bash ignora o errexit aqui
+    # dentro: cada passo confere o próprio status.
+    set -Eeuo pipefail
+    cd "$novo" || exit 1
+    # Um caminho que muda de tipo (arquivo virou pasta, ou o contrário) sai
+    # antes; é o único que fica um instante ausente.
+    instalar() {
+      local rel=$1 tmp
+      tmp="$destino/${rel%/*}/.${rel##*/}.mesclar"
+      # Um link no lugar sai antes: o mv o seguiria e gravaria fora de www.
+      if [ -L "$destino/$rel" ]; then
+        rm -f "$destino/$rel" || return 1
+      elif [ -d "$destino/$rel" ]; then
+        rm -rf "${destino:?}/$rel" || return 1
+      fi
+      rm -rf "$tmp" || return 1
+      cp -a "$novo/$rel" "$tmp" && mv -f "$tmp" "$destino/$rel"
+    }
+    find . -mindepth 1 -type d -print0 | while IFS= read -r -d '' rel; do
+      if [ -L "$destino/$rel" ] || { [ -e "$destino/$rel" ] && [ ! -d "$destino/$rel" ]; }; then
+        rm -f "$destino/$rel" || exit 1
+      fi
+      mkdir -p "$destino/$rel" || exit 1
+    done || exit 1
+    find . ! -type d ! -path ./sw.js ! -path ./index.html -print0 | while IFS= read -r -d '' rel; do
+      instalar "$rel" || exit 1
+    done || exit 1
+    for rel in ./sw.js ./index.html; do
+      if [ -e "$rel" ] || [ -L "$rel" ]; then
+        instalar "$rel" || exit 1
+      fi
+    done
+    cd "$destino" || exit 1
+    find . -mindepth 1 -depth -print0 | while IFS= read -r -d '' rel; do
+      if [ -e "$novo/$rel" ] || [ -L "$novo/$rel" ]; then
+        continue
+      fi
+      rm -rf "${destino:?}/$rel" || exit 1
+    done || exit 1
+  )
 }
 
 # Os arquivos de associação do app nativo, em www/.well-known, com os valores
@@ -811,7 +865,7 @@ voltar() {
     # diz. Só diagnóstico: o resultado não muda a volta.
     compose run --rm --no-deps -T web caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
   fi
-  rm -rf "$root/.deploy-build"
+  rm -rf "$root/.deploy-build" "$root/.deploy-www"
 
   if ! git reset -q --hard "$previous"; then
     falhas=$((falhas + 1))
@@ -825,11 +879,11 @@ voltar() {
     log "volta: sem registro da versão anterior; confira se $previous é o commit que rodava"
   fi
   if [ "$www_trocado" = 1 ]; then
-    # www é um bind mount: troca-se o conteúdo, nunca o diretório. A página
-    # anterior também entra por último, depois do nó dela (copiar_app).
+    # www é um bind mount: troca-se o conteúdo, nunca o diretório. A cópia
+    # guardada entra como no deploy (mesclar_www, com dono, modo e data dela):
+    # sem apagar antes, e a página anterior por último, depois do nó dela.
     if ! { mkdir -p "$www" \
-      && find "$www" -mindepth 1 -delete \
-      && copiar_app "$state/www-anterior" "$www" -a; }; then
+      && mesclar_www "$state/www-anterior" "$www"; }; then
       falhas=$((falhas + 1))
       log "volta: restaurar deploy/seeder/www falhou (a cópia está em $state/www-anterior)"
     fi
@@ -945,8 +999,7 @@ main() {
 
   # Daqui em diante, qualquer falha volta para a versão anterior. Cada passo é
   # um comando solto (fora de if, || e &&) para que a falha chegue ao trap.
-  # Um Ctrl-C ou SIGTERM no meio (a troca de www esvazia o diretório antes de
-  # copiar) também volta.
+  # Um Ctrl-C ou SIGTERM no meio (com o www em parte trocado) também volta.
   log "implantando $target (antes: $previous)"
   trap voltar ERR
   trap 'voltar sinal' INT TERM

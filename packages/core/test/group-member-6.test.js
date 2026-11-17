@@ -9,6 +9,7 @@ const { readBoundRoots } = require('../lib/sync')
 const store = require('../lib/store')
 const member = require('../lib/member')
 const { hex, person, exchange, pair, writerEntries, offlineAppend, rejects, FILL, createGroup, joinGroup, THUMBS, HEART } = require('./helpers/group-member')
+const { groupCutRecord } = require('../lib/records')
 
 test('loading a group records a root its creator bound, and not one it never bound', async (t) => {
   const { b, group } = await pair(t)
@@ -216,4 +217,45 @@ test('group.read leaves out the fold\'s forum keys: no topic, poll voters or thr
   t.alike(await member.groupHide(a, { group, target, on: true }), { ok: true })
   const hidden = await member.groupRead(a, { group })
   t.alike(keys(hidden), [['Sim!', false, false, false], ['', false, false, false]], 'a hidden root shows no poll')
+})
+
+// A seeder keeps a cut writer sparse (#350): below the cut, then only its
+// leaves and key blocks. A node holding such a copy folds it as the whole one.
+test('a cut writer held sparse folds like the whole copy (#350)', async (t) => {
+  const { a, b, group } = await pair(t)
+  await member.groupPost(b, { group, text: 'antes' })
+  const own = await writerEntries(b, group)
+  const cut = own.length
+  await offlineAppend(b, group, groupLib.groupPost({ text: 'depois' }))
+  await offlineAppend(b, group, groupLib.groupPost({ text: 'depois 2' }))
+  const leave = await offlineAppend(b, group, groupLib.groupLeave({ seen: null, cuts: [{ writer: own.key, seq: cut + 2 }] }))
+  const s = await store.openStore(b.dataDir)
+  try {
+    await store.appendRecord(await store.openDiary(s), groupCutRecord({ group, writer: own.key, cut }))
+  } finally {
+    await s.close()
+  }
+  await exchange(b, a)
+  const view = async () => {
+    const info = await member.groupInfo(a, { group })
+    const page = await member.groupRead(a, { group })
+    const members = await member.groupMembers(a, { group })
+    return JSON.stringify({ info, members, posts: page.items.map((p) => [p.writer, p.seq, p.text]) })
+  }
+  const whole = await view()
+  t.ok(JSON.parse(whole).posts.some((p) => p[2] === 'antes'), 'control: the post below the cut counts')
+  t.absent(JSON.parse(whole).posts.some((p) => p[2] === 'depois'), 'control: the posts past the cut do not')
+  t.absent(JSON.parse(whole).members.members.some((m) => m.member === b.key), 'control: the leave past the cut counts')
+  const sa = await store.openStore(a.dataDir)
+  try {
+    const core = sa.get({ key: Buffer.from(own.key, 'hex'), writable: false })
+    await core.ready()
+    await core.clear(cut, leave.seq)
+    t.is(core.contiguousLength, cut, 'a sparse copy: a hole at the cut')
+    t.ok(await core.has(leave.seq), 'the leave past it is held')
+    await core.close()
+  } finally {
+    await sa.close()
+  }
+  t.is(await view(), whole, 'the sparse copy folds like the whole one')
 })

@@ -6,7 +6,7 @@ const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
-const { feira } = require('@varanda/rpc')
+const { feira, garden: gardenRules } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 
@@ -32,8 +32,10 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   CLI flag for `origins` yet: the public deployment PR adds --ws-origin to
 //   allow the PWA's origin.
 // The seeder also caps external sockets on its own (Seeder#maxExternal,
-// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers. Nothing
-// is logged per connection and no address is ever logged.
+// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers, and
+// shares those slots by client address (clientAddress below: behind Caddy,
+// the X-Forwarded-For it sets). Nothing is logged per connection and no
+// address is ever logged or stored.
 //
 // One TCP listener carries the WebSocket sockets, /media, /index and Caddy's
 // keep-alive connections, so its socket cap (server.maxConnections, see
@@ -146,17 +148,31 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   (as in /index/post) and `next` the same shape or null; any other
 //   segment after the owner is 400 'pedido inválido', never 404, so a
 //   client tells a bad cursor from an unknown owner.
+// - /index/garden/<owner> -> Seeder#indexGarden: `{ on: seq | null, state:
+//   seq | null, helps: [{ author, seq, followSeq }], given: [seq], indexing,
+//   complete }` (Varandinha; at most GARDEN_HELP_ROWS helps and given): the
+//   owner's newest live garden block (on or off) and garden-state block,
+//   the neighbours' garden-help blocks inside the reader window with the
+//   seq of each helper's live follow of the owner, and the owner's own help
+//   seqs. /index/garden/<owner>/rua[/<key>] -> Seeder#indexGardenStreet:
+//   `{ items: [{ key, on, state }], next, indexing, complete }` (at most
+//   GARDEN_STREET_PAGE rows), the open balconies of the keys the owner
+//   follows, key order, strictly after the cursor key; `next` is null or a
+//   key. Any other segment after the owner is 400 'pedido inválido'.
+//   Pointers only, checked against the exact shape: an extra key, a
+//   duplicate or an oversized list is the generic 404, never trimmed.
 // - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
 //   mood: seq | null, fans: { count, indexing }, top: { seq, back:
-//   { <friend>: seq | null } } | null, visits: seq | null, indexing,
-//   complete }`, the author's newest live profile-about, mood, top-friends
-//   and visits blocks (perfil rico, melhores amigos, visitas; visits is a
-//   pointer only, the node peeks the block and checks on), the claimed number of fas and, per listed friend, the
+//   { <friend>: seq | null } } | null, visits: seq | null, garden: seq |
+//   null, indexing, complete }`, the author's newest live profile-about,
+//   mood, top-friends, visits and garden blocks (perfil rico, melhores
+//   amigos, visitas, Varandinha; visits and garden are pointers only, the
+//   node peeks the block and checks on, so an off block still has a seq), the claimed number of fas and, per listed friend, the
 //   friend's live follow block of the author (at most MAX_TOP_FRIENDS). The
 //   object is open: later features add pointers and readers ignore keys they
 //   do not know, so profileBody keeps only the keys it lists. While the
 //   author's own diary is still being indexed or scanned (fail closed)
-//   about, mood, top and visits are null, indexing and fans.indexing are true and
+//   about, mood, top, visits and garden are null, indexing and fans.indexing are true and
 //   complete is false; otherwise complete is true and indexing is the global
 //   flag. Pointers only; the node verifies.
 // - /index/fans/<author>[/<atMs>.<key>] -> Seeder#indexFans: `{ author,
@@ -420,6 +436,14 @@ const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9
 // Any path below an owner's recados that INDEX_SCRAPS_RE refuses: a
 // malformed cursor (400).
 const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
+const INDEX_GARDEN_RE = /^\/index\/garden\/([0-9a-f]{64})$/
+const INDEX_GARDEN_STREET_RE = /^\/index\/garden\/([0-9a-f]{64})\/rua(?:\/([0-9a-f]{64}))?$/
+// Any path below an owner's balcony that the two above refuse (400).
+const INDEX_GARDEN_BAD_RE = /^\/index\/garden\/[0-9a-f]{64}\//
+const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
+const GARDEN_HELP_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
+const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
 const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
 const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const FAN_ROWS_MAX = 20
@@ -606,6 +630,42 @@ function allowedHosts (configured, address, port) {
     for (const name of LOOPBACK_NAMES) hosts.add(name + ':' + port)
   }
   return hosts
+}
+
+const LOOPBACK_V4_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+
+// A TCP peer address on loopback: 127.0.0.0/8, ::1 or IPv4-mapped 127.x.
+function isLoopbackAddress (address) {
+  if (typeof address !== 'string') return false
+  const s = address.toLowerCase()
+  if (s === '::1') return true
+  return LOOPBACK_V4_RE.test(s.startsWith('::ffff:') ? s.slice(7) : s)
+}
+
+// The client address handed to Seeder#acceptStream, which shares its
+// external slots by address. Behind Caddy every WebSocket arrives from
+// loopback and Caddy sets X-Forwarded-For to the address it saw
+// (deploy/seeder/Caddyfile); the last entry is the one the nearest proxy
+// wrote, so earlier entries a client sent never count. A direct connection,
+// or a loopback one without the header, uses the TCP peer. Used only in
+// memory: never logged, stored or exposed.
+function clientAddress (req) {
+  const remote = req && req.socket ? req.socket.remoteAddress : undefined
+  if (typeof remote !== 'string') return null
+  const forwarded = req.headers ? req.headers['x-forwarded-for'] : undefined
+  if (isLoopbackAddress(remote) && typeof forwarded === 'string') {
+    return forwarded.split(',').pop().trim()
+  }
+  return remote
+}
+
+// A loopback connection with no X-Forwarded-For did not come through the
+// proxy, which always sets it: a process on this host, such as the account
+// service's page links. The seeder never displaces its slot.
+function isLocalClient (req) {
+  const remote = req && req.socket ? req.socket.remoteAddress : undefined
+  const forwarded = req && req.headers ? req.headers['x-forwarded-for'] : undefined
+  return isLoopbackAddress(remote) && forwarded === undefined
 }
 
 // Normalizes an exact origin of the allow-list ('http://127.0.0.1:8790').
@@ -886,6 +946,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     // The atMs of a cursor fits 16 digits but must stay a safe integer.
     if (m && (m[2] === undefined || Number.isSafeInteger(Number(m[2].split('.')[0])))) return ['indexScraps', [m[1], m[2] === undefined ? null : m[2]], scrapsBody]
     if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_GARDEN_STREET_RE.exec(url)
+    if (m) return ['indexGardenStreet', [m[1], m[2] === undefined ? null : m[2]], gardenStreetBody]
+    m = INDEX_GARDEN_RE.exec(url)
+    if (m) {
+      const owner = m[1]
+      return ['indexGarden', [owner], (answer) => gardenBody(answer, owner)]
+    }
+    if (INDEX_GARDEN_BAD_RE.test(url)) return BAD_CURSOR
     m = INDEX_PROFILE_RE.exec(url)
     if (m) return ['indexProfile', [m[1]], profileBody]
     m = INDEX_FOLLOW_RE.exec(url)
@@ -963,11 +1031,59 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
   }
 
+  // Exactly the Varandinha pointers, checked as the node checks them: a help
+  // from the owner, a duplicate, an extra key or an oversized list is a 404,
+  // never a trimmed answer.
+  function gardenBody (answer, owner) {
+    if (!exactKeys(answer, GARDEN_KEYS)) throw new Error('index')
+    const { on, state, helps, given, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if ((on !== null && !seqOk(on)) || (state !== null && !seqOk(state))) throw new Error('index')
+    if (!Array.isArray(helps) || helps.length > gardenRules.GARDEN_HELP_ROWS || !Array.isArray(given) || given.length > gardenRules.GARDEN_HELP_ROWS) throw new Error('index')
+    const refs = new Set()
+    const rows = helps.map((row) => {
+      if (!exactKeys(row, GARDEN_HELP_KEYS)) throw new Error('index')
+      const { author, seq, followSeq } = row
+      if (typeof author !== 'string' || !HEX64_RE.test(author) || author === owner || !seqOk(seq) || !seqOk(followSeq)) throw new Error('index')
+      const ref = author + ':' + seq
+      if (refs.has(ref)) throw new Error('index')
+      refs.add(ref)
+      return { author, seq, followSeq }
+    })
+    const seqs = new Set()
+    for (const seq of given) {
+      if (!seqOk(seq) || seqs.has(seq)) throw new Error('index')
+      seqs.add(seq)
+    }
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { on, state, helps: rows, given: [...given], indexing, complete }
+  }
+
+  // Exactly one page of Varandas da rua: a duplicate key, an extra key or an
+  // oversized page is a 404.
+  function gardenStreetBody (answer) {
+    if (!exactKeys(answer, GARDEN_STREET_KEYS)) throw new Error('index')
+    const { items, next, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (!Array.isArray(items) || items.length > gardenRules.GARDEN_STREET_PAGE) throw new Error('index')
+    const keys = new Set()
+    const rows = items.map((item) => {
+      if (!exactKeys(item, GARDEN_STREET_ITEM_KEYS)) throw new Error('index')
+      const { key, on, state } = item
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || keys.has(key) || !seqOk(on) || (state !== null && !seqOk(state))) throw new Error('index')
+      keys.add(key)
+      return { key, on, state }
+    })
+    if (next !== null && (typeof next !== 'string' || !HEX64_RE.test(next))) throw new Error('index')
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { items: rows, next, indexing, complete }
+  }
+
   // The pointer keys known so far; a new key is added here when its feature
   // ships, an unknown one is never echoed.
-  function profileBody ({ about, mood, fans = null, top = null, visits = null, indexing, complete }) {
+  function profileBody ({ about, mood, fans = null, top = null, visits = null, garden = null, indexing, complete }) {
     const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
-    if (!seqOk(about) || !seqOk(mood) || !seqOk(visits)) throw new Error('index')
+    if (!seqOk(about) || !seqOk(mood) || !seqOk(visits) || !seqOk(garden)) throw new Error('index')
     let fanCount = null
     if (fans !== null) {
       if (typeof fans !== 'object' || !Number.isSafeInteger(fans.count) || fans.count < 0) throw new Error('index')
@@ -985,7 +1101,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       }
       pointers = { seq: top.seq, back }
     }
-    return { about, mood, fans: fanCount, top: pointers, visits, indexing: indexing === true, complete: complete === true }
+    return { about, mood, fans: fanCount, top: pointers, visits, garden, indexing: indexing === true, complete: complete === true }
   }
 
   // Only the follower-list fields, checked as the client checks them: a
@@ -1934,6 +2050,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       // Set when the seeder refuses for capacity: the socket is then ours to
       // close with 1013 (try again later) instead of the bare 1006 a
       // terminate() gives, so the client can tell "full" from a network loss.
+      // Also called, with reason 'connection-displaced', for a socket the
+      // seeder already took and later gave up to make room for another
+      // address (Seeder#acceptStream): the client backs off the same way.
       let refused = false
       const onRefuse = () => {
         if (refused) return
@@ -1944,6 +2063,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         // 'close' (the listener below), when terminate() is a no-op. The
         // unref'd timer bounds how long a client that never answers the close
         // can keep the socket (ws's own close timeout is 30 s).
+        // A displaced socket may still be writing (keep-alives, replication):
+        // as in drain(), its writes are dropped from here on, so none reaches
+        // ws.send on the CLOSING socket, errors the duplex and turns the
+        // 1013 into a 1006.
+        if (duplex) duplex._write = dropWrite
         const timer = setTimeout(() => ws.terminate(), REFUSE_GRACE_MS)
         timer.unref()
         ws.once('close', () => clearTimeout(timer))
@@ -1963,7 +2087,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
           streams.delete(ws)
           duplex.destroy()
         })
-        Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
+        Promise.resolve(seeder.acceptStream(duplex, { onRefuse, address: clientAddress(req), local: isLocalClient(req) })).then((noise) => {
           if (!noise && !refused) ws.terminate()
         }, () => { if (!refused) ws.terminate() })
       } catch {
@@ -2067,6 +2191,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 module.exports = {
   startSeedWs,
   socketCap,
+  clientAddress,
+  isLocalClient,
   DEFAULT_HOST,
   MAX_SOCKETS,
   MAX_PAYLOAD,
@@ -2092,6 +2218,8 @@ module.exports = {
   INDEX_FOLLOWS_RE,
   INDEX_TESTIMONIALS_RE,
   INDEX_SCRAPS_RE,
+  INDEX_GARDEN_RE,
+  INDEX_GARDEN_STREET_RE,
   INDEX_PROFILE_RE,
   INDEX_FANS_RE,
   INDEX_POLL_RE,

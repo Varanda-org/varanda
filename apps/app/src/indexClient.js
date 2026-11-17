@@ -352,6 +352,25 @@ export function scrapsUrl (owner, cursor = null) {
   return resolveUrl('/index/scraps/' + o + (cursor === null ? '' : '/' + cursor))
 }
 
+// Varandinha: GET /index/garden/<owner> and /index/garden/<owner>/rua[/<cursor>].
+// Strict lowercase hex64 only; the seeder only points.
+const GARDEN_HELP_ROWS = rpc.garden.GARDEN_HELP_ROWS
+const GARDEN_STREET_PAGE = rpc.garden.GARDEN_STREET_PAGE
+const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
+const GARDEN_ROW_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
+const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
+
+export function gardenUrl (owner) {
+  return isHex64(owner) ? resolveUrl('/index/garden/' + owner) : null
+}
+
+export function gardenStreetUrl (owner, cursor = null) {
+  if (!isHex64(owner)) return null
+  if (cursor !== null && !isHex64(cursor)) return null
+  return resolveUrl('/index/garden/' + owner + '/rua' + (cursor === null ? '' : '/' + cursor))
+}
+
 // Perfil rico: GET /index/profile/<author>. An open object of pointers; a
 // later change adds keys, so a reader ignores the ones it does not know.
 export function profileUrl (author) {
@@ -1105,6 +1124,58 @@ export function validScraps (body, owner, cursor = null) {
   return { rows, hides: body.hides.slice(), wall: body.wall, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
 }
 
+// The pointers of one garden: `on` and `state` are record seqs or null, `helps`
+// are neighbours' help records (never null followSeq), `given` the seqs of the
+// owner's own help records.
+export function validGarden (body, owner) {
+  if (!isHex64(owner)) return null
+  if (!hasExactKeys(body, GARDEN_KEYS) || !isFlags(body)) return null
+  if (!isHint(body.on) || !isHint(body.state)) return null
+  if (!Array.isArray(body.helps) || body.helps.length > GARDEN_HELP_ROWS) return null
+  if (!Array.isArray(body.given) || body.given.length > GARDEN_HELP_ROWS) return null
+  const seen = new Set()
+  const helps = []
+  for (const row of body.helps) {
+    if (!hasExactKeys(row, GARDEN_ROW_KEYS) || !isHex64(row.author) || row.author === owner) return null
+    if (!isSeq(row.seq) || !isSeq(row.followSeq)) return null
+    const ref = row.author + ':' + row.seq
+    if (seen.has(ref)) return null
+    seen.add(ref)
+    helps.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+  }
+  const givenSeen = new Set()
+  for (const g of body.given) {
+    if (!isSeq(g) || givenSeen.has(g)) return null
+    givenSeen.add(g)
+  }
+  // The seeder lists nothing for an owner with no `garden` block, so one
+  // lookup never names who watered a balcony outside the game.
+  if (body.on === null && (body.state !== null || helps.length > 0 || body.given.length > 0)) return null
+  return { on: body.on, state: body.state, helps, given: body.given.slice(), indexing: body.indexing, complete: body.complete }
+}
+
+// One page of the street, a walk of the followed keys in ascending order:
+// item keys strictly ascending after the cursor, and `next` (the last key
+// examined) at or after the last item, so following `next` always moves
+// forward. A `next` equal to the cursor sent reads as the end.
+export function validGardenStreet (body, cursor = null) {
+  if (!hasExactKeys(body, GARDEN_STREET_KEYS) || !isFlags(body)) return null
+  if (!Array.isArray(body.items) || body.items.length > GARDEN_STREET_PAGE) return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  let last = cursor
+  const items = []
+  for (const it of body.items) {
+    if (!hasExactKeys(it, GARDEN_STREET_ITEM_KEYS) || !isHex64(it.key)) return null
+    if (last !== null && !(it.key > last)) return null
+    if (!isSeq(it.on) || !isHint(it.state)) return null
+    last = it.key
+    items.push({ key: it.key, on: it.on, state: it.state })
+  }
+  if (body.next !== null && last !== null && body.next < last) return null
+  const stuck = body.next !== null && body.next === cursor
+  return { items, next: stuck ? null : body.next, indexing: body.indexing, complete: stuck ? false : body.complete }
+}
+
 // Tolerant: unknown keys are ignored, the known ones are checked. `about` and
 // `mood` are the seq of the author's latest profile-about and mood record, or
 // null (a key a seeder does not send yet reads as null). The node re-reads
@@ -1115,8 +1186,11 @@ export function validProfile (body) {
   const mood = body.mood === undefined ? null : body.mood
   // `visits` is the seq of the author's latest visits record, or null.
   const visits = body.visits === undefined ? null : body.visits
-  if (!isHint(about) || !isHint(mood) || !isHint(visits)) return null
-  const out = { about, mood, visits, indexing: body.indexing, complete: body.complete }
+  // `garden` is the seq of the author's latest `garden` flag record, on or
+  // off (a peek tells which), or null; the state seq is on /index/garden.
+  const garden = body.garden === undefined ? null : body.garden
+  if (!isHint(about) || !isHint(mood) || !isHint(visits) || !isHint(garden)) return null
+  const out = { about, mood, visits, garden, indexing: body.indexing, complete: body.complete }
   // Fãs and Melhores amigos: strict when present, null when absent.
   let fans = null
   if (body.fans !== undefined && body.fans !== null) {
@@ -1517,6 +1591,16 @@ export function fetchScraps (owner, cursor = null, deps = {}) {
   const url = scrapsUrl(owner, cursor)
   const o = url === null ? null : inputAuthor(owner)
   return run(url, (body) => validScraps(body, o, cursor), deps)
+}
+
+export function fetchGarden (owner, deps = {}) {
+  const url = gardenUrl(owner)
+  return run(url, (body) => validGarden(body, owner), deps)
+}
+
+export function fetchGardenStreet (owner, cursor = null, deps = {}) {
+  const url = gardenStreetUrl(owner, cursor)
+  return run(url, (body) => validGardenStreet(body, cursor), deps)
 }
 
 export function fetchProfile (author, deps = {}) {

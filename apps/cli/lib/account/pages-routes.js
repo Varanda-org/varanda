@@ -325,6 +325,11 @@ function createPagesRoutes ({
   let creating = Promise.resolve()
   const audit = []
   const counts = { ok: 0, refused: 0, uncertain: 0 }
+  // `inviteUnreadable`: the file was there but could not be read, so memory
+  // may lack rows still on disk. `inviteStale`: a save failed, so disk may
+  // hold rows memory dropped. Either keeps the deletion sweep pending.
+  let inviteUnreadable = false
+  let inviteStale = false
   const invites = loadInvites()
   // K1 -> the communities its move left, for a resumed move's re-join on K2.
   const moveLeft = new Map()
@@ -783,26 +788,75 @@ function createPagesRoutes ({
     let data = null
     try {
       data = JSON.parse(fs.readFileSync(file, 'utf8'))
-    } catch {
+    } catch (err) {
+      if (err.code !== 'ENOENT') inviteUnreadable = true
       return map
     }
-    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) return map
+    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) {
+      inviteUnreadable = true
+      return map
+    }
     for (const [k, v] of Object.entries(data.rows)) {
       if (isPlainObject(v) && isPlainObject(v.record) && typeof v.expiresAt === 'string') map.set(k, v)
     }
     return map
   }
 
-  function saveInvites () {
+  // `drop`: keys that go with the expired ones. Memory follows only once the
+  // file is written, so a failed write leaves holdsInvites() true and the
+  // deletion sweep tries again.
+  function saveInvites (drop = null) {
     const file = invitePath()
-    if (file === null) return
     const t = now()
     const rows = {}
+    const gone = []
     for (const [k, v] of invites) {
-      if (Date.parse(v.expiresAt) > t) rows[k] = v
-      else invites.delete(k)
+      if (Date.parse(v.expiresAt) > t && (drop === null || !drop.has(k))) rows[k] = v
+      else gone.push(k)
     }
-    writeJsonAtomic(file, { v: 1, rows }, 0o600)
+    if (file === null) {
+      if (drop !== null) for (const k of drop) invites.delete(k)
+      return
+    }
+    try {
+      writeJsonAtomic(file, { v: 1, rows }, 0o600)
+    } catch (err) {
+      inviteStale = true
+      throw err
+    }
+    inviteUnreadable = false
+    inviteStale = false
+    for (const k of gone) invites.delete(k)
+  }
+
+  // Rows are keyed '<page>:<invitee>'. Only the invitee's own rows go: a
+  // roster another invitee holds may list the deleted member as an admin,
+  // and it is the owner's signed statement, settled at accept or expiry.
+  function invitesOf (member) {
+    const out = []
+    for (const k of invites.keys()) if (k.slice(65) === member) out.push(k)
+    return out
+  }
+
+  // Never answers from a memory that may disagree with the file: unreadable
+  // throws until a save rewrites it, and a failed save is retried first,
+  // since memory loaded fine and is the authority.
+  function holdsInvites (member) {
+    if (inviteUnreadable) throw refuse('indisponivel')
+    if (inviteStale) saveInvites()
+    return invitesOf(member).length > 0
+  }
+
+  // The file the sweep's warning names while holdsInvites cannot answer.
+  function inviteBrokenFiles () {
+    return inviteUnreadable || inviteStale ? [INVITE_FILE] : []
+  }
+
+  function forgetInvites (member) {
+    const keys = invitesOf(member)
+    if (keys.length === 0) return false
+    saveInvites(new Set(keys))
+    return true
   }
 
   // ---- start --------------------------------------------------------------
@@ -2728,6 +2782,9 @@ function createPagesRoutes ({
     handle,
     stats: () => ({ available: on, ...counts, applied: applied.size, invites: invites.size }),
     reboxSweep,
+    holdsInvites,
+    forgetInvites,
+    inviteBrokenFiles,
     close: () => {
       routesClosed = true
       clearInterval(reboxTimer)

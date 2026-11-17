@@ -89,6 +89,7 @@ import Identidade from './Identidade'
 import Passkeys from './Passkeys'
 import Perfil, { KeyboardForm } from './Perfil'
 import Telefone from './Telefone'
+import { PHONE_CHANGE_UNKNOWN_TEXT, phoneChangeShown } from '../phone'
 import Recurso from './Recurso'
 import Bloqueados from './Bloqueados'
 import Aparelhos from './Aparelhos'
@@ -195,7 +196,7 @@ function AccountCard ({ ownKey, profile, onPress }) {
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, markVerified, recheckPhone, termsBeforeCreate = null }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, onOpenVarandinha, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, phoneProofDate = null, phoneKnownDate = null, markVerified, recheckPhone, termsBeforeCreate = null }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -279,6 +280,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const openPaginas = () => {
     onClose()
     onOpenPaginas()
+  }
+  const openVarandinha = () => {
+    onClose()
+    onOpenVarandinha()
   }
   const pushEligible = node.hosted === true && member !== null
   // Avisos no aparelho, from the store the shell's note shares (null: not
@@ -434,12 +439,11 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
 
   // gateKey is the shell's phone-gate key: markVerified stores the proof only
   // for the session the request started under, which keeps the gate open.
-  // No proof means the sheet closed on a status recheck after a lost check:
-  // the status says 'verificado' for the old number too, so it cannot tell
-  // whether the new one was recorded.
-  const onPhoneVerified = (proof, key) => {
+  // text: Telefone's verdict from the proof dates (src/phone.js
+  // phoneChangeOutcome); without one, nothing tells the numbers apart.
+  const onPhoneVerified = (proof, key, text) => {
     if (typeof markVerified === 'function') markVerified(proof, key)
-    setSaved(proof === undefined ? 'Não deu para saber se o número mudou. Se precisar, troque de novo.' : 'Celular atualizado.')
+    setSaved(typeof text === 'string' && text !== '' ? text : PHONE_CHANGE_UNKNOWN_TEXT)
     onNavigate('lista')
   }
   const askPhoneAgain = typeof recheckPhone === 'function' ? recheckPhone : undefined
@@ -483,7 +487,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   // Prefer the shell member: markVerified only accepts a proof under that key.
   const phoneMember = typeof gateMember === 'string' ? gateMember : member
   const phoneNode = nodeProp || node
-  const showChangePhone = account && phoneNode.hosted === true && unlocked && phoneGate === 'ok' && typeof phoneMember === 'string'
+  const showChangePhone = phoneChangeShown({ hosted: node.hosted === true && phoneNode.hosted === true, hasPasskey, unlocked, gate: phoneGate, member: phoneMember })
   const { ui: pushUi, row: pushRow, trailing: pushTrailing, note: pushNote } = pushRowView({ push, pending: pushPending, error: pushError })
   const inviting = account && policy !== null && policy.required === true
   const lines = versionLines({ app: BUILD, server })
@@ -520,6 +524,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
               {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
+              {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
               <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
             {visitasOn
@@ -722,6 +727,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                     offline={phoneNode.online === false}
                     statusBusy={phoneChecking}
                     statusVerified={phoneVerified}
+                    statusDate={phoneProofDate}
+                    knownDate={phoneKnownDate}
                   />
                 </Page>
               </KeyboardForm>

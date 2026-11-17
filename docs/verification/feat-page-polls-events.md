@@ -6,7 +6,7 @@
 - `packages/core/lib/page-proof.js`, `packages/rpc/lib/methods.js`, `apps/app/src/pages.js`: `choice` entra nas listas de ações da Página.
 - `apps/app/src/screens/Publicar.js`, `pagePost.js`: como Página, a tela Publicar publica enquete e evento com os mesmos limites da pessoa. Um envio incerto é refeito só com um toque.
 - `apps/app/src/ui/PollCard.js`, `EventCard.js`, `pageChoice.js`, `screens/Conversa.js`, `ARua.js`: agindo como Página, o cartão mostra o voto da Página e vota pela ação `choice`; a enquete e o evento de uma publicação da Página aparecem para quem lê. O link na web de uma publicação da Página continua desligado (próximo PR).
-- `apps/app/src/legal.js`: Termos e Política versão 79, com novo aceite. A lista de termos cobre as opções da enquete e o título e o local do evento, e o diário público da Página inclui enquetes, eventos, votos e confirmações de presença.
+- `apps/app/src/legal.js`: Termos e Política versão 80, com novo aceite. A lista de termos cobre as opções da enquete e o título e o local do evento, e o diário público da Página inclui enquetes, eventos, votos e confirmações de presença.
 
 ## Como verificar
 

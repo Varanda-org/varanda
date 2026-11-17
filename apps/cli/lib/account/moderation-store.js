@@ -1253,6 +1253,33 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     }))
   }
 
+  // Read-only, for the phone rule: is `member` in the published list, or
+  // does any change for it still wait for the operator? Excluir conta's own
+  // block (by OWNER_ACTOR) counts too: a 'bloquear' decided while it waits
+  // joins it. An unblock still waiting does not let go of a number, even
+  // next to the claimed block it lifts: it may be cancelled, and the burn
+  // itself is only lifted by the published list. An invalid member is false.
+  function held (member) {
+    usable()
+    if (!isLowerHex(member, 32)) return false
+    if (blockedSet(state.published.snapshot).has(member)) return true
+    return state.pending.some((c) => c.member === member)
+  }
+
+  // Read-only: how many 'bloquear' reports blocked `member` with a decision
+  // at or after `since` (canonical ISO, so strings compare in time order),
+  // or all of them when `since` is null. An invalid member is 0.
+  function blockReportsAfter (member, since) {
+    usable()
+    if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be null or a canonical ISO date')
+    if (!isLowerHex(member, 32)) return 0
+    let n = 0
+    for (const r of Object.values(state.reports)) {
+      if (r.status === 'bloquear' && blockedKey(r) === member && (since === null || r.decidedAt >= since)) n++
+    }
+    return n
+  }
+
   function stats () {
     usable()
     let open = 0
@@ -1267,6 +1294,37 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       blocked: blockedSet(s).size,
       publishedSeq: s === null ? null : s.seq
     }
+  }
+
+  // Asked per key on every page fold and deletion pass, so each answer is
+  // built once per state: a mutation replaces `state.published` and
+  // `state.reports` (cloneState), never edits them, so their identity is the
+  // revision.
+  let blockedMemo = { snapshot: undefined, set: null }
+  let targetsMemo = { reports: null, ids: null }
+
+  // Same answer as blocked().some((b) => b.member === member).
+  function isBlocked (member) {
+    usable()
+    const snapshot = state.published.snapshot
+    if (blockedMemo.snapshot !== snapshot) blockedMemo = { snapshot, set: blockedSet(snapshot) }
+    return blockedMemo.set.has(member)
+  }
+
+  // The ids of the reports whose target is `member` (exportRows({ member })
+  // ids), for Excluir conta.
+  function reportIdsAbout (member) {
+    usable()
+    if (targetsMemo.reports !== state.reports) {
+      const ids = new Map()
+      for (const r of Object.values(state.reports)) {
+        if (!ids.has(r.target)) ids.set(r.target, [])
+        ids.get(r.target).push(r.id)
+      }
+      targetsMemo = { reports: state.reports, ids }
+    }
+    const got = targetsMemo.ids.get(member)
+    return got === undefined ? [] : got.slice()
   }
 
   // For the operator (LGPD access requests, legal orders): report rows with
@@ -1331,7 +1389,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, isBlocked, held, blockReportsAfter, groupKeys, stats, exportRows, reportIdsAbout, humanReversed }
 }
 
 module.exports = {

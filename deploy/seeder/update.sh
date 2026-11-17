@@ -24,7 +24,8 @@
 # assinada (cosign keyless) pelo workflow do canal em main. A assinatura é
 # conferida com o cosign fixado no cosign.ref ao lado deste script (nunca o
 # da imagem candidata), e o release.json da imagem assinada fixa por digest a
-# imagem da web. Passo a passo no README, seção "Atualização por imagem (pull)".
+# imagem da web (e o caddy.json, quando existe, a do Caddy). Passo a passo no
+# README, seção "Atualização por imagem (pull)".
 #
 # Códigos de saída: 0 feito ou nada a fazer; 1 falha (nada mudou, ou voltou
 # para a versão anterior); 2 uso errado.
@@ -67,6 +68,12 @@ web_ref_re='^ghcr\.io/varanda-org/varanda-web@sha256:[0-9a-f]{64}$'
 # A linha inteira de /app/release.json (sem jq no servidor): chaves nesta
 # ordem, sem espaços, a web só de ghcr.io/varanda-org/varanda-web por digest.
 release_re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"(ghcr\.io/varanda-org/varanda-web@sha256:[0-9a-f]{64})"\}$'
+# A imagem do Caddy, fixada por digest em /app/caddy.json, um arquivo à parte:
+# o release.json fica como era, porque o update.sh das versões já instaladas o
+# confere com a regex acima e recusaria uma chave nova. Sem caddy.json (versão
+# antiga), o Caddy roda da imagem web e é recriado a cada versão, como antes.
+caddy_ref_re='^ghcr\.io/varanda-org/varanda-caddy@sha256:[0-9a-f]{64}$'
+caddy_json_re='^\{"v":1,"caddy":"(ghcr\.io/varanda-org/varanda-caddy@sha256:[0-9a-f]{64})"\}$'
 cosign_re='^ghcr\.io/sigstore/cosign/cosign:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$'
 # Dono root e nenhum acesso de grupo ou outros (saída de dono_modo).
 privado_re='^0 ([0-7]*00|0)$'
@@ -146,6 +153,8 @@ cand_seeder=''
 cand_commit=''
 cand_seq=''
 cand_web=''
+# Vazio quando a imagem não traz /app/caddy.json.
+cand_caddy=''
 cand_dir=''
 em_dia=0
 # 1 quando preparar_versao substituiu um diretório que já existia.
@@ -157,6 +166,10 @@ piso_preparada=1
 alvo_dir=''
 alvo_seeder=''
 alvo_web=''
+# Com a imagem do Caddy, o web roda dela e monta o www e o Caddyfile por
+# caminhos fixos em $releases (trocar_web): uma versão só de app não recria o
+# Caddy. Vazio, o web roda da imagem web e monta o diretório da versão.
+alvo_caddy=''
 alvo_checkout=0
 www=''
 caddyfile=''
@@ -166,6 +179,7 @@ r_commit=''
 r_seq=''
 r_seeder=''
 r_web=''
+r_caddy=''
 
 # Abre uma conexão WebSocket de verdade, com o Origin de produção, usando o
 # ws da própria CLI dentro da imagem do semeador (que confere o TLS). Os
@@ -405,12 +419,14 @@ ler_estado() {
 }
 
 # Lê commit, seq, seeder e web de um registro (atual, anterior, preparada) e
-# confere a forma de cada um; fora dela, retorna 1.
+# confere a forma de cada um; fora dela, retorna 1. O caddy é opcional (um
+# registro de antes da imagem do Caddy não o tem), mas, se existe, tem forma.
 ler_registro() {
   r_commit=''
   r_seq=''
   r_seeder=''
   r_web=''
+  r_caddy=''
   if [ ! -f "$1" ]; then
     return 1
   fi
@@ -418,14 +434,18 @@ ler_registro() {
   r_seq=$(ler_estado "$1" seq)
   r_seeder=$(ler_estado "$1" seeder)
   r_web=$(ler_estado "$1" web)
+  r_caddy=$(ler_estado "$1" caddy)
   [[ $r_commit =~ $sha_re ]] && [[ $r_seq =~ $seq_re ]] \
-    && [[ $r_seeder =~ $seeder_ref_re ]] && [[ $r_web =~ $web_ref_re ]]
+    && [[ $r_seeder =~ $seeder_ref_re ]] && [[ $r_web =~ $web_ref_re ]] \
+    && { [ -z "$r_caddy" ] || [[ $r_caddy =~ $caddy_ref_re ]]; }
 }
 
-# Grava um registro de estado com um rename: nunca fica pela metade.
+# Grava um registro de estado com um rename: nunca fica pela metade. A linha
+# caddy= só existe quando a versão traz a imagem do Caddy.
 gravar_estado() {
-  local destino=$1
-  if ! { printf 'commit=%s\nseq=%s\nseeder=%s\nweb=%s\n' "$2" "$3" "$4" "$5" >"$destino.tmp" \
+  local destino=$1 caddy=${6:-}
+  if ! { { printf 'commit=%s\nseq=%s\nseeder=%s\nweb=%s\n' "$2" "$3" "$4" "$5" \
+    && if [ -n "$caddy" ]; then printf 'caddy=%s\n' "$caddy"; fi; } >"$destino.tmp" \
     && mv -f "$destino.tmp" "$destino"; }; then
     rm -f "$destino.tmp" 2>/dev/null || true
     log "não foi possível gravar $destino"
@@ -557,6 +577,41 @@ ler_release() {
   rm -f "$arquivo"
 }
 
+# /app/caddy.json da mesma imagem conferida, lido do mesmo jeito. Ausente
+# (test -e sai com 1), a versão segue com o Caddy da imagem web, como antes;
+# qualquer outra saída (docker, imagem) adia a troca, como um release.json
+# ilegível. Presente, precisa ser exatamente uma linha na forma de
+# caddy_json_re mais LF.
+ler_caddy() {
+  local arquivo="$state/caddy.json.tmp" linha='' saida=0
+  cand_caddy=''
+  rm -f "$arquivo"
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --entrypoint test "$cand_seeder" -e /app/caddy.json 2>/dev/null || saida=$?
+  if [ "$saida" = 1 ]; then
+    log "sem /app/caddy.json em $cand_seeder: o Caddy segue a imagem web"
+    return 0
+  fi
+  if [ "$saida" != 0 ] || ! docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --entrypoint cat "$cand_seeder" /app/caddy.json 2>/dev/null | head -c 1024 >"$arquivo" \
+    || [ ! -s "$arquivo" ]; then
+    rm -f "$arquivo"
+    log "não foi possível ler /app/caddy.json de $cand_seeder (saída $saida); nada mudou"
+    return 1
+  fi
+  IFS= read -r linha <"$arquivo" || true
+  if [[ $linha =~ $caddy_json_re ]] && printf '%s\n' "$linha" | cmp -s - "$arquivo"; then
+    cand_caddy=${linha#*\"caddy\":\"}
+    cand_caddy=${cand_caddy%\"\}}
+  fi
+  rm -f "$arquivo"
+  if ! [[ $cand_caddy =~ $caddy_ref_re ]]; then
+    cand_caddy=''
+    log "caddy.json de $cand_seeder fora do formato esperado"
+    return 1
+  fi
+}
+
 # Sem versão instalada, o piso é a preparada ou a anterior (uma volta ao
 # checkout apaga atual): mais antiga é recusada; a mesma vale, porque o
 # primeiro apply usa a versão que install preparou. install --image de uma
@@ -606,7 +661,7 @@ verificar() {
   if ! verificar_assinatura "$cand_seeder"; then
     return 1
   fi
-  if ! ler_release; then
+  if ! ler_release || ! ler_caddy; then
     return 1
   fi
   if [ -f "$state/atual" ]; then
@@ -622,7 +677,7 @@ verificar() {
   elif ! piso_sem_atual; then
     return 1
   fi
-  if ! gravar_estado "$state/disponivel" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web"; then
+  if ! gravar_estado "$state/disponivel" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web" "$cand_caddy"; then
     return 1
   fi
   log "versão verificada: $cand_commit (seq $cand_seq, canal $canal)"
@@ -1246,9 +1301,17 @@ restaurar_segredos() {
 # fixadas por digest. Sempre --no-build em quem sobe (o build dos compose
 # nunca é usado aqui) e nunca --remove-orphans: ele removeria os contêineres
 # avulsos de um docker compose run do operador.
+#
+# Com a imagem do Caddy ($4), o web roda dela e monta caminhos que não mudam
+# de uma versão para outra: $releases inteiro em /srv (o Caddyfile serve
+# /srv/web, o link $releases/web que trocar_web aponta para <commit>/www) e o
+# Caddyfile por um nome que é o sha256 do conteúdo. Assim o compose só recria
+# o web quando a imagem do Caddy ou o Caddyfile mudam. Sem ela, os binds
+# relativos ./Caddyfile e ./www do diretório da versão, como antes.
 compose_em() {
-  local dir=$1 seeder=$2 web=$3 real
-  shift 3
+  local dir=$1 seeder=$2 web=$3 caddy=$4 real soma
+  local caddyfile_src=./Caddyfile www_src=./www www_dst=/srv/web
+  shift 4
   local -a arquivos=(-f compose.yaml)
   local -a envs=()
   if [ "$perfil" = full ]; then
@@ -1262,11 +1325,66 @@ compose_em() {
     envs=(--env-file "$env_file")
   fi
   real=$(readlink -f "$dir") || return 1
+  if [ "$perfil" = full ] && [ -n "$caddy" ]; then
+    soma=$(soma_caddyfile "$real/Caddyfile") || return 1
+    web=$caddy
+    caddyfile_src="$releases/Caddyfile-$soma"
+    www_src=$releases
+    www_dst=/srv
+  fi
   (
     cd "$real" &&
-      VARANDA_SEEDER_IMAGE=$seeder VARANDA_WEB_IMAGE=$web \
+      VARANDA_CADDYFILE_SRC=$caddyfile_src VARANDA_WWW_SRC=$www_src VARANDA_WWW_DST=$www_dst \
+        VARANDA_SEEDER_IMAGE=$seeder VARANDA_WEB_IMAGE=$web \
         docker compose -p varanda-seeder ${envs[@]+"${envs[@]}"} "${arquivos[@]}" "$@"
   )
+}
+
+# O sha256 de um Caddyfile (64 hexadecimais), o nome da cópia em $releases.
+soma_caddyfile() {
+  local saida
+  if ! saida=$(sha256sum <"$1") || ! [[ ${saida%% *} =~ $hash_re ]]; then
+    log "não foi possível calcular o sha256 de $1" >&2
+    return 1
+  fi
+  printf '%s\n' "${saida%% *}"
+}
+
+# Link simbólico trocado por rename, como current: nunca some no meio.
+trocar_link() {
+  rm -f "$2.tmp"
+  ln -s "$1" "$2.tmp" && mv -Tf "$2.tmp" "$2"
+}
+
+# O que o web monta no modo da imagem do Caddy, apontado para a versão em $1:
+# a cópia do Caddyfile por sha256 (escrita uma vez, por rename, nunca alterada
+# depois) e o link $releases/web, relativo para valer também dentro do
+# contêiner (/srv/web -> /srv/<commit>/www). O link troca num rename, então o
+# Caddy nunca serve um www pela metade, e o www antigo fica inteiro em disco.
+trocar_web() {
+  local dir=$1 nome soma destino
+  nome=${dir##*/}
+  if ! soma=$(soma_caddyfile "$dir/Caddyfile"); then
+    return 1
+  fi
+  destino="$releases/Caddyfile-$soma"
+  # Um compose up sem o arquivo deixaria um diretório no lugar dele.
+  if [ -L "$destino" ] || { [ -e "$destino" ] && [ ! -f "$destino" ]; }; then
+    rm -rf "$destino"
+  fi
+  if [ ! -f "$destino" ]; then
+    rm -f "$destino.tmp"
+    if ! { cp "$dir/Caddyfile" "$destino.tmp" && chmod 0644 "$destino.tmp" \
+      && mv -f "$destino.tmp" "$destino"; }; then
+      rm -f "$destino.tmp" 2>/dev/null || true
+      log "não foi possível gravar $destino"
+      return 1
+    fi
+  fi
+  if ! trocar_link "$nome/www" "$releases/web"; then
+    log "não foi possível apontar $releases/web para $nome/www"
+    return 1
+  fi
 }
 
 # O compose do alvo atual: uma versão, ou o checkout antigo (com o .env, o
@@ -1282,7 +1400,7 @@ compose_alvo() {
     # pelo trap ERR devolve o status que disparou o trap.
     return $?
   fi
-  compose_em "$alvo_dir" "$alvo_seeder" "$alvo_web" "$@"
+  compose_em "$alvo_dir" "$alvo_seeder" "$alvo_web" "$alvo_caddy" "$@"
 }
 
 alvo_versao() {
@@ -1290,6 +1408,7 @@ alvo_versao() {
   alvo_dir=$1
   alvo_seeder=$2
   alvo_web=$3
+  alvo_caddy=${4:-}
   www="$1/www"
   caddyfile="$1/Caddyfile"
 }
@@ -1301,6 +1420,7 @@ alvo_do_checkout() {
   alvo_dir=$1
   alvo_seeder=varanda-seeder:antes-do-pull
   alvo_web=varanda-caddy:antes-do-pull
+  alvo_caddy=''
   www="$1/www"
   caddyfile="$1/Caddyfile"
   if [ "$perfil" = full ] && [ -f "$1/.env" ]; then
@@ -1447,6 +1567,10 @@ em_uso() {
       return 0
     fi
   fi
+  # O www que o Caddy serve pelo link web.
+  if [ "$(readlink "$releases/web" 2>/dev/null || true)" = "$nome/www" ]; then
+    return 0
+  fi
   montado "$dir"
 }
 
@@ -1527,7 +1651,7 @@ montar_versao() {
     rm -rf "$tmp"
     return 1
   fi
-  if ! compose_em "$tmp" "$cand_seeder" "$cand_web" config -q; then
+  if ! compose_em "$tmp" "$cand_seeder" "$cand_web" "$cand_caddy" config -q; then
     log "docker compose config recusou a versão $cand_commit; nada mudou"
     rm -rf "$tmp"
     return 1
@@ -1757,7 +1881,7 @@ sondar_ws() {
 # Cada serviço do perfil roda a imagem do alvo (pelo id): um compose up que
 # não recriou um contêiner não passa.
 conferir_imagens() {
-  local id_seeder id_web servico esperado cid img
+  local id_seeder id_web servico esperado cid img img_web=${alvo_caddy:-$alvo_web}
   local -a servicos=(seeder)
   if ! id_seeder=$(docker image inspect -f '{{.Id}}' "$alvo_seeder") || [ -z "$id_seeder" ]; then
     log "não foi possível ler o id de $alvo_seeder"
@@ -1766,8 +1890,8 @@ conferir_imagens() {
   id_web=''
   if [ "$perfil" = full ]; then
     servicos+=(account web)
-    if ! id_web=$(docker image inspect -f '{{.Id}}' "$alvo_web") || [ -z "$id_web" ]; then
-      log "não foi possível ler o id de $alvo_web"
+    if ! id_web=$(docker image inspect -f '{{.Id}}' "$img_web") || [ -z "$id_web" ]; then
+      log "não foi possível ler o id de $img_web"
       return 1
     fi
   fi
@@ -1811,11 +1935,14 @@ verificar_saude() {
   log 'saúde: health 200, imagens conferidas'
 }
 
-# Mantém só o diretório da versão nova, o de current e o da anterior.
+# Mantém só o diretório da versão nova, o de current, o da anterior e o que
+# o link web serve, e só as cópias do Caddyfile que um deles ainda usa.
 limpar_versoes() {
-  local p nome manter_atual='' manter_ant=''
+  local p nome manter_atual='' manter_ant='' manter_web='' somas='' soma
   manter_atual=$(readlink "$releases/current" 2>/dev/null || true)
   manter_atual=${manter_atual##*/}
+  manter_web=$(readlink "$releases/web" 2>/dev/null || true)
+  manter_web=${manter_web%/www}
   if [ -f "$state/anterior" ] && [ "$(ler_estado "$state/anterior" origem)" != checkout ]; then
     manter_ant=$(ler_estado "$state/anterior" commit)
   fi
@@ -1824,10 +1951,31 @@ limpar_versoes() {
     if ! [[ $nome =~ ^[0-9a-f]{40}(\.tmp)?$ ]]; then
       continue
     fi
-    if [ "$nome" = "$cand_commit" ] || [ "$nome" = "$manter_atual" ] || [ "$nome" = "$manter_ant" ]; then
+    if [ "$nome" = "$cand_commit" ] || [ "$nome" = "$manter_atual" ] || [ "$nome" = "$manter_ant" ] \
+      || [ "$nome" = "$manter_web" ]; then
       continue
     fi
     rm -rf "$p" || log "aviso: não foi possível apagar $p"
+  done
+  # Uma soma que falha deixa todas as cópias: sem ela, a cópia de uma versão
+  # mantida pareceria sobra.
+  for p in "$releases"/*/Caddyfile; do
+    if [ ! -f "$p" ]; then
+      continue
+    fi
+    if ! soma=$(soma_caddyfile "$p"); then
+      log "aviso: as cópias $releases/Caddyfile-* ficam até a próxima limpeza"
+      return 0
+    fi
+    somas="$somas $soma "
+  done
+  for p in "$releases"/Caddyfile-*; do
+    nome=${p##*/Caddyfile-}
+    if ! [[ $nome =~ $hash_re ]]; then
+      continue
+    fi
+    case $somas in *" $nome "*) continue ;; esac
+    rm -f "$p" || log "aviso: não foi possível apagar $p"
   done
 }
 
@@ -1842,11 +1990,11 @@ apagar_imagens_velhas() {
   fi
   for ref in "$state/atual" "$state/anterior"; do
     if [ -f "$ref" ]; then
-      manter="$manter $(ler_estado "$ref" seeder) $(ler_estado "$ref" web) "
+      manter="$manter $(ler_estado "$ref" seeder) $(ler_estado "$ref" web) $(ler_estado "$ref" caddy) "
     fi
   done
-  for ref in "$(ler_estado "$f" seeder)" "$(ler_estado "$f" web)"; do
-    if ! [[ $ref =~ $seeder_ref_re ]] && ! [[ $ref =~ $web_ref_re ]]; then
+  for ref in "$(ler_estado "$f" seeder)" "$(ler_estado "$f" web)" "$(ler_estado "$f" caddy)"; do
+    if ! [[ $ref =~ $seeder_ref_re ]] && ! [[ $ref =~ $web_ref_re ]] && ! [[ $ref =~ $caddy_ref_re ]]; then
       continue
     fi
     case $manter in *" $ref "*) continue ;; esac
@@ -1872,8 +2020,8 @@ concluir() {
   if ! trocar_atual "$cand_dir"; then
     log "aviso: não foi possível apontar $releases/current para $cand_dir"
   fi
-  if ! gravar_estado "$state/atual" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web"; then
-    marcar_intervencao "atualizado para $cand_commit e saudável, mas $state/atual não foi gravado: grave-o à mão (commit=, seq=, seeder=, web=)$depois"
+  if ! gravar_estado "$state/atual" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web" "$cand_caddy"; then
+    marcar_intervencao "atualizado para $cand_commit e saudável, mas $state/atual não foi gravado: grave-o à mão (commit=, seq=, seeder=, web=${cand_caddy:+, caddy=})$depois"
     exit 1
   fi
   apagar_imagens_velhas
@@ -1927,9 +2075,12 @@ aplicar() {
   if [ "$perfil" = full ] && ! garantir_imagem "$cand_web"; then
     exit 1
   fi
+  if [ "$perfil" = full ] && [ -n "$cand_caddy" ] && ! garantir_imagem "$cand_caddy"; then
+    exit 1
+  fi
   if ! etiquetar_rodando seeder varanda-seeder:anterior || ! etiquetar_rodando web varanda-caddy:anterior \
     || ! docker image tag "$cand_seeder" varanda-seeder:atual \
-    || { [ "$perfil" = full ] && ! docker image tag "$cand_web" varanda-caddy:atual; }; then
+    || { [ "$perfil" = full ] && ! docker image tag "${cand_caddy:-$cand_web}" varanda-caddy:atual; }; then
     log 'não foi possível etiquetar as imagens; nada do que roda mudou'
     exit 1
   fi
@@ -1956,7 +2107,7 @@ aplicar() {
     log "não foi possível trocar $segredos/efetivo.env; nada do que roda mudou"
     exit 1
   fi
-  alvo_versao "$cand_dir" "$cand_seeder" "$cand_web"
+  alvo_versao "$cand_dir" "$cand_seeder" "$cand_web" "$cand_caddy"
   log "aplicando $cand_commit (seq $cand_seq)"
   # Cada passo é um comando solto (fora de if, || e &&) para que a falha
   # chegue ao trap.
@@ -1966,7 +2117,17 @@ aplicar() {
   fi
   trap voltar ERR
   trap 'voltar sinal' INT TERM
-  compose_alvo up -d --no-build ${recriacao[@]+"${recriacao[@]}"}
+  if [ "$perfil" = full ] && [ -n "$cand_caddy" ]; then
+    # Primeiro o semeador e o serviço de conta, depois o www e o Caddyfile
+    # trocam por rename, e por fim o web, que o compose só recria se a imagem
+    # do Caddy ou o Caddyfile mudaram (o recriar não vale para ele: o web não
+    # monta o diretório da versão).
+    compose_alvo up -d --no-build ${recriacao[@]+"${recriacao[@]}"} seeder account
+    trocar_web "$cand_dir"
+    compose_alvo up -d --no-build web
+  else
+    compose_alvo up -d --no-build ${recriacao[@]+"${recriacao[@]}"}
+  fi
   verificar_saude
   trap - ERR INT TERM
   concluir
@@ -1985,7 +2146,8 @@ voltar_versao() {
     return 1
   fi
   log "voltando para $r_commit"
-  if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; }; then
+  if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; } \
+    || { [ "$perfil" = full ] && [ -n "$r_caddy" ] && ! garantir_imagem "$r_caddy"; }; then
     marcar_intervencao "as imagens da versão anterior ($r_commit) não estão disponíveis"
     return 1
   fi
@@ -1994,10 +2156,29 @@ voltar_versao() {
     marcar_intervencao "não foi possível restaurar $segredos/efetivo.env da versão anterior ($r_commit)"
     return 1
   fi
-  alvo_versao "$dir" "$r_seeder" "$r_web"
-  if ! compose_alvo up -d --no-build --force-recreate; then
+  alvo_versao "$dir" "$r_seeder" "$r_web" "$r_caddy"
+  if [ "$perfil" = full ] && [ -n "$r_caddy" ]; then
+    # O www e o Caddyfile da anterior voltam por rename; o web volta para a
+    # imagem do Caddy e o Caddyfile dela, e o compose só o recria se um dos
+    # dois mudou.
+    if ! compose_alvo up -d --no-build --force-recreate seeder account; then
+      falhas=$((falhas + 1))
+      log 'volta: compose up falhou'
+    fi
+    if ! trocar_web "$dir"; then
+      falhas=$((falhas + 1))
+      log 'volta: não foi possível apontar o www e o Caddyfile para a versão anterior'
+    elif ! compose_alvo up -d --no-build web; then
+      falhas=$((falhas + 1))
+      log 'volta: compose up do web falhou'
+    fi
+  elif ! compose_alvo up -d --no-build --force-recreate; then
     falhas=$((falhas + 1))
     log 'volta: compose up falhou'
+  else
+    # O web voltou a montar o www da própria versão: o link não segura mais
+    # a versão que falhou.
+    rm -f "$releases/web" || log "aviso: não foi possível apagar $releases/web"
   fi
   if ! verificar_saude; then
     falhas=$((falhas + 1))
@@ -2039,6 +2220,8 @@ voltar_checkout() {
   if ! compose_alvo up -d --no-build --force-recreate; then
     falhas=$((falhas + 1))
     log 'volta: compose up no checkout falhou'
+  else
+    rm -f "$releases/web" || log "aviso: não foi possível apagar $releases/web"
   fi
   if ! verificar_saude; then
     falhas=$((falhas + 1))
@@ -2138,7 +2321,8 @@ subir_instalada() {
     return 1
   fi
   adiar_google=0
-  if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; }; then
+  if ! garantir_imagem "$r_seeder" || { [ "$perfil" = full ] && ! garantir_imagem "$r_web"; } \
+    || { [ "$perfil" = full ] && [ -n "$r_caddy" ] && ! garantir_imagem "$r_caddy"; }; then
     return 1
   fi
   if ! conferir_arvore "$dir" || ! preparar_segredos "$r_seeder" "$dir"; then
@@ -2164,7 +2348,10 @@ subir_instalada() {
     log "não foi possível trocar $segredos/efetivo.env; nada mudou"
     return 1
   fi
-  alvo_versao "$dir" "$r_seeder" "$r_web"
+  alvo_versao "$dir" "$r_seeder" "$r_web" "$r_caddy"
+  if [ "$perfil" = full ] && [ -n "$r_caddy" ] && ! trocar_web "$dir"; then
+    return 1
+  fi
   if ! compose_alvo up -d --no-build "$@"; then
     log 'compose up falhou'
     return 1
@@ -2306,7 +2493,7 @@ cmd_rollback() {
   fi
   case $rc in
     0)
-      if ! gravar_estado "$state/atual" "$r_commit" "$r_seq" "$r_seeder" "$r_web"; then
+      if ! gravar_estado "$state/atual" "$r_commit" "$r_seq" "$r_seeder" "$r_web" "$r_caddy"; then
         marcar_intervencao "voltou para $r_commit, mas $state/atual não foi gravado"
         exit 1
       fi
@@ -2378,7 +2565,7 @@ cmd_compose() {
   if [ ! -d "$releases/current" ]; then
     morrer_cedo 1 "$releases/current não existe"
   fi
-  compose_em "$releases/current" "$r_seeder" "$r_web" "$@"
+  compose_em "$releases/current" "$r_seeder" "$r_web" "$r_caddy" "$@"
 }
 
 instalar_unidades() {
@@ -2521,7 +2708,7 @@ cmd_install() {
     log "não foi possível gravar $segredos/efetivo.env; nada foi iniciado"
     exit 1
   fi
-  if ! gravar_estado "$state/preparada" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web"; then
+  if ! gravar_estado "$state/preparada" "$cand_commit" "$cand_seq" "$cand_seeder" "$cand_web" "$cand_caddy"; then
     log "não foi possível registrar a versão preparada em $cand_dir"
     exit 1
   fi

@@ -77,6 +77,40 @@ export function missingEntry (peeked) {
   return peeked ? { ...peeked } : null
 }
 
+// A profile.read answer with no name, bio or photo at all (the profile record
+// may sit in a part of the diary the node has not downloaded yet, docs/rpc.md
+// 5.21) keeps what a kept verified peek said, name, bio, photo and @nome
+// together. Once the answer has any of the profile fields it is the newest
+// record and its nulls are real (a removed photo or bio), and a null @nome
+// may be a revoked one, so nothing is filled. -> the entry, or the same
+// object when there is nothing to fill.
+export function fillFromPeek (entry, peeked) {
+  if (!peeked || !entry) return entry
+  if (entry.name !== null || entry.bio !== null || entry.avatar) return entry
+  const fill = {}
+  for (const field of ['name', 'bio']) if (peeked[field] !== null) fill[field] = peeked[field]
+  if (peeked.avatar) fill.avatar = peeked.avatar
+  if (entry.username === null && peeked.username !== null) fill.username = peeked.username
+  return Object.keys(fill).length === 0 ? entry : { ...entry, ...fill }
+}
+
+// What a profile.read answer (a non-null entry) leaves: the entry to store and
+// the peek to keep for the next answer (undefined: dropped). The peek stays
+// only while it filled the answer.
+export function settleProfile (entry, peeked) {
+  const filled = fillFromPeek(entry, peeked)
+  return { entry: filled, peek: filled === entry ? undefined : peeked }
+}
+
+// The profile a Página owner just saved or renamed, as a verified entry: the
+// name, bio and photo the service accepted (`base`, the page's known profile,
+// null when unknown) and the @nome (`username`, the new one after a rename,
+// else the one shown). null when the name is not known.
+export function keptProfile (base, username) {
+  if (!base || typeof base.name !== 'string' || base.name === '') return null
+  return { name: base.name, bio: base.bio, avatar: base.avatar, username: typeof username === 'string' && username !== '' ? username : null }
+}
+
 // Whether a verified peek may replace `known`: a profile.read answer wins, a seed does not.
 export function peekReplaces (known, had, unsupported) {
   if (had || known === null) return true

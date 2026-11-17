@@ -28,8 +28,12 @@
 // with an EMPTY inventory and no announce, the seeder's hello verified
 // before anything is replicated, then on the SAME protomux: the writer
 // cores, the replica Corestore <dir>/pages-replicas (at most MAX_REPLICAS
-// cores, the least recently used purged) and the groups channel that lists
-// a group's writers. It reconnects with a 1 s .. 60 s backoff.
+// cores, the least recently used purged; emptied at every start, and a
+// blocked key's replica, or a writer whose listing or signed header names
+// a blocked diary, purged once nobody holds it; a blocked key, or a writer
+// listed under a blocked diary, is not opened again) and
+// the groups channel that lists a group's writers. It reconnects with a
+// 1 s .. 60 s backoff.
 //
 // The fold is buildCommunity / buildGroup over the root, the listed writers
 // whose header names the group, the page's own writers and every binding
@@ -45,12 +49,14 @@ const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const Corestore = require('corestore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecord, readAll, readBlocks, openReplica, purgeReplica } = require('@varanda/core/lib/store')
+const storeLib = require('@varanda/core/lib/store')
+const { writeJsonAtomic, appendRecord, readAll, readBlocks, readHeldBlocks, openReplica } = storeLib
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { groupJoinRecord, latestProfile, validateRecord, MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
+const { advertisedHeld } = require('@varanda/core/lib/sparse-held')
 const { latestUsername } = require('@varanda/core/lib/username')
 const groups = require('@varanda/core/lib/group')
 const { keyTag, keyCommit, wipe } = require('@varanda/core/lib/group-crypto')
@@ -67,6 +73,9 @@ const NOISE_FILE = 'noise-key.json'
 const MAX_REPLICAS = 1024
 const MAX_WRITER_PAGES = Math.ceil(groups.MAX_GROUP_WRITERS / GROUPS_LIMIT_MAX)
 const FETCH_TIMEOUT_MS = 10000
+// A listed writer held past the seeder's prefix is checked this often for
+// the blocks the seeder advertises (core sparse-held.js).
+const SPARSE_POLL_MS = 50
 const BACKOFF_MIN_MS = 1000
 const BACKOFF_MAX_MS = 60000
 const HANDSHAKE_TIMEOUT_MS = 10000
@@ -155,7 +164,9 @@ const isLeave = (e) => e.record !== null && typeof e.record === 'object' && e.re
 // writer: a pages-writer; pagesStore: the page ACL; keys: page-keys;
 // blocklist: { has(key) } or null; revokedIssuers: () => Set | Array.
 // maxWritersPerGroup and maxGroups only lower the protocol caps (tests).
-function createPagesGroups ({ dir, writer, pagesStore, keys, association, blocklist = null, revokedIssuers = null, seederWs = null, log = noop, guard = () => true, fetchTimeoutMs = FETCH_TIMEOUT_MS, maxReplicas = MAX_REPLICAS, maxWritersPerGroup = groups.MAX_GROUP_WRITERS_PER_DIARY, maxGroups = groups.MAX_GROUPS_PER_DIARY } = {}) {
+// clearReplicas false keeps the replica cache of an earlier run (tests that
+// fold offline from a cache they seeded).
+function createPagesGroups ({ dir, writer, pagesStore, keys, association, blocklist = null, revokedIssuers = null, seederWs = null, log = noop, guard = () => true, fetchTimeoutMs = FETCH_TIMEOUT_MS, maxReplicas = MAX_REPLICAS, maxWritersPerGroup = groups.MAX_GROUP_WRITERS_PER_DIARY, maxGroups = groups.MAX_GROUPS_PER_DIARY, clearReplicas = true } = {}) {
   if (typeof dir !== 'string' || dir === '') throw new TypeError('dir must be a path')
   if (!writer || typeof writer.append !== 'function') throw new TypeError('writer must be a pages writer')
   if (!pagesStore || typeof pagesStore.setWriters !== 'function') throw new TypeError('pagesStore must be a pages store')
@@ -175,6 +186,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   const replicas = new Map() // key -> { core, refs }, in use order
   const openingReplicas = new Map() // key -> pending open
   const purging = new Map() // key -> pending close and purge
+  // Blocked keys whose purge failed: their blocks are still on disk, so every
+  // purgeBlocked pass tries again until one works.
+  const failedPurges = new Set()
   let store = null
   let conn = null
   let closed = false
@@ -202,17 +216,22 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     refuse,
     groupBoxPublic,
     writersOf,
+    purgeBlocked,
     connected: () => conn !== null && conn.ready,
     fail: () => { failed = true },
     close
   }
 
-  function check () {
-    let ok = false
+  function guardOk () {
     try {
-      ok = !failed && guard() === true
-    } catch {}
-    if (!ok) throw fail('indisponivel')
+      return !failed && guard() === true
+    } catch {
+      return false
+    }
+  }
+
+  function check () {
+    if (!guardOk()) throw fail('indisponivel')
   }
 
   function note (event, extra = {}) {
@@ -235,7 +254,13 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   async function open () {
     refuseSymlinkDir(groupsDir)
     fs.mkdirSync(groupsDir, { recursive: true, mode: 0o700 })
-    store = new Corestore(path.join(dir, REPLICAS_DIR))
+    const replicasDir = path.join(dir, REPLICAS_DIR)
+    // A cache of other members' cores and nothing else: no named core, the
+    // noise pair lives in groupsDir and writer cores are standalone, so its
+    // primary key backs nothing. Cores left by an earlier run (the LRU
+    // purge lives in memory) and replicas of keys blocked since go with it.
+    if (clearReplicas && guardOk()) fs.rmSync(replicasDir, { recursive: true, force: true })
+    store = new Corestore(replicasDir)
     await store.ready()
     await dropLegacyGroupBoxes()
     if (url !== null && !closed) {
@@ -558,14 +583,20 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   // ---- replicas -------------------------------------------------------
 
   // A replica held by the caller until release(key): opened once per key
-  // (concurrent callers share the open), never evicted while held.
-  async function hold (key) {
+  // (concurrent callers share the open), never evicted while held. A
+  // blocked key is never opened again. `diary` is the diary a writer core
+  // was listed for: the blocklist names diaries, so a blocked member's
+  // writer replicas go with the diary. Once the writer's signed header is
+  // read (partsHeld), the entry keeps the header's diary instead.
+  async function hold (key, diary = null) {
     for (;;) {
       if (closed) throw fail('fechado')
+      if (isBlocked(key) || (diary !== null && isBlocked(diary))) throw fail('nao-encontrada')
       const entry = replicas.get(key)
       if (entry !== undefined) {
         replicas.delete(key)
         replicas.set(key, entry)
+        if (entry.diary === null) entry.diary = diary
         entry.refs++
         return entry.core
       }
@@ -575,7 +606,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
         continue
       }
       const opened = openReplica(store, key).then((core) => {
-        replicas.set(key, { core, refs: 0 })
+        replicas.set(key, { core, refs: 0, diary: null })
       }).finally(() => openingReplicas.delete(key))
       openingReplicas.set(key, opened)
       await opened
@@ -585,7 +616,33 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
   function release (key) {
     const entry = replicas.get(key)
     if (entry !== undefined && entry.refs > 0) entry.refs--
+    if (entry !== undefined && entry.refs === 0 && replicaBlocked(key, entry)) drop(key, entry, true)
     evict()
+  }
+
+  function replicaBlocked (key, entry) {
+    return isBlocked(key) || (entry.diary !== null && isBlocked(entry.diary))
+  }
+
+  // -> a promise of whether the purge worked; it never rejects.
+  function drop (key, entry, blocked = false) {
+    replicas.delete(key)
+    return purge(key, entry.core.close().catch(noop), blocked)
+  }
+
+  function purge (key, before, blocked) {
+    const done = before
+      .then(() => storeLib.purgeReplica(store, key))
+      .then(() => {
+        failedPurges.delete(key)
+        return true
+      }, () => {
+        if (blocked) failedPurges.add(key)
+        return false
+      })
+      .finally(() => purging.delete(key))
+    purging.set(key, done)
+    return done
   }
 
   // The least recently used replicas nobody holds, past the cap.
@@ -594,26 +651,59 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     for (const [key, entry] of [...replicas]) {
       if (replicas.size <= cap) break
       if (entry.refs > 0) continue
-      replicas.delete(key)
-      const done = entry.core.close().catch(noop)
-        .then(() => purgeReplica(store, key)).catch(noop)
-        .finally(() => purging.delete(key))
-      purging.set(key, done)
+      drop(key, entry)
     }
+  }
+
+  // The replicas of keys (or of a writer's diary, listed or signed) blocked
+  // since they were opened, nobody holding them (a held one goes at its
+  // release). The deletion sweep calls it at every pass, so no timer of its
+  // own. A failed purge is retried at the next pass, needing no open entry.
+  // -> the number purged.
+  async function purgeBlocked () {
+    const done = []
+    for (const key of [...failedPurges]) {
+      if (replicas.has(key) || openingReplicas.has(key) || purging.has(key)) continue
+      done.push(purge(key, Promise.resolve(), true))
+    }
+    for (const [key, entry] of [...replicas]) {
+      if (entry.refs === 0 && replicaBlocked(key, entry)) done.push(drop(key, entry, true))
+    }
+    const purged = (await Promise.all(done)).filter(Boolean).length
+    if (purged < done.length) note('purge-failed', { count: done.length - purged })
+    return purged
   }
 
   // The core at the length the seeder offers, held (release it), or null
   // when nothing arrived in time. `complete` is false while a block up to
-  // min(length, MAX_LOG_BLOCKS) is missing.
-  async function fetch (key, held) {
-    const core = await hold(key)
+  // min(length, MAX_LOG_BLOCKS) is missing, or for a `sparse` core (a listed
+  // writer, which a seeder keeps sparse once its diary cut it, #350) while
+  // a block the seeder advertises below that is missing.
+  async function fetch (key, held, sparse = false, diary = null) {
+    const core = await hold(key, diary)
     held.push(key)
     await timeout(core.update({ wait: true }).catch(noop), fetchTimeoutMs)
     if (core.length === 0) return null
     const end = Math.min(core.length, MAX_LOG_BLOCKS)
-    await timeout(core.download({ start: 0, end }).done().catch(noop), fetchTimeoutMs)
+    const range = core.download({ start: 0, end }).done().catch(noop)
+    if (!sparse) {
+      await timeout(range, fetchTimeoutMs)
+      if (core.contiguousLength === 0) return null
+      return { core, complete: core.contiguousLength >= end }
+    }
+    // The range never completes past a seeder's hole: it ends once every
+    // block the seeder advertises is here.
+    const deadline = Date.now() + fetchTimeoutMs
+    let done = false
+    range.then(() => { done = true })
+    let complete = false
+    for (;;) {
+      complete = core.contiguousLength >= end || (core.contiguousLength > 0 && await advertisedHeld(core, end))
+      if (complete || done || closed || Date.now() >= deadline) break
+      await timeout(range, Math.min(SPARSE_POLL_MS, Math.max(0, deadline - Date.now())))
+    }
     if (core.contiguousLength === 0) return null
-    return { core, complete: core.contiguousLength >= end }
+    return { core, complete }
   }
 
   function localWriter (key) {
@@ -699,7 +789,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       // replica of the same key would never get a channel, so read it here.
       let got = localWriter(it.key)
       try {
-        if (got === null) got = await fetch(it.key, held)
+        if (got === null) got = await fetch(it.key, held, true, it.diary)
       } catch {
         incomplete = true
         continue
@@ -711,9 +801,15 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       if (!got.complete) incomplete = true
       const core = got.core
       if (core.fork !== 0) continue
-      const entries = await readBlocks(core)
+      // A seeder keeps a cut writer sparse (#350): past its first hole, its
+      // leaves and key blocks.
+      const entries = await readHeldBlocks(core)
       const h = entries[0] && entries[0].record
       if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
+      // The signed header, not the seeder's listing, names the diary whose
+      // block takes this replica with it.
+      const entry = replicas.get(it.key)
+      if (entry !== undefined) entry.diary = h.diary
       logs.push({ key: it.key, diary: h.diary, entries, length: core.contiguousLength, signed: core.length })
     }
     const profiles = new Map()
