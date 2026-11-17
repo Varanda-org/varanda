@@ -78,6 +78,7 @@ Confira cada tela nas plataformas do ciclo:
   - Faixa de lembrete: aparece nas 24 horas antes do início, com o título, "começa em N min" ou "começa em N horas" e o botão de dispensar; sem notificação do sistema, e o texto avisa que o lembrete só vale com o app aberto.
   - Agenda (comunidade): os eventos dos grupos públicos da comunidade, por data, com o estado vazio; grupo privado sem a opção de evento.
 - Visitas, só no nó hospedado (Ajustes › Visitas: interruptor, folha de consentimento que abre desligada, lista de visitantes agrupada por dia, estado vazio, aviso de mensagens privadas desativadas ao ligar e aviso de limite diário). Claro e escuro, 375x812 e 1280x800, com texto grande, alvos de 44 pt, sem emoji decorativo; sem contagem de visualizações.
+- Varandinha, só no nó hospedado (entrada em Ajustes abaixo de Visitas, no Diário e no perfil de um membro; tela da varanda com vasos, plantar, regar e colher; Varandas da rua; lista "Quem regou", com nomes só na própria varanda; na varanda de outra pessoa, só a contagem de vizinhos que regaram; estado vazio e estado desligado; Regar some depois da rega do dia, e o nó recusa uma segunda). Claro e escuro, 375x812 e 1280x800, com texto grande, movimento reduzido, alvos de 44 pt, sem emoji decorativo; sem ranking, pontuação nem prêmio.
 
 ## Critério de revisão
 

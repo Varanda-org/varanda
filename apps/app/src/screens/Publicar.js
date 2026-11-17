@@ -69,6 +69,7 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
 import { actAs, pagesList, pagesMedia, pagesOrigin, pagesStart } from '../pages'
+import { pagePostOp, prepPageVideo } from '../pagePost'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
@@ -79,7 +80,7 @@ import { ringState } from '../composeRing'
 import { composeStatus } from '../composeStatus'
 import { countAfterInsert, insertAt } from '../emoji'
 import { MAX_MEDIA_PER_POST, durationLabel } from '../media/plan'
-import { validDescriptor } from '../media/fetch'
+import { validDescriptor, validVideoDescriptor } from '../media/fetch'
 import { pickImages, pickVideo } from '../media/attach'
 import { prepareVideo } from '../media/videoPrep'
 import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
@@ -107,7 +108,7 @@ import { MusicPicker } from '../ui/MusicPicker'
 import { useMusicAvailable } from '../ui/MusicPlayerCard'
 import { MusicSticker } from '../ui/MusicSticker'
 import { withPreview } from '../attach-plan'
-import { previewRefusal, refusalOf } from '../wordCheck'
+import { findTerm, previewRefusal, refusalOf } from '../wordCheck'
 import { editorInit, editorPoll } from '../polls'
 import { PollEditor } from '../ui/PollEditor'
 import { EventEditor, eventEditorEvent, eventEditorInit, eventEditorTexts } from '../ui/EventEditor'
@@ -805,8 +806,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const [mode, setMode] = useState('post')
   const momentMode = momentOn && mode === 'moment'
   const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode })
-  const video = useVideoDraft({ active: open === true && !momentMode && asPage === null })
-  const canVideo = canComposeVideo({ node, asPage, pickVideo, prepareVideo })
+  const video = useVideoDraft({ active: open === true && !momentMode })
+  const canVideo = canComposeVideo({ node, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
   // post is published, and that must not reopen the composer in Momento.
   const lastMomentRequest = useRef(momentRequest)
@@ -865,6 +866,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (!open) closesRef.current++
   }, [open])
   const asPageRef = useRef(asPage)
+  // What a page already uploaded for its video draft: { page, file, poster,
+  // video, retry }. poster always; video once the pair is up; retry for a
+  // video upload whose outcome was unknown. Reused only on an explicit tap,
+  // for the same page and file.
+  const pagePosterRef = useRef(null)
+  // The page card built for { page, url, thumb }: a new tap reuses it, so its
+  // thumbnail is never uploaded twice.
+  const pageCardRef = useRef(null)
   asPageRef.current = asPage
   const canAttach = typeof pickImages === 'function' && (media !== null || asPage !== null)
   const { request: nodeRequest, hosted: nodeHosted } = node
@@ -908,11 +917,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // being sent or waiting for its retry keeps its photos: they are in the
   // signed bytes.
   useEffect(() => {
-    if (asPage !== null) setMusicDraft(null)
     if (pageRetryRef.current !== null || pageSendingRef.current) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
     video.draft.clear()
+    pagePosterRef.current = null
   }, [asPage, video.draft])
   // Drops the post waiting for its retry and unlocks the draft. Its photos
   // stay only for the page they were uploaded for.
@@ -924,6 +933,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (pending.page !== asPage) {
       genRef.current++
       removeItems(Array.from(liveRef.current))
+      video.draft.clear()
+      pagePosterRef.current = null
     }
   }
 
@@ -945,7 +956,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Quotes are never queued: offline they wait for the network.
   const offlineQueue = canQueue && asPage === null && node.online === false && !quote
   const quoteOffline = !!quote && node.online === false
-  // The draft link card (not as a page: its posts are signed statements).
+  // The draft link card (a page's card is uploaded as one of its items).
   // cardRef keeps the card a Publicar already built from a snapshot, so a
   // new press after a failure never uploads its thumbnail again.
   // linkHold: the text a share left in the field while its link waits for
@@ -989,9 +1000,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const musicResolveOn = musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())
   const musicResolveTarget = resolveTarget(text, musicTried.current)
   // Wait for the music policy before allowing an Audius page fetch on the device.
-  const linkDraft = useLinkDraft({ text, enabled: open === true && asPage === null && !shareLinkHeld && pollDraft === null && eventDraft === null && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
+  const linkDraft = useLinkDraft({ text, enabled: open === true && !shareLinkHeld && pollDraft === null && eventDraft === null && !musicDraft && !(musicAvailable !== false && isAudiusLink(previewTarget(text))), photos: hasMedia, member: self.publicKey, fallback: fallbackCard })
   useEffect(() => {
-    if (!open || momentMode || asPage !== null || hasMedia || musicDraft || busy || frozen || musicPickerOpen || shareLinkHeld || !musicResolveOn) return undefined
+    if (!open || momentMode || hasMedia || musicDraft || busy || frozen || musicPickerOpen || shareLinkHeld || !musicResolveOn) return undefined
     const url = musicResolveTarget
     if (url === null) return undefined
     const controller = new AbortController()
@@ -1013,12 +1024,12 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       clearTimeout(timer)
       controller.abort()
     }
-  }, [musicResolveTarget, open, momentMode, asPage, hasMedia, musicDraft, busy, frozen, musicPickerOpen, shareLinkHeld, musicResolveOn, member, musicOrigin, nodeRequest])
+  }, [musicResolveTarget, open, momentMode, hasMedia, musicDraft, busy, frozen, musicPickerOpen, shareLinkHeld, musicResolveOn, member, musicOrigin, nodeRequest])
   useEffect(() => {
-    if (!open || momentMode || asPage !== null) setMusicPickerOpen(false)
-  }, [open, momentMode, asPage])
+    if (!open || momentMode) setMusicPickerOpen(false)
+  }, [open, momentMode])
   const pickMusic = (draft) => {
-    if (busy || frozen || asPage !== null) return
+    if (busy || frozen) return
     if (liveRef.current.size > 0) { setNote(MUSIC_PHOTOS_TEXT); return }
     if (video.draft.state.phase !== 'empty') { setNote(MUSIC_VIDEO_TEXT); return }
     if (musicSnapshot(draft) === null) return
@@ -1093,14 +1104,19 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // bytes to the service. -> the descriptor.
   const uploadForPage = async (page, item) => {
     if (typeof item.retry === 'function') return (await item.retry()).descriptor
-    const { encoded } = item
+    return (await uploadBytesForPage(page, item.encoded)).descriptor
+  }
+
+  // One signed page media upload: a still image, or a video with its `ms`.
+  // -> the service's answer ({ descriptor }). Never retried here.
+  const uploadBytesForPage = async (page, encoded) => {
     const member = await memberKeyOf(nodeRequest, nodeRef.current)
     const origin = pagesOrigin(nodeRef.current)
     const { nonce } = await pagesStart({ member, action: 'media', page, origin })
     const op = { sha256: hexOf(sha256(encoded.bytes)), mime: encoded.mime, width: encoded.width, height: encoded.height, bytes: encoded.bytes.byteLength }
+    if (encoded.ms !== undefined) op.ms = encoded.ms
     const signed = await nodeRequest('page.sign', { action: 'media', nonce, page, op })
-    const res = await pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: encoded.bytes, origin })
-    return res.descriptor
+    return pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: encoded.bytes, origin })
   }
 
   // Uploads, on Publicar only, the items that have no descriptor yet, one at
@@ -1502,6 +1518,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (openRef.current && asPageRef.current === page) return
     genRef.current++
     removeItems(Array.from(liveRef.current))
+    video.draft.clear()
+    pagePosterRef.current = null
   }
 
   const sendAsPage = async () => {
@@ -1512,6 +1530,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       if (pageRetryRef.current !== pending) return
       if (r.ok) {
         setPageRetry(null)
+        pagePosterRef.current = null
         published(pending.sent, pending.reply, pending.ids, pending.quote)
       } else if (!r.uncertain) {
         // Refused for sure: nothing was published, the draft is free again.
@@ -1527,22 +1546,73 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (sentQuote && countChars(sent) < 1) return
     setPageSending(true)
     try {
-      await sendNewAsPage(page, sent, sentReply, sentQuote)
+      await sendNewAsPage(page, sent, sentReply, sentQuote, musicDraft)
     } finally {
       setPageSending(false)
     }
     settledAsPage(page)
   }
 
-  const sendNewAsPage = async (page, sent, sentReply, sentQuote) => {
-    const sentIds = items.map((item) => item.id)
+  // The [poster, video] pair for a page post. What an earlier tap already
+  // uploaded for this same page and file is reused: the pair, the poster, or
+  // the signed video upload whose outcome was unknown (resent only now, on
+  // this explicit tap). -> the pair, or null when it stopped (error shown).
+  const pageVideoMedia = async (page, videoFile) => {
+    const gen = genRef.current
+    const stale = () => gen !== genRef.current || video.draft.state.file !== videoFile
+    const kept0 = pagePosterRef.current
+    const kept = kept0 !== null && kept0.page === page && kept0.file === videoFile ? kept0 : null
+    if (kept !== null && kept.video) return [kept.poster, kept.video]
+    try {
+      let pair
+      if (kept !== null && typeof kept.retry === 'function') {
+        const answer = await kept.retry()
+        const d = answer && typeof answer === 'object' ? answer.descriptor : undefined
+        if (!validVideoDescriptor(d)) throw Object.assign(new Error('Resposta inválida ao enviar o vídeo.'), { uncertain: true, poster: kept.poster })
+        pair = [kept.poster, d]
+      } else {
+        pair = await prepPageVideo({ upload: (f) => uploadBytesForPage(page, f), file: videoFile, poster: kept !== null ? kept.poster : null })
+      }
+      if (stale()) return null
+      pagePosterRef.current = { page, file: videoFile, poster: pair[0], video: pair[1] }
+      return pair
+    } catch (err) {
+      if (stale()) return null
+      const poster = err && err.poster ? err.poster : kept !== null ? kept.poster : null
+      // A kept retry that failed again is dropped: the next tap uploads the
+      // video anew (with the kept poster), never a loop of resends.
+      const resent = kept !== null && typeof kept.retry === 'function'
+      const retry = !resent && err && err.uncertain === true && typeof err.retry === 'function' ? err.retry : null
+      pagePosterRef.current = poster !== null ? { page, file: videoFile, poster, video: null, retry } : null
+      setCheckError(mediaComposeError(err) || errorText(err))
+      return null
+    }
+  }
+
+  // The first listed term in a card's title or description, or null.
+  const findPreviewTerm = (view) => {
+    for (const t of [view.title, view.desc]) {
+      const term = typeof t === 'string' ? findTerm(t) : null
+      if (term !== null) return term
+    }
+    return null
+  }
+
+  const sendNewAsPage = async (page, sent, sentReply, sentQuote, sentMusic) => {
+    const videoFile = hasVideo ? video.draft.state.file : null
+    const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
     let sentMedia = null
     if (hasMedia) {
-      if (!mediaReady || !mediaOnline) return
+      if (!mediaReady || !mediaOnline || (hasVideo && (!canVideo || video.draft.state.phase !== 'ready'))) return
       uploadingRef.current = true
       setUploading(true)
       try {
-        sentMedia = await uploadAll(items, page)
+        if (hasVideo) {
+          sentMedia = await pageVideoMedia(page, videoFile)
+          if (sentMedia === null) return
+        } else {
+          sentMedia = await uploadAll(items, page)
+        }
       } finally {
         uploadingRef.current = false
         setUploading(false)
@@ -1550,10 +1620,55 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       if (sentMedia === null) return
     }
     const kind = sentQuote ? 'quote' : sentReply ? 'reply' : 'post'
-    const op = { text: sent }
-    if (sentQuote) op.to = sentQuote.ref
-    else if (sentReply) op.to = sentReply.ref
-    if (sentMedia !== null) op.media = sentMedia
+    const pageMethod = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
+    const to = sentQuote ? sentQuote.ref : sentReply ? sentReply.ref : null
+    // The same link or music card a person's post carries; its thumbnail is
+    // uploaded as one of the page's items.
+    let card = null
+    const snapshot = sentMedia === null ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
+    // A music title comes from the provider: refused before any signature.
+    const musicRefused = sentMusic !== null && snapshot !== null ? findPreviewTerm(snapshot) : null
+    if (musicRefused !== null) {
+      setCheckError('Não dá para publicar como Página: "' + musicRefused + '" aparece no título ou no artista da música, e o Varanda não permite esse termo em conteúdo público. Escolha outra música e tente de novo.')
+      return
+    }
+    const thumbKey = snapshot && snapshot.thumb ? snapshot.thumb.bytes : null
+    const cached = pageCardRef.current
+    if (snapshot !== null && cached !== null && cached.page === page && cached.url === snapshot.url && cached.thumb === thumbKey) {
+      card = cached.card
+    } else if (snapshot !== null) {
+      const gen = genRef.current
+      const upload = async (t) => {
+        const d = (await uploadBytesForPage(page, { bytes: t.bytes, mime: t.mime, width: t.width, height: t.height })).descriptor
+        if (!validDescriptor(d) || d.mime !== t.mime) throw new Error('resposta inválida')
+        return d
+      }
+      uploadingRef.current = true
+      setUploading(true)
+      try {
+        card = await cardForSend(snapshot, { upload })
+      } finally {
+        uploadingRef.current = false
+        setUploading(false)
+      }
+      if (gen !== genRef.current) return
+      pageCardRef.current = { page, url: snapshot.url, thumb: thumbKey, card }
+    }
+    let built
+    try {
+      built = withCardFallback((c) => {
+        const checked = c ? withPreview(pageMethod, to !== null ? { to, text: sent } : { text: sent }, c) : null
+        return pagePostOp({ text: sent, media: sentMedia, preview: checked !== null ? checked.preview : null })
+      }, card)
+    } catch (err) {
+      setCheckError(errorText(err))
+      return
+    }
+    if (sentMusic !== null && built.card === null) {
+      setCheckError('A música não coube: encurte o texto')
+      return
+    }
+    const op = to !== null ? { ...built.op, to } : built.op
     let raw = null
     const r = await action.run(async () => {
       try {
@@ -1563,7 +1678,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         throw err
       }
     })
-    if (r.ok) return published(sent, sentReply, sentIds, sentQuote)
+    if (r.ok) {
+      pagePosterRef.current = null
+      return published(sent, sentReply, sentIds, sentQuote)
+    }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
       setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds })
     }
@@ -1618,7 +1736,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     const sentMusic = musicDraft
     if (sentMusic !== null) {
-      const blocked = musicBlocks({ hasMedia, hasVideo, asPage, online: node.online, textLength: len })
+      const blocked = musicBlocks({ hasMedia, hasVideo, online: node.online, textLength: len })
       if (blocked !== '') { setCheckError(blocked); return }
     }
     // Never a new signature while a signed post waits for its retry.
@@ -1814,6 +1932,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     genRef.current++
     removeItems(Array.from(liveRef.current))
     video.draft.clear()
+    pagePosterRef.current = null
     setMusicDraft(null)
     musicTried.current.clear()
     setText('')
@@ -2178,7 +2297,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               />
             </View>
           </View>
-          <VideoDraft video={video} disabled={held} onRemove={() => { video.draft.clear(); setNote('') }} />
+          <VideoDraft video={video} sending={uploading && asPage !== null} disabled={held} onRemove={() => { video.draft.clear(); pagePosterRef.current = null; setNote('') }} />
           {hasMedia && items.length > 0
             ? (
               <View style={styles.thumbs}>
@@ -2200,7 +2319,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               )
             : hasMedia || musicDraft !== null
               ? null
-              : shareLinkHeld && open === true && asPage === null && previewsEnabled(previewPrefStore())
+              : shareLinkHeld && open === true && previewsEnabled(previewPrefStore())
                 ? (
                   <Pressable
                     accessibilityRole='button'
@@ -2305,7 +2424,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   </Pressable>
                   )
                 : null}
-              {musicAvailable === true && asPage === null && pollDraft === null && eventDraft === null
+              {musicAvailable === true && pollDraft === null && eventDraft === null
                 ? (
                   <Pressable
                     accessibilityRole='button'
@@ -2331,7 +2450,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             </View>
           </View>
           <MusicPicker
-            open={open === true && !momentMode && asPage === null && musicAvailable === true && musicPickerOpen && !held}
+            open={open === true && !momentMode && musicAvailable === true && musicPickerOpen && !held}
             onClose={() => setMusicPickerOpen(false)}
             onPick={pickMusic}
             initial={musicDraft}

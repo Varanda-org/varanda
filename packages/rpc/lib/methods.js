@@ -12,6 +12,7 @@ const { isReaction } = require('./reaction')
 const PX = require('./profile-extra')
 const { isPoll, isPick } = require('./poll')
 const { isEvent, copyEvent } = require('./event')
+const garden = require('./garden')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -1617,6 +1618,15 @@ const SPECS = {
   'visits.list': { fields: none },
   'visits.clear': { fields: none, mutating: true },
   'visits.note': { fields: { key: req(isKey) }, mutating: true },
+  // Varandinha, browser node only (docs/rpc.md 5.157 to 5.160). garden.set
+  // turns the caller's own game on or off; garden.state reads it; garden.play
+  // applies one batch of acts as one save; garden.help waters pot `pot` of
+  // the balcony of `to`, a diary key. No date parameter: the node sets every
+  // `at` from its own clock.
+  'garden.set': { fields: { on: req(isBool) }, mutating: true },
+  'garden.state': { fields: none },
+  'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
+  'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
   // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
   // a page record and appends nothing; the node fills in member, actor and
   // association, so a caller never chooses the bytes. The exact op of each
