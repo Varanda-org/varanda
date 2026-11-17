@@ -294,5 +294,24 @@ test('Grupo wires the page community path and the neutral name', (t) => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
   t.ok(src.includes('pageCommunityToEnter({ error: pageJoinError, communityKey })'))
   t.ok(src.includes('onOpenCommunity(pageEnterCommunity, { group })'), 'the page opens the community like a person')
-  t.ok(src.includes('groupNameText({ info, page: asPage.page, visibility: pageVis })'))
+  t.ok(src.includes('groupNameText({ info, page: asPage.page, visibility: pageSeen })'))
+})
+
+test('a page outside a private group it holds no key for still sees it named private', async (t) => {
+  const { groupNameText, pagePostVisibility, PRIVATE_LABEL } = await import('../src/groups.js')
+  t.is(pagePostVisibility({ visibility: 'private', noKey: true }), null, 'posting stays unknown without the key')
+  t.is(groupNameText({ info: null, page: true, visibility: 'private' }), PRIVATE_LABEL)
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  t.ok(src.includes('visibility: pageSeen'), 'the title uses the raw verified read, not the posting visibility')
+  t.ok(src.includes('setPageSeen(seen)'))
+})
+
+test('a page that joined its community clears the stale refusal and the queued group opens from its join', (t) => {
+  const grupo = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  const comu = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidade.js'), 'utf8')
+  t.ok(/if \(pageRole !== 'member' && pageRole !== 'requested'\) return\s+setPageJoinError\(null\)/.test(grupo), 'member or requested clears the refusal')
+  t.ok(grupo.includes('if (asPage.page && was === false && isTop === true) loadRef.current()'), 'reload when the group is on top again')
+  t.ok(/setPageError\(''\)\n\s+setPageJoinError\(null\)\n\s+setPageRetry\(null\)\n\s+setSealAgain/.test(grupo), 'switching identity clears the join refusal')
+  t.ok(comu.includes("pageRoleOf(answer) === 'member' && typeof onJoined === 'function') onJoined()"))
+  t.ok(comu.includes('onJoined={openQueued}'))
 })

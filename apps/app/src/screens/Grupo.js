@@ -223,6 +223,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // the node answers), and why it has not answered yet.
   const pageVisRef = useRef({ id: null, value: null })
   const [pageVis, setPageVis] = useState(null)
+  // The node's verified header read as it came, kept for the title: pageVis is null for a private group whose key this device lacks.
+  const [pageSeen, setPageSeen] = useState(null)
   const [pageVisNote, setPageVisNote] = useState('')
   // The text of a sealed post the service refused as 'sequencia': sealed
   // again only on the person's tap.
@@ -358,6 +360,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const visibility = pagePostVisibility({ visibility: seen, noKey })
     pageVisRef.current = { id, value: visibility }
     setPageVis(visibility)
+    setPageSeen(seen)
     let note = ''
     if (visibility === null) note = seen === 'private' ? PAGE_NO_KEY_TEXT : (nodeError ? pageGroupErrorText(nodeError) : PAGE_GROUP_LOADING_TEXT)
     setPageVisNote(note)
@@ -565,10 +568,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setStore(EMPTY_PAGES)
     setPageRole(null)
     setPageError('')
+    setPageJoinError(null)
     setPageRetry(null)
     setSealAgain(null)
     pageVisRef.current = { id: null, value: null }
     setPageVis(null)
+    setPageSeen(null)
     setPageVisNote('')
     setLoadError('')
     setLoadedAt(null)
@@ -705,6 +710,19 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       setPagePending(false)
     }
   }
+
+  // Back from the community after the page joined it: the refusal is stale.
+  useEffect(() => {
+    if (pageRole !== 'member' && pageRole !== 'requested') return
+    setPageJoinError(null)
+    setPageError('')
+  }, [pageRole])
+  const wasTop = useRef(isTop)
+  useEffect(() => {
+    const was = wasTop.current
+    wasTop.current = isTop
+    if (asPage.page && was === false && isTop === true) loadRef.current()
+  }, [isTop, asPage.page])
 
   // Join or leave as the page; same rule as pageSend.
   const pageMembership = async (fn) => {
@@ -1262,7 +1280,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, markSeen])
   olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
-  const nameText = groupNameText({ info, page: asPage.page, visibility: pageVis })
+  const nameText = groupNameText({ info, page: asPage.page, visibility: pageSeen })
   const subtitle = info ? membersLabel(info.members) || visibilityLabel(info.visibility) : ''
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
   const communityKey = heldCommunity || indexCommunity
