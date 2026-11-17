@@ -1146,6 +1146,7 @@ async function purgeGroupCore (storage, hex) {
   await storage.deleteCore(groupName(hex))
   await unregisterGroupCore(storage, hex)
   await removeBoundRoot(storage, hex)
+  await removeHeaderStub(storage, hex)
 }
 
 // kv boundRoots = { v: 1, keys: [rootHex...] }: the group roots whose gate
@@ -1176,6 +1177,48 @@ function removeBoundRoot (storage, hex) {
     const keys = await readBoundRoots(storage)
     if (!keys.includes(key)) return
     await storage.writeJson('boundRoots', { v: 1, keys: keys.filter((k) => k !== key) })
+  })
+}
+
+// kv headerStubs = { v: 1, stubs: [{ key, group, diary }] }: the header
+// stubs this device fetched (#350), each a core held for block 0 alone
+// under (group, diary), the hinted diary whose join of it was proven,
+// because its block 0 can never count for that diary. Newest last, at most
+// MAX_HEADER_STUBS: a restart keeps one only while the stored binding diary
+// still holds that join, and its cap slot stays under that pair, never
+// under the one its header names. Removed with the core. An unreadable
+// entry, or a malformed stub, reads as none.
+const MAX_HEADER_STUBS = 256
+
+async function readHeaderStubs (storage) {
+  const data = await readKv(storage, 'headerStubs')
+  if (!isVersioned(data) || !Array.isArray(data.stubs)) return []
+  const out = new Map()
+  for (const x of data.stubs) {
+    if (x === null || typeof x !== 'object' || ![x.key, x.group, x.diary].every(isHex64)) continue
+    const key = x.key.toLowerCase()
+    out.delete(key)
+    out.set(key, { key, group: x.group.toLowerCase(), diary: x.diary.toLowerCase() })
+  }
+  return [...out.values()].slice(-MAX_HEADER_STUBS)
+}
+
+function addHeaderStub (storage, stub) {
+  if (stub === null || typeof stub !== 'object' || ![stub.key, stub.group, stub.diary].every(isHex64)) throw new TypeError('chave inválida')
+  const x = { key: stub.key.toLowerCase(), group: stub.group.toLowerCase(), diary: stub.diary.toLowerCase() }
+  return withGroupCoreLock(storage, async () => {
+    const stubs = (await readHeaderStubs(storage)).filter((y) => y.key !== x.key)
+    stubs.push(x)
+    await storage.writeJson('headerStubs', { v: 1, stubs: stubs.slice(-MAX_HEADER_STUBS) })
+  })
+}
+
+function removeHeaderStub (storage, hex) {
+  const key = String(hex).toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const stubs = await readHeaderStubs(storage)
+    if (!stubs.some((x) => x.key === key)) return
+    await storage.writeJson('headerStubs', { v: 1, stubs: stubs.filter((x) => x.key !== key) })
   })
 }
 
@@ -1326,13 +1369,18 @@ function writeLeaveNotes (storage, notes) {
 // v: 1) among those kv groupWriters, groupReplicas and groupCores name:
 // each is purged and dropped from the lists, a created entry included, since
 // no seeder or fold of protocol v2 takes it -> [{ event: 'group-skipped',
-// key, reason: 'legacy' }], one per purged core.
+// key, reason: 'legacy' }], one per purged core. A header stub (kv
+// headerStubs) whose block 0 is v1 stays: the startup judges it by its
+// binding diary's join, and the fold never counts it.
 async function purgeLegacyGroupCores (storage) {
   const writers = await readGroupWriters(storage)
   const keys = new Set([...await readGroupReplicas(storage), ...await readGroupCoreKeys(storage)])
   for (const e of writers) {
     keys.add(e.key)
     if (e.rootNonce !== null) keys.add(e.group)
+  }
+  for (const x of await readHeaderStubs(storage)) {
+    if (!writers.some((e) => e.key === x.key || e.group === x.key)) keys.delete(x.key)
   }
   const legacy = new Set()
   for (const key of [...keys].sort()) {
@@ -1465,6 +1513,7 @@ async function deleteGroupData (storage) {
   await withGroupCoreLock(storage, () => storage.writeJson('groupCores', null))
   await withGroupCoreLock(storage, () => storage.writeJson('groupCerts', null))
   await withGroupCoreLock(storage, () => storage.writeJson('boundRoots', null))
+  await withGroupCoreLock(storage, () => storage.writeJson('headerStubs', null))
 }
 
 // ---- follows, local-first ----
@@ -2544,6 +2593,10 @@ module.exports = {
   dropGroupCerts,
   readBoundRoots,
   addBoundRoot,
+  MAX_HEADER_STUBS,
+  readHeaderStubs,
+  addHeaderStub,
+  removeHeaderStub,
   withFollowsLock,
   readFollowsPending,
   writeFollowsPending,
