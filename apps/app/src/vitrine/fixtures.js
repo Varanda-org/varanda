@@ -576,4 +576,75 @@ export const visitList = [
   { key: members[4].author, at: visitDayMs(4) }
 ]
 
-export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords, ...choiceRecords, ...visitRecords], sealed, listings, rates, visits: { on: true, sentToday: 1, list: visitList } }
+// Varandinha (docs/protocol.md): `garden` flags, `garden-state` balconies and
+// `garden-help` waterings in each writer's own diary, on the demo clock `now`.
+// Lia plays: a ripe manjericao, a dry tomate, a wet alecrim and a pimenta
+// planted a moment ago, and two empty pots. Andre and Cecilia play too, follow
+// Lia and each watered one of her pots today; Lia watered Cecilia's balcony;
+// Bia left the game (an off flag still has a seq). Joao, the pending top
+// friend, stays out: he must not follow Lia back. Own seqs 51 to 53 are free
+// slots of Lia's log (the next block she writes stays after seq 61).
+export const gardenRecords = [
+  { author: own, seq: 51, record: { type: 'garden', on: true, at: at(4, 19, 0) } },
+  {
+    author: own,
+    seq: 52,
+    record: {
+      type: 'garden-state',
+      pots: [
+        { plant: 'manjericao', at: at(4, 20, 0), water: at(4, 20, 0), w: 0 },
+        { plant: 'tomate', at: at(5, 6, 0), water: at(5, 6, 0), w: 0 },
+        { plant: 'alecrim', at: at(5, 1, 0), water: at(5, 14, 0), w: 2 },
+        { plant: 'pimenta', at: at(5, 14, 30), water: at(5, 14, 30), w: 0 },
+        null,
+        null
+      ],
+      n: 1,
+      at: at(5, 14, 30)
+    }
+  },
+  { author: own, seq: 53, record: { type: 'garden-help', to: members[2].author, pot: 3, at: at(5, 12, 0) } },
+  { author: members[3].author, seq: 130, record: { type: 'garden', on: true, at: at(4, 18, 0) } },
+  {
+    author: members[3].author,
+    seq: 131,
+    record: {
+      type: 'garden-state',
+      pots: [
+        { plant: 'tomate', at: at(5, 10, 0), water: at(5, 10, 0), w: 0 },
+        { plant: 'alecrim', at: at(5, 8, 0), water: at(5, 8, 0), w: 0 },
+        null,
+        null,
+        null,
+        null
+      ],
+      n: 1,
+      at: at(5, 10, 30)
+    }
+  },
+  { author: members[3].author, seq: 132, record: { type: 'follow', key: own, on: true, at: at(4, 10, 0) } },
+  { author: members[3].author, seq: 133, record: { type: 'garden-help', to: own, pot: 1, at: at(5, 9, 0) } },
+  { author: members[2].author, seq: 130, record: { type: 'garden', on: true, at: at(4, 18, 30) } },
+  {
+    author: members[2].author,
+    seq: 131,
+    record: {
+      type: 'garden-state',
+      pots: [
+        null,
+        null,
+        { plant: 'manjericao', at: at(5, 7, 0), water: at(5, 7, 0), w: 0 },
+        { plant: 'samambaia', at: at(5, 7, 0), water: at(5, 7, 0), w: 0 },
+        null,
+        null
+      ],
+      n: 1,
+      at: at(5, 7, 30)
+    }
+  },
+  { author: members[2].author, seq: 132, record: { type: 'follow', key: own, on: true, at: at(4, 11, 0) } },
+  { author: members[2].author, seq: 133, record: { type: 'garden-help', to: own, pot: 2, at: at(5, 10, 0) } },
+  { author: members[4].author, seq: 130, record: { type: 'garden', on: false, at: at(4, 17, 0) } }
+]
+
+export const fixtures = { now, own, association, members, incompleteDiaries, applicants, pages, follows, conversations, uncertainSends, communities, groups, feed, noticePosts, notices, diaryRecords: [...diaryRecords, ...testimonialRecords, ...momentRecords, ...scrapRecords, ...profileRecords, ...fanRecords, ...choiceRecords, ...visitRecords, ...gardenRecords], sealed, listings, rates, visits: { on: true, sentToday: 1, list: visitList } }

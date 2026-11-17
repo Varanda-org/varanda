@@ -29,3 +29,11 @@ test('MusicEqualizer bars run on the native driver off the web', (t) => {
 test('the screen visibility default stays false', (t) => {
   t.ok(read('screenVisible.js').includes('export const ScreenVisible = createContext(false)'))
 })
+
+test('GardenSceneView sway runs on the native driver off the web', (t) => {
+  const src = read('GardenSceneView.js')
+  t.ok(src.includes('const native = Platform.select({ web: false, default: true })'), 'driver constant, false on web')
+  t.absent(src.includes('useNativeDriver: false'), 'no JS-driven timing left')
+  t.is((src.match(/useNativeDriver: native/g) || []).length, 1, 'the one loop step')
+  t.ok(src.includes('loopTiming({'), 'still through loopTiming')
+})

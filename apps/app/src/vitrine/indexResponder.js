@@ -99,6 +99,51 @@ function scrapsIndex (owner, cursor) {
   return { scraps, hides: hideRows.map((e) => e.seq).sort((a, b) => b - a).slice(0, 1000), wall: latest === null ? null : latest.seq, next: all.length > start + 50 ? String(start + 50) : null, ...flags }
 }
 
+// Varandinha (docs/protocol.md "Seeder Varandinha index"): pointers read from
+// the live Vitrine records, at most one help per helper per Brasilia day and
+// only helpers whose own live follow of the owner exists.
+const newestSeq = (rows, type) => {
+  const seqs = rows.filter((e) => e.record.type === type).map((e) => e.seq)
+  return seqs.length === 0 ? null : Math.max(...seqs)
+}
+
+function gardenIndex (owner) {
+  const live = liveEntries()
+  const mine = live.filter((e) => e.author === owner)
+  const flag = mine.filter((e) => e.record.type === 'garden').sort((a, b) => b.seq - a.seq)[0]
+  const on = flag === undefined ? null : flag.seq
+  // An off or never opened balcony names no state, helper or given help.
+  if (flag === undefined || flag.record.on !== true) return { on, state: null, helps: [], given: [], ...flags }
+  const days = new Map()
+  for (const e of live.filter((x) => x.author !== owner && x.record.type === 'garden-help' && x.record.to === owner)) {
+    const id = `${e.author}/${rpc.garden.dayStart(Date.parse(e.record.at))}`
+    const previous = days.get(id)
+    if (!previous || e.seq < previous.seq) days.set(id, e)
+  }
+  const helps = []
+  for (const e of [...days.values()].sort((a, b) => Date.parse(b.record.at) - Date.parse(a.record.at) || compare(a.author, b.author) || a.seq - b.seq)) {
+    const followSeq = liveFollowSeq(live, e.author, owner)
+    if (followSeq !== null) helps.push({ author: e.author, seq: e.seq, followSeq })
+  }
+  const given = mine.filter((e) => e.record.type === 'garden-help').map((e) => e.seq).sort((a, b) => b - a)
+  return { on, state: newestSeq(mine, 'garden-state'), helps: helps.slice(0, rpc.garden.GARDEN_HELP_ROWS), given: given.slice(0, rpc.garden.GARDEN_HELP_ROWS), ...flags }
+}
+
+function gardenStreet (owner, cursor) {
+  if (cursor !== undefined && !isKey(cursor)) notFound()
+  const live = liveEntries()
+  const follows = lastWrites(live.filter((e) => e.author === owner && e.record.type === 'follow'), (r) => r.key).map((e) => e.record.key)
+  const rows = []
+  for (const key of [...new Set(follows)].sort(compare)) {
+    if (cursor !== undefined && key <= cursor) continue
+    const theirs = live.filter((e) => e.author === key)
+    const flag = theirs.filter((e) => e.record.type === 'garden').sort((a, b) => b.seq - a.seq)[0]
+    if (flag && flag.record.on === true) rows.push({ key, on: flag.seq, state: newestSeq(theirs, 'garden-state') })
+  }
+  const items = rows.slice(0, rpc.garden.GARDEN_STREET_PAGE)
+  return { items, next: rows.length > items.length ? items[items.length - 1].key : null, ...flags }
+}
+
 function notFound () {
   throw Object.assign(new Error('not-found'), { reason: 'not-found' })
 }
@@ -471,7 +516,13 @@ export function vitrineIndex (url, request) {
     const fans = fanRows(key)
     const top = rows('top-friends')[0]
     const back = top ? Object.fromEntries(top.record.keys.map((k) => [k, liveFollowSeq(liveEntries(), k, key)])) : null
-    return { about: latest('profile-about'), mood: latest('mood'), visits: latest('visits'), fans: { count: fans.length, indexing: false }, top: top ? { seq: top.seq, back } : null, ...flags }
+    return { about: latest('profile-about'), mood: latest('mood'), visits: latest('visits'), garden: latest('garden'), fans: { count: fans.length, indexing: false }, top: top ? { seq: top.seq, back } : null, ...flags }
+  }
+
+  if (route === 'garden') {
+    if (!isKey(key) || (part !== undefined && part !== 'rua') || (part === undefined && cursor !== undefined)) notFound()
+    requireProfile(key)
+    return part === undefined ? gardenIndex(key) : gardenStreet(key, cursor)
   }
 
   if (route === 'follow' && cursor === undefined) {

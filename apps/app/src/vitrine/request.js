@@ -341,6 +341,29 @@ export function createVitrineRequest (fixtures, options) {
     return { seq, ref: `${data.own}:${seq}` }
   }
 
+  // Varandinha (5.156 to 5.159): the own balcony is read from the own diary
+  // records, so the fixtures, a play, a help and a leave all agree with
+  // diary.peek and the /index/garden answers. The rules are rpc.garden, on
+  // the demo clock; answered dates move with options.clock like momentos.
+  const gardenOf = (type) => (logs.get(data.own) || []).filter((e) => e.record.type === type && !deleted.has(`${data.own}:${e.seq}`)).sort((a, b) => b.seq - a.seq)
+  const gardenOn = () => gardenOf('garden')[0]?.record.on === true
+  const shownPot = (p) => p === null ? null : { ...p, at: shown(p.at), water: shown(p.water) }
+  const gardenShape = (e) => e ? { seq: e.seq, pots: e.record.pots.map(shownPot), n: e.record.n, at: shown(e.record.at) } : null
+  const gardenTombstone = (seq) => deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
+  // Latest wins, as the node's publishLatest: every earlier live block of the
+  // type is tombstoned before the new one.
+  const gardenLatest = (record) => {
+    for (const e of gardenOf(record.type).reverse()) gardenTombstone(e.seq)
+    return append(record)
+  }
+  const helpRefusals = {
+    self: 'não dá para regar a própria varanda',
+    'not-following': 'você só rega a varanda de quem você segue',
+    'same-day': 'você já regou esta varanda hoje',
+    daily: 'você já regou o máximo de varandas por hoje',
+    invalid: 'parâmetro inválido: to'
+  }
+
   function folded (author) {
     const entries = logs.get(author) || []
     const gone = new Set(entries.filter((e) => e.record.type === 'delete').map((e) => e.record.seq))
@@ -850,6 +873,57 @@ export function createVitrineRequest (fixtures, options) {
       if (!visits.on || !profileOf(key)) return { queued: false }
       visits.sentToday++
       return { queued: true }
+    },
+    'garden.set': ({ on }) => {
+      const blocks = [...gardenOf('garden-state'), ...gardenOf('garden-help')].sort((a, b) => a.seq - b.seq)
+      if (on && !gardenOn()) gardenLatest({ type: 'garden', on: true, at: stamp() })
+      if (!on && (gardenOn() || blocks.length > 0)) {
+        for (const e of blocks) gardenTombstone(e.seq)
+        gardenLatest({ type: 'garden', on: false, at: stamp() })
+      }
+      return { on }
+    },
+    'garden.state': () => {
+      const now = demoNow()
+      const state = gardenOf('garden-state')[0]
+      const today = rpc.garden.dayStart(now)
+      const helps = gardenOf('garden-help').map((e) => ({ seq: e.seq, to: e.record.to, pot: e.record.pot, at: e.record.at, atMs: Date.parse(e.record.at) }))
+      return {
+        on: gardenOn(),
+        state: gardenShape(state),
+        savesToday: state && Date.parse(state.record.at) >= today ? state.record.n : 0,
+        helpsToday: helps.filter((h) => h.atMs >= today).length,
+        given: helps.filter((h) => h.atMs >= now - rpc.garden.GARDEN_HELP_WINDOW_MS && h.atMs <= now + rpc.garden.GARDEN_MAX_FUTURE_MS)
+          .slice(0, rpc.garden.GARDEN_HELP_ROWS).map(({ seq, to, pot, at }) => ({ seq, to, pot, at: shown(at) }))
+      }
+    },
+    'garden.play': ({ acts }) => {
+      if (!gardenOn()) refuse('USAGE', 'ligue a Varandinha para jogar')
+      const now = Date.parse(stamp())
+      const prev = gardenOf('garden-state')[0]
+      const n = rpc.garden.saveOrdinal(prev ? prev.record : null, now)
+      if (n === null) refuse('USAGE', 'você já cuidou da varanda o máximo de vezes por hoje')
+      const given = rpc.garden.foldGiven({ self: data.own, pots: prev ? prev.record.pots : null, given: gardenOf('garden-help'), now }).perPot
+      const played = rpc.garden.applyActs(prev ? prev.record : null, acts, now, { received: Array(6).fill(rpc.garden.GARDEN_HELP_PER_POT), given })
+      if (!played.ok) refuse('USAGE', 'jogada inválida')
+      const { seq, ref } = gardenLatest({ type: 'garden-state', pots: played.state.pots, n, at: new Date(now).toISOString() })
+      return { seq, ref, state: gardenShape(gardenOf('garden-state')[0]) }
+    },
+    'garden.help': ({ to, pot }) => {
+      const now = Date.parse(stamp())
+      if (to === data.own) refuse('USAGE', helpRefusals.self)
+      if (blockedKeys.has(to)) refuse('USAGE', 'você bloqueou esta pessoa')
+      if (!gardenOn()) refuse('USAGE', 'ligue a Varandinha para regar')
+      const own = gardenOf('garden-help').map((e) => ({ to: e.record.to, at: e.record.at }))
+      const allowed = rpc.garden.helpAllowed({ self: data.own, to, now, follows: new Set(data.follows), own })
+      if (!allowed.ok) refuse('USAGE', helpRefusals[allowed.reason] || helpRefusals.invalid)
+      if (data.pages.some((p) => p.author === to)) refuse('USAGE', 'páginas não têm Varandinha')
+      const theirs = (type) => (logs.get(to) || []).filter((e) => e.record.type === type && !deleted.has(`${to}:${e.seq}`)).sort((a, b) => b.seq - a.seq)[0]
+      if (theirs('garden')?.record.on !== true) refuse('USAGE', 'esta pessoa não está na Varandinha')
+      const view = rpc.garden.potView(theirs('garden-state')?.record.pots[pot] ?? null, now)
+      if (!view || view.ripe) refuse('USAGE', 'este vaso não tem planta para regar')
+      const { seq, ref } = append({ type: 'garden-help', to, pot, at: new Date(now).toISOString() })
+      return { seq, ref }
     },
     'group.create': createGroup,
     'group.join': ({ group, community }) => {

@@ -32,6 +32,16 @@ export const HELP = Object.freeze({
       'Nas conversas com uma Página, só quem administra a página lê as mensagens.'
     ])
   }),
+  varandinha: Object.freeze({
+    title: 'Como funciona a Varandinha',
+    paragraphs: Object.freeze([
+      'As plantas crescem em horas de verdade, no relógio de quem olha. Nada acontece enquanto ninguém joga, mas o tempo passa igual.',
+      'Regar a própria planta e receber a rega de um vizinho adiantam a colheita.',
+      'Cada pessoa rega a varanda de quem segue, uma vez por dia por varanda.',
+      'Tudo no jogo fica público no diário e é declarado por cada pessoa: participar, o que está plantado, as datas de plantio, rega e colheita, e de quem você regou. Quem recebe a rega vê o nome de quem regou.',
+      'Não tem compra, ranking nem prêmio. Sair da Varandinha marca os seus registros do jogo como apagados, mas cópias que outras pessoas já buscaram podem continuar. As regas que vizinhos fizeram na sua varanda ficam no diário deles.'
+    ])
+  }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([
