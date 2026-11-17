@@ -22,7 +22,7 @@ const { openTermsStore } = require('../lib/account/terms-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { generateVapidKeys, sendPush, encryptPayload } = require('../lib/account/web-push')
 const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT } = require('../lib/account/push-routes')
-const { createAccountServer } = require('../lib/account/server')
+const { createAccountServer, keyedWindow } = require('../lib/account/server')
 const { createPushKey, writeJsonExclusive } = require('../lib/commands/account')
 const { tmpDir, until } = require('./helpers/net')
 
@@ -1597,3 +1597,341 @@ test('relay: one actor gets 30 pushes an hour across all recipients; another act
   t.is(capped(), 6, 'the next hour opens a new window')
   await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'drained' })
 })
+
+// Recall: an undone follow, like or repost drops the notice while it still
+// waits for its delay. The real keyedWindow, so the cooldown is the one
+// deliver charges.
+async function recallRoutes (t, extra = {}) {
+  const token = 'cd'.repeat(32)
+  let next = null
+  const replies = []
+  // Every window give-back, so a test can count refunds (four each).
+  const releases = []
+  const counted = (...args) => {
+    const w = keyedWindow(...args)
+    const check = (...a) => w(...a)
+    check.release = (key, at) => {
+      releases.push(key)
+      w.release(key, at)
+    }
+    return check
+  }
+  const d = await delayedRoutes(t, [30000], {
+    relayTokenHash: sha256(token),
+    http: { ...HTTP_STUB, send: (res, status) => replies.push(status), readJsonBody: async () => next, keyedWindow: counted },
+    ...extra
+  })
+  const relay = (event) => {
+    next = event
+    return d.r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  }
+  let seq = 0
+  const notice = (kind, from, to, ref = null) => relay({ v: 1, kind, actor: from.hex, recipient: to.hex, seq: ++seq, ref, name: null })
+  const undo = (kind, from, to, ref = null) => relay({ v: 1, op: 'cancel', kind, actor: from.hex, recipient: to.hex, ref })
+  const reasons = () => d.logs.map((e) => e.reason)
+  const clean = (t) => {
+    for (const e of d.logs) t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason'), 'only event and reason')
+  }
+  return { ...d, token, replies, releases, relay, notice, undo, reasons, clean }
+}
+
+test('recall: a cancel drops every waiting copy of the like, 202, and a new like of the same post is delivered', async (t) => {
+  const { s, r, sent, fire, replies, notice, undo, reasons, clean } = await recallRoutes(t)
+  const actor = member()
+  const m = member()
+  const a = await s.subscribe(m)
+  const b = await s.subscribe(m)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  t.is(r.stats().queued, 2, 'one copy per device waits')
+  await undo('like', actor, m, post)
+  t.alike(replies, [202, 202])
+  t.is(r.stats().queued, 0, 'both copies recalled')
+  t.ok(reasons().includes('cancelado'))
+  fire()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(sent.length, 0, 'nothing was sent')
+  await notice('like', actor, m, post)
+  t.is(r.stats().queued, 2, 'the recall gave the cooldown back')
+  fire()
+  await until(() => sent.length === 2, { name: 'the new like sent' })
+  t.alike(sent.slice().sort(), [a.endpoint, b.endpoint].sort())
+  t.is(r.stats().dropped, 0, 'a recall is not a drop')
+  clean(t)
+  await r.close()
+})
+
+test('recall: only the same kind, actor, recipient and ref is dropped', async (t) => {
+  const { s, r, sent, fire, notice, undo, reasons } = await recallRoutes(t)
+  const actor = member()
+  const other = member()
+  const m = member()
+  const n = member()
+  await s.subscribe(m)
+  await s.subscribe(n)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  await notice('like', actor, m, m.hex + ':8')
+  await notice('like', other, m, post)
+  await notice('repost', actor, m, post)
+  await notice('like', actor, n, n.hex + ':7')
+  await notice('follow', actor, m)
+  t.is(r.stats().queued, 6)
+  await undo('like', actor, m, post)
+  t.is(r.stats().queued, 5, 'only the matching like')
+  await undo('follow', other, m)
+  await undo('repost', actor, m, m.hex + ':8')
+  await undo('like', actor, m, post)
+  t.is(r.stats().queued, 5, 'no other notice matches, and a recalled one is gone')
+  t.alike(reasons().filter((x) => x === 'cancelado' || x === 'descartado'), ['cancelado', 'descartado', 'descartado', 'descartado'])
+  await undo('follow', actor, m)
+  t.is(r.stats().queued, 4, 'a follow recall has no ref')
+  fire()
+  await until(() => sent.length === 4, { name: 'the rest sent' })
+  await r.close()
+})
+
+test('recall: an invite drop, a deletion notice and a DM wake never match', async (t) => {
+  const { s, r, sent, fire, relay, undo, reasons } = await recallRoutes(t)
+  const actor = member()
+  const m = member()
+  await s.subscribe(m)
+  t.is(r.notifyInvite(invite(s, m)), 'queued')
+  t.is(r.notifyDeletion({ member: m.hex }), 'queued')
+  await relay({ v: 1, kind: 'dm-wake' })
+  t.is(r.stats().queued, 3)
+  await undo('follow', actor, m)
+  await undo('like', actor, m, m.hex + ':1')
+  await undo('repost', actor, m, m.hex + ':1')
+  t.is(r.stats().queued, 3, 'nothing recalled')
+  t.absent(reasons().includes('cancelado'))
+  t.is(r.room(), INVITE_QUEUE_MAX - 1, 'the invite still holds its slot')
+  fire()
+  await until(() => sent.length === 3, { name: 'all three sent' })
+  await r.close()
+})
+
+test('recall: a copy already in flight is sent, and the cooldown stays spent', async (t) => {
+  const held = []
+  const { s, r, sent, notice, undo, reasons } = await recallRoutes(t, {
+    delayMs: () => 0,
+    send: (args) => new Promise((resolve) => held.push(() => { sent.push(args.subscription.endpoint); resolve('ok') }))
+  })
+  const actor = member()
+  const filler = member()
+  const m = member()
+  // Other notices hold all but two slots, so two of m's four copies leave
+  // at once and two wait for room.
+  for (let i = 0; i < MAX_IN_FLIGHT - 2; i++) {
+    const other = member()
+    await s.subscribe(other)
+    await notice('follow', filler, other)
+  }
+  const mine = []
+  for (let i = 0; i < 4; i++) mine.push((await s.subscribe(m)).endpoint)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  t.is(r.stats().inFlight, MAX_IN_FLIGHT, 'the pool is full')
+  t.is(r.stats().queued, 2, 'two copies still wait')
+  await undo('like', actor, m, post)
+  t.is(r.stats().queued, 0, 'the waiting copies are recalled')
+  t.is(r.stats().inFlight, MAX_IN_FLIGHT, 'the copies in flight stay')
+  t.ok(reasons().includes('cancelado'))
+  while (held.length > 0) held.shift()()
+  await until(() => r.stats().inFlight === 0, { name: 'in-flight copies done' })
+  t.is(sent.filter((e) => mine.includes(e)).length, 2, 'the copies in flight were sent, the recalled ones never')
+  await notice('like', actor, m, post)
+  t.is(r.stats().queued + r.stats().inFlight, 0, 'a device already got it: the cooldown still holds')
+  t.is(reasons()[reasons().length - 1], 'descartado')
+  await undo('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'nothing left to recall')
+  await r.close()
+})
+
+test('recall: like and unlike loops inside the delay leave the actor, pair and recipient budgets untouched', async (t) => {
+  const { s, r, notice, undo, reasons } = await recallRoutes(t)
+  const teto = () => reasons().filter((x) => x === 'teto').length
+  const m = member()
+  const xs = [member(), member(), member()]
+  for (const who of [m, ...xs]) await s.subscribe(who)
+  const attacker = member()
+  const others = Array.from({ length: 6 }, () => member())
+  // 40 cycles from one actor (over its 30) and 70 on one recipient (over
+  // its 60), 10 per pair.
+  for (const to of [m, ...xs]) {
+    for (let i = 0; i < 10; i++) {
+      await notice('like', attacker, to, to.hex + ':1')
+      await undo('like', attacker, to, to.hex + ':1')
+    }
+  }
+  for (const from of others) {
+    for (let i = 0; i < 10; i++) {
+      await notice('like', from, m, m.hex + ':1')
+      await undo('like', from, m, m.hex + ':1')
+    }
+  }
+  t.is(teto(), 0, 'no cycle was capped')
+  t.is(r.stats().queued, 0, 'every cycle was recalled')
+  for (let i = 0; i < 10; i++) await notice('like', attacker, m, m.hex + ':' + (100 + i))
+  t.is(teto(), 0, 'the pair budget is whole: 10 pass')
+  await notice('like', attacker, m, m.hex + ':110')
+  t.is(teto(), 1, 'the 11th is teto')
+  for (let i = 0; i < 10; i++) await notice('like', attacker, xs[0], xs[0].hex + ':' + (100 + i))
+  for (let i = 0; i < 10; i++) await notice('like', attacker, xs[1], xs[1].hex + ':' + (100 + i))
+  t.is(teto(), 1, 'the actor budget is whole: 30 pass')
+  await notice('like', attacker, xs[2], xs[2].hex + ':100')
+  t.is(teto(), 2, 'the 31st is teto')
+  const fresh = Array.from({ length: 6 }, () => member())
+  for (const from of fresh.slice(0, 5)) {
+    for (let i = 0; i < 10; i++) await notice('like', from, m, m.hex + ':' + (200 + i))
+  }
+  t.is(teto(), 2, 'the recipient budget is whole: 60 pass')
+  await notice('like', fresh[5], m, m.hex + ':200')
+  t.is(teto(), 3, 'the 61st is teto')
+  await r.close()
+})
+
+test('recall: a notice whose only copy the push service refused as gone gives its cooldown back', async (t) => {
+  const outcomes = ['gone']
+  const { s, r, sent, fire, notice, undo, reasons, releases } = await recallRoutes(t, {
+    send: async (args) => {
+      const outcome = outcomes.length > 0 ? outcomes.shift() : 'ok'
+      if (outcome === 'ok') sent.push(args.subscription.endpoint)
+      return outcome
+    }
+  })
+  const actor = member()
+  const m = member()
+  await s.subscribe(m)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  fire()
+  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'the copy settled' })
+  t.ok(reasons().includes('removido'), 'the gone row was removed')
+  await undo('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'cancelado', 'the undo recalls a notice no device got')
+  t.is(releases.length, 4, 'one refund')
+  // The browser subscribes again, so the redo has a device.
+  const b = await s.subscribe(m)
+  await notice('like', actor, m, post)
+  t.is(r.stats().queued, 1, 'the redo is queued, not descartado')
+  fire()
+  await until(() => sent.length === 1, { name: 'the redo sent' })
+  t.is(sent[0], b.endpoint)
+  await r.close()
+})
+
+// 'dropped' covers a timeout or a reset after the push service may have
+// taken the POST, so the notice may be on the device already.
+test('recall: a dropped copy then a cancel refunds nothing', async (t) => {
+  const outcomes = ['dropped']
+  const { s, r, fire, notice, undo, reasons, releases } = await recallRoutes(t, {
+    send: async () => outcomes.length > 0 ? outcomes.shift() : 'ok'
+  })
+  const teto = () => reasons().filter((x) => x === 'teto').length
+  const actor = member()
+  const m = member()
+  await s.subscribe(m)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  fire()
+  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'the copy settled' })
+  t.ok(reasons().includes('falhou'))
+  await undo('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'nothing to recall')
+  t.is(releases.length, 0, 'no refund')
+  await notice('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'the cooldown still holds')
+  for (let i = 0; i < 9; i++) await notice('like', actor, m, m.hex + ':' + (100 + i))
+  t.is(teto(), 0)
+  await notice('like', actor, m, m.hex + ':109')
+  t.is(teto(), 1, 'the pair budget stays spent: the 10th is teto')
+  await r.close()
+})
+
+test('recall: a notice a device got refunds nothing', async (t) => {
+  const { s, r, sent, fire, notice, undo, reasons } = await recallRoutes(t)
+  const teto = () => reasons().filter((x) => x === 'teto').length
+  const actor = member()
+  const m = member()
+  await s.subscribe(m)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  fire()
+  await until(() => sent.length === 1 && r.stats().inFlight === 0, { name: 'sent' })
+  await undo('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'nothing to recall')
+  await notice('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'the cooldown still holds')
+  for (let i = 0; i < 9; i++) await notice('like', actor, m, m.hex + ':' + (100 + i))
+  t.is(teto(), 0)
+  await notice('like', actor, m, m.hex + ':109')
+  t.is(teto(), 1, 'the pair budget stays spent: the 10th is teto')
+  await r.close()
+})
+
+// Two copies in flight when the undo comes: the refund waits for both, and
+// happens once, only if neither may have reached a device. pump runs the
+// refund right after it counts a send down, so inFlight reaching a value
+// means every copy settled by then has had its refund check.
+async function inFlightRecall (t, outcomes) {
+  const held = []
+  const d = await recallRoutes(t, {
+    delayMs: () => 0,
+    send: () => new Promise((resolve) => held.push(resolve))
+  })
+  const { s, r, notice, undo, reasons, releases } = d
+  const teto = () => reasons().filter((x) => x === 'teto').length
+  const actor = member()
+  const m = member()
+  await s.subscribe(m)
+  await s.subscribe(m)
+  const post = m.hex + ':7'
+  await notice('like', actor, m, post)
+  t.is(r.stats().inFlight, 2, 'both copies in flight')
+  await undo('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'cancelado')
+  await notice('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'no refund while a copy is out')
+  t.is(r.stats().inFlight, 2, 'the redo queued nothing')
+  held[0](outcomes[0])
+  await until(() => r.stats().inFlight === 1, { name: 'the first copy settled' })
+  t.is(releases.length, 0, 'no refund while the other copy is out')
+  held[1](outcomes[1])
+  await until(() => r.stats().inFlight === 0, { name: 'both copies settled' })
+  await undo('like', actor, m, post)
+  t.is(reasons()[reasons().length - 1], 'descartado', 'a cancelled notice is not recalled twice')
+  return { ...d, teto, actor, m, post, held }
+}
+
+test('recall: copies in flight that are both gone give the charges back once', async (t) => {
+  const { s, r, notice, releases, actor, m, post, held } = await inFlightRecall(t, ['gone', 'gone'])
+  // Cooldown, actor, pair and recipient, once each: zero refunds give 0 and
+  // two give 8.
+  t.is(releases.length, 4, 'exactly one refund')
+  t.is(new Set(releases).size, 4, 'one give-back per window')
+  // Both rows were removed: the browser subscribes again.
+  await s.subscribe(m)
+  await notice('like', actor, m, post)
+  t.is(r.stats().inFlight, 1, 'the redo is sent, not descartado')
+  const release = () => { while (held.length > 0) held.shift()('ok') }
+  await until(() => { release(); return r.stats().inFlight === 0 && r.stats().queued === 0 }, { name: 'drained' })
+  await r.close()
+})
+
+for (const outcomes of [['gone', 'ok'], ['gone', 'dropped']]) {
+  test('recall: copies in flight where one may reach a device refund nothing (' + outcomes[1] + ')', async (t) => {
+    const { r, notice, teto, reasons, releases, actor, m, post, held } = await inFlightRecall(t, outcomes)
+    t.is(releases.length, 0, 'no refund')
+    await notice('like', actor, m, post)
+    t.is(reasons()[reasons().length - 1], 'descartado', 'the cooldown still holds')
+    // Pair window: the recalled like. Nine more pass, the tenth is teto.
+    for (let i = 0; i < 9; i++) await notice('like', actor, m, m.hex + ':' + (200 + i))
+    t.is(teto(), 0)
+    await notice('like', actor, m, m.hex + ':209')
+    t.is(teto(), 1, 'the pair budget stays spent')
+    const release = () => { while (held.length > 0) held.shift()('ok') }
+    await until(() => { release(); return r.stats().inFlight === 0 && r.stats().queued === 0 }, { name: 'drained' })
+    await r.close()
+  })
+}
