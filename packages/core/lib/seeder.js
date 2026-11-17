@@ -224,7 +224,7 @@ const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { verifyRoster } = require('./page')
@@ -933,6 +933,48 @@ function groupWalkStep (walks, group, e) {
   if (e.kind === 'join' && e.on === true && s.state.has(e.writer)) s.onSeq.set(e.writer, e.seq)
 }
 
+// One valid group-join or group-cut record at diary seq `i` folded into the
+// entry: a join into the newest join per writer and the root binding (each
+// map keeps by seq), and both into the slot walk of its group.
+function foldGroupRecord (entry, i, r) {
+  if (r.type === 'group-join') {
+    const prev = entry.groupDecls.get(r.writer)
+    if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
+    const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
+    if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
+  }
+  const e = r.type === 'group-join'
+    ? { kind: 'join', writer: r.writer, on: r.on, seq: i }
+    : { kind: 'cut', writer: r.writer, cut: r.cut, seq: i }
+  let events = entry.groupEvents.get(r.group)
+  if (events === undefined) {
+    events = []
+    entry.groupEvents.set(r.group, events)
+  }
+  const s = entry.groupWalks.get(r.group)
+  if (s === undefined || i > s.last) {
+    events.push(e)
+    groupWalkStep(entry.groupWalks, r.group, e)
+    return
+  }
+  // A record the scan passed as a hole (a deleted one fetched once, which
+  // still counts): placed in seq order, and the walk of its group stepped
+  // again from its first record, so the walk is the one a scan that held it
+  // would have built.
+  let lo = 0
+  let hi = events.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (events[mid].seq < i) lo = mid + 1
+    else hi = mid
+  }
+  if (lo < events.length && events[lo].seq === i) return
+  events.splice(lo, 0, e)
+  const fresh = new Map()
+  for (const x of events) groupWalkStep(fresh, r.group, x)
+  entry.groupWalks.set(r.group, fresh.get(r.group))
+}
+
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
 // writeBlocklist), or null.
 function readSnapshot (dataDir, options) {
@@ -1090,6 +1132,45 @@ async function modRootPoll (core, read, writerHex, seq, root, visibility) {
 // The text of a group-event a reviewer reads: its title, then its place.
 function eventLines (r) {
   return r.place === '' ? [r.title] : [r.title, r.place]
+}
+
+// The bound group cores (key -> { diary, group, seq } or null) with a count
+// of the bindings naming each diary, so _groupNames, asked for every diary
+// a seeder prepares, is one lookup instead of a walk over every group core.
+class GroupBindings extends Map {
+  constructor () {
+    super()
+    this._byDiary = new Map()
+  }
+
+  set (key, binding) {
+    this._count(super.get(key), -1)
+    super.set(key, binding)
+    this._count(binding, 1)
+    return this
+  }
+
+  delete (key) {
+    if (!super.has(key)) return false
+    this._count(super.get(key), -1)
+    return super.delete(key)
+  }
+
+  clear () {
+    super.clear()
+    this._byDiary.clear()
+  }
+
+  names (diary) {
+    return this._byDiary.has(diary)
+  }
+
+  _count (binding, step) {
+    if (binding === null || binding === undefined || typeof binding.diary !== 'string') return
+    const n = (this._byDiary.get(binding.diary) || 0) + step
+    if (n > 0) this._byDiary.set(binding.diary, n)
+    else this._byDiary.delete(binding.diary)
+  }
 }
 
 // Per-phase startup durations (ms, non-negative integers) from the Date.now()
@@ -1361,7 +1442,7 @@ class Seeder {
     // Group cores (header comment): bound and dropping bindings, key ->
     // { diary, group, seq }; admitted.json `groups` is the union of both.
     // They share _inflight and _drops with diaries and media.
-    this._groups = new Map()
+    this._groups = new GroupBindings()
     this._groupsDropping = new Map()
     this._groupServed = new Map() // key -> { core, diary, group, download, stopFork, stopGrow, stopQuota, dropped, headerOk, gating, expected }
     this._groupReserved = new Map() // key -> group, holding a group slot mid-admission
@@ -2344,10 +2425,13 @@ class Seeder {
       // `groupWalks` the slot walk per group (group -> lib/group.js walk
       // state) over its group-join and group-cut records, which picks the
       // writers that count and keeps the newest on:true join of each
-      // (groupWalkStep, liveGroupJoins).
+      // (groupWalkStep, liveGroupJoins), with `groupEvents` those records
+      // per group in seq order, to step a walk again when a deleted one
+      // arrives after the scan passed it.
       groupDecls: new Map(),
       groupBound: new Map(),
       groupWalks: new Map(),
+      groupEvents: new Map(),
       groupLive: new Map(),
       groupRefused: new Map(),
       // Public share hint, rebuilt by every scan from block 1 (in memory
@@ -2395,10 +2479,18 @@ class Seeder {
       // recounts this serve ran and `mediaRecounting` one is running.
       // `pageSeqs` the tombstone targets read as page-* records: never in
       // `deleted` nor `effective` (a delete of one has no effect).
+      // `groupSeqs` the same for group-join, group-confirm and group-cut
+      // records (docs/protocol.md "Deletion"). `grouped` that the diary is
+      // group-bound (it holds a group record, or a group served here names
+      // it), and `pageGuard` the download's tombstone target guard, which
+      // then fetches each unheld target once (_prepareDiary).
       deleted: new Set(),
       tombstones: new Map(),
       effective: null,
       pageSeqs: new Set(),
+      groupSeqs: new Set(),
+      grouped: false,
+      pageGuard: null,
       media: new Map(),
       mediaRefs: new Map(),
       listingRoots: new Map(),
@@ -2534,6 +2626,7 @@ class Seeder {
     } catch {}
     if (stale()) return
     if (state !== null) {
+      if (state.grouped) entry.grouped = true
       for (const { seq, record } of state.raw) {
         const r = record !== null && record.type === 'delete' ? validRecordCopy(record, seq) : null
         if (r === null) continue
@@ -2556,11 +2649,15 @@ class Seeder {
       state = null
     }
     for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
-    // A page diary keeps an unheld tombstone target in the download until
-    // it is read once (lib/deletion.js downloadExceptPages, docs/protocol.md
-    // §12). The held targets are read before the clear below, so a cleared
-    // one is not fetched back.
-    const pageGuard = pageTargets(core)
+    // A page diary, and a group-bound one, keeps an unheld tombstone target
+    // in the download until it is read once (lib/deletion.js
+    // downloadExceptPages, docs/protocol.md §12): a group record is then
+    // kept and folded (_pageArrived), anything else is cleared. The held
+    // targets are read before the clear below, so a cleared one is not
+    // fetched back.
+    if (!entry.grouped && this._groupNames(key)) entry.grouped = true
+    const pageGuard = pageTargets(core, { groupBound: entry.grouped })
+    entry.pageGuard = pageGuard
     if (!this.noClear) {
       try {
         // The roster probe settles later (the download is told): it must not
@@ -2932,6 +3029,10 @@ class Seeder {
         if (r !== null) this._notePage(key, entry, i, r)
         continue
       }
+      if (GROUP_HISTORY_TYPES.has(block.type) && (!entry.grouped || entry.gone.has(i)) && validRecordCopy(block, i) !== null) {
+        if (entry.gone.has(i)) this._noteGroupKept(entry, i)
+        else this._markGroupBound(entry)
+      }
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
@@ -2944,17 +3045,12 @@ class Seeder {
       }
       if (block.type === 'group-join') {
         const r = validRecordCopy(block, i)
-        if (r === null) continue
-        const prev = entry.groupDecls.get(r.writer)
-        if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
-        const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
-        if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
-        groupWalkStep(entry.groupWalks, r.group, { kind: 'join', writer: r.writer, on: r.on, seq: i })
+        if (r !== null) foldGroupRecord(entry, i, r)
         continue
       }
       if (block.type === 'group-cut') {
         const r = validRecordCopy(block, i)
-        if (r !== null) groupWalkStep(entry.groupWalks, r.group, { kind: 'cut', writer: r.writer, cut: r.cut, seq: i })
+        if (r !== null) foldGroupRecord(entry, i, r)
         continue
       }
       // Folded here, not in _runIndex: that queue pauses at capacity and
@@ -3318,6 +3414,12 @@ class Seeder {
         return true
       }
     }
+    // A group history target: the delete has no effect either. One not
+    // held yet is folded when it arrives (_pageArrived).
+    if (block !== null && GROUP_HISTORY_TYPES.has(block.type) && validRecordCopy(block, target) !== null) {
+      this._noteGroupKept(entry, target)
+      return true
+    }
     entry.deleted.add(target)
     this._forgetRecent(entry, (r) => r.seq === target)
     if (media) countTombstone(entry, seq, record, block)
@@ -3396,7 +3498,7 @@ class Seeder {
       const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
       for (let n = seqs.length - 1; n >= 0; n--) {
         const target = entry.tombstones.get(seqs[n])
-        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target)) out.add(target)
+        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target) && !entry.groupSeqs.has(target)) out.add(target)
       }
       entry.effective = out
     }
@@ -3416,17 +3518,53 @@ class Seeder {
     if (skipped || seq < entry.indexed) this._names.note(key, seq, record)
   }
 
+  // A tombstone target read as a valid group history record: kept out of
+  // `deleted` and `effective`, as a page-* record is.
+  _noteGroupKept (entry, seq) {
+    this._markGroupBound(entry)
+    if (entry.groupSeqs.has(seq)) return
+    entry.groupSeqs.add(seq)
+    entry.effective = null
+    entry.deleted.delete(seq)
+  }
+
+  // The diary holds a group record or a served group names it: from now on
+  // its download fetches each unheld tombstone target once (_prepareDiary).
+  _markGroupBound (entry) {
+    if (entry.grouped) return
+    entry.grouped = true
+    if (entry.pageGuard) entry.pageGuard.setGroupBound(true)
+  }
+
+  // Whether a group core served here is bound to `diary` as its writer.
+  _groupNames (diary) {
+    return this._groups.names(diary)
+  }
+
   // A tombstone target below the scan cursor arrived (the scan passed it
-  // as a hole): read it once to learn whether it is a page-* record.
+  // as a hole): read it once to learn whether it is a page-* record or a
+  // group history record. A group-join or group-cut one is folded into the
+  // diary's group bindings and slot walk now, as the scan would have.
   async _pageArrived (key, entry, seq) {
-    if (entry.pageSeqs.has(seq)) return
+    if (entry.pageSeqs.has(seq) || entry.groupSeqs.has(seq)) return
     let raw = null
     try {
       raw = await entry.core.get(seq, { wait: false, raw: true })
     } catch {}
     if (raw === null || entry.dropped || this._closing || this._served.get(key) !== entry) return
     const block = decodeBlock(raw)
-    if (block === null || !isPageType(block.type)) return
+    if (block === null) return
+    if (GROUP_HISTORY_TYPES.has(block.type)) {
+      const r = validRecordCopy(block, seq)
+      if (r === null || entry.groupSeqs.has(seq)) return
+      this._noteGroupKept(entry, seq)
+      if (r.type !== 'group-join' && r.type !== 'group-cut') return
+      foldGroupRecord(entry, seq, r)
+      entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupWalks)
+      this._reconcileGroups(key, entry)
+      return
+    }
+    if (!isPageType(block.type)) return
     const r = validRecordCopy(block, seq)
     if (r !== null) this._notePage(key, entry, seq, r)
   }
@@ -4416,6 +4554,8 @@ class Seeder {
     }
     const writerBinding = { diary: owner, group, seq: ownSeq }
     this._groups.set(key, key === group ? rootBinding : writerBinding)
+    const ownerServed = this._served.get(owner)
+    if (ownerServed && !ownerServed.dropped) this._markGroupBound(ownerServed)
     let core
     let opening = false
     try {
@@ -8419,6 +8559,7 @@ Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 
 module.exports = {
   Seeder,
+  GroupBindings,
   startupPhases,
   GATE_TIMEOUT_MS,
   MAX_HANDSHAKE_FRAME,

@@ -7,6 +7,7 @@
 // rotates and a second distributor waits. The session tests script the
 // sync (no network): runSync is replaced before session.js loads.
 const test = require('brittle')
+const b4a = require('b4a')
 
 const syncPath = require.resolve('../lib/sync')
 const realSync = require(syncPath)
@@ -146,6 +147,52 @@ test('core: two distributors, the opener rotates at once and the other waits', a
   const bw = ownWriter(b, group)
   t.ok(bw !== group)
   t.is((await member.groupRead(b, { group })).state, 'ok')
+})
+
+// Copies the blocks `from`'s own diary holds into the store of `to`: a block
+// `from` cleared never reaches `to`.
+async function copyHeldDiary (from, to) {
+  const a = await store.openStore(from.dataDir)
+  const b = await store.openStore(to.dataDir)
+  let left
+  let right
+  try {
+    const key = b4a.from(from.key, 'hex')
+    const source = a.get({ key, writable: false })
+    await source.ready()
+    const target = b.get({ key, writable: false })
+    await target.ready()
+    left = a.replicate(true)
+    right = b.replicate(false)
+    left.pipe(right).pipe(left)
+    for (let seq = 0; seq < source.length; seq++) {
+      if (await source.has(seq)) await target.get(seq, { raw: true, timeout: 10000 })
+    }
+  } finally {
+    if (left) left.destroy()
+    if (right) right.destroy()
+    await b.close()
+    await a.close()
+  }
+}
+
+test('core: a deleted post of a member diary this node never read does not hold back a due rotation', async (t) => {
+  const { a, b, group } = await admitted(t)
+  const { seq } = await member.postCreate(b, { text: 'apagado' })
+  await member.postDelete(b, { to: { author: b.key, seq } })
+  await copyHeldDiary(b, a)
+  const s = await store.openStore(a.dataDir)
+  try {
+    const replica = s.get({ key: b4a.from(b.key, 'hex'), writable: false })
+    await replica.ready()
+    t.absent(await replica.has(seq), 'fixture: the deleted post never reached A')
+    t.ok(await replica.has(seq + 1), 'fixture: its tombstone did')
+  } finally {
+    await s.close()
+  }
+  const r = await member.periodicRekey(a, { now: Date.now() + REKEY_PERIOD_MS + MINUTE })
+  t.alike(r.failed, [])
+  t.alike(r.rotated, [group], 'the due group rotates')
 })
 
 // ---- the session ----
