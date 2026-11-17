@@ -287,7 +287,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -375,6 +375,13 @@ const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
 const SCRAP_INDEX_MAX_CHARS = 64 * 1024
 const FOLLOW_INDEX_MAX_CHARS = 1024
 const VISIT_INDEX_MAX_CHARS = 16 * 1024
+// Varandinha (docs/rpc.md 5.159): the help target's refusals, read off the
+// chain from the owner's blocks. The index cap holds the seeder route's
+// largest body (apps/cli/lib/seed-ws.js INDEX_MAX_BODY).
+const GARDEN_PAGE = 'páginas não têm Varandinha'
+const GARDEN_NOT_IN = 'esta pessoa não está na Varandinha'
+const GARDEN_NO_PLANT = 'este vaso não tem planta para regar'
+const GARDEN_INDEX_MAX_CHARS = 64 * 1024
 // visits.set { on: true } without private messages enabled (no dm key): a
 // switch on could neither queue a ping nor be pinged. Same text as the
 // app's DMS_OFF_NOTICE (apps/app/src/visits.js).
@@ -3475,6 +3482,55 @@ function createBrowserSession ({
     if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
   }
 
+  // garden.help's evidence deadline (docs/rpc.md 5.159): scrap.write's.
+  const gardenEvidenceMs = Math.min(12000, 2 * peekTimeoutMs)
+
+  // Whether pot `pot` of `owner`'s balcony takes a help now, with public
+  // evidence only, read off the chain under ONE deadline as scrapAdmits: the
+  // seeder names the owner's newest garden flag and garden-state, each a
+  // pointer, peeked and checked here with blocks 1 and 2 (a page-roster
+  // there is a page). Returns when the help may be written; throws a USAGE
+  // refusal when the verified evidence excludes it, and SEEDER_UNAVAILABLE
+  // (or the peek's own NOT_FOUND) when it cannot be read or does not verify.
+  // RESIDUAL: the seeder can point at an older live 'on' flag or an older
+  // state it still serves (it can withhold any newer block); readers apply
+  // foldHelps and drop a help that does not count, so a wrong write costs
+  // one of the helper's daily helps and nothing else.
+  async function gardenTarget (owner, pot) {
+    const deadline = Date.now() + gardenEvidenceMs
+    let timer = null
+    const late = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(SEEDER_UNAVAILABLE)), gardenEvidenceMs)
+    })
+    const work = gardenEvidence(owner, pot, deadline)
+    try {
+      return await Promise.race([work, late])
+    } finally {
+      clearTimeout(timer)
+      work.catch(() => {})
+    }
+  }
+
+  async function gardenEvidence (owner, pot, deadline) {
+    const left = () => {
+      const ms = deadline - Date.now()
+      if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+      return ms
+    }
+    const index = await seederIndexJson('/index/garden/' + owner, GARDEN_INDEX_MAX_CHARS, left())
+    // A refusal never rests on an index still catching up.
+    const seqs = member.gardenTargetSeqs(index)
+    if (seqs === null) throw new Error(SEEDER_UNAVAILABLE)
+    const r = await peekBefore(owner, seqs, deadline)
+    // No boosts in the pot check: the generous reading is the reader's.
+    const verdict = member.gardenTargetVerdict(index, r, pot, Date.now())
+    if (verdict === null) return
+    if (verdict === 'page') throw new UsageError(GARDEN_PAGE)
+    if (verdict === 'off') throw new UsageError(GARDEN_NOT_IN)
+    if (verdict === 'no-plant') throw new UsageError(GARDEN_NO_PLANT)
+    throw new Error(SEEDER_UNAVAILABLE)
+  }
+
   // Refuses (USAGE `message`) a key whose diary is a page: blocks 1 and 2
   // tell a page diary (a page-roster there) from a person's, peeked as the
   // recados check does. Fails closed: an unread block 1 or 2 inside the
@@ -4986,6 +5042,91 @@ function createBrowserSession ({
         if (own === null) return { queued: false }
         return dmEngine.visitQueue(own, keyPair, { to: key, box, now: Date.now() })
       })({}, ident)
+    },
+
+    // Varandinha (docs/rpc.md 5.156 to 5.159). The game lives in public
+    // records of the own diary, written like profile.mood and never retried;
+    // a help is checked like scrap.write: the own checks on the chain, the
+    // owner's balcony off it (gardenTarget, fail closed), then the checks
+    // again and the write on the chain, so a help sent from another device
+    // of the same passkey meanwhile is refused there.
+    'garden.set': async ({ on }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        if (on === true) {
+          const cur = await withCores((c) => member.gardenOwn(c, Date.now()))
+          if (cur.on !== true) await profileExtraWrite((c) => member.gardenSet(c))
+          return { on: true }
+        }
+        // A leave that finds nothing to do (null) writes and pushes nothing;
+        // one cut short counts and pushes the blocks that landed (written).
+        let r
+        try {
+          r = await withStore((c) => member.gardenLeave(c))
+        } catch (err) {
+          if (err !== null && typeof err === 'object' && Number.isSafeInteger(err.written)) {
+            wrote(err.written)
+            try { await pushAfterWrite() } catch {}
+          }
+          throw err
+        }
+        if (r !== null) {
+          wrote(r.seq)
+          await pushAfterWrite()
+        }
+        return { on: false }
+      })({})
+    },
+
+    // The own diary alone, as choice.mine: no key needed to read it.
+    'garden.state': serial(() => withCores((c) => member.gardenOwn(c, Date.now()))),
+
+    // Caught up first, so a second device of the same passkey plays on the
+    // freshest state. Helps received are bounded generously (they live in
+    // other diaries; readers fold them).
+    'garden.play': async ({ acts }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        let state = null
+        const r = await profileExtraWrite(async (c) => {
+          const out = await member.gardenPlay(c, { acts, now: Date.now(), received: Array(garden.GARDEN_POTS).fill(garden.GARDEN_HELP_PER_POT) })
+          state = out.state
+          return out
+        })
+        return { seq: r.seq, ref: r.ref, state }
+      })({})
+    },
+
+    'garden.help': async ({ to, pot }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(member.GARDEN_HELP_SELF)
+        if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      const writer = await serial(async () => {
+        const own = await requireUnlocked()
+        await refuse(own)
+        await withCores((c) => member.gardenHelpCheck(c, { to: key, writer: own, now: Date.now() }))
+        return own
+      })({})
+      try {
+        await gardenTarget(key, pot)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.gardenHelp(c, { to: key, pot, writer, now: Date.now() }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
     },
 
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
