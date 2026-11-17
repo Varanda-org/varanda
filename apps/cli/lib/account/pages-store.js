@@ -6,8 +6,10 @@
 // the open transfer offer, the close and move markers, the follow and media
 // counts and the community writers, and the page's device-held Conversas
 // keys as opaque values: the public boxes, the gen and each member's sealed
-// share (docs/rpc.md 5.84 'dm-box'), never a secret. Also the core-node
-// delegates and the
+// share (docs/rpc.md 5.84 'dm-box'), never a secret. Also each core delegate
+// admin's own signed dm box ('actor-box'), kept only while it is in the
+// roster; the row key is left out while no member has one, so a build that
+// predates it can still open the file. Also the core-node delegates and the
 // spent-nonce table that makes a replayed request answer the seq it already
 // produced. Never a secret key, never a core. And the detached page-moved
 // statements of pages moved while paused (served by the successor route).
@@ -58,7 +60,7 @@ const { writeJsonAtomic } = require('@varanda/core/lib/store')
 const { writeGuarded, isRefused, held } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { NONCE_RE } = require('@varanda/core/lib/account-link')
-const { PAGE_SECRETS_SEALED_BYTES } = require('@varanda/core/lib/page-secrets')
+const { PAGE_SECRETS_SEALED_BYTES, verifyActorBox } = require('@varanda/core/lib/page-secrets')
 
 const FILE = 'pages.json'
 const VERSION = 1
@@ -100,6 +102,12 @@ const ROTATE_KINDS = ['box', 'remove']
 const IDEM_RE = /^[0-9a-f]{64}:[A-Za-z0-9_-]{1,128}$/
 const SHARE_KEYS = ['gen', 'sealed', 'by', 'sig', 'at']
 const PENDING_KEYS = ['gen', 'sealed', 'sig']
+// The optional row key of the roster members whose box is a delegate actor's
+// own signed statement (docs/protocol.md §12, "Conversas como página").
+const ACTOR_BOX_KEYS = ['box', 'gen', 'at', 'sig']
+// A statement dated further ahead would shut out every later one of the
+// same actor until that date.
+const ACTOR_BOX_SKEW_MS = 10 * 60 * 1000
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
 
 function fail (code) {
@@ -225,11 +233,27 @@ function validDm (d) {
   return d.rotatePending === null || (validRotate(d.rotatePending) && d.rotatePending.gen > d.gen)
 }
 
+function validActorBox (v) {
+  return exactKeys(v, ACTOR_BOX_KEYS) && validKey(v.box) && validInt(v.gen, 1, Number.MAX_SAFE_INTEGER) && isCanonicalIso(v.at) && validSig(v.sig)
+}
+
+// Shape only, as dm: the signature is checked once, by setActorBox, and again
+// by every sharer's device.
+function validActorBoxes (boxes, roster) {
+  if (!isPlainObject(boxes) || Object.keys(boxes).length === 0) return false
+  for (const [m, v] of Object.entries(boxes)) if (!roster.includes(m) || !validActorBox(v)) return false
+  return true
+}
+
 function validRow (page, r) {
-  const hasDm = isPlainObject(r) && has(r, 'dm')
-  if (!exactKeys(hasDm ? { ...r, dm: undefined } : r, hasDm ? [...ROW_KEYS, 'dm'] : ROW_KEYS)) return false
-  if (hasDm && !validDm(r.dm)) return false
+  if (!isPlainObject(r)) return false
+  const extra = ['dm', 'actorBoxes'].filter((k) => has(r, k))
+  const base = { ...r }
+  for (const k of extra) delete base[k]
+  if (!exactKeys(base, ROW_KEYS)) return false
+  if (has(r, 'dm') && !validDm(r.dm)) return false
   if (!validKey(r.owner) || r.owner === page || !validAdmins(r.admins, r.owner) || r.admins.includes(page)) return false
+  if (has(r, 'actorBoxes') && !validActorBoxes(r.actorBoxes, [r.owner, ...r.admins])) return false
   if (!validInt(r.gen, 1, MAX_GEN) || !validInt(r.rosterSeq, 1, Number.MAX_SAFE_INTEGER)) return false
   if (!validInt(r.length, 0, Number.MAX_SAFE_INTEGER) || typeof r.paused !== 'boolean' || !isCanonicalIso(r.createdAt)) return false
   if (!isPlainObject(r.invites)) return false
@@ -867,6 +891,7 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
           if (v.gen > gen && Date.parse(v.expiresAt) > nowMs && m !== owner && !sorted.includes(m)) next.invites[m] = v
         }
         if (has(next, 'dm')) rosterShares(next.dm, r.owner, [owner, ...sorted], nowMs)
+        rosterActorBoxes(next)
       }
       if (rotate !== null) {
         if (!has(next, 'dm')) throw fail('pedido-invalido')
@@ -889,6 +914,35 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     }
     for (const m of Object.keys(dm.pending)) if (roster.includes(m)) delete dm.pending[m]
     for (const m of Object.keys(dm.shares)) if (!roster.includes(m)) delete dm.shares[m]
+  }
+
+  // A member who left the roster keeps no actor box.
+  function rosterActorBoxes (row) {
+    if (!has(row, 'actorBoxes')) return
+    const roster = [row.owner, ...row.admins]
+    for (const m of Object.keys(row.actorBoxes)) if (!roster.includes(m)) delete row.actorBoxes[m]
+    if (Object.keys(row.actorBoxes).length === 0) delete row.actorBoxes
+  }
+
+  // A roster member's own signed box ('actor-box'): { box, gen, at, sig },
+  // signed by `member` as the actor. A newer `at` replaces the held one, the
+  // same statement again writes nothing, and any other is 'expirado'.
+  function setActorBox (page, member, value, { spend } = {}) {
+    needKey(member, 'member')
+    if (!validActorBox(value)) throw new TypeError('value must be { box, gen, at, sig }')
+    const v = { box: value.box, gen: value.gen, at: value.at, sig: value.sig }
+    if (!verifyActorBox({ actor: member, box: v.box, gen: v.gen, at: v.at }, v.sig)) return Promise.reject(fail('assinatura-invalida'))
+    return setFlag(page, (next, r) => {
+      if (!live(r)) throw fail('encerrada')
+      if (r.owner !== member && !r.admins.includes(member)) throw fail('sem-permissao')
+      if (Date.parse(v.at) > now() + ACTOR_BOX_SKEW_MS) throw fail('pedido-invalido')
+      const prior = has(r, 'actorBoxes') && has(r.actorBoxes, member) ? r.actorBoxes[member] : null
+      if (prior !== null) {
+        if (prior.box === v.box && prior.gen === v.gen && prior.at === v.at && prior.sig === v.sig) return false
+        if (!(Date.parse(v.at) > Date.parse(prior.at))) throw fail('expirado')
+      }
+      next.actorBoxes = { ...(has(r, 'actorBoxes') ? r.actorBoxes : {}), [member]: v }
+    }, { spend })
   }
 
   // The page's device-held Conversas keys (validDm), or null to drop them.
@@ -1003,6 +1057,7 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       next.invites = {}
       next.offer = null
       delete next.dm
+      delete next.actorBoxes
     }, { spend })
   }
 
@@ -1030,8 +1085,11 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       old.invites = {}
       old.offer = null
       delete old.dm
+      delete old.actorBoxes
       const row = newRow(r.owner, [...r.admins], nowMs, from)
       if (k2dm !== null) row.dm = k2dm
+      // The statements name no page, and K2's roster is K1's.
+      if (has(r, 'actorBoxes')) row.actorBoxes = copy(r.actorBoxes)
       commit({ pages: { [from]: old, [to]: row }, nonces })
       return { from: copy(old), to: copy(row) }
     })
@@ -1243,6 +1301,7 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     transferAccept,
     setRoster,
     setDm,
+    setActorBox,
     promoteDm,
     markRebox,
     settleRebox,

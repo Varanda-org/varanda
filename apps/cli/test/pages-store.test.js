@@ -13,6 +13,7 @@ const {
   MAX_FOLLOWS, NONCE_TTL_MS, INVITE_TTL_MS, MAX_PAGE_MOVES
 } = require('../lib/account/pages-store')
 const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { signActorBox } = require('@varanda/core/lib/page-secrets')
 const { tmpDir } = require('./helpers/net')
 
 const T0 = Date.parse('2026-11-03T12:00:00.000Z')
@@ -870,6 +871,53 @@ test('pages-store: dm keeps opaque shares, survives a reopen, leaves at close an
   t.absent('dm' in store.get(p2), 'a moved page keeps no shares')
   await store.setDm(k2, null)
   t.absent('dm' in store.get(k2))
+})
+
+test('pages-store: actor boxes: signed by the member, newer only, pruned by a removal, gone at close, carried by a move', async (t) => {
+  const { store, open, c } = setup(t)
+  const ownerKp = crypto.keyPair()
+  const owner = b4a.toString(ownerKp.publicKey, 'hex')
+  const danKp = crypto.keyPair()
+  const dan = b4a.toString(danKp.publicKey, 'hex')
+  const page = key()
+  const stated = (kp, at, box = key()) => {
+    const v = { box, gen: 1, at: iso(at) }
+    return { ...v, sig: signActorBox({ actor: b4a.toString(kp.publicKey, 'hex'), ...v }, kp) }
+  }
+  await store.create({ page, owner })
+  await store.invite(page, dan, { gen: 2, rosterSignature: sig() })
+  const n = store.accept(page, dan)
+  await store.setRoster(page, { gen: n.gen, seq: 3, owner: n.owner, admins: n.admins })
+  t.absent('actorBoxes' in store.get(page), 'no key while empty')
+
+  const first = stated(danKp, c.t - 1000)
+  await store.setActorBox(page, dan, first)
+  t.alike(open().get(page).actorBoxes, { [dan]: first }, 'persisted')
+  await rejects(t, store.setActorBox(page, owner, stated(danKp, c.t)), 'assinatura-invalida', 'signed by another actor')
+  await rejects(t, store.setActorBox(page, dan, { ...stated(danKp, c.t), sig: sig() }), 'assinatura-invalida', 'a bad signature')
+  await rejects(t, store.setActorBox(page, dan, stated(danKp, c.t - 2000)), 'expirado', 'older')
+  await rejects(t, store.setActorBox(page, dan, stated(danKp, c.t - 1000)), 'expirado', 'same at, another box')
+  await rejects(t, store.setActorBox(page, dan, stated(danKp, c.t + 11 * 60000)), 'pedido-invalido', 'too far ahead')
+  const outsiderKp = crypto.keyPair()
+  await rejects(t, store.setActorBox(page, b4a.toString(outsiderKp.publicKey, 'hex'), stated(outsiderKp, c.t)), 'sem-permissao', 'outside the roster')
+  t.exception.all(() => store.setActorBox(page, dan, { ...first, extra: 1 }), /value must be/)
+  await store.setActorBox(page, dan, first)
+  t.alike(store.get(page).actorBoxes, { [dan]: first }, 'the same statement again changes nothing')
+  const second = stated(danKp, c.t)
+  await store.setActorBox(page, dan, second)
+  await store.setActorBox(page, owner, stated(ownerKp, c.t))
+  t.alike(Object.keys(store.get(page).actorBoxes).sort(), [owner, dan].sort())
+  t.alike(store.get(page).actorBoxes[dan], second, 'a newer one replaces it')
+
+  const k2 = key()
+  await store.move(page, k2)
+  t.absent('actorBoxes' in store.get(page), 'the moved row keeps none')
+  t.alike(store.get(k2).actorBoxes[dan], second, 'carried to K2 with its roster')
+  const gone = store.remove(k2, dan)
+  await store.setRoster(k2, { gen: gone.gen, seq: 3, owner: gone.owner, admins: gone.admins })
+  t.alike(Object.keys(store.get(k2).actorBoxes), [owner], 'a removal forgets the removed member only')
+  await store.close(k2)
+  t.absent('actorBoxes' in store.get(k2), 'a close drops them')
 })
 
 test('pages-store: an invite share becomes a share at accept; a removed admin keeps none', async (t) => {

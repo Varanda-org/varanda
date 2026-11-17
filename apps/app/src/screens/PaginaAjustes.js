@@ -668,7 +668,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
         ? async ({ to }) => {
           // The old page's current gen stays readable on this device.
           if (dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })
-          const made = (await pagesDmPrepare(node, { member, page: to, status: { gen: 0 }, roster: { owner: roster.owner, admins: roster.admins }, gen: 1 })).dmBox
+          const made = (await pagesDmPrepare(node, { member, page: to, status: { gen: 0 }, roster: { owner: roster.owner, admins: roster.admins }, gen: 1, boxesFrom: page })).dmBox
           pagesDmExpectAdopt(to, 1)
           return made
         }
