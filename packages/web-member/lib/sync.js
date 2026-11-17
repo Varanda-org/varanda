@@ -363,7 +363,7 @@ const {
   foldTargets,
   isKeptType
 } = require('@varanda/core/lib/deletion')
-const { advertisedHeld, keptPastSeqs, askHeld, peerHolds } = require('@varanda/core/lib/sparse-held')
+const { advertisedHeld, keptPastSeqs, askHeld, peerHolds, nextHeld } = require('@varanda/core/lib/sparse-held')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
 const store = require('./node-store')
@@ -3825,6 +3825,7 @@ async function syncRun ({
       stub: false, // block 0 alone is held: released with a box that does not match, or a header stub
       head: null, // a header stub (#350): { group, diary } its block 0 names
       headHint: false, // refused as a header stub whose join was not proven: another listing may prove it
+      stubSlot: false, // holds a header stub slot until its record lands (stubSlotsHeld)
       boxRefused: false, // refused for its box alone until its diary releases it (liftBoxRefused)
       boxWalk: null, // the remembered walk that refused it (refuseBox)
       gating: false,
@@ -3891,6 +3892,9 @@ async function syncRun ({
       await openOwnGroupCore(e.key, e.group)
       if (e.rootNonce !== null) await openOwnGroupCore(e.group, e.group)
     }
+    // A core this device writes is never a stub: its record goes.
+    for (const key of [...headerStubs.keys()]) if (ownGroupKeys.has(key)) dropStubRecord(key)
+    const bindings = new Map()
     const stored = []
     for (const key of replicas) {
       if (ending) break
@@ -3920,12 +3924,18 @@ async function syncRun ({
         raw = await core.get(0, { wait: false, raw: true })
       } catch {}
       // A header stub is held under the pair that proved it, whatever its
-      // block 0 names: judged below by that diary's join alone.
+      // block 0 names: judged below by that diary's join alone. A record
+      // alone never purges a core that is more than a stub here
+      // (beyondStub): the record goes, and the core is read below by its
+      // own header.
       const rec = headerStubs.get(key)
       if (rec !== undefined && raw !== null && core.fork === 0) {
-        stored.push({ key, core, raw, group: rec.group, diary: rec.diary, headerStub: true })
-        heldAtStart.add(key)
-        continue
+        if (!(await beyondStub(key, core, raw, writers, bindings))) {
+          stored.push({ key, core, raw, group: rec.group, diary: rec.diary, headerStub: true })
+          heldAtStart.add(key)
+          continue
+        }
+        dropStubRecord(key)
       }
       const h = raw === null ? null : groupHeaderOf(raw, key)
       if (h === null || core.fork !== 0) {
@@ -3951,7 +3961,6 @@ async function syncRun ({
     // read): the startup scan adopts the rest (adoptDiaryGroups) without
     // reading the diary twice. Before parent paging: a root header naming
     // a diary-bound key never makes it a parent.
-    const bindings = new Map()
     if (stored.length > 0) {
       const entries = await bindingEntries(ownHex, bindings)
       if (entries === null) log('aviso: falha ao ler os grupos do diário')
@@ -4119,6 +4128,31 @@ async function syncRun ({
     }
   }
 
+  // Whether stored group core `key` is more than a header stub here: the
+  // root of a group of kv groupWriters, a block past 0 held, or a writer of
+  // such a group whose header's own diary, as stored, joined it. A header
+  // naming a diary that never joined it stays a stub.
+  async function beyondStub (key, core, raw, writers, cache) {
+    if (writers.some((e) => e.group === key)) return true
+    if (core.length > 1 && (await nextHeld(core, 1, core.length)) !== -1) return true
+    const h = groupHeaderOf(raw, key)
+    if (h === null || h.group === key || !writers.some((e) => e.group === h.group) || ending) return false
+    return storedJoinProof(await bindingEntries(h.diary, cache), h.group, key).proven
+  }
+
+  function dropStubRecord (key) {
+    if (!headerStubs.delete(key)) return
+    track(groupKv(() => store.removeHeaderStub(storage, key)), noop, noop)
+  }
+
+  // Header stubs past the cap check of their gate and not recorded yet:
+  // each holds a slot, so gates in flight never record past the cap.
+  function stubSlotsHeld () {
+    let n = 0
+    for (const ge of groupCores.values()) if (ge.stubSlot === true && ge.state !== 'failed' && ge.state !== 'failing') n++
+    return n
+  }
+
   // The stored entries of binding diary d (the own diary, or a stored
   // replica: followed or kv groupDiaries), read once per run start; null
   // when not stored or unreadable.
@@ -4284,6 +4318,7 @@ async function syncRun ({
     gd.stopFork()
     gd.stopQuota()
     gd.tracker = null
+    dropWalk(gd.key)
     const core = gd.core
     gd.core = null
     if (unlist) track(groupKv(() => store.removeGroupDiary(storage, gd.key)), noop, noop)
@@ -4403,10 +4438,13 @@ async function syncRun ({
     purgeKeptGroupCores((x) => x.diary === d && (x.key !== x.group || x.rootBound === true), reason)
   }
 
-  // Failed-but-kept and resting foreign cores matching `match`.
+  // Failed-but-kept and resting foreign cores matching `match`. Each match
+  // is a verdict on a listing's group or diary, so a recorded header stub
+  // is left to the next start, unless its own key is blocked.
   function purgeKeptGroupCores (match, reason) {
+    const spared = (key) => headerStubs.has(key) && !isBlockedKey(key)
     for (const ge of groupCores.values()) {
-      if (!match(ge) || ge.state !== 'failed' || ge.kept !== true) continue
+      if (!match(ge) || ge.state !== 'failed' || ge.kept !== true || spared(ge.key)) continue
       ge.kept = false
       const core = ge.core
       ge.core = null
@@ -4415,7 +4453,7 @@ async function syncRun ({
       markGroupChanged(ge.group)
     }
     for (const [key, r] of [...restingCores]) {
-      if (!match({ key, ...r })) continue
+      if (!match({ key, ...r }) || spared(key)) continue
       restingCores.delete(key)
       emit({ event: 'group-skipped', key, group: r.group, reason })
       purgeGroupKey(key, reason)
@@ -4507,12 +4545,19 @@ async function syncRun ({
     ge.stopGrow = ge.stopFork = ge.stopQuota = ge.stopSparse = ge.range = ge.retryTimer = null
   }
 
-  function failGroupEntry (ge, reason, { purge }) {
+  // `own`: the verdict is about the key itself (its fork, its block 0, its
+  // length), not its listing or the diary that listing names.
+  function failGroupEntry (ge, reason, { purge, own = false }) {
     if (ge.state === 'failing' || ge.state === 'failed') return
+    // A header stub stored before this run may write in another group: a
+    // verdict on its listing or its hinted diary never purges it, unless
+    // its own key is blocked.
+    if (purge && !own && ge.head !== null && ge.preStored === true && !isBlockedKey(ge.key)) purge = false
     const stored = ge.state === 'active' || ge.state === 'regate'
     stopGroupEntry(ge)
     ge.reason = reason
     ge.reserved = false
+    ge.stubSlot = false
     ge.hints.add(ge.group + ':' + ge.diary + ':' + ge.seq)
     log('aviso: núcleo de grupo ' + key8(ge.key) + ' ignorado (' + reason + ')')
     emit({ event: 'group-skipped', key: ge.key, group: ge.group, reason })
@@ -4586,7 +4631,7 @@ async function syncRun ({
     if (ended || !core) return false
     if (ge.state !== 'active' && ge.state !== 'regate') return false
     if (!overQuota(core)) return false
-    failGroupEntry(ge, 'quota', { purge: ge.state === 'regate' })
+    failGroupEntry(ge, 'quota', { purge: ge.state === 'regate', own: true })
     return true
   }
 
@@ -4614,7 +4659,7 @@ async function syncRun ({
     }
     ge.stopFork = watchFork(core, () => {
       if (ended || (ge.state !== 'active' && ge.state !== 'regate')) return
-      failGroupEntry(ge, 'fork', { purge: true })
+      failGroupEntry(ge, 'fork', { purge: true, own: true })
     })
     // A stub's block 0 is all the fold reads of it: nothing past it is fetched.
     ge.range = core.download(ge.stub ? { start: 0, end: 1 } : { start: 0, end: -1 })
@@ -4882,7 +4927,7 @@ async function syncRun ({
         return
       }
       if (!ok) {
-        failGroupEntry(ge, 'header-invalid', { purge: true })
+        failGroupEntry(ge, 'header-invalid', { purge: true, own: true })
         return
       }
       const recheck = bindingRecheck(ge.diaryRaw0, ge.diary, ownHex, association, gateOpts(), isBlockedKey)
@@ -4895,11 +4940,13 @@ async function syncRun ({
         const x = { key: ge.key, group: ge.group, diary: ge.diary }
         headerStubs.set(ge.key, x)
         track(groupKv(() => store.addHeaderStub(storage, x)), noop, () => log('aviso: falha ao gravar o núcleo de grupo ' + key8(ge.key)))
-      } else if (ge.head === null && ge.key !== ge.group && headerStubs.has(ge.key)) {
-        // Gated as a writer of the pair its header names, which proved it.
-        headerStubs.delete(ge.key)
-        track(groupKv(() => store.removeHeaderStub(storage, ge.key)), noop, noop)
+      } else if (ge.head === null) {
+        // Gated as a writer, or as the root, of the pair its header names,
+        // which proved it: a root too, or the next start would judge the
+        // full core by the record alone.
+        dropStubRecord(ge.key)
       }
+      ge.stubSlot = false
       markGroupBound(ge.diary)
       if (ge.diary !== ownHex && ge.diaryRaw0) {
         bindingCerts.set(ge.diary, ge.diaryRaw0)
@@ -4919,7 +4966,7 @@ async function syncRun ({
     }, () => {
       ge.gating = false
       if (ge.state !== 'regate' || ge.core !== core) return
-      failGroupEntry(ge, 'header-invalid', { purge: true })
+      failGroupEntry(ge, 'header-invalid', { purge: true, own: true })
     })
   }
 
@@ -5430,8 +5477,10 @@ async function syncRun ({
     const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group))
     if (verdict === 'not-community') return refuseNotCommunity(ge)
     // A header stub (HEAD_REASONS), held once the hinted diary's join is
-    // proven (below), else refused on the hint.
-    const head = ge.key !== ge.group && HEAD_REASONS.has(verdict) ? verdict : null
+    // proven (below), else refused on the hint. A core stored before this
+    // gate is one only when kv headerStubs records it: any other keeps its
+    // verdict, as before.
+    const head = ge.key !== ge.group && HEAD_REASONS.has(verdict) && (ge.preStored !== true || headerStubs.has(ge.key)) ? verdict : null
     if (verdict !== null && head === null) return failGroupEntry(ge, verdict, { purge: false })
     // A `member` that does not match its root's kind: the fold rejects it at
     // any cut, so it is held as a stub, block 0 alone, once its diary's
@@ -5460,8 +5509,12 @@ async function syncRun ({
     if (isBlockedKey(ge.group)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (overQuota(probe)) return failGroupEntry(ge, 'quota', { purge: false })
     // A full record refuses a new header stub: the fold waits for it as
-    // before.
-    if (head !== null && !ge.preStored && !headerStubs.has(ge.key) && headerStubs.size >= store.MAX_HEADER_STUBS) return failGroupEntry(ge, 'quota', { purge: false })
+    // before. The slot is held from here until the record lands or the
+    // entry fails, so gates in flight never record past the cap.
+    if (head !== null && !ge.preStored && !headerStubs.has(ge.key) && ge.stubSlot !== true) {
+      if (headerStubs.size + stubSlotsHeld() >= store.MAX_HEADER_STUBS) return failGroupEntry(ge, 'quota', { purge: false })
+      ge.stubSlot = true
+    }
     if (boxless) {
       const rel = await heldRelease(ge.diary, ge.group, ge.key)
       if (ge.state !== 'pending' || ending) return
@@ -5494,11 +5547,13 @@ async function syncRun ({
       core = await store.openGroupReplica(storage, ge.key)
     } catch {
       ge.reserved = false
+      ge.stubSlot = false
       if (!ended) log('aviso: falha ao abrir o núcleo de grupo ' + key8(ge.key))
       return gateUnanswered(ge)
     }
     ge.reserved = false
     if (ending || ge.state !== 'pending' || link !== l) {
+      ge.stubSlot = false
       // A core stored before this gate stays; a new one goes, inside the
       // kv chain like every other group purge.
       track(groupKv(async () => {
@@ -5570,10 +5625,7 @@ async function syncRun ({
     const core = openBinding(d)
     let st = walkCache.get(d)
     if (st !== undefined && st.core === core && !st.stale && st.length === (core && core.length)) return st.records
-    if (st !== undefined) {
-      st.stop()
-      walkCache.delete(d)
-    }
+    if (st !== undefined) dropWalk(d)
     if (core === null || core.fork !== 0) return Promise.resolve(null)
     st = { core, length: core.length, stale: false, records: null, stop: noop }
     const kept = st
@@ -5581,14 +5633,18 @@ async function syncRun ({
     core.on('download', onDownload)
     st.stop = () => core.off('download', onDownload)
     st.records = store.readAll(core).then(diaryWalkRecords, () => {
-      if (walkCache.get(d) === kept) {
-        kept.stop()
-        walkCache.delete(d)
-      }
+      if (walkCache.get(d) === kept) dropWalk(d)
       return null
     })
     walkCache.set(d, st)
     return st.records
+  }
+
+  function dropWalk (d) {
+    const st = walkCache.get(d)
+    if (st === undefined) return
+    st.stop()
+    walkCache.delete(d)
   }
 
   // The writers refused for their box whose diary d, as this run holds it,
@@ -5654,6 +5710,7 @@ async function syncRun ({
   // Nothing came within the timeout: a continuous run asks again later; a
   // once run keeps the core as an unmet goal.
   function gateUnanswered (ge) {
+    ge.stubSlot = false
     if (ending) return
     emit({ event: 'group-unanswered', key: ge.key, group: ge.group, attempts: ge.attempts })
     if (once) return

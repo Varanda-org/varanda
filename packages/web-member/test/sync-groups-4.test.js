@@ -19,7 +19,7 @@ const store = require('../lib/node-store')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const ops = require('../lib/member-ops')
 const { CAP_HEADER_STUBS } = require('@varanda/core/lib/admission')
-const { hex, member, seederOverWs, indexed, sync, once, named, lender, joinSeq, injectWriters } = require('./helpers/sync-groups')
+const { hex, member, seederOverWs, indexed, sync, once, named, lender, joinSeq, injectWriters, moderatorSnapshot } = require('./helpers/sync-groups')
 
 const enc = (record) => b4a.from(JSON.stringify(record))
 const AT = '2026-01-01T00:00:00.000Z'
@@ -121,7 +121,7 @@ async function stubWorld (t, kinds = Object.keys(HEADS)) {
   const wb = (await store.readGroupWriters(b.storage)).find((e) => e.group === group).key
   const wc = (await store.readGroupWriters(c.storage)).find((e) => e.group === group).key
   await until(() => indexed(seeder, group, wb) && indexed(seeder, group, wc), { name: 'writers indexed', timeoutMs: 30000 })
-  return { seeder, url, a, b, c, r, community, group, stubs, wb, wc, skip }
+  return { seeder, url, assocKp, a, b, c, r, community, group, stubs, wb, wc, skip }
 }
 
 test('a listed writer whose block 0 can never count for the diary that joined it is held as a stub once the join is proven, and a restart keeps it while that diary does (#350)', async (t) => {
@@ -262,4 +262,88 @@ test('an identity reset clears kv headerStubs (#350)', async (t) => {
   t.is((await store.readHeaderStubs(storage)).length, 1, 'recorded')
   await store.deleteGroupData(storage)
   t.is(await storage.readJson('headerStubs'), null, 'cleared, so the next person on the device inherits no stub keys')
+})
+
+test('a group root first held as a stub of another group leaves the record once gated as its root, and a record alone never purges it at start (#350)', async (t) => {
+  t.timeout(300000)
+  const { seeder, url, a, b, r, community, group, skip } = await stubWorld(t, [])
+  // A's group G2 of the community, with a post; B's diary joins its root K
+  // to G as well.
+  const { group: k } = await ops.groupCreate(a.ctx, { name: 'Outro', join: 'open', community })
+  await ops.groupPost(a.ctx, { group: k, text: 'de A' })
+  t.ok((await once(a, url, [])).ok, 'A pushed G2')
+  await until(() => indexed(seeder, k, k), { name: 'G2 root indexed' })
+  skip.add(b.ownHex + ':' + k)
+  await bind(b, group, k)
+  t.ok((await once(b, url, [])).ok, 'B pushed the join')
+  const rootCore = seeder.store.get({ key: b4a.from(k, 'hex') })
+  await rootCore.ready()
+  t.teardown(() => rootCore.close().catch(() => {}))
+  const len = rootCore.length
+  t.ok(len > 1, 'G2\'s root holds blocks past 0')
+  const full = { length: len, contiguous: len, held: Array.from({ length: len }, (_, i) => i) }
+  const asStub = { key: k, diary: b.ownHex, length: full.length, seq: await joinSeq(b, group, k) }
+  // No page lists K but as B's writer of G until `hide` goes.
+  let hide = true
+  const real = seeder.groupWriters.bind(seeder)
+  seeder.groupWriters = (q) => {
+    const page = real(q)
+    const items = hide ? page.items.filter((it) => it.key !== k) : page.items
+    return { ...page, items: sorted(q.group === group ? [...items, asStub] : items) }
+  }
+  t.ok((await once(r, url, [])).ok, 'R\'s first run ends ok')
+  t.alike(await recorded(r), { [k]: b.ownHex }, 'K held as a stub of (G, B)')
+  t.is((await heldCopy(r, k)).contiguous, 1, 'block 0 alone')
+  hide = false
+  await store.addGroupReplica(r.storage, k)
+  t.ok((await once(r, url, [])).ok, 'R\'s second run ends ok')
+  t.alike(await heldCopy(r, k), full, 'then gated as G2\'s root and fetched in full')
+  t.alike(await recorded(r), {}, 'and it leaves the record')
+  // A record left by an earlier run, naming a diary R never held; offline,
+  // so nothing purged here could be fetched again.
+  await r.storage.writeJson('headerStubs', { v: 1, stubs: [{ key: k, group, diary: hex(crypto.randomBytes(32)) }] })
+  await once(r, 'ws://127.0.0.1:9', [], { timeoutMs: 5000 })
+  t.alike(await heldCopy(r, k), full, 'a core held past block 0 is kept in full')
+  t.alike(await recorded(r), {}, 'only its record goes')
+})
+
+test('a core stored before its gate is a header stub only when kv headerStubs records it (#350)', async (t) => {
+  t.timeout(300000)
+  const { seeder, url, r, group, stubs } = await stubWorld(t, ['another group'])
+  const x = stubs['another group']
+  injectWriters(seeder, group, [x])
+  t.ok((await once(r, url, [])).ok, 'R\'s first run ends ok')
+  t.alike(await recorded(r), { [x.key]: x.diary }, 'held as a stub of (G, B)')
+  // The record is lost: the stored core rests under the group its header
+  // names, and B's listing of it is judged as before.
+  await r.storage.writeJson('headerStubs', { v: 1, stubs: [] })
+  const ev = []
+  t.ok((await once(r, url, ev)).ok, 'R\'s second run ends ok')
+  t.alike(skips(ev, x.key), ['wrong-group'], 'refused with its header\'s verdict, not made a stub')
+  t.alike(await recorded(r), {}, 'and not recorded')
+  t.comment('held after: ' + JSON.stringify(await heldCopy(r, x.key)))
+})
+
+test('a verdict on the diary that proved a recorded stub leaves the stub\'s core in place (#350)', async (t) => {
+  t.timeout(300000)
+  const { seeder, url, b, r, group, stubs, assocKp } = await stubWorld(t, ['undecodable'])
+  const x = stubs.undecodable
+  injectWriters(seeder, group, [x])
+  t.ok((await once(r, url, [])).ok, 'R\'s first run ends ok')
+  t.alike(await recorded(r), { [x.key]: x.diary }, 'held as a stub of (G, B)')
+  const ev = []
+  const lent = lender()
+  const ac = new AbortController()
+  const run = sync(r, url, ev, { signal: ac.signal, groupPageMs: 300, reader: lent.reader })
+  try {
+    await until(() => lent.held(x.key) !== null, { name: 'the stub held at start', timeoutMs: 60000 })
+    await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [b.ownHex] }), null)
+    await until(() => skips(ev, x.key).length > 0, { name: 'the stub leaves the table', timeoutMs: 60000 })
+  } finally {
+    ac.abort()
+    await run
+  }
+  t.alike(skips(ev, x.key), ['blocked'], 'for the blocked diary that proved it')
+  t.ok(await store.groupCoreExists(r.storage, x.key), 'but its core stays')
+  t.alike(await heldCopy(r, x.key), { length: 2, contiguous: 1, held: [0] }, 'block 0 and all')
 })
