@@ -1035,6 +1035,24 @@ function eventLines (r) {
   return r.place === '' ? [r.title] : [r.title, r.place]
 }
 
+// Per-phase startup durations (ms, non-negative integers) from the Date.now()
+// marks taken at the step boundaries of Seeder#start. Pure: no clock.
+function startupPhases (m) {
+  const d = (a, b) => Math.max(0, Math.trunc(b - a))
+  return {
+    configMs: d(m.t0, m.config),
+    storeMs: d(m.config, m.store),
+    stateMs: d(m.store, m.state),
+    diariesMs: d(m.state, m.diaries),
+    mediaMs: d(m.diaries, m.media),
+    groupsMs: d(m.media, m.groups),
+    prepareMs: d(m.groups, m.prepare),
+    swarmMs: d(m.prepare, m.swarm),
+    flushMs: d(m.swarm, m.flush),
+    totalMs: d(m.t0, m.flush)
+  }
+}
+
 class Seeder {
   // purgeHook(core), gateHook(key), admitHook(key, step) ('persist' |
   // 'open', awaited right before that admission step; a throw simulates the
@@ -1576,18 +1594,27 @@ class Seeder {
   async start () {
     if (this._started) throw new Error('semeador já iniciado')
     this._started = true
+    const marks = { t0: Date.now() }
 
     // Step 1: trust root, Noise key pair and seeder certificate.
     this.association = Seeder.ensureConfig(this.dataDir, this.associationKey)
     this._keyPair = loadSeederKey(this.dataDir)
     this._cert = loadSeederCert(this.dataDir)
     checkSeederCert(this._cert, this._keyPair, this.association)
+    marks.config = Date.now()
 
     // Step 2: the main store (data-dir lock) FIRST, then the state: a
     // previous seeder process may write admitted.json until it releases the
     // lock, so it is read only once the lock is held. The main store opens
     // BEFORE the quarantine is wiped (R6.2).
     this.store = await openStore(this.dataDir)
+    marks.store = Date.now()
+    let diariesBefore = 0
+    let mediaBefore = 0
+    let groupsBefore = 0
+    let diariesKept = 0
+    let mediaKept = 0
+    let groupsKept = 0
 
     try {
       this._guardReplication()
@@ -1637,7 +1664,12 @@ class Seeder {
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
+      marks.state = Date.now()
       // Step 3: re-gate every stored replica before anything can serve it.
+      // Ready-event core counts are fixed at the end of this step (media at
+      // the end of 3b, groups at the end of 3c), all before step 4, so they
+      // describe the re-gate alone.
+      diariesBefore = this._admitted.size
       const survivors = []
       for (const key of [...this._admitted.keys()]) {
         const core = await openReplica(this.store, key)
@@ -1677,11 +1709,14 @@ class Seeder {
         await this._persist()
       }
 
+      diariesKept = survivors.length
+      marks.diaries = Date.now()
       // Step 3b: re-gate every listed media core the same way, once the
       // diaries are settled: its diary must have survived (else 'unbound'),
       // the core must not be forked, must hold its header, be within the
       // media quota and its block 0 must be a header naming that diary.
       // Failures are purged BEFORE they leave the file (R6.1 order).
+      mediaBefore = this._media.size
       const mediaSurvivors = []
       const kept = new Set(survivors.map(([key]) => key))
       for (const [key, binding] of [...this._media]) {
@@ -1711,11 +1746,14 @@ class Seeder {
         await this._persist()
       }
 
+      mediaKept = mediaSurvivors.length
+      marks.media = Date.now()
       // Step 3c: listed group cores, the same way (header comment). A writer
       // needs its diary to have survived; a root its creator or a listed
       // writer of the group whose diary survived. A root key in the
       // snapshot takes its group down. The stored block 0 must be the header
       // the binding names.
+      groupsBefore = this._groups.size
       const groupSurvivors = []
       const perGroup = new Map()
       let provisionalRoot = false
@@ -1788,6 +1826,8 @@ class Seeder {
         await this._persist()
       }
 
+      groupsKept = groupSurvivors.length
+      marks.groups = Date.now()
       // Step 4: watchers and live downloads (no swarm yet). A persisted
       // binding is served right away: the scan of its diary (after ready)
       // only confirms or drops it, it never has to rediscover it. The
@@ -1821,9 +1861,11 @@ class Seeder {
       }
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
+      marks.prepare = Date.now()
       // Step 5: the swarm, with the seeder's Noise key pair.
       this.topic = topicFor(this.association)
       this.swarm = createSwarm({ bootstrap: this.bootstrap, keyPair: this._keyPair, host: this.host })
+      marks.swarm = Date.now()
       this.swarm.on('connection', (socket) => this._onConnection(socket))
       const topics = [
         this.topic,
@@ -1837,6 +1879,7 @@ class Seeder {
       } finally {
         done()
       }
+      marks.flush = Date.now()
       if (this._closing) throw new Error('semeador encerrado')
       this._stopRediscovery = startRediscovery(this.swarm, [this.topic], {
         intervalMs: REDISCOVER_MS,
@@ -1850,7 +1893,17 @@ class Seeder {
     const topic = b4a.toString(this.topic, 'hex')
     const admitted = this.admittedKeys()
     this._ready = true
-    this.log({ event: 'ready', topic, admitted })
+    const phases = startupPhases(marks)
+    // kept is the survivors of that re-gate step. dropped is the size before
+    // the step minus kept. The step only drops keys it walked, so dropped
+    // is >= 0 with no clamp. A diary admitted or dropped while the swarm
+    // flushes is not part of these counts.
+    const cores = {
+      diaries: { kept: diariesKept, dropped: diariesBefore - diariesKept },
+      media: { kept: mediaKept, dropped: mediaBefore - mediaKept },
+      groups: { kept: groupsKept, dropped: groupsBefore - groupsKept }
+    }
+    this.log({ event: 'ready', topic, admitted, phases, cores })
     // Background pass (never inside start()): scan every served diary for
     // media-core records, one diary at a time (_scanQueue), and index it on
     // the separate index queue (`indexing` stays true until every diary
@@ -8280,6 +8333,7 @@ Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 
 module.exports = {
   Seeder,
+  startupPhases,
   GATE_TIMEOUT_MS,
   MAX_HANDSHAKE_FRAME,
   MAX_HANDSHAKE_BYTES,
