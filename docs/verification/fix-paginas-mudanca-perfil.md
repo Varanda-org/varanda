@@ -30,17 +30,18 @@ Casos fixados em `apps/cli/test/pages-lifecycle.test.js`:
 
 ## Conferir no app (pessoas)
 
-Ordem: Android (build de debug), simulador iOS, depois web e PWA. A mudança de chave de uma Página exige conta: no Android, conferir com o APK de preview do EAS (veja `docs/development.md`).
+Caminhada na web, no laboratório hospedado (`apps/cli/scripts/hosted-lab.js` com este serviço, navegador sem tela): a dona criou a Página, pôs foto e bio, convidou uma administradora e uma terceira pessoa passou a seguir.
 
-- [ ] Android: numa Página com nome, bio e foto, Ajustes da página › Mudar a chave. A página na chave nova mostra o mesmo nome, a mesma bio e a mesma foto, para o dono e para quem segue.
-- [ ] Android: uma Página sem foto muda de chave e mostra nome e bio, sem foto.
-- [ ] iOS: os mesmos passos.
-- [ ] Web: os mesmos passos.
-- [ ] PWA: os mesmos passos.
+- [x] Ajustes da página › Mudar a chave: "Pronto: a página mudou para uma nova chave", sem `perfil-pendente` nem `foto-pendente` no log.
+- [x] No aparelho da dona, Páginas lista a chave antiga "encerrada" e a nova, as duas com nome e @nome; a página na chave nova (a que `/account/username/<@nome>` passou a apontar) mostra o mesmo nome, a mesma bio e a foto, guardada no núcleo de mídia da chave nova.
+- [x] Quem segue abre a página pela Busca (já na chave nova) e vê o mesmo nome, a mesma bio e a foto.
+- [ ] Uma Página sem foto muda de chave e mostra nome e bio, sem foto: só nos testes.
+
+Android, iOS e PWA: os mesmos passos ficam com o Rodrigo, no APK de preview do EAS (o build de debug não entra com passkey).
 
 ## Não verificado / limites conhecidos
 
-- Não conferido em aparelho.
+- Não conferido em aparelho (Android, iOS) nem no PWA.
 - Se a cópia falhar, o dono precisa editar o perfil na chave nova à mão; o app não avisa.
 - A cópia não passa de novo pela conferência de palavras: o texto já estava publicado na chave antiga.
 - Se o serviço cair entre a gravação da mudança na ACL e a cópia, K2 fica sem perfil e nenhum reenvio retoma a cópia: o dono edita o perfil na chave nova à mão.
