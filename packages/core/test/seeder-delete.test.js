@@ -1480,6 +1480,27 @@ test('a deleted group-cut that arrives after the scan steps the slot walk at its
   t.alike(entry.groupLive.get(CUT_WRITERS[8]), { group: GROUP_KEY, seq: 10, left: false }, 'the ninth takes the slot it freed')
 })
 
+// A member joined a writer (seq 1), left (seq 2, the join off) and deleted
+// the join (seq 3). The scan passed the join as a hole: when it arrives the
+// walk counts the writer, which readers then check by that on join.
+const LEFT_BLOCKS = [
+  { type: 'member-cert', cert: { member: GROUP_DIARY } },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: true, at: GROUP_AT },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: false, at: GROUP_AT },
+  { type: 'delete', seq: 1, at: GROUP_AT }
+]
+
+test('a deleted on join that arrives after the scan lists its left writer by that join (#350)', async (t) => {
+  const held = new Set(LEFT_BLOCKS.keys())
+  const { seeder, entry, reconciled } = groupFixture(held, LEFT_BLOCKS)
+  await seeder._pageArrived(GROUP_DIARY, entry, 2)
+  t.absent(entry.groupLive.has(GROUP_WRITER), 'an off join alone counts no writer')
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 1)
+  t.alike(entry.groupLive.get(GROUP_WRITER), { group: GROUP_KEY, seq: 1, left: true }, 'listed left by the late on join, never the off one')
+  t.alike(reconciled.at(-1), [GROUP_DIARY, [GROUP_WRITER]], 'the group cores are reconciled with it')
+})
+
 test('a held group-join a tombstone targets never enters the deleted bookkeeping', async (t) => {
   const { seeder, entry } = groupFixture(new Set([0, 1, 2, 3, 4]))
   await learnGroupTombstones(seeder, entry)
