@@ -2811,8 +2811,10 @@ class Seeder {
   // only on the stored signed sizes and the admitted.json order, so start()
   // runs the same pass and a restart picks the same victims; a crash
   // mid-purge leaves a victim listed and the next start picks it again.
-  // Not a moderation outcome: nothing is noted in goneRoots or
-  // revokedCreators, and the member may be admitted again once it fits.
+  // Not a moderation outcome: nothing is noted in revokedCreators, a
+  // dropped root its creator bound keeps only that creator in goneRoots, as
+  // for any drop (_noteDroppedRoot), and the member may be admitted again
+  // once it fits.
   _storagePass () {
     this._storagePassQueued = false
     if (this._closing) return
