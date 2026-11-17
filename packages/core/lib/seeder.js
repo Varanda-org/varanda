@@ -108,10 +108,12 @@
 // a root its blocked or revoked creator bound, a root key in the blocklist snapshot, a fork or the
 // quota.
 // A writer D joins to G whose block 0 can never count for (G, D) (any
-// header refusal but a box mismatch, a member certificate, a media header
-// or an oversized block; never a root) is kept as a header stub (#350): one
-// row per (G, K) in admitted.json `headerStubs`, and K's block 0 alone in
-// the main store unless K already has another role there. Listed on the
+// header refusal but a box mismatch or an oversized block; never a root) is
+// kept as a header stub (#350): one row per (G, K) in admitted.json
+// `headerStubs`, and K's block 0 alone in the main store unless K already
+// has another role there. A diary or media core fetched for such a join (a
+// member certificate or a media header) is refused; one already served
+// here becomes a listing-only row, as its block 0 is verified. Listed on the
 // groups channel only to peers announcing CAP_HEADER_STUBS, so their reads
 // stop waiting for K; at most MAX_HEADER_STUBS_PER_DIARY rows per diary and
 // maxHeaderStubs in all ('stub-full' past them, nothing evicted).
@@ -1597,7 +1599,8 @@ class Seeder {
     this.maxGroupCores = maxGroupCores === null ? maxServed : maxGroupCores
     this.maxGroupWriters = maxGroupWriters
     this.maxGroupInflight = maxGroupInflight
-    this.maxHeaderStubs = maxHeaderStubs
+    // admitted.json keeps at most ROOT_DENIALS_HARD rows (headerStubRows).
+    this.maxHeaderStubs = Math.min(maxHeaderStubs, ROOT_DENIALS_HARD)
     this.groupScanStallMs = groupScanStallMs
     this.groupHeaderTimeoutMs = groupHeaderTimeoutMs
     this.regateTimeoutMs = regateTimeoutMs
@@ -1772,6 +1775,7 @@ class Seeder {
     // other role: block 0 alone, open in the main store, never in _groups.
     this._headerStubs = new Map()
     this._stubCores = new Map()
+    this._stubsRestored = false
     this._groupIndex = createGroupIndex({ maxGroups: this.maxGroupCores, maxWritersPerGroup: maxGroupWriters })
     this._groupHandles = new Set()
     this._preparing = 0 // _prepareDiary calls running (at most PREPARE_CONCURRENCY)
@@ -2108,6 +2112,9 @@ class Seeder {
       for (const [key, binding] of Object.entries(file.groups)) {
         if (HEX64.test(key) && !this._admitted.has(key) && !this._media.has(key)) this._groups.set(key, binding)
       }
+      // Header stub rows load now, so every persist of steps 3a to 3c keeps
+      // them; step 3d judges them.
+      for (const r of file.headerStubs) this._headerStubs.set(r.group + ':' + r.key, { ...r, dropping: false })
       // The stored moderation snapshot, read under the lock like
       // admitted.json and kept only when it verifies for the association
       // (createBlocklistState ignores anything else). An unreadable file is
@@ -2305,7 +2312,7 @@ class Seeder {
 
       groupsKept = groupSurvivors.length
       // Step 3d: header stub rows (#350), once every other role is settled.
-      await this._restoreHeaderStubs(file.headerStubs, kept)
+      await this._restoreHeaderStubs(kept)
       marks.groups = Date.now()
       // Step 4: watchers and live downloads (no swarm yet). A persisted
       // binding is served right away: the scan of its diary (after ready)
@@ -4655,12 +4662,16 @@ class Seeder {
     if (this._isBlocked(diary)) return
     // Once the scan caught up, a row whose join no longer names K for G
     // goes (K joined to another group); a left join keeps its row, as
-    // leaving keeps a writer's core.
+    // leaving keeps a writer's core. While K's new join is still unsettled
+    // the row stays for this pass: the admission then reads the held core
+    // with no fetch, and the next pass drops the row.
     if (scanCaughtUp(entry)) {
       for (const [id, r] of [...this._headerStubs]) {
         if (r.diary !== diary || r.dropping) continue
         const live = entry.groupLive.get(r.key)
-        if (live === undefined || live.group !== r.group) this._dropHeaderStub(id, 'unbound')
+        if (live !== undefined && live.group === r.group) continue
+        if (live !== undefined && this._stubMoving(entry, r.key, live)) continue
+        this._dropHeaderStub(id, 'unbound')
       }
     }
     for (const [writer, j] of entry.groupLive) {
@@ -4675,6 +4686,14 @@ class Seeder {
         this._admitGroup(diary, entry, k, j.group, j.seq).catch(noop)
       }
     }
+  }
+
+  // Whether K's held stub core waits for the admission of its new join j:
+  // no row answers j yet, j is not refused and K is not bound.
+  _stubMoving (entry, key, j) {
+    if (!this._stubCores.has(key) || this._headerStubs.has(j.group + ':' + key)) return false
+    if (entry.groupRefused.get(key) === j.seq) return false
+    return !this._groups.has(key) && !this._groupsDropping.has(key)
   }
 
   // D's join j of writer K, as a header stub: true when a row of D's
@@ -4954,7 +4973,10 @@ class Seeder {
     for (const [writer, j] of e.groupLive) {
       if (group !== null && j.group !== group) continue
       for (const k of writer === j.group || j.left ? [writer] : [writer, j.group]) {
-        if (!this._groups.has(k) && !this._headerStubs.has(j.group + ':' + k) && !this._groupJoinStale(diary, k)) return true
+        if (this._groups.has(k) || this._groupJoinStale(diary, k)) continue
+        // Only D's own live row answers D's join.
+        const rec = this._headerStubs.get(j.group + ':' + k)
+        if (rec === undefined || rec.diary !== diary || rec.dropping) return true
       }
     }
     return false
@@ -5127,9 +5149,9 @@ class Seeder {
   // block is still a stub for the row. A core no row keeps is purged
   // before its rows leave the file (a purge failure fails the start).
   // A row whose join is gone waits for the first caught-up scan.
-  async _restoreHeaderStubs (rows, kept) {
-    if (rows.length === 0) return
-    for (const r of rows) this._headerStubs.set(r.group + ':' + r.key, { ...r, dropping: false })
+  async _restoreHeaderStubs (kept) {
+    this._stubsRestored = true
+    if (this._headerStubs.size === 0) return
     const gone = new Map() // id -> reason
     for (const [id, r] of this._headerStubs) {
       if (!kept.has(r.diary)) gone.set(id, 'unbound')
@@ -5137,17 +5159,20 @@ class Seeder {
       else if (this._isBlocked(r.diary) || this._isBlocked(r.key)) gone.set(id, 'blocked')
     }
     const held = new Map() // key -> core (null when it did not open), keys with no other role
-    for (const key of new Set(rows.map((r) => r.key))) {
+    for (const key of new Set([...this._headerStubs.values()].map((r) => r.key))) {
       if (this._admitted.has(key) || this._media.has(key) || this._groups.has(key)) continue
       let core = null
       let raw = null
+      let forked = false
       try {
         core = await openMediaReplica(this.store, key)
         if (core.fork === 0) raw = await core.get(0, { wait: false, raw: true })
+        else forked = true
       } catch {}
       for (const [id, r] of this._headerStubs) {
         if (r.key !== key || gone.has(id)) continue
-        if (raw === null) gone.set(id, 'no-header')
+        if (forked) gone.set(id, 'fork')
+        else if (raw === null) gone.set(id, 'no-header')
         else if (stubVerdict(raw, key, r.group, r.diary) === null) gone.set(id, 'header-invalid')
       }
       held.set(key, core)
@@ -5261,6 +5286,7 @@ class Seeder {
     this._headerStubs.set(id, rec)
     if (this._stubCores.has(key)) {
       this._groupRefusals.delete(diary + ':' + key)
+      this._dropMovedStubRows(rec)
       await this._persist().catch(noop)
       this.log({ event: 'group-header-stub', key, diary, group, reason: kind })
       return
@@ -5286,6 +5312,7 @@ class Seeder {
       stub.stopFork = watchFork(stub.core, () => this._stubForked(key))
       stub.ready = true
       this._groupRefusals.delete(diary + ':' + key)
+      this._dropMovedStubRows(rec)
       this.log({ event: 'group-header-stub', key, diary, group, reason: kind })
       return
     }
@@ -5302,8 +5329,21 @@ class Seeder {
     if (this._headerStubs.get(id) === rec) this._headerStubs.delete(id)
     await this._persist().catch(noop)
     if (this._closing) return
-    if (reason === 'timeout') this._groupBackoffHit(diary, key, 'timeout', group)
+    // A refusal is remembered or backed off, so a reconcile does not fetch,
+    // store and purge the same core again: two block 0s are final for this
+    // join.
+    if (reason === 'fork') entry.groupRefused.set(key, seq)
+    else if (reason === 'timeout' || reason === 'admission-failed') this._groupBackoffHit(diary, key, 'timeout', group)
     return this._rejectGroup(key, diary, group, reason, seq)
+  }
+
+  // D's other rows of K, kept while K's moved join was admitted
+  // (_stubMoving): D has one live join per K, so they go now. The new row
+  // still needs the core, so nothing is purged.
+  _dropMovedStubRows (rec) {
+    for (const [id, r] of [...this._headerStubs]) {
+      if (r !== rec && r.diary === rec.diary && r.key === rec.key && !r.dropping) this._dropHeaderStub(id, 'unbound')
+    }
   }
 
   // A held stub core forked: every row of it goes (purged first).
@@ -5331,9 +5371,13 @@ class Seeder {
     const key = rec.key
     this.log({ event: 'group-header-stub-dropped', key, diary: rec.diary, group: rec.group, reason })
     const prev = this._drops.get(key)
+    // Read now, as _dropGroup does: an admission of K that starts later
+    // waits on this drop (_admitGroupReserved), so awaiting it here would
+    // park both. With a prev, that earlier drop already awaits any
+    // admission running now.
+    const inflight = prev ? null : (this._inflight.get(key) || null)
     const drop = (async () => {
       if (prev) await prev
-      const inflight = this._inflight.get(key)
       if (inflight) await inflight.catch(noop)
       // Closing: the row stays listed and the next start judges it again.
       if (this._closing) return
@@ -5369,6 +5413,8 @@ class Seeder {
   // each join is tried again (fetched and stubbed afresh), its pages kept
   // incomplete meanwhile.
   _stubRolePurged (key) {
+    // Before step 3d the start settles such a row itself.
+    if (!this._stubsRestored) return
     let changed = false
     for (const [id, r] of [...this._headerStubs]) {
       if (r.key !== key || r.dropping || this._stubCores.has(key)) continue
@@ -8549,8 +8595,10 @@ class Seeder {
       if (r.group !== group || r.dropping) continue
       if ((after !== null && r.key <= after) || (next !== null && r.key >= next)) continue
       if (!this._indexVisible(r.diary) || this._isBlocked(r.diary) || this._isBlocked(r.key) || !this._stubBlockHeld(r.key)) continue
+      // Hidden only behind a writer item members can see: one still waiting
+      // for its header check would leave K with no item at all.
       const own = this._groupIndex.writer(r.key)
-      if (own !== null && own.group === group) continue
+      if (own !== null && own.group === group && this._groupCoreVisible(r.key)) continue
       stubs.push({ key: r.key, diary: r.diary, length: 1, signed: 1, seq: r.seq })
     }
     if (stubs.length === 0) return { items, next }

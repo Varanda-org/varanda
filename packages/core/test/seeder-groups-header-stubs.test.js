@@ -9,6 +9,8 @@ const { testnet, until } = require('./helpers/net')
 const { Seeder } = require('../lib/seeder')
 const { CAP_HEADER_STUBS } = require('../lib/net')
 const { createSnapshot } = require('../lib/blocklist')
+const { writeBlocklist } = require('../lib/store')
+const { tmpDir } = require('./helpers/tmp')
 const { groupJoinRecord } = require('../lib/records')
 const { groupPost } = require('../lib/group')
 const {
@@ -359,4 +361,192 @@ test('a block over the size limit or a member certificate fetched for a join is 
   t.is(seeder._headerStubs.size, 0)
   t.absent(events.some((e) => e.event === 'group-header-stub'))
   t.is(fatal(events), 0)
+})
+
+test('a row stays in the file when start drops a blocked diary before the rows are judged', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir, publicKey } = prepareSeederDir(t, assoc)
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const k = {}
+  const B = await member(t, bootstrap, assoc, async () => [])
+  const C = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    k.G = await make('g', groupHeader({ diary: key, name: 'Um' }), [post('oi')])
+    k.Kb = await make('kb', post('sem cabeçalho'), [post('a')])
+    return [join(k.G, k.G), join(k.G, k.Kb)]
+  })
+  await admit(B, assoc)
+  await admit(C, assoc)
+  await stubbed(first.events, k.Kb, 'header-invalid')
+  await downloaded(first.seeder, k.G, 2)
+  await until(() => rows(dataDir).length === 1, { name: 'linha gravada' })
+  const before = rows(dataDir)
+  await B.swarm.destroy()
+  await C.swarm.destroy()
+  await first.seeder.close()
+
+  // B is blocked while the seeder is stopped: step 3a drops it and persists.
+  const mod = moderator(assoc)
+  writeBlocklist(dataDir, createSnapshot({ seq: 1, blocked: [B.key], revokedIssuers: [] }, mod.kp, mod.cert))
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  t.ok(second.events.some((e) => e.event === 'rejected' && e.key === B.key && e.reason === 'blocked'), 'B dropped at start')
+  t.absent(second.seeder.admittedKeys().includes(B.key))
+  t.alike(rows(dataDir), before, 'the row is still in admitted.json')
+  t.ok(second.seeder._stubCores.get(k.Kb).ready, 'Kb held again')
+  const r = await reader(t, bootstrap, publicKey, { caps: CAP_HEADER_STUBS })
+  t.ok((await page(r, k.G)).some((i) => i.key === k.Kb && i.length === 1), 'and listed')
+  t.is(fatal(second.events), 0)
+})
+
+test('a stub whose join moves to another group keeps its core with the author offline', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const k = {}
+  // X authors Kb but never announces; it goes offline after the first fetch.
+  const X = await member(t, bootstrap, assoc, async ({ make }) => {
+    k.Kb = await make('kb', post('sem cabeçalho'), [post('a')])
+    return []
+  })
+  const C = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    k.G = await make('g', groupHeader({ diary: key, name: 'Um' }))
+    k.G2 = await make('g2', groupHeader({ diary: key, name: 'Dois' }))
+    return [join(k.G, k.G), join(k.G2, k.G2), join(k.G, k.Kb)]
+  })
+  await admit(C, assoc)
+  await stubbed(events, k.Kb, 'header-invalid')
+  await admitted(events, k.G2)
+  await X.swarm.destroy()
+  let admissions = 0
+  const original = seeder._admitGroupReserved.bind(seeder)
+  seeder._admitGroupReserved = (diary, entry, key, ...rest) => {
+    if (key === k.Kb && !seeder._stubCores.has(key)) admissions++
+    return original(diary, entry, key, ...rest)
+  }
+
+  await C.diary.append(join(k.G2, k.Kb))
+  await until(() => seeder._headerStubs.has(k.G2 + ':' + k.Kb) && !seeder._headerStubs.has(k.G + ':' + k.Kb) && seeder._drops.size === 0, { name: 'Kb sob G2' })
+  t.ok(seeder._stubCores.get(k.Kb).ready, 'the stub core is kept')
+  t.ok(await stored(seeder, k.Kb))
+  t.is(admissions, 0, 'Kb is never fetched again')
+  t.absent(events.some((e) => e.event === 'group-rejected' && e.key === k.Kb), 'no refusal')
+  await until(() => rows(dataDir).some((r) => r.key === k.Kb && r.group === k.G2) && !rows(dataDir).some((r) => r.group === k.G), { name: 'arquivo com Kb sob G2' })
+
+  // Only C's own live row answers C's join (_groupDiaryWaiting).
+  const rec = seeder._headerStubs.get(k.G2 + ':' + k.Kb)
+  t.absent(seeder._groupDiaryWaiting(C.key, k.G2), 'answered by its own row')
+  rec.diary = OTHER_DIARY
+  t.ok(seeder._groupDiaryWaiting(C.key, k.G2), 'another diary\'s row does not answer it')
+  rec.diary = C.key
+  rec.dropping = true
+  t.ok(seeder._groupDiaryWaiting(C.key, k.G2), 'nor a dropping row')
+  rec.dropping = false
+  t.is(fatal(events), 0)
+})
+
+test('two drops of one stub core and a new admission of it all settle', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const k = {}
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  await member(t, bootstrap, assoc, async ({ make }) => {
+    k.K = await make('k', post('sem cabeçalho'), [post('a')])
+    return []
+  })
+  const C = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    k.G1 = await make('g1', groupHeader({ diary: key, name: 'Um' }))
+    k.G3 = await make('g3', groupHeader({ diary: key, name: 'Três' }))
+    return [join(k.G1, k.G1), join(k.G3, k.G3), join(k.G1, k.K)]
+  })
+  const C2 = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    k.G2 = await make('g2', groupHeader({ diary: key, name: 'Dois' }))
+    return [join(k.G2, k.G2), join(k.G2, k.K)]
+  })
+  await admit(C, assoc)
+  await stubbed(events, k.K)
+  await admit(C2, assoc)
+  await until(() => seeder._headerStubs.has(k.G2 + ':' + k.K), { name: 'segunda linha' })
+  await admitted(events, k.G3)
+
+  // Both rows go at once (as a fork of K does). The first drop's write
+  // waits while C's new join of K starts an admission, which waits for the
+  // second drop; that drop must not wait for the admission in turn.
+  let open = null
+  const held = new Promise((resolve) => { open = resolve })
+  const persist = seeder._persist.bind(seeder)
+  seeder._persist = () => held.then(() => persist())
+  seeder._stubForked(k.K)
+  seeder._persist = persist
+  await C.diary.append(join(k.G3, k.K))
+  await until(() => seeder._inflight.has(k.K), { name: 'admissão de K' })
+  open()
+  await until(() => seeder._drops.size === 0 && !seeder._inflight.has(k.K), { name: 'tudo resolvido', timeoutMs: 30000 })
+  await until(() => seeder._headerStubs.has(k.G3 + ':' + k.K), { name: 'K sob G3' })
+  t.is(seeder._headerStubs.size, 1)
+  await Promise.race([seeder.close(), new Promise((resolve, reject) => setTimeout(() => reject(new Error('close() não terminou')), 20000))])
+  t.pass('close() returns')
+  t.is(fatal(events), 0)
+})
+
+test('a stub refused for a changed block 0 or a failed admission is not fetched again on each reconcile', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const k = {}
+  await member(t, bootstrap, assoc, async ({ make }) => {
+    k.Kf = await make('kf', post('um'), [post('a')])
+    k.Ka = await make('ka', post('dois'), [post('a')])
+    return []
+  })
+  // Kf's block 0 from the quarantine fetch differs from the stored one (as
+  // when its author signs two); Ka's admission fails before its core opens.
+  const admitStub = seeder._admitHeaderStub.bind(seeder)
+  const persist = seeder._persist.bind(seeder)
+  let failPersist = false
+  seeder._persist = () => {
+    if (failPersist) {
+      failPersist = false
+      return Promise.reject(new Error('falha simulada'))
+    }
+    return persist()
+  }
+  seeder._admitHeaderStub = (diary, entry, key, group, seq, kind, raw) => {
+    if (key === k.Kf) raw = Buffer.concat([raw, Buffer.from(' ')])
+    if (key === k.Ka) failPersist = true
+    return admitStub(diary, entry, key, group, seq, kind, raw)
+  }
+  const C = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    k.G = await make('g', groupHeader({ diary: key, name: 'Um' }))
+    return [join(k.G, k.G), join(k.G, k.Kf), join(k.G, k.Ka)]
+  })
+  await admit(C, assoc)
+  await rejected(events, k.Kf, 'fork')
+  await rejected(events, k.Ka, 'admission-failed')
+  await until(() => !seeder._inflight.has(k.Kf) && !seeder._inflight.has(k.Ka), { name: 'admissões terminadas' })
+  let tries = 0
+  const admitGroup = seeder._admitGroup.bind(seeder)
+  seeder._admitGroup = (diary, entry, key, ...rest) => {
+    if (key === k.Kf || key === k.Ka) tries++
+    return admitGroup(diary, entry, key, ...rest)
+  }
+  const entry = seeder._served.get(C.key)
+  for (let i = 0; i < 3; i++) seeder._reconcileGroups(C.key, entry)
+  t.is(tries, 0, 'neither key is fetched again')
+  t.is(seeder._headerStubs.size, 0)
+  t.absent(await stored(seeder, k.Kf))
+  t.absent(await stored(seeder, k.Ka))
+  t.is(fatal(events), 0)
+})
+
+test('maxHeaderStubs never exceeds the rows admitted.json keeps', (t) => {
+  const dataDir = tmpDir(t, 'varanda-seed-')
+  t.is(new Seeder({ dataDir, maxHeaderStubs: 100000 }).maxHeaderStubs, 8192)
+  t.is(new Seeder({ dataDir, maxHeaderStubs: 3 }).maxHeaderStubs, 3)
 })
