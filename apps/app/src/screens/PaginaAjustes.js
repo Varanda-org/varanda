@@ -27,13 +27,14 @@
 // the button is for a page activated before that, or to finish a pending one.
 // A group with no room for the new writer is left and listed.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { MAX_BIO, MAX_NAME, displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
-import { whoOf } from '../who'
+import { useRowPeeks } from '../useRowPeeks'
+import { whoLabel, whoOf } from '../who'
 import { formatNextChange, isUsername, lookupUsername } from '../account'
 import { countChars } from '../format'
 import { pickImage } from '../media/attach'
@@ -49,7 +50,7 @@ import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
 import { usePageMember } from './Paginas'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, removeOp, rosterRows } from '../pageRoster'
+import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, peopleKeys, removeOp, rosterRows } from '../pageRoster'
 import { pagesOn } from '../pageGate'
 import * as actingAs from '../actingAs'
 import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction, useNow } from '../ui'
@@ -254,7 +255,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
       setRead(value)
       setStatus(st)
       setDmStatus(box)
-      resolveMany([page, value.owner, ...rosterRows(value).admins, ...(st && st.offer ? [st.offer.to] : [])].filter(Boolean))
+      resolveMany(peopleKeys(value, page, st))
     } catch (err) {
       if (seq === seqRef.current) setLoadError(errorText(err))
     }
@@ -280,6 +281,11 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   // ---- name, bio and photo ---------------------------------------------------
 
   const profile = read ? profileOf(page) : undefined
+  // The page and the people on its roster (owner, admins, a pending offer) are
+  // often keys this node does not hold, so profile.read says "missing": they
+  // are named by a verified diary.peek, as the Conversas list does.
+  const peekKeys = useMemo(() => (read ? peopleKeys(read, page, status) : []), [read, status, page])
+  useRowPeeks(peekKeys, hosted)
   const [form, setForm] = useState(null) // { name, bio } once the current profile is known
   const [draft, setDraft] = useState(undefined) // undefined keep, null remove, { encoded, previewUrl }
   const [editor, setEditor] = useState(null)
@@ -768,7 +774,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
         {confirm && confirm.kind === 'remove'
           ? (
             <View style={styles.confirm}>
-              <Soft>{'Remover ' + displayText(whoOf(profileOf(confirm.key)).title) + ' da administração da página?'}</Soft>
+              <Soft>{'Remover ' + displayText(whoLabel(profileOf(confirm.key))) + ' da administração da página?'}</Soft>
               <ConfirmStack
                 confirm={<Btn label='Remover' danger onPress={() => remove(confirm.key)} pending={removeAct.pending} />}
                 cancel={<Btn label='Cancelar' secondary onPress={() => setConfirm(null)} disabled={removeAct.pending} />}

@@ -209,3 +209,36 @@ test('names.js drops a peek from an older session scope', async (t) => {
   const line = src.split('\n').find((l) => l.includes('const value = useMemo('))
   t.ok(line && line.includes('peekScope'), 'peekScope is in the context value')
 })
+
+test('fillFromPeek keeps a verified peek for what a profile.read answer left empty', async (t) => {
+  const { fillFromPeek } = await load()
+  const peeked = { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }
+  const bare = { name: null, username: null, bio: null, avatar: null, loaded: true }
+  t.alike(fillFromPeek(bare, peeked), { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }, 'an answer with nothing keeps the whole peek')
+  const named = { name: 'Padaria', username: null, bio: null, avatar: null, loaded: true }
+  t.is(fillFromPeek(named, peeked).name, 'Padaria', 'what the answer brought wins')
+  t.is(fillFromPeek(named, peeked).username, 'padaria', 'the empty @nome comes from the peek')
+  const full = { name: 'A', username: 'a_a', bio: 'b', avatar: AV2, loaded: true }
+  t.is(fillFromPeek(full, peeked), full, 'a complete answer is returned as is')
+  t.is(fillFromPeek(bare, undefined), bare, 'no kept peek, nothing to fill')
+})
+
+test('names.js keeps a peek through a profile.read answer without a name', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
+  t.ok(src.includes('const filled = fillFromPeek(entry, peekedRef.current.get(key))'), 'a profile answer is filled from the kept peek')
+  t.ok(src.includes('if (filled === entry) peekedRef.current.delete(key)'), 'the peek is dropped only when the answer replaced it')
+})
+
+test('the Páginas screens name people through verified peeks, not seeds', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (f) => fs.readFileSync(path.join(__dirname, '../src/screens/' + f), 'utf8')
+  const paginas = read('Paginas.js')
+  t.ok(paginas.includes('learnVerified([[author, entry]], scope)'), 'Páginas keeps the peeked name as a verified entry')
+  t.absent(paginas.includes('learnMany'), 'and no longer seeds it (a seed does not survive "missing")')
+  t.ok(read('NovaPagina.js').includes('learnVerified([[value.page,'), 'a created page is named from what the member wrote')
+  t.ok(read('PaginaAjustes.js').includes('useRowPeeks(peekKeys, hosted)'), 'Ajustes names the page and its roster')
+  t.ok(read('Mensagens.js').includes('useRowPeeks(sortedPeers, unlocked && loaded)'), 'the page requests list names its senders')
+})

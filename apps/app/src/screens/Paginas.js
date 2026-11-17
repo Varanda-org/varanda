@@ -18,7 +18,8 @@ import { useNames } from '../names'
 import { UNNAMED, whoOf } from '../who'
 import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
-import { learnPeeked, peekAll, refOf } from './Conversa'
+import { peekAll, refOf } from './Conversa'
+import { peerEntryOf } from '../peerProfile'
 import { actAs, pagesList } from '../pages'
 import { acceptOp, transferAcceptOp } from '../pageRoster'
 import { pagesCore, pagesOn } from '../pageGate'
@@ -139,7 +140,9 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
-  const { profileOf, resolveMany, learnMany } = names
+  const { profileOf, resolveMany, learnVerified, peekScope } = names
+  const scopeRef = useRef(peekScope)
+  scopeRef.current = peekScope
   const who = usePageMember(node)
   const member = who.member
   const retryMember = who.retry
@@ -199,6 +202,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     }
     if (missing.length === 0) return undefined
     let alive = true
+    const scope = scopeRef.current
     const peek = async () => {
       for (const key of missing.slice(0, 8)) {
         if (!alive) return
@@ -215,7 +219,13 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
           const peeked = new Map()
           await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, () => alive)
           if (!alive) continue
-          learnPeeked(learnMany, peeked)
+          // Verified, not a seed: profile.read says "missing" for a page this
+          // device does not hold, and a seed would not survive that answer
+          // (after Aceitar or a list reload the row lost its name).
+          for (const [author, peek] of peeked) {
+            const entry = peerEntryOf(peek, author)
+            if (entry !== null) learnVerified([[author, entry]], scope)
+          }
           if (peeked.has(key)) peekedRef.current.add(key)
         } catch {
         } finally {
@@ -225,7 +235,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     }
     peek()
     return () => { alive = false }
-  }, [list, profileOf, learnMany, node])
+  }, [list, profileOf, learnVerified, node])
 
   const dismiss = (id) => setDismissed((prev) => new Set(prev).add(id))
 

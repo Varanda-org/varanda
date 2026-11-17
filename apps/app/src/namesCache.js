@@ -77,6 +77,19 @@ export function missingEntry (peeked) {
   return peeked ? { ...peeked } : null
 }
 
+// A profile.read answer that names nothing or only one of name and @nome (the
+// profile record may sit in a part of the diary the node has not downloaded
+// yet, docs/rpc.md 5.21) keeps what a kept verified peek said for the field
+// the answer left empty; what the answer brought wins. -> the entry, or the
+// same object when there is nothing to fill.
+export function fillFromPeek (entry, peeked) {
+  if (!peeked || !entry) return entry
+  const fill = {}
+  for (const field of ['name', 'username', 'bio']) if (entry[field] === null && peeked[field] !== null) fill[field] = peeked[field]
+  if (!entry.avatar && peeked.avatar) fill.avatar = peeked.avatar
+  return Object.keys(fill).length === 0 ? entry : { ...entry, ...fill }
+}
+
 // Whether a verified peek may replace `known`: a profile.read answer wins, a seed does not.
 export function peekReplaces (known, had, unsupported) {
   if (had || known === null) return true
