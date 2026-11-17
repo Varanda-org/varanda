@@ -1,6 +1,6 @@
 'use strict'
 
-// device.* through the node session (docs/rpc.md 5.151 to 5.154):
+// device.* through the node session (docs/rpc.md 5.152 to 5.155):
 // devices.changed and groups.changed, errors on the wire.
 
 const test = require('brittle')

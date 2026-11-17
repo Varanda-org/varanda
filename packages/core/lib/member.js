@@ -2641,7 +2641,7 @@ async function periodicRekey (ctx, { groups: wanted = null, now = Date.now(), re
           return
         }
         if (loaded.view.orphan || loaded.view.community === null) return
-        // A disconnected device hands no key on (rpc.md 5.151); a failed
+        // A disconnected device hands no key on (rpc.md 5.152); a failed
         // read of its state throws, so nothing rotates then either.
         if (await deviceIsOff(ctx, identity)) return
         const core = await distributorCore(loaded, identity)
@@ -3983,7 +3983,7 @@ async function communityList (ctx) {
   })
 }
 
-// ---- connected devices (docs/rpc.md 5.151 to 5.154, lib/devices.js) ----
+// ---- connected devices (docs/rpc.md 5.152 to 5.155, lib/devices.js) ----
 
 const DEVICE_FILE = 'device.json'
 
@@ -4034,7 +4034,7 @@ async function withDevices (ctx, fn) {
 
 // A disconnected device binds no new writer by hand either (group.join,
 // community.join, group.create, community.create): only device.reconnect
-// brings it back (rpc.md 5.153). Inside withIdentity, before anything is
+// brings it back (rpc.md 5.154). Inside withIdentity, before anything is
 // written.
 async function refuseOffDevice (ctx, identity) {
   if (await deviceIsOff(ctx, identity)) throw new UsageError(devices.OFF_REFUSED)
@@ -4064,7 +4064,7 @@ async function appendDevices (diary, records, key) {
   for (const inner of records) await appendRecord(diary, devices.sealedRecord(inner, key))
 }
 
-// -> { id, registered, off }: rpc.md 5.151. A disconnected device registers
+// -> { id, registered, off }: rpc.md 5.152. A disconnected device registers
 // nothing and creates no id (id null when it has none).
 async function deviceHello (ctx, { name }) {
   const canonical = deviceName(name)
@@ -4087,12 +4087,12 @@ async function deviceOff (ctx) {
   return withDevices(ctx, async ({ view }) => ({ off: view.off }))
 }
 
-// -> rpc.md 5.152.
+// -> rpc.md 5.153.
 async function deviceList (ctx) {
   return withDevices(ctx, async ({ self, own, view }) => devices.listView({ fold: view.fold, self, linked: view.linked, cuts: view.cuts, own }))
 }
 
-// -> { id, registered: true, off: false }: rpc.md 5.154, only on a
+// -> { id, registered: true, off: false }: rpc.md 5.155, only on a
 // disconnected device. The node session has no passkey ceremony to ask for:
 // the device's own data dir holds the identity.
 async function deviceReconnect (ctx, { name }) {
@@ -4138,7 +4138,7 @@ async function heldContiguous (store, key) {
   }
 }
 
-// -> { cut, empty, groups }: rpc.md 5.153. The caller updated the writer
+// -> { cut, empty, groups }: rpc.md 5.154. The caller updated the writer
 // cores first (bounded). Each linked pair is marked at the contiguous
 // length held here unless it already carries a mark (never lowered); then, for `id`,
 // the off record. `groups` lists the roots marked, for the caller's events.

@@ -2782,7 +2782,7 @@ function createBrowserSession ({
     return r
   }
 
-  // ---- connected devices (docs/rpc.md 5.151 to 5.154) ----
+  // ---- connected devices (docs/rpc.md 5.152 to 5.155) ----
 
   // devices.changed (section 6): `off` for this device, sent when it differs
   // from the last one sent under the current key pair (none sent: false).
@@ -4899,7 +4899,7 @@ function createBrowserSession ({
       return { ok: true }
     }),
 
-    // Aparelhos conectados (docs/rpc.md 5.151 to 5.154, member-ops). The
+    // Aparelhos conectados (docs/rpc.md 5.152 to 5.155, member-ops). The
     // refusals and a hello with nothing to write are reads on the run's
     // cores; a write runs the write gate first (device.disconnect a bounded
     // group refresh before it). Never retried.

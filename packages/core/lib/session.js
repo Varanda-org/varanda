@@ -1082,7 +1082,7 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
-    // Aparelhos conectados (docs/rpc.md 5.151 to 5.154).
+    // Aparelhos conectados (docs/rpc.md 5.152 to 5.155).
     'device.hello': serial(async (params, epoch) => {
       const r = await withStore((c) => member.deviceHello(c, params))
       noteDeviceOff(r.off, epoch)

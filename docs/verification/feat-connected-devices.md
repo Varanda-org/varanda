@@ -1,6 +1,6 @@
 # Aparelhos conectados no nó (branch feat/connected-devices)
 
-Parte da #350. Este arquivo confere o lado do nó: o registro `device` no diário, os métodos `device.hello`, `device.list`, `device.disconnect` e `device.reconnect` (`docs/rpc.md` 5.151 a 5.154), o evento `devices.changed` e o corte dos escritores de um aparelho perdido. A tela do app fica para outro PR; nada aqui mexe em `apps/app`.
+Parte da #350. Este arquivo confere o lado do nó: o registro `device` no diário, os métodos `device.hello`, `device.list`, `device.disconnect` e `device.reconnect` (`docs/rpc.md` 5.152 a 5.155), o evento `devices.changed` e o corte dos escritores de um aparelho perdido. A tela do app fica para outro PR; nada aqui mexe em `apps/app`.
 
 ## Passo 0: leitores antigos
 

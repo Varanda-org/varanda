@@ -81,7 +81,7 @@ function validateEventData (event, data) {
   if (event === 'dm.changed') return exactKeys(data, ['added'], ['page']) && Number.isSafeInteger(data.added) && data.added >= 0 && (!hasOwn(data, 'page') || isKey(data.page))
   // The page whose held key no longer matches the one the service published.
   if (event === 'dm.pageKeyMismatch') return exactKeys(data, ['page']) && isKey(data.page)
-  // Whether this device is disconnected from the account (5.151 to 5.154).
+  // Whether this device is disconnected from the account (5.152 to 5.155).
   if (event === 'devices.changed') return exactKeys(data, ['off']) && typeof data.off === 'boolean'
   // This device is about to put a drop of its own. The event carries nothing.
   if (event === 'dm.sending') return exactKeys(data, [])

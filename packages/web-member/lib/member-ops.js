@@ -4711,7 +4711,7 @@ async function periodicRekeyPlan (ctx, { now = Date.now(), ready = () => true, j
   const h = holderOf(ctx)
   if (h === null || !h.unlocked) return out
   return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
-    // A disconnected device hands no key on (rpc.md 5.151), and plans
+    // A disconnected device hands no key on (rpc.md 5.152), and plans
     // nothing when its state cannot be read.
     try {
       if ((await deviceStateRead(ctx, base.ownEntries, ownHex)).off) return out
@@ -5928,7 +5928,7 @@ function reboxStatus (fold, ownHex) {
 // that never counts for lack of this device's box (needsRebox).
 async function deviceUpkeepPlan (ctx) {
   return withCommunityBase(ctx, false, async ({ ownHex, base }) => {
-    // A disconnected device (docs/rpc.md 5.153) enrols nowhere and hands
+    // A disconnected device (docs/rpc.md 5.154) enrols nowhere and hands
     // no key on. With its id on, a listed writer the own diary cut is a
     // candidate again: the join writes a new writer, which the kv then
     // lists unmarked, so it never loops.
@@ -6152,7 +6152,7 @@ async function deviceUpkeep (ctx, { enrol = [], share = [] } = {}) {
   return { enrolled, shared, failed, changed: [...changed] }
 }
 
-// ---- connected devices (docs/rpc.md 5.151 to 5.154, @varanda/core
+// ---- connected devices (docs/rpc.md 5.152 to 5.155, @varanda/core
 // lib/devices.js) ----
 
 const DEVICE_PARTIAL = devices.PARTIAL
@@ -6215,7 +6215,7 @@ async function deviceOff (ctx) {
 
 // A disconnected device binds no new writer by hand either (group.join,
 // community.join, group.create, community.create): only device.reconnect,
-// after the passkey, brings it back (rpc.md 5.153). Checked before anything
+// after the passkey, brings it back (rpc.md 5.154). Checked before anything
 // is written; `entries` the own diary entries. Fails closed: a failed read
 // of the device state refuses with its own error.
 async function refuseOffDevice (ctx, entries, ownHex) {
@@ -6232,7 +6232,7 @@ async function appendDevices (ctx, diary, records, key) {
   for (const inner of records) await appendOwn(ctx, diary, devices.sealedRecord(inner, key))
 }
 
-// -> { id, registered, off }: rpc.md 5.151. A disconnected device registers
+// -> { id, registered, off }: rpc.md 5.152. A disconnected device registers
 // nothing and creates no id (id null when it has none). `write: false` (a
 // read, on the run's cores) answers only when nothing is to be written,
 // else null.
@@ -6256,12 +6256,12 @@ async function deviceHello (ctx, { name }, { write = true } = {}) {
   })
 }
 
-// -> rpc.md 5.152.
+// -> rpc.md 5.153.
 async function deviceList (ctx) {
   return withDevices(ctx, async ({ self, own, view }) => devices.listView({ fold: view.fold, self, linked: view.linked, cuts: view.cuts, own }))
 }
 
-// -> { id, registered: true, off: false }: rpc.md 5.154, only on a
+// -> { id, registered: true, off: false }: rpc.md 5.155, only on a
 // disconnected device: a new id, registered as by a first hello. `write:
 // false` only runs the refusals.
 async function deviceReconnect (ctx, { name }, { write = true } = {}) {
@@ -6302,7 +6302,7 @@ async function heldContiguous (ctx, key) {
   return Number.isSafeInteger(length) && length > 0 ? length : 0
 }
 
-// -> { cut, empty, groups }: rpc.md 5.153. The caller updated the writer
+// -> { cut, empty, groups }: rpc.md 5.154. The caller updated the writer
 // cores first (bounded). Each linked pair is marked at the contiguous
 // length held here unless it already carries a mark (never lowered); then, for `id`,
 // the off record. `groups` lists the roots marked, for the caller's events.
