@@ -4987,9 +4987,9 @@ class Seeder {
   // or D waits for a slot (`settled`: the join loop already ran), so the
   // admission reads the held core with no fetch. A new join refused or
   // waiting otherwise drops it, and K is fetched again on its retry.
-  _dropUnboundStubRows (diary, entry, settled) {
+  _dropUnboundStubRows (diary, entry, settled, key = null) {
     for (const [id, r] of [...this._headerStubs]) {
-      if (r.diary !== diary || r.dropping) continue
+      if (r.diary !== diary || r.dropping || (key !== null && r.key !== key)) continue
       const live = entry.groupLive.get(r.key)
       if (live !== undefined && live.group === r.group) continue
       if (live !== undefined && this._stubMoving(entry, r.key, live) &&
@@ -4998,12 +4998,19 @@ class Seeder {
     }
   }
 
-  // Whether D still has a row of K under another group than G.
-  _stubRowElsewhere (diary, key, group) {
-    for (const r of this._headerStubs.values()) {
-      if (r.diary === diary && r.key === key && r.group !== group && !r.dropping) return true
+  // A row of K kept for a moved join (_dropUnboundStubRows) is judged again
+  // once an admission of K settled, not at some later unrelated pass: the
+  // admission may be another diary's, which kept every diary's row (the
+  // in-flight check). Drop only: starting the join again from here would
+  // restart an admission that failed with no state set, with no wait.
+  _settleStubRows (key) {
+    const diaries = new Set()
+    for (const r of this._headerStubs.values()) if (r.key === key && !r.dropping) diaries.add(r.diary)
+    for (const d of diaries) {
+      const e = this._served.get(d)
+      if (e === undefined || !e.gated || e.dropped || this._isBlocked(d) || !scanCaughtUp(e)) continue
+      this._dropUnboundStubRows(d, e, true, key)
     }
-    return false
   }
 
   // Whether K's held stub core waits for the admission of its new join j:
@@ -5261,12 +5268,7 @@ class Seeder {
       const kept = awaiting !== undefined && !awaiting.dropped && !awaiting.headerOk && awaiting.by === diary
       if (!kept && waitBefore !== undefined && this._groupBackoff.get(diary + ':' + key) === waitBefore) this._deleteGroupBackoff(diary + ':' + key)
       if (this._inflight.get(key) === work) this._inflight.delete(key)
-      // A row of K that D kept for this join (_dropUnboundStubRows) is
-      // judged again now that the admission settled, not at some later
-      // unrelated pass.
-      if (!this._closing && this._stubRowElsewhere(diary, key, group) && this._served.get(diary) === entry && entry.gated && !entry.dropped) {
-        this._reconcileGroups(diary, entry)
-      }
+      if (!this._closing) this._settleStubRows(key)
       this._resumeDeferredGroups()
     }
   }
@@ -5443,6 +5445,9 @@ class Seeder {
       this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
+      // A wait, as a stub's failed write has: no other state is left, so
+      // the next reconcile would start the same admission at once.
+      this._groupBackoffHit(diary, key, 'timeout', group)
       return this._rejectGroup(key, diary, group, 'admission-failed', seq)
     }
     if (this._closing) return
@@ -5617,14 +5622,15 @@ class Seeder {
 
   // Room for one more row of D: the per-diary and total caps count every
   // row, listing-only and dropping ones included. For a row of K under G,
-  // D's own live rows of K under another group are left out: K moved, and
-  // they go when this row is set (_dropMovedStubRows).
+  // D's own rows of K under another group are left out: K moved, and they
+  // go when this row is set (_dropMovedStubRows) or are already going (a
+  // listing-only row is marked dropping before the new row is listed).
   _stubRoom (diary, key = null, group = null) {
     let mine = 0
     let moved = 0
     for (const r of this._headerStubs.values()) {
       if (r.diary !== diary) continue
-      if (key !== null && r.key === key && r.group !== group && !r.dropping) moved++
+      if (key !== null && r.key === key && r.group !== group) moved++
       else mine++
     }
     return this._headerStubs.size - moved < this.maxHeaderStubs && mine < MAX_HEADER_STUBS_PER_DIARY
@@ -5634,7 +5640,7 @@ class Seeder {
   // (_stubHeldElsewhere): no fetch, no second copy.
   _listHeaderStub (diary, entry, key, group, seq) {
     if (this._isBlocked(key) || this._isBlocked(diary) || this._isBlocked(group)) return
-    if (!this._stubRoom(diary)) {
+    if (!this._stubRoom(diary, key, group)) {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, 'stub-full', seq)
     }
@@ -6505,9 +6511,22 @@ class Seeder {
     // (_noteRevokedCreator), which puts in force a kept entry of another
     // served root naming that creator.
     this._dropHeldRoots()
-    if (this._groupRootStartup !== null) return
-    for (const [k, g] of [...this._groupServed]) {
-      if (k === g.group && !this._groupSupported(k)) this._dropGroup(k, 'unbound')
+    if (this._groupRootStartup === null) {
+      for (const [k, g] of [...this._groupServed]) {
+        if (k === g.group && !this._groupSupported(k)) this._dropGroup(k, 'unbound')
+      }
+    }
+    this._dropGoneRootStubs()
+  }
+
+  // After the roots: a held stub whose block 0 is a root of a creator now
+  // gone goes as that root did (_stubRootGone), whether the creator left
+  // in an adoption or later (a re-gate, a drop).
+  _dropGoneRootStubs () {
+    for (const [id, r] of [...this._headerStubs]) {
+      const stub = this._stubCores.get(r.key)
+      const gone = stub === undefined || r.dropping ? null : this._stubRootGone(r.key, stub.creator || null)
+      if (gone !== null) this._dropHeaderStub(id, gone)
     }
   }
 
@@ -9372,13 +9391,6 @@ class Seeder {
     for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
     this._dropBlockedStamps()
     this._dropUnsupportedRoots()
-    // After the roots: a held stub whose block 0 is a root of a creator now
-    // gone goes as that root did (_stubRootGone).
-    for (const [id, r] of [...this._headerStubs]) {
-      const stub = this._stubCores.get(r.key)
-      const gone = stub === undefined || r.dropping ? null : this._stubRootGone(r.key, stub.creator || null)
-      if (gone !== null) this._dropHeaderStub(id, gone)
-    }
     // Joins held while the list was lost may be admitted now, and so may
     // roots refused for naming a diary the new list no longer blocks.
     for (const [id, b] of [...this._groupBackoff]) if (b.reason === 'blocked') this._deleteGroupBackoff(id)
