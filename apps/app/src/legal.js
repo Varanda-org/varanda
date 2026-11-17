@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 75
+export const LEGAL_VERSION = 76
 export const LEGAL_DATE = '16/11/2026'
-export const REVIEW_NOTE = 'Versão 75, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 76, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
