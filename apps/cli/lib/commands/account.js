@@ -895,14 +895,16 @@ async function serve (flags, env) {
     terms = openTermsStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
-    // The recovery entries (recovery.json): the same guard. An invalid file
+    // The recovery entries (recovery.json): every write asks lock.held(),
+    // ours and live by mtime, so a process whose heartbeat fell behind never
+    // writes while another may be taking the lock over. An invalid file
     // leaves only the recovery routes answering 'indisponivel'.
-    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.owned(), log })
+    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.held(), log })
     if (!recovery.available()) log({ event: 'recovery', reason: 'indisponivel' })
     stopRecoveryHeal = startHeal(recovery, 'recovery', log)
-    // The passkey public keys and waiting deletions (passkeys.json): the same
-    // guard. An invalid file leaves Excluir conta and the passkey enrolment
-    // answering 'indisponivel'.
+    // The passkey public keys and waiting deletions (passkeys.json): the
+    // terms guard, lock.owned(). An invalid file leaves Excluir conta and
+    // the passkey enrolment answering 'indisponivel'.
     passkeys = openPasskeyStore(flags.dataDir, { guard: () => lock.owned(), log })
     if (!passkeys.available()) log({ event: 'passkeys', reason: 'indisponivel' })
     stopPasskeysHeal = startHeal(passkeys, 'passkeys', log)

@@ -25,6 +25,7 @@ const { createGoogle } = require('../lib/account/google')
 const { openAccountStore, phoneSub, COOLDOWN_MS, PENDING_TTL_MS } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openInvitesStore, inviteId } = require('../lib/account/invites-store')
+const { openRecoveryStore, FILE: RECOVERY_FILE } = require('../lib/account/recovery-store')
 const { createAccountServer, keyedWindow, takeLock, lockHeld, loadIssuer, LOCK_FILE, KEY_FILE, CERT_FILE, COOKIE, MAX_SOCKETS, DEFAULT_RATE, DEFAULT_BURST } = require('../lib/account/server')
 const { readEnv, closeIfOwned, loseLock, startTermsHeal, startHeal, storeUnavailable } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
@@ -931,6 +932,80 @@ test('data-dir lock: owned() reads the lock now, and the shutdown close runs onl
   const events = []
   t.is(await closeIfOwned(failing, mine, false, (e) => events.push(e)), 'failed', 'a failing close is reported, so serve() exits non-zero')
   t.alike(events, [{ event: 'close', reason: 'falhou' }], 'logged without detail')
+})
+
+test('data-dir lock: held() is true only while the token is ours and the mtime is live', (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const lockFile = path.join(dir, LOCK_FILE)
+  // No heartbeat tick during the test: the mtime only moves when set here.
+  const lock = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => lock.release(), { force: true })
+  t.is(lock.held(), true, 'ours and fresh')
+
+  const old = (Date.now() - 31 * 1000) / 1000
+  fs.utimesSync(lockFile, old, old)
+  t.is(lock.held(), false, 'ours but stale: another process may be taking it over')
+  t.is(lock.owned(), true, 'owned() still answers by token alone')
+  const now = new Date()
+  fs.utimesSync(lockFile, now, now)
+  t.is(lock.held(), true, 'a refreshed mtime makes it held again')
+
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'f'.repeat(32) }) + '\n')
+  t.is(lock.held(), false, 'another token')
+  fs.unlinkSync(lockFile)
+  t.is(lock.held(), false, 'no lock file')
+})
+
+test('data-dir lock: held() keeps one heartbeat of margin before the stale window', (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const lockFile = path.join(dir, LOCK_FILE)
+  // The service's windows; the test ends well before the first tick.
+  const lock = takeLock(dir, { heartbeatMs: 10 * 1000, staleMs: 30 * 1000 })
+  t.teardown(() => lock.release(), { force: true })
+  const age = (ms) => {
+    const at = (Date.now() - ms) / 1000
+    fs.utimesSync(lockFile, at, at)
+  }
+  age(15 * 1000)
+  t.is(lock.held(), true, 'one heartbeat late: still held')
+  age(25 * 1000)
+  t.is(lock.held(), false, 'within one heartbeat of the stale window: not held')
+  t.is(lock.owned(), true, 'owned() still answers by token alone')
+})
+
+test('data-dir lock: the recovery store guarded by held() refuses a put while the lock is stale', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const lockFile = path.join(dir, LOCK_FILE)
+  const lock = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => lock.release(), { force: true })
+  const recovery = openRecoveryStore(dir, { guard: () => lock.held() })
+  const member = b4a.toString(crypto.randomBytes(32), 'hex')
+  const entry = (kind) => ({
+    member,
+    kind,
+    lookupId: b4a.toString(crypto.randomBytes(32), 'hex'),
+    blob: { v: 1, kind, nonce: b4a.toString(crypto.randomBytes(24), 'hex'), ciphertext: b4a.toString(crypto.randomBytes(82), 'hex') }
+  })
+  const first = entry('passkey')
+  t.is((await recovery.put(first)).changed, true, 'held: the put lands')
+  const file = path.join(dir, RECOVERY_FILE)
+  const before = fs.readFileSync(file)
+
+  const old = (Date.now() - 31 * 1000) / 1000
+  fs.utimesSync(lockFile, old, old)
+  const second = entry('passkey')
+  try {
+    await recovery.put(second)
+    t.fail('a put under a stale lock resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'a put under a stale lock is refused')
+  }
+  t.ok(b4a.equals(fs.readFileSync(file), before), 'the file is unchanged')
+  t.ok(recovery.available(), 'the store is not failed')
+
+  const now = new Date()
+  fs.utimesSync(lockFile, now, now)
+  t.is((await recovery.put(second)).changed, true, 'the next heartbeat makes writes land again')
 })
 
 test('data-dir lock: a lost lock marks the store unavailable before the service stops', async (t) => {

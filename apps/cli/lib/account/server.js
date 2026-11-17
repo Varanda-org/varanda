@@ -402,7 +402,7 @@ function checkIssuerCert (cert, keyPair, association) {
 const LOCK_HEARTBEAT_MS = 10000
 const LOCK_STALE_MS = 30000
 
-// -> { file, owned(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
+// -> { file, owned(), held(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
 // tests and the serve path; the heartbeat timer is unref'd so it never
 // keeps a process alive on its own.
 function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_STALE_MS, onLost = () => {} } = {}) {
@@ -412,7 +412,7 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
   const token = nodeCrypto.randomBytes(16).toString('hex')
   const body = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token }) + '\n'
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (publishLock(file, body)) return heartbeat(file, token, { heartbeatMs, onLost })
+    if (publishLock(file, body)) return heartbeat(file, token, { heartbeatMs, staleMs, onLost })
     if (attempt > 0) break
     const current = readLock(file)
     if (current === null) continue // gone between link and read: retry once
@@ -432,9 +432,22 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
 }
 
 // Refreshes the lock's mtime every `heartbeatMs` while it is still ours;
-// -> { file, owned(), release() }. owned() reads the lock file now, for a
-// check that cannot wait for the next tick (the shutdown close).
-function heartbeat (file, token, { heartbeatMs, onLost }) {
+// -> { file, owned(), held(), release() }. owned() reads the lock file now,
+// for a check that cannot wait for the next tick (the shutdown close).
+// held() is stricter: ours AND an mtime younger than `staleMs` minus one
+// heartbeat. A holder whose own heartbeat fell behind may be in the middle
+// of a takeover (the taker saw the lock stale and is about to unlink it),
+// and the margin makes held() refuse a late heartbeat before anyone can
+// call the lock stale. It does not cover a holder that stalled past the
+// whole window: its next tick refreshes the mtime while its token is still
+// in the file, possibly just before a taker that already read the lock
+// stale unlinks it (recovery-store.js, Residual). A store guarded by held() refuses
+// to write until the next tick refreshes the mtime while the token is still
+// ours: the request is refused (the client sees an uncertain result) and
+// nothing is lost from the file. A heartbeat as long as the stale window
+// (tests only) leaves no margin, so the window alone applies.
+function heartbeat (file, token, { heartbeatMs, staleMs, onLost }) {
+  const heldMs = heartbeatMs < staleMs ? staleMs - heartbeatMs : staleMs
   let timer = null
   const stop = () => {
     if (timer !== null) clearInterval(timer)
@@ -456,6 +469,7 @@ function heartbeat (file, token, { heartbeatMs, onLost }) {
   return {
     file,
     owned: () => ownLock(file, token),
+    held: () => holdLock(file, token, heldMs),
     release: () => {
       stop()
       releaseLock(file, token)
@@ -508,6 +522,25 @@ function ownLock (file, token) {
     return isPlainObject(data) && data.token === token
   } catch {
     return false
+  }
+}
+
+// True while the lock carries `token` and its mtime is within `windowMs` of
+// now, both from one open of the file, so the token and the mtime belong to
+// the same lock.
+function holdLock (file, token, windowMs) {
+  let fd
+  try {
+    fd = fs.openSync(file, 'r')
+    const { mtimeMs } = fs.fstatSync(fd)
+    const data = JSON.parse(fs.readFileSync(fd, 'utf8'))
+    return isPlainObject(data) && data.token === token && lockLive({ mtimeMs }, windowMs)
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch {}
+    }
   }
 }
 

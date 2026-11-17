@@ -77,6 +77,7 @@ export const TEXTS = Object.freeze({
   'rotacao-necessaria': 'A chave da página está sendo trocada; tente de novo em instantes',
   sequencia: 'Alguém publicou antes; toque para enviar de novo',
   'aguardando-chave': 'aguardando nova chave',
+  'fora-da-comunidade': 'A página ainda não está na comunidade deste grupo',
   privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho',
   // The account service's word check (apps/cli/lib/account/word-check.js):
   // the app checks the same list first, so this shows only when the service

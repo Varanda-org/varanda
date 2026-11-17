@@ -125,7 +125,7 @@ function GroupRow ({ title, detail, own, time, unread, onPress }) {
 // Join or leave as the page acted as. The signed statement goes out once: an
 // uncertain outcome keeps err.retry, which resends the same bytes, and the
 // screen never signs again on its own. The personal controls stay hidden.
-function PagePanel ({ node, community, page }) {
+function PagePanel ({ node, community, page, onJoined }) {
   const styles = useStyles(makeStyles)
   const [role, setRole] = useState(null)
   const [error, setError] = useState('')
@@ -172,7 +172,9 @@ function PagePanel ({ node, community, page }) {
     setRetry(null)
     try {
       const member = await memberKeyOf(request, node)
-      settle(await pagesGroup(node, { member, page, action, op: { community } }))
+      const answer = await pagesGroup(node, { member, page, action, op: { community } })
+      settle(answer)
+      if (action === 'community-join' && !inside && pageRoleOf(answer) === 'member' && typeof onJoined === 'function') onJoined()
     } catch (err) {
       fail(err)
     } finally {
@@ -359,6 +361,15 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     onOpenGroup(group)
   }, [role, onOpenGroup])
 
+  // A page has no community role on this screen, so shouldOpenQueued never
+  // fires for it: the page's own join answer opens the queued group instead.
+  const openQueued = () => {
+    const group = queued.current
+    if (group === null || typeof onOpenGroup !== 'function') return
+    queued.current = null
+    onOpenGroup(group)
+  }
+
   const mutate = async (method, params) => {
     setCheck(null)
     setConfirm(null)
@@ -493,19 +504,25 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   let body
   const fromIndex = needIndex && idx.status === 'done'
   if (fromIndex) {
+    // The page joins through the service, as on a held community: the
+    // person's card here would join the person.
     body = (
       <View>
-        <JoinCard
-          title={title}
-          header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
-          join={idx.join}
-          showJoin={joinNote === ''}
-          onJoin={doJoin}
-          pending={join.pending}
-          offline={offline}
-          error={join.error}
-          note={joinNote}
-        />
+        {asPage.page
+          ? <PagePanel node={node} community={community} page={asPage.key} onJoined={openQueued} />
+          : (
+            <JoinCard
+              title={title}
+              header={[COMMUNITY_JOIN_LABELS[idx.join] || '', membersLabel(idx.members)].filter(Boolean).join(' · ')}
+              join={idx.join}
+              showJoin={joinNote === ''}
+              onJoin={doJoin}
+              pending={join.pending}
+              offline={offline}
+              error={join.error}
+              note={joinNote}
+            />
+            )}
         {checkBox}
         <View style={styles.block}>
           {idx.partial ? <Soft>O índice ainda está sendo atualizado; a lista pode estar incompleta.</Soft> : null}
@@ -535,7 +552,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
     const joinable = !asPage.page && !isMember && role !== 'banned' && role !== 'requested' && role !== 'pending' && !pending && info.leavePending !== true
     body = (
       <View>
-        {asPage.page ? <PagePanel node={node} community={community} page={asPage.key} /> : null}
+        {asPage.page ? <PagePanel node={node} community={community} page={asPage.key} onJoined={openQueued} /> : null}
         {joinable
           ? (
             <JoinCard

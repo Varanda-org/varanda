@@ -1729,3 +1729,10 @@ test('pagesList: an answer never ends an identity chosen after its request began
   acting.leaveMoment()
   t.is(acting.get().kind, 'me', 'the stopped page does not come back after the momento composer')
 })
+
+test('pageError has plain words for a join refused because the page is outside the community', async (t) => {
+  const { pageError } = await load()
+  const err = pageError('fora-da-comunidade')
+  t.is(err.code, 'fora-da-comunidade')
+  t.is(err.message, 'A página ainda não está na comunidade deste grupo')
+})
