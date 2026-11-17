@@ -164,6 +164,10 @@ const resultKeys = {
   'visits.list': ['visits'],
   'visits.clear': ['ok'],
   'visits.note': ['queued'],
+  'garden.set': ['on'],
+  'garden.state': ['on', 'state', 'savesToday', 'helpsToday', 'given'],
+  'garden.play': ['seq', 'ref', 'state'],
+  'garden.help': ['seq', 'ref'],
   'profile.extra.delete': ['seq', 'deleted'],
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
@@ -655,6 +659,10 @@ function samples (f) {
     'visits.list': {},
     'visits.clear': {},
     'visits.note': { key: f.members[1].author },
+    'garden.set': { on: true },
+    'garden.state': {},
+    'garden.play': { acts: [{ op: 'plant', pot: 4, plant: 'tomate' }] },
+    'garden.help': { to: f.members[3].author, pot: 0 },
     'profile.mood': { emoji: '☕', text: 'Café na praça' },
     'profile.extra.delete': { kind: 'about' },
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
@@ -1868,4 +1876,105 @@ test('vitrine visits.list rows are a key and a whole UTC day in ms, from visitor
   }
   const { groupByDay } = await import('../src/visits.js')
   t.is(groupByDay(visits, Date.parse(f.now)).reduce((n, g) => n + g.rows.length, 0), visits.length, 'every row renders')
+})
+
+test('garden.state answers the seeded balcony of Lia, with the helps she gave today', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { validateRecord } = require('@varanda/core/lib/records')
+  const { garden } = require('@varanda/rpc')
+  const records = f.diaryRecords.filter((e) => ['garden', 'garden-state', 'garden-help'].includes(e.record.type))
+  t.is(records.length, 10)
+  for (const e of records) t.is(validateRecord(e.record, e.seq), null, e.record.type + ' ' + e.author.slice(0, 4) + ':' + e.seq + ' validates')
+  t.is(new Set(f.diaryRecords.map((e) => e.author + ':' + e.seq)).size, f.diaryRecords.length, 'no author reuses a seq')
+  const state = await answer(t, request, 'garden.state', {})
+  t.is(state.on, true)
+  t.is(state.state.seq, 52)
+  t.is(state.state.n, 1)
+  t.is(state.savesToday, 1)
+  t.is(state.helpsToday, 1)
+  t.alike(state.given, [{ seq: 53, to: f.members[2].author, pot: 3, at: '2026-11-05T12:00:00.000Z' }])
+  t.ok(garden.isPots(state.state.pots, Date.parse(state.state.at)), 'the pots are a valid balcony')
+  const views = state.state.pots.map((p) => p === null ? null : garden.potView(p, Date.parse(f.now)))
+  t.is(views[0].ripe, true, 'one ripe')
+  t.ok(!views[1].ripe && views[1].dry, 'one growing and dry')
+  t.ok(!views[2].ripe && !views[2].dry, 'one growing and wet')
+  t.is(views[3].stage, 0, 'one just planted')
+  t.alike([views[4], views[5]], [null, null])
+  const records3 = f.diaryRecords.filter((e) => e.record.type === 'garden-help' && e.record.to === f.own)
+  t.alike(records3.map((e) => e.author).sort(), [f.members[2].author, f.members[3].author].sort())
+  for (const e of records3) t.ok(f.diaryRecords.some((x) => x.author === e.author && x.record.type === 'follow' && x.record.key === f.own && x.record.on === true), 'the helper follows Lia')
+})
+
+test('garden.play saves a valid plant act as a new state and refuses an invalid one without change', async (t) => {
+  const { request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const before = await call('garden.state', {})
+  const played = await call('garden.play', { acts: [{ op: 'plant', pot: 4, plant: 'tomate' }] })
+  t.ok(played.seq > before.state.seq)
+  t.is(played.ref.split(':')[1], String(played.seq))
+  t.is(played.state.seq, played.seq)
+  t.is(played.state.n, 2)
+  t.is(played.state.pots[4].plant, 'tomate')
+  const after = await call('garden.state', {})
+  t.alike(after.state, played.state, 'a following state shows the save')
+  t.is(after.savesToday, 2)
+  const peek = await call('diary.peek', { author: played.ref.split(':')[0], seqs: [played.seq], profileSeq: 1, usernameSeq: 2 })
+  t.is(peek.entries[0].record.type, 'garden-state')
+  const prior = await call('diary.peek', { author: played.ref.split(':')[0], seqs: [before.state.seq], profileSeq: 1, usernameSeq: 2 })
+  t.alike(prior.missing, [before.state.seq], 'a save tombstones the previous state, as the node does')
+  await refused(t, request, 'garden.play', { acts: [{ op: 'plant', pot: 0, plant: 'tomate' }] }, 'USAGE', 'jogada inválida')
+  await refused(t, request, 'garden.play', { acts: [{ op: 'water', pot: 5 }] }, 'USAGE', 'jogada inválida')
+  t.alike(await call('garden.state', {}), after, 'a refused session changes nothing')
+  for (let i = after.savesToday; i < 6; i++) await call('garden.play', { acts: [{ op: 'clear', pot: 4 }, { op: 'plant', pot: 4, plant: 'tomate' }] })
+  await refused(t, request, 'garden.play', { acts: [{ op: 'clear', pot: 4 }] }, 'USAGE', 'você já cuidou da varanda o máximo de vezes por hoje')
+})
+
+test('garden.set leaves and joins the game, and a left game refuses plays and helps', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  t.alike(await call('garden.set', { on: false }), { on: false })
+  const left = await call('garden.state', {})
+  t.is(left.on, false)
+  t.is(left.state, null, 'a leave tombstones the saved state')
+  t.alike(left.given, [])
+  await refused(t, request, 'garden.play', { acts: [{ op: 'plant', pot: 0, plant: 'tomate' }] }, 'USAGE', 'ligue a Varandinha para jogar')
+  await refused(t, request, 'garden.help', { to: f.members[3].author, pot: 0 }, 'USAGE', 'ligue a Varandinha para regar')
+  const flags = (seqs) => call('diary.peek', { author: f.own, seqs, profileSeq: 1, usernameSeq: 2 })
+  const offSeq = (await flags([51])).length - 1
+  t.is((await flags([offSeq])).entries[0].record.on, false, 'the off flag is the last block of the leave')
+  t.alike(await call('garden.set', { on: true }), { on: true })
+  t.alike((await flags([offSeq])).missing, [offSeq], 'joining tombstones the off flag, as the node does')
+  t.is((await call('garden.state', {})).on, true)
+  t.alike(await call('garden.set', { on: true }), { on: true }, 'joining twice is harmless')
+})
+
+test('garden.play counts the caller own helps (foldGiven) when it judges a harvest, as the node does', async (t) => {
+  const { fixtures, createVitrineRequest } = await load()
+  // Lia's alecrim (pot 2) ripens at 16:30 with the 30 min her help seq 53
+  // gives it, and at 17:00 without it.
+  const late = createVitrineRequest({ ...fixtures, now: '2026-11-05T16:45:00.000Z' })
+  const played = await answer(t, late, 'garden.play', { acts: [{ op: 'harvest', pot: 2 }] })
+  t.is(played.state.pots[2], null, 'the harvest empties the pot')
+  const early = createVitrineRequest({ ...fixtures, now: '2026-11-05T16:15:00.000Z' })
+  await refused(t, early, 'garden.play', { acts: [{ op: 'harvest', pot: 2 }] }, 'USAGE', 'jogada inválida')
+})
+
+test('garden.help waters a neighbour pot once a day and refuses the other cases with the documented message', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const [joao, cecilia, andre, bia] = [f.members[1].author, f.members[2].author, f.members[3].author, f.members[4].author]
+  await refused(t, request, 'garden.help', { to: f.own, pot: 0 }, 'USAGE', 'não dá para regar a própria varanda')
+  await refused(t, request, 'garden.help', { to: bia, pot: 0 }, 'USAGE', 'você só rega a varanda de quem você segue')
+  await refused(t, request, 'garden.help', { to: joao, pot: 0 }, 'USAGE', 'esta pessoa não está na Varandinha')
+  await refused(t, request, 'garden.help', { to: cecilia, pot: 3 }, 'USAGE', 'você já regou esta varanda hoje')
+  await refused(t, request, 'garden.help', { to: f.pages[0].author, pot: 0 }, 'USAGE', 'páginas não têm Varandinha')
+  await refused(t, request, 'garden.help', { to: andre, pot: 2 }, 'USAGE', 'este vaso não tem planta para regar')
+  const helped = await call('garden.help', { to: andre, pot: 0 })
+  t.is(helped.ref, f.own + ':' + helped.seq)
+  await refused(t, request, 'garden.help', { to: andre, pot: 1 }, 'USAGE', 'você já regou esta varanda hoje')
+  const state = await call('garden.state', {})
+  t.is(state.helpsToday, 2)
+  t.alike(state.given.map((g) => g.seq), [helped.seq, 53])
+  await call('block.set', { key: bia, on: true })
+  await refused(t, request, 'garden.help', { to: bia, pot: 0 }, 'USAGE', 'você bloqueou esta pessoa')
 })
