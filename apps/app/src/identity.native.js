@@ -27,6 +27,17 @@
 // finishRecovery() creates a marked passkey for the root. No HTTP here: the
 // app (src/node.js) talks to the account service.
 //
+// unlock({ check: true }) (the hosted app): a passkey without a user handle
+// that is neither bound nor known marked is not installed yet. Its PRF output
+// stays here, the worklet keeps its wrap key (identity.recoveryLookup with
+// withKey), and the call resolves { check: true, publicKey, lookupId }. The
+// app reads the account status of publicKey; only when that key has no
+// account does it send lookupId to the service. Then unlockWrapped() opens
+// the member's blob as for a marked passkey (bound with UNKNOWN_WRAP_USER_ID),
+// or unlockDirect() installs the held PRF output as before. cancelRecovery,
+// lock, signOut, reset and any install drop it (zero-filled), as its timer
+// does after 120 s.
+//
 // confirm({ challenge }), as the browser handle's: a fresh user verification
 // with the bound passkey while unlocked, over the account service's nonce,
 // before a step the stored session alone must not authorize; it answers the
@@ -70,6 +81,7 @@ const SIGNED_OUT_TEXT = 'sessão encerrada neste aparelho: entre com a passkey'
 const SIGNOUT_INCOMPLETE_TEXT = 'não foi possível sair por completo neste aparelho: tente de novo'
 const KNOWN_CODES = ['CANCELLED', 'EXISTS', 'UNSUPPORTED', 'NO_PRF', 'WEBAUTHN', 'NOT_SYNCED', 'NONE']
 const MISSING_TEXT = 'não deu para concluir a criação; tente criar de novo'
+const INTENT_USER_ID = /^[0-9a-f]{64}$/
 // apps/app/worklet/identity-install.js BAD_ENTRY (docs/rpc.md 5.92).
 const BAD_ENTRY_TEXT = 'entrada de recuperação inválida'
 const RECOVERY_EXPIRED_TEXT = 'o tempo da recuperação acabou: entre de novo'
@@ -80,6 +92,13 @@ const RECOVERY_UNDONE_TEXT = 'não deu para concluir a recuperação: entre com 
 const LOCKED_TEXT = 'identidade bloqueada: entre com a passkey'
 const BUSY_TEXT = 'outra entrada com a passkey em andamento'
 const RECOVERY_MS = 120 * 1000
+
+// A timer that never keeps a process (the tests) alive.
+function unrefTimer (fn, ms) {
+  const timer = setTimeout(fn, ms)
+  if (timer && typeof timer.unref === 'function') timer.unref()
+  return timer
+}
 
 // packages/web-member/lib/recovery.js WRAP_MARK ('varanda-wrap-v1\n'),
 // duplicated as passkeyOptions.js duplicates PRF_INPUT: Metro cannot import
@@ -163,7 +182,7 @@ function validId (id) {
 // installed) and rejects CANCELLED. signOut and reset wait for the
 // post-ceremony part in flight (`finishing`) before they delete the stored
 // session, so a save racing 'Sair' is deleted after it.
-export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, enrolStore = passkeyEnrolStore, random = randomBytes, now = Date.now, whenActive = () => Promise.resolve() } = {}) {
+export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = PasskeyPrf, store = sessionStore, epoch = keychainEpoch, local = passkeyLocal, enrolStore = passkeyEnrolStore, random = randomBytes, now = Date.now, setTimer = unrefTimer, clearTimer = clearTimeout, whenActive = () => Promise.resolve() } = {}) {
   if (typeof request !== 'function') throw new TypeError('request required')
   if (typeof rpIdOf !== 'function') throw new TypeError('rpId required')
 
@@ -174,6 +193,11 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   let finishing = Promise.resolve()
   // { credentialId, userId } of a creation whose PRF output needs complete().
   let pendingReg = null
+  // { userId } of a sign-up creation whose create() was asked for, written
+  // before the ceremony: a kill before the pending write leaves the passkey
+  // in the manager with no credential id here, and its user handle is all
+  // that recognizes it (complete(), signIn).
+  let intentReg = null
   // [{ credentialId, userId, code, cleaned, created }]: passkeys this app
   // refused, kept out of every new creation (excludeCredentials). There is no
   // signal API on native to hide them in the manager, so cleaned stays false.
@@ -189,6 +213,10 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // credentialId, userId, expiresAt }. No PRF output is held: the worklet
   // keeps the wrap key.
   let awaiting = null
+  // The PRF output of unlock({ check: true }) for unlockDirect():
+  // { bytes, credentialId, expiresAt, timer }. Zero-filled whenever it is
+  // dropped, at the latest by its 120 s timer.
+  let direct = null
   // The root opened from a code, waiting for finishRecovery():
   // { prfHex, publicKey, expiresAt, pinned }. A string cannot be zero-filled:
   // it is dropped. pinned: a creation for it is running or pending, so it
@@ -200,6 +228,15 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
 
   function dropAwaiting () {
     awaiting = null
+    dropDirect()
+  }
+
+  function dropDirect () {
+    if (direct !== null) {
+      clearTimer(direct.timer)
+      direct.bytes.fill(0)
+    }
+    direct = null
   }
 
   function dropRecovery () {
@@ -251,11 +288,17 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       pendingReg = rec && rec.pending && validId(rec.pending.credentialId)
         ? { credentialId: rec.pending.credentialId, userId: typeof rec.pending.userId === 'string' ? rec.pending.userId : '' }
         : null
+      intentReg = intentOf(rec)
       refused = rec && Array.isArray(rec.refused)
         ? rec.refused.filter((r) => r && validId(r.credentialId)).map((r) => ({ credentialId: r.credentialId, userId: typeof r.userId === 'string' ? r.userId : '', code: String(r.code), cleaned: false, created: r.created === true }))
         : []
     })()
     return loading
+  }
+
+  function intentOf (rec) {
+    const i = rec && rec.intent
+    return i && typeof i.userId === 'string' && INTENT_USER_ID.test(i.userId) ? { userId: i.userId } : null
   }
 
   // A failed write keeps the memory state: this run still excludes them.
@@ -273,10 +316,11 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
         if (pendingReg === null && rec && rec.pending && validId(rec.pending.credentialId)) {
           pendingReg = { credentialId: rec.pending.credentialId, userId: typeof rec.pending.userId === 'string' ? rec.pending.userId : '' }
         }
+        if (intentReg === null) intentReg = intentOf(rec)
         loadedFor = rpId
         readFor = rpId
       }
-      await local.save(rpId, { pending: pendingReg, refused: refused.map((r) => ({ ...r })) })
+      await local.save(rpId, { pending: pendingReg, refused: refused.map((r) => ({ ...r })), intent: intentReg })
     } catch {}
   }
 
@@ -315,6 +359,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // 'recomeçar' still needs its explicit confirm, so nothing is lost silently.
   async function settleInstalled (rpId, credentialId) {
     supersede(credentialId)
+    intentReg = null
     refused = refused.filter((r) => r.credentialId !== credentialId)
     await persist(rpId)
   }
@@ -461,12 +506,16 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   // and the service's answer must never decide what becomes an identity. A
   // compliant authenticator returns the handle, so only a manager that drops
   // it loses the recovery path.
-  async function signIn (gen, rpId, allowCredentialIds, created, knownUserId = null, bound = null) {
+  async function signIn (gen, rpId, allowCredentialIds, created, knownUserId = null, bound = null, check = false) {
     const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds }))
     if (gen !== generation) throw cancelled()
     const credentialId = credentialIdOf(response)
     const handle = userHandleOf(response)
     const userId = typeof knownUserId === 'string' ? knownUserId : (/^[0-9a-f]{64}$/.test(handle) ? handle : '')
+    // The passkey of a sign-up creation whose pending write never landed:
+    // the creation checks, before any other route (the hosted account check
+    // included), since it is the person's own new passkey.
+    if (!created && intentReg !== null && handle === intentReg.userId) return await finishIntent(gen, rpId, response, credentialId, intentReg)
     let bytes
     try {
       bytes = parsePrf(response)
@@ -508,10 +557,47 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       const fallback = known !== null ? known.userId : (entry !== null ? entry.userId : '')
       const markHandle = handle !== '' ? handle : (typeof fallback === 'string' ? fallback : '')
       if (isWrapUserId(markHandle)) return await lookupWrapped(gen, bytes, credentialId, markHandle)
+      // Unknown and without a handle, on a hosted app: maybe an added passkey
+      // whose manager dropped the handle. Held for the app's account check.
+      if (check === true && handle === '' && known === null) return await lookupCheck(gen, bytes, credentialId)
     }
     const out = await track(install(gen, { prfBytes: bytes, credentialId, userId, rpId, created, resumed: false }))
     await settleInstalled(rpId, credentialId)
     return out
+  }
+
+  // The creation checks register() applies, on an assertion: the BE flag
+  // is read here (a sign-in never acts on it otherwise) because this passkey
+  // was created by this app and never checked. No attestation was kept, so
+  // there is nothing to enrol.
+  async function finishIntent (gen, rpId, response, credentialId, target) {
+    const refuse = async (code) => {
+      if (intentReg === target) intentReg = null
+      addRefused(credentialId, target.userId, code, true)
+      await persist(rpId)
+      const err = code === 'NOT_SYNCED' ? passkeyError('NOT_SYNCED') : noPrf(credentialId, target.userId)
+      err.credentialId = credentialId
+      err.userId = target.userId
+      return err
+    }
+    const sync = syncStateOf(response, fromBase64Url)
+    let bytes
+    try {
+      bytes = parsePrf(response)
+    } catch {
+      throw await refuse(sync === 'bound' ? 'NOT_SYNCED' : 'NO_PRF')
+    }
+    if (sync === 'bound' || boundRefusal(credentialId)) {
+      bytes.fill(0)
+      throw await refuse('NOT_SYNCED')
+    }
+    const out = await track(install(gen, { prfBytes: bytes, credentialId, userId: target.userId, rpId, created: true, resumed: false }))
+    await settleInstalled(rpId, credentialId)
+    return out
+  }
+
+  function otherPasskey (target) {
+    return codedError('OTHER_PASSKEY', 'essa não é a passkey criada agora; escolha a passkey "Varanda ' + target.userId.slice(0, 6) + '"')
   }
 
   // Asks the worklet for the lookup id of a passkey PRF (the wrap key stays
@@ -527,6 +613,29 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       return { wrapped: true, lookupId: res.lookupId }
     } finally {
       bytes.fill(0)
+    }
+  }
+
+  // unlock({ check: true }): the lookup id and the diary key of this PRF
+  // output (the worklet keeps the wrap key), the output itself kept for
+  // unlockDirect(). Nothing is installed.
+  async function lookupCheck (gen, bytes, credentialId) {
+    let kept = false
+    try {
+      if (gen !== generation) throw cancelled()
+      const res = await request('identity.recoveryLookup', { kind: 'passkey', secret: toHex(bytes), withKey: true })
+      if (gen !== generation) throw cancelled()
+      if (!res || typeof res.lookupId !== 'string' || typeof res.publicKey !== 'string') throw passkeyError('WEBAUTHN')
+      dropRecovery()
+      const expiresAt = now() + RECOVERY_MS
+      awaiting = { kind: 'passkey', credentialId, userId: '', expiresAt }
+      const entry = { bytes, credentialId, expiresAt, timer: null }
+      entry.timer = setTimer(() => { if (direct === entry) dropDirect() }, RECOVERY_MS)
+      direct = entry
+      kept = true
+      return { check: true, publicKey: res.publicKey, lookupId: res.lookupId }
+    } finally {
+      if (!kept) bytes.fill(0)
     }
   }
 
@@ -618,7 +727,29 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     if (pendingReg !== null) exclude.add(pendingReg.credentialId)
     for (const r of refused) exclude.add(r.credentialId)
     if (gen !== generation) throw cancelled()
-    const response = await ceremony('create', buildCreateOptions({ rpId, userId: userIdBytes, challenge: random(CHALLENGE_BYTES), excludeCredentialIds: [...exclude] }))
+    // The trace goes to disk before the manager can store anything. An end
+    // with no passkey (cancel, failure, a lock before create resolved) puts
+    // the previous one back; a passkey made but not yet recorded keeps it.
+    const prevIntent = intentReg
+    const mine = mode === 'unlock' ? { userId } : null
+    const dropIntent = () => {
+      if (mine !== null && intentReg === mine) intentReg = prevIntent
+    }
+    let response
+    try {
+      if (mine !== null) {
+        intentReg = mine
+        await persist(rpId)
+        if (gen !== generation) throw cancelled()
+      }
+      response = await ceremony('create', buildCreateOptions({ rpId, userId: userIdBytes, challenge: random(CHALLENGE_BYTES), excludeCredentialIds: [...exclude] }))
+    } catch (err) {
+      if (mine !== null && intentReg === mine) {
+        dropIntent()
+        await persist(rpId)
+      }
+      throw err
+    }
     if (gen !== generation) throw cancelled()
     const credentialId = credentialIdOf(response)
     // An authenticator that ignored excludeCredentials can hand back a
@@ -628,6 +759,10 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     const known = boundRefusal(credentialId)
     if (known) {
       try { parsePrf(response).fill(0) } catch {}
+      if (mine !== null && intentReg === mine) {
+        dropIntent()
+        await persist(rpId)
+      }
       throw boundError(known, credentialId, userId)
     }
     // A handed-back excluded id was not made by this request (it may be an
@@ -640,6 +775,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     if (syncStateOf(response, fromBase64Url) === 'bound') {
       addRefused(credentialId, userId, 'NOT_SYNCED', madeNow)
       if (pendingReg !== null && pendingReg.credentialId === credentialId) pendingReg = null
+      dropIntent()
       await persist(rpId)
       const err = passkeyError('NOT_SYNCED')
       err.credentialId = credentialId
@@ -655,18 +791,27 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       if (prfOutputPresent(response) || !prfEnabled(response)) {
         addRefused(credentialId, userId, 'NO_PRF', madeNow)
         if (pendingReg !== null && pendingReg.credentialId === credentialId) pendingReg = null
+        dropIntent()
         await persist(rpId)
         const err = noPrf(credentialId, userId)
         if (!madeNow) err.created = false
         throw err
       }
       // complete() would put a malformed id in allowCredentials.
-      if (!validId(credentialId)) throw passkeyError('WEBAUTHN')
+      if (!validId(credentialId)) {
+        if (mine !== null && intentReg === mine) {
+          dropIntent()
+          await persist(rpId)
+        }
+        throw passkeyError('WEBAUTHN')
+      }
       supersede(credentialId)
       refused = refused.filter((r) => r.credentialId !== credentialId)
       // The attestation object stays in memory only: after a restart the
       // 'concluir' of an add sends no key.
       pendingReg = addAttestation !== null ? { credentialId, userId, attestationObject: addAttestation } : { credentialId, userId }
+      // The pending creation, with its id, replaces the trace in one write.
+      if (mine !== null && intentReg === mine) intentReg = null
       // complete() needs the root as long as the creation is pending: it
       // stays pinned (finishRecovery).
       await persist(rpId)
@@ -688,6 +833,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       // A lock, signOut or reset meanwhile is not the passkey's fault.
       if (gen === generation) {
         addRefused(credentialId, userId, 'INSTALL_FAILED', true)
+        dropIntent()
         await persist(rpId)
       }
       throw err
@@ -748,7 +894,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
 
   // any: true offers every Varanda passkey of this rp.id (discoverable), for
   // a person whose bound passkey is gone and who signs in with another one.
-  async function unlock ({ register: create = false, any = false } = {}) {
+  async function unlock ({ register: create = false, any = false, check = false } = {}) {
     await resuming
     await loadLocal(rpIdOf())
     const rpId = begin()
@@ -757,7 +903,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     try {
       if (create) return await register(gen, rpId)
       const bound = await boundRecord(rpId)
-      return await signIn(gen, rpId, any === true || bound === null ? [] : [bound.credentialId], false, null, bound)
+      return await signIn(gen, rpId, any === true || bound === null ? [] : [bound.credentialId], false, null, bound, check === true)
     } finally {
       busy = false
     }
@@ -805,11 +951,31 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     }
   }
 
-  // Kept only so an older caller fails clearly: signIn() never holds a PRF
-  // for a direct install after a lookup (it installs an unmarked passkey at
-  // once), so there is nothing to install here.
+  // After { check: true }: the held PRF output installs as the identity, as
+  // a plain passkey's does (the account check found nothing to open). Only
+  // that output: a marked passkey's never is (RECOVERY_BAD, nothing held).
   async function unlockDirect () {
-    throw codedError('USAGE', 'pedido inválido')
+    await resuming
+    const rpId = begin()
+    const gen = generation
+    const held = direct !== null && now() <= direct.expiresAt ? direct : null
+    // An expired entry is zero-filled; a live one is the install's, which
+    // zero-fills it in the finally below.
+    if (held === null) dropDirect()
+    else {
+      clearTimer(held.timer)
+      direct = null
+    }
+    dropAwaiting()
+    try {
+      if (held === null) throw codedError('RECOVERY_BAD', RECOVERY_EXPIRED_TEXT)
+      const out = await track(install(gen, { prfBytes: held.bytes, credentialId: held.credentialId, userId: '', rpId, created: false, resumed: false }))
+      await settleInstalled(rpId, held.credentialId)
+      return out
+    } finally {
+      if (held !== null) held.bytes.fill(0)
+      busy = false
+    }
   }
 
   // The code goes to the worklet (5.91), which decodes it and keeps the wrap
@@ -1014,6 +1180,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   async function complete () {
     await resuming
     await loadLocal(rpIdOf())
+    if (pendingReg === null && intentReg !== null) return await completeIntent()
     if (pendingReg === null) throw codedError('CANCELLED', 'nenhuma criação de passkey pendente')
     const target = pendingReg
     const rpId = begin()
@@ -1066,6 +1233,37 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     }
   }
 
+  // 'concluir' for a trace with no credential id: every passkey of the
+  // rp.id is offered and only the one whose user handle is the trace's is
+  // that creation. Another one is never installed and leaves the trace.
+  async function completeIntent () {
+    const target = intentReg
+    const rpId = begin()
+    const gen = generation
+    try {
+      const response = await ceremony('get', buildGetOptions({ rpId, challenge: random(CHALLENGE_BYTES), allowCredentialIds: [] }))
+      if (gen !== generation) throw cancelled()
+      if (userHandleOf(response) !== target.userId) {
+        try { parsePrf(response).fill(0) } catch {}
+        throw otherPasskey(target)
+      }
+      return await finishIntent(gen, rpId, response, credentialIdOf(response), target)
+    } catch (err) {
+      if (gen !== generation) throw err
+      // No Varanda passkey at all (Android NoCredentialException): the
+      // creation never reached the manager, so the trace goes, with no id to
+      // refuse, and a new creation is the way out, as for a pending one.
+      if (err && err.code === 'NONE') {
+        if (intentReg === target) intentReg = null
+        await persist(rpId)
+        throw passkeyError('WEBAUTHN', MISSING_TEXT)
+      }
+      throw err
+    } finally {
+      busy = false
+    }
+  }
+
   // prf, hybrid and platform stay 'unknown': the platforms offer no
   // capability probe, so only a ceremony can tell (NO_PRF, with the retry
   // path of src/passkeyTrouble.js). signal is 'no': nothing on native can
@@ -1085,7 +1283,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       // A creation this run holds is pending even when the attempts file is
       // unreadable; with none in memory and the file unread, one may still be
       // on disk, so null rather than a false that claims there is none.
-      pending: pendingReg !== null ? true : (typeof rpId === 'string' && rpId !== '' && readFor !== rpId ? null : false),
+      pending: pendingReg !== null || intentReg !== null ? true : (typeof rpId === 'string' && rpId !== '' && readFor !== rpId ? null : false),
       refused: refused.map((r) => ({ userId: r.userId, code: r.code, cleaned: r.cleaned, created: r.created })),
       rpId: typeof rpId === 'string' ? rpId : null
     }
@@ -1100,8 +1298,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     return request('identity.clear', { keepMedia: true })
   }
 
-  // The pending creation and the refused passkeys stay: they describe the
-  // managers of this device, not the session.
+  // The pending creation, its trace and the refused passkeys stay: they
+  // describe the managers of this device, not the session.
   async function signOut () {
     invalidate()
     dropRecovery()
@@ -1154,6 +1352,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     dropRecovery()
     installedCred = null
     pendingReg = null
+    intentReg = null
     refused = kept
     await enrolStore.clear()
     await resuming
@@ -1164,6 +1363,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     }
     kept = capRefused(kept)
     pendingReg = null
+    intentReg = null
     refused = kept
     const localRp = rpIdOf()
     if (typeof localRp === 'string' && localRp !== '') {

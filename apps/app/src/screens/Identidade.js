@@ -44,6 +44,12 @@
 // large buttons and keeps the passkey, phone and recovery-code rows, without
 // explanations, under 'Outras formas de entrar' (src/entrarCard.js decides
 // when it opens); the explanations are in HELP.entrar.
+//
+// A hosted Entrar whose passkey opened no account (the provider's
+// `empty: true`, src/emptyAccount.js: a key new here that the account
+// service does not know) stops before the onboarding on one card: 'Entrar
+// com outra passkey' forgets that new identity as 'Recomeçar' does and
+// starts Entrar with any passkey; 'Criar conta com ela' goes on as before.
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Platform, StyleSheet, TextInput, View } from 'react-native'
@@ -58,6 +64,8 @@ import { COMPLETE_LABEL, COMPLETE_TEXT, CREATE_LABEL, MORE_LABEL, advancedOpen, 
 import { ENTRY_TEXT, ENTRY_TITLE } from '../feiraEntry'
 import { useFeiraEntryStart } from '../useFeiraEntryStart'
 import { registerEntry } from '../recovery'
+import { EMPTY_CREATE_LABEL, EMPTY_OTHER_LABEL, EMPTY_TEXT, EMPTY_TITLE, chooseEmpty, emptyCardShown, emptyKeyOf } from '../emptyAccount'
+import { tapActive } from '../tapActive'
 import { isAppClient } from '../appClient'
 import { deviceRandomBytes, newLinkSecret } from '../appLinkSecret'
 import { HELP, SHORT } from '../help'
@@ -779,6 +787,15 @@ export default function Identidade ({ active, embedded = false, setup = false, v
   // A code opened the account's root ({ needsPasskey }): the next press
   // creates the passkey (finishRecovery).
   const [needsPasskey, setNeedsPasskey] = useState(false)
+  // The public key of a sign-in that opened no account (empty: true), until
+  // the person picks one of the card's buttons. It lives in the shared
+  // passkey context (src/node.js), so the shell keeps this screen for the
+  // card instead of the recovery's splash or the Termos gate.
+  const emptyKey = passkey !== null && typeof passkey.emptyCard === 'string' ? passkey.emptyCard : null
+  // A 'recomeçar' after a sign-up's MISMATCH: the next sign-in, if it
+  // succeeds, finishes that creation, so it raises no card
+  // (src/emptyAccount.js emptyKeyOf). It goes by sequence, not by passkey.
+  const createResetRef = useRef(false)
   const stepHeld = needsPasskey || awaitingComplete
   useEffect(() => {
     if (typeof onStepHeld !== 'function') return
@@ -946,8 +963,13 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       if (!created) setCreateToo(true)
       return setNoPrf({ created, notSynced: code === 'NOT_SYNCED', cleaned })
     }
-    if (code === 'MISMATCH') return setMismatch({ legacy: err.legacy === true })
-    const known = pkStatus !== null && pkStatus.passkeyKnown === true
+    // signUp: a creation's own MISMATCH (Criar or its 'concluir'); a code
+    // recovery's ('finish') also passes created but is no sign-up.
+    if (code === 'MISMATCH') return setMismatch({ legacy: err.legacy === true, signUp: created === true && mode !== 'finish' })
+    // 'card': Entrar from the empty card, right after the identity it names
+    // was forgotten; the passkey this status still calls known is gone on
+    // purpose, so a cancel there is no lost passkey.
+    const known = mode !== 'card' && pkStatus !== null && pkStatus.passkeyKnown === true
     // NONE (Android: no passkey for this site) or a second miss after
     // 'entrar com outra passkey': the known passkey is gone from here.
     if (known && (code === 'NONE' || (mode === 'other' && code === 'CANCELLED'))) {
@@ -1060,9 +1082,19 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         setKnownLost(false)
         setMissedOnce(false)
         setNoCredential(false)
+        // A card raised by an earlier sign-in is for another identity.
+        passkey.setEmptyCard(null)
+        const afterCreateReset = createResetRef.current
+        createResetRef.current = false
+        // The recovery stays on (the 'recuperando' step keeps this screen)
+        // until the person picks a button.
+        const empty = emptyKeyOf(r, { afterCreateReset })
+        if (empty !== null) return passkey.setEmptyCard(empty)
         await afterUnlock()
       }, (err) => {
         passkey.endRecovery()
+        // The skip covers only the sign-in right after the reset.
+        createResetRef.current = false
         // The node drops the pending creation only when its own passkey fails.
         // Older nodes omit status.pending, so this local flag is the fallback.
         if (completing && err && err.code === 'NO_PRF') setAwaitingComplete(false)
@@ -1201,6 +1233,7 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         forgetSavedFor(oldKey)
         try { Promise.resolve(forgetReminderKey(oldKey)).catch(() => {}) } catch {}
       }
+      createResetRef.current = mismatch !== null && mismatch.signUp === true
       setMismatch(null)
       setAwaitingComplete(false)
       setCreateToo(false)
@@ -1210,6 +1243,46 @@ export default function Identidade ({ active, embedded = false, setup = false, v
       setNoCredential(false)
       setPkNote('A conta antiga foi apagada ' + (NATIVE ? 'deste aparelho' : 'deste navegador') + '. Entre com a passkey para recomeçar.')
     }, pkFail).finally(pkEnd)
+  }
+
+  // The empty card's buttons. 'Entrar com outra passkey': the identity this
+  // sign-in just made here is forgotten through the reset path, then Entrar
+  // with any passkey starts while the tap may still run a ceremony (on the
+  // web only within its activation; otherwise the Entrar card is back with
+  // the option open). 'Criar conta com ela': the onboarding, as before.
+  const onEmptyOther = () => {
+    const key = emptyKey
+    if (key === null || !pkStart()) return
+    let forgot = false
+    let handedOff = false
+    chooseEmpty('other', {
+      forget: async () => {
+        if (!outbox.forgetAuthor(key)) throw new Error('não foi possível apagar as publicações que aguardam envio neste aparelho')
+        await turnOffBeforeSwitch(pushStore.turnOffPush, { node, member: key })
+        await passkey.reset()
+        forgot = true
+        forgetSavedFor(key)
+        try { Promise.resolve(forgetReminderKey(key)).catch(() => {}) } catch {}
+        passkey.setEmptyCard(null)
+        passkey.endRecovery()
+        setAdvanced(true)
+      },
+      canSignIn: tapActive,
+      signIn: () => {
+        handedOff = true
+        pkEnd()
+        ceremony(() => passkey.unlock({ any: true }), false, false, 'card')
+      }
+    }).catch((err) => {
+      // Not forgotten: the card stays, with the error, for another try.
+      if (forgot) passkey.setEmptyCard(null)
+      pkFail(err)
+    }).finally(() => { if (!handedOff) pkEnd() })
+  }
+  const onEmptyCreate = () => {
+    if (emptyKey === null || !pkStart()) return
+    passkey.setEmptyCard(null)
+    chooseEmpty('create', { proceed: afterUnlock }).catch((err) => setPkError(errorText(err))).finally(pkEnd)
   }
 
   // A profile invite (App.js, src/profileLink.js) or a group or community
@@ -1467,6 +1540,27 @@ export default function Identidade ({ active, embedded = false, setup = false, v
         ))
 
   if (entrar !== null) return frame('Entrar', entrar, step === 'entrar')
+  if (passkey !== null && emptyCardShown(emptyKey, { locked, status: pkStatus })) {
+    const card = (
+      <>
+        <Body>{EMPTY_TEXT}</Body>
+        <Btn label={EMPTY_OTHER_LABEL} onPress={onEmptyOther} pending={pkPending} disabled={pkPending} {...bigSetup} />
+        <Btn label={EMPTY_CREATE_LABEL} secondary onPress={onEmptyCreate} disabled={pkPending} {...bigSetup} />
+        <ErrorText>{pkError}</ErrorText>
+      </>
+    )
+    return setup
+      ? (
+        <KeyboardForm>
+          <Page flush grow padBottom={16}>
+            <Stepper index={index} total={total} title={EMPTY_TITLE} hint=''>
+              <View style={styles.stepBody}>{card}</View>
+            </Stepper>
+          </Page>
+        </KeyboardForm>
+        )
+      : <Page><Card><Label>{EMPTY_TITLE}</Label>{card}</Card></Page>
+  }
 
   const withPasskey = passkey !== null
   // certLocal only ever holds a parseCertificateText error.

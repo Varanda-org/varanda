@@ -1780,3 +1780,126 @@ test('identity: a resume that meets a locked phone waits for active and reads on
   t.absent(c2.methods().includes('identity.install'))
   t.ok(items().has(itemKey(RP, PK)))
 })
+
+test('identity: a creation intent survives a kill after create; concluir and sign-in finish it by user handle', async (t) => {
+  resetStubs()
+  const { createNativeIdentity } = await loadIdentity()
+  const { createPasskeyLocal } = await import('../src/passkeyLocal.native.js')
+  const MINE = '03'.repeat(32)
+  const handleOf = (hex) => Buffer.from(hex, 'hex').toString('base64url')
+  const assertion = (id, prf, flags, userId = MINE) => credResponse(id, prf, { userHandle: handleOf(userId), authenticatorData: Buffer.from(authData(flags)).toString('base64url') })
+  // The attempts file of a process killed right after create(): every
+  // write once the ceremony resolved is lost.
+  const disk = memoryLocal()
+  let dead = false
+  const local = { ...disk, save: (rpId, rec) => { if (dead) throw new Error('killed'); disk.save(rpId, rec) } }
+  let next = null
+  let got = null
+  const seen = fakePasskey({ create: () => next(), get: () => got() })
+  const fresh = (client = fakeClient()) => ({ client, id: createNativeIdentity({ request: client.request, rpId: () => RP, store: memoryStore(), local, random: deterministicRandom }) })
+  const crashed = async (response) => {
+    resetStubs()
+    globalThis.__passkey = { isAvailable: () => true, create: async (json) => { seen.push({ kind: 'create', options: JSON.parse(json) }); return next() }, get: async (json) => { seen.push({ kind: 'get', options: JSON.parse(json) }); return got() } }
+    disk.byRp.clear()
+    dead = false
+    seen.length = 0
+    next = () => { dead = true; return response }
+    await fresh().id.unlock({ register: true }).catch(() => {})
+    dead = false
+    return fresh()
+  }
+
+  // A plain cancel leaves the record as it was.
+  next = () => { const e = new Error('native'); e.code = 'CANCELLED'; throw e }
+  t.is((await fresh().id.unlock({ register: true }).catch((e) => e)).code, 'CANCELLED')
+  t.alike(disk.byRp.get(RP), { pending: null, refused: [], intent: null }, 'a cancel leaves no trace')
+  t.is((await fresh().id.status()).pending, false)
+
+  // Killed after create: only the trace, with no credential id, is on disk.
+  let { id, client } = await crashed(credResponse(ID_A, { enabled: true }))
+  t.alike(disk.byRp.get(RP), { pending: null, refused: [], intent: { userId: MINE } }, 'the trace, written before create')
+  const real = createPasskeyLocal()
+  real.save(RP, disk.byRp.get(RP))
+  const raw = JSON.parse(files().get('file:///stub/Documents/varanda-passkey-attempts.json')).byRp[RP]
+  t.alike(raw, { pending: null, refused: [], intent: { userId: MINE } }, 'the file layout')
+  t.is(raw.pending, null, 'a build without the trace reads no pending creation')
+  t.alike(real.load(RP), { pending: null, refused: [], intent: { userId: MINE } })
+  t.is((await id.status()).pending, true, 'the next start offers concluir')
+
+  // Another passkey at concluir: never installed, the trace stays.
+  got = () => assertion(ID_B, { results: { first: PRF_B64 } }, BE_SET, '01'.repeat(32))
+  const other = await id.complete().catch((e) => e)
+  t.is(other.code, 'OTHER_PASSKEY')
+  t.is(other.message, 'essa não é a passkey criada agora; escolha a passkey "Varanda 030303"')
+  t.absent('allowCredentials' in seen[seen.length - 1].options, 'concluir of a trace offers every passkey')
+  t.absent(client.methods().includes('identity.install'))
+  t.is((await id.status()).pending, true, 'the trace stays')
+  t.alike(disk.byRp.get(RP).intent, { userId: MINE })
+  t.alike(disk.byRp.get(RP).refused, [], 'nothing refused')
+
+  // The passkey of the trace: installed as a creation, the trace consumed.
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_SET)
+  t.alike(await id.complete(), { publicKey: PK, created: true })
+  t.is(client.calls.find((c) => c.method === 'identity.install').params.credentialId, ID_A)
+  t.absent(disk.byRp.get(RP).intent, 'the trace goes')
+  t.is((await id.status()).pending, false)
+
+  // BE off at concluir: refused NOT_SYNCED as a creation of this app.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_CLEAR)
+  const bound = await id.complete().catch((e) => e)
+  t.is(bound.code, 'NOT_SYNCED')
+  t.is(bound.credentialId, ID_A)
+  t.is(bound.userId, MINE)
+  t.absent(client.methods().includes('identity.install'), 'never an identity')
+  t.alike(disk.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NOT_SYNCED', true]])
+  t.absent(disk.byRp.get(RP).intent)
+  t.is((await id.unlock({ any: true }).catch((e) => e)).code, 'NOT_SYNCED', 'and it never signs in later')
+
+  // Entrar with it and no PRF output: NO_PRF, created here.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, null, BE_SET)
+  const noPrf = await id.unlock({ any: true }).catch((e) => e)
+  t.is(noPrf.code, 'NO_PRF')
+  t.alike(disk.byRp.get(RP).refused.map((r) => [r.credentialId, r.code, r.created]), [[ID_A, 'NO_PRF', true]])
+  t.is((await id.status()).pending, false)
+
+  // Entrar with it, BE off: NOT_SYNCED before the hosted account check.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_CLEAR)
+  t.is((await id.unlock({ any: true, check: true }).catch((e) => e)).code, 'NOT_SYNCED')
+  t.absent(client.methods().includes('identity.recoveryLookup'), 'no account check')
+
+  // Entrar with it, synced, on a hosted app: installed as a creation.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => assertion(ID_A, { results: { first: PRF_B64 } }, BE_SET)
+  t.alike(await id.unlock({ any: true, check: true }), { publicKey: PK, created: true })
+  t.absent(client.methods().includes('identity.recoveryLookup'), 'never held for the account check')
+  t.absent(disk.byRp.get(RP).intent)
+
+  // NONE at concluir: no passkey ever reached the manager.
+  ;({ id, client } = await crashed(credResponse(ID_A, { enabled: true })))
+  got = () => { const e = new Error('native'); e.code = 'NONE'; throw e }
+  const missing = await id.complete().catch((e) => e)
+  t.is(missing.code, 'WEBAUTHN')
+  t.is(missing.message, 'não deu para concluir a criação; tente criar de novo')
+  t.absent(disk.byRp.get(RP).intent, 'the trace goes')
+  t.alike(disk.byRp.get(RP).refused, [], 'with no id to refuse')
+  t.is((await id.status()).pending, false)
+
+  // A creation that recorded its pending id replaces the trace in one write.
+  resetStubs()
+  globalThis.__passkey = { isAvailable: () => true, create: async () => next(), get: async () => got() }
+  disk.byRp.clear()
+  next = () => credResponse(ID_A, { enabled: true })
+  t.alike(await fresh().id.unlock({ register: true }), { pending: true })
+  t.alike(disk.byRp.get(RP), { pending: { credentialId: ID_A, userId: MINE }, refused: [], intent: null })
+
+  // reset clears the trace; signOut keeps it, as the pending creation.
+  ;({ id } = await crashed(credResponse(ID_A, { enabled: true })))
+  await id.signOut().catch(() => {})
+  t.is((await id.status()).pending, true, 'signOut keeps it')
+  await id.reset().catch(() => {})
+  t.absent(disk.byRp.has(RP) && disk.byRp.get(RP).intent, 'reset drops it')
+  t.is((await id.status()).pending, false)
+})
