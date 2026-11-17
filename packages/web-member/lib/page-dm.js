@@ -274,13 +274,25 @@ function createPageHolder ({ storage, association, now = Date.now } = {}) {
     return { member, sealed, sig: ps.signShare({ page, gen, member, sealed }, identity) }
   }
 
+  // A recipient with a proof is a core delegate actor whose box came from
+  // the service ('dm-box-read' actorBoxes): it is sealed to only when the
+  // actor itself signed that box, never on the service's word.
+  function checkProof ({ member, box, proof }) {
+    if (proof === undefined) return
+    const ok = proof !== null && typeof proof === 'object' &&
+      ps.verifyActorBox({ actor: member, box, gen: proof.gen, at: proof.at }, proof.sig)
+    if (!ok) throw new UsageError(BAD_SIGNATURE)
+  }
+
   // dm.pageGenerate. own: the caller identity, which must be a recipient.
+  // Every proof is checked before anything is generated or sealed.
   function generate (own, identity, { page, gen, recipients }) {
     requireUnlocked()
     sweep()
     if (!recipients.some((r) => r.member === own) || new Set(recipients.map((r) => r.member)).size !== recipients.length) {
       throw new UsageError(BAD_RECIPIENTS)
     }
+    for (const r of recipients) checkProof(r)
     const secrets = ps.newPageSecrets()
     let pairs = null
     try {
@@ -302,7 +314,8 @@ function createPageHolder ({ storage, association, now = Date.now } = {}) {
   }
 
   // dm.pageShare: the held secrets for one more member.
-  function share (identity, { page, member, box }) {
+  function share (identity, { page, member, box, proof }) {
+    checkProof({ member, box, proof })
     const e = need(page)
     const s = shareFor(e.secrets, { page, gen: e.gen, member, box }, identity)
     return { gen: e.gen, sealed: s.sealed, sig: s.sig }

@@ -182,6 +182,24 @@ test('page secrets: generate, adopt, share, late key catch-up, draft and send as
   await B.web.request('dm.pull')
   t.is((await B.web.request('dm.thread', { page: P, peer: C.key })).messages[0].text, SECRET, 'B reads the page inbox too')
 
+  // A core admin's box comes with the actor's own proof ('dm-box-read'
+  // actorBoxes) through the session; a proof the actor did not sign seals nothing.
+  const actorKp = crypto.keyPair()
+  const actor = hex(actorKp.publicKey)
+  const actorBox = gc.boxKeyPairFromSeed(crypto.randomBytes(32))
+  const aBox = hex(actorBox.publicKey)
+  const proof = { gen: 1, at: AT, sig: ps.signActorBox({ actor, box: aBox, gen: 1, at: AT }, actorKp) }
+  const toActor = await A.web.request('dm.pageShare', { page: P, member: actor, box: aBox, proof })
+  const seeds = ps.openSecrets(toActor.sealed, actorBox, { page: P, gen: 1, member: actor })
+  t.ok(seeds, 'the delegate opens its share with its own box')
+  ps.wipeSecrets(seeds)
+  const forgedBy = crypto.keyPair()
+  const forged = { ...proof, sig: ps.signActorBox({ actor: hex(forgedBy.publicKey), box: aBox, gen: 1, at: AT }, forgedBy) }
+  const refusedShare = await errorOf(A.web.request('dm.pageShare', { page: P, member: actor, box: aBox, proof: forged }))
+  t.alike([refusedShare.code, refusedShare.message], ['USAGE', 'assinatura inválida'], 'a forged proof is refused')
+  const refusedGen = await errorOf(A.web.request('dm.pageGenerate', { page: P, gen: 2, recipients: [{ member: A.key, box: A.box }, { member: actor, box: aBox, proof: forged }] }))
+  t.alike([refusedGen.code, refusedGen.message], ['USAGE', 'assinatura inválida'], 'and refuses the whole generate')
+
   // A drafts as the page; the page key signs the digest elsewhere.
   await copyDiary(C, A)
 
@@ -963,6 +981,64 @@ test('page holder: pairs and pending secrets zeroed at lock, reopened from kv un
   holder.lock()
   await holder.unlock(crypto.randomBytes(32))
   t.is(holder.get(page), null, 'another key opens nothing')
+  holder.lock()
+})
+
+test('page holder: a core delegate recipient is sealed to only with its own signed box', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const storage = memoryNodeStorage()
+  const holder = createPageHolder({ storage, association: hex(assoc.publicKey) })
+  const idKp = crypto.keyPair()
+  const own = hex(idKp.publicKey)
+  const ownBox = gc.boxKeyPairFromSeed(crypto.randomBytes(32))
+  const page = hex(crypto.keyPair().publicKey)
+  await holder.unlock(crypto.randomBytes(32))
+  // A core admin: its delegate actor and that actor's dm box, which no diary
+  // publishes, so the box reaches the sharer from the service.
+  const actorKp = crypto.keyPair()
+  const actor = hex(actorKp.publicKey)
+  const actorBox = gc.boxKeyPairFromSeed(crypto.randomBytes(32))
+  const box = hex(actorBox.publicKey)
+  const at = new Date().toISOString()
+  const proof = { gen: 2, at, sig: ps.signActorBox({ actor, box, gen: 2, at }, actorKp) }
+  const me = { member: own, box: hex(ownBox.publicKey) }
+
+  const made = holder.generate(own, idKp, { page, gen: 1, recipients: [me, { member: actor, box, proof }] })
+  const toActor = made.shares.find((s) => s.member === actor)
+  t.ok(ps.verifyShare({ page, gen: 1, member: actor, sealed: toActor.sealed }, toActor.sig, own), 'signed by the sharer')
+  const opened = ps.openSecrets(toActor.sealed, actorBox, { page, gen: 1, member: actor })
+  t.ok(opened, 'opens with the actor box secret')
+  ps.wipeSecrets(opened)
+  t.is(ps.openSecrets(toActor.sealed, ownBox, { page, gen: 1, member: actor }), null, 'and with no other box')
+  const params = { page, gen: 1, sealed: made.shares[0].sealed, by: own, sig: made.shares[0].sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: page }, assoc) }
+  t.alike(await holder.adopt(own, ownBox, { owner: own, admins: [actor] }, params), { changed: true })
+
+  const shared = holder.share(idKp, { page, member: actor, box, proof })
+  const again = ps.openSecrets(shared.sealed, actorBox, { page, gen: 1, member: actor })
+  t.ok(again, 'dm.pageShare with the proof opens with the actor box')
+  ps.wipeSecrets(again)
+
+  // What the service could hand over instead of the actor's own statement.
+  const serviceKp = crypto.keyPair()
+  const otherKp = crypto.keyPair()
+  const rogueBox = hex(gc.boxKeyPairFromSeed(crypto.randomBytes(32)).publicKey)
+  const forged = [
+    ['re-signed by the service key', box, { ...proof, sig: ps.signActorBox({ actor: hex(serviceKp.publicKey), box, gen: 2, at }, serviceKp) }],
+    ['signed by another member', box, { ...proof, sig: ps.signActorBox({ actor: hex(otherKp.publicKey), box, gen: 2, at }, otherKp) }],
+    ['the actor proof for another box', rogueBox, proof],
+    ['another gen', box, { ...proof, gen: 3 }],
+    ['another at', box, { ...proof, at: new Date(Date.parse(at) + 1).toISOString() }],
+    ['a malformed proof', box, { gen: 2, at }]
+  ]
+  const pendingBefore = holder.pendingCount
+  for (const [why, b, pr] of forged) {
+    t.exception.all(() => holder.generate(own, idKp, { page, gen: 2, recipients: [me, { member: actor, box: b, proof: pr }] }), /assinatura inválida/, 'pageGenerate: ' + why)
+    t.exception.all(() => holder.share(idKp, { page, member: actor, box: b, proof: pr }), /assinatura inválida/, 'pageShare: ' + why)
+  }
+  t.is(holder.pendingCount, pendingBefore, 'a refused generate keeps no secrets')
+  t.is(holder.get(page).gen, 1, 'the held gen is unchanged')
+  const unheld = hex(crypto.keyPair().publicKey)
+  t.exception.all(() => holder.share(idKp, { page: unheld, member: actor, box: rogueBox, proof }), /assinatura inválida/, 'checked before the held secrets are looked up')
   holder.lock()
 })
 
