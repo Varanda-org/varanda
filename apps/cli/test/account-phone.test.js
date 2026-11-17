@@ -24,7 +24,7 @@ const { openAgeStore } = require('../lib/account/age-store')
 const { openPhoneStore } = require('../lib/account/phone-store')
 const { openInvitesStore } = require('../lib/account/invites-store')
 const { createPhoneClient } = require('../lib/account/phone-client')
-const { createPhoneRoutes } = require('../lib/account/phone-routes')
+const { createPhoneRoutes, keyedCeiling, maxKeysFor } = require('../lib/account/phone-routes')
 const { openPasskeyStore } = require('../lib/account/passkey-store')
 const { keyFromAttestation } = require('../lib/account/webauthn')
 const { createFakePasskey } = require('./helpers/fake-passkey')
@@ -188,10 +188,20 @@ async function setup (t, { loopback = false, phone = true, age = true, inviting 
 }
 
 // The published blocklist is c.blocked; Excluir conta's own block request
-// leaves it as it is (a pending change, not yet published).
+// leaves it as it is (a pending change, not yet published). Nothing is
+// pending and reports carry no decision time: a listed key is held, and its
+// reports all count until the sweep first clears it.
 function fakeModeration (c) {
+  const entry = (m) => c.blocked.find((b) => b.member === m)
   return {
     blocked: () => c.blocked.map((b) => ({ member: b.member, reportIds: [...b.reportIds], kind: 'conta' })),
+    held: (m) => entry(m) !== undefined,
+    // c.reports: 'bloquear' reports of members no longer listed.
+    blockReportsAfter: (m, since) => {
+      if (since !== null) return 0
+      const b = entry(m)
+      return b !== undefined ? b.reportIds.length : (c.reports && c.reports[m]) || 0
+    },
     requestDeletion: async () => ({ change: null, kind: 'igual' })
   }
 }
@@ -508,6 +518,23 @@ test('phone nonces: single-use, member-bound, expiring, action-bound, never an a
   t.alike(Object.keys((await s.start(member())).body), ['nonce'], 'start reveals nothing')
 })
 
+test('phone nonces: a flood of unsigned starts never pushes out a member\'s unspent nonce', async (t) => {
+  const s = await setup(t, { burst: 5000 })
+  const m = member()
+  await s.band(m)
+  const nonce = (await s.start(m)).body.nonce
+  // More than the 1000 nonces the old table held, each for a fresh key.
+  let failed = 0
+  for (let i = 0; i < 1100; i++) {
+    if ((await s.start(member())).status !== 200) failed++
+  }
+  t.is(failed, 0, '1100 unsigned starts answered')
+  t.is(s.server.phoneStats().nonces, 0, 'start stores nothing')
+  const r = await s.post('/account/phone/send', { member: m.hex, nonce, signature: s.signFor(m, 'send', nonce), phone: PHONE_A })
+  t.alike(r.body, { state: 'enviado' })
+  t.is(s.server.phoneStats().nonces, 1, 'only the spent nonce is kept')
+})
+
 test('phone limits: a 60 s cooldown, five sends a day per member, three per number', async (t) => {
   const s = await setup(t)
   const m = member()
@@ -563,6 +590,112 @@ test('phone limits: refused sends never charge the daily ceiling, which answers 
   t.alike((await s.step(late, 'send', { phone: PHONE_D })).body, { error: 'indisponivel' })
   await linkDirect(s.store, s.iss, late, 'lia')
   t.alike((await s.step(late, 'send', { phone: PHONE_D })).body, { state: 'enviado' }, 'linked between two calls: the other ceiling')
+})
+
+test('phone limits: a full keyed window table refuses a new key and never evicts a live window', (t) => {
+  let now = 1_800_000_000_000
+  const k = keyedCeiling(1, DAY, () => now, 2)
+  k.take('a')
+  k.take('b')
+  t.absent(k.has('c'), 'full of live windows: a new key is refused')
+  if (k.has('c')) k.take('c')
+  t.absent(k.has('a'), 'a stays limited')
+  t.absent(k.has('b'), 'b stays limited')
+  now += DAY
+  t.ok(k.has('c'), 'room once the windows expired')
+  k.take('c')
+  t.ok(k.has('a'), 'a new window for a')
+  t.is(maxKeysFor(200), 800, 'the routes size the tables from the daily ceiling')
+  t.exception.all(() => keyedCeiling(1, DAY, () => now), /max/)
+})
+
+// The phone routes alone, on a fake clock, with a fake provider that counts
+// its sends and a store that holds nothing.
+function bareRoutes (opts = {}) {
+  const c = { t: 1_800_000_000_000, sends: 0, logs: [] }
+  const iss = issuer()
+  const http = {
+    send: (res, status, body) => { res.status = status; res.body = body },
+    readJsonBody: async (req) => req.body,
+    checkPost () {},
+    RouteError: Error,
+    refuse: (token) => Object.assign(new Error(token), { token }),
+    keyedWindow: () => () => true,
+    fixedWindow: () => () => true
+  }
+  const client = {
+    send: async () => { c.sends++; return { ok: true, status: 'enviado' } },
+    check: async () => ({ ok: false, reason: 'entrada' })
+  }
+  const phones = {
+    available: () => true,
+    indexOf: (phone) => nodeCrypto.createHash('sha256').update(phone).digest('hex'),
+    verified: () => false,
+    live: () => null,
+    sweep: async () => {},
+    settled: async () => {}
+  }
+  const routes = createPhoneRoutes({
+    client,
+    phones,
+    association: iss.association,
+    store: { isFull: () => false },
+    ageVerified: () => true,
+    linked: () => false,
+    deleted: () => false,
+    burnable: () => false,
+    log: (e) => c.logs.push(e.reason),
+    now: () => c.t,
+    http,
+    ...opts
+  })
+  async function call (pathname, body) {
+    const res = {}
+    try {
+      await routes.handle({ method: 'POST', body }, res, new URL('http://127.0.0.1' + pathname))
+    } catch (err) {
+      return { error: err.token }
+    }
+    return res.body
+  }
+  c.send = async (who, phone) => {
+    const { nonce } = await call('/account/phone/start', { member: who.hex })
+    return call('/account/phone/send', { member: who.hex, nonce, signature: signPhone({ action: 'send', nonce, member: who.hex, association: iss.association }, who.kp), phone })
+  }
+  c.routes = routes
+  return c
+}
+
+test('phone limits: full pending codes refuse a send before the provider call, never evicting one', async (t) => {
+  const c = bareRoutes({ maxPending: 1 })
+  const a = member()
+  const b = member()
+  t.alike(await c.send(a, PHONE_A), { state: 'enviado' })
+  t.is(c.sends, 1)
+  t.alike(await c.send(b, PHONE_B), { error: 'limite-telefone' }, 'a pending code is never evicted')
+  t.is(c.sends, 1, 'the provider was not called')
+  t.alike(c.logs, ['enviado', 'tabela-cheia'])
+  c.t += 61 * 1000
+  t.alike(await c.send(b, PHONE_B), { error: 'limite-telefone' }, 'a\'s code is still pending')
+  t.alike(await c.send(a, PHONE_A), { state: 'enviado' }, 'a member that holds an entry has room')
+  t.is(c.sends, 2)
+  t.is(c.routes.stats().pending, 1)
+  c.t += 600 * 1000
+  t.alike(await c.send(b, PHONE_B), { state: 'enviado' }, 'room once a\'s code expired')
+  t.is(c.sends, 3)
+})
+
+test('phone limits: the keyed windows are sized from the daily ceiling and refuse a new key when full', async (t) => {
+  const c = bareRoutes({ maxWindows: 1 })
+  const a = member()
+  t.alike(await c.send(a, PHONE_A), { state: 'enviado' })
+  c.t += 601 * 1000
+  t.alike(await c.send(member(), PHONE_B), { error: 'limite-telefone' }, 'a new member and number while the windows are full')
+  t.is(c.sends, 1)
+  c.t += DAY
+  t.alike(await c.send(member(), PHONE_B), { state: 'enviado' }, 'room once the windows expired')
+  t.exception.all(() => bareRoutes({ maxPending: 0 }), /maxPending/)
+  t.exception.all(() => bareRoutes({ maxWindows: 0 }), /max/)
 })
 
 test('phone: two concurrent sends for one member make one provider call', async (t) => {
@@ -711,6 +844,17 @@ test('phone send: provider refusals map to tokens and log field names, never val
   t.alike(uncertain.body, { error: 'resultado-incerto' })
   t.alike(s.server.phoneStats().pending, 1, 'a code may still arrive')
   noPersonalData(t, s, [m])
+})
+
+test('phone: an expired code leaves memory on the next start, with no send or check for it', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await s.band(m)
+  t.alike((await s.step(m, 'send', { phone: PHONE_A })).body, { state: 'enviado' })
+  t.is(s.server.phoneStats().pending, 1)
+  s.c.offset += 601 * 1000
+  t.is((await s.start(member())).status, 200)
+  t.is(s.server.phoneStats().pending, 0, 'the number is gone')
 })
 
 test('phone: a timeout on send leaves a pending entry that a later check approves', async (t) => {
@@ -1075,7 +1219,7 @@ test('phone limits: three wrong codes never open an early resend', async (t) => 
   t.is(s.sends().length, 2)
 })
 
-test('phone: Excluir conta waits for the burn of a blocked member when the sweep fails; nobody else is held', async (t) => {
+test('phone: Excluir conta waits for the burn of a blocked or once-blocked member when the sweep fails; nobody else is held', async (t) => {
   const s = await setup(t, { passkeys: true })
   const enrol = async (who) => {
     const pk = createFakePasskey({ rpId: 'varanda.test' })
@@ -1118,6 +1262,14 @@ test('phone: Excluir conta waits for the burn of a blocked member when the sweep
   const done = await remove(free, freeKey)
   t.is(done.status, 200, done.text)
   t.ok(s.store.deletedAt(free.hex) !== null, 'a member who is not blocked is deleted')
+
+  const lifted = member()
+  await linkDirect(s.store, s.iss, lifted, 'lia')
+  const liftedKey = await enrol(lifted)
+  s.c.reports = { [lifted.hex]: 1 }
+  const waits = await remove(lifted, liftedKey)
+  t.alike(waits.body, { error: 'indisponivel' }, 'nor one unblocked whose old reports the sweep may not have cleared')
+  t.is(s.store.deletedAt(lifted.hex), null)
 
   s.c.guardOk = true
   const later = await remove(holder, holderKey)

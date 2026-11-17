@@ -1253,6 +1253,33 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     }))
   }
 
+  // Read-only, for the phone rule: is `member` in the published list, or
+  // does any change for it still wait for the operator? Excluir conta's own
+  // block (by OWNER_ACTOR) counts too: a 'bloquear' decided while it waits
+  // joins it. An unblock still waiting does not let go of a number, even
+  // next to the claimed block it lifts: it may be cancelled, and the burn
+  // itself is only lifted by the published list. An invalid member is false.
+  function held (member) {
+    usable()
+    if (!isLowerHex(member, 32)) return false
+    if (blockedSet(state.published.snapshot).has(member)) return true
+    return state.pending.some((c) => c.member === member)
+  }
+
+  // Read-only: how many 'bloquear' reports blocked `member` with a decision
+  // at or after `since` (canonical ISO, so strings compare in time order),
+  // or all of them when `since` is null. An invalid member is 0.
+  function blockReportsAfter (member, since) {
+    usable()
+    if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be null or a canonical ISO date')
+    if (!isLowerHex(member, 32)) return 0
+    let n = 0
+    for (const r of Object.values(state.reports)) {
+      if (r.status === 'bloquear' && blockedKey(r) === member && (since === null || r.decidedAt >= since)) n++
+    }
+    return n
+  }
+
   function stats () {
     usable()
     let open = 0
@@ -1362,7 +1389,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, isBlocked, groupKeys, stats, exportRows, reportIdsAbout, humanReversed }
+  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, isBlocked, held, blockReportsAfter, groupKeys, stats, exportRows, reportIdsAbout, humanReversed }
 }
 
 module.exports = {

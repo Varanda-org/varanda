@@ -701,3 +701,61 @@ test('an accepted clear keeps masking the vouch until node.info shows it', async
   await tick()
   t.is(r.out.gate, 'ok', 'once shown, the mask is gone (a later proof vouches again)')
 })
+
+// Trocar o celular (src/phone.js phoneChangeOutcome) compares these dates.
+const NEW_DATE = '2026-11-17T09:30:00.000Z'
+const dated = (date) => ({ ...PROOF, date })
+
+test('proofDate: the date of the latest verificado proof, for this key only', async (t) => {
+  let answer = { state: 'verificado', proof: dated(DATE) }
+  const { r } = await mount(t, {
+    phonePolicy: async () => ({ required: true }),
+    phoneStatus: async () => answer
+  })
+  t.is(r.out.proofDate, DATE, 'the status read\'s proof')
+  t.is(r.out.knownDate, DATE)
+  r.out.markVerified(dated(NEW_DATE), r.out.key)
+  await tick()
+  t.is(r.out.proofDate, NEW_DATE, 'a recorded number moves it')
+  t.is(r.out.knownDate, NEW_DATE)
+  answer = { state: 'verificado' }
+  r.out.recheck()
+  await tick()
+  t.is(r.out.proofDate, null, 'a verificado without a proof (no issuer) has no date')
+  answer = { state: 'verificado', proof: dated('2026-11-17T09:30:00Z') }
+  r.out.recheck()
+  await tick()
+  t.is(r.out.proofDate, null, 'a non-canonical date is no date')
+  answer = { state: 'verificado', proof: dated(DATE) }
+  r.out.recheck()
+  await tick()
+  t.is(r.out.proofDate, DATE)
+  r.out.markVerified(undefined, r.out.key)
+  await tick()
+  t.is(r.out.proofDate, DATE, 'a proofless markVerified keeps the date the recheck read')
+  r.rerender({ generation: 2 })
+  t.is(r.out.proofDate, null, 'an answer under another key gives none')
+})
+
+test('knownDate: node.info\'s date for this member when the status gave none', async (t) => {
+  const err = Object.assign(new Error('serviço indisponível'), { code: 'indisponivel' })
+  const failing = { phonePolicy: async () => ({ required: true }), phoneStart: async () => { throw err } }
+  const vouched = await mount(t, failing, { info: { publicKey: M, phoneVerifiedDate: DATE, phoneSince: null } })
+  t.is(vouched.r.out.gate, 'ok')
+  t.is(vouched.r.out.proofDate, null)
+  t.is(vouched.r.out.knownDate, DATE, 'the node\'s proof')
+  const other = await mount(t, failing, { info: { publicKey: OTHER, phoneVerifiedDate: DATE, phoneSince: null } })
+  t.is(other.r.out.knownDate, null, 'node.info of another key')
+  const odd = await mount(t, failing, { info: { publicKey: M, phoneVerifiedDate: '2026-11-11', phoneSince: null } })
+  t.is(odd.r.out.knownDate, null, 'a non-canonical date')
+  const fresher = await mount(t, {
+    phonePolicy: async () => ({ required: true }),
+    phoneStatus: async () => ({ state: 'verificado', proof: dated(NEW_DATE) })
+  }, { info: { publicKey: M, phoneVerifiedDate: DATE, phoneSince: null } })
+  t.is(fresher.r.out.knownDate, NEW_DATE, 'the service\'s answer wins over the node\'s copy')
+  const cleared = await mount(t, {
+    phonePolicy: async () => ({ required: true }),
+    phoneStatus: async () => ({ state: 'nenhum' })
+  }, { info: { publicKey: M, phoneVerifiedDate: DATE, phoneSince: null } })
+  t.is(cleared.r.out.knownDate, null, 'a nenhum masks the node\'s old proof')
+})
