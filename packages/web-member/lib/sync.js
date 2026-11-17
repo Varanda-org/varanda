@@ -255,7 +255,7 @@
 //                is the fold's business. A stored group core is purged only
 //                when D or its group is blocked, D's issuer is revoked, on a
 //                fork, or when its local block 0 differs. At most
-//                MAX_GROUP_WRITERS_PER_DIARY cores per (diary, group) are
+//                MAX_GROUP_HELD_PER_DIARY cores per (diary, group) are
 //                gated, the rest fail 'quota' (never purged); a gate refused
 //                on the page item alone is tried again for another listing
 //                of the key. Gates take
@@ -338,7 +338,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupJoins, buildCommunity, diaryGroupKeys, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupCutHistory, groupJoins, buildCommunity, diaryGroupKeys, slotWalk, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
   presentState,
   presentLength,
@@ -433,8 +433,15 @@ const DIARY_UNAVAILABLE = 'diário indisponível'
 
 function noop () {}
 
-// The per-diary writer cap, as @varanda/core lib/group.js capPerDiary keeps
-// the MAX_GROUP_WRITERS_PER_DIARY EARLIEST joins, not the first stored:
+// The cores of one (group, diary) the fold may await, as the seeder holds
+// them (#350): the slot walk of the diary (@varanda/core lib/group.js
+// slotWalk) counts 8 live, 8 frozen and 16 released writers at most, so a
+// frozen or released writer, which may hold a leave, is still fetched.
+const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
+
+// The per-diary writer cap keeps the MAX_GROUP_HELD_PER_DIARY EARLIEST
+// joins, not the first stored: the walk gives slots in join order, and only
+// the diary itself can bind a writer past its walk, never a seeder.
 // held = the live accepted cores of (group, diary) besides the candidate,
 // each { key, group, seq, proven }; seq = the candidate's proven join seq.
 // -> { full, victim }: when full, the held writer with the highest PROVEN
@@ -443,7 +450,7 @@ function noop () {}
 // seeder listing later writers first to push out the one holding a leave
 // or moderation.
 function capVictim (held, seq) {
-  if (held.length < MAX_GROUP_WRITERS_PER_DIARY) return { full: false, victim: null }
+  if (held.length < MAX_GROUP_HELD_PER_DIARY) return { full: false, victim: null }
   let victim = null
   for (const x of held) {
     if (!x.proven || x.key === x.group || !(x.seq > seq)) continue
@@ -487,7 +494,7 @@ function capExcess (live) {
   }
   for (const list of byPair.values()) {
     const { group, diary: d } = list[0]
-    const room = MAX_GROUP_WRITERS_PER_DIARY - (live.some((r) => r.key === group && r.diary === d) ? 1 : 0)
+    const room = MAX_GROUP_HELD_PER_DIARY - (live.some((r) => r.key === group && r.diary === d) ? 1 : 0)
     if (list.length <= room) continue
     list.sort((x, y) => (y.proven - x.proven) || (x.seq - y.seq) || (x.key < y.key ? -1 : 1))
     for (const x of list.slice(room)) excess.add(x)
@@ -562,6 +569,10 @@ function ownGroupVerdict (length, pageLength, peerLength) {
 
 // Listings of a full (group, diary) gated at once as contenders.
 const MAX_CAP_CONTENDERS = 2
+
+// The own diary's records the scan keeps for diaryGroupKeys and
+// liveDiaryWriters: the slot walk reads the cuts with the joins (#350).
+const WALK_TYPES = new Set(['group-join', 'group-cut'])
 
 const NO_READER = { set: noop, clear: noop }
 // A startup that has not reached the seeder link ('ready') by then logs the
@@ -3704,7 +3715,7 @@ async function syncRun ({
       live.push(s)
     }
     // Kept victims of an earlier run come back from the storage: the cap
-    // holds across runs only if at most MAX_GROUP_WRITERS_PER_DIARY of a
+    // holds across runs only if at most MAX_GROUP_HELD_PER_DIARY of a
     // (group, diary) go live, the earliest proven joins (a bound root is one
     // of them), the rest at rest.
     const excess = capExcess(live)
@@ -5148,7 +5159,7 @@ async function syncRun ({
       const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
       fold.holes.delete(seq)
       fold.readFails.delete(seq)
-      if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq, record })
+      if (record !== null && WALK_TYPES.has(record.type)) fold.joinEntries.push({ seq, record })
     } catch {
       // Once per scan: a diary of failing blocks must not flood the log.
       if (!ended && !fold.scanLogged) {
@@ -5195,28 +5206,15 @@ async function syncRun ({
   }
 
   // The on:true writers the own diary binds now to the roots it binds, as
-  // diaryGroupKeys counts them: the root's own key always, then the earliest
-  // MAX_GROUP_WRITERS_PER_DIARY by first join seq. -> Map writer -> group.
+  // diaryGroupKeys counts them: the root's own key once bound, then the
+  // live and frozen writers of the diary's slot walk (#350). -> Map writer
+  // -> group.
   function liveDiaryWriters (entries, roots) {
-    const first = new Map()
-    for (const { seq, record } of entries) {
-      if (record.type !== 'group-join' || record.on !== true || !roots.has(record.group)) continue
-      let writers = first.get(record.group)
-      if (writers === undefined) first.set(record.group, (writers = new Map()))
-      if (!writers.has(record.writer) || seq < writers.get(record.writer)) writers.set(record.writer, seq)
-    }
     const allowed = new Set()
-    for (const [group, writers] of first) {
-      let room = MAX_GROUP_WRITERS_PER_DIARY
-      if (writers.has(group)) {
-        allowed.add(group + ':' + group)
-        room--
-      }
-      for (const [writer] of [...writers].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))) {
-        if (writer === group) continue
-        if (room-- <= 0) break
-        allowed.add(group + ':' + writer)
-      }
+    for (const group of roots) {
+      const walk = slotWalk(groupJoinHistory(entries, group), groupCutHistory(entries, group), group)
+      if (walk.rootSlot) allowed.add(group + ':' + group)
+      for (const writer of [...walk.live, ...walk.frozen]) allowed.add(group + ':' + writer)
     }
     const out = new Map()
     for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
@@ -5344,7 +5342,7 @@ async function syncRun ({
         continue
       }
       const record = validRecordCopy(entry.record, entry.seq)
-      if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq: entry.seq, record })
+      if (record !== null && WALK_TYPES.has(record.type)) fold.joinEntries.push({ seq: entry.seq, record })
     }
     fold.joinCursor = Math.max(1, state.present)
   }
@@ -5656,4 +5654,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

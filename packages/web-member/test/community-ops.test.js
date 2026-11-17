@@ -130,9 +130,9 @@ test('community create writes the root and Geral; info shapes and refusals', asy
 
   const geralRow = { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }
   t.alike(await ops.communityInfo(a.ctx, { community }), {
-    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, authorityHere: true, writersBound: 1, generalWritersBound: 1
+    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, authorityHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 1, generalWritersFrozen: 0, generalFrozenRoom: 8
   })
-  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, writersBound: 1 })
+  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }], total: 1 }, 'a community is not listed as a group')
 
   const { group: horta } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval', community })
@@ -158,7 +158,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   await t.exception(() => ops.groupCreate(b.ctx, { name: 'Feira', join: 'open', community }), /só quem criou a comunidade cria grupos/)
   await t.exception(() => ops.groupJoin(b.ctx, { group: general }), /entre na comunidade primeiro/)
   const pending = 'cd'.repeat(32)
-  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, writersBound: 0, generalWritersBound: 0 })
+  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: 8 })
   await t.exception(() => ops.communityInfo(b.ctx, { community: general }), /comunidade não encontrada/, 'a group root is no community')
 })
 
@@ -1716,4 +1716,44 @@ test('invitePolicy: the creator toggles C, an admin sets C and a group through i
   const cFlag = await lastRecord(c, ccw)
   t.alike([cFlag.type, cFlag.group, cFlag.on], ['group-invites', null, true], 'an admin on its own CW')
   t.is((await ops.communityInfo(c.ctx, { community })).memberInvite, true)
+})
+
+// Appends diary records of `s` with no other check.
+async function diaryAppend (s, list) {
+  const diary = await store.openDiary(s.storage, s.ctx.keyPair)
+  try {
+    for (const r of list) await store.appendRecord(diary, r)
+  } finally {
+    await diary.close()
+  }
+}
+
+test('community.join counts the own diary\'s slot walk, not the CWs held: COMMUNITY_FULL with nothing written (#350)', async (t) => {
+  const { members: [b], community } = await world(t, 1)
+  // Eight CWs of other devices this node never held take every live slot.
+  await diaryAppend(b, Array.from({ length: grp.MAX_GROUP_WRITERS_PER_DIARY }, () => groupJoinRecord({ group: community, writer: hex(crypto.randomBytes(32)), on: true })))
+  const before = (await ops.logRead(b.ctx)).entries.length
+  await t.exception(() => ops.communityJoin(b.ctx, { community }), /limite da comunidade atingido/)
+  t.is((await ops.logRead(b.ctx)).entries.length, before, 'no CW bound')
+  t.is(await ownWriter(b, community), null, 'no CW made')
+})
+
+test('community.join takes a slot a cut freed; community.info counts live and frozen slots, Geral\'s too (#350)', async (t) => {
+  const { members: [b], community, general } = await world(t, 1)
+  const ws = Array.from({ length: grp.MAX_GROUP_WRITERS_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  const gw = hex(crypto.randomBytes(32))
+  await diaryAppend(b, [
+    ...ws.map((writer) => groupJoinRecord({ group: community, writer, on: true })),
+    groupJoinRecord({ group: general, writer: gw, on: true }),
+    // A cut at 0 releases a writer, a cut past 0 freezes one.
+    groupCutRecord({ group: community, writer: ws[0], cut: 0 }),
+    groupCutRecord({ group: community, writer: ws[1], cut: 2 }),
+    groupCutRecord({ group: general, writer: gw, cut: 1 })
+  ])
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member')
+  const info = await ops.communityInfo(b.ctx, { community })
+  t.alike([info.writersBound, info.writersFrozen, info.frozenRoom], [grp.MAX_GROUP_WRITERS_PER_DIARY - 1, 1, grp.MAX_FROZEN_WRITERS_PER_DIARY - 1], 'six old CWs and the new one live, one frozen')
+  t.alike([info.generalWritersBound, info.generalWritersFrozen, info.generalFrozenRoom], [1, 1, grp.MAX_FROZEN_WRITERS_PER_DIARY - 1], 'Geral: the new writer live, the old one frozen')
+  const gi = await ops.groupInfo(b.ctx, { group: general })
+  t.alike([gi.writersBound, gi.writersFrozen, gi.frozenRoom], [info.generalWritersBound, info.generalWritersFrozen, info.generalFrozenRoom], 'group.info of Geral agrees')
 })

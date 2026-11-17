@@ -116,8 +116,9 @@ const devices = require('@varanda/core/lib/devices')
 const store = require('./node-store')
 
 const {
-  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader, replacedWriterCut, walkHasRoom,
-  orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY
+  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader, replacedWriterCut, retiredWriterCut, walkHasRoom, slotWalk,
+  orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY,
+  MAX_FROZEN_WRITERS_PER_DIARY
 } = grp
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -2768,24 +2769,21 @@ async function rootUnfoldable (ctx, group) {
   return root.fork !== 0 || !foldableHeader(root.entries[0].record)
 }
 
-// The writers an admit waits for, from diary d's join history alone: the
-// MAX_GROUP_WRITERS_PER_DIARY earliest bound by an on:true join (the bound
-// root is one of its creator's), the per-diary rule from before the slot
-// walk (@varanda/core lib/group.js slotWalk), which the fold now uses; the
-// switch to the walk comes with the client nodes (#350).
-function joinedCounted (history, d, rootDiary, group) {
-  const first = new Map()
-  for (const j of history || []) {
-    if (j.on !== true || typeof j.writer !== 'string') continue
-    const seq = Number.isSafeInteger(j.seq) ? j.seq : Infinity
-    if (!first.has(j.writer) || seq < first.get(j.writer)) first.set(j.writer, seq)
-  }
-  const rootBound = d === rootDiary && first.has(group)
-  const rest = [...first].filter(([w]) => w !== group)
-    .sort((x, y) => (x[1] - y[1]) || (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
-    .slice(0, MAX_GROUP_WRITERS_PER_DIARY - (rootBound ? 1 : 0))
-    .map(([w]) => w)
-  return rootBound ? [group, ...rest] : rest
+// The slot walk of diary d in fold g (@varanda/core lib/group.js
+// slotWalk), from its join history and its marks as the fold read them.
+function diaryWalk (g, d, history = g.joins.get(d)) {
+  const marks = g.input && g.input.marks instanceof Map ? g.input.marks.get(d) : undefined
+  return slotWalk(history || [], marks, g.group)
+}
+
+// The writers of diary d the fold awaits, as the core node's
+// unheldCountedWriters: the live, frozen and released writers of its slot
+// walk (a released one may hold a leave), and the root when d is its
+// creator's diary and bound it.
+function walkCounted (g, d, history) {
+  const walk = diaryWalk(g, d, history)
+  const counted = [...walk.live, ...walk.frozen, ...walk.released]
+  return d === g.cores.get(g.group).diary && walk.rootSlot ? [g.group, ...counted] : counted
 }
 
 // Whether diary d binds a writer the fold would count that is not HELD
@@ -2804,7 +2802,7 @@ function missingWriters (g, d, history) {
     for (const j of history || []) latest.set(j.writer, j.on === true)
     for (const [w, on] of latest) if (!on) off.add(w)
   }
-  return joinedCounted(history, d, g.cores.get(g.group).diary, g.group).some((w) => !held.has(w) && !off.has(w))
+  return walkCounted(g, d, history).some((w) => !held.has(w) && !off.has(w))
 }
 
 function hasLeave (entries) {
@@ -2971,21 +2969,33 @@ function releasedWriter (g, writer) {
   return g.built.released instanceof Set && g.built.released.has(writer)
 }
 
+// The cut a record names on a counted writer, never past its diary's own
+// cut on it (#350), as the core node's countedCuts and groupCuts.
+function cappedCut (g, writer, grant) {
+  const seq = cutSeq(g.cores.get(writer), grant)
+  const cut = g.built.cuts instanceof Map ? g.built.cuts.get(writer) : undefined
+  return { writer, seq: Number.isSafeInteger(cut) && cut < seq ? cut : seq }
+}
+
 function cutsFor (g, d, grant = false) {
   return boundWriters(g, d).filter((writer) => g.built.writers.has(writer) && !releasedWriter(g, writer)).slice(0, MAX_GROUP_CUTS)
-    .map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), grant) }))
+    .map((writer) => cappedCut(g, writer, grant))
 }
 
 // The writers of diary d the fold counts (the creator's bound root
 // included), each at its local length: a leave or a grant listing them
-// covers exactly what this device saw of them.
-function countedCuts (g, d, grant = false) {
+// covers exactly what this device saw of them. `frozen: false` leaves out
+// the writers a diary cut froze (#350), as the core node: a new leave or
+// grant never names them (their cut already fixes them), so a diary with
+// eight live writers stays within the record's cuts.
+function countedCuts (g, d, grant = false, { frozen = true } = {}) {
+  const still = g.built.frozen instanceof Set ? g.built.frozen : new Set()
   const out = []
   for (const writer of g.built.writers) {
     const c = g.cores.get(writer)
-    if (c !== undefined && c.diary === d && !releasedWriter(g, writer)) out.push(writer)
+    if (c !== undefined && c.diary === d && !releasedWriter(g, writer) && (frozen || !still.has(writer))) out.push(writer)
   }
-  return out.sort().map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), grant) }))
+  return out.sort().map((writer) => cappedCut(g, writer, grant))
 }
 
 function statusOf (g, d) {
@@ -3030,11 +3040,22 @@ function roleHere (fold, ownHex, base, keys = null) {
   return 'pending'
 }
 
-// How many writers the own diary ever bound in this root (on:true joins):
-// the seeder never releases those slots, a later leave included.
+// The live slots the own diary takes in this root (#350): the live writers
+// of its slot walk, and the root's slot once it bound the root. A frozen or
+// released writer gave its slot back.
 function diaryBound (fold, ownHex) {
-  const history = fold.joins.get(ownHex) || []
-  return new Set(history.filter((j) => j.on === true).map((j) => j.writer)).size
+  return liveSlots(diaryWalk(fold, ownHex))
+}
+
+function liveSlots (walk) {
+  return walk.live.size + (walk.rootSlot ? 1 : 0)
+}
+
+// The frozen writers of the own diary in this root, and the frozen reserve
+// left (rpc.md 5.42 writersFrozen, frozenRoom): while it lasts, a cut that
+// freezes a writer gives a live slot back.
+function diaryFrozen (walk) {
+  return { writersFrozen: walk.frozen.size, frozenRoom: Math.max(0, MAX_FROZEN_WRITERS_PER_DIARY - walk.frozen.size) }
 }
 
 function isActingAdmin (g, d) {
@@ -3075,7 +3096,7 @@ async function ownRejoinLeave (ctx, base, diary, c, ownHex) {
     // Every counted own CW held here, as any leave of the diary: the fold
     // withdraws an unlisted one from seq 0. Never C's root: a creator back
     // after a forged leave keeps its powers (cycle 14).
-    const cuts = countedCuts(c, ownHex).filter((x) => x.writer !== c.key)
+    const cuts = countedCuts(c, ownHex, false, { frozen: false }).filter((x) => x.writer !== c.key)
     const record = buildRecord(() => grp.groupLeave({ seen: latestLeaveOf(c, ownHex), cuts }))
     const seq = await appendToOwnGroupCore(ctx, own, record)
     // The diary confirms it, as for any honest leave.
@@ -3328,8 +3349,7 @@ async function pendingJoin (ctx, { group, own }, { diary, ownHex, base }, { memb
   // does: without it the fold takes the CW as generation 0.
   const rejoin = written && community ? headerRejoin(core) : null
   if (writer === null) {
-    const bound = new Set(groupJoinHistory(base.ownEntries, group).filter((j) => j.on).map((j) => j.writer))
-    if (bound.size >= MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(store.GROUP_FULL)
+    if (!ownWalkHasRoom(base.ownEntries, group)) throw new UsageError(store.GROUP_FULL)
     await makeGroupRoom(ctx, base, group)
     const record = buildRecord(() => grp.writerHeader({ group, diary: ownHex, member, rejoin: null }))
     const created = await newOwnGroupCore(ctx)
@@ -3401,7 +3421,8 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   // The off join keeps its slot in the slot walk: a cut before the new join
   // gives it back (#350). Both are written only once the room check passed.
   const replace = []
-  if (g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)) {
+  const stale = g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)
+  if (stale) {
     const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === g.own.key).pop()
     if (last !== undefined && last.on) replace.push({ kind: 'join', writer: g.own.key, on: false })
     const held = g.cores.get(g.own.key)
@@ -3418,6 +3439,7 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   let writer = !left && sameMember && !cut(g.own.key) && ownPending(g, ownHex) && usable(g.own.key) && await ownWriterDerived(ctx, g.own) ? g.own.key : null
   if (writer === null) {
     if (groupWritersFull(g)) throw new UsageError(store.GROUP_FULL)
+    if (!stale) replace.push(...retireOwnWriter(g, base.ownEntries))
     // The diary's own slot walk, after the off join and the cut above: a
     // new writer it would not count live never counts.
     if (!walkHasRoom(groupJoinHistory(base.ownEntries, g.group), groupCutHistory(base.ownEntries, g.group), g.group, replace)) {
@@ -3448,6 +3470,35 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   return { state: joinState(await refold(ctx, diary, base, g.group), ownHex, writer) }
 }
 
+// Whether a new writer the own diary binds to `group` takes a live slot of
+// its slot walk (#350): not the writers bound or held, since a frozen or
+// released writer frees its slot and one past the cap never held any.
+function ownWalkHasRoom (ownEntries, group) {
+  return walkHasRoom(groupJoinHistory(ownEntries, group), groupCutHistory(ownEntries, group), group)
+}
+
+// The off join and the cut that retire this device's writer of the group
+// when a join replaces it (#350), as the core node's retireLocalWriter:
+// retired by a leave of any device of the diary, or naming another
+// community writer than the live one, it would keep its live slot in the
+// diary's walk for good. The cut sits at the length this device holds of
+// its own core (retiredWriterCut), so every record it wrote keeps counting.
+function retireOwnWriter (g, ownEntries) {
+  if (g.own === null || g.own.key === g.group) return []
+  const key = g.own.key
+  const joins = groupJoinHistory(ownEntries, g.group)
+  const marks = groupCutHistory(ownEntries, g.group)
+  if (!slotWalk(joins, marks, g.group).live.has(key)) return []
+  const held = g.cores.get(key)
+  const cut = retiredWriterCut(held === undefined ? null : held.entries)
+  if (cut === null) return []
+  const out = []
+  const last = joins.filter((j) => j.writer === key).pop()
+  if (last !== undefined && last.on) out.push({ kind: 'join', writer: key, on: false })
+  if (!marks.some((m) => m.writer === key && m.cut <= cut)) out.push({ kind: 'cut', writer: key, cut })
+  return out
+}
+
 // -> { state: 'left' }: a group-leave in this device's writer, then the
 // diary's join off (an index hint only). No local core is deleted.
 async function groupLeave (ctx, { group }) {
@@ -3472,7 +3523,7 @@ async function groupLeave (ctx, { group }) {
     // another device of the diary included.
     // Every counted writer of the own diary is listed (retired ones and the
     // creator's root included): the fold withdraws an unlisted one from seq 0.
-    const cuts = countedCuts(g, ownHex)
+    const cuts = countedCuts(g, ownHex, false, { frozen: false })
     // The fold withdraws the leaving diary's records on its other writers
     // anyway, so anyone leaves at once. The creator's bound root keeps the
     // cut rule: the leave must list it, or the group's charter would be
@@ -3913,7 +3964,7 @@ function groupAdmin (ctx, { group, member, on }) {
     if (!on) return buildRecord(() => grp.groupAdmin({ member: d, on, cuts: cutsFor(g, d), seen: g.built.last }))
     // A grant covers only the listed writers from their local length on, so
     // records the member wrote before the promotion never gain authority.
-    const cuts = countedCuts(g, d, true)
+    const cuts = countedCuts(g, d, true, { frozen: false })
     if (cuts.length > MAX_GROUP_CUTS) throw new UsageError(store.GROUP_FULL)
     return buildRecord(() => grp.groupAdmin({ member: d, on, cuts, seen: g.built.last }))
   }, grantKeyChange, on ? null : demoteThroughCw(member))
@@ -4271,12 +4322,21 @@ async function groupInfo (ctx, { group }) {
     memberInvite: g.built.memberInvite === true,
     writerHere: g.own !== null,
     canWrite: groupCanWrite(ctx, g, ownHex),
-    writersBound: diaryBound(g, ownHex)
+    ...walkInfo(diaryWalk(g, ownHex))
   }), (p) => {
     requirePendingOwn(p)
-    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, writersBound: 0 }
+    return { group: p.group, ...PENDING_INFO, creator: null, state: 'pending', community: null, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: false, ...PENDING_WALK }
   })
 }
+
+// rpc.md 5.42 and 5.59: the own diary's live slots and frozen reserve in a
+// root, from its slot walk.
+function walkInfo (walk) {
+  const { writersFrozen, frozenRoom } = diaryFrozen(walk)
+  return { writersBound: liveSlots(walk), writersFrozen, frozenRoom }
+}
+
+const PENDING_WALK = { writersBound: 0, writersFrozen: 0, frozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
 
 // The header times of the diary's writers in the fold, oldest first.
 function writerTimes (g, d) {
@@ -4869,16 +4929,20 @@ async function foldCommunity (ctx, base, key, kv, rec) {
   }
   const diaries = new Map()
   const joins = new Map()
+  // The diaries' group-cut marks for C, as the core node reads them: the
+  // slot walk frees a CW's slot and stops its records at its cut (#350).
+  const marks = new Map()
   const confirms = new Map()
   for (const d of new Set([ownHex, header.diary, ...writers.map((w) => w.diary)])) {
     const entries = await foldEntriesOf(ctx, base, d, rec)
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, key))
+      marks.set(d, groupCutHistory(entries, key))
       confirms.set(d, groupConfirmHistory(entries, key))
     }
   }
-  const input = { root: { key, entries: root.entries }, writers, joins, confirms }
+  const input = { root: { key, entries: root.entries }, writers, joins, marks, confirms }
   const built = grp.buildCommunity({ ...input, now: Date.now() })
   return { key, group: key, header, own, built, cores, diaries, joins, input }
 }
@@ -5099,7 +5163,7 @@ async function communityJoin (ctx, { community }, { general: withGeneral = true 
       let writer = !left && !cut && current !== undefined && ownPending(c, ownHex) && await ownWriterDerived(ctx, c.own) ? c.own.key : null
       let rejoin = writer === null ? null : headerRejoin(current)
       if (writer === null) {
-        if (groupWritersFull(c) || boundWriters(c, ownHex).length >= MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(COMMUNITY_FULL)
+        if (groupWritersFull(c) || !ownWalkHasRoom(base.ownEntries, c.key)) throw new UsageError(COMMUNITY_FULL)
         // Geral's slot only when this call joins it: the upkeep's room
         // check must not refuse, or evict a left entry, for a slot unused.
         await makeGroupRoom(ctx, base, c.key, general === null || !withGeneral ? [] : [general])
@@ -5272,7 +5336,7 @@ async function finishNotedLeave (ctx, diary, c, ownHex, ownEntries) {
 function ownCwsBehind (c, d) {
   const held = new Set()
   for (const [key, core] of c.cores) if (core.diary === d) held.add(key)
-  const counted = joinedCounted(c.joins.get(d) || [], d, c.cores.get(c.key).diary, c.key)
+  const counted = walkCounted(c, d)
   if (counted.some((w) => w !== c.key && !held.has(w))) return true
   for (const w of c.built.writers) {
     const core = c.cores.get(w)
@@ -5303,7 +5367,7 @@ async function communityLeave (ctx, { community, force = false }) {
     const own = liveOwnWriter(c, ownHex) || (statusOf(c, ownHex) === 'requested' && ownPending(c, ownHex) ? c.own : null) || (lingering ? c.own : null)
     if (own === null) throw new UsageError(GROUP_UNCHANGED)
     if (!c.built.writers.has(own.key)) throw new UsageError(COMMUNITY_FULL)
-    const cuts = countedCuts(c, ownHex)
+    const cuts = countedCuts(c, ownHex, false, { frozen: false })
     if (c.header.diary === ownHex && c.built.writers.has(c.key) && !cuts.some((x) => x.writer === c.key)) {
       throw new UsageError(COMMUNITY_LEAVE_CREATOR)
     }
@@ -5406,7 +5470,7 @@ async function plannedGroupLeaves (ctx, base, C, ownHex) {
       if (g === null || g.community !== C || statusOf(g, ownHex) !== 'member') continue
       const own = liveOwnWriter(g, ownHex)
       if (own === null || !g.built.writers.has(own.key)) continue
-      const cuts = countedCuts(g, ownHex)
+      const cuts = countedCuts(g, ownHex, false, { frozen: false })
       if (g.cores.get(g.group).diary === ownHex && g.built.writers.has(g.group) && !cuts.some((x) => x.writer === g.group)) continue
       out.push({ group: g.group, own, cuts, seen: g.built.last, priv: g.private })
     } catch {}
@@ -5588,7 +5652,7 @@ async function communitySetAdmin (ctx, { community, member, on }) {
     // outlives it as a shield against a ban.
     if (on === true && statusOf(c, d) !== 'member') throw new UsageError(COMMUNITY_MEMBER_NEEDED)
     if (on !== true && !everGranted(c, d)) throw new UsageError(GROUP_UNCHANGED)
-    const cuts = countedCuts(c, d, on === true)
+    const cuts = countedCuts(c, d, on === true, { frozen: on !== true })
     if (cuts.length > MAX_GROUP_CUTS) throw new UsageError(COMMUNITY_FULL)
     await appendToOwnGroupCore(ctx, root, rootGone
       ? buildRecord(() => grp.communityDemote({ member: d, cuts, seen: c.built.last }))
@@ -5685,7 +5749,7 @@ function lastAndUnread (g, base, mark) {
   return { last, unread }
 }
 
-const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, writersBound: 0, generalWritersBound: 0 }
+const PENDING_COMMUNITY = { name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, ...PENDING_WALK, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: MAX_FROZEN_WRITERS_PER_DIARY }
 
 // rpc.md 5.59. A root not held yet is pending; a held root that is no
 // community root is NOT_FOUND. Each catalogue row names its root when held.
@@ -5724,9 +5788,10 @@ async function communityInfo (ctx, { community }) {
     }
     // Geral's slots are spent by the same tap (community.join also joins it),
     // so the app's reserve warning needs its count too.
-    // From the own diary's joins, as diaryBound counts them: Geral's root
-    // need not be here for the slots the account already spent in it.
-    const generalBound = c.built.general ? new Set(groupJoinHistory(base.ownEntries, c.built.general).filter((j) => j.on === true).map((j) => j.writer)).size : 0
+    // From the own diary's joins and marks: Geral's root need not be here
+    // for the slots the account already spent in it.
+    const G = c.built.general
+    const general = G ? walkInfo(slotWalk(groupJoinHistory(base.ownEntries, G), groupCutHistory(base.ownEntries, G), G)) : PENDING_WALK
     return {
       community: C,
       name: c.built.name,
@@ -5747,8 +5812,10 @@ async function communityInfo (ctx, { community }) {
       canWrite: countedLive(c, ownHex),
       rootHere: c.own !== null && c.own.rootNonce !== null,
       authorityHere: c.own !== null && c.built.authorityWriters instanceof Set && c.built.authorityWriters.has(c.own.key),
-      writersBound: diaryBound(c, ownHex),
-      generalWritersBound: generalBound
+      ...walkInfo(diaryWalk(c, ownHex)),
+      generalWritersBound: general.writersBound,
+      generalWritersFrozen: general.writersFrozen,
+      generalFrozenRoom: general.frozenRoom
     }
   }, (p) => ({ community: p.group, ...PENDING_COMMUNITY, writerHere: p.own !== null }))
 }
@@ -5831,10 +5898,10 @@ async function communityGroups (ctx, { community }) {
 
 // ---- device upkeep (docs/rpc.md 5.61 and 5.63, browser node only) ----
 
-// The automatic enrolment of a second device stops while the diary binds
-// MAX_GROUP_WRITERS_PER_DIARY - AUTO_ENROL_RESERVE writers in a root: the
-// seeder never releases a bound slot, so the last two are spent only by an
-// explicit tap (owner decision).
+// The automatic enrolment of a second device stops while the diary takes
+// MAX_GROUP_WRITERS_PER_DIARY - AUTO_ENROL_RESERVE live slots in a root: a
+// slot comes back only from a cut, while the frozen reserve lasts (#350),
+// so the last two are spent only by an explicit tap (owner decision).
 const AUTO_ENROL_RESERVE = 2
 
 function autoEnrolRoom (fold, ownHex) {

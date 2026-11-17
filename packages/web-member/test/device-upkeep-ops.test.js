@@ -246,6 +246,23 @@ test('reserve: the diary binding 6 of the 8 writers skips the automatic path, an
   t.is((await ops.communityInfo(d.ctx, { community })).writersBound, 7)
 })
 
+test('a cut that freezes a writer gives its live slot back to the automatic enrolment (#350)', async (t) => {
+  const { a, community, general } = await world(t)
+  // The creator's root writer and five more devices: six bound, one frozen.
+  const extra = []
+  for (let i = 0; i < 5; i++) {
+    extra.push(await rawDevice(a, community, [grp.writerHeader({ group: community, diary: a.key, member: null })], true))
+  }
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  try { await store.appendRecord(diary, groupCutRecord({ group: community, writer: extra[0], cut: 1 })) } finally { await diary.close() }
+  const d = await secondDevice(t, a, [community, general, ...extra])
+  const info = await ops.communityInfo(d.ctx, { community })
+  t.alike([info.writersBound, info.writersFrozen], [5, 1], 'five live slots, one frozen')
+  const plan = await ops.deviceUpkeepPlan(d.ctx)
+  t.alike(plan.enrol.map((x) => x.root), [community, general], 'below the reserve')
+  t.alike(reasons(plan), [])
+})
+
 test('a left, blocklisted or unheld root is never enrolled', async (t) => {
   const { a, members: [b], community, general } = await world(t, 1)
   await ops.communityJoin(b.ctx, { community })
@@ -804,7 +821,9 @@ test('a boxless private writer is not reboxed under a community writer the own d
   const { a, b, community, group } = await boxlessJoin(t)
   await copyCore(a, b, group)
   await ops.deviceHello(b.ctx, { name: 'Celular' })
-  for (let i = 0; i < 5; i++) await rawDevice(b, community, [grp.writerHeader({ group: community, diary: b.key, member: null })], true)
+  // Six more CWs: once the cut freezes this one, six live slots are still
+  // taken, so the reserve keeps the automatic path from a new CW (#350).
+  for (let i = 0; i < 6; i++) await rawDevice(b, community, [grp.writerHeader({ group: community, diary: b.key, member: null })], true)
   const before = await ops.deviceUpkeepPlan(b.ctx)
   t.alike(before.enrol.map((x) => [x.root, x.rebox]), [[group, true]], 'reboxed while the CW is uncut')
 

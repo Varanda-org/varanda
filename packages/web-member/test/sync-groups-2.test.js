@@ -8,7 +8,7 @@ const { createIssuerCert, createIssuedCert, generateAssociationKeyPair } = requi
 const { groupJoinRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY } = grp
-const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq } = require('../lib/sync')
+const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY: HELD } = require('../lib/sync')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
@@ -201,12 +201,12 @@ test('a once run against a seeder without groups ends without waiting for own gr
 
 test('writers stored in an earlier run prove their join seq from the binding diary, so an earlier writer listed later takes a slot', (t) => {
   // Unit test of the run-start derivation plus capVictim (the end-to-end
-  // harness needs 9 real writers of one diary through a seeder).
+  // harness needs 33 real writers of one diary through a seeder).
   const g = 'aa'.repeat(32)
   const at = '2026-01-01T00:00:00.000Z'
   const earliest = randomKey()
   const later = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) later.push(randomKey())
+  for (let i = 0; i < HELD; i++) later.push(randomKey())
   const entries = [{ seq: 0, record: { type: 'genesis' } }]
   entries.push({ seq: 1, record: groupJoinRecord({ group: g, writer: earliest, on: true, at }) })
   for (const w of later) entries.push({ seq: entries.length, record: groupJoinRecord({ group: g, writer: w, on: true, at }) })
@@ -225,10 +225,10 @@ test('stored cores beyond the per-diary cap stay at rest, the earliest proven jo
   const g = 'aa'.repeat(32)
   const d = 'bb'.repeat(32)
   const live = [{ key: g, group: g, diary: d, seq: 0, proven: false }]
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 1; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
+  for (let i = 0; i < HELD + 1; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
   live.push({ key: randomKey(), group: g, diary: d, seq: 1, proven: false })
   const excess = capExcess(live)
-  t.is(excess.size, 3, 'root + 7 writers stay live')
+  t.is(excess.size, 3, 'root + 31 writers stay live')
   t.ok(excess.has(live[live.length - 1]), 'an unproven core goes to rest first')
   t.ok(excess.has(live[live.length - 2]) && excess.has(live[live.length - 3]), 'then the latest proven joins')
   t.absent(excess.has(live[0]), 'never the root')
@@ -239,7 +239,7 @@ test('a later duplicate join never makes an earlier writer lose its slot', (t) =
   const g = 'aa'.repeat(32)
   const at = '2026-01-01T00:00:00.000Z'
   const held = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
+  for (let i = 0; i < HELD; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
   const early = held[held.length - 1]
   // The seeder named early's duplicate join at 17; its first join is seq 3.
   const entries = [{ seq: 3, record: groupJoinRecord({ group: g, writer: early.key, on: true, at }) }]
@@ -476,7 +476,7 @@ test('a cap eviction purges a victim still in regate and keeps a listed one', (t
 test('the writer cap keeps the earliest proven joins, never evicting on an unproven seq or a root', (t) => {
   const g = 'aa'.repeat(32)
   const held = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
+  for (let i = 0; i < HELD; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
   t.alike(capVictim(held.slice(1), 5), { full: false, victim: null }, 'room left')
   t.is(capVictim(held, 5).victim, held[held.length - 1], 'an earlier join takes the latest one\'s slot')
   t.is(capVictim(held, 99).victim, null, 'a later join is refused')
@@ -648,4 +648,19 @@ test('a peek never fetches a seq the binding diary knows deleted, on a diary hel
   } finally {
     await replica.close()
   }
+})
+
+test('the per-diary cap holds every writer the slot walk counts: 8 live, 8 frozen and 16 released (#350)', (t) => {
+  // A frozen or released writer may hold the diary's leave: past the 8 live
+  // slots it is still fetched, as the seeder holds it.
+  t.is(HELD, MAX_GROUP_WRITERS_PER_DIARY + grp.MAX_FROZEN_WRITERS_PER_DIARY + grp.MAX_WRITER_RELEASES_PER_DIARY)
+  t.is(HELD, 32)
+  const g = 'aa'.repeat(32)
+  const d = 'bb'.repeat(32)
+  const held = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) held.push({ key: randomKey(), group: g, seq: 10 + i, proven: true })
+  t.alike(capVictim(held, 5), { full: false, victim: null }, '8 held writers leave room')
+  const live = [{ key: g, group: g, diary: d, seq: 0, proven: false }]
+  for (let i = 0; i < 2 * MAX_GROUP_WRITERS_PER_DIARY; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
+  t.is(capExcess(live).size, 0, 'a root and 16 writers all stay live')
 })
