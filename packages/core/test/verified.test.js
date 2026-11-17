@@ -5,7 +5,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const cert = require('../lib/cert')
 const blocklist = require('../lib/blocklist')
-const { verify, memoSize, clearMemo, MAX_ENTRIES, MAX_BYTES } = require('../lib/verified')
+const { verify, warm, loadDigests, exportDigests, onDigest, clearDigests, useSubtle, memoSize, clearMemo, MAX_ENTRIES, MAX_BYTES, MAX_DIGESTS } = require('../lib/verified')
 
 const MEMBER = 'ab'.repeat(32)
 const DATE = '2026-10-19T00:00:00.000Z'
@@ -151,4 +151,163 @@ test('verify: with a warm memo, revocation and tampering are still refused', (t)
   const snapshot = blocklist.createSnapshot({ seq: 1, date: DATE, blocked: ['11'.repeat(32)] }, modKp, modCert)
   t.alike(blocklist.verifySnapshot(snapshot, assocHex), { ok: true })
   t.alike(blocklist.verifySnapshot({ ...snapshot, blocked: [] }, assocHex), { ok: false, reason: 'bad-signature' }, 'a key dropped from the signed list')
+})
+
+function issued () {
+  const assocKp = crypto.keyPair()
+  const assocHex = b4a.toString(assocKp.publicKey, 'hex')
+  const issuerKp = crypto.keyPair()
+  const issuerCert = cert.createIssuerCert({ issuer: b4a.toString(issuerKp.publicKey, 'hex'), date: DATE }, assocKp)
+  const c = cert.createIssuedCert({ member: MEMBER, date: DATE }, issuerKp, issuerCert)
+  const r = cert.createUsernameRecord({ member: MEMBER, username: 'ana', date: DATE }, issuerKp, issuerCert)
+  return { assocKp, assocHex, issuerKp, c, r }
+}
+
+function platformSubtle () {
+  return globalThis.crypto ? globalThis.crypto.subtle : null
+}
+
+// RFC 8032 section 7.1, test 1, as lib/verified.js probes WebCrypto with.
+const RFC_KEY = b4a.from('d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a', 'hex')
+const RFC_SIG = b4a.from('e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b', 'hex')
+
+// A SubtleCrypto that answers the probe truthfully and accepts anything
+// else, recording what reached it.
+function acceptingSubtle (reached) {
+  return {
+    async importKey (format, raw) { return { raw: b4a.from(raw) } },
+    async verify (algorithm, key, signature, message) {
+      if (b4a.equals(key.raw, RFC_KEY)) return crypto.verify(b4a.from(message), b4a.from(signature), key.raw)
+      reached.push(b4a.from(signature))
+      return true
+    }
+  }
+}
+
+test('digests: a verified triple stays known without the memo until cleared', (t) => {
+  const checks = countChecks(t)
+  loadDigests('')
+  t.teardown(clearDigests)
+  const { kp, message, signature } = signed('varanda digest')
+  t.is(verify(message, signature, kp.publicKey), true)
+  const saved = exportDigests()
+  t.is(saved.length, 64, 'one digest')
+  clearMemo()
+  t.is(verify(message, signature, kp.publicKey), true)
+  t.is(checks.n, 1, 'answered from the digest')
+  const other = b4a.from(message)
+  other[0] ^= 1
+  t.is(verify(other, signature, kp.publicKey), false, 'another message is checked and refused')
+  t.is(checks.n, 2)
+  clearDigests()
+  clearMemo()
+  t.is(verify(message, signature, kp.publicKey), true)
+  t.is(checks.n, 3, 'checked again once cleared')
+  t.is(exportDigests(), '', 'nothing recorded while the tier is off')
+  clearMemo()
+  t.is(loadDigests(saved), 1, 'a restart loads the saved digest')
+  t.is(verify(message, signature, kp.publicKey), true)
+  t.is(checks.n, 3, 'and answers from it')
+})
+
+test('digests: only well-formed input loads, the newest are kept, onDigest fires per new digest', (t) => {
+  countChecks(t)
+  t.teardown(clearDigests)
+  for (const bad of [null, 'xyz', 'ab'.repeat(31), 'AB'.repeat(32), 42]) t.is(loadDigests(bad), 0)
+  t.is(exportDigests(), '')
+  const digest = (i) => i.toString(16).padStart(64, '0')
+  const many = Array.from({ length: MAX_DIGESTS + 2 }, (_, i) => digest(i)).join('')
+  t.is(loadDigests(many), MAX_DIGESTS)
+  t.is(exportDigests().length, MAX_DIGESTS * 64)
+  t.is(exportDigests().slice(0, 64), digest(2), 'the two oldest dropped')
+  clearDigests()
+  loadDigests('')
+  let fired = 0
+  const off = onDigest(() => fired++)
+  const a = signed('a')
+  verify(a.message, a.signature, a.kp.publicKey)
+  clearMemo()
+  verify(a.message, a.signature, a.kp.publicKey)
+  t.is(fired, 1, 'a known digest does not fire again')
+  off()
+  const b = signed('b')
+  verify(b.message, b.signature, b.kp.publicKey)
+  t.is(fired, 1, 'unsubscribed')
+})
+
+test('warm: the RFC 8032 probe vector verifies, a SubtleCrypto that accepts a bad signature is not used', async (t) => {
+  t.is(crypto.verify(b4a.alloc(0), RFC_SIG, RFC_KEY), true)
+  t.teardown(() => useSubtle(platformSubtle()))
+  const yes = { importKey: async () => ({}), verify: async () => true }
+  t.is(await useSubtle(yes), null)
+  const { assocKp, c } = issued()
+  t.is(await warm([cert.certChain(c)], assocKp.publicKey), 0, 'nothing warmed')
+  t.is(await useSubtle(null), null)
+  t.is(await warm([cert.certChain(c)], assocKp.publicKey), 0)
+})
+
+test('warm: WebCrypto checks association-rooted chains ahead, link by link, and changes no answer', async (t) => {
+  if (await useSubtle(platformSubtle()) === null) {
+    t.pass('no WebCrypto Ed25519 on this platform')
+    return
+  }
+  const checks = countChecks(t)
+  const { assocKp, assocHex, issuerKp, c, r } = issued()
+  clearMemo()
+  checks.n = 0
+  const chains = [cert.certChain(c), cert.usernameChain(r)]
+  t.is(await warm(chains, assocKp.publicKey), 4, 'two links per chain known good')
+  t.alike(cert.certForKey(c, MEMBER, assocHex), { ok: true })
+  t.alike(cert.verifyUsernameRecord(r, MEMBER, assocHex), { ok: true })
+  t.is(checks.n, 0, 'every check answered from the memo')
+  t.alike(cert.certForKey({ ...c, date: '2026-10-20T00:00:00.000Z' }, MEMBER, assocHex), { ok: false, reason: 'bad-signature' })
+  t.alike(cert.certForKey(c, MEMBER, assocHex, { revokedIssuers: new Set([b4a.toString(issuerKp.publicKey, 'hex')]) }), { ok: false, reason: 'revoked-issuer' })
+
+  clearMemo()
+  checks.n = 0
+  t.is(await warm(chains, issuerKp.publicKey), 0, 'a chain not rooted at the given key is skipped')
+  t.alike(cert.certForKey(c, MEMBER, assocHex), { ok: true })
+  t.is(checks.n, 2, 'both checked for real')
+
+  clearMemo()
+  checks.n = 0
+  const chain = cert.certChain(c)
+  const badSignature = b4a.from(chain[0].signature)
+  badSignature[0] ^= 1
+  chain[0] = { ...chain[0], signature: badSignature }
+  t.is(await warm([chain], assocKp.publicKey), 0, 'a bad first link stops the chain')
+  t.is(verify(chain[1].message, chain[1].signature, chain[1].publicKey), true)
+  t.is(checks.n, 1, 'the link after it was not warmed')
+})
+
+test('warm: only triples that pass libsodium\'s encoding checks reach WebCrypto', async (t) => {
+  const reached = []
+  t.teardown(() => useSubtle(platformSubtle()))
+  t.ok(await useSubtle(acceptingSubtle(reached)), 'the probe passes')
+  const checks = countChecks(t)
+  const { kp, message, signature } = signed('varanda-cert-v1')
+  // S + L: the same signature with a non-canonical S, which libsodium refuses.
+  const ORDER = b4a.from('edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010', 'hex')
+  const malleated = b4a.from(signature)
+  let carry = 0
+  for (let i = 0; i < 32; i++) {
+    const sum = malleated[32 + i] + ORDER[i] + carry
+    malleated[32 + i] = sum & 0xff
+    carry = sum >> 8
+  }
+  const identity = b4a.alloc(32)
+  identity[0] = 1
+  const smallR = b4a.concat([identity, signature.subarray(32)])
+  const highY = b4a.from('efffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f', 'hex')
+  const nonCanonicalR = b4a.concat([highY, signature.subarray(32)])
+  const bad = [malleated, smallR, nonCanonicalR]
+  t.is(await warm(bad.map((s) => [{ message, signature: s, publicKey: kp.publicKey }]), kp.publicKey), 0)
+  t.is(await warm([[{ message, signature, publicKey: identity }]], identity), 0, 'a small-order key')
+  t.is(reached.length, 0, 'none reached WebCrypto')
+  for (const s of bad) t.is(verify(message, s, kp.publicKey), false, 'and the real check refuses them')
+  t.is(await warm([[{ message, signature, publicKey: kp.publicKey }]], kp.publicKey), 1)
+  t.is(reached.length, 1, 'a well-formed triple does')
+  checks.n = 0
+  t.is(verify(message, signature, kp.publicKey), true)
+  t.is(checks.n, 0, 'answered from the memo')
 })
