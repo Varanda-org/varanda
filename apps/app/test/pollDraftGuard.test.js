@@ -15,7 +15,7 @@ test('a poll draft never falls through to a plain post or the outbox', (t) => {
   t.ok(guard < body.indexOf("const method = sentQuote ? 'post.quote'"), 'before a plain post')
   const branch = body.slice(guard, guard + 260)
   t.ok(branch.includes('if (!pollOk) { setCheckError(node.online === false ? POLL_NEEDS_ONLINE : POLL_ALONE); return }'), 'refuses with a message and keeps the draft')
-  t.ok(branch.includes('return sendPoll()'), 'sends the poll when allowed')
+  t.ok(branch.includes('return asPage !== null ? sendAsPage() : sendPoll()'), 'sends the poll when allowed: as the page when acting as one')
   t.ok(!branch.includes('setPollDraft(null)'), 'the draft is kept')
   t.ok(src.includes("const POLL_NEEDS_ONLINE = 'Enquete só pode ser publicada com conexão.'"), 'offline message in pt-BR')
 })

@@ -189,3 +189,16 @@ test('a malformed descriptor is uncertain', async (t) => {
   t.is(notVideo.uncertain, true)
   t.is(notVideo.message, 'Resposta inválida ao enviar o vídeo.')
 })
+
+test('pagePostOp carries a poll or an event, never with media, a preview or each other', async (t) => {
+  const { pagePostOp } = await load()
+  t.alike(pagePostOp({ text: 'Qual?', poll: ['a', 'b'] }), { text: 'Qual?', poll: ['a', 'b'] })
+  const event = { title: 'Festa', start: 1900000000000 }
+  t.alike(pagePostOp({ text: 'Vem', event }), { text: 'Vem', event })
+  t.alike(pagePostOp({ text: 'oi', poll: null, event: null }), { text: 'oi' })
+  const refused = (args) => { try { pagePostOp(args) } catch (err) { return err.code } return null }
+  t.is(refused({ text: 'x', poll: ['a', 'b'], event }), 'pedido-invalido')
+  t.is(refused({ text: 'x', poll: ['a', 'b'], media: [photoD()] }), 'pedido-invalido')
+  t.is(refused({ text: 'x', event, preview: { url: 'https://exemplo.org' } }), 'pedido-invalido')
+  t.is(refused({ text: 'x', poll: ['a', 'b'], media: [] }), null, 'an empty media list is no media')
+})

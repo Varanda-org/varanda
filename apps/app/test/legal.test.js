@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 78)
+  t.is(LEGAL_VERSION, 79)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 78, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 79, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ecfb348bd8e63bcd7922076dc99fe8c1ffb74935d2b63c5c598c7882f4ca4477', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f00a774fa0ef2599c92e795bcd15714486d7b716afd504ee4fdd759d571133ff', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -910,7 +910,18 @@ test('legal: version 78 describes video and link previews in page posts', async 
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('As publicações de uma página também aceitam um vídeo curto, como as de uma pessoa.'))
-  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links e quem ela segue'))
-  t.ok(text(PRIVACY).includes('fotos e vídeos das publicações, imagens das prévias de links e a lista de quem a página segue'))
-  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links e quem ela segue)'))
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links'))
+  t.ok(text(PRIVACY).includes('fotos e vídeos das publicações, imagens das prévias de links'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links'))
+})
+
+test('legal: version 79 describes polls, events, votes and RSVPs of a page', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela e quem ela segue, é público como a página'))
+  t.ok(text(TERMS).includes('Como os de uma pessoa, um voto ou uma resposta de presença da página é um registro no diário dela, e retirá-lo grava um novo registro que deixa os anteriores públicos.'))
+  t.ok(text(TERMS).includes('ao que uma página publica por ele (publicações, com as opções de uma enquete e o título e o lugar de um evento, respostas,'))
+  t.ok(text(PRIVACY).includes('imagens das prévias de links, enquetes, eventos, os votos e as respostas de presença da página e a lista de quem a página segue'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links, votos, respostas de presença e quem ela segue)'))
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })

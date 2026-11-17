@@ -6,7 +6,10 @@
 // the seeder only points, and each voter is shown only when their own diary
 // returned a signed choice for this poll and option (a seeder can omit a
 // voter, never add one). Voting needs the hosted node (decided by capability,
-// not by platform); without it the card is read-only. A vote is never resent.
+// not by platform); without it the card is read-only. A vote is never resent
+// by itself. Acting as a Page, the vote is the page's: its pick comes from the
+// page's own status read and it votes with the page action 'choice'; after an
+// unknown outcome the same option tapped again resends the signed vote.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -17,7 +20,8 @@ import { fetchPoll, fetchPollVoters } from '../indexClient'
 import { nextPick, pollCard } from '../polls'
 import { whoOf } from '../who'
 import { confirmedVoters, voterSeqs } from './pollVoters'
-import { learnPeeked, peekAll } from '../screens/Conversa'
+import { learnPeeked, peekAll, readPagePick, setPagePick, useActing } from '../screens/Conversa'
+import { PAGE_PICK_UNREAD, PAGE_VOTE_NOTICE, PAGE_VOTE_UNCERTAIN, choiceNotice, choicePage, ownMark, pickRef, refusalText, tapAfterUncertain } from '../pageChoice'
 import { tap } from './haptics'
 import { layout, type } from './theme'
 import { useStyles } from './ThemeProvider'
@@ -38,6 +42,8 @@ export function PollCard ({ author, seq, poll }) {
   const key = typeof author === 'string' ? author.toLowerCase() : ''
   const valid = HEX64.test(key) && Number.isSafeInteger(seq) && seq > 0
   const hosted = node.hosted === true && valid
+  const page = choicePage(useActing())
+  const ref = pickRef(key, seq)
   const { request } = node
   const online = node.online !== false
   const count = Array.isArray(poll) ? poll.length : 0
@@ -45,11 +51,20 @@ export function PollCard ({ author, seq, poll }) {
   const [totals, setTotals] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [unread, setUnread] = useState(false)
   const [open, setOpen] = useState(null)
   const [voters, setVoters] = useState({ pick: null, phase: 'idle', rows: [] })
   const gen = useRef(0)
+  const retryRef = useRef(null)
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const pageRef = useRef(page)
+  pageRef.current = page
+
+  // Another identity's pick is never shown: unread until this one's is.
+  useEffect(() => { setOwn(undefined); setError(''); setUnread(false); retryRef.current = null }, [page])
 
   const readTotals = useCallback(async () => {
     if (!hosted || !online) return
@@ -60,12 +75,18 @@ export function PollCard ({ author, seq, poll }) {
   useEffect(() => {
     if (!hosted || !online) return undefined
     let live = true
-    request('choice.mine', { to: { author: key, seq } }).then((r) => {
-      if (live && alive.current && isObject(r)) setOwn(Number.isSafeInteger(r.pick) ? r.pick : null)
-    }, () => {})
+    if (page !== null) {
+      readPagePick(nodeRef.current, page, ref, count).then((pick) => {
+        if (live && alive.current) { setUnread(false); setOwn(pick) }
+      }, () => { if (live && alive.current) setUnread(true) })
+    } else {
+      request('choice.mine', { to: { author: key, seq } }).then((r) => {
+        if (live && alive.current && isObject(r)) setOwn(Number.isSafeInteger(r.pick) ? r.pick : null)
+      }, () => {})
+    }
     readTotals()
     return () => { live = false }
-  }, [hosted, online, request, key, seq, readTotals])
+  }, [hosted, online, request, key, seq, count, readTotals, page, ref])
 
   const card = pollCard({ poll, totals, own })
   const vote = async (index) => {
@@ -75,13 +96,27 @@ export function PollCard ({ author, seq, poll }) {
     setBusy(true)
     setError('')
     tap('light')
+    const pending = retryRef.current
+    retryRef.current = null
     try {
-      await request('choice.set', { to: { author: key, seq }, pick: plan.pick })
-      if (!alive.current) return
+      if (page !== null) {
+        const again = tapAfterUncertain(pending, { page, ref, pick: plan.pick }) === 'resend'
+        await (again ? pending.retry() : setPagePick(nodeRef.current, page, ref, plan.pick))
+      } else {
+        await request('choice.set', { to: { author: key, seq }, pick: plan.pick })
+      }
+      // The identity changed while it was in flight: the answer is not this one's.
+      if (!alive.current || pageRef.current !== page) return
       setOwn(plan.pick)
       readTotals()
-    } catch {
-      if (alive.current) setError(VOTE_FAILED)
+    } catch (err) {
+      if (!alive.current || pageRef.current !== page) return
+      if (page !== null && err && err.uncertain === true) {
+        if (typeof err.retry === 'function') retryRef.current = { page, ref, pick: plan.pick, retry: err.retry }
+        setError(PAGE_VOTE_UNCERTAIN)
+      } else {
+        setError(page !== null ? refusalText(err, VOTE_FAILED) : VOTE_FAILED)
+      }
     } finally {
       if (alive.current) setBusy(false)
     }
@@ -109,7 +144,7 @@ export function PollCard ({ author, seq, poll }) {
 
   if (card === null) return null
   const canVote = hosted && online && card.ownKnown && !busy
-  const spoken = (row) => displayText(row.label) + (row.countLabel ? ', ' + row.countLabel : '') + (row.own ? ', seu voto' : '')
+  const spoken = (row) => displayText(row.label) + (row.countLabel ? ', ' + row.countLabel : '') + (row.own ? ownMark(page, ', seu voto') : '')
   return (
     <View style={styles.card}>
       {card.options.map((row) => (
@@ -142,7 +177,8 @@ export function PollCard ({ author, seq, poll }) {
           {open === row.index ? <Voters state={voters} names={names} /> : null}
         </View>
       ))}
-      {card.notice !== null && hosted ? <Text style={styles.note}>{card.notice}</Text> : null}
+      {card.notice !== null && hosted ? <Text style={styles.note}>{choiceNotice(page, card.notice, PAGE_VOTE_NOTICE)}</Text> : null}
+      {page !== null && unread && hosted && online ? <Text style={styles.note} accessibilityLiveRegion='polite'>{PAGE_PICK_UNREAD}</Text> : null}
       {!hosted ? <Text style={styles.note}>{NOT_HOSTED}</Text> : null}
       {hosted && online
         ? <Text style={styles.note}>{(card.totalLabel ? card.totalLabel + '. ' : '') + card.totalsNote + (card.claimed && card.incomplete ? ' ' + 'A contagem pode estar incompleta.' : '')}</Text>
