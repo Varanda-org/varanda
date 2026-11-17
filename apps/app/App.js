@@ -129,6 +129,9 @@ import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
+import { DeviceOffNote } from './src/ui/DeviceOffNote'
+import { deviceMemberOf, deviceStep, deviceStore, notePasskeyUnlock, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
+import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
 import { InviteCardOpen } from './src/ui/InviteCardOpen'
@@ -2610,6 +2613,54 @@ function Member () {
   useEffect(() => {
     if (seenMember !== null && seenSchedulerRef.current) seenSchedulerRef.current.wake('unlock')
   }, [seenMember, seenGeneration])
+
+  // --- Aparelhos conectados (#350, src/devices.js) ---
+  // The member is the unlocked passkey key, or on a node without a passkey
+  // (the core kind) the own key; not hosted-only. Once per app open and
+  // member, after the unlock: device.hello with this device's short name. An
+  // unknown method or any failure is silent and never retried (the next open
+  // tries again). The answers (and devices.changed) feed the shared store,
+  // which also tells whether the account disconnected this device. A member
+  // that comes back after a lock gets one device.list read (hello is not
+  // sent again, and the lock wiped the state); the own diary catching up
+  // later arrives as devices.changed.
+  const deviceMember = deviceMemberOf({ ready, termsOk, hasPasskey: passkey !== null, status: pkStatus, ownKey })
+  const deviceState = visibleDevices(useDeviceState(), deviceMember)
+  const helloSentRef = useRef(null)
+  const deviceReadRef = useRef(null)
+  const passkeyHereRef = useRef(new Set())
+  const [lockFailed, setLockFailed] = useState(false)
+  useEffect(() => {
+    deviceStore.bind(deviceMember)
+    if (deviceMember === null) {
+      deviceReadRef.current = null
+      setLockFailed(false)
+      return
+    }
+    const step = deviceStep({ member: deviceMember, online: node.online, helloSent: helloSentRef.current, readFor: deviceReadRef.current })
+    if (step === 'hello') {
+      helloSentRef.current = deviceMember
+      deviceReadRef.current = deviceMember
+      sendHello({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() })
+    } else if (step === 'read') {
+      deviceReadRef.current = deviceMember
+      readDevices({ request: seenRequestRef.current, store: deviceStore }).catch(() => {})
+    }
+  }, [deviceMember, node.online])
+  // A disconnected device whose identity came from a kept session forgets it
+  // and locks: only the passkey opens it again (the unlock screen says why).
+  // After a passkey unlock in this open it never locks again, even when a
+  // later reconnect reports resumed again: it only shows the note. If the
+  // sign-out fails the note shows too.
+  const passkeyHere = notePasskeyUnlock(passkeyHereRef.current, { member: deviceMember, unlocked: !locked, resumed: pkStatus ? pkStatus.resumed === true : undefined })
+  const deviceForceLock = deviceMember !== null && shouldForceLock({ off: deviceState.off, hasPasskey: passkey !== null, unlocked: !locked, resumed: !!(pkStatus && pkStatus.resumed === true), passkeyHere })
+  useEffect(() => {
+    if (!deviceForceLock) return
+    deviceStore.forceLock()
+    Promise.resolve(passkey.signOut()).catch(() => setLockFailed(true))
+  }, [deviceForceLock])
+  const deviceOffShown = deviceMember !== null && deviceState.off && (!deviceForceLock || lockFailed)
+  const reconnectThisDevice = useCallback(() => reconnectDevice({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() }), [])
   // The connection came back: marks made offline go out once the minimum
   // interval allows.
   const seenWasOnlineRef = useRef(node.online)
@@ -2754,7 +2805,9 @@ function Member () {
       // { draft, card } from a listing's Conversar, shown in the composer only;
       // nothing is sent until the member presses send.
       const initial = options && (typeof options.draft === 'string' || options.card) ? { draft: options.draft, card: options.card || null } : null
-      pushScreen({ screen: 'mensagem', key, params: initial ? { initial } : {} })
+      // A thread of a key the Página moved from is its own entry, never the new key's thread with the same peer.
+      const oldPage = options && typeof options.oldPage === 'string' ? options.oldPage : null
+      pushScreen({ screen: 'mensagem', key, params: { ...(initial ? { initial } : {}), ...(oldPage ? { oldPage } : {}) } })
     }
     if (!(options && options.context && typeof key === 'string')) {
       pageDmGen.current++
@@ -2863,6 +2916,9 @@ function Member () {
   }, [pushScreen])
   const openRequests = useCallback(() => {
     pushScreen({ screen: 'pedidos' })
+  }, [pushScreen])
+  const openOldKey = useCallback((oldPage) => {
+    pushScreen({ screen: 'pedidos', params: { oldPage } })
   }, [pushScreen])
   // The Conversas top bar: the "+" opens the NovaConversa sheet (the search
   // field lives in the list). A lock, unlock or reset closes it.
@@ -3923,15 +3979,15 @@ function Member () {
       }
       if (entry.screen === 'pedidos') {
         return (
-          <StackLayer key={i + ':pedidos:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagens onBack={goBack} onOpenThread={openMessage} />
+          <StackLayer key={i + ':pedidos:' + (entry.params.oldPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagens onBack={goBack} onOpenThread={openMessage} oldPage={entry.params.oldPage || undefined} />
           </StackLayer>
         )
       }
       if (entry.screen === 'mensagem') {
         return (
-          <StackLayer key={i + ':mensagem:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
-            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={h.handleOpenInvite} onOpenListing={openListing} onAvaliar={openAvaliar} />
+          <StackLayer key={i + ':mensagem:' + entry.key + ':' + (entry.params.oldPage || '') + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Mensagem peer={entry.key} intent={i === stack.length - 1 ? intentsRef.current.get(entry.key) : undefined} onIntentUsed={intentUsed} initial={entry.params.initial || undefined} oldPage={entry.params.oldPage || undefined} isTop={i === stack.length - 1} onBack={goBack} onOpenMember={openMember} onOpenMention={mentionHandler} onReport={setReport} onOpenInvite={h.handleOpenInvite} onOpenListing={openListing} onAvaliar={openAvaliar} />
           </StackLayer>
         )
       }
@@ -4102,16 +4158,19 @@ function Member () {
           {scheduledDeletion !== null
             ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
             : null}
+          {deviceOffShown
+            ? <DeviceOffNote onReconnect={reconnectThisDevice} inset={tab === 'diario' && node.online !== false && scheduledDeletion === null} />
+            : null}
           {inviteNoteShown
-            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
+            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null} />
             : null}
           {updateReady && !updateDismissed
-            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
             : installCardOpen && install.card !== 'none'
-              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
               : install.note !== 'none'
-                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
-                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
+                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
+                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
         </Animated.View>
         <TabBarShown.Provider value={!barsHidden}>
           <ScreenCovered.Provider value={covered}>
@@ -4226,6 +4285,7 @@ function Member () {
                           onOpenThread={openMessage}
                           onOpenCommunities={openCommunities}
                           onOpenRequests={openRequests}
+                          onOpenOldKey={openOldKey}
                           showInbox={dmOpenCount}
                           seenTick={seenTick}
                           composing={convCompose}

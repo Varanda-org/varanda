@@ -7,9 +7,10 @@ const {
   groupHeader, writerHeader, groupPost, groupHide, groupAdmit, groupBan, groupMeta, groupAdmin, groupLeave,
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
-  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice
+  GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY
 } = require('../lib/group')
-const { groupJoinRecord } = require('../lib/records')
+const { groupJoinRecord, groupCutRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
 
 const G = K(0x100)
@@ -54,6 +55,10 @@ function world ({ join = 'open', bindRoot = true, demoted = false } = {}) {
     },
     push: g.push,
     len: g.len,
+    mark (diary, writer, cut, seq) {
+      g.mark(diary, writer, cut, seq)
+      return w
+    },
     input ({ drop = [], community = parent.input() } = {}) {
       return g.input({ drop, community })
     }
@@ -317,8 +322,9 @@ test('diaryGroupKeys', (t) => {
     rooted.push(join(50 + i, G, false, writer))
   }
   t.alike(diaryGroupKeys(rooted), [G], 'the root key always counts')
-  // The root joined late and then left: it still spends one of the 8 slots,
-  // so the 8th other writer (the only one still on) does not count.
+  // The root joined late and then left: it spends one of the 8 slots from its
+  // join on, never one an earlier writer already holds (the slot walk only
+  // reads earlier records, #350), so the 8th other writer still counts.
   const displaced = []
   for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
     const writer = K(0x6100 + i)
@@ -327,7 +333,16 @@ test('diaryGroupKeys', (t) => {
   }
   displaced.push(join(30, C, true, C))
   displaced.push(join(31, C, false, C))
-  t.alike(diaryGroupKeys(displaced), [], 'the root key takes one of the 8 writer slots')
+  t.alike(diaryGroupKeys(displaced), [C], 'a root joined after 8 writers takes no slot back')
+  const rootFirst = [join(1, C, true, C)]
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const writer = K(0x6200 + i)
+    rootFirst.push(join(i + 2, C, true, writer))
+    if (i < MAX_GROUP_WRITERS_PER_DIARY - 1) rootFirst.push(join(70 + i, C, false, writer))
+  }
+  t.alike(diaryGroupKeys(rootFirst), [C], 'the root joined first counts')
+  rootFirst.push(join(90, C, false, C))
+  t.alike(diaryGroupKeys(rootFirst), [], 'and takes one of the 8 writer slots from its join on')
   const tie = []
   for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY - 1; i++) {
     const writer = K(0x5200 + i)
@@ -882,6 +897,32 @@ test('over 512 writers keeps the 512 lowest keys', (t) => {
   const shuffled = w.input()
   shuffled.writers = shuffled.writers.slice().reverse()
   t.alike(normalize(buildGroup(shuffled)), normalize(g))
+})
+
+test('over 512 writers a frozen writer goes before the live ones of its layer (#350)', (t) => {
+  // 64 diaries of 8 writers and the root: one over the cap.
+  const build = (freeze) => {
+    const w = world()
+    for (let i = 0; i < MAX_GROUP_WRITERS; i++) {
+      const key = K(0x20000 + i)
+      w.add(K(0x10000 + (i % 64)), key)
+      post(w, key, i)
+    }
+    // The lowest key, cut at its length: frozen, nothing of it is dropped.
+    if (freeze) w.mark(K(0x10000), K(0x20000), 2)
+    return buildGroup(w.input())
+  }
+  const lowest = K(0x20000)
+  const highest = K(0x20000 + MAX_GROUP_WRITERS - 1)
+  let g = build(false)
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.ok(g.writers.has(lowest), 'control: the lowest key stays')
+  t.absent(g.writers.has(highest), 'control: the highest key goes')
+  g = build(true)
+  t.is(g.writers.size, MAX_GROUP_WRITERS)
+  t.absent(g.writers.has(lowest), 'the frozen writer goes first')
+  t.ok(g.writers.has(highest), 'and the live one stays')
+  t.is(g.incomplete, true, 'a dropped frozen writer leaves the group incomplete')
 })
 
 test('the creator cannot be banned or demoted', (t) => {
@@ -3227,4 +3268,248 @@ test('an old reader skips the forum records and still reads later posts', (t) =>
   const now = buildGroup(w.input())
   t.alike(visible(now), visible(g), 'the new reader shows the same posts')
   t.alike(postOf(now, root).topic.poll.totals, [1, 0, 0])
+})
+
+// The slot walk (#350): per diary and root, from the diary's own group-join
+// and group-cut records in seq order.
+const walkView = (wk) => JSON.stringify({
+  live: [...wk.live].sort(),
+  frozen: [...wk.frozen].sort(),
+  released: [...wk.released].sort(),
+  over: [...wk.over].sort(),
+  cut: [...wk.cut].sort((a, b) => a[0] < b[0] ? -1 : 1),
+  rootSlot: wk.rootSlot,
+  gap: wk.gap,
+  bound: wk.bound
+})
+const RANK = { none: 0, live: 1, frozen: 2, released: 3 }
+const stateOf = (wk, w) => wk.live.has(w) ? 'live' : wk.frozen.has(w) ? 'frozen' : wk.released.has(w) ? 'released' : 'none'
+const slotted = (wk, w) => wk.live.has(w) || wk.frozen.has(w) || wk.released.has(w)
+
+// A random diary history for root G over a small writer pool: joins (on or
+// off), cuts (often 0 or 1) and now and then the root's own join.
+function walkHistory (rnd, n) {
+  const joins = []
+  const marks = []
+  const pool = []
+  for (let i = 0; i < 24; i++) pool.push(K(0x8000 + i))
+  for (let seq = 1; seq <= n; seq++) {
+    const r = rnd()
+    const writer = pool[Math.floor(rnd() * pool.length)]
+    if (r < 0.03) joins.push({ writer: G, on: true, seq })
+    else if (r < 0.55) joins.push({ writer, on: rnd() < 0.85, seq })
+    else marks.push({ writer: rnd() < 0.03 ? G : writer, cut: rnd() < 0.4 ? 0 : 1 + Math.floor(rnd() * 5), seq })
+  }
+  return { joins, marks }
+}
+
+function shuffled (list, rnd) {
+  const out = list.slice()
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1))
+    ;[out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
+}
+
+test('slotWalk: one result for any input order, and every prefix agrees with the whole diary (#350)', (t) => {
+  const rnd = mulberry32(0x5107)
+  let orders = 0
+  let prefixes = 0
+  for (let round = 0; round < 60; round++) {
+    const { joins, marks } = walkHistory(rnd, 20 + Math.floor(rnd() * 60))
+    const whole = slotWalk(joins, marks, G)
+    const view = walkView(whole)
+    let same = true
+    for (let i = 0; i < 5; i++) {
+      orders++
+      if (walkView(slotWalk(shuffled(joins, rnd), shuffled(marks, rnd), G)) !== view) same = false
+    }
+    t.ok(same, 'round ' + round + ': input order changes nothing')
+    t.is(walkView(slotWalk(joins, marks, G)), view, 'round ' + round + ': deterministic')
+    const n = Math.max(0, ...joins.map((j) => j.seq), ...marks.map((m) => m.seq))
+    let agrees = true
+    let oneWay = true
+    for (let upto = 0; upto <= n; upto++) {
+      prefixes++
+      const head = slotWalk(joins.filter((j) => j.seq <= upto), marks.filter((m) => m.seq <= upto), G)
+      for (const j of joins) {
+        if (!j.on || j.seq > upto || j.writer === G) continue
+        // Whether a join got a slot is decided at its seq, for good.
+        if (slotted(head, j.writer) !== slotted(whole, j.writer) || head.over.has(j.writer) !== whole.over.has(j.writer)) agrees = false
+        if (RANK[stateOf(head, j.writer)] > RANK[stateOf(whole, j.writer)]) oneWay = false
+      }
+      if (head.rootSlot && !whole.rootSlot) agrees = false
+      if (head.live.size > MAX_GROUP_WRITERS_PER_DIARY || head.frozen.size > MAX_FROZEN_WRITERS_PER_DIARY || head.released.size > MAX_WRITER_RELEASES_PER_DIARY) agrees = false
+    }
+    t.ok(agrees, 'round ' + round + ': every prefix agrees on the slots it sees, and the caps hold')
+    t.ok(oneWay, 'round ' + round + ': a writer only moves none, live, frozen, released')
+  }
+  t.ok(orders >= 300 && prefixes >= 1000, 'checked ' + orders + ' orders and ' + prefixes + ' prefixes')
+})
+
+test('slotWalk: the rules one by one (#350)', (t) => {
+  const W = (i) => K(0x9000 + i)
+  const joinAll = (from, count, seq0 = 1) => {
+    const out = []
+    for (let i = 0; i < count; i++) out.push({ writer: W(from + i), on: true, seq: seq0 + i })
+    return out
+  }
+  let wk = slotWalk(joinAll(0, 9), [], G)
+  t.is(wk.live.size, MAX_GROUP_WRITERS_PER_DIARY, 'eight live writers')
+  t.ok(wk.over.has(W(8)), 'the 9th never counts')
+  t.ok(wk.bound)
+
+  wk = slotWalk([{ writer: G, on: true, seq: 1 }, ...joinAll(0, 8, 2)], [], G)
+  t.ok(wk.rootSlot, 'the root takes its slot')
+  t.is(wk.live.size, MAX_GROUP_WRITERS_PER_DIARY - 1, 'seven others next to the root')
+  t.ok(wk.over.has(W(7)))
+
+  wk = slotWalk(joinAll(0, 8), [{ writer: G, cut: 0, seq: 20 }, { writer: G, cut: 3, seq: 21 }], G)
+  t.alike([...wk.cut], [], 'a mark on the root stays out of the walk')
+  t.is(wk.released.size, 0)
+
+  wk = slotWalk(joinAll(0, 9, 2), [{ writer: W(0), cut: 0, seq: 1 }], G)
+  t.alike([...wk.released], [], 'a cut before the writer is bound is ignored')
+  t.alike([...wk.cut], [])
+  t.ok(wk.over.has(W(8)))
+
+  wk = slotWalk([...joinAll(0, 8), { writer: W(8), on: true, seq: 20 }], [{ writer: W(0), cut: 5, seq: 10 }], G)
+  t.ok(wk.frozen.has(W(0)), 'a cut >= 1 freezes a live writer')
+  t.ok(wk.live.has(W(8)), 'the 9th joined after the freeze counts')
+  t.is(wk.cut.get(W(0)), 5)
+
+  wk = slotWalk([...joinAll(0, 8), { writer: W(8), on: true, seq: 9 }], [{ writer: W(0), cut: 5, seq: 10 }], G)
+  t.ok(wk.over.has(W(8)), 'a 9th joined before the freeze stays out for good')
+
+  wk = slotWalk(joinAll(0, 8), [{ writer: W(0), cut: 5, seq: 10 }, { writer: W(0), cut: 9, seq: 11 }, { writer: W(0), cut: 2, seq: 12 }], G)
+  t.is(wk.cut.get(W(0)), 2, 'the lowest cut wins')
+  t.ok(wk.frozen.has(W(0)))
+  t.is(wk.frozen.size, 1, 'a frozen writer cut again stays one frozen writer')
+  wk = slotWalk(joinAll(0, 8), [{ writer: W(0), cut: 5, seq: 10 }, { writer: W(0), cut: 0, seq: 11 }, { writer: W(0), cut: 4, seq: 12 }], G)
+  t.ok(wk.released.has(W(0)), 'cut 0 releases a frozen writer')
+  t.is(wk.cut.get(W(0)), 0, 'a released writer takes no later cut')
+  t.is(wk.frozen.size, 0)
+
+  // R full: the next cut >= 1 applies to the records, the writer stays live.
+  const marks = []
+  for (let i = 0; i < MAX_FROZEN_WRITERS_PER_DIARY; i++) marks.push({ writer: W(i), cut: 1, seq: 100 + i })
+  const joins = [...joinAll(0, 8), ...joinAll(8, 8, 200)]
+  wk = slotWalk(joins, [...marks, { writer: W(8), cut: 3, seq: 300 }], G)
+  t.is(wk.frozen.size, MAX_FROZEN_WRITERS_PER_DIARY, 'R frozen')
+  t.ok(wk.live.has(W(8)), 'R full: a cut writer stays live and keeps its slot')
+  t.is(wk.cut.get(W(8)), 3, 'R full: its cut still applies')
+  t.is(wk.live.size, MAX_GROUP_WRITERS_PER_DIARY)
+  wk = slotWalk([...joins, { writer: W(16), on: true, seq: 400 }], [...marks, { writer: W(8), cut: 3, seq: 300 }], G)
+  t.ok(wk.over.has(W(16)), 'R full: no slot comes back')
+
+  // K full: the next cut 0 applies, the writer keeps its state and slot.
+  const cycle = []
+  const zeros = []
+  for (let i = 0; i < MAX_WRITER_RELEASES_PER_DIARY + 1; i++) {
+    cycle.push({ writer: W(40 + i), on: true, seq: 1000 + i * 2 })
+    zeros.push({ writer: W(40 + i), cut: 0, seq: 1001 + i * 2 })
+  }
+  wk = slotWalk(cycle, zeros, G)
+  t.is(wk.released.size, MAX_WRITER_RELEASES_PER_DIARY, 'K releases')
+  const last = W(40 + MAX_WRITER_RELEASES_PER_DIARY)
+  t.ok(wk.live.has(last), 'K full: cut 0 keeps the writer in its slot')
+  t.is(wk.cut.get(last), 0, 'K full: and nothing of it counts')
+
+  t.is(slotWalk(joinAll(0, 2), [{ gap: true }], G).gap, true, 'a gap is reported')
+  t.is(slotWalk([{ writer: W(0), on: false, seq: 1 }], [], G).bound, false, 'only off joins bind nothing')
+  t.is(slotWalk([{ writer: W(0), on: false, seq: 1 }], [], G).live.size, 0, 'an off join takes no slot')
+  for (const bad of [null, 'x', 7, [null, { writer: 'x', on: true, seq: 1 }]]) {
+    t.is(slotWalk(bad, bad, G).live.size, 0, 'never throws on ' + JSON.stringify(bad))
+  }
+})
+
+test('slotWalk: with no cut off the root it keeps the slots of the per-diary cap (#350)', (t) => {
+  // The seeder's rule before the walk (liveGroupJoins): the
+  // MAX_GROUP_WRITERS_PER_DIARY writers with the earliest on:true join, the
+  // root's key holding one of them, off writers included.
+  const before = (joins) => {
+    const first = new Map()
+    for (const j of joins) if (j.on && (!first.has(j.writer) || j.seq < first.get(j.writer))) first.set(j.writer, j.seq)
+    const allowed = new Set()
+    let room = MAX_GROUP_WRITERS_PER_DIARY
+    if (first.has(G)) {
+      allowed.add(G)
+      room--
+    }
+    const list = [...first].filter(([w]) => w !== G).sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))
+    for (const [w] of list) {
+      if (room <= 0) break
+      allowed.add(w)
+      room--
+    }
+    return [...allowed].sort()
+  }
+  const latestOff = (list, w) => {
+    let last = null
+    for (const j of list) if (j.writer === w && (last === null || j.seq > last.seq)) last = j
+    return last !== null && !last.on
+  }
+  const rnd = mulberry32(0xe9a1)
+  let same = 0
+  let withOff = 0
+  const rounds = 200
+  for (let round = 0; round < rounds; round++) {
+    const { joins } = walkHistory(rnd, 10 + Math.floor(rnd() * 50))
+    // The root's join, when any, comes first (the creator binds it on
+    // creating the group).
+    const own = joins.filter((j) => j.writer !== G)
+    const list = rnd() < 0.5 ? [{ writer: G, on: true, seq: 0 }, ...own] : own
+    const wk = slotWalk(list, [], G)
+    const counted = [...wk.live, ...wk.frozen, ...(wk.rootSlot ? [G] : [])].sort()
+    if (JSON.stringify(counted) === JSON.stringify(before(list))) same++
+    if (counted.some((w) => w !== G && latestOff(list, w))) withOff++
+  }
+  t.is(same, rounds, 'the same counted set in every history')
+  t.ok(withOff > 0, 'histories with off writers counted were checked (' + withOff + ')')
+})
+
+test('diaryGroupKeys: a diary cut gives a slot back to a later join (#350)', (t) => {
+  const join = (seq, writer, on = true) => ({ seq, record: groupJoinRecord({ group: G, writer, on, at: AT(seq) }) })
+  const cut = (seq, writer, at) => ({ seq, record: groupCutRecord({ group: G, writer, cut: at, at: AT(seq) }) })
+  const eight = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    eight.push(join(i + 1, K(0xa000 + i)))
+    eight.push(join(20 + i, K(0xa000 + i), false))
+  }
+  const ninth = K(0xa100)
+  t.alike(diaryGroupKeys([...eight, join(40, ninth)]), [], 'the 9th alone is out')
+  t.alike(diaryGroupKeys([...eight, cut(39, K(0xa000), 1), join(40, ninth)]), [G], 'after a freeze it counts')
+  t.alike(diaryGroupKeys([...eight, cut(39, K(0xa000), 0), join(40, ninth)]), [G], 'after a release it counts')
+  t.alike(diaryGroupKeys([...eight, join(40, ninth), cut(41, K(0xa000), 0)]), [], 'a cut after the join gives it nothing')
+})
+
+test('walkHasRoom: a new writer counts only where the walk has a live slot, after the caller\'s own events (#350)', (t) => {
+  const G = K(0x7000)
+  const ws = []
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 1; i++) ws.push(K(0x7100 + i))
+  const joins = (n, from = 1) => ws.slice(0, n).map((writer, i) => ({ writer, on: true, seq: from + i }))
+  t.ok(walkHasRoom([], [], G), 'an empty diary has room')
+  t.ok(walkHasRoom(joins(MAX_GROUP_WRITERS_PER_DIARY - 1), [], G))
+  t.absent(walkHasRoom(joins(MAX_GROUP_WRITERS_PER_DIARY), [], G), 'eight live: full')
+  t.absent(walkHasRoom([{ writer: G, on: true, seq: 0 }, ...joins(MAX_GROUP_WRITERS_PER_DIARY - 1)], [], G), 'the root takes one slot')
+  const full = joins(MAX_GROUP_WRITERS_PER_DIARY)
+  t.absent(walkHasRoom(full, [], G, [{ kind: 'join', writer: ws[0], on: false }]), 'an off join frees nothing')
+  t.ok(walkHasRoom(full, [], G, [{ kind: 'join', writer: ws[0], on: false }, { kind: 'cut', writer: ws[0], cut: 0 }]), 'a cut at 0 releases a slot')
+  t.ok(walkHasRoom(full, [], G, [{ kind: 'cut', writer: ws[0], cut: 3 }]), 'a cut at 3 freezes one')
+  const over = [...full, { writer: ws[MAX_GROUP_WRITERS_PER_DIARY], on: true, seq: 99 }]
+  t.absent(walkHasRoom(over, [], G, [{ kind: 'cut', writer: ws[MAX_GROUP_WRITERS_PER_DIARY], cut: 0 }]), 'cutting a writer the walk never counted frees nothing')
+  // Every release spent: a further cut at 0 keeps the writer's slot.
+  const spent = []
+  const marks = []
+  let seq = 1
+  for (let i = 0; i < MAX_WRITER_RELEASES_PER_DIARY; i++) {
+    const writer = K(0x7300 + i)
+    spent.push({ writer, on: true, seq: seq++ })
+    marks.push({ writer, cut: 0, seq: seq++ })
+  }
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) spent.push({ writer: ws[i], on: true, seq: seq++ })
+  t.absent(walkHasRoom(spent, marks, G, [{ kind: 'cut', writer: ws[0], cut: 0 }]), 'no release left: no room')
+  t.ok(walkHasRoom(null, null, G, [null]), 'bad items read as an empty diary, never throwing')
+  t.absent(walkHasRoom(full, [], G, 5), 'a bad event list: no room')
 })

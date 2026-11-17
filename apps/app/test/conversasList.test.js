@@ -335,3 +335,16 @@ test('a person row draws the @nome line from the names cache only', (t) => {
   t.ok(row.includes('const handle = person ? handleLine(profile) : null'), 'a group never has one')
   t.ok(row.includes('{handle ? <Text style={styles.handle} numberOfLines={1}>'), 'one line, cut like the title')
 })
+
+test('oldKeyRow is a pinned old-key row that only Todas shows', async (t) => {
+  const { oldKeyRow, requestsRow, applyFilter } = await load()
+  const K1 = '11'.repeat(32)
+  const K0 = '00'.repeat(32)
+  t.alike(oldKeyRow(K1, 0), { kind: 'old-key', key: 'old-key:' + K1, page: K1, title: 'Conversas da chave antiga', pinned: true, unread: false })
+  t.is(oldKeyRow(K0, 0).title, (await import('../src/pageOldKeys.js')).OLD_KEY_TITLE)
+  t.is(oldKeyRow(K0, 1).title, 'Conversas da chave antiga 2')
+  const rows = [requestsRow({ requests: true }), oldKeyRow(K1, 0), oldKeyRow(K0, 1)]
+  t.is(applyFilter(rows, 'todas').length, 3)
+  t.alike(applyFilter(rows, 'nao-lidas').map((r) => r.kind), ['requests'])
+  t.is(applyFilter(rows, 'grupos').length, 0)
+})

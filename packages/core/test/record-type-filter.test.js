@@ -388,5 +388,5 @@ test('type pre-filter: heldUsernames and the group walkers copy only records of 
   t.is(clonesOf(() => groupJoinHistory(entries, G)), N + 3, 'groupJoinHistory: N entries + 3 joins')
   t.is(clonesOf(() => groupConfirmHistory(entries, G)), N + 1, 'groupConfirmHistory: N entries + 1 confirm')
   t.is(clonesOf(() => groupCutHistory(entries, G)), N + 1, 'groupCutHistory: N entries + 1 cut')
-  t.is(clonesOf(() => diaryGroupKeys(entries)), 2 * (N + 3), 'diaryGroupKeys: two passes of N entries + 3 joins')
+  t.is(clonesOf(() => diaryGroupKeys(entries)), 2 * (N + 3) + 1, 'diaryGroupKeys: two passes of N entries + 3 joins, plus the cut its slot walk reads')
 })

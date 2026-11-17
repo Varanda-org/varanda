@@ -10,7 +10,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createSnapshot } = require('@varanda/core/lib/blocklist')
-const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
@@ -118,6 +118,15 @@ async function diaryJoins (s) {
   const core = await store.openDiary(s.storage)
   try {
     return (await store.readAll(core)).map((e) => e.record).filter((r) => r.type === 'group-join')
+  } finally {
+    await core.close()
+  }
+}
+
+async function diaryRecords (s) {
+  const core = await store.openDiary(s.storage)
+  try {
+    return (await store.readAll(core)).map((e) => e.record)
   } finally {
     await core.close()
   }
@@ -708,7 +717,16 @@ test('a boxless private writer is reboxed once the root arrives, then nothing is
   t.is((await coreRecords(b, boxed))[0].box, hex(b.ctx.groupKeys.boxPublicKey()), 'this device\'s box')
   const joins = (await diaryJoins(b)).filter((j) => j.group === group)
   t.alike(joins.slice(-2).map((j) => [j.writer, j.on]), [[boxless, false], [boxed, true]], 'the old writer is unbound, the new one bound')
-  t.is(await diaryLength(b), before + 2)
+  // The join off keeps the slot in the slot walk: one cut on the header-only
+  // boxless writer, between the two joins, gives it back (#350).
+  const own = await diaryRecords(b)
+  const at = (type, writer) => own.findIndex((r) => r.type === type && r.group === group && r.writer === writer && (type !== 'group-join' || r.on === (writer === boxed)))
+  t.alike(own.filter((r) => r.type === 'group-cut' && r.group === group).map((r) => [r.writer, r.cut]), [[boxless, 0]], 'one cut at 0 on the boxless writer')
+  t.ok(at('group-join', boxless) < at('group-cut', boxless) && at('group-cut', boxless) < at('group-join', boxed), 'after the join off, before the new join')
+  t.is(await diaryLength(b), before + 3)
+  const entries = own.map((record, seq) => ({ seq, record }))
+  const walk = grp.slotWalk(grp.groupJoinHistory(entries, group), grp.groupCutHistory(entries, group), group)
+  t.ok(walk.released.has(boxless) && walk.live.has(boxed), 'the slot walk releases the boxless writer and counts the new one')
 
   t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [] }, 'nothing left: no loop')
   const still = await footprint(b)
@@ -776,6 +794,30 @@ test('a public group\'s boxless writer is never reboxed once its root is held', 
   t.alike(reasons(await ops.deviceUpkeepPlan(b.ctx)), [[group, 'unheld']], 'waited for while the root is unknown')
   await copyCore(a, b, group)
   t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [] }, 'public writers carry no box: nothing to replace')
+})
+
+// The rebox needs the community writer admitted; one the own diary cut
+// (a disconnected device's CW) admits nothing. Five more CWs of b's diary
+// put the community at its reserve, so the plan does not enrol it again
+// first and the rebox is judged on the cut CW alone.
+test('a boxless private writer is not reboxed under a community writer the own diary cut', async (t) => {
+  const { a, b, community, group } = await boxlessJoin(t)
+  await copyCore(a, b, group)
+  await ops.deviceHello(b.ctx, { name: 'Celular' })
+  for (let i = 0; i < 5; i++) await rawDevice(b, community, [grp.writerHeader({ group: community, diary: b.key, member: null })], true)
+  const before = await ops.deviceUpkeepPlan(b.ctx)
+  t.alike(before.enrol.map((x) => [x.root, x.rebox]), [[group, true]], 'reboxed while the CW is uncut')
+
+  const cw = await ownWriter(b, community)
+  const core = await store.openGroupCoreReadOnly(b.storage, cw)
+  const cut = core.length
+  await core.close()
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try { await store.appendRecord(diary, groupCutRecord({ group: community, writer: cw, cut })) } finally { await diary.close() }
+
+  const plan = await ops.deviceUpkeepPlan(b.ctx)
+  t.alike(plan.enrol, [], 'no rebox under the cut CW')
+  t.alike(reasons(plan), [[community, 'reserve'], [group, 'community-first']])
 })
 
 test('a boxless private writer is skipped as locked without this device\'s box', async (t) => {

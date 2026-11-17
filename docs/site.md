@@ -23,9 +23,9 @@ node apps/site/scripts/serve.js --prefix /varanda
 O que conferir:
 
 - Largura de 390 px (celular): sem rolagem horizontal, texto legível.
-- Reduzir movimento: em macOS Ajustes > Acessibilidade > Tela, ligue "Reduzir movimento" e recarregue; a animação deve parar.
+- Reduzir movimento: em macOS Ajustes > Acessibilidade > Tela, ligue "Reduzir movimento" e recarregue; as pessoas no calçadão ficam paradas.
 - Foco com Tab: todo link e botão mostra o foco, na ordem da página.
-- O botão "pausar o movimento" pausa e retoma a animação.
+- O botão "pausar o movimento" pausa as pessoas no calçadão no quadro em que estão e retoma de onde pararam. As pedras e as ondas nunca se movem.
 - Os botões "Conheça a Varanda" e "Quero conhecer a Varanda" abrem https://bora.varanda.app/ sem parâmetros, na mesma aba.
 - A frase "Vagas limitadas nesta abertura." aparece junto dos dois botões.
 - As perguntas frequentes abrem e fecham sem JavaScript (`details` e `summary`).

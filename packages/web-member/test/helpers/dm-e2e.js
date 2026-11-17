@@ -53,7 +53,8 @@ function rsaKey () {
 // /blob/<id>/<index> on the same port, answered from Seeder#blobChunk unless
 // host.blobGone (the pool swept); host.blobShort cuts every frame body
 // short, with no Content-Length (a body that ended early).
-async function seederHost (t, bootstrap, assoc, { blob = false } = {}) {
+// copyStampsPerWeek: the seeder's weekly history copy allowance (default: its own).
+async function seederHost (t, bootstrap, assoc, { blob = false, copyStampsPerWeek = undefined } = {}) {
   const dataDir = tmpDir(t, 'varanda-dm-e2e-seed-')
   Seeder.ensureConfig(dataDir, assoc.hex)
   const { publicKey } = Seeder.createKey(dataDir)
@@ -71,7 +72,7 @@ async function seederHost (t, bootstrap, assoc, { blob = false } = {}) {
       associationKey: assoc.hex,
       ...localSwarmOptions(bootstrap),
       log: (e) => host.events.push(e),
-      dm: { postage: { get: async () => ({ keys: [key] }) }, ...(blob ? { blobPostage: { get: async () => ({ keys: [blobKey] }) } } : {}) }
+      dm: { postage: { get: async () => ({ keys: [key] }) }, ...(copyStampsPerWeek === undefined ? {} : { copyStampsPerWeek }), ...(blob ? { blobPostage: { get: async () => ({ keys: [blobKey] }) } } : {}) }
     })
     t.teardown(() => seeder.close(), { force: true })
     await seeder.start()

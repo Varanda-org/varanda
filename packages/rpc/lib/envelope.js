@@ -5,7 +5,7 @@ const { WIRE_CODES, MAX_ERROR_MESSAGE } = require('./errors')
 const { charLength } = require('./text')
 const { isMethod, validateParams, isPlainObject, hasOwn, isId, isKey } = require('./methods')
 
-const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch'])
+const EVENTS = Object.freeze(['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch', 'devices.changed', 'dm.copyProgress', 'dm.copyImported'])
 // 'idle': the browser node ended a continuous run because its verified
 // seeder link was settled for the lease hold (docs/rpc.md 6.1); no result.
 const STOP_REASONS = Object.freeze(['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
@@ -81,9 +81,15 @@ function validateEventData (event, data) {
   if (event === 'dm.changed') return exactKeys(data, ['added'], ['page']) && Number.isSafeInteger(data.added) && data.added >= 0 && (!hasOwn(data, 'page') || isKey(data.page))
   // The page whose held key no longer matches the one the service published.
   if (event === 'dm.pageKeyMismatch') return exactKeys(data, ['page']) && isKey(data.page)
+  // Whether this device is disconnected from the account (5.152 to 5.155).
+  if (event === 'devices.changed') return exactKeys(data, ['off']) && typeof data.off === 'boolean'
   // This device is about to put a drop of its own. The event carries nothing.
   if (event === 'dm.sending') return exactKeys(data, [])
   if (event === 'seen.changed') return exactKeys(data, [])
+  // A history copy under way (dm.historyCopy): the items put so far of the total.
+  if (event === 'dm.copyProgress') return exactKeys(data, ['done', 'total']) && Number.isSafeInteger(data.done) && data.done >= 0 && Number.isSafeInteger(data.total) && data.total >= data.done
+  // A history copy from another device was filed here: counts only.
+  if (event === 'dm.copyImported') return exactKeys(data, ['messages']) && Number.isSafeInteger(data.messages) && data.messages >= 0
   // sync.stopped
   if (!exactKeys(data, ['runId', 'reason'], ['result'])) return false
   if (!isId(data.runId) || !STOP_REASONS.includes(data.reason)) return false

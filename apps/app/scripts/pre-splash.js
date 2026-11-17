@@ -21,7 +21,8 @@ const SPRING = 'cubic-bezier(0.22, 1, 0.36, 1)'
 async function load () {
   const scene = await import('../src/ui/splashScene.js')
   const motion = await import('../src/ui/splashMotion.js')
-  return { scene, motion }
+  const street = await import('../src/ui/splashStreet.js')
+  return { scene, motion, street }
 }
 
 function attrs (shape) {
@@ -139,8 +140,104 @@ function flyerCss (L, flyers, motion) {
   return out
 }
 
+// Street shapes share one rule for the cap and the common 3 wide stroke
+// (.g svg, inherited), so only a different width stays as an attribute (it beats the inherited value); `n` is fill: none.
+// The join is opt in (`j`): limbs keep sharp knees and shoes, only the outlines ask for round corners.
+function streetAttrs (shape) {
+  const cls = [shape.fill ? 'f-' + shape.fill : 'n']
+  if (shape.stroke) cls.push('s-' + shape.stroke)
+  if (shape.join === 'round') cls.push('j')
+  let a = ' d="' + shape.d + '" class="' + cls.join(' ') + '"'
+  if (shape.stroke && shape.width !== 3) a += ' stroke-width="' + shape.width + '"'
+  return '<path' + a + '/>'
+}
+
+// The people on the near band, from splashStreet.js. Each mover is an HTML
+// wrapper around one svg; a lane is mirrored as a whole, so the left-facing
+// walkers share the one motion. No ids and no <use>: every figure repeats its
+// paths, which keeps the overlay free of references the CSP scan rejects.
+// A bare unit-less 0 and no leading zero keep the generated frames short.
+function short (n) {
+  return n === 0 ? '0' : String(n).replace(/^(-?)0\./, '$1.')
+}
+
+// Linear frames between two equal neighbours add nothing, so drop them.
+function trim (input, ...ys) {
+  const keep = input.map((_, j) => j === 0 || j === input.length - 1 || ys.some((y) => y[j] !== y[j - 1] || y[j] !== y[j + 1]))
+  return input.map((t, j) => keep[j] ? j : -1).filter((j) => j >= 0)
+}
+
+function streetParts (st, top) {
+  const { STREET: S } = st
+  const row = (name) => S.rows.find((r) => r.name === name)
+  const figure = (f, cls) => {
+    const art = st.figureArt(f.figure, f.tint)
+    const pose = (k) => art[k].length ? '<g class="' + k + '">' + art[k].map(streetAttrs).join('') + '</g>' : ''
+    return '<svg' + (cls ? ' class="' + cls + '"' : '') + ' viewBox="' + art.viewBox + '">' + art.body.map(streetAttrs).join('') + pose('a') + pose('b') + '</svg>'
+  }
+  const rest = []
+  const motion = []
+  const marg = S.track.margin
+  const travel = 'max(' + S.track.period + 'px, 100% + ' + 2 * marg + 'px)'
+  const lines = []
+  // Every pose loop is one a-then-b swap per --t, so one pair of keyframes
+  // serves the lanes and the roda; a second cycle count would need its own.
+  if (S.idle.poseCycles !== 1) throw new Error('pre-splash: the roda swaps once per loop')
+  const sw = st.poseSwap(1)
+  for (const k of ['a', 'b']) {
+    motion.push(
+      '  ' + P + ' .' + k + ' { animation: vps-p' + k + ' var(--t) steps(1) infinite; }',
+      '  @keyframes vps-p' + k + ' { ' + sw.input.map((t, i) => pct(t) + ' { opacity: ' + sw[k][i] + '; }').join(' ') + ' }'
+    )
+  }
+  const laneHtml = (name) => {
+    const lane = S.lanes[name]
+    const r = row(lane.row)
+    const inner = lane.movers.map((m, i) => {
+      const art = st.figureArt(m.figure, m.tint)
+      const h = art.height * r.scale
+      const cls = name[0] + i
+      rest.push(P + ' .' + cls + ' { top: ' + (r.feet - h) + 'px; height: ' + h + 'px; --p: ' + short(Math.round(st.moverPhase(lane, m) * 10000) / 10000) + '; }')
+      motion.push('  ' + P + ' .' + cls + ' { animation: vps-walk ' + lane.ms + 'ms linear -' + st.moverDelayMs(lane, m) + 'ms infinite; }')
+      return '<div class="m ' + cls + '">' + figure(m) + '</div>'
+    })
+    return '<div class="l ' + name + '" style="--t:' + lane.strideMs + 'ms">' + inner.join('') + '</div>'
+  }
+  motion.push('  @keyframes vps-walk { from { transform: translateX(-' + marg + 'px); } to { transform: translateX(calc(' + travel + ' - ' + marg + 'px)); } }')
+  const sr = row('standing')
+  let kid = 0
+  const standing = S.standing.map((f, i) => {
+    const art = st.figureArt(f.figure, f.tint)
+    rest.push(P + ' .s' + i + ' { left: calc(50% ' + px(f.x) + '); top: ' + (sr.feet - art.height) + 'px; height: ' + art.height + 'px;' + (f.figure === 'roda' ? ' --t: ' + S.idle.ms + 'ms;' : '') + ' }')
+    if (f.figure === 'crianca') {
+      const hop = st.kidHop(kid)
+      const frames = trim(hop.input, hop.y).map((j) => pct(hop.input[j]) + ' { transform: translateY(' + short(hop.y[j]) + (hop.y[j] ? 'px' : '') + '); }').join(' ')
+      motion.push('  ' + P + ' .s' + i + ' { animation: vps-hop' + kid + ' ' + S.idle.ms + 'ms linear infinite; }', '  @keyframes vps-hop' + kid + ' { ' + frames + ' }')
+      kid++
+    } else if (f.figure === 'bola') {
+      const b = st.ballArc()
+      const frames = trim(b.input, b.x, b.y).map((j) => pct(b.input[j]) + ' { transform: translate(' + short(b.x[j]) + (b.x[j] ? 'px' : '') + ', ' + short(b.y[j]) + (b.y[j] ? 'px' : '') + '); }').join(' ')
+      motion.push('  ' + P + ' .s' + i + ' { animation: vps-bola ' + S.idle.ms + 'ms linear infinite; }', '  @keyframes vps-bola { ' + frames + ' }')
+    }
+    return '<div class="f s' + i + '">' + figure(f, f.mirrored ? 'e' : '') + '</div>'
+  })
+  const markup = '<div class="g">' + laneHtml('vindo') + standing.join('') + laneHtml('indo') + '</div>'
+  lines.push(
+    P + ' .g, ' + P + ' .l, ' + P + ' .m, ' + P + ' .f { position: absolute; }',
+    P + ' .g { inset: ' + top + 'px 0 auto; height: ' + S.band + 'px; overflow: hidden; }',
+    P + ' .l { inset: 0; }',
+    P + ' .vindo, ' + P + ' .e { transform: scaleX(-1); }',
+    P + ' .m { left: 0; width: 100%; transform: translateX(calc(' + travel + ' * var(--p) - ' + marg + 'px)); }',
+    P + ' .g svg { height: 100%; overflow: visible; stroke-width: 3; stroke-linecap: round; }',
+    P + ' .j { stroke-linejoin: round; }',
+    P + ' .n { fill: none; }',
+    P + ' .b { opacity: 0; }'
+  )
+  return { markup, rest: lines.concat(rest), motion }
+}
+
 async function renderPreSplash () {
-  const { scene, motion } = await load()
+  const { scene, motion, street } = await load()
   const L = scene.sceneLayout({ width: 390, height: 900 })
   const mid = L.width / 2
   // sceneLayout keeps the trunk beside the varanda but never left of a
@@ -150,17 +247,18 @@ async function renderPreSplash () {
   const treeLeft = 'max(calc(50% ' + px(L.varanda.x - mid + wide.tree.x - wide.varanda.x) + '), ' +
     scene.sceneLayout({ width: 200, height: 900 }).tree.x + 'px)'
   const m = motion.splashMotion(false)
-  const loops = scene.stripLoops(1)
   const light = scene.scenePalette('light')
   const dark = scene.scenePalette('dark')
   const keys = Object.keys(light)
   const H = L.height
   const g = L.far.y
 
+  const walk = streetParts(street, L.near.y - g)
   const nearTiles = scene.nearTiles()
-  const nearPeriod = loops.near.distance
+  // The pattern repeats at the tiles' own widths; the strips no longer move.
+  const nearPeriod = nearTiles.reduce((n, t) => n + t.width, 0)
   const farTile = scene.farTile()
-  const farPeriod = loops.far.distance
+  const farPeriod = farTile.width
   const varanda = scene.varandaArt()
   const tree = scene.treeArt()
   const bird = scene.birdArt()
@@ -191,6 +289,7 @@ async function renderPreSplash () {
     '  <div class="ground">',
     '    ' + strip('far', farPeriod, L.far.height, group(farTile, 0)),
     '    ' + strip('near', nearPeriod, L.near.height, nearTiles.map((t, i) => group(t, i * t.width)).join('')),
+    '    ' + walk.markup,
     '    <div class="kerb"></div>',
     '    <div class="rua"></div>',
     '  </div>',
@@ -234,13 +333,14 @@ async function renderPreSplash () {
     P + ' .borboleta { position: absolute; left: calc(50% ' + px(L.butterfly.x - mid) + '); top: ' + L.butterfly.y + 'px; width: ' + L.butterfly.w + 'px; height: ' + L.butterfly.h + 'px; }',
     P + ' .borboleta svg { left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }',
     P + ' .ground { position: absolute; left: 0; right: 0; top: ' + g + 'px; bottom: 0; }',
-    P + ' .strip { left: 0; will-change: transform; }',
-    P + ' .far { top: ' + (L.far.y - g) + 'px; width: calc(100% + ' + farPeriod + 'px); height: ' + L.far.height + 'px; }',
-    P + ' .near { top: ' + (L.near.y - g) + 'px; width: calc(100% + ' + nearPeriod + 'px); height: ' + L.near.height + 'px; }',
+    P + ' .strip { left: 0; }',
+    P + ' .far { top: ' + (L.far.y - g) + 'px; width: 100%; height: ' + L.far.height + 'px; }',
+    P + ' .near { top: ' + (L.near.y - g) + 'px; width: 100%; height: ' + L.near.height + 'px; }',
     P + ' .kerb, ' + P + ' .rua { position: absolute; left: 0; right: 0; }',
     P + ' .kerb { top: ' + (L.kerb.y - g) + 'px; height: ' + L.kerb.height + 'px; background: var(--vps-meioFio); }',
     '/* the scene sits above the inset; the rua runs on under it at the smallest k too */',
     P + ' .rua { top: ' + (L.rua.y - g) + 'px; height: calc(' + L.rua.height + 'px + ' + Math.ceil(1 / Math.min(...scene.SCALE_STEPS.map((s) => s.k))) + ' * env(safe-area-inset-bottom)); background: var(--vps-asfalto); }',
+    ...walk.rest,
     ...keys.filter((key) => used.has('f-' + key)).map((key) => P + ' .f-' + key + ' { fill: var(--vps-' + key + '); }'),
     ...keys.filter((key) => used.has('s-' + key)).map((key) => P + ' .s-' + key + ' { stroke: var(--vps-' + key + '); }')
   ]
@@ -273,10 +373,7 @@ async function renderPreSplash () {
     '  ' + keyframes('vps-varanda', m.varanda),
     '  ' + P + ' .scene .chair { animation: vps-chair ' + m.chair.duration + 'ms ' + SPRING + ' ' + m.chair.delay + 'ms both; }',
     '  ' + keyframes('vps-chair', m.chair),
-    '  ' + P + ' .far { animation: vps-slide-far ' + loops.far.ms + 'ms linear infinite; }',
-    '  @keyframes vps-slide-far { from { transform: translateX(0); } to { transform: translateX(-' + farPeriod + 'px); } }',
-    '  ' + P + ' .near { animation: vps-slide-near ' + loops.near.ms + 'ms linear infinite; }',
-    '  @keyframes vps-slide-near { from { transform: translateX(0); } to { transform: translateX(-' + nearPeriod + 'px); } }',
+    ...walk.motion,
     ...flyerCss(L, flyers, motion),
     '  ' + P + ' .word svg { animation: vps-rise ' + m.letters[0].duration + 'ms ' + LETTER_EASE + ' both; animation-delay: calc(' + m.letters[0].delay + 'ms + var(--i) * ' + (m.letters[1].delay - m.letters[0].delay) + 'ms); }',
     '  ' + keyframes('vps-rise', m.letters[0]),
