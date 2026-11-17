@@ -4168,6 +4168,16 @@ async function syncRun ({
     track(groupKv(() => store.removeHeaderStub(storage, key)), noop, noop)
   }
 
+  // A stale resting entry follows the record, so a later sweep of the old
+  // pair's diary never purges the core.
+  function moveStubRecord (key, group, diary) {
+    const x = { key, group, diary }
+    headerStubs.set(key, x)
+    const r = restingCores.get(key)
+    if (r !== undefined) restingCores.set(key, { group, diary, rootBound: r.rootBound })
+    track(groupKv(() => store.addHeaderStub(storage, x)), noop, () => log('aviso: falha ao gravar o núcleo de grupo ' + key8(key)))
+  }
+
   // Header stubs past the cap check of their gate and not recorded yet:
   // each holds a slot, so gates in flight never record past the cap.
   function stubSlotsHeld () {
@@ -4529,9 +4539,16 @@ async function syncRun ({
     if (ge !== undefined && (ge.state === 'pending' || (ge.state === 'regate' && ge.head === null))) return
     const live = ge !== undefined && (ge.state === 'active' || ge.state === 'regate')
     // Live under another (group, diary): that pair holds it, so the verdict
-    // on the record's pair takes the record (and its slot) alone. Its stale
-    // resting entry goes too, or a later sweep of that diary would purge it.
+    // on the record's pair never purges it. Still a stub there, its record
+    // moves to that pair: dropped, the next start would take the core by its
+    // own header, a writer of the pair the header names with no proven join.
+    // Otherwise the record goes, and its stale resting entry too, or a later
+    // sweep of that diary would purge it.
     const elsewhere = live && (ge.group !== x.group || ge.diary !== x.diary)
+    if (elsewhere && !kept && ge.head !== null) {
+      moveStubRecord(x.key, ge.group, ge.diary)
+      return
+    }
     if (kept || elsewhere) {
       dropStubRecord(x.key)
       if (elsewhere) restingCores.delete(x.key)
@@ -4544,6 +4561,9 @@ async function syncRun ({
       purgeKeptEntry(ge, reason)
     } else if (restingCores.has(x.key)) {
       purgeResting(x.key, reason)
+    } else if (ownGroupKeys.has(x.key)) {
+      // Written by this device since the start: never a stub, never purged.
+      dropStubRecord(x.key)
     } else {
       // Held by nothing in this run (its stub left the table): the core
       // and its record go now, as the core node does.

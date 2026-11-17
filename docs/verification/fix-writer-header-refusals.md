@@ -420,14 +420,46 @@ Prova de regressão desta rodada, nó core: cada mutação tira uma parte da cor
 Navegador:
 
 - Nó do navegador, revisão de registros (`reviewStubRecord` em `packages/web-member/lib/sync.js`): uma entrada `pending` deixa o registro para o próximo início; uma entrada em `regate` sem `head` (sendo admitida pelo par que o próprio bloco 0 nomeia) também; só uma entrada viva com `head` falha por essa revisão.
-- Um stub vivo sob outro par (grupo, diário) que não o do registro perde só o registro (e a vaga), sem purga, como no nó do core; a entrada em repouso que ficou velha sai junto, para uma varredura seguinte do mesmo diário não purgar o núcleo. Teste: "a recorded stub live under another pair stays held when the diary its record names is blocked: only the record goes".
-- Um registro que nenhuma entrada viva, guardada ou em repouso segura é purgado na hora, núcleo e registro, como no nó do core. Teste: "a recorded stub no entry of the run holds is purged in the run when the diary that proved it is blocked" (o núcleo sai da lista de réplicas antes da rodada, um cenário determinístico).
-- No início, um stub com bloco além do 0 ('held') só fica enquanto o diário que o provou está guardado aqui (`diaryStored`); sem esse diário, o núcleo e o registro vão, e nenhuma réplica vazia desse diário é aberta. O teste "a group root first held as a stub of another group..." passou a cobrir os dois lados (registro com o diário de C, guardado: fica; registro com um diário ausente: sai, sem réplica nem entrada em kv groupDiaries).
+- Um toco vivo sob outro par (grupo, diário) que não o do registro perde só o registro (e a vaga), sem apagar, como no nó do core; a entrada em repouso que ficou velha sai junto, para uma varredura seguinte do mesmo diário não apagar o núcleo. Teste: "a recorded stub live under another pair stays held when the diary its record names is blocked: only the record goes".
+- Um registro que nenhuma entrada viva, guardada ou em repouso segura é apagado na hora, núcleo e registro, como no nó do core. Teste: "a recorded stub no entry of the run holds is purged in the run when the diary that proved it is blocked" (o núcleo sai da lista de réplicas antes da rodada, um cenário determinístico).
+- No início, um toco com bloco além do 0 ('held') só fica enquanto o diário que o provou está guardado aqui (`diaryStored`); sem esse diário, o núcleo e o registro vão, e nenhuma réplica vazia desse diário é aberta. O teste "a group root first held as a stub of another group..." passou a cobrir os dois lados (registro com o diário de C, guardado: fica; registro com um diário ausente: sai, sem réplica nem entrada em kv groupDiaries).
 - Uma passagem da revisão lê cada diário no máximo uma vez (`heldEntries` com um Map por passagem, como `bindingEntries` no início). Sem mudança de comportamento, sem teste próprio.
 - Testes novos dos ramos sem cobertura: "a revoked issuer of the diary that proved a stub stored in this run purges the stub with its record" e "a blocked group purges its header stubs, stored before this run or in it, with their records".
-- Verificação por remoção (cada uma revertida, `git diff --stat -- packages/web-member` igual antes e depois): WR1 (outro par purga) falha 3 asserções; WR2 (entrada em repouso velha fica) falha 2; WR3 (registro sem entrada não purgado) falha por tempo esgotado; WS (stub 'held' sob diário ausente fica) falha 4.
-- A revogação tem dois caminhos (`dropRevokedDiary` e a varredura de revogação `sweepRevokedGroups`) e o grupo bloqueado também (`stopBlockedGroup` e a revisão do registro, que um stub desta rodada também tem): cada remoção sozinha passa; as duas juntas (WV12, WG12) falham por tempo esgotado.
+- Verificação por remoção (cada uma revertida, `git diff --stat -- packages/web-member` igual antes e depois): WR1 (outro par apaga) falha 3 asserções; WR2 (entrada em repouso velha fica) falha 2; WR3 (registro sem entrada não apagado) falha por tempo esgotado; WS (toco 'held' sob diário ausente fica) falha 4.
+- A revogação tem dois caminhos (`dropRevokedDiary` e a varredura de revogação `sweepRevokedGroups`) e o grupo bloqueado também (`stopBlockedGroup` e a revisão do registro, que um toco desta rodada também tem): cada remoção sozinha passa; as duas juntas (WV12, WG12) falham por tempo esgotado.
 - Não coberto por teste: o retorno para uma entrada `pending` ou em `regate` sem `head` (sem montagem determinística).
+
+## Rodada de revisão 4
+
+Nó core (`packages/core/lib/sync.js`, testes de `packages/core/test/sync-groups-8.test.js`):
+
+- A (e a auditoria R2). A marca de quem perdeu o limite (`provenLater`) agora tem chave por grupo, chave e diário (`capLost`), e vale também para um toco: na recusa pelo limite, na saída de uma entrada ativa e na de uma vaga guardada, sempre sob o diário cujo limite a chave perdeu. Uma chave recusada sob dois diários guarda as duas marcas. Um escritor guardado listado sob outro diário passa pelo portão sob o diário do próprio cabeçalho; se a marca desse diário vale e ele continua cheio, o portão termina como a recusa pelo limite, sem ler o diário da dica.
+- B. Um toco ativo que cede a vaga a uma entrada provada mais cedo não entra em `failedWriters` (`failGroupCore` com `memo: false`): só a marca por diário o mantém fora das listagens daquele diário. Na prática isso só pesa quando o toco é guardado aqui em outro papel (o apagamento fica de fora e `retire` roda na hora); quando o núcleo é apagado, `dropGroupCore` já tirava a entrada antes de `retire`.
+- C (e a auditoria R1). Na revisão de registros, uma chave ativa como toco sob outro par leva o registro para esse par (`moveRecord`), com a vaga de toco do registro; ativa como escritor do par do próprio cabeçalho, só sai do registro, como antes. A partida seguinte revê o toco contra esse par e nunca o conta pelo próprio cabeçalho.
+- G. Na partida, `reviewHeaderStubs` trata um erro de leitura de `replicaStored` (da chave e do diário que provou o toco) como guardado: o toco e o registro ficam.
+- `docs/protocol.md`, item "Header stubs": a marca por diário (toco ou escritor), o toco que cede a vaga, o registro que muda de par nos dois nós, a leitura de cada diário uma vez por passagem nos dois nós e o erro de leitura que mantém o toco.
+
+Testes novos ou mudados:
+
+- "a stub refused for the full cap of the diary that proved it is gated once, however many pages list it" (A): 32 escritores de Da guardados aqui, Da não; três páginas listam K sob Da depois da recusa, e Da é lido por um portão só.
+- "a stub evicted from the cap of the diary that proved it is admitted under the pair its header names in the same run" (B): W, com entrada mais cedo, tira K de (G, Da); a listagem de K sob (G, Dv) baixa inteira na mesma execução.
+- "a stub held here in another role, evicted from the cap of the diary that proved it, has its listing under another pair gated in the same run" (B): KD, toco de (G, Da) e diário de ligação de X, cede a vaga a W e continua guardado; a listagem de KD sob (G, Dx) passa pelo portão (Dx é lido).
+- "a record whose diary is blocked moves to the pair its stub is active under, and a restart keeps the stub slot there" (C, era "a record whose diary is blocked only drops the record while its stub is active under another pair"): o registro passa a nomear (G, Dx) e, depois de reiniciar, `diskSlotOf(K)` é `{ group: G, diary: Dx, stub: true }`.
+
+Prova de regressão (cada remoção revertida, `shasum` do `sync.js` igual antes e depois):
+
+- 1, a recusa pelo limite não marca um toco: o teste A falha em "and Da is read for one gate of K, not one per page" (3 leituras, não 1; 3/4).
+- 2, um toco que cede a vaga entra em `failedWriters`: o teste B do outro papel falha em "and its listing under (G, Dx) is gated in the same run" (2/3). O teste B do par do cabeçalho passa (4/4), pelo motivo acima.
+- 3, a revisão tira o registro em vez de mudá-lo de par: o teste C falha em "its record moves from (G, Da) to (G, Dx)", "a restart keeps the record of (G, Dx)" e na vaga de toco de (G, Dx) depois de reiniciar (4/7).
+- Sem teste próprio: o portão que termina pela marca do diário do cabeçalho de um escritor guardado (R2 caso b) e o erro de leitura em `reviewHeaderStubs` (G).
+
+Navegador:
+
+- Nó do navegador, revisão de registros (`reviewStubRecord` em `packages/web-member/lib/sync.js`): um toco vivo sob outro par (grupo, diário), ainda toco ali (`head` não nulo), não perde mais o registro: o registro passa para o par vivo (`moveStubRecord`, em memória e em kv headerStubs), e a entrada em repouso, se houver, também. Sem isso, o próximo início pegaria o núcleo pelo próprio cabeçalho, como escritor do par que o cabeçalho nomeia sem adesão provada (ou o apagaria, com cabeçalho inválido).
+- Se o núcleo é mais que toco (`kept`) ou está vivo sob outro par como escritor completo (`head` nulo), o registro sai sozinho, como antes.
+- Teste estendido e renomeado: "a recorded stub live under another pair stays held when the diary its record names is blocked: the record moves to that pair". Depois da rodada, o registro nomeia (G, C); um reinício sem rede e uma rodada seguinte com C listando o núcleo o mantêm como toco de (G, C), só o bloco 0, nunca baixado inteiro, nunca recusado, com o registro em (G, C).
+- Apagar sem dono na rodada: um registro de chave que virou própria durante a rodada (`ownGroupKeys`) só perde o registro, nunca o núcleo, como o `ownKey` do nó do core. Sem teste (sem montagem barata).
+- Verificação por remoção (revertida, `git diff --stat -- packages/web-member` igual antes e depois): WM (volta a apagar o registro e a entrada em repouso) falha por tempo esgotado em "the record moves to (G, C)"; sem remoção, o teste passa (23/23 asserções).
 
 ## Decisões tomadas aqui
 
@@ -454,3 +486,5 @@ Navegador:
 - Uma caixa que não bate num escritor com corte maior que 0 continua esperada, como antes (fora do escopo).
 - `heldCatalogue` não mudou.
 - A política de cobrança de tocos listados por semeadores que anunciam o bit fica para o próximo PR.
+- Um registro pulado enquanto o portão da chave roda espera a próxima revisão ou a próxima partida (só o bloco 0 fica guardado).
+- O cache de entradas de cada passagem da revisão guarda, durante a passagem, toda entrada `on: true` dos diários que lê.
