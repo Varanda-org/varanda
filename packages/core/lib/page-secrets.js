@@ -15,6 +15,7 @@ const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const groupCrypto = require('./group-crypto')
 const { isWeakBoxKey } = require('./group')
+const { isCanonicalIso } = require('./records')
 
 const PAGE_SECRETS_V = 1
 const SEED_BYTES = sodium.crypto_box_SEEDBYTES
@@ -26,6 +27,7 @@ const PAGE_SECRETS_BYTES = 1 + KEY_BYTES + 4 + KEY_BYTES + SEED_BYTES + SEED_BYT
 const PAGE_SECRETS_SEALED_BYTES = PAGE_SECRETS_BYTES + SEAL_BYTES
 const TAG_DOMAIN = b4a.from('varanda/page-secrets/v1', 'utf8')
 const SHARE_PREFIX = b4a.from('varanda-page-share-v1\n', 'utf8')
+const ACTOR_BOX_PREFIX = b4a.from('varanda-page-actor-box-v1\n', 'utf8')
 const LEGACY_DOMAIN = b4a.from('varanda/page-legacy-box/v1', 'utf8')
 const LEGACY_SECRET_BYTES = 32
 const LEGACY_SEALED_BYTES = LEGACY_DOMAIN.byteLength + LEGACY_SECRET_BYTES + SEAL_BYTES
@@ -204,6 +206,45 @@ function verifyShare (share, sigHex, signerHex) {
   }
 }
 
+// A core node's delegate actor sits in a page roster with no diary of its
+// own, so dm.lookup finds no box for it. The actor signs its box itself, and
+// a sharer seals the page secrets to that box only on the actor's word, never
+// on the service's (docs/protocol.md section 12, "Conversas como página").
+function validActorBox ({ actor, at, box, gen }) {
+  return isHex64(actor) && isHex64(box) && !isWeakBoxKey(box) && Number.isSafeInteger(gen) && gen >= 1 && isCanonicalIso(at)
+}
+
+function actorBoxBytes (statement) {
+  if (!isPlainObject(statement)) throw new TypeError('caixa inválida')
+  const { actor, at, box, gen } = statement
+  if (!validActorBox({ actor, at, box, gen })) throw new TypeError('caixa inválida')
+  const digest = b4a.alloc(32)
+  sodium.crypto_hash_sha256(digest, b4a.from(JSON.stringify({ actor, at, box, gen }), 'utf8'))
+  return b4a.concat([ACTOR_BOX_PREFIX, digest])
+}
+
+// statement: { actor, box, gen, at }; actorKeyPair: the actor's Ed25519 pair.
+function signActorBox (statement, actorKeyPair) {
+  if (!isPlainObject(actorKeyPair) || !isBytes(actorKeyPair.secretKey, 64) || !isBytes(actorKeyPair.publicKey, 32)) {
+    throw new TypeError('chave de assinatura inválida')
+  }
+  const bytes = actorBoxBytes(statement)
+  if (b4a.toString(actorKeyPair.publicKey, 'hex') !== statement.actor) throw new TypeError('chave de assinatura inválida')
+  return b4a.toString(hcrypto.sign(bytes, actorKeyPair.secretKey), 'hex')
+}
+
+// The signer is always the statement's own actor.
+function verifyActorBox (statement, sigHex) {
+  try {
+    if (typeof sigHex !== 'string' || !HEX128.test(sigHex) || !isPlainObject(statement)) return false
+    const { actor, at, box, gen } = statement
+    const bytes = actorBoxBytes({ actor, at, box, gen })
+    return hcrypto.verify(bytes, b4a.from(sigHex, 'hex'), b4a.from(actor, 'hex'))
+  } catch {
+    return false
+  }
+}
+
 // Before page secrets, the service kept a page's gen 1 box secret; moving it
 // to a device seals that 32-byte secret alone, under its own domain.
 function sealLegacyBox (secret, boxHex) {
@@ -251,6 +292,9 @@ module.exports = Object.freeze({
   shareBytes,
   signShare,
   verifyShare,
+  actorBoxBytes,
+  signActorBox,
+  verifyActorBox,
   sealLegacyBox,
   openLegacyBox
 })

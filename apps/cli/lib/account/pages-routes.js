@@ -31,6 +31,8 @@
 //     and dm-box-read keep the public boxes and the sealed shares;
 //     dm-legacy-read and dm-legacy-done hand the owner's device the sealed
 //     bundle of a legacy page's old Conversas and drop it once imported.
+//     actor-box keeps a core delegate admin's own signed dm box, which
+//     dm-box-read then hands the owner and admins (actorBoxes).
 //     dm-list and dm-thread serve the old rows only while the service still
 //     holds them.
 //   - media and avatar take the raw bytes as the body and the statement in
@@ -157,7 +159,7 @@ function eventTexts (event) {
 }
 
 // Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
-const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
+const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box']
 const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
 const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
@@ -592,7 +594,7 @@ function createPagesRoutes ({
       }
     }
     if (seq !== null) {
-      if (action === 'dm-box-share') return { ok: true, replay: true }
+      if (action === 'dm-box-share' || action === 'actor-box') return { ok: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
         const r = pagesStore.get(page)
@@ -2467,6 +2469,11 @@ function createPagesRoutes ({
       if (!exactKeys(op, ['id']) || typeof op.id !== 'string' || !HEX64_RE.test(op.id)) throw refuse('pedido-invalido')
       return { id: op.id }
     }
+    if (action === 'actor-box') {
+      if (!exactKeys(op, ['box', 'gen', 'at', 'sig'])) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.gen) || op.gen < 1 || !isCanonicalIso(op.at) || typeof op.box !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
+      return { box: op.box, gen: op.gen, at: op.at, sig: op.sig }
+    }
     if (action === 'dm-box-share') {
       if (!exactKeys(op, ['member', 'gen', 'sealed', 'sig'])) throw refuse('pedido-invalido')
       if (!Number.isSafeInteger(op.gen) || op.gen < 1 || typeof op.sealed !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
@@ -2497,8 +2504,11 @@ function createPagesRoutes ({
   // on, and nothing is signed, read or stored for them.
   async function dm (action, body) {
     if (pagesDm === null) throw refuse('nao-encontrado')
-    const { member, page, nonce, op, hash } = await statement(body, action, false)
+    const { member, page, nonce, op, hash, delegate } = await statement(body, action, false)
     const params = dmParams(action, op)
+    // A linked member's box is its diary's dm-key: only a core delegate
+    // actor, which has no diary of its own key, states one.
+    if (action === 'actor-box' && delegate === null) throw refuse('pedido-invalido')
     const read = DM_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
@@ -2555,6 +2565,12 @@ function createPagesRoutes ({
           result = await pagesDm.legacyDone(page, { member, id: params.id })
         } catch (err) {
           throw dmFailure(err)
+        }
+      } else if (action === 'actor-box') {
+        try {
+          result = await pagesDm.actorBox(page, { member, ...params, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
         }
       } else {
         try {
