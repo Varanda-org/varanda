@@ -229,6 +229,7 @@ const {
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
+const { advertisedHeld } = require('./sparse-held')
 const { attachGroups } = require('./groups-net')
 const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
@@ -647,7 +648,7 @@ function mediaBinding (value) {
 // creator left for another reason (quota, its own drop).
 function groupBinding (value) {
   if (!isPlainObject(value)) return null
-  const { diary, group, seq, by, bound, issuer, cut, clearedFrom, clearedTo } = value
+  const { diary, group, seq, by, bound, issuer, cut, clearedFrom, clearedTo, unsureFrom, unsureTo } = value
   if (typeof diary !== 'string' || !HEX64.test(diary)) return null
   if (typeof group !== 'string' || !HEX64.test(group)) return null
   if (!Number.isSafeInteger(seq) || seq < 1) return null
@@ -657,14 +658,19 @@ function groupBinding (value) {
   if (out.bound === true && typeof issuer === 'string' && HEX64.test(issuer)) out.issuer = issuer
   // A writer its diary cut is kept below `cut` and, in [clearedFrom,
   // clearedTo), only its leaves and key blocks (_cutGroupCore); cut 0 is a
-  // released writer's stub. A range that does not fit the cut reads as
-  // nothing cleared yet.
+  // stub. A range that does not fit the cut reads as nothing cleared yet.
+  // [unsureFrom, unsureTo) inside it was read from sparse peers only and is
+  // read again; one that does not fit reads as read whole.
   if (Number.isSafeInteger(cut) && cut >= 0) {
     const below = keptBelow(cut)
     const fits = Number.isSafeInteger(clearedFrom) && Number.isSafeInteger(clearedTo) && below <= clearedFrom && clearedFrom <= clearedTo
     out.cut = cut
     out.clearedFrom = fits ? clearedFrom : below
     out.clearedTo = fits ? clearedTo : below
+    if (fits && Number.isSafeInteger(unsureFrom) && Number.isSafeInteger(unsureTo) && clearedFrom <= unsureFrom && unsureFrom < unsureTo && unsureTo <= clearedTo) {
+      out.unsureFrom = unsureFrom
+      out.unsureTo = unsureTo
+    }
   }
   return out
 }
@@ -979,6 +985,24 @@ function keptPastCut (raw) {
 // Blocks past a cut read per step of _cutGroupCore: what a seeder stores
 // beyond what it keeps stays within one chunk.
 const CUT_CHUNK = 256
+// A chunk past a cut whose fetch has not ended is checked against what its
+// peers advertise (_groupPastRange): soon, then less often while a peer is
+// connected; a peer joining checks it again at once.
+const CUT_POLL_MIN_MS = 100
+const CUT_POLL_MAX_MS = 2000
+// A range past a cut that sparse peers only fed (binding unsureFrom,
+// unsureTo) is read again (_cutGroupCore): REREAD_PEER_MS after a peer
+// joins, so that it has synced, and at intervals growing from
+// REREAD_MIN_MS to REREAD_MAX_MS, until a pass reads each chunk whole.
+const REREAD_PEER_MS = 1000
+const REREAD_MIN_MS = 1000
+const REREAD_MAX_MS = 5 * 60 * 1000
+
+// Widens range { from, to } (null: none) to cover [from, to).
+function widen (range, from, to) {
+  if (range === null) return { from, to }
+  return { from: Math.min(range.from, from), to: Math.max(range.to, to) }
+}
 
 // The held blocks of [from, to) a cut keeps, as [seq, bytes], and the runs
 // [start, end) of the others, to clear.
@@ -4264,6 +4288,8 @@ class Seeder {
       delete b.cut
       delete b.clearedFrom
       delete b.clearedTo
+      delete b.unsureFrom
+      delete b.unsureTo
     } else {
       const below = keptBelow(cut)
       if (old === null) {
@@ -4273,6 +4299,13 @@ class Seeder {
         b.clearedFrom = Math.max(b.clearedFrom, below)
         b.clearedTo = Math.max(b.clearedTo, b.clearedFrom)
       }
+      if (Number.isSafeInteger(b.unsureFrom)) {
+        b.unsureFrom = Math.max(b.unsureFrom, b.clearedFrom)
+        if (b.unsureFrom >= b.unsureTo) {
+          delete b.unsureFrom
+          delete b.unsureTo
+        }
+      }
       b.cut = cut
     }
     this._persist().catch(noop)
@@ -4280,6 +4313,8 @@ class Seeder {
     if (!entry || entry.dropped) return
     entry.cut = cut
     entry.cutConfirmed = true
+    entry.rereadAt = null
+    entry.rereadLeft = null
     entry.belowBytes = 0
     entry.belowCounted = 0
     for (const [i, bytes] of entry.keptPast) {
@@ -4666,7 +4701,10 @@ class Seeder {
       // the cut counted so far (`belowCounted` of them), `counted` once the
       // range read was read again in this serve, `past` the fetch of blocks
       // past the cut being read, `cutting`, `cutAgain` and `wake` one pass at
-      // a time.
+      // a time. A read again of the binding's unsure range (`reread` asked,
+      // `rereadAt` the next chunk, `rereadLeft` the chunks still read from
+      // sparse peers only in this pass) runs at `rereadTimer`, backing off
+      // by `rereadDelay`.
       cut,
       cutConfirmed: !restored,
       keptPast: new Map(),
@@ -4677,7 +4715,12 @@ class Seeder {
       past: null,
       cutting: false,
       cutAgain: false,
-      wake: null
+      wake: null,
+      reread: false,
+      rereadAt: null,
+      rereadLeft: null,
+      rereadTimer: null,
+      rereadDelay: REREAD_MIN_MS
     }
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
@@ -4689,14 +4732,24 @@ class Seeder {
     const onDownload = (index) => {
       if (entry.cut !== null && index < keptBelow(entry.cut) && core.byteLength > this.maxLogBytes) this._cutGroupCore(key, entry)
     }
+    // A peer that joins may hold what sparse peers did not.
+    const onPeer = () => {
+      if (entry.dropped || this._closing) return
+      entry.rereadDelay = REREAD_MIN_MS
+      this._armReread(key, entry, REREAD_PEER_MS)
+    }
     core.on('append', checkQuota)
     core.on('download', onDownload)
+    core.on('peer-add', onPeer)
     entry.stopQuota = () => {
       core.off('append', checkQuota)
       core.off('download', onDownload)
+      core.off('peer-add', onPeer)
       try {
         if (entry.past) entry.past.range.destroy()
       } catch {}
+      if (entry.rereadTimer !== null) clearTimeout(entry.rereadTimer)
+      entry.rereadTimer = null
       if (entry.wake !== null) entry.wake()
     }
     entry.stopFork = watchFork(core, (reason) => this._dropGroup(key, reason))
@@ -4708,6 +4761,7 @@ class Seeder {
     this._groupServed.set(key, entry)
     checkQuota()
     if (entry.dropped) return
+    this._armReread(key, entry, REREAD_MIN_MS)
     this._scanRoot(key, entry)
     // A peer that served block 0 to the quarantine and then withholds it
     // from the main store must not keep the group's answers incomplete
@@ -4747,7 +4801,10 @@ class Seeder {
   }
 
   // Waits for blocks [from, to) of a cut writer, fetched by one range kept
-  // across passes: true once all are local, false when another pass was
+  // across passes: 'done' once all are local; 'sparse' once every block of
+  // it a connected peer advertises is (sparse-held.js advertisedHeld), as
+  // when its only sources keep it sparse themselves (another seeder past
+  // the same cut), whose fetch would never end; null when another pass was
   // asked for first or the fetch ended without them.
   async _groupPastRange (entry, from, to) {
     let p = entry.past
@@ -4764,16 +4821,57 @@ class Seeder {
       entry.past = q
       p = q
     }
-    if (!p.done && !p.failed) {
-      await new Promise((resolve) => {
-        entry.wake = resolve
-        p.settled.then(resolve)
+    const core = entry.core
+    let delay = CUT_POLL_MIN_MS
+    let held = null
+    while (!p.done && !p.failed) {
+      if (await advertisedHeld(core, to, from)) {
+        held = (await core.has(from, to)) ? 'done' : 'sparse'
+        break
+      }
+      if (p.done || p.failed) break
+      let timer = null
+      let onPeer = null
+      const why = await new Promise((resolve) => {
+        entry.wake = () => resolve('wake')
+        p.settled.then(() => resolve('settled'))
+        onPeer = () => resolve('peer')
+        core.on('peer-add', onPeer)
+        if (core.peers.length > 0) timer = setTimeout(() => resolve('tick'), delay)
       })
       entry.wake = null
+      core.off('peer-add', onPeer)
+      if (timer !== null) clearTimeout(timer)
+      if (why === 'wake') break
+      delay = why === 'tick' ? Math.min(delay * 2, CUT_POLL_MAX_MS) : CUT_POLL_MIN_MS
     }
-    if (!p.done) return false
+    if (p.done) held = 'done'
+    if (held === null) return null
+    // Its blocks no peer advertised would otherwise come later, past the
+    // read, and stay.
+    if (!p.done) {
+      try {
+        p.range.destroy()
+      } catch {}
+    }
     if (entry.past === p) entry.past = null
-    return true
+    return held
+  }
+
+  // Arms the next read again of writer K's unsure range in `delay` ms (none
+  // without one), replacing any armed before.
+  _armReread (key, entry, delay) {
+    if (entry.rereadTimer !== null) clearTimeout(entry.rereadTimer)
+    entry.rereadTimer = null
+    const b = this._groups.get(key)
+    if (entry.dropped || this._closing || !b || !Number.isSafeInteger(b.unsureFrom)) return
+    entry.rereadTimer = setTimeout(() => {
+      entry.rereadTimer = null
+      if (entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+      entry.reread = true
+      this._cutGroupCore(key, entry)
+    }, delay)
+    if (entry.rereadTimer.unref) entry.rereadTimer.unref()
   }
 
   // A writer its diary cut (docs/protocol.md section 10) keeps its blocks
@@ -4784,8 +4882,12 @@ class Seeder {
   // they are one of those (Hypercore keeps the tree nodes the proofs of the
   // kept blocks need). A chunk is listed as read before its blocks go: after
   // a crash in between, the next serve reads the range again and clears
-  // what it still holds beyond the kept blocks. The quota counts what is
-  // kept. One pass at a time; growth or a new cut during a pass runs another.
+  // what it still holds beyond the kept blocks. A chunk read from sparse
+  // peers only (_groupPastRange 'sparse') joins the binding's unsure range,
+  // read again chunk by chunk once a peer joins and at growing intervals:
+  // a leave or key block those peers lacked comes from a fuller one, and a
+  // chunk read whole leaves the range. The quota counts what is kept. One
+  // pass at a time; growth or a new cut during a pass runs another.
   _cutGroupCore (key, entry) {
     if (entry.cutting) {
       entry.cutAgain = true
@@ -4838,39 +4940,75 @@ class Seeder {
         }
         if (!entry.cutConfirmed) return
         // A lower cut first reads down from the range already read, so that
-        // range stays one piece; then up to the signed length.
+        // range stays one piece; then up to the signed length; then, when
+        // asked, the unsure range again.
         const end = Math.min(core.length, MAX_LOG_BLOCKS)
         const down = b.clearedFrom > below
+        const unsure = Number.isSafeInteger(b.unsureFrom)
         let from
         let to
+        let again = false
         if (down) {
           from = Math.max(below, b.clearedFrom - CUT_CHUNK)
           to = b.clearedFrom
         } else if (b.clearedTo < end) {
           from = b.clearedTo
           to = Math.min(end, from + CUT_CHUNK)
+        } else if (entry.reread && unsure) {
+          again = true
+          from = entry.rereadAt === null ? b.unsureFrom : Math.max(entry.rereadAt, b.unsureFrom)
+          to = Math.min(b.unsureTo, from + CUT_CHUNK)
         } else {
+          entry.reread = false
           return
         }
-        const held = await this._groupPastRange(entry, from, to)
+        const res = from < to ? await this._groupPastRange(entry, from, to) : 'done'
         if (moved()) continue
-        if (!held) {
+        if (res === null) {
           if (entry.cutAgain) continue
           return
         }
         const { keep, clear } = await cutRange(core, from, to)
         if (moved()) continue
-        if (down) b.clearedFrom = from
-        else b.clearedTo = to
-        try {
-          await this._persist()
-        } catch (err) {
-          entry.counted = false
-          throw err
-        }
-        if (moved()) {
-          entry.counted = false
-          continue
+        if (again) {
+          if (res === 'sparse') entry.rereadLeft = widen(entry.rereadLeft, from, to)
+          entry.rereadAt = to
+          if (to >= b.unsureTo) {
+            const left = entry.rereadLeft
+            if (left === null) {
+              delete b.unsureFrom
+              delete b.unsureTo
+            } else {
+              b.unsureFrom = left.from
+              b.unsureTo = left.to
+            }
+            entry.reread = false
+            entry.rereadAt = null
+            entry.rereadLeft = null
+            entry.rereadDelay = Math.min(entry.rereadDelay * 2, REREAD_MAX_MS)
+            this._armReread(key, entry, entry.rereadDelay)
+            this._persist().catch(noop)
+          }
+        } else {
+          if (down) b.clearedFrom = from
+          else b.clearedTo = to
+          if (res === 'sparse') {
+            const u = widen(unsure ? { from: b.unsureFrom, to: b.unsureTo } : null, from, to)
+            b.unsureFrom = u.from
+            b.unsureTo = u.to
+            if (entry.rereadAt !== null) entry.rereadLeft = widen(entry.rereadLeft, from, to)
+            if (!unsure) this._armReread(key, entry, entry.rereadDelay)
+          }
+          try {
+            await this._persist()
+          } catch (err) {
+            entry.counted = false
+            throw err
+          }
+          if (moved()) {
+            entry.counted = false
+            continue
+          }
         }
         for (const [start, end] of clear) await core.clear(start, end)
         if (moved()) {

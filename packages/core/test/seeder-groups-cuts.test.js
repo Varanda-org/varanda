@@ -8,7 +8,8 @@
 
 const test = require('brittle')
 const b4a = require('b4a')
-const { testnet, until } = require('./helpers/net')
+const { testnet, until, localSwarmOptions } = require('./helpers/net')
+const { createSwarm, attachAdmission } = require('../lib/net')
 const { liveGroupJoins, groupWalkStep, groupWalkCut } = require('../lib/seeder')
 const {
   groupJoinRecord,
@@ -570,4 +571,68 @@ test('a boxless writer of a private group its diary released is kept as a stub; 
   t.ok(second.seeder._groupServed.get(N), 'N served at ready')
   t.absent(second.events.some((e) => e.event === 'group-rejected' && e.key === N), 'not purged')
   t.is(first.events.filter((e) => e.event === 'fatal').length + second.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a seeder fed only by a seeder that keeps a writer sparse reads past cut + 256, then reads it again once a fuller peer joins (#350)', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const first = prepareSeederDir(t, assoc)
+  const one = await startSeeder(t, bootstrap, first.dataDir, { associationKey: assoc.hex })
+
+  // W: header, five posts, 300 more, a leave and one more post; cut at 3,
+  // so the leave sits past the first chunk read after the cut.
+  const { A, B, R, W } = await cutWorld(t, bootstrap, assoc)
+  const posts = []
+  for (let i = 0; i < 300; i++) posts.push(b4a.from(JSON.stringify(groupPost({ text: 'mais ' + i }))))
+  await B.cores.w.append(posts)
+  const leaveAt = B.cores.w.length
+  await B.cores.w.append(b4a.from(JSON.stringify(groupLeave({ cuts: [{ writer: W, seq: leaveAt }] }))))
+  await B.cores.w.append(b4a.from(JSON.stringify(groupPost({ text: 'depois da saída' }))))
+  const length = B.cores.w.length
+  t.ok(leaveAt >= 3 + 256, 'the leave is past the first chunk')
+  await B.diary.append(groupCutRecord({ group: R, writer: W, cut: 3 }))
+  await admit(A, assoc)
+  await admit(B, assoc)
+  await admitted(one.events, W)
+  const e1 = one.seeder._groupServed.get(W)
+  await until(async () => e1.cut === 3 && !e1.cutting && one.seeder._groups.get(W).clearedTo === length && (await blocksHeld(e1.core, 0, length)).length === 4, { name: 'W esparso no primeiro semeador' })
+  t.alike(await blocksHeld(e1.core, 0, length), [0, 1, 2, leaveAt], 'the first seeder keeps W below its cut and its leave')
+  t.absent('unsureFrom' in readGroups(first.dataDir)[W], 'read whole from its owner')
+
+  // B goes: a second seeder reads W from the first only, which holds
+  // nothing of the first chunk past the cut. A carries B's diary to it (the
+  // gate fetches a diary from its announcer), never W.
+  const carried = A.store.get({ key: B.diary.key })
+  await carried.ready()
+  await carried.download({ start: 0, end: B.diary.length }).done()
+  await B.swarm.destroy()
+  const second = prepareSeederDir(t, assoc)
+  const two = await startSeeder(t, bootstrap, second.dataDir, { associationKey: assoc.hex })
+  const twoKey = hex(two.seeder.swarm.keyPair.publicKey)
+  const peer = await until(() => A.peers.find((p) => p.remoteRole === 'seeder' && p.peerKey === twoKey), { name: 'segundo semeador' })
+  peer.send({ type: 'announce', key: A.key, cert: A.certOf(A.key) })
+  peer.send({ type: 'announce', key: B.key, cert: B.certOf(B.key) })
+  await admitted(two.events, W)
+  const e2 = two.seeder._groupServed.get(W)
+  await until(async () => !e2.cutting && two.seeder._groups.get(W).clearedTo === length && await e2.core.has(leaveAt), { name: 'W lido do primeiro semeador', timeoutMs: 60000 })
+  t.alike(await blocksHeld(e2.core, 0, length), [0, 1, 2, leaveAt], 'the second seeder keeps the leave too')
+  t.is(e2.keptPast.size, 1, 'and counts it toward the quota')
+  const listed = readGroups(second.dataDir)[W]
+  t.alike([listed.unsureFrom, listed.unsureTo], [3, length], 'the range read from sparse peers only is listed as such')
+
+  // B comes back with W whole: the range is read again, each chunk whole,
+  // and what is not kept is cleared again.
+  const back = createSwarm(localSwarmOptions(bootstrap))
+  t.teardown(() => back.destroy(), { force: true })
+  back.on('connection', (socket) => {
+    socket.on('error', () => {})
+    B.store.replicate(socket)
+    attachAdmission(socket, { role: 'member', have: [] })
+  })
+  back.joinPeer(b4a.from(twoKey, 'hex'))
+  await until(() => !('unsureFrom' in two.seeder._groups.get(W)) && !e2.cutting, { name: 'W relido inteiro', timeoutMs: 60000 })
+  t.alike(await blocksHeld(e2.core, 0, length), [0, 1, 2, leaveAt], 'what it read again past the cut is cleared again')
+  t.absent('unsureFrom' in readGroups(second.dataDir)[W], 'and the range is listed as read whole')
+  t.is(one.events.filter((e) => e.event === 'fatal').length + two.events.filter((e) => e.event === 'fatal').length, 0)
 })
