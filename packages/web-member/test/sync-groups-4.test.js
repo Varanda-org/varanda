@@ -12,7 +12,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
-const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const { createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { groupJoinRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const store = require('../lib/node-store')
@@ -84,13 +84,15 @@ async function seederCore (t, seeder, name, raw) {
 
 // A's community and its Geral G, with member B; one core per kind of stub
 // in the seeder's store, each joined to G by B's diary and listed with it.
-// R, a member of G too, has fetched none of them.
-async function stubWorld (t, kinds = Object.keys(HEADS)) {
+// R, a member of G too, has fetched none of them. With `issuer` (a key
+// pair), B's certificate comes from that issuer.
+async function stubWorld (t, kinds = Object.keys(HEADS), { issuer = null } = {}) {
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
   const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
   const a = await member(assocKp, 'Ana')
-  const b = await member(assocKp, 'Bia')
+  const issCert = issuer === null ? null : createIssuerCert({ issuer: hex(issuer.publicKey) }, assocKp)
+  const b = await member(assocKp, 'Bia', issuer === null ? null : (key) => createIssuedCert({ member: key }, issuer, issCert))
   const c = await member(assocKp, 'Caio')
   const r = await member(assocKp, 'Rui')
   // The seeder's own gate refuses these joins and purges the cores (it lists
@@ -266,7 +268,7 @@ test('an identity reset clears kv headerStubs (#350)', async (t) => {
 
 test('a group root first held as a stub of another group leaves the record once gated as its root, and a record alone never purges it at start, where a block past 0 keeps the record (#350)', async (t) => {
   t.timeout(300000)
-  const { seeder, url, a, b, r, community, group, skip } = await stubWorld(t, [])
+  const { seeder, url, a, b, c, r, community, group, skip } = await stubWorld(t, [])
   // A's group G2 of the community, with a post; B's diary joins its root K
   // to G as well.
   const { group: k } = await ops.groupCreate(a.ctx, { name: 'Outro', join: 'open', community })
@@ -299,17 +301,27 @@ test('a group root first held as a stub of another group leaves the record once 
   t.ok((await once(r, url, [])).ok, 'R\'s second run ends ok')
   t.alike(await heldCopy(r, k), full, 'then gated as G2\'s root and fetched in full')
   t.alike(await recorded(r), {}, 'and it leaves the record')
-  // A record left by an earlier run, naming a diary R never held; offline,
-  // so nothing purged here could be fetched again. A block past 0 held
-  // proves nothing (a peer's listing may have made R store one): the core
-  // is not purged, and the record stays, across restarts.
-  const nobody = hex(crypto.randomBytes(32))
-  await r.storage.writeJson('headerStubs', { v: 1, stubs: [{ key: k, group, diary: nobody }] })
+  // A record left by an earlier run, naming C's diary, which R holds and
+  // which never joined K; offline, so nothing purged here could be fetched
+  // again. A block past 0 held proves nothing (a peer's listing may have
+  // made R store one): the core is not purged, and the record stays,
+  // across restarts.
+  t.ok(await store.replicaExists(r.storage, c.ownHex), 'R holds C\'s diary')
+  await r.storage.writeJson('headerStubs', { v: 1, stubs: [{ key: k, group, diary: c.ownHex }] })
   for (const run of ['first', 'second']) {
     await once(r, 'ws://127.0.0.1:9', [], { timeoutMs: 5000 })
     t.alike(await heldCopy(r, k), full, run + ' restart: a core held past block 0 is kept in full')
-    t.alike(await recorded(r), { [k]: nobody }, run + ' restart: and keeps its record')
+    t.alike(await recorded(r), { [k]: c.ownHex }, run + ' restart: and keeps its record')
   }
+  // One naming a diary R does not hold goes with its record: live under
+  // that pair, it would open an empty replica of that diary every run.
+  const nobody = hex(crypto.randomBytes(32))
+  await r.storage.writeJson('headerStubs', { v: 1, stubs: [{ key: k, group, diary: nobody }] })
+  await once(r, 'ws://127.0.0.1:9', [], { timeoutMs: 5000 })
+  t.is(await heldCopy(r, k), null, 'a core held past block 0 under a diary not stored is purged')
+  t.alike(await recorded(r), {}, 'with its record')
+  t.absent(await store.replicaExists(r.storage, nobody), 'and no replica of that diary is opened')
+  t.absent((await store.readGroupDiaries(r.storage)).includes(nobody), 'nor listed')
 })
 
 test('a core stored before its gate is a header stub only when kv headerStubs records it (#350)', async (t) => {
@@ -373,4 +385,147 @@ test('a block of the diary that proved a stub stored before this run purges the 
   t.alike(skips(ev, x.key), ['blocked'], 'for the blocked diary that proved it')
   t.absent(await store.groupCoreExists(r.storage, x.key), 'no other diary or role holds it: it is purged in this run')
   t.alike(await recorded(r), {}, 'and its record goes with it')
+})
+
+// Every writer page of `group` with `extra.items` added, which a test
+// changes between runs.
+function extraWriters (seeder, group) {
+  const extra = { items: [] }
+  const real = seeder.groupWriters.bind(seeder)
+  seeder.groupWriters = (q) => {
+    const page = real(q)
+    if (q.group !== group) return page
+    return { ...page, items: sorted([...page.items, ...extra.items]) }
+  }
+  return extra
+}
+
+test('a recorded stub live under another pair stays held when the diary its record names is blocked: only the record goes (#350)', async (t) => {
+  t.timeout(300000)
+  const { seeder, url, b, c, r, group, stubs, assocKp } = await stubWorld(t, ['undecodable'])
+  const x = stubs.undecodable
+  // C's diary joins the stub to G too, and B's joins it to a group R does
+  // not sync.
+  const other = hex(crypto.randomBytes(32))
+  await bind(c, group, x.key)
+  await bind(b, other, x.key)
+  // B's run waits for a root of G2 no seeder holds: it ends at its
+  // deadline, its diary pushed.
+  await once(b, url, [], { timeoutMs: 10000 })
+  t.ok((await once(c, url, [])).ok, 'C pushed the join')
+  const extra = extraWriters(seeder, group)
+  extra.items = [x]
+  t.ok((await once(r, url, [])).ok, 'R\'s first run ends ok')
+  t.alike(await recorded(r), { [x.key]: x.diary }, 'held as a stub of (G, B)')
+  const bd = await store.openReplica(r.storage, b.ownHex)
+  try {
+    t.ok((await store.readAll(bd)).some((e) => e.record.type === 'group-join' && e.record.group === other && e.record.writer === x.key), 'R holds B\'s join of the stub to G2')
+  } finally {
+    await bd.close()
+  }
+  // Its record now names (G2, B): the stub rests at start, and C's listing
+  // gates it again, live under (G, C).
+  await r.storage.writeJson('headerStubs', { v: 1, stubs: [{ key: x.key, group: other, diary: b.ownHex }] })
+  extra.items = [{ key: x.key, diary: c.ownHex, length: 2, seq: await joinSeq(c, group, x.key) }]
+  const ev = []
+  const lent = lender()
+  const ac = new AbortController()
+  const run = sync(r, url, ev, { signal: ac.signal, groupPageMs: 300, reader: lent.reader })
+  try {
+    await until(() => lent.held(x.key) !== null, { name: 'the stub live under (G, C)', timeoutMs: 60000 })
+    await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [b.ownHex] }), null)
+    await until(async () => !(x.key in await recorded(r)), { name: 'the record goes', timeoutMs: 60000 })
+    // A later snapshot sweeps B's cores again: the stub is no longer B's.
+    await seeder._offerBlocklist(moderatorSnapshot(assocKp, { seq: 2, blocked: [b.ownHex] }), null)
+    await until(async () => (await store.readBlocklist(r.storage)).snapshot.seq === 2, { name: 'the second snapshot adopted', timeoutMs: 60000 })
+    t.ok(lent.held(x.key) !== null, 'still held during the run')
+  } finally {
+    ac.abort()
+    await run
+  }
+  t.alike(skips(ev, x.key), [], 'never refused')
+  t.alike(await heldCopy(r, x.key), { length: 2, contiguous: 1, held: [0] }, 'kept, block 0 alone')
+  t.alike(await recorded(r), {}, 'and its record is gone')
+})
+
+test('a recorded stub no entry of the run holds is purged in the run when the diary that proved it is blocked (#350)', async (t) => {
+  t.timeout(300000)
+  const { seeder, url, b, r, group, stubs, assocKp, wb } = await stubWorld(t, ['undecodable'])
+  const x = stubs.undecodable
+  const extra = extraWriters(seeder, group)
+  extra.items = [x]
+  t.ok((await once(r, url, [])).ok, 'R\'s first run ends ok')
+  t.alike(await recorded(r), { [x.key]: x.diary }, 'held as a stub of (G, B)')
+  // Unlisted and no longer paged: the next run opens no entry for it, and
+  // only its record names it.
+  await store.removeGroupReplica(r.storage, x.key)
+  extra.items = []
+  const ev = []
+  const lent = lender()
+  const ac = new AbortController()
+  const run = sync(r, url, ev, { signal: ac.signal, groupPageMs: 300, reader: lent.reader })
+  try {
+    await until(() => lent.held(wb) !== null, { name: 'the run under way', timeoutMs: 60000 })
+    t.is(lent.held(x.key), null, 'the stub is not opened')
+    await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [b.ownHex] }), null)
+    await until(() => skips(ev, x.key).length > 0, { name: 'the stub purged', timeoutMs: 30000 })
+  } finally {
+    ac.abort()
+    await run
+  }
+  t.alike(skips(ev, x.key), ['blocked'], 'for the blocked diary that proved it')
+  t.absent(await store.groupCoreExists(r.storage, x.key), 'purged in this run')
+  t.alike(await recorded(r), {}, 'with its record')
+})
+
+test('a revoked issuer of the diary that proved a stub stored in this run purges the stub with its record (#350)', async (t) => {
+  t.timeout(300000)
+  const issuer = crypto.keyPair()
+  const { seeder, url, r, group, stubs, assocKp } = await stubWorld(t, ['undecodable'], { issuer })
+  const x = stubs.undecodable
+  injectWriters(seeder, group, [x])
+  const ev = []
+  const lent = lender()
+  const ac = new AbortController()
+  const run = sync(r, url, ev, { signal: ac.signal, groupPageMs: 300, reader: lent.reader })
+  try {
+    await until(() => lent.held(x.key) !== null, { name: 'the stub held', timeoutMs: 60000 })
+    await seeder._offerBlocklist(moderatorSnapshot(assocKp, { revokedIssuers: [hex(issuer.publicKey)] }), null)
+    await until(() => skips(ev, x.key).length > 0, { name: 'the stub leaves the table', timeoutMs: 60000 })
+  } finally {
+    ac.abort()
+    await run
+  }
+  t.alike(skips(ev, x.key), ['revoked-issuer'], 'once, for the revoked diary that proved it')
+  t.absent(await store.groupCoreExists(r.storage, x.key), 'held for that listing alone, it is purged')
+  t.alike(await recorded(r), {}, 'and its record goes with it')
+})
+
+test('a blocked group purges its header stubs, stored before this run or in it, with their records (#350)', async (t) => {
+  t.timeout(300000)
+  const { seeder, url, r, group, stubs, assocKp } = await stubWorld(t, ['undecodable', 'invalid'])
+  const before = stubs.undecodable
+  const now = stubs.invalid
+  const extra = extraWriters(seeder, group)
+  extra.items = [before]
+  t.ok((await once(r, url, [])).ok, 'R\'s first run ends ok')
+  t.alike(await recorded(r), { [before.key]: before.diary }, 'one held as a stub of (G, B)')
+  extra.items = [before, now]
+  const ev = []
+  const lent = lender()
+  const ac = new AbortController()
+  const run = sync(r, url, ev, { signal: ac.signal, groupPageMs: 300, reader: lent.reader })
+  try {
+    await until(() => lent.held(before.key) !== null && lent.held(now.key) !== null, { name: 'both stubs held', timeoutMs: 60000 })
+    await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [group] }), null)
+    await until(() => skips(ev, before.key).length > 0 && skips(ev, now.key).length > 0, { name: 'both stubs leave the table', timeoutMs: 60000 })
+  } finally {
+    ac.abort()
+    await run
+  }
+  for (const [name, x] of [['stored before this run', before], ['stored in this run', now]]) {
+    t.alike(skips(ev, x.key), ['blocked'], name + ': refused for the blocked group')
+    t.absent(await store.groupCoreExists(r.storage, x.key), name + ': purged')
+  }
+  t.alike(await recorded(r), {}, 'and their records go with them')
 })

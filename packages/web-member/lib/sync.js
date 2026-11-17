@@ -3931,7 +3931,8 @@ async function syncRun ({
       // alone never purges the root of a group of kv groupWriters or a
       // writer its header's diary joined (beyondStub): the record goes, and
       // the core is read below by its own header. One holding a block past
-      // 0 keeps its record and is not purged for a missing join.
+      // 0 keeps its record and is not purged for a missing join while the
+      // diary that proved it is stored here.
       const rec = headerStubs.get(key)
       if (rec !== undefined && raw !== null && core.fork === 0) {
         const beyond = await beyondStub(key, core, raw, writers, bindings)
@@ -4062,9 +4063,12 @@ async function syncRun ({
       }
       // A header or member stub stays only while the stored replica of the
       // diary that proved it still holds that join; otherwise it goes. A
-      // header stub holding a block past 0 is not purged for that.
+      // header stub holding a block past 0 is not purged for that while
+      // that diary is stored here: live under a diary not stored, it would
+      // open an empty replica of it every run.
       if (s.headerStub === true || s.memberStub === true) {
-        if (s.held === true || storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.key).proven) s.stub = true
+        if (storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.key).proven) s.stub = true
+        else if (s.held === true && await diaryStored(s.diary)) s.stub = true
         else s.invalid = true
       }
       if (s.invalid === true) {
@@ -4146,6 +4150,17 @@ async function syncRun ({
     if (h !== null && h.group !== key && writers.some((e) => e.group === h.group) && !ending &&
       storedJoinProof(await bindingEntries(h.diary, cache), h.group, key).proven) return 'joined'
     return past ? 'held' : false
+  }
+
+  // Whether diary d is stored here; true when that cannot be read, so a
+  // read error never purges.
+  async function diaryStored (d) {
+    if (d === ownHex) return true
+    try {
+      return await store.replicaExists(storage, d)
+    } catch {
+      return true
+    }
   }
 
   function dropStubRecord (key) {
@@ -4490,51 +4505,78 @@ async function syncRun ({
   // reviewed at once, as at start: the stub goes, with its record, unless
   // it is the root of a group of kv groupWriters or a writer its header's
   // diary joined (the record then goes alone). A block past 0 held proves
-  // nothing here.
+  // nothing here. One pass reads each diary at most once.
   function reviewStubRecords (match, reason) {
     const due = [...headerStubs.values()].filter(match)
     if (due.length === 0) return
+    const cache = new Map()
     track((async () => {
       for (const x of due) {
         if (ending) return
-        await reviewStubRecord(x, reason)
+        await reviewStubRecord(x, reason, cache)
       }
     })(), noop, noop)
   }
 
-  async function reviewStubRecord (x, reason) {
+  async function reviewStubRecord (x, reason, cache) {
     if (headerStubs.get(x.key) !== x) return
-    const kept = !isBlockedKey(x.key) && await provenBeyondStub(x.key)
+    const kept = !isBlockedKey(x.key) && await provenBeyondStub(x.key, cache)
     if (ending || headerStubs.get(x.key) !== x) return
     const ge = groupCores.get(x.key)
+    // A gate in flight rules on the key first: the record is left to the
+    // next start. One in regate with no head is being admitted under the
+    // pair its block 0 names, which drops the record.
+    if (ge !== undefined && (ge.state === 'pending' || (ge.state === 'regate' && ge.head === null))) return
     const live = ge !== undefined && (ge.state === 'active' || ge.state === 'regate')
-    if (kept) {
+    // Live under another (group, diary): that pair holds it, so the verdict
+    // on the record's pair takes the record (and its slot) alone. Its stale
+    // resting entry goes too, or a later sweep of that diary would purge it.
+    const elsewhere = live && (ge.group !== x.group || ge.diary !== x.diary)
+    if (kept || elsewhere) {
       dropStubRecord(x.key)
-      if (live && ge.head !== null && ge.group === x.group && ge.diary === x.diary) failGroupEntry(ge, reason, { purge: false })
+      if (elsewhere) restingCores.delete(x.key)
+      else if (live && ge.head !== null) failGroupEntry(ge, reason, { purge: false })
       return
     }
-    if (live) failGroupEntry(ge, reason, { purge: true, review: true })
-    else if (ge !== undefined && ge.state === 'failed' && ge.kept === true) purgeKeptEntry(ge, reason)
-    else if (restingCores.has(x.key)) purgeResting(x.key, reason)
+    if (live) {
+      if (ge.head !== null) failGroupEntry(ge, reason, { purge: true, review: true })
+    } else if (ge !== undefined && ge.state === 'failed' && ge.kept === true) {
+      purgeKeptEntry(ge, reason)
+    } else if (restingCores.has(x.key)) {
+      purgeResting(x.key, reason)
+    } else {
+      // Held by nothing in this run (its stub left the table): the core
+      // and its record go now, as the core node does.
+      emit({ event: 'group-skipped', key: x.key, group: x.group, reason })
+      purgeGroupKey(x.key, reason)
+    }
   }
 
   // Whether recorded stub `key` is more than a stub here, as beyondStub at
   // start without its block-past-0 branch. Read from the live entry's block
   // 0: a resting stub is judged a stub.
-  async function provenBeyondStub (key) {
+  async function provenBeyondStub (key, cache) {
     const own = (g) => localGroups.has(g) || ownCommunities.has(g)
     if (own(key)) return true
     const ge = groupCores.get(key)
     const h = ge !== undefined && ge.raw0 ? groupHeaderOf(ge.raw0, key) : null
     if (h === null || h.group === key || !own(h.group)) return false
-    return storedJoinProof(await heldEntries(h.diary), h.group, key).proven
+    return storedJoinProof(await heldEntries(h.diary, cache), h.group, key).proven
   }
 
   // The entries of diary d as this device holds it, read through the core
   // already open for it (the own diary, a follow, a binding diary), else
-  // from the storage; null when not held or unreadable.
-  async function heldEntries (d) {
-    if (d === ownHex) return bindingEntries(d, new Map())
+  // from the storage; null when not held or unreadable. Read once per
+  // `cache` (a review pass).
+  async function heldEntries (d, cache) {
+    if (cache.has(d)) return cache.get(d)
+    const entries = await readHeldEntries(d, cache)
+    cache.set(d, entries)
+    return entries
+  }
+
+  async function readHeldEntries (d, cache) {
+    if (d === ownHex) return bindingEntries(d, cache)
     const f = follows.get(d)
     const gd = groupDiaries.get(d)
     if (f !== undefined || gd !== undefined) {
@@ -4546,7 +4588,7 @@ async function syncRun ({
         return null
       }
     }
-    return groupKv(() => follows.has(d) || groupDiaries.has(d) ? null : bindingEntries(d, new Map()))
+    return groupKv(() => follows.has(d) || groupDiaries.has(d) ? null : bindingEntries(d, cache))
   }
 
   function reconcileGroupDiaries () {
