@@ -17,7 +17,7 @@ Dobra (`packages/core/lib/group.js`):
 - `bindCores` aceita `heads` (`[{ key, entries }]`): o bloco 0 sozinho de um núcleo guardado que um diário ligou e cujo cabeçalho não nomeia esse diário. Esse bloco entra na junção com as outras cópias do núcleo (um bloco 0 diferente é bifurcação) e não conta nenhum escritor.
 - Um par (D, W) da caminhada não é mais esperado quando o bloco 0 de W, de qualquer cópia, não é cabeçalho de escritor válido ou nomeia outro grupo ou outro diário que não D. O bloco 0 é assinado pela chave de W, então nenhuma cópia faz um escritor cujo cabeçalho conta para (D, W) parecer descartado ali.
 - O `member` que não bate passou para antes da checagem da caixa: rejeita o escritor em qualquer corte, com a caixa batendo ou não.
-- `headerStubs(joins, firsts)` monta `heads` a partir do bloco 0 de cada núcleo guardado e do diário que um cabeçalho de escritor desta raiz nomeia. O carregador do nó core (`member.js` `readCoreParts`) e os do navegador (`member-ops.js` `foldGroup` e `foldCommunity`) passam `heads`.
+- `headerStubs(joins, firsts)` monta `heads` a partir do bloco 0 de cada núcleo guardado e do diário que um cabeçalho de escritor desta raiz nomeia. O carregador do nó core (`member.js` `readCoreParts`), os do navegador (`member-ops.js` `foldGroup` e `foldCommunity`) e o do serviço de conta (`pages-groups.js` `partsHeld`) passam `heads`.
 
 Nó core (`packages/core/lib/sync.js`, `store.js`, `admission.js`, `net.js`):
 
@@ -35,7 +35,12 @@ Nó do navegador (`packages/web-member/lib/sync.js`, `node-store.js`, `member-op
 - Partida: um toco registrado, e um escritor guardado cujo `member` não bate, ficam só enquanto o diário de ligação guardado prova a entrada (`storedJoinProof`); senão são apagados. A varredura de legado (`purgeLegacyGroupCores`) pula um toco registrado que não está em kv `groupWriters`.
 - O nó anuncia `CAP_HEADER_STUBS`.
 
-Protocolo (`docs/protocol.md`): `CAP_HEADER_STUBS` em "Capabilities"; o cabeçalho do escritor e o texto do `member`; a regra do escritor ausente em `buildGroup` (com `heads`); as regras (1), (3) e (4) de "Bad hints and bounds on memory" e a exceção do navegador; o item (3) de "Released writers whose box does not match"; o novo item "Header stubs"; as metas de conclusão; `header-stubs.json` e kv `headerStubs` em "Data-dir files"; a exceção na varredura de legado.
+Serviço de conta (`apps/cli/lib/account/pages-groups.js`):
+
+- `partsHeld` anota o bloco 0 de cada núcleo de escritor que já lê para a raiz (os da Página e os que o semeador lista), com o diário que um cabeçalho de escritor desta raiz nomeia, e passa `headerStubs(joins, firsts)` como `heads`, como `readCoreParts`. Não guarda tocos nem abre outro núcleo.
+- O caso que isso fecha: o semeador ainda lista um escritor W sob um diário B cujo certificado o serviço já recusa (o serviço lê a cada chamada as revogações publicadas pela moderação, e o semeador só as segue quando adota o snapshot novo), e outro diário aceito, A, liga W. W não entra em `writers`, porque B não é aceito, e antes a dobra esperava o par (A, W): a leitura do grupo voltava `incomplete` e a entrada de uma Página no grupo respondia `indisponivel`.
+
+Protocolo (`docs/protocol.md`): `CAP_HEADER_STUBS` em "Capabilities"; o cabeçalho do escritor e o texto do `member`; a regra do escritor ausente em `buildGroup` (com `heads`); as regras (1), (3) e (4) de "Bad hints and bounds on memory" e a exceção do navegador; o item (3) de "Released writers whose box does not match"; o novo item "Header stubs", com o carregador do serviço de conta no item (6); as metas de conclusão; `header-stubs.json` e kv `headerStubs` em "Data-dir files"; a exceção na varredura de legado.
 
 ## Como verificar
 
@@ -88,6 +93,16 @@ Nó do navegador (`packages/web-member/test/`):
 | `groups-e2e.test.js` | 2/2 | 94/94 |
 | `private-e2e.test.js` | 2/2 | 85/85 |
 
+Serviço de conta (`apps/cli/test/`, depois do merge):
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `pages-groups.test.js` (teste novo) | 8/8 | 184/184 |
+| `pages-groups-sparse.test.js` | 1/1 | 8/8 |
+| `account-pages-groups.test.js` | 1/1 | 49/49 |
+
+Depois do merge da `main` (`9d062303`: o conflito foi o bit 8, que a `main` deu a `CAP_PEER_PROOF`), rodaram de novo, sozinhos: no navegador, `sync-groups-4` (5/5, 75/75), `sync-groups-2` (29/29, 139/139), `sync-groups-3` (3/3, 43/43), `sync-gate` (15/15, 126/126), `group-ops` (64/64, 487/487), `private-ops` (24/24, 231/231) e `sync-prove` (11/11, 48/48, da `main`); no nó core, `sync-groups-8` (11/11, 55/55), `admission-caps` (11/11, 50/50), `sync-slots` (8/8, 27/27, da `main`) e `sync-private` (9/9, 44/44). As asserções de `sync-gate` variam com o número de anúncios `have` da corrida (o laço de "have ... covers only stored blocks"): 127 antes, 126 aqui.
+
 `npm run lint` passa. Não rodaram aqui: o `npm test` inteiro e o `npm run demo`.
 
 Os testes novos cobrem os casos a até e nos dois nós. No nó core, `sync-groups-8.test.js` cobre:
@@ -110,6 +125,8 @@ Os testes novos cobrem os casos a até e nos dois nós. No nó core, `sync-group
 - a cessão ao outro diário;
 - o bit;
 - a troca de identidade.
+
+No serviço de conta, o teste novo de `apps/cli/test/pages-groups.test.js` ("another diary's join of a listed writer whose diary the service refuses ...") monta o caso: o certificado de Bia vem de um emissor que o serviço revoga e o semeador não, o semeador lista o escritor de Bia sob o diário dela, e o diário de Ana liga esse escritor. O teste confere que a leitura do grupo fica inteira, que o post de Bia fica de fora e que a Página entra na comunidade e no grupo.
 
 ## Prova de regressão
 
@@ -156,6 +173,12 @@ Nó do navegador (`packages/web-member/test/sync-groups-4.test.js`, só o teste 
 - WC1, o nó do navegador não anuncia o bit: teste 4, a asserção 2 falha (1/2).
 - WR1, a troca de identidade não apaga kv `headerStubs` (`deleteGroupData`): teste 5, a asserção 2 falha (1/2).
 
+Serviço de conta (`apps/cli/lib/account/pages-groups.js`, `apps/cli/test/pages-groups.test.js`, só o teste novo):
+
+- Antes da correção (o teste rodou sobre o código sem `heads`): as asserções 1 ("the group reads whole") e 4 ("and the group: no join answers indisponivel") falham (2/4). A entrada na comunidade passa: só a dobra do grupo espera o escritor de Bia.
+- MS1, `partsHeld` não passa `heads` (`heads = []`): as mesmas asserções 1 e 4 falham (2/4).
+- MS2, o bloco 0 dos escritores listados não é anotado (só o dos escritores da Página): as mesmas asserções 1 e 4 falham (2/4).
+
 ## Decisões tomadas aqui
 
 - Todas as recusas de cabeçalho entram neste PR (escolha do mantenedor): os casos a até e, nos dois nós.
@@ -167,6 +190,7 @@ Nó do navegador (`packages/web-member/test/sync-groups-4.test.js`, só o teste 
 - O toco do caso (a) não é registrado: o cabeçalho nomeia o próprio par, então a partida o julga pelo diário que o cabeçalho nomeia, como qualquer escritor guardado.
 - A capacidade só é anunciada. Nenhum semeador a lê; o próximo PR faz o semeador listar tocos só para quem anuncia o bit.
 - O bit é 16: a `main` deu o 8 a `CAP_PEER_PROOF` (#738) antes do merge, e membro e semeador usam o mesmo espaço de bits no canal, então cada capacidade tem o seu.
+- O serviço de conta monta `heads` só com os núcleos que já lê, sem registro de tocos. O semeador local só lista escritores que passaram pelo veredito dele, então os casos b a e não chegam por ele. O caso (a), e um escritor cujo cabeçalho nomeia um diário que o serviço aceita, já entram inteiros em `writers`, e a dobra decide o par do outro diário pelo bloco 0 dessa cópia. Sobra o escritor listado sob um diário que o serviço recusa e o semeador ainda aceita, que é o caso coberto.
 - Asserções antigas que mudaram para a nova regra: em `packages/core/test/group.test.js`, um escritor e um CW com só um bloco 0 inválido não são mais esperados (`incomplete` passa a `false`); em `packages/core/test/sync-private.test.js`, o teste 7 (o escritor recusado pelo `member` não era testado de novo quando o diário o liberava) virou "a writer refused for its member is held as a stub, block 0 alone, once its diary's join is proven"; em `packages/core/test/sync-communities.test.js`, o teste 6 (um escritor com `member` sob uma comunidade era recusado) passou a esperar o toco.
 
 ## Riscos residuais e pontos em aberto
@@ -176,7 +200,7 @@ Nó do navegador (`packages/web-member/test/sync-groups-4.test.js`, só o teste 
 - No navegador, a listagem do par do cabeçalho vista enquanto o toco passava pelo portão (`renoteHeadStub`) não tem teste próprio; no nó core o caso tem teste (MG6).
 - No navegador, um escritor que passa pelo portão antes de o tipo da raiz ser conhecido não é julgado pelo `member` e baixa inteiro; a dobra o rejeita do mesmo jeito. Já era assim antes desta branch.
 - Lixo listado sob um diário que nenhum par serve agora espera o prazo do portão (15 s) antes de ser cobrado como timeout.
-- O carregador do serviço de conta (`apps/cli/lib/account/pages-groups.js`) não passa `heads`: uma Página com um escritor desses continua parcial ali.
+- No serviço de conta, o bloco 0 só vem de um escritor que o semeador local ainda lista e que o serviço lê. Um escritor listado sob um diário que o serviço bloqueia não é aberto (sai com o diário), e um que o semeador deixou de listar, depois de adotar o bloqueio ou a revogação, não é lido. A entrada de outro diário para ele continua deixando a dobra parcial ali, como a de qualquer escritor que nenhum semeador lista (sem mudança).
 - Uma caixa que não bate num escritor com corte maior que 0 continua esperada, como antes (fora do escopo).
 - `heldCatalogue` não mudou.
 - A política de cobrança de tocos listados por semeadores que anunciam o bit fica para o próximo PR.
