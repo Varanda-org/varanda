@@ -1973,6 +1973,10 @@ test('identity.recoveryLookup', (t) => {
   for (const c of ['', 'x'.repeat(65), 1, null]) bad(t, 'identity.recoveryLookup', { kind: 'code', code: c }, 'bad code')
   for (const s of ['CD'.repeat(32), 'cd'.repeat(31), '', null]) bad(t, 'identity.recoveryLookup', { kind: 'passkey', secret: s }, 'bad secret')
   bad(t, 'identity.recoveryLookup', { ...pk, member: KEY }, 'extra key')
+  ok(t, 'identity.recoveryLookup', { ...pk, withKey: true }, { ...pk, withKey: true })
+  ok(t, 'identity.recoveryLookup', { ...pk, withKey: false }, { ...pk, withKey: false })
+  bad(t, 'identity.recoveryLookup', { ...pk, withKey: 1 }, 'withKey not a boolean')
+  bad(t, 'identity.recoveryLookup', { ...code, withKey: true }, 'withKey with kind code')
   bad(t, 'identity.recoveryLookup', { secret: 'cd'.repeat(32) }, 'missing kind')
 })
 

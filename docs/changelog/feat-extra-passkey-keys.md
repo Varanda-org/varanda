@@ -1,0 +1,7 @@
+### Adicionado
+
+- Uma passkey adicionada em Ajustes › Passkeys e recuperação, ou na troca da passkey, também confirma Excluir conta na hora (parte da #444; PR `feat/extra-passkey-keys`). Depois do cadastro, o app pede a passkey que abriu a sessão, e o serviço de conta guarda a chave pública da passkey nova só com essa confirmação de uma passkey cuja chave ele já tem. A chave fica ligada à entrada de recuperação, só vale enquanto ela existe e sai quando ela é removida. Sem a confirmação (serviço antigo, cancelada, recusada, ou uma passkey criada com o código de recuperação), a exclusão confirmada só com ela continua agendada por 7 dias. A tela de adicionar passkey avisa para usar a passkey nova só com o app atualizado. `POST /account/passkey/start` só responde a lista de passkeys com `list: true`, então os apps antigos continuam lendo `{ nonce }`. O `passkeys.json` passa à versão 2 quando guarda a primeira chave de uma passkey adicionada; uma versão anterior do serviço não a lê (Excluir conta e o envio da chave respondem 503 até a versão nova voltar). Verificação em `docs/verification/feat-extra-passkey-keys.md`.
+
+### Alterado
+
+- Termos e Política de Privacidade na versão 81: descrevem a chave pública das passkeys adicionadas com confirmação, o que fica das entradas de recuperação depois de 30 dias (a chave pública da conta e um número de controle, sem prazo) e a consulta ao serviço de conta, só pela chave pública, ao entrar com uma passkey que o app não reconhece. Quem já aceitou vê o aceite de novo.

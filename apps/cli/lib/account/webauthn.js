@@ -235,6 +235,16 @@ function plainObject (o) {
   return o !== null && typeof o === 'object' && !Array.isArray(o) && Object.getPrototypeOf(o) === Object.prototype
 }
 
+const ASSERTION_KEYS = ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature']
+
+// The shape of an assertion in a request body (Excluir conta and the
+// enrolment of an extra passkey), before verifyAssertion decodes it.
+function isAssertion (a) {
+  return a !== null && typeof a === 'object' && !Array.isArray(a) &&
+    Object.keys(a).length === ASSERTION_KEYS.length &&
+    ASSERTION_KEYS.every((k) => typeof a[k] === 'string' && a[k].length > 0 && a[k].length <= 2048)
+}
+
 // A fresh assertion against a stored key. assertion = { credentialId,
 // clientDataJSON, authenticatorData, signature } (base64url); key = { alg,
 // spki (hex), signCount }; challenge = the Buffer the ceremony had to sign;
@@ -316,6 +326,7 @@ module.exports = {
   keyFromCose,
   keyFromAttestation,
   attestationHash,
+  isAssertion,
   verifyAssertion,
   passkeyOrigins
 }

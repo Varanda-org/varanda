@@ -37,8 +37,9 @@ export function createLimiter (width) {
 }
 
 // Every screen shares one of the browser node's two peek slots (it refuses a
-// third with 'ocupado'); the other stays free for the node's own peeks
-// (dm.lookup before a first message, a page.read probe).
+// third with 'ocupado'), the Conversas of a page (page.read) included; the
+// other stays free for the node's own peeks (dm.lookup before a first message,
+// the page.read inside dm.pageSecrets).
 export const diaryPeekSlots = createLimiter(1)
 
 export async function poolMap (items, width, fn) {

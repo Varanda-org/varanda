@@ -13,7 +13,7 @@ const SOURCE_WELL_KNOWN = '. ' + JSON.stringify(WELL_KNOWN) + '\n'
 
 // Optional seeder limits passed through compose.web.yaml (read by apps/cli/lib/cli.js).
 const SEEDER_LIMITS = [
-  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY',
+  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES',
   'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST',
   'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST'
 ]
@@ -576,6 +576,14 @@ test('deploy.sh: conferir_antes rejects a bad or out-of-range seeder limit and a
   t.is(run('VARANDA_FRAME_MEMORY=8454143\n').status, 1, 'VARANDA_FRAME_MEMORY below 8454144 is refused')
   t.is(run('VARANDA_FRAME_MEMORY=8454144\n').status, 0, 'VARANDA_FRAME_MEMORY=8454144 passes')
   t.is(run('VARANDA_MEDIA_MAX_IN_FLIGHT=1025\n').status, 1, 'VARANDA_MEDIA_MAX_IN_FLIGHT above 1024 is refused')
+  // VARANDA_STORAGE_BYTES needs 16 digits; 64-bit bash compares them exactly.
+  t.is(run('VARANDA_STORAGE_BYTES=1073741823\n').status, 1, 'VARANDA_STORAGE_BYTES below 1 GiB is refused')
+  t.is(run('VARANDA_STORAGE_BYTES=1073741824\n').status, 0, 'VARANDA_STORAGE_BYTES=1073741824 passes')
+  t.is(run('VARANDA_STORAGE_BYTES=1125899906842624\n').status, 0, 'VARANDA_STORAGE_BYTES at 1 PiB (16 digits) passes')
+  t.is(run('VARANDA_STORAGE_BYTES=1125899906842625\n').status, 1, 'VARANDA_STORAGE_BYTES above 1 PiB is refused')
+  t.is(run('VARANDA_STORAGE_BYTES=11258999068426240\n').status, 1, '17 digits are refused')
+  t.is(run('VARANDA_STORAGE_BYTES=01073741824\n').status, 1, 'a leading zero is refused')
+  t.is(run('VARANDA_MAX_EXTERNAL=0000000000000300\n').status, 1, 'a zero-padded 16-digit value is refused')
   // Compose passes a quoted value verbatim (comment included), so a quoted
   // value is refused instead of being cleaned up here; an unquoted trailing
   // comment is dropped by Compose and here alike.

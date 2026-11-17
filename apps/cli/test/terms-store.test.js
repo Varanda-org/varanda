@@ -381,8 +381,9 @@ test('guard() true before and false after the write refuses to acknowledge', asy
   const { store, file } = setup(t, { guard })
   const m = memberKey()
   await store.accept(req(m, 1))
-  // The next accept asks guard() before (call n+1) and after (n+2) the write.
-  failAt = calls + 2
+  // The next accept asks guard() before (call n+1), right before the rename
+  // (n+2) and after it (n+3).
+  failAt = calls + 3
   await rejects(t, store.accept(req(m, 2)), 'indisponivel', 'not acknowledged after the guard failed')
   t.ok(store.available(), 'only that request was refused')
   t.is(readFile(file).members[m].length, 2, 'the write itself landed')
@@ -398,7 +399,7 @@ test('a refusal after the write leaves the store dirty: the repeat rewrites befo
   const { store, file } = setup(t, { guard })
   const m = memberKey()
   await store.accept(req(m, 1))
-  failAt = calls + 2
+  failAt = calls + 3
   await rejects(t, store.accept(req(m, 2)), 'indisponivel', 'not acknowledged')
   const renames = countRenames(t, file)
   const out = await store.accept(req(m, 2))
@@ -660,4 +661,48 @@ test('heal() reads the file only when it changed or the store is dirty', async (
   fs.writeFileSync(file, JSON.stringify(watch.read()) + '\n')
   await store.heal()
   t.is(watch.n, 4, 'a rewrite with the same entries is still noticed')
+})
+
+test('a writer that lost the lock before the rename leaves the new holder\'s acknowledged write in place', async (t) => {
+  const { dir, file, c } = setup(t)
+  let held = true
+  let inject = null
+  const now = () => {
+    if (inject) {
+      const f = inject
+      inject = null
+      f()
+    }
+    return c.t
+  }
+  const a = openTermsStore(dir, { now, guard: () => held })
+  const m = memberKey()
+  await a.accept(req(m, 1))
+  // The new holder B starts from the same file (a copy of the directory)
+  // and acknowledges its own write there.
+  const copy = path.join(tmpDir(t), 'account')
+  fs.mkdirSync(copy, { mode: 0o700 })
+  fs.copyFileSync(file, path.join(copy, FILE))
+  const b = openTermsStore(copy, { now: c.now })
+  c.t += HOUR
+  t.is((await b.accept(req(m, 2))).changed, true, 'B acknowledges')
+  const bFile = fs.readFileSync(path.join(copy, FILE))
+  // A stalls after its first guard check and read (accept reads the clock
+  // while it builds the entry): meanwhile B takes the lock and its file
+  // lands in place.
+  inject = () => {
+    fs.copyFileSync(path.join(copy, FILE), file)
+    held = false
+  }
+  await rejects(t, a.accept(req(m, 3)), 'indisponivel', 'A does not acknowledge')
+  t.ok(b4a.equals(fs.readFileSync(file), bFile), 'the file is B\'s')
+  t.alike(fs.readdirSync(dir), [FILE], 'no temp file is left')
+  t.ok(a.available(), 'A is not failed')
+  t.alike(a.list(m).map((e) => e.version), [1], 'A\'s memory is unchanged')
+  const reopened = openTermsStore(dir, { now: c.now })
+  t.alike(reopened.list(m).map((e) => e.version), [1, 2], 'a reopen shows B\'s write, not A\'s')
+  held = true
+  const out = await a.accept(req(m, 3))
+  t.is(out.changed, true, 'with the lock back A writes again')
+  t.alike(readFile(file).members[m].map((e) => e.version), [1, 2, 3], 'merged with B\'s write')
 })

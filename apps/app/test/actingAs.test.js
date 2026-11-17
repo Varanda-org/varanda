@@ -147,3 +147,27 @@ test("choosing 'Você' while the momento composer is open keeps it after closing
   a.leaveMoment()
   t.is(a.get().kind, 'me', 'set counts as a choice too')
 })
+
+test('dropPage acts as me and clears the page a momento composer set aside; another page stays', async (t) => {
+  const { createActingAs } = await load()
+  const OTHER = 'ab'.repeat(32)
+  const a = createActingAs()
+  a.asPage({ key: K })
+  t.is(a.pageKey(), K)
+  t.is(a.dropPage(OTHER).kind, 'page', 'another page changes nothing')
+  t.is(a.dropPage(K).kind, 'me')
+  t.is(a.pageKey(), null)
+
+  a.asPage({ key: K })
+  a.enterMoment()
+  t.is(a.pageKey(), K, 'the page set aside still counts')
+  a.dropPage(K)
+  a.leaveMoment()
+  t.is(a.get().kind, 'me', 'the dropped page does not come back after the composer')
+
+  a.asPage({ key: OTHER })
+  a.enterMoment()
+  a.dropPage(K)
+  a.leaveMoment()
+  t.is(a.get().key, OTHER, 'a page not dropped comes back')
+})

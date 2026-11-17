@@ -311,7 +311,9 @@ test('guard false after the write leaves the store dirty; heal writes it back', 
   const { open, file } = setup(t)
   let calls = 0
   let ok = true
-  const store = open({ guard: () => { calls++; return ok || calls % 2 === 1 } })
+  // Asked before the write, right before the rename, then after it: only
+  // the third answer is false.
+  const store = open({ guard: () => { calls++; return ok || calls % 3 !== 0 } })
   const m = memberKey()
   ok = false
   calls = 0
@@ -468,7 +470,7 @@ test('a refused issue whose merge write is refused by guard still answers limite
   const usedIds = new Set()
   let calls = 0
   let ok = true
-  const store = open({ isUsed: (id) => usedIds.has(id), guard: () => { calls++; return ok || calls % 2 === 1 } })
+  const store = open({ isUsed: (id) => usedIds.has(id), guard: () => { calls++; return ok || calls % 3 !== 0 } })
   const m = memberKey()
   const codes = []
   for (let i = 0; i < 3; i++) codes.push((await store.issue(m)).code)
@@ -582,4 +584,48 @@ test('inviterOf names the owner of a live unused code, null otherwise', async (t
   t.exception.all(() => store.inviterOf('not hex'), TypeError, 'malformed id throws like check')
   await store.consume(id)
   t.is(store.inviterOf(id), null, 'a used code names nobody')
+})
+
+test('a writer that lost the lock before the rename leaves the new holder\'s acknowledged write in place', async (t) => {
+  const { dir, file, c } = setup(t)
+  let held = true
+  let inject = null
+  const now = () => {
+    if (inject) {
+      const f = inject
+      inject = null
+      f()
+    }
+    return c.t
+  }
+  const a = openInvitesStore(dir, { now, perWeek: 3, guard: () => held })
+  const first = memberKey()
+  await a.issue(first)
+  // The new holder B starts from the same file (a copy of the directory)
+  // and acknowledges its own write there.
+  const copy = path.join(tmpDir(t), 'account')
+  fs.mkdirSync(copy, { mode: 0o700 })
+  fs.copyFileSync(file, path.join(copy, FILE))
+  const b = openInvitesStore(copy, { now: c.now, perWeek: 3 })
+  const theirs = memberKey()
+  c.t += HOUR
+  await b.issue(theirs)
+  const bFile = fs.readFileSync(path.join(copy, FILE))
+  // A stalls after its guard check and read (issue reads the clock while it
+  // builds the row): meanwhile B takes the lock and its file lands in place.
+  inject = () => {
+    fs.copyFileSync(path.join(copy, FILE), file)
+    held = false
+  }
+  const mine = memberKey()
+  await rejects(t, a.issue(mine), 'indisponivel', 'A does not acknowledge')
+  t.ok(b4a.equals(fs.readFileSync(file), bFile), 'the file is B\'s')
+  t.alike(fs.readdirSync(dir), [FILE], 'no temp file is left')
+  t.ok(a.available(), 'A is not failed')
+  t.absent(a.holds(mine), 'A\'s memory does not hold the refused row')
+  t.absent(a.holds(theirs), 'nor B\'s, which it never acknowledged')
+  const reopened = openInvitesStore(dir, { now: c.now, perWeek: 3 })
+  t.ok(reopened.holds(theirs), 'a reopen shows B\'s row')
+  t.absent(reopened.holds(mine), 'and not A\'s')
+  t.ok(reopened.holds(first))
 })

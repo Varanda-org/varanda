@@ -310,7 +310,7 @@ test('terms: no terms store, an unavailable one, or a guard lost after the write
   t.alike(refused.body, { error: 'indisponivel' })
 
   // The lock read fails while the first acceptance is written: the guard
-  // passes before the write and fails after it. That write is never
+  // passes before the write and right before the rename, and fails after it. That write is never
   // acknowledged; the refusal is for that request only (a lost lock is
   // confirmed by the heartbeat, which calls terms.fail()), so the next finish
   // and start go through.
@@ -319,7 +319,7 @@ test('terms: no terms store, an unavailable one, or a guard lost after the write
   const n1 = await s.start(s.m)
   const n2 = await s.start(s.m)
   t.is(n2.status, 200)
-  answers.push(true, false)
+  answers.push(true, true, false)
   const lost = await s.finish(s.m, n1.body.nonce, s.sign(s.m, n1.body.nonce))
   t.is(lost.status, 503, lost.text)
   t.alike(lost.body, { error: 'indisponivel' })

@@ -19,7 +19,7 @@ const { spentCapacity } = require('./start-nonces')
 const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
-const { createDeletionSweep } = require('./deletion')
+const { createDeletionSweep, createModerationRetention } = require('./deletion')
 const { createPasskeyRoutes } = require('./passkey-routes')
 const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, header } = require('./app-return')
@@ -763,12 +763,14 @@ function checkRawPost (req, origin) {
 // loopback fixtures. Every audio request, a seek included, also spends one
 // token of the global bucket like any other request.
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
-// recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
+// recovery routes (./recovery-routes.js) and the enrolment of an extra
+// passkey (./passkey-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
 // `drops` is the surprise-invite ledger (./invite-drops.js) or null, only so
 // Excluir conta (./delete-routes.js, ./deletion.js) can purge its marks.
 // `passkeys` is an openPasskeyStore (./passkey-store.js) or null: Excluir
-// conta and the passkey enrolment then answer 503 'indisponivel'.
+// conta, the passkey enrolment and the removal of an extra passkey's
+// recovery entry then answer 503 'indisponivel'.
 // `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
 // Android app's origin to the ones a passkey assertion may report
 // (./webauthn.js passkeyOrigins).
@@ -961,6 +963,9 @@ function createAccountServer ({
 
   // Excluir conta: always mounted. The sweep purges the other stores for
   // every deleted key; serve() runs it at start and then periodically.
+  // Six months after a deletion it also purges the key's moderation data,
+  // after a phone sweep, so a late block still burns the number first.
+  const moderationRetention = createModerationRetention({ accounts: store, moderation, beforeForget: () => phoneRoutes.sweepNow(), now, log })
   const deletion = createDeletionSweep({
     accounts: store,
     terms,
@@ -979,6 +984,7 @@ function createAccountServer ({
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
     tick: pages !== null && pages.pagesGroups && typeof pages.pagesGroups.purgeBlocked === 'function' ? () => pages.pagesGroups.purgeBlocked() : null,
+    retention: moderationRetention,
     log
   })
   const publishedList = moderationBlocklist(moderation)
@@ -994,6 +1000,7 @@ function createAccountServer ({
     moderation,
     pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
     passkeys,
+    recovery,
     purge: deletion.purge,
     isBlocked: inPublishedList,
     notify: (member) => { if (pushRoutes !== null) pushRoutes.notifyDeletion({ member }) },
@@ -1032,8 +1039,10 @@ function createAccountServer ({
   // routes and Excluir conta. add is charged per member after the proof.
   const passkeyRoutes = createPasskeyRoutes({
     store: passkeys,
+    recovery,
     accounts: store,
     rpId: webauthn.rpId,
+    origins: webauthn.origins,
     association,
     now,
     log,
@@ -1051,6 +1060,7 @@ function createAccountServer ({
   // charged per member after the proof.
   const recoveryRoutes = createRecoveryRoutes({
     store: recovery,
+    passkeys,
     accounts: store,
     association,
     now,

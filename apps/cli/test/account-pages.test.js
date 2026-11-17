@@ -186,7 +186,7 @@ async function thirdMember (t, bootstrap, association) {
   }
 }
 
-async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } = {}) {
+async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {}, pagesGuard } = {}) {
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
   const association = hex(assocKp.publicKey)
@@ -282,6 +282,7 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
       ctx.pagesStore = openPagesStore(dir)
       const { writer, acl } = faulty(real, ctx.pagesStore)
       opts.pages = { keys, writer, pagesStore: acl, dir, blocklist: { has: (k) => ctx.blocked.has(k) } }
+      if (pagesGuard) opts.pages.guard = () => pagesGuard(dir)
     }
     server = createAccountServer(opts)
     const l = await server.listen({ host: '127.0.0.1', port: 0 })
@@ -808,6 +809,17 @@ test('account pages: a resend after a lost answer or a restart appends once', as
   t.is(fs.statSync(file).mode & 0o777, 0o600, 'the nonce key file is 0600')
   const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
   t.absent(JSON.stringify(s.logs).includes(saved.key), 'the nonce key is never logged')
+})
+
+test('account pages: a nonce key refused right before its rename is not written', async (t) => {
+  t.timeout(300000)
+  // Refuses only while the nonce key's temp file sits in the data dir.
+  const pagesGuard = (d) => !fs.readdirSync(d).some((n) => n.startsWith('.page-nonce-key.json.') && n.endsWith('.tmp'))
+  const s = await setup(t, { pagesGuard })
+  const dir = s.ctx.dir
+  t.ok(s.logs.some((e) => e.event === 'pagina' && e.action === 'nonce-key' && e.reason === 'indisponivel'), 'the refusal is logged')
+  t.absent(fs.existsSync(path.join(dir, 'page-nonce-key.json')), 'no nonce key file')
+  t.absent(fs.readdirSync(dir).some((n) => n.endsWith('.tmp')), 'no temp file is left')
 })
 
 test('account pages: a resend while the first post is in flight is em-andamento and the page gets one post', async (t) => {

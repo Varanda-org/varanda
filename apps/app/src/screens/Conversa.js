@@ -59,6 +59,7 @@ import { Sheet } from '../ui/Sheet'
 import { SwipeReply } from '../ui/SwipeReply'
 import { ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
+import { BUSY_RETRIES, BUSY_RETRY_MS, isBusy } from '../busyRetry'
 import { revokeDeletedMedia } from '../media/cache'
 import { space } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -66,8 +67,6 @@ import { useStyles } from '../ui/ThemeProvider'
 // Same value as packages/rpc/lib/limits.js ENGAGEMENT_LIMIT_MAX.
 export const ENGAGEMENT_MAX = 62
 const SEEDER_RETRY_MS = 2000
-const BUSY_RETRY_MS = 600
-const BUSY_RETRIES = 3
 const NOT_HOSTED_NOTE = 'Conversa completa disponível na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: a conversa completa aparece quando a conexão voltar.'
 const RESEND_NOTE = 'A mensagem anterior pode ter sido enviada. Envie de novo sem mudar o texto: ela é reenviada, sem duplicar.'
@@ -249,7 +248,7 @@ function chunks (list, size) {
 // (retryable). 'diário indisponível': that author cannot be read (skipped).
 export const isSeederDown = (err) => !!err && err.code === 'NOT_FOUND' && err.message === 'semeador indisponível'
 export const isDiaryGone = (err) => !!err && err.code === 'NOT_FOUND' && err.message === 'diário indisponível'
-export const isBusy = (err) => !!err && err.code === 'USAGE' && err.message === 'ocupado'
+export { isBusy }
 
 // Merges a peek result into the per-author map: entries are added, the
 // first known profile and username are kept.
