@@ -225,3 +225,33 @@ test('with no frozen room left, a community rejoin after a leave gets COMMUNITY_
   t.is((await member.logRead(c)).entries.length, before, 'nothing written')
   t.is(entryOf(c, community).writer, old, 'no new CW')
 })
+
+test('a rejoin repeats the cut on a retired writer a mark left live, once the walk has room to freeze it (#350)', async (t) => {
+  const { a, others: [b], community } = await world(t, { names: ['Bia'] })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await sync(a, b)
+  const cw = entryOf(b, community).writer
+  const old = []
+  for (let i = 0; i < groupLib.MAX_FROZEN_WRITERS_PER_DIARY; i++) old.push(await sibling(b, group, cw))
+  await diaryAppend(b, old.map((writer) => groupCutRecord({ group, writer, cut: 1 })))
+  t.is((await joinGroup(b, group)).state, 'member')
+  const w1 = entryOf(b, group).writer
+  for (let i = 1; i < MAX; i++) await sibling(b, group, cw)
+  t.alike(await member.groupLeave(b, { group }), { state: 'left' })
+  const held = (await coreEntries(b, w1)).length
+  // With a device id, a mark on its own writer does not read as a
+  // disconnect of this device.
+  await member.deviceHello(b, { name: 'Celular' })
+  // A mark written while the frozen reserve was spent leaves the writer
+  // live; then a frozen writer is released, so the reserve has room again.
+  await diaryAppend(b, [groupCutRecord({ group, writer: w1, cut: held }), groupCutRecord({ group, writer: old[0], cut: 0 })])
+  t.ok((await ownWalk(b, group)).walk.live.has(w1), 'the mark alone left the retired writer live')
+  t.is((await joinGroup(b, group)).state, 'member')
+  const w2 = entryOf(b, group).writer
+  t.not(w2, w1, 'a new writer')
+  const { entries, walk } = await ownWalk(b, group)
+  t.alike(groupLib.groupCutHistory(entries, group).filter((m) => m.writer === w1).map((m) => m.cut), [held, held], 'the cut is written again, at the same seq')
+  t.ok(indexOf(entries, 'group-join', w2) > entries.map((e) => e.record && e.record.type === 'group-cut' && e.record.writer === w1).lastIndexOf(true), 'the new join comes after it')
+  t.ok(walk.frozen.has(w1), 'the walk freezes the retired writer now')
+  t.ok(walk.live.has(w2), 'the new one is live')
+})

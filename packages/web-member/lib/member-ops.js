@@ -3452,13 +3452,14 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
     if (!walkHasRoom(groupJoinHistory(base.ownEntries, g.group), groupCutHistory(base.ownEntries, g.group), g.group, replace)) {
       throw new UsageError(live !== null ? GROUP_BOXLESS_FULL : store.GROUP_FULL)
     }
+    // Before the off join and the cut, as communityJoin does.
+    await makeGroupRoom(ctx, base, g.group)
   }
   for (const e of replace) {
     if (e.kind === 'join') await appendOwn(ctx, diary, groupJoinRecord({ group: g.group, writer: e.writer, on: false }))
     else await appendOwn(ctx, diary, groupCutRecord({ group: g.group, writer: e.writer, cut: e.cut }))
   }
   if (writer === null) {
-    await makeGroupRoom(ctx, base, g.group)
     // The causal latest leave, never the newest timestamp.
     const rejoin = latestLeaveOf(g, ownHex)
     const record = buildRecord(() => grp.writerHeader({ group: g.group, diary: ownHex, member, rejoin, box }))
@@ -3492,7 +3493,10 @@ function ownWalkHasRoom (ownEntries, group) {
 // its own core (retiredWriterCut), so every record it wrote keeps counting.
 // `leaving`: a community join appends a leave to it first (ownRejoinLeave),
 // so the cut planned before anything is written sits past that leave, as
-// the one written after it does.
+// the one written after it does. A writer the walk still has live gets the
+// cut even when a mark is already there (written while the walk had no room
+// to freeze or release it), so the walk can take it now; never above the
+// lowest mark on it.
 function retireOwnWriter (g, ownEntries, { leaving = false } = {}) {
   if (g.own === null || g.own.key === g.group) return []
   const key = g.own.key
@@ -3507,7 +3511,9 @@ function retireOwnWriter (g, ownEntries, { leaving = false } = {}) {
   const out = []
   const last = joins.filter((j) => j.writer === key).pop()
   if (last !== undefined && last.on) out.push({ kind: 'join', writer: key, on: false })
-  if (!marks.some((m) => m.writer === key && m.cut <= cut)) out.push({ kind: 'cut', writer: key, cut })
+  let low = cut
+  for (const m of marks) if (m.writer === key && Number.isSafeInteger(m.cut) && m.cut < low) low = m.cut
+  out.push({ kind: 'cut', writer: key, cut: low })
   return out
 }
 

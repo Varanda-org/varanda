@@ -2026,3 +2026,43 @@ test('a ban from the core node and from the browser node fold the same for a fro
   t.alike(browser.posts, [['antes', false], ['vivo', false]], 'both posts written before the ban stay visible')
   t.alike(core.posts, browser.posts, 'the core node\'s fold gives the same')
 })
+
+test('a rejoin repeats the cut on a retired writer a mark left live, once the walk has room to freeze it (#350)', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  const old = []
+  for (let i = 0; i < grp.MAX_FROZEN_WRITERS_PER_DIARY; i++) old.push(await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })]))
+  const append = async (records) => {
+    const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+    try {
+      for (const r of records) await store.appendRecord(diary, r)
+    } finally {
+      await diary.close()
+    }
+  }
+  await append(old.map((writer) => groupCutRecord({ group, writer, cut: 1 })))
+  await ops.groupJoin(b.ctx, { group })
+  const w1 = (await store.readGroupWriters(b.storage))[0].key
+  for (let i = 1; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
+  }
+  t.alike(await ops.groupLeave(b.ctx, { group }), { state: 'left' })
+  const held = (await readGroupCoreEntries(b, w1)).length
+  // With a device id, a mark on its own writer does not read as a
+  // disconnect of this device.
+  await ops.deviceHello(b.ctx, { name: 'Celular' })
+  // A mark written while the frozen reserve was spent leaves the writer
+  // live; then a frozen writer is released, so the reserve has room again.
+  await append([groupCutRecord({ group, writer: w1, cut: held }), groupCutRecord({ group, writer: old[0], cut: 0 })])
+  t.ok((await ownWalk(b, group)).walk.live.has(w1), 'the mark alone left the retired writer live')
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w2 = (await store.readGroupWriters(b.storage))[0].key
+  t.not(w2, w1, 'a new writer')
+  const { entries, walk } = await ownWalk(b, group)
+  t.alike(grp.groupCutHistory(entries, group).filter((m) => m.writer === w1).map((m) => m.cut), [held, held], 'the cut is written again, at the same seq')
+  t.ok(recordAt(entries, 'group-join', w2) > entries.map((e) => e.record && e.record.type === 'group-cut' && e.record.writer === w1).lastIndexOf(true), 'the new join comes after it')
+  t.ok(walk.frozen.has(w1), 'the walk freezes the retired writer now')
+  t.ok(walk.live.has(w2), 'the new one is live')
+})

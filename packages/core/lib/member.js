@@ -2128,6 +2128,9 @@ function unheldCountedWriters (loaded, diary) {
 // `own`: the own diary's entries. `leaving`: a community join appends a
 // leave to it first (ownRejoinLeave), so the cut planned before anything is
 // written sits past that leave, as the one written after it does.
+// A writer the walk still has live gets the cut even when a mark is already
+// there (written while the walk had no room to freeze or release it), so
+// the walk can take it now; never above the lowest mark on it.
 function retireLocalWriter (loaded, own, { leaving = false } = {}) {
   const local = loaded.local
   const group = loaded.group
@@ -2143,8 +2146,16 @@ function retireLocalWriter (loaded, own, { leaving = false } = {}) {
   const out = []
   const last = joins.filter((j) => j.writer === local.writer).pop()
   if (last && last.on) out.push({ kind: 'join', writer: local.writer, on: false })
-  if (!marks.some((m) => m.writer === local.writer && m.cut <= cut)) out.push({ kind: 'cut', writer: local.writer, cut })
+  out.push({ kind: 'cut', writer: local.writer, cut: lowestCut(marks, local.writer, cut) })
   return out
+}
+
+// `cut`, or the lowest mark `marks` (groupCutHistory items) hold on `writer`
+// when that is lower.
+function lowestCut (marks, writer, cut) {
+  let low = cut
+  for (const m of marks) if (m.writer === writer && Number.isSafeInteger(m.cut) && m.cut < low) low = m.cut
+  return low
 }
 
 async function ownGroupWriter (loaded, identity, { root = false } = {}) {
@@ -2423,13 +2434,14 @@ async function joinLoaded (ctx, identity, loaded, cw) {
     // The diary's own slot walk, after the off join and the cut above: a
     // new writer it would not count live never counts.
     if (!groups.walkHasRoom(groups.groupJoinHistory(own, group), groups.groupCutHistory(own, group), group, replace)) throw new UsageError(GROUP_FULL)
+    // Before the off join and the cut, as communityJoin does.
+    await makeGroupRoom(ctx, identity, group)
   }
   for (const e of replace) {
     if (e.kind === 'join') await appendRecord(diary, groupJoinRecord({ group, writer: e.writer, on: false }))
     else await appendRecord(diary, groupCutRecord({ group, writer: e.writer, cut: e.cut }))
   }
   if (writerKey === null) {
-    await makeGroupRoom(ctx, identity, group)
     const rejoin = foldRejoin(loaded.view, ownHex)
     const box = loaded.private ? ownBoxPublic(ctx) : null
     const nonce = hex(randomBytes(16))
