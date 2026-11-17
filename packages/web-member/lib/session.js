@@ -3725,27 +3725,32 @@ function createBrowserSession ({
     if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
   }
 
-  // garden.help's evidence deadline (docs/rpc.md 5.160): scrap.write's.
+  // garden.help's and garden.give's evidence deadline (docs/rpc.md 5.160,
+  // 5.163): scrap.write's.
   const gardenEvidenceMs = Math.min(12000, 2 * peekTimeoutMs)
 
-  // Whether pot `pot` of `owner`'s balcony takes a help now, with public
-  // evidence only, read off the chain under ONE deadline as scrapAdmits: the
-  // seeder names the owner's newest garden flag and garden-state, each a
-  // pointer, peeked and checked here with blocks 1 and 2 (a page-roster
-  // there is a page). Returns when the help may be written; throws a USAGE
-  // refusal when the verified evidence excludes it, and SEEDER_UNAVAILABLE
-  // (or the peek's own NOT_FOUND) when it cannot be read or does not verify.
+  // Whether `owner`'s balcony takes the write now, with public evidence
+  // only, read off the chain under ONE deadline as scrapAdmits: the seeder
+  // names the owner's newest garden flag and garden-state, each a pointer,
+  // peeked and checked here with blocks 1 and 2 (a page-roster there is a
+  // page). judge(index, peek, now) is the verdict of member-ops (a help's
+  // pot check, or a give's open balcony). Returns when the write may go
+  // ahead; throws a USAGE refusal when the verified evidence excludes it,
+  // and SEEDER_UNAVAILABLE (or the peek's own NOT_FOUND) when it cannot be
+  // read or does not verify.
   // RESIDUAL: the seeder can point at an older live 'on' flag or an older
   // state it still serves (it can withhold any newer block); readers apply
   // foldHelps and drop a help that does not count, so a wrong write costs
-  // one of the helper's daily helps and nothing else.
-  async function gardenTarget (owner, pot) {
+  // one of the helper's daily helps and nothing else. For a give, the same
+  // older live 'on' flag costs the giver one mimo and one save and nothing
+  // else, since the recipient still has to accept it (garden.take).
+  async function gardenTarget (owner, judge) {
     const deadline = Date.now() + gardenEvidenceMs
     let timer = null
     const late = new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(new Error(SEEDER_UNAVAILABLE)), gardenEvidenceMs)
     })
-    const work = gardenEvidence(owner, pot, deadline)
+    const work = gardenEvidence(owner, judge, deadline)
     try {
       return await Promise.race([work, late])
     } finally {
@@ -3754,7 +3759,7 @@ function createBrowserSession ({
     }
   }
 
-  async function gardenEvidence (owner, pot, deadline) {
+  async function gardenEvidence (owner, judge, deadline) {
     const left = () => {
       const ms = deadline - Date.now()
       if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
@@ -3765,8 +3770,7 @@ function createBrowserSession ({
     const seqs = member.gardenTargetSeqs(index)
     if (seqs === null) throw new Error(SEEDER_UNAVAILABLE)
     const r = await peekBefore(owner, seqs, deadline)
-    // No boosts in the pot check: the generous reading is the reader's.
-    const verdict = member.gardenTargetVerdict(index, r, pot, Date.now())
+    const verdict = judge(index, r, Date.now())
     if (verdict === null) return
     if (verdict === 'page') throw new UsageError(GARDEN_PAGE)
     if (verdict === 'off') throw new UsageError(GARDEN_NOT_IN)
@@ -5361,7 +5365,8 @@ function createBrowserSession ({
         return own
       })({})
       try {
-        await gardenTarget(key, pot)
+        // No boosts in the pot check: the generous reading is the reader's.
+        await gardenTarget(key, (index, r, now) => member.gardenTargetVerdict(index, r, pot, now))
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }
@@ -5372,6 +5377,112 @@ function createBrowserSession ({
         wrote(r.seq)
         await pushAfterWrite()
         return { seq: r.seq, ref: r.ref }
+      })({})
+    },
+
+    // Enfeites and the Barraquinha (docs/rpc.md 5.161 to 5.165), hosted only
+    // and never retried. A give is checked as a help, with the recipient's
+    // open balcony as its evidence; a take reads the giver's block through
+    // the sync run and no seeder index; a drop reads the own diary only.
+    'garden.decor': async ({ items }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        let stored = null
+        const r = await profileExtraWrite(async (c) => {
+          const out = await member.gardenDecor(c, { items })
+          stored = out.items
+          return out
+        })
+        return { seq: r.seq, ref: r.ref, items: stored }
+      })({})
+    },
+
+    // The own diary alone, as garden.state.
+    'garden.stall': serial(() => withCores((c) => member.gardenStallOwn(c, Date.now()))),
+
+    // Helps received are bounded as garden.play bounds them.
+    'garden.give': async ({ to, pot }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      const received = Array(garden.GARDEN_POTS).fill(garden.GARDEN_HELP_PER_POT)
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(member.GARDEN_GIFT_SELF)
+        if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      const writer = await serial(async () => {
+        const own = await requireUnlocked()
+        await refuse(own)
+        await withCores((c) => member.gardenGiveCheck(c, { to: key, pot, writer: own, now: Date.now(), received }))
+        return own
+      })({})
+      try {
+        await gardenTarget(key, (index, r, now) => member.gardenOpenVerdict(index, r, now))
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        let state = null
+        const r = await profileExtraWrite(async (c) => {
+          const out = await member.gardenGive(c, { to: key, pot, writer, now: Date.now(), received })
+          state = out.state
+          return out
+        })
+        return { seq: r.seq, ref: r.ref, state }
+      })({})
+    },
+
+    // As testimonial.show, with no seeder index read and no DM keys. Only an
+    // answered peek proves a gift gone (a missing or deleted block is no
+    // gift); a peek that fails says nothing about it, so it is unavailable
+    // and nothing is written.
+    'garden.take': async ({ from, seq }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = from.toLowerCase()
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(member.GARDEN_GIFT_GONE)
+        if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      await serial(async () => {
+        await refuse(await requireUnlocked())
+        const own = await withCores((c) => member.gardenOwn(c, Date.now()))
+        if (own.on !== true) throw new UsageError(member.GARDEN_OFF_PLAY)
+      })({})
+      let record = null
+      try {
+        const r = await diaryPeek({ author: key, seqs: [seq] })
+        const e = r.entries.find((x) => x.seq === seq)
+        if (e !== undefined) record = e.record
+      } catch (err) {
+        const out = toRpcError(err, reportInternal)
+        if (out.code === 'LOCKED') throw out
+        throw rpcError('NOT_FOUND', SEEDER_UNAVAILABLE)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.gardenTake(c, { from: key, seq, record, now: Date.now() }))
+        if (r.changed) {
+          wrote(r.seq)
+          await pushAfterWrite()
+        }
+        return { seq: r.seq, ref: r.ref, changed: r.changed }
+      })({})
+    },
+
+    // The flag is not needed: a member can always take a mimo back.
+    'garden.drop': async ({ kind, seq }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.gardenDrop(c, { kind, seq }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, deleted: r.deleted }
       })({})
     },
 

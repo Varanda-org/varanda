@@ -1622,6 +1622,14 @@ const SPECS = {
   'garden.state': { fields: none },
   'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
   'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
+  // Phase 2 (docs/rpc.md 5.161 to 5.165): Enfeites and the Barraquinha.
+  // No date and no free-text parameter, same as the methods above: the node
+  // sets every `at` from its own clock, and any other key is refused.
+  'garden.decor': { fields: { items: req(garden.isDecor) }, mutating: true },
+  'garden.stall': { fields: none },
+  'garden.give': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
+  'garden.take': { fields: { from: req(isKey), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
+  'garden.drop': { fields: { kind: req((v) => v === 'gift' || v === 'take'), seq: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
   // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
   // a page record and appends nothing; the node fills in member, actor and
   // association, so a caller never chooses the bytes. The exact op of each
