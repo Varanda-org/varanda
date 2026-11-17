@@ -864,6 +864,19 @@ test('visitas: the queue keeps the oldest VISIT_QUEUE_MAX valid items, and a cle
   await s.close()
 })
 
+test('visitas: a queued ping keeps its 6-bit bucket prefix; one without it or with a bad one reads without', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const sealed = b4a.toString(b4a.alloc(DM_SEALED_BYTES, 1), 'base64')
+  const item = (to, extra) => ({ to, day: '2026-11-15', due: 5, sealed, ...extra })
+  await s.writeVisitQueue([item(PEER, { prefix: 41 }), item(OWN), item(PEER, { prefix: 64 }), item(OWN, { prefix: 1.5 }), item(PEER, { prefix: 0 })])
+  const out = await s.visitQueue()
+  t.alike(out.map((q) => q.prefix), [41, undefined, undefined, undefined, 0])
+  t.ok(!('prefix' in out[1]), 'an item from before has no prefix field')
+  await s.close()
+})
+
 // ---- compaction of deleted conversations ----
 
 const DAY = 86400000

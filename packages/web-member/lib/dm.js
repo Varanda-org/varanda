@@ -1282,19 +1282,26 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return store.writeDmStamps(storage, { items: items.map((s) => ({ kid: s.kid, ...local.seal({ token: s.token, sig: s.sig }) })), kids })
   }
 
-  // The ctl queue as base64 strings (sealed envelopes or encoded drops);
-  // kv holds each sealed under the local key. Throws while locked.
+  // The ctl queue as { b, p } items: b a base64 string (a sealed envelope or
+  // an encoded drop), p the group drawn for a held page's ctl (randomPrefix),
+  // absent on the own queue and on an item queued before it. kv holds each
+  // sealed under the local key. Throws while locked.
   async function readQueue (ctx = personal) {
     const out = []
     for (const item of await store.readDmCtlQueue(storage, ctx.prefix)) {
       const v = ctx.local.open(item)
-      if (v !== null && typeof v.b === 'string') out.push(v.b)
+      if (v === null || typeof v.b !== 'string') continue
+      out.push(isPrefix(v.p) ? { b: v.b, p: v.p } : { b: v.b })
     }
     return out
   }
 
   function writeQueue (list, ctx = personal) {
-    return store.writeDmCtlQueue(storage, list.map((b) => ctx.local.seal({ b })), ctx.prefix)
+    return store.writeDmCtlQueue(storage, list.map((x) => ctx.local.seal(x.p === undefined ? { b: x.b } : { b: x.b, p: x.p })), ctx.prefix)
+  }
+
+  function isPrefix (x) {
+    return Number.isSafeInteger(x) && x >= 0 && x < 2 ** dm.DM_BUCKET_BITS_MAX
   }
 
   // Takes n stamps at once (all or none) -> [{ kid, token, sig }] or null.
@@ -1401,6 +1408,39 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     })
   }
 
+  // The 6-bit bucket prefix of a box public key (hex or bytes) for the pool
+  // put and page requests; null for a missing or unusable key (an untagged
+  // put, which matches every bucket).
+  function prefixOf (boxKey) {
+    if (boxKey === null || boxKey === undefined) return null
+    try {
+      return dm.bucketPrefix(boxKey)
+    } catch {
+      return null
+    }
+  }
+
+  // The prefix a queued ctl is put with: an own ctl the own box's; a held
+  // page's ctl the random group drawn when it was queued (randomPrefix), so
+  // it looks like any envelope and every holder, asking every group, still
+  // gets it. One queued before that has none and stays untagged, the shape
+  // its first put may already have on the seeder.
+  function ctxPrefix (ctx, item) {
+    if (ctx.page !== null) return item.p === undefined ? null : item.p
+    return box === null ? null : prefixOf(box.publicKey)
+  }
+
+  // A group for a drop sealed to a held page's box, drawn once per drop by
+  // the caller, which keeps it for every retry. Uniform and never derived
+  // from anything the seeder sees nor from the own or the page's bucket,
+  // which would tie the drop back to the Página; leaving those two out of
+  // the draw would be a tell of its own.
+  function randomPrefix () {
+    const b = b4a.alloc(1)
+    sodium.randombytes_buf(b)
+    return b[0] >> (8 - dm.DM_BUCKET_BITS_MAX)
+  }
+
   // ---- sending ----
 
   function refusal (reason) {
@@ -1429,7 +1469,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         let r
         emit('dm.sending', {})
         try {
-          r = await link.put(entry.drops[i])
+          r = await link.put(entry.drops[i], entry.prefixes === undefined ? null : entry.prefixes[i])
         } catch {
           throw unconfirmed()
         }
@@ -1500,22 +1540,26 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // link) and keeps it. A refused drop (invalido) is removed with a warning.
   async function flushCtlQueue (ctx = personal) {
     if (!unlocked()) return
+    const gen = generation
     let queue = await readQueue(ctx)
     if (queue.length === 0) return
     let link = null
     try {
       while (queue.length > 0) {
-        let bytes = b4a.from(queue[0], 'base64')
+        let bytes = b4a.from(queue[0].b, 'base64')
         if (bytes.byteLength !== dm.DM_DROP_BYTES) {
           const stamps = await takeStamps(1)
           if (stamps === null) return
           bytes = dropOf(bytes, stamps[0])
-          queue = [b4a.toString(bytes, 'base64'), ...queue.slice(1)]
+          queue = [{ ...queue[0], b: b4a.toString(bytes, 'base64') }, ...queue.slice(1)]
           await writeQueue(queue, ctx)
         }
         if (link === null) link = await openDmLink(linkOpts)
+        // A lock during the awaits above: nothing goes out after it; the
+        // item stays queued for the next unlock.
+        if (gen !== generation || !unlocked()) return
         emit('dm.sending', {})
-        const r = await link.put(bytes)
+        const r = await link.put(bytes, ctxPrefix(ctx, queue[0]))
         if (!r.ok && r.reason !== 'invalido') return
         if (!r.ok) log('aviso: 1 estado de conversa recusado pelo semeador')
         queue = queue.slice(1)
@@ -1629,6 +1673,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       id,
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      prefixes: [prefixOf(recipientBox), prefixOf(box.publicKey)],
       acked: [false, false],
       row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest, ...(moment === null ? {} : { moment }) },
       blobs: sealedBlobs,
@@ -1747,7 +1792,12 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (d === null || d.byteLength !== dm.DM_DROP_BYTES) return null
       drops.push(d)
     }
-    return { key: m.key, id: m.id, at: m.at, drops, acked: m.acked, row: m.row, rx: { emoji: rx.emoji, rev: rx.rev, digest: rx.digest }, blobs: [], plains: null }
+    // An item stored before the buckets has no prefixes and goes untagged.
+    const prefixes = Array.isArray(m.prefixes) && m.prefixes.length === 2 &&
+      m.prefixes.every((x) => x === null || (Number.isSafeInteger(x) && x >= 0 && x < 64))
+      ? m.prefixes
+      : [null, null]
+    return { key: m.key, id: m.id, at: m.at, drops, prefixes, acked: m.acked, row: m.row, rx: { emoji: rx.emoji, rev: rx.rev, digest: rx.digest }, blobs: [], plains: null }
   }
 
   // Writes the reaction ops of `pending` to kv dmReactPending, in order,
@@ -1762,7 +1812,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       for (const e of pending.values()) {
         if (e.rx === undefined || (e.row === null && e.acked.every(Boolean))) continue
         items.push({
-          meta: local.seal({ key: e.key, id: e.id, at: e.at, acked: e.acked, row: e.row, rx: e.rx }),
+          meta: local.seal({ key: e.key, id: e.id, at: e.at, acked: e.acked, row: e.row, rx: e.rx, prefixes: e.prefixes }),
           drops: e.drops.map((d, i) => e.acked[i] ? null : local.sealBytes(d))
         })
       }
@@ -1806,6 +1856,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       id,
       at,
       drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+      prefixes: [prefixOf(recipientBox), prefixOf(box.publicKey)],
       acked: [false, false],
       row: { t: 'rx', id, peer: to, from: own, to, target: t, emoji, rev, at, mine: true },
       rx: { emoji, rev, digest: t.digest },
@@ -1891,80 +1942,98 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (err instanceof UsageError) throw err
         throw new UsageError('sem conexão com o semeador')
       }
+      if (box === null) throw new UsageError(LOCKED)
+      // A device that holds a Página asks every bucket: asking only the
+      // Página's would tell the seeder which Página this connection runs.
+      // Read before the scans, so one that fails still asks every bucket.
+      const asksAll = pages.pages().length > 0
       scans = await pageScans()
-      // Pages scanned up to where the own cursor stands ride along.
-      const along = scans.filter((p) => p.cursor.after === cursor)
+      if (box === null) throw new UsageError(LOCKED)
+      const live = scans.filter((p) => !pageStale(p))
+      const ownPrefix = prefixOf(box.publicKey)
+      const prefixes = asksAll || ownPrefix === null ? undefined : [ownPrefix]
       let read = 0
-      for (;;) {
-        if (gen !== generation) throw new UsageError(LOCKED)
-        const page = await link.page({ after: cursor, limit: L.pageMax })
-        const rows = []
-        // A copy: this page's ctls join it as they are filed.
-        const ops = [...local.ops()]
-        const mod = await moderation()
-        const missed = []
-        // History copy pointers of this page (./dm-copy.js).
-        const pointers = []
-        for (const item of page.items) {
-          read += item.bytes.byteLength
-          const row = openItem(own, item.bytes, ops, rows, mod)
-          if (row !== null && row.t === 'copy') {
-            pointers.push(row)
-          } else if (row !== null) {
-            // Filed now, on the monotonic clock: a ctl earlier in this page
-            // then counts for the items after it (dm-fold ignores a row
-            // without filedAt).
-            row.filedAt = local.nextFiled()
-            rows.push(row)
-            if (row.t === 'ctl') ops.push(row)
-          } else if (along.length > 0) {
-            missed.push(item.bytes)
-          }
-        }
-        if (gen !== generation) throw new UsageError(LOCKED)
-        if (rows.length > 0) {
-          await local.append(rows)
-          for (const r of rows) {
-            if (r.t === 'msg') added++
-            else applied++
-          }
-          // A delete from another own device.
-          if (rows.some((r) => r.t === 'ctl' && r.op === 'deleted')) housekeep(personal, gen)
-        }
-        for (const p of along) await filePageItems(p, missed, mod)
-        // Noted (sealed in kv) before the cursor passes this page: a lock or
-        // a kill after the cursor write would otherwise lose the pointer.
-        if (pointers.length > 0) await copy.note(pointers)
-        if (page.items.length > 0) {
-          cursor = page.items[page.items.length - 1].seq
-          await store.writeDmCursor(storage, cursor)
-          for (const p of along) await movePageCursor(p, cursor)
-        }
-        if (page.next === null || page.items.length === 0) break
-        if (read >= L.budgetBytes) {
-          incomplete = true
-          break
-        }
-      }
-      // The other held pages catch up from their own cursor.
-      for (const p of scans) {
-        if (incomplete) break
-        if (along.includes(p)) continue
+      // One pass reads the pool in order from `start`. A scan whose cursor
+      // is at or above the start has seen everything before it, so it takes
+      // part: it files only what is above its own cursor, and its cursor
+      // follows the last item read, never backwards. The budget is shared:
+      // where it stops a pass, each cursor stays at the last item its scan
+      // saw.
+      const pass = async (start) => {
+        const along = live.filter((p) => p.cursor.after >= start)
+        let after = start
         for (;;) {
           if (gen !== generation) throw new UsageError(LOCKED)
-          if (p.stale) break
-          const page = await link.page({ after: p.cursor.after, limit: L.pageMax })
+          const page = await link.page({ after, limit: L.pageMax, prefixes })
+          const rows = []
+          // A copy: this page's ctls join it as they are filed.
+          const ops = [...local.ops()]
           const mod = await moderation()
-          for (const item of page.items) read += item.bytes.byteLength
-          await filePageItems(p, page.items.map((item) => item.bytes), mod)
-          if (page.items.length > 0) await movePageCursor(p, page.items[page.items.length - 1].seq)
-          if (page.next === null || page.items.length === 0) break
+          const missed = []
+          // History copy pointers of this page (./dm-copy.js).
+          const pointers = []
+          for (const item of page.items) {
+            read += item.bytes.byteLength
+            const row = item.seq > cursor ? openItem(own, item.bytes, ops, rows, mod) : null
+            if (row !== null && row.t === 'copy') {
+              pointers.push(row)
+            } else if (row !== null) {
+              // Filed now, on the monotonic clock: a ctl earlier in this page
+              // then counts for the items after it (dm-fold ignores a row
+              // without filedAt).
+              row.filedAt = local.nextFiled()
+              rows.push(row)
+              if (row.t === 'ctl') ops.push(row)
+            } else if (along.length > 0) {
+              missed.push(item)
+            }
+          }
+          if (gen !== generation) throw new UsageError(LOCKED)
+          if (rows.length > 0) {
+            await local.append(rows)
+            for (const r of rows) {
+              if (r.t === 'msg') added++
+              else applied++
+            }
+            // A delete from another own device.
+            if (rows.some((r) => r.t === 'ctl' && r.op === 'deleted')) housekeep(personal, gen)
+          }
+          for (const p of along) {
+            await filePageItems(p, missed.filter((item) => item.seq > p.cursor.after).map((item) => item.bytes), mod)
+          }
+          // Noted (sealed in kv) before the cursor passes this page: a lock or
+          // a kill after the cursor write would otherwise lose the pointer.
+          if (pointers.length > 0) await copy.note(pointers)
+          if (page.items.length > 0) {
+            after = page.items[page.items.length - 1].seq
+            if (after > cursor) {
+              cursor = after
+              await store.writeDmCursor(storage, cursor)
+            }
+            for (const p of along) if (after > p.cursor.after) await movePageCursor(p, after)
+          }
+          if (page.next === null) {
+            // At the pool's end each scan of the pass saw everything the
+            // pool still holds above its cursor, and seqs never go back: one
+            // left below the own cursor joins it, so it asks no pass again.
+            if (gen !== generation) throw new UsageError(LOCKED)
+            for (const p of along) if (p.cursor.after < cursor) await movePageCursor(p, cursor)
+            return
+          }
+          if (page.items.length === 0) return
           if (read >= L.budgetBytes) {
             incomplete = true
-            break
+            return
           }
         }
       }
+      // The own messages first: a pass from the own cursor, with the pages
+      // caught up to it riding along. Then the pages left behind (an
+      // adoption, a new gen, a legacy import) catch up in a pass from the
+      // oldest of their cursors, so they never hold up a new message.
+      await pass(cursor)
+      const behind = live.filter((p) => !pageStale(p) && p.cursor.after < cursor)
+      if (!incomplete && behind.length > 0) await pass(Math.min(...behind.map((p) => p.cursor.after)))
     } finally {
       pulling = false
       if (link !== null) link.close()
@@ -2179,7 +2248,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       await local.writeVisitSent(visits.pruneSent([...await local.visitSent(), { to, day }], now))
       const delay = Math.max(0, Math.floor(Number(L.visitDelay()) || 0))
       const queued = await local.visitQueue()
-      await local.writeVisitQueue([...queued, { to, day, due: now + delay, sealed: b4a.toString(sealed, 'base64') }])
+      await local.writeVisitQueue([...queued, { to, day, due: now + delay, sealed: b4a.toString(sealed, 'base64'), ...(prefixOf(recipientBox) === null ? {} : { prefix: prefixOf(recipientBox) }) }])
       track(scheduleVisits().catch(noop))
       return { queued: true }
     })
@@ -2281,7 +2350,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         puts++
         let r
         try {
-          r = await link.put(dropOf(b4a.from(q.sealed, 'base64'), stamp))
+          r = await link.put(dropOf(b4a.from(q.sealed, 'base64'), stamp), q.prefix === undefined ? null : q.prefix)
         } catch {
           return
         }
@@ -2393,11 +2462,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         throw new UsageError('sem conexão com o semeador')
       }
       let cursor = await withVisits(() => local.visitCursor())
+      if (box === null) throw new UsageError(LOCKED)
+      // A device that holds a Página asks every bucket here too: its own
+      // bucket right after an every-bucket pull would point at it (pull).
+      const ownPrefix = pages.pages().length > 0 ? null : prefixOf(box.publicKey)
+      const prefixes = ownPrefix === null ? undefined : [ownPrefix]
       let read = 0
       const floor = visits.dayNumber(since)
       for (;;) {
         if (epoch !== visitEpoch || !unlocked()) break
-        const page = await link.page({ after: cursor, limit: L.pageMax })
+        const page = await link.page({ after: cursor, limit: L.pageMax, prefixes })
         let mod
         try {
           mod = await moderationStrict()
@@ -2598,7 +2672,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (!ctx.local.hasOp(b.id)) await ctx.local.append([{ t: 'ctl', id: b.id, op: b.op, peer: b.peer, at: b.at, filedAt: ctx.local.nextFiled() }])
       if (b.op === 'deleted') housekeep(ctx, generation)
       if (d.queued !== true) {
-        const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed }), ctx.prefix))
+        if (d.prefix === undefined) d.prefix = randomPrefix()
+        const dropped = await withQueue(() => store.pushDmCtlQueue(storage, ctx.local.seal({ b: d.sealed, p: d.prefix }), ctx.prefix))
         d.queued = true
         if (dropped > 0) log('aviso: ' + dropped + ' estados de conversa antigos descartados da fila')
       }
@@ -2636,6 +2711,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         id: b.id,
         at: b.at,
         drops: [dropOf(sealedTo, stamps[0]), dropOf(sealedSelf, stamps[1])],
+        // The self copy goes with a random group, kept on the entry for every
+        // retry, as the page's ctls do (ctxPrefix).
+        prefixes: [prefixOf(d.box), randomPrefix()],
         acked: [false, false],
         row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
         blobs: [],
@@ -2675,9 +2753,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // stamped or not.
   async function stillQueued (ctx, sealedB64) {
     const target = b4a.from(sealedB64, 'base64')
-    for (const item of await readQueue(ctx)) {
-      if (item === sealedB64) return true
-      const drop = dm.decodeDrop(b4a.from(item, 'base64'))
+    for (const { b } of await readQueue(ctx)) {
+      if (b === sealedB64) return true
+      const drop = dm.decodeDrop(b4a.from(b, 'base64'))
       if (drop !== null && b4a.equals(drop.sealed, target)) return true
     }
     return false

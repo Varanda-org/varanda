@@ -7,7 +7,7 @@
 - Selo `copy`: um selo de blob com cota semanal própria (8192 por diário e semana de Brasília, `copy-stamps.json`). Semeador antigo não responde: texto e manifesto caem para a cota diária; fotos nunca.
 - Importação: linhas entram abaixo de tudo o que o aparelho tem (como `legacyHorizon`), com dedupe (mensagem por remetente e id, ctl por id, reação por remetente e id). Marcas de visto importadas não disparam a sincronização de vistos.
 - Conversa apagada no aparelho de origem fica fora (só linhas que a dobra ainda mostra, mais os ctl). Páginas: o armazém da Página entra no aparelho que a guarda; senão espera cifrado (kv `dmCopyPend`) até a Página ser adotada ou até a retenção.
-- Resultado: `{ id, messages, photos, notCached, leftOut }`. Sem bump de Termos (texto atualizado na versão 67).
+- Resultado: `{ id, messages, photos, notCached, leftOut }`. Termos 75 (os Termos e a Política ganham um parágrafo sobre a cópia).
 
 ## O que muda
 

@@ -37,6 +37,15 @@
 // Lifetime: as notices-net.js. A member handle is single-use per channel;
 // a request timeout is terminal for the channel, never the socket.
 //
+// The bucketed lanes 'varanda/dm/2' and 'varanda/visit/2' are this channel
+// again with a bucket (docs/protocol.md section 11, "Buckets"): the channel
+// handshake is one uint, the bits of bucket, which the seeder opens with and
+// the member opens with 0; put gains "bucket" (an integer below 2^bits, or
+// null for untagged) and page gains "buckets" (non-empty, strictly ascending,
+// at most 2^bits entries). The member API takes full 6-bit prefixes and
+// truncates them itself after the handshake. A member that is told more than
+// DM_BUCKET_BITS_MAX bits closes the channel. The v1 lanes are unchanged.
+//
 // The quiet visit lane 'varanda/visit/1' (opts.protocol = VISIT_PROTOCOL) is
 // this same channel under another protocol name: the same messages, checks
 // and rate buckets (its own, per channel), its own socket slot, and on the
@@ -47,7 +56,7 @@ const b4a = require('b4a')
 const c = require('compact-encoding')
 const clock = require('./clock')
 const { hasExactKeys } = require('./records')
-const { DM_PROTOCOL, VISIT_PROTOCOL, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE } = require('./dm')
+const { DM_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, DM_BUCKET_BITS_MAX, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE } = require('./dm')
 
 const MAX_BAD_DM = 5
 const DM_REQUEST_TIMEOUT_MS = 10000
@@ -60,10 +69,12 @@ const DM_PUT_RATE = 8 / 60
 const ACK_REASONS = Object.freeze([null, 'cheio', 'invalido', 'ritmo'])
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 const DROP_BASE64_LENGTH = Math.ceil(DM_DROP_BYTES / 3) * 4
-// protocol -> { slot: default socket slot, tag: log event prefix }
+// protocol -> { slot: default socket slot, tag: log event prefix, v2 }
 const LANES = Object.freeze({
-  [DM_PROTOCOL]: Object.freeze({ slot: '_varandaDm', tag: 'dm' }),
-  [VISIT_PROTOCOL]: Object.freeze({ slot: '_varandaVisit', tag: 'visit' })
+  [DM_PROTOCOL]: Object.freeze({ slot: '_varandaDm', tag: 'dm', v2: false }),
+  [VISIT_PROTOCOL]: Object.freeze({ slot: '_varandaVisit', tag: 'visit', v2: false }),
+  [DM_PROTOCOL_V2]: Object.freeze({ slot: '_varandaDm2', tag: 'dm', v2: true }),
+  [VISIT_PROTOCOL_V2]: Object.freeze({ slot: '_varandaVisit2', tag: 'visit', v2: true })
 })
 // The dm and visit lanes of one socket share one 'close' listener: the
 // seeder's _attachPeer hangs many channels on the same socket, and one
@@ -121,6 +132,10 @@ function isPlainObject (x) {
   return proto === Object.prototype || proto === null
 }
 
+function isPrefix (n) {
+  return Number.isSafeInteger(n) && n >= 0 && n < 2 ** DM_BUCKET_BITS_MAX
+}
+
 function isCursor (n) {
   return Number.isSafeInteger(n) && n >= 0
 }
@@ -147,16 +162,41 @@ function validItems (items) {
   return true
 }
 
-// Exact keys for every message of the channel. Never throws.
-function validateDmMessage (msg) {
+function isBucket (n, bits) {
+  return Number.isSafeInteger(n) && n >= 0 && n < 2 ** bits
+}
+
+// Non-empty, strictly ascending, at most 2^bits entries, each below 2^bits.
+function validBuckets (list, bits) {
+  if (!Array.isArray(list) || list.length < 1 || list.length > 2 ** bits) return false
+  let prev = -1
+  for (const b of list) {
+    if (!isBucket(b, bits) || b <= prev) return false
+    prev = b
+  }
+  return true
+}
+
+// Exact keys for every message of the channel. Never throws. v2 (the lane
+// 'varanda/dm/2' or 'varanda/visit/2') adds a bucket to put and a bucket list
+// to page, checked against the bits the channel's handshake fixed.
+function validateDmMessage (msg, v2 = false, bits = 0) {
   try {
     if (!isPlainObject(msg)) return false
     switch (msg.type) {
       case 'put':
+        if (v2) {
+          return hasExactKeys(msg, ['type', 'drop', 'bucket']) && isDropBase64(msg.drop) &&
+            (msg.bucket === null || isBucket(msg.bucket, bits))
+        }
         return hasExactKeys(msg, ['type', 'drop']) && isDropBase64(msg.drop)
       case 'page':
-        return hasExactKeys(msg, ['type', 'after', 'limit']) && isCursor(msg.after) &&
-          Number.isSafeInteger(msg.limit) && msg.limit >= 1 && msg.limit <= DM_PAGE_MAX
+        if (v2) {
+          if (!hasExactKeys(msg, ['type', 'after', 'limit', 'buckets']) || !validBuckets(msg.buckets, bits)) return false
+        } else if (!hasExactKeys(msg, ['type', 'after', 'limit'])) {
+          return false
+        }
+        return isCursor(msg.after) && Number.isSafeInteger(msg.limit) && msg.limit >= 1 && msg.limit <= DM_PAGE_MAX
       case 'ack':
         if (!hasExactKeys(msg, ['type', 'ok', 'reason']) || typeof msg.ok !== 'boolean') return false
         if (!ACK_REASONS.includes(msg.reason)) return false
@@ -229,13 +269,17 @@ function attachDm (socket, opts = {}) {
     pageBurst = DM_PAGE_BURST,
     pageRate = DM_PAGE_RATE,
     putBurst = DM_PUT_BURST,
-    putRate = DM_PUT_RATE
+    putRate = DM_PUT_RATE,
+    // Seeder on a v2 lane: the bits it advertises, fixed for the channel.
+    bits: ownBits = 0
   } = opts
+  const v2 = lane.v2
 
   if (role !== 'seeder' && role !== 'member') throw new TypeError('role must be seeder or member')
   if (role === 'seeder' && (typeof put !== 'function' || typeof page !== 'function')) {
     throw new TypeError('put and page must be functions')
   }
+  if (!Number.isSafeInteger(ownBits) || ownBits < 0 || ownBits > DM_BUCKET_BITS_MAX) throw new TypeError('invalid bits')
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new TypeError('invalid maxBytes')
   if (!Number.isSafeInteger(maxBad) || maxBad < 0) throw new TypeError('invalid maxBad')
   if (!(requestTimeoutMs > 0)) throw new TypeError('invalid requestTimeoutMs')
@@ -255,6 +299,9 @@ function attachDm (socket, opts = {}) {
   let dropped = false
   let settled = false
   let resolveSupported
+  // The bits of this channel: our own advertised value on the seeder, the
+  // seeder's on a member (known once the channel is open).
+  let bits = role === 'seeder' ? ownBits : 0
   const inbound = tokenBucket(messageBurst, messageRate)
   const pages = tokenBucket(pageBurst, pageRate)
   const puts = tokenBucket(putBurst, putRate)
@@ -270,6 +317,8 @@ function attachDm (socket, opts = {}) {
     role,
     protocol,
     badMessages: 0,
+    v2,
+    get bits () { return bits },
     supported: new Promise((resolve) => { resolveSupported = resolve }),
     close
   }
@@ -292,11 +341,14 @@ function attachDm (socket, opts = {}) {
   }
 
   function openChannel () {
-    const ch = mux.createChannel({ protocol, onopen, onclose: onchannelclose })
+    const ch = mux.createChannel({ protocol, onopen, onclose: onchannelclose, ...(v2 ? { handshake: c.uint } : {}) })
     if (ch === null) return
     channel = ch
     message = ch.addMessage({ encoding: c.buffer, onmessage: onraw })
-    ch.open()
+    // The seeder says how many bits of bucket it uses; the member says 0 and
+    // the seeder ignores it.
+    if (v2) ch.open(role === 'seeder' ? ownBits : 0)
+    else ch.open()
   }
 
   function onpair () {
@@ -306,6 +358,15 @@ function attachDm (socket, opts = {}) {
 
   function onopen (handshake, ch) {
     if (ch !== channel || ended) return
+    if (v2 && role === 'member') {
+      // A seeder claiming more bits than the app ever takes could narrow a
+      // recipient to a handful of people: the channel is bad.
+      if (!Number.isSafeInteger(handshake) || handshake < 0 || handshake > DM_BUCKET_BITS_MAX) {
+        close()
+        return
+      }
+      bits = handshake
+    }
     isOpen = true
     settle(true)
     if (request !== null && !request.sent) sendRequest()
@@ -376,7 +437,7 @@ function attachDm (socket, opts = {}) {
       badMessage()
       return
     }
-    if (!validateDmMessage(msg)) {
+    if (!validateDmMessage(msg, v2, bits)) {
       badMessage()
       return
     }
@@ -416,7 +477,7 @@ function attachDm (socket, opts = {}) {
     const ch = channel
     let reply = null
     try {
-      reply = ackFor(await put(b4a.from(msg.drop, 'base64')))
+      reply = ackFor(await (v2 ? put(b4a.from(msg.drop, 'base64'), { bucket: msg.bucket, bits }) : put(b4a.from(msg.drop, 'base64'))))
     } catch {
       log({ event: lane.tag + '-put-failed', reason: 'erro' })
     }
@@ -428,7 +489,8 @@ function attachDm (socket, opts = {}) {
     const ch = channel
     let reply = null
     try {
-      reply = itemsMessage(await page({ after: msg.after, limit: msg.limit }), msg.after, msg.limit, maxBytes)
+      const query = v2 ? { after: msg.after, limit: msg.limit, buckets: msg.buckets, bits } : { after: msg.after, limit: msg.limit }
+      reply = itemsMessage(await page(query), msg.after, msg.limit, maxBytes)
       if (reply === null) log({ event: lane.tag + '-page-invalid' })
     } catch {
       log({ event: lane.tag + '-page-failed', reason: 'erro' })
@@ -476,27 +538,43 @@ function attachDm (socket, opts = {}) {
     })
   }
 
-  function memberPut (bytes) {
+  // prefix: the drop's FULL 6-bit prefix (bucketPrefix), or null when the
+  // box it is sealed to is unknown; truncated here to the channel's bits, so
+  // callers never depend on the seeder's bits. Ignored on a v1 lane.
+  function memberPut (bytes, prefix = null) {
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== DM_DROP_BYTES) {
       return Promise.reject(new TypeError('drop must be ' + DM_DROP_BYTES + ' bytes'))
     }
-    return startRequest({ type: 'put', drop: b4a.toString(bytes, 'base64') }, 'ack')
+    if (prefix !== null && !isPrefix(prefix)) return Promise.reject(new TypeError('invalid prefix'))
+    const drop = b4a.toString(bytes, 'base64')
+    return startRequest(() => v2
+      ? { type: 'put', drop, bucket: prefix === null ? null : prefix >> (DM_BUCKET_BITS_MAX - bits) }
+      : { type: 'put', drop }, 'ack')
   }
 
-  function requestPage ({ after = 0, limit = DM_PAGE_MAX } = {}) {
-    const msg = { type: 'page', after, limit }
-    if (!validateDmMessage(msg)) return Promise.reject(new TypeError('invalid page request'))
-    return startRequest(msg, 'items')
+  // prefixes: 6-bit prefixes to read (deduplicated and sorted after the
+  // truncation); left out, every bucket. Ignored on a v1 lane, which returns
+  // the whole pool.
+  function requestPage ({ after = 0, limit = DM_PAGE_MAX, prefixes } = {}) {
+    if (!validateDmMessage({ type: 'page', after, limit })) return Promise.reject(new TypeError('invalid page request'))
+    if (prefixes !== undefined && (!Array.isArray(prefixes) || prefixes.length < 1 || !prefixes.every(isPrefix))) {
+      return Promise.reject(new TypeError('invalid prefixes'))
+    }
+    return startRequest(() => {
+      if (!v2) return { type: 'page', after, limit }
+      const all = prefixes === undefined ? Array.from({ length: 2 ** bits }, (_, i) => i) : prefixes.map((p) => p >> (DM_BUCKET_BITS_MAX - bits))
+      return { type: 'page', after, limit, buckets: [...new Set(all)].sort((a, b) => a - b) }
+    }, 'items')
   }
 
   // The timeout runs from the call and is terminal: it rejects AND closes
   // the channel (the socket stays), so a late reply cannot answer a later
   // request.
-  function startRequest (msg, expects) {
+  function startRequest (make, expects) {
     if (ended || dropped) return Promise.reject(new Error('dm channel closed'))
     if (request !== null) return Promise.reject(new Error('a dm request is already in flight'))
     return new Promise((resolve, reject) => {
-      const r = { msg, expects, sent: false, resolve, reject, timer: null }
+      const r = { make, msg: null, expects, sent: false, resolve, reject, timer: null }
       r.timer = setTimeout(() => {
         if (request !== r) return
         request = null
@@ -511,6 +589,15 @@ function attachDm (socket, opts = {}) {
   function sendRequest () {
     const r = request
     if (r === null || r.sent) return
+    // Built now, not at the call: the bits are known only once the channel is open.
+    const msg = r.make()
+    if (!validateDmMessage(msg, v2, bits)) {
+      request = null
+      clearTimeout(r.timer)
+      r.reject(new TypeError('invalid dm request'))
+      return
+    }
+    r.msg = msg
     if (!rawSend(r.msg)) return
     r.sent = true
   }
@@ -527,6 +614,8 @@ function attachDm (socket, opts = {}) {
 module.exports = {
   DM_PROTOCOL,
   VISIT_PROTOCOL,
+  DM_PROTOCOL_V2,
+  VISIT_PROTOCOL_V2,
   MAX_BAD_DM,
   DM_REQUEST_TIMEOUT_MS,
   DM_MESSAGE_BURST,
