@@ -59,6 +59,7 @@ const {
   readAll,
   readRaw,
   readBlocks,
+  readHeldBlocks,
   appendRecord,
   appendRecords,
   readConfig,
@@ -1352,7 +1353,7 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
       const h = decodeBlock(await core.get(0, { wait: false, raw: true }))
       if (validateRecord(h, 0) === null) localDiaries.add(hex(core.key))
       if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
-      logs.push({ key: hex(core.key), diary: h.diary, entries: await readBlocks(core), length: core.contiguousLength, signed: core.length })
+      logs.push({ key: hex(core.key), diary: h.diary, entries: await readHeldBlocks(core), length: core.contiguousLength, signed: core.length })
     } finally {
       await core.close()
     }
