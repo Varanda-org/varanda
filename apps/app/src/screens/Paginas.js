@@ -159,6 +159,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   const peekedRef = useRef(new Set())
   const peekingRef = useRef(new Set())
   const triesRef = useRef(new Map())
+  const [peekAgain, setPeekAgain] = useState(0)
 
   const load = useCallback(async () => {
     if (!hosted || member === null) return
@@ -213,10 +214,10 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
         if (!alive()) return
         if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue
         peekingRef.current.add(key)
+        triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
         try {
           const res = await fetchMember(key)
           if (!alive()) continue
-          triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
           if (!res.ok) continue
           const { profileSeq, usernameSeq } = res.value
           const seqs = [...new Set([profileSeq, usernameSeq].filter((n) => Number.isSafeInteger(n) && n >= 1))]
@@ -232,7 +233,11 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
             const entry = peerEntryOf(peek, author)
             if (entry !== null) learnVerified([[author, entry]], scope)
           }
-          if (peeked.has(key)) peekedRef.current.add(key)
+          // An answer dropped for another identity leaves the key to ask
+          // again, in a run of its own: the run of the new identity skipped
+          // it while this peek was in flight.
+          if (scope !== scopeRef.current) setPeekAgain((n) => n + 1)
+          else if (peeked.has(key)) peekedRef.current.add(key)
         } catch {
         } finally {
           peekingRef.current.delete(key)
@@ -241,7 +246,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     }
     peek()
     return undefined
-  }, [list, profileOf, learnVerified, node])
+  }, [list, profileOf, learnVerified, node, peekAgain])
 
   const dismiss = (id) => setDismissed((prev) => new Set(prev).add(id))
 
