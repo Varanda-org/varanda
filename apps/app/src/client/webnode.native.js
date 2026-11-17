@@ -174,7 +174,7 @@ export function webNodeHandle (request) {
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
       let params
-      if (ref.kind === 'dm') params = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index }
+      if (ref.kind === 'dm') params = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index, ...(ref.page != null ? { page: ref.page } : {}) }
       else if (ref.kind === 'moment') params = { kind: 'moment', author: ref.author, seq: ref.seq }
       else params = { kind: 'group', diary: ref.diary, item: ref.item }
       const got = await request('media.readFile', params)

@@ -82,6 +82,7 @@ const fs = require('#fs')
 const path = require('#path')
 const { writeJsonAtomic } = require('./store')
 const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, BLOB_RETENTION_MS, BLOB_POOL_BYTES, decodeChunk } = require('./blob')
+const { STAMP_TOKEN_RETENTION_MS } = require('./dm')
 
 const BLOBS_DIR = 'blobs'
 const META_FILE = 'meta.json'
@@ -184,7 +185,7 @@ function createBlobPool (opts = {}) {
     now = Date.now,
     retentionMs = BLOB_RETENTION_MS,
     partialMs = Math.min(BLOB_PARTIAL_MS, retentionMs),
-    tokenRetentionMs = 2 * retentionMs,
+    tokenRetentionMs = Math.max(retentionMs, STAMP_TOKEN_RETENTION_MS),
     maxBytes = BLOB_POOL_BYTES,
     verifyStamp,
     isKidAccepted = () => false,

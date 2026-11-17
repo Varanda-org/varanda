@@ -128,7 +128,7 @@ test('scroll reserves the initial safe-area bar estimate and keeps body padding'
 test('conversation and offer share the page gate and resume the chosen action', (t) => {
   const src = read('screens/Anuncio.js')
   const gate = src.slice(src.indexOf('const contactSeller ='), src.indexOf('const startConversation ='))
-  const literal = 'listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'
+  const literal = 'listing.page === true && !pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), listing.author)'
   t.ok(gate.includes(literal) && src.split(literal).length === 2, 'one notice gate for both actions')
   t.ok(gate.includes('setPageNotice(id)') && gate.includes('await continueContact(id)'), 'notice remembers which button opened it')
   t.ok(src.includes("contactSeller('conversar')") && src.includes("contactSeller('oferta')"), 'both handlers enter the gate')

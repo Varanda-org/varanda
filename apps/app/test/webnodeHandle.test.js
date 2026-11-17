@@ -185,6 +185,10 @@ test('read names a read-dir file and the handle releases it', async (t) => {
   const a = await media.read(dmRef)
   t.alike(a, { uri: READS + names[0], mime: 'image/jpeg', w: 10, h: 20 })
   t.alike(calls.at(-1).params, { kind: 'dm', from: 'ab'.repeat(32), id: 'cd'.repeat(16), index: 1 }, 'only the dm fields cross')
+  await media.read({ ...dmRef, page: '12'.repeat(32) })
+  t.alike(calls.at(-1).params, { kind: 'dm', from: 'ab'.repeat(32), id: 'cd'.repeat(16), index: 1, page: '12'.repeat(32) }, 'a Página read carries its page')
+  media.forgetReadFile(names[1])
+  names.splice(1, 1)
 
   const item = { core: 'ab'.repeat(32) }
   const b = await media.read({ kind: 'group', diary: 'ef'.repeat(32), item })
@@ -286,6 +290,8 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
   t.alike(await media.putDm({ bytes, mime: 'image/png', width: 1, height: 1 }), { id: 'i' })
   const dm = await media.read({ kind: 'dm', from: 'a', id: 'b', index: 0 })
   t.alike(calls.at(-1), ['readDm', { from: 'a', id: 'b', index: 0 }])
+  await media.read({ kind: 'dm', from: 'a', id: 'b', index: 'card', page: 'p' })
+  t.alike(calls.at(-1), ['readDm', { from: 'a', id: 'b', index: 'card', page: 'p' }], 'a Página read carries its page')
   t.is(dm.bytes, gif)
   t.is(dm.mime, 'image/gif')
   t.absent('uri' in dm)

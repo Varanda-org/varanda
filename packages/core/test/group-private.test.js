@@ -407,24 +407,229 @@ test('an epoch distributed before a ban is never eligible after the ban', (t) =>
   t.is(kidOf(g.epoch), kidOf(E3))
 })
 
-test('a pending new device of an admitted diary is never an entitled recipient', (t) => {
+// Owner decision (#350): the admission covers the diary's new devices while
+// it has not left or been banned.
+test('a new device of an admitted diary is entitled without a new admit', (t) => {
   const w = pworld()
   w.add(X, wX2)
   const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
   const g = buildGroup(w.input(w.reader(wA)))
   t.is(g.members.get(X), 'member')
-  t.ok(g.requests.includes(X), 'the new device waits for an admit')
-  t.is(kidOf(g.epoch), kidOf(w.E1), 'E2 hands the key to a pending writer')
-  t.not(kidOf(g.epoch), kidOf(E2))
-  t.alike(g.entitled, [G, wA, wX, wY].sort(), 'the writers a rotation seals to')
-  const own = buildGroup(w.input(w.reader(wX2)))
-  t.is(own.epoch, null, 'the pending device itself holds only E2, which names it')
-  t.is(own.rekeyPending, true)
-  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(7) }))
-  const after = buildGroup(w.input(w.reader(wA)))
-  t.is(kidOf(after.epoch), kidOf(E2), 'admitted, E2 becomes eligible')
-  t.alike(after.entitled, [G, wA, wX, wX2, wY].sort())
-  t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2))
+  t.absent(g.requests.includes(X), 'the new device waits for nobody')
+  t.alike(g.entitled, [G, wA, wX, wX2, wY].sort(), 'the writers a rotation seals to')
+  t.is(kidOf(g.epoch), kidOf(E2), 'E2 hands the key to an entitled writer')
+  t.is(kidOf(buildGroup(w.input(w.reader(wX2))).epoch), kidOf(E2), 'the new device reads E2')
+})
+
+test('a new device of a diary not admitted or banned is never entitled', (t) => {
+  const w = pworld()
+  w.add(Z, wZ)
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(Z), 'requested')
+  t.absent(g.entitled.includes(wZ), 'never admitted')
+  w.push(G, groupAdmit({ member: Z, on: true, cuts: [{ writer: wZ, seq: 1 }], at: AT(6) }))
+  w.push(G, groupAdmit({ member: Z, on: false, cuts: [{ writer: wZ, seq: 1 }], at: AT(7) }))
+  const wZ2 = K(0x701)
+  w.add(Z, wZ2, { at: 8 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wZ2), 'admission withdrawn')
+  const ban = w.push(G, groupBan({ member: X, on: true, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(9) }))
+  w.add(X, wX2, { at: 10 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wX2), 'banned')
+  w.push(G, groupBan({ member: X, on: false, lifts: ban, cuts: [{ writer: wX, seq: w.len(wX) }], at: AT(11) }))
+  g = buildGroup(w.input(w.reader(wA)))
+  t.ok(g.entitled.includes(wX), 'unbanned on the writer the unban lists')
+  t.absent(g.entitled.includes(wX2), 'not on a device the unban never listed')
+})
+
+test('a covered device that leaves keeps its earlier posts and is not entitled; the next generation needs a new admit', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
+  const own = sealedPost(w, wX2, E2, 7)
+  const leave = w.push(wX2, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(8) }))
+  let g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(X), 'left')
+  t.alike(visible(g), [own.writer + ':' + own.seq], 'its post from before the leave stays, as a listed writer\'s')
+  t.alike(g.posts.map((p) => p.text), ['p7'])
+  t.absent(g.entitled.includes(wX2), 'the device that left is not entitled')
+  t.absent(g.entitled.includes(wX))
+  const wN = K(0x705)
+  w.add(X, wN, { rejoin: leave, at: 9 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.absent(g.entitled.includes(wN), 'the old admit covers no writer of the next generation')
+  t.ok(g.requests.includes(X))
+  t.alike(visible(g), [own.writer + ':' + own.seq])
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX2, seq: w.len(wX2) }], at: AT(10) }))
+  const wN2 = K(0x706)
+  w.add(X, wN2, { rejoin: leave, at: 11 })
+  g = buildGroup(w.input(w.reader(wA)))
+  t.is(g.members.get(X), 'member')
+  t.ok(g.entitled.includes(wN), 'the new admit covers its generation')
+  t.ok(g.entitled.includes(wN2), 'also a device added after it')
+  t.absent(g.entitled.includes(wX2) || g.entitled.includes(wX), 'never a device from before the leave')
+  t.alike(visible(g), [own.writer + ':' + own.seq], 'the earlier post stays')
+
+  // An admit whose cut passes a leave that sorts after it saw the leave
+  // (sawPrefix) in an older generation (admitGen): it covers no old device.
+  const v = pworld()
+  v.add(X, wX2)
+  const F2 = v.rotate(G, [G, wA, wX, wX2, wY], { at: 6 })
+  v.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 9 }], at: AT(10) }))
+  const vLeave = v.push(wX, groupLeave({ cuts: [{ writer: wX, seq: v.len(wX) }], at: AT(20) }))
+  v.add(X, wN, { rejoin: vLeave, at: 21 })
+  v.seal(wX2, F2, groupPost({ text: 'late', seen: { writer: wN, seq: 0 }, at: AT(22) }))
+  t.absent(buildGroup(v.input(v.reader(wA))).entitled.includes(wX2), 'an old device after the rejoin')
+})
+
+// The fold's `cuts` as entries, or null when the result has none.
+const cutsOf = (r) => r.cuts instanceof Map ? [...r.cuts] : null
+
+test('a writer its own diary cut is never entitled: the group rotates as after a removal (#350)', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  const cut = w.len(wX)
+  sealedPost(w, wX, E2, 9)
+  const marks = new Map([[X, [{ writer: wX, cut, seq: 1 }]]])
+  let g = buildGroup(w.input(w.reader(wX2)))
+  t.is(kidOf(g.epoch), kidOf(E2), 'control: E2 is eligible')
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p9'])
+
+  g = buildGroup(w.input(w.reader(wX2), { marks }))
+  t.alike(g.entitled, [G, wA, wX2, wY].sort(), 'the cut writer is not entitled')
+  t.alike(cutsOf(g), [[wX, cut]])
+  t.is(g.epoch, null, 'an epoch sealed to it is no longer eligible')
+  t.is(g.rekeyPending, true, 'a rotation is needed')
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'its sealed post past the cut does not count')
+  t.is(buildGroup(w.input(w.reader(wX), { marks })).rekeyPending, true, 'the cut device reads as pending too')
+
+  const E3 = w.rotate(G, [G, wA, wX2, wY], { at: 10 })
+  sealedPost(w, wX2, E3, 11)
+  g = buildGroup(w.input(w.reader(wX2), { marks }))
+  t.is(kidOf(g.epoch), kidOf(E3), 'a rotation that leaves it out is eligible')
+  t.is(g.rekeyPending, false)
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p11'], 'the others read the group again')
+  const lost = buildGroup(w.input(w.reader(wX), { marks }))
+  t.absent(lost.posts.some((p) => p.text === 'p11'), 'the cut device cannot open the new epoch')
+  t.ok(lost.sealed >= 1)
+  t.alike(buildGroup(w.input(w.reader(wX2), { marks: new Map([[Y, [{ writer: wX, cut: 1, seq: 1 }]]]) })).entitled, [G, wA, wX, wX2, wY].sort(), 'a mark in another diary changes nothing')
+})
+
+test('a key block past a diary cut stays readable, never sendable (#350)', (t) => {
+  // A's device rotates after a removal; members seal under its epoch; A's
+  // diary then cuts that device below the key block.
+  const hist = (cut) => {
+    const w = pworld()
+    const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+    const E2 = w.rotate(wA, [G, wA, wX], { basis: [ban], at: 7 })
+    sealedPost(w, wX, E2, 8)
+    sealedPost(w, G, E2, 9)
+    sealedPost(w, wA, E2, 10)
+    const extra = cut === null ? {} : { marks: new Map([[A, [{ writer: wA, cut, seq: 1 }]]]) }
+    return { w, E2, g: buildGroup(w.input(w.reader(wX), extra)) }
+  }
+  let { g, E2 } = hist(null)
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p9', 'p10'])
+  for (const cut of [0, 1, 2]) {
+    ;({ g } = hist(cut))
+    t.alike(g.posts.map((p) => p.text), ['p8', 'p9'], 'cut ' + cut + ': the history others sealed stays readable, the cut writer post past the cut does not count')
+    t.is(g.sealed, 0, 'cut ' + cut)
+    t.is(g.epoch, null, 'cut ' + cut + ': the epoch no longer sends')
+    t.is(g.rekeyPending, true, 'cut ' + cut)
+    t.is(g.removals.length, 1, 'cut ' + cut + ': the removal the block covered still counts')
+  }
+})
+
+test('a key block citing a cut community writer stays readable (#350)', (t) => {
+  const viaC = (cut) => {
+    const w = pworld({ cadmins: [B] })
+    w.add(B, wB)
+    w.comm.push(cwKey(B), communityBan({ member: K(0xabc), on: true, cuts: [], at: AT(5) }))
+    const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+    const E2 = w.rotate(wB, [G, wA, wB, wX], { basis: [ban], auth: w.cauth(B), at: 7 })
+    sealedPost(w, wX, E2, 8)
+    if (cut !== null) w.comm.mark(B, cwKey(B), cut)
+    return { E2, g: buildGroup(w.input(w.reader(wX))) }
+  }
+  let { g, E2 } = viaC(null)
+  t.is(kidOf(g.epoch), kidOf(E2))
+  t.alike(g.posts.map((p) => p.text), ['p8'])
+  ;({ g } = viaC(1))
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'the history stays readable')
+  t.is(g.sealed, 0)
+  t.is(g.epoch, null, 'a cut CW gives no sending authority')
+  t.is(g.rekeyPending, true)
+})
+
+test('a diary cut below its own leave keeps the diary left and the removal (#350)', (t) => {
+  const unleave = (cut) => {
+    const w = pworld()
+    w.add(X, wX2)
+    w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+    const L = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(7) }))
+    const E2 = w.rotate(G, [G, wA, wY], { basis: [L], at: 8 })
+    sealedPost(w, wY, E2, 9)
+    const extra = cut === null ? {} : { marks: new Map([[X, [{ writer: wX, cut, seq: 1 }]]]) }
+    return { E2, g: buildGroup(w.input(w.reader(wY), extra)) }
+  }
+  const control = unleave(null)
+  for (const cut of [0, 1]) {
+    const { g, E2 } = unleave(cut)
+    t.is(g.members.get(X), 'left', 'cut ' + cut)
+    t.alike(g.removals, control.g.removals, 'cut ' + cut + ': the leave is still a requirement')
+    t.is(kidOf(g.epoch), kidOf(E2), 'cut ' + cut + ': the rotation covering it stays the one to send under')
+    t.alike(g.entitled, control.g.entitled)
+  }
+})
+
+test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {
+  const rotated = (ref) => {
+    const w = pworld()
+    const cut = w.len(wX)
+    sealedPost(w, wX, w.E1, 20)
+    const basis = ref === null ? [] : [{ writer: wX, seq: ref }]
+    const E2 = w.rotate(wA, [G, wA, wY], { basis, at: 21 })
+    sealedPost(w, wY, E2, 22)
+    return { E2, g: buildGroup(w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut, seq: 1 }]]]) })) }
+  }
+  for (const ref of [null, 1, 2, 2 ** 40]) {
+    const { g, E2 } = rotated(ref)
+    const label = 'basis ' + (ref === null ? 'none' : ref) + ': '
+    t.alike(g.posts.map((p) => p.text), ['p22'], label + 'the post sealed past the cut stays out')
+    t.alike(cutsOf(g), [[wX, 1]], label + 'the cut is the marked cut')
+    t.is(kidOf(g.epoch), kidOf(E2), label + 'the rotation leaving the cut writer out is the epoch to send under')
+    t.is(g.rekeyPending, false, label)
+    t.ok(!g.entitled.includes(wX), label)
+  }
+})
+
+test('a mark that arrives after the rotation, in any order, gives the same fold (#350)', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(G, [G, wA, wX, wX2, wY], { at: 7 })
+  sealedPost(w, wX, E2, 8)
+  sealedPost(w, wX, E2, 9)
+  // The rotation that leaves wX out, written before this reader holds the mark.
+  const E3 = w.rotate(G, [G, wA, wX2, wY], { at: 10 })
+  sealedPost(w, wX2, E3, 11)
+  const before = buildGroup(w.input(w.reader(wX2)))
+  t.alike(before.posts.map((p) => p.text), ['p8', 'p9', 'p11'], 'without the mark every post counts')
+  const marks = [{ writer: wX, cut: 3, seq: 1 }, { writer: wX, cut: 2, seq: 2 }, { gap: true }]
+  const expected = normalize(buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, marks]]) })))
+  for (const order of [[1, 0, 2], [2, 1, 0], [0, 2, 1]]) {
+    t.is(normalize(buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, order.map((i) => marks[i])]]) }))), expected, 'order ' + order.join(''))
+  }
+  const g = buildGroup(w.input(w.reader(wX2), { marks: new Map([[X, marks]]) }))
+  t.is(kidOf(g.epoch), kidOf(E3))
+  t.alike(cutsOf(g), [[wX, 2]])
+  t.alike(g.posts.map((p) => p.text), ['p8', 'p11'])
+  t.alike([...g.cutUnknown], [X])
 })
 
 test('a community admin receives keys and distributes through auth; a demotion in C ends it, history stays', (t) => {
@@ -937,6 +1142,30 @@ test('a member back in the community enters G only on a new writer an admit list
   t.is(g.members.get(X), 'member')
   t.ok(g.entitled.includes(wX2))
   t.absent(g.entitled.includes(wX), 'the writer on the retired CW stays out')
+})
+
+test('after leaving C, a G admission entitles only writers of the CW generation it lists, whatever the dates', (t) => {
+  const wX4 = K(0x403)
+  const wX5 = K(0x404)
+  const w = cworld()
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }], at: AT(60) }))
+  // The leave dated before both admits: no causal link places it.
+  const leave = w.cleave(X, 1)
+  w.comm.addWriter(X, cwX2, { rejoin: leave })
+  w.add(X, wX3, { at: 70 })
+  let g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wX3), 'the admits list only a writer of the old CW generation')
+  t.ok(g.requests.includes(X))
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX3, seq: 1 }], at: AT(80) }))
+  w.add(X, wX4, { at: 81 })
+  g = buildGroup(w.input())
+  t.ok(g.entitled.includes(wX3) && g.entitled.includes(wX4), 'an admit listing a writer of the new CW covers its later devices')
+  t.alike(g.requests, [])
+  // A G writer on the retired CW: same generation as the listed wX, never covered.
+  w.add(X, wX5, { cw: w.logs.get(wX).entries[0].record.member, at: 90 })
+  g = buildGroup(w.input())
+  t.absent(g.entitled.includes(wX5), 'a writer on a retired CW')
+  t.alike(g.requests, [X], 'it stays uncovered, as without automatic cover')
 })
 
 const wY2 = K(0x501)

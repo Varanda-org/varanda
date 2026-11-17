@@ -25,7 +25,7 @@ test('LABELS are the approved Portuguese', async (t) => {
     decline: 'Recusar',
     block: 'Bloquear mensagens',
     unblock: 'Desbloquear mensagens',
-    delete: 'Apagar conversa neste aparelho',
+    delete: 'Apagar conversa',
     report: 'Denunciar',
     reply: 'Responder',
     message: 'Mensagem',
@@ -256,6 +256,9 @@ test('chatMediaRefs names the DM sender, message and index, and the group diary'
   t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG }), [])
   t.alike(chatMediaRefs('group', { media: [a] }), [], 'no diary, no ref')
   t.is(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a, a, a, a, a] }).length, 4)
+  t.alike(chatMediaRefs('dm', { from: HEX('a'), id: MSG, media: [a], page: HEX('c') }), [
+    { kind: 'dm', from: HEX('a'), id: MSG, index: 0, page: HEX('c'), item: a }
+  ], 'a Página\'s message names the page')
   t.alike(itemSize({ w: 3, h: 2 }), { w: 3, h: 2 })
   t.alike(itemSize({ width: 5, height: 4 }), { w: 5, h: 4 })
   t.alike(itemSize(null), { w: null, h: null })
@@ -394,11 +397,11 @@ test('Mensagem sends a voice note on the blob channel and keeps the photo send s
 test('Mensagem offers Encaminhar and marks forwarded messages without the original author', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(src.includes("label: 'Encaminhar'"), 'the long press action')
-  t.ok(src.includes('const canForward = pageKey === null && unlocked'), 'never as a page')
+  t.ok(src.includes('const canForward = unlocked\n'), 'also as a page, through the page client (forwardSheet.test.js)')
   t.ok(src.includes('<ForwardSheet'), 'the sheet')
   t.ok(src.includes('fwd={fwdOf.get(item.key)}') && src.includes('forwarded={!item.deleted && fwd === 1}'), 'fwd 1 from dm.thread shows the line')
   t.ok(src.includes('media={mediaOf.get(item.key)}') && src.includes('dmForwardSource(item.rawText, media)'), 'expired media maps to an unavailable item')
-  t.ok(src.includes('if (forwardSource !== null) {'), 'no Encaminhar when nothing is left to forward')
+  t.ok(src.includes('if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {'), 'no Encaminhar when nothing is left to forward')
   t.absent(src.includes('media: Array.isArray(media) ? media : []'), 'expired media never becomes a plain text forward')
   const bubble = readFileSync(join(__dirname, '../src/ui/Bubble.js'), 'utf8')
   t.ok(bubble.includes("<Icon name='encaminhar'") && bubble.includes('FORWARDED_LABEL'), 'Encaminhada with the encaminhar icon')
@@ -440,6 +443,16 @@ test('a message request never loads a provider player', (t) => {
   t.ok(src.includes("plainCard={folder === 'request'}"), 'Mensagem passes plainCard in a request')
   t.ok(src.includes("deferred={folder === 'request'}"), 'the same row defers its photos')
   t.ok(/const extra = useMemo\(\(\) => \(\{[^}]*\bfolder\b[^}]*\}\), \[[^\]]*\bfolder\b/.test(src) && src.includes('extraData={extra}'), 'rows redraw when the request is accepted')
+})
+
+test('acting as a Página, its photos and the card thumbnail are read from the Página\'s store', (t) => {
+  const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(src.includes('const pageOf = pageKey !== null ? { page: pageKey } : {}'), 'the row knows the Página it acts as')
+  t.ok(src.includes("chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })"), 'the photo refs carry page: pageKey')
+  t.ok(src.includes("cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}"), 'the card thumb too, and the identity stays the person\'s')
+  t.absent(src.includes('pageKey !== null ? undefined'), 'a Página card is never left without its thumb')
+  const card = readFileSync(join(__dirname, '../src/ui/LinkCard.js'), 'utf8')
+  t.ok(card.includes("const page = typeof thumb.page === 'string' ? { page: thumb.page } : {}") && card.includes("index: 'card', ...page, item: image"), 'chatThumbRef carries the page')
 })
 
 test('chat screens end the player band at the composer', (t) => {
@@ -682,7 +695,7 @@ test('Conversar is offered only for an open page on a hosted node with pages ena
   t.ok(src.includes('<PageNoticeSheet') && anuncioSrc.includes('<PageNoticeSheet'), 'the profile and the listing show the shared page notice sheet')
   t.ok(sheetSrc.includes('{PAGE_DM_NOTICE}') && sheetSrc.includes('<ConfirmStack'), 'the sheet shows the notice over a full-width confirm stack')
   t.ok(sheetSrc.includes("request('dm.lookup', { member: page })") && sheetSrc.includes('{inactive ? <Soft>{PAGE_DM_NOT_ACTIVE}</Soft> : null}'), 'a page without device-held keys gets the extra line')
-  t.ok(anuncioSrc.includes('listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)'), 'Conversar on a page listing shows the same notice first')
+  t.ok(anuncioSrc.includes('listing.page === true && !pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), listing.author)'), 'Conversar on a page listing shows the same notice first')
   t.ok(src.includes("<Pill icon='mensagem' label='Conversar' onPress={openPageConversation}"))
   t.ok(src.includes('onPress={() => onOpenListings(author)}'))
   t.ok(src.includes("const listingsRow = node.hosted === true && !(isPage && lifecycle.moved) && typeof onOpenListings === 'function'"), 'listings require a hosted node and stay hidden on a moved page')

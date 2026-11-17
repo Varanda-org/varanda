@@ -332,6 +332,7 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { decodeBlock, validateRecord, validRecordCopy, PAGE_KEYS, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
@@ -661,6 +662,7 @@ function rootVisibilityOf (raw, key) {
 async function localGate (core, keyHex, associationHex, opts) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
+    await warmBlock0(raw, associationHex)
     return gateVerdict(raw, keyHex, associationHex, opts)
   } catch {
     return 'not-in-log'

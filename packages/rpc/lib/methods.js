@@ -1636,6 +1636,8 @@ const SPECS = {
       return value.unchanged && value.blob !== null ? 'unchanged só com blob nulo' : null
     }
   },
+  // Result { key }: the account's secret for the app's once-marks (5.151).
+  'seen.onceKey': { fields: none },
   // Marks a momento seen for the member's devices (5.149); an idempotent local
   // store like dm.seen, synced in the seen document. Result { changed }.
   'moment.seen': { fields: { author: req(isKey), seq: req(int(1, 4294967295)) } },
@@ -1812,15 +1814,16 @@ const SPECS = {
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and
   // only its name comes back, since a photo is far above MAX_MESSAGE. A DM
-  // item is { kind: 'dm', from, id, index }, a private group item
-  // { kind: 'group', diary, item }, a moment { kind: 'moment', author, seq }.
-  // Not mutating: it changes no diary.
+  // item is { kind: 'dm', from, id, index } (plus `page` for a Página's
+  // conversation), a private group item { kind: 'group', diary, item }, a
+  // moment { kind: 'moment', author, seq }. Not mutating: it changes no diary.
   'media.readFile': {
     fields: {
       kind: req((v) => v === 'dm' || v === 'group' || v === 'moment'),
       from: opt(isKey),
       id: opt(isDmId),
       index: opt((v) => v === 'card' || int(0, L.MAX_DM_MEDIA - 1)(v)),
+      page: opt(isKey),
       diary: opt(isKey),
       item: opt(isPrivateGroupMediaItem),
       author: opt(isKey),
@@ -1831,7 +1834,8 @@ const SPECS = {
       const group = ['diary', 'item']
       const moment = ['author', 'seq']
       const want = given.kind === 'dm' ? dm : given.kind === 'group' ? group : moment
-      const other = [...dm, ...group, ...moment].filter((k) => !want.includes(k))
+      // page is optional, and only a DM item takes it.
+      const other = [...dm, ...group, ...moment, ...(given.kind === 'dm' ? [] : ['page'])].filter((k) => !want.includes(k))
       for (const k of want) if (!hasOwn(given, k)) return 'parâmetro obrigatório: ' + k
       for (const k of other) if (hasOwn(given, k)) return 'parâmetro desconhecido'
       return null

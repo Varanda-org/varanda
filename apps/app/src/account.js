@@ -317,6 +317,26 @@ export const termsFinish = async ({ member, nonce, signature }) => {
   return { version: data.version, acceptedAt: data.acceptedAt }
 }
 
+// Whether this member already accepted `version` on another device, asked
+// after Entrar (src/terms.js shouldAskHeld). The signature is invite.sign's
+// read-only summary statement over the nonce. Both answer null on a 404 of a
+// route the service does not have: an older service.
+export const termsHeldStart = async ({ member }) => {
+  const data = await call('POST', '/account/terms/held/start', { member }, { allow404: 'route' })
+  if (data === null) return null
+  if (!exactKeys(data, ['nonce']) || !isToken(data.nonce)) throw toError('indisponivel')
+  return { nonce: data.nonce }
+}
+export const termsHeldFinish = async ({ member, nonce, signature, version }) => {
+  const data = await call('POST', '/account/terms/held/finish', { member, nonce, signature, version }, { allow404: 'route' })
+  if (data === null) return null
+  if (!exactKeys(data, ['version', 'acceptedAt']) || !Number.isSafeInteger(data.version) || data.version !== version ||
+    (data.acceptedAt !== null && !(isIso(data.acceptedAt) && new Date(data.acceptedAt).toISOString() === data.acceptedAt))) {
+    throw toError('indisponivel')
+  }
+  return { version: data.version, acceptedAt: data.acceptedAt }
+}
+
 // Web Push (pushClient.web.js). The key read and the check answer null on any
 // failure: the Ajustes row then hides or reads "not known", nothing more.
 export const pushKey = async () => {

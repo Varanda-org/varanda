@@ -325,6 +325,7 @@ const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-pro
 const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
 const { latestUsernameRecord } = require('@varanda/core/lib/username')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { createRekeyGate, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
 const member = require('./member-ops')
 const { runSync, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE } = require('./sync')
 const { verifyShow } = require('@varanda/core/lib/testimonials')
@@ -425,6 +426,7 @@ const INVITE_CARD_PAST = 24 * 60 * 60
 const INVITE_CARD_AHEAD = 8 * 24 * 60 * 60
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
+const LOCAL_LINE = 'diário próprio escrito neste aparelho'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
@@ -847,6 +849,8 @@ function readyWithin (ready, ms) {
 // (the browser's VARANDA_NO_CLEAR kill switch; tombstones still hide them).
 // upkeepDelayMs: the device upkeep's coalescing delay (tests).
 // upkeepFullMaxAgeMs: the age after which it plans in full again (tests).
+// rekeyClock, rekeyRandom: the clock (ms) and random source of the
+// periodic rotation of private groups' keys (tests).
 // hkdf: the HKDF of passkey.js for every key derived from the PRF of
 // setKeyPair (group box, group writer and direct message keys); absent, it
 // is WebCrypto's. The Bare worklet passes its own: its WebCrypto has none.
@@ -877,6 +881,8 @@ function createBrowserSession ({
   noClear = false,
   upkeepDelayMs = UPKEEP_DELAY_MS,
   upkeepFullMaxAgeMs = UPKEEP_FULL_MAX_AGE_MS,
+  rekeyClock = Date.now,
+  rekeyRandom = Math.random,
   fetchMedia = (...args) => globalThis.fetch(...args),
   hkdf,
   dmUnlockHook = null,
@@ -1060,6 +1066,19 @@ function createBrowserSession ({
   let upkeepFull = false
   let upkeepFullAt = 0
   let upkeepQuick = false
+  // The periodic rotation (periodicRekeyStep): the per-group check limit,
+  // a limit on the groups-changed that start a rotation-only pass, the
+  // timer that starts one when a group becomes due, and that pass's own
+  // coalescing timer.
+  const rekeyGate = createRekeyGate({ now: rekeyClock, random: rekeyRandom })
+  const rekeyTriggers = createRekeyGate({ now: rekeyClock })
+  let rekeyTimer = null
+  let rekeyTimerAt = null
+  let rekeyPassTimer = null
+  let rekeyQueued = false
+  const rekeyDeferred = new Set()
+  let rekeyDeferTimer = null
+  let rekeyDeferAt = Infinity
   // The own length of the last fold the continuous run was restarted for.
   let lastFoldLength = null
   // Last own-sync verdict of a run: the own diary held what the verified
@@ -1072,6 +1091,7 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  let localEchoed = null // the greatest local length already announced with LOCAL_LINE
   // diary.peek: the running sync publishes its peek function here once its
   // seeder link verified (runSync `peeker`) and withdraws it when the link
   // closes or the run ends; set() wakes the handlers waiting for one.
@@ -1351,6 +1371,18 @@ function createBrowserSession ({
                 return
               case 'own-synced':
                 synced = true
+                // The reader (the app) must not take the echo of a write
+                // made here for a post from another device. Any length up
+                // to localLength is already in the local core (a later
+                // wrote() may move localLength before an earlier length
+                // is reported, hence <=). Once per length keeps
+                // Ajustes > Sincronização quiet when a new link reports
+                // the same length again.
+                if (localLength !== null && Number.isSafeInteger(ev.length) &&
+                  ev.length <= localLength && (localEchoed === null || ev.length > localEchoed)) {
+                  localEchoed = ev.length
+                  event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
+                }
                 event('diário próprio sincronizado (' + safe(String(ev.length)) + ')')
                 if (!r.ownSynced) {
                   r.ownSynced = true
@@ -1389,6 +1421,9 @@ function createBrowserSession ({
                 // even the next echo of a local write plans in full.
                 if (!once && !internal) upkeepFull = true
                 if (!once && !internal && upkeepRoom()) scheduleUpkeep()
+                // A grown group may make its epoch due (periodicRekeyStep):
+                // a rotation-only pass, at most once an hour per group.
+                if (!once && !internal && typeof ev.group === 'string') rekeyGrew(ev.group)
                 return
               case 'group-writer':
                 // A writer stored after the pass that planned on the own
@@ -2390,6 +2425,147 @@ function createBrowserSession ({
     upkeepFull = false
     upkeepFullAt = 0
     upkeepQuick = false
+    clearRekeyTimer()
+  }
+
+  // ---- the periodic rotation of private groups' keys ----
+  // (docs/protocol.md "Rotation", @varanda/core lib/group-rekey.js)
+
+  function clearRekeyTimer () {
+    if (rekeyTimer !== null) clearTimeout(rekeyTimer)
+    if (rekeyPassTimer !== null) clearTimeout(rekeyPassTimer)
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
+    rekeyTimer = null
+    rekeyTimerAt = null
+    rekeyPassTimer = null
+    rekeyDeferTimer = null
+    rekeyDeferAt = Infinity
+    rekeyDeferred.clear()
+  }
+
+  // Runs a rotation-only pass when the earliest group not due yet becomes
+  // due, never sooner than the check limit (a group checked now is skipped
+  // until then).
+  function armRekeyTimer (at) {
+    const now = rekeyClock()
+    const delay = Math.min(Math.max(at - now, REKEY_CHECK_MS), 0x7fffffff)
+    if (closed || (rekeyTimerAt !== null && rekeyTimerAt <= now + delay)) return
+    if (rekeyTimer !== null) clearTimeout(rekeyTimer)
+    rekeyTimerAt = now + delay
+    rekeyTimer = setTimeout(() => {
+      rekeyTimer = null
+      rekeyTimerAt = null
+      scheduleRekey()
+    }, delay)
+  }
+
+  // A group that grew starts a rotation-only pass at most once an hour;
+  // growth inside its hour is kept and starts one when the hour ends, on a
+  // single timer.
+  function rekeyGrew (group) {
+    if (closed || keyPair === null || groupPrf === null) return
+    if (rekeyTriggers.ready(group)) {
+      rekeyTriggers.checked(group)
+      scheduleRekey()
+      return
+    }
+    rekeyDeferred.add(group)
+    const at = rekeyTriggers.readyAt(group)
+    if (rekeyDeferTimer !== null && rekeyDeferAt <= at) return
+    if (rekeyDeferTimer !== null) clearTimeout(rekeyDeferTimer)
+    rekeyDeferAt = at
+    rekeyDeferTimer = setTimeout(() => {
+      rekeyDeferTimer = null
+      rekeyDeferAt = Infinity
+      const groups = [...rekeyDeferred]
+      rekeyDeferred.clear()
+      for (const g of groups) rekeyGrew(g)
+    }, Math.min(Math.max(at - rekeyClock(), 0), 0x7fffffff))
+  }
+
+  // A rotation-only pass outside the upkeep's armings: it leaves their
+  // bounds and disarming alone, and stops the run only to rotate.
+  function scheduleRekey () {
+    if (rekeyQueued || rekeyPassTimer !== null || closed || keyPair === null || groupPrf === null) return
+    rekeyPassTimer = setTimeout(() => {
+      rekeyPassTimer = null
+      if (closed || rekeyQueued) return
+      rekeyQueued = true
+      rekeyOnly({}).catch(noop)
+    }, upkeepDelayMs)
+  }
+
+  // withCores without its fallback: a plan the running sync cannot serve
+  // from its own cores is skipped (null), so the rotation-only pass stops
+  // the run only to write. The upkeep pass and the due timer check later.
+  async function withLentCores (fn) {
+    const r = run
+    if (r === null) return withStore(fn)
+    const api = await readyWithin(r.ready, readerWaitMs)
+    if (api === NOT_READY || api === null || !api.hold()) return null
+    try {
+      return await fn({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group } })
+    } catch (err) {
+      if (member.isNeedsExclusive(err)) return null
+      throw err
+    } finally {
+      api.release()
+    }
+  }
+
+  const rekeyOnly = serial(async (_, epoch, generation) => {
+    rekeyQueued = false
+    if (closed || keyPair === null || groupPrf === null) return
+    try { checkGroupOperation(epoch, generation) } catch { return }
+    // The app's recovery run is never preempted: the next trigger checks.
+    if (run !== null && run.once) return
+    if (!(await store.diaryExists(storage))) return
+    groupWriting = true
+    try {
+      await periodicRekeyStep(epoch, generation, withLentCores)
+    } finally {
+      groupWriting = false
+      for (const pair of groupPairs) zeroPair(pair)
+      groupPairs.clear()
+    }
+  })
+
+  // Inside an upkeep pass: plans on the run's cores which private groups
+  // this device distributes in have a due epoch, then rotates them through
+  // the write gate like the shares. Each group is checked at most once per
+  // REKEY_CHECK_MS, whatever the outcome; a failure waits for the next check
+  // and is never a warning: the group keeps its epoch, nothing is pending.
+  async function periodicRekeyStep (epoch, generation, read = withCores) {
+    try {
+      const now = rekeyClock()
+      const jitter = (group, kid) => rekeyGate.jitter(group, kid)
+      const plan = await read((c) => member.periodicRekeyPlan(c, { now, ready: (group) => rekeyGate.ready(group), jitter }))
+      if (plan === null) return
+      for (const group of plan.checked) rekeyGate.checked(group)
+      if (plan.next !== null) armRekeyTimer(plan.next)
+      if (plan.rekey.length === 0) return
+      const planned = plan.rekey.map((x) => x.group)
+      checkGroupOperation(epoch, generation)
+      await ensureCaughtUp(epoch, [...new Set(plan.rekey.map((x) => x.writer))], generation)
+      // What a step wrote before it threw is announced and pushed too.
+      let changed = []
+      await withStore(async (c) => {
+        checkGroupOperation(epoch, generation)
+        const lengths = await ownCoreLengths(planned)
+        try {
+          await member.periodicRekey(c, { groups: planned, now, jitter })
+        } finally {
+          const after = await ownCoreLengths(planned)
+          changed = plan.rekey.filter((x) => lengths.get(x.writer) !== after.get(x.writer)).map((x) => x.group)
+          await noteWrittenRoots(changed)
+        }
+      }).catch(noop)
+      for (const group of changed) send('groups.changed', { group }, epoch)
+      if (changed.length > 0) {
+        checkGroupOperation(epoch, generation)
+        await pushAfterWrite()
+      }
+    } catch {}
   }
 
   // The pass never calls another serial handler and never runs inside
@@ -2509,6 +2685,7 @@ function createBrowserSession ({
         checkGroupOperation(epoch, generation)
         await pushAfterWrite()
       }
+      await periodicRekeyStep(epoch, generation)
       if (arrived) scheduleUpkeep()
       else if (failed > 0) {
         // A root that failed is tried again within the bound.
@@ -4029,6 +4206,21 @@ function createBrowserSession ({
       const r = await seenSync.merge({ blob, avisos, unchanged }, keyPair, own)
       if (r.dmChanged || r.groupChanged) seenChanged()
       return r
+    }),
+
+    // The key the app derives its once-marks with (docs/rpc.md 5.151): keyed
+    // by the identity secret like the notice seen tokens, so a mark that
+    // lands in this origin's storage cannot be matched to a Página or invite
+    // by hashing public keys. Answered to the app only, never logged or kept.
+    'seen.onceKey': serial(async () => {
+      await seenOwn()
+      const own = b4a.toString(keyPair.publicKey, 'hex')
+      const digest = crypto.hash([
+        b4a.from('varanda-once-key-v1\n'),
+        keyPair.secretKey.subarray(0, 32),
+        b4a.from(own)
+      ])
+      return { key: b4a.toString(digest, 'hex') }
     }),
 
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
@@ -5771,14 +5963,15 @@ function createBrowserSession ({
   }
 
   // The plaintext of item `index` of a kept message -> { bytes, mime }, for
-  // the page only (never over RPC: a photo is far above MAX_MESSAGE).
-  function dmReadMedia ({ from, id, index } = {}) {
+  // the page only (never over RPC: a photo is far above MAX_MESSAGE). page:
+  // a message of that Página's conversations held on this device.
+  function dmReadMedia ({ from, id, index, page } = {}) {
     return (async () => {
       try {
         if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
         const ident = identityTarget
         const own = await dmIdentity({}, ident)
-        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index }))
+        return await withDmReady(ident, () => dmEngine.readMedia(own, { from, id, index, page }))
       } catch (err) {
         if (err instanceof TypeError) throw err
         throw toRpcError(err, reportInternal)
@@ -6005,6 +6198,7 @@ function createBrowserSession ({
     synced = false
     unpushed = true
     localLength = null
+    localEchoed = null
     groupUnpushed.clear()
     groupLengths.clear()
     drainWanted = false
@@ -6035,6 +6229,9 @@ function createBrowserSession ({
     syncIntent = null
     // The next connection's first own-synced arms afresh.
     resetUpkeep()
+    // The reader starts over with no lengths: the first own-synced it gets
+    // must say again whether that length was written here.
+    localEchoed = null
     return stopRun('stopped').then(noop)
   }
 

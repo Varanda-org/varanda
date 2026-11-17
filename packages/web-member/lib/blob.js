@@ -63,7 +63,7 @@
 //   transient failure (NO_SEEDER), not retried here.
 //   The GETs bypass the HTTP cache (cache: 'no-store'): the caller's sealed
 //   plaintext cache is the only local copy, and ciphertext must not sit in
-//   the browser's cache for the pool's 7 days.
+//   the browser's cache for the pool's 14 days.
 //
 // Nothing here logs a key, an id, a token or an address.
 const b4a = require('b4a')

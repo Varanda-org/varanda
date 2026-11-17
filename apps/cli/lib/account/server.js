@@ -796,6 +796,7 @@ function createAccountServer ({
     termsFinish: keyedWindow(5, 600 * 1000, now),
     invitesFinish: keyedWindow(10, 600 * 1000, now),
     invitesSummary: keyedWindow(30, 600 * 1000, now),
+    termsHeld: keyedWindow(30, 600 * 1000, now),
     seenRead: keyedWindow(30, 600 * 1000, now),
     seenWrite: keyedWindow(10, 600 * 1000, now),
     seenDelete: keyedWindow(5, 600 * 1000, now),
@@ -1120,6 +1121,9 @@ function createAccountServer ({
   const termsNonces = new Map()
   // Invite issue requests by nonce: { member, expiresAt }, the same rules.
   const inviteNonces = new Map()
+  // Terms held reads by nonce: { member, expiresAt }, the same rules. Its own
+  // table, so a nonce minted for any other route never answers here.
+  const termsHeldNonces = new Map()
   // Sign-up invite reservations: invite id -> { pendingId, expiresAt }. In
   // memory beside the pending rows, which are memory-only too, so a
   // reservation never outlives its row across a restart.
@@ -1586,6 +1590,45 @@ function createAccountServer ({
     send(res, 200, { version: result.version, acceptedAt: result.acceptedAt })
   }
 
+  // Whether the service holds this member's acceptance of one version, so
+  // another device of the same passkey does not ask again. Behind a signed
+  // single-use nonce like invitesSummary, never in /account/status: Terms
+  // change often, so a held version read by public key would date the
+  // member's last visit.
+  async function termsHeldStart (req, res, body) {
+    const member = memberParam(body.member)
+    termsAvailable()
+    linked(member)
+    sweep(termsHeldNonces)
+    while (termsHeldNonces.size >= MAX_TERMS_NONCES) termsHeldNonces.delete(termsHeldNonces.keys().next().value)
+    const nonce = base64url(nodeCrypto.randomBytes(32))
+    termsHeldNonces.set(nonce, { member, expiresAt: now() + TERMS_TTL_MS })
+    send(res, 200, { nonce })
+  }
+
+  async function termsHeldFinish (req, res, body) {
+    const member = memberParam(body.member)
+    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
+    const signature = signatureParam(body.signature)
+    const version = body.version
+    const row = nonce === null ? undefined : termsHeldNonces.get(nonce)
+    if (nonce !== null) termsHeldNonces.delete(nonce)
+    if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
+    if (!verifyInvite({ action: 'summary', nonce, member, association }, signature).ok) throw refuse('assinatura-invalida')
+    if (!Number.isSafeInteger(version) || version < 1 || version > TERMS_VERSION) throw refuse('pedido-invalido')
+    if (!limits.termsHeld(member)) throw over()
+    termsAvailable()
+    linked(member)
+    let entry
+    try {
+      entry = terms.list(member).find((e) => e.version === version)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    log({ event: 'terms', reason: 'lido' })
+    send(res, 200, { version, acceptedAt: entry === undefined ? null : entry.acceptedAt })
+  }
+
   function invitesAvailable () {
     if (!inviting || !invites.available()) throw refuse('indisponivel')
   }
@@ -1658,7 +1701,9 @@ function createAccountServer ({
     '/account/rename/start': renameStart,
     '/account/rename/finish': renameFinish,
     '/account/terms/start': termsStart,
-    '/account/terms/finish': termsFinish
+    '/account/terms/finish': termsFinish,
+    '/account/terms/held/start': termsHeldStart,
+    '/account/terms/held/finish': termsHeldFinish
   }
   // Open sign-up has no POST invite routes; the policy route still answers.
   if (inviting) {

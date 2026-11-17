@@ -651,6 +651,8 @@ export function createVitrineRequest (fixtures, options) {
     // merge that changes nothing.
     'seen.sign': () => ({ signature, prevHash: '0'.repeat(64) }),
     'seen.merge': () => ({ avisos: { own: [], pages: {} }, pending: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [] }),
+    // No key: the once-marks stay on this device, as with no seen sync.
+    'seen.onceKey': () => ({ key: null }),
     'report.sign': signed,
     'appeal.sign': signed,
     'dm.reportSign': signed,
@@ -1180,7 +1182,8 @@ export function createVitrineRequest (fixtures, options) {
       }
     },
     'feed.read': ({ limit, before }) => ({
-      items: [...data.feed, ...extraFeed].filter((item) => (item.author === data.own || data.follows.includes(item.author)) && (!before || comparePosition(item, before, 'author') < 0)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit),
+      items: [...data.feed, ...extraFeed].filter((item) => (item.author === data.own || data.follows.includes(item.author)) && (!before || comparePosition(item, before, 'author') < 0)).sort((a, b) => comparePosition(a, b, 'author')).slice(-limit)
+        .map((item) => ({ ...item, avatar: (profileOf(item.author) || {}).avatar || null })),
       skipped: [],
       skippedTruncated: 0,
       future: [],

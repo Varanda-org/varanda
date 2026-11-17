@@ -71,7 +71,7 @@ import { STACK_MS } from '../stackMotion'
 
 export const PHOTO_UNAVAILABLE = 'Foto indisponível'
 export const VIDEO_UNAVAILABLE = 'vídeo indisponível'
-export const OWN_NOTE = 'O momento sai dos servidores em até 7 dias.'
+export const OWN_NOTE = 'O momento sai dos servidores em até 14 dias.'
 export const DELETE_TITLE = 'Apagar momento?'
 export const DELETE_BODY = 'O momento deixa de aparecer para quem segue você. Cópias que outras pessoas fizeram não voltam.'
 // A moment past its 24 hours is already shown to nobody.

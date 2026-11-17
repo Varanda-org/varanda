@@ -54,7 +54,7 @@
 // The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
-import { Profiler, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Profiler, memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Animated, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -82,10 +82,13 @@ import { SavedProvider, forgetSavedFor } from './src/savedProvider'
 import { forgetReminderKey } from './src/eventRemindersStore'
 import { POST_OPEN_WAIT_MS, capturePostPath, postAccount, postLink, postOpeningGate, postOpeningWait, postRef, postWaitDelay } from './src/postLink'
 import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
+import { forgetSalt } from './src/sorteStore'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
-import { pageNoticeStore } from './src/pageNoticeStore'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsStart } from './src/account'
+import { pageNoticeStore, wipeLegacyPageNotices } from './src/pageNoticeStore'
+import { inviteDropOnceId, syncedPageNoticeStore, withOnceTokens } from './src/onceMarks'
+import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, onceKeyOf, onceMember, onceMemberFor, onceRegistry, setOnceMember } from './src/onceSync'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
 import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
@@ -109,7 +112,8 @@ import { OPEN_WAIT_MS, arrivalGate, expiryLine, openingGate } from './src/invite
 import { INVITE_TTL_MS, NOT_FOUND_TEXT, OFFLINE_TEXT, acceptInvite, buildProfileUrl, confirmText, followedText, inviteAction, inviteCardText, resolveInvite } from './src/profileLink'
 import { OutboxProvider, useOutbox, useOutboxDrain } from './src/outboxProvider'
 import { LEGAL_VERSION } from './src/legal'
-import { shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
+import { TERMS_HELD_WAIT_MS, heldKey, heldSettle, shouldSyncTerms, termsDecision, termsSyncAttempted, termsSyncStep } from './src/terms'
+import { RECOVER_WAIT_MS, createNeedsTerms, heldOutcome, heldView, modeUnknownPass, recoverView } from './src/termsCreate'
 import { useTerms } from './src/useTerms'
 import { useAgeMemory } from './src/useAgeMemory'
 import { INTRO_VERSION, introDecision } from './src/intro'
@@ -809,11 +813,14 @@ function Member () {
   const ageHosted = passkey !== null && (node.hosted || hostedPage)
 
   // --- the Termos de Uso and the Política de Privacidade (src/terms.js) ---
-  // The device's record says which member accepted which version; the gate
-  // asks when the device has no record of the current version (before
-  // Conexao and Entrar) and, once a member is known, when the record does not
-  // list that member. The member is the unlocked passkey's key (browser node)
-  // or node.info's identity.
+  // The device's record says which member accepted which version. Hosted,
+  // Entrar comes first and the gate asks once the member is known and not
+  // listed, unless the account service says that member accepted this
+  // version on another device (the held check below); Criar conta asks
+  // before its ceremony (termsBeforeCreate). Native and varanda-serve ask
+  // before Conexao when the device has no record of the current version.
+  // The member is the unlocked passkey's key (browser node) or node.info's
+  // identity.
   const terms = useTerms(LEGAL_VERSION)
   const intro = useIntro()
   const introState = introDecision({ status: intro.status, record: intro.record, version: INTRO_VERSION })
@@ -833,30 +840,27 @@ function Member () {
   // the terms gate, until it is erased here. Read once per unlocked member.
   // The same read gives the date of a deletion waiting for it (asked without
   // a passkey the service could verify), shown on every signed-in device
-  // (DeletionNote), and, for a linked member, sends the passkey enrolment
-  // left by a creation on this device (src/passkeyEnrol.js), at most one
-  // attempt in flight. refreshAccount() reads again after a schedule or a
-  // cancel.
+  // (DeletionNote), and, for a linked member, leaves the passkey enrolment
+  // of a creation on this device (src/passkeyEnrol.js) due: an account
+  // write, sent only once the terms pass (below termsOk). refreshAccount()
+  // reads again after a schedule or a cancel.
   const [deletedState, setDeletedState] = useState(null)
   const [scheduledDeletion, setScheduledDeletion] = useState(null)
   const [accountTick, setAccountTick] = useState(0)
   const refreshAccount = useCallback(() => setAccountTick((n) => n + 1), [])
   const enrolling = useRef(false)
+  const [enrolDue, setEnrolDue] = useState(null)
   useEffect(() => {
     setDeletedState(null)
     setScheduledDeletion(null)
+    setEnrolDue(null)
     if (node.hosted !== true || member === null) return
     let alive = true
     accountStatus(member).then((st) => {
       if (!alive) return
       setDeletedState(deletedOf(st))
       setScheduledDeletion(scheduledOf(st))
-      if (st && st.linked === true && typeof st.username === 'string' && passkey !== null && !enrolling.current) {
-        enrolling.current = true
-        enrolWith({ passkey, request: node.request, member, username: st.username, start: passkeyStart, add: passkeyAdd })
-          .catch(() => {})
-          .finally(() => { enrolling.current = false })
-      }
+      if (st && st.linked === true && typeof st.username === 'string') setEnrolDue({ member, username: st.username })
     }, () => {})
     return () => { alive = false }
   }, [node.hosted, member, accountTick])
@@ -874,18 +878,137 @@ function Member () {
       locked
     })
   // Past the setup a hosted member is never null (unlocked means a known
-  // key). On native or varanda-serve a node reached later without an identity
-  // gives null too: termsDecision lets it through (nothing flows without an
-  // identity) and asks as soon as one appears that is not in the record.
+  // key). Hosted and locked at Entrar, termsOk is true before any acceptance
+  // (the gate comes after Entrar), so what carries member data also waits
+  // for !locked. On native or varanda-serve a node reached later without an
+  // identity gives null too: termsDecision lets it through (nothing flows
+  // without an identity) and asks as soon as one appears that is not in the
+  // record.
   const termsOk = decision === 'accepted' || decision === 'bind'
-  // The acceptance made before anyone signed in (the claim) is spent on the
-  // first member known in this page load: recorded for that member, or just
-  // dropped when that member had accepted already. It never reaches the next
-  // identity.
-  const { bind: bindTerms, markSynced: markTermsSynced, dropMember: dropTermsMember } = terms
+  // The enrolment left due by the status read above: one attempt per answer
+  // (consumed here, even when one is already in flight), never retried.
+  useEffect(() => {
+    if (!termsOk || locked || enrolDue === null || enrolDue.member !== member) return
+    setEnrolDue(null)
+    if (passkey === null || enrolling.current) return
+    enrolling.current = true
+    enrolWith({ passkey, request: node.request, member, username: enrolDue.username, start: passkeyStart, add: passkeyAdd })
+      .catch(() => {})
+      .finally(() => { enrolling.current = false })
+  }, [termsOk, locked, enrolDue, member])
+  // The acceptance made before any member is known (the claim: Criar conta
+  // before its ceremony, or native before the identity exists) is spent on
+  // the first member known in this page load: recorded for that member, or
+  // just dropped when that member had accepted already. It never reaches the
+  // next identity.
+  const { bind: bindTerms, markSynced: markTermsSynced, dropMember: dropTermsMember, acceptHeld: acceptTermsHeld } = terms
   useEffect(() => {
     if (member !== null && terms.claim !== null && (decision === 'bind' || decision === 'accepted')) bindTerms(member)
   }, [decision, member, terms.claim, bindTerms])
+  // After Entrar: did this member accept LEGAL_VERSION on another device?
+  // One question per member#version per page load (src/terms.js heldKey),
+  // never forgotten. Recomeçar settles it as none (dropTermsAndSync): a reset
+  // here must not come back from the service in the same page load, even for
+  // a member accepted on this device before it loaded. While it is young the splash
+  // stands in for the gate (gateDecision); termsOk stays the raw decision.
+  const termsHeld = useRef(new Map())
+  const [, setHeldTick] = useState(0)
+  const heldEntryKey = member !== null ? heldKey(member, LEGAL_VERSION) : null
+  const held = heldView({
+    hosted: mode === 'hosted',
+    member,
+    claim: terms.claim,
+    decision,
+    online: node.online,
+    entry: heldEntryKey !== null ? termsHeld.current.get(heldEntryKey) : undefined,
+    nowMs: Date.now()
+  })
+  // Render-time ref write, idempotent: the gate already shows.
+  if (held.offline) termsHeld.current.set(heldEntryKey, { state: 'none' })
+  // After Entrar with no diary here, until the key is known (src/termsCreate.js
+  // recoverView). Render-time ref writes: the window's start, cleared with it.
+  const recoverAt = useRef(null)
+  const recoverProbe = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision })
+  if (!recoverProbe.window) recoverAt.current = null
+  else if (recoverAt.current === null) recoverAt.current = Date.now()
+  const recoverElapsed = recoverAt.current === null ? NaN : Date.now() - recoverAt.current
+  const recoverWait = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait
+  useEffect(() => {
+    if (!recoverWait) return
+    const t = setTimeout(() => setHeldTick((n) => n + 1), Math.max(0, RECOVER_WAIT_MS - recoverElapsed) + 50)
+    return () => clearTimeout(t)
+  }, [recoverWait])
+  // Before the connection says whether it is hosted, the render goes on as
+  // if the terms passed (src/termsCreate.js modeUnknownPass): the splash,
+  // then Conexão, never the gate ahead of Entrar.
+  const modePass = modeUnknownPass({ hostedMode: mode === 'hosted', hostedPage, installation: installationOrigin(), config: node.config, phase: node.phase, decision })
+  const gateDecision = held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision)
+  useEffect(() => {
+    if (!held.ask || member === null) return
+    const who = member
+    const key = heldKey(who, LEGAL_VERSION)
+    if (termsHeld.current.has(key)) return
+    const at = Date.now()
+    termsHeld.current.set(key, { state: 'asking', at })
+    const gen = generationRef.current
+    const stale = () => gen !== generationRef.current || memberRef.current !== who
+    // The record and the entry change in one batch, so the gate never
+    // flashes before the acceptance lands.
+    const settle = (outcome, answer) => {
+      const e = termsHeld.current.get(key)
+      const next = heldSettle(e, outcome, Date.now() - at)
+      if (next === e) return
+      termsHeld.current.set(key, next)
+      if (next.state === 'held') acceptTermsHeld(who, answer.version, answer.acceptedAt)
+      setHeldTick((n) => n + 1)
+    }
+    // Not cleared on a re-render: the next render no longer asks, and the
+    // wait must still end.
+    const timer = setTimeout(() => settle('timeout'), TERMS_HELD_WAIT_MS)
+    ;(async () => {
+      try {
+        const started = await termsHeldStart({ member: who })
+        if (stale()) return
+        // An older service has neither route: nothing to sign, nothing held.
+        if (started === null) {
+          clearTimeout(timer)
+          settle('none')
+          return
+        }
+        const { nonce } = started
+        const { signature } = await node.request('invite.sign', { action: 'summary', nonce })
+        if (stale()) return
+        const answer = await termsHeldFinish({ member: who, nonce, signature, version: LEGAL_VERSION })
+        if (stale()) return
+        clearTimeout(timer)
+        settle(heldOutcome(answer), answer)
+      } catch {
+        if (stale()) return
+        clearTimeout(timer)
+        settle('failed')
+      }
+    })()
+  }, [held.ask, member])
+  // Criar conta: a new account has no other device to have accepted on, and
+  // Identidade talks to the account service as soon as its key exists, so
+  // it accepts before the passkey ceremony. ask() brings the gate up, and
+  // the person presses Criar again (the ceremony needs that press's user
+  // activation). The acceptance is a claim, which the new key binds.
+  // The gate replaces the tree, so Identidade remounts and forgets what
+  // offered Criar (a passkey gone from the manager): `accepted` offers it
+  // again until a member is known.
+  const createTerms = createNeedsTerms({ hosted: mode === 'hosted', claim: terms.claim })
+  const [createAsked, setCreateAsked] = useState(false)
+  const [createAccepted, setCreateAccepted] = useState(false)
+  useEffect(() => { if (member !== null) setCreateAccepted(false) }, [member])
+  const askCreateTerms = useCallback(() => setCreateAsked(true), [])
+  const termsBeforeCreate = useMemo(() => ({ needed: createTerms, ask: askCreateTerms, accepted: createAccepted }), [createTerms, askCreateTerms, createAccepted])
+  const acceptCreateTerms = () => {
+    terms.accept(null)
+    setCreateAccepted(true)
+    setCreateAsked(false)
+  }
+  const showCreateTerms = createAsked && createTerms
   const memberRef = useRef(member)
   memberRef.current = member
   const recovering = passkey !== null && passkey.recovering === true
@@ -1445,6 +1568,10 @@ function Member () {
   const dropTermsAndSync = useCallback((m) => {
     dropTermsMember(m)
     if (typeof m !== 'string') return
+    // A member accepted here at load never asked the service: without this,
+    // Entrar would now ask and take the old acceptance back. heldSettle only
+    // moves an 'asking' entry, so a check in flight lands on this and stops.
+    termsHeld.current.set(heldKey(m, LEGAL_VERSION), { state: 'none' })
     // The account left this device: so does its list of saved posts.
     forgetSavedFor(m)
     // And the event reminders it set (fire and forget).
@@ -2243,7 +2370,7 @@ function Member () {
   // closes. inboxUnread and requests cover every page (docs/rpc.md 5.77).
   const [dmOpenCount, setDmOpenCount] = useState(0)
   const [dmDot, setDmDot] = useState(false)
-  const dmReady = mode === 'hosted' && ready && !locked
+  const dmReady = mode === 'hosted' && ready && !locked && termsOk
   const dmRequest = node.request
   const bumpDm = node.bumpDm
   const dmDotGen = useRef(0)
@@ -2294,13 +2421,13 @@ function Member () {
   const feiraOnScreen = tab === 'feira' && stackDepth === 0
   const [feiraAlerts, setFeiraAlerts] = useState(null)
   useEffect(() => {
-    if (mode !== 'hosted' || !ready || locked || feiraOnScreen) return
+    if (mode !== 'hosted' || !ready || locked || !termsOk || feiraOnScreen) return
     let live = true
     alertsStore.load(feiraAlertsOrigin).then((value) => {
       if (live) setFeiraAlerts({ epoch: nodeEpoch, origin: feiraAlertsOrigin, value })
     }, () => {})
     return () => { live = false }
-  }, [mode, ready, locked, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
+  }, [mode, ready, locked, termsOk, feiraOnScreen, feiraAlertsOrigin, nodeEpoch])
   // The dot also refreshes every 15 minutes while the app is in the foreground,
   // whichever tab is open (badgeRefreshPlan). Background, offline or a Feira
   // that answered off: no timer and no call. The store throttles the runs.
@@ -2309,7 +2436,7 @@ function Member () {
   const feiraOffRef = useRef(null)
   const feiraRunAt = useRef(null)
   useEffect(() => {
-    if (mode !== 'hosted' || !ready || locked) return
+    if (mode !== 'hosted' || !ready || locked || !termsOk) return
     const scopeKey = JSON.stringify([nodeEpoch, feiraAlertsOrigin])
     if (feiraOffRef.current === scopeKey) return
     let live = true
@@ -2336,8 +2463,8 @@ function Member () {
       live = false
       if (timer !== null) clearTimeout(timer)
     }
-  }, [mode, ready, locked, node.visible, node.online, node.hosted, feiraAlertsOrigin, nodeEpoch])
-  const feiraBadge = mode === 'hosted' && !locked && !feiraOnScreen && feiraAlerts !== null &&
+  }, [mode, ready, locked, termsOk, node.visible, node.online, node.hosted, feiraAlertsOrigin, nodeEpoch])
+  const feiraBadge = mode === 'hosted' && !locked && termsOk && !feiraOnScreen && feiraAlerts !== null &&
     feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
     alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
   // --- Visto em todos os aparelhos (src/seenSync.js) ---
@@ -2352,6 +2479,13 @@ function Member () {
     : null
   const seenMemberRef = useRef(seenMember)
   seenMemberRef.current = seenMember
+  // Screens read the page notice through the shared registry: set during
+  // render, like the ref above, so a handler never sees an older member.
+  setOnceMember(seenMember)
+  const [firstPass, stepFirstPass] = useReducer(firstPassStep, FIRST_PASS_IDLE)
+  // Bumped on every seenMember change: after A, null, A a late answer of the
+  // earlier appearance names the same member and must still be dropped.
+  const seenAppearanceRef = useRef(0)
   const seenOnlineRef = useRef(node.online)
   seenOnlineRef.current = node.online
   const seenRequestRef = useRef(node.request)
@@ -2377,15 +2511,49 @@ function Member () {
     // within the debounce, not only at the next poll.
     if (fresh && seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
   }, [ownKey])
+  // A one-time notice shown here travels as an own avisos token: every pass
+  // of its member sends the registry's unsynced marks, and a new one asks
+  // for a pass without the debounce.
+  useEffect(() => onceRegistry.onMark(({ member }) => {
+    if (member !== seenMemberRef.current || !seenSchedulerRef.current) return
+    seenSchedulerRef.current.wake('once')
+  }), [])
   useEffect(() => {
     avisosSeenRef.current = { own: [], pages: {} }
     avisosMergedRef.current = null
     avisosDeliveredRef.current = new Set()
     setRemoteSeen(null)
+    stepFirstPass({ type: 'member', member: seenMember })
+    const appearance = ++seenAppearanceRef.current
+    if (seenMember === null) return
+    // A pass that never starts (offline) must not hold the invite note.
+    const member = seenMember
+    let live = true
+    const t = setTimeout(() => stepFirstPass({ type: 'timeout', member }), FIRST_PASS_MS)
+    // The once-marks key, asked once per appearance of the member and never
+    // again after a failure: without it the marks stay on this device.
+    Promise.resolve()
+      .then(() => seenRequestRef.current('seen.onceKey', {}))
+      .then((answer) => {
+        const key = onceKeyOf(answer)
+        if (live && seenAppearanceRef.current === appearance && seenMemberRef.current === member && key !== null) {
+          onceRegistry.setKey(member, key)
+          // From here the page notice flags of this install are opaque: the
+          // page-named ones of earlier builds go, never turned into marks.
+          wipeLegacyPageNotices()
+        }
+      }, () => {})
+      .then(() => { if (live) stepFirstPass({ type: 'key', member }) })
+    return () => {
+      live = false
+      clearTimeout(t)
+      onceRegistry.forget(member)
+    }
   }, [seenMember])
   useEffect(() => {
     if (seenMember === null) return
     const member = seenMember
+    const appearance = seenAppearanceRef.current
     const run = async () => {
       // caughtUp describes the groups as the merge saw them when it
       // answered: the versions known at that answer are acknowledged, so a
@@ -2395,20 +2563,24 @@ function Member () {
         versions: groupVersionsRef.current,
         epoch: nodeEpochRef.current
       }))
-      const sent = cleanAvisos(avisosSeenRef.current)
+      const sent = cleanAvisos(withOnceTokens(avisosSeenRef.current, onceRegistry.unsynced(member)))
       const result = await runSeenPass({
         member,
         request,
         http: { seenStart, seenFinish },
         avisos: sent
       })
-      if (seenMemberRef.current !== member) return
+      if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return
+      // Answered or failed, the invite monitor no longer waits for it.
+      stepFirstPass({ type: 'pass', member })
       if (result.avisos) {
         // The first merge stored what was sent in the node's document.
         avisosSeenRef.current = dropSent(avisosSeenRef.current, sent)
         rememberSent(avisosDeliveredRef.current, sent)
         avisosMergedRef.current = result.avisos
         setRemoteSeen(result.avisos)
+        onceRegistry.delivered(member, sent.own)
+        onceRegistry.setRemote(member, result.avisos.own)
       }
       if (result.dmChanged) bumpDm()
       // Another device of the passkey blocked or unblocked someone.
@@ -2600,7 +2772,7 @@ function Member () {
         hosted: node.hosted,
         enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
       })
-      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(pageNoticeStore(), key), canConverse })
+      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), key), canConverse })
       if (plan === 'open') return open()
       if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })
       if (plan === 'notice') return setPageDmAsk({ key })
@@ -2784,12 +2956,22 @@ function Member () {
   const [avisosReload, setAvisosReload] = useState(0)
   const [threadReload, setThreadReload] = useState({ ref: null, n: 0 })
   const [inviteNudge, setInviteNudge] = useState(0)
+  // The note marks its record in the seen document, so a second device of
+  // the passkey does not show it again; nothing syncs for any other member.
+  const inviteOnce = onceMemberFor(seenMember, member)
+  const inviteSeenElsewhere = useCallback((record) => inviteOnce !== null && onceRegistry.has('invite-drop', inviteOnce, inviteDropOnceId(record)), [inviteOnce])
+  const inviteMarked = useCallback((record) => { if (inviteOnce !== null) onceRegistry.mark('invite-drop', inviteOnce, inviteDropOnceId(record)) }, [inviteOnce])
   const inviteDrop = useInviteDrop({
-    enabled: node.hosted === true && node.visible !== false && ready && !locked && pkStatus?.unlocked === true,
+    enabled: node.hosted === true && node.visible !== false && ready && !locked && pkStatus?.unlocked === true && termsOk && !inviteWaitsForSeen(firstPass, seenMember),
     member,
-    request: node.request
+    request: node.request,
+    seenElsewhere: inviteSeenElsewhere,
+    onMarked: inviteMarked
   })
   const handleInviteShown = inviteDrop.markSeen
+  // A mark from another device that arrives while the note is on screen.
+  const recheckInvite = inviteDrop.recheck
+  useEffect(() => onceRegistry.onChange(recheckInvite), [recheckInvite])
   const openInvites = useCallback(() => {
     setAjustes('convites')
     setInviteNudge((n) => n + 1)
@@ -3134,17 +3316,18 @@ function Member () {
   // The intro cards come first, once per device (src/intro.js): presentation
   // only, so autosync, the outbox and the invite keep waiting for termsOk. An
   // age return skips them for that page load without marking them seen.
-  // The terms gate, before everything else: Conexao, Entrar (so before
-  // Google) while this device has no record of the current version, and the
-  // tabs. Once it has one, an account that unlocks without its own entry
-  // meets the gate right after the passkey. Nothing renders behind it, and
+  // The terms gate, before the tabs: hosted, right after Entrar for a member
+  // this device does not list (once the held check said no or took too
+  // long) and before the ceremony of Criar conta; native and serve, before
+  // Conexao while the device has no record of the current version, and
+  // again for an identity it does not list. Nothing renders behind it, and
   // autosync, the outbox and the invite wait for termsOk. Not gated
   // (documented): the provider's boot, the session resume and the one
   // recovery sync of a diary without its certificate (src/node.js).
-  const gateNext = (introState === 'show' && !AGE_RETURN) || decision === 'needed' || decision === 'updated' || decision === 'account'
+  const gateNext = (introState === 'show' && !AGE_RETURN) || gateDecision === 'needed' || gateDecision === 'updated' || gateDecision === 'account' || showCreateTerms
   // The 10 s patience counts only while the splash is what covers the
   // connect, never while the intro cards or the terms are on screen.
-  const coveringConnect = !ready && !seen && node.phase === 'connecting' && decision !== 'loading' && introState !== 'loading' && !gateNext
+  const coveringConnect = !ready && !seen && node.phase === 'connecting' && gateDecision !== 'loading' && introState !== 'loading' && !gateNext
   useEffect(() => {
     if (!coveringConnect) return
     if (connectingAt.current === null) connectingAt.current = Date.now()
@@ -3153,13 +3336,14 @@ function Member () {
     const t = setTimeout(() => bumpSplash((n) => n + 1), remaining + 50)
     return () => clearTimeout(t)
   }, [coveringConnect, node.canConfigure])
-  const loadingGate = decision === 'loading' || introState === 'loading'
+  const loadingGate = gateDecision === 'loading' || introState === 'loading'
   // Before the presentation has been seen nothing replaces the splash, ready
   // or not. The latch only goes one way, so a reconnect later never brings it
   // back.
   const holding = holdSplash({ presented, elapsedMs: Date.now() - bootAt, released: released.current })
   const showIntro = introState === 'show' && !AGE_RETURN
-  const showTerms = decision === 'needed' || decision === 'updated' || decision === 'account'
+  const decisionTerms = gateDecision === 'needed' || gateDecision === 'updated' || gateDecision === 'account'
+  const showTerms = decisionTerms || showCreateTerms
   const connectingSplash = !ready && !seen && coverConnecting({ phase: node.phase, canConfigure: node.canConfigure, elapsedMs: connectingAt.current === null ? 0 : Date.now() - connectingAt.current, released: released.current })
   const showConexao = !ready && !seen && !connectingSplash
   const atShell = !loadingGate && !holding && !showIntro && !showTerms && !connectingSplash && !showConexao
@@ -3309,7 +3493,7 @@ function Member () {
     snapshot: previewSeed.snapshot,
     previewCapable,
     // Not known yet whether a gate comes next counts as one.
-    gateNext: gateNext || loadingGate || opening === 'wait',
+    gateNext: gateNext || loadingGate || modePass || opening === 'wait',
     showConexao,
     step: previewStep,
     locked: pkStatus !== null && pkStatus.unlocked !== true,
@@ -3342,8 +3526,8 @@ function Member () {
   // A shared post link with no account here (a first visit, or a returning
   // visitor once the identity says no account exists) says what waits.
   // Entrar marks the intro seen, as the invite card does, and dismisses the
-  // preview for this load, leading to the Terms and then Entrar, where the
-  // post card and the destination stay.
+  // preview for this load, leading to Entrar (the Terms come after it, or
+  // before Criar conta), where the post card and the destination stay.
   if (postOpeningGate(postGate)) {
     if (openHow) return <Introducao key='how' onDone={() => setOpenHow(false)} sidePad={sidePad} edges={sideEdges} />
     return <PostLinkOpen post={pendingPost} origin={ageOrigin} onEnter={() => { intro.markSeen(); setPostOpenLater(true) }} onHow={() => setOpenHow(true)} onLater={() => setPostOpenLater(true)} sidePad={sidePad} edges={sideEdges} />
@@ -3376,7 +3560,9 @@ function Member () {
   if (showTerms) {
     return (
       <SafeAreaView style={[styles.flex, { paddingHorizontal: sidePad }]} edges={sideEdges}>
-        <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
+        {decisionTerms
+          ? <Termos gate reason={decision} version={LEGAL_VERSION} onAccept={() => terms.accept(member)} />
+          : <Termos gate reason='needed' version={LEGAL_VERSION} onAccept={acceptCreateTerms} onBack={() => setCreateAsked(false)} />}
         <StatusBar style={statusBarStyle(scheme)} />
       </SafeAreaView>
     )
@@ -3501,7 +3687,7 @@ function Member () {
             onDismiss: () => { clearPostLink(); setPendingPost(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} termsBeforeCreate={termsBeforeCreate} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
@@ -4241,7 +4427,7 @@ function Member () {
             showToast(text)
           }}
         />
-        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} />
+        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
         {/* Mounted after the splash, so it wins: while the boot cover shows it
             follows the splash, which stays cream on native (Splash.js). */}
         <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />
@@ -4260,6 +4446,9 @@ export default function App () {
     flushEarly(perfMarks())
   }, [])
   useEffect(() => { loadIcons().catch(() => {}) }, [])
+  // The per-device salt of an older Sorte do dia, once per app load for every
+  // mode and person: the line now comes from the diary's key (src/sorte.js).
+  useEffect(() => { forgetSalt() }, [])
   // The gate build never mounts Splash, which is what normally removes the overlay.
   useEffect(() => {
     if (!GATE_URL || typeof document === 'undefined') return

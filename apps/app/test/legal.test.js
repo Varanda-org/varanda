@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 68)
+  t.is(LEGAL_VERSION, 73)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 68, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 73, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'f2b5592eaadb96c0997113fc98e2032ac6f633461216bd7f966e8d096d9dc4df', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ac940dbaf7b790cc701e47fc3a005bbf53a6c4bba1af446cd104cc38ab1d10b8', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -435,14 +435,14 @@ test('legal: version 33 states the residual risks of a page\'s end-to-end Conver
     t.ok(pages(doc).includes('assina as mensagens da página sem vê-las e fica sabendo qual administrador pediu a assinatura de cada mensagem e quando'), doc.title + ': blind signing, who and when')
     t.ok(pages(doc).includes('quais membros guardam as chaves de mensagens da página'), doc.title + ': key holders')
     t.ok(pages(doc).includes('as mensagens que essa pessoa ainda enviar para a chave antiga da página também podem ser lidas pela associação'), doc.title + ': old key after activation')
-    t.ok(pages(doc).includes('Por até 8 dias depois da remoção, ele ainda pode enviar, em nome da página, mensagens que já tinha preparado antes de ser removido'), doc.title + ': prepared messages after removal')
+    t.ok(pages(doc).includes('Por até 15 dias depois da remoção, ele ainda pode enviar, em nome da página, mensagens que já tinha preparado antes de ser removido'), doc.title + ': prepared messages after removal')
     t.absent(pages(doc).includes('o ponto até onde já leu as mensagens da página'), doc.title + ': no service read cursor')
     t.ok(pages(doc).includes('As mensagens escritas antes da ativação podiam ser lidas pelo serviço'), doc.title + ': before activation')
     t.ok(pages(doc).includes('copiadas para o aparelho do dono e depois apagadas no serviço'), doc.title + ': copied, then deleted')
     t.ok(pages(doc).includes('a associação poderia trocar a chave de mensagens publicada da página por uma chave dela'), doc.title + ': key replacement')
     t.ok(pages(doc).includes('se recusam a enviar em nome da página e mostram um aviso quando alguém tenta enviar'), doc.title + ': the warning')
     t.ok(pages(doc).includes('as mensagens enviadas para a chave trocada poderiam ser lidas pela associação'), doc.title + ': until acted on')
-    t.ok(pages(doc).includes('receba em 7 dias se perde'), doc.title + ': 7-day collection')
+    t.ok(pages(doc).includes('receba em 14 dias se perde'), doc.title + ': 14-day collection')
     t.absent(all(doc).includes('Ao conversar com uma Página, a associação pode ler essa conversa'), doc.title + ': no service-readable page chat')
     t.ok(all(doc).includes('A conversa com uma Página que ativou as Conversas privadas é cifrada entre você e quem administra a página'), doc.title + ': Feira line')
   }
@@ -487,7 +487,10 @@ test('legal: version 17 describes photos in chats and the report image', async (
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('até 4 por mensagem'))
-  t.ok(text(TERMS).includes('sob um identificador aleatório, por até sete dias'))
+  t.ok(text(TERMS).includes('sob um identificador aleatório, por até 14 dias'))
+  t.ok(text(TERMS).includes('envelopes lacrados de tamanho fixo, por até 14 dias'), 'the seeder keeps sealed envelopes 14 days')
+  t.ok(text(PRIVACY).includes('os envelopes lacrados no semeador, por até 14 dias; um resumo (hash) de cada selo de envio já usado, por até 14 dias'), 'envelopes and spent stamps 14 days')
+  t.absent(text(TERMS).includes('por até sete dias') || text(PRIVACY).includes('por até sete dias'), 'no seven-day seeder retention is left')
   t.ok(text(TERMS).includes('só os aparelhos dos membros conseguem abri-la'))
   t.ok(text(TERMS).includes('marcada como não conferida'))
   t.ok(text(PRIVACY).includes('Fotos de grupos públicos são públicas'))
@@ -608,7 +611,6 @@ test('legal: version 58 describes the rich profile and the Sorte do dia', async 
   t.ok(all(PRIVACY).includes('o semeador vê qual perfil foi aberto e pode associar essa leitura à conta de quem abriu'), 'seeder sees the opened profile')
   t.ok(all(PRIVACY).includes('A Sorte do dia é escolhida no próprio aparelho'), 'sorte on the device')
   t.ok(all(PRIVACY).includes('não é enviada a ninguém, não usa a rede e não fica no seu diário'), 'sorte sends nothing')
-  t.ok(all(PRIVACY).includes('esse arquivo pode ir para o backup do aparelho no iCloud'), 'sorte seed may be in the iCloud backup')
   t.ok(all(TERMS).includes('marca como apagadas as versões anteriores'), 'a new version marks the earlier one as deleted')
   t.ok(all(PRIVACY).includes('cópias que outras pessoas ou semeadores já buscaram podem continuar existindo'), 'copies may remain')
 })
@@ -690,14 +692,14 @@ test('legal: version 37 describes momentos that disappear but are not erased', a
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('uma foto ou um vídeo curto e até 200 caracteres de texto, que quem segue você vê por 24 horas'))
   t.ok(text(TERMS).includes('Depois de 24 horas, o momento deixa de aparecer no app'))
-  t.ok(text(TERMS).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 7 dias'))
+  t.ok(text(TERMS).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 14 dias'))
   t.ok(text(TERMS).includes('O texto fica no seu diário até você apagar o momento'))
   t.ok(text(TERMS).includes('Sumir não é apagar: cópias que outras pessoas fizeram'))
   t.ok(text(TERMS).includes('não podem ser recolhidas'))
   t.ok(text(PRIVACY).includes('a chave para abrir essa mídia fica no próprio registro, de propósito'))
-  t.ok(text(PRIVACY).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 7 dias'))
+  t.ok(text(PRIVACY).includes('A foto ou o vídeo é removido dos servidores da Varanda em até 14 dias'))
   t.ok(text(PRIVACY).includes('sumir não é apagar'))
-  t.ok(text(PRIVACY).includes('A foto ou o vídeo curto de um momento fica no semeador por até 7 dias, sem renovação'))
+  t.ok(text(PRIVACY).includes('A foto ou o vídeo curto de um momento fica no semeador por até 14 dias, sem renovação'))
   t.ok(text(PRIVACY).includes('perfil, seguidos, depoimentos, momentos, fotos'))
 })
 
@@ -861,4 +863,29 @@ test('legal: version 67 keeps opened direct message media across a lock and send
   t.ok(text(TERMS).includes('No app nativo, quem monta a prévia é o aparelho de quem envia, que não segue redirecionamentos: quando o link leva a outro endereço (um link encurtado, por exemplo), o app ligado à instalação da associação pede a prévia ao serviço de conta'), 'terms: a redirect goes to the account service')
   t.ok(text(PRIVACY).includes('no app nativo, pelo aparelho de quem envia, que fala direto com o site e não segue redirecionamentos (quando o site responde com um redirecionamento, como o de um link encurtado, e o app está ligado à instalação da associação, o aparelho pede a prévia ao serviço de conta, que lê a página como na versão web hospedada)'), 'privacy: a redirect goes to the account service')
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
+})
+
+test('legal: version 71 shares the Sorte do dia and the acceptance across devices', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(PRIVACY).includes('a partir da data local e da chave pública da sua conta, por isso é a mesma em todos os aparelhos em que você entra com a mesma passkey'), 'same Sorte on every device')
+  t.absent(text(PRIVACY).includes('backup do aparelho no iCloud'), 'old per-device number is gone')
+  t.ok(text(TERMS).includes('a nova versão é pedida uma vez por conta: quem entra com uma passkey que já existe vê o aceite depois de Entrar'), 'asked once per account, after Entrar')
+  t.ok(text(TERMS).includes('quem cria uma conta aceita antes de criá-la, antes de qualquer dado dela ser enviado.'), 'sign-up accepts before anything of the account is sent')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
+  t.ok(text(PRIVACY).includes('O serviço só responde para conta vinculada, e responde só a versão e a data desse aceite.'), 'signed check answers only version and date')
+  t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
+})
+
+test('legal: version 73 keeps the one-time notes from repeating on another device', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const marks = 'marcas opacas de que o aviso antes da primeira mensagem a uma Página e o aviso de convite novo já foram mostrados, na mesma janela do Avisos, para que outro aparelho da mesma conta não os mostre de novo; as marcas do bloco são calculadas com uma chave da sua conta, e nem o serviço nem quem lê essas marcas consegue saber a qual Página ou convite elas se referem. O aparelho que mostrou o aviso de uma Página guarda um registro de que já o mostrou (na instalação hospedada, com um nome derivado dessa mesma chave) e o apaga quando você sai da conta.'
+  const all = text(PRIVACY)
+  t.ok(all.includes(marks), 'opaque marks for the one-time notes, keyed with the account')
+  const closing = 'Onde o aplicativo não usa esse bloco, essa lista fica só no aparelho e é apagada quando você sai da conta.'
+  const momentos = all.indexOf('Esse mesmo bloco guarda também os momentos de outras pessoas que você já viu')
+  t.ok(all.indexOf(marks) < momentos, 'the marks come before the momentos sentence')
+  t.ok(all.indexOf(closing) > momentos && all.indexOf(closing) > all.indexOf(marks), 'the closing sentence follows the momentos list, not the marks')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })

@@ -42,6 +42,7 @@ const resultKeys = {
   'outbox.seal': ['box'],
   'outbox.open': ['to', 'text'],
   'seen.merge': ['avisos', 'pending', 'dmChanged', 'groupChanged', 'blocksChanged', 'testimonialsChanged', 'momentsChanged', 'caughtUp'],
+  'seen.onceKey': ['key'],
   'report.sign': ['signature'],
   'appeal.sign': ['signature'],
   'dm.reportSign': ['signature'],
@@ -293,7 +294,7 @@ test('all vitrine methods match the documented result and row keys', async (t) =
   }
   const feed = await answer(t, request, 'feed.read', {})
   for (const row of feed.items) {
-    keys(t, row, ['kind', 'author', 'name', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : []), ...(row.event ? ['event'] : [])])
+    keys(t, row, ['kind', 'author', 'name', 'avatar', 'username', 'seq', 'at', 'text', 'replyTo', 'quote', 'media', ...(row.poll ? ['poll'] : []), ...(row.event ? ['event'] : [])])
     if (row.quote) keys(t, row.quote, ['author', 'seq'])
     if (row.media) for (const media of row.media) keys(t, media, ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'])
   }
@@ -434,7 +435,9 @@ test('feed, notices, profiles and diary peeks preserve paging and references', a
     before = { at, author, seq }
   }
   t.alike(pages.filter((item) => item.author === f.own || f.follows.includes(item.author)), pages)
-  t.alike(pages, f.feed.filter((item) => item.author === f.own || f.follows.includes(item.author)))
+  // Each item carries its author's avatar from the profile, as a node's does.
+  const avatarOf = (author) => ([...f.members, ...f.pages, ...f.applicants].find((p) => p.author === author) || {}).avatar || null
+  t.alike(pages, f.feed.filter((item) => item.author === f.own || f.follows.includes(item.author)).map((item) => ({ ...item, avatar: avatarOf(item.author) })))
   t.is((await answer(t, request, 'feed.read', { before: { at: f.feed[0].at, author: f.feed[0].author, seq: f.feed[0].seq } })).items.length, 0)
   const notices = []
   let after
@@ -669,6 +672,7 @@ function samples (f) {
     'outbox.open': { ...queued, box: Buffer.from(JSON.stringify([1, queued.id, queued.author, queued.association, queued.kind, null, 'Fica para depois.', queued.writtenAt])).toString('base64url') },
     'seen.sign': { nonce, action: 'read' },
     'seen.merge': { blob: null, avisos: { own: [] }, unchanged: false },
+    'seen.onceKey': {},
     'report.sign': { nonce, target: member, reason: 'outro' },
     'appeal.sign': { nonce, text: 'Foi um engano.' },
     'dm.reportSign': { nonce, target: member, reason: 'outro', quote: 'Uma mensagem de exemplo.' },
