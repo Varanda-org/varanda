@@ -11,7 +11,7 @@ const A = 'a'.repeat(64)
 test('dm-wake: constants', (t) => {
   t.is(DM_WAKE_COOLDOWN_MS, 900000)
   t.is(DM_WAKE_TEXT, 'Pode haver uma mensagem nova na Varanda')
-  t.alike(PUSH_KINDS, ['follow', 'reply', 'like', 'repost'])
+  t.alike(PUSH_KINDS, ['follow', 'reply', 'quote', 'mention', 'like', 'repost'])
 })
 
 test('dm-wake: only the exact shape is valid', (t) => {

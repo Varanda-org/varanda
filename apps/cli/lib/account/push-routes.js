@@ -21,7 +21,7 @@ const { pushBody, dmWakePayload, inviteDropPayload, deletionPayload } = require(
 //     endpoint it issued, never the RFC 8291 keys, so it cannot ask which
 //     member owns one of its devices.
 //   - the relay sink POST /push-event: the local seeder's notice of a follow,
-//     reply, like or repost aimed at a member (packages/core/lib/push-events.js).
+//     reply, quote, mention, like or repost aimed at a member (packages/core/lib/push-events.js).
 //     It is not under /account/, so Caddy never proxies it, and a Bearer token
 //     (VARANDA_PUSH_TOKEN) still gates it because loopback is not trusted
 //     (the /moderation-post rule of apps/cli/lib/seed-ws.js). Every valid
@@ -81,7 +81,7 @@ function createPushRoutes ({
   send = sendPush,
   relayTokenHash = null,
   // The Topic header travels in clear to the browser vendor's push service.
-  // A bare hash of actor:seq (both public) would let it map each device to
+  // A bare hash of actor:seq:recipient (all public) would let it map each device to
   // the member a record targets, so the topic is keyed with a process secret.
   topicKey = nodeCrypto.randomBytes(32),
   // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
@@ -109,6 +109,9 @@ function createPushRoutes ({
     recipient: keyedWindow(60, 3600 * 1000, now),
     // One actor's share of a recipient's budget.
     pair: keyedWindow(10, 3600 * 1000, now),
+    // One actor's share of the whole queue: one post can mention several
+    // members, so pair and recipient alone let one diary fill MAX_QUEUE.
+    actor: keyedWindow(30, 3600 * 1000, now),
     cooldown: keyedWindow(1, 600 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
@@ -116,7 +119,7 @@ function createPushRoutes ({
   // Pending opt-ins and opt-outs by nonce: { member, action, expiresAt },
   // single-use, the oldest evicted for room (start needs no proof).
   const nonces = new Map()
-  // actor:seq of the events already taken, FIFO: the seeder may relay one
+  // actor:seq:recipient of the events already taken, FIFO: the seeder may relay one
   // record twice (a restart before its cursor was saved).
   const seen = new Set()
   const queue = []
@@ -347,7 +350,8 @@ function createPushRoutes ({
 
   function deliver (event) {
     const { kind, actor, recipient, seq, ref } = event
-    const id = actor + ':' + seq
+    // One record can notify several members (a quote and a mention).
+    const id = actor + ':' + seq + ':' + recipient
     if (seen.has(id)) return log({ event: 'push', reason: 'descartado' })
     seen.add(id)
     while (seen.size > MAX_SEEN) seen.delete(seen.values().next().value)
@@ -367,9 +371,15 @@ function createPushRoutes ({
       return log({ event: 'push', reason: 'descartado' })
     }
     // Budgets are charged only for a push that will be queued, and one actor
-    // cannot spend the whole of a recipient's.
-    if (!limits.pair(actor + ' ' + recipient)) return log({ event: 'push', reason: 'teto' })
-    if (!limits.recipient(recipient)) return log({ event: 'push', reason: 'teto' })
+    // cannot spend the whole of a recipient's nor of the queue. All three
+    // are checked before any is charged, so a refusal spends none.
+    const pairKey = actor + ' ' + recipient
+    if (!limits.actor(actor, false) || !limits.pair(pairKey, false) || !limits.recipient(recipient, false)) {
+      return log({ event: 'push', reason: 'teto' })
+    }
+    limits.actor(actor)
+    limits.pair(pairKey)
+    limits.recipient(recipient)
     const status = accounts.status(actor)
     const username = status.linked && typeof status.username === 'string' ? status.username : null
     const body = pushBody({ kind, name: event.name, username })

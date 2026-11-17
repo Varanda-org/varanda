@@ -35,7 +35,9 @@ const ACTIONS = {
   follow: ' começou a seguir você',
   reply: ' respondeu ao seu post',
   like: ' curtiu seu post',
-  repost: ' republicou seu post'
+  repost: ' republicou seu post',
+  quote: ' citou seu post',
+  mention: ' mencionou você'
 }
 
 // Same rule as isValidUsername in apps/app/src/who.js: six hex digits could
@@ -55,7 +57,7 @@ function actorName (name, username) {
 
 function pushBody ({ kind, name, username } = {}) {
   if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(ACTIONS, kind)) {
-    throw new TypeError('kind must be follow, reply, like or repost')
+    throw new TypeError('kind must be follow, reply, like, repost, quote or mention')
   }
   const action = ACTIONS[kind]
   const room = PUSH_BODY_MAX - Array.from(action).length
