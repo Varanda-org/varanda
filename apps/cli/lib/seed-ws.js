@@ -158,7 +158,14 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   `{ items: [{ key, on, state }], next, indexing, complete }` (at most
 //   GARDEN_STREET_PAGE rows), the open balconies of the keys the owner
 //   follows, key order, strictly after the cursor key; `next` is null or a
-//   key. Any other segment after the owner is 400 'pedido inválido'.
+//   key. /index/garden/<owner>/mimos -> Seeder#indexGardenStall: `{ decor:
+//   seq | null, pending: [{ author, followSeq, seq }], shelf: [{ from, gseq,
+//   seq }], indexing, complete }` (Barraquinha and Enfeites; at most
+//   GARDEN_GIFT_ROWS pending and GARDEN_SHELF_ROWS shelf rows): the owner's
+//   newest live garden-decor block, the open mimos addressed to the owner
+//   with the seq of each giver's live follow of the owner, and the owner's
+//   takes (seq) of a giver's gift (from, gseq). Any other segment after the
+//   owner is 400 'pedido inválido'.
 //   Pointers only, checked against the exact shape: an extra key, a
 //   duplicate or an oversized list is the generic 404, never trimmed.
 // - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
@@ -439,12 +446,16 @@ const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9
 const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
 const INDEX_GARDEN_RE = /^\/index\/garden\/([0-9a-f]{64})$/
 const INDEX_GARDEN_STREET_RE = /^\/index\/garden\/([0-9a-f]{64})\/rua(?:\/([0-9a-f]{64}))?$/
-// Any path below an owner's balcony that the two above refuse (400).
+const INDEX_GARDEN_MIMOS_RE = /^\/index\/garden\/([0-9a-f]{64})\/mimos$/
+// Any path below an owner's balcony that the three above refuse (400).
 const INDEX_GARDEN_BAD_RE = /^\/index\/garden\/[0-9a-f]{64}\//
 const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
 const GARDEN_HELP_KEYS = ['author', 'followSeq', 'seq']
 const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
 const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
+const GARDEN_MIMOS_KEYS = ['complete', 'decor', 'indexing', 'pending', 'shelf']
+const GARDEN_MIMO_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_SHELF_KEYS = ['from', 'gseq', 'seq']
 const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
 const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const FAN_ROWS_MAX = 20
@@ -951,6 +962,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
     m = INDEX_GARDEN_STREET_RE.exec(url)
     if (m) return ['indexGardenStreet', [m[1], m[2] === undefined ? null : m[2]], gardenStreetBody]
+    m = INDEX_GARDEN_MIMOS_RE.exec(url)
+    if (m) {
+      const owner = m[1]
+      return ['indexGardenStall', [owner], (answer) => mimosBody(answer, owner)]
+    }
     m = INDEX_GARDEN_RE.exec(url)
     if (m) {
       const owner = m[1]
@@ -1080,6 +1096,37 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (next !== null && (typeof next !== 'string' || !HEX64_RE.test(next))) throw new Error('index')
     if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
     return { items: rows, next, indexing, complete }
+  }
+
+  // Exactly the Barraquinha and Enfeites pointers, checked as the node checks
+  // them: a row naming the owner, a duplicate, an extra key or an oversized
+  // list is a 404, never a trimmed answer.
+  function mimosBody (answer, owner) {
+    if (!exactKeys(answer, GARDEN_MIMOS_KEYS)) throw new Error('index')
+    const { decor, pending, shelf, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (decor !== null && !seqOk(decor)) throw new Error('index')
+    if (!Array.isArray(pending) || pending.length > gardenRules.GARDEN_GIFT_ROWS || !Array.isArray(shelf) || shelf.length > gardenRules.GARDEN_SHELF_ROWS) throw new Error('index')
+    const refs = new Set()
+    const gifts = pending.map((row) => {
+      if (!exactKeys(row, GARDEN_MIMO_KEYS)) throw new Error('index')
+      const { author, seq, followSeq } = row
+      if (typeof author !== 'string' || !HEX64_RE.test(author) || author === owner || !seqOk(seq) || !seqOk(followSeq)) throw new Error('index')
+      const ref = author + ':' + seq
+      if (refs.has(ref)) throw new Error('index')
+      refs.add(ref)
+      return { author, seq, followSeq }
+    })
+    const seqs = new Set()
+    const takes = shelf.map((row) => {
+      if (!exactKeys(row, GARDEN_SHELF_KEYS)) throw new Error('index')
+      const { from, gseq, seq } = row
+      if (typeof from !== 'string' || !HEX64_RE.test(from) || from === owner || !seqOk(gseq) || !seqOk(seq) || seqs.has(seq)) throw new Error('index')
+      seqs.add(seq)
+      return { seq, from, gseq }
+    })
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { decor, pending: gifts, shelf: takes, indexing, complete }
   }
 
   // The pointer keys known so far; a new key is added here when its feature
@@ -2224,6 +2271,7 @@ module.exports = {
   INDEX_SCRAPS_RE,
   INDEX_GARDEN_RE,
   INDEX_GARDEN_STREET_RE,
+  INDEX_GARDEN_MIMOS_RE,
   INDEX_PROFILE_RE,
   INDEX_FANS_RE,
   INDEX_POLL_RE,

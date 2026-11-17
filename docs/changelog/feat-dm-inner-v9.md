@@ -1,0 +1,3 @@
+### Adicionado
+
+- As Conversas leem mensagens e reações de um nó core (Hypercore 11), cuja chave de diário é o hash do manifesto do assinante e não a chave pública dele: o inner v9 (mensagem ou ctl) e o v10 (reação) levam o campo `signer`, assinado em domínio próprio, e só abrem quando o manifesto desse assinante dá exatamente o diário em `from`. Tudo o mais (certificado, bloqueios, a linha da conversa) continua pelo diário. Nenhum nó escreve v9 ou v10 ainda: a leitura vai primeiro (#352). Leitores mais antigos ignoram esses inners sem mostrar nada. Verificação em `docs/verification/feat-dm-inner-v9.md`.
