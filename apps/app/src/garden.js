@@ -108,6 +108,7 @@ function emptyBalcony () {
     on: false,
     pots: new Array(rpc.garden.GARDEN_POTS).fill(null),
     helpers: [],
+    received: new Array(rpc.garden.GARDEN_POTS).fill(0),
     isPage: false,
     stale: false,
     loading: false,
@@ -168,10 +169,40 @@ export function assembleBalcony (args) {
       helps.push({ author: row.author, seq: row.seq, record, follow })
     }
     const folded = rpc.garden.foldBalcony({ owner, flag, state, helps, given, now })
-    return { on: folded.on, pots: folded.pots, helpers: folded.helpers, isPage: false, stale: folded.stale, loading, incomplete, indexing: idx.indexing, refetch }
+    // Helps counted per pot, as the fold counts them: the helper list keeps
+    // one row per neighbour, but a neighbour's helps of several days each
+    // count.
+    const received = folded.on && state !== null
+      ? rpc.garden.foldHelps({ owner, pots: state.pots, helps, now }).perPot
+      : new Array(rpc.garden.GARDEN_POTS).fill(0)
+    return { on: folded.on, pots: folded.pots, helpers: folded.helpers, received, isPage: false, stale: folded.stale, loading, incomplete, indexing: idx.indexing, refetch }
   } catch {
     return emptyBalcony()
   }
+}
+
+// Whether a balcony read proves its owner is not playing: an off answer
+// counts only when both first blocks and every pointer were read, the index
+// was complete and nothing was dated ahead of the reader.
+export function provenOff (result, forced) {
+  return isObject(result) && result.isPage !== true && result.on === false && result.indexing !== true &&
+    result.incomplete !== true && result.stale !== true && forced !== true
+}
+
+// Varandas da rua: the seeder's street page is a claim, so only keys the
+// viewer's own follow list holds are offered, once each, in the seeder's
+// order. Without a follow set nothing is offered.
+export function streetKeys (items, follows) {
+  if (!Array.isArray(items) || !(follows instanceof Set)) return []
+  const out = []
+  const seen = new Set()
+  for (const it of items) {
+    const key = isObject(it) && typeof it.key === 'string' ? it.key.toLowerCase() : null
+    if (key === null || !HEX64.test(key) || seen.has(key) || !follows.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
 }
 
 export function nextLoadStep (args) {
