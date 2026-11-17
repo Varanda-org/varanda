@@ -155,7 +155,7 @@ Remoção de cada correção (desfeita depois; `shasum` de `seeder.js` igual ant
 | Mutação | Resultado |
 |---|---|
 | fim da admissão reconcilia o próprio diário e `admission-failed` sem espera (rodada 2) | falha (teste 19, e tempo esgotado em "linha antiga fora" do 22) |
-| só o fim da admissão volta a reconciliar o próprio diário | falha (tempo esgotado em "linha antiga fora") |
+| só o fim da admissão volta a reconciliar o próprio diário | falha só no teste 22 (tempo esgotado em "linha antiga fora") |
 | só `admission-failed` sem espera | falha (tempo esgotado em "K movido para G2") |
 | saída dos tocos de raiz só na adoção, como na rodada 2 | falha (tempo esgotado em "R2 removido") |
 | `_listHeaderStub` com `_stubRoom(diary)` | falha (tempo esgotado em "Kd sob G3") |
@@ -175,6 +175,38 @@ Depois desta rodada, cada arquivo sozinho (`VARANDA_TEST_CONCURRENCY=1 node <arq
 | `seeder-groups-gone.test.js` | 25/25 | 153/153 |
 | `seeder-groups-waits.test.js` | 12/12 | 61/61 |
 
+## Rodada de revisão 4
+
+Mudanças em `packages/core/lib/seeder.js`:
+
+- `_stubJoin`: uma entrada movida que uma linha só de lista responderia, lida antes de a varredura de D alcançar o fim do diário, espera a varredura enquanto D ainda tem uma linha de K sob outro grupo. Antes, um diário entregue bloco a bloco listava K sob um grupo depois do outro, e as linhas antigas ficavam fora dos dois limites. Agora a passagem que alcança o fim tira a linha antiga e só então lista a nova.
+- `_stubRoom`: só uma linha movida de K fica fora dos limites (`Math.min(moved, 1)`); as outras contam para o diário. Um diário fica com no máximo 9 linhas e o semeador com no máximo `maxHeaderStubs + 1`.
+- Fim de `_admitGroup`: quando a entrada viva de K do próprio diário nomeia outro grupo que não o da admissão (a entrada mudou de novo enquanto K estava em andamento, e a passagem a pulou), o diário é reconciliado uma vez, antes de `_settleStubRows`, e a nova entrada lê o K guardado sem buscar. Não entra em laço: a saída por gravação falha tem o mesmo grupo.
+
+Testes novos em `seeder-groups-header-stubs.test.js` (23 a 25): entrada de Kd (guardado em outro papel) movida por 10 grupos com a varredura de D atrás do comprimento em cada passagem (as passagens de D veem `scanned` abaixo do comprimento, como um diário que chega bloco a bloco), com uma linha de Kd por vez e só a do último grupo listada depois; linha só de lista movida duas vezes com `maxHeaderStubs: 1` enquanto uma saída anterior de Kd ainda roda, que recusa a segunda mudança com `stub-full` em vez de passar de 2 linhas; entrada movida de G1 para G2, com a admissão presa, e de G2 para G3 nesse meio tempo, respondida sob G3 pelo núcleo guardado, sem nova busca e com o autor fora do ar.
+
+Remoção de cada correção (desfeita depois; `shasum` de `seeder.js` igual antes e depois), rodando só `seeder-groups-header-stubs.test.js`:
+
+| Mutação | Resultado |
+|---|---|
+| `_stubJoin` lista a entrada movida antes de a varredura alcançar o fim | falha no teste 23 (9 linhas de Kd, e tempo esgotado em "Kd sob o último grupo") |
+| `_stubRoom` deixa de fora todas as linhas movidas | falha no teste 24 (3 linhas, sem `stub-full`) |
+| fim da admissão sem reconciliar a entrada movida de novo | falha no teste 25 (tempo esgotado em "K sob G3") |
+| fim da admissão reconcilia o próprio diário, como na rodada 2 | falha só no teste 22 (tempo esgotado em "linha antiga fora") |
+
+Depois desta rodada, cada arquivo sozinho (`VARANDA_TEST_CONCURRENCY=1 node <arquivo>`), Node 24.22.1, todos passaram:
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `seeder-groups-header-stubs.test.js` | 25/25 | 166/166 |
+| `seeder-groups.test.js` | 44/44 | 271/271 |
+| `seeder-header-stubs-e2e.test.js` | 1/1 | 9/9 |
+| `seeder-storage-budget.test.js` | 14/14 | 160/160 |
+| `seeder-groups-gone.test.js` | 25/25 | 153/153 |
+| `seeder-groups-waits.test.js` | 12/12 | 61/61 |
+
+A saída só de remoção no fim da admissão continua sem teste próprio: um teste como o 19 com a espera ignorada (`_groupBackingOff` sempre falso) passou também com a reconciliação da rodada 2 de volta (1 gravação), então não foi mantido. O teste 19 ainda passa com no máximo 2 gravações.
+
 ## Pontos em aberto (padrões do responsável)
 
 - Uma entrada desligada (`on: false`) mantém o toco: sair do grupo nunca apaga um núcleo, e os leitores ainda esperam um escritor que saiu.
@@ -191,5 +223,5 @@ Qualquer ordem funciona. O semeador lista tocos só para quem manda a capacidade
 
 - Um semeador pode listar, a cada atualização, todo núcleo que o membro guarda sob cada grupo que ele pagina, sem nunca ser cortado: o membro abre cada um localmente e o pula, sem buscar nem guardar nada. O custo fica limitado a cada atualização (núcleos guardados vezes grupos paginados).
 - Quando a nova entrada de uma chave movida é recusada sem espera, ou espera por outro motivo que não uma vaga de admissão, a linha antiga sai na mesma passagem e o núcleo é apagado; quando a entrada for tentada de novo, K é buscado outra vez (com o autor fora do ar, a entrada fica esperando).
-- Uma linha movida que já sai não conta nos limites para a nova entrada de K, então, enquanto essas saídas demoram (uma limpeza lenta), as linhas guardadas podem passar dos limites pelo número de linhas ainda saindo. Cada saída espera a anterior da mesma chave.
+- Para a nova entrada de K, só uma linha movida de K (guardada para a mudança ou já saindo) fica fora dos limites; as outras contam. Enquanto essas saídas demoram (uma limpeza lenta), um diário guarda no máximo uma linha além do seu limite (9) e o semeador no máximo uma além de `maxHeaderStubs`; passando disso a entrada é recusada com `stub-full`. Cada saída espera a anterior da mesma chave.
 - Uma entrada movida cuja gravação de `admitted.json` falha perde a linha antiga e, com ela, o núcleo guardado: quando a espera acaba, K é buscado de novo.
