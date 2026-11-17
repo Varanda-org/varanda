@@ -6,9 +6,9 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet, localSwarmOptions } = require('./helpers/net')
-const { runSync } = require('../lib/sync')
+const { runSync, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, generateAssociationKeyPair } = require('../lib/cert')
-const { writerHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
+const { writerHeader, groupPost } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, groupMember } = require('./helpers/sync-groups')
 
@@ -121,7 +121,7 @@ test('one diary listed with many writers: targets and gates stay within the per-
   const group = hex(crypto.randomBytes(32))
   const diary = hex(crypto.randomBytes(32))
   const items = []
-  for (let i = 0; i < 30; i++) items.push({ key: hex(crypto.randomBytes(32)), diary, length: 1, seq: i + 1 })
+  for (let i = 0; i < CAP + 8; i++) items.push({ key: hex(crypto.randomBytes(32)), diary, length: 1, seq: i + 1 })
   items.sort((x, y) => x.key < y.key ? -1 : 1)
   await fakeSeeder(t, bootstrap, kp, items)
   const m = await groupMember(t, kp, group)
@@ -138,7 +138,7 @@ test('one diary listed with many writers: targets and gates stay within the per-
   })
   t.ok(result.ok, result.errors.join('; '))
   // The held writers plus at most two contenders gated without a slot.
-  t.ok(most <= MAX_GROUP_WRITERS_PER_DIARY + 2, 'targets only for admitted writers: ' + most)
+  t.ok(most <= CAP + 2, 'targets only for admitted writers: ' + most)
 })
 
 test('a wrong join seq hint does not hide a writer another seeder lists correctly', async (t) => {
@@ -299,7 +299,7 @@ test('fabricated low-seq writers of a full diary never stop its held writers', a
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+  for (let i = 0; i < CAP; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
@@ -309,7 +309,7 @@ test('fabricated low-seq writers of a full diary never stop its held writers', a
   }
   for (let i = 0; i < 3; i++) forged.push({ key: hex(crypto.randomBytes(32)), diary: dkey, length: 1, seq: 1 })
   const m = await groupMember(t, kp, group)
-  // The diary is held already: eight gates of one diary read it through the
+  // The diary is held already: the gates of one diary read it through the
   // main store, never through concurrent quarantine reads. A stored writer
   // naming it is what keeps it at start (an unnamed diary is purged).
   await copyInto(fake.store, m, [d, writers[0]])

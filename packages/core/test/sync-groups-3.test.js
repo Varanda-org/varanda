@@ -11,10 +11,10 @@ const Corestore = require('corestore')
 const Hypercore = require('hypercore')
 const { testnet, until } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
-const { runSync } = require('../lib/sync')
+const { runSync, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
-const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
+const { writerHeader, groupHeader, groupPost } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord, postRecord, deleteRecord } = require('../lib/records')
 const store = require('../lib/store')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, groupMember } = require('./helpers/sync-groups')
@@ -64,7 +64,7 @@ test('the per-diary cap compares the earliest proven join, not the latest one a 
   await early.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
   await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: ekey, on: true })))) // seq 1
   const writers = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+  for (let i = 0; i < CAP; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true })))) // seq i + 2

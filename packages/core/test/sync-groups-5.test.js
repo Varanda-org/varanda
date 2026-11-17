@@ -6,9 +6,10 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet } = require('./helpers/net')
+const { MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
-const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
+const { writerHeader, groupHeader, groupPost } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, groupMember, never } = require('./helpers/sync-groups')
 
@@ -121,7 +122,7 @@ test('a writer evicted by an earlier proven join is still purged when its diary 
   await d.ready()
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
-  for (let i = 0; i <= MAX_GROUP_WRITERS_PER_DIARY; i++) {
+  for (let i = 0; i <= CAP; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))

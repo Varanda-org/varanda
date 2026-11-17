@@ -12,11 +12,11 @@ const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
 const { testnet, until } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
-const { runSync, recordBoundRoot } = require('../lib/sync')
+const { runSync, recordBoundRoot, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
-const { memberCertRecord, groupJoinRecord } = require('../lib/records')
+const { memberCertRecord, groupJoinRecord, groupCutRecord } = require('../lib/records')
 const store = require('../lib/store')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, never, inBackground, joinedRoot, blockDiary, readCerts, revokeIssuer } = require('./helpers/sync-groups')
 
@@ -107,7 +107,7 @@ test('stored writers of one diary listed under other diaries never exceed the pe
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const cores = [d]
   const keys = []
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 2; i++) {
+  for (let i = 0; i < CAP + 2; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
@@ -125,8 +125,41 @@ test('stored writers of one diary listed under other diaries never exceed the pe
   // what counts is what stays active, not who was ever downloaded.
   const gone = new Set(events.filter((ev) => ev.event === 'group-skipped' && ev.reason === 'quota').map((ev) => ev.key))
   const active = new Set(events.filter((ev) => ev.event === 'group-downloaded' && keys.includes(ev.key) && !gone.has(ev.key)).map((ev) => ev.key))
-  t.ok(active.size <= MAX_GROUP_WRITERS_PER_DIARY, 'at most the cap stays active: ' + active.size)
+  t.ok(active.size <= CAP, 'at most the cap stays active: ' + active.size)
   t.ok(events.some((ev) => ev.event === 'group-skipped' && keys.includes(ev.key) && ev.reason === 'quota'), 'the rest are refused for quota')
+})
+
+test('writers a diary cut froze or released are still fetched past its live slots (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const cores = [d]
+  const keys = []
+  // Two writers more than the live slots, one released and one frozen by
+  // the diary's cuts: each may hold a leave the fold reads.
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY + 2; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    keys.push(hex(w.key))
+    items.push({ key: hex(w.key), diary: dkey, length: 1, seq: i + 1 })
+  }
+  await d.append(b4a.from(JSON.stringify(groupCutRecord({ group, writer: keys[0], cut: 0 }))))
+  await d.append(b4a.from(JSON.stringify(groupCutRecord({ group, writer: keys[1], cut: 1 }))))
+  items.sort((x, y) => x.key < y.key ? -1 : 1)
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, cores)
+  const { events } = await syncOnce(bootstrap, m)
+  t.absent(events.some((ev) => ev.event === 'group-skipped' && keys.includes(ev.key) && ev.reason === 'quota'), 'none refused for the cap')
+  for (const k of keys) t.ok(await stored(m, k), 'stored ' + k.slice(0, 8))
 })
 
 test('writers kept on disk after a quota stop hold their per-diary slots, in the run and after a restart', async (t) => {
@@ -141,7 +174,7 @@ test('writers kept on disk after a quota stop hold their per-diary slots, in the
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  for (let i = 0; i <= MAX_GROUP_WRITERS_PER_DIARY; i++) {
+  for (let i = 0; i <= CAP; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
@@ -149,29 +182,29 @@ test('writers kept on disk after a quota stop hold their per-diary slots, in the
     writers.push(w)
   }
   const keys = writers.map((w) => hex(w.key))
-  const late = keys[MAX_GROUP_WRITERS_PER_DIARY]
-  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+  const late = keys[CAP]
+  for (let i = 0; i < CAP; i++) items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
   items.sort((x, y) => x.key < y.key ? -1 : 1)
   const m = await groupMember(t, kp, group)
-  // The quota leaves room for the diary (cert and nine joins).
-  const quota = MAX_GROUP_WRITERS_PER_DIARY + 4
+  // The quota leaves room for the diary (its cert and CAP + 1 joins).
+  const quota = CAP + 4
   const opts = { maxLogBlocks: quota, pageRetryMs: 100, pageRefreshMs: 300 }
   const decided = (evs) => evs.some((ev) => ev.key === late && (ev.event === 'group-skipped' || ev.event === 'group-downloaded'))
   let phase = 0
   const { events } = await runUntil(m, bootstrap, (evs) => {
     const has = (ev, k) => ev.key === k
-    if (phase === 0 && keys.slice(0, MAX_GROUP_WRITERS_PER_DIARY).every((k) => evs.some((ev) => ev.event === 'group-downloaded' && has(ev, k)))) {
+    if (phase === 0 && keys.slice(0, CAP).every((k) => evs.some((ev) => ev.event === 'group-downloaded' && has(ev, k)))) {
       phase = 1
       // Every held writer grows past the log quota and stops (blocks kept).
       inBackground(async () => {
-        for (const w of writers.slice(0, MAX_GROUP_WRITERS_PER_DIARY)) {
+        for (const w of writers.slice(0, CAP)) {
           for (let i = 0; i < quota; i++) await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' + i }))))
         }
       })
     }
-    if (phase === 1 && keys.slice(0, MAX_GROUP_WRITERS_PER_DIARY).every((k) => evs.some((ev) => ev.event === 'group-skipped' && ev.reason === 'quota' && has(ev, k)))) {
+    if (phase === 1 && keys.slice(0, CAP).every((k) => evs.some((ev) => ev.event === 'group-skipped' && ev.reason === 'quota' && has(ev, k)))) {
       phase = 2
-      items.push({ key: late, diary: dkey, length: 1, seq: MAX_GROUP_WRITERS_PER_DIARY + 1 })
+      items.push({ key: late, diary: dkey, length: 1, seq: CAP + 1 })
       items.sort((x, y) => x.key < y.key ? -1 : 1)
     }
     return phase === 2 && decided(evs)
@@ -237,7 +270,7 @@ test('writers listed latest join first converge on the earliest joins within the
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  const n = MAX_GROUP_WRITERS_PER_DIARY + 2
+  const n = CAP + 2
   for (let i = 0; i < n; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
@@ -279,12 +312,12 @@ test('writers listed latest join first converge on the earliest joins within the
   t.ok(skipped(r1.events, keys[n - 2]), 'and so does the next latest joiner')
   t.absent(await stored(m, keys[n - 1]), 'its blocks are purged')
   t.absent(await stored(m, keys[n - 2]), 'and so are the other evicted holder\'s')
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'stored writers of the diary stay at the cap')
+  t.is(await storedCount(), CAP, 'stored writers of the diary stay at the cap')
   // After a restart every stored writer counts the others on disk, and the
   // later joiners are refused against their proven joins.
   const r2 = await runUntil(m, bootstrap, (evs) => skipped(evs, keys[n - 1]) && skipped(evs, keys[n - 2]), { pageRetryMs: 100, pageRefreshMs: 300 })
   t.absent(downloaded(r2.events, keys[n - 1]) || downloaded(r2.events, keys[n - 2]), 'no later joiner comes back after a restart')
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'still at the cap: ' + (await storedCount()))
+  t.is(await storedCount(), CAP, 'still at the cap: ' + (await storedCount()))
 })
 
 test('a writer stored in an earlier run gives its slot to an earlier proven join listed later', async (t) => {
@@ -299,7 +332,7 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   const dkey = hex(d.key)
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   const writers = []
-  const n = MAX_GROUP_WRITERS_PER_DIARY + 1
+  const n = CAP + 1
   for (let i = 0; i < n; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
@@ -323,7 +356,7 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   // Run 1: the seeder lists every writer but the earliest joiner.
   for (let i = 1; i < n; i++) list(i)
   await runUntil(m, bootstrap, (evs) => keys.slice(1).every((k) => downloaded(evs, k)), opts)
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'run 1 stores the cap')
+  t.is(await storedCount(), CAP, 'run 1 stores the cap')
   t.absent(await stored(m, keys[0]), 'without the earliest joiner')
   // Run 2: the earliest joiner is listed too.
   list(0)
@@ -332,7 +365,7 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   t.ok(r2.events.some((ev) => ev.event === 'group-skipped' && ev.key === keys[n - 1] && ev.reason === 'quota'), 'the latest joiner gives way')
   t.ok(await stored(m, keys[0]), 'the earliest joiner is stored')
   t.absent(await stored(m, keys[n - 1]), 'the latest joiner is purged')
-  t.is(await storedCount(), MAX_GROUP_WRITERS_PER_DIARY, 'the stored count stays at the cap')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
 })
 
 test('a stored writer listed under the wrong group leaves the table so its own group admits it', async (t) => {
