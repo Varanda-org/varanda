@@ -28,6 +28,7 @@ const { PROTOCOL: ADMISSION_PROTOCOL } = require('@varanda/core/lib/admission')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openPageKeys } = require('../lib/account/page-keys')
 const { createPagesWriter } = require('../lib/account/pages-writer')
+const avifSamples = require('../../../packages/rpc/test/helpers/avif-samples')
 
 const NoiseSecretStream = require(require.resolve('@hyperswarm/secret-stream', {
   paths: [path.dirname(require.resolve('@varanda/core/lib/seeder'))]
@@ -109,6 +110,27 @@ function jpeg (width, height, size) {
   out[size - 2] = 0xff
   out[size - 1] = 0xd9
   return out
+}
+
+// PNG signature, an IHDR chunk of the given size, then one IDAT chunk.
+function pngFile (width, height) {
+  const u32 = (n) => b4a.from([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff])
+  const chunk = (type, data) => b4a.concat([u32(data.byteLength), b4a.from(type), data, u32(0)])
+  return b4a.concat([
+    b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', b4a.concat([u32(width), u32(height), b4a.from([8, 2, 0, 0, 0])])),
+    chunk('IDAT', b4a.alloc(16, 1))
+  ])
+}
+
+// GIF89a header, one image descriptor, trailer.
+function gifFile (width, height) {
+  const le16 = (n) => b4a.from([n & 0xff, n >> 8])
+  return b4a.concat([
+    b4a.from('GIF89a'), le16(width), le16(height), b4a.from([0, 0, 0]),
+    b4a.from([0x2c]), le16(0), le16(0), le16(width), le16(height), b4a.from([0]),
+    b4a.from([2, 1, 0, 0]), b4a.from([0x3b])
+  ])
 }
 
 // One video sample with complete container tables, so refusal cannot be
@@ -265,7 +287,7 @@ test('pages-writer: a page is created, pushed, admitted and served; media, follo
   await t.exception(writer.mediaItem(page.key, { bytes: notPng, mime: 'image/png', width: 1, height: 1, sha256: sha(notPng) }), /midia-invalida/, 'png magic mismatch')
   t.is(writer.info(page.key).length, lengthBefore, 'refusals append nothing')
   t.is(writer.items(page.key).length, 1)
-  const png = b4a.concat([b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), b4a.alloc(100, 1)])
+  const png = pngFile(10, 20)
   const pngItem = await writer.mediaItem(page.key, { bytes: png, mime: 'image/png', width: 10, height: 20, sha256: sha(png) })
   t.is(pngItem.start, 33)
   t.is(pngItem.mime, 'image/png')
@@ -445,6 +467,60 @@ test('pages-writer: append takes no media-core or follow record and only media o
   t.is(writer.info(page.key).length, length, 'refusals append nothing')
   const ok = await writer.append(page.key, [profileRecord({ name: 'Quitanda', avatar: item }), postRecord({ text: 'foto', media: [item] })])
   t.is(ok.length, length + 2)
+})
+
+test('pages-writer: a still AVIF of the declared size is stored; anything else labelled image/avif is refused', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'quitanda')
+  await writer.createPage(page.args)
+  const avif = avifSamples.ios.opaque
+  const item = await writer.mediaItem(page.key, { bytes: avif, mime: 'image/avif', width: 16, height: 16, sha256: sha(avif) })
+  t.is(item.mime, 'image/avif')
+  t.is(item.bytes, avif.byteLength)
+  t.alike(writer.items(page.key).map((it) => it.mime), ['image/avif'], 'the AVIF is in the item table')
+  const lib = avifSamples.libavif.opaque
+  t.is((await writer.mediaItem(page.key, { bytes: lib, mime: 'image/avif', width: 16, height: 16, sha256: sha(lib) })).mime, 'image/avif', 'a libavif AVIF is stored')
+  const length = writer.items(page.key).length
+
+  const png = b4a.concat([b4a.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), b4a.alloc(32)])
+  await t.exception(writer.mediaItem(page.key, { bytes: png, mime: 'image/avif', width: 16, height: 16, sha256: sha(png) }), /midia-invalida/, 'png bytes labelled image/avif')
+  const truncated = avif.subarray(0, 100)
+  await t.exception(writer.mediaItem(page.key, { bytes: truncated, mime: 'image/avif', width: 16, height: 16, sha256: sha(truncated) }), /midia-invalida/, 'truncated avif')
+  await t.exception(writer.mediaItem(page.key, { bytes: avif, mime: 'image/avif', width: 32, height: 16, sha256: sha(avif) }), /midia-invalida/, 'wrong declared width')
+  await t.exception(writer.mediaItem(page.key, { bytes: avif, mime: 'image/avif', width: 16, height: 8, sha256: sha(avif) }), /midia-invalida/, 'wrong declared height')
+  await t.exception(writer.avatarItem(page.key, avif, 'image/avif'), /midia-invalida/, 'an AVIF avatar is refused')
+  t.is(writer.items(page.key).length, length, 'refusals store nothing')
+})
+
+test('pages-writer: every photo is held to the strict parser the app runs, at its declared size', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'quitanda')
+  await writer.createPage(page.args)
+  const put = (bytes, mime, width, height) => writer.mediaItem(page.key, { bytes, mime, width, height, sha256: sha(bytes) })
+
+  // Over the pixel cap (6000 x 4000 = 24 MP) or the side cap: the app would refuse them.
+  const over = [['image/jpeg', jpeg(6000, 4000, 3000), 6000, 4000], ['image/jpeg', jpeg(16385, 10, 3000), 16385, 10],
+    ['image/png', pngFile(6000, 4000), 6000, 4000], ['image/gif', gifFile(6000, 4000), 6000, 4000]]
+  for (const [mime, bytes, width, height] of over) await t.exception(put(bytes, mime, width, height), /midia-invalida/, mime + ' over the cap ' + width + 'x' + height)
+  t.is(writer.items(page.key).length, 0, 'an over-cap photo stores nothing')
+
+  // A declared size that differs from the bytes, for every still type.
+  await t.exception(put(pngFile(10, 20), 'image/png', 20, 10), /midia-invalida/, 'png size mismatch')
+  await t.exception(put(gifFile(10, 20), 'image/gif', 10, 21), /midia-invalida/, 'gif size mismatch')
+  t.is(writer.items(page.key).length, 0)
+
+  // The same files at their own size under the cap are stored.
+  t.is((await put(pngFile(10, 20), 'image/png', 10, 20)).mime, 'image/png')
+  t.is((await put(gifFile(10, 20), 'image/gif', 10, 20)).mime, 'image/gif')
+  t.is((await put(jpeg(4000, 4000, 3000), 'image/jpeg', 4000, 4000)).width, 4000, 'exactly the pixel cap')
 })
 
 test('pages-writer: an unexpected diary length, a foreign media append or a fork pauses the page', async (t) => {

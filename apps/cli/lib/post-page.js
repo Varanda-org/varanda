@@ -26,7 +26,9 @@ const MAX_TEXT_CHARS = 1000
 const MAX_NAME_CHARS = 80
 const MAX_USERNAME_CHARS = 40
 const MAX_CARD_CHARS = 300
-const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
+// Some link crawlers cannot render AVIF, so og:image never names one.
+const NO_OG_MIME = 'image/avif'
 const VIDEO_MIME = 'video/mp4'
 const HEX64 = /^[0-9a-f]{64}$/
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
@@ -321,8 +323,10 @@ function render (origin, author, seq, record, rawName, rawUsername) {
     '<meta property="og:type" content="website">\n' +
     '<meta property="og:title" content="' + esc(ogTitle) + '">\n' +
     '<meta property="og:description" content="' + esc(description) + '">\n'
-  if (photos.items.length > 0 && imageOrigin !== '') {
-    head += '<meta property="og:image" content="' + esc(imageOrigin + base + '/foto/1') + '">\n'
+  const og = photos.items.findIndex((item) => mimeOf(item) !== NO_OG_MIME)
+  if (og !== -1 && imageOrigin !== '') {
+    head += '<meta property="og:image" content="' + esc(imageOrigin + base + '/foto/' + (og + 1)) + '">\n' +
+      '<meta property="og:image:type" content="' + esc(mimeOf(photos.items[og])) + '">\n'
   }
 
   let html = '<article class="row">\n' + avatarHtml(author, name, username) +

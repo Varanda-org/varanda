@@ -563,7 +563,7 @@ test('media constants', async (t) => {
   t.is(MAX_MEDIA_PER_POST, 10)
   t.is(records.MAX_DELETE_RANGES, 4)
   t.is(MAX_MEDIA_ITEM_BLOCKS, 256)
-  t.alike([...MEDIA_MIMES], ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+  t.alike([...MEDIA_MIMES], ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
   t.is(MAX_MEDIA_DIMENSION, 16384)
 })
 
@@ -604,9 +604,10 @@ test('validateRecord: posts with media', async (t) => {
   await t.exception.all(async () => postRecord({ text: 'x', at: AT, media: between }), /media-invalid/)
   // Descriptor edge cases.
   const maxItem = { ...DESC, mime: 'image/gif', start: MAX_MEDIA_BLOCKS - MAX_MEDIA_ITEM_BLOCKS, blocks: MAX_MEDIA_ITEM_BLOCKS, bytes: MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES, width: MAX_MEDIA_DIMENSION, height: MAX_MEDIA_DIMENSION }
-  for (const d of [maxItem, { ...DESC, blocks: 1, bytes: 1 }, { ...DESC, blocks: 1, bytes: 32768 }, { ...DESC, bytes: 65536 }, { ...DESC, start: 8191, blocks: 1, bytes: 1 }, { ...DESC, mime: 'image/png' }, { ...DESC, mime: 'image/webp' }, { ...DESC, width: 1, height: 1 }]) {
+  for (const d of [maxItem, { ...DESC, blocks: 1, bytes: 1 }, { ...DESC, blocks: 1, bytes: 32768 }, { ...DESC, bytes: 65536 }, { ...DESC, start: 8191, blocks: 1, bytes: 1 }, { ...DESC, mime: 'image/png' }, { ...DESC, mime: 'image/webp' }, { ...DESC, mime: 'image/avif' }, { ...DESC, width: 1, height: 1 }]) {
     t.is(validateRecord(withMedia([d]), 1), null, 'valid ' + JSON.stringify(d))
   }
+  t.ok(records.validDescriptor({ ...DESC, mime: 'image/avif' }), 'an avif descriptor')
   const missing = { ...DESC }
   delete missing.sha256
   const bad = [
@@ -1027,6 +1028,7 @@ test('validateRecord: profile with an avatar', async (t) => {
   for (const avatar of [
     { ...AVATAR, mime: 'image/png' },
     { ...AVATAR, mime: 'image/gif' },
+    { ...AVATAR, mime: 'image/avif' },
     { ...AVATAR, width: 511, height: 511 },
     { ...AVATAR, width: 513, height: 513 },
     { ...AVATAR, width: 512, height: 511 },
@@ -1750,6 +1752,7 @@ test('validateRecord: a video post is exactly [JPEG poster, video]', (t) => {
     'photos then video': [DESC, DESC, VDESC],
     'two videos': [VDESC, VDESC],
     'png poster': [{ ...DESC, mime: 'image/png' }, VDESC],
+    'avif poster': [{ ...DESC, mime: 'image/avif' }, VDESC],
     'poster with ms': [{ ...DESC, ms: 1 }, VDESC],
     'ms 0': [DESC, { ...VDESC, ms: 0 }],
     'ms 30001': [DESC, { ...VDESC, ms: 30001 }],

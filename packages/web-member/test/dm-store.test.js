@@ -206,6 +206,23 @@ test('a message row keeps its media descriptors, key included, across a reopen; 
   await again.close()
 })
 
+test('a photo row keeps every still image type, AVIF included, across a reopen; other image types are refused', async (t) => {
+  const storage = memoryNodeStorage()
+  const s = createDmStore({ storage })
+  await open(s, key(7))
+  const media = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].map((mime, i) => ({ ...mediaItem('0' + (i + 1)), mime }))
+  const avif = { ...mediaItem('05'), mime: 'image/avif', w: 16, h: 16 }
+  await s.append([{ ...msg(s.nextFiled()), text: '', media }, { ...msg(s.nextFiled()), id: '56'.repeat(16), text: '', media: [avif] }])
+  for (const mime of ['image/heic', 'image/AVIF', 'image/svg+xml', 'video/mp4']) {
+    await t.exception.all(s.append([{ ...msg(s.nextFiled()), id: '78'.repeat(16), text: '', media: [{ ...avif, mime }] }]), /linha inválida/, mime)
+  }
+  await s.close()
+  const again = createDmStore({ storage })
+  await open(again, key(7))
+  t.alike(again.snapshot().messages.map((m) => m.media), [media, [avif]], 'kept exactly')
+  await again.close()
+})
+
 test('a voice note row: audio/mp4 with no sides and its duration, alone in its message', async (t) => {
   const storage = memoryNodeStorage()
   const s = createDmStore({ storage })

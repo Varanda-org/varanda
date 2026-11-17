@@ -29,6 +29,7 @@ const { connectClient, errorOf } = require('./helpers/session')
 const { dmSeeder, rsaKey } = require('./helpers/dm-seeder')
 const postage = require('@varanda/core/lib/dm-postage')
 const { testnet } = require('./helpers/net')
+const avif = require('../../rpc/test/helpers/avif-samples')
 const { seederOverWs, once } = require('./helpers/sync-groups')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
@@ -1109,6 +1110,57 @@ test('the dm engine opens a voice note only when its bytes are audio only', asyn
   t.is(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0, ms: 4001 }), 'mídia inválida', 'past the tolerance')
   t.not(await putErr({ bytes: m4a(), mime: 'audio/mp4', width: 0, height: 0 }), 'mídia inválida', 'no ms: the container decides')
   t.is(await putErr({ bytes: m4a({ handlers: ['vide'] }), mime: 'video/mp4', width: 640, height: 360, ms: 3000 }), 'mídia inválida', 'the engine refuses a video for a chat')
+})
+
+// The chat and Momento puts check the bytes with mediaBounds (the blob
+// channel a stand-in, engineWithBlobs): an AVIF goes through whole, never
+// truncated, never under another label, and an ftyp
+// body that is not a still AVIF (HEIC, audio MP4, a sequence) is refused.
+test('the dm engine takes an AVIF photo only when its bytes are a whole still AVIF', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  seeder.assoc = hex(assoc.publicKey)
+  const sent = []
+  const { engine, storage } = engineWithBlobs(t, seeder, sent)
+  const kp = crypto.keyPair()
+  await certify(storage, kp, assoc)
+  await engine.unlock(crypto.randomBytes(32))
+  await engine.loaded()
+  const own = hex(kp.publicKey)
+  const to = hex(crypto.keyPair().publicKey)
+  const ftyp = (major, compatible) => {
+    const b = b4a.alloc(16 + 4 * compatible.length + 400, 0x11)
+    b.writeUInt32BE(16 + 4 * compatible.length, 0)
+    b.write('ftyp' + major, 4, 'latin1')
+    b.writeUInt32BE(0, 12)
+    compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+    return new Uint8Array(b)
+  }
+  const sample = avif.libavif.opaque
+  const cut = sample.subarray(0, sample.byteLength - 40)
+  for (const [name, put] of [
+    ['dm.putMedia', (args) => engine.putMedia(own, kp, { to, ...args })],
+    ['putPublicMedia', (args) => engine.putPublicMedia(own, kp, args)]
+  ]) {
+    const message = async (args) => {
+      const err = await errorOf(Promise.resolve().then(() => put({ width: 16, height: 16, mime: 'image/avif', ...args })))
+      return err && err.message
+    }
+    t.is(await message({ bytes: new Uint8Array(sample) }), null, name + ': a whole AVIF is put')
+    t.is(await message({ bytes: new Uint8Array(avif.ios.opaque) }), null, name + ': the iOS encoder\'s AVIF is put')
+    for (const [label, args] of [
+      ['a truncated AVIF', { bytes: new Uint8Array(cut) }],
+      ['an AVIF labelled PNG', { bytes: new Uint8Array(sample), mime: 'image/png' }],
+      ['an AVIF labelled HEIC', { bytes: new Uint8Array(sample), mime: 'image/heic' }],
+      ['a HEIC labelled AVIF', { bytes: ftyp('mif1', ['mif1', 'heic']) }],
+      ['an audio MP4 labelled AVIF', { bytes: ftyp('M4A ', ['M4A ', 'mp42', 'isom']) }],
+      ['an AVIF sequence labelled AVIF', { bytes: ftyp('avis', ['avis', 'avif', 'mif1']) }]
+    ]) {
+      t.is(await message(args), 'mídia inválida', name + ': ' + label)
+    }
+  }
+  t.is(sent.length, 4, 'only the whole AVIFs were put')
 })
 
 // A dm engine whose blob channel is a stand-in that acks every frame at once
