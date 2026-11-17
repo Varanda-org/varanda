@@ -733,7 +733,8 @@ test('visual 1, 9 to 11: Momento box height, Diário rows, past delete body', (t
   t.ok(strip.includes('<Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(past.length)}</Text>'), 'the count apart, never cut')
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'"), 'past body covers photos and videos')
-  t.ok(src.includes('{target && expiresIn(target.at) === 0 ? DELETE_BODY_PAST : DELETE_BODY}'), 'chosen by the 24-hour end')
+  t.ok(src.includes('<Soft>{deleteBody(target, page)}</Soft>'), 'chosen by the 24-hour end and by whose diary it is')
+  t.ok(src.includes('const past = !!target && expiresIn(target.at) === 0'), 'chosen by the 24-hour end')
 })
 
 test('visual 2, 1: solid scrims behind the text, a real gradient past it, a text shadow', (t) => {
@@ -3828,4 +3829,132 @@ test('momento music button follows the draft availability gate', (t) => {
     const tree = h.render({ moment: { musicAvailable }, node: { online: true } })
     t.is(treeNodes(tree).some((n) => n.props.label === 'Música'), musicAvailable)
   }
+})
+
+test('Momentos: PageMoments reads the page status and deletes through the page action', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(/export function PageMoments \(/.test(src))
+  t.ok(/action: 'status', page: key/.test(src), 'the signed page status read')
+  t.ok(/pageMomentsOf\(state\.owner === owner \? state\.status : null, key, now\)/.test(src), 'live and past split at render, against now')
+  t.ok(/<ConfirmMomentDelete open=\{target !== null\} target=\{target\} page=\{key\}/.test(src), 'the page action, not moment.delete')
+  t.ok(/Tentar de novo/.test(src))
+})
+
+test('Diario: acting as a Page shows PageMoments in place of DiarioMoments', (t) => {
+  const src = read('src/screens/Diario.js')
+  t.ok(/choicePage\(acting\) !== null\s*\? <PageMoments key=\{choicePage\(acting\)\} page=\{choicePage\(acting\)\}/.test(src))
+  t.ok(src.includes("tick={String(refresh) + ':' + pulls} active={active !== false}"), 'the pull and a hidden Diário reach the read')
+  t.ok(/<DiarioMoments/.test(src), 'the person path stays')
+})
+
+const PM = 'cd'.repeat(32)
+const PM2 = 'ef'.repeat(32)
+
+async function pageMomentsHost ({ answers }) {
+  const env = { changed: 0, epoch: 1, asked: [], answers }
+  const { momentPublisher, pageMomentsOf } = await import('../src/pageMoment.js')
+  const source = read('src/screens/Momentos.js')
+  const deps = {
+    momentPublisher,
+    pageMomentsOf,
+    makeStyles: null,
+    useStyles: () => ({}),
+    useNode: () => ({ hosted: true, request: async () => ({}), epoch: env.epoch }),
+    useMomentsChanged: () => env.changed,
+    memberKeyOf: async () => A,
+    actAs: async (node, args) => {
+      env.asked.push(args.page)
+      const next = env.answers.shift()
+      if (next instanceof Error) throw next
+      return next
+    },
+    excerptOf: (text) => text,
+    relativeTime: () => '',
+    PAGE_MOMENTS_TITLE: 'Momentos da Página',
+    PAGE_MOMENTS_FAILED: 'falhou',
+    ...Object.fromEntries(['View', 'Text', 'ErrorText', 'Pill', 'MoreButton', 'ConfirmMomentDelete'].map((n) => [n, n]))
+  }
+  const host = hookHost(functionSource(source, 'PageMoments'), 'PageMoments', deps)
+  host.render({ page: PM })
+  await host.flush()
+  const nodes = () => treeNodes(host.render())
+  return {
+    host,
+    env,
+    nodes,
+    rows: () => nodes().filter((n) => n.type === 'MoreButton'),
+    sheet: () => nodes().find((n) => n.type === 'ConfirmMomentDelete'),
+    retry: () => nodes().find((n) => n.props.label === 'Tentar de novo')
+  }
+}
+
+const pmAnswer = (page, seq, text = 'oi') => ({ moments: [{ seq, at: new Date().toISOString(), text }] })
+
+test('PageMoments: a failed read says so and Tentar de novo reads again', async (t) => {
+  const h = await pageMomentsHost({ answers: [new Error('offline'), pmAnswer(PM, 4)] })
+  t.ok(h.retry(), 'the way to read again')
+  t.is(h.rows().length, 0)
+  h.retry().props.onPress()
+  await h.host.flush()
+  t.is(h.retry(), undefined)
+  t.is(h.rows().length, 1)
+  t.is(h.env.asked.length, 2, 'two reads, no delete')
+})
+
+test('PageMoments: another Page shows none of the first Page rows, and its delete goes to that Page', async (t) => {
+  const h = await pageMomentsHost({ answers: [pmAnswer(PM, 4)] })
+  t.is(h.rows().length, 1)
+  h.rows()[0].props.actions[0].onPress()
+  h.env.answers.push(new Promise(() => {}))
+  h.host.render({ page: PM2 })
+  t.is(h.rows().length, 0, 'no row of the previous Page')
+  t.is(h.sheet().props.open, false, 'no sheet of the previous Page')
+  t.is(h.sheet().props.page, PM2)
+})
+
+test('PageMoments: a momento that passes 24 h while the list is open moves to the past ones, with no new read', async (t) => {
+  const at = Date.now() - 23 * 3600 * 1000
+  const h = await pageMomentsHost({ answers: [{ moments: [{ seq: 4, at: new Date(at).toISOString(), text: 'oi' }] }] })
+  const metas = () => h.nodes().filter((n) => n.type === 'Text').map((n) => n.children.filter((c) => typeof c === 'string').join('')).filter((c) => /^(24 h|Anterior), /.test(c))
+  t.alike(metas(), ['24 h, '])
+  h.host.render({ page: PM, now: at + 25 * 3600 * 1000 })
+  t.alike(metas(), ['Anterior, '], 'the screen clock moves it')
+  t.is(h.env.asked.length, 1, 'no read for a tick of the clock')
+})
+
+test('PageMoments: a new node epoch drops the rows and the open sheet, and reads again', async (t) => {
+  const h = await pageMomentsHost({ answers: [pmAnswer(PM, 4)] })
+  h.rows()[0].props.actions[0].onPress()
+  t.is(h.sheet().props.open, true)
+  h.env.answers.push(pmAnswer(PM, 5))
+  h.env.epoch++
+  h.host.render()
+  t.is(h.rows().length, 0, 'no row read under the old epoch')
+  t.is(h.sheet().props.open, false, 'no sheet opened under the old epoch')
+  await h.host.flush()
+  t.is(h.env.asked.length, 2)
+  t.is(h.rows().length, 1)
+  h.rows()[0].props.actions[0].onPress()
+  t.is(h.sheet().props.target.ref, PM + ':5', 'the row read under the new epoch')
+})
+
+test('PageMoments: the delete sheet stays mounted when the reload fails or comes back empty', async (t) => {
+  const h = await pageMomentsHost({ answers: [pmAnswer(PM, 4)] })
+  h.rows()[0].props.actions[0].onPress()
+  t.is(h.sheet().props.open, true)
+  t.is(h.sheet().props.target.ref, PM + ':4')
+  h.env.answers.push(new Error('offline'))
+  h.env.changed++
+  h.host.render()
+  await h.host.flush()
+  t.ok(h.retry(), 'the list shows the failed read')
+  t.is(h.sheet()?.props.open, true, 'the sheet with the outcome is still there')
+  h.env.answers.push({ moments: [] })
+  h.env.changed++
+  h.host.render()
+  await h.host.flush()
+  t.is(h.rows().length, 0)
+  t.is(h.sheet()?.props.open, true, 'also with an empty list')
+  h.sheet().props.onClose()
+  t.is(h.sheet().props.open, false, 'only the sheet closes it')
 })

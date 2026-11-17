@@ -7,7 +7,13 @@
 // moment.create and moment.delete. The media blob is the same anonymous one
 // moment.putMedia answers for both.
 
+import { expiresIn } from './moments.js'
+
 const HEX64 = /^[0-9a-f]{64}$/
+
+// A faulty answer never renders more than this many rows, or a longer text.
+export const PAGE_MOMENTS_MAX = 20
+export const PAGE_MOMENT_TEXT_MAX = 200
 
 export const MOMENT_PAGE_UNCERTAIN = 'Não sabemos se o momento saiu. Toque em Tentar de novo para reenviar o mesmo, ou descarte.'
 
@@ -88,4 +94,25 @@ export function momentFailure ({ uncertain, publisher, retry, itemKept }) {
 export function momentDeleteAs (ref, actingPage) {
   const page = momentPublisher(actingPage)
   return page !== null && typeof ref === 'string' && ref.startsWith(page + ':') ? page : null
+}
+
+// The Page's own momentos from its signed 'status' answer (`moments`, newest
+// first): { live, past }, live by the same 24-hour rule the rings use. An
+// entry with a bad seq or `at` is dropped; text is data for the screen's
+// displayText.
+export function pageMomentsOf (status, pageKey, now = Date.now()) {
+  const out = { live: [], past: [] }
+  const page = momentPublisher(pageKey)
+  const raw = status && typeof status === 'object' && !Array.isArray(status) ? status.moments : null
+  if (page === null || !Array.isArray(raw)) return out
+  const items = []
+  for (const m of raw) {
+    if (!m || typeof m !== 'object' || !Number.isSafeInteger(m.seq) || m.seq < 1) continue
+    if (typeof m.at !== 'string' || Number.isNaN(new Date(m.at).getTime())) continue
+    if (typeof m.text === 'string' && Array.from(m.text).length > PAGE_MOMENT_TEXT_MAX) continue
+    items.push({ ref: page + ':' + m.seq, seq: m.seq, at: m.at, text: typeof m.text === 'string' ? m.text : '' })
+  }
+  items.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime() || b.seq - a.seq)
+  for (const it of items.slice(0, PAGE_MOMENTS_MAX)) (expiresIn(it.at, now) > 0 ? out.live : out.past).push(it)
+  return out
 }

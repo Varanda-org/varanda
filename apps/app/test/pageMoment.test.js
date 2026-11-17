@@ -162,9 +162,56 @@ test('App and the store: the composer no longer switches the identity', (t) => {
 
 test('Momentos: the delete as the Page goes through the page delete action', (t) => {
   const src = read('src/screens/Momentos.js')
-  t.ok(src.includes("import { momentDeleteAs } from '../pageMoment'"))
+  t.ok(src.includes("import { momentDeleteAs, momentPublisher, pageMomentsOf } from '../pageMoment'"))
   t.ok(src.includes("action: 'delete', page: as, op: { to: target.ref }"), 'the page delete')
   t.ok(src.includes("await request('moment.delete', { to: target.ref })"), 'the person keeps moment.delete')
   t.ok(src.includes('const pageOwn = !mine && author !== null && actingPage === author'))
   t.ok(src.includes('page={pageOwn ? actingPage : null}'))
+})
+
+test('pageMomentsOf: live and past from a status answer, newest first, malformed dropped', async (t) => {
+  const { pageMomentsOf } = await load()
+  const now = Date.parse('2026-11-17T12:00:00Z')
+  const hours = (h) => new Date(now - h * 3600 * 1000).toISOString()
+  const status = {
+    moments: [
+      { seq: 3, at: hours(30), text: 'velho' },
+      { seq: 5, at: hours(1), text: 'novo' },
+      { seq: 4, at: hours(23), text: 'meio' },
+      { seq: 0, at: hours(1), text: 'seq ruim' },
+      { seq: 1.5, at: hours(1) },
+      { seq: 6, at: 'nope' },
+      { seq: 7, at: 5 },
+      null,
+      { seq: 8, at: new Date(now + 3600 * 1000).toISOString(), text: 7 }
+    ]
+  }
+  const r = pageMomentsOf(status, P, now)
+  t.alike(r.live.map((m) => m.seq), [8, 5, 4], 'future-dated is live, newest first')
+  t.alike(r.past.map((m) => m.seq), [3])
+  t.is(r.live[1].ref, P + ':5')
+  t.is(r.live[1].text, 'novo')
+  t.is(r.live[0].text, '', 'a non-string text becomes empty')
+})
+
+test('pageMomentsOf: not an answer, not an array, not a page key', async (t) => {
+  const { pageMomentsOf } = await load()
+  const empty = { live: [], past: [] }
+  t.alike(pageMomentsOf(null, P), empty)
+  t.alike(pageMomentsOf({}, P), empty)
+  t.alike(pageMomentsOf({ moments: 'x' }, P), empty)
+  t.alike(pageMomentsOf({ moments: { seq: 1 } }, P), empty)
+  t.alike(pageMomentsOf({ moments: [{ seq: 1, at: new Date().toISOString() }] }, 'abc'), empty)
+  t.alike(pageMomentsOf({ moments: [{ seq: 1, at: new Date().toISOString() }] }, null), empty)
+})
+
+test('pageMomentsOf: at most 20 items, and a text over 200 code points is dropped', async (t) => {
+  const { pageMomentsOf } = await load()
+  const now = Date.parse('2026-11-17T12:00:00Z')
+  const at = new Date(now - 3600 * 1000).toISOString()
+  const many = Array.from({ length: 50 }, (_, i) => ({ seq: 100 - i, at, text: 'x' }))
+  const r = pageMomentsOf({ moments: many }, P, now)
+  t.is(r.live.length + r.past.length, 20)
+  const long = pageMomentsOf({ moments: [{ seq: 1, at, text: 'a'.repeat(201) }, { seq: 2, at, text: 'a'.repeat(200) }, { seq: 3, at, text: '\u{1F600}'.repeat(200) }] }, P, now)
+  t.alike(long.live.map((m) => m.seq).sort(), [2, 3], '200 code points stay, 201 goes')
 })
