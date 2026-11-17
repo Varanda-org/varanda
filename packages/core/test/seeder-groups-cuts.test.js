@@ -10,7 +10,7 @@ const path = require('node:path')
 const test = require('brittle')
 const b4a = require('b4a')
 const { testnet, until } = require('./helpers/net')
-const { liveGroupJoins, groupWalkStep } = require('../lib/seeder')
+const { Seeder, liveGroupJoins, groupWalkStep } = require('../lib/seeder')
 const {
   groupJoinRecord,
   groupCutRecord,
@@ -125,6 +125,33 @@ test('liveGroupJoins: a left or released writer is listed by its newest on join 
   t.alike(out.get(key(1)), { group: G, seq: 4, left: true }, 'released, then left: its join')
   t.alike(out.get(key(2)), { group: G, seq: 8, left: true }, 'an on join to another group is not it')
   t.alike(out.get(key(3)), { group: G, seq: 12, left: true }, 'left, back and left again: the last on join')
+})
+
+test('a stored binding the scan no longer lists gets its on join too, never an off one (#350)', (t) => {
+  // An older seeder stored W in G with its off join (seq 2); the diary then
+  // named W in H, so the scan lists W there and not in G.
+  const D = key(90)
+  const H = 'bb'.repeat(32)
+  const W = key(0)
+  const { decls, walks } = diary([join(W), join(W, false), join(W, true, H)])
+  const entry = { gated: true, dropped: false, groupDecls: decls, groupWalks: walks, groupBound: new Map(), groupRefused: new Map(), groupLive: liveGroupJoins(decls, walks) }
+  t.is(entry.groupLive.get(W).group, H, 'the scan lists W in H only')
+  const rows = []
+  const seeder = Object.create(Seeder.prototype)
+  Object.assign(seeder, {
+    _closing: false,
+    _groups: new Map([[W, { diary: D, group: G, seq: 2 }]]),
+    _groupServed: new Map([[W, {}]]),
+    _groupIndex: {
+      addWriter: (group, k, d, seq) => rows.push({ group, key: k, diary: d, seq }),
+      setLeft: (k, left) => rows.push({ key: k, left })
+    },
+    _persist: async () => {},
+    _isBlocked: () => true
+  })
+  seeder._reconcileGroups(D, entry)
+  t.is(seeder._groups.get(W).seq, 1, 'the binding takes its on join in G')
+  t.alike(rows, [{ group: G, key: W, diary: D, seq: 1 }, { key: W, left: true }], 'and so does its row, left')
 })
 
 test('liveGroupJoins: groups past MAX_GROUPS_PER_DIARY keep no writer, left or not (#350)', (t) => {

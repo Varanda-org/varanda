@@ -4243,8 +4243,17 @@ class Seeder {
       const listed = live !== undefined && live.group === b.group
       const bound = listed && !live.left
       // A left writer is listed by its newest on:true join too, so a binding
-      // stored with the seq of an off join takes it here.
-      let seq = listed ? live.seq : b.seq
+      // stored with the seq of an off join takes it here. One the scan does
+      // not list (its diary named W in another group, the group is past the
+      // cap) still gets a row: the walk's newest on:true join of W, once the
+      // scan has read it.
+      let seq = b.seq
+      if (listed) seq = live.seq
+      else {
+        const s = entry.groupWalks.get(b.group)
+        const on = s === undefined || s.onSeq === undefined ? undefined : s.onSeq.get(k)
+        if (on !== undefined) seq = on
+      }
       if (k === b.group) {
         // A root's row must point at a join in its creator's own diary: the
         // binding may have been persisted with the seq of the member join
