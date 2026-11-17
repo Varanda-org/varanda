@@ -111,7 +111,7 @@ export function mediaOf (facade) {
       const call = ref.kind === 'dm' ? 'readDm' : ref.kind === 'moment' ? 'readMoment' : 'readGroup'
       if (!has(call)) throw new TypeError('mídia inválida')
       let got
-      if (call === 'readDm') got = await facade.readDm({ from: ref.from, id: ref.id, index: ref.index })
+      if (call === 'readDm') got = await facade.readDm({ from: ref.from, id: ref.id, index: ref.index, ...(ref.page != null ? { page: ref.page } : {}) })
       else if (call === 'readMoment') got = await facade.readMoment({ author: ref.author, seq: ref.seq })
       else got = await facade.readGroup({ diary: ref.diary, item: ref.item })
       let w = got.w

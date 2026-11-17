@@ -106,12 +106,14 @@ export function itemSize (item) {
 
 // The chatMedia.sourceFor refs of a DM message or a group item, at most four,
 // in order; [] when there is no media or the row cannot name its sender.
+// A DM row's `page` (the Página whose conversation holds it) goes on each ref.
 export function chatMediaRefs (kind, row) {
   if (!row || typeof row !== 'object' || !Array.isArray(row.media)) return []
   const media = row.media.slice(0, MAX_MEDIA_PER_MESSAGE)
   if (kind === 'dm') {
     if (typeof row.from !== 'string' || typeof row.id !== 'string') return []
-    return media.map((item, index) => ({ kind: 'dm', from: row.from, id: row.id, index, item }))
+    const page = typeof row.page === 'string' ? { page: row.page } : {}
+    return media.map((item, index) => ({ kind: 'dm', from: row.from, id: row.id, index, ...page, item }))
   }
   if (kind === 'group') {
     if (typeof row.diary !== 'string') return []

@@ -46,9 +46,10 @@
 //                       -> Promise<media item>  (lib/node.js dmPutMedia: the
 //                          photo sealed and put on the blob channel; the item
 //                          goes back unchanged in dm.send `media`)
-//   media.readDm({ from, id, index })
+//   media.readDm({ from, id, index, page })
 //                       -> Promise<{ bytes, mime }>  (lib/node.js dmReadMedia:
-//                          the opened photo of a kept message; errors keep
+//                          the opened photo of a kept message, of a Página's
+//                          conversation with `page`; errors keep
 //                          .code and .message, 'mídia indisponível' when gone)
 //   media.readGroup({ diary, item })
 //                       -> Promise<{ bytes, mime, w, h }>  (lib/node.js

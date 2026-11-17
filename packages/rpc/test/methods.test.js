@@ -26,7 +26,7 @@ test('method list and mutating set', (t) => {
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
-    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
+    'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
@@ -405,6 +405,12 @@ test('seen.sign', (t) => {
       bad(t, 'seen.sign', { ...base, action, [key]: KEY })
     }
   }
+})
+
+test('seen.onceKey: no params, not mutating', (t) => {
+  t.absent(isMutating('seen.onceKey'))
+  ok(t, 'seen.onceKey', {}, {})
+  bad(t, 'seen.onceKey', { kind: 'page-dm-notice' })
 })
 
 test('seen.merge: shape and unchanged', (t) => {
@@ -2047,6 +2053,10 @@ test('media.readFile', (t) => {
     delete p[k]
     t.is(validateParams('media.readFile', p).message, 'parâmetro obrigatório: ' + k)
   }
+  const PAGE = 'ef'.repeat(32)
+  ok(t, 'media.readFile', { ...dm, page: PAGE }, { ...dm, page: PAGE })
+  ok(t, 'media.readFile', { ...dm, index: 'card', page: PAGE })
+  for (const page of [PAGE.toUpperCase(), PAGE.slice(1), '', null, 1]) bad(t, 'media.readFile', { ...dm, page }, 'bad page')
   const item = { core: KEY, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: 'cd'.repeat(32), key: 'ef'.repeat(32), nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: KEY, w: 10, h: 10, ms: 0 }
   const group = { kind: 'group', diary: KEY, item }
   ok(t, 'media.readFile', group, group)
@@ -2060,6 +2070,8 @@ test('media.readFile', (t) => {
   bad(t, 'media.readFile', { ...group, diary: 'x' }, 'bad diary')
   bad(t, 'media.readFile', { ...dm, diary: KEY }, 'dm with a group field')
   bad(t, 'media.readFile', { ...group, index: 0 }, 'group with a dm field')
+  bad(t, 'media.readFile', { ...group, page: PAGE }, 'group with a page')
+  t.is(validateParams('media.readFile', { ...group, page: PAGE }).message, 'parâmetro desconhecido')
   const moment = { kind: 'moment', author: KEY, seq: 1 }
   ok(t, 'media.readFile', moment, moment)
   ok(t, 'media.readFile', { ...moment, seq: Number.MAX_SAFE_INTEGER })
@@ -2078,7 +2090,7 @@ test('media.readFile', (t) => {
   for (const seq of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '1', null]) {
     bad(t, 'media.readFile', { ...moment, seq })
   }
-  for (const [k, value] of Object.entries({ from: KEY, id: ID, index: 0, diary: KEY, item, extra: true })) {
+  for (const [k, value] of Object.entries({ from: KEY, id: ID, index: 0, page: PAGE, diary: KEY, item, extra: true })) {
     bad(t, 'media.readFile', { ...moment, [k]: value }, 'moment with ' + k)
   }
   bad(t, 'media.readFile', { ...dm, kind: 'moment' }, 'moment with only dm fields')

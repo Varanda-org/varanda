@@ -53,7 +53,7 @@ export function createInviteSeenStore ({ read, write }) {
 
 // The shell supplies capability gates; transport and timers are injected so
 // a lock or identity change can invalidate every awaited step in tests too.
-export function createInviteDropMonitor ({ policy, start, summary, store, setInterval, clearInterval, onNote }) {
+export function createInviteDropMonitor ({ policy, start, summary, store, setInterval, clearInterval, onNote, seenElsewhere = () => false, onMarked = () => {} }) {
   let current = null
   let timer = null
   let unavailable = false
@@ -68,6 +68,23 @@ export function createInviteDropMonitor ({ policy, start, summary, store, setInt
   function publish (next) {
     note = next
     onNote(next)
+  }
+
+  function remember (record) {
+    const previous = seen.get(record.member)
+    if (previous && previous.resetsAt === record.resetsAt && previous.seenOpened >= record.seenOpened) return false
+    seen.set(record.member, record)
+    // The memory guard is synchronous, even if persistence rejects.
+    Promise.resolve().then(() => store.save(record)).catch(() => {})
+    return true
+  }
+
+  function shownElsewhere (record) {
+    try { return seenElsewhere(record) === true } catch { return false }
+  }
+
+  function marked (record) {
+    try { onMarked(record) } catch {}
   }
 
   async function poll (session) {
@@ -103,9 +120,15 @@ export function createInviteDropMonitor ({ policy, start, summary, store, setInt
       }
       const next = seenRecordOf({ v: 1, member, resetsAt: answer.resetsAt, seenOpened: answer.opened })
       if (next && shouldAnnounce({ summary: answer, seen: seen.get(member) })) {
-        if (!note || note.resetsAt !== next.resetsAt || note.seenOpened !== next.seenOpened) publish(next)
+        // Another device of this member already showed it: stop asking here too.
+        if (shownElsewhere(next)) remember(next)
+        else if (!note || note.resetsAt !== next.resetsAt || note.seenOpened !== next.seenOpened) publish(next)
       } else if (answer.remaining === 0 || answer.mode !== 'sorteio') {
         publish(null)
+      } else if (next && !shownElsewhere(next)) {
+        // Shown here already, but its mark never reached the seen document
+        // (a closed tab, an older build): offered again, at most once.
+        marked(next)
       }
     } catch {
       // A failed read says nothing about the available balance.
@@ -135,11 +158,19 @@ export function createInviteDropMonitor ({ policy, start, summary, store, setInt
     },
     markSeen (record) {
       if (!current || record !== note) return
-      const previous = seen.get(record.member)
-      if (previous && previous.resetsAt === record.resetsAt && previous.seenOpened >= record.seenOpened) return
-      seen.set(record.member, record)
-      // The memory guard is synchronous, even if persistence rejects.
-      Promise.resolve().then(() => store.save(record)).catch(() => {})
+      if (!remember(record)) return
+      marked(record)
+    },
+    // The marks changed: a note another device showed meanwhile goes away.
+    // One already on screen here stays, since its own echoed mark looks the
+    // same as another device's.
+    recheck () {
+      if (note === null) return
+      const shown = seen.get(note.member)
+      if (shown && shown.resetsAt === note.resetsAt && shown.seenOpened >= note.seenOpened) return
+      if (!shownElsewhere(note)) return
+      remember(note)
+      publish(null)
     },
     dismiss () { publish(null) },
     stop

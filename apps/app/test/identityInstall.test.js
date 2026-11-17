@@ -990,6 +990,10 @@ test('readMediaToFile opens a DM or group item through the session and writes it
   t.alike(g, { name: MEDIA_NAME, mime: 'image/png', w: 3, h: 2 }, 'the size comes from the bytes, not the item')
   t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 'card' }), dm)
   t.alike(calls[2], ['dm', { from: 'a', id: 'b', index: 'card' }])
+  const pageKey = 'c'.repeat(64)
+  t.alike(await readMediaToFile(io, { kind: 'dm', from: 'a', id: 'b', index: 'card', page: pageKey }), dm)
+  t.alike(calls[3], ['dm', { from: 'a', id: 'b', index: 'card', page: pageKey }], 'a Página read carries its page')
+  calls.splice(3, 1)
 
   const momentSession = {
     momentReadMedia: async (args) => { calls.push(['moment', args]); return { bytes: new Uint8Array(png), mime: 'image/png', w: 9, h: 9 } }

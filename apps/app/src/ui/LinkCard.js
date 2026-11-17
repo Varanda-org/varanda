@@ -52,11 +52,15 @@ const fetchDeps = () => ({ ...mediaHashDeps(), ...(isAppClient() ? { fetch: expo
 
 const textOf = (v) => (typeof v === 'string' ? displayText(v).trim() : '')
 
-// The chatMedia ref of a group or DM card's thumbnail, or null.
+// The chatMedia ref of a group or DM card's thumbnail, or null. A DM thumb
+// of a Página's conversation carries its `page`.
 export function chatThumbRef (thumb, image) {
   if (!thumb || typeof thumb !== 'object' || !image || typeof image !== 'object') return null
   if (thumb.kind === 'group') return { kind: 'group', diary: thumb.diary, item: image }
-  if (thumb.kind === 'dm') return { kind: 'dm', from: thumb.from, id: thumb.id, index: 'card', item: image }
+  if (thumb.kind === 'dm') {
+    const page = typeof thumb.page === 'string' ? { page: thumb.page } : {}
+    return { kind: 'dm', from: thumb.from, id: thumb.id, index: 'card', ...page, item: image }
+  }
   return null
 }
 

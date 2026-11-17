@@ -15,12 +15,11 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { attachBlob, validateBlobMessage, MAX_BAD_BLOB } = require('../lib/blob-net')
 const { createBlobPool } = require('../lib/blob-pool')
-const { BLOB_PROTOCOL, BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_MESSAGE, encodeChunk, newBlobId } = require('../lib/blob')
+const { BLOB_PROTOCOL, BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_MESSAGE, BLOB_RETENTION_MS, encodeChunk, newBlobId } = require('../lib/blob')
 const { createSwarm, topicFor, joinAndFlush } = require('../lib/net')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 
-const DAY = 86400000
 const GOOD_KID = b4a.from('00112233aabbccdd', 'hex')
 
 function randomBytes (n) {
@@ -127,7 +126,7 @@ test('refusals: bad stamp, mismatched repeat, spent token, byte cap', async (t) 
   badMagic[0] = 0
   t.alike(await hm.put(badMagic), { ok: false, reason: 'invalido' })
 
-  k.t += 7 * DAY
+  k.t += BLOB_RETENTION_MS
   t.is(p.sweep(), 2)
   t.alike(await hm.put(x.frames[0]), { ok: false, reason: 'invalido' }, 'spent token refused')
 })
