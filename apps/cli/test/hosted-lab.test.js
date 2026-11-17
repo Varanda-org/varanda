@@ -66,6 +66,8 @@ test('the lab origin maps the five routes and the UI fallback', async (t) => {
   const cases = [
     ['/media/' + 'cd'.repeat(32) + '/' + 'ef'.repeat(32) + '/1/1', 'seeder', seederPort],
     ['/index/counts/x', 'seeder', seederPort],
+    ['/blob/' + 'ab'.repeat(32) + '/0', 'seeder', seederPort],
+    ['/f/' + 'ab'.repeat(32) + '/1', 'seeder', seederPort],
     ['/account/age/policy', 'account', accountPort],
     ['/account/phone/policy', 'account', accountPort],
     ['/account/start', 'account', accountPort],
@@ -217,6 +219,10 @@ test('routeOf', (t) => {
   t.is(routeOf('/account/x'), 'account')
   t.is(routeOf('/x'), 'ui')
   t.is(routeOf('/p/policy'), 'seeder')
+  t.is(routeOf('/blob/' + 'a'.repeat(64) + '/0'), 'seeder', 'chat attachments come from the seeder')
+  t.is(routeOf('/blobx'), 'ui')
+  t.is(routeOf('/f/' + 'a'.repeat(64) + '/1/capa'), 'seeder', 'the Feira listing pages come from the seeder')
+  t.is(routeOf('/feira'), 'ui')
   t.is(routeOf('/p/' + 'a'.repeat(64) + '/1'), 'seeder')
   t.is(routeOf('/p'), 'ui')
   t.is(routeOf('/px'), 'ui')
@@ -341,6 +347,20 @@ test('the running lab requires a phone check and finishes sign-up without an age
   t.alike(await policy.json(), { required: true })
   t.alike(await (await fetch(base + '/account/age/policy')).json(), { required: false })
   t.alike(await (await fetch(base + '/account/gif/policy')).json(), { enabled: true }, 'GIF search is on, through the stub provider')
+  const pagesPolicy = await (await fetch(base + '/account/pages/policy')).json()
+  t.is(pagesPolicy.available, true, 'Páginas are on, under the throwaway key')
+  t.ok(Number.isInteger(pagesPolicy.maxOwned) && Number.isInteger(pagesPolicy.maxAdmins), 'with the page limits')
+  // The seeder's blob route answers (a chunk it does not hold is its 404),
+  // not the app's index.html: chat photos and voice notes can travel.
+  const blobRes = await fetch(base + '/blob/' + 'a'.repeat(64) + '/0')
+  t.is(blobRes.status, 404, 'an unknown chat attachment chunk is not found')
+  t.is(await blobRes.text(), 'não encontrado\n', 'by the seeder itself')
+  // Recovery entries are kept (recovery.json): an unknown lookup is the
+  // route's own miss, not 503 'indisponivel', so a recovery code made in the
+  // lab opens the account on a second browser.
+  const recoveryMiss = await postJson(base + '/account/recovery/fetch', origin, { lookupId: 'b'.repeat(64) })
+  t.is(recoveryMiss.status, 404, 'an unknown recovery entry is not found')
+  t.alike(recoveryMiss.body, { error: 'nao-encontrado', recovery: true }, 'by the recovery store itself')
 
   const config = await (await fetch(base + '/varanda.json')).json()
   const kp = crypto.keyPair()
