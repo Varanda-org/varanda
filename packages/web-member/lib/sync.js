@@ -53,7 +53,10 @@
 //   link-closed                   the link dropped: nothing is tracked
 //                                 (preceded by 'seeder-busy' and a warning
 //                                 when the socket closed with 1013, the
-//                                 seeder at its connection cap)
+//                                 seeder at its connection cap; preceded by
+//                                 'seeder-restarting' and a warning when
+//                                 the socket closed with 1012, the seeder
+//                                 stopping for a deploy)
 // They are emitted by checkOwnSync() from the hello / have handlers and the
 // diary watcher, in once and continuous runs alike.
 //
@@ -372,13 +375,20 @@ const CONNECT_TIMEOUT_MS = 15000
 // that dropped for a redeploy is redialled within a few seconds; after that
 // the cap is RETRY_MAX_MS. Each wait is shortened by up to RETRY_JITTER, so
 // clients retry at different times. A caller whose retryMaxMs is already
-// below RETRY_FAST_MAX_MS keeps that shorter cap. A socket closed with 1013
-// (the seeder is full) uses the full retryMaxMs cap for that one wait.
+// below RETRY_FAST_MAX_MS keeps that shorter cap. A socket closed with 1012
+// (the seeder is stopping for a deploy) waits RESTART_WAIT_MS plus up to
+// RESTART_JITTER_MS, and that wait does not count as a failed attempt; the
+// fast window still starts (downSince). The close code is unauthenticated,
+// so only the first 1012 of a down streak gets that wait: another 1012
+// before a verified hello counts like any failure. A socket closed with
+// 1013 (the seeder is full) uses the full retryMaxMs cap for that one wait.
 const RETRY_MIN_MS = 1000
 const RETRY_MAX_MS = 30000
 const RETRY_FAST_MAX_MS = 5000
 const RETRY_FAST_WINDOW_MS = 180000
 const RETRY_JITTER = 0.25
+const RESTART_WAIT_MS = 500
+const RESTART_JITTER_MS = 1000
 
 // Pure. The wait before the next dial, in milliseconds. jitter is clamped
 // to [0, 1] (NaN counts as 0); random defaults to Math.random.
@@ -396,6 +406,16 @@ function retryWait ({
   const cap = downMs < fastWindowMs ? Math.min(maxMs, fastMaxMs) : maxMs
   const base = Math.min(cap, minMs * 2 ** Math.min(failures, 16))
   return Math.round(base * (1 - j * random()))
+}
+
+// Pure. The wait after a 1012 close, in milliseconds: waitMs plus up to
+// jitterMs (500 to 1500 with the defaults). NaN, a non-number, or a
+// negative value counts as 0. random defaults to Math.random and is
+// expected in [0, 1].
+function restartWait ({ waitMs, jitterMs, random = Math.random }) {
+  const base = typeof waitMs === 'number' && !Number.isNaN(waitMs) ? Math.max(0, waitMs) : 0
+  const span = typeof jitterMs === 'number' && !Number.isNaN(jitterMs) ? Math.max(0, jitterMs) : 0
+  return Math.round(base + span * random())
 }
 
 // Push confirmation poll of the own media cores (see the header).
@@ -1419,6 +1439,10 @@ async function syncRun ({
   retryFastMaxMs = RETRY_FAST_MAX_MS,
   retryFastWindowMs = RETRY_FAST_WINDOW_MS,
   retryJitter = RETRY_JITTER,
+  // 1012 close: RESTART_WAIT_MS plus up to RESTART_JITTER_MS (see RETRY_*).
+  restartWaitMs = RESTART_WAIT_MS,
+  restartJitterMs = RESTART_JITTER_MS,
+  random = Math.random, // injectable for tests; also the retryWait jitter
   mediaPollMs = MEDIA_POLL_MS,
   groupPageMs = GROUP_PAGE_MS,
   groupRetryMs = GROUP_RETRY_MS,
@@ -1514,6 +1538,10 @@ async function syncRun ({
   let readyEmitted = false
   let failures = 0 // consecutive connections that ended without a verified hello
   let downSince = null // ms timestamp of the first miss of this streak
+  // A 1012 close already got its quick redial in this streak. The close code
+  // arrives outside Noise (anyone on the path can send it), so only one per
+  // streak skips the backoff; the next counts as a failed attempt.
+  let restartUsed = false
   let fetching = 0
   let admittedEver = false
   let rejectedReason = null
@@ -1693,7 +1721,7 @@ async function syncRun ({
     const l = {
       socket,
       noise,
-      ws, // the WebSocketStream: its closeCode tells a full seeder (1013)
+      ws, // the WebSocketStream: its closeCode tells a restart (1012) or a full seeder (1013)
       peer: null,
       verified: false,
       hello: false, // the seeder's actual hello arrived (and verified)
@@ -1738,20 +1766,28 @@ async function syncRun ({
   }
 
   // Schedule the next dial (backoff rules at the RETRY_* constants).
-  function reconnectLater ({ fastMaxMs = retryFastMaxMs } = {}) {
+  // restart: a 1012 close. The first in a streak waits restartWait and
+  // failures stays put; a later one before a verified hello is an ordinary
+  // failure. downSince still marks the start of the fast window.
+  function reconnectLater ({ fastMaxMs = retryFastMaxMs, restart = false } = {}) {
     if (ending) return
     const now = Date.now()
     if (downSince === null) downSince = now
-    const wait = retryWait({
-      failures,
-      downMs: now - downSince,
-      minMs: retryMinMs,
-      maxMs: retryMaxMs,
-      fastMaxMs,
-      fastWindowMs: retryFastWindowMs,
-      jitter: retryJitter
-    })
-    failures++
+    const quick = restart && !restartUsed
+    if (quick) restartUsed = true
+    const wait = quick
+      ? restartWait({ waitMs: restartWaitMs, jitterMs: restartJitterMs, random })
+      : retryWait({
+        failures,
+        downMs: now - downSince,
+        minMs: retryMinMs,
+        maxMs: retryMaxMs,
+        fastMaxMs,
+        fastWindowMs: retryFastWindowMs,
+        jitter: retryJitter,
+        random
+      })
+    if (!quick) failures++
     log('aviso: sem conexão com o semeador; nova tentativa em ' + Math.ceil(wait / 1000) + ' s')
     later(connect, wait)
   }
@@ -1820,20 +1856,34 @@ async function syncRun ({
     for (const m of pushCores()) m.pushed = -1
     for (const m of groupOwn) m.synced = null
     lastOwnBehind = null
-    // 1013 keeps the long cap for this wait (see RETRY_*).
+    // 1013 keeps the long cap for this wait. The first 1012 of a streak
+    // waits a short jittered delay and does not count as a failed attempt
+    // (see RETRY_*). The peer's close reason is never logged or emitted.
     const seederFull = l.ws.closeCode === 1013
+    const seederRestarting = l.ws.closeCode === 1012
     if (seederFull) {
       log('aviso: semeador ocupado; tente novamente em instantes')
       emit({ event: 'seeder-busy' })
     }
+    if (seederRestarting) {
+      log('aviso: semeador reiniciando; reconectando em instantes')
+      emit({ event: 'seeder-restarting' })
+    }
     emit({ event: 'link-closed' })
     evaluate()
-    reconnectLater(seederFull ? { fastMaxMs: retryMaxMs } : {})
+    if (seederRestarting) {
+      reconnectLater({ restart: true })
+    } else if (seederFull) {
+      reconnectLater({ fastMaxMs: retryMaxMs })
+    } else {
+      reconnectLater()
+    }
   }
 
   function onVerified (l) {
     failures = 0
     downSince = null
+    restartUsed = false
     clearLater(l.timer)
     l.timer = null
     // Verified: only now are the diary, the own media cores (never
@@ -5839,4 +5889,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, retryWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, retryWait, restartWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, RESTART_WAIT_MS, RESTART_JITTER_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
