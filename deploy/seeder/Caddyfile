@@ -132,6 +132,12 @@
 	handle /seeder {
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
+			# O semeador divide as vagas de conexão por endereço: ele lê o
+			# endereço do cliente só deste cabeçalho, e só quando a conexão
+			# vem de 127.0.0.1. O valor substitui qualquer X-Forwarded-For
+			# enviado pelo cliente. O endereço fica só na memória do
+			# semeador, nunca em log.
+			header_up X-Forwarded-For {remote_host}
 			# Num deploy a porta do semeador fica fechada enquanto o contêiner
 			# dele reinicia. O Caddy repete a discagem por até 5 s, em vez de
 			# falhar na hora. 5 s mais a espera de 8 s da partida do próprio

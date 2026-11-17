@@ -32,8 +32,10 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   CLI flag for `origins` yet: the public deployment PR adds --ws-origin to
 //   allow the PWA's origin.
 // The seeder also caps external sockets on its own (Seeder#maxExternal,
-// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers. Nothing
-// is logged per connection and no address is ever logged.
+// VARANDA_MAX_EXTERNAL), so these clients never starve swarm peers, and
+// shares those slots by client address (clientAddress below: behind Caddy,
+// the X-Forwarded-For it sets). Nothing is logged per connection and no
+// address is ever logged or stored.
 //
 // One TCP listener carries the WebSocket sockets, /media, /index and Caddy's
 // keep-alive connections, so its socket cap (server.maxConnections, see
@@ -628,6 +630,42 @@ function allowedHosts (configured, address, port) {
     for (const name of LOOPBACK_NAMES) hosts.add(name + ':' + port)
   }
   return hosts
+}
+
+const LOOPBACK_V4_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+
+// A TCP peer address on loopback: 127.0.0.0/8, ::1 or IPv4-mapped 127.x.
+function isLoopbackAddress (address) {
+  if (typeof address !== 'string') return false
+  const s = address.toLowerCase()
+  if (s === '::1') return true
+  return LOOPBACK_V4_RE.test(s.startsWith('::ffff:') ? s.slice(7) : s)
+}
+
+// The client address handed to Seeder#acceptStream, which shares its
+// external slots by address. Behind Caddy every WebSocket arrives from
+// loopback and Caddy sets X-Forwarded-For to the address it saw
+// (deploy/seeder/Caddyfile); the last entry is the one the nearest proxy
+// wrote, so earlier entries a client sent never count. A direct connection,
+// or a loopback one without the header, uses the TCP peer. Used only in
+// memory: never logged, stored or exposed.
+function clientAddress (req) {
+  const remote = req && req.socket ? req.socket.remoteAddress : undefined
+  if (typeof remote !== 'string') return null
+  const forwarded = req.headers ? req.headers['x-forwarded-for'] : undefined
+  if (isLoopbackAddress(remote) && typeof forwarded === 'string') {
+    return forwarded.split(',').pop().trim()
+  }
+  return remote
+}
+
+// A loopback connection with no X-Forwarded-For did not come through the
+// proxy, which always sets it: a process on this host, such as the account
+// service's page links. The seeder never displaces its slot.
+function isLocalClient (req) {
+  const remote = req && req.socket ? req.socket.remoteAddress : undefined
+  const forwarded = req && req.headers ? req.headers['x-forwarded-for'] : undefined
+  return isLoopbackAddress(remote) && forwarded === undefined
 }
 
 // Normalizes an exact origin of the allow-list ('http://127.0.0.1:8790').
@@ -2012,6 +2050,9 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       // Set when the seeder refuses for capacity: the socket is then ours to
       // close with 1013 (try again later) instead of the bare 1006 a
       // terminate() gives, so the client can tell "full" from a network loss.
+      // Also called, with reason 'connection-displaced', for a socket the
+      // seeder already took and later gave up to make room for another
+      // address (Seeder#acceptStream): the client backs off the same way.
       let refused = false
       const onRefuse = () => {
         if (refused) return
@@ -2022,6 +2063,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         // 'close' (the listener below), when terminate() is a no-op. The
         // unref'd timer bounds how long a client that never answers the close
         // can keep the socket (ws's own close timeout is 30 s).
+        // A displaced socket may still be writing (keep-alives, replication):
+        // as in drain(), its writes are dropped from here on, so none reaches
+        // ws.send on the CLOSING socket, errors the duplex and turns the
+        // 1013 into a 1006.
+        if (duplex) duplex._write = dropWrite
         const timer = setTimeout(() => ws.terminate(), REFUSE_GRACE_MS)
         timer.unref()
         ws.once('close', () => clearTimeout(timer))
@@ -2041,7 +2087,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
           streams.delete(ws)
           duplex.destroy()
         })
-        Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
+        Promise.resolve(seeder.acceptStream(duplex, { onRefuse, address: clientAddress(req), local: isLocalClient(req) })).then((noise) => {
           if (!noise && !refused) ws.terminate()
         }, () => { if (!refused) ws.terminate() })
       } catch {
@@ -2145,6 +2191,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 module.exports = {
   startSeedWs,
   socketCap,
+  clientAddress,
+  isLocalClient,
   DEFAULT_HOST,
   MAX_SOCKETS,
   MAX_PAYLOAD,

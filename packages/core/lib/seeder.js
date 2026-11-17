@@ -150,6 +150,8 @@ const path = require('#path')
 const process = require('#process')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const Hypercore = require('hypercore')
+const Verifier = require('hypercore/lib/verifier')
 const {
   normalizeHex,
   certForKey,
@@ -167,15 +169,17 @@ const {
   joinAndFlush,
   startRediscovery,
   attachAdmission,
-  refuseOverConnectionLimit,
   watchContiguous,
   watchFork,
   startQuarantineFetch,
   MAX_CONNECTIONS,
   MAX_INVENTORY,
   CAP_DISCOVERY,
-  CAP_WRITER_CUTS
+  CAP_WRITER_CUTS,
+  CAP_PEER_PROOF
 } = require('./net')
+const { addressGroup, createSlots, PROBATION_MS } = require('./peer-slots')
+const { verifyPeerProof, MAX_PROOFS_PER_DIARY } = require('./peer-proof')
 const { attachDiscovery, newViewId, MAX_DISCOVERY_LIMIT } = require('./discovery-net')
 const {
   openStore,
@@ -349,6 +353,11 @@ const FRAME_CLOCK = Object.freeze({
 // An external socket with no incoming data for this long after the handshake
 // is dropped (Hypercore keep-alives every 5 s keep a live peer well inside it).
 const EXTERNAL_IDLE_MS = 30000
+// A displaced external stream handed to the caller's onRefuse (seed-ws closes
+// the WebSocket with 1013 and tears it down within its own grace) is
+// destroyed here after this long anyway, so a caller that never cleans up
+// cannot keep the socket.
+const DISPLACED_GRACE_MS = 5000
 
 // Discovery (docs/protocol.md "Discovery channel"): pages of the served
 // inventory over 'varanda/discovery/1' (lib/discovery-net.js). A page is cut
@@ -371,6 +380,64 @@ const DISCOVERY_VIEW_MAX_KEYS = Math.min(4096, MAX_INVENTORY)
 const DISCOVERY_RECENT_KEPT = 8
 
 function noop () {}
+
+// A slot table (lib/peer-slots.js) that follows a limit read at each
+// admission, as maxConnections and maxExternal are plain fields a test may
+// change on a live seeder. When the limit to apply changes, the table is
+// rebuilt with the live entries in their order and with their age, each
+// entry's data moving along (data.entry names the new entry). A limit below
+// the live count applies as "full" (size), so the excess goes as
+// connections close, and a newcomer may still displace one by the usual rules.
+function followingSlots (readLimit, { probationMs, isProtected }) {
+  let replaying = null
+  const now = () => replaying !== null ? replaying : clock.now()
+  let table = null
+  let tableLimit = 0
+  function sized () {
+    const live = table === null ? 0 : table.size
+    // A limit set to something other than an integer >= 1 at run time
+    // counts as 1, so the table never throws or opens up.
+    const raw = readLimit()
+    const limit = Math.max(Number.isSafeInteger(raw) && raw >= 1 ? raw : 1, live)
+    if (table !== null && limit === tableLimit) return table
+    const next = createSlots({ limit, probationMs, now, isProtected })
+    if (table !== null) {
+      for (const e of table.entries()) {
+        replaying = e.since
+        try {
+          const r = next.admit(e.group)
+          r.entry.data = e.data
+          if (e.data !== null) e.data.entry = r.entry
+        } finally {
+          replaying = null
+        }
+      }
+    }
+    table = next
+    tableLimit = limit
+    return table
+  }
+  sized()
+  return {
+    admit: (group) => sized().admit(group),
+    remove: (entry) => table.remove(entry),
+    count: (group) => table.count(group),
+    entries: () => table.entries(),
+    get size () {
+      return table.size
+    }
+  }
+}
+
+function remoteKeyHex (socket) {
+  return socket && socket.remotePublicKey ? b4a.toString(socket.remotePublicKey, 'hex') : null
+}
+
+// A Hypercore 11 diary key is the hash of its one-signer manifest, not the
+// signer's public key: a `prove` signer owns the key when this reproduces it.
+function diaryManifestKey (signerPublicKey) {
+  return Hypercore.key(Verifier.defaultSignerManifest(signerPublicKey))
+}
 
 // Below the present length a block that is not local is one a local
 // tombstone above it targets (presentLength passes only those holes), even
@@ -1392,6 +1459,10 @@ class Seeder {
   // exactly like a seeder from before discovery (tests and rollback, no CLI
   // flag). discoveryViewTtlMs (= DISCOVERY_VIEW_TTL_MS) and
   // discoveryRebuildMs (= DISCOVERY_REBUILD_MS) are test-only.
+  // Connection slots (issue #32) are shared by remote address on both caps
+  // (lib/peer-slots.js); addressOf(socket) -> host string reads a swarm
+  // socket's address (default: its UDX stream's remoteHost) and probationMs
+  // (= PROBATION_MS) is the slot probation. Both are test-only.
   constructor ({
     dataDir,
     associationKey = null,
@@ -1414,6 +1485,8 @@ class Seeder {
     maxLogBytes = MAX_LOG_BYTES,
     maxConnections = MAX_CONNECTIONS,
     maxExternal = null,
+    addressOf = null,
+    probationMs = PROBATION_MS,
     externalIdleMs = EXTERNAL_IDLE_MS,
     maxFrameMemory = MAX_FRAME_MEMORY,
     frameDeadlineBaseMs = FRAME_DEADLINE_BASE_MS,
@@ -1508,11 +1581,36 @@ class Seeder {
     // Two independent caps: maxConnections bounds swarm sockets only and
     // maxExternal bounds external sockets (acceptStream, in-flight handshakes
     // included) only, so neither kind can starve the other.
+    if (!Number.isInteger(maxConnections) || maxConnections < 1) throw new TypeError('maxConnections must be an integer >= 1')
     this.maxConnections = maxConnections
     if (maxExternal !== null && (!Number.isInteger(maxExternal) || maxExternal < 1)) {
       throw new TypeError('maxExternal must be an integer >= 1')
     }
     this.maxExternal = maxExternal === null ? Math.max(1, Math.floor(maxConnections / 2)) : maxExternal
+    if (addressOf !== null && typeof addressOf !== 'function') throw new TypeError('addressOf must be a function')
+    this._addressOf = addressOf || ((socket) => socket.rawStream && socket.rawStream.remoteHost)
+    // One slot table per cap. The address of a connection lives only in its
+    // entry's group, in memory: it is never logged, stored or exposed. Each
+    // entry's data is { socket, onRefuse, entry, displaced, swarm, local }
+    // (onRefuse: external streams only; entry: the connection's current
+    // entry, see followingSlots; displaced: set once the entry lost its
+    // slot; swarm: a swarm socket; local: an external stream acceptStream
+    // was told comes from this host).
+    const isProtected = (entry) => this._slotProtected(entry)
+    this._swarmSlots = followingSlots(() => this.maxConnections, { probationMs, isProtected })
+    this._externalSlots = followingSlots(() => this.maxExternal, { probationMs, isProtected })
+    // Diary key -> live connections holding a valid `prove` for it.
+    this._proofCounts = new Map()
+    // Diary key -> connections whose valid `prove` found the diary at
+    // MAX_PROOFS_PER_DIARY, oldest first: one takes the place a closing
+    // connection frees, so a reconnect is not left out by a stale one.
+    this._proofWaiting = new Map()
+    // Seeder Noise key (hex) -> the one connection of that seeder whose slot
+    // is protected (_slotProtected).
+    this._slotSeeders = new Map()
+    // Slot data of the live local external streams, oldest first; the oldest
+    // within the local share are protected (_localInShare).
+    this._localStreams = new Set()
     // Seeder-wide budget of the bytes declared by charged (large,
     // incomplete) frames of external sockets (see FrameGuard), the guards
     // holding a reservation, and the frame deadline parameters.
@@ -1682,7 +1780,10 @@ class Seeder {
     // older generation is never applied as a pass (_gate re-runs it).
     this._moderationGen = 0
     this._peers = new Set()
-    this._external = new Set() // NoiseSecretStreams from acceptStream (not in swarm.connections)
+    // NoiseSecretStreams from acceptStream (not in swarm.connections) until
+    // they close, displaced ones handed to onRefuse included, so close()
+    // destroys them all; stats() counts the live slots (_externalSlots).
+    this._external = new Set()
     this._keyPair = null
     this._cert = null
     this._started = false
@@ -2253,9 +2354,9 @@ class Seeder {
       ...countActive(this._served.values(), Date.now()),
       blocks,
       bytes,
-      connections: swarm + this._external.size,
+      connections: swarm + this._externalSlots.size,
       swarm,
-      external: this._external.size,
+      external: this._externalSlots.size,
       maxConnections: this.maxConnections,
       maxExternal: this.maxExternal,
       peers: this._peers.size,
@@ -8525,13 +8626,100 @@ class Seeder {
       socket.destroy()
       return
     }
-    // Swarm connection cap (S1), before the store replicates the socket.
-    // External sockets (acceptStream) are never in swarm.connections and
-    // have their own cap (maxExternal), so they never reduce this limit.
-    const onDropped = (ev) => this.log(ev)
-    const limit = this.maxConnections
-    if (refuseOverConnectionLimit(this.swarm, socket, { limit, log: onDropped })) return
+    // Swarm connection cap (S1), before the store replicates the socket,
+    // shared by remote address (issue #32): a full table makes room for a
+    // newcomer by displacing an unprotected connection of an address that
+    // holds more slots (lib/peer-slots.js). External sockets (acceptStream)
+    // have their own table (maxExternal), so they never reduce this limit.
+    const slot = this._swarmSlots.admit(addressGroup(this._socketAddress(socket)))
+    if (slot === null) {
+      this.log({ event: 'peer-dropped', peerKey: remoteKeyHex(socket), reason: 'connection-limit' })
+      socket.destroy()
+      return
+    }
+    const data = { socket, onRefuse: null, entry: slot.entry, swarm: true }
+    slot.entry.data = data
+    socket.once('close', () => this._swarmSlots.remove(data.entry))
+    this._displace(slot.victim)
     this._attachPeer(socket)
+  }
+
+  // A throwing or odd addressOf groups the socket as 'unknown'.
+  _socketAddress (socket) {
+    try {
+      return this._addressOf(socket)
+    } catch {
+      return null
+    }
+  }
+
+  // The victim of a slot admission, already out of its table: logged and
+  // destroyed. An external stream whose acceptStream call had an onRefuse is
+  // handed back to the caller instead, like a refusal, so the client is told
+  // to back off (seed-ws closes the WebSocket with 1013): destroying it here
+  // would destroy the raw stream too, and ws's createWebSocketStream
+  // terminates the socket on destroy, before the close frame goes out.
+  _displace (victim) {
+    if (victim === null || victim.data === null) return
+    const { socket, onRefuse } = victim.data
+    victim.data.displaced = true
+    this.log({ event: 'peer-dropped', peerKey: remoteKeyHex(socket), reason: 'connection-displaced' })
+    if (typeof onRefuse === 'function') {
+      let handed = true
+      try {
+        onRefuse({ reason: 'connection-displaced' })
+      } catch {
+        handed = false // a throwing caller cannot be trusted to clean up
+      }
+      if (handed && !socket.destroyed) {
+        const timer = setTimeout(() => socket.destroy(), DISPLACED_GRACE_MS)
+        if (timer.unref) timer.unref()
+        socket.once('close', () => clearTimeout(timer))
+        return
+      }
+    }
+    socket.destroy()
+  }
+
+  // Whether a slot entry may not be displaced: an external stream from this
+  // host within its share (acceptStream's `local`), a swarm connection of a seeder whose
+  // certificate checked out at hello (one per seeder key), or a member that
+  // proved it owns a diary this seeder serves, has gated and does not block
+  // or hold. Evaluated when a full table looks for a victim, so a diary
+  // dropped or blocked since the proof stops protecting at once.
+  _slotProtected (entry) {
+    const data = entry.data
+    if (data && data.local === true) return this._localInShare(data)
+    const socket = data && data.socket
+    const peer = socket ? socket._varandaPeer : null
+    if (!peer || !this._peers.has(peer)) return false
+    if (peer.remoteRole === 'seeder') {
+      if (data.swarm !== true || peer.slotSeederOk !== true) return false
+      const holder = this._slotSeeders.get(peer.peerKey)
+      if (holder === peer) return true
+      if (holder && this._peers.has(holder)) return false
+      this._slotSeeders.set(peer.peerKey, peer)
+      return true
+    }
+    const key = peer.provenKey
+    if (typeof key !== 'string') return false
+    const served = this._served.get(key)
+    return !!served && served.gated === true && !this._isBlocked(key) && !this._searchHeld(key)
+  }
+
+  // Whether a local external stream is among the oldest live ones within
+  // the local share, a quarter of maxExternal (at least 1): links the
+  // account service opens on request cannot fill the table, and a
+  // long-lived link takes a place as soon as older ones close.
+  _localInShare (data) {
+    const quarter = Math.floor(this.maxExternal / 4)
+    const share = Number.isSafeInteger(quarter) && quarter >= 1 ? quarter : 1
+    let rank = 0
+    for (const d of this._localStreams) {
+      if (rank++ >= share) return false
+      if (d === data) return true
+    }
+    return false
   }
 
   // Admits a member over a raw duplex that is not the swarm (phase 0 spike:
@@ -8548,16 +8736,29 @@ class Seeder {
   // terminates the socket in _destroy, so a close frame queued just before
   // never reaches the client. Without onRefuse the stream is destroyed as
   // before; not-accepting/closing refusals always destroy it.
-  acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null } = {}) {
+  // address (optional): the client's address as the caller saw it (seed-ws:
+  // the X-Forwarded-For Caddy sets), used only to share the external slots
+  // by address; missing or malformed groups as 'unknown'. When the stream is
+  // later displaced by a client of an address that holds fewer slots, the
+  // seeder calls onRefuse({ reason: 'connection-displaced' }) under the same
+  // handoff (and destroys the stream itself DISPLACED_GRACE_MS later anyway);
+  // without onRefuse it is destroyed.
+  // local (optional): true when the caller knows the client runs on this
+  // host (seed-ws: a loopback connection that did not come through the
+  // proxy, such as the account service's links); its slot is never
+  // displaced while it is among the oldest live local streams within a
+  // quarter of maxExternal (at least 1); any other is an ordinary entry.
+  acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null, address = null, local = false } = {}) {
     rawStream.on('error', noop)
     if (!this._accepting || this._closing) {
       rawStream.destroy()
       return null
     }
     // External cap (maxExternal) BEFORE the handshake: in-flight handshakes
-    // count. Swarm sockets have their own cap and never count here; the
-    // check and _external.add below are synchronous on the same set.
-    if (this._external.size >= this.maxExternal) {
+    // count. Swarm sockets have their own table and never count here; the
+    // admission is synchronous, so the check and the insertion are atomic.
+    const slot = this._externalSlots.admit(addressGroup(address))
+    if (slot === null) {
       this.log({ event: 'peer-dropped', peerKey: null, reason: 'connection-limit' })
       // The refused stream is never added to _external, so it takes no slot
       // whichever side ends up destroying it.
@@ -8591,6 +8792,10 @@ class Seeder {
     const socket = new NoiseSecretStream(false, guard, { keyPair: this._keyPair })
     socket.on('error', noop)
     this._external.add(socket)
+    const data = { socket, onRefuse: typeof onRefuse === 'function' ? onRefuse : null, entry: slot.entry, local: local === true }
+    slot.entry.data = data
+    if (data.local) this._localStreams.add(data)
+    this._displace(slot.victim)
     // Absolute handshake deadline (never refreshed by incoming bytes).
     let timer = setTimeout(() => {
       timer = null
@@ -8607,6 +8812,8 @@ class Seeder {
     socket.on('close', () => {
       clear()
       this._external.delete(socket)
+      this._externalSlots.remove(data.entry)
+      this._localStreams.delete(data)
     })
     // The peer key is snapshotted when the admission channel is attached, so
     // _attachPeer never runs before the handshake completes.
@@ -8616,6 +8823,9 @@ class Seeder {
         socket.destroy()
         return
       }
+      // Displaced mid-handshake and handed to onRefuse: never served; the
+      // caller (or DISPLACED_GRACE_MS) tears it down.
+      if (data.displaced === true) return
       // secret-stream destroys the stream after this long without incoming
       // data (each received chunk refreshes the timer).
       socket.setTimeout(this.externalIdleMs)
@@ -8887,10 +9097,15 @@ class Seeder {
         // lean hello and pages over discovery instead; any other member
         // gets the full inventory as before.
         // CAP_WRITER_CUTS: this seeder keeps the writers a diary cut.
-        caps: (this.discovery ? CAP_DISCOVERY : 0) | CAP_WRITER_CUTS,
+        // CAP_PEER_PROOF: this seeder accepts `prove` (_onProve).
+        caps: (this.discovery ? CAP_DISCOVERY : 0) | CAP_WRITER_CUTS | CAP_PEER_PROOF,
         lean: this.discovery,
         onmessage: (msg, p) => this._onMessage(msg, p),
-        onclose: (p) => this._peers.delete(p),
+        onclose: (p) => {
+          this._peers.delete(p)
+          this._releaseProof(p)
+          if (this._slotSeeders.get(p.peerKey) === p) this._slotSeeders.delete(p.peerKey)
+        },
         log: (ev) => { if (ev && ev.event === 'peer-dropped') onDropped(ev) }
       })
     } catch {
@@ -9297,6 +9512,84 @@ class Seeder {
   _onMessage (msg, peer) {
     if (this._closing) return
     if (msg.type === 'announce') this.admit(msg.key, msg.cert, peer).catch(noop)
+    else if (msg.type === 'hello') this._onHelloSlot(peer)
+    else if (msg.type === 'prove') this._onProve(msg, peer)
+  }
+
+  // A seeder peer whose certificate is valid for its Noise key keeps its
+  // connection slot (_slotProtected); checked once, at its hello.
+  _onHelloSlot (peer) {
+    if (peer.remoteRole !== 'seeder') return
+    peer.slotSeederOk = seederCertForKey(peer.remoteCert, peer.peerKey, this.association).ok === true
+  }
+
+  // `prove` (lib/peer-proof.js): a member signs, with its diary key, a
+  // payload bound to its own Noise key, so this connection keeps its slot
+  // while the diary is served here. Only after a member's hello, at most one
+  // per connection; anything else, or a proof that does not verify, is a bad
+  // message. A diary already proven on MAX_PROOFS_PER_DIARY live connections
+  // does not protect one more, so one diary key cannot shield many
+  // connections: the proof waits for a place (_releaseProof). Nothing about
+  // the proof is logged.
+  _onProve (msg, peer) {
+    if (peer.remoteRole !== 'member' || peer.proveSeen === true) {
+      peer.badMessage()
+      return
+    }
+    peer.proveSeen = true
+    const ok = verifyPeerProof({ noiseHex: peer.peerKey, key: msg.key, signer: msg.signer, sig: msg.sig }, { manifestKey: diaryManifestKey })
+    if (!ok) {
+      peer.badMessage()
+      return
+    }
+    if (!this._peers.has(peer)) return
+    const n = this._proofCounts.get(msg.key) || 0
+    if (n >= MAX_PROOFS_PER_DIARY) {
+      let waiting = this._proofWaiting.get(msg.key)
+      if (!waiting) this._proofWaiting.set(msg.key, (waiting = new Set()))
+      waiting.add(peer)
+      peer.waitingProof = msg.key
+      return
+    }
+    this._proofCounts.set(msg.key, n + 1)
+    peer.provenKey = msg.key
+  }
+
+  // Idempotent: a closed connection's proof stops counting for its diary,
+  // or passes to the oldest live connection waiting with a proof for it.
+  _releaseProof (peer) {
+    const waitingKey = peer.waitingProof
+    if (typeof waitingKey === 'string') {
+      peer.waitingProof = null
+      const waiting = this._proofWaiting.get(waitingKey)
+      if (waiting) {
+        waiting.delete(peer)
+        if (waiting.size === 0) this._proofWaiting.delete(waitingKey)
+      }
+    }
+    const key = peer.provenKey
+    if (typeof key !== 'string') return
+    peer.provenKey = null
+    const waiting = this._proofWaiting.get(key)
+    if (waiting) {
+      let next = null
+      for (const w of waiting) {
+        waiting.delete(w)
+        w.waitingProof = null
+        if (this._peers.has(w)) {
+          next = w
+          break
+        }
+      }
+      if (waiting.size === 0) this._proofWaiting.delete(key)
+      if (next !== null) {
+        next.provenKey = key
+        return
+      }
+    }
+    const n = (this._proofCounts.get(key) || 0) - 1
+    if (n > 0) this._proofCounts.set(key, n)
+    else this._proofCounts.delete(key)
   }
 
   // Whether a newly revoked issuer's re-gate of `hex` is still pending
@@ -9389,6 +9682,10 @@ class Seeder {
         try { await this.store.close() } catch {}
       }
       this._peers.clear()
+      this._proofCounts.clear()
+      this._proofWaiting.clear()
+      this._slotSeeders.clear()
+      this._localStreams.clear()
       this._blocklistHandles.clear()
       for (const handle of this._noticeHandles) {
         try { handle.close() } catch {}
