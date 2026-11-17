@@ -20,7 +20,7 @@
 //   the proof signed by the identity key over THIS link's Noise key. Used
 //   for a wallet top-up and closed right after; never the dm link, never the
 //   sync socket. key(kind) and issue(blinded, kind) take the stamp kind,
-//   'dm' (the default, sent without a kind field) or 'blob'.
+//   'dm' (the default, sent without a kind field), 'blob' or 'copy'.
 // - openBlobLink: the anonymous 'varanda/blob/1' channel (lib/blob-net.js,
 //   member role), shaped like openDmLink: nothing on it names a diary.
 //   put(frame) -> { ok, reason }. A put is never repeated here.

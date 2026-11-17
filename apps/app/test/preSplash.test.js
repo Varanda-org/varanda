@@ -23,9 +23,9 @@ test('ids and url() stay inside the vps- namespace', (t) => {
   for (const u of urls) t.ok(u.startsWith('#vps-'), u)
 })
 
-test('the CSS carries the motion and the strip loops', async (t) => {
+test('the CSS carries the motion', async (t) => {
   const { splashMotion, PULSE_MS, BAR_MS } = await import('../src/ui/splashMotion.js')
-  const { stripLoops, sceneLayout } = await import('../src/ui/splashScene.js')
+  const { sceneLayout } = await import('../src/ui/splashScene.js')
   const { style } = readRegions(html)
   const m = splashMotion(false)
   t.ok(style.includes('vps-ground ' + m.ground.duration + 'ms'), 'ground')
@@ -37,18 +37,62 @@ test('the CSS carries the motion and the strip loops', async (t) => {
   t.ok(style.includes('vps-fade ' + m.hint.duration + 'ms ease-out ' + m.hint.delay + 'ms'), 'bar fade')
   t.ok(style.includes('vps-pulse ' + PULSE_MS + 'ms'), 'pulse')
   t.ok(style.includes('transition: width ' + BAR_MS + 'ms'), 'bar width')
-  const loops = stripLoops(1)
-  t.ok(style.includes('vps-slide-near ' + loops.near.ms + 'ms linear infinite'), 'near period')
-  t.ok(style.includes('translateX(-' + loops.near.distance + 'px)'), 'near distance')
-  t.ok(style.includes('calc(100% + ' + loops.near.distance + 'px)'), 'near width')
-  t.ok(style.includes('vps-slide-far ' + loops.far.ms + 'ms linear infinite'), 'far period')
-  t.ok(style.includes('translateX(-' + loops.far.distance + 'px)'), 'far distance')
-
   const offsets = (w) => {
     const l = sceneLayout({ width: w, height: 900 })
     return [l.varanda.x - l.width / 2, l.chair.x - l.width / 2, l.varanda.y, l.chair.y]
   }
   t.alike(offsets(1280), offsets(390), 'centre offsets do not depend on the width')
+})
+
+test('the strips stand still and the street people walk', async (t) => {
+  const st = await import('../src/ui/splashStreet.js')
+  const { nearTiles, farTile } = await import('../src/ui/splashScene.js')
+  const { style, markup } = readRegions(html)
+  const at = style.indexOf('@media (prefers-reduced-motion: no-preference) {')
+  const rest = style.slice(0, at)
+  t.absent(style.includes('vps-slide'), 'no strip slide')
+  t.absent(style.includes('will-change'), 'no will-change')
+  t.absent(style.includes('calc(100% + 192px)'), 'strips are not widened')
+  t.absent(/\.g svg \{[^}]*linejoin/.test(style), 'limbs keep sharp joins')
+  t.ok(style.includes('.j { stroke-linejoin: round; }'), 'round joins are opt in')
+  const outlines = markup.match(/class="f-pedra s-pedra j"/g) || []
+  t.ok(outlines.length > 0 && !/class="n s-[a-z]+ j"/.test(markup), 'only the closed outlines round their joins')
+  t.ok(/<pattern id="vps-near" patternUnits="userSpaceOnUse" width="192"/.test(markup), 'near pattern 192 wide')
+  t.ok(/<pattern id="vps-far" patternUnits="userSpaceOnUse" width="128"/.test(markup), 'far pattern 128 wide')
+  t.is(nearTiles().reduce((n, x) => n + x.width, 0), 192)
+  t.is(farTile().width, 128)
+
+  for (const [lane, def] of Object.entries(st.STREET.lanes)) {
+    for (const m of def.movers) {
+      t.ok(style.includes(def.ms + 'ms linear -' + st.moverDelayMs(def, m) + 'ms infinite'), lane + ' ' + m.figure + ' loop')
+    }
+    t.ok(markup.includes('<div class="l ' + lane + '" style="--t:' + def.strideMs + 'ms">'), lane + ' stride')
+  }
+  t.ok(rest.includes('--t: ' + st.STREET.idle.ms + 'ms;'), 'idle pose swap')
+  t.is(st.STREET.idle.poseCycles, 1, 'one shared pose swap')
+  t.ok(style.includes('vps-pa var(--t) steps(1) infinite') && style.includes('vps-pb var(--t) steps(1) infinite'), 'pose loops')
+  for (const name of ['vps-walk', 'vps-pa', 'vps-pb', 'vps-hop0', 'vps-hop1', 'vps-bola']) {
+    t.ok(style.indexOf('@keyframes ' + name + ' ') > at, name + ' inside no-preference')
+  }
+  t.ok(/\.vindo, #varanda-pre-splash \.e \{ transform: scaleX\(-1\); \}/.test(rest), 'the back lane and mirrored figures rest flipped')
+  t.ok(rest.includes('.b { opacity: 0; }'), 'pose b rests hidden')
+  t.ok(rest.includes('translateX(calc(max(1600px, 100% + 160px) * var(--p) - 80px))'), 'rest translateX from the phase')
+  for (const def of Object.values(st.STREET.lanes)) {
+    for (const m of def.movers) {
+      const phase = Math.round(st.moverPhase(def, m) * 10000) / 10000
+      t.ok(rest.includes('--p: ' + String(phase).replace(/^0\./, '.') + ';'), 'rest phase ' + phase)
+    }
+  }
+
+  const movers = Object.values(st.STREET.lanes).reduce((n, l) => n + l.movers.length, 0)
+  t.is((markup.match(/<div class="m [vi]\d">/g) || []).length, movers, 'one wrapper per mover')
+  t.is((markup.match(/<div class="f s\d">/g) || []).length, st.STREET.standing.length, 'one element per standing figure')
+  const drawn = new Set([...markup.matchAll(/<path[^>]* d="([^"]*)"/g)].map((m) => m[1]))
+  const figures = [...Object.values(st.STREET.lanes).flatMap((l) => l.movers), ...st.STREET.standing]
+  for (const f of figures) {
+    const art = st.figureArt(f.figure, f.tint)
+    for (const shape of [...art.body, ...art.a, ...art.b]) t.ok(drawn.has(shape.d), f.figure + ' path drawn')
+  }
 })
 
 test('every keyframe but the expiry is motion-gated', (t) => {
@@ -67,7 +111,8 @@ test('every keyframe but the expiry is motion-gated', (t) => {
 test('index.html stays small and has no em dash', (t) => {
   const size = Buffer.byteLength(html)
   t.comment('index.html is ' + size + ' bytes')
-  t.ok(size < 47000, 'index.html is ' + size + ' bytes')
+  // Measured 55493 bytes with the street people: little room left, so new art must shrink something else.
+  t.ok(size < 56000, 'index.html is ' + size + ' bytes')
   t.absent(html.includes('\u2014'), 'no em dash')
 })
 

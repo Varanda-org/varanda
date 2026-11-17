@@ -13,6 +13,8 @@ const {
   DAY_OFFSET_MS,
   dayStart,
   localDay,
+  localWeek,
+  weekBefore,
   noteGrowth,
   countActive
 } = require('../lib/activity')
@@ -96,4 +98,16 @@ test('countActive: skips ungated and inactive entries, counts only', (t) => {
 test('module requires nothing', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'activity.js'), 'utf8')
   t.absent(/\brequire\s*\(/.test(src))
+})
+
+test('localWeek: the Brasília ISO week, and weekBefore walks back across a year', (t) => {
+  t.is(localWeek(ms('2026-11-16T12:00:00.000Z')), '2026-W47', 'a Monday')
+  t.is(localWeek(ms('2026-11-16T02:59:59.999Z')), '2026-W46', 'still Sunday in Brasília')
+  t.is(localWeek(ms('2026-11-16T03:00:00.000Z')), '2026-W47', 'Monday starts at 03:00 UTC')
+  t.is(localWeek(ms('2026-12-31T12:00:00.000Z')), '2026-W53')
+  t.is(localWeek(ms('2027-01-01T12:00:00.000Z')), '2026-W53', 'ISO year, not the calendar one')
+  t.is(weekBefore('2026-W46', 4), '2026-W42')
+  t.is(weekBefore('2026-W02', 3), '2025-W51')
+  t.is(weekBefore('2026-11-16', 1), null)
+  t.is(weekBefore('nope', 1), null)
 })

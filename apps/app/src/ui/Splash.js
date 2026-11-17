@@ -3,8 +3,8 @@
 // and the sky band rise, the varanda appears beside its araucária, the chair
 // comes up onto its floor (birds cross the sky and a butterfly flutters by
 // the plant), the logo's hand-drawn letters of the name enter
-// one by one, then the progress bar fades in and pulses while the calçada
-// keeps sliding; the bar's fill follows `progress` (real boot steps,
+// one by one, then the progress bar fades in and pulses while people walk
+// the still calçada; the bar's fill follows `progress` (real boot steps,
 // src/splashGate.js bootProgress). On native it stays cream in both schemes
 // to match the launch screens; on the web it follows the scheme, like the
 // pre-splash in index.html.
@@ -23,8 +23,9 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { light, statusBarStyle } from '../appearance'
 import { useStyles, useTheme } from './ThemeProvider'
 import { loopTiming } from './loopMotion'
-import { BAR_MS, BAR_WIDTH, FLYERS, SPLASH_LABEL, PULSE_MS, PRESENTATION_MS, REST_MS, flyerMotion, overlayRemainingMs, slideMotion, splashMotion } from './splashMotion'
-import { sceneLayout, scenePalette, stripLoops } from './splashScene'
+import { BAR_MS, BAR_WIDTH, FLYERS, SPLASH_LABEL, PULSE_MS, PRESENTATION_MS, REST_MS, flyerMotion, overlayRemainingMs, splashMotion } from './splashMotion'
+import { sceneLayout, scenePalette } from './splashScene'
+import { streetMotion } from './splashStreet'
 import { SplashLettering, SplashScene, hiddenFromReaders } from './SplashSceneView'
 
 const native = Platform.OS !== 'web'
@@ -42,8 +43,6 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
   const { width, height } = useWindowDimensions()
   const insets = useSafeAreaInsets()
   const layout = useMemo(() => sceneLayout({ width, height }), [width, height])
-  const layoutRef = useRef(layout)
-  layoutRef.current = layout
   const palette = scenePalette(scheme)
   const full = useRef(null)
   if (full.current === null) full.current = splashMotion(false)
@@ -82,10 +81,17 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
     const f = full.current.varanda.from
     varanda.current = { opacity: new Animated.Value(f.opacity), translateY: new Animated.Value(f.translateY) }
   }
-  const slideNear = useRef(null)
-  if (slideNear.current === null) slideNear.current = new Animated.Value(0)
-  const slideFar = useRef(null)
-  if (slideFar.current === null) slideFar.current = new Animated.Value(0)
+  // At 0 the street is the still picture: walkers at their marks, pose a,
+  // kids on the ground and the ball at the first kid. lanes[0] and strides[0]
+  // are the indo lane; [1] is vindo, the same indexes the scene reads.
+  const street = useRef(null)
+  if (street.current === null) {
+    street.current = {
+      lanes: [new Animated.Value(0), new Animated.Value(0)],
+      strides: [new Animated.Value(0), new Animated.Value(0)],
+      idle: new Animated.Value(0)
+    }
+  }
   // The sky's flyers: one 0..1 crossing per bird, the butterfly's wing beat
   // and its drift. At 0 every flyer stands at its visible rest pose.
   const flyers = useRef(null)
@@ -131,7 +137,7 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
     let reduced = false
     let composite = null
     let loop = null
-    let slides = []
+    let walkers = []
     let flights = []
     let presented = false
     let presentTimer = null
@@ -149,11 +155,11 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
     const stopAll = () => {
       if (composite) composite.stop()
       if (loop) loop.stop()
-      slides.forEach((s) => s.stop())
+      walkers.forEach((w) => w.stop())
       flights.forEach((f) => f.stop())
       composite = null
       loop = null
-      slides = []
+      walkers = []
       flights = []
     }
     const settle = () => {
@@ -166,8 +172,7 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
       }
       pose(ground.current, m.ground.to)
       pose(varanda.current, m.varanda.to)
-      slideNear.current.setValue(0)
-      slideFar.current.setValue(0)
+      for (const v of [...street.current.lanes, ...street.current.strides, street.current.idle]) v.setValue(0)
       flyers.current.birds.forEach((v) => v.setValue(0))
       flyers.current.flap.setValue(0)
       flyers.current.drift.setValue(0)
@@ -193,14 +198,17 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
       loop = Animated.loop(Animated.sequence([pulse(0.6), pulse(1)]), { resetBeforeIteration: false })
       loop.start()
     }
-    const startSlides = () => {
-      if (!slideMotion(reduced)) return
-      const loops = stripLoops(layoutRef.current.k)
-      const near = Animated.loop(Animated.timing(slideNear.current, loopTiming({ toValue: 1, duration: loops.near.ms, easing: Easing.linear, useNativeDriver: native })))
-      const far = Animated.loop(Animated.timing(slideFar.current, loopTiming({ toValue: 1, duration: loops.far.ms, easing: Easing.linear, useNativeDriver: native })))
-      slides = [near, far]
-      near.start()
-      far.start()
+    const startStreet = () => {
+      const s = streetMotion(reduced)
+      if (!s) return
+      const v = street.current
+      const indo = Animated.loop(Animated.timing(v.lanes[0], loopTiming({ toValue: 1, duration: s.lanes.indo.ms, easing: Easing.linear, useNativeDriver: native })))
+      const vindo = Animated.loop(Animated.timing(v.lanes[1], loopTiming({ toValue: 1, duration: s.lanes.vindo.ms, easing: Easing.linear, useNativeDriver: native })))
+      const strideIndo = Animated.loop(Animated.timing(v.strides[0], loopTiming({ toValue: 1, duration: s.lanes.indo.strideMs, easing: Easing.linear, useNativeDriver: native })))
+      const strideVindo = Animated.loop(Animated.timing(v.strides[1], loopTiming({ toValue: 1, duration: s.lanes.vindo.strideMs, easing: Easing.linear, useNativeDriver: native })))
+      const idle = Animated.loop(Animated.timing(v.idle, loopTiming({ toValue: 1, duration: s.idle.ms, easing: Easing.linear, useNativeDriver: native })))
+      walkers = [indo, vindo, strideIndo, strideVindo, idle]
+      walkers.forEach((a) => a.start())
     }
     const startFlyers = () => {
       const f = flyerMotion(reduced)
@@ -244,17 +252,17 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
         if (reduced) return
         startPulse()
       })
-      startSlides()
+      startStreet()
       startFlyers()
     }
-    // Settled but moving: the hint pulses, the strips slide and the flyers fly.
-    // On the 20 s expiry path they restart from 0, a one-off hop against the
-    // overlay's last frame that is acceptable on that failure path.
+    // Settled but moving: the hint pulses, people walk the street and the
+    // flyers fly. On the 20 s expiry path they restart from 0, a one-off hop
+    // against the overlay's last frame that is acceptable on that failure path.
     const resumeMoving = () => {
       reduced = false
       stillRef.current = false
       startPulse()
-      startSlides()
+      startStreet()
       startFlyers()
     }
     const skip = () => {
@@ -360,8 +368,7 @@ export function Splash ({ sidePad = 0, edges, progress = 0, onPresented, entered
             ground={ground.current}
             varanda={varanda.current}
             chair={chair.current}
-            slideNear={slideNear.current}
-            slideFar={slideFar.current}
+            street={street.current}
             flyers={flyers.current}
           />
         </View>

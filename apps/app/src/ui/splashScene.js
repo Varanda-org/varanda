@@ -6,8 +6,6 @@
 // picture. Shapes name palette keys, not colours, so one geometry serves the
 // light and the dark scheme.
 
-import { SLIDES } from './splashMotion.js'
-
 // Heights of the scene bands at scale 1, bottom to top.
 export const SCENE = deepFreeze({
   rua: 36,
@@ -63,17 +61,6 @@ export function sceneScale (height) {
 // The near strip repeats this sequence of motifs, left to right.
 export const NEAR_SEQUENCE = deepFreeze(['araucaria', 'saoPaulo'])
 
-// One strip loop is a whole period of its motifs, so when the animation
-// jumps back the same motif is under the seam and nothing visibly skips. The
-// per-tile speed is the one SLIDES sets.
-export function stripLoops (k) {
-  const n = NEAR_SEQUENCE.length
-  return Object.freeze({
-    near: Object.freeze({ distance: SLIDES.near.tile * n * k, ms: SLIDES.near.ms * n }),
-    far: Object.freeze({ distance: SLIDES.far.tile * k, ms: SLIDES.far.ms })
-  })
-}
-
 // The bbox of every coordinate in CHAIR_PATHS, in its 256 viewBox (the test
 // recomputes it). The drawing sits right of the viewBox centre, so placing
 // the box by its own centre would push the chair off the varanda's middle.
@@ -95,8 +82,8 @@ export const BIRDS = deepFreeze([
 // Pixel boxes for the bottom-anchored scene block, y from the block top, so
 // both renderers draw the same picture without computing anything. The
 // strips keep their exact tile height and the kerb takes the rounding, so
-// every edge lands on a whole pixel. The strips carry enough tiles to slide
-// a full loop (stripLoops) and still cover the width.
+// every edge lands on a whole pixel. Each strip carries just enough tiles to
+// cover the width, with no more than one tile to spare.
 export function sceneLayout ({ width, height }) {
   const k = sceneScale(height)
   const w = Number.isFinite(width) && width > 0 ? Math.round(width) : 0
@@ -162,8 +149,8 @@ export function sceneLayout ({ width, height }) {
     near: { y: farY + farH, height: nearH },
     kerb: { y: farY + farH + nearH, height: kerbH },
     rua: { y: total - ruaH, height: ruaH },
-    nearCount: Math.ceil(w / (NEAR * k)) + NEAR_SEQUENCE.length,
-    farCount: Math.ceil(w / (FAR_W * k)) + 1
+    nearCount: Math.ceil(w / (NEAR * k)),
+    farCount: Math.ceil(w / (FAR_W * k))
   })
 }
 

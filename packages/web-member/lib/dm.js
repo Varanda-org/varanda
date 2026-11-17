@@ -108,6 +108,7 @@ const { createPageHolder, NO_PAGE_KEY, KEY_MISMATCH } = require('./page-dm')
 const { openDmLink, openStampLink, openVisitLink } = require('./dm-link')
 const visits = require('@varanda/core/lib/visits')
 const store = require('./node-store')
+const { createDmCopy } = require('./dm-copy')
 
 const LOCKED = store.LOCKED
 const SELF_SEND = 'não é possível enviar para si'
@@ -542,6 +543,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     clearPending()
     forgetAllBlobs()
     publicItems.clear()
+    copy.reset()
     dropQueued(false, LOCKED)
     opening.clear()
     gone.clear()
@@ -703,7 +705,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       followSet: follows,
       seen,
       ops,
-      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, digest: m.digest })),
+      messages: messages.map((m) => ({ id: m.id, from: m.from, to: m.mine ? m.peer : own, text: m.text, replyTo: replyOfRow(m), fwd: m.fwd, media: m.media, card: m.card, moment: m.moment, at: m.at, filedAt: m.filedAt, shownAt: m.shownAt, digest: m.digest })),
       reactions: (reactions || []).map((r) => ({ id: r.id, from: r.from, to: r.to, target: { from: r.target.from, id: r.target.id, digest: r.target.digest }, emoji: r.emoji, rev: r.rev, filedAt: r.filedAt }))
     })
     // A store locked (or relocked) since is never remembered.
@@ -1968,10 +1970,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           const ops = [...local.ops()]
           const mod = await moderation()
           const missed = []
+          // History copy pointers of this page (./dm-copy.js).
+          const pointers = []
           for (const item of page.items) {
             read += item.bytes.byteLength
             const row = item.seq > cursor ? openItem(own, item.bytes, ops, rows, mod) : null
-            if (row !== null) {
+            if (row !== null && row.t === 'copy') {
+              pointers.push(row)
+            } else if (row !== null) {
               // Filed now, on the monotonic clock: a ctl earlier in this page
               // then counts for the items after it (dm-fold ignores a row
               // without filedAt).
@@ -1995,6 +2001,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           for (const p of along) {
             await filePageItems(p, missed.filter((item) => item.seq > p.cursor.after).map((item) => item.bytes), mod)
           }
+          // Noted (sealed in kv) before the cursor passes this page: a lock or
+          // a kill after the cursor write would otherwise lose the pointer.
+          if (pointers.length > 0) await copy.note(pointers)
           if (page.items.length > 0) {
             after = page.items[page.items.length - 1].seq
             if (after > cursor) {
@@ -2032,6 +2041,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       for (const p of scans) {
         if (p.added > 0 || p.applied > 0) emit('dm.changed', { added: p.added, page: p.page })
       }
+      // The import (the pointers were noted page by page above) is reads and
+      // local filing only: one job at a time, tracked by idle(), and the pull
+      // does not wait for it.
+      if (gen === generation && unlocked()) track(copy.importAll(own).catch(noop))
     }
     housekeepDue(gen, [personal, ...scans.map((p) => p.ctx)])
     return { added, cursor, incomplete }
@@ -2113,6 +2126,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
     if (body === null || dm.pageInnerStale(body, Date.now())) return null
+    // A history copy pointer is never a row: the pull hands it to ./dm-copy.js.
+    if (body.kind === 'copy') return { t: 'copy', id: body.id, copy: body.copy }
     return rowOf(own, body, ops, batch, mod.blocked, local, dm.bodyDigest(body))
   }
 
@@ -2130,6 +2145,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
       // A Página conversation has no reactions: a v4 body is never filed.
       if (body.kind === 'react') return null
+      // Nor a history copy pointer (own box only).
+      if (body.kind === 'copy') return null
       // Nor a reaction to a momento (v5): a page sends no momento reactions.
       if (body.v === 5) return null
       // Of the body as signed, before a carried legacy key is renamed.
@@ -3080,6 +3097,36 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   const tracked = (fn) => (...args) => track(fn(...args))
 
+  // History copy to another device (./dm-copy.js).
+  const copy = createDmCopy({
+    storage,
+    local,
+    personal,
+    pages,
+    pageCtx,
+    blobs,
+    blobOrigin,
+    fetchImpl,
+    fetchLimits: L.fetch,
+    linkOpts,
+    openDmLink,
+    takeStamps,
+    topUpDm,
+    dropOf,
+    boxHex,
+    generation: () => generation,
+    unlocked,
+    requireUnlocked,
+    emit,
+    log,
+    mediaItem,
+    refusal,
+    unconfirmed,
+    folded,
+    moderation,
+    openMedia
+  })
+
   return {
     unlock,
     lock,
@@ -3108,6 +3155,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     dropPageSummaries,
     set: tracked(set),
     pull: tracked(pull),
+    historyCopy: tracked(copy.historyCopy),
     pageGenerate,
     pageShare,
     pageSecrets: tracked(pageSecrets),
