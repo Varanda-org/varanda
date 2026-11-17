@@ -199,7 +199,9 @@ function bindReplies (kept) {
 // this device stored the row (monotonic, assigned by the node; the send
 // time for own messages, the filing or creation time for own ctl ops). A
 // row without a valid filedAt is ignored. Cutoffs compare filedAt only;
-// ordering uses min(at, filedAt), so a future `at` cannot pin a thread.
+// ordering uses min(at, filedAt), so a future `at` cannot pin a thread. A
+// message may carry shownAt (ms): the filing time of the device that made a
+// history copy, used instead of filedAt for that min only.
 function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
   if (!isHex64(self)) return { inbox: [], requests: [] }
   const follows = toSet(followSet)
@@ -216,7 +218,11 @@ function fold ({ self, followSet, messages, ops, seen, reactions } = {}) {
     const at = time(m.at)
     const f = filed(m.filedAt)
     if (!Number.isFinite(at) || !Number.isFinite(f)) continue
-    candidates.push({ m, f, t: Math.min(at, f), i })
+    // A row imported from another device's history copy carries the time that
+    // device filed it (shownAt): the shown time caps at that, while f, filed
+    // below the local rows, still orders it against the ctl ops.
+    const shown = typeof m.shownAt === 'number' && Number.isFinite(m.shownAt) && Math.abs(m.shownAt) <= MAX_TIME ? m.shownAt : f
+    candidates.push({ m, f, t: Math.min(at, shown), i })
   }
   // Within one conversation an id belongs to one row, which keeps quotes and
   // the dm.thread cursor unambiguous. An own message always keeps its id: it

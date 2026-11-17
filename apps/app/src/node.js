@@ -124,6 +124,7 @@ import { displayText, isMutating } from '@varanda/rpc'
 import { connectNode } from './client/connect'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
+import { copyStore } from './historyCopy'
 import { isOnline, subscribeOnline } from './online'
 import { effectiveVisible, isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
@@ -753,6 +754,12 @@ function LiveNodeProvider ({ children }) {
     }
     if (name === 'dm.changed') {
       setDmVersion((n) => n + 1)
+      return
+    }
+    // History copy: progress on the device that copies, a notice on the one
+    // that receives (src/historyCopy.js). Neither is a sync line.
+    if (name === 'dm.copyProgress' || name === 'dm.copyImported') {
+      copyStore.apply(name, data)
       return
     }
     // Sent on every pull while the held key differs: no sync line.
