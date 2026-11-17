@@ -34,8 +34,9 @@
 // then one dm.send carries them (attach-plan.js composePlan, chatSend.js
 // runChatSend) under a progress ring. Cancelar before the send discards them.
 // An uncertain send keeps that exact request (uploads included) and only
-// "Tentar de novo" resends it; nothing is resent by itself. Received photos
-// render inside the bubble through ChatMedia (chatMedia.js sourceFor).
+// "Tentar de novo" resends it; nothing is resent by itself. As a page, that
+// retry is the signed draft's own re-put, never a new dm.pageDraft.
+// Received photos render inside the bubble through ChatMedia (chatMedia.js sourceFor).
 // Voice notes take the same path: with an empty field the composer records
 // one (where the device can make audio/mp4), it goes to the blob channel as
 // the only item of one dm.send, and the bubble plays it (VoiceBubble).
@@ -73,7 +74,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread } from '../dm-screen'
+import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
@@ -116,6 +117,11 @@ import { TopBar } from '../ui/TopBar'
 import { memberKeyOf, useActing } from './Conversa'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
+// The node's answer when a page draft is gone or already used (rpc 5.114).
+// After an uncertain send it means the message may have landed.
+const PAGE_DRAFT_GONE = 'rascunho expirado'
+const MEDIA_MAYBE = 'A mensagem pode ter sido enviada. Confira na conversa.'
+const draftGone = (err) => !!(err && err.message === PAGE_DRAFT_GONE)
 const unsureSend = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
 
 export function initialMessage (initial) {
@@ -353,13 +359,12 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [confirming, setConfirming] = useState(null)
   const [offerHold, setOfferHold] = useState(null)
   const attachments = useChatAttachments()
-  // The draft link card (not as a page: its sends are signed statements).
   const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
-  const automaticDraft = useLinkDraft({ text: draft, enabled: pageKey === null && !initialTarget, photos: attachments.items.length > 0, member: ownKey })
+  const automaticDraft = useLinkDraft({ text: draft, enabled: !initialTarget, photos: attachments.items.length > 0, member: ownKey })
   useEffect(() => {
     if (attachments.items.length > 0) setInitialCard((s) => linkDraftStep(s, { type: 'photo' }))
   }, [attachments.items.length])
-  const snapshot = pageKey === null && attachments.items.length === 0 ? freezeSnapshot(initialCard, draft) : null
+  const snapshot = attachments.items.length === 0 ? freezeSnapshot(initialCard, draft) : null
   const [initialImage, setInitialImage] = useState(null)
   const thumb = snapshot?.thumb || null
   const thumbBytes = thumb?.bytes
@@ -390,6 +395,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [mediaSend, setMediaSend] = useState(null)
   const [mediaHold, setMediaHold] = useState(null)
   const [mediaError, setMediaError] = useState('')
+  const [mediaNote, setMediaNote] = useState('')
   const sendTokenRef = useRef(null)
   // A closed screen uploads nothing more and sends nothing.
   useEffect(() => () => { if (sendTokenRef.current) sendTokenRef.current.live = false }, [])
@@ -594,6 +600,8 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     setHold(null)
     setAskNew(false)
     setMediaHold(null)
+    setMediaNote('')
+    setMediaError('')
     setOfferHold(null)
     setConfirming(null)
     setOfferOpen(false)
@@ -811,6 +819,11 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (state === 'deleted') onBack()
   }
 
+  // A page inner is always v3. The expiry takes 8 bytes a v2 measure does
+  // not, so a caption that fills a v2 budget is refused here, before the
+  // node and before a photo is uploaded for a message it cannot carry.
+  const dmTarget = (extra = {}) => ({ kind: 'dm', to: peer, ...extra, ...(pageKey !== null ? { v: 3 } : {}) })
+
   // heldCard: the card frozen into a held send (null: none). A fresh send
   // (undefined) takes the draft card, uploads its thumbnail once and keeps
   // the result with the hold, so an explicit retry never builds or uploads
@@ -819,20 +832,21 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   // (a held send keeps both).
   const send = async (text, quoteId, heldCard, typed = (heldCard !== undefined && hold && hold.typed) || text, ctx = (heldCard !== undefined && hold && hold.ctx) || null) => {
     setAskNew(false)
+    setMediaNote('')
     lastErr.current = null
     // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
     inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
-    let snapshot = heldCard === undefined && pageKey === null ? linkDraft.take(text) : null
+    let snapshot = heldCard === undefined ? linkDraft.take(text) : null
     const richBlocks = hasRich(text) ? parseRich(text) : null
     if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
     const r = await post.run(async () => {
       try {
         const plain = { to: peer, text, ...(quoteId ? { replyTo: quoteId } : {}) }
-        const target = { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) }
+        const target = dmTarget(quoteId ? { replyTo: quoteId } : {})
         if (snapshot !== null) {
           // `to` keeps the thumbnail's blob to this conversation (rpc 5.97).
-          const upload = mediaApi !== null ? (t) => mediaApi.putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height, to: peer }) : null
+          const upload = mediaApi !== null ? (t) => putDm({ bytes: t.bytes, mime: t.mime, width: t.width, height: t.height }) : null
           card = await cardForSend(snapshot, { upload, fits: (c) => cardFits({ text, target, card: c }) })
         }
         if (!live.current) return null
@@ -897,41 +911,60 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       setHold(null)
     } else if (r.uncertain && err && typeof err.retry === 'function') {
       setHold({ ...hold, retry: err.retry })
+    } else if (draftGone(err)) {
+      // The draft is gone or used: the first put may have landed. The hold is
+      // settled as unknown, never signed again.
+      if (contextRef.current === (hold.ctx || null)) setDraft('')
+      setReplyTo(null)
+      if (hold.ctx) setContext((c) => (c === hold.ctx ? null : c))
+      setHold(null)
+      post.clearError()
+      setMediaNote(MEDIA_MAYBE)
     }
     reread()
   }
 
   const mediaApi = node.media && typeof node.media.putDm === 'function' ? node.media : null
-  const canAttach = mediaApi !== null && pageKey === null && node.online !== false
+  // Every DM upload goes to this conversation (rpc 5.97) and, as a page,
+  // names the page: the node keys the blob to that sender, so the same photo
+  // sent as the person and as the page never shares a blob, and a page draft
+  // refuses an item put for the person (rpc 5.88).
+  const putDm = (args) => mediaApi.putDm({ ...args, to: peer, ...(pageKey !== null ? { page: pageKey } : {}) })
+  const canAttach = mediaApi !== null && node.online !== false
   const sendingMedia = mediaSend !== null && (mediaSend.phase === 'uploading' || mediaSend.phase === 'sending')
 
   const mediaDone = (r, text, quoteId, typed = text, ctx = null) => {
     setMediaSend(null)
-    if (r.phase === 'done') {
+    if (r.phase === 'done' || r.phase === 'maybe') {
       // As the text path: a draft whose chip was removed meanwhile is a new message.
       if (contextRef.current === ctx) setDraft((d) => (d === typed ? '' : d))
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
       if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setMediaHold(null)
       attachments.clear()
+      // Settled but unknown: the same photos are never offered to Enviar again.
+      if (r.phase === 'maybe') setMediaNote(MEDIA_MAYBE)
     } else if (r.phase === 'uncertain') {
-      setMediaHold({ op: r.op, text, quoteId, typed, ctx })
+      // A page keeps err.retry. Dropping it would make "Tentar de novo"
+      // draft and sign a second message while the first may have landed.
+      setMediaHold(mediaUncertainHold({ op: r.op, error: r.error, text, quoteId, typed, ctx, page: pageKey !== null }))
     } else if (r.phase === 'failed') {
       setMediaHold(null)
       if (r.error && r.error.message === BLOCKED_SEND) setBlocked(true)
       setMediaError(errorText(r.error))
     }
-    if (r.phase === 'done' || r.phase === 'uncertain' || (r.phase === 'failed' && r.op)) reread()
+    if (r.phase === 'done' || r.phase === 'maybe' || r.phase === 'uncertain' || (r.phase === 'failed' && r.op)) reread()
   }
 
   const sendMedia = async (text, quoteId, typed = text, ctx = null) => {
     if (mediaApi === null || sendingMedia || !attachments.ready) return
     setMediaError('')
+    setMediaNote('')
     setAskNew(false)
     const files = attachments.files
     let plan
     try {
-      plan = composePlan({ text, attachments: stagedOf(files), target: { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) } })
+      plan = composePlan({ text, attachments: stagedOf(files), target: dmTarget(quoteId ? { replyTo: quoteId } : {}) })
     } catch (err) {
       setMediaError(errorText(err))
       return
@@ -942,7 +975,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       plan,
       files,
       // `to` keeps this photo's blob to this conversation (rpc 5.97).
-      upload: (f) => mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height, to: peer }),
+      upload: (f) => putDm({ bytes: f.bytes, mime: f.mime, width: f.width, height: f.height }),
       request: dm,
       live: () => token.live,
       onPhase: (p) => { if (token.live) setMediaSend(p) },
@@ -959,11 +992,12 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (mediaApi === null || sendingMedia || mediaHold !== null || attachments.items.length > 0) return
     if (!recording || !(recording.bytes instanceof Uint8Array)) return
     setMediaError('')
+    setMediaNote('')
     setAskNew(false)
     const quoteId = replyTo ? replyTo.id : null
     let plan
     try {
-      plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: { kind: 'dm', to: peer, ...(quoteId ? { replyTo: quoteId } : {}) } })
+      plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: dmTarget(quoteId ? { replyTo: quoteId } : {}) })
     } catch (err) {
       setMediaError(errorText(err))
       return
@@ -975,7 +1009,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       files: [recording],
       upload: async (f) => {
         try {
-          return await mediaApi.putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice', to: peer })
+          return await putDm({ bytes: f.bytes, mime: f.mime, width: 0, height: 0, ms: f.ms, kind: 'voice' })
         } catch (err) {
           throw voiceUploadError(err)
         }
@@ -990,11 +1024,22 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     mediaDone(r, '', quoteId)
   }
 
-  // The explicit retry of an uncertain photo send: the same dm.send, once.
+  // The explicit retry of an uncertain photo or voice send. A page re-puts
+  // the signed draft it kept. A person resends the same dm.send, once.
   const retryMedia = async () => {
     if (!mediaHold || sendingMedia) return
     const held = mediaHold
     setMediaError('')
+    if (pageKey !== null) {
+      if (typeof held.retry !== 'function') return
+      setMediaSend({ phase: 'sending', progress: 0 })
+      const r = await runPageMediaRetry(held, unsureSend)
+      // The draft is gone or used: the first put may have landed, so a new
+      // draft would be a second message.
+      const gone = r.phase === 'failed' && r.error && r.error.message === PAGE_DRAFT_GONE
+      mediaDone(gone ? { ...r, phase: 'maybe' } : r, held.text, held.quoteId, held.typed, held.ctx)
+      return
+    }
     const r = await retryChatSend({ op: held.op, request: dm, onPhase: setMediaSend, uncertain: unsureSend })
     mediaDone(r, held.text, held.quoteId, held.typed, held.ctx)
   }
@@ -1007,6 +1052,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     setMediaSend(null)
     setMediaHold(null)
     setMediaError('')
+    setMediaNote('')
     attachments.clear()
   }
 
@@ -1020,6 +1066,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   // One offer step's dm.send. `op` is kept with an uncertain answer and only
   // "Tentar de novo" sends it again (a page re-puts its signed bytes).
   const offerSend = async (build) => {
+    setMediaNote('')
     let lastOffer = null
     let sent = null
     const r = await offerAct.run(async () => {
@@ -1043,17 +1090,25 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       setOfferHold({ op: sent.op, retry })
       setOfferOpen(false)
       setConfirming(null)
+    } else if (sent !== null && typeof sent.retry === 'function' && draftGone(lastOffer)) {
+      // A page re-put whose draft is gone or used: it may have landed, so the
+      // hold is settled as unknown and nothing is signed again.
+      setOfferHold(null)
+      setOfferOpen(false)
+      setOfferValue('')
+      setConfirming(null)
+      offerAct.clearError()
+      setMediaNote(MEDIA_MAYBE)
     } else if (lastOffer && lastOffer.message === BLOCKED_SEND) {
       setBlocked(true)
     }
     reread()
   }
 
-  // A personal account sends the link as a card and in the text; a page's
-  // sends are text only (signed statements), so the text always holds it.
+  // The link goes as a card and in the text, for a page as for a person.
   const offerOp = (text, card, replyId) => {
-    const target = { kind: 'dm', to: peer, ...(replyId ? { replyTo: replyId } : {}) }
-    if (pageKey !== null || card === null) return { to: peer, text, ...(replyId ? { replyTo: replyId } : {}) }
+    const target = dmTarget(replyId ? { replyTo: replyId } : {})
+    if (card === null) return { to: peer, text, ...(replyId ? { replyTo: replyId } : {}) }
     return composePlan({ text, target, card }).send().params
   }
 
@@ -1070,7 +1125,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       setOfferNote('Não foi possível montar a oferta.')
       return
     }
-    offerSend(async () => ({ op: offerOp(proposalText(listing, cents, card.url, { asPage: pageKey !== null }), card, null) }))
+    offerSend(async () => ({ op: offerOp(proposalText(listing, cents, card.url), card, null) }))
   }
 
   const acceptOffer = ({ offer, listing }) => offerSend(async () => {
@@ -1305,10 +1360,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     (context !== null && draft.trim() === '' ? false : staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
-  // As a page, a forward goes through the page client (dm.pageSend), text
-  // only, to the page's own conversations.
+  // As a page, a forward goes through the page client (dm.pageSend), with
+  // its media, to the page's own conversations.
   const canForward = unlocked
-  const pageForward = pageKey !== null && forwarding ? pageForwardSource(forwarding.source) : null
 
   const rowLive = useRef(null)
   rowLive.current = { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, mentionTap, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct }
@@ -1449,11 +1503,15 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
           ? (
             <View style={styles.inline}>
               <Soft>{LABELS.uncertain}</Soft>
-              <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />
+              {/* A page re-puts only its signed bytes and never drafts again. */}
+              {typeof mediaHold.retry === 'function' || pageKey === null
+                ? <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />
+                : null}
               <Pill label='descartar' onPress={cancelMedia} />
             </View>
             )
           : null}
+        {mediaNote !== '' && mediaHold === null ? <Soft>{mediaNote}</Soft> : null}
         {mediaError || attachments.note ? <ErrorText>{mediaError || attachments.note}</ErrorText> : null}
         {hold ? null : <ErrorText>{post.error}</ErrorText>}
         {hold && askNew && pageKey === null
@@ -1605,10 +1663,10 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       <ForwardSheet
         open={forwarding !== null}
         onClose={() => setForwarding(null)}
-        source={pageForward !== null ? pageForward.source : (forwarding ? forwarding.source : null)}
-        refs={pageForward !== null ? [] : (forwarding ? forwarding.refs : [])}
+        source={forwarding ? forwarding.source : null}
+        refs={forwarding ? forwarding.refs : []}
         identity={ownKey}
-        {...(pageKey !== null ? { request: dm, mediaLeft: pageForward !== null ? pageForward.left : 0 } : {})}
+        {...(pageKey !== null ? { request: dm, page: pageKey } : {})}
       />
       <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
@@ -1695,9 +1753,11 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
     if (!readOnly) actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
     actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
   }
-  // A message with no text whose media expired has nothing to forward, and a
-  // page forwards text only.
+  // A message with no text whose media expired has nothing to forward.
   const forwardSource = !item.deleted && canForward && !readOnly ? dmForwardSource(item.rawText, media) : null
+  // The sheet plans with forwardPlan(source, target) and cannot be told
+  // apart from a person except by this flag: a page caption is a v3 inner.
+  if (forwardSource !== null && pageKey !== null) forwardSource.page = true
   if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {
     actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
   }
