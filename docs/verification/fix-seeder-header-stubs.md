@@ -1,6 +1,6 @@
 # Tocos de cabeçalho no semeador (branch fix/seeder-header-stubs)
 
-Parte da #350, sobre `fix/writer-header-refusals` (o PR do leitor) a partir de `03d7744d`. Sem mudança de RPC nem de Termos; `docs/protocol.md` descreve a regra.
+Parte da #350, depois do #768 (o PR do leitor, `fix/writer-header-refusals`, já na `main`). Sem mudança de RPC nem de Termos; `docs/protocol.md` descreve a regra.
 
 ## O que mudou
 
