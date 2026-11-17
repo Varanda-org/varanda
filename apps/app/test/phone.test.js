@@ -206,3 +206,86 @@ test('phone texts and phoneErrorText', async (t) => {
     t.absent(text.includes(String.fromCharCode(0x2014)), text)
   }
 })
+
+const OLD = '2026-11-11T12:00:00.000Z'
+const NEW = '2026-11-17T09:30:00.000Z'
+
+test('phoneChange: a later proof date is a new number, the same date is not', async (t) => {
+  const { phoneChange } = await load()
+  t.is(phoneChange(OLD, NEW), 'changed')
+  t.is(phoneChange(OLD, '2026-11-11T12:00:00.001Z'), 'changed', 'one millisecond later')
+  t.is(phoneChange(OLD, OLD), 'same')
+  t.is(phoneChange(NEW, OLD), 'unknown', 'an older answer proves nothing')
+})
+
+test('phoneChange: a missing or non-canonical date is unknown', async (t) => {
+  const { phoneChange } = await load()
+  for (const bad of [undefined, null, '', '2026-11-11T12:00:00Z', '2026-11-11', '2026-02-30T12:00:00.000Z', Date.parse(OLD), {}, ' ' + OLD.slice(1)]) {
+    t.is(phoneChange(bad, NEW), 'unknown', 'before ' + String(bad))
+    t.is(phoneChange(OLD, bad), 'unknown', 'after ' + String(bad))
+  }
+  t.is(phoneChange(), 'unknown')
+})
+
+test('phoneChangeOutcome: what Trocar o celular says after each answer', async (t) => {
+  const { phoneChangeOutcome, PHONE_CHANGED_TEXT, PHONE_SAME_TEXT, PHONE_NOT_CHANGED_TEXT, PHONE_CHANGE_UNKNOWN_TEXT } = await load()
+  t.is(PHONE_CHANGED_TEXT, 'Celular atualizado.')
+  t.is(PHONE_SAME_TEXT, 'Esse já é o seu celular.')
+  t.is(PHONE_NOT_CHANGED_TEXT, 'O número ainda não mudou. Confirme o código de novo ou peça outro.')
+  t.is(PHONE_CHANGE_UNKNOWN_TEXT, 'Não deu para saber se o número mudou. Se precisar, troque de novo.')
+  for (const via of ['check', 'recheck']) {
+    t.alike(phoneChangeOutcome({ via, before: OLD, after: NEW }), { stay: false, text: PHONE_CHANGED_TEXT }, via + ': changed')
+    t.alike(phoneChangeOutcome({ via, before: OLD, after: undefined }), { stay: false, text: PHONE_CHANGE_UNKNOWN_TEXT }, via + ': no proof')
+    t.alike(phoneChangeOutcome({ via, before: null, after: NEW }), { stay: false, text: PHONE_CHANGE_UNKNOWN_TEXT }, via + ': nothing known before')
+  }
+  // The service answers a send with 'verificado' only for the member's live
+  // number: a newer date there is a change made elsewhere, not by this send.
+  for (const [before, after] of [[OLD, OLD], [OLD, NEW], [OLD, undefined], [null, NEW]]) {
+    t.alike(phoneChangeOutcome({ via: 'send', before, after }), { stay: false, text: PHONE_SAME_TEXT }, 'the number typed is already the member\'s: ' + String(before) + ' ' + String(after))
+  }
+  t.alike(phoneChangeOutcome({ via: 'recheck', before: OLD, after: OLD }), { stay: true, text: PHONE_NOT_CHANGED_TEXT }, 'a lost check that recorded nothing keeps the screen')
+  t.alike(phoneChangeOutcome({ via: 'check', before: OLD, after: OLD }), { stay: false, text: PHONE_CHANGE_UNKNOWN_TEXT }, 'a check never records the old date: doubtful')
+  t.alike(phoneChangeOutcome(), { stay: false, text: PHONE_CHANGE_UNKNOWN_TEXT })
+  for (const text of [PHONE_CHANGED_TEXT, PHONE_SAME_TEXT, PHONE_NOT_CHANGED_TEXT, PHONE_CHANGE_UNKNOWN_TEXT]) {
+    t.absent(text.includes(String.fromCharCode(0x2014)), text)
+    t.absent(/[0-9]/.test(text), 'never a number: ' + text)
+  }
+})
+
+test('phoneChangeShown: Trocar o celular for a linked, unlocked account behind an open gate', async (t) => {
+  const { phoneChangeShown } = await load()
+  const M = 'a'.repeat(64)
+  const linked = { hosted: true, hasPasskey: true, unlocked: true, gate: 'ok', member: M }
+  t.is(phoneChangeShown(linked), true, 'a linked account sees it')
+  for (const gate of ['off', 'loading', 'needed', undefined, 'OK']) {
+    t.is(phoneChangeShown({ ...linked, gate }), false, 'gate ' + String(gate))
+  }
+  t.is(phoneChangeShown({ ...linked, unlocked: false }), false, 'locked')
+  t.is(phoneChangeShown({ ...linked, hosted: false }), false, 'not hosted (a hand-typed configuration)')
+  t.is(phoneChangeShown({ ...linked, hasPasskey: false }), false, 'no passkey account')
+  t.is(phoneChangeShown({ ...linked, member: null }), false, 'no member known')
+  for (const v of [1, 'true', null]) {
+    t.is(phoneChangeShown({ ...linked, hosted: v }), false, 'hosted ' + String(v))
+    t.is(phoneChangeShown({ ...linked, unlocked: v }), false, 'unlocked ' + String(v))
+  }
+  t.is(phoneChangeShown(), false)
+})
+
+test('Ajustes and Telefone use the pure rules for Trocar o celular', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const read = (f) => fs.readFileSync(path.join(__dirname, '../src/screens', f), 'utf8')
+  const ajustes = read('Ajustes.js')
+  t.ok(ajustes.includes('const showChangePhone = phoneChangeShown({ hosted: node.hosted === true && phoneNode.hosted === true, hasPasskey, unlocked, gate: phoneGate, member: phoneMember })'))
+  t.ok(ajustes.includes('statusDate={phoneProofDate}') && ajustes.includes('knownDate={phoneKnownDate}'))
+  t.ok(ajustes.includes("setSaved(typeof text === 'string' && text !== '' ? text : PHONE_CHANGE_UNKNOWN_TEXT)"))
+  t.absent(ajustes.includes("'Celular atualizado.'"), 'the verdict comes from Telefone')
+  const telefone = read('Telefone.js')
+  t.ok(telefone.includes('const [before] = useState(knownDate)'), 'the date before is read once, when the screen opens')
+  t.ok(telefone.includes("if (answered && statusVerified) verified(undefined, awaiting, 'recheck', statusDate)"))
+  t.ok(telefone.includes("finish(r, 'send')") && telefone.includes("finish(r, 'check')"))
+  t.ok(telefone.includes('if (mode !== \'trocar\') return onVerified(proof, key)'), 'the setup step is unchanged')
+  t.ok(telefone.includes('if (outcome.stay) setNotChanged(outcome.text)'))
+  const app = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
+  t.ok(app.includes('phoneProofDate={phone.proofDate} phoneKnownDate={phone.knownDate}'))
+})

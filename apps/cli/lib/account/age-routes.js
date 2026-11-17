@@ -7,6 +7,7 @@ const { isCanonicalIso } = require('@varanda/core/lib/cert')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { staleUnlinked, AGE_UNLINKED_TTL_MS } = require('./age-store')
 const { isAppRequest, ageReturnUrl } = require('./app-return')
+const { createStartNonces, MAX_SPENT } = require('./start-nonces')
 
 // Hosted age verification with Didit (mounted by ./server.js):
 //
@@ -37,9 +38,10 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 //     at most every 30 s), and each failure is logged once per episode. A
 //     separate route because installed apps parse the policy strictly.
 //   - start mints a single-use nonce for a member key with no proof and no
-//     directory link (the key may be a fresh passkey that is not linked yet),
-//     bounded like the other unsigned starts by its table and the global
-//     bucket.
+//     directory link (the key may be a fresh passkey that is not linked yet).
+//     The nonce is stateless (./start-nonces.js): start stores nothing, so a
+//     flood of unsigned starts cannot push out a member's unspent nonce; only
+//     the global bucket bounds it.
 //   - session and result each need the member's diary-key proof over that
 //     nonce (packages/core/lib/age.js), action-bound, the nonce spent first.
 //     session opens one paid Didit session per member and client (web or
@@ -83,8 +85,6 @@ const { isAppRequest, ageReturnUrl } = require('./app-return')
 // signature as the web does.
 
 const MAX_BODY = 4096
-const NONCE_TTL_MS = 600 * 1000
-const MAX_NONCES = 1000
 const URL_REUSE_MS = 3600 * 1000
 const SESSION_TTL_MS = 24 * 3600 * 1000
 const MAX_SESSIONS = 10000
@@ -101,7 +101,6 @@ function rawPath (req) {
   return q === -1 ? target : target.slice(0, q)
 }
 const HEX64_RE = /^[0-9a-f]{64}$/
-const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const LOG_TOKEN_RE = /^[a-z0-9_-]{1,48}$/
 // Only a 4xx from the provider (it refused the request) or our own input check
 // proves no session was created; after a timeout, a dropped connection, a 5xx
@@ -152,6 +151,8 @@ function createAgeRoutes ({
   now = Date.now,
   http,
   dailyLimit = 200,
+  // Spent start nonces kept (./server.js sizes it from its token bucket).
+  maxSpent = MAX_SPENT,
   since = null,
   issuer = null,
   ageCheck = null,
@@ -203,8 +204,7 @@ function createAgeRoutes ({
     since: fixedWindow(6000, 60 * 1000, now)
   }
 
-  // nonce -> { member, expiresAt }, single-use, the oldest evicted for room.
-  const nonces = new Map()
+  const nonces = createStartNonces({ label: 'varanda-age-start-v1', now, max: maxSpent })
   // slot -> { sessionId, url, createdAt }, the oldest evicted for room. A
   // slot is the member and the client kind (see slotOf): the return URL is
   // fixed when the session is created, so a web session is never handed to
@@ -313,7 +313,6 @@ function createAgeRoutes ({
 
   function sweep () {
     const t = now()
-    for (const [k, v] of nonces) if (v.expiresAt <= t) nonces.delete(k)
     // An abandoned session still holds images at the provider: drop it there too.
     for (const [k, v] of sessions) {
       if (t - v.createdAt >= SESSION_TTL_MS) {
@@ -323,14 +322,12 @@ function createAgeRoutes ({
     }
   }
 
-  // Spends the nonce before anything else, then checks the member, the
-  // expiry and the signature for `action`.
+  // Spends the nonce (minted for this member, live and unspent) before
+  // anything else, then checks the signature for `action`.
   function prove (body, action) {
     const member = memberParam(body.member)
-    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
-    const row = nonce === null ? undefined : nonces.get(nonce)
-    if (nonce !== null) nonces.delete(nonce)
-    if (row === undefined || row.member !== member || row.expiresAt <= now()) throw refuse('expirado')
+    const nonce = body.nonce
+    if (!nonces.spend(member, nonce)) throw refuse('expirado')
     if (!verifyAge({ action, nonce, member, association }, body.signature).ok) throw refuse('assinatura-invalida')
     return member
   }
@@ -484,10 +481,7 @@ function createAgeRoutes ({
     available()
     const member = memberParam(body.member)
     sweep()
-    while (nonces.size >= MAX_NONCES) nonces.delete(nonces.keys().next().value)
-    const nonce = nodeCrypto.randomBytes(32).toString('base64url')
-    nonces.set(nonce, { member, expiresAt: now() + NONCE_TTL_MS })
-    send(res, 200, { nonce })
+    send(res, 200, { nonce: nonces.mint(member) })
   }
 
   // A key that deleted its account (Excluir conta) never links again, so it
@@ -688,7 +682,7 @@ function createAgeRoutes ({
 
   // Sizes only, never a nonce, a session id or a URL.
   function stats () {
-    return { nonces: nonces.size, sessions: sessions.size }
+    return { nonces: nonces.size(), sessions: sessions.size }
   }
 
   return { owns, handle, required, verified, stats, sweepRecords }
