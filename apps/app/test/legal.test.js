@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 85)
+  t.is(LEGAL_VERSION, 86)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 85, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 86, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -358,9 +358,9 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
   }
 })
 
-test('legal: version 85 describes web share of a page post', async (t) => {
+test('legal: version 86 describes web share of a page post', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
-  t.ok(LEGAL_VERSION >= 85)
+  t.ok(LEGAL_VERSION >= 86)
   const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
   const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
   t.ok(terms.includes('O dono ou um administrador de uma página pode fazer o mesmo com uma publicação da página. A escolha é um registro no diário da página'), 'terms: an owner or admin shares a page post, recorded in the page diary')
@@ -376,7 +376,7 @@ test('legal: version 85 describes web share of a page post', async (t) => {
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '451d1292dae84a794c3bab94fc94ebd656a25044ae559e40c6ac0cbce4b7ba5f', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '9ab683029cb2dfe22fcca57216f6f4f85aae70dc86fa22456bbc731332eef757', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -1030,4 +1030,20 @@ test('legal: version 83 describes the automatic history copy to a new device', a
   }
   t.ok(text(PRIVACY).includes('um reserva a cópia, para que só um aparelho a faça'), 'the claim, plainly')
   t.ok(text(TERMS).includes('As fotos das Páginas não vão.'))
+})
+
+test('legal: version 84 describes Excluir conta sem a passkey and the e-mail path', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('sem nenhuma passkey e sem o código, toque em Excluir conta sem a passkey na tela de entrada: digite o seu @nome, o número de celular que você confirmou e o código que enviamos por SMS para ele. Isso só registra um pedido: nada acontece antes de você escrever para contato@varanda.app com o seu @nome. Depois que a operação confirmar o pedido com você, a exclusão fica agendada por 7 dias, como acima, contados a partir daí.'))
+  t.absent(text(TERMS).includes('para ele, e a exclusão fica agendada'), 'the code alone schedules nothing')
+  t.ok(text(PRIVACY).includes('O pedido feito em Excluir conta sem a passkey (a chave pública da conta e a data do pedido) fica guardado por até 30 dias e é apagado quando a conta é excluída.'))
+  t.ok(text(TERMS).includes('Sem celular confirmado (contas que entraram com o Google), escreva para contato@varanda.app pelo e-mail da conta; a operação confere o pedido e agenda a mesma exclusão de 7 dias.'))
+  t.absent(text(TERMS).includes('ainda não há como pedir a exclusão pelo app'), 'the old sentence is gone')
+  t.ok(text(TERMS).includes('a seu pedido (em Ajustes, pela tela de entrada ou por e-mail) ou por decisão da moderação'))
+  t.ok(text(PRIVACY).includes('O parceiro de verificação recebe o número só para enviar o código de confirmação ou de exclusão por SMS'))
+  t.ok(text(PRIVACY).includes('ou, sem a passkey, em Excluir conta sem a passkey na tela de entrada'))
+  t.ok(text(PRIVACY).includes('para você pedir a exclusão da conta sem a passkey'))
+  t.ok(text(PRIVACY).includes('Só o operador consegue ler o número, com um comando do servidor, para atender uma ordem judicial ou um pedido seu.'), 'the operator line is unchanged: the service never unseals the number')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })

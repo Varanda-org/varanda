@@ -62,10 +62,33 @@ const NODE_MISMATCH = 'chave da página não confere'
 const NODE_NO_KEY = 'sem chave da página'
 const NODE_WAITING = 'aguardando nova chave'
 
+const SIG_RE = /^[0-9a-f]{128}$/
+const isCanonicalIso = (v) => {
+  if (typeof v !== 'string') return false
+  try { return new Date(v).toISOString() === v } catch { return false }
+}
+
+// The box a core delegate signed for itself ('dm-box-read' actorBoxes,
+// docs/rpc.md 5.84) as { box, proof } for dm.pageGenerate and dm.pageShare,
+// or null. The caller asks only for a member dm.lookup found no box for: a
+// published dm-key always wins, and the node checks the signature, so the
+// service can at most replay an older statement of that same member.
+export function actorBoxOf (status, member) {
+  const list = isObject(status) && Array.isArray(status.actorBoxes) ? status.actorBoxes : []
+  if (!isKey(member)) return null
+  for (const e of list) {
+    if (!isObject(e) || e.member !== member) continue
+    if (!isKey(e.box) || !Number.isSafeInteger(e.gen) || e.gen < 1 || !isCanonicalIso(e.at) || typeof e.sig !== 'string' || !SIG_RE.test(e.sig)) return null
+    return { box: e.box, proof: { gen: e.gen, at: e.at, sig: e.sig } }
+  }
+  return null
+}
+
 // The owner first, then the admins, each once. A member whose dm-key is
-// unknown (null, missing, not a key) is left out of the shares and listed
-// in `missing` for 'Enviar chave' later.
-export function planShares ({ owner, admins, boxes } = {}) {
+// unknown (null, missing, not a key) gets the box it signed for itself in
+// `status` (a core delegate, actorBoxOf), else is left out of the shares and
+// listed in `missing` for 'Enviar chave' later.
+export function planShares ({ owner, admins, boxes, status } = {}) {
   const members = []
   for (const m of [owner, ...(Array.isArray(admins) ? admins : [])]) {
     if (isKey(m) && !members.includes(m)) members.push(m)
@@ -75,7 +98,9 @@ export function planShares ({ owner, admins, boxes } = {}) {
   const missing = []
   for (const member of members) {
     const box = Object.hasOwn(table, member) ? table[member] : null
+    const stated = isKey(box) ? null : actorBoxOf(status, member)
     if (isKey(box)) recipients.push({ member, box })
+    else if (stated !== null) recipients.push({ member, box: stated.box, proof: stated.proof })
     else missing.push(member)
   }
   return { recipients, missing }

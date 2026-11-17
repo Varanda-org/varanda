@@ -48,6 +48,7 @@ const ACTIONS = Object.freeze([
   'dm-box-read',
   'dm-legacy-read',
   'dm-legacy-done',
+  'actor-box',
   'group-seal',
   'group-rebox',
   'follow',

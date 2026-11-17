@@ -1050,15 +1050,96 @@ test('move builds dmBox for K2 after start', async (t) => {
 
 test('Enviar chave seals for the member\'s dm-key and files the share', async (t) => {
   const { pagesDmShareTo, pagesDmInviteShare, PAGE_DM_NO_BOX } = await load()
-  const calls = stub(t, flow(() => json(200, { ok: true })))
+  // A nonce, then the signed action; 'dm-box-read' names no actor box.
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { ok: true }))
   const node = dmNode({ 'dm.lookup': ({ member }) => ({ box: member === ADMIN ? BOX : null, gen: 1 }), 'dm.pageShare': () => ({ gen: 4, sealed: 'S', sig: SIG }) })
   await pagesDmShareTo(node, { member: M, page: P, to: ADMIN })
   t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: ADMIN, box: BOX })
   t.alike(body(calls[1]).op, { member: ADMIN, gen: 4, sealed: 'S', sig: SIG })
+  t.is(calls.length, 2, 'a member with a dm-key needs no box read')
   const err = await caught(t, pagesDmShareTo(node, { member: M, page: P, to: K2 }))
   t.is(err.message, PAGE_DM_NO_BOX)
+  t.is(node.calls.filter((c) => c.method === 'dm.pageShare').length, 1, 'nothing sealed without a box')
   t.alike(await pagesDmInviteShare(node, { page: P, to: ADMIN, status: { gen: 4 } }), { sealed: 'S', sig: SIG })
   t.is(await pagesDmInviteShare(node, { page: P, to: K2, status: { gen: 4 } }), null, 'no dm-key, no share')
+})
+
+const DELEGATE = '22'.repeat(32)
+const ACTOR_BOX = 'b3'.repeat(32)
+const AT = '2026-11-17T12:00:00.000Z'
+const actorBoxes = [{ member: DELEGATE, box: ACTOR_BOX, gen: 2, at: AT, sig: SIG }, { member: ADMIN, box: 'b4'.repeat(32), gen: 1, at: AT, sig: SIG }]
+const generate = ({ recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's', sig: SIG })) })
+const keyedLookup = ({ member }) => ({ box: member === M ? OWN_BOX : member === ADMIN ? BOX : null, gen: 1 })
+const sealedFor = (node) => node.calls.find((c) => c.method === 'dm.pageGenerate').params.recipients
+const boxReads = (calls) => calls.filter((c) => String(c.url).endsWith('/dm-box-read'))
+
+test('a move seals K2 for a core delegate with the box it stated on the old page', async (t) => {
+  const { pagesDmPrepare } = await load()
+  const NEW = '5e'.repeat(32)
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { gen: 3, actorBoxes }))
+  const node = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate })
+  const prep = await pagesDmPrepare(node, { member: M, page: NEW, status: { gen: 0 }, roster: { owner: M, admins: [ADMIN, DELEGATE] }, gen: 1, boxesFrom: P })
+  t.alike(sealedFor(node), [{ member: M, box: OWN_BOX }, { member: ADMIN, box: BOX }, { member: DELEGATE, box: ACTOR_BOX, proof: { gen: 2, at: AT, sig: SIG } }])
+  t.alike(prep.missing, [], 'the delegate is not left out of K2')
+  t.is(boxReads(calls).length, 1)
+  t.is(body(boxReads(calls)[0]).page, P, 'the statements come from the old page, K2 has none yet')
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  t.ok(ajustes.includes('gen: 1, boxesFrom: page })'), 'the move reads the statements of the old page')
+})
+
+test('a remove seals for the newest stated box, not the one in the screen\'s older read', async (t) => {
+  const { pagesDmPrepare } = await load()
+  const PAGE = '5f'.repeat(32)
+  const cached = { gen: 3, actorBoxes: [{ member: DELEGATE, box: 'c0'.repeat(32), gen: 1, at: AT, sig: SIG }] }
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { gen: 3, actorBoxes }))
+  const node = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate })
+  const prep = await pagesDmPrepare(node, { member: M, page: PAGE, status: cached, roster: { owner: M, admins: [DELEGATE] } })
+  t.is(prep.gen, 4, 'the gen still comes from the given status')
+  t.alike(sealedFor(node), [{ member: M, box: OWN_BOX }, { member: DELEGATE, box: ACTOR_BOX, proof: { gen: 2, at: AT, sig: SIG } }])
+  t.is(body(boxReads(calls)[0]).page, PAGE)
+
+  calls.length = 0
+  const keyed = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate })
+  await pagesDmPrepare(keyed, { member: M, page: PAGE, status: cached, roster: { owner: M, admins: [ADMIN] } })
+  t.is(calls.length, 0, 'every member has a dm-key: no extra read')
+})
+
+test('a failed fresh read keeps the given statements, and Enviar chave answers no box', async (t) => {
+  const { pagesDmPrepare, pagesDmShareTo, PAGE_DM_NO_BOX } = await load()
+  const cached = { gen: 3, actorBoxes }
+  const calls = stub(t, () => new Error('offline'))
+  const node = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate, 'dm.pageShare': () => ({ gen: 3, sealed: 'S', sig: SIG }) })
+  await pagesDmPrepare(node, { member: M, page: '6e'.repeat(32), status: cached, roster: { owner: M, admins: [DELEGATE] } })
+  t.ok(calls.length >= 1, 'the fresh read was tried')
+  t.alike(sealedFor(node), [{ member: M, box: OWN_BOX }, { member: DELEGATE, box: ACTOR_BOX, proof: { gen: 2, at: AT, sig: SIG } }])
+
+  const err = await caught(t, pagesDmShareTo(node, { member: M, page: P, to: DELEGATE }))
+  t.is(err.message, PAGE_DM_NO_BOX, 'a failed read is no statement, not its own error')
+  t.absent(node.calls.some((c) => c.method === 'dm.pageShare'), 'nothing sealed')
+})
+
+test('a core delegate without a dm-key gets its signed box with the proof, never one that has a dm-key', async (t) => {
+  const { pagesDmShareTo, pagesDmPrepare } = await load()
+  const proof = { gen: 2, at: AT, sig: SIG }
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, url.endsWith('/dm-box-read') ? { gen: 4, actorBoxes } : { ok: true }))
+  const lookup = ({ member }) => ({ box: member === ADMIN || member === M ? (member === M ? OWN_BOX : BOX) : null, gen: 1 })
+  const node = dmNode({ 'dm.lookup': lookup, 'dm.pageShare': () => ({ gen: 4, sealed: 'S', sig: SIG }) })
+  await pagesDmShareTo(node, { member: M, page: P, to: DELEGATE })
+  t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: DELEGATE, box: ACTOR_BOX, proof })
+  t.ok(calls[1].url.endsWith('/dm-box-read'), 'the box comes from a fresh read')
+  t.alike(body(calls[3]).op, { member: DELEGATE, gen: 4, sealed: 'S', sig: SIG })
+  node.calls.length = 0
+  await pagesDmShareTo(node, { member: M, page: P, to: ADMIN })
+  t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: ADMIN, box: BOX }, 'the dm-key wins over a stated box')
+
+  const prepNode = dmNode({ 'dm.enable': { box: OWN_BOX, gen: 1, seq: null }, 'dm.lookup': lookup, 'dm.pageGenerate': generate })
+  const prep = await pagesDmPrepare(prepNode, { member: M, page: P, status: { gen: 0, actorBoxes }, roster: { owner: M, admins: [ADMIN, DELEGATE, K2] } })
+  t.alike(prepNode.calls.find((c) => c.method === 'dm.pageGenerate').params.recipients, [
+    { member: M, box: OWN_BOX },
+    { member: ADMIN, box: BOX },
+    { member: DELEGATE, box: ACTOR_BOX, proof }
+  ])
+  t.alike(prep.missing, [K2], 'no box and no statement: left for Enviar chave')
 })
 
 test('a core node with an https account origin sends every page request there', async (t) => {

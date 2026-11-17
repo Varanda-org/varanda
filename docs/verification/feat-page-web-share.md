@@ -7,7 +7,7 @@
 - `packages/core/lib/page-proof.js`, `packages/rpc/lib/methods.js`, `apps/app/src/pages.js`: as duas ações nas listas fixas.
 - `apps/app/src/pageShare.js` (novo), `postShareCompose.js`, `screens/Publicar.js`, `ui/PostShareSheet.js`, `App.js`, `screens/ARua.js`, `screens/Conversa.js`: a caixa no Publicar como Página (uma só ação `post-share` depois da publicação, nunca reenviada) e a folha "Página pública na web" em modo Página nas publicações da própria Página.
 - `docs/protocol.md` (seções 2, 12 e 16), `docs/rpc.md` (5.84), `docs/app.md`.
-- `apps/app/src/legal.js`, `packages/core/lib/terms.js`: Termos e Política versão 85, com novo aceite.
+- `apps/app/src/legal.js`, `packages/core/lib/terms.js`: Termos e Política versão 86, com novo aceite.
 
 ## Como verificar
 

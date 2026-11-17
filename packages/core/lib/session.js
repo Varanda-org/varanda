@@ -868,6 +868,8 @@ function createSession ({
     'dm.pageLegacyChunk': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageLegacyBlocks': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageForget': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    // A later change signs the delegate's box here (docs/rpc.md 5.161).
+    'dm.actorBox': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'group.seal': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // Like report.sign (docs/rpc.md 5.20).
     'dm.reportSign': serial(async () => {
