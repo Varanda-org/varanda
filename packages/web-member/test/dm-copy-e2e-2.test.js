@@ -1,30 +1,38 @@
 'use strict'
 
-// More of the history copy (docs/protocol.md section 11, docs/rpc.md 5.156),
-// over the real Seeder and real browser nodes, as dm-copy-e2e.test.js:
-// the maker's side (a held Página with no rows, no copy allowance, a retry)
-// and the importing side (shown time, one import at a time, replays, seen
-// marks). Local DHT and tmp dirs only.
+// More of the history copy (docs/protocol.md section 11), over the real
+// Seeder and real browser nodes, as dm-copy-e2e.test.js: the maker's side (a
+// held Página with no rows, no copy allowance) and the importing side (shown
+// time, one import at a time, replays, seen marks). A retry that holds its
+// stamps is in dm-copy-unit-2.test.js. Local DHT and tmp dirs only.
 
 const test = require('brittle')
 const { testnet, until } = require('./helpers/net')
 const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const store = require('../lib/node-store')
-const { errorOf } = require('./helpers/session')
 const { hex, seederHost, memberNode, png } = require('./helpers/dm-e2e')
-const { BLOB, sleep, copyDiary, sweepPool, copyUsed, textsOf, adoptPage } = require('./helpers/dm-copy')
+const { BLOB, sleep, copyDiary, sweepPool, textsOf, adoptPage } = require('./helpers/dm-copy')
+const { account, sibling, ownDrops, copiesOf, kick, idle } = require('./helpers/dm-auto')
 
 const imports = (n) => n.web.events.filter((e) => e.name === 'dm.copyImported')
 
+// The old device A of a new account and its newer device A2 (which knows
+// its own device id, as the session tells the engine).
+async function devicesOf (t, assoc, host, blob) {
+  const acct = await account(t, assoc, host, { old: 1, fresh: 1, blob })
+  const A2 = await sibling(t, assoc, host, acct, acct.fresh[0], { blob })
+  t.is((await A2.web.request('device.list')).self, acct.fresh[0], 'A2 knows its device id')
+  return { acct, A: acct.first, A2 }
+}
+
 test('an empty held Página does not end the copy; without the copy allowance the photos stay out; imported rows show their real time', async (t) => {
-  t.timeout(110000)
+  t.timeout(200000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
   const assoc = { kp, hex: hex(kp.publicKey) }
   const host = await seederHost(t, bootstrap, assoc, { blob: true })
-  const A = await memberNode(t, assoc, host, { blob: BLOB })
+  const { acct, A, A2 } = await devicesOf(t, assoc, host, BLOB)
   const P = await memberNode(t, assoc, host, { blob: BLOB })
-  const A2 = await memberNode(t, assoc, host, { keyPair: A.keyPair, prf: A.prf, enable: false, blob: BLOB })
   await copyDiary(A, P)
   await copyDiary(P, A)
 
@@ -41,20 +49,20 @@ test('an empty held Página does not end the copy; without the copy allowance th
   await P.web.request('dm.send', { to: A.key, text: 'resposta' })
   await A.web.request('dm.pull')
   await sweepPool(host)
-  // The seeder cannot sign a copy stamp: what an older seeder, a failed link
-  // or any copy-stamp failure looks like to the maker.
+  // The weekly copy allowance is spent: the seeder answers 'teto' to every
+  // copy stamp, so the text goes on the daily wallet and the photo stage
+  // ends at once. (A copy-stamp failure that is not 'teto' fails the kick
+  // instead and is tried again: dm-copy-auto.test.js.)
   const seeder = host.current
   const take = seeder._takeStamp.bind(seeder)
   seeder._takeStamp = (diary, day, kind) => {
-    if (kind === 'copy') throw new Error('sem selo de cópia')
+    if (kind === 'copy') return false
     return take(diary, day, kind)
   }
 
-  const made = await A.web.request('dm.historyCopy')
-  t.is(made.messages, 3, 'every message text travels')
-  t.is(made.photos, 0, 'no photo: the copy allowance cannot be used')
-  t.is(made.leftOut, 1, 'the photo is counted as left out')
-  t.is(made.notCached, 0)
+  await kick(A)
+  await idle(t, A)
+  t.is(copiesOf(await ownDrops(t, host, acct)).length, 1, 'the text went, and no photo batch: the copy allowance cannot be used')
 
   await A2.web.request('dm.pull')
   await until(() => imports(A2).length > 0, { name: 'copyImported', timeoutMs: 60000 })
@@ -73,16 +81,14 @@ test('an empty held Página does not end the copy; without the copy allowance th
   t.is(byText(thread, 'resposta').at, byText(onA, 'resposta').at, 'a received message too')
 })
 
-test('one import at a time, replays file nothing, seen marks go in front, and a retry spends no second stamp', async (t) => {
-  t.timeout(110000)
+test('one import at a time, replays file nothing, and seen marks go in front', async (t) => {
+  t.timeout(200000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
   const assoc = { kp, hex: hex(kp.publicKey) }
   const host = await seederHost(t, bootstrap, assoc, { blob: true })
-  let off = false
-  const A = await memberNode(t, assoc, host, { blob: BLOB, offline: () => off })
+  const { A, A2 } = await devicesOf(t, assoc, host, BLOB)
   const P = await memberNode(t, assoc, host, { blob: BLOB })
-  const A2 = await memberNode(t, assoc, host, { keyPair: A.keyPair, prf: A.prf, enable: false, blob: BLOB })
   await copyDiary(A, P)
   await copyDiary(P, A)
 
@@ -98,8 +104,8 @@ test('one import at a time, replays file nothing, seen marks go in front, and a 
   const own = ['a', 'b', 'c'].map((c) => c.repeat(32))
   await store.writeDmSeen(A2.storage, own)
 
-  const made = await A.web.request('dm.historyCopy')
-  t.is(made.messages, 3)
+  await kick(A)
+  await idle(t, A)
 
   // Two pulls overlap while the seeder answers slowly: one job imports.
   host.blobDelayMs = 300
@@ -130,21 +136,4 @@ test('one import at a time, replays file nothing, seen marks go in front, and a 
   t.is(imports(A2).length, 1, 'no second notice')
   t.alike(textsOf(await A2.web.request('dm.thread', { peer: P.key })), ['dois', 'tres', 'um'], 'no duplicate')
   t.is((await store.readDmSeen(A2.storage)).length, 4, 'no seen mark twice')
-
-  // A retry in the same unlock after the pointer failed: the same frames, no
-  // second copy stamp.
-  const put = A.storage.writeJson.bind(A.storage)
-  A.storage.writeJson = async (key, value) => {
-    const r = await put(key, value)
-    if (key === 'dmCopy') off = true
-    return r
-  }
-  const first = await errorOf(A.web.request('dm.historyCopy'))
-  t.ok(first && first.message, 'the first attempt failed at the pointer')
-  const spent = copyUsed(host)
-  off = false
-  A.storage.writeJson = put
-  const second = await A.web.request('dm.historyCopy')
-  t.is(second.messages, 3, 'the retry finished')
-  t.is(copyUsed(host), spent, 'and bought no copy stamp')
 })

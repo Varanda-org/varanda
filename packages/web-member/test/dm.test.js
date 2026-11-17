@@ -2795,3 +2795,29 @@ test('a failing compaction is a warning: dm.set and the pull still succeed', asy
   t.ok(s.logs.some((l) => l.startsWith('aviso: limpeza local')), 'warned')
   t.alike(await localBlocks(s.storage), [true, true], 'nothing was freed')
 })
+
+test('a pull that fails after a complete one leaves the automatic copy waiting', async (t) => {
+  const s = await sendingEngine(t, { stamps: 4, options: { mediaOrigin: 'http://127.0.0.1:9' } })
+  // A message held here: something to copy to another device.
+  await s.send()
+  let pageFails = false
+  s.link.page = async () => {
+    if (pageFails) throw new Error('link cut')
+    return { items: [], next: null }
+  }
+  const claimPuts = () => s.calls.filter(([name]) => name === 'put').length
+  const view = { self: 'a'.repeat(64), off: false, targets: ['d'.repeat(64)] }
+  t.is((await s.engine.pull(s.own)).incomplete, false, 'a complete pull')
+  pageFails = true
+  await t.exception(s.engine.pull(s.own), 'then one that fails')
+  const puts = claimPuts()
+  await s.engine.autoCopy(s.own, s.kp, view)
+  t.is(claimPuts(), puts, 'no claim put')
+  t.is(await store.readDmAutoCopy(s.storage), null, 'and no job')
+
+  // The same view after a complete pull does claim: the wait was the pull's.
+  pageFails = false
+  await s.engine.pull(s.own)
+  await s.engine.autoCopy(s.own, s.kp, view)
+  t.is(claimPuts(), puts + 1, 'a claim put after a complete pull')
+})

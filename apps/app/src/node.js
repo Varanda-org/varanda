@@ -786,9 +786,9 @@ function LiveNodeProvider ({ children }) {
       setDmVersion((n) => n + 1)
       return
     }
-    // History copy: progress on the device that copies, a notice on the one
-    // that receives (src/historyCopy.js). Neither is a sync line.
-    if (name === 'dm.copyProgress' || name === 'dm.copyImported') {
+    // A history copy from another device was filed here: the notice
+    // (src/historyCopy.js), not a sync line.
+    if (name === 'dm.copyImported') {
       copyStore.apply(name, data)
       return
     }
