@@ -1616,7 +1616,8 @@ class Seeder {
     // Seeder Noise key (hex) -> the one connection of that seeder whose slot
     // is protected (_slotProtected).
     this._slotSeeders = new Map()
-    // Slot data of the live local external streams, oldest first; the oldest
+    // Slot data of the local external streams that hold a slot, oldest
+    // first (a displaced one leaves at once, in _displace); the oldest
     // within the local share are protected (_localInShare).
     this._localStreams = new Set()
     // Seeder-wide budget of the bytes declared by charged (large,
@@ -8669,6 +8670,9 @@ class Seeder {
     if (victim === null || victim.data === null) return
     const { socket, onRefuse } = victim.data
     victim.data.displaced = true
+    // Its socket may stay open for the grace below; it no longer holds a
+    // slot, so it must not hold a place in the local share either.
+    this._localStreams.delete(victim.data)
     this.log({ event: 'peer-dropped', peerKey: remoteKeyHex(socket), reason: 'connection-displaced' })
     if (typeof onRefuse === 'function') {
       let handed = true
@@ -8688,7 +8692,8 @@ class Seeder {
   }
 
   // Whether a slot entry may not be displaced: an external stream from this
-  // host within its share (acceptStream's `local`), a swarm connection of a seeder whose
+  // host within its share (acceptStream's `local`; one outside it is not
+  // protected, not even by a proof), a swarm connection of a seeder whose
   // certificate checked out at hello (one per seeder key), or a member that
   // proved it owns a diary this seeder serves, has gated and does not block
   // or hold. Evaluated when a full table looks for a victim, so a diary
@@ -8752,8 +8757,10 @@ class Seeder {
   // local (optional): true when the caller knows the client runs on this
   // host (seed-ws: a loopback connection that did not come through the
   // proxy, such as the account service's links); its slot is never
-  // displaced while it is among the oldest live local streams within a
-  // quarter of maxExternal (at least 1); any other is an ordinary entry.
+  // displaced while it is among the oldest local streams that hold a slot,
+  // within a quarter of maxExternal (at least 1); any other local stream is
+  // an unprotected entry of its address, even when its peer sends a valid
+  // `prove`.
   acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null, address = null, local = false } = {}) {
     rawStream.on('error', noop)
     if (!this._accepting || this._closing) {
