@@ -177,3 +177,82 @@ test('a creator back after its confirmed leave takes a group off the catalogue; 
   t.ok(info.groups.some((g) => g.group === geral), 'Geral stays')
   await rejects(t, member.communityRemoveGroup(a, { community, group: horta }), 'nada a alterar')
 })
+
+// Every core `from` holds, copied into `to` block by block, only the blocks
+// `from` holds: a block it cleared never reaches `to`.
+async function copyHeld (from, to) {
+  const a = await store.openStore(from.dataDir)
+  const b = await store.openStore(to.dataDir)
+  let left
+  let right
+  try {
+    const copies = []
+    for await (const dk of a.list()) {
+      const source = a.get({ discoveryKey: dk, writable: false })
+      await source.ready()
+      const target = b.get({ key: source.key, writable: false })
+      await target.ready()
+      copies.push({ source, target })
+    }
+    left = a.replicate(true)
+    right = b.replicate(false)
+    left.pipe(right).pipe(left)
+    for (const { source, target } of copies) {
+      for (let seq = 0; seq < source.length; seq++) {
+        if (await source.has(seq)) await target.get(seq, { raw: true, timeout: 10000 })
+      }
+    }
+  } finally {
+    if (left) left.destroy()
+    if (right) right.destroy()
+    await b.close()
+    await a.close()
+  }
+}
+
+async function holds (ctx, key, seq) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = s.get({ key: Buffer.from(key, 'hex'), writable: false })
+    await core.ready()
+    return await core.has(seq)
+  } finally {
+    await s.close()
+  }
+}
+
+// The root cut of group `group` as the fold of `ctx` computes it (null: the
+// root keeps its authority).
+async function rootCutOf (ctx, group) {
+  const real = groupLib.buildGroup
+  let cut
+  groupLib.buildGroup = (input, ...rest) => {
+    const view = real(input, ...rest)
+    if (input && input.root && input.root.key === group) cut = view.rootCut
+    return view
+  }
+  try {
+    await member.groupInfo(ctx, { group })
+  } finally {
+    groupLib.buildGroup = real
+  }
+  return cut
+}
+
+test('a deleted post of the creator diary that one replica read and another never did leaves both with the same G root', async (t) => {
+  const { a, others: [b, c], community } = await world(t)
+  const { group: horta } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  const { seq } = await member.postCreate(a, { text: 'apagado' })
+  await sync(a, c)
+  await member.postDelete(a, { to: { author: a.key, seq } })
+  t.alike(await member.communityLeave(a, { community }), { state: 'left' })
+  await copyHeld(a, b)
+  await copyHeld(a, c)
+  t.absent(await holds(b, a.key, seq), 'fixture: B never read the deleted post')
+  t.ok(await holds(b, a.key, seq + 1), 'fixture: B holds its tombstone')
+  t.ok(await holds(c, a.key, seq), 'fixture: C read the deleted post')
+  const cb = await rootCutOf(b, horta)
+  const cc = await rootCutOf(c, horta)
+  t.ok(Number.isSafeInteger(cc) && cc > 0, 'C reads the mark the leave wrote')
+  t.is(cb, cc, 'B reaches the same root cut')
+})
