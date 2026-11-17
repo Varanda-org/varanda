@@ -5,6 +5,11 @@
 // removes administrators, offers the page to another member (and cancels the
 // offer) and renames the @nome (7 days between renames). People are found by
 // @nome (lookupUsername) and shown by name, never by key.
+// An admin whose account was deleted (Excluir conta, /account/status) is
+// marked 'Conta excluída' in Pessoas; nothing is removed for the owner, who
+// still removes that admin with Remover. Each admin is asked once per screen
+// while the answer stays; a failed lookup is asked again only when the screen
+// reloads the list.
 //
 // Every change is signed by the node (pages.js) and is never resent: an
 // uncertain answer only shows the 'incerto' sentence and the page is read
@@ -35,7 +40,7 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { useRowPeeks } from '../useRowPeeks'
 import { whoLabel, whoOf } from '../who'
-import { formatNextChange, isUsername, lookupUsername } from '../account'
+import { accountStatus, formatNextChange, isUsername, lookupUsername } from '../account'
 import { countChars } from '../format'
 import { pickImage } from '../media/attach'
 import { openImage } from '../media/avatarEncode'
@@ -51,7 +56,7 @@ import { keptProfile } from '../namesCache'
 import { usePageMember } from './Paginas'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
-import { MAX_ADMINS, cancelOfferOp, closeOp, inviteOp, moveOp, offerOp, peopleKeys, removeOp, rosterRows } from '../pageRoster'
+import { MAX_ADMINS, cancelOfferOp, closeOp, deletedAdmins, inviteOp, moveOp, offerOp, peopleKeys, removeOp, rosterRows } from '../pageRoster'
 import { pagesOn } from '../pageGate'
 import * as actingAs from '../actingAs'
 import { Btn, ConfirmStack, ErrorText, Field, Notice, Page, Row, SectionHeader, Soft, errorText, useAction, useNow } from '../ui'
@@ -71,6 +76,7 @@ const NOT_ADMIN = 'Você não administra esta página.'
 const NAME_RULE = '@nome inválido: de 3 a 20 letras minúsculas, números ou _, começando por letra'
 const RENAME_RULE = 'Depois de trocar, você só poderá mudar de novo daqui a 7 dias.'
 const ALREADY_ADMIN = 'Essa pessoa já participa da página.'
+const ACCOUNT_DELETED = 'Conta excluída'
 const OFFER_TTL_MS = 7 * 24 * 3600 * 1000 - 60 * 1000
 const PHOTO_SOFT = 'A foto da página é pública. Ela é recortada em quadrado e enviada sem dados de localização.'
 const TRANSFER_SOFT = 'Quem aceitar passa a ser a dona ou o dono. Você continua como administrador. A oferta vale por 7 dias.'
@@ -161,7 +167,8 @@ async function readPeekedProfile (node, page) {
 
 // The roster is other members, and this screen knows neither the own key
 // nor the follows: their photos are never kept on disk.
-function PersonRow ({ personKey, profile, role, children }) {
+// `note`: a fixed line under the name ('Conta excluída'), never peer text.
+function PersonRow ({ personKey, profile, role, note, children }) {
   const styles = useStyles(makeStyles)
   const who = whoOf(profile)
   const title = displayText(who.title)
@@ -171,6 +178,7 @@ function PersonRow ({ personKey, profile, role, children }) {
       <View style={styles.who}>
         <Text style={styles.name} numberOfLines={1}>{title}</Text>
         <Text style={styles.meta} numberOfLines={1}>{who.subtitle ? displayText(who.subtitle) + ' · ' + role : role}</Text>
+        {note ? <Text style={styles.meta}>{note}</Text> : null}
       </View>
       {children}
     </View>
@@ -217,6 +225,8 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   const reboxAct = useAction()
   const [reboxHold, setReboxHold] = useState(null) // the uncertain 'group-rebox': err.retry() resends it
   const [reboxGroups, setReboxGroups] = useState([]) // [{ group, name, text }] of the last answer
+  const [accountAnswers, setAccountAnswers] = useState({}) // admin key -> /account/status answer
+  const askedRef = useRef(new Set()) // admin keys already asked on this screen
   const seqRef = useRef(0)
   const aliveRef = useRef(true)
   const baseRef = useRef(null)
@@ -225,6 +235,23 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     baseRef.current = next
     setBase(next)
   }
+
+  // Whether an admin deleted the account (Excluir conta): each admin key is
+  // asked once per screen while its answer stays, never polled. A failed
+  // lookup (timeout, 429) leaves no answer and so no flag, is never shown and
+  // never blocks Remover; it is asked again only when the screen reloads the
+  // list (Tentar de novo, or the load after an action). `hosted` already says
+  // the account service is reachable (pagesOn).
+  const askAccounts = useCallback((value) => {
+    const origin = pagesOrigin(node)
+    for (const key of rosterRows(value).admins) {
+      if (askedRef.current.has(key)) continue
+      askedRef.current.add(key)
+      accountStatus(key, { origin }).then((answer) => {
+        if (aliveRef.current) setAccountAnswers((prev) => ({ ...prev, [key]: answer }))
+      }, () => { askedRef.current.delete(key) })
+    }
+  }, [node])
 
   const load = useCallback(async () => {
     if (!hosted || member === null || !KEY_RE.test(page)) return
@@ -257,10 +284,11 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
       setStatus(st)
       setDmStatus(box)
       resolveMany(peopleKeys(value, page, st))
+      if (value.isOwner === true || value.isAdmin === true) askAccounts(value)
     } catch (err) {
       if (seq === seqRef.current) setLoadError(errorText(err))
     }
-  }, [hosted, member, page, node, resolveMany])
+  }, [hosted, member, page, node, resolveMany, askAccounts])
 
   useEffect(() => { load() }, [load])
   useEffect(() => () => { aliveRef.current = false; seqRef.current += 1 }, [])
@@ -427,6 +455,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
 
   const roster = rosterRows(read)
   const rosterKnown = !!read && read.complete === true
+  const deleted = deletedAdmins(roster.rows, accountAnswers)
   const isOwner = !!read && read.isOwner === true
   const isAdmin = !!read && (read.isAdmin === true || isOwner)
 
@@ -776,7 +805,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
             </>
             )}
         {roster.rows.map((r) => (
-          <PersonRow key={r.key} personKey={r.key} profile={profileOf(r.key)} role={r.role === 'owner' ? 'Dono' : 'Administrador'}>
+          <PersonRow key={r.key} personKey={r.key} profile={profileOf(r.key)} role={r.role === 'owner' ? 'Dono' : 'Administrador'} note={deleted.has(r.key) ? ACCOUNT_DELETED : ''}>
             {isOwner && rosterKnown && r.role === 'admin'
               ? <Pill label='Remover' danger onPress={() => setConfirm({ kind: 'remove', key: r.key })} disabled={busy} />
               : null}

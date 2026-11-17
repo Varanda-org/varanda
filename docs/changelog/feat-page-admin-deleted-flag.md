@@ -1,0 +1,3 @@
+### Adicionado
+
+- Em "Ajustes da página", seção Pessoas, um administrador que excluiu a conta aparece com "Conta excluída" na linha, abaixo de "Administrador". O app pergunta ao serviço de conta (`GET /account/status`) sobre cada administrador uma vez por tela, onde o serviço é alcançável; uma pergunta que falhou só volta a ser feita quando a tela recarrega a lista. Nada é removido sozinho: o dono continua removendo com "Remover", que assina a lista e a troca de chave como antes. Sem resposta, com falha ou fora do alcance do serviço, a linha fica como antes. Parte da #31. Verificação em `docs/verification/feat-page-admin-deleted-flag.md`.
