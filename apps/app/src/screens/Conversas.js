@@ -33,7 +33,7 @@ import { diaryPeekSlots } from '../engagement'
 import { readPeerEntry } from '../peerProfile'
 import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settleRefresh, refreshDepth, searchPaging } from '../inboxPaging'
 import { planRowPeeks, runRowPeeks } from '../rowPeek'
-import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, requestsRow } from '../conversas'
+import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
 import { FilterChips } from '../ui/FilterChips'
@@ -46,6 +46,7 @@ import { useStyles } from '../ui/ThemeProvider'
 import { NovaComunidade, bindingKeyOf, memberSnapshotBinding, readGroupSnapshot, sameSnapshotBinding, saveGroupSnapshot } from './Comunidades'
 import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
+import { heldOldKeys, oldPageKeys } from '../pageOldKeys'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
 
 export const PULL_EVERY_MS = 5 * 60 * 1000
@@ -63,7 +64,8 @@ const RETRY_LABEL = 'Tentar de novo'
 // The strip's short names; the spoken label keeps the full row title.
 const STRIP_PARTS = {
   requests: { label: 'Pedidos', news: ', há pedidos novos' },
-  communities: { label: 'Comunidades', news: ', há novidades' }
+  communities: { label: 'Comunidades', news: ', há novidades' },
+  'old-key': { label: 'Chave antiga', news: '' }
 }
 
 // Runs `work` over `items` with at most `limit` calls in flight.
@@ -231,6 +233,37 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
   return { ...state, load }
 }
 
+// The keys a moved Página held before, with conversations this device can
+// read (pageOldKeys.js). Only while acting as a Página; a slow answer for
+// another Página or an older version is dropped by the generation.
+function useOldKeys ({ enabled, request, pageKey, dmVersion }) {
+  const [state, setState] = useState({ page: null, keys: [] })
+  const gen = useRef(0)
+  const chains = useRef(new Map())
+  useEffect(() => {
+    const mine = ++gen.current
+    if (!enabled) {
+      setState((cur) => (cur.keys.length === 0 ? cur : { page: null, keys: [] }))
+      return
+    }
+    ;(async () => {
+      try {
+        // The verified chain does not change: only a non-empty one is kept.
+        let chain = chains.current.get(pageKey)
+        if (!chain) {
+          chain = await oldPageKeys(request, pageKey)
+          if (chain.length > 0) chains.current.set(pageKey, chain)
+        }
+        const keys = await heldOldKeys(request, chain)
+        if (mine === gen.current) setState({ page: pageKey, keys })
+      } catch {}
+    })()
+  }, [enabled, request, pageKey, dmVersion])
+  return useMemo(() => (state.page === pageKey && pageKey !== null ? state.keys : NO_KEYS), [state, pageKey])
+}
+
+const NO_KEYS = []
+
 // The inbox folder of dm.list, paged like the old Mensagens list.
 function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
   const [state, setState] = useState({ rows: [], next: null, requests: false, loaded: false, error: '' })
@@ -392,7 +425,7 @@ function matches (text, query) {
 }
 
 export function Conversas ({
-  active, onOpenGroup, onOpenCommunity, onOpenThread, onOpenCommunities, onOpenRequests, showInbox = 0, seenTick = 0,
+  active, onOpenGroup, onOpenCommunity, onOpenThread, onOpenCommunities, onOpenRequests, onOpenOldKey, showInbox = 0, seenTick = 0,
   composing = false, onComposing
 }) {
   const styles = useStyles(makeStyles)
@@ -418,6 +451,7 @@ export function Conversas ({
   // Search text reaches the inbox only while the tab is on screen: leaving it ends the paging.
   const inbox = useInbox({ ready: ready && allowed, dm, dmVersion: node.dmVersion, pageKey, needle: active ? query.trim().toLocaleLowerCase('pt-BR') : '' })
   const acting = useActing()
+  const oldKeys = useOldKeys({ enabled: ready && allowed && pageKey !== null, request: node.request, pageKey, dmVersion: node.dmVersion })
   const snapshotBinding = memberSnapshotBinding({ node, acting, pageKey })
   const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, binding: snapshotBinding })
 
@@ -544,7 +578,7 @@ export function Conversas ({
   }, [merged, paged, needle, filter, profileOf])
   // Pedidos and Comunidades follow the chip like the rows do, and step aside
   // while a search runs.
-  const pinned = useMemo(() => (needle !== '' ? [] : applyFilter([requestsRow({ requests: inbox.requests }), communitiesRow()], filter)), [needle, filter, inbox.requests])
+  const pinned = useMemo(() => (needle !== '' ? [] : applyFilter([requestsRow({ requests: inbox.requests }), ...oldKeys.map(oldKeyRow), communitiesRow()], filter)), [needle, filter, inbox.requests, oldKeys])
   // The sheet's "Conversas recentes": the loaded private conversations,
   // newest first (mergeRows order).
   const recent = useMemo(() => merged.filter((row) => row.kind === 'dm').slice(0, RECENT_MAX).map((row) => row.peer), [merged])
@@ -680,7 +714,9 @@ export function Conversas ({
                 {i > 0 ? <Text style={styles.stripSep} aria-hidden importantForAccessibility='no' accessibilityElementsHidden>·</Text> : null}
                 {item.kind === 'requests'
                   ? <StripPart kind='requests' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />
-                  : <StripPart kind='communities' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />}
+                  : item.kind === 'old-key'
+                    ? <StripPart kind='old-key' title={item.title} dot={false} onPress={() => { if (typeof onOpenOldKey === 'function') onOpenOldKey(item.page) }} />
+                    : <StripPart kind='communities' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />}
               </Fragment>
             ))}
           </View>
