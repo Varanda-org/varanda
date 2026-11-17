@@ -507,7 +507,7 @@ test('round 4, 3: playback stays held until the menu action ran', (t) => {
 test('verifier: closing the composer returns it to Publicação', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Publicar.js'), 'utf8')
   t.absent(src.includes("useEffect(() => { if (!open) setMode('post') }, [open])"), 'no reset on the close (the sliding sheet kept its mode)')
-  t.ok(src.includes("if (!momentAskedRef.current) setMode('post')") && src.indexOf('momentAskedRef.current = true') < src.indexOf("if (!momentAskedRef.current) setMode('post')"), 'each opening starts in Publicação unless a moment request came with it')
+  t.ok(src.includes("if (!momentAskedRef.current) setMode(moment.canRetry ? 'moment' : 'post')") && src.indexOf('momentAskedRef.current = true') < src.indexOf("if (!momentAskedRef.current) setMode(moment.canRetry ? 'moment' : 'post')"), 'each opening starts in Publicação unless a moment request came with it')
 })
 
 // The pure helpers of a screen file evaluated alone, as loadPrune does.
