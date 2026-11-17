@@ -40,7 +40,7 @@ import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
-  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
+  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, oldFollowSeen, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
   needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetCut, snippetOf, writeSeenNamespace
 } from '../notices'
 import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
@@ -601,6 +601,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const seenNamespaceRef = useRef(seenNamespace)
   seenNamespaceRef.current = seenNamespace
   const settleRef = useRef(null)
+  const followsSetRef = useRef(null)
   const settle = useCallback((list, mark, shown = true) => {
     // A read that began before the own key arrived settles through the
     // current namespace; one of another identity settles nothing.
@@ -628,7 +629,20 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const remote = remoteFor(remoteSeenRef.current, seenNamespace)
     const stored = new Set(seen.ids)
     const elsewhere = remote.filter((id) => !stored.has(id))
-    const fresh = list.filter((item) => typeof item.seen === 'string' && !stored.has(item.seen) && !elsewhere.includes(item.seen)).map((item) => item.seen)
+    // Old follow rows (see oldFollowSeen) are stored as seen and get no dot,
+    // also on the hidden read, where the follow set is still null. Members
+    // only. Idempotent: tokens already stored change nothing.
+    const old = new Set(randomBytes !== null && !isPageSeenNamespace(seenNamespace) ? oldFollowSeen(list, followsSetRef.current) : [])
+    if (old.size > 0) {
+      // The rows of this list and of the one on screen are protected from eviction.
+      const keep = shownListRef.current === null ? list : list.concat(shownListRef.current)
+      const { ids, changed } = markSeenPadded(seen.ids, [...old].map((token) => ({ seen: token })), randomBytes, undefined, keep)
+      if (changed) {
+        seen.ids = ids
+        writeSeen(seenNamespace, ids, ownKeyRef.current)
+      }
+    }
+    const fresh = list.filter((item) => typeof item.seen === 'string' && !stored.has(item.seen) && !elsewhere.includes(item.seen) && !old.has(item.seen)).map((item) => item.seen)
     if (fresh.length > 0) setUnread((u) => (fresh.every((id) => u.has(id)) ? u : new Set([...u, ...fresh])))
     if (elsewhere.length > 0) setUnread((u) => (elsewhere.some((id) => u.has(id)) ? new Set([...u].filter((id) => !elsewhere.includes(id))) : u))
     if (mark) {
@@ -949,6 +963,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // again on any follow change or another identity. A page never reads it
   // and never gets a pill.
   const { follows, load: loadFollows, mark: markFollow } = useFollowSet(request)
+  followsSetRef.current = follows
   useEffect(() => {
     if (hosted && active && pageKey === null) loadFollows()
   }, [hosted, active, pageKey, ownKey, followsVersion, loadFollows])
