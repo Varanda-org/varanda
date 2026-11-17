@@ -17,6 +17,10 @@ const { GROUP_LIMIT_DEFAULT } = require('@varanda/rpc')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
+// The core node, for the tests that compare what both nodes write.
+const coreMember = require('@varanda/core/lib/member')
+const coreStore = require('@varanda/core/lib/store')
+const coreWorld = require('../../core/test/helpers/community-member')
 
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
@@ -1956,4 +1960,69 @@ test('a pending join counts the own diary\'s slot walk: a cut frees a slot, eigh
   t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'pending' }, 'the released writer gave its slot back')
   const { walk } = await ownWalk(b, group)
   t.ok(walk.live.has((await store.readGroupWriters(b.storage))[0].key), 'the new writer is live')
+})
+
+// A ban of Bia written by the group's creator, whose fold holds two writers
+// of hers: one her diary froze at its length after a post ("antes"), a live
+// one with a post ("vivo"), and one her diary released (cut at 0). The ban's
+// cuts by role and the creator's read of her posts afterwards.
+function frozenBanOutcome (ban, { frozen, live, released }, read) {
+  const role = (w) => w === frozen ? 'frozen' : w === live ? 'live' : w === released ? 'released' : w
+  const cuts = ban.cuts.map((c) => [role(c.writer), c.seq]).sort((x, y) => x[0] < y[0] ? -1 : 1)
+  const posts = read.items.filter((i) => i.text === 'antes' || i.text === 'vivo').map((i) => [i.text, i.hidden === true]).sort()
+  return { cuts, posts }
+}
+
+async function coreFrozenBan (t) {
+  const { a, others: [b], community } = await coreWorld.world(t, { names: ['Bia'] })
+  const { group } = await coreMember.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await coreWorld.sync(a, b)
+  await coreMember.groupJoin(b, { group })
+  await coreMember.groupPost(b, { group, text: 'antes' })
+  const frozen = coreWorld.entryOf(b, group).writer
+  const cw = coreWorld.entryOf(b, community).writer
+  const live = await coreWorld.otherDevice(b, group, hex(crypto.randomBytes(16)), grp.writerHeader({ group, diary: b.key, member: cw }), [() => grp.groupPost({ text: 'vivo' })])
+  const released = await coreWorld.otherDevice(b, group, hex(crypto.randomBytes(16)), grp.writerHeader({ group, diary: b.key, member: cw }))
+  const cut = (await coreWorld.coreEntries(b, frozen)).length
+  await coreMember.withIdentity(b, async ({ diary }) => {
+    await coreStore.appendRecord(diary, groupCutRecord({ group, writer: frozen, cut }))
+    await coreStore.appendRecord(diary, groupCutRecord({ group, writer: released, cut: 0 }))
+  })
+  await coreWorld.sync(a, b)
+  await coreMember.groupBan(a, { group, member: b.key, on: true })
+  const ban = (await coreWorld.coreEntries(a, group)).pop().record
+  return frozenBanOutcome(ban, { frozen, live, released }, await coreMember.groupRead(a, { group }))
+}
+
+async function browserFrozenBan () {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  await ops.groupJoin(b.ctx, { group })
+  await ops.groupPost(b.ctx, { group, text: 'antes' })
+  const frozen = (await store.readGroupWriters(b.storage))[0].key
+  const live = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex }), grp.groupPost({ text: 'vivo' })])
+  const released = await otherDevice(b, group, [grp.writerHeader({ group, diary: b.ownHex })])
+  const cut = (await readGroupCoreEntries(b, frozen)).length
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group, writer: frozen, cut }))
+    await store.appendRecord(diary, groupCutRecord({ group, writer: released, cut: 0 }))
+  } finally {
+    await diary.close()
+  }
+  for (const key of [frozen, live, released]) await shareGroupCore(b, a, key)
+  await shareDiary(b, a)
+  await ops.groupBan(a.ctx, { group, member: b.ownHex, on: true })
+  return frozenBanOutcome(await lastRecord(a, group), { frozen, live, released }, await ops.groupRead(a.ctx, { group }))
+}
+
+test('a ban from the core node and from the browser node fold the same for a frozen writer: it is named at its cut, its post below stays (#350)', async (t) => {
+  const core = await coreFrozenBan(t)
+  const browser = await browserFrozenBan()
+  t.alike(browser.cuts, [['frozen', 2], ['live', 2]], 'the browser names the frozen writer at its cut and the live one at its length, never the released one')
+  t.alike(core.cuts, browser.cuts, 'the core node names the same writers at the same seqs')
+  t.alike(browser.posts, [['antes', false], ['vivo', false]], 'both posts written before the ban stay visible')
+  t.alike(core.posts, browser.posts, 'the core node\'s fold gives the same')
 })

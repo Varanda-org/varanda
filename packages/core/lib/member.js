@@ -2044,13 +2044,17 @@ async function makeGroupRoom (ctx, identity, group, need = 1) {
 
 // buildGroup does not list the writers it counted. A probe post asks the
 // same fold (rejoin binding and the writer cap) so a cut names only those,
-// never past the diary's own cut on a writer (#350): a frozen writer cut
-// past its local length still takes the probe, and its signed length may
-// be past the cut.
+// never past the diary's own cut on a writer (#350). A writer the diary
+// froze takes no probe once its cut is at or below its length, and is named
+// from the fold's frozen set, as the browser node does: a ban, admission or
+// demotion that left it out would cover it from seq 0. A released writer is
+// never named (countedCuts); the fold's frozen set holds it too.
 function groupCuts (loaded, member, { signed = false } = {}) {
   const accepted = new Set(probePosts(loaded).map((p) => p.writer))
+  const frozen = loaded.view.frozen instanceof Set ? loaded.view.frozen : new Set()
+  const released = loaded.view.released instanceof Set ? loaded.view.released : new Set()
   const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
-  return loaded.logs.filter((l) => accepted.has(l.key) && l.diary === member)
+  return loaded.logs.filter((l) => l.diary === member && !released.has(l.key) && (accepted.has(l.key) || (frozen.has(l.key) && loaded.view.writers.has(l.key))))
     .sort((a, b) => a.key.localeCompare(b.key))
     .slice(0, groups.MAX_GROUP_CUTS)
     .map((l) => {
