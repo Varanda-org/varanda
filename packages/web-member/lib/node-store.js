@@ -1783,6 +1783,26 @@ function clearTestimonialDecisions (storage) {
   return storage.writeJson('testimonialDecisions', null)
 }
 
+// kv deviceId = { v: 1, own: hex64, id: hex64 }: this device's id in the
+// account's `device` records (@varanda/core lib/devices.js), created by the
+// first device.hello. Bound to the own key like seenLocal: another
+// identity's id reads as absent. Identity state: reset() deletes it.
+async function readDeviceId (storage, own) {
+  const data = await readKv(storage, 'deviceId')
+  if (!isVersioned(data) || !sameOwn(data, own) || !isHex64(data.id)) return null
+  return data.id.toLowerCase()
+}
+
+function writeDeviceId (storage, own, id) {
+  if (!isHex64(own)) throw new TypeError('chave inválida')
+  if (!isHex64(id)) throw new TypeError('aparelho inválido')
+  return storage.writeJson('deviceId', { v: 1, own, id: id.toLowerCase() })
+}
+
+function clearDeviceId (storage) {
+  return storage.writeJson('deviceId', null)
+}
+
 // kv momentSeen = { v: 1, own: hex64, entries }: the momentos the member has
 // seen (@varanda/core lib/moment-seen.js), synced through the seen document.
 // Bound to the own key like testimonialDecisions: another identity's list
@@ -2367,6 +2387,9 @@ module.exports = {
   readTestimonialDecisions,
   writeTestimonialDecisions,
   clearTestimonialDecisions,
+  readDeviceId,
+  writeDeviceId,
+  clearDeviceId,
   readMomentSeen,
   writeMomentSeen,
   clearMomentSeen,

@@ -1,7 +1,7 @@
 'use strict'
 
 // Copying the conversation history to another device (docs/protocol.md
-// section 11, docs/rpc.md 5.152): the real Seeder (dm and blob pools, the
+// section 11, docs/rpc.md 5.156): the real Seeder (dm and blob pools, the
 // copy stamp kind) behind a WebSocket server and real browser nodes. Device
 // A makes the copy; device A2 of the same passkey imports it after the
 // seeder's pool lost the original drops (what a sweep does). Local DHT and

@@ -1571,7 +1571,7 @@ const SPECS = {
   'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
   'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
   // Copy the conversations (text and cached photos, the held Páginas' too) to
-  // the other devices of the same passkey (docs/rpc.md 5.152). Browser node
+  // the other devices of the same passkey (docs/rpc.md 5.156). Browser node
   // only. It puts blobs and one pointer drop, so an uncertain failure is left
   // to the user's retry; the node never repeats it by itself.
   'dm.historyCopy': { fields: none, mutating: true },
@@ -1649,6 +1649,20 @@ const SPECS = {
   // Result { refs: ['<author>:<seq>'] }, oldest first, at most MOMENT_SEEN_MAX
   // (5.150).
   'moments.seen': { fields: none },
+  // Connected devices (5.152 to 5.155). The node stores the name trimmed
+  // and NFC (1 to 40 characters, the invite card name rule) and refuses
+  // anything else; disconnect takes exactly one of `id` and `previous`.
+  'device.hello': { fields: { name: req(str(1, 200)) }, mutating: true },
+  'device.list': { fields: none },
+  'device.disconnect': {
+    fields: { id: opt(isKey), previous: opt((v) => v === true) },
+    mutating: true,
+    cross (given, value) {
+      if (hasOwn(value, 'id') === hasOwn(value, 'previous')) return 'informe id ou previous'
+      return null
+    }
+  },
+  'device.reconnect': { fields: { name: req(str(1, 200)) }, mutating: true },
   'group.meta': {
     fields: { group: req(isKey), name: opt(str(1, L.MAX_GROUP_NAME)), join: opt(isGroupJoin) },
     mutating: true,

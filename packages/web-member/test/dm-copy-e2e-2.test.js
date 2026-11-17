@@ -1,6 +1,6 @@
 'use strict'
 
-// More of the history copy (docs/protocol.md section 11, docs/rpc.md 5.152),
+// More of the history copy (docs/protocol.md section 11, docs/rpc.md 5.156),
 // over the real Seeder and real browser nodes, as dm-copy-e2e.test.js:
 // the maker's side (a held Página with no rows, no copy allowance, a retry)
 // and the importing side (shown time, one import at a time, replays, seen

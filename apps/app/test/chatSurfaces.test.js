@@ -34,7 +34,7 @@ test('inbox empty actions match the available paths and successful requests only
   t.ok(defaults.includes("actionLabel='Todas'\n      onAction={() => setFilter('todas')}"), 'unread empty clears its filter')
   t.ok(defaults.includes("secondaryLabel='Nova conversa'") && defaults.includes('onComposing(true)'), 'search and unread can start a conversation')
   t.ok(conversations.includes("else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'a pending request is not presented as empty')
-  t.ok(messages.includes("title={LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />"), 'successful empty requests do not offer retry')
+  t.ok(messages.includes("title={old !== null ? 'Nenhuma conversa da chave antiga.' : LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />"), 'successful empty requests do not offer retry')
   t.ok(messages.includes("body={LOCKED_TEXT} actionLabel='Voltar' onAction={onBack}"))
 })
 

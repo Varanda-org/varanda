@@ -638,7 +638,7 @@ test('empty chat starters only fill the draft and respect writing capability', (
       loadedAt: 1, loadError: '', canPost: true, node: { online: true, passkey: { status: { unlocked: true } } }, post: { pending: false }, pagePending: false, postHold: null, check: null, mediaHold: null, sendingMedia: false
     },
     Mensagem: {
-      loaded: true, loadError: '', folder: 'inbox', blockNote: null, blocks: new Set(), peer: 'peer', node: { online: true }, post: { pending: false }, hold: null, mediaHold: null, sendingMedia: false
+      loaded: true, loadError: '', old: null, folder: 'inbox', blockNote: null, blocks: new Set(), peer: 'peer', node: { online: true }, post: { pending: false }, hold: null, mediaHold: null, sendingMedia: false
     }
   }
   for (const [file, env] of Object.entries(cases)) {
@@ -662,6 +662,7 @@ test('empty chat starters only fill the draft and respect writing capability', (
       t.absent(src.includes('Só na versão web'))
     } else {
       t.absent(enabled({ folder: 'request' }))
+      t.absent(enabled({ old: 'a'.repeat(64) }), 'an old-key thread is read-only')
       t.absent(enabled({ blockNote: 'blocked' }))
       t.absent(enabled({ blocks: new Set(['peer']) }))
       t.absent(enabled({ hold: {} }))

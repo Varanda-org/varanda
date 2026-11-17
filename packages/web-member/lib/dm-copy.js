@@ -1,7 +1,7 @@
 'use strict'
 
 // Copying the conversation history to another device of the same identity
-// (docs/protocol.md section 11 "History copy", docs/rpc.md 5.152). The
+// (docs/protocol.md section 11 "History copy", docs/rpc.md 5.156). The
 // browser node's engine (./dm.js) wires this module in with the pieces it
 // owns; nothing here touches the network except through them.
 //
