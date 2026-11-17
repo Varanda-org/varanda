@@ -1521,3 +1521,62 @@ test('pagesList forgets, once, the keys of a page the newest list no longer show
   await flush()
   t.absent(forgot.includes(Z), 'another account origin\'s list forgets none of this one\'s pages')
 })
+
+test('pagesList sets the acting identity back to the person when the page acted as is closed, moved or no longer run; a failed or older answer changes nothing', async (t) => {
+  const { pagesList } = await load()
+  const acting = await import('../src/actingAs.js')
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const Z = '78'.repeat(32)
+  const list = (owned, admin = []) => json(200, { owned, admin, invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const node = {
+    request: async (method) => {
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'dm.pageLegacyBlocks') return { pending: [] }
+      if (method === 'dm.pageForget') return { ok: true }
+      throw new Error('unexpected ' + method)
+    }
+  }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+  t.teardown(() => acting.reset())
+
+  acting.asPage({ key: X, name: 'Casa' })
+  answers.push(list([{ page: X }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'page', 'a page still run stays')
+
+  answers.push(new Error('offline'))
+  await caught(t, pagesList(node, { member: MEM }))
+  t.is(acting.get().kind, 'page', 'a failed read changes nothing')
+
+  answers.push(list([{ page: X, closed: true }]))
+  await pagesList(node, { member: MEM })
+  await flush()
+  t.is(acting.get().kind, 'me', 'a closed page: back to the person')
+
+  acting.asPage({ key: X })
+  answers.push(list([{ page: X, closed: true, movedTo: Z }, { page: Z }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'me', 'the old key of a moved page: back to the person')
+  acting.asPage({ key: Z })
+  answers.push(list([{ page: X, closed: true, movedTo: Z }, { page: Z }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().key, Z, 'the new key stays')
+
+  answers.push(list([]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'me', 'removed as admin: back to the person')
+
+  acting.asPage({ key: Z })
+  let releaseOld
+  answers.push(new Promise((resolve) => { releaseOld = resolve }))
+  answers.push(list([{ page: Z }]))
+  const older = pagesList(node, { member: MEM })
+  await flush()
+  await pagesList(node, { member: MEM })
+  releaseOld(list([]))
+  await older
+  t.is(acting.get().kind, 'page', 'an older answer that lands later changes nothing')
+})

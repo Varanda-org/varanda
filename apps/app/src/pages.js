@@ -19,7 +19,8 @@
 import rpc from '@varanda/rpc'
 import { buildRequest, readJson, formatNextChange } from './account.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
-import { isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
+import * as actingStore from './actingAs.js'
+import { actingPageStopped, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -812,6 +813,10 @@ export async function pagesList (node, { member, also = [] } = {}) {
   const out = pagesNoLongerRun(data, { before: last ? last.run : [], also, tried: forgetTried })
   if (out === null) return data
   listRuns.set(runKey, { seq, run: out.run })
+  // The device keeps acting as a page the member stopped running (closed, moved
+  // or removed as admin elsewhere) until this answer says otherwise.
+  const acting = actingStore.get()
+  if (acting.kind === 'page' && actingPageStopped(data, acting.key)) actingStore.me()
   for (const page of out.gone) {
     forgetTried.add(page)
     pagesDmForget(node, page).then((forgot) => {

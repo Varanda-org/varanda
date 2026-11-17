@@ -22,6 +22,8 @@ import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../d
 import { pagesDm, pagesDmActivate, pagesDmAdopt, pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPeers } from '../pages'
 import { PAGE_DM_ACTIVATE_TEXT, PAGE_DM_ACTIVATE_TITLE, PAGE_DM_ASK_OWNER, PAGE_DM_CONFLICT, PAGE_DM_ROTATE_TEXT, PAGE_DM_ROTATE_TITLE, PAGE_DM_ROTATING, PAGE_DM_BLOCKS_FAILED, PAGE_KEYS_IDLE, blockPeersLine, legacyBundleOf, legacyCardLabel, pageDmState, pageKeyText, pageKeysOf, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
+import { readRetryingBusy } from '../busyRetry'
+import { diaryPeekSlots } from '../engagement'
 import { OLD_KEY_NOTE, OLD_KEY_TITLE, oldThreadClient } from '../pageOldKeys'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { ConversationRow } from '../ui/ConversationRow'
@@ -99,7 +101,10 @@ function usePageKeys (pageKey) {
     setState((s) => (s.page === pageKey && s.phase !== 'idle' ? s : { ...PAGE_KEYS_IDLE, page: pageKey, phase: 'reading' }))
     try {
       const member = await memberKeyOf(n.request, n)
-      const roster = await n.request('page.read', { key: pageKey })
+      const probe = await readRetryingBusy(() => n.request('page.read', { key: pageKey }), { slots: diaryPeekSlots, alive: () => g === gen.current })
+      // Peek slots still taken: not a failure, the next re-read trigger asks again.
+      if (probe.busy) return
+      const roster = probe.value
       const status = await pagesDmBoxRead(n, { member, page: pageKey })
       const owner = !!roster && roster.isOwner === true
       const kind = pageDmState(status, { owner })
