@@ -17,15 +17,15 @@ const { spawnSync } = require('node:child_process')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert, createModeratorCert } = require('@varanda/core/lib/cert')
-const { createSnapshot } = require('@varanda/core/lib/blocklist')
+const { createSnapshot, MAX_BLOCKED, MAX_SNAPSHOT_BYTES } = require('@varanda/core/lib/blocklist')
 const { signReport, signListingReport } = require('@varanda/core/lib/report')
 const { signAppeal } = require('@varanda/core/lib/appeal')
-const { signModRequest, canonicalBody } = require('@varanda/core/lib/mod-request')
+const { signModRequest, canonicalBody, MAX_CHANGE_IDS } = require('@varanda/core/lib/mod-request')
 const { createGoogle } = require('../lib/account/google')
 const { openAccountStore } = require('../lib/account/store')
 const { openModerationStore } = require('../lib/account/moderation-store')
-const { createAccountServer, COOKIE } = require('../lib/account/server')
-const { SESSION_COOKIE, LOGIN_COOKIE, PANEL_CSP, parseModEmails } = require('../lib/account/mod-routes')
+const { createAccountServer, COOKIE, BODY_READ_MS, HEADERS_TIMEOUT_MS, REQUEST_TIMEOUT_MS } = require('../lib/account/server')
+const { SESSION_COOKIE, LOGIN_COOKIE, PANEL_CSP, parseModEmails, ACK_BODY_MAX, ACK_READ_MAX_MS, ANEXO_READ_MAX_MS, LARGE_BODY_READ_MAX_MS, largeBodyDeadlineMs } = require('../lib/account/mod-routes')
 const { createGroupCheck } = require('../lib/account/group-check')
 const { tmpDir } = require('./helpers/net')
 
@@ -1211,6 +1211,112 @@ test('operator challenges: stateless, bound to moderator and op; anonymous flood
   t.is((await ack(n)).status, 403, 'a replayed signed ack')
   t.is(spent(), 1, 'only the ack is recorded: the pull\'s row was swept at its expiry')
   noLeak(t, s)
+})
+
+test('operator ack and pull carry a list of MAX_BLOCKED keys (more than the old 4096)', async (t) => {
+  // The largest snapshot plus MAX_CHANGE_IDS ids of 64 characters (67 JSON
+  // bytes each) and the signed fields fit the ack body bound.
+  t.ok(ACK_BODY_MAX >= MAX_SNAPSHOT_BYTES + MAX_CHANGE_IDS * 67 + 1024, 'ACK_BODY_MAX covers the largest ack')
+  const s = await setup(t)
+  const modKeys = keys()
+  const modCert = createModeratorCert({ moderator: modKeys.hex, date: '2026-10-01T00:00:00.000Z' }, s.iss.assoc)
+  const challenge = async (op) => (await s.api('GET', '/account/mod/api/challenge?moderator=' + modKeys.hex + '&op=' + op)).body.nonce
+  const signed = (op, nonce, data) => signModRequest({ origin: ORIGIN, association: s.iss.association, moderator: modKeys.hex, nonce, op, body: canonicalBody(op, data) }, modKeys.kp)
+  const blocked = Array.from({ length: MAX_BLOCKED }, () => b4a.toString(crypto.randomBytes(32), 'hex'))
+  const snapshot = createSnapshot({ seq: 1, blocked }, modKeys.kp, modCert)
+  const changeIds = []
+  const body = { cert: modCert, nonce: await challenge('ack'), changeIds, snapshot }
+  body.signature = signed('ack', body.nonce, { changeIds, snapshot })
+  t.ok(Buffer.byteLength(JSON.stringify(body)) > 524288, 'over the old ack bound')
+  const acked = await s.api('POST', '/account/mod/api/ack', { origin: null, body })
+  t.is(acked.status, 200, acked.text && acked.text.slice(0, 200))
+  t.alike(acked.body, { ok: true, seq: 1 })
+  t.is(s.moderation.stats().blocked, MAX_BLOCKED)
+  const nonce = await challenge('pull')
+  const pulled = await s.api('POST', '/account/mod/api/pull', { origin: null, body: { cert: modCert, nonce, signature: signed('pull', nonce) } })
+  t.is(pulled.status, 200)
+  t.is(pulled.body.published.snapshot.blocked.length, MAX_BLOCKED)
+})
+
+// An operator POST over a raw socket that sends `first` and then nothing
+// more (or ends there with `end`). -> { req, done } with done resolving to
+// { status, body, connection }, or to 'cut' when the server drops the
+// connection without an answer.
+function rawModPost (s, pathname, headers, first, { end = false } = {}) {
+  const req = http.request(s.base + pathname, { method: 'POST', headers: { 'content-type': 'application/json', ...headers } })
+  const done = new Promise((resolve) => {
+    req.on('response', (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        let body = null
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch {}
+        resolve({ status: res.statusCode, body, connection: res.headers.connection })
+      })
+      res.on('error', () => resolve({ status: res.statusCode, body: null, connection: res.headers.connection }))
+    })
+    req.on('error', () => resolve('cut'))
+  })
+  req.write(first)
+  if (end) req.end()
+  return { req, done }
+}
+
+test('operator ack: read deadline grows with the declared length, past the 10 s of other bodies', (t) => {
+  t.is(ACK_READ_MAX_MS, largeBodyDeadlineMs(ACK_BODY_MAX))
+  t.ok(ACK_READ_MAX_MS > BODY_READ_MS, 'a full ack body gets more than BODY_READ_MS: ' + ACK_READ_MAX_MS + ' ms')
+  // 1 Mbit/s: a full ack body takes about 12.6 s on the wire.
+  t.ok(ACK_READ_MAX_MS >= Math.ceil(ACK_BODY_MAX * 8 / 1000), 'covers the body at 1 Mbit/s')
+  t.ok(largeBodyDeadlineMs(ACK_BODY_MAX) > largeBodyDeadlineMs(ACK_BODY_MAX / 2), 'grows with the length')
+  t.ok(largeBodyDeadlineMs(8000) < BODY_READ_MS, 'a small body gets a short deadline')
+  t.is(LARGE_BODY_READ_MAX_MS, Math.max(ANEXO_READ_MAX_MS, ACK_READ_MAX_MS))
+  t.ok(REQUEST_TIMEOUT_MS >= HEADERS_TIMEOUT_MS + ANEXO_READ_MAX_MS, 'requestTimeout never cuts an anexo first')
+  t.ok(REQUEST_TIMEOUT_MS >= HEADERS_TIMEOUT_MS + ACK_READ_MAX_MS, 'requestTimeout never cuts an ack first')
+})
+
+test('operator ack: a body without Content-Length is refused, one past ACK_BODY_MAX answers 413 unread', async (t) => {
+  const s = await setup(t)
+  const chunked = await rawModPost(s, '/account/mod/api/ack', {}, '{"changeIds":[]}', { end: true }).done
+  t.alike(chunked, { status: 411, body: { error: 'pedido-invalido' }, connection: 'close' }, 'chunked body refused')
+  // Only the headers and one byte: the answer comes without the rest.
+  const big = rawModPost(s, '/account/mod/api/ack', { 'content-length': ACK_BODY_MAX + 1 }, '{')
+  const over = await big.done
+  big.req.destroy()
+  t.is(over.status, 413)
+  t.alike(over.body, { error: 'pedido-invalido' })
+  t.is(s.moderation.stats().blocked, 0, 'nothing acked')
+})
+
+test('operator ack: stalled anonymous ack bodies never keep a signed ack out', async (t) => {
+  const s = await setup(t)
+  const modKeys = keys()
+  const modCert = createModeratorCert({ moderator: modKeys.hex, date: '2026-10-01T00:00:00.000Z' }, s.iss.assoc)
+  // Three bodies that declared a large length and stopped after a few bytes.
+  const stalled = []
+  for (let i = 0; i < 3; i++) stalled.push(rawModPost(s, '/account/mod/api/ack', { 'content-length': 1000000 }, '{"changeIds":['))
+  t.teardown(() => { for (const x of stalled) x.req.destroy() })
+  const nonce = (await s.api('GET', '/account/mod/api/challenge?moderator=' + modKeys.hex + '&op=ack')).body.nonce
+  const snapshot = createSnapshot({ seq: 1, blocked: [s.ana.hex] }, modKeys.kp, modCert)
+  const changeIds = []
+  const signature = signModRequest({ origin: ORIGIN, association: s.iss.association, moderator: modKeys.hex, nonce, op: 'ack', body: canonicalBody('ack', { changeIds, snapshot }) }, modKeys.kp)
+  const acked = await s.api('POST', '/account/mod/api/ack', { origin: null, body: { cert: modCert, nonce, changeIds, snapshot, signature } })
+  t.is(acked.status, 200, acked.text && acked.text.slice(0, 200))
+  t.alike(acked.body, { ok: true, seq: 1 })
+  for (const x of stalled) t.ok(!x.req.destroyed, 'the stalled bodies were still open')
+})
+
+test('operator ack: a body that drips past its own deadline is cut long before 10 s', async (t) => {
+  const s = await setup(t)
+  const started = Date.now()
+  // 8000 bytes declared: a deadline of 2 s plus 64 ms. A byte every 400 ms
+  // keeps the idle cut away, so only the deadline can end it.
+  const drip = rawModPost(s, '/account/mod/api/ack', { 'content-length': 8000 }, '{')
+  const timer = setInterval(() => { if (!drip.req.destroyed) drip.req.write(' ') }, 400)
+  const end = await drip.done
+  clearInterval(timer)
+  const elapsed = Date.now() - started
+  t.ok(end === 'cut' || end.status === 408, 'cut by the server')
+  t.ok(elapsed >= 1900 && elapsed < 4500, 'at its deadline (' + elapsed + ' ms)')
 })
 
 // The login cookie with one base64url character changed in the middle (the

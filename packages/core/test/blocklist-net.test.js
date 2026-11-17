@@ -15,6 +15,7 @@ const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { attachAdmission } = require('../lib/admission')
 const {
   PROTOCOL,
+  MAX_BLOCKLIST_MESSAGE,
   MAX_RETRY_DELAY_MS,
   MESSAGE_BURST,
   MESSAGE_RATE,
@@ -573,6 +574,25 @@ test('haves carry the signature prefix of the held snapshot; remoteHave keeps it
   raw2.sendJson({ type: 'have', moderatorDate: D1, seq: 3, sig: SIG_A.toUpperCase() })
   await until(() => h2.badMessages === 1, { name: 'uppercase sig is bad' })
   t.is(h2.remoteHave, null)
+})
+
+test('a list of MAX_BLOCKED keys travels in one message (more than the old 4096)', async (t) => {
+  const bl = require('../lib/blocklist')
+  t.is(MAX_BLOCKLIST_MESSAGE, bl.MAX_SNAPSHOT_BYTES, 'same bound as MAX_SNAPSHOT_BYTES')
+  const blocked = Array.from({ length: bl.MAX_BLOCKED }, (_, i) => i.toString(16).padStart(64, '0'))
+  const big = snap(D1, 2, { blocked, revokedIssuers: [], signature: SIG_A + SIG_B + SIG_A + SIG_B })
+  const bytes = b4a.byteLength(JSON.stringify({ type: 'snapshot', snapshot: big }))
+  t.ok(bytes > 393216, 'over the old bound: ' + bytes + ' bytes')
+  t.ok(bytes <= MAX_BLOCKLIST_MESSAGE, 'under the bound')
+  const { a, b } = streams(t)
+  const sa = fakeState(big)
+  const sb = fakeState(snap(D1, 1))
+  const ha = attachBlocklist(a, { current: sa.current, offer: sa.offer })
+  const hb = attachBlocklist(b, { current: sb.current, offer: sb.offer })
+  await until(() => sb.saved.length === 1, { name: 'large snapshot persisted' })
+  t.is(sb.saved[0].blocked.length, bl.MAX_BLOCKED)
+  t.is(ha.badMessages + hb.badMessages, 0)
+  t.absent(b.destroyed)
 })
 
 test('close unpairs and settles', async (t) => {

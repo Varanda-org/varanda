@@ -9,7 +9,7 @@ const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-lin
 const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
-const { createModRoutes, ANEXO_READ_MAX_MS } = require('./mod-routes')
+const { createModRoutes, LARGE_BODY_READ_MAX_MS } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
@@ -76,12 +76,13 @@ const MAX_SOCKETS = 64
 const DEFAULT_RATE = 20
 const DEFAULT_BURST = 100
 const HEADERS_TIMEOUT_MS = 4000
-// Long enough for the largest report anexo at the slowest rate its own
-// deadline allows (mod-routes.js). Every other body is at most a few dozen
-// KB and gets BODY_READ_MS from when its route starts reading it, the
-// earlier request timeout, so only the anexo route holds a slow sender's
-// socket past HEADERS_TIMEOUT_MS + BODY_READ_MS.
-const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + ANEXO_READ_MAX_MS
+// Long enough for the largest report anexo or operator ack at the slowest
+// rate their own deadline allows (mod-routes.js LARGE_BODY_READ_MAX_MS, the
+// larger of the two maxima). Every other body is at most a few dozen KB and
+// gets BODY_READ_MS from when its route starts reading it, the earlier
+// request timeout, so only those two routes hold a slow sender's socket
+// past HEADERS_TIMEOUT_MS + BODY_READ_MS.
+const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + LARGE_BODY_READ_MAX_MS
 const BODY_READ_MS = 10000
 const CHECK_INTERVAL_MS = 1000
 const MAX_BODY = 4096
@@ -1861,6 +1862,7 @@ module.exports = {
   MAX_SOCKETS,
   DEFAULT_RATE,
   DEFAULT_BURST,
+  HEADERS_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   BODY_READ_MS,
   KEY_FILE,
