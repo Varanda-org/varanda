@@ -257,10 +257,14 @@ test('Publicar shares once after the post, never from the outbox, a poll, an eve
   const src = read('screens/Publicar.js')
   t.ok(src.includes('!sentWeb && canQueue'), 'a ticked post never falls back to the outbox')
   t.is(src.split('shareNew(').length - 1, 2, 'one share after post.create, one after an uncertain post is found')
-  for (const head of ['  const queue = async (', '  const sendPoll = async (', '  const sendEvent = async (', '  const sendAsPage = async (']) {
+  for (const head of ['  const queue = async (', '  const sendPoll = async (', '  const sendEvent = async (']) {
     const body = publicarBody(src, head)
     t.ok(body, head.trim() + ' found')
     t.absent(body && body.includes('shareNew'), head.trim() + ' never shares')
   }
+  const page = publicarBody(src, '  const sendAsPage = async (')
+  t.ok(page && !page.includes('shareNew(') && !page.includes("'post.share'"), 'a Page post never uses the person share, only shareNewAsPage')
+  const retry = page.slice(page.indexOf('await action.run(async () => {'), page.indexOf('if (pageRetryRef.current !== pending) return'))
+  t.ok(retry.includes('pending.retry()') && retry.includes('shareNewAsPage('), 'the retry branch shares inside the same action.run')
   t.absent(src.includes("'post.share'"), 'the screen never sends post.share itself')
 })

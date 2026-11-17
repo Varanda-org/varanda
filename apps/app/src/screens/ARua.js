@@ -1414,7 +1414,7 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   // The seeder's public page shows diary posts only. Chats, groups and
   // moments never come through here and are not kind 'post'; a page's diary
-  // is told apart by its profile.
+  // is told apart by its profile, and only the acting Page's own posts count.
   const actingPage = actingPageKey()
   const actingOwn = actingPage !== null && String(post.author).toLowerCase() === actingPage
   const diaryPost = post.kind === 'post' && (!(prof && prof.page === true) || actingOwn)
@@ -1423,11 +1423,10 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const postRef = diaryPost ? refOf(post) : null
   const origin = installationOrigin() || globalThis.location?.origin || null
   const link = postRef !== null ? postLink(origin, postRef) : null
-  // The member's own diary only, never the page acted as: the writer refuses
-  // a post-share for any diary but the caller's own. The original under a
-  // repost is published from its own row.
+  // The member's own diary, or the acting Page's own posts (shared through the
+  // page action): the writer refuses a person's post-share for any other
+  // diary. The original under a repost is published from its own row.
   const authorKey = String(post.author).toLowerCase()
-  // The acting Page's own posts are published through the page action (pageShare.js).
   const publishable = postRef !== null && own !== null && ((authorKey === own && authorKey !== actingPage) || actingOwn) &&
     repostedBy === null && Number.isSafeInteger(post.seq)
   // While the index is still being built a count would be misleadingly small.

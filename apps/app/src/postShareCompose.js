@@ -18,8 +18,8 @@ const PUBLISH_FALLBACK = 'Não deu para publicar na web.'
 const KEY = /^[0-9a-f]{64}$/i
 
 // Only a plain post offers the box, a Page's included (pageShare.js shares it
-// through the page action); `locked` is the composer being locked. rpc 5.121 lets a reply or a quote be
-// shared too, but that is a product choice: the public page never shows the
+// through the page action); `locked` is the composer being locked. rpc 5.121
+// lets a reply or a quote be shared too, but that is a product choice: the public page never shows the
 // parent of a reply or a quote, and polls and events render only as text
 // there, so those are shared later from the post's menu, on purpose.
 export function webShareOffered ({ enabled, online, author, locked, moment, reply, quote, poll, event } = {}) {

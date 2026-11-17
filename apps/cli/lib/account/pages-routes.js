@@ -2014,8 +2014,9 @@ function createPagesRoutes ({
     Promise.resolve().then(() => pagesDm.forget(page)).catch(() => note('conversas', 'parada-pendente'))
   }
 
-  // A tombstone, with the media ranges it releases, for every post, like,
-  // repost and profile version the page still shows.
+  // A tombstone, with the media ranges it releases, for every live record of
+  // a CLOSE_DELETES type the page still shows, its web shares included, so
+  // nothing of a closed page stays readable or on the public page.
   async function closeDeletes (page) {
     let entries
     try {

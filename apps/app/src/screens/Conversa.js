@@ -702,10 +702,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     const authorKey = String(item.author).toLowerCase()
     const postRef = diaryPost ? authorKey + ':' + item.seq : null
     const link = postRef !== null ? postLink(installationOrigin() || globalThis.location?.origin || null, postRef) : null
-    // The member's own diary only, never the page acted as: the writer refuses
-    // a post-share for any diary but the caller's own. Membro passes a repost's
-    // original with extra.repostedBy.
-    // The acting Page's own posts are published through the page action (pageShare.js).
+    // The member's own diary, or the acting Page's own posts (shared through
+    // the page action): the writer refuses a person's post-share for any other
+    // diary. Membro passes a repost's original with extra.repostedBy.
     const publishable = postRef !== null && typeof ownKey === 'string' && ((authorKey === ownKey.toLowerCase() && authorKey !== actingPage) || actingOwn) &&
       (extra.repostedBy === undefined || extra.repostedBy === null)
     return {

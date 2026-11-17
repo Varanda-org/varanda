@@ -111,10 +111,24 @@ export function pageShareOps ({ page, status, share, unshare }) {
       const seq = pageSeqOf(page, ref)
       if (seq === null) return wrong
       try {
-        return shareAnswerState(await unshare(seq), 'unpublish')
+        const raw = await unshare(seq)
+        const answer = shareAnswerState(raw, 'unpublish')
+        if (answer.state !== 'off' || raw.changed !== true) return answer
+        // More than MAX_UNSHARE live shares leave older ones live: the state
+        // comes from one fresh read, never from a repeated unshare.
+        const after = await this.read(ref)
+        return after.state === 'on' || after.state === 'off' ? after : { state: 'uncertain', shareSeq: null, message: READ_FAILED }
       } catch (err) {
         return shareErrorState(err, 'unpublish')
       }
     }
   }
+}
+
+// The acting Page's key when `target` is a ref of that Page's own post, else
+// null: the sheet then works in page mode. `acting` is { kind, key }.
+export function sharePageOf (target, acting) {
+  if (typeof target !== 'string' || acting === null || typeof acting !== 'object') return null
+  if (acting.kind !== 'page' || typeof acting.key !== 'string' || !KEY.test(acting.key)) return null
+  return pageSeqOf(acting.key, target) === null ? null : acting.key.toLowerCase()
 }

@@ -175,6 +175,8 @@ test('socialRowProps: the row cache keys on link, origin and publishable', async
   env.origin = 'https://outra.varanda.app'
   const moved = at()
   t.not(moved, back, 'a new origin builds new props')
+  env.acting = PAGE
+  t.is(at({ post: post(ME, 9), ref: ME + ':9', rowKey: ME + ':9' }).link, 'https://outra.varanda.app/p/' + ME + '/9', 'a person post keeps its link')
   reset()
 })
 

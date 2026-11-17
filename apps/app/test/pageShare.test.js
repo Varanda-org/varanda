@@ -62,7 +62,7 @@ test('pageShareOps reads status once and writes one request per call', async (t)
   let unshares = 0
   const ops = pageShareOps({
     page: PAGE,
-    status: async () => { reads++; return { shared: [3] } },
+    status: async () => { reads++; return { shared: reads > 2 ? [] : [3] } },
     share: async (seq) => { shares++; t.is(seq, 5); return { shareSeq: 9, created: true } },
     unshare: async (seq) => { unshares++; t.is(seq, 3); return { ok: true, changed: true } }
   })
@@ -99,5 +99,37 @@ test('a Page\'s own post gets the web menu and nobody else\'s does (source pins)
     t.ok(/\(!\((prof|authorProfile) && (prof|authorProfile)\.page === true\) \|\| actingOwn\)/.test(src), f + ': another page\'s post stays no diary post')
   }
   const app = read('App.js')
-  t.ok(app.includes('ops={shareOps}') && app.includes('shareTarget.slice(0, 64).toLowerCase() === acting.key'), 'App opens page mode only for the acting page\'s ref')
+  t.ok(app.includes('ops={shareOps}') && app.includes('sharePageOf(shareTarget, acting)') && app.includes('acting.kind, acting.key]'), 'App opens page mode only for the acting page\'s ref')
+})
+
+test('sharePageOf names the acting page only for its own post refs', async (t) => {
+  const { sharePageOf } = await load()
+  const acting = { kind: 'page', key: PAGE }
+  t.is(sharePageOf(PAGE + ':3', acting), PAGE)
+  t.is(sharePageOf(PAGE.toUpperCase() + ':3', acting), PAGE, 'uppercase ref')
+  t.is(sharePageOf('cd'.repeat(32) + ':3', acting), null, 'another page or a person')
+  t.is(sharePageOf(PAGE + ':3', { kind: 'member' }), null, 'acting as the member')
+  t.is(sharePageOf(null, acting), null)
+  t.is(sharePageOf(PAGE + ':3', null), null)
+  t.is(sharePageOf(PAGE + ':0', acting), null, 'bad seq')
+})
+
+test('pageShareOps unpublish re-reads status after a change and never repeats the unshare', async (t) => {
+  const { pageShareOps } = await load()
+  let unshares = 0
+  let reads = 0
+  const mk = (status) => pageShareOps({ page: PAGE, status, share: async () => ({}), unshare: async () => { unshares++; return { ok: true, changed: true } } })
+  const still = await mk(async () => { reads++; return { shared: [3] } }).unpublish(PAGE + ':3')
+  t.is(still.state, 'on', 'older shares stay live: not off')
+  const gone = await mk(async () => { reads++; return { shared: [] } }).unpublish(PAGE + ':3')
+  t.is(gone.state, 'off')
+  const lost = await mk(async () => { reads++; throw new Error('x') }).unpublish(PAGE + ':3')
+  t.is(lost.state, 'uncertain')
+  t.is(lost.message, 'Não deu para ver se esta publicação está na web.')
+  t.is(unshares, 3)
+  t.is(reads, 3)
+  let r2 = 0
+  const noop = pageShareOps({ page: PAGE, status: async () => { r2++; return { shared: [] } }, share: async () => ({}), unshare: async () => ({ ok: true, changed: false }) })
+  t.is((await noop.unpublish(PAGE + ':3')).state, 'off')
+  t.is(r2, 0, 'no read when nothing changed')
 })

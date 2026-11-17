@@ -181,7 +181,7 @@ import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './s
 import Conexao from './src/screens/Conexao'
 import ConversaScreen, { memberKeyOf, useActing } from './src/screens/Conversa'
 import { actAs, pagesPostShare, pagesPostUnshare } from './src/pages'
-import { pageShareOps } from './src/pageShare'
+import { pageShareOps, sharePageOf } from './src/pageShare'
 import CurtidasScreen from './src/screens/Curtidas'
 import CitacoesScreen from './src/screens/Citacoes'
 import Denunciar from './src/screens/Denunciar'
@@ -2760,6 +2760,8 @@ function Member () {
   const intentsRef = useRef(new Map())
   // The page notice asked from a post's "Mensagem em particular" ({ key }).
   const [pageDmAsk, setPageDmAsk] = useState(null)
+  const actingRef = useRef(null)
+  actingRef.current = acting
   // The colon ref of the own post whose "Página pública na web" sheet is open.
   const [shareTarget, setShareTarget] = useState(null)
   // What the composer says on top of that sheet after its own post.share; a
@@ -2768,15 +2770,18 @@ function Member () {
   const [shareNotice, setShareNotice] = useState('')
   const openPostShare = useCallback((ref, notice = '') => {
     setShareNotice(typeof notice === 'string' ? notice : '')
-    setShareTarget(nav.isRef(ref) ? ref : null)
-  }, [])
+    // A ref that is neither the member's own nor the acting Page's is dropped.
+    const author = typeof ref === 'string' ? ref.slice(0, 64).toLowerCase() : ''
+    const mine = author === (typeof ownKey === 'string' ? ownKey.toLowerCase() : null) || sharePageOf(ref, actingRef.current) !== null
+    setShareTarget(nav.isRef(ref) && mine ? ref : null)
+  }, [ownKey])
   // A lock, an unlock or another identity closes it: the post is the old one's.
-  useEffect(() => setShareTarget(null), [ownKey, nodeEpoch])
+  useEffect(() => setShareTarget(null), [ownKey, nodeEpoch, acting.kind, acting.key])
   // The acting Page's own post opens the sheet in page mode (pageShare.js):
   // the page's status and actions, never the person's post.* methods.
   const shareNodeRef = useRef(node)
   shareNodeRef.current = node
-  const sharePage = shareTarget !== null && acting.kind === 'page' && shareTarget.slice(0, 64).toLowerCase() === acting.key ? acting.key : null
+  const sharePage = sharePageOf(shareTarget, acting)
   const shareOps = useMemo(() => {
     if (sharePage === null) return null
     const run = async (fn) => {

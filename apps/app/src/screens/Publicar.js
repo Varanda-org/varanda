@@ -1618,12 +1618,22 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const page = asPage
     const pending = pageRetryRef.current
     if (pending !== null) {
-      const r = await action.run(() => pending.retry())
+      // Like the person path's late share after an uncertain post: one
+      // post-share for the post this tap settles, never resent, inside the
+      // same pending action so a second Send cannot slip in meanwhile.
+      let late = null
+      const r = await action.run(async () => {
+        const value = await pending.retry()
+        if (pending.web) {
+          late = await shareNewAsPage(async (o) => pagesPostShare(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page: pending.page, seq: o.seq }), pending.page, seqOf(value)).catch(() => ({ ref: null, result: null }))
+        }
+        return value
+      })
       if (pageRetryRef.current !== pending) return
       if (r.ok) {
         setPageRetry(null)
         pagePosterRef.current = null
-        published(pending.sent, pending.reply, pending.ids, pending.quote)
+        published(pending.sent, pending.reply, pending.ids, pending.quote, late !== null && mountedRef.current ? late : null)
       } else if (!r.uncertain) {
         // Refused for sure: nothing was published, the draft is free again.
         setPageRetry(null)
@@ -1805,7 +1815,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null)
     }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
-      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds })
+      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb })
     }
   }
 
