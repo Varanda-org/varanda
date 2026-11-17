@@ -1948,3 +1948,48 @@ test('deleteCancelStart/Finish and passkeyStart/Add: exact shapes', async (t) =>
     t.is(err.code, 'vinculo-antigo')
   }
 })
+
+test('passkeyStart with list and passkeyAdd with an assertion: an extra passkey\'s key', async (t) => {
+  const a = await load()
+  let calls = stub(t, json(200, { nonce: 'p'.repeat(43) }))
+  await a.passkeyStart({ member: M })
+  t.alike(JSON.parse(calls[0].init.body), { member: M }, 'the sign-up enrolment sends no list')
+  calls = stub(t, json(200, { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana' }))
+  t.alike(await a.passkeyStart({ member: M, list: true }), { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana' })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, list: true })
+  stub(t, json(200, { nonce: 'p'.repeat(43) }))
+  t.alike(await a.passkeyStart({ member: M, list: true }), { nonce: 'p'.repeat(43), passkeys: null, username: null }, 'an older service answers no list')
+  stub(t, json(200, { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana' }))
+  await t.exception(a.passkeyStart({ member: M }), /serviço indisponível/, 'a list nobody asked for is not the old shape')
+  for (const bad of [
+    { nonce: 'p'.repeat(43), passkeys: ['a+b'], username: 'ana' },
+    { nonce: 'p'.repeat(43), passkeys: new Array(9).fill('Q1JFRA'), username: 'ana' },
+    { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: '' },
+    { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'] },
+    { nonce: 'p'.repeat(43), passkeys: ['Q1JFRA'], username: 'ana', more: 1 }
+  ]) {
+    stub(t, json(200, bad))
+    await t.exception(a.passkeyStart({ member: M, list: true }), /serviço indisponível/)
+  }
+
+  const assertion = { credentialId: 'Q1JFRA', clientDataJSON: 'Yw', authenticatorData: 'YQ', signature: 'cw' }
+  calls = stub(t, json(200, { added: true }))
+  t.alike(await a.passkeyAdd({ member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'TkVX', attestationObject: 'oA', assertion, lookupId: 'cd'.repeat(32) }), { added: true })
+  t.alike(JSON.parse(calls[0].init.body), { member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'TkVX', attestationObject: 'oA', assertion, lookupId: 'cd'.repeat(32) })
+  stub(t, json(409, { error: 'limite-recuperacao' }))
+  try {
+    await a.passkeyAdd({ member: M, nonce: 'p'.repeat(43), signature: 'e'.repeat(128), credentialId: 'TkVX', attestationObject: 'oA', assertion, lookupId: 'cd'.repeat(32) })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'limite-recuperacao')
+    t.is(err.status, 409)
+  }
+  stub(t, json(429, { error: 'pedido-invalido' }))
+  try {
+    await a.passkeyStart({ member: M, list: true })
+    t.fail('resolved')
+  } catch (err) {
+    t.is(err.code, 'pedido-invalido')
+    t.is(err.status, 429, 'the status rides along, so the caller can wait instead of giving up')
+  }
+})

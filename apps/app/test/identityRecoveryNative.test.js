@@ -159,11 +159,11 @@ function assertion (credentialId, prfHex, handleHex) {
   })
 }
 
-function creation (credentialId, prfHex) {
+function creation (credentialId, prfHex, attestationObject) {
   return JSON.stringify({
     id: credentialId,
     rawId: credentialId,
-    response: {},
+    response: attestationObject === undefined ? {} : { attestationObject },
     clientExtensionResults: prfHex === null ? { prf: { enabled: true } } : { prf: { enabled: true, results: { first: b64(prfHex) } } }
   })
 }
@@ -416,6 +416,29 @@ test('add: a pending creation returns the add result from complete()', async (t)
   const out = await id.complete()
   t.alike(out, { credentialId: FRESH, userId: MARKED_ID, lookupId: '99'.repeat(32), blob: { v: 1, kind: 'passkey', under: NEW_PRF_HEX } })
   t.is(w.calls.filter((c) => c.method === 'identity.install').length, 1)
+})
+
+test('add: the creation\'s attestation object rides on the add result, direct and after concluir', async (t) => {
+  resetStubs()
+  const ATT = Buffer.from([0xa3, 1, 2, 3]).toString('base64url')
+  let pendingCreate = false
+  let getCred = ORIG
+  fakePasskey({
+    get: () => getCred === ORIG ? assertion(ORIG, ROOT_HEX, PLAIN_ID) : assertion(FRESH, NEW_PRF_HEX, MARKED_ID),
+    create: () => creation(FRESH, pendingCreate ? null : NEW_PRF_HEX, ATT)
+  })
+  const w = fakeWorklet()
+  const { id } = await makeIdentity(w)
+  await id.unlock({ any: true })
+  const out = await id.addPasskey()
+  t.is(out.attestationObject, ATT, 'for the new passkey\'s key at the account service')
+  t.is(out.credentialId, FRESH)
+  pendingCreate = true
+  t.alike(await id.addPasskey(), { pending: true })
+  getCred = FRESH
+  const done = await id.complete()
+  t.is(done.attestationObject, ATT, 'kept with the pending creation')
+  t.is((await id.status()).credentialId, ORIG, 'status names the bound passkey that vouches for it')
 })
 
 test('add while locked reports the passkey the manager stored', async (t) => {
