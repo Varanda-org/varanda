@@ -761,13 +761,16 @@ async function blockZero (core) {
 // root is such a core goes, created entries included (their roots are never
 // folded again). `emit` receives { event: 'group-skipped', key, reason:
 // 'legacy' } once per purged core or dropped group. Returns the purged keys.
-async function sweepLegacyGroups (dataDir, store, emit = () => {}) {
+// `keep` (a Set of keys, optional): header stubs, whose v1 block 0 is held
+// only so a fold never waits for them (#350), stay.
+async function sweepLegacyGroups (dataDir, store, emit = () => {}, keep = null) {
   const legacy = new Set()
   for await (const dk of store.list()) {
     const core = store.get({ discoveryKey: dk, writable: false, active: false })
     try {
       await core.ready()
-      if (legacyGroupBlock(await blockZero(core))) legacy.add(b4a.toString(core.key, 'hex'))
+      const key = b4a.toString(core.key, 'hex')
+      if ((keep === null || !keep.has(key)) && legacyGroupBlock(await blockZero(core))) legacy.add(key)
     } finally {
       await core.close()
     }
