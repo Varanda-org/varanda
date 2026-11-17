@@ -47,6 +47,9 @@ export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, dange
     <Pressable
       accessibilityRole='button'
       accessibilityState={selected === undefined ? { disabled: off } : { disabled: off, selected: selected === true }}
+      // react-native-web drops accessibilityState, so the web reads a pressed
+      // state: on a button `aria-selected` does not count.
+      aria-pressed={selected === undefined ? undefined : selected === true}
       // A worded pill is read by its label: with an icon beside it a screen
       // reader otherwise joined both (", Mensagem").
       accessibilityLabel={accessibilityLabel || (iconOnly ? undefined : label)}

@@ -4,10 +4,10 @@ Branch `fix/a11y-publicar-denunciar`. Fecha parte da #153: rótulos, papéis e e
 
 ## O que mudou
 
-- `ui/Pill.js` aceita `selected` e o anuncia em `accessibilityState`. Sem a prop, nada muda.
+- `ui/Pill.js` aceita `selected` e o anuncia em `accessibilityState` e, para a web, em `aria-pressed`. Sem a prop, nada muda.
 - `screens/Denunciar.js`: "esta publicação" e "a conta toda" deixavam o estado num `View` em volta do botão, que o leitor não lê. Agora o próprio botão carrega `selected`.
-- `screens/Publicar.js`: o grupo "Publicar como" ganha o nome, e cada opção ganha `aria-checked` (a web descarta `accessibilityState`).
-- `ui/EmojiPicker.js`: a fileira de grupos vira `tablist`, cada aba ganha `aria-selected`, e "Nenhum emoji encontrado" é uma região viva educada.
+- `screens/Publicar.js`: o grupo "Publicar como" ganha o nome, o texto visível igual a ele fica escondido do leitor, e cada opção ganha `aria-checked` (a web descarta `accessibilityState`).
+- `ui/EmojiPicker.js`: a fileira de grupos vira `tablist`, cada aba ganha `aria-selected`, e "Nenhum emoji encontrado" vai numa região viva sempre montada, fora da grade, e no iOS (sem região viva) é falado por `announceForAccessibility`.
 
 ## Como verificar
 

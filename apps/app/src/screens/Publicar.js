@@ -1858,7 +1858,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && roster.length > 0
             ? (
               <View style={styles.asRow} accessibilityRole='radiogroup' accessibilityLabel='Publicar como'>
-                <Text style={styles.asLabel}>Publicar como</Text>
+                <Text style={styles.asLabel} aria-hidden importantForAccessibility='no' accessibilityElementsHidden>Publicar como</Text>
                 <Chip label='Você' on={asPage === null} disabled={held} onPress={() => actingStore.me()} />
                 {roster.map((key) => {
                   const p = names.profileOf(key)
