@@ -9,6 +9,7 @@ const { WebSocket } = require('ws')
 const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const dm = require('@varanda/core/lib/dm')
 const postage = require('@varanda/core/lib/dm-postage')
+const { diaryKeyOfSigner } = require('@varanda/core/lib/diary-signer')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocketServer } = require('ws')
@@ -33,8 +34,8 @@ function hex (buf) {
   return b4a.toString(buf, 'hex')
 }
 
-async function stamp (seeder, keyPair) {
-  const link = await openStampLink({ seederUrl: seeder.url, createSocket, association: seeder.assoc, keyPair })
+async function stamp (seeder, keyPair, opts = {}) {
+  const link = await openStampLink({ seederUrl: seeder.url, createSocket, association: seeder.assoc, keyPair, ...opts })
   try {
     const pub = await link.key()
     const { n } = postage.parsePublicKey(pub)
@@ -78,6 +79,30 @@ test('stamp link proves the diary, issues a stamp that verifies; dm link puts an
   t.ok(opened !== null, 'the recipient opens it')
   link.close()
   for (const text of seeder.traffic) t.absent(text.includes(hex(identity.publicKey)), 'no diary key on the dm channel')
+})
+
+test('stamp link with diary: a core node\'s diary proves with v2 and the budget is the diary\'s', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  seeder.assoc = hex(assoc.publicKey)
+  const identity = crypto.keyPair()
+  const diary = hex(diaryKeyOfSigner(identity.publicKey))
+  const s = await stamp(seeder, identity, { diary })
+  t.ok(postage.verify(s.token, s.sig, s.pub), 'unblinded stamp verifies')
+  t.alike(seeder.stampProofs, [diary], 'charged to the diary key, not the signer')
+})
+
+test('stamp link refuses a diary its key pair does not sign, before connecting', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  seeder.assoc = hex(assoc.publicKey)
+  const identity = crypto.keyPair()
+  const bad = [hex(diaryKeyOfSigner(crypto.keyPair().publicKey)), hex(identity.publicKey), 'zz', hex(diaryKeyOfSigner(identity.publicKey)).toUpperCase(), 1]
+  for (const diary of bad) {
+    await t.exception.all(openStampLink({ seederUrl: seeder.url, createSocket, association: seeder.assoc, keyPair: identity, diary }), /diário inválido/)
+  }
+  t.is(seeder.stampProofs.length, 0)
 })
 
 test('a seeder of another association is refused before any proof', async (t) => {
