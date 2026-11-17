@@ -1018,7 +1018,8 @@ function foldGroupRecord (entry, i, r) {
 }
 
 // A lower cut keeps less (the quota) and a release keeps a boxless writer
-// (groupVerdict): a join refused before is tried again, once per lower cut.
+// (groupVerdict): a join refused before is tried again, once per lower cut,
+// whether the scan read the cut or fetched it late as a deleted hole.
 function foldGroupCut (entry, i, r) {
   const before = groupWalkCut(entry.groupWalks, r.group, r.writer)
   foldGroupRecord(entry, i, r)
@@ -3739,7 +3740,8 @@ class Seeder {
       if (r === null || entry.groupSeqs.has(seq)) return
       this._noteGroupKept(entry, seq)
       if (r.type !== 'group-join' && r.type !== 'group-cut') return
-      foldGroupRecord(entry, seq, r)
+      if (r.type === 'group-cut') foldGroupCut(entry, seq, r)
+      else foldGroupRecord(entry, seq, r)
       entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupWalks)
       this._reconcileGroups(key, entry)
       return
