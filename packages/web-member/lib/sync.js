@@ -34,7 +34,12 @@
 // core is replicated before the seeder's hello verified (role 'seeder' and
 // seederCertForKey on its Noise key, as lib/sync.js and ./seeder-link.js
 // do); an endpoint that fails that check is dropped. Nothing here logs or
-// returns the seeder URL.
+// returns the seeder URL. Whenever the own diary is announced on a link
+// whose verified seeder opened admission with CAP_PEER_PROOF, the link also
+// sends one `prove` (@varanda/core lib/peer-proof.js, issue #32): the diary
+// key's signature over this link's Noise public key, made by `signProof`
+// (the session's in-memory key pair). A locked identity sends none; the
+// next link proves. A `prove` received here is ignored.
 //
 // The own diary is opened read-only here (no key pair: ./node-store.js) and
 // DOWNLOADED from the verified seeder as a replica is, so a device that
@@ -342,7 +347,7 @@ const b4a = require('b4a')
 const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
-const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { attachAdmission, MAX_INVENTORY, CAP_PEER_PROOF } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
@@ -1526,6 +1531,10 @@ async function syncRun ({
   // async (key) => queues a signed follow of key (member-ops followAdd);
   // null while the session is locked, so a move is then left for later.
   followPage = null,
+  // (noiseHex, ownHex) => { key, signer, sig }: signs the own diary's
+  // `prove` (lib/peer-proof.js signPeerProof) synchronously; throws while
+  // the identity is locked. null: no link ever proves.
+  signProof = null,
   // The roots the pages this device holds the secrets of are in (docs/rpc.md
   // 5.114), kept paged like the roots the own diary binds: as replicas
   // only, never an own writer, nothing appended. At most MAX_PAGE_ROOTS.
@@ -1794,6 +1803,7 @@ async function syncRun ({
       peer: null,
       verified: false,
       hello: false, // the seeder's actual hello arrived (and verified)
+      proved: false, // this link sent its `prove` (at most one per link)
       inventoryTimedOut: false, // inventoryComplete came from the timeout
       quarantine: new Set(), // quarantine and peek cores replicating on this link
       peeks: new Map(), // key -> the shared peek core of this link ({ core, ready, refs })
@@ -1995,6 +2005,26 @@ async function syncRun ({
   function announceOwn () {
     if (cert === null || ownRefused()) return
     send({ type: 'announce', key: ownHex, cert })
+    proveOwn()
+  }
+
+  // Once per link, beside the announce, to a verified seeder that offered
+  // CAP_PEER_PROOF: the diary key signs this link's own Noise public key
+  // (what the seeder reads as remotePublicKey), so the proof holds on this
+  // connection only. A signer that throws (a locked identity) leaves the
+  // link unproven.
+  function proveOwn () {
+    const l = seederLink()
+    if (l === null || l.proved || signProof === null) return
+    if ((l.peer.remoteCaps & CAP_PEER_PROOF) === 0) return
+    let proof
+    try {
+      proof = signProof(hex(l.noise.publicKey), ownHex)
+    } catch {
+      return
+    }
+    l.proved = true
+    l.peer.send({ type: 'prove', key: proof.key, signer: proof.signer, sig: proof.sig })
   }
 
   // Keys whose advertisements matter: our own and the follows.
@@ -2074,6 +2104,8 @@ async function syncRun ({
           }
         }
         break
+      case 'prove':
+        return // only a seeder judges proofs
       default:
         break // members ignore announce
     }
@@ -3356,11 +3388,19 @@ async function syncRun ({
       }
       direct.push(key)
     }
+    // The block 0 kept for a blocked binding diary judges nothing any more
+    // (its cores are purged above) and would only name it. kv goes through
+    // the group kv chain, behind any putGroupCert queued before this sweep.
+    // Never the own diary, which groupCerts never holds.
+    for (const d of [...bindingCerts.keys()]) if (d !== ownHex && isBlockedKey(d)) bindingCerts.delete(d)
+    const certs = groupKv(() => store.dropGroupCerts(storage, (d) => d !== ownHex && isBlockedKey(d)))
+    certs.catch(noop) // awaited below, inside the sweep
     return track(serialSweep(async () => {
       for (const core of cores) await core.close()
       for (const key of direct) {
         if (await store.replicaExists(storage, key)) await store.purgeReplica(storage, key)
       }
+      await certs
     }), noop, () => {
       if (!ended) fail(['falha ao limpar diário bloqueado'])
       else log('aviso: falha ao limpar diário bloqueado')

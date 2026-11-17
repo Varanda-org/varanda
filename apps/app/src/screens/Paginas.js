@@ -18,7 +18,8 @@ import { useNames } from '../names'
 import { UNNAMED, whoOf } from '../who'
 import { fetchMember } from '../indexClient'
 import { planPeeks } from '../thread'
-import { learnPeeked, peekAll, refOf } from './Conversa'
+import { peekAll, refOf } from './Conversa'
+import { peerEntryOf } from '../peerProfile'
 import { actAs, pagesList } from '../pages'
 import { acceptOp, transferAcceptOp } from '../pageRoster'
 import { pagesCore, pagesOn } from '../pageGate'
@@ -139,7 +140,9 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
-  const { profileOf, resolveMany, learnMany } = names
+  const { profileOf, resolveMany, learnVerified, peekScope } = names
+  const scopeRef = useRef(peekScope)
+  scopeRef.current = peekScope
   const who = usePageMember(node)
   const member = who.member
   const retryMember = who.retry
@@ -156,6 +159,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
   const peekedRef = useRef(new Set())
   const peekingRef = useRef(new Set())
   const triesRef = useRef(new Map())
+  const [peekAgain, setPeekAgain] = useState(0)
 
   const load = useCallback(async () => {
     if (!hosted || member === null) return
@@ -181,7 +185,8 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     if (active) load()
   }, [active, load])
 
-  useEffect(() => () => { seqRef.current += 1 }, [])
+  const mountedRef = useRef(true)
+  useEffect(() => () => { seqRef.current += 1; mountedRef.current = false }, [])
 
   // Keys the names cache could not name (a page this device does not hold)
   // are peeked once, the way Membro opens a diary it does not hold; the
@@ -198,25 +203,41 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
       if (whoOf(p).title === UNNAMED) missing.push(key)
     }
     if (missing.length === 0) return undefined
-    let alive = true
+    // Only leaving the screen stops a peek. profileOf changes with every
+    // answer of profile.read, and a peek stopped there left its row unnamed:
+    // the next run skips a key still being peeked. learnVerified drops an
+    // answer from another identity (scope).
+    const alive = () => mountedRef.current
+    const scope = scopeRef.current
     const peek = async () => {
       for (const key of missing.slice(0, 8)) {
-        if (!alive) return
+        if (!alive()) return
+        if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue
         peekingRef.current.add(key)
+        triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
         try {
           const res = await fetchMember(key)
-          if (!alive) continue
-          triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
+          if (!alive()) continue
           if (!res.ok) continue
           const { profileSeq, usernameSeq } = res.value
           const seqs = [...new Set([profileSeq, usernameSeq].filter((n) => Number.isSafeInteger(n) && n >= 1))]
           // Nothing to peek is an answer too: asking again would say the same.
           if (seqs.length === 0) { peekedRef.current.add(key); continue }
           const peeked = new Map()
-          await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, () => alive)
-          if (!alive) continue
-          learnPeeked(learnMany, peeked)
-          if (peeked.has(key)) peekedRef.current.add(key)
+          await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, alive)
+          if (!alive()) continue
+          // Verified, not a seed: profile.read says "missing" for a page this
+          // device does not hold, and a seed would not survive that answer
+          // (after Aceitar or a list reload the row lost its name).
+          for (const [author, peek] of peeked) {
+            const entry = peerEntryOf(peek, author)
+            if (entry !== null) learnVerified([[author, entry]], scope)
+          }
+          // An answer dropped for another identity leaves the key to ask
+          // again, in a run of its own: the run of the new identity skipped
+          // it while this peek was in flight.
+          if (scope !== scopeRef.current) setPeekAgain((n) => n + 1)
+          else if (peeked.has(key)) peekedRef.current.add(key)
         } catch {
         } finally {
           peekingRef.current.delete(key)
@@ -224,8 +245,8 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
       }
     }
     peek()
-    return () => { alive = false }
-  }, [list, profileOf, learnMany, node])
+    return undefined
+  }, [list, profileOf, learnVerified, node, peekAgain])
 
   const dismiss = (id) => setDismissed((prev) => new Set(prev).add(id))
 

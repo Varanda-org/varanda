@@ -15,11 +15,15 @@
 // MAX_EXTERNAL_FRAME: a member's legitimate batches reach 8 MiB): a frame
 // declaring more is cut at its header, before the secret stream allocates
 // it, and the link then fails through the ordinary close path.
+// Right after the announce, a seeder that opened admission with
+// CAP_PEER_PROOF gets one `prove` (@varanda/core lib/peer-proof.js): the
+// diary key's signature over this link's own Noise public key.
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { attachAdmission } = require('@varanda/core/lib/admission')
+const { attachAdmission, CAP_PEER_PROOF } = require('@varanda/core/lib/admission')
+const { signPeerProof } = require('@varanda/core/lib/peer-proof')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { guardedWsStream } = require('./ws-stream')
 
@@ -61,6 +65,7 @@ function connectSeeder ({ member, socket, association, seederPublicKey = null, o
     peer: null,
     hello: null,
     verified: false,
+    proved: false,
     admitted,
     waitServed,
     close
@@ -171,7 +176,23 @@ function connectSeeder ({ member, socket, association, seederPublicKey = null, o
   async function announce () {
     const block0 = await member.block(0)
     if (block0 === null || block0.cert === null || typeof block0.cert !== 'object') throw new Error('certificado ausente no bloco 0')
-    if (link.peer) link.peer.send({ type: 'announce', key, cert: block0.cert })
+    if (link.peer) {
+      link.peer.send({ type: 'announce', key, cert: block0.cert })
+      prove()
+    }
+  }
+
+  // Once per link, to the verified seeder only, when it offered the cap.
+  function prove () {
+    if (link.proved || !link.verified || (link.peer.remoteCaps & CAP_PEER_PROOF) === 0) return
+    link.proved = true
+    let proof
+    try {
+      proof = signPeerProof({ noiseHex: hex(noise.publicKey), keyHex: key, keyPair: member.keyPair })
+    } catch {
+      return // a member without its secret key stays unproven
+    }
+    link.peer.send({ type: 'prove', key: proof.key, signer: proof.signer, sig: proof.sig })
   }
 
   // Resolves with the served length once the seeder reports (have or

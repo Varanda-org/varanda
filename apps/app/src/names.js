@@ -45,7 +45,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { isKey, PROFILE_LIMIT_MAX, USAGE } from '@varanda/rpc'
 import { useNode, useSyncSignals } from './node'
 import { namesQuiet } from './autoSyncPolicy'
-import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, pageOnlyEntry, peekReplaces, peekedEntry, stableView } from './namesCache'
+import { absentSeeds, applySeed, fieldsOf, forgottenEntry, isPeekedKey, missingEntry, pageOnlyEntry, peekReplaces, peekedEntry, settleProfile, stableView } from './namesCache'
 import { fetchMember } from './indexClient'
 import { diaryPeekSlots } from './engagement'
 import { createNamePeeker, foldRead, peekApply } from './namesPeek'
@@ -309,8 +309,12 @@ export function NamesProvider ({ children }) {
           continue
         }
         if (old && old.page === true) Object.assign(entry, { page: true, closed: old.closed === true, moved: old.moved === true })
-        next.set(key, entry)
-        peekedRef.current.delete(key)
+        // An answer with nothing at all does not take away what a verified
+        // peek said (an invalidate re-asked while the diary still downloads);
+        // the peek stays for the next one. Any other answer replaces it.
+        const settled = settleProfile(entry, peekedRef.current.get(key))
+        next.set(key, settled.entry)
+        if (settled.peek === undefined) peekedRef.current.delete(key)
         heldRef.current.add(key)
         retryRef.current.delete(key)
       }
