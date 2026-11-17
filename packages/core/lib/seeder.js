@@ -5279,9 +5279,10 @@ class Seeder {
       // D's join of K moved again while this admission ran: the join loop
       // skipped it (in flight) and no wait or block will start it, so it
       // starts now, before the settle drops the row the held core answers.
-      // The failing-write exit names this group, so this cannot loop.
+      // The failing-write exit names this group, so this cannot loop. A root
+      // admission has no join of its own (groupLive is keyed by writer).
       const live = entry.groupLive.get(key)
-      if (!this._closing && live !== undefined && live.group !== group && this._served.get(diary) === entry && entry.gated && !entry.dropped) this._reconcileGroups(diary, entry)
+      if (!this._closing && key !== group && live !== undefined && live.group !== group && this._served.get(diary) === entry && entry.gated && !entry.dropped) this._reconcileGroups(diary, entry)
       if (!this._closing) this._settleStubRows(key)
       this._resumeDeferredGroups()
     }

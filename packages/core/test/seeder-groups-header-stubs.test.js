@@ -1058,7 +1058,7 @@ test('only one leaving row of a key is left out of the cap when its join moves t
   await C.diary.append(join(k.G4, k.Kd))
   await until(() => seeder._headerStubs.has(k.G4 + ':' + k.Kd) || events.some((e) => e.event === 'group-rejected' && e.key === k.Kd), { name: 'junta de Kd para G4 julgada' })
   t.ok(seeder._headerStubs.size <= 2, 'at most one row past the cap (' + seeder._headerStubs.size + ')')
-  t.ok(events.some((e) => e.event === 'group-rejected' && e.key === k.Kd && e.reason === 'stub-full'), 'the second move waits for room')
+  t.ok(events.some((e) => e.event === 'group-rejected' && e.key === k.Kd && e.reason === 'stub-full'), 'the second move is refused with stub-full')
   release()
   await until(() => seeder._drops.size === 0 && !seeder._headerStubs.has(k.G + ':' + k.Kd) && !seeder._headerStubs.has(k.G3 + ':' + k.Kd), { name: 'linhas antigas fora', timeoutMs: 10000 })
   t.is(fatal(events), 0)
