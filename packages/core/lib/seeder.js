@@ -4822,10 +4822,16 @@ class Seeder {
       p = q
     }
     const core = entry.core
+    // A drop or a close destroys the range, whose done() then never settles,
+    // and wakes only a wait already armed: one landing during an await here
+    // would park this loop for good, listening on a closed core.
+    const gone = () => entry.dropped || this._closing
     let delay = CUT_POLL_MIN_MS
     let held = null
-    while (!p.done && !p.failed) {
-      if (await advertisedHeld(core, to, from)) {
+    while (!p.done && !p.failed && !gone()) {
+      const all = await advertisedHeld(core, to, from)
+      if (gone()) break
+      if (all) {
         held = (await core.has(from, to)) ? 'done' : 'sparse'
         break
       }
@@ -4845,6 +4851,7 @@ class Seeder {
       if (why === 'wake') break
       delay = why === 'tick' ? Math.min(delay * 2, CUT_POLL_MAX_MS) : CUT_POLL_MIN_MS
     }
+    if (gone()) return null
     if (p.done) held = 'done'
     if (held === null) return null
     // Its blocks no peer advertised would otherwise come later, past the

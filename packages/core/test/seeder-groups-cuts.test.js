@@ -10,7 +10,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { createSwarm, attachAdmission } = require('../lib/net')
-const { liveGroupJoins, groupWalkStep, groupWalkCut } = require('../lib/seeder')
+const { liveGroupJoins, groupWalkStep, groupWalkCut, Seeder } = require('../lib/seeder')
 const {
   groupJoinRecord,
   groupCutRecord,
@@ -635,4 +635,32 @@ test('a seeder fed only by a seeder that keeps a writer sparse reads past cut + 
   t.alike(await blocksHeld(e2.core, 0, length), [0, 1, 2, leaveAt], 'what it read again past the cut is cleared again')
   t.absent('unsureFrom' in readGroups(second.dataDir)[W], 'and the range is listed as read whole')
   t.is(one.events.filter((e) => e.event === 'fatal').length + two.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+// A drop or a close destroys the range of a chunk past the cut, whose done()
+// then never settles, and wakes only a wait already armed: one landing while
+// the loop checks what its peers advertise must still end it.
+test('a drop during the check of a chunk past the cut ends its wait (#350)', async (t) => {
+  const listeners = new Set()
+  const entry = { past: null, wake: null, dropped: false }
+  const peer = { remoteSynced: true, remoteContiguousLength: 300, remoteLength: 300, remoteBitfield: { getBitfield: () => null, get: () => false } }
+  const core = {
+    peers: [peer],
+    contiguousLength: 3,
+    download: () => ({ done: () => new Promise(() => {}), destroy () {} }),
+    // The drop lands while advertisedHeld reads what is held, and the close
+    // takes the peers with it.
+    async has () {
+      entry.dropped = true
+      core.peers = []
+      return false
+    },
+    on (name, fn) { listeners.add(fn) },
+    off (name, fn) { listeners.delete(fn) }
+  }
+  entry.core = core
+  const read = Seeder.prototype._groupPastRange.call({ _closing: false }, entry, 3, 259)
+  const ended = await Promise.race([read.then((value) => ({ value })), new Promise((resolve) => setTimeout(() => resolve(null), 2000))])
+  t.alike(ended, { value: null }, 'the wait ends with nothing read')
+  t.is(listeners.size, 0, 'and listens on the core no more')
 })
