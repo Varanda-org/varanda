@@ -1636,13 +1636,15 @@ const SPECS = {
       return value.unchanged && value.blob !== null ? 'unchanged só com blob nulo' : null
     }
   },
+  // Result { key }: the account's secret for the app's once-marks (5.151).
+  'seen.onceKey': { fields: none },
   // Marks a momento seen for the member's devices (5.149); an idempotent local
   // store like dm.seen, synced in the seen document. Result { changed }.
   'moment.seen': { fields: { author: req(isKey), seq: req(int(1, 4294967295)) } },
   // Result { refs: ['<author>:<seq>'] }, oldest first, at most MOMENT_SEEN_MAX
   // (5.150).
   'moments.seen': { fields: none },
-  // Connected devices (5.151 to 5.154). The node stores the name trimmed
+  // Connected devices (5.152 to 5.155). The node stores the name trimmed
   // and NFC (1 to 40 characters, the invite card name rule) and refuses
   // anything else; disconnect takes exactly one of `id` and `previous`.
   'device.hello': { fields: { name: req(str(1, 200)) }, mutating: true },

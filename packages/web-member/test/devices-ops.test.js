@@ -1,6 +1,6 @@
 'use strict'
 
-// Connected devices in the browser node (docs/rpc.md 5.151 to 5.154):
+// Connected devices in the browser node (docs/rpc.md 5.152 to 5.155):
 // member-ops over memory storages. A second device of the account shares
 // the key pair and PRF; cores move by direct replication, no seeder.
 const test = require('brittle')

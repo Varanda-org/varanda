@@ -1,7 +1,7 @@
 'use strict'
 
-// device.* through the browser node's session (docs/rpc.md 5.151 to
-// 5.154): devices.changed, the refusals of a disconnected device, and
+// device.* through the browser node's session (docs/rpc.md 5.152 to
+// 5.155): devices.changed, the refusals of a disconnected device, and
 // device.reconnect only after a passkey ceremony in this open (`fresh`).
 const test = require('brittle')
 const b4a = require('b4a')

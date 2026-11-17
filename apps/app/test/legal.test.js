@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'dd3061318755ecdfc0221619bc3ccbb0c8afe3e1d0970ea693fa8e37ced6df41', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ac940dbaf7b790cc701e47fc3a005bbf53a6c4bba1af446cd104cc38ab1d10b8', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -891,4 +891,17 @@ test('legal: version 73 describes connected devices and the periodic key change'
   t.ok(text(PRIVACY).includes('não o número, o nome nem os grupos'), 'holders see neither the id, the name nor the groups')
   t.ok(text(PRIVACY).includes('o app não tem como apagá-los, e o corte é definitivo'), 'records and cuts cannot be deleted')
   t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
+})
+
+test('legal: version 73 keeps the one-time notes from repeating on another device', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const marks = 'marcas opacas de que o aviso antes da primeira mensagem a uma Página e o aviso de convite novo já foram mostrados, na mesma janela do Avisos, para que outro aparelho da mesma conta não os mostre de novo; as marcas do bloco são calculadas com uma chave da sua conta, e nem o serviço nem quem lê essas marcas consegue saber a qual Página ou convite elas se referem. O aparelho que mostrou o aviso de uma Página guarda um registro de que já o mostrou (na instalação hospedada, com um nome derivado dessa mesma chave) e o apaga quando você sai da conta.'
+  const all = text(PRIVACY)
+  t.ok(all.includes(marks), 'opaque marks for the one-time notes, keyed with the account')
+  const closing = 'Onde o aplicativo não usa esse bloco, essa lista fica só no aparelho e é apagada quando você sai da conta.'
+  const momentos = all.indexOf('Esse mesmo bloco guarda também os momentos de outras pessoas que você já viu')
+  t.ok(all.indexOf(marks) < momentos, 'the marks come before the momentos sentence')
+  t.ok(all.indexOf(closing) > momentos && all.indexOf(closing) > all.indexOf(marks), 'the closing sentence follows the momentos list, not the marks')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })

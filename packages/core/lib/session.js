@@ -831,6 +831,7 @@ function createSession ({
     // and group.seen keeps writing group-seen.json only.
     'seen.sign': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     'seen.merge': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
+    'seen.onceKey': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     // The seen momentos live in the seen document (rpc.md 5.149, 5.150).
     'moment.seen': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
     'moments.seen': serial(async () => { throw new UsageError(SEEN_WEB_ONLY) }),
@@ -1081,7 +1082,7 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 
-    // Aparelhos conectados (docs/rpc.md 5.151 to 5.154).
+    // Aparelhos conectados (docs/rpc.md 5.152 to 5.155).
     'device.hello': serial(async (params, epoch) => {
       const r = await withStore((c) => member.deviceHello(c, params))
       noteDeviceOff(r.off, epoch)

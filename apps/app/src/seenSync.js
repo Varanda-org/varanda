@@ -240,23 +240,39 @@ export function ackCaughtUp (cur, caughtUp, snap) {
 // wait), and 'changed' bursts coalesced. 'online' (the connection came back)
 // waits out the interval like 'changed'; an unlock during a pass runs right
 // after it. A failed pass waits for the next trigger: there is no retry
-// timer.
+// timer. 'once' (a one-time notice was just marked) skips the debounce: it
+// runs as soon as the interval allows, or right after a pass in flight
+// reaches it, so a closed tab rarely takes the mark with it.
 export function createSeenScheduler ({ run, canRun, now, setTimer, clearTimer }) {
   let last = null
   let inFlight = false
   let changedTimer = null
   let stopped = false
   let unlockQueued = false
+  let onceQueued = false
+  let changedDue = 0
 
   const arm = (ms) => {
+    changedDue = now() + ms
     changedTimer = setTimer(() => {
       changedTimer = null
       fire('changed')
     }, ms)
   }
 
+  // Moves an armed timer earlier, never later.
+  const armBy = (ms) => {
+    if (changedTimer !== null) {
+      if (changedDue <= now() + ms) return
+      clearTimer(changedTimer)
+      changedTimer = null
+    }
+    arm(ms)
+  }
+
   function start (reason) {
     inFlight = true
+    onceQueued = false
     last = now()
     let p
     try { p = Promise.resolve(run(reason)) } catch { p = Promise.resolve() }
@@ -267,6 +283,9 @@ export function createSeenScheduler ({ run, canRun, now, setTimer, clearTimer })
       if (unlockQueued) {
         unlockQueued = false
         fire('unlock')
+      } else if (onceQueued) {
+        onceQueued = false
+        fire('once')
       }
     })
   }
@@ -279,12 +298,14 @@ export function createSeenScheduler ({ run, canRun, now, setTimer, clearTimer })
       // The running pass may have signed before this change: keep it queued.
       if (owed && changedTimer === null) arm(SEEN_CHANGED_DEBOUNCE_MS)
       if (reason === 'unlock') unlockQueued = true
+      if (reason === 'once') onceQueued = true
       return false
     }
     if (reason !== 'unlock' && last !== null) {
       const wait = last + SEEN_PASS_MIN_MS - now()
       if (wait > 0) {
-        if (owed && changedTimer === null) arm(wait)
+        if (reason === 'once') armBy(wait)
+        else if (owed && changedTimer === null) arm(wait)
         return false
       }
     }
@@ -306,6 +327,7 @@ export function createSeenScheduler ({ run, canRun, now, setTimer, clearTimer })
   function stop () {
     stopped = true
     unlockQueued = false
+    onceQueued = false
     if (changedTimer !== null) clearTimer(changedTimer)
     changedTimer = null
   }

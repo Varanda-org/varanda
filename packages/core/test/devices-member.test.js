@@ -1,6 +1,6 @@
 'use strict'
 
-// Connected devices on the node (docs/rpc.md 5.151 to 5.154): member.js
+// Connected devices on the node (docs/rpc.md 5.152 to 5.155): member.js
 // over a real data dir. Another device of the account is simulated by
 // appending its records to the own diary.
 

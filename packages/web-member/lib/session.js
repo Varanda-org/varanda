@@ -428,6 +428,7 @@ const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
 const DEVICE_LINE = 'atualizando os grupos antes de desconectar'
 const RECONNECT_PASSKEY = 'para conectar de novo, entre com a passkey'
+const LOCAL_LINE = 'diário próprio escrito neste aparelho'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
@@ -1100,6 +1101,7 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  let localEchoed = null // the greatest local length already announced with LOCAL_LINE
   // diary.peek: the running sync publishes its peek function here once its
   // seeder link verified (runSync `peeker`) and withdraws it when the link
   // closes or the run ends; set() wakes the handlers waiting for one.
@@ -1379,6 +1381,18 @@ function createBrowserSession ({
                 return
               case 'own-synced':
                 synced = true
+                // The reader (the app) must not take the echo of a write
+                // made here for a post from another device. Any length up
+                // to localLength is already in the local core (a later
+                // wrote() may move localLength before an earlier length
+                // is reported, hence <=). Once per length keeps
+                // Ajustes > Sincronização quiet when a new link reports
+                // the same length again.
+                if (localLength !== null && Number.isSafeInteger(ev.length) &&
+                  ev.length <= localLength && (localEchoed === null || ev.length > localEchoed)) {
+                  localEchoed = ev.length
+                  event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
+                }
                 event('diário próprio sincronizado (' + safe(String(ev.length)) + ')')
                 if (!r.ownSynced) {
                   r.ownSynced = true
@@ -2768,7 +2782,7 @@ function createBrowserSession ({
     return r
   }
 
-  // ---- connected devices (docs/rpc.md 5.151 to 5.154) ----
+  // ---- connected devices (docs/rpc.md 5.152 to 5.155) ----
 
   // devices.changed (section 6): `off` for this device, sent when it differs
   // from the last one sent under the current key pair (none sent: false).
@@ -4305,6 +4319,21 @@ function createBrowserSession ({
       return r
     }),
 
+    // The key the app derives its once-marks with (docs/rpc.md 5.151): keyed
+    // by the identity secret like the notice seen tokens, so a mark that
+    // lands in this origin's storage cannot be matched to a Página or invite
+    // by hashing public keys. Answered to the app only, never logged or kept.
+    'seen.onceKey': serial(async () => {
+      await seenOwn()
+      const own = b4a.toString(keyPair.publicKey, 'hex')
+      const digest = crypto.hash([
+        b4a.from('varanda-once-key-v1\n'),
+        keyPair.secretKey.subarray(0, 32),
+        b4a.from(own)
+      ])
+      return { key: b4a.toString(digest, 'hex') }
+    }),
+
     'profile.set': serial(async ({ name, bio, avatar }, epoch) => {
       const own = await requireUnlocked()
       await ensureCaughtUp(epoch)
@@ -4870,7 +4899,7 @@ function createBrowserSession ({
       return { ok: true }
     }),
 
-    // Aparelhos conectados (docs/rpc.md 5.151 to 5.154, member-ops). The
+    // Aparelhos conectados (docs/rpc.md 5.152 to 5.155, member-ops). The
     // refusals and a hello with nothing to write are reads on the run's
     // cores; a write runs the write gate first (device.disconnect a bounded
     // group refresh before it). Never retried.
@@ -6343,6 +6372,7 @@ function createBrowserSession ({
     synced = false
     unpushed = true
     localLength = null
+    localEchoed = null
     groupUnpushed.clear()
     groupLengths.clear()
     drainWanted = false
@@ -6373,6 +6403,9 @@ function createBrowserSession ({
     syncIntent = null
     // The next connection's first own-synced arms afresh.
     resetUpkeep()
+    // The reader starts over with no lengths: the first own-synced it gets
+    // must say again whether that length was written here.
+    localEchoed = null
     return stopRun('stopped').then(noop)
   }
 
