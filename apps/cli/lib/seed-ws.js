@@ -6,7 +6,7 @@ const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
-const { feira } = require('@varanda/rpc')
+const { feira, garden: gardenRules } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 
@@ -146,17 +146,31 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   (as in /index/post) and `next` the same shape or null; any other
 //   segment after the owner is 400 'pedido inválido', never 404, so a
 //   client tells a bad cursor from an unknown owner.
+// - /index/garden/<owner> -> Seeder#indexGarden: `{ on: seq | null, state:
+//   seq | null, helps: [{ author, seq, followSeq }], given: [seq], indexing,
+//   complete }` (Varandinha; at most GARDEN_HELP_ROWS helps and given): the
+//   owner's newest live garden block (on or off) and garden-state block,
+//   the neighbours' garden-help blocks inside the reader window with the
+//   seq of each helper's live follow of the owner, and the owner's own help
+//   seqs. /index/garden/<owner>/rua[/<key>] -> Seeder#indexGardenStreet:
+//   `{ items: [{ key, on, state }], next, indexing, complete }` (at most
+//   GARDEN_STREET_PAGE rows), the open balconies of the keys the owner
+//   follows, key order, strictly after the cursor key; `next` is null or a
+//   key. Any other segment after the owner is 400 'pedido inválido'.
+//   Pointers only, checked against the exact shape: an extra key, a
+//   duplicate or an oversized list is the generic 404, never trimmed.
 // - /index/profile/<author> -> Seeder#indexProfile: `{ about: seq | null,
 //   mood: seq | null, fans: { count, indexing }, top: { seq, back:
-//   { <friend>: seq | null } } | null, visits: seq | null, indexing,
-//   complete }`, the author's newest live profile-about, mood, top-friends
-//   and visits blocks (perfil rico, melhores amigos, visitas; visits is a
-//   pointer only, the node peeks the block and checks on), the claimed number of fas and, per listed friend, the
+//   { <friend>: seq | null } } | null, visits: seq | null, garden: seq |
+//   null, indexing, complete }`, the author's newest live profile-about,
+//   mood, top-friends, visits and garden blocks (perfil rico, melhores
+//   amigos, visitas, Varandinha; visits and garden are pointers only, the
+//   node peeks the block and checks on, so an off block still has a seq), the claimed number of fas and, per listed friend, the
 //   friend's live follow block of the author (at most MAX_TOP_FRIENDS). The
 //   object is open: later features add pointers and readers ignore keys they
 //   do not know, so profileBody keeps only the keys it lists. While the
 //   author's own diary is still being indexed or scanned (fail closed)
-//   about, mood, top and visits are null, indexing and fans.indexing are true and
+//   about, mood, top, visits and garden are null, indexing and fans.indexing are true and
 //   complete is false; otherwise complete is true and indexing is the global
 //   flag. Pointers only; the node verifies.
 // - /index/fans/<author>[/<atMs>.<key>] -> Seeder#indexFans: `{ author,
@@ -353,6 +367,9 @@ const CHECK_INTERVAL_MS = 1000
 // refused by the seeder for capacity its 1013 close, before the socket is
 // destroyed anyway.
 const REFUSE_GRACE_MS = 1000
+// How often a /seeder upgrade held while the seeder starts (startHoldMs)
+// checks whether the seeder accepts streams yet.
+const HOLD_CHECK_MS = 100
 
 const MEDIA_PREFIX = '/media'
 // Canonical decimals only (no sign, no leading zero); the digit caps keep the
@@ -417,6 +434,14 @@ const INDEX_SCRAPS_RE = /^\/index\/scraps\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9
 // Any path below an owner's recados that INDEX_SCRAPS_RE refuses: a
 // malformed cursor (400).
 const INDEX_SCRAPS_BAD_RE = /^\/index\/scraps\/[0-9a-f]{64}\//
+const INDEX_GARDEN_RE = /^\/index\/garden\/([0-9a-f]{64})$/
+const INDEX_GARDEN_STREET_RE = /^\/index\/garden\/([0-9a-f]{64})\/rua(?:\/([0-9a-f]{64}))?$/
+// Any path below an owner's balcony that the two above refuse (400).
+const INDEX_GARDEN_BAD_RE = /^\/index\/garden\/[0-9a-f]{64}\//
+const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
+const GARDEN_HELP_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
+const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
 const INDEX_PROFILE_RE = /^\/index\/profile\/([0-9a-f]{64})$/
 const INDEX_FANS_RE = /^\/index\/fans\/([0-9a-f]{64})(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
 const FAN_ROWS_MAX = 20
@@ -777,7 +802,12 @@ function refuse (socket, code, reason) {
 // postPublic(hex, seq) and mediaRead; postsLimits: overrides
 // ({ pageMaxInFlight, pageRate, pageBurst, pageDeadlineMs, photoMaxInFlight,
 // photoDeadlineMs, previewMaxInFlight, previewRate, previewBurst,
-// previewDeadlineMs }), for tests.
+// previewDeadlineMs }), for tests. startHoldMs (default 0): while the
+// seeder's status is 'starting', a /seeder upgrade that passed the host, path
+// and origin checks is held up to this long (at most maxExternal at once) and
+// accepted as soon as the seeder accepts streams, instead of a 503 at once.
+// The resolved object also has drain(): closes every /seeder WebSocket with
+// 1012 'reiniciando' (see below) before the seeder shuts down.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
@@ -790,7 +820,7 @@ function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null 
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {} }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, startHoldMs = 0 }) {
   if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
     throw new TypeError('publicOrigin inválido')
   }
@@ -878,6 +908,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     // The atMs of a cursor fits 16 digits but must stay a safe integer.
     if (m && (m[2] === undefined || Number.isSafeInteger(Number(m[2].split('.')[0])))) return ['indexScraps', [m[1], m[2] === undefined ? null : m[2]], scrapsBody]
     if (m || INDEX_SCRAPS_BAD_RE.test(url)) return BAD_CURSOR
+    m = INDEX_GARDEN_STREET_RE.exec(url)
+    if (m) return ['indexGardenStreet', [m[1], m[2] === undefined ? null : m[2]], gardenStreetBody]
+    m = INDEX_GARDEN_RE.exec(url)
+    if (m) {
+      const owner = m[1]
+      return ['indexGarden', [owner], (answer) => gardenBody(answer, owner)]
+    }
+    if (INDEX_GARDEN_BAD_RE.test(url)) return BAD_CURSOR
     m = INDEX_PROFILE_RE.exec(url)
     if (m) return ['indexProfile', [m[1]], profileBody]
     m = INDEX_FOLLOW_RE.exec(url)
@@ -955,11 +993,59 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
   }
 
+  // Exactly the Varandinha pointers, checked as the node checks them: a help
+  // from the owner, a duplicate, an extra key or an oversized list is a 404,
+  // never a trimmed answer.
+  function gardenBody (answer, owner) {
+    if (!exactKeys(answer, GARDEN_KEYS)) throw new Error('index')
+    const { on, state, helps, given, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if ((on !== null && !seqOk(on)) || (state !== null && !seqOk(state))) throw new Error('index')
+    if (!Array.isArray(helps) || helps.length > gardenRules.GARDEN_HELP_ROWS || !Array.isArray(given) || given.length > gardenRules.GARDEN_HELP_ROWS) throw new Error('index')
+    const refs = new Set()
+    const rows = helps.map((row) => {
+      if (!exactKeys(row, GARDEN_HELP_KEYS)) throw new Error('index')
+      const { author, seq, followSeq } = row
+      if (typeof author !== 'string' || !HEX64_RE.test(author) || author === owner || !seqOk(seq) || !seqOk(followSeq)) throw new Error('index')
+      const ref = author + ':' + seq
+      if (refs.has(ref)) throw new Error('index')
+      refs.add(ref)
+      return { author, seq, followSeq }
+    })
+    const seqs = new Set()
+    for (const seq of given) {
+      if (!seqOk(seq) || seqs.has(seq)) throw new Error('index')
+      seqs.add(seq)
+    }
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { on, state, helps: rows, given: [...given], indexing, complete }
+  }
+
+  // Exactly one page of Varandas da rua: a duplicate key, an extra key or an
+  // oversized page is a 404.
+  function gardenStreetBody (answer) {
+    if (!exactKeys(answer, GARDEN_STREET_KEYS)) throw new Error('index')
+    const { items, next, indexing, complete } = answer
+    const seqOk = (n) => Number.isSafeInteger(n) && n >= 1
+    if (!Array.isArray(items) || items.length > gardenRules.GARDEN_STREET_PAGE) throw new Error('index')
+    const keys = new Set()
+    const rows = items.map((item) => {
+      if (!exactKeys(item, GARDEN_STREET_ITEM_KEYS)) throw new Error('index')
+      const { key, on, state } = item
+      if (typeof key !== 'string' || !HEX64_RE.test(key) || keys.has(key) || !seqOk(on) || (state !== null && !seqOk(state))) throw new Error('index')
+      keys.add(key)
+      return { key, on, state }
+    })
+    if (next !== null && (typeof next !== 'string' || !HEX64_RE.test(next))) throw new Error('index')
+    if (typeof indexing !== 'boolean' || typeof complete !== 'boolean') throw new Error('index')
+    return { items: rows, next, indexing, complete }
+  }
+
   // The pointer keys known so far; a new key is added here when its feature
   // ships, an unknown one is never echoed.
-  function profileBody ({ about, mood, fans = null, top = null, visits = null, indexing, complete }) {
+  function profileBody ({ about, mood, fans = null, top = null, visits = null, garden = null, indexing, complete }) {
     const seqOk = (n) => n === null || (Number.isSafeInteger(n) && n >= 1)
-    if (!seqOk(about) || !seqOk(mood) || !seqOk(visits)) throw new Error('index')
+    if (!seqOk(about) || !seqOk(mood) || !seqOk(visits) || !seqOk(garden)) throw new Error('index')
     let fanCount = null
     if (fans !== null) {
       if (typeof fans !== 'object' || !Number.isSafeInteger(fans.count) || fans.count < 0) throw new Error('index')
@@ -977,7 +1063,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       }
       pointers = { seq: top.seq, back }
     }
-    return { about, mood, fans: fanCount, top: pointers, visits, indexing: indexing === true, complete: complete === true }
+    return { about, mood, fans: fanCount, top: pointers, visits, garden, indexing: indexing === true, complete: complete === true }
   }
 
   // Only the follower-list fields, checked as the client checks them: a
@@ -1847,25 +1933,81 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // Sockets between the 'upgrade' event and either their hand-off to ws
   // (then tracked by wss.clients) or their destruction; close() destroys them.
   const upgrading = new Set()
+  // Upgrades held while the seeder starts (a subset of upgrading), each with
+  // its check timer; at most maxExternal at once.
+  const held = new Map()
+  // The stream handed to the seeder for each open /seeder WebSocket, so
+  // drain() can stop the seeder writing to it.
+  const streams = new Map()
   let closing = null
+  let draining = null
+
+  // Whether the seeder takes a stream now: accepting() when the seeder has
+  // it (it accepts before its status turns 'ok'), else the status as before.
+  const ready = () => {
+    try {
+      if (typeof seeder.accepting === 'function') return seeder.accepting() === true
+      return seeder.stats().status === 'ok'
+    } catch {
+      return false
+    }
+  }
+  const starting = () => {
+    try {
+      return seeder.stats().status === 'starting'
+    } catch {
+      return false
+    }
+  }
+  const release = (socket) => {
+    const timer = held.get(socket)
+    if (timer === undefined) return
+    clearInterval(timer)
+    held.delete(socket)
+  }
 
   server.on('upgrade', (req, socket, head) => {
     socket.on('error', () => {})
     if (closing) return socket.destroy()
     upgrading.add(socket)
-    socket.once('close', () => upgrading.delete(socket))
+    socket.once('close', () => {
+      upgrading.delete(socket)
+      release(socket)
+    })
     if (!hostOk(req)) return refuse(socket, '421 Misdirected Request', 'host inválido')
     if (req.url.split('?')[0] !== PATH) return refuse(socket, '404 Not Found', 'não encontrado')
     if (!originAllowed(req.headers.origin, allowList)) return refuse(socket, '403 Forbidden', 'origem não permitida')
-    let ok = false
-    try {
-      ok = seeder.stats().status === 'ok'
-    } catch {}
-    if (!ok) return refuse(socket, '503 Service Unavailable', 'indisponível')
+    const unavailable = () => refuse(socket, '503 Service Unavailable', 'indisponível')
+    if (draining) return unavailable()
+    if (ready()) return accept(req, socket, head)
+    if (startHoldMs <= 0 || held.size >= maxExternal || !starting()) return unavailable()
+    // Held in upgrading, so close() and drain() destroy it like any other
+    // socket mid-upgrade; its 'close' listener above clears the timer.
+    const deadline = Date.now() + startHoldMs
+    const timer = setInterval(() => {
+      if (closing || draining || socket.destroyed) return release(socket)
+      if (ready()) {
+        release(socket)
+        return accept(req, socket, head)
+      }
+      // starting() is not re-read on each tick: ready() reads accepting(),
+      // which is cheap, and only a seeder without it falls back to stats(),
+      // which walks every served core. A seeder that fails to start has the
+      // listener closed by its caller.
+      if (Date.now() >= deadline) {
+        release(socket)
+        unavailable()
+      }
+    }, HOLD_CHECK_MS)
+    timer.unref()
+    held.set(socket, timer)
+  })
+
+  function accept (req, socket, head) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       upgrading.delete(socket)
       ws.on('error', () => {})
-      if (closing) return ws.terminate()
+      if (closing || draining) return ws.terminate()
       let duplex
       // Set when the seeder refuses for capacity: the socket is then ours to
       // close with 1013 (try again later) instead of the bare 1006 a
@@ -1892,9 +2034,13 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       try {
         duplex = createWebSocketStream(ws)
         duplex.on('error', () => {})
+        streams.set(ws, duplex)
         // A closed WebSocket only ends the duplex's readable side; destroy it
         // so the seeder releases the connection slot at once.
-        ws.once('close', () => duplex.destroy())
+        ws.once('close', () => {
+          streams.delete(ws)
+          duplex.destroy()
+        })
         Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
           if (!noise && !refused) ws.terminate()
         }, () => { if (!refused) ws.terminate() })
@@ -1902,14 +2048,82 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         if (!refused) ws.terminate()
       }
     })
-  })
+  }
+
+  // Drops a write the seeder makes after drain() began, as if it had been
+  // sent, so it never reaches ws.send on a CLOSING WebSocket.
+  const dropWrite = (chunk, encoding, callback) => callback()
+
+  // Stops accepting connections; the promise settles once every open one
+  // has ended. Shared by drain() and close(): a second server.close() on a
+  // closed server only reports ERR_SERVER_NOT_RUNNING on a later 'close'
+  // event, which never comes once the first 'close' has been emitted.
+  let stopped = null
+  const stopListening = () => {
+    if (!stopped) stopped = new Promise((resolve) => server.close(() => resolve()))
+    return stopped
+  }
+
+  // Closes every /seeder WebSocket with 1012 (service restart) instead of the
+  // bare 1006 seeder.close() would give, so a client can tell a restart from
+  // a network loss. Resolves once they are all closed, or after
+  // REFUSE_GRACE_MS, terminating the ones whose client never answered.
+  const drain = () => {
+    if (draining) return draining
+    if (closing) return closing
+    // The port stops listening first, so the client's quick redial after the
+    // 1012 meets a refused dial, which Caddy holds and retries for up to 5 s,
+    // instead of a 503 for the whole of seeder.close(),
+    // which Caddy passes on. /media, /blob and the other HTTP routes share
+    // this port and are refused too from here on: the seeder is going away,
+    // and Caddy answers 502 once its retry runs out.
+    // Connections already open (the WebSockets below) are left to finish.
+    stopListening()
+    draining = new Promise((resolve) => {
+      for (const socket of upgrading) socket.destroy()
+      upgrading.clear()
+      for (const socket of [...held.keys()]) release(socket)
+      const open = []
+      for (const ws of wss.clients) {
+        if (ws.readyState === ws.CLOSED) continue
+        open.push(ws)
+        if (ws.readyState !== ws.OPEN) continue // already closing (a 1013): its own timer ends it
+        // Same order as the 1013 path. The seeder's writes are cut off
+        // first: a write after close() would make ws.send fail on the
+        // CLOSING socket, the duplex would error and destroy itself, and
+        // createWebSocketStream's _destroy terminates an unclosed WebSocket,
+        // turning the 1012 back into a 1006. With _write dropped, nothing
+        // destroys the duplex until ws emits 'close' (the listener in
+        // accept()), when terminate() is a no-op. A write already handed to
+        // ws.send went out on the socket before the close frame.
+        const duplex = streams.get(ws)
+        if (duplex) duplex._write = dropWrite
+        try {
+          ws.close(1012, 'reiniciando')
+        } catch {
+          ws.terminate()
+        }
+      }
+      const gone = open.map((ws) => ws.readyState === ws.CLOSED ? null : new Promise((resolve) => ws.once('close', resolve)))
+      const timer = setTimeout(() => {
+        for (const ws of open) ws.terminate()
+      }, REFUSE_GRACE_MS)
+      timer.unref()
+      Promise.all(gone).then(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+    return draining
+  }
 
   const close = () => {
     if (closing) return closing
     closing = new Promise((resolve) => {
-      server.close(() => resolve())
+      stopListening().then(resolve)
       for (const socket of upgrading) socket.destroy()
       upgrading.clear()
+      for (const socket of [...held.keys()]) release(socket)
       for (const ws of wss.clients) ws.terminate()
       server.closeAllConnections()
     })
@@ -1923,7 +2137,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       server.on('error', () => {})
       const address = server.address()
       hosts = allowedHosts(host, address.address, address.port)
-      resolve({ host: address.address, port: address.port, close })
+      resolve({ host: address.address, port: address.port, close, drain })
     })
   })
 }
@@ -1956,6 +2170,8 @@ module.exports = {
   INDEX_FOLLOWS_RE,
   INDEX_TESTIMONIALS_RE,
   INDEX_SCRAPS_RE,
+  INDEX_GARDEN_RE,
+  INDEX_GARDEN_STREET_RE,
   INDEX_PROFILE_RE,
   INDEX_FANS_RE,
   INDEX_POLL_RE,

@@ -282,3 +282,59 @@ test('a link card rides with text only, checked and counted in the DM budget', a
   t.alike(withPreview('post.create', { text: 'oi' }, null), { text: 'oi' })
   t.exception(() => withPreview('post.create', { text: 'oi', media: [publicMedia()] }, CARD))
 })
+
+test('a page caption is measured as inner v3, a person as v2', async (t) => {
+  const { composePlan, cardFits, stagedVoice, WIDEST_DM_ITEM, WIDEST_DM_VOICE } = await load()
+  const cert = rpc.MEMBER_CERT_STANDIN
+  const page = { ...dm, v: 3 }
+  const bound = { from: '0'.repeat(64), id: ID, digest: '0'.repeat(64) }
+  const v2 = rpc.dmTextBudget({ to: KEY, cert, card: CARD })
+  const v3 = rpc.dmTextBudget({ to: KEY, cert, card: CARD, v: 3 })
+  t.is(v2 - v3, 8, 'a card with image null leaves exactly the expiry')
+  t.ok(v3 >= 0)
+  t.ok(cardFits({ text: 'x'.repeat(v3), target: page, card: CARD }))
+  t.absent(cardFits({ text: 'x'.repeat(v2), target: page, card: CARD }))
+  t.ok(cardFits({ text: 'x'.repeat(v2), target: dm, card: CARD }), 'a person keeps the v2 budget')
+  t.exception(() => composePlan({ text: 'x'.repeat(v2), target: page, card: CARD }), /mensagem longa demais/)
+  let personErr = null
+  try {
+    composePlan({ text: 'x'.repeat(v2), target: dm, card: CARD })
+  } catch (err) {
+    personErr = err
+  }
+  t.ok(!personErr || personErr.message !== 'mensagem longa demais', 'the same bytes still fit a person')
+  const reply2 = rpc.dmTextBudget({ to: KEY, replyTo: bound, cert, card: CARD })
+  const reply3 = rpc.dmTextBudget({ to: KEY, replyTo: bound, cert, card: CARD, v: 3 })
+  t.is(reply2 - reply3, 8)
+  const pageReply = { ...page, replyTo: ID }
+  t.absent(cardFits({ text: 'x'.repeat(reply2), target: pageReply, card: CARD }))
+  t.ok(cardFits({ text: 'x'.repeat(reply3), target: pageReply, card: CARD }))
+  t.ok(cardFits({ text: 'x'.repeat(reply2), target: { ...dm, replyTo: ID }, card: CARD }), 'a person reply stays on the v2 bound measure')
+
+  const attachments = [attachment()]
+  const wide2 = rpc.dmTextBudget({ to: KEY, cert, media: [WIDEST_DM_ITEM] })
+  const wide3 = rpc.dmTextBudget({ to: KEY, cert, media: [WIDEST_DM_ITEM], v: 3 })
+  t.is(wide2 - wide3, 8)
+  t.exception(() => composePlan({ text: 'x'.repeat(wide2), attachments, target: page }), /texto longo demais com anexo/)
+  t.is(composePlan({ text: 'x'.repeat(wide2), attachments, target: dm }).uploads.length, 1, 'a person may still upload')
+  const planned = composePlan({ text: 'x'.repeat(wide3), attachments, target: page })
+  t.is(planned.uploads.length, 1, 'a page caption at the v3 budget is accepted before upload')
+  // One byte past the widest stand-in: v3 refuses, v2 still has the expiry slack.
+  const wider = { ...WIDEST_DM_ITEM, mime: 'image/jpegx' }
+  t.exception(() => planned.send([wider]), /texto longo demais com anexo/)
+  let personWide = null
+  try {
+    composePlan({ text: 'x'.repeat(wide3), attachments, target: dm }).send([wider])
+  } catch (err) {
+    personWide = err
+  }
+  t.ok(!personWide || personWide.message !== 'texto longo demais com anexo', 'a person measures that descriptor as v2')
+
+  const voice2 = rpc.dmTextBudget({ to: KEY, cert, media: [WIDEST_DM_VOICE] })
+  const voice3 = rpc.dmTextBudget({ to: KEY, cert, media: [WIDEST_DM_VOICE], v: 3 })
+  t.is(voice2 - voice3, 8)
+  const staged = stagedVoice({ ms: 4200 })
+  t.exception(() => composePlan({ text: 'x'.repeat(voice2), attachments: [staged], target: page }), /texto longo demais com anexo/)
+  t.is(composePlan({ text: 'x'.repeat(voice3), attachments: [staged], target: page }).uploads.length, 1)
+  t.is(composePlan({ text: 'x'.repeat(voice2), attachments: [staged], target: dm }).uploads.length, 1)
+})

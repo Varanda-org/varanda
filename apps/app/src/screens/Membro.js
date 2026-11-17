@@ -45,6 +45,9 @@ import * as actingAs from '../actingAs'
 import { TEXTS, pagesFollow, pagesFollows, pagesSuccessor } from '../pages'
 import { MAX_HOPS, moveOf, pageMoveView, resolveChain, shownUnderCut, successorOf } from '../pageMove'
 import { rosterRows } from '../pageRoster'
+import { flagOn } from '../garden.js'
+import { peekBatches } from '../scraps.js'
+import { diaryPeekSlots } from '../engagement'
 import { Soft, errorText, useBottomPad, useVisibleNow } from '../ui'
 import { FollowPill } from '../ui/FollowPill'
 import { OfflineNote } from '../ui/OfflineNote'
@@ -287,7 +290,7 @@ export default function Membro (props) {
   return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
 }
 
-function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onToast, onTabChange }) {
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onOpenVarandinha, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -910,6 +913,23 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const rich = useProfileExtra({ author, enabled: node.hosted === true && !isPage && !blockedHere, request })
   const extraShown = extraView(rich.held, now)
   const hostedHere = node.hosted === true && !isPage && !blockedHere
+  // The seeder's pointer may name a flag that is off, so the row waits for one
+  // verified peek of that seq.
+  const gardenSeq = rich.index && Number.isSafeInteger(rich.index.garden) ? rich.index.garden : null
+  const [gardenOn, setGardenOn] = useState(false)
+  useEffect(() => {
+    setGardenOn(false)
+    if (!hostedHere || gardenSeq === null || typeof author !== 'string') return undefined
+    let live = true
+    ;(async () => {
+      for (const params of peekBatches(author, [gardenSeq])) {
+        const peek = await diaryPeekSlots.run(() => (live ? request('diary.peek', params) : null), { front: true })
+        if (!live) return
+        if (peek && peek.key === author && flagOn(peek.entries, gardenSeq)) { setGardenOn(true); return }
+      }
+    })().catch(() => {})
+    return () => { live = false }
+  }, [hostedHere, gardenSeq, author, request])
   const topRead = useTopFriends({ owner: author, ownKey, index: rich.index, request, enabled: hostedHere && !own })
   // One visit note per profile view, fire and forget: the node applies every
   // budget and the switch, a failure is never retried and never shown.
@@ -992,6 +1012,15 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       <PressScale accessibilityRole='link' accessibilityLabel='Recados' onPress={() => onOpenRecados(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
         <Icon name='recado' size={20} color={colors.accent} />
         <Text style={styles.linkText}>Recados</Text>
+        <Icon name='seta' size={20} color={colors.soft} />
+      </PressScale>
+      )
+    : null
+  const varandinhaRow = hostedHere && gardenOn && typeof onOpenVarandinha === 'function'
+    ? (
+      <PressScale accessibilityRole='link' accessibilityLabel='Varandinha' onPress={() => onOpenVarandinha(author)} style={({ pressed }) => [styles.linkRow, pressed && styles.pressed]}>
+        <Icon name='droplet' size={20} color={colors.accent} />
+        <Text style={styles.linkText}>Varandinha</Text>
         <Icon name='seta' size={20} color={colors.soft} />
       </PressScale>
       )
@@ -1151,7 +1180,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
         about={extraShown.about ? <AboutCard about={extraShown.about} theme={extraShown.theme} /> : null}
         fan={hostedHere && !own && typeof ownKey === 'string' ? <FanButton author={author} ownKey={ownKey} title={displayText(who.title)} page={isPage} blocked={blockedHere} onToast={typeof onToast === 'function' ? onToast : undefined} /> : null}
         top={hostedHere && !own && topRead.view && (topRead.view.rows.length > 0 || topRead.view.notice) ? <TopFriendsRow rows={topRead.view.rows} notice={topRead.view.notice} onOpen={onOpenMember} loading={topRead.phase === 'loading' && !topRead.view} /> : null}
-        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{eventosRow}{ratingsRow}</>}
+        rows={blockedHere ? null : <>{listingsRow}{recadosRow}{varandinhaRow}{eventosRow}{ratingsRow}</>}
         avatar={{ name: who.avatarName, publicKey: author, picture: header.avatar, persist: own || isFollowed }}
         title={displayText(who.title)}
         subtitle={who.subtitle ? displayText(who.subtitle) : null}

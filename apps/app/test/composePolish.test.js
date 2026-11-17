@@ -29,6 +29,7 @@ test('settings group every row and keep the existing advanced toggle last', (t) 
     ['{WALL_TITLE}', "() => onNavigate('recados')"],
     ['{DEVICES_TITLE}', "() => onNavigate('aparelhos')"],
     ['{VISITAS_TITLE}', 'openVisitasSheet'],
+    ["'Varandinha'", 'openVarandinha'],
     ['{CONSENT_SWITCH_LABEL}', '() => setConsent(toggleConsent(consent))'],
     ["'Convidar pessoas'", "() => onNavigate('convites')"],
     ["'Páginas'", 'openPaginas'],

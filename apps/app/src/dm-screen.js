@@ -295,7 +295,7 @@ export function heldBubble (hold) {
 // Conversas as a page: the screens call the same dm.* names. The page's
 // conversations live on this device (docs/rpc.md 5.114): dm.list, dm.thread
 // and dm.seen read the node with `page`; dm.send and dm.set draft on the
-// node (dm.pageDraft), the page signs the digest ('dm-sign', `sign(digest)`,
+// node (dm.pageDraft, with the media or card of a person's dm.send), the page signs the digest ('dm-sign', `sign(digest)`,
 // answering { signature, expiresAt }: the service picks the expiry) and the
 // node sends it (dm.pageSend). An uncertain dm.pageSend keeps a retry of that
 // exact request; nothing is drafted or signed again.
@@ -327,10 +327,14 @@ export function pageDmClient ({ request, sign, page }) {
     if (PAGE_READS.includes(method)) return request(method, { ...params, page })
     if (method === 'dm.pull') return request('dm.pull', {})
     if (method === 'dm.send') {
-      const { to, text, replyTo, fwd } = params
+      const { to, text, replyTo, fwd, media, card } = params
       const op = { kind: 'msg', to, text }
       if (replyTo !== undefined) op.replyTo = replyTo
       if (fwd !== undefined) op.fwd = fwd
+      // As a person's dm.send: photos, GIFs and voice notes (media) or a
+      // link card, never both (the node refuses it).
+      if (media !== undefined) op.media = media
+      if (card !== undefined) op.card = card
       return send(op)
     }
     if (method === 'dm.set') {
@@ -338,5 +342,27 @@ export function pageDmClient ({ request, sign, page }) {
       return { ok: true }
     }
     return {}
+  }
+}
+
+// The hold an uncertain photo, GIF or voice send keeps. A page keeps
+// err.retry, the re-put of the same signed draft (pageDmClient). A person
+// keeps retry null and resends op. A page error without a retry stays null:
+// nothing may draft a second message in its place.
+export function mediaUncertainHold ({ op, error, text, quoteId, typed, ctx = null, page = false }) {
+  const retry = page === true && error && typeof error.retry === 'function' ? error.retry : null
+  return { op, text, quoteId, typed, ctx, retry }
+}
+
+// The explicit retry of that page hold: one call of the kept re-put, never
+// a new draft. -> { phase: 'done' | 'uncertain' | 'failed', op?, error? }.
+export async function runPageMediaRetry (hold, uncertain) {
+  if (!hold || typeof hold.retry !== 'function') return { phase: 'failed', error: new Error('nada para reenviar') }
+  try {
+    await hold.retry()
+    return { phase: 'done', op: hold.op }
+  } catch (error) {
+    const unsure = typeof uncertain === 'function' ? uncertain(error) : !!(error && error.uncertain === true)
+    return { phase: unsure ? 'uncertain' : 'failed', op: hold.op, error }
   }
 }

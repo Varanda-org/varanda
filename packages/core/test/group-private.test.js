@@ -11,7 +11,7 @@ const {
   groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites,
   groupReact, replacedWriterCut
 } = require('../lib/group')
-const { community } = require('./helpers/groups')
+const { community, diaryLog } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
 const { cutUnknownEntitled, rekeyDue, REKEY_PERIOD_MS, REKEY_CHECK_MS } = require('../lib/group-rekey')
 
@@ -568,6 +568,59 @@ test('a key block citing a cut community writer stays readable (#350)', (t) => {
   t.is(g.sealed, 0)
   t.is(g.epoch, null, 'a cut CW gives no sending authority')
   t.is(g.rekeyPending, true)
+})
+
+test('a key block citing a cut CW held sparse is judged by its signed length (#350)', (t) => {
+  const w = pworld({ cadmins: [B] })
+  w.add(B, wB)
+  w.comm.push(cwKey(B), communityBan({ member: K(0xabc), on: true, cuts: [], at: AT(5) }))
+  const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(wB, [G, wA, wB, wX], { basis: [ban], auth: w.cauth(B), at: 7 })
+  sealedPost(w, wX, E2, 8)
+  w.comm.mark(B, cwKey(B), 1)
+  const whole = w.input(w.reader(wX))
+  const cwB = whole.community.writers.find((l) => l.key === cwKey(B))
+  t.is(cwB.entries.length, 2, 'the auth cites the whole CW, past its cut')
+  const trimmed = (signed) => ({ ...whole, community: { ...whole.community, writers: whole.community.writers.map((l) => l === cwB ? { ...l, entries: l.entries.slice(0, 1), signed } : l) } })
+  t.alike(buildGroup(trimmed(undefined)).posts, [], 'control: held alone, the trimmed CW is too short for the auth')
+  const g = buildGroup(trimmed(2))
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'the signed length keeps the history readable')
+  t.is(g.epoch, null, 'and still sends nothing')
+  t.is(normalize(g), normalize(buildGroup(whole)), 'the sparse CW folds like the whole one')
+})
+
+test('a cut writer held sparse folds like the whole copy; a copy with a hole folds as its prefix (#350)', (t) => {
+  const w = pworld()
+  const E2 = w.rotate(wA, [G, wA, wX, wY], { at: 6 })
+  sealedPost(w, wA, E2, 7)
+  const cut = w.len(wA)
+  sealedPost(w, wA, E2, 8)
+  const E3 = w.rotate(wA, [G, wA, wX, wY], { at: 9 })
+  sealedPost(w, wA, E3, 10)
+  w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(11) }))
+  sealedPost(w, wX, E3, 12)
+  sealedPost(w, wX, E3, 13)
+  const signed = w.len(wA)
+  const marks = new Map([[A, [{ writer: wA, cut, seq: 2 }]]])
+  const base = w.input(w.reader(wX), { marks })
+  const kept = (e) => e.seq < cut || e.record.type === 'group-leave' || e.record.type === 'group-key'
+  const withCopy = (key, entries, extra = {}) => ({ ...base, writers: base.writers.map((l) => l.key === key ? { ...l, entries, ...extra } : l) })
+  const wAentries = base.writers.find((l) => l.key === wA).entries
+  const wXentries = base.writers.find((l) => l.key === wX).entries
+  const whole = buildGroup(base)
+  t.alike(whole.posts.map((p) => p.text), ['p7', 'p12', 'p13'], 'control: the whole copy drops the posts past the cut')
+  t.is(whole.members.get(A), 'left', 'control: the leave past the cut counts')
+  const sparse = wAentries.filter(kept)
+  t.alike(sparse.map((e) => e.seq), [0, 1, 2, 4, 6], 'the sparse copy: below the cut, the key block and the leave past it')
+  t.is(normalize(buildGroup(withCopy(wA, sparse, { signed }))), normalize(whole), 'the sparse copy folds like the whole one')
+  t.is(normalize(buildGroup({ ...base, writers: [...base.writers, { key: wA, diary: A, entries: sparse, signed }] })), normalize(whole), 'and so does a sparse copy next to the whole one')
+  // A copy that stops below the cut counts only up to its hole, even with
+  // the leave and key block held past it.
+  const short = wAentries.filter((e) => e.seq < 2 || e.seq === 4 || e.seq === 6)
+  t.is(normalize(buildGroup(withCopy(wA, short, { signed }))), normalize(buildGroup(withCopy(wA, wAentries.slice(0, 2)))), 'a hole below the cut: the prefix')
+  // An uncut writer never reads past a hole.
+  const holed = wXentries.filter((e) => e.seq !== 1)
+  t.is(normalize(buildGroup(withCopy(wX, holed))), normalize(buildGroup(withCopy(wX, wXentries.slice(0, 1)))), 'an uncut writer: the prefix')
 })
 
 test('a diary cut below its own leave keeps the diary left and the removal (#350)', (t) => {
@@ -2721,6 +2774,34 @@ test('last never names a sealed reaction', (t) => {
   const g = buildGroup(w.input(w.reader(wX)))
   t.alike(g.last, p)
   t.alike(g.posts[0].reactions, [{ emoji: '\u{1f44d}', count: 1, by: [Y] }])
+})
+
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+test('a leave still counts for key recipients after its diary deletes the join it closed', (t) => {
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  // X's diary binds both writers, leaves from wX (the leave cuts both),
+  // confirms it and turns wX off.
+  const log = diaryLog()
+  const on1 = log.join(G, wX)
+  log.join(G, wX2)
+  const leave = w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: w.len(wX2) }], at: AT(7) }))
+  log.confirm(G, wX, w.logs.get(wX))
+  const fold = () => {
+    const read = log.read(G)
+    return buildGroup(w.input(w.reader(wA), { joins: new Map([...w.joins, [X, read.joins]]), confirms: new Map([[X, read.confirms]]) }))
+  }
+  let g = fold()
+  t.is(g.members.get(X), 'left')
+  t.alike(g.entitled, [G, wA, wY].sort(), 'neither writer of X is a recipient')
+  t.alike(g.removals, [leave], 'the leave is a removal')
+  log.delete(on1)
+  g = fold()
+  t.is(g.members.get(X), 'left', 'still out after the delete')
+  t.alike(g.entitled, [G, wA, wY].sort(), 'and still no recipient')
+  t.alike(g.removals, [leave])
 })
 
 test('slot walk: an old boxless writer holds its slot until a cut 0 releases it (#350)', (t) => {

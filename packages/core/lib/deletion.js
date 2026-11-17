@@ -2,25 +2,34 @@
 
 // Deletion fold over one diary's entries ({ seq, record }). A `delete`
 // record (lib/records.js) at block b removes block `seq` whatever that
-// block is (a page-* record aside, below) and whether or not this replica
-// holds it. Walking from the
-// highest block down, a tombstone takes effect only if no later effective
-// tombstone deleted it, so the result is the same on every replica that
-// holds the same blocks. The fold is pure: no I/O, never throws (also
+// block is (a page-*, group-join, group-confirm or group-cut record aside,
+// below) and whether or not this replica holds it. Walking from the highest
+// block down, a tombstone takes effect only if no later effective tombstone
+// deleted it, so the result is the same on every replica that holds the
+// same blocks. The fold is pure: no I/O, never throws (also
 // loaded by the browser node).
 // A tombstone whose target is a page-* record has no effect (docs/
 // protocol.md §12): a leaked page key must not undo a roster, a close or a
-// move. The fold can only tell when the target block is present; a
-// tombstone over a block this replica never held is folded as before, and
-// the clear path never clears a page-* block, so a present one stays.
+// move. Nor does one whose target is a group-join, group-confirm or
+// group-cut (docs/protocol.md, "Deletion"): group readers fold membership
+// from them, so the history stays as written. The fold can only tell when
+// the target block is present; a tombstone over a block this replica never
+// held is folded as before, and the clear path never clears such a block,
+// so a present one stays.
 
 const b4a = require('b4a')
 const { validRecordCopy, decodeBlock, MAX_LOG_BLOCKS, PAGE_KEYS } = require('./records')
 
 const PAGE_TYPES = new Set(Object.keys(PAGE_KEYS))
+const GROUP_HISTORY_TYPES = new Set(['group-join', 'group-confirm', 'group-cut'])
 
 function isPageType (type) {
   return typeof type === 'string' && PAGE_TYPES.has(type)
+}
+
+// A type no tombstone deletes.
+function isKeptType (type) {
+  return isPageType(type) || (typeof type === 'string' && GROUP_HISTORY_TYPES.has(type))
 }
 
 // Always a fresh copy: reading entries can run getters, which must not be
@@ -31,12 +40,14 @@ function toSet (v) {
 }
 
 // Valid tombstones, highest block first, one per block, and the seqs of the
-// valid page-* records, in one pass: validating each record once keeps the
-// fold as cheap as it was before the page rule.
+// valid records of a kept type, in one pass: validating each record once
+// keeps the fold as cheap as it was before the page rule. `grouped`: one of
+// them is a group history record (the diary is group-bound, pageTargets).
 function scan (entries, copyOf = validRecordCopy) {
   const out = []
-  const pages = new Set()
-  if (!Array.isArray(entries)) return { tombstones: out, pages }
+  const kept = new Set()
+  let grouped = false
+  if (!Array.isArray(entries)) return { tombstones: out, kept, grouped }
   const seen = new Set()
   for (let i = 0; i < entries.length; i++) {
     try {
@@ -46,26 +57,28 @@ function scan (entries, copyOf = validRecordCopy) {
       if (!Number.isSafeInteger(seq)) continue
       const copy = copyOf(entry.record, seq)
       if (copy === null) continue
-      if (isPageType(copy.type)) pages.add(seq)
-      else if (copy.type === 'delete' && !seen.has(seq)) {
+      if (isKeptType(copy.type)) {
+        kept.add(seq)
+        if (GROUP_HISTORY_TYPES.has(copy.type)) grouped = true
+      } else if (copy.type === 'delete' && !seen.has(seq)) {
         seen.add(seq)
         out.push({ seq, record: copy })
       }
     } catch {}
   }
   out.sort((a, b) => b.seq - a.seq)
-  return { tombstones: out, pages }
+  return { tombstones: out, kept, grouped }
 }
 
 function fold (entries) {
   return foldScanned(scan(entries))
 }
 
-function foldScanned ({ tombstones: valid, pages }) {
+function foldScanned ({ tombstones: valid, kept }) {
   const deleted = new Set()
   const effective = []
   for (const t of valid) {
-    if (deleted.has(t.seq) || pages.has(t.record.seq)) continue
+    if (deleted.has(t.seq) || kept.has(t.record.seq)) continue
     deleted.add(t.record.seq)
     effective.push(t)
   }
@@ -258,7 +271,7 @@ async function presentState (core) {
   // holds decodeBlock output (JSON.parse, plain data, no accessors), so the
   // type read here is the type validRecordCopy would copy, and any other
   // record is skipped by scan anyway after a clone and a full validation.
-  const scanned = scan(raw.filter((e) => e.record !== null && (e.record.type === 'delete' || isPageType(e.record.type))))
+  const scanned = scan(raw.filter((e) => e.record !== null && (e.record.type === 'delete' || isKeptType(e.record.type))))
   const { deleted } = foldScanned(scanned)
   // Targets of every valid tombstone, effective or not.
   const targets = new Set(scanned.tombstones.map((t) => t.record.seq))
@@ -269,7 +282,7 @@ async function presentState (core) {
       break
     }
   }
-  return { raw, entries: withDeleted(raw, deleted), deleted, present }
+  return { raw, entries: withDeleted(raw, deleted), deleted, present, kept: scanned.kept, grouped: scanned.grouped }
 }
 
 // Present length walked from `from`, a present length the caller computed
@@ -389,23 +402,49 @@ async function tombstoneAt (core, seq) {
   }
 }
 
+// What a held block means to the fold: { target } for a valid tombstone,
+// { kept: true, group } for a valid record of a kept type (`group` for a
+// group history record), null for any other block or one not held. A read
+// error throws.
+async function heldKind (core, seq) {
+  if (!Number.isSafeInteger(seq) || seq < 1 || seq >= core.length || !(await core.has(seq))) return null
+  const copy = validRecordCopy(decodeBlock(await core.get(seq, { wait: false, raw: true })), seq)
+  if (copy === null) return null
+  if (copy.type === 'delete') return { target: copy.seq }
+  return isKeptType(copy.type) ? { kept: true, group: GROUP_HISTORY_TYPES.has(copy.type) } : null
+}
+
+// The fold over tombstones already validated (seq -> target) and the seqs
+// of the held records of a kept type: the same set deletedSeqs gives over
+// those blocks, without copying every record again.
+function foldTargets (tombs, kept = null) {
+  const deleted = new Set()
+  for (const seq of [...tombs.keys()].sort((a, b) => b - a)) {
+    const target = tombs.get(seq)
+    if (deleted.has(seq) || (kept !== null && kept.has(target))) continue
+    deleted.add(target)
+  }
+  return deleted
+}
+
 // Sorted deletable seqs: block 0 never is.
 function sortedSeqs (deleted) {
   return [...toSet(deleted)].filter((s) => Number.isSafeInteger(s) && s > 0).sort((a, b) => a - b)
 }
 
 // Clears every deleted block still local -> the cleared seqs. Block 0,
-// tombstones and page-* records are never cleared: every replica needs the
-// tombstones to compute the same fold, a tombstone a later one deleted
-// becomes effective again if that later one is itself deleted, and a page-*
-// record is never deletable (a seeder holding a set computed elsewhere
-// still keeps it).
+// tombstones and records of a kept type are never cleared: every replica
+// needs the tombstones to compute the same fold, a tombstone a later one
+// deleted becomes effective again if that later one is itself deleted, and
+// a page-*, group-join, group-confirm or group-cut record is never deletable
+// (a seeder holding a set computed elsewhere still keeps it).
 async function clearDeleted (core, deleted) {
   return clearSeqs(core, sortedSeqs(deleted), () => true)
 }
 
 // stillDeleted(seq) is asked again after every await, right before the
-// clear, so a seq an update took out of the set is never cleared.
+// clear, so a seq an update took out of the set is never cleared. A
+// cleared seq was read as a record of no kept type: it is remembered.
 async function clearSeqs (core, seqs, stillDeleted) {
   const cleared = []
   for (const seq of seqs) {
@@ -414,19 +453,20 @@ async function clearSeqs (core, seqs, stillDeleted) {
       cleared.push(seq)
     }
   }
+  if (cleared.length > 0) await rememberRead(core, cleared)
   return cleared
 }
 
 // Fails closed: only a block read back and known to be neither a valid
-// tombstone nor a valid page-* record may be cleared; a read error or a
-// missing block never is.
+// tombstone nor a valid record of a kept type may be cleared; a read error
+// or a missing block never is.
 async function clearable (core, seq, stillDeleted) {
   try {
     if (!stillDeleted(seq) || seq >= core.length || !(await core.has(seq))) return false
     const block = await core.get(seq, { wait: false, raw: true })
     if (block === null || block === undefined) return false
     const copy = validRecordCopy(decodeBlock(block), seq)
-    if (copy !== null && (copy.type === 'delete' || isPageType(copy.type))) return false
+    if (copy !== null && (copy.type === 'delete' || isKeptType(copy.type))) return false
     return stillDeleted(seq) && seq < core.length
   } catch {
     return false
@@ -599,11 +639,63 @@ const ROSTER_SEQ = 2
 const ROSTER_PROBE_MS = 2000
 const ROSTER_REPROBE_MS = 30000
 const PROBE_POLL_MS = 50
-// pageTargets `remember`: the targets read once as non-page records, kept
-// in the core's user data (uint32 LE seqs, at most MAX_REMEMBERED) so a
-// later download never fetches them back from a stale peer.
+// The deleted blocks read once as records of no kept type (pageTargets
+// `remember`, and every clear), kept in the core's user data (uint32 LE
+// seqs, at most MAX_REMEMBERED): a later download never fetches them back
+// from a stale peer.
 const REMEMBER_KEY = 'varanda/page-read'
 const MAX_REMEMBERED = 4096
+// Per core key, one read-merge-write at a time: two writers in one process
+// (a guard and a clear) never drop each other's seqs.
+const rememberChains = new Map()
+
+function canRemember (core) {
+  return core !== null && typeof core === 'object' && typeof core.getUserData === 'function' && typeof core.setUserData === 'function'
+}
+
+async function loadRemembered (core) {
+  const out = new Set()
+  if (!canRemember(core)) return out
+  try {
+    const buf = await core.getUserData(REMEMBER_KEY)
+    if (!buf || buf.byteLength % 4 !== 0) return out
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+    for (let i = 0; i < buf.byteLength && out.size < MAX_REMEMBERED; i += 4) out.add(view.getUint32(i, true))
+  } catch {}
+  return out
+}
+
+// Adds seqs to the remembered set; never throws.
+function rememberRead (core, seqs) {
+  if (!canRemember(core)) return Promise.resolve()
+  const add = [...seqs].filter((s) => Number.isSafeInteger(s) && s > 0 && s <= 0xffffffff)
+  if (add.length === 0) return Promise.resolve()
+  let id = core
+  try {
+    if (core.key) id = b4a.toString(core.key, 'hex')
+  } catch {}
+  const prev = rememberChains.get(id) || Promise.resolve()
+  const next = prev.then(async () => {
+    const all = await loadRemembered(core)
+    let changed = false
+    for (const s of add) {
+      if (all.has(s) || all.size >= MAX_REMEMBERED) continue
+      all.add(s)
+      changed = true
+    }
+    if (!changed) return
+    const list = sortedSeqs(all)
+    const buf = b4a.alloc(list.length * 4)
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+    for (let i = 0; i < list.length; i++) view.setUint32(i * 4, list[i], true)
+    await core.setUserData(REMEMBER_KEY, buf)
+  }).catch(() => {})
+  rememberChains.set(id, next)
+  next.then(() => {
+    if (rememberChains.get(id) === next) rememberChains.delete(id)
+  })
+  return next
+}
 
 // Whether a connected peer advertised block seq (Hypercore: its
 // contiguous range, then its bitfield), and whether any peer is connected.
@@ -657,60 +749,40 @@ async function heldType (core, seq) {
 }
 
 // -> { excludable (deleted, { wait }) -> Set, page () -> true | false |
-// null, watch (fn) -> unwatch, destroy () }: the seqs of `deleted` that may
-// leave the download now. Read every held target before a clear, so a
-// cleared one is not fetched back. `wait` false does not wait for a roster
-// probe (it settles later; watch(fn) is told). The guard may outlive one
-// download (the browser follower reopens it), so only its owner destroys it;
-// the peer-add listener also goes once the type is settled. `remember`
-// keeps the targets read as non-page records in the core's user data, so a
-// later guard (the next run) does not fetch them again: a block's type
-// never changes in a signed log, and a forked replica is purged.
-function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPROBE_MS, remember = false } = {}) {
-  let page = null
+// null, groupBound () -> boolean, setGroupBound (on), watch (fn) -> unwatch,
+// destroy () }: the seqs of `deleted` that may leave the download now. Read
+// every held target before a clear, so a cleared one is not fetched back.
+// `wait` false does not wait for a roster probe (it settles later;
+// watch(fn) is told). The guard may outlive one download (the browser
+// follower reopens it), so only its owner destroys it; the peer-add
+// listener also goes once the type is settled.
+// A page diary and a group-bound diary (docs/protocol.md "Deletion": one
+// holding a group-join, group-confirm or group-cut record, or one a group
+// the node holds names) keep an unheld target in the download until it is
+// read once: then a record of a kept type stays, any other is cleared and
+// excluded for good. Any other diary excludes every target and never
+// fetches one. A change of setGroupBound tells the watchers, so the
+// download recomputes. `page` false: the diary is known not to be a page,
+// its genesis is never read. `remember` keeps the targets read as records
+// of no kept type in the core's user data, so a later guard (the next run)
+// does not fetch them again: a block's type never changes in a signed log,
+// and a forked replica is purged.
+function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPROBE_MS, groupBound: bound = false, page: known = null, remember = false } = {}) {
+  let page = known === false ? false : null
+  let grouped = bound === true
   const read = new Set()
-  const keeps = remember === true && typeof core.getUserData === 'function' && typeof core.setUserData === 'function'
+  const keeps = remember === true && canRemember(core)
   let loaded = keeps ? null : Promise.resolve()
-  let saving = null
-  let dirty = false
   const load = () => {
     if (loaded === null) {
-      loaded = (async () => {
-        try {
-          const buf = await core.getUserData(REMEMBER_KEY)
-          if (!buf || buf.byteLength % 4 !== 0) return
-          const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-          for (let i = 0; i < buf.byteLength && read.size < MAX_REMEMBERED; i += 4) read.add(view.getUint32(i, true))
-        } catch {}
-      })()
+      loaded = loadRemembered(core).then((seqs) => {
+        for (const seq of seqs) read.add(seq)
+      })
     }
     return loaded
   }
-  // One write at a time; marks that arrive meanwhile join the next one.
-  const save = () => {
-    if (!keeps) return
-    dirty = true
-    if (saving !== null) return
-    // Cleared in the same tick the loop sees nothing dirty, so a mark
-    // that lands right after is written by a new run, not dropped.
-    saving = Promise.resolve().then(async () => {
-      try {
-        while (dirty) {
-          dirty = false
-          const seqs = sortedSeqs(read).slice(0, MAX_REMEMBERED)
-          const buf = b4a.alloc(seqs.length * 4)
-          const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-          for (let i = 0; i < seqs.length; i++) view.setUint32(i * 4, seqs[i], true)
-          try {
-            await core.setUserData(REMEMBER_KEY, buf)
-          } catch {
-            return
-          }
-        }
-      } finally {
-        saving = null
-      }
-    })
+  const save = (seqs) => {
+    if (keeps) rememberRead(core, seqs)
   }
   let probing = null
   let nextAt = 0
@@ -777,6 +849,14 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
   }
   return {
     page: () => page,
+    groupBound: () => grouped,
+    setGroupBound (on) {
+      if (destroyed || grouped === (on === true)) return
+      grouped = on === true
+      for (const fn of [...watchers]) {
+        try { fn() } catch {}
+      }
+    },
     watch (fn) {
       watchers.add(fn)
       return () => watchers.delete(fn)
@@ -804,18 +884,18 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
       if (unsettled()) {
         arm()
         const run = probe()
-        if (wait && run !== null) await run
+        if (wait && run !== null && !grouped) await run
       }
-      if (page === false) return new Set(all)
+      if (page === false && !grouped) return new Set(all)
       const out = new Set()
-      let learned = false
+      const learned = []
       for (const seq of all) {
         if (!read.has(seq)) {
           const type = await heldType(core, seq)
           if (type === null) continue
-          if (!isPageType(type) && Number.isSafeInteger(seq) && seq >= 0 && seq <= 0xffffffff) {
+          if (!isKeptType(type) && Number.isSafeInteger(seq) && seq >= 0 && seq <= 0xffffffff) {
             read.add(seq)
-            learned = true
+            learned.push(seq)
           }
           // A deleted block 2 read once settles it, cleared or not.
           if (seq === ROSTER_SEQ && page === null) {
@@ -825,12 +905,13 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
         }
         out.add(seq)
       }
-      if (learned) save()
+      if (learned.length > 0) save(learned)
       // Until block 2 settles the type, every target stays out: a personal
       // diary never fetches a deleted post from a stale or hostile peer, and
       // a page fetches its targets once the roster lands (downloadExceptPages
-      // refreshes on block 1 or 2).
-      if (page !== true) return new Set(all)
+      // refreshes on block 1 or 2). A group-bound diary fetches its targets
+      // once whatever the type.
+      if (page !== true && !grouped) return new Set(all)
       return out
     }
   }
@@ -839,11 +920,12 @@ function pageTargets (core, { probeMs = ROSTER_PROBE_MS, reprobeMs = ROSTER_REPR
 // make(core, skip) (downloadExcept, or the browser's linearExcept) over the
 // excludable part of `deleted` only (pageTargets); a 'download' of a target
 // still in the range, or of a genesis block, recomputes it. Same { update,
-// destroy, idle } as make's handle; the first ranges open once the first
-// read is done, and update(next) waits for the recompute.
-function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null, remember = false } = {}) {
+// destroy, idle } as make's handle, plus setGroupBound(on) (the guard's);
+// the first ranges open once the first read is done, and update(next) waits
+// for the recompute. `groupBound` and `remember` seed a guard made here.
+function downloadExceptPages (core, deleted, { make = downloadExcept, guard: given = null, groupBound = false, remember = false } = {}) {
   // A guard made here is this download's own; a given one is its caller's.
-  const guard = given !== null ? given : pageTargets(core, { remember })
+  const guard = given !== null ? given : pageTargets(core, { groupBound, remember })
   let wanted = toSet(deleted)
   let waiting = new Set(sortedSeqs(wanted))
   let inner = null
@@ -894,6 +976,9 @@ function downloadExceptPages (core, deleted, { make = downloadExcept, guard: giv
       wanted = toSet(next)
       return refresh(true)
     },
+    setGroupBound (on) {
+      if (!destroyed && typeof guard.setGroupBound === 'function') guard.setGroupBound(on)
+    },
     destroy () {
       if (destroyed) return
       destroyed = true
@@ -934,6 +1019,10 @@ module.exports = {
   presentState,
   presentLength,
   tombstoneAt,
+  heldKind,
+  foldTargets,
+  isKeptType,
+  GROUP_HISTORY_TYPES,
   clearDeleted,
   downloadExcept,
   downloadExceptPages,

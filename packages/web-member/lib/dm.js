@@ -1100,11 +1100,18 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // retry), so without it the same photo forwarded to a second conversation
   // would carry the first one's blob and let the seeder link the readers of
   // both; send refuses an item prepared for another destination.
-  async function putMedia (own, keyPair, { bytes, mime, width, height, ms, to }) {
+  // page: the Página this item is put for (its secrets held here), or
+  // undefined for the person. The sender is part of the reuse key and kept
+  // on the entry as `from`: the same photo sent as the person and as a
+  // Página to one reader in one unlock would otherwise share a blob id, key
+  // and nonce, which proves to that reader who writes as the Página. A page
+  // draft refuses an item put for the person, and dm.send one put for a page.
+  async function putMedia (own, keyPair, { bytes, mime, width, height, ms, to, page }) {
     requireUnlocked()
     const gen = generation
     const voice = mime === dm.DM_AUDIO_MIME
-    const toOk = typeof to === 'string' && /^[0-9a-f]{64}$/.test(to)
+    const pageOk = page === undefined || (typeof page === 'string' && /^[0-9a-f]{64}$/.test(page))
+    const toOk = pageOk && typeof to === 'string' && /^[0-9a-f]{64}$/.test(to)
     let ok = false
     if (toOk && bytes instanceof Uint8Array && voice) {
       const given = ms === undefined || (Number.isInteger(ms) && ms >= 1 && ms <= dm.DM_AUDIO_MAX_MS)
@@ -1118,9 +1125,19 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (bytes instanceof Uint8Array) wipe(bytes)
       throw new UsageError(BAD_MEDIA)
     }
+    if (page !== undefined) {
+      try {
+        pages.need(page)
+        pages.requireMatch(page)
+      } catch (err) {
+        wipe(bytes)
+        throw err
+      }
+    }
+    const from = page === undefined ? own : page
     const plain = new Uint8Array(bytes)
     wipe(bytes)
-    const hash = [sha256Hex(plain), mime, width, height, ms, to].join('\n')
+    const hash = [sha256Hex(plain), mime, width, height, ms, to, from].join('\n')
     let entry = sealedByPlain.get(hash)
     if (entry === undefined || entry.plain === null) {
       let sealed
@@ -1130,7 +1147,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         wipe(plain)
         throw err
       }
-      entry = { sealed, mime, w: width, h: height, ms, to, plain, hash, lock: Promise.resolve() }
+      entry = { sealed, mime, w: width, h: height, ms, to, from, plain, hash, lock: Promise.resolve() }
       sealedById.set(sealed.descriptor.id, entry)
       sealedByPlain.set(hash, entry)
       while (sealedById.size > BLOBS_MAX) forgetBlob(sealedById.values().next().value)
@@ -1146,10 +1163,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // The sealed blob of a dm.send item, which must be exactly what putMedia
-  // answered in this unlock for this same destination.
-  function entryOfItem (item, to) {
+  // answered in this unlock for this same destination and sender (the own
+  // key, or the Página's).
+  function entryOfItem (item, to, from) {
     const entry = sealedById.get(item.id)
-    if (entry === undefined || entry.plain === null || entry.to !== to) throw new UsageError(MEDIA_STALE)
+    if (entry === undefined || entry.plain === null || entry.to !== to || entry.from !== from) throw new UsageError(MEDIA_STALE)
     const want = itemOf(entry)
     if (!DM_MEDIA_KEYS.every((k) => want[k] === item[k])) throw new UsageError(MEDIA_STALE)
     return entry
@@ -1507,7 +1525,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (plains.length > 0) {
       try {
         // Deleted while the upload ran: nothing to cache.
-        if (!lc.hiddenByDelete(row.from, row.id)) await local.putMedia(row.from, row.id, plains)
+        if (!lc.hiddenByDelete(row.from, row.id)) await lc.putMedia(row.from, row.id, plains)
       } catch {}
       plains.forEach(wipe)
     }
@@ -1605,7 +1623,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       entry = pending.get(key)
     }
     if (entry === undefined) {
-      const sealedBlobs = messageItems({ media: items, card }).map((item) => entryOfItem(item, to))
+      const sealedBlobs = messageItems({ media: items, card }).map((item) => entryOfItem(item, to, own))
       // Copied before any await: an overlapping send of the same blob may
       // forget (and wipe) the shared entry meanwhile.
       const plains = sealedBlobs.map((b) => new Uint8Array(b.plain))
@@ -2598,12 +2616,19 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   // recipientBox: the newest dm-key box of `to` (a msg), as dm.send's.
-  async function pageDraft ({ page, kind, to, text, replyTo, fwd, op, peer }, recipientBox) {
+  // media and card: as dm.send's (docs/rpc.md 5.75), each item answered by
+  // putMedia in this unlock for `to` and this `page` (never an item put for
+  // the person) and fully acked before the digest goes
+  // out to be signed. keyPair: the identity, whose blob stamps that upload
+  // spends, as in a person's send. The draft keeps the sealed blob entries,
+  // never a copy of their plaintext.
+  async function pageDraft ({ page, kind, to, text, replyTo, fwd, op, peer, media = null, card = null }, recipientBox, keyPair) {
     requireUnlocked()
     const e = pages.need(page)
     pages.requireMatch(page)
     const ctx = await pageCtx(page)
     let fields
+    let sealedBlobs = []
     if (kind === 'msg') {
       if (typeof to !== 'string' || typeof text !== 'string') throw new UsageError(BAD_TEXT)
       if (to === page) throw new UsageError(SELF_SEND)
@@ -2616,9 +2641,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         if (target === null) throw new UsageError(BAD_REPLY)
         reply = boundReply(target)
       }
-      fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, cert: e.cert }
+      const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
+      const c = card === null ? null : copyLinkCard(card, mediaItem)
+      sealedBlobs = messageItems({ media: items, card: c }).map((item) => entryOfItem(item, to, page))
+      fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, media: items, card: c, cert: e.cert }
     } else {
       if (typeof peer !== 'string' || peer === page || !dm.DM_OPS.includes(op)) throw new UsageError('nada a alterar')
+      if (media !== null || card !== null) throw new UsageError(BAD_TEXT)
       fields = { kind: 'ctl', from: page, to: page, op, peer, cert: e.cert }
     }
     let d
@@ -2627,7 +2656,20 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
     }
-    pages.putDraft(d.body.id, { page, kind, json: d.json, body: d.body, box: kind === 'msg' ? recipientBox : null, entry: null })
+    // Every chunk acked before anything is signed, stamped or put. A failed
+    // upload or a lock meanwhile leaves no inner behind; the blobs stay
+    // whole for the retry, as a person's (lock forgets them).
+    try {
+      if (sealedBlobs.length > 0) {
+        const gen = generation
+        for (const b of sealedBlobs) await upload(b, keyPair)
+        if (gen !== generation) throw new UsageError(LOCKED)
+      }
+      pages.putDraft(d.body.id, { page, kind, json: d.json, body: d.body, box: kind === 'msg' ? recipientBox : null, entry: null, blobs: sealedBlobs })
+    } catch (err) {
+      wipe(d.json)
+      throw err
+    }
     return { id: d.body.id, digest: d.digest, at: d.body.at }
   }
 
@@ -2650,6 +2692,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // goes to the page box only, through the page's ctl queue.
   async function pageSend ({ page, id, signature, expiresAt }) {
     requireUnlocked()
+    const gen = generation
     const d = pages.draftOf(page, id)
     if (d === null) throw new UsageError(DRAFT_GONE)
     const e = pages.need(page)
@@ -2704,8 +2747,24 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       } finally {
         inner.fill(0)
       }
-      const stamps = await takeStamps(2)
-      if (stamps === null) throw new UsageError(NO_STAMPS)
+      // The page's own copy of its photos is cached from the bytes it put,
+      // as a person's, while every blob still holds them (a lock or the
+      // BLOBS_MAX bound may have dropped one since the draft); otherwise its
+      // thread reads them from the seeder like any other.
+      const blobs = d.blobs
+      const plains = blobs.every((x) => x.plain !== null) ? blobs.map((x) => new Uint8Array(x.plain)) : []
+      const stamps = await takeStamps(2).catch((err) => {
+        plains.forEach(wipe)
+        throw err
+      })
+      if (stamps === null) {
+        plains.forEach(wipe)
+        throw new UsageError(NO_STAMPS)
+      }
+      if (gen !== generation) {
+        plains.forEach(wipe)
+        throw new UsageError(LOCKED)
+      }
       entry = {
         key: null,
         id: b.id,
@@ -2715,17 +2774,36 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         // retry, as the page's ctls do (ctxPrefix).
         prefixes: [prefixOf(d.box), randomPrefix()],
         acked: [false, false],
-        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b) },
-        blobs: [],
-        plains: [],
+        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: b.media, card: b.card, at: b.at, mine: true, digest: dm.bodyDigest(b) },
+        blobs,
+        plains,
         local: ctx.local
       }
       d.entry = entry
     }
     // The page's queued ops go first, as the own ones do before a dm.set.
     await flushQueued(ctx)
-    await deliver(entry)
+    try {
+      if (gen !== generation) throw new UsageError(LOCKED)
+      await deliver(entry)
+    } catch (err) {
+      // The plaintext copies stay on the entry, as on a person's pending
+      // one, so a retry of this draft still caches the page's own photos;
+      // ./page-dm.js wipes them with the draft (expiry, forget, lock). A
+      // lock meanwhile already dropped the draft: none stay.
+      if (gen !== generation) dropEntry(entry)
+      // The recipient's drop landed and only the self copy was refused
+      // ('cheio', 'ritmo'): the message is out, so the answer is uncertain
+      // and the user's explicit retry re-puts this same draft (the acked drop
+      // is skipped). A plain refusal would let the next tap draft and sign a
+      // second message. Nothing is retried here.
+      if (gen === generation && entry.acked[0] && !(err && err.uncertain)) throw unconfirmed()
+      throw err
+    }
     pages.dropDraft(id)
+    dropEntry(entry)
+    for (const x of entry.blobs) forgetBlob(x)
+    entry.blobs = []
     return { id: b.id, at: b.at }
   }
 

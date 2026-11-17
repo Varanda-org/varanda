@@ -228,7 +228,10 @@ O que ele sobe, no mesmo processo:
 - uma rede DHT de teste presa a loopback, ou a que `VARANDA_BOOTSTRAP` aponta (precisa ser loopback, por exemplo a de `apps/cli/scripts/local-dht.js`);
 - uma associação e um semeador certificado, com a entrada WebSocket, como `seed --ws-port`;
 - o serviço de conta, com a loja de termos ligada, verificação de celular com SMS simulado, sem verificação de idade (`GET /account/age/policy` responde `{ required: false }`) e com a busca de GIF ligada num provedor simulado (`apps/cli/scripts/gif-stub.js`: qualquer busca traz as mesmas imagens de uma cor só, sem chave nem rede externa);
-- um só endereço, `http://localhost:<porta>`, que reúne `/varanda.json`, `/seeder`, `/media/*`, `/index/*`, `/account/*` e `/p/*`; o resto vai para o servidor do Expo ou para o `dist` exportado.
+- as Páginas ligadas (`GET /account/pages/policy` responde `{ available: true }`), com um `VARANDA_PAGE_KEYS` sorteado a cada execução, guardado só na memória do processo e nunca impresso: as Páginas e as Conversas delas somem com os dados do laboratório;
+- fotos e mensagens de voz nas Conversas: o semeador guarda os pedaços cifrados e o selo deles, como numa instalação;
+- os códigos de recuperação (`recovery.json`): um código criado em Ajustes › Passkeys e recuperação abre a mesma conta num segundo perfil do Chrome, que vira um segundo aparelho da pessoa (Entrar › Outras formas de entrar › Entrar com código de recuperação, depois uma passkey nova);
+- um só endereço, `http://localhost:<porta>`, que reúne `/varanda.json`, `/seeder`, `/media/*`, `/index/*`, `/account/*`, `/blob/*`, `/f/*` e `/p/*`; o resto vai para o servidor do Expo ou para o `dist` exportado.
 
 ### SMS simulado
 

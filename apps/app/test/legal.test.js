@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 76)
-  t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 76, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(LEGAL_VERSION, 80)
+  t.is(LEGAL_DATE, '17/11/2026')
+  t.is(REVIEW_NOTE, 'Versão 80, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ff8c9d0e4077049a6f46fe9873ae5d8661226ed9918ad5b7c5b3822f1194097b', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '07f33cdaf10e9a97966134cef6a053f89669d5b6ba41783f8b94f37b2fdfc5b3', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -507,7 +507,7 @@ test('legal: version 18 describes voice notes in chats and the report audio', as
   t.ok(text(TERMS).includes('só pede acesso ao microfone quando você começa a gravar'))
   t.ok(text(TERMS).includes('o botão de gravar não aparece'))
   t.ok(text(TERMS).includes('só os aparelhos dos membros conseguem ouvi-la'))
-  t.ok(text(TERMS).includes('Conversas, grupos, Feira, Páginas e a foto do perfil não aceitam vídeo'))
+  t.ok(text(TERMS).includes('Conversas, grupos, Feira e a foto do perfil, de uma pessoa ou de uma página, não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('As conversas não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('o áudio vai junto com a denúncia, aberto'))
   t.ok(text(PRIVACY).includes('se tiver até 700 KB'))
@@ -893,6 +893,30 @@ test('legal: version 76 describes connected devices and the periodic key change'
   t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
 })
 
+test('legal: version 78 describes Varandinha', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('a Varandinha é opcional e começa desligada') || text(doc).includes('A Varandinha é um jogo opcional e começa desligada'), 'optional and off by default')
+    t.ok(text(doc).includes('a pessoa cuja planta você regou vê o seu nome') || text(doc).includes('A pessoa cuja planta você regou vê o seu nome'), 'the watered person sees the name')
+    t.ok(text(doc).includes('recompensa sorteada, ranking nem prêmio'), 'no random reward, ranking or prize')
+    t.ok(text(doc).includes('nenhuma notificação pede para alguém voltar'), 'nothing asks anyone to come back')
+    t.ok(text(doc).includes('cópias que outras pessoas já buscaram podem continuar'), 'fetched copies may remain')
+    t.ok(text(doc).includes('Sair apaga só os seus próprios registros: as regas que vizinhos fizeram na sua varanda ficam no diário deles, e só quem regou pode apagá-las.'), 'leaving deletes only the own records')
+    t.absent(text(doc).includes('\u2014'), 'no em dash')
+  }
+  t.ok(text(TERMS).includes('O estado de cada varanda é declarado por quem joga e não é conferido por ninguém.'), 'terms: declared, not verified')
+  t.ok(text(PRIVACY).includes('O estado do jogo é declarado por cada pessoa e não é conferido'), 'privacy: declared, not verified')
+  t.ok(text(PRIVACY).includes('e fica sabendo qual varanda o seu aparelho abre'), 'privacy: the seeder sees which balcony is opened')
+  t.ok(text(PRIVACY).includes('sem guardar planta nem nome'), 'privacy: pointers only')
+  t.ok(text(PRIVACY).includes('A cada nova rega, o app marca como apagadas até sete das suas regas com mais de cerca de três dias; as que sobrarem continuam públicas até as regas seguintes ou até você sair.'), 'privacy: each watering prunes at most seven helps older than about three days')
+  t.ok(text(TERMS).includes('deixa no seu diário um registro público de que o jogo foi desligado'), 'terms: leaving keeps a public off flag')
+  t.ok(text(PRIVACY).includes('deixa no diário o registro público de desligado'), 'privacy: leaving keeps a public off flag')
+  t.ok(text(PRIVACY).includes('inclusive as regas que você deu'), 'privacy: leaving deletes the given helps')
+  const visitas = text(PRIVACY).indexOf('No app instalado e na versão web hospedada, Visitas é opcional')
+  t.ok(visitas >= 0 && text(PRIVACY).indexOf('No app instalado e na versão web hospedada, a Varandinha') > visitas, 'privacy: after the Visitas paragraph')
+})
+
 test('legal: version 73 keeps the one-time notes from repeating on another device', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -903,5 +927,25 @@ test('legal: version 73 keeps the one-time notes from repeating on another devic
   const momentos = all.indexOf('Esse mesmo bloco guarda também os momentos de outras pessoas que você já viu')
   t.ok(all.indexOf(marks) < momentos, 'the marks come before the momentos sentence')
   t.ok(all.indexOf(closing) > momentos && all.indexOf(closing) > all.indexOf(marks), 'the closing sentence follows the momentos list, not the marks')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 79 describes video and link previews in page posts', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('As publicações de uma página também aceitam um vídeo curto, como as de uma pessoa.'))
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links'))
+  t.ok(text(PRIVACY).includes('fotos e vídeos das publicações, imagens das prévias de links'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links'))
+})
+
+test('legal: version 80 describes polls, events, votes and RSVPs of a page', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela e quem ela segue, é público como a página'))
+  t.ok(text(TERMS).includes('Como os de uma pessoa, um voto ou uma resposta de presença da página é um registro no diário dela, e retirá-lo grava um novo registro que deixa os anteriores públicos.'))
+  t.ok(text(TERMS).includes('ao que uma página publica por ele (publicações, com as opções de uma enquete e o título e o lugar de um evento, respostas,'))
+  t.ok(text(PRIVACY).includes('imagens das prévias de links, enquetes, eventos, os votos e as respostas de presença da página e a lista de quem a página segue'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links, votos, respostas de presença e quem ela segue)'))
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })

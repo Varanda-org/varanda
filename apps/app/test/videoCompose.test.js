@@ -252,11 +252,12 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
   }
 }
 
-test('video capability is explicit, online, personal, and needs both functions', async (t) => {
+test('video capability is explicit, online, and needs both functions', async (t) => {
   const { canComposeVideo } = await load()
   const args = { node: { online: true, media: { video: true } }, pickVideo () {}, prepareVideo () {} }
   t.ok(canComposeVideo(args))
-  t.absent(canComposeVideo({ ...args, asPage: 'page' }))
+  t.ok(canComposeVideo({ ...args, asPage: 'page' }), 'a page can compose video')
+  t.ok(canComposeVideo({ ...args, asPage: null }))
   t.absent(canComposeVideo({ ...args, node: { ...args.node, online: false } }))
   t.absent(canComposeVideo({ ...args, node: { media: {} } }))
   t.absent(canComposeVideo({ ...args, pickVideo: null }))

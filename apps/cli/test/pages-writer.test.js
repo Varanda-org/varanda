@@ -256,9 +256,9 @@ test('pages-writer: a page is created, pushed, admitted and served; media, follo
   t.alike(videoBounds(video), { width: 1200, height: 800, ms: 3000, audio: false }, 'a valid short video container')
   const beforeVideo = writer.info(page.key).length
   const beforeItems = writer.items(page.key)
-  for (const bytes of [video, big]) {
-    await t.exception(writer.mediaItem(page.key, { bytes, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(bytes) }), /midia-invalida/, 'video MIME is refused even with image bytes')
-  }
+  // The same valid container is stored below with its ms: without one it is refused.
+  await t.exception(writer.mediaItem(page.key, { bytes: video, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(video) }), /midia-invalida/, 'a valid video without ms is refused')
+  await t.exception(writer.mediaItem(page.key, { bytes: big, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(big), ms: 3000 }), /midia-invalida/, 'image bytes labeled video/mp4 are refused')
   t.is(writer.info(page.key).length, beforeVideo, 'a refused video appends no record')
   t.alike(writer.items(page.key), beforeItems, 'a refused video stores no media item')
   const notPng = b4a.from('not a png at all')
@@ -269,6 +269,12 @@ test('pages-writer: a page is created, pushed, admitted and served; media, follo
   const pngItem = await writer.mediaItem(page.key, { bytes: png, mime: 'image/png', width: 10, height: 20, sha256: sha(png) })
   t.is(pngItem.start, 33)
   t.is(pngItem.mime, 'image/png')
+  const storedVideo = await writer.mediaItem(page.key, { bytes: video, mime: 'video/mp4', width: 1200, height: 800, sha256: sha(video), ms: 3000 })
+  t.is(storedVideo.mime, 'video/mp4')
+  t.is(storedVideo.ms, 3000, 'a video with a valid ms is stored')
+  t.is(storedVideo.width, 1200)
+  t.is(storedVideo.height, 800)
+  t.ok(writer.items(page.key).some((it) => it.sha256 === storedVideo.sha256 && it.ms === 3000))
 
   const post = await writer.append(page.key, [postRecord({ text: 'foto', media: [item] })])
   t.is(post.pushed, true)

@@ -188,8 +188,9 @@ function timedOf ({ ms, kind }) {
 // dm.putMedia after the read (docs/rpc.md 5.88): the same file rules, the
 // photo sealed and put on the blob channel by the session. `to`, the
 // destination, is required and the session refuses it missing (5.97).
-function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, to }) {
-  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to }) })
+// `page`, when acting as a Página, keys the blob to that sender.
+function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, to, page }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.dmPutMedia({ bytes, mime, width, height, ...voiceOf({ ms, kind }), to, ...(page !== undefined ? { page } : {}) }) })
 }
 
 // moment.putMedia after the read (docs/rpc.md 5.113): a momento's photo, a

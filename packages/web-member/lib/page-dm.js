@@ -128,12 +128,23 @@ function createPageHolder ({ storage, association, now = Date.now } = {}) {
     pending.delete(page)
   }
 
+  // A msg draft's send entry (./dm.js pageSend) keeps copies of its photos'
+  // plaintext for a retry of the same draft: they go with the draft.
+  function wipeDraft (d) {
+    wipe(d.json)
+    const e = d.entry
+    if (e !== null && e !== undefined && Array.isArray(e.plains)) {
+      e.plains.forEach(wipe)
+      e.plains = null
+    }
+  }
+
   function sweep () {
     const t = now()
     for (const [page, p] of [...pending]) if (p.expires <= t) dropPending(page)
     for (const [id, d] of [...drafts]) {
       if (d.expires <= t) {
-        wipe(d.json)
+        wipeDraft(d)
         drafts.delete(id)
       }
     }
@@ -205,7 +216,7 @@ function createPageHolder ({ storage, association, now = Date.now } = {}) {
     for (const e of held.values()) dropEntry(e)
     held.clear()
     for (const page of [...pending.keys()]) dropPending(page)
-    for (const d of drafts.values()) wipe(d.json)
+    for (const d of drafts.values()) wipeDraft(d)
     drafts.clear()
     mismatch.clear()
     maxGen.clear()
@@ -437,7 +448,7 @@ function createPageHolder ({ storage, association, now = Date.now } = {}) {
     mismatch.delete(page)
     for (const [id, d] of [...drafts]) {
       if (d.page === page) {
-        wipe(d.json)
+        wipeDraft(d)
         drafts.delete(id)
       }
     }
@@ -470,7 +481,7 @@ function createPageHolder ({ storage, association, now = Date.now } = {}) {
   function dropDraft (id) {
     const d = drafts.get(id)
     if (d === undefined) return
-    wipe(d.json)
+    wipeDraft(d)
     drafts.delete(id)
   }
 

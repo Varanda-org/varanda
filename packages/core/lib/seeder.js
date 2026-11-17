@@ -90,16 +90,22 @@
 // diary that count are the ones its slot walk counts (lib/group.js
 // slotWalk, over its group-join and group-cut records): at most
 // MAX_GROUP_WRITERS_PER_DIARY live and MAX_FROZEN_WRITERS_PER_DIARY frozen,
-// plus each of the up to MAX_WRITER_RELEASES_PER_DIARY writers it released
-// (liveGroupJoins). Listed in admitted.json (`groups: { K: { diary, group,
-// seq } }`), persisted before the open, purged before un-listing.
+// plus a stub of each of the up to MAX_WRITER_RELEASES_PER_DIARY writers it
+// released (liveGroupJoins). Listed in admitted.json (`groups: { K: { diary,
+// group, seq, cut, clearedFrom, clearedTo } }`), persisted before the open,
+// purged before un-listing.
 // Leaving (a join turned off) NEVER purges: it only marks the writer as
 // left in the group index (lib/group-index.js), so the moderation record of
 // a departed member stays verifiable, and a counted writer whose join is
-// off is still admitted. A writer its diary cut (frozen or released) is
-// held whole, like any writer: a reader folds from a contiguous copy, so
-// nothing past the cut is cleared yet. Purges happen for a dropped or blocked diary, a root its blocked or revoked
-// creator bound, a root key in the blocklist snapshot, a fork or the
+// off is still admitted. A writer its diary cut keeps its blocks below the
+// cut and, past it, only its group-leave and group-key blocks, which the
+// fold still counts and readers read past a hole (_cutGroupCore): the rest
+// is fetched, read and cleared, and the quota counts what is kept. A writer
+// cut at 0 (released, or cut at 0 while counted once the releases are
+// spent) is such a stub: block 0, its leaves and its key blocks, also a
+// replaced boxless writer of a private group, which readers
+// then reject by its header. Purges happen for a dropped or blocked diary,
+// a root its blocked or revoked creator bound, a root key in the blocklist snapshot, a fork or the
 // quota.
 // Group keys never travel on the admission channel; members learn writer
 // sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
@@ -202,7 +208,7 @@ const { attachBlob } = require('./blob-net')
 const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
 const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
-const { pushCandidates, pushName } = require('./push-events')
+const { CANCEL_KINDS, pushCancel, pushCandidates, pushName, PUSH_MAX_AGE_MS } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -223,8 +229,9 @@ const {
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
+const { advertisedHeld, peerAnswered, peerOffers, askHeld } = require('./sparse-held')
 const { attachGroups } = require('./groups-net')
-const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
+const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
 const { createNameIndex } = require('./name-index')
 const { verifyRoster } = require('./page')
@@ -238,7 +245,7 @@ const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
-const { feira } = require('@varanda/rpc')
+const { feira, mentionTokens, MENTION_MAX } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 const {
@@ -322,7 +329,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -399,6 +406,20 @@ async function momentBlobIds (core) {
 // while a diary declaring thousands of keys holds at most this many cores x
 // MAX_MEDIA_BLOCKS x 2 counter entries, whatever it writes.
 const MEDIA_TRACK_MAX = 2 * MAX_MEDIA_CORES
+// Mentions of a name not yet verified when the push cursor passed the post,
+// kept in memory to push once the name settles (_pushHold). Oldest first out.
+const PUSH_PENDING_MAX = 1024
+// Per actor, its own oldest out first, so one member cannot evict everyone
+// else's waiting mentions.
+const PUSH_PENDING_PER_ACTOR = 32
+// A recall (on: false) cancels only a follow, like or repost this seeder
+// emitted this recently: comfortably above the account service send delay
+// (PUSH_DELAY_MAX_MS, 60 s, apps/cli/lib/account/push-routes.js), after
+// which the push is out and a cancel would drop nothing. Bounded, oldest
+// out first, and never persisted: after a restart the queued push is
+// delivered (no recall), as before recalls existed.
+const PUSH_RECALL_MS = 5 * 60 * 1000
+const PUSH_RECALL_MAX = 4096
 
 // Fresh counters for a core first declared at seq `since`. Sparse (one entry
 // per block actually referenced, never above MAX_MEDIA_BLOCKS), so an honest
@@ -641,7 +662,7 @@ function mediaBinding (value) {
 // creator left for another reason (quota, its own drop).
 function groupBinding (value) {
   if (!isPlainObject(value)) return null
-  const { diary, group, seq, by, bound, issuer } = value
+  const { diary, group, seq, by, bound, issuer, cut, clearedFrom, clearedTo, unsureFrom, unsureTo } = value
   if (typeof diary !== 'string' || !HEX64.test(diary)) return null
   if (typeof group !== 'string' || !HEX64.test(group)) return null
   if (!Number.isSafeInteger(seq) || seq < 1) return null
@@ -649,6 +670,22 @@ function groupBinding (value) {
   if (typeof by === 'string' && HEX64.test(by)) out.by = by
   if (bound === true) out.bound = true
   if (out.bound === true && typeof issuer === 'string' && HEX64.test(issuer)) out.issuer = issuer
+  // A writer its diary cut is kept below `cut` and, in [clearedFrom,
+  // clearedTo), only its leaves and key blocks (_cutGroupCore); cut 0 is a
+  // stub. A range that does not fit the cut reads as nothing cleared yet.
+  // [unsureFrom, unsureTo) inside it was read from sparse peers only and is
+  // read again; one that does not fit reads as read whole.
+  if (Number.isSafeInteger(cut) && cut >= 0) {
+    const below = keptBelow(cut)
+    const fits = Number.isSafeInteger(clearedFrom) && Number.isSafeInteger(clearedTo) && below <= clearedFrom && clearedFrom <= clearedTo
+    out.cut = cut
+    out.clearedFrom = fits ? clearedFrom : below
+    out.clearedTo = fits ? clearedTo : below
+    if (fits && Number.isSafeInteger(unsureFrom) && Number.isSafeInteger(unsureTo) && clearedFrom <= unsureFrom && unsureFrom < unsureTo && unsureTo <= clearedTo) {
+      out.unsureFrom = unsureFrom
+      out.unsureTo = unsureTo
+    }
+  }
   return out
 }
 
@@ -802,8 +839,13 @@ async function localMediaVerdict (core, diaryHex) {
 // writer's `box` must match it, hex64 in a private group and null in a
 // public one, else 'header-invalid' as in the fold and member sync. A
 // version 1 header (the validators' 'legacy') is 'header-invalid' too: no
-// wire reason of its own, and the startup re-gate purges it.
-function groupVerdict (raw, key, group, diary, visibility = null) {
+// wire reason of its own, and the startup re-gate purges it. `released`: the
+// writer is kept as a stub, cut at 0 (groupWalkCut: released by its diary,
+// or cut at 0 while still counted once the releases are spent), so a
+// boxless writer of a private group (one its diary replaced) stays as a
+// stub, which readers fetch and reject by its header instead of waiting
+// for it (#350).
+function groupVerdict (raw, key, group, diary, visibility = null, released = false) {
   try {
     const header = decodeBlock(raw)
     if (header === null) return 'header-invalid'
@@ -814,7 +856,7 @@ function groupVerdict (raw, key, group, diary, visibility = null) {
     if (validateWriterHeader(header) !== null) return 'header-invalid'
     if (header.group !== group) return 'wrong-group'
     if (header.diary !== diary) return 'wrong-diary'
-    if (visibility === 'private' && header.box === null) return 'header-invalid'
+    if (visibility === 'private' && header.box === null && !released) return 'header-invalid'
     if (visibility === 'public' && header.box !== null) return 'header-invalid'
     return null
   } catch {
@@ -827,18 +869,18 @@ function groupVerdict (raw, key, group, diary, visibility = null) {
 async function localGroupVerdict (core, key, binding, visibility = null) {
   try {
     const raw = await core.get(0, { wait: false, raw: true })
-    return { reason: groupVerdict(raw, key, binding.group, binding.diary, visibility), raw }
+    return { reason: groupVerdict(raw, key, binding.group, binding.diary, visibility, key !== binding.group && binding.cut === 0), raw }
   } catch {
     return { reason: 'header-invalid', raw: null }
   }
 }
 
 // Writer cores one diary may hold at a seeder in one group, left ones
-// included (leaving never frees a slot): its live and frozen slots, and
-// each released writer, held whole (#350).
+// included (leaving never frees a slot): its live and frozen slots, and a
+// stub of each released writer (#350).
 const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
 // And across all its groups: its share of the group cores, each released
-// writer, held whole, included. It stays at the live and frozen slots of
+// writer's stub included. It stays at the live and frozen slots of
 // every group (owner decision).
 const MAX_GROUP_CORES_PER_DIARY = MAX_GROUPS_PER_DIARY * (MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY)
 // Waits before a group core that timed out or found no peer is tried again
@@ -875,7 +917,9 @@ const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
 // still counts their records (below the cut, and block 0, leaves and key
 // blocks at any cut) and waits for them, but their join never picks a
 // group, fetches a root or supports one (a root already held stays by the
-// retention rule, _groupSupported).
+// retention rule, _groupSupported). Such a writer is listed by its newest
+// on:true join for the group (the walk counts a writer only after one):
+// readers check the page item's seq against an on:true join naming it.
 // writer -> { group, seq, left }.
 function liveGroupJoins (decls, walks = new Map()) {
   const allowed = new Set()
@@ -906,22 +950,159 @@ function liveGroupJoins (decls, walks = new Map()) {
     const pair = d.group + ':' + writer
     if (!released.has(pair) && (d.on || !allowed.has(pair))) continue
     if (joined.has(d.group) && !groups.has(d.group)) continue
-    out.set(writer, { group: d.group, seq: d.seq, left: true })
+    const onSeq = walks.get(d.group).onSeq
+    const seq = onSeq === undefined ? undefined : onSeq.get(writer)
+    if (seq === undefined) continue
+    out.set(writer, { group: d.group, seq, left: true })
   }
   return out
 }
 
 // Steps one group-join or group-cut of a diary into its walk for that group
 // (`walks`, group -> walk state), each seq once: the scan reads a diary in
-// seq order and never steps back.
+// seq order and never steps back. The state also keeps `onSeq`, writer ->
+// the seq of its newest on:true join for the group, for the writers the
+// walk counts or released only (so no more than the walk's caps per group).
 function groupWalkStep (walks, group, e) {
   let s = walks.get(group)
   if (s === undefined) {
     s = slotWalkState()
+    s.onSeq = new Map()
     walks.set(group, s)
   }
   if (e.seq <= s.last) return
   slotWalkStep(s, e, group)
+  if (e.kind === 'join' && e.on === true && s.state.has(e.writer)) s.onSeq.set(e.writer, e.seq)
+}
+
+// One valid group-join or group-cut record at diary seq `i` folded into the
+// entry: a join into the newest join per writer and the root binding (each
+// map keeps by seq), and both into the slot walk of its group.
+function foldGroupRecord (entry, i, r) {
+  if (r.type === 'group-join') {
+    const prev = entry.groupDecls.get(r.writer)
+    if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
+    const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
+    if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
+  }
+  const e = r.type === 'group-join'
+    ? { kind: 'join', writer: r.writer, on: r.on, seq: i }
+    : { kind: 'cut', writer: r.writer, cut: r.cut, seq: i }
+  let events = entry.groupEvents.get(r.group)
+  if (events === undefined) {
+    events = []
+    entry.groupEvents.set(r.group, events)
+  }
+  const s = entry.groupWalks.get(r.group)
+  if (s === undefined || i > s.last) {
+    events.push(e)
+    groupWalkStep(entry.groupWalks, r.group, e)
+    return
+  }
+  // A record the scan passed as a hole (a deleted one fetched once, which
+  // still counts): placed in seq order, and the walk of its group stepped
+  // again from its first record, so the walk is the one a scan that held it
+  // would have built.
+  let lo = 0
+  let hi = events.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (events[mid].seq < i) lo = mid + 1
+    else hi = mid
+  }
+  if (lo < events.length && events[lo].seq === i) return
+  events.splice(lo, 0, e)
+  const fresh = new Map()
+  for (const x of events) groupWalkStep(fresh, r.group, x)
+  entry.groupWalks.set(r.group, fresh.get(r.group))
+}
+
+// A lower cut keeps less (the quota) and a release keeps a boxless writer
+// (groupVerdict): a join refused before is tried again, once per lower cut,
+// whether the scan read the cut or fetched it late as a deleted hole.
+function foldGroupCut (entry, i, r) {
+  const before = groupWalkCut(entry.groupWalks, r.group, r.writer)
+  foldGroupRecord(entry, i, r)
+  const after = groupWalkCut(entry.groupWalks, r.group, r.writer)
+  if (after !== null && (before === null || after < before)) entry.groupRefused.delete(r.writer)
+}
+
+// The cut a diary's walk for G gives writer W: 0 once released (or cut at 0
+// with no release left), its lowest cut while counted, null with none.
+function groupWalkCut (walks, group, writer) {
+  const s = walks.get(group)
+  if (s === undefined || writer === group) return null
+  const st = s.state.get(writer)
+  if (st === 'released') return 0
+  if ((st === 'live' || st === 'frozen') && s.cut.has(writer)) return s.cut.get(writer)
+  return null
+}
+
+// The blocks of a writer cut at `cut` a seeder keeps in full: those below
+// it, block 0 always.
+function keptBelow (cut) {
+  return Math.max(cut, 1)
+}
+
+// Whether a block past a writer's cut stays at the seeder: a group-leave or
+// a group-key, which the fold keeps past a cut (lib/group.js bindCores) and
+// readers read past a hole (store.js readHeldBlocks).
+function keptPastCut (raw) {
+  if (raw === null || raw === undefined) return false
+  try {
+    const block = decodeBlock(raw)
+    return block !== null && (block.type === 'group-leave' || block.type === 'group-key')
+  } catch {
+    return false
+  }
+}
+
+// Blocks past a cut read per step of _cutGroupCore: what a seeder stores
+// beyond what it keeps stays within one chunk.
+const CUT_CHUNK = 256
+// A chunk past a cut whose fetch has not ended is checked against what its
+// peers advertise (_groupPastRange): soon, then less often while a peer is
+// connected; a peer joining checks it again at once.
+const CUT_POLL_MIN_MS = 100
+const CUT_POLL_MAX_MS = 2000
+// A range past a cut that sparse peers only fed (binding unsureFrom,
+// unsureTo) is read again (_cutGroupCore) at intervals growing from
+// REREAD_MIN_MS to REREAD_MAX_MS, until a pass reads each chunk whole, and
+// at once when a peer that joins advertises a block there this seeder
+// lacks (_rereadIfOffered): checked every REREAD_PEER_MS from its join, so
+// that it has synced and answered, up to REREAD_PEER_TRIES times.
+const REREAD_PEER_MS = 1000
+const REREAD_PEER_TRIES = 10
+const REREAD_MIN_MS = 1000
+const REREAD_MAX_MS = 5 * 60 * 1000
+
+// Widens range { from, to } (null: none) to cover [from, to).
+function widen (range, from, to) {
+  if (range === null) return { from, to }
+  return { from: Math.min(range.from, from), to: Math.max(range.to, to) }
+}
+
+// The held blocks of [from, to) a cut keeps, as [seq, bytes], and the runs
+// [start, end) of the others, to clear.
+async function cutRange (core, from, to) {
+  const keep = []
+  const clear = []
+  let start = -1
+  for (let i = from; i < to; i++) {
+    let raw = null
+    try {
+      raw = await core.get(i, { wait: false, raw: true })
+    } catch {}
+    if (raw !== null && keptPastCut(raw)) {
+      keep.push([i, raw.byteLength])
+      if (start !== -1) clear.push([start, i])
+      start = -1
+    } else if (raw !== null && start === -1) {
+      start = i
+    }
+  }
+  if (start !== -1) clear.push([start, to])
+  return { keep, clear }
 }
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
@@ -1083,10 +1264,53 @@ function eventLines (r) {
   return r.place === '' ? [r.title] : [r.title, r.place]
 }
 
+// The bound group cores (key -> { diary, group, seq } or null) with a count
+// of the bindings naming each diary, so _groupNames, asked for every diary
+// a seeder prepares, is one lookup instead of a walk over every group core.
+class GroupBindings extends Map {
+  constructor () {
+    super()
+    this._byDiary = new Map()
+  }
+
+  set (key, binding) {
+    this._count(super.get(key), -1)
+    super.set(key, binding)
+    this._count(binding, 1)
+    return this
+  }
+
+  delete (key) {
+    if (!super.has(key)) return false
+    this._count(super.get(key), -1)
+    return super.delete(key)
+  }
+
+  clear () {
+    super.clear()
+    this._byDiary.clear()
+  }
+
+  names (diary) {
+    return this._byDiary.has(diary)
+  }
+
+  _count (binding, step) {
+    if (binding === null || binding === undefined || typeof binding.diary !== 'string') return
+    const n = (this._byDiary.get(binding.diary) || 0) + step
+    if (n > 0) this._byDiary.set(binding.diary, n)
+    else this._byDiary.delete(binding.diary)
+  }
+}
+
 // Per-phase startup durations (ms, non-negative integers) from the Date.now()
 // marks taken at the step boundaries of Seeder#start. Pure: no clock.
 function startupPhases (m) {
-  const d = (a, b) => Math.max(0, Math.trunc(b - a))
+  // A missing mark (a non-finite difference) counts as 0.
+  const d = (a, b) => {
+    const ms = Math.trunc(b - a)
+    return Number.isFinite(ms) ? Math.max(0, ms) : 0
+  }
   return {
     configMs: d(m.t0, m.config),
     storeMs: d(m.config, m.store),
@@ -1097,7 +1321,10 @@ function startupPhases (m) {
     prepareMs: d(m.groups, m.prepare),
     swarmMs: d(m.prepare, m.swarm),
     flushMs: d(m.swarm, m.flush),
-    totalMs: d(m.t0, m.flush)
+    totalMs: d(m.t0, m.flush),
+    // From the start to the point where external streams are accepted
+    // (overlaps the phases above; not part of totalMs's sum).
+    acceptingMs: d(m.t0, m.accepting)
   }
 }
 
@@ -1108,7 +1335,9 @@ class Seeder {
   // local block-0 verdict is computed and before it is applied, _gate and
   // _gateGroup) and
   // storeHook() (awaited right after the main store, and
-  // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
+  // its data-dir lock, is acquired) and flushHook() (awaited in start()
+  // once external streams are accepted, right before joinAndFlush; a throw
+  // fails the start) are test-only hooks (no CLI flag), as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
   // maxAnnounces, announceRate, announceBurst, maxBadAnnounces, maxMedia,
   // maxMediaBlocks, maxMediaBytes; defaults = the constants, maxExternal =
@@ -1139,8 +1368,11 @@ class Seeder {
   // purgeHook also see group keys.
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per recipient of each follow, reply, quote, @mention, like or
-  // repost appended to a served diary past its push cursor (push-events.js
-  // shapes the event; a throw is ignored).
+  // repost appended to a served diary past its push cursor, and once with
+  // { op: 'cancel' } for each such follow, like or repost undone there
+  // within PUSH_RECALL_MS of its push (push-events.js shapes both; a throw
+  // is ignored). A mention of a name
+  // nobody verifiably held then pushes when the name settles, within 24 h.
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -1171,6 +1403,7 @@ class Seeder {
     admitHook = null,
     regateHook = null,
     storeHook = null,
+    flushHook = null, // test-only (see above)
     onPush = null,
     dm = null,
     noClear = null,
@@ -1243,6 +1476,7 @@ class Seeder {
     this.admitHook = admitHook
     this.regateHook = regateHook
     this.storeHook = storeHook
+    this.flushHook = flushHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
     this._dmOpts = dmOptions(dm)
@@ -1352,7 +1586,7 @@ class Seeder {
     // Group cores (header comment): bound and dropping bindings, key ->
     // { diary, group, seq }; admitted.json `groups` is the union of both.
     // They share _inflight and _drops with diaries and media.
-    this._groups = new Map()
+    this._groups = new GroupBindings()
     this._groupsDropping = new Map()
     this._groupServed = new Map() // key -> { core, diary, group, download, stopFork, stopGrow, stopQuota, dropped, headerOk, gating, expected }
     this._groupReserved = new Map() // key -> group, holding a group slot mid-admission
@@ -1436,6 +1670,12 @@ class Seeder {
     // the v1, v2 and v3 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
     this._postNotices = this._createPostNoticeIndex()
+    // id (actor:seq:token) -> { actor, seq, token, at, added, post }: never
+    // persisted, so a restart forgets them (no push, the aviso still shows).
+    this._pushPending = new Map()
+    // kind:actor:recipient:ref -> emit time (ms) of each follow, like or
+    // repost pushed, for recalls (PUSH_RECALL_MS).
+    this._pushSent = new Map()
     this._noticeHandles = new Set()
     // Moderation generation: bumped on every adoption that blocks a key or
     // revokes an issuer. A block-0 verdict computed across an await under an
@@ -1447,6 +1687,9 @@ class Seeder {
     this._cert = null
     this._started = false
     this._ready = false
+    // External streams (acceptStream) are served from the end of step 5's
+    // swarm setup, before the DHT join and flush, like swarm peers.
+    this._accepting = false
     this._closing = null
     this._stopRediscovery = null
     this.closed = new Promise((resolve) => { this._resolveClosed = resolve })
@@ -1839,7 +2082,7 @@ class Seeder {
           core = await openMediaReplica(this.store, key)
           if (core.fork !== 0) reason = 'fork'
           else if (core.contiguousLength === 0) reason = 'no-header'
-          else if (this._overQuota(core)) reason = 'quota'
+          else if (this._groupOverQuota(key === binding.group || binding.cut === undefined ? null : binding.cut, core)) reason = 'quota'
           else ({ reason, raw } = await localGroupVerdict(core, key, binding, this._groupVisibility(binding.group)))
         }
         if (reason === null && (groupSurvivors.length >= this.maxGroupCores || (perGroup.get(binding.group) || 0) >= this.maxGroupWriters)) reason = 'group-full'
@@ -1899,15 +2142,19 @@ class Seeder {
           this._groupIndex.setHeader(key, decodeBlock(raw))
           this._keepGroupHeader(key, decodeBlock(raw))
         }
-        this._serveGroup(key, binding, core, { headerOk: true })
+        this._serveGroup(key, binding, core, { headerOk: true, restored: true })
         if (key === binding.group && !this._served.has(binding.diary)) this._indexKeptRoot(key, false)
       }
       // A writer served after its root's header was first recorded in this
-      // loop was gated without the root's visibility.
+      // loop was gated without the root's visibility. Awaited, so a writer
+      // whose box no longer matches is dropped before external streams are
+      // accepted below.
+      const rechecks = []
       for (const group of new Set(groupSurvivors.map(([, binding]) => binding.group))) {
         const visibility = this._groupVisibility(group)
-        if (visibility !== null) this._recheckGroupBoxes(group, visibility)
+        if (visibility !== null) rechecks.push(this._recheckGroupBoxes(group, visibility))
       }
+      await Promise.all(rechecks)
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
       marks.prepare = Date.now()
@@ -1916,6 +2163,12 @@ class Seeder {
       this.swarm = createSwarm({ bootstrap: this.bootstrap, keyPair: this._keyPair, host: this.host })
       marks.swarm = Date.now()
       this.swarm.on('connection', (socket) => this._onConnection(socket))
+      // Every core is re-gated and prepared and the swarm exists: app
+      // clients are served from here, as swarm peers already are during the
+      // flush. A failure from here on goes through close(), which closes
+      // the external streams accepted meanwhile.
+      if (!this._closing) this._accepting = true
+      marks.accepting = Date.now()
       const topics = [
         this.topic,
         ...survivors.map(([, core]) => core.discoveryKey),
@@ -1924,6 +2177,7 @@ class Seeder {
       ]
       const done = this.store.findingPeers()
       try {
+        if (this.flushHook) await this.flushHook()
         await joinAndFlush(this.swarm, topics)
       } finally {
         done()
@@ -1952,7 +2206,7 @@ class Seeder {
       media: { kept: mediaKept, dropped: mediaBefore - mediaKept },
       groups: { kept: groupsKept, dropped: groupsBefore - groupsKept }
     }
-    this.log({ event: 'ready', topic, admitted, phases, cores })
+    this.log({ event: 'ready', topic, admitted, phases, cores, at: Date.now() })
     // Background pass (never inside start()): scan every served diary for
     // media-core records, one diary at a time (_scanQueue), and index it on
     // the separate index queue (`indexing` stays true until every diary
@@ -1968,6 +2222,12 @@ class Seeder {
 
   mediaKeys () {
     return [...this._media.keys()]
+  }
+
+  // Whether acceptStream would take a stream now: true from the accepting
+  // point of start() (before stats().status turns 'ok') until close().
+  accepting () {
+    return this._accepting === true && !this._closing
   }
 
   // Aggregate state for the health endpoint: counts and sizes only, never a
@@ -2287,6 +2547,15 @@ class Seeder {
     return length > this.maxLogBlocks || byteLength > this.maxLogBytes
   }
 
+  // A group core's log quota at admission and restore: the whole log's or,
+  // for a writer cut at `cut`, the blocks it keeps below the cut (its bytes
+  // and the blocks it keeps past the cut count as they are read,
+  // _cutGroupCore).
+  _groupOverQuota (cut, { length, byteLength }) {
+    if (cut === null) return this._overQuota({ length, byteLength })
+    return Math.min(keptBelow(cut), length) > this.maxLogBlocks
+  }
+
   _serve (key, core, { regate, cert0 = null, pushFrom = core.length }) {
     // Media scan state (header comment): `scanned` is the next block to read
     // for media-core records (block 0 is the certificate), `decls` the
@@ -2334,10 +2603,14 @@ class Seeder {
       // the map grows no faster than groupDecls; and
       // `groupWalks` the slot walk per group (group -> lib/group.js walk
       // state) over its group-join and group-cut records, which picks the
-      // writers that count (liveGroupJoins).
+      // writers that count and keeps the newest on:true join of each
+      // (groupWalkStep, liveGroupJoins), with `groupEvents` those records
+      // per group in seq order, to step a walk again when a deleted one
+      // arrives after the scan passed it.
       groupDecls: new Map(),
       groupBound: new Map(),
       groupWalks: new Map(),
+      groupEvents: new Map(),
       groupLive: new Map(),
       groupRefused: new Map(),
       // Public share hint, rebuilt by every scan from block 1 (in memory
@@ -2385,10 +2658,18 @@ class Seeder {
       // recounts this serve ran and `mediaRecounting` one is running.
       // `pageSeqs` the tombstone targets read as page-* records: never in
       // `deleted` nor `effective` (a delete of one has no effect).
+      // `groupSeqs` the same for group-join, group-confirm and group-cut
+      // records (docs/protocol.md "Deletion"). `grouped` that the diary is
+      // group-bound (it holds a group record, or a group served here names
+      // it), and `pageGuard` the download's tombstone target guard, which
+      // then fetches each unheld target once (_prepareDiary).
       deleted: new Set(),
       tombstones: new Map(),
       effective: null,
       pageSeqs: new Set(),
+      groupSeqs: new Set(),
+      grouped: false,
+      pageGuard: null,
       media: new Map(),
       mediaRefs: new Map(),
       listingRoots: new Map(),
@@ -2524,6 +2805,7 @@ class Seeder {
     } catch {}
     if (stale()) return
     if (state !== null) {
+      if (state.grouped) entry.grouped = true
       for (const { seq, record } of state.raw) {
         const r = record !== null && record.type === 'delete' ? validRecordCopy(record, seq) : null
         if (r === null) continue
@@ -2546,11 +2828,15 @@ class Seeder {
       state = null
     }
     for (const seq of this._effectiveDeleted(entry)) entry.excluded.add(seq)
-    // A page diary keeps an unheld tombstone target in the download until
-    // it is read once (lib/deletion.js downloadExceptPages, docs/protocol.md
-    // §12). The held targets are read before the clear below, so a cleared
-    // one is not fetched back.
-    const pageGuard = pageTargets(core)
+    // A page diary, and a group-bound one, keeps an unheld tombstone target
+    // in the download until it is read once (lib/deletion.js
+    // downloadExceptPages, docs/protocol.md §12): a group record is then
+    // kept and folded (_pageArrived), anything else is cleared. The held
+    // targets are read before the clear below, so a cleared one is not
+    // fetched back.
+    if (!entry.grouped && this._groupNames(key)) entry.grouped = true
+    const pageGuard = pageTargets(core, { groupBound: entry.grouped })
+    entry.pageGuard = pageGuard
     if (!this.noClear) {
       try {
         // The roster probe settles later (the download is told): it must not
@@ -2744,6 +3030,7 @@ class Seeder {
     this._served.delete(key)
     this._notices.removeAuthor(key)
     this._postNotices.removeAuthor(key)
+    this._pushForget((e) => e.actor === key)
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
@@ -2922,6 +3209,10 @@ class Seeder {
         if (r !== null) this._notePage(key, entry, i, r)
         continue
       }
+      if (GROUP_HISTORY_TYPES.has(block.type) && (!entry.grouped || entry.gone.has(i)) && validRecordCopy(block, i) !== null) {
+        if (entry.gone.has(i)) this._noteGroupKept(entry, i)
+        else this._markGroupBound(entry)
+      }
       if (block.type === 'follow') {
         const r = validRecordCopy(block, i)
         if (r !== null) this._notices.foldFollow(key, i, r)
@@ -2934,17 +3225,12 @@ class Seeder {
       }
       if (block.type === 'group-join') {
         const r = validRecordCopy(block, i)
-        if (r === null) continue
-        const prev = entry.groupDecls.get(r.writer)
-        if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
-        const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
-        if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
-        groupWalkStep(entry.groupWalks, r.group, { kind: 'join', writer: r.writer, on: r.on, seq: i })
+        if (r !== null) foldGroupRecord(entry, i, r)
         continue
       }
       if (block.type === 'group-cut') {
         const r = validRecordCopy(block, i)
-        if (r !== null) groupWalkStep(entry.groupWalks, r.group, { kind: 'cut', writer: r.writer, cut: r.cut, seq: i })
+        if (r !== null) foldGroupCut(entry, i, r)
         continue
       }
       // Folded here, not in _runIndex: that queue pauses at capacity and
@@ -3308,12 +3594,19 @@ class Seeder {
         return true
       }
     }
+    // A group history target: the delete has no effect either. One not
+    // held yet is folded when it arrives (_pageArrived).
+    if (block !== null && GROUP_HISTORY_TYPES.has(block.type) && validRecordCopy(block, target) !== null) {
+      this._noteGroupKept(entry, target)
+      return true
+    }
     entry.deleted.add(target)
     this._forgetRecent(entry, (r) => r.seq === target)
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
     this._postNotices.removePost(key, target)
+    this._pushForget((e) => e.actor === key && e.seq === target)
     // Removing a block a paused cursor never indexed (the refused one, or a
     // later one) frees nothing, so onFreed never fires: resume this diary's
     // pass so it skips the deleted seq instead of staying paused.
@@ -3386,7 +3679,7 @@ class Seeder {
       const seqs = Array.from(entry.tombstones.keys()).sort((a, b) => a - b)
       for (let n = seqs.length - 1; n >= 0; n--) {
         const target = entry.tombstones.get(seqs[n])
-        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target)) out.add(target)
+        if (!out.has(seqs[n]) && !entry.pageSeqs.has(target) && !entry.groupSeqs.has(target)) out.add(target)
       }
       entry.effective = out
     }
@@ -3406,17 +3699,54 @@ class Seeder {
     if (skipped || seq < entry.indexed) this._names.note(key, seq, record)
   }
 
+  // A tombstone target read as a valid group history record: kept out of
+  // `deleted` and `effective`, as a page-* record is.
+  _noteGroupKept (entry, seq) {
+    this._markGroupBound(entry)
+    if (entry.groupSeqs.has(seq)) return
+    entry.groupSeqs.add(seq)
+    entry.effective = null
+    entry.deleted.delete(seq)
+  }
+
+  // The diary holds a group record or a served group names it: from now on
+  // its download fetches each unheld tombstone target once (_prepareDiary).
+  _markGroupBound (entry) {
+    if (entry.grouped) return
+    entry.grouped = true
+    if (entry.pageGuard) entry.pageGuard.setGroupBound(true)
+  }
+
+  // Whether a group core served here is bound to `diary` as its writer.
+  _groupNames (diary) {
+    return this._groups.names(diary)
+  }
+
   // A tombstone target below the scan cursor arrived (the scan passed it
-  // as a hole): read it once to learn whether it is a page-* record.
+  // as a hole): read it once to learn whether it is a page-* record or a
+  // group history record. A group-join or group-cut one is folded into the
+  // diary's group bindings and slot walk now, as the scan would have.
   async _pageArrived (key, entry, seq) {
-    if (entry.pageSeqs.has(seq)) return
+    if (entry.pageSeqs.has(seq) || entry.groupSeqs.has(seq)) return
     let raw = null
     try {
       raw = await entry.core.get(seq, { wait: false, raw: true })
     } catch {}
     if (raw === null || entry.dropped || this._closing || this._served.get(key) !== entry) return
     const block = decodeBlock(raw)
-    if (block === null || !isPageType(block.type)) return
+    if (block === null) return
+    if (GROUP_HISTORY_TYPES.has(block.type)) {
+      const r = validRecordCopy(block, seq)
+      if (r === null || entry.groupSeqs.has(seq)) return
+      this._noteGroupKept(entry, seq)
+      if (r.type !== 'group-join' && r.type !== 'group-cut') return
+      if (r.type === 'group-cut') foldGroupCut(entry, seq, r)
+      else foldGroupRecord(entry, seq, r)
+      entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupWalks)
+      this._reconcileGroups(key, entry)
+      return
+    }
+    if (!isPageType(block.type)) return
     const r = validRecordCopy(block, seq)
     if (r !== null) this._notePage(key, entry, seq, r)
   }
@@ -4090,10 +4420,25 @@ class Seeder {
     if (entry.dropped || !entry.gated || this._closing) return
     for (const [k, b] of [...this._groups]) {
       if (b === null || b.diary !== diary) continue
+      // The cut its walk gives a writer, also while its core still opens
+      // (_serveGroup reads the binding's).
+      if (k !== b.group) this._groupCutScan(k, b, entry)
       if (!this._groupServed.has(k)) continue
       const live = entry.groupLive.get(k)
-      const bound = live !== undefined && live.group === b.group && !live.left
-      let seq = bound ? live.seq : b.seq
+      const listed = live !== undefined && live.group === b.group
+      const bound = listed && !live.left
+      // A left writer is listed by its newest on:true join too, so a binding
+      // stored with the seq of an off join takes it here. One the scan does
+      // not list (its diary named W in another group, the group is past the
+      // cap) still gets a row: the walk's newest on:true join of W, once the
+      // scan has read it.
+      let seq = b.seq
+      if (listed) seq = live.seq
+      else {
+        const s = entry.groupWalks.get(b.group)
+        const on = s === undefined || s.onSeq === undefined ? undefined : s.onSeq.get(k)
+        if (on !== undefined) seq = on
+      }
       if (k === b.group) {
         // A root's row must point at a join in its creator's own diary: the
         // binding may have been persisted with the seq of the member join
@@ -4137,6 +4482,81 @@ class Seeder {
         this._admitGroup(diary, entry, k, j.group, j.seq).catch(noop)
       }
     }
+  }
+
+  // A lower cut from the walk applies at once: the scan only adds marks, so
+  // the diary's cut is never above it. A higher one, or none, only once the
+  // scan caught up with the diary (a cut restored from admitted.json whose
+  // block can no longer be read, for example), and what clearing removed is
+  // fetched again.
+  _groupCutScan (key, b, entry) {
+    const cut = groupWalkCut(entry.groupWalks, b.group, key)
+    const now = Number.isSafeInteger(b.cut) ? b.cut : null
+    const caught = scanCaughtUp(entry)
+    if ((cut !== null && (now === null || cut < now)) || (caught && cut !== now)) return this._applyGroupCut(key, b, cut)
+    const served = this._groupServed.get(key)
+    if (caught && served && !served.dropped && !served.cutConfirmed) {
+      served.cutConfirmed = true
+      if (served.cut !== null) this._cutGroupCore(key, served)
+    }
+  }
+
+  // Writer K's cut (null: none) on its binding and, once served, on its
+  // entry: the download stops at the new cut, a lower cut reads the blocks
+  // now past it (_cutGroupCore), and a higher one or none fetches again what
+  // clearing removed below it.
+  _applyGroupCut (key, b, cut) {
+    const old = Number.isSafeInteger(b.cut) ? b.cut : null
+    if (cut === null) {
+      delete b.cut
+      delete b.clearedFrom
+      delete b.clearedTo
+      delete b.unsureFrom
+      delete b.unsureTo
+    } else {
+      const below = keptBelow(cut)
+      if (old === null) {
+        b.clearedFrom = below
+        b.clearedTo = below
+      } else if (cut > old) {
+        b.clearedFrom = Math.max(b.clearedFrom, below)
+        b.clearedTo = Math.max(b.clearedTo, b.clearedFrom)
+      }
+      if (Number.isSafeInteger(b.unsureFrom)) {
+        b.unsureFrom = Math.max(b.unsureFrom, b.clearedFrom)
+        if (b.unsureFrom >= b.unsureTo) {
+          delete b.unsureFrom
+          delete b.unsureTo
+        }
+      }
+      b.cut = cut
+    }
+    this._persist().catch(noop)
+    const entry = this._groupServed.get(key)
+    if (!entry || entry.dropped) return
+    entry.cut = cut
+    entry.cutConfirmed = true
+    entry.rereadAt = null
+    entry.rereadLeft = null
+    entry.belowBytes = 0
+    entry.belowCounted = 0
+    for (const [i, bytes] of entry.keptPast) {
+      if (cut !== null && i >= b.clearedFrom) continue
+      entry.keptPast.delete(i)
+      entry.keptPastBytes -= bytes
+    }
+    this._rearmGroupDownload(entry)
+    // A boxless writer kept as a stub is judged again once its cut is no
+    // longer 0.
+    if (old === 0 && cut !== 0) {
+      const visibility = this._groupVisibility(entry.group)
+      if (visibility !== null) this._recheckGroupBoxes(entry.group, visibility)
+    }
+    if (cut === null) {
+      if (this._overQuota(entry.core)) this._dropGroup(key, 'quota')
+      return
+    }
+    this._cutGroupCore(key, entry)
   }
 
   _retryGroups (peer) {
@@ -4349,7 +4769,8 @@ class Seeder {
       return this._rejectGroup(key, diary, group, 'timeout', seq)
     }
     if (!this._groupStillWanted(diary, entry, key, group)) return
-    const verdict = groupVerdict(res.raw, key, group, key === group ? null : diary, this._groupVisibility(group))
+    const cut = key === group ? null : groupWalkCut(entry.groupWalks, group, key)
+    const verdict = groupVerdict(res.raw, key, group, key === group ? null : diary, this._groupVisibility(group), cut === 0)
     if (verdict !== null) {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, verdict, seq)
@@ -4359,8 +4780,8 @@ class Seeder {
     if (key === group) this._keepGroupHeader(group, decodeBlock(res.raw))
     // Refusals after a fetch are remembered (this join) or backed off, so a
     // rescan does not fetch the same core again. A writer its diary cut is
-    // held whole, so its whole log is judged.
-    if (this._overQuota(res)) {
+    // judged on the blocks it keeps below the cut.
+    if (this._groupOverQuota(cut, res)) {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, 'quota', seq)
     }
@@ -4402,7 +4823,10 @@ class Seeder {
       if (wasGone.issuer !== null) rootBinding.issuer = wasGone.issuer
     }
     const writerBinding = { diary: owner, group, seq: ownSeq }
+    if (cut !== null) Object.assign(writerBinding, { cut, clearedFrom: keptBelow(cut), clearedTo: keptBelow(cut) })
     this._groups.set(key, key === group ? rootBinding : writerBinding)
+    const ownerServed = this._served.get(owner)
+    if (ownerServed && !ownerServed.dropped) this._markGroupBound(ownerServed)
     let core
     let opening = false
     try {
@@ -4434,7 +4858,7 @@ class Seeder {
     else if (key === group && this._rootsClosed()) late = 'denials-full'
     else if (!this._groupStillWanted(diary, entry, key, group)) late = 'unbound'
     else if (core.fork !== 0) late = 'fork'
-    else if (this._overQuota(core)) late = 'quota'
+    else if (this._groupOverQuota(key === group || writerBinding.cut === undefined ? null : writerBinding.cut, core)) late = 'quota'
     if (late === null && this._closing) return
     if (late !== null) {
       await core.close().catch(noop)
@@ -4472,7 +4896,9 @@ class Seeder {
   // Serving a group core: live download, fork watcher, the log quota on
   // every append, no growth broadcast. `expected` and `headerOk` as for
   // media (_serveMedia): a fresh admission is re-gated once block 0 is local.
-  _serveGroup (key, { diary, group }, core, { expected = null, headerOk = false, by = diary } = {}) {
+  _serveGroup (key, { diary, group }, core, { expected = null, headerOk = false, by = diary, restored = false } = {}) {
+    const binding = this._groups.get(key)
+    const cut = key !== group && binding && Number.isSafeInteger(binding.cut) ? binding.cut : null
     const entry = {
       core,
       diary,
@@ -4491,16 +4917,68 @@ class Seeder {
       rootScanning: false,
       rootDecoded: 0, // blocks a root scan decoded (past the group-meta prefilter)
       rootRetry: null, // the retry of a failed root block read (_retryRootScan)
-      rootReadFailures: 0
+      rootReadFailures: 0,
+      // A writer its diary cut (binding `cut`): its blocks below the cut and,
+      // in the range its binding lists as read, only its leaves and key
+      // blocks (`keptPast`, seq -> bytes; _cutGroupCore). `cutConfirmed`
+      // once the diary's scan gave the cut: one restored from admitted.json
+      // clears nothing new before. `belowBytes` the bytes of the blocks below
+      // the cut counted so far (`belowCounted` of them), `counted` once the
+      // range read was read again in this serve, `past` the fetch of blocks
+      // past the cut being read, `cutting`, `cutAgain` and `wake` one pass at
+      // a time. A read again of the binding's unsure range (`reread` asked,
+      // `rereadAt` the next chunk, `rereadLeft` the chunks still read from
+      // sparse peers only in this pass) runs at `rereadTimer`, backing off
+      // by `rereadDelay`.
+      cut,
+      cutConfirmed: !restored,
+      keptPast: new Map(),
+      keptPastBytes: 0,
+      belowBytes: 0,
+      belowCounted: 0,
+      counted: false,
+      past: null,
+      cutting: false,
+      cutAgain: false,
+      wake: null,
+      reread: false,
+      rereadAt: null,
+      rereadLeft: null,
+      rereadTimer: null,
+      rereadDelay: REREAD_MIN_MS
     }
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
+      if (entry.cut !== null) return this._cutGroupCore(key, entry)
       if (this._overQuota(core)) this._dropGroup(key, 'quota')
     }
+    // A block below a cut counts toward the bytes kept, read only while the
+    // whole log is over the byte quota.
+    const onDownload = (index) => {
+      if (entry.cut !== null && index < keptBelow(entry.cut) && core.byteLength > this.maxLogBytes) this._cutGroupCore(key, entry)
+    }
+    // A peer that joins may hold what sparse peers did not.
+    const onPeer = (peer) => {
+      if (entry.dropped || this._closing) return
+      const b = this._groups.get(key)
+      if (b && Number.isSafeInteger(b.unsureFrom)) this._rereadIfOffered(key, entry, peer, REREAD_PEER_TRIES)
+    }
     core.on('append', checkQuota)
-    entry.stopQuota = () => core.off('append', checkQuota)
+    core.on('download', onDownload)
+    core.on('peer-add', onPeer)
+    entry.stopQuota = () => {
+      core.off('append', checkQuota)
+      core.off('download', onDownload)
+      core.off('peer-add', onPeer)
+      try {
+        if (entry.past) entry.past.range.destroy()
+      } catch {}
+      if (entry.rereadTimer !== null) clearTimeout(entry.rereadTimer)
+      entry.rereadTimer = null
+      if (entry.wake !== null) entry.wake()
+    }
     entry.stopFork = watchFork(core, (reason) => this._dropGroup(key, reason))
-    entry.download = core.download({ start: 0, end: -1 })
+    entry.download = core.download(cut === null ? { start: 0, end: -1 } : { start: 0, end: keptBelow(cut) })
     entry.stopGrow = watchContiguous(core, () => {
       this._gateGroup(key, entry)
       this._scanRoot(key, entry)
@@ -4508,6 +4986,7 @@ class Seeder {
     this._groupServed.set(key, entry)
     checkQuota()
     if (entry.dropped) return
+    this._armReread(key, entry, REREAD_MIN_MS)
     this._scanRoot(key, entry)
     // A peer that served block 0 to the quarantine and then withholds it
     // from the main store must not keep the group's answers incomplete
@@ -4522,6 +5001,290 @@ class Seeder {
       if (entry.headerTimer.unref) entry.headerTimer.unref()
     }
     if (!entry.headerOk && core.contiguousLength >= 1) this._gateGroup(key, entry)
+  }
+
+  // The download of a served writer for its cut: the blocks below it, block
+  // 0 always, or the whole log without one. A block a pass cleared under a
+  // cut that rose meanwhile is fetched again.
+  _rearmGroupDownload (entry) {
+    try {
+      if (entry.download) entry.download.destroy()
+      if (entry.past) entry.past.range.destroy()
+    } catch {}
+    entry.past = null
+    entry.download = entry.core.download(entry.cut === null ? { start: 0, end: -1 } : { start: 0, end: keptBelow(entry.cut) })
+  }
+
+  // Whether a cut writer keeps more than the log quota: the blocks below its
+  // cut, block 0 always, and the leaves and key blocks kept past it, and
+  // their bytes. Counted only once the whole log is over the quota.
+  _groupKeptOver (entry) {
+    const core = entry.core
+    if (!this._overQuota(core)) return false
+    const blocks = Math.min(keptBelow(entry.cut), core.length) + entry.keptPast.size
+    return blocks > this.maxLogBlocks || entry.belowBytes + entry.keptPastBytes > this.maxLogBytes
+  }
+
+  // Waits for blocks [from, to) of a cut writer, fetched by one range kept
+  // across passes: 'done' once all are local; 'sparse' once every block of
+  // it a connected peer advertises is (sparse-held.js advertisedHeld), as
+  // when its only sources keep it sparse themselves (another seeder past
+  // the same cut), whose fetch would never end; null when another pass was
+  // asked for first or the fetch ended without them.
+  async _groupPastRange (entry, from, to) {
+    let p = entry.past
+    if (p !== null && (p.from !== from || p.to !== to || p.failed)) {
+      try {
+        p.range.destroy()
+      } catch {}
+      p = null
+    }
+    if (p === null) {
+      const range = entry.core.download({ start: from, end: to })
+      const q = { from, to, range, done: false, failed: false, settled: null }
+      q.settled = range.done().then(() => { q.done = true }, () => { q.failed = true })
+      entry.past = q
+      p = q
+    }
+    const core = entry.core
+    // A drop or a close destroys the range, whose done() then never settles,
+    // and wakes only a wait already armed: one landing during an await here
+    // would park this loop for good, listening on a closed core.
+    const gone = () => entry.dropped || this._closing
+    let delay = CUT_POLL_MIN_MS
+    let held = null
+    while (!p.done && !p.failed && !gone()) {
+      const all = await advertisedHeld(core, to, from)
+      if (gone()) break
+      if (all) {
+        held = (await core.has(from, to)) ? 'done' : 'sparse'
+        break
+      }
+      if (p.done || p.failed) break
+      let timer = null
+      let onPeer = null
+      const why = await new Promise((resolve) => {
+        entry.wake = () => resolve('wake')
+        p.settled.then(() => resolve('settled'))
+        onPeer = () => resolve('peer')
+        core.on('peer-add', onPeer)
+        if (core.peers.length > 0) timer = setTimeout(() => resolve('tick'), delay)
+      })
+      entry.wake = null
+      core.off('peer-add', onPeer)
+      if (timer !== null) clearTimeout(timer)
+      if (why === 'wake') break
+      delay = why === 'tick' ? Math.min(delay * 2, CUT_POLL_MAX_MS) : CUT_POLL_MIN_MS
+    }
+    if (gone()) return null
+    if (p.done) held = 'done'
+    if (held === null) return null
+    // Its blocks no peer advertised would otherwise come later, past the
+    // read, and stay.
+    if (!p.done) {
+      try {
+        p.range.destroy()
+      } catch {}
+    }
+    if (entry.past === p) entry.past = null
+    return held
+  }
+
+  // Reads writer K's unsure range again at once when `peer`, which joined,
+  // advertises a block there this seeder lacks, checked REREAD_PEER_MS from
+  // now, once it has synced and answered for the range (asked for its
+  // bitfield there, as a seeder holding the blocks below the cut sends no
+  // want past them), up to `tries` times. Any other peer, a reader that
+  // connects or one reconnecting in a loop, leaves the backoff as it is: a
+  // writer whose device is gone keeps its unsure range for good.
+  _rereadIfOffered (key, entry, peer, tries) {
+    const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry || peer.removed === true
+    const timer = setTimeout(async () => {
+      try {
+        const b = this._groups.get(key)
+        if (stale() || !b || !Number.isSafeInteger(b.unsureFrom)) return
+        if (peer.remoteSynced === true) askHeld(peer, [b.unsureFrom])
+        if (!peerAnswered(peer, b.unsureTo, b.unsureFrom)) {
+          if (tries > 1) this._rereadIfOffered(key, entry, peer, tries - 1)
+          return
+        }
+        if (!(await peerOffers(entry.core, peer, b.unsureFrom, b.unsureTo)) || stale()) return
+        entry.rereadDelay = REREAD_MIN_MS
+        this._armReread(key, entry, 0)
+      } catch {}
+    }, REREAD_PEER_MS)
+    if (timer.unref) timer.unref()
+  }
+
+  // Arms the next read again of writer K's unsure range in `delay` ms (none
+  // without one), replacing any armed before.
+  _armReread (key, entry, delay) {
+    if (entry.rereadTimer !== null) clearTimeout(entry.rereadTimer)
+    entry.rereadTimer = null
+    const b = this._groups.get(key)
+    if (entry.dropped || this._closing || !b || !Number.isSafeInteger(b.unsureFrom)) return
+    entry.rereadTimer = setTimeout(() => {
+      entry.rereadTimer = null
+      if (entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
+      entry.reread = true
+      this._cutGroupCore(key, entry)
+    }, delay)
+    if (entry.rereadTimer.unref) entry.rereadTimer.unref()
+  }
+
+  // A writer its diary cut (docs/protocol.md section 10) keeps its blocks
+  // below the cut and, from the cut on, its group-leave and group-key blocks
+  // only, which every fold still counts there and readers read past a hole:
+  // a reader fed by seeders folds as one holding the whole log. The blocks
+  // past the cut are fetched a chunk at a time, read, and cleared unless
+  // they are one of those (Hypercore keeps the tree nodes the proofs of the
+  // kept blocks need). A chunk is listed as read before its blocks go: after
+  // a crash in between, the next serve reads the range again and clears
+  // what it still holds beyond the kept blocks. A chunk read from sparse
+  // peers only (_groupPastRange 'sparse') joins the binding's unsure range,
+  // read again chunk by chunk once a peer joins and at growing intervals:
+  // a leave or key block those peers lacked comes from a fuller one, and a
+  // chunk read whole leaves the range. The quota counts what is kept. One
+  // pass at a time; growth or a new cut during a pass runs another.
+  _cutGroupCore (key, entry) {
+    if (entry.cutting) {
+      entry.cutAgain = true
+      if (entry.wake !== null) entry.wake()
+      return
+    }
+    entry.cutting = true
+    const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry
+    const run = async () => {
+      for (;;) {
+        entry.cutAgain = false
+        if (stale()) return
+        const cut = entry.cut
+        const b = this._groups.get(key)
+        if (cut === null || !b || !Number.isSafeInteger(b.clearedFrom)) return
+        const core = entry.core
+        const below = keptBelow(cut)
+        const moved = () => stale() || entry.cut !== cut
+        if (!entry.counted) {
+          const { keep, clear } = await cutRange(core, b.clearedFrom, b.clearedTo)
+          if (moved()) continue
+          for (const [start, end] of clear) await core.clear(start, end)
+          if (moved()) {
+            this._rearmGroupDownload(entry)
+            continue
+          }
+          entry.keptPast = new Map(keep)
+          entry.keptPastBytes = keep.reduce((n, [, bytes]) => n + bytes, 0)
+          entry.counted = true
+        }
+        if (core.byteLength > this.maxLogBytes) {
+          const to = Math.min(core.contiguousLength, below)
+          while (entry.belowCounted < to) {
+            let raw = null
+            try {
+              raw = await core.get(entry.belowCounted, { wait: false, raw: true })
+            } catch {}
+            if (moved()) break
+            entry.belowBytes += raw === null ? 0 : raw.byteLength
+            entry.belowCounted++
+          }
+          if (moved()) continue
+        }
+        if (this._groupKeptOver(entry)) {
+          // Refused as at admission, or every rescan would fetch it again.
+          const owner = this._served.get(entry.diary)
+          if (owner && !owner.dropped) owner.groupRefused.set(key, b.seq)
+          this._dropGroup(key, 'quota')
+          return
+        }
+        if (!entry.cutConfirmed) return
+        // A lower cut first reads down from the range already read, so that
+        // range stays one piece; then up to the signed length; then, when
+        // asked, the unsure range again.
+        const end = Math.min(core.length, MAX_LOG_BLOCKS)
+        const down = b.clearedFrom > below
+        const unsure = Number.isSafeInteger(b.unsureFrom)
+        let from
+        let to
+        let again = false
+        if (down) {
+          from = Math.max(below, b.clearedFrom - CUT_CHUNK)
+          to = b.clearedFrom
+        } else if (b.clearedTo < end) {
+          from = b.clearedTo
+          to = Math.min(end, from + CUT_CHUNK)
+        } else if (entry.reread && unsure) {
+          again = true
+          from = entry.rereadAt === null ? b.unsureFrom : Math.max(entry.rereadAt, b.unsureFrom)
+          to = Math.min(b.unsureTo, from + CUT_CHUNK)
+        } else {
+          entry.reread = false
+          return
+        }
+        const res = from < to ? await this._groupPastRange(entry, from, to) : 'done'
+        if (moved()) continue
+        if (res === null) {
+          if (entry.cutAgain) continue
+          return
+        }
+        const { keep, clear } = await cutRange(core, from, to)
+        if (moved()) continue
+        if (again) {
+          if (res === 'sparse') entry.rereadLeft = widen(entry.rereadLeft, from, to)
+          entry.rereadAt = to
+          if (to >= b.unsureTo) {
+            const left = entry.rereadLeft
+            if (left === null) {
+              delete b.unsureFrom
+              delete b.unsureTo
+            } else {
+              b.unsureFrom = left.from
+              b.unsureTo = left.to
+            }
+            entry.reread = false
+            entry.rereadAt = null
+            entry.rereadLeft = null
+            entry.rereadDelay = Math.min(entry.rereadDelay * 2, REREAD_MAX_MS)
+            this._armReread(key, entry, entry.rereadDelay)
+            this._persist().catch(noop)
+          }
+        } else {
+          if (down) b.clearedFrom = from
+          else b.clearedTo = to
+          if (res === 'sparse') {
+            const u = widen(unsure ? { from: b.unsureFrom, to: b.unsureTo } : null, from, to)
+            b.unsureFrom = u.from
+            b.unsureTo = u.to
+            if (entry.rereadAt !== null) entry.rereadLeft = widen(entry.rereadLeft, from, to)
+            if (!unsure) this._armReread(key, entry, entry.rereadDelay)
+          }
+          try {
+            await this._persist()
+          } catch (err) {
+            entry.counted = false
+            throw err
+          }
+          if (moved()) {
+            entry.counted = false
+            continue
+          }
+        }
+        for (const [start, end] of clear) await core.clear(start, end)
+        if (moved()) {
+          entry.counted = false
+          this._rearmGroupDownload(entry)
+          continue
+        }
+        for (const [i, bytes] of keep) {
+          if (entry.keptPast.has(i)) continue
+          entry.keptPast.set(i, bytes)
+          entry.keptPastBytes += bytes
+        }
+      }
+    }
+    run().catch(noop).then(() => {
+      entry.cutting = false
+      if (entry.cutAgain && !stale()) this._cutGroupCore(key, entry)
+    })
   }
 
   // Local re-gate of a served group core, the twin of _gateMedia: block 0
@@ -4542,7 +5305,7 @@ class Seeder {
       if (raw === null) return 'header-invalid'
       if (entry.expected !== null && !b4a.equals(raw, entry.expected)) return 'fork'
       visibility = this._groupVisibility(entry.group)
-      return groupVerdict(raw, key, entry.group, entry.diary, visibility)
+      return groupVerdict(raw, key, entry.group, entry.diary, visibility, entry.cut === 0)
     }
     check().then(async (reason) => {
       if (this.regateHook) await this.regateHook(key, reason)
@@ -4552,7 +5315,7 @@ class Seeder {
       // _recheckGroupBoxes skips a writer not gated yet: check the box
       // against the visibility known now.
       const now = this._groupVisibility(entry.group)
-      if (reason === null && now !== visibility) reason = groupVerdict(raw, key, entry.group, entry.diary, now)
+      if (reason === null && now !== visibility) reason = groupVerdict(raw, key, entry.group, entry.diary, now, entry.cut === 0)
       if (reason !== null) return this._dropGroup(key, reason)
       entry.headerOk = true
       entry.expected = null
@@ -4724,7 +5487,7 @@ class Seeder {
     }
     this._groupHeaders.set(group, rec)
     this._persist().catch(noop)
-    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility)
+    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility).catch(noop)
   }
 
   // The verified visibility of root G ('public' | 'private'), or null while
@@ -4738,8 +5501,10 @@ class Seeder {
 
   // A writer gated before its root's header was known never had its `box`
   // checked: re-read the block 0 of every gated writer of G and drop a
-  // mismatch with 'header-invalid', as the gate would have.
+  // mismatch with 'header-invalid', as the gate would have. Resolves once
+  // every check has run and any mismatch is dropped (start() awaits it).
   _recheckGroupBoxes (group, visibility) {
+    const checks = []
     for (const [key, entry] of this._groupServed) {
       if (key === group || entry.group !== group || !entry.headerOk || entry.dropped) continue
       const check = async () => {
@@ -4748,13 +5513,14 @@ class Seeder {
           raw = await entry.core.get(0, { wait: false, raw: true })
         } catch {}
         if (raw === null) return null
-        return groupVerdict(raw, key, entry.group, entry.diary, visibility)
+        return groupVerdict(raw, key, entry.group, entry.diary, visibility, entry.cut === 0)
       }
-      check().then((reason) => {
+      checks.push(check().then((reason) => {
         if (reason === null || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
         this._dropGroup(key, reason)
-      }, noop)
+      }, noop))
     }
+    return Promise.all(checks)
   }
 
   // A blocked group, or one with no core left here, loses its record.
@@ -5141,7 +5907,7 @@ class Seeder {
           // A closed or moved page leaves the Feira at once.
           if (isPage && this._names.endSeq(key) !== null && this._feira) this._feiraClose(key)
           // Page records only feed the name index's hint.
-          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true } : null)) {
+          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true, now: Date.now() } : { now: Date.now() })) {
             entry.indexPaused = true
             return
           }
@@ -5210,6 +5976,7 @@ class Seeder {
     return createPostNoticeIndex({
       isMember: (k) => this._admitted.has(k) || this._served.has(k),
       maxAuthors: this.maxServed,
+      onOwnersGained: (token, owners) => this._pushSettle(token, owners),
       verifyUsername: (author, record) => {
         try {
           return cert.verifyUsernameRecord(record, author, this.association).ok === true
@@ -5983,10 +6750,17 @@ class Seeder {
         entry.pushReadFailures = 0
         const block = raw === null ? null : decodeBlock(raw)
         const record = block && validRecordCopy(block, i)
+        // The scan may not have applied this tombstone yet (scans run one at
+        // a time), so a name settling before it would push a deleted post.
+        if (record && record.type === 'delete') this._pushForget((e) => e.actor === key && e.seq === record.seq)
+        // Before any await on this block, so a settle that lands while it is
+        // read still finds the mentions nobody holds yet.
+        const held = record && this.onPush !== null ? this._pushHold(key, i, record, Date.now(), entry) : null
         // Two phases, so a stop while a read is pending never emits part of
         // a block's pushes: A awaits (target posts, the actor name), B only
         // decides and emits, synchronously, then the cursor moves once.
         let survivors = []
+        const decided = []
         let name = null
         let now = 0
         if (record) {
@@ -5998,6 +6772,7 @@ class Seeder {
             // does). A target this replica cannot read yet drops the
             // recipient: a weaker kind would mislabel a reply or a quote.
             for (const c of this._pushCandidatesFor(key, i, record, now)) {
+              decided.push(c.recipient)
               for (const hit of [c, ...c.alternates]) {
                 if (hit.targetSeq !== null) {
                   const target = await this._pushTargetIsPost(c.recipient, hit.targetSeq)
@@ -6009,7 +6784,7 @@ class Seeder {
                 break
               }
             }
-            if (survivors.length > 0) {
+            if (survivors.length > 0 || held !== null) {
               name = await this._pushActorName(key, entry)
               if (!live()) return
             }
@@ -6030,10 +6805,20 @@ class Seeder {
           }
           for (const c of survivors) {
             if (!still.has(c.kind + ':' + c.recipient)) continue
+            this._pushNoteSent(c.kind, key, c.recipient, c.ref)
             try {
               this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
             } catch {}
           }
+        }
+        if (held !== null) this._pushRelease(held, name, decided)
+        // An undone follow, like or repost recalls the push the service may
+        // still hold queued; it needs no target read, so it is decided here.
+        const cancel = record && this.onPush !== null ? this._pushCancelFor(key, i, record, now) : null
+        if (cancel !== null) {
+          try {
+            this.onPush(cancel)
+          } catch {}
         }
         entry.pushNext = i + 1
       }
@@ -6047,16 +6832,6 @@ class Seeder {
   // holding the name now; a revoked issuer's names never match, as on the
   // notices page. A lookup that throws counts as nobody (push-events.js).
   _pushCandidatesFor (key, seq, record, now) {
-    const index = this._postNotices
-    let revoked = null
-    const holders = (token) => {
-      if (!index || typeof index.holders !== 'function') return []
-      if (revoked === null) {
-        const opts = this._certOpts()
-        revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
-      }
-      return index.holders(token, (issuer) => !revoked.has(issuer))
-    }
     return pushCandidates({
       author: key,
       seq,
@@ -6064,8 +6839,175 @@ class Seeder {
       now,
       isMember: (k) => this._admitted.has(k) || this._served.has(k),
       isBlocked: (k) => this._isBlocked(k),
-      holders
+      holders: (token) => this._pushHolders(token)
     })
+  }
+
+  // The members verifiably holding `token` now, a revoked issuer's names
+  // never matching, as on the notices page. A throw counts as nobody.
+  _pushHolders (token) {
+    try {
+      const index = this._postNotices
+      if (!index || typeof index.holders !== 'function') return []
+      const opts = this._certOpts()
+      const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      return index.holders(token, (issuer) => !revoked.has(issuer))
+    } catch {
+      return []
+    }
+  }
+
+  // Records each mention of a valid, recent post whose name nobody holds
+  // now; null when there is none. The entries of one post share `post`,
+  // open while the block is read: a gain reported then waits for
+  // _pushRelease, which knows who the normal path decided for.
+  // `source` is the served entry whose push pass held it: a re-served diary
+  // is a new entry, so what the old one held never pushes (_pushSettleEntry).
+  _pushHold (key, seq, record, now, source = null) {
+    try {
+      if (record.type !== 'post' || typeof record.text !== 'string') return null
+      const at = Date.parse(record.at)
+      if (!Number.isFinite(at) || now - at > PUSH_MAX_AGE_MS) return null
+      let post = null
+      for (const token of mentionTokens(record.text, MENTION_MAX)) {
+        if (this._pushHolders(token).length > 0) continue
+        if (post === null) post = { open: true, name: null, sent: new Set() }
+        const id = key + ':' + seq + ':' + token
+        this._pushPending.delete(id)
+        this._pushPending.set(id, { actor: key, seq, token, at, added: now, post, source })
+        let own = 0
+        let oldest = null
+        for (const [k, e] of this._pushPending) {
+          if (e.actor !== key) continue
+          if (oldest === null) oldest = k
+          own++
+        }
+        if (own > PUSH_PENDING_PER_ACTOR) this._pushPending.delete(oldest)
+        if (this._pushPending.size > PUSH_PENDING_MAX) this._pushPending.delete(this._pushPending.keys().next().value)
+      }
+      return post
+    } catch {
+      return null
+    }
+  }
+
+  // The block passed phase B: every recipient the normal path decided for
+  // (pushed, or dropped so a reply or quote is never relabelled) is done for
+  // this post, and a name gained while the block was read settles now.
+  _pushRelease (post, name, decided) {
+    for (const recipient of decided) post.sent.add(recipient)
+    post.name = name
+    post.open = false
+    const now = Date.now()
+    for (const [id, entry] of [...this._pushPending]) {
+      if (entry.post !== post) continue
+      if (this._pushExpired(entry, now)) this._pushPending.delete(id)
+      else this._pushSettleEntry(id, entry, this._pushHolders(entry.token))
+    }
+  }
+
+  // onOwnersGained of the post notice index: a name just verified for
+  // `owners` settles the mentions of it the push cursor passed unresolved.
+  // Synchronous, like every other emit; a throw in onPush is ignored.
+  _pushSettle (token, owners) {
+    if (this.onPush === null || this._closing || !Array.isArray(owners)) return
+    const now = Date.now()
+    for (const [id, entry] of [...this._pushPending]) {
+      if (this._pushExpired(entry, now)) {
+        this._pushPending.delete(id)
+      } else if (entry.token === token && owners.includes(entry.actor)) {
+        // The author gained the name: the index dropped the post's mention
+        // rows as self-mentions (dropOwnMentions), so no later holder may
+        // get a push without an aviso.
+        this._pushPending.delete(id)
+      } else if (entry.token === token && !entry.post.open) {
+        this._pushSettleEntry(id, entry, owners)
+      }
+    }
+  }
+
+  // By the record's `at`, which is author-supplied, and by when it was
+  // held, so a future `at` cannot keep an entry past the window either.
+  _pushExpired (entry, now) {
+    return now - entry.at > PUSH_MAX_AGE_MS || now - entry.added > PUSH_MAX_AGE_MS
+  }
+
+  // The gates of a mention push (_pushCandidatesFor) on the current state:
+  // a member holding the name under a usable issuer, not the actor, neither
+  // side blocked (a throw counts as blocked), and nothing for this post yet.
+  // The name is the one the block's own pass read (null if it held none).
+  // An entry stays until it expires or is evicted: a name can have several
+  // verified holders settling at different times, and post.sent keeps each
+  // recipient to one push. It goes once the actor holds the name too (the
+  // mention is then a self-mention, with no aviso for anyone).
+  _pushSettleEntry (id, entry, recipients) {
+    const { actor, seq, token, post } = entry
+    // Only while the author is served by the entry that held it (live, as
+    // in _runPush), and a deleted post has no aviso either. A re-served
+    // diary's deleted set may not be rescanned yet, so its old entries are
+    // deleted, never pushed.
+    const source = this._served.get(actor)
+    if (!source || source !== entry.source || !source.gated || source.dropped || source.deleted.has(seq)) {
+      this._pushPending.delete(id)
+      return
+    }
+    const blocked = (k) => {
+      try {
+        return this._isBlocked(k)
+      } catch {
+        return true
+      }
+    }
+    const holders = this._pushHolders(token)
+    if (holders.includes(actor)) {
+      this._pushPending.delete(id)
+      return
+    }
+    for (const recipient of recipients) {
+      if (recipient === actor || post.sent.has(recipient) || !holders.includes(recipient)) continue
+      if (!this._admitted.has(recipient) && !this._served.has(recipient)) continue
+      if (blocked(actor) || blocked(recipient)) continue
+      post.sent.add(recipient)
+      try {
+        this.onPush({ v: 1, kind: 'mention', actor, recipient, seq, ref: actor + ':' + seq, name: post.name })
+      } catch {}
+    }
+  }
+
+  // Deletes the waiting mentions `pred` matches (a dropped actor, a
+  // deleted post).
+  _pushForget (pred) {
+    // A seeder built without the push state (tests use bare prototypes)
+    // holds nothing to forget.
+    if (!(this._pushPending instanceof Map)) return
+    for (const [id, entry] of [...this._pushPending]) {
+      if (pred(entry)) this._pushPending.delete(id)
+    }
+  }
+
+  // Notes a follow, like or repost just emitted, for a recall within
+  // PUSH_RECALL_MS. Oldest out first past PUSH_RECALL_MAX.
+  _pushNoteSent (kind, actor, recipient, ref) {
+    if (!CANCEL_KINDS.includes(kind)) return
+    const id = kind + ':' + actor + ':' + recipient + ':' + ref
+    this._pushSent.delete(id)
+    this._pushSent.set(id, Date.now())
+    if (this._pushSent.size > PUSH_RECALL_MAX) this._pushSent.delete(this._pushSent.keys().next().value)
+  }
+
+  // The cancel one `on: false` record of `key` yields, or null: only for a
+  // push this seeder emitted within PUSH_RECALL_MS, so closing a page (up
+  // to thousands of follow-offs) never floods the relay with cancels of
+  // nothing. A matched cancel goes out even after a block or a lost
+  // membership: it only drops a queued job and carries no content.
+  _pushCancelFor (key, seq, record, now) {
+    const cancel = pushCancel({ author: key, seq, record, now })
+    if (cancel === null) return null
+    const id = cancel.kind + ':' + key + ':' + cancel.recipient + ':' + cancel.ref
+    const at = this._pushSent.get(id)
+    if (at === undefined) return null
+    this._pushSent.delete(id)
+    return Date.now() - at <= PUSH_RECALL_MS ? cancel : null
   }
 
   // The engagement index only checks a reference's shape and keeps targets
@@ -6512,13 +7454,82 @@ class Seeder {
     }
   }
 
+  // GET /index/garden/<owner>: pointers to the owner's Varandinha, { on,
+  // state, helps: [{ author, seq, followSeq }], given: [seq], indexing,
+  // complete } (engagement-index.js garden): on and state are the seqs of
+  // the newest live `garden` (on or off: the node peeks it) and
+  // `garden-state` blocks or null; helps are the neighbours' waterings
+  // inside the reader window of now, from visible writers only, each with
+  // followSeq, the seq of that HELPER's committed live follow of the owner
+  // (a help from someone who does not follow the owner counts for nothing,
+  // so it is left out); given are the owner's own help seqs. A balcony that
+  // is off, or was never opened, answers state null and no helps or given.
+  // A held or hidden writer is left out and the answer says complete false,
+  // as it does while the writers cap refused a help that may still be
+  // listed (garden hidden) and while the follow index may miss a follow of
+  // the owner (followersIncomplete: a pending or capped helper has no
+  // followSeq, so its help is left out); a throw there reads incomplete. Null
+  // when the owner is not visible or held (_searchHeld), never an empty
+  // balcony. Fails closed while the owner's own diary is not fully indexed
+  // and scanned (its newest blocks and tombstones may be missing): nothing
+  // listed, indexing true, complete false. Keys and seqs only: no pot,
+  // plant, date or name, which the node reads from the diaries and verifies.
+  indexGarden (ownerHex) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const g = this._index.garden(ownerHex, Date.now(), {
+        visible: v.visible,
+        followSeq: (hex) => this._notices.followSeq(hex, ownerHex)
+      })
+      if (g === null) return null
+      if (this._ownerIndexPending(ownerHex)) return { on: null, state: null, helps: [], given: [], indexing: true, complete: false }
+      const flags = this._indexFlags()
+      let followsComplete = false
+      try { followsComplete = this._notices.followersIncomplete(ownerHex) === false } catch {}
+      return { on: g.on, state: g.state, helps: g.helps, given: g.given, indexing: flags.indexing, complete: flags.complete && !g.hidden && !v.held && followsComplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/garden/<owner>/rua[/<cursor>]: Varandas da rua, the
+  // balconies of the accounts the owner follows that show theirs, { items:
+  // [{ key, on, state }], next, indexing, complete } (engagement-index.js
+  // gardenStreet): on is the seq of the key's newest live `garden` block,
+  // which is on, state its newest `garden-state` seq or null; keys
+  // ascending, strictly after the cursor (a key), `next` the cursor of the
+  // following page or null. Visible keys only; a held one is left out and
+  // the answer says complete false, as it does while the owner's own follows
+  // are pending, truncated or capped (followingIncomplete, a throw reading
+  // incomplete), since the street may be short. Null when the owner is not visible or
+  // held or the cursor is malformed. Fails closed while the owner's own
+  // diary is not fully indexed and scanned (an unfollow may be missing): no
+  // items, complete false. Keys and seqs only.
+  indexGardenStreet (ownerHex, cursor = null) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const page = this._index.gardenStreet(ownerHex, this._notices.followTargets(ownerHex), { visible: v.visible, cursor })
+      if (page === null) return null
+      const flags = this._indexFlags()
+      if (this._ownerIndexPending(ownerHex)) return { items: [], next: null, indexing: flags.indexing, complete: false }
+      let followsComplete = false
+      try { followsComplete = this._notices.followingIncomplete(ownerHex) === false } catch {}
+      return { items: page.rows, next: page.next, indexing: flags.indexing, complete: flags.complete && !v.held && followsComplete }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/profile/<author>: pointers to the author's perfil rico blocks,
   // { about: seq | null, mood: seq | null, fans: { count, indexing }, top:
   // { seq, back: { <friend>: followSeq | null } } | null, visits: seq | null,
-  // indexing, complete } (engagement-index.js profileExtra, fanCount): the
-  // newest live `profile-about`, `mood`, `top-friends` and `visits` block
-  // (visits is a pointer only: the node peeks the block and checks on === true,
-  // an off block still has a seq). fans.count is the number
+  // garden: seq | null, indexing, complete } (engagement-index.js
+  // profileExtra, fanCount): the newest live `profile-about`, `mood`,
+  // `top-friends`, `visits` and `garden` block (visits and garden are
+  // pointers only: the node peeks the block and checks on === true, an off
+  // block still has a seq). fans.count is the number
   // of visible fas indexed so far (held ones, and writers whose own diary
   // is pending, left out: _fansShown), a claim like the follower counts;
   // fans.indexing is true while it may still grow (any diary not fully
@@ -6529,8 +7540,8 @@ class Seeder {
   // readers ignore keys they do not know. Null when the author is not
   // visible or held (_searchHeld). Fails closed while the author's own diary
   // is not fully indexed and scanned (the newest block may be missing, a
-  // tombstone not yet applied): about, mood, top and visits null, fans.indexing,
-  // indexing true and complete false. Seqs only: the node reads and verifies
+  // tombstone not yet applied): about, mood, top, visits and garden null,
+  // fans.indexing, indexing true and complete false. Seqs only: the node reads and verifies
   // the blocks.
   indexProfile (authorHex) {
     try {
@@ -6538,8 +7549,8 @@ class Seeder {
       const v = this._followsVisible()
       const shown = this._fansShown(v)
       const count = this._index.fanCount(authorHex, shown.visible)
-      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, visits: null, indexing: true, complete: false }
-      const { about, mood, top, visits } = this._index.profileExtra(authorHex)
+      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, visits: null, garden: null, indexing: true, complete: false }
+      const { about, mood, top, visits, garden } = this._index.profileExtra(authorHex)
       let pointers = null
       if (top !== null) {
         const back = {}
@@ -6550,7 +7561,7 @@ class Seeder {
         pointers = { seq: top.seq, back }
       }
       const flags = this._indexFlags()
-      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, visits, indexing: flags.indexing, complete: true }
+      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, visits, garden, indexing: flags.indexing, complete: true }
     } catch {
       return null
     }
@@ -7536,10 +8547,10 @@ class Seeder {
   // Destroying here would be too early: ws's createWebSocketStream
   // terminates the socket in _destroy, so a close frame queued just before
   // never reaches the client. Without onRefuse the stream is destroyed as
-  // before; not-ready/closing refusals always destroy it.
+  // before; not-accepting/closing refusals always destroy it.
   acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null } = {}) {
     rawStream.on('error', noop)
-    if (!this._ready || this._closing) {
+    if (!this._accepting || this._closing) {
       rawStream.destroy()
       return null
     }
@@ -8328,6 +9339,7 @@ class Seeder {
   }
 
   close () {
+    this._accepting = false
     if (this._closing) return this._closing
     this._closing = (async () => {
       if (this._stopRediscovery) this._stopRediscovery()
@@ -8335,6 +9347,8 @@ class Seeder {
       this._served.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
       this._postNotices = createPostNoticeIndex()
+      this._pushPending.clear()
+      this._pushSent.clear()
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
       for (const entry of this._groupServed.values()) this._stopEntry(entry)
@@ -8406,6 +9420,7 @@ Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 
 module.exports = {
   Seeder,
+  GroupBindings,
   startupPhases,
   GATE_TIMEOUT_MS,
   MAX_HANDSHAKE_FRAME,
@@ -8424,5 +9439,6 @@ module.exports = {
   DISCOVERY_VIEW_MAX_KEYS,
   // For tests.
   liveGroupJoins,
-  groupWalkStep
+  groupWalkStep,
+  groupWalkCut
 }
