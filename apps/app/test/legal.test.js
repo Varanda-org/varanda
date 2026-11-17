@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 77)
+  t.is(LEGAL_VERSION, 78)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 77, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 78, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd81d40a05d10940ff41d82114a787d45b1f483c62933f1da9255106ec45e6851', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'cd7e977121ae044b4df027e16ba0563e983238025c647376e6d0ca48c043f9c6', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -891,6 +891,30 @@ test('legal: version 76 describes connected devices and the periodic key change'
   t.ok(text(PRIVACY).includes('não o número, o nome nem os grupos'), 'holders see neither the id, the name nor the groups')
   t.ok(text(PRIVACY).includes('o app não tem como apagá-los, e o corte é definitivo'), 'records and cuts cannot be deleted')
   t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
+})
+
+test('legal: version 78 describes Varandinha', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('a Varandinha é opcional e começa desligada') || text(doc).includes('A Varandinha é um jogo opcional e começa desligada'), 'optional and off by default')
+    t.ok(text(doc).includes('a pessoa cuja planta você regou vê o seu nome') || text(doc).includes('A pessoa cuja planta você regou vê o seu nome'), 'the watered person sees the name')
+    t.ok(text(doc).includes('recompensa sorteada, ranking nem prêmio'), 'no random reward, ranking or prize')
+    t.ok(text(doc).includes('nenhuma notificação pede para alguém voltar'), 'nothing asks anyone to come back')
+    t.ok(text(doc).includes('cópias que outras pessoas já buscaram podem continuar'), 'fetched copies may remain')
+    t.ok(text(doc).includes('Sair apaga só os seus próprios registros: as regas que vizinhos fizeram na sua varanda ficam no diário deles, e só quem regou pode apagá-las.'), 'leaving deletes only the own records')
+    t.absent(text(doc).includes('\u2014'), 'no em dash')
+  }
+  t.ok(text(TERMS).includes('O estado de cada varanda é declarado por quem joga e não é conferido por ninguém.'), 'terms: declared, not verified')
+  t.ok(text(PRIVACY).includes('O estado do jogo é declarado por cada pessoa e não é conferido'), 'privacy: declared, not verified')
+  t.ok(text(PRIVACY).includes('e fica sabendo qual varanda o seu aparelho abre'), 'privacy: the seeder sees which balcony is opened')
+  t.ok(text(PRIVACY).includes('sem guardar planta nem nome'), 'privacy: pointers only')
+  t.ok(text(PRIVACY).includes('A cada nova rega, o app marca como apagadas até sete das suas regas com mais de cerca de três dias; as que sobrarem continuam públicas até as regas seguintes ou até você sair.'), 'privacy: each watering prunes at most seven helps older than about three days')
+  t.ok(text(TERMS).includes('deixa no seu diário um registro público de que o jogo foi desligado'), 'terms: leaving keeps a public off flag')
+  t.ok(text(PRIVACY).includes('deixa no diário o registro público de desligado'), 'privacy: leaving keeps a public off flag')
+  t.ok(text(PRIVACY).includes('inclusive as regas que você deu'), 'privacy: leaving deletes the given helps')
+  const visitas = text(PRIVACY).indexOf('No app instalado e na versão web hospedada, Visitas é opcional')
+  t.ok(visitas >= 0 && text(PRIVACY).indexOf('No app instalado e na versão web hospedada, a Varandinha') > visitas, 'privacy: after the Visitas paragraph')
 })
 
 test('legal: version 73 keeps the one-time notes from repeating on another device', async (t) => {

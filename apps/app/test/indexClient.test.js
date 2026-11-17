@@ -1819,15 +1819,18 @@ test('profileUrl and validProfile: tolerant of unknown keys, strict on known one
   t.is(profileUrl(A.toUpperCase()), '/index/profile/' + A, 'author lowercased')
   for (const author of [null, undefined, '', 'abc', A + 'a', 7]) t.is(profileUrl(author), null, 'author ' + String(author))
   const flags = { indexing: false, complete: true }
-  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, visits: null, fans: null, top: null, ...flags })
-  t.alike(validProfile({ ...flags }), { about: null, mood: null, visits: null, fans: null, top: null, ...flags }, 'missing pointers read as null')
-  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, visits: null, fans: null, top: null, ...flags }, 'unknown keys ignored')
+  t.alike(validProfile({ about: 3, mood: null, ...flags }), { about: 3, mood: null, visits: null, garden: null, fans: null, top: null, ...flags })
+  t.alike(validProfile({ ...flags }), { about: null, mood: null, visits: null, garden: null, fans: null, top: null, ...flags }, 'missing pointers read as null')
+  t.alike(validProfile({ about: 1, mood: 2, later: { x: 1 }, ...flags }), { about: 1, mood: 2, visits: null, garden: null, fans: null, top: null, ...flags }, 'unknown keys ignored')
   t.is(validProfile({ visits: 4, ...flags }).visits, 4, 'visits pointer read')
   for (const bad of [0, '1', 1.5]) t.is(validProfile({ visits: bad, ...flags }), null, 'visits ' + String(bad))
+  t.is(validProfile({ garden: 6, ...flags }).garden, 6, 'garden pointer read')
+  t.is(validProfile({ ...flags }).garden, null, 'garden absent reads as null')
+  for (const bad of [0, '1', 1.5]) t.is(validProfile({ garden: bad, ...flags }), null, 'garden ' + String(bad))
   const K = 'b'.repeat(64)
   const good = { fans: { count: 3, indexing: false }, top: { seq: 5, back: { [K]: 7, ['c'.repeat(64)]: null } } }
-  t.alike(validProfile({ ...good, ...flags }), { about: null, mood: null, visits: null, ...good, ...flags }, 'fans and top read')
-  t.alike(validProfile({ fans: null, top: null, ...flags }), { about: null, mood: null, visits: null, fans: null, top: null, ...flags })
+  t.alike(validProfile({ ...good, ...flags }), { about: null, mood: null, visits: null, garden: null, ...good, ...flags }, 'fans and top read')
+  t.alike(validProfile({ fans: null, top: null, ...flags }), { about: null, mood: null, visits: null, garden: null, fans: null, top: null, ...flags })
   const many = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [i.toString(16).repeat(64), null]))
   for (const bad of [{ fans: { count: -1, indexing: false } }, { fans: { count: 1.5, indexing: false } }, { fans: { count: 1 } }, { fans: { count: 1, indexing: false, x: 1 } }, { top: { seq: 0, back: {} } }, { top: { seq: 1 } }, { top: { seq: 1, back: { [K.toUpperCase()]: 1 } } }, { top: { seq: 1, back: { [K]: 0 } } }, { top: { seq: 1, back: many } }, { top: { seq: 1, back: {}, x: 1 } }]) {
     t.is(validProfile({ ...bad, ...flags }), null, JSON.stringify(bad))
@@ -2130,4 +2133,108 @@ test('events: URL builder and body contract', async (t) => {
   }
   t.is(validEvents(good, 9), null, 'not below before')
   t.alike(validEvents(good, 10), good)
+})
+
+const gflags = { indexing: false, complete: true }
+const hx = (i) => i.toString(16).padStart(64, '0')
+const gardenGood = (over = {}) => ({ on: 2, state: null, helps: [{ author: B, seq: 3, followSeq: 4 }], given: [1, 2], ...gflags, ...over })
+const streetGood = (over = {}) => ({ items: [{ key: B, on: 1, state: null }], next: null, ...gflags, ...over })
+
+test('gardenUrl and gardenStreetUrl: lowercase hex64 only', async (t) => {
+  const { gardenUrl, gardenStreetUrl } = await load()
+  t.is(gardenUrl(A), '/index/garden/' + A)
+  t.is(gardenStreetUrl(A), '/index/garden/' + A + '/rua')
+  t.is(gardenStreetUrl(A, B), '/index/garden/' + A + '/rua/' + B)
+  for (const bad of [A.toUpperCase(), 'abc', A + 'a', 7, null, undefined]) {
+    t.is(gardenUrl(bad), null, 'owner ' + String(bad))
+    t.is(gardenStreetUrl(bad), null, 'street owner ' + String(bad))
+  }
+  for (const bad of [B.toUpperCase(), 'abc', B + 'a', 7, '']) t.is(gardenStreetUrl(A, bad), null, 'cursor ' + String(bad))
+})
+
+test('validGarden: exact shape, bounds and copies', async (t) => {
+  const { validGarden } = await load()
+  const worst = gardenGood({ helps: Array.from({ length: 24 }, (_, i) => ({ author: hx(i + 1), seq: 1, followSeq: 1 })), given: Array.from({ length: 24 }, (_, i) => i + 1) })
+  const out = validGarden(worst, A)
+  t.alike(out, worst)
+  t.not(out.helps, worst.helps)
+  t.not(out.given, worst.given)
+  t.not(out.helps[0], worst.helps[0])
+  const row = { author: B, seq: 3, followSeq: 4 }
+  const bads = [
+    { ...gardenGood(), extra: 1 },
+    gardenGood({ helps: [{ ...row, extra: 1 }] }),
+    gardenGood({ helps: [{ ...row, pot: {} }] }),
+    gardenGood({ helps: [{ author: B, seq: 3 }] }),
+    (() => { const b = gardenGood(); delete b.given; return b })(),
+    gardenGood({ helps: [{ ...row, author: A }] }),
+    gardenGood({ helps: [{ ...row, author: B.toUpperCase() }] }),
+    gardenGood({ helps: [{ ...row, seq: 0 }] }),
+    gardenGood({ helps: [{ ...row, followSeq: null }] }),
+    gardenGood({ helps: [row, row] }),
+    gardenGood({ given: [1, 1] }),
+    gardenGood({ helps: Array.from({ length: 25 }, (_, i) => ({ author: hx(i + 1), seq: 1, followSeq: 1 })) }),
+    gardenGood({ given: Array.from({ length: 25 }, (_, i) => i + 1) }),
+    gardenGood({ on: '1' }),
+    gardenGood({ state: 0 }),
+    gardenGood({ indexing: 'no' }),
+    gardenGood({ complete: 1 }),
+    gardenGood({ on: null, state: 3, helps: [], given: [] }),
+    gardenGood({ on: null, helps: [row], given: [] }),
+    gardenGood({ on: null, helps: [], given: [4] }),
+    null,
+    []
+  ]
+  bads.forEach((b, i) => t.is(validGarden(b, A), null, 'bad ' + i))
+  const outside = gardenGood({ on: null, state: null, helps: [], given: [] })
+  t.alike(validGarden(outside, A), outside, 'no garden block: empty lists')
+  t.is(validGarden(gardenGood(), 'nope'), null, 'bad owner')
+})
+
+test('validGardenStreet: exact shape, page bound and stuck cursor', async (t) => {
+  const { validGardenStreet } = await load()
+  const page = streetGood({ items: Array.from({ length: 20 }, (_, i) => ({ key: hx(i + 1), on: 1, state: i === 0 ? null : 2 })), next: C })
+  t.alike(validGardenStreet(page), page)
+  const it = { key: B, on: 1, state: null }
+  const bads = [
+    streetGood({ items: Array.from({ length: 21 }, (_, i) => ({ key: hx(i + 1), on: 1, state: null })) }),
+    streetGood({ items: [it, it] }),
+    streetGood({ items: [{ ...it, on: null }] }),
+    streetGood({ items: [{ ...it, state: 0 }] }),
+    streetGood({ items: [{ ...it, extra: 1 }] }),
+    { ...streetGood(), extra: 1 },
+    streetGood({ next: 'abc' }),
+    streetGood({ next: C.toUpperCase() }),
+    streetGood({ complete: 'yes' }),
+    streetGood({ items: [{ ...it, key: C }, it] }),
+    streetGood({ items: [{ ...it, key: C }], next: B })
+  ]
+  bads.forEach((b, i) => t.is(validGardenStreet(b), null, 'bad ' + i))
+  t.alike(validGardenStreet(streetGood({ items: [], next: C }), C), { items: [], next: null, indexing: false, complete: false })
+  t.is(validGardenStreet(streetGood({ next: C }), C), null, 'an item at or before the cursor')
+  t.is(validGardenStreet(streetGood({ items: [], next: A }), B), null, 'a next before the cursor walks back')
+  t.alike(validGardenStreet(streetGood({ items: [{ ...it, key: C }], next: C }), B), streetGood({ items: [{ ...it, key: C }], next: C }), 'next may equal the last item')
+})
+
+test('fetchGarden and fetchGardenStreet: request, contract and failures', async (t) => {
+  const { fetchGarden, fetchGardenStreet } = await load()
+  const calls = []
+  const g = await fetchGarden(A, { fetch: async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(gardenGood())) } })
+  t.is(g.ok, true)
+  t.alike(g.value, gardenGood())
+  t.is(calls[0].url, '/index/garden/' + A)
+  t.is(calls[0].opts.method, 'GET')
+  const s = await fetchGardenStreet(A, B, { fetch: async (url) => { calls.push({ url }); return response(JSON.stringify(streetGood({ items: [], next: B }))) } })
+  t.alike([s.ok, s.value.next, s.value.complete], [true, null, false])
+  t.is(calls[1].url, '/index/garden/' + A + '/rua/' + B)
+  t.alike(await fetchGarden(A, { fetch: async () => response(JSON.stringify({ ...gardenGood(), pot: 1 })) }), { ok: false, reason: 'malformed' })
+  t.alike(await fetchGardenStreet(A, null, { fetch: async () => response(JSON.stringify([])) }), { ok: false, reason: 'malformed' })
+  const down = await fetchGarden(A, { fetch: async () => response('', { status: 500 }) })
+  t.is(down.ok, false)
+  let called = false
+  const noFetch = { fetch: async () => { called = true } }
+  t.alike(await fetchGarden('nope', noFetch), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchGardenStreet('nope', null, noFetch), { ok: false, reason: 'invalid-input' })
+  t.alike(await fetchGardenStreet(A, 'abc', noFetch), { ok: false, reason: 'invalid-input' })
+  t.is(called, false)
 })
