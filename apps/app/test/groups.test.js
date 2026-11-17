@@ -268,7 +268,7 @@ test('device join: this device writes, or the account still has to join here', a
 test('device slots: the reserve warning and the full refusal follow frozenRoom (#350)', async (t) => {
   const { groupSlots, communitySlots, slotReturn, reserveText, reserveJoinText, slotFullText, slotRefusal, DEVICE_RESERVE_TEXT, DEVICE_RESERVE_JOIN_TEXT } = await load()
   const returns = 'Cada aparelho usa uma das 8 vagas da conta neste grupo. Desconectar um aparelho antigo em Ajustes, Aparelhos conectados, devolve a vaga.'
-  const final = 'Cada aparelho usa uma das 8 vagas da conta neste grupo. Aqui, desconectar um aparelho não devolve mais a vaga.'
+  const final = 'Cada aparelho usa uma das 8 vagas da conta neste grupo. Aqui, desconectar um aparelho pode não devolver a vaga.'
   const { DEVICES_TITLE } = await import('../src/devices.js')
   t.ok(returns.includes('Ajustes, ' + DEVICES_TITLE + ','), 'names the Ajustes entry by its label')
   t.alike(groupSlots({ writersBound: 6, frozenRoom: 3 }), [{ bound: 6, room: 3 }])
@@ -291,13 +291,13 @@ test('device slots: the reserve warning and the full refusal follow frozenRoom (
   t.is(reserveJoinText([{ bound: 6 }]), DEVICE_RESERVE_JOIN_TEXT)
   t.ok(reserveJoinText([{ bound: 6, room: 1 }]).includes('Participar neste aparelho'))
   t.ok(reserveJoinText([{ bound: 6, room: 1 }]).endsWith(returns.replace('neste grupo', 'nesta comunidade')))
-  t.ok(reserveJoinText([{ bound: 6, room: 0 }]).endsWith('Aqui, desconectar um aparelho não devolve mais a vaga.'))
+  t.ok(reserveJoinText([{ bound: 6, room: 0 }]).endsWith('Aqui, desconectar um aparelho pode não devolver a vaga.'))
 
   // With 8 live the refusal points to Ajustes, Aparelhos conectados; with no frozen
-  // reserve it says a disconnect no longer gives the slot back there.
-  t.is(slotFullText([{ bound: 8, room: 2 }]), 'Sua conta já usa as 8 vagas de aparelho neste grupo. Desconecte um aparelho antigo em Ajustes, Aparelhos conectados, para liberar uma vaga.')
-  t.is(slotFullText([{ bound: 8, room: 0 }]), 'Sua conta já usa as 8 vagas de aparelho neste grupo, e aqui desconectar um aparelho não devolve mais a vaga.')
-  t.is(slotFullText([{ bound: 3, room: 0 }, { bound: 8, room: 5 }], 'comunidade'), 'Sua conta já usa as 8 vagas de aparelho nesta comunidade. Desconecte um aparelho antigo em Ajustes, Aparelhos conectados, para liberar uma vaga.', 'only the full root decides')
+  // reserve it says a disconnect may not give the slot back there.
+  t.is(slotFullText([{ bound: 8, room: 2 }]), 'Sua conta já usa as 8 vagas de aparelho neste grupo. Para liberar a vaga, desconecte um aparelho antigo em Ajustes, Aparelhos conectados.')
+  t.is(slotFullText([{ bound: 8, room: 0 }]), 'Sua conta já usa as 8 vagas de aparelho neste grupo, e aqui desconectar um aparelho pode não devolver a vaga.')
+  t.is(slotFullText([{ bound: 3, room: 0 }, { bound: 8, room: 5 }], 'comunidade'), 'Sua conta já usa as 8 vagas de aparelho nesta comunidade. Para liberar a vaga, desconecte um aparelho antigo em Ajustes, Aparelhos conectados.', 'only the full root decides')
   t.is(slotFullText([{ bound: 7, room: 2 }]), null, 'a full group, not the account: the node\'s words')
   t.is(slotFullText([{ bound: 8 }]), null, 'older node: the node\'s words')
   t.is(slotFullText([]), null)
@@ -308,8 +308,8 @@ test('device slots: the reserve warning and the full refusal follow frozenRoom (
     reads++
     return info
   }
-  t.is((await slotRefusal(full, read({ writersBound: 8, frozenRoom: 1 }), groupSlots)).message, 'Sua conta já usa as 8 vagas de aparelho neste grupo. Desconecte um aparelho antigo em Ajustes, Aparelhos conectados, para liberar uma vaga.')
-  t.is((await slotRefusal(new Error('limite da comunidade atingido'), read({ writersBound: 4, frozenRoom: 8, generalWritersBound: 8, generalFrozenRoom: 0 }), communitySlots, 'comunidade')).message, 'Sua conta já usa as 8 vagas de aparelho nesta comunidade, e aqui desconectar um aparelho não devolve mais a vaga.')
+  t.is((await slotRefusal(full, read({ writersBound: 8, frozenRoom: 1 }), groupSlots)).message, 'Sua conta já usa as 8 vagas de aparelho neste grupo. Para liberar a vaga, desconecte um aparelho antigo em Ajustes, Aparelhos conectados.')
+  t.is((await slotRefusal(new Error('limite da comunidade atingido'), read({ writersBound: 4, frozenRoom: 8, generalWritersBound: 8, generalFrozenRoom: 0 }), communitySlots, 'comunidade')).message, 'Sua conta já usa as 8 vagas de aparelho nesta comunidade, e aqui desconectar um aparelho pode não devolver a vaga.')
   t.is(await slotRefusal(full, read({ writersBound: 5, frozenRoom: 8 }), groupSlots), full, 'a full group keeps the error')
   t.is(await slotRefusal(full, async () => { throw new Error('sem conexão com o nó') }, groupSlots), full, 'a failed read keeps the error')
   const before = reads

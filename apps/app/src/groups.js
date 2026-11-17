@@ -262,7 +262,9 @@ export function slotReturn (slots) {
 // the test holds the two together).
 const DEVICES_PATH = 'Ajustes, Aparelhos conectados'
 const SLOT_RETURNS_TEXT = 'Desconectar um aparelho antigo em ' + DEVICES_PATH + ', devolve a vaga.'
-const SLOT_FINAL_TEXT = 'desconectar um aparelho não devolve mais a vaga.'
+// With no frozen reserve a disconnect's mark of 1 or more frees no slot; a
+// mark at 0 still releases one while the diary has releases left.
+const SLOT_FINAL_TEXT = 'desconectar um aparelho pode não devolver a vaga.'
 
 function slotPlace (where) {
   return where === 'comunidade' ? 'nesta comunidade' : 'neste grupo'
@@ -290,7 +292,7 @@ export function slotFullText (slots, where = 'grupo') {
   const r = slotReturn(full)
   if (full.length === 0 || r === 'legacy') return null
   const head = 'Sua conta já usa as 8 vagas de aparelho ' + slotPlace(where)
-  return r === 'final' ? head + ', e aqui ' + SLOT_FINAL_TEXT : head + '. Desconecte um aparelho antigo em ' + DEVICES_PATH + ', para liberar uma vaga.'
+  return r === 'final' ? head + ', e aqui ' + SLOT_FINAL_TEXT : head + '. Para liberar a vaga, desconecte um aparelho antigo em ' + DEVICES_PATH + '.'
 }
 
 const FULL_REFUSALS = Object.freeze(['limite do grupo atingido', 'limite da comunidade atingido'])
