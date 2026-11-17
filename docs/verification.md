@@ -5416,7 +5416,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - A flag BE é autodeclarada pelo autenticador quando a atestação é `none`; o app não consegue provar que o gerenciador sincroniza.
 - Dados de autenticação ilegíveis são aceitos, então um autenticador que não informa a flag passa na criação.
 - As dicas (`client-device`, `hybrid`) são só orientação: não forçam a tela do QR code.
-- No Android, a limpeza de passkeys é só exclusão, e só com androidx.credentials 1.5.0.
+- No Android, a limpeza de passkeys é só exclusão, e depende de androidx.credentials 1.5.0 ou mais novo, fixado em versão exata no `build.gradle` do módulo; `apps/app/test/passkeyPrfAndroid.test.js` falha se a versão cair ou deixar de ser exata (#444).
 - No iOS nativo, o domínio associado já está no projeto (`Varanda.entitlements`); entrar com passkey numa instalação de produção depende da conta Apple Developer.
 - O build de debug do Android (`app.varanda.debug`) não usa passkeys de produção.
 - Entrar com uma passkey do Varanda antiga, num aparelho sem diário, ainda abre um diário vazio.
@@ -5482,9 +5482,7 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - Remover ou trocar uma entrada não troca a raiz: quem buscou aquele blob enquanto a entrada valia e tem o segredo dela ainda abre a conta. Isso vem do desenho da raiz embrulhada. Remover a entrada ou criar um código novo só impede novas entradas num aparelho que ainda não a usou; quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Se uma passkey adicionada ou o código vazar, o único caminho seguro é criar uma conta nova. O cartão do código, a confirmação de código novo e as duas confirmações de remover dizem isso, e os Termos e a Política também (a versão continua 17).
 - Cancelar a recuperação não desfaz o que já terminou: uma instalação que concluiu antes do cancelamento continua (a conta fica aberta e presa à passkey nova), uma passkey criada durante a cerimônia continua no gerenciador (o Varanda não consegue apagá-la; no navegador ela fica recusada como `SUPERSEDED` e fora das próximas criações) e um put já enviado ao serviço pode ter sido gravado (a lista confirma).
 - Remover uma entrada não desconecta um aparelho que já desembrulhou a raiz com ela.
-- Se o disco do serviço se perder, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo.
-- Uma cópia de `recovery.json` mais antiga que uma lápide já podada pode trazer de volta aquela linha.
-- Só membros com vínculo Google cadastram entradas.
+- Se o disco do serviço se perder sem cópia, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo. Uma cópia restaurada não tem as entradas cadastradas depois dela e volta a ter as removidas depois dela; o README descreve a restauração e o aviso aos membros (#444).
 
 ## 111. Busca de GIFs pelo serviço de conta (PR feat/gif-search)
 
