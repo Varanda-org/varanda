@@ -348,6 +348,7 @@ const { strictVerifyInviteCard } = require('./invite-card')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPhone } = require('@varanda/core/lib/phone')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { signPeerProof } = require('@varanda/core/lib/peer-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
@@ -1445,6 +1446,13 @@ function createBrowserSession ({
           peeker: diaryPeeker,
           reader,
           followPage: syncOptions.followPage !== undefined ? syncOptions.followPage : followMovedPage,
+          // The own diary's `prove` on each link (./sync.js signProof), with
+          // the in-memory key, for the own key the run opened.
+          signProof: (noiseHex, own) => {
+            if (keyPair === null) throw new UsageError(store.LOCKED)
+            if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+            return signPeerProof({ noiseHex, keyHex: own, keyPair })
+          },
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))

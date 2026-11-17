@@ -9,7 +9,7 @@ const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-lin
 const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
-const { createModRoutes, ANEXO_READ_MAX_MS } = require('./mod-routes')
+const { createModRoutes, LARGE_BODY_READ_MAX_MS } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
@@ -79,12 +79,13 @@ const MAX_SOCKETS = 64
 const DEFAULT_RATE = 20
 const DEFAULT_BURST = 100
 const HEADERS_TIMEOUT_MS = 4000
-// Long enough for the largest report anexo at the slowest rate its own
-// deadline allows (mod-routes.js). Every other body is at most a few dozen
-// KB and gets BODY_READ_MS from when its route starts reading it, the
-// earlier request timeout, so only the anexo route holds a slow sender's
-// socket past HEADERS_TIMEOUT_MS + BODY_READ_MS.
-const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + ANEXO_READ_MAX_MS
+// Long enough for the largest report anexo or operator ack at the slowest
+// rate their own deadline allows (mod-routes.js LARGE_BODY_READ_MAX_MS, the
+// larger of the two maxima). Every other body is at most a few dozen KB and
+// gets BODY_READ_MS from when its route starts reading it, the earlier
+// request timeout, so only those two routes hold a slow sender's socket
+// past HEADERS_TIMEOUT_MS + BODY_READ_MS.
+const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + LARGE_BODY_READ_MAX_MS
 const BODY_READ_MS = 10000
 const CHECK_INTERVAL_MS = 1000
 const MAX_BODY = 4096
@@ -401,7 +402,7 @@ function checkIssuerCert (cert, keyPair, association) {
 const LOCK_HEARTBEAT_MS = 10000
 const LOCK_STALE_MS = 30000
 
-// -> { file, owned(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
+// -> { file, owned(), held(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
 // tests and the serve path; the heartbeat timer is unref'd so it never
 // keeps a process alive on its own.
 function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_STALE_MS, onLost = () => {} } = {}) {
@@ -411,7 +412,7 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
   const token = nodeCrypto.randomBytes(16).toString('hex')
   const body = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token }) + '\n'
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (publishLock(file, body)) return heartbeat(file, token, { heartbeatMs, onLost })
+    if (publishLock(file, body)) return heartbeat(file, token, { heartbeatMs, staleMs, onLost })
     if (attempt > 0) break
     const current = readLock(file)
     if (current === null) continue // gone between link and read: retry once
@@ -431,9 +432,22 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
 }
 
 // Refreshes the lock's mtime every `heartbeatMs` while it is still ours;
-// -> { file, owned(), release() }. owned() reads the lock file now, for a
-// check that cannot wait for the next tick (the shutdown close).
-function heartbeat (file, token, { heartbeatMs, onLost }) {
+// -> { file, owned(), held(), release() }. owned() reads the lock file now,
+// for a check that cannot wait for the next tick (the shutdown close).
+// held() is stricter: ours AND an mtime younger than `staleMs` minus one
+// heartbeat. A holder whose own heartbeat fell behind may be in the middle
+// of a takeover (the taker saw the lock stale and is about to unlink it),
+// and the margin makes held() refuse a late heartbeat before anyone can
+// call the lock stale. It does not cover a holder that stalled past the
+// whole window: its next tick refreshes the mtime while its token is still
+// in the file, possibly just before a taker that already read the lock
+// stale unlinks it (recovery-store.js, Residual). A store guarded by held() refuses
+// to write until the next tick refreshes the mtime while the token is still
+// ours: the request is refused (the client sees an uncertain result) and
+// nothing is lost from the file. A heartbeat as long as the stale window
+// (tests only) leaves no margin, so the window alone applies.
+function heartbeat (file, token, { heartbeatMs, staleMs, onLost }) {
+  const heldMs = heartbeatMs < staleMs ? staleMs - heartbeatMs : staleMs
   let timer = null
   const stop = () => {
     if (timer !== null) clearInterval(timer)
@@ -455,6 +469,7 @@ function heartbeat (file, token, { heartbeatMs, onLost }) {
   return {
     file,
     owned: () => ownLock(file, token),
+    held: () => holdLock(file, token, heldMs),
     release: () => {
       stop()
       releaseLock(file, token)
@@ -507,6 +522,25 @@ function ownLock (file, token) {
     return isPlainObject(data) && data.token === token
   } catch {
     return false
+  }
+}
+
+// True while the lock carries `token` and its mtime is within `windowMs` of
+// now, both from one open of the file, so the token and the mtime belong to
+// the same lock.
+function holdLock (file, token, windowMs) {
+  let fd
+  try {
+    fd = fs.openSync(file, 'r')
+    const { mtimeMs } = fs.fstatSync(fd)
+    const data = JSON.parse(fs.readFileSync(fd, 'utf8'))
+    return isPlainObject(data) && data.token === token && lockLive({ mtimeMs }, windowMs)
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch {}
+    }
   }
 }
 
@@ -744,6 +778,9 @@ function checkRawPost (req, origin) {
 // off) turns the /account/feira/* routes of ./feira-routes.js on together
 // with `listingReader`; `invites` is then the ./invites-pair.js facade over
 // both stores, so sign-up and Excluir conta see the Feira codes too.
+// `triageForget` (a createTriageForget of ./ai/forget.js, or null) is what
+// Excluir conta purges the AI triage's copies with while `triage` is null:
+// it has no other use and is never handed to the moderation routes.
 function createAccountServer ({
   association,
   origin,
@@ -755,6 +792,7 @@ function createAccountServer ({
   googleMod = null,
   modEmails = [],
   triage = null,
+  triageForget = null,
   statsEmails = [],
   usage = null,
   groupCheck = null,
@@ -934,8 +972,13 @@ function createAccountServer ({
     seen,
     passkeys,
     phones,
+    pages: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    // Bound late, like `scheduled`: pagesRoutes is created below.
+    pageInvites: { holds: (m) => pagesRoutes.holdsInvites(m), forget: (m) => pagesRoutes.forgetInvites(m), brokenFiles: () => pagesRoutes.inviteBrokenFiles() },
+    triage: triage !== null && typeof triage.forgetMember === 'function' ? triage : triageForget,
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
+    tick: pages !== null && pages.pagesGroups && typeof pages.pagesGroups.purgeBlocked === 'function' ? () => pages.pagesGroups.purgeBlocked() : null,
     log
   })
   const publishedList = moderationBlocklist(moderation)
@@ -1874,6 +1917,7 @@ module.exports = {
   MAX_SOCKETS,
   DEFAULT_RATE,
   DEFAULT_BURST,
+  HEADERS_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   BODY_READ_MS,
   KEY_FILE,

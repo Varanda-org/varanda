@@ -235,9 +235,11 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // the release mark of the www index.html, and the page lands last.
     'versao=$(versao_web "$www/index.html")',
     '[ -z "$versao" ] || servido_igual "varanda-node-$versao.js" "varanda-node-$versao.js"',
-    'copiar_app "$base/src/apps/app/dist" "$www"',
-    // The rollback restores the saved www the same way, attributes kept.
-    'copiar_app "$state/www-anterior" "$www" -a',
+    'copiar_app "$base/src/apps/app/dist" "$novo"',
+    // The new tree is built beside www and merged in by renames; the rollback
+    // restores the saved www the same way (cp -a keeps its attributes).
+    'mesclar_www "$novo" "$www"',
+    'mesclar_www "$state/www-anterior" "$www"',
     // The account service is probed through the domain, and its OAuth client
     // must be configured before anything changes.
     '/account/health',
@@ -274,7 +276,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
     // The build gets the validated commit, and root rewrites version.json in
     // www from it; the probe compares with the www copy, so a rollback passes.
     'EXPO_PUBLIC_VARANDA_COMMIT="$target"',
-    'gravar_versao "$www" "$target"',
+    'gravar_versao "$novo" "$target"',
     'servido_igual version.json version.json',
     '[ ! -f "$www/version.json" ]',
     // The optional seeder limits are validated by shape before anything changes.
@@ -288,6 +290,7 @@ test('deploy.sh: executable, required strings and last line', (t) => {
   t.absent(wait && wait[0].includes('$target'), 'aguardar_web never compares with $target (a rollback must pass)')
   t.absent(shCode.includes('cp -R "$base/src/apps/app/dist/." "$www/"'), 'www is never filled in directory order')
   t.absent(shCode.includes('cp -a "$state/www-anterior/." "$www/"'), 'nor restored in directory order by the rollback')
+  t.absent(/find "\$www" -mindepth 1 -delete/.test(shCode), 'www is never emptied while Caddy serves it')
 })
 
 test('deploy.sh: forbidden constructs are absent', (t) => {
@@ -965,9 +968,100 @@ test('build-web.sh: writes the association files and refuses malformed values', 
   t.ok(argNoCopy.stderr.includes(NO_COPY), 'and says what is missing')
 })
 
-// The deploy, its rollback and build-web.sh empty www and refill it: the page
-// comes last, after sw.js, so an index.html never lands before the node copy
-// it loads.
+// www is a bind mount that Caddy serves while the deploy runs: the new tree
+// goes in by renames, index.html last, and only then the old files go away.
+test('deploy.sh: mesclar_www swaps www without emptying it', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^mesclar_www\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn, 'mesclar_www located')
+  if (!fn) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-mesclar-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const novo = path.join(dir, 'novo')
+  const www = path.join(dir, 'www')
+  const log = path.join(dir, 'mv.log')
+  const write = (base, rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(base, rel)), { recursive: true })
+    fs.writeFileSync(path.join(base, rel), text)
+  }
+  write(www, 'index.html', 'old page')
+  write(www, 'sw.js', 'old sw')
+  write(www, 'old-bundle.js', 'old bundle')
+  write(www, 'shared.js', 'old shared')
+  write(www, 'gone/x.txt', 'gone')
+  write(www, 'flip', 'a file that becomes a directory')
+  write(novo, 'index.html', 'new page')
+  write(novo, 'sw.js', 'new sw')
+  write(novo, 'new-bundle.js', 'new bundle')
+  write(novo, 'shared.js', 'new shared')
+  write(novo, '.well-known/assetlinks.json', '[]')
+  write(novo, 'flip/inner.txt', 'inner')
+  // Every rename is logged with what www holds at that moment.
+  const script = 'set -Eeuo pipefail\n' +
+    'mv() { printf "%s %s\\n" "$' + '{*: -1}" "$(cat ' + JSON.stringify(www) + '/index.html 2>/dev/null || echo NONE)" >> ' + JSON.stringify(log) + '; command mv "$@"; }\n' +
+    'export -f mv\n' + fn[0] + 'mesclar_www ' + JSON.stringify(novo) + ' ' + JSON.stringify(www) + '\n'
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  t.is(r.status, 0, 'merges: ' + r.stderr)
+  const tree = (base) => {
+    const out = []
+    const walk = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const p = path.join(d, e.name)
+        if (e.isDirectory()) walk(p)
+        else out.push(path.relative(base, p) + '=' + fs.readFileSync(p, 'utf8'))
+      }
+    }
+    walk(base)
+    return out
+  }
+  t.alike(tree(www), tree(novo), 'www ends equal to the new tree, old files gone')
+  t.ok(fs.existsSync(path.join(novo, 'index.html')), 'the source is left intact')
+  const moves = fs.readFileSync(log, 'utf8').trim().split('\n')
+  t.ok(moves.every((l) => !l.endsWith(' NONE')), 'index.html never missing during the swap')
+  t.ok(moves[moves.length - 1].startsWith(path.join(www, 'index.html') + ' ') || moves[moves.length - 1].startsWith(www + '/./index.html '), 'index.html is renamed last')
+  const swAt = moves.findIndex((l) => /\/sw\.js /.test(l))
+  t.ok(swAt === moves.length - 2, 'sw.js right before index.html')
+  t.ok(moves.slice(0, -1).every((l) => l.endsWith(' old page')), 'the old page stays until its own rename')
+})
+
+// The rollback calls mesclar_www inside `if !`, where bash ignores errexit:
+// a failed copy must still fail the call, before anything is deleted. A
+// symlink already at a file path is replaced, never followed out of www.
+test('deploy.sh: mesclar_www fails under if ! on a failed copy and never follows a link', (t) => {
+  if (!hasBash(t)) return
+  const src = fs.readFileSync(SCRIPT, 'utf8')
+  const fn = src.match(/^mesclar_www\(\) \{\n[\s\S]*?^\}\n/m)
+  t.ok(fn, 'mesclar_www located')
+  if (!fn) return
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-mesclar-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const novo = path.join(dir, 'novo')
+  const www = path.join(dir, 'www')
+  const fora = path.join(dir, 'fora')
+  fs.mkdirSync(novo)
+  fs.mkdirSync(www)
+  fs.mkdirSync(fora)
+  fs.writeFileSync(path.join(novo, 'index.html'), 'new page')
+  fs.writeFileSync(path.join(novo, 'a.js'), 'new a')
+  fs.writeFileSync(path.join(www, 'index.html'), 'old page')
+  fs.writeFileSync(path.join(www, 'old.js'), 'old')
+  fs.symlinkSync(fora, path.join(www, 'a.js'))
+  const run = (pre) => spawnSync('bash', ['-c', 'set -Eeuo pipefail\n' + pre + fn[0] +
+    'if ! mesclar_www ' + JSON.stringify(novo) + ' ' + JSON.stringify(www) + '; then echo FAILED; fi\n'], { encoding: 'utf8' })
+
+  const failed = run('cp() { return 1; }\nexport -f cp\n')
+  t.ok(failed.stdout.includes('FAILED'), 'a failed copy fails the call: ' + failed.stderr)
+  t.ok(fs.existsSync(path.join(www, 'old.js')), 'nothing is deleted after a failed copy')
+  t.is(fs.readFileSync(path.join(www, 'index.html'), 'utf8'), 'old page', 'the old page stays')
+
+  const ok = run('')
+  t.absent(ok.stdout.includes('FAILED'), 'merges: ' + ok.stderr)
+  t.alike(fs.readdirSync(fora), [], 'nothing was written through the link')
+  t.absent(fs.lstatSync(path.join(www, 'a.js')).isSymbolicLink(), 'the link is replaced by the file')
+  t.is(fs.readFileSync(path.join(www, 'a.js'), 'utf8'), 'new a', 'with the new content')
+})
+
 test('well-known.sh: copiar_app copies index.html last and versao_web reads the release mark', (t) => {
   if (!hasBash(t)) return
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-copy-'))

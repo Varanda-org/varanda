@@ -88,3 +88,13 @@ test('limits are duplicated with their service values', async (t) => {
   t.is(MAX_ADMINS, 16)
   t.is(MAX_FEED_KEYS, 64)
 })
+
+test('peopleKeys lists the page, the roster and an offer target, each once', async (t) => {
+  const { peopleKeys } = await load()
+  const page = key('e')
+  t.alike(peopleKeys(READ, page, null), [page, OWNER, A2, A1])
+  t.alike(peopleKeys(READ, page, { offer: { to: NEW } }), [page, OWNER, A2, A1, NEW])
+  t.alike(peopleKeys(READ, page, { offer: { to: A1 } }), [page, OWNER, A2, A1], 'an admin offered the page is not listed twice')
+  t.alike(peopleKeys(null, page, undefined), [page])
+  t.alike(peopleKeys({ ...READ, admins: ['x'] }, 'nope', {}), [OWNER], 'invalid keys are left out')
+})

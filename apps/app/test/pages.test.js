@@ -1640,3 +1640,10 @@ test('pagesList forgets, once, the keys of a page the newest list no longer show
   await flush()
   t.absent(forgot.includes(Z), 'another account origin\'s list forgets none of this one\'s pages')
 })
+
+test('pageError has plain words for a join refused because the page is outside the community', async (t) => {
+  const { pageError } = await load()
+  const err = pageError('fora-da-comunidade')
+  t.is(err.code, 'fora-da-comunidade')
+  t.is(err.message, 'A página ainda não está na comunidade deste grupo')
+})

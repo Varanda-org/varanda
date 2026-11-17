@@ -25,7 +25,19 @@
 // that pointer; the phone store's own sweep purges it after, and only the
 // moderation rule of ./phone-routes.js burns it. Each sweep first runs the
 // deletions whose date came (`scheduled`, ./delete-routes.js runScheduled),
-// so they are purged in the same pass. What stays is decided elsewhere: the deleted row and
+// so they are purged in the same pass. Pages: the member's pending state in
+// pages.json (./pages-store.js forgetMember: their admin invites with the
+// key share sealed for them, a transfer offer to them, their share in a
+// rotation not yet promoted, a core delegate row of or for their key) and
+// the invite rosters kept for them (page-invite-rosters.json,
+// ./pages-routes.js forgetInvites). The owner's signed roster, the admins
+// list and the current key shares stay: only the owner's own Remover
+// changes those. AI triage (./ai/worker.js forgetMember when it runs, else
+// ./ai/forget.js on the files an earlier run left): the cached reads with
+// text and embedding and the marks of the reports about the member, and
+// their precedents in exemplars.json. Each pass also runs
+// `tick` (./pages-groups.js purgeBlocked: replicas of blocked keys). What
+// stays is decided elsewhere: the deleted row and
 // the burned names in the directory, the reports and decisions in
 // moderation.json (issue #38), and the pending block (./moderation-store.js).
 //
@@ -38,10 +50,13 @@ function usable (s) {
 }
 
 // createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites,
-// drops, seen, passkeys, phones, scheduled, log }) -> { purge(member), sweep(),
-// start() -> stop }. Every store but `accounts` may be null (the feature is
-// off: no file to purge). `scheduled` is an async function that never throws.
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, phones = null, scheduled = null, log = () => {} }) {
+// drops, seen, passkeys, phones, pages, pageInvites, triage, scheduled, tick,
+// log }) -> { purge(member), sweep(), start() -> stop }. Every store but
+// `accounts` may be null (the feature is off: no file to purge). `pages` is
+// an openPagesStore, `pageInvites` { holds(m), forget(m) } and `triage`
+// { holdsMember(m), forgetMember(m) }. `scheduled` and `tick` are async
+// functions that never throw.
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
@@ -52,7 +67,10 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
     ['sorteio', drops, (m) => drops.holds(m), (m) => drops.forget(m)],
     ['vistos', seen, (m) => seen.get(m) !== null, forgetSeen],
     ['passkeys', passkeys, (m) => passkeys.holds(m), (m) => passkeys.forget(m)],
-    ['telefone', phones, (m) => phones.live(m) !== null, (m) => phones.end(m, 'excluida')]
+    ['telefone', phones, (m) => phones.live(m) !== null, (m) => phones.end(m, 'excluida')],
+    ['paginas', pages, (m) => pages.holdsMember(m), (m) => pages.forgetMember(m)],
+    ['convites-pagina', pageInvites, (m) => pageInvites.holds(m), (m) => pageInvites.forget(m)],
+    ['triagem', triage, (m) => triage.holdsMember(m), (m) => triage.forgetMember(m)]
   ].filter(([, store]) => store !== null && store !== undefined)
 
   async function forgetSeen (member) {
@@ -106,9 +124,10 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
   function sweep () {
     if (running !== null) return running
     running = (async () => {
-      if (scheduled !== null) {
+      for (const fn of [scheduled, tick]) {
+        if (fn === null) continue
         try {
-          await scheduled()
+          await fn()
         } catch {}
       }
       let pending = 0
