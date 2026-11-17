@@ -38,6 +38,7 @@ const CALLS = [
   ['dm.pageLegacyChunk', { page: KEY, id: KEY, index: 0, count: 1, sealed: 'x' }, DM_NO],
   ['dm.pageLegacyBlocks', { page: KEY }, DM_NO],
   ['dm.pageForget', { page: KEY }, DM_NO],
+  ['dm.actorBox', {}, DM_NO],
   ['group.seal', { group: KEY, page: KEY, text: 'oi' }, DM_NO],
   ['dm.reportSign', { nonce: 'n'.repeat(43), target: KEY, reason: 'assedio', quote: 'mensagem' }, SIGN_NO]
 ]

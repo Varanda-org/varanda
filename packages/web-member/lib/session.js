@@ -511,6 +511,7 @@ const TESTIMONIAL_DEAD_REF_MAX = 256
 const BAD_PAGE = 'operação de página inválida'
 const PAGE_FEED_BUSY = 'feed de página já em andamento'
 const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
+const ACTOR_BOX_CORE_ONLY = 'caixa de delegado disponível só no nó core'
 const NO_LOCAL_DATA = 'sem dados locais para este diário'
 // page.read (docs/rpc.md 5.85): the bounded read of a page diary this node
 // does not hold peeks blocks 1..3 and this many windows of PEEK_WINDOW seqs,
@@ -4582,6 +4583,10 @@ function createBrowserSession ({
     // A browser identity is an Ed25519 key already: no delegate to register.
     'page.register': serial(async () => {
       throw new UsageError(PAGE_REGISTER_CORE_ONLY)
+    }),
+    // Nor a delegate's box: dm.lookup finds this identity's own (5.161).
+    'dm.actorBox': serial(async () => {
+      throw new UsageError(ACTOR_BOX_CORE_ONLY)
     }),
 
     // Signs the push-subscription statement with the in-memory key

@@ -220,11 +220,14 @@ test('page.sign: statements and records signed by the own key verify, refusals, 
   t.is(m && m.message, MISMATCH)
 })
 
-test('page.register is refused on the browser node', async (t) => {
+test('page.register and dm.actorBox are refused on the browser node', async (t) => {
   await testnet(t)
   const s = await browserNode(t, { assoc: association() })
   const err = await errorOf(s.web.request('page.register', {}))
   t.alike([err.code, err.message], ['USAGE', 'registro de página disponível só no nó core'])
+  const box = await errorOf(s.web.request('dm.actorBox', {}))
+  t.alike([box.code, box.message], ['USAGE', 'caixa de delegado disponível só no nó core'])
+  t.alike(s.internal, [], 'no internal error')
 })
 
 test('page.read: bounded windows find the roster, person diary, closed and moved pages', async (t) => {
