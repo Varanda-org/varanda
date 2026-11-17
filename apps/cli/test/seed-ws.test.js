@@ -3545,6 +3545,135 @@ test('startSeedWs /index/garden: an answer off the exact shape is the generic 40
   t.is(busy.headers['retry-after'], '1')
 })
 
+// /index/garden/<owner>/mimos: the Barraquinha and Enfeites pointers, a
+// route of its own so the closed /index/garden body never grows a key.
+const mimosOf = () => ({ decor: 7, pending: [{ author: B, seq: 4, followSeq: 2 }, { author: GARDEN_E, seq: 1, followSeq: 6 }], shelf: [{ seq: 11, from: B, gseq: 3 }, { seq: 10, from: GARDEN_E, gseq: 2 }], indexing: false, complete: true })
+
+function mimosSeeder ({ mimos = mimosOf } = {}) {
+  const stub = gardenSeeder()
+  stub.indexGardenStall = async (owner) => {
+    stub.calls.push(['indexGardenStall', owner])
+    return owner === A ? mimos() : null
+  }
+  return stub
+}
+
+test('startSeedWs /index/garden/<owner>/mimos: regex, exact body, HEAD, 404, 400 for a bad tail, 421 and 405', async (t) => {
+  t.timeout(20000)
+  const { INDEX_GARDEN_MIMOS_RE } = require('../lib/seed-ws')
+  t.is(INDEX_GARDEN_MIMOS_RE.source, '^\\/index\\/garden\\/([0-9a-f]{64})\\/mimos$')
+  const seeder = mimosSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/garden/' + A + '/mimos'
+  const got = await mediaRequest(server.port, url)
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  t.is(got.body.toString(), JSON.stringify(mimosOf()) + '\n', 'the exact body, key order included')
+  t.alike(seeder.calls.at(-1), ['indexGardenStall', A])
+  const head = await mediaRequest(server.port, url, { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  t.is(head.body.byteLength, 0)
+  const unknown = await mediaRequest(server.port, '/index/garden/' + 'f'.repeat(64) + '/mimos')
+  t.is(unknown.status, 404, 'an unserved or held owner (the seeder answers null)')
+  t.is(unknown.body.toString(), 'não encontrado\n')
+  t.alike(JSON.parse((await mediaRequest(server.port, '/index/garden/' + A)).body.toString()), gardenOf(), 'the balcony route is unchanged')
+  t.alike(seeder.calls.at(-1), ['indexGarden', A])
+
+  seeder.calls.length = 0
+  t.is((await mediaRequest(server.port, '/index/garden/' + A.toUpperCase() + '/mimos')).status, 404, 'an uppercase owner')
+  for (const suffix of ['/mimos/', '/mimos/x', '/mimos/' + B, '/Mimos', '/mimo', '/mimoss', '/mimos?x=1', '/mimos/rua', '/rua/mimos', '/feira', '/barraca']) {
+    const r = await mediaRequest(server.port, '/index/garden/' + A + suffix)
+    t.is(r.status, 400, suffix + ' -> 400')
+    t.is(r.body.toString(), 'pedido inválido\n')
+    t.is(r.headers['cache-control'], 'no-store')
+  }
+  t.is(seeder.calls.length, 0, 'malformed paths never reach the seeder')
+  t.is((await mediaRequest(server.port, url, { host: 'evil.example:' + server.port })).status, 421)
+  for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+    for (const u of [url, url + '/x']) {
+      const r = await mediaRequest(server.port, u, { method })
+      t.is(r.status, 405, method + ' ' + u + ' -> 405')
+      t.is(r.headers.allow, 'GET, HEAD')
+    }
+  }
+  t.is(seeder.calls.length, 0, 'refused requests never reach the seeder')
+})
+
+test('startSeedWs /index/garden/<owner>/mimos: an answer off the exact shape is the generic 404, the worst case fits, it spends the index bucket', async (t) => {
+  t.timeout(30000)
+  const hex = (i) => i.toString(16).padStart(64, '0')
+  const big = Number.MAX_SAFE_INTEGER
+  let mimos = null
+  const seeder = indexSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const url = '/index/garden/' + A + '/mimos'
+  t.is((await mediaRequest(server.port, url)).status, 404, 'a seeder without the method')
+  seeder.indexGardenStall = async () => mimos
+
+  const worst = { decor: big, pending: Array.from({ length: 12 }, (_, i) => ({ author: hex(i), seq: big - i, followSeq: big })), shelf: Array.from({ length: 8 }, (_, i) => ({ seq: big - i, from: hex(i), gseq: big })), indexing: true, complete: false }
+  mimos = worst
+  const w = await mediaRequest(server.port, url)
+  t.is(w.status, 200)
+  t.ok(w.body.byteLength <= INDEX_MAX_BODY, 'mimos worst case is ' + w.body.byteLength + ' bytes')
+  t.alike(JSON.parse(w.body.toString()), worst)
+  mimos = { decor: null, pending: [], shelf: [], indexing: true, complete: false }
+  const pending = await mediaRequest(server.port, url)
+  t.is(pending.status, 200, 'the fail-closed pending answer passes')
+  t.is(pending.body.toString(), JSON.stringify(mimos) + '\n')
+
+  const gift = { author: B, seq: 4, followSeq: 2 }
+  const take = { seq: 11, from: B, gseq: 3 }
+  const cases = [
+    ['an extra key', { ...mimosOf(), gave: [] }],
+    ['a missing key', (() => { const o = mimosOf(); delete o.shelf; return o })()],
+    ['decor 0', { ...mimosOf(), decor: 0 }],
+    ['a string decor', { ...mimosOf(), decor: '7' }],
+    ['an unsafe decor', { ...mimosOf(), decor: 2 ** 53 }],
+    ['an extra pending key', { ...mimosOf(), pending: [{ ...gift, pot: 1 }] }],
+    ['a pending row without followSeq', { ...mimosOf(), pending: [{ author: B, seq: 4 }] }],
+    ['a pending row with a null followSeq', { ...mimosOf(), pending: [{ ...gift, followSeq: null }] }],
+    ['a pending row from the owner', { ...mimosOf(), pending: [{ ...gift, author: A }] }],
+    ['a duplicate pending row', { ...mimosOf(), pending: [gift, { ...gift, followSeq: 9 }] }],
+    ['a pending row with seq 0', { ...mimosOf(), pending: [{ ...gift, seq: 0 }] }],
+    ['a pending row with an uppercase author', { ...mimosOf(), pending: [{ ...gift, author: B.toUpperCase() }] }],
+    ['a pending row that is an array', { ...mimosOf(), pending: [[B, 4, 2]] }],
+    ['13 pending rows', { ...mimosOf(), pending: [...worst.pending, { author: hex(99), seq: 1, followSeq: 1 }] }],
+    ['pending not an array', { ...mimosOf(), pending: { 0: gift } }],
+    ['an extra shelf key', { ...mimosOf(), shelf: [{ ...take, plant: 'x' }] }],
+    ['a shelf row without gseq', { ...mimosOf(), shelf: [{ seq: 11, from: B }] }],
+    ['a shelf row from the owner', { ...mimosOf(), shelf: [{ ...take, from: A }] }],
+    ['a duplicate shelf seq', { ...mimosOf(), shelf: [take, { ...take, from: GARDEN_E }] }],
+    ['a shelf row with gseq 0', { ...mimosOf(), shelf: [{ ...take, gseq: 0 }] }],
+    ['a shelf row with a fractional seq', { ...mimosOf(), shelf: [{ ...take, seq: 1.5 }] }],
+    ['9 shelf rows', { ...mimosOf(), shelf: [...worst.shelf, { seq: 1, from: hex(99), gseq: 1 }] }],
+    ['shelf not an array', { ...mimosOf(), shelf: null }],
+    ['a non-boolean indexing', { ...mimosOf(), indexing: 0 }],
+    ['a non-boolean complete', { ...mimosOf(), complete: 'true' }],
+    ['null', null]
+  ]
+  for (const [label, value] of cases) {
+    mimos = value
+    const r = await mediaRequest(server.port, url)
+    t.is(r.status, 404, 'mimos: ' + label + ' -> 404')
+    t.is(r.body.toString(), 'não encontrado\n')
+  }
+  seeder.indexGardenStall = async () => { throw new Error('segredo') }
+  const thrown = await mediaRequest(server.port, url)
+  t.is(thrown.status, 404)
+  t.absent(thrown.body.toString().includes('segredo'))
+
+  const s2 = await startSeedWs({ port: 0, seeder: mimosSeeder(), index: { rate: 0, burst: 2 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, url)).status, 200, 'mimos spends a token')
+  t.is((await mediaRequest(s2.port, '/index/garden/' + A)).status, 200, 'the balcony spends a token')
+  const busy = await mediaRequest(s2.port, url)
+  t.is(busy.status, 503, 'the shared index bucket is empty')
+  t.is(busy.headers['retry-after'], '1')
+})
+
 // /index/profile/<author>: the perfil rico pointers, rebuilt key by key.
 test('startSeedWs /index/profile: regex, pointers only, HEAD, 404, 421, 405 and the index bucket', async (t) => {
   t.timeout(20000)

@@ -379,6 +379,7 @@ module.exports = {
   CAP_DISCOVERY: admission.CAP_DISCOVERY,
   CAP_WRITER_CUTS: admission.CAP_WRITER_CUTS,
   CAP_PEER_PROOF: admission.CAP_PEER_PROOF,
+  CAP_HEADER_STUBS: admission.CAP_HEADER_STUBS,
   topicFor: admission.topicFor,
   parseBootstrap,
   generateNoiseKeyPair,
