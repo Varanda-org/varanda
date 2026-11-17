@@ -1086,7 +1086,11 @@ function eventLines (r) {
 // Per-phase startup durations (ms, non-negative integers) from the Date.now()
 // marks taken at the step boundaries of Seeder#start. Pure: no clock.
 function startupPhases (m) {
-  const d = (a, b) => Math.max(0, Math.trunc(b - a))
+  // A missing mark (a non-finite difference) counts as 0.
+  const d = (a, b) => {
+    const ms = Math.trunc(b - a)
+    return Number.isFinite(ms) ? Math.max(0, ms) : 0
+  }
   return {
     configMs: d(m.t0, m.config),
     storeMs: d(m.config, m.store),
@@ -1097,7 +1101,10 @@ function startupPhases (m) {
     prepareMs: d(m.groups, m.prepare),
     swarmMs: d(m.prepare, m.swarm),
     flushMs: d(m.swarm, m.flush),
-    totalMs: d(m.t0, m.flush)
+    totalMs: d(m.t0, m.flush),
+    // From the start to the point where external streams are accepted
+    // (overlaps the phases above; not part of totalMs's sum).
+    acceptingMs: d(m.t0, m.accepting)
   }
 }
 
@@ -1108,7 +1115,9 @@ class Seeder {
   // local block-0 verdict is computed and before it is applied, _gate and
   // _gateGroup) and
   // storeHook() (awaited right after the main store, and
-  // its data-dir lock, is acquired) are test-only hooks, as are the injectable limits
+  // its data-dir lock, is acquired) and flushHook() (awaited in start()
+  // once external streams are accepted, right before joinAndFlush; a throw
+  // fails the start) are test-only hooks (no CLI flag), as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
   // maxAnnounces, announceRate, announceBurst, maxBadAnnounces, maxMedia,
   // maxMediaBlocks, maxMediaBytes; defaults = the constants, maxExternal =
@@ -1171,6 +1180,7 @@ class Seeder {
     admitHook = null,
     regateHook = null,
     storeHook = null,
+    flushHook = null, // test-only (see above)
     onPush = null,
     dm = null,
     noClear = null,
@@ -1243,6 +1253,7 @@ class Seeder {
     this.admitHook = admitHook
     this.regateHook = regateHook
     this.storeHook = storeHook
+    this.flushHook = flushHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
     this._dmOpts = dmOptions(dm)
@@ -1447,6 +1458,9 @@ class Seeder {
     this._cert = null
     this._started = false
     this._ready = false
+    // External streams (acceptStream) are served from the end of step 5's
+    // swarm setup, before the DHT join and flush, like swarm peers.
+    this._accepting = false
     this._closing = null
     this._stopRediscovery = null
     this.closed = new Promise((resolve) => { this._resolveClosed = resolve })
@@ -1903,11 +1917,15 @@ class Seeder {
         if (key === binding.group && !this._served.has(binding.diary)) this._indexKeptRoot(key, false)
       }
       // A writer served after its root's header was first recorded in this
-      // loop was gated without the root's visibility.
+      // loop was gated without the root's visibility. Awaited, so a writer
+      // whose box no longer matches is dropped before external streams are
+      // accepted below.
+      const rechecks = []
       for (const group of new Set(groupSurvivors.map(([, binding]) => binding.group))) {
         const visibility = this._groupVisibility(group)
-        if (visibility !== null) this._recheckGroupBoxes(group, visibility)
+        if (visibility !== null) rechecks.push(this._recheckGroupBoxes(group, visibility))
       }
+      await Promise.all(rechecks)
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
       marks.prepare = Date.now()
@@ -1916,6 +1934,12 @@ class Seeder {
       this.swarm = createSwarm({ bootstrap: this.bootstrap, keyPair: this._keyPair, host: this.host })
       marks.swarm = Date.now()
       this.swarm.on('connection', (socket) => this._onConnection(socket))
+      // Every core is re-gated and prepared and the swarm exists: app
+      // clients are served from here, as swarm peers already are during the
+      // flush. A failure from here on goes through close(), which closes
+      // the external streams accepted meanwhile.
+      if (!this._closing) this._accepting = true
+      marks.accepting = Date.now()
       const topics = [
         this.topic,
         ...survivors.map(([, core]) => core.discoveryKey),
@@ -1924,6 +1948,7 @@ class Seeder {
       ]
       const done = this.store.findingPeers()
       try {
+        if (this.flushHook) await this.flushHook()
         await joinAndFlush(this.swarm, topics)
       } finally {
         done()
@@ -1968,6 +1993,12 @@ class Seeder {
 
   mediaKeys () {
     return [...this._media.keys()]
+  }
+
+  // Whether acceptStream would take a stream now: true from the accepting
+  // point of start() (before stats().status turns 'ok') until close().
+  accepting () {
+    return this._accepting === true && !this._closing
   }
 
   // Aggregate state for the health endpoint: counts and sizes only, never a
@@ -4724,7 +4755,7 @@ class Seeder {
     }
     this._groupHeaders.set(group, rec)
     this._persist().catch(noop)
-    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility)
+    if (prev === undefined || prev.visibility !== rec.visibility) this._recheckGroupBoxes(group, rec.visibility).catch(noop)
   }
 
   // The verified visibility of root G ('public' | 'private'), or null while
@@ -4738,8 +4769,10 @@ class Seeder {
 
   // A writer gated before its root's header was known never had its `box`
   // checked: re-read the block 0 of every gated writer of G and drop a
-  // mismatch with 'header-invalid', as the gate would have.
+  // mismatch with 'header-invalid', as the gate would have. Resolves once
+  // every check has run and any mismatch is dropped (start() awaits it).
   _recheckGroupBoxes (group, visibility) {
+    const checks = []
     for (const [key, entry] of this._groupServed) {
       if (key === group || entry.group !== group || !entry.headerOk || entry.dropped) continue
       const check = async () => {
@@ -4750,11 +4783,12 @@ class Seeder {
         if (raw === null) return null
         return groupVerdict(raw, key, entry.group, entry.diary, visibility)
       }
-      check().then((reason) => {
+      checks.push(check().then((reason) => {
         if (reason === null || entry.dropped || this._closing || this._groupServed.get(key) !== entry) return
         this._dropGroup(key, reason)
-      }, noop)
+      }, noop))
     }
+    return Promise.all(checks)
   }
 
   // A blocked group, or one with no core left here, loses its record.
@@ -7536,10 +7570,10 @@ class Seeder {
   // Destroying here would be too early: ws's createWebSocketStream
   // terminates the socket in _destroy, so a close frame queued just before
   // never reaches the client. Without onRefuse the stream is destroyed as
-  // before; not-ready/closing refusals always destroy it.
+  // before; not-accepting/closing refusals always destroy it.
   acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null } = {}) {
     rawStream.on('error', noop)
-    if (!this._ready || this._closing) {
+    if (!this._accepting || this._closing) {
       rawStream.destroy()
       return null
     }
@@ -8328,6 +8362,7 @@ class Seeder {
   }
 
   close () {
+    this._accepting = false
     if (this._closing) return this._closing
     this._closing = (async () => {
       if (this._stopRediscovery) this._stopRediscovery()
