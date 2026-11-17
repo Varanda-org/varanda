@@ -151,6 +151,13 @@ const TOP_FRIENDS_KEYS = Object.freeze(['type', 'keys', 'at'])
 // Visitas, `on` true or false, latest wins. It names nobody: who visited
 // whom is never written to a diary.
 const VISITS_KEYS = Object.freeze(['type', 'on', 'at'])
+// A connected device (lib/devices.js): an opaque secretbox only the account's
+// unlocked devices open. Readers from before it skip it as malformed.
+const DEVICE_KEYS = Object.freeze(['type', 'nonce', 'box', 'at'])
+const DEVICE_NONCE_BYTES = 24
+const MIN_DEVICE_BOX = 17
+// 32 writer pairs and a 40 code point name seal to about 5.2 KB.
+const MAX_DEVICE_BOX = 8192
 // Varandinha (docs/protocol.md): `garden` is the public flag that a diary
 // shows its balcony, latest wins; `garden-state` is the whole balcony after
 // a play session (the pot rules are packages/rpc lib/garden.js), latest
@@ -322,6 +329,14 @@ function validMomentMedia (m) {
 }
 
 // Canonical base64 (padded, the exact re-encoding) of a sealed testimonial.
+// Canonical standard base64 of min..max decoded bytes.
+function isCanonicalBase64 (s, min, max) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
+  if (s.length > Math.ceil(max / 3) * 4 || !BASE64_RE.test(s)) return false
+  const buf = b4a.from(s, 'base64')
+  return buf.byteLength >= min && buf.byteLength <= max && b4a.toString(buf, 'base64') === s
+}
+
 function validTestimonialBox (s) {
   if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0) return false
   if (s.length > MAX_TESTIMONIAL_BOX || !BASE64_RE.test(s)) return false
@@ -589,7 +604,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -695,6 +710,12 @@ function check (record, seq) {
   }
   if (type === 'visits') {
     if (!hasExactKeys(record, VISITS_KEYS) || typeof record.on !== 'boolean') return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'device') {
+    if (!hasExactKeys(record, DEVICE_KEYS)) return 'malformed'
+    if (!isCanonicalBase64(record.nonce, DEVICE_NONCE_BYTES, DEVICE_NONCE_BYTES)) return 'malformed'
+    if (!isCanonicalBase64(record.box, MIN_DEVICE_BOX, MAX_DEVICE_BOX)) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'garden') {
@@ -957,6 +978,10 @@ function fanRecord ({ key, on, at = nowIso() } = {}) {
 
 function visitsRecord ({ on, at = nowIso() } = {}) {
   return build({ type: 'visits', on, at }, 1)
+}
+
+function deviceRecord ({ nonce, box, at = nowIso() } = {}) {
+  return build({ type: 'device', nonce, box, at }, 1)
 }
 
 function gardenRecord ({ on, at = nowIso() } = {}) {
@@ -1242,6 +1267,11 @@ module.exports = {
   MOOD_KEYS,
   FAN_KEYS,
   VISITS_KEYS,
+  DEVICE_KEYS,
+  DEVICE_NONCE_BYTES,
+  MIN_DEVICE_BOX,
+  MAX_DEVICE_BOX,
+  isCanonicalBase64,
   GARDEN_KEYS,
   GARDEN_STATE_KEYS,
   GARDEN_HELP_KEYS,
@@ -1318,6 +1348,7 @@ module.exports = {
   moodRecord,
   fanRecord,
   visitsRecord,
+  deviceRecord,
   gardenRecord,
   gardenStateRecord,
   gardenHelpRecord,

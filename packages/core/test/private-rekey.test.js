@@ -19,6 +19,7 @@ const { REKEY_PERIOD_MS, REKEY_OTHER_WAIT_MS, REKEY_JITTER_MS, REKEY_CHECK_MS } 
 const { exchange, sync, rootEntries, texts, privateGroup, ownWriter } = require('./helpers/private-member')
 const { newSession, connect, until } = require('./helpers/net')
 const store = require('../lib/store')
+const devices = require('../lib/devices')
 
 const DAY = 24 * 60 * 60 * 1000
 const MINUTE = 60 * 1000
@@ -108,6 +109,24 @@ test('core: a plain member never rotates', async (t) => {
   t.ok(r.checked.includes(group), 'checked')
   t.alike([r.rotated, r.failed, r.next], [[], [], null])
   t.is(firstBlocks(await rootEntries(b, group)), 1)
+})
+
+test('core: a disconnected device never rotates', async (t) => {
+  const { a, group } = await admitted(t)
+  const { id } = await member.deviceHello(a, { name: 'Celular' })
+  // Another device of the account disconnected this one: its id is off.
+  await member.withIdentity(a, async ({ diary }) => {
+    const key = devices.deviceKey(diary.keyPair.secretKey, diary.key)
+    try {
+      await store.appendRecord(diary, devices.sealedRecord({ v: 1, id, name: null, on: false, writers: [] }, key))
+    } finally {
+      devices.wipeKey(key)
+    }
+  })
+  t.is((await member.deviceList(a)).off, true)
+  const r = await member.periodicRekey(a, { now: Date.now() + REKEY_PERIOD_MS + MINUTE })
+  t.alike([r.rotated, r.failed], [[], []], 'due, but this device hands no key on')
+  t.is(firstBlocks(await rootEntries(a, group)), 1, 'nothing written')
 })
 
 test('core: two distributors, the opener rotates at once and the other waits', async (t) => {
