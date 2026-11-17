@@ -538,13 +538,19 @@ test('account pages: create, admins, transfer, follows, media, replay and the AC
   t.alike(videoBounds(video), { width: 640, height: 480, ms: 3000, audio: false }, 'a valid short video container')
   const beforeVideo = ctx.writer.info(K).length
   const beforeItems = ctx.writer.items(K)
-  for (const bytes of [video, img]) {
-    const refused = await s.upload(bia, K, bytes, { ...op, mime: 'video/mp4', bytes: bytes.length, sha256: sha(bytes) })
-    t.is(refused.status, 400, 'an authenticated admin cannot upload video')
-    t.is(refused.body.error, 'midia-invalida')
-  }
+  const missingMs = await s.upload(bia, K, video, { ...op, mime: 'video/mp4', bytes: video.length, sha256: sha(video) })
+  t.is(missingMs.status, 400, 'a video without ms is refused')
+  t.is(missingMs.body.error, 'midia-invalida', 'the refusal is midia-invalida because ms is missing')
+  const labeled = await s.upload(bia, K, img, { ...op, mime: 'video/mp4', bytes: img.length, sha256: sha(img), ms: 3000 })
+  t.is(labeled.status, 400, 'image bytes labeled video/mp4 are refused')
+  t.is(labeled.body.error, 'midia-invalida')
   t.is(ctx.writer.info(K).length, beforeVideo, 'a refused video appends no record')
   t.alike(ctx.writer.items(K), beforeItems, 'a refused video stores no media item')
+  const withMs = await s.upload(bia, K, video, { ...op, mime: 'video/mp4', bytes: video.length, sha256: sha(video), ms: 3000 })
+  t.is(withMs.status, 200, JSON.stringify(withMs.body))
+  t.is(withMs.body.descriptor.mime, 'video/mp4')
+  t.is(withMs.body.descriptor.ms, 3000, 'a video with a valid ms is stored')
+  t.ok(ctx.writer.items(K).some((it) => it.sha256 === sha(video) && it.ms === 3000))
   t.is((await s.upload(bia, K, img, { ...op, sha256: 'ab'.repeat(32) })).body.error, 'midia-invalida', 'the body must hash to the op')
   t.is((await s.upload(dani, K, img, op)).body.error, 'nao-vinculado')
   const foreign = { ...d, core: F }

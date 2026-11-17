@@ -10,12 +10,13 @@ const { Seeder, startupPhases } = require('../lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
 const { memberCertRecord } = require('../lib/records')
 
-const PHASE_KEYS = ['configMs', 'storeMs', 'stateMs', 'diariesMs', 'mediaMs', 'groupsMs', 'prepareMs', 'swarmMs', 'flushMs', 'totalMs']
+const PHASE_KEYS = ['configMs', 'storeMs', 'stateMs', 'diariesMs', 'mediaMs', 'groupsMs', 'prepareMs', 'swarmMs', 'flushMs', 'totalMs', 'acceptingMs']
 
 test('startupPhases subtracts the marks of each step', (t) => {
-  const phases = startupPhases({ t0: 100, config: 101, store: 105, state: 106, diaries: 110, media: 112, groups: 115, prepare: 120, swarm: 121, flush: 130 })
-  t.alike(phases, { configMs: 1, storeMs: 4, stateMs: 1, diariesMs: 4, mediaMs: 2, groupsMs: 3, prepareMs: 5, swarmMs: 1, flushMs: 9, totalMs: 30 })
-  t.alike(startupPhases({ t0: 5, config: 4, store: 4, state: 4, diaries: 4, media: 4, groups: 4, prepare: 4, swarm: 4, flush: 4 }).totalMs, 0, 'never negative')
+  const phases = startupPhases({ t0: 100, config: 101, store: 105, state: 106, diaries: 110, media: 112, groups: 115, prepare: 120, swarm: 121, accepting: 122, flush: 130 })
+  t.alike(phases, { configMs: 1, storeMs: 4, stateMs: 1, diariesMs: 4, mediaMs: 2, groupsMs: 3, prepareMs: 5, swarmMs: 1, flushMs: 9, totalMs: 30, acceptingMs: 22 })
+  t.alike(startupPhases({ t0: 5, config: 4, store: 4, state: 4, diaries: 4, media: 4, groups: 4, prepare: 4, swarm: 4, accepting: 4, flush: 4 }).totalMs, 0, 'never negative')
+  t.is(startupPhases({ t0: 5, config: 4, store: 4, state: 4, diaries: 4, media: 4, groups: 4, prepare: 4, swarm: 4, flush: 4 }).acceptingMs, 0, 'a missing mark counts as 0, not NaN')
 })
 
 test('the ready event carries phases and core counts, without keys', async (t) => {
@@ -40,7 +41,7 @@ test('the ready event carries phases and core counts, without keys', async (t) =
   t.is(ready.topic, started.topic)
   t.alike(Object.keys(ready.phases), PHASE_KEYS)
   for (const k of PHASE_KEYS) t.ok(Number.isInteger(ready.phases[k]) && ready.phases[k] >= 0, k + ' is an integer >= 0')
-  const sum = PHASE_KEYS.slice(0, -1).reduce((n, k) => n + ready.phases[k], 0)
+  const sum = PHASE_KEYS.slice(0, -2).reduce((n, k) => n + ready.phases[k], 0)
   t.ok(ready.phases.totalMs >= sum - 9, 'total covers the phases')
   t.alike(ready.cores, {
     diaries: { kept: 0, dropped: 0 },

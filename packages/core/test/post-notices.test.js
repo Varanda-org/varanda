@@ -771,3 +771,47 @@ test('holders matches who gets the mention row from the page', (t) => {
   t.alike(idx.holders('ana', issuerUsable), fromPage.sort())
   t.alike(fromPage, [A, C], 'former name still held inside the window')
 })
+
+test('onOwnersGained: a gain is reported once, never an unchanged set or a loss', (t) => {
+  const seen = []
+  let state = null
+  const idx = index({
+    onOwnersGained: (token, owners) => {
+      seen.push([token, owners])
+      state = idx.holders(token, ok)
+    }
+  })
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  t.alike(seen, [], 'nothing before settle')
+  idx.settle(A)
+  t.alike(seen, [['ana', [A]]], 'gain reported')
+  t.alike(state, [A], 'the index already holds the new owner when it reports')
+  idx.settle(A)
+  idx.foldUsername(A, 2, username(A, 'ana'))
+  idx.settle(A)
+  t.alike(seen, [['ana', [A]]], 'unchanged set: not reported again')
+
+  idx.foldUsername(B, 1, username(B, 'ana'))
+  idx.settle(B)
+  t.alike(seen, [['ana', [A]], ['ana', [B]]], 'a second owner is a gain of that owner only')
+
+  idx.removeAuthor(B)
+  t.alike(idx.holders('ana', ok), [A])
+  t.is(seen.length, 2, 'a loss is not reported')
+
+  idx.foldUsername(A, 3, username(A, 'ana_nova'))
+  idx.settle(A)
+  t.alike(seen.slice(2), [['ana_nova', [A]]], 'a new name of an owner is a gain of that name only')
+})
+
+test('onOwnersGained: a throwing hook breaks nothing; a bad hook is refused', (t) => {
+  let calls = 0
+  const idx = index({ onOwnersGained: () => { calls++; throw new Error('x') } })
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(A, 2, username(A, 'ana_nova'))
+  idx.settle(A)
+  t.is(calls, 2, 'every gained name reported despite the throw')
+  t.alike(idx.holders('ana', ok), [A])
+  t.alike(idx.holders('ana_nova', ok), [A])
+  t.exception.all(() => createPostNoticeIndex({ onOwnersGained: 'x' }), /onOwnersGained/)
+})

@@ -29,7 +29,8 @@
 // key, or a crash between the append and the state write): the page is
 // paused for good and nothing more is appended ('pausada'). Only
 // mediaItem() and setFollow() write `media-core` and `follow` records, and a
-// post, profile or listing may only point at items of the page's own item table.
+// post (photos, a [poster, video] pair or a link card thumbnail), profile or
+// listing may only point at items of the page's own item table.
 //
 // The link: one WebSocket to the loopback seeder (/seeder), wrapped as a
 // NoiseSecretStream initiator with the persistent pair, the admission
@@ -73,9 +74,9 @@ const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = requir
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const {
-  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES,
+  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS,
   AVATAR_SIDE, AVATAR_MIMES, MAX_AVATAR_BLOCKS,
-  memberCertRecord, mediaCoreRecord, followRecord, validDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
+  memberCertRecord, mediaCoreRecord, followRecord, validDescriptor, validVideoDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
 } = require('@varanda/core/lib/records')
 const { mediaHeader, latestMediaCores } = require('@varanda/core/lib/media')
 const { deletedSeqs, deletedRanges, clearDeleted: clearDeletedSeqs, clearRanges, overlaps } = require('@varanda/core/lib/deletion')
@@ -83,7 +84,7 @@ const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { feira } = require('@varanda/rpc')
+const { feira, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -159,9 +160,10 @@ function readFileNoFollow (file) {
   }
 }
 
+// A video item also has its duration (`ms`, absent on a still image).
 function sameItem (a, b) {
   return a.core === b.core && a.start === b.start && a.blocks === b.blocks && a.sha256 === b.sha256 &&
-    a.mime === b.mime && a.bytes === b.bytes && a.width === b.width && a.height === b.height
+    a.mime === b.mime && a.bytes === b.bytes && a.width === b.width && a.height === b.height && a.ms === b.ms
 }
 
 // A plain JSON copy taken before any await, so a caller changing its object
@@ -174,7 +176,7 @@ function copyJson (value) {
   }
 }
 
-const DELETABLE = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first
@@ -199,8 +201,26 @@ function closeBatches (records) {
   return batches
 }
 
+// A still image, or a short video (only ever the second item of a post's
+// [poster, video] pair): a page that stored a video must load it again.
 function validItem (it) {
-  return isPlainObject(it) && validDescriptor(it)
+  return isPlainObject(it) && (validDescriptor(it) || validVideoDescriptor(it))
+}
+
+// -> the container's duration of a short video the page may store, or
+// null. The bytes must already be what every reader accepts (no udta, meta
+// or uuid) and must come back unchanged from stripVideoMetadata: the
+// service never rewrites what a member uploaded, so the stored copy is the
+// one whose sha256 the member signed. The sides must be the container's and
+// the given ms within VIDEO_MS_TOLERANCE of its samples' duration, which
+// is what gets stored. Synchronous, on a private copy.
+function videoMs (bytes, width, height, ms) {
+  if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_VIDEO_MS) return null
+  const bounds = videoBounds(bytes, { maxMs: MAX_VIDEO_MS })
+  if (bounds === null || bounds.width !== width || bounds.height !== height || Math.abs(ms - bounds.ms) > VIDEO_MS_TOLERANCE) return null
+  const stripped = stripVideoMetadata(bytes)
+  if (stripped === null || !b4a.equals(stripped, bytes)) return null
+  return bounds.ms
 }
 
 // -> { member, nonce } or null; a malformed one is a refusal.
@@ -766,6 +786,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
           pointed.push(...r.media)
         }
         if (r.avatar !== undefined && r.avatar !== null) pointed.push(r.avatar)
+        if (isPlainObject(r.preview) && r.preview.image !== undefined && r.preview.image !== null) pointed.push(r.preview.image)
         for (const d of pointed) {
           if (!isPlainObject(d) || !p.items.some((it) => sameItem(it, d))) throw fail('midia-invalida')
         }
@@ -859,13 +880,20 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   // ---- media ----------------------------------------------------------
 
-  async function mediaItem (key, { bytes: input, mime, width, height, sha256 } = {}, opts) {
+  // `ms` only for a video/mp4 (videoMs), never for a still image.
+  async function mediaItem (key, { bytes: input, mime, width, height, sha256, ms } = {}, opts) {
     const idem = idempotency(opts)
     if (!(input instanceof Uint8Array) || input.byteLength < 1 || input.byteLength > MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES) throw fail('midia-invalida')
     const bytes = b4a.from(input)
     if (typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || sha256Hex(bytes) !== sha256) throw fail('midia-invalida')
-    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw fail('midia-invalida')
-    if (mime === 'image/jpeg' || mime === 'image/webp') {
+    const video = mime === VIDEO_MIME
+    if (typeof mime !== 'string' || (!video && !MEDIA_MIMES.includes(mime))) throw fail('midia-invalida')
+    if (!video && ms !== undefined) throw fail('midia-invalida')
+    let duration
+    if (video) {
+      duration = videoMs(bytes, width, height, ms)
+      if (duration === null) throw fail('midia-invalida')
+    } else if (mime === 'image/jpeg' || mime === 'image/webp') {
       const size = stillImageSize(bytes, mime)
       if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
     } else {
@@ -873,8 +901,10 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       if (bytes.byteLength < magic.byteLength || !b4a.equals(bytes.subarray(0, magic.byteLength), magic)) throw fail('midia-invalida')
     }
     const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
-    const shape = { core: '0'.repeat(64), mime, start: 1, blocks, bytes: bytes.byteLength, sha256, width, height }
-    if (!validDescriptor(shape)) throw fail('midia-invalida')
+    const valid = video ? validVideoDescriptor : validDescriptor
+    const withMs = (d) => video ? { ...d, ms: duration } : d
+    const shape = withMs({ core: '0'.repeat(64), mime, start: 1, blocks, bytes: bytes.byteLength, sha256, width, height })
+    if (!valid(shape)) throw fail('midia-invalida')
 
     return withPage(key, async (p, row) => {
       const prior = recall(p, 'media', idem)
@@ -886,8 +916,8 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       const chunks = []
       for (let i = 0; i < blocks; i++) chunks.push(b4a.from(bytes.subarray(i * MEDIA_BLOCK_BYTES, Math.min(bytes.byteLength, (i + 1) * MEDIA_BLOCK_BYTES))))
       const start = p.mediaLength
-      const descriptor = { core: p.mediaKey, mime, start, blocks, bytes: bytes.byteLength, sha256, width, height }
-      if (!validDescriptor(descriptor)) throw fail('midia-invalida')
+      const descriptor = withMs({ core: p.mediaKey, mime, start, blocks, bytes: bytes.byteLength, sha256, width, height })
+      if (!valid(descriptor)) throw fail('midia-invalida')
       check()
       stillKeyed(p)
       await media.append(chunks)

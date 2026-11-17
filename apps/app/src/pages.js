@@ -18,6 +18,8 @@
 
 import rpc from '@varanda/rpc'
 import { buildRequest, readJson, formatNextChange } from './account.js'
+import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
+import { VIDEO_MIME } from './media/plan.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
 import { isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
 
@@ -33,6 +35,8 @@ export { MAX_AVATAR_BYTES }
 const KEY_RE = /^[0-9a-f]{64}$/
 const TIMEOUT_MS = 8000
 const UPLOAD_TIMEOUT_MS = 30000
+// A video is up to MAX_MEDIA_BYTES on a slow uplink.
+const VIDEO_UPLOAD_TIMEOUT_MS = 120000
 const MAX_BODY = 65536
 // The signed reads: 'follows' answers up to 4095 keys, 'status' up to 4096
 // liked and 4096 reposted refs, 'list' every invite and offer.
@@ -62,7 +66,7 @@ export const TEXTS = Object.freeze({
   pausada: 'Página pausada; fale com a associação',
   encerrada: 'Esta página foi encerrada',
   movida: 'Esta página mudou para uma nova chave',
-  'midia-invalida': 'Foto não aceita',
+  'midia-invalida': 'Foto ou vídeo não aceito',
   indisponivel: 'Serviço indisponível',
   'termos-pendentes': 'Aceite os Termos para continuar',
   'troca-bloqueada': 'Você ainda não pode trocar o @nome',
@@ -95,6 +99,11 @@ export function pageError (code, nextChangeAt) {
 
 const isKey = (v) => typeof v === 'string' && KEY_RE.test(v)
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+const plainObject = (v) => {
+  if (!isObject(v)) return false
+  const proto = Object.getPrototypeOf(v)
+  return proto === Object.prototype || proto === null
+}
 
 // A header value is latin-1 on the wire: JSON with every non-ASCII character
 // escaped parses to the same op, and the service canonicalizes it anyway.
@@ -250,12 +259,15 @@ function upload (action, { member, nonce, page, op, signature, bytes, origin }, 
       'x-varanda-page-signature': signature,
       'x-varanda-page-op': headerJson(op)
     },
-    timeoutMs: UPLOAD_TIMEOUT_MS,
+    timeoutMs: op && op.mime === VIDEO_MIME ? VIDEO_UPLOAD_TIMEOUT_MS : UPLOAD_TIMEOUT_MS,
     signed: true,
     origin
   })
 }
 
+// A video's duration `ms` travels inside the signed op; upload() sends the
+// op whole. video/mp4 shares the still-image byte cap (MAX_VIDEO_BYTES equals
+// MAX_MEDIA_BYTES).
 export const pagesMedia = (args) => upload('media', args, MAX_MEDIA_BYTES)
 export const pagesAvatar = (args) => upload('avatar', args, MAX_AVATAR_BYTES)
 
@@ -271,7 +283,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -280,10 +292,45 @@ const signer = (node) => {
   return null
 }
 
+const MEDIA_ACTIONS = ['post', 'reply', 'quote', 'listing', 'listing-edit']
+const POST_ACTIONS = ['post', 'reply', 'quote']
+
+// A diary video is exactly [JPEG poster, video], the same pair postRecord
+// accepts. Anything else that carries a video is not that pair.
+function isVideoPair (media) {
+  if (!Array.isArray(media) || media.length !== 2) return false
+  const poster = media[0]
+  const video = media[1]
+  return validDescriptor(poster) && poster.mime === 'image/jpeg' && validVideoDescriptor(video)
+}
+
+function hasVideo (media) {
+  if (!Array.isArray(media)) return false
+  for (let i = 0; i < media.length; i++) {
+    const item = media[i]
+    if (validVideoDescriptor(item)) return true
+    if (item && typeof item === 'object' && item.mime === VIDEO_MIME) return true
+  }
+  return false
+}
+
+// preview, when present on a post, reply or quote: a plain object with a
+// url string. The service checks the card; this is only the shape.
+function checkPreview (action, op) {
+  if (!POST_ACTIONS.includes(action) || op.preview === undefined) return true
+  return plainObject(op.preview) && typeof op.preview.url === 'string'
+}
+
 function checkMedia (action, op) {
-  if (!['post', 'reply', 'quote', 'listing', 'listing-edit'].includes(action) || !isObject(op) || op.media === undefined) return true
+  if (!MEDIA_ACTIONS.includes(action) || !isObject(op)) return true
+  if (!checkPreview(action, op)) return false
+  // A preview never travels with media (records.js POST_PREVIEW_KEYS).
+  if (op.preview !== undefined && op.media !== undefined && op.media !== null && !(Array.isArray(op.media) && op.media.length === 0)) return false
+  if (op.media === undefined) return true
   // listing.edit takes media null to drop every photo (docs/rpc.md 5.107).
   if (action === 'listing-edit' && op.media === null) return true
+  if (POST_ACTIONS.includes(action) && isVideoPair(op.media)) return true
+  if (POST_ACTIONS.includes(action) && hasVideo(op.media)) return false
   // A listing is not a diary post: Feira stays at its own cap.
   const cap = action === 'listing' || action === 'listing-edit' ? rpc.feira.MAX_LISTING_MEDIA : MAX_MEDIA_PER_POST
   return Array.isArray(op.media) && op.media.length >= 1 && op.media.length <= cap
@@ -351,6 +398,18 @@ export async function actAs (node, args) {
 
 export function pagesFollow (node, { member, page, key, on }) {
   return actAs(node, { member, action: 'follow', page, op: { key, on: on === true } })
+}
+
+// The page's vote on a poll or RSVP to an event ('choice', docs/rpc.md 5.84):
+// `to` an 'author:seq' ref, `pick` an option index or null to withdraw (an
+// absent pick is null). Anything else is sent as given for the service to
+// refuse, never turned into a withdrawal.
+export function pageChoiceOp (to, pick) {
+  return { to, pick: pick === undefined ? null : pick }
+}
+
+export function pagesChoice (node, { member, page, to, pick }) {
+  return actAs(node, { member, action: 'choice', page, op: pageChoiceOp(to, pick) })
 }
 
 export async function pagesFollows (node, { member, page }) {

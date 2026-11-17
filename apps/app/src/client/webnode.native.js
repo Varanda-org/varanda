@@ -163,10 +163,11 @@ export function webNodeHandle (request) {
     upload: ({ bytes, mime, width, height, sealed, ms, kind, onProgress } = {}) =>
       sendFile(bytes, 'media.uploadFile', { mime, width, height, ...voiceOf({ ms, kind }), ...videoOf({ ms, kind }), ...(sealed === true ? { sealed } : {}) }, onProgress),
     // `to`, the destination, is required: it keys the sealed blob to one
-    // conversation (5.97).
-    putDm: async ({ bytes, mime, width, height, ms, kind, to } = {}) => {
+    // conversation (5.97). `page`, acting as a Página, keys it to that sender.
+    putDm: async ({ bytes, mime, width, height, ms, kind, to, page } = {}) => {
       if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError('mídia inválida')
-      return sendFile(bytes, 'dm.putMedia', { to, mime, width, height, ...voiceOf({ ms, kind }) })
+      if (page !== undefined && (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page))) throw new TypeError('mídia inválida')
+      return sendFile(bytes, 'dm.putMedia', { to, ...(page !== undefined ? { page } : {}), mime, width, height, ...voiceOf({ ms, kind }) })
     },
     // A momento's photo or video: a fresh blob of its own (5.113).
     putMoment: ({ bytes, mime, width, height, ms, kind } = {}) =>

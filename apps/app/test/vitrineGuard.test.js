@@ -1,6 +1,7 @@
 // The Vitrine's fixtures stand in for the node only in a development bundle
 // with the opt-in env var: the provider, the account calls and the terms
-// stores, push hook and index client are the only way in, all behind vitrineEnabled.
+// stores, push hook, index client and garden clock are the only way in, all
+// behind vitrineEnabled.
 'use strict'
 
 const test = require('brittle')
@@ -12,7 +13,7 @@ const SRC = path.join(APP, 'src')
 const VITRINE_DIR = path.join(SRC, 'vitrine')
 // src/client/connect.web.js only reads enabled.js, so the Vitrine page skips
 // the browser node script it would otherwise preload.
-const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js', 'src/client/connect.web.js', 'src/media/fetch.js']
+const ALLOWED = ['src/node.js', 'src/account.js', 'src/termsStore.web.js', 'src/termsStore.native.js', 'src/usePush.web.js', 'src/indexClient.js', 'src/client/connect.web.js', 'src/media/fetch.js', 'src/gardenClock.js']
 const TERMS_STORES = ['src/termsStore.web.js', 'src/termsStore.native.js']
 const IMPORT_RE = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"]*vitrine\/[^'"]*)\1/g
 const GUARD_RE = /const VITRINE = vitrineEnabled\(\{ EXPO_PUBLIC_VARANDA_VITRINE: process\.env\.EXPO_PUBLIC_VARANDA_VITRINE \}, typeof __DEV__ !== 'undefined' && __DEV__\)/
@@ -77,7 +78,7 @@ test('vitrineEnabled needs a development bundle and the exact opt-in', async (t)
   t.is(vitrineEnabled(undefined, true), false)
 })
 
-test('only the node, account, terms stores, push hook and index client import src/vitrine', (t) => {
+test('only the node, account, terms stores, push hook, index client and garden clock import src/vitrine', (t) => {
   const importers = []
   for (const file of appSources()) {
     const code = withoutComments(fs.readFileSync(file, 'utf8'))

@@ -65,9 +65,9 @@ import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import {
-  AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
+  AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -204,7 +204,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [communityJoin, setCommunityJoin] = useState(null)
   const [communityWriterHere, setCommunityWriterHere] = useState(null)
   // The community's and Geral's bound writers: the tap spends slots there too when it calls community.join.
-  const [communityBound, setCommunityBound] = useState([])
+  const [communitySlotsKnown, setCommunitySlotsKnown] = useState([])
   const [needCommunity, setNeedCommunity] = useState(false)
   // Set once a device join was sent (answered or not): a second tap could bind another writer.
   const [deviceJoinSent, setDeviceJoinSent] = useState(false)
@@ -1282,7 +1282,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       if (typeof c.name === 'string') setCommunityName(c.name)
       setCommunityJoin(typeof c.join === 'string' ? c.join : null)
       setCommunityWriterHere(typeof c.writerHere === 'boolean' ? c.writerHere : null)
-      setCommunityBound([c.writersBound, c.generalWritersBound])
+      setCommunitySlotsKnown(communitySlots(c))
     }, () => {})
     return () => { live = false }
   }, [hosted, heldCommunity, request, version])
@@ -1343,7 +1343,12 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
             held = true
             return null
           }
-          const joined = await request('community.join', { community: communityKey })
+          let joined
+          try {
+            joined = await request('community.join', { community: communityKey })
+          } catch (err) {
+            throw await slotRefusal(err, () => request('community.info', { community: communityKey }), communitySlots, 'comunidade')
+          }
           // Landed: a later tap must not send community.join again.
           setCommunityWriterHere(true)
           if (joined && joined.group === group) return joined
@@ -1353,7 +1358,11 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         held = true
         return null
       }
-      return await request('group.join', { group })
+      try {
+        return await request('group.join', { group })
+      } catch (err) {
+        throw await slotRefusal(err, () => request('group.info', { group }), groupSlots)
+      }
     })
     if (held) {
       setReserveConfirm(true)
@@ -1695,10 +1704,11 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const replyBar = replyKey !== null && !asPage.page ? (quoteOf(replyKey) || replyQuote) : null
   let composer = null
   if (reader && showJoinCard && !orphan) {
+    const reserveSlots = [...groupSlots(info), ...(communityWriterHere === false ? communitySlotsKnown : [])]
     composer = (
       <View style={styles.composer}>
         <Soft>{DEVICE_JOIN_TEXT}</Soft>
-        {reserveConfirm || reserveReachedAny([info && info.writersBound, ...(communityWriterHere === false ? communityBound : [])]) ? <Soft>{DEVICE_RESERVE_TEXT}</Soft> : null}
+        {reserveConfirm || reserveReachedAny(reserveSlots.map((s) => s.bound)) ? <Soft>{reserveText(reserveSlots)}</Soft> : null}
         <Btn label={DEVICE_JOIN_LABEL} onPress={enterHere} pending={join.pending} disabled={!node.online} />
         <ErrorText>{join.error}</ErrorText>
       </View>

@@ -1507,6 +1507,10 @@ async function releasePhone (dataDir, member, key, { open = openPhoneStore } = {
 
 module.exports = {
   closeOrphanPages,
+  // The hosted lab (scripts/hosted-lab.js) opens the page clients the same way.
+  openPageClients,
+  pageClientsOf,
+  closePageClients,
   commands: {
     account: { summary: 'serviço de contas', run }
   },

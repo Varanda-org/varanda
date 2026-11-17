@@ -8,10 +8,10 @@ const {
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
   GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
-  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut
 } = require('../lib/group')
 const { groupJoinRecord, groupCutRecord } = require('../lib/records')
-const { K, BASE, AT, NOW, community: communityOf, groupIn } = require('./helpers/groups')
+const { K, BASE, AT, NOW, community: communityOf, groupIn, diaryLog } = require('./helpers/groups')
 
 const G = K(0x100)
 const C = K(1)
@@ -3270,6 +3270,77 @@ test('an old reader skips the forum records and still reads later posts', (t) =>
   t.alike(postOf(now, root).topic.poll.totals, [1, 0, 0])
 })
 
+// Group readers ignore deletes of group-join, group-confirm and group-cut
+// (docs/protocol.md, "Deletion"), so membership history stays as written.
+test('a group leave still counts when its diary deletes the join it closed afterwards', (t) => {
+  const D = K(0x70)
+  const M = K(0x71)
+  const gw1 = K(0x72)
+  const gw2 = K(0x73)
+  const gwM = K(0x74)
+  const cm = communityOf({ key: CMG, creator: C, members: [{ diary: D, cw: cwOf(D), status: 'member' }, { diary: M, cw: cwOf(M), status: 'member' }] })
+  const g = groupIn(cm, { key: G, diary: C })
+  g.add(D, gw1).add(D, gw2).add(M, gwM)
+  // D binds two writers, is made admin, leaves from gw1 (the leave cuts
+  // both), confirms it and turns gw1 off; gw2 then hides and bans.
+  const log = diaryLog()
+  const on1 = log.join(G, gw1)
+  log.join(G, gw2)
+  const p = g.push(gwM, groupPost({ text: 'oi', at: AT(10) }))
+  g.push(G, groupAdmin({ member: D, on: true, cuts: [{ writer: gw1, seq: 1 }, { writer: gw2, seq: 1 }], at: AT(11) }))
+  g.push(gw1, groupLeave({ cuts: [{ writer: gw1, seq: g.len(gw1) }, { writer: gw2, seq: g.len(gw2) }], at: AT(12) }))
+  const confirm = log.confirm(G, gw1, g.logs.get(gw1))
+  g.push(gw2, groupHide({ target: p, on: true, at: AT(13) }))
+  g.push(gw2, groupBan({ member: M, on: true, cuts: [{ writer: gwM, seq: g.len(gwM) }], at: AT(14) }))
+  const fold = () => {
+    const input = g.input()
+    const read = log.read(G)
+    return buildGroup({ ...input, joins: new Map([...input.joins, [D, read.joins]]), confirms: new Map([[D, read.confirms]]) })
+  }
+  const view = (r) => ({ D: r.members.get(D), M: r.members.get(M), gw2: r.authorityWriters.has(gw2), hidden: r.posts.find((x) => x.writer === gwM).hidden === true })
+  const before = log.read(G)
+  const left = { D: 'left', M: 'member', gw2: false, hidden: false }
+  t.alike(view(fold()), left, 'after the leave D is out and gw2 acts on nothing')
+  log.delete(on1)
+  t.alike(log.read(G), before, 'the join is still read')
+  t.alike(view(fold()), left, 'a delete of the closed join changes nothing')
+  log.delete(confirm)
+  t.alike(log.read(G), before, 'the confirm is still read')
+  t.alike(view(fold()), left, 'nor does a delete of the confirm')
+})
+
+test('a group leave still counts when its diary deletes the off join of the leave', (t) => {
+  const D = K(0x75)
+  const M = K(0x76)
+  const gw1 = K(0x77)
+  const gwM = K(0x78)
+  const cm = communityOf({ key: CMG, creator: C, members: [{ diary: D, cw: cwOf(D), status: 'member' }, { diary: M, cw: cwOf(M), status: 'member' }] })
+  const g = groupIn(cm, { key: G, diary: C })
+  g.add(D, gw1).add(M, gwM)
+  // D binds gw1, is made admin, leaves, confirms it and turns gw1 off
+  // (the off join is the block after the confirm); gw1 then hides a post.
+  const log = diaryLog()
+  log.join(G, gw1)
+  const p = g.push(gwM, groupPost({ text: 'oi', at: AT(10) }))
+  g.push(G, groupAdmin({ member: D, on: true, cuts: [{ writer: gw1, seq: 1 }], at: AT(11) }))
+  g.push(gw1, groupLeave({ cuts: [{ writer: gw1, seq: g.len(gw1) }], at: AT(12) }))
+  const off = log.confirm(G, gw1, g.logs.get(gw1)) + 1
+  g.push(gw1, groupHide({ target: p, on: true, at: AT(13) }))
+  const fold = () => {
+    const input = g.input()
+    const read = log.read(G)
+    return buildGroup({ ...input, joins: new Map([...input.joins, [D, read.joins]]), confirms: new Map([[D, read.confirms]]) })
+  }
+  const view = (r) => ({ D: r.members.get(D), gw1: r.authorityWriters.has(gw1), hidden: r.posts.find((x) => x.writer === gwM).hidden === true })
+  const before = log.read(G)
+  const left = { D: 'left', gw1: false, hidden: false }
+  t.is(log.entries[off].record.on, false, 'the block is the off join')
+  t.alike(view(fold()), left, 'after the leave D is out and gw1 acts on nothing')
+  log.delete(off)
+  t.alike(log.read(G), before, 'the off join is still read')
+  t.alike(view(fold()), left, 'a delete of the off join changes nothing')
+})
+
 // The slot walk (#350): per diary and root, from the diary's own group-join
 // and group-cut records in seq order.
 const walkView = (wk) => JSON.stringify({
@@ -3512,4 +3583,47 @@ test('walkHasRoom: a new writer counts only where the walk has a live slot, afte
   t.absent(walkHasRoom(spent, marks, G, [{ kind: 'cut', writer: ws[0], cut: 0 }]), 'no release left: no room')
   t.ok(walkHasRoom(null, null, G, [null]), 'bad items read as an empty diary, never throwing')
   t.absent(walkHasRoom(full, [], G, 5), 'a bad event list: no room')
+})
+
+test('retiredWriterCut and replacedWriterCut: the cut a node marks on the own writer it replaces (#350)', (t) => {
+  const header = (extra = {}) => ({ seq: 0, record: { type: 'group-writer', box: 'ab'.repeat(32), rejoin: null, ...extra } })
+  const post = (seq) => ({ seq, record: { type: 'group-post' } })
+  const rejoin = { writer: K(0x7400), seq: 3 }
+  t.is(retiredWriterCut([header()]), 0, 'header only, no rejoin: released')
+  t.is(retiredWriterCut([header({ rejoin })]), 1, 'header only with a rejoin: the generation still reads block 0')
+  t.is(retiredWriterCut([header(), post(1), post(2)]), 3, 'more blocks: the length held')
+  t.is(retiredWriterCut([post(2), header({ rejoin }), post(1)]), 3, 'any order of the held entries')
+  t.is(retiredWriterCut([header({ box: null }), post(1)]), 2, 'a retired writer of a public group keeps its records')
+  t.is(retiredWriterCut([post(1)]), null, 'block 0 not held: no cut')
+  t.is(retiredWriterCut(null), null)
+  t.is(replacedWriterCut([header({ box: null }), post(1)]), 0, 'a boxless writer of a private group is released whatever it holds')
+  t.is(replacedWriterCut([header(), post(1)]), 2, 'a writer boxed to another key is cut like a retired one')
+  t.is(replacedWriterCut([header({ rejoin })]), 1)
+  t.is(replacedWriterCut([]), null)
+})
+
+// The slot walk reads the diary's joins and marks as the nodes hand them to
+// the fold and to walkHasRoom (after the deletion fold): a deleted group-cut
+// keeps its writer frozen or released, and a deleted join keeps its slot.
+test('slot walk: a diary that deletes its own group-cut or group-join keeps the walk as written', (t) => {
+  const ws = Array.from({ length: MAX_GROUP_WRITERS_PER_DIARY + 1 }, (_, i) => K(0x9a00 + i))
+  const log = diaryLog()
+  const joins = ws.slice(0, MAX_GROUP_WRITERS_PER_DIARY).map((w) => log.join(G, w))
+  const released = log.mark(G, ws[0], 0)
+  const frozen = log.mark(G, ws[1], 2)
+  log.join(G, ws[MAX_GROUP_WRITERS_PER_DIARY])
+  const walk = () => {
+    const read = log.read(G)
+    return { wk: slotWalk(read.joins, read.marks, G), room: walkHasRoom(read.joins, read.marks, G) }
+  }
+  const before = walk()
+  t.ok(before.wk.released.has(ws[0]) && before.wk.frozen.has(ws[1]), 'the cuts released one writer and froze another')
+  t.ok(before.wk.live.has(ws[MAX_GROUP_WRITERS_PER_DIARY]), 'the ninth writer took a freed slot')
+  log.delete(released)
+  log.delete(frozen)
+  log.delete(joins[2])
+  const after = walk()
+  t.alike(walkView(after.wk), walkView(before.wk), 'the deletes change nothing in the walk')
+  t.ok(after.wk.live.has(ws[2]), 'the writer whose join was deleted keeps its slot')
+  t.is(after.room, before.room, 'walkHasRoom answers as before')
 })

@@ -224,6 +224,25 @@ test('the visitas methods are refused on the node session, nothing written', asy
   t.alike(await failure(m.call('visits.note', { key: 'zz' })), { code: 'USAGE', message: 'parâmetro inválido: key' })
 })
 
+test('the varandinha methods are refused on the node session, nothing written', async (t) => {
+  const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
+  const m = await member(t)
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('garden.set', { on: true })), NO)
+  t.alike(await failure(m.call('garden.set', { on: false })), NO)
+  t.alike(await failure(m.call('garden.state', {})), NO)
+  t.alike(await failure(m.call('garden.play', { acts: [{ op: 'plant', pot: 0, plant: 'manjericao' }] })), NO)
+  t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 0 })), NO)
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike(m.session.internal, [])
+  const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
+  t.alike(await failure(m.call('garden.set', { on: true, extra: 1 })), UNKNOWN)
+  t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 0, at: '2026-11-16T00:00:00.000Z' })), UNKNOWN)
+  t.alike(await failure(m.call('garden.set', { on: 'sim' })), { code: 'USAGE', message: 'parâmetro inválido: on' })
+  t.alike(await failure(m.call('garden.help', { to: 'zz', pot: 0 })), { code: 'USAGE', message: 'parâmetro inválido: to' })
+  t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 6 })), { code: 'USAGE', message: 'parâmetro inválido: pot' })
+})
+
 test('the enquete methods are refused on the node session, nothing written', async (t) => {
   const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
   const m = await member(t)

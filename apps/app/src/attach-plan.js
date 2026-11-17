@@ -91,8 +91,18 @@ function measured (fields) {
   return { ...fields, replyTo: { from: HEX64_STANDIN, id: fields.replyTo, digest: HEX64_STANDIN } }
 }
 
-// target is { kind: 'dm', to, replyTo?, cert?, fwd? } or
+// A page inner is always v3: the same JSON as v2 once media, a card or fwd
+// is present, plus 8 bytes of expiry. A person target leaves v unset, so
+// the budget stays v1 or v2. `v` is only for the measure, never the request.
+function budgetOf (target, fields) {
+  const body = measured({ ...fields })
+  if (target && target.v === 3) body.v = 3
+  return textBudget(body)
+}
+
+// target is { kind: 'dm', to, replyTo?, cert?, fwd?, v? } or
 // { kind: 'group', group, visibility: 'public' | 'private', replyTo?, fwd? }.
+// v: 3 (a page) measures the inner as v3. It is not part of the request.
 // fwd: 1 marks a forwarded message (forward.js); it rides in the request and
 // counts in the DM text budget.
 // Attachments are staged { name, mime, width, height } files. Uploads run
@@ -132,7 +142,7 @@ export function composePlan ({ text = '', attachments = [], target, card = null 
     if (sealed) params.sealed = true
     return checked(dm ? 'dm.putMedia' : 'media.uploadFile', params)
   })
-  if (dm && count > 0 && dmTextBytes(text) > textBudget(measured({ ...base, media: Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM), cert }))) {
+  if (dm && count > 0 && dmTextBytes(text) > budgetOf(target, { ...base, media: Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM), cert })) {
     throw new Error('texto longo demais com anexo')
   }
 
@@ -145,7 +155,7 @@ export function composePlan ({ text = '', attachments = [], target, card = null 
       params.media = media.map(item => ({ ...item }))
       if (sealed) params.sealed = true
     }
-    if (dm && dmTextBytes(text) > textBudget(measured({ ...params, cert }))) {
+    if (dm && dmTextBytes(text) > budgetOf(target, { ...params, cert })) {
       throw new Error(count > 0 ? 'texto longo demais com anexo' : 'mensagem longa demais')
     }
     return checked(method, params)
@@ -173,7 +183,7 @@ export function cardFits ({ text = '', target, card }) {
     if (target.replyTo != null) fields.replyTo = target.replyTo
     if (target.fwd === 1) fields.fwd = 1
     const cert = target.cert == null ? MEMBER_CERT_STANDIN : target.cert
-    return dmTextBytes(text) <= textBudget(measured({ ...fields, cert }))
+    return dmTextBytes(text) <= budgetOf(target, { ...fields, cert })
   } catch {
     return false
   }

@@ -1,0 +1,3 @@
+### Alterado
+
+- Conversas da Página com fotos, voz e cartões (PR `feat/page-dm-media`): agindo como uma Página, a conversa envia fotos, GIFs, mensagem de voz, cartão de link (música e proposta da Feira com o cartão incluídas) e encaminha mensagens com a mídia, como a pessoa faz. Antes, a Página só mandava texto, e a proposta da Feira saía como o link puro. O aparelho de quem administra sela as mídias e as põe no canal anônimo com os próprios selos; o serviço continua assinando só o digest. Um envio incerto não se repete sozinho: tocar em tentar de novo reenvia o mesmo rascunho assinado e, se ele já expirou, o app avisa que a mensagem pode ter sido enviada. Verificação em `docs/verification/feat-page-dm-media.md`.

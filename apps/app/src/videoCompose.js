@@ -12,8 +12,8 @@ export function mediaComposeError (err) {
   return err && err.uncertain !== true && err.message === 'espaço de fotos deste aparelho esgotado' ? MEDIA_FULL : ''
 }
 
-export function canComposeVideo ({ node, asPage = null, pickVideo, prepareVideo }) {
-  return !!node && node.online !== false && node.media?.video === true && asPage === null &&
+export function canComposeVideo ({ node, pickVideo, prepareVideo }) {
+  return !!node && node.online !== false && node.media?.video === true &&
     typeof pickVideo === 'function' && typeof prepareVideo === 'function'
 }
 

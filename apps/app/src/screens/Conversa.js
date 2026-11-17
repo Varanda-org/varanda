@@ -41,7 +41,8 @@ import { canDeletePost } from '../postActions'
 import { installationOrigin } from '../installation'
 import { postLink } from '../postLink'
 import * as actingStore from '../actingAs'
-import { actAs } from '../pages'
+import { actAs, pagesChoice } from '../pages'
+import { pickedFromStatus, pickedOf, withPick } from '../pageChoice'
 import { pagesCore } from '../pageGate'
 import { coreActor } from '../pageCore'
 import { Btn, ErrorText, Row, Soft, UNCERTAIN, errorText, useAction, useBottomPad, useVisibleNow } from '../ui'
@@ -136,20 +137,32 @@ const pageStatus = new Map()
 const pageGen = new Map()
 const genOf = (page) => pageGen.get(page) || 0
 
-export async function pageEngagement (source, page, { fresh = false } = {}) {
-  if (!fresh && pageStatus.has(page)) return pageStatus.get(page)
+// One read per page at a time: a plain read joins the one in flight, and a
+// failed read is not kept, so the next call reads again.
+const pageReads = new Map()
+
+export function pageEngagement (source, page, { fresh = false } = {}) {
+  if (!fresh && pageStatus.has(page)) return Promise.resolve(pageStatus.get(page))
+  if (!fresh && pageReads.has(page)) return pageReads.get(page)
   const started = genOf(page)
-  const node = nodeOf(source)
-  const member = await memberKeyOf(node.request, node)
-  const data = await actAs(node, { member, action: 'status', page })
-  const eng = data && typeof data.engagement === 'object' && data.engagement !== null ? data.engagement : {}
-  const entry = {
-    liked: new Set(Array.isArray(eng.liked) ? eng.liked : []),
-    reposted: new Set(Array.isArray(eng.reposted) ? eng.reposted : [])
-  }
-  if (genOf(page) !== started) return pageStatus.get(page) || entry
-  pageStatus.set(page, entry)
-  return entry
+  const read = (async () => {
+    const node = nodeOf(source)
+    const member = await memberKeyOf(node.request, node)
+    const data = await actAs(node, { member, action: 'status', page })
+    const eng = data && typeof data.engagement === 'object' && data.engagement !== null ? data.engagement : {}
+    const entry = {
+      liked: new Set(Array.isArray(eng.liked) ? eng.liked : []),
+      reposted: new Set(Array.isArray(eng.reposted) ? eng.reposted : []),
+      picked: pickedFromStatus(data)
+    }
+    if (genOf(page) !== started) return pageStatus.get(page) || entry
+    pageStatus.set(page, entry)
+    return entry
+  })()
+  pageReads.set(page, read)
+  const done = () => { if (pageReads.get(page) === read) pageReads.delete(page) }
+  read.then(done, done)
+  return read
 }
 
 // engagement.read of `refs`, as the member or as the page acted as.
@@ -188,6 +201,42 @@ export async function setEngagement (source, kind, ref, on, page = actingPageKey
     throw err
   })
   return run(() => actAs(node, { member, action: kind, page, op: { to: ref, on } }))
+}
+
+// The page's own pick on the poll or event `ref` ('author:seq') of `count`
+// options: an option index, or null for none. Reads the page's 'status' once
+// per page.
+export async function readPagePick (source, page, ref, count) {
+  const entry = await pageEngagement(source, page)
+  return pickedOf(entry.picked, ref, count)
+}
+
+// The page's vote or RSVP ('choice'; pick null withdraws). A failure after
+// the signature is 'uncertain' and never signs again: its err.retry resends
+// the same bytes and settles the cache like a first answer.
+export async function setPagePick (source, page, ref, pick) {
+  const node = nodeOf(source)
+  const member = await memberKeyOf(node.request, node)
+  const settle = () => {
+    pageGen.set(page, genOf(page) + 1)
+    const entry = pageStatus.get(page)
+    if (entry) entry.picked = withPick(entry.picked, ref, pick)
+    return { pick }
+  }
+  // After an unknown outcome the cached pick may be the old one: the entry
+  // is dropped, so the next read asks the service again.
+  const run = (send) => send().then(settle, (err) => {
+    if (err && err.uncertain === true) {
+      pageGen.set(page, genOf(page) + 1)
+      pageStatus.delete(page)
+    }
+    if (err && typeof err.retry === 'function') {
+      const again = err.retry
+      err.retry = () => run(again)
+    }
+    throw err
+  })
+  return run(() => pagesChoice(node, { member, page, to: ref, pick }))
 }
 
 function chunks (list, size) {
@@ -646,6 +695,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     // moments never come through here and are not kind 'post'; a page's diary
     // is told apart by its profile.
     const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)
+    // A poll or an event shows for a page's post too: a page votes and
+    // answers like a person. Only the public web link stays off for a page.
+    const pollable = item.kind === 'post' && hasSeq
     const authorKey = String(item.author).toLowerCase()
     const postRef = diaryPost ? authorKey + ':' + item.seq : null
     const link = postRef !== null ? postLink(installationOrigin() || globalThis.location?.origin || null, postRef) : null
@@ -664,9 +716,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
       replyToName: parentRef ? replyNameOf(parentProfile) : null,
       media: item.media || null,
       preview: item.preview || null,
-      // A diary post only: the poll card asks the seeder and the own diary.
-      ...(diaryPost && Array.isArray(item.poll) ? { poll: item.poll } : {}),
-      ...(diaryPost && item.event && typeof item.event === 'object' ? { event: item.event } : {}),
+      // A post only: the poll card asks the seeder and the own diary (a page's, its status).
+      ...(pollable && Array.isArray(item.poll) ? { poll: item.poll } : {}),
+      ...(pollable && item.event && typeof item.event === 'object' ? { event: item.event } : {}),
       persistMedia: item.author === ownKey || (follows !== null && follows.has(item.author)),
       now,
       quote,
