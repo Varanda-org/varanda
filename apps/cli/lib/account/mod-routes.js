@@ -21,8 +21,11 @@ const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_
 //     POST /account/report/anexo is the same report carrying one image or
 //     one voice note (a private or group message, statements dm v2 / v3):
 //     the only member route with a body above REPORT_BODY_MAX (the
-//     operator's api/ack is the other large one), and at most
-//     MAX_ANEXO_INFLIGHT such bodies are read at once. The image is stored as the reporter's word
+//     operator's api/ack is the other large one). It has no slot cap of its
+//     own, so a stalled body from a sender who never signs cannot have a
+//     valid report answered `limite`: the server's maxConnections (default
+//     MAX_SOCKETS, 64), each body's declared length (ANEXO_BODY_MAX), the idle cut and the length
+//     deadline bound these reads. The image is stored as the reporter's word
 //     and served to the panel from local disk only; it never reaches the AI
 //     triage, a log or the seeder.
 //   - a blocked member's appeal (POST /account/appeal/start, POST
@@ -41,7 +44,7 @@ const { MAX_REPORTS, MAX_APPEALS, AI_ACTOR, OWNER_ACTOR, ANEXO_MAX_BYTES, ANEXO_
 //     the exact body (packages/core/lib/mod-request.js), is the authority.
 //     api/ack carries a whole blocklist snapshot, so it is read like an
 //     anexo (a declared length, an idle cut, a deadline that grows with the
-//     length) but with no slot cap: a slot taken before the moderator
+//     length) and, like it, with no slot cap: a slot taken before the moderator
 //     signature is checked would let an anonymous sender keep the operator
 //     out, so ack reads share only the service's socket ceiling.
 //
@@ -102,9 +105,8 @@ const REPORT_BODY_MAX = 8192
 // body past this (a 2 MiB image, say) answers 413 unread.
 const ANEXO_B64_MAX = 4 * Math.ceil(ANEXO_MAX_BYTES / 3)
 const ANEXO_BODY_MAX = ANEXO_B64_MAX + REPORT_BODY_MAX
-const MAX_ANEXO_INFLIGHT = 4
 // Reading an anexo or an ack body is anonymous until its nonce and signature
-// check, so a slot is never held by a sender that stops: a body with no
+// check, so a socket is never held long by a sender that stops: a body with no
 // chunk for LARGE_BODY_IDLE_MS is cut, and every body has a deadline of
 // LARGE_BODY_SLACK_MS plus its declared length at LARGE_BODY_MIN_BITS_PER_MS
 // (1 Mbit/s, a slow mobile link): a full ANEXO_BODY_MAX (about 1.4 MB, 11.3 s
@@ -124,9 +126,9 @@ const ANEXO_CSP = "default-src 'none'; sandbox"
 // MAX_CHANGE_IDS, 274432 bytes), plus the signed fields: 1.5 MiB leaves
 // about 115 KB of room.
 const ACK_BODY_MAX = 1572864
-// Ack reads have no slot cap of their own (see the header): only the
-// service's socket ceiling (server.js MAX_SOCKETS) bounds them, as every
-// route other than the anexo.
+// With no slot cap (see the header), the bodies held in memory at once are
+// at most the server's maxConnections (default MAX_SOCKETS, 64) times
+// ANEXO_BODY_MAX (or ACK_BODY_MAX).
 const ANEXO_READ_MAX_MS = largeBodyDeadlineMs(ANEXO_BODY_MAX)
 const ACK_READ_MAX_MS = largeBodyDeadlineMs(ACK_BODY_MAX)
 const LARGE_BODY_READ_MAX_MS = Math.max(ANEXO_READ_MAX_MS, ACK_READ_MAX_MS)
@@ -306,14 +308,14 @@ function createModRoutes ({
   // SIGNED requests (and the global bucket), never by anonymous traffic.
   // One exception: /account/report/anexo spends a genuine unspent nonce as
   // soon as it is checked, before the signature, so one nonce cannot be
-  // replayed into many slot-holding bodies; that growth is still bounded by
-  // the nonces this process minted and by MAX_ANEXO_INFLIGHT reads at once.
+  // replayed into many decodes and hashes; that growth is still bounded by
+  // the nonces report/start minted under the global token bucket, and the
+  // bodies read at once by the server's maxConnections (default
+  // MAX_SOCKETS, 64).
   // nonce -> expiresAt.
   const spentReportNonces = new Map()
   const spentAppealNonces = new Map()
   const spentChallenges = new Map()
-  // Anexo bodies being read right now (see MAX_ANEXO_INFLIGHT).
-  let anexoInflight = 0
 
   // The moderator sign-in is stateless until the callback: GET /login stores
   // nothing and seals { expiry, loginId, state, verifier } into the login
@@ -1258,7 +1260,7 @@ function createModRoutes ({
     return readJsonBody(req, max)
   }
 
-  // A large body's declared length, or a refusal before any slot is taken:
+  // A large body's declared length, or a refusal before any of it is read:
   // a chunked body (no Content-Length) could only be capped as it streams,
   // and a length past `max` answers 413 unread.
   function declaredLength (req, res, max) {
@@ -1273,7 +1275,7 @@ function createModRoutes ({
   }
 
   // readJsonBody under the idle cut and the deadline (largeBodyDeadlineMs):
-  // either destroys the request, which ends the read and so frees its slot.
+  // either destroys the request, which ends the read and frees its socket.
   function readLargeBody (req, length, max) {
     return new Promise((resolve, reject) => {
       let settled = false
@@ -1323,16 +1325,8 @@ function createModRoutes ({
       needModeration()
       checkPost(req)
       const length = declaredLength(req, res, ANEXO_BODY_MAX)
-      if (anexoInflight >= MAX_ANEXO_INFLIGHT) throw refuse('limite')
-      anexoInflight++
-      // The slot is held until the whole report is handled, so the decode,
-      // bounds check and hash of an image are bounded too, not only the read.
-      try {
-        const body = await readLargeBody(req, length, ANEXO_BODY_MAX)
-        return await report(req, res, body, true)
-      } finally {
-        anexoInflight--
-      }
+      const body = await readLargeBody(req, length, ANEXO_BODY_MAX)
+      return report(req, res, body, true)
     }
 
     if (get && p === '/account/mod') return redirectTo(res, origin + '/account/mod/')
@@ -1433,7 +1427,6 @@ module.exports = {
   ANEXO_READ_MAX_MS,
   ACK_READ_MAX_MS,
   LARGE_BODY_READ_MAX_MS,
-  MAX_ANEXO_INFLIGHT,
   ANEXO_LIST_LABEL,
   ANEXO_PROVENANCE,
   ANEXO_AUDIO_PROVENANCE,
