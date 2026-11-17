@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 74)
+  t.is(LEGAL_VERSION, 75)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 74, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 75, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '55eebe02444ebee52bb29ffd2e8d9f69f95ce9a9bdf372cf4dfcc55026559884', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '08eaa0f01dc0759156aff3697a910795223d0cc935f11ae7248b79f33487f9c0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -877,7 +877,7 @@ test('legal: version 71 shares the Sorte do dia and the acceptance across device
   t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
 })
 
-test('legal: version 74 describes connected devices and the periodic key change', async (t) => {
+test('legal: version 75 describes connected devices and the periodic key change', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   for (const doc of [TERMS, PRIVACY]) {
