@@ -875,7 +875,9 @@ const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
 // still counts their records (below the cut, and block 0, leaves and key
 // blocks at any cut) and waits for them, but their join never picks a
 // group, fetches a root or supports one (a root already held stays by the
-// retention rule, _groupSupported).
+// retention rule, _groupSupported). Such a writer is listed by its newest
+// on:true join for the group (the walk counts a writer only after one):
+// readers check the page item's seq against an on:true join naming it.
 // writer -> { group, seq, left }.
 function liveGroupJoins (decls, walks = new Map()) {
   const allowed = new Set()
@@ -906,22 +908,29 @@ function liveGroupJoins (decls, walks = new Map()) {
     const pair = d.group + ':' + writer
     if (!released.has(pair) && (d.on || !allowed.has(pair))) continue
     if (joined.has(d.group) && !groups.has(d.group)) continue
-    out.set(writer, { group: d.group, seq: d.seq, left: true })
+    const onSeq = walks.get(d.group).onSeq
+    const seq = onSeq === undefined ? undefined : onSeq.get(writer)
+    if (seq === undefined) continue
+    out.set(writer, { group: d.group, seq, left: true })
   }
   return out
 }
 
 // Steps one group-join or group-cut of a diary into its walk for that group
 // (`walks`, group -> walk state), each seq once: the scan reads a diary in
-// seq order and never steps back.
+// seq order and never steps back. The state also keeps `onSeq`, writer ->
+// the seq of its newest on:true join for the group, for the writers the
+// walk counts or released only (so no more than the walk's caps per group).
 function groupWalkStep (walks, group, e) {
   let s = walks.get(group)
   if (s === undefined) {
     s = slotWalkState()
+    s.onSeq = new Map()
     walks.set(group, s)
   }
   if (e.seq <= s.last) return
   slotWalkStep(s, e, group)
+  if (e.kind === 'join' && e.on === true && s.state.has(e.writer)) s.onSeq.set(e.writer, e.seq)
 }
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
@@ -2334,7 +2343,8 @@ class Seeder {
       // the map grows no faster than groupDecls; and
       // `groupWalks` the slot walk per group (group -> lib/group.js walk
       // state) over its group-join and group-cut records, which picks the
-      // writers that count (liveGroupJoins).
+      // writers that count and keeps the newest on:true join of each
+      // (groupWalkStep, liveGroupJoins).
       groupDecls: new Map(),
       groupBound: new Map(),
       groupWalks: new Map(),
@@ -4092,8 +4102,11 @@ class Seeder {
       if (b === null || b.diary !== diary) continue
       if (!this._groupServed.has(k)) continue
       const live = entry.groupLive.get(k)
-      const bound = live !== undefined && live.group === b.group && !live.left
-      let seq = bound ? live.seq : b.seq
+      const listed = live !== undefined && live.group === b.group
+      const bound = listed && !live.left
+      // A left writer is listed by its newest on:true join too, so a binding
+      // stored with the seq of an off join takes it here.
+      let seq = listed ? live.seq : b.seq
       if (k === b.group) {
         // A root's row must point at a join in its creator's own diary: the
         // binding may have been persisted with the seq of the member join

@@ -5,6 +5,8 @@
 // or released writer is held whole, as a reader folds from a contiguous
 // copy (a reduced copy comes with the client nodes' sparse read).
 
+const fs = require('node:fs')
+const path = require('node:path')
 const test = require('brittle')
 const b4a = require('b4a')
 const { testnet, until } = require('./helpers/net')
@@ -98,7 +100,7 @@ test('liveGroupJoins: a counted writer whose join is off stays, left; an uncount
   for (let i = 0; i < 9; i++) records.push(join(key(i)))
   records.push(join(key(1), false), join(key(8), false), cut(key(1), 2))
   const out = kept(records)
-  t.alike(out.get(key(1)), { group: G, seq: 10, left: true }, 'frozen and left: kept for its history')
+  t.alike(out.get(key(1)), { group: G, seq: 2, left: true }, 'frozen and left: kept for its history, by its on join')
   t.absent(out.has(key(8)), 'never counted: not kept')
   t.alike(out.get(key(0)), { group: G, seq: 1, left: false })
 
@@ -106,8 +108,23 @@ test('liveGroupJoins: a counted writer whose join is off stays, left; an uncount
   // root key never through an off join.
   const H = 'bb'.repeat(32)
   const gone = kept([join(H, true, H), join(key(50), true, H), join(key(50), false, H), join(H, false, H)])
-  t.alike(gone.get(key(50)), { group: H, seq: 3, left: true })
+  t.alike(gone.get(key(50)), { group: H, seq: 2, left: true })
   t.absent(gone.has(H), 'the root key is not kept through an off join')
+})
+
+test('liveGroupJoins: a left or released writer is listed by its newest on join for the group, never an off join (#350)', (t) => {
+  // Readers check the item's seq against an on:true join naming the writer.
+  const H = 'bb'.repeat(32)
+  const out = kept([
+    join(key(0)), join(key(0)), join(key(0), false),
+    join(key(1)), cut(key(1), 0), join(key(1), false),
+    join(key(2), true, H), join(key(2)), join(key(2), false),
+    join(key(3)), join(key(3), false), join(key(3)), join(key(3), false)
+  ])
+  t.alike(out.get(key(0)), { group: G, seq: 2, left: true }, 'joined twice, then left: the second join')
+  t.alike(out.get(key(1)), { group: G, seq: 4, left: true }, 'released, then left: its join')
+  t.alike(out.get(key(2)), { group: G, seq: 8, left: true }, 'an on join to another group is not it')
+  t.alike(out.get(key(3)), { group: G, seq: 12, left: true }, 'left, back and left again: the last on join')
 })
 
 test('liveGroupJoins: groups past MAX_GROUPS_PER_DIARY keep no writer, left or not (#350)', (t) => {
@@ -306,6 +323,45 @@ test('a 9th writer after a freeze is admitted, a counted writer whose join is of
   t.is(seeder._groupIndex.writer(W[1]).left, true, 'and marked left')
   t.is(seeder._groupIndex.writer(W[0]).left, false, 'a frozen writer with its join on is not')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a writer that left before its admission is listed by its on join, and a binding stored with the off join heals at the next start (#350)', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  // B's diary: its certificate (0) and the join of W (1); then B leaves
+  // online, before any seeder saw W: a leave in W (block 6) and the join
+  // turned off (2).
+  const { A, B, R, W } = await cutWorld(t, bootstrap, assoc)
+  await B.cores.w.append(b4a.from(JSON.stringify(groupLeave({ seen: null, cuts: [{ writer: W, seq: 6 }] }))))
+  await B.diary.append(groupJoinRecord({ group: R, writer: W, on: false }))
+  await admit(A, assoc)
+  await admit(B, assoc)
+  await admitted(first.events, W)
+  await settledFor(first.seeder, B)
+  await downloaded(first.seeder, W, 7)
+  const item = first.seeder._groupIndex.page(R).items.find((i) => i.key === W)
+  t.is(item.left, true, 'listed left')
+  t.is(item.seq, 1, 'by its on join, the block readers check')
+  t.is(readGroups(dataDir)[W].seq, 1, 'and stored with it')
+  await first.seeder.close()
+
+  // A binding stored with the seq of the off join, as the build before
+  // this one wrote it, takes the on join at the next scan.
+  const file = path.join(dataDir, 'admitted.json')
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+  data.groups[W].seq = 2
+  fs.writeFileSync(file, JSON.stringify(data))
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  await settledFor(second.seeder, B)
+  await until(() => readGroups(dataDir)[W].seq === 1, { name: 'vínculo corrigido', timeoutMs: 10000 }).catch(() => {})
+  t.alike(second.seeder._groupIndex.writer(W), { group: R, diary: B.key, seq: 1, left: true }, 'listed left by its on join again')
+  t.is(readGroups(dataDir)[W].seq, 1, 'and stored with it')
+  t.absent(second.events.some((e) => e.event === 'group-rejected' && e.key === W), 'never purged')
+  t.is(first.events.filter((e) => e.event === 'fatal').length + second.events.filter((e) => e.event === 'fatal').length, 0)
 })
 
 test('a writer its diary released (cut 0) stays held whole, and a fresh reader reads its leave in order (#350)', async (t) => {
