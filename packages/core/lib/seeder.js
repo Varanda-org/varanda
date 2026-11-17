@@ -249,6 +249,7 @@ const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
+const { DEFAULT_STORAGE_BYTES, coreCharge, memberCapFor, createStorageBudget } = require('./storage-budget')
 const { feira, mentionTokens, MENTION_MAX } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
@@ -1467,6 +1468,13 @@ class Seeder {
   // exactly like a seeder from before discovery (tests and rollback, no CLI
   // flag). discoveryViewTtlMs (= DISCOVERY_VIEW_TTL_MS) and
   // discoveryRebuildMs (= DISCOVERY_REBUILD_MS) are test-only.
+  // storageBytes (default DEFAULT_STORAGE_BYTES) is the seeder-wide storage
+  // budget over every diary, media core and group core it holds
+  // (storage-budget.js; blob, DM and visit pools are bounded apart).
+  // Each member gets a fair share of it (memberCapFor: a sixteenth, never
+  // less than one diary and its media at their quotas).
+  // storageReserve (null = reserveFor(storageBytes)) and storageMemberCap
+  // (null = that fair share) are test-only.
   // Connection slots (issue #32) are shared by remote address on both caps
   // (lib/peer-slots.js); addressOf(socket) -> host string reads a swarm
   // socket's address (default: its UDX stream's remoteHost) and probationMs
@@ -1531,8 +1539,23 @@ class Seeder {
     feiraMaxRatings = undefined,
     feiraMaxRatingsPerTarget = undefined,
     feiraRescanMs = FEIRA_RESCAN_MS,
-    feiraRescanMaxMs = FEIRA_RESCAN_MAX_MS
+    feiraRescanMaxMs = FEIRA_RESCAN_MAX_MS,
+    storageBytes = DEFAULT_STORAGE_BYTES,
+    storageReserve = null, // test-only (see above)
+    storageMemberCap = null // test-only (see above)
   } = {}) {
+    const fullMember = coreCharge({ length: maxLogBlocks, byteLength: maxLogBytes }) +
+      MAX_MEDIA_CORES * coreCharge({ length: maxMediaBlocks, byteLength: maxMediaBytes })
+    this._storage = createStorageBudget({
+      budget: storageBytes,
+      reserve: storageReserve,
+      memberCap: storageMemberCap === null ? memberCapFor(storageBytes, fullMember) : storageMemberCap
+    })
+    this._storageDropped = 0 // owners dropped by the budget since start
+    this._storagePassQueued = false
+    // Off until start() runs its own pass once every survivor is served:
+    // a pass earlier would drop a diary before its media and groups are.
+    this._storageArmed = false
     this.maxServed = maxServed
     this.maxMedia = maxMedia === null ? maxServed : maxMedia
     this.maxMediaBlocks = maxMediaBlocks
@@ -1616,7 +1639,8 @@ class Seeder {
     // Seeder Noise key (hex) -> the one connection of that seeder whose slot
     // is protected (_slotProtected).
     this._slotSeeders = new Map()
-    // Slot data of the live local external streams, oldest first; the oldest
+    // Slot data of the local external streams that hold a slot, oldest
+    // first (a displaced one leaves at once, in _displace); the oldest
     // within the local share are protected (_localInShare).
     this._localStreams = new Set()
     // Seeder-wide budget of the bytes declared by charged (large,
@@ -2268,6 +2292,18 @@ class Seeder {
       }
       await Promise.all(rechecks)
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
+      // The storage budget, before the swarm: the runtime pass over the
+      // stored signed sizes, so a restart with a smaller budget comes back
+      // under it, and its purges finish first (a failure fails the start
+      // and keeps the victim listed for the next one).
+      this._storageArmed = true
+      const servedBefore = [this._served.size, this._mediaServed.size, this._groupServed.size]
+      this._storagePass()
+      diariesKept -= servedBefore[0] - this._served.size
+      mediaKept -= servedBefore[1] - this._mediaServed.size
+      groupsKept -= servedBefore[2] - this._groupServed.size
+      await Promise.all([...this._drops.values()])
+      if (this.fatal) throw new Error('falha ao limpar núcleos na partida')
 
       marks.prepare = Date.now()
       // Step 5: the swarm, with the seeder's Noise key pair.
@@ -2283,7 +2319,7 @@ class Seeder {
       marks.accepting = Date.now()
       const topics = [
         this.topic,
-        ...survivors.map(([, core]) => core.discoveryKey),
+        ...survivors.filter(([key]) => this._served.has(key)).map(([, core]) => core.discoveryKey),
         ...mediaSurvivors.filter(([key]) => this._mediaServed.has(key)).map(([, , core]) => core.discoveryKey),
         ...groupSurvivors.filter(([key]) => this._groupServed.has(key)).map(([, , core]) => core.discoveryKey)
       ]
@@ -2309,9 +2345,10 @@ class Seeder {
     const admitted = this.admittedKeys()
     this._ready = true
     const phases = startupPhases(marks)
-    // kept is the survivors of that re-gate step. dropped is the size before
-    // the step minus kept. The step only drops keys it walked, so dropped
-    // is >= 0 with no clamp. A diary admitted or dropped while the swarm
+    // kept is the survivors of that re-gate step, less the cores the
+    // startup storage pass dropped. dropped is the size before the step
+    // minus kept. Both only drop keys the step walked, so dropped is >= 0
+    // with no clamp. A diary admitted or dropped while the swarm
     // flushes is not part of these counts.
     const cores = {
       diaries: { kept: diariesKept, dropped: diariesBefore - diariesKept },
@@ -2358,6 +2395,7 @@ class Seeder {
     let mediaBytes = 0
     for (const entry of this._mediaServed.values()) mediaBytes += entry.core.byteLength
     const swarm = this.swarm ? this.swarm.connections.size : 0
+    const storage = this._storage.stats()
     return {
       status: this._closing ? 'closing' : (this._ready ? 'ok' : 'starting'),
       admitted: this._admitted.size,
@@ -2378,6 +2416,7 @@ class Seeder {
       mediaCores: this._media.size,
       mediaBytes,
       groupCores: this._groups.size,
+      storage: { used: storage.used, budget: storage.budget, reserve: storage.reserve, dropped: this._storageDropped },
       indexRecords: this._index.stats().records,
       indexSaturated: this._index.stats().saturated,
       topicPosts: this._topics.stats().posts,
@@ -2508,11 +2547,14 @@ class Seeder {
     // The slot is reserved synchronously, before the first await (M1), so
     // concurrent admissions for different keys never overshoot the cap.
     if (this._served.size + this._reserved.size >= this.maxServed) return this._reject(peer, key, 'seeder-full')
+    // Storage budget: no block 0 is fetched while nothing could fit.
+    if (!this._storage.room() || !this._storage.memberRoom(key)) return this._reject(peer, key, 'storage-full')
     this._reserved.add(key)
     try {
       return await this._admitReserved(key, cert, peer, onFetch)
     } finally {
       this._reserved.delete(key)
+      this._storage.unreserve(key)
     }
   }
 
@@ -2550,6 +2592,9 @@ class Seeder {
     // store (an oversized block 0 itself is 'not-in-log': decodeBlock refuses
     // it).
     if (this._overQuota(res)) return this._reject(peer, key, 'quota')
+    // The signed sizes are charged against the storage budget before
+    // anything is persisted, so concurrent admissions never overshoot it.
+    if (!this._storage.reserveCharge(key, coreCharge(res), key)) return this._reject(peer, key, 'storage-full')
     // Re-check the cap right before admitting (defence in depth, M1).
     if (this._served.size >= this.maxServed) return this._reject(peer, key, 'seeder-full')
 
@@ -2590,6 +2635,7 @@ class Seeder {
         }
       }
       this._admitted.delete(key)
+      this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
       return this._reject(peer, key, 'admission-failed')
@@ -2611,6 +2657,7 @@ class Seeder {
         return
       }
       this._admitted.delete(key)
+      this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
       return this._reject(peer, key, after)
@@ -2666,6 +2713,83 @@ class Seeder {
   _groupOverQuota (cut, { length, byteLength }) {
     if (cut === null) return this._overQuota({ length, byteLength })
     return Math.min(keptBelow(cut), length) > this.maxLogBlocks
+  }
+
+  // A group core is charged at most the log quota: a cut writer keeps no
+  // more than that of a longer signed log (_groupKeptOver).
+  _groupCharge (sizes) {
+    return coreCharge(sizes, { maxBytes: this.maxLogBytes, maxBlocks: this.maxLogBlocks })
+  }
+
+  // Growth past the storage budget or past a member's fair share queues
+  // one drop pass; several appends in the same tick share it.
+  _storageCheck () {
+    if (!this._storageArmed || this._storagePassQueued || this._closing) return
+    if (!this._storage.over() && !this._storage.capOver()) return
+    this._storagePassQueued = true
+    setImmediate(() => this._storagePass())
+  }
+
+  // First the fair shares: a member past its share sheds the roots its
+  // joins brought in, largest first, and goes itself only when its own
+  // cores still pass it (storage-budget.js capVictims). Then the budget:
+  // whole owners, roots first, then members, each the largest first, until
+  // what is served fits the budget minus its reserve (victims). Both depend
+  // only on the stored signed sizes and the admitted.json order, so start()
+  // runs the same pass and a restart picks the same victims; a crash
+  // mid-purge leaves a victim listed and the next start picks it again.
+  // Not a moderation outcome: nothing is noted in goneRoots or
+  // revokedCreators, and the member may be admitted again once it fits.
+  _storagePass () {
+    this._storagePassQueued = false
+    if (this._closing) return
+    let dropped = 0
+    const memberCap = this._storage.memberCap
+    for (const { member, bytes, roots, drop, left } of this._storage.capVictims()) {
+      this.log({ event: 'warning', key: member, reason: 'storage-member-over', bytes, cap: memberCap })
+      for (const root of roots) {
+        // An earlier drop's cascade may have taken it already.
+        if (!this._groupServed.has(root.key)) continue
+        dropped++
+        this.log({ event: 'warning', key: root.key, reason: 'storage-full', bytes: root.bytes })
+        this._dropGroup(root.key, 'storage-full')
+      }
+      if (drop) {
+        dropped++
+        this.log({ event: 'warning', key: member, reason: 'storage-full', bytes: left })
+        this._dropOwner(member)
+      }
+    }
+    const order = new Map()
+    for (const key of this._admitted.keys()) order.set(key, order.size)
+    const victims = this._storage.victims((owner) => order.has(owner) ? order.get(owner) : -1)
+    if (victims.length > 0) {
+      const { used, budget } = this._storage.stats()
+      this.log({ event: 'warning', reason: 'storage-over-budget', used, budget })
+      let fromBudget = 0
+      for (const { owner, bytes } of victims) {
+        // A drop's cascade can free more than its owner's charge (a root no
+        // member supports any longer): stop once what is served fits.
+        if (fromBudget > 0 && this._storage.stats().served <= this._storage.limit) break
+        fromBudget++
+        this.log({ event: 'warning', key: owner, reason: 'storage-full', bytes })
+        this._dropOwner(owner)
+      }
+      dropped += fromBudget
+    }
+    this._storageDropped += dropped
+  }
+
+  // One owner out by the storage budget: a diary with what it brought, or
+  // a root alone.
+  _dropOwner (owner) {
+    this._drop(owner, 'storage-full')
+    // What _drop did not take: a root (its own owner, never a served
+    // diary), or the cores of a diary that is no longer served itself.
+    for (const key of this._storage.keysOf(owner)) {
+      if (this._mediaServed.has(key)) this._dropMedia(key, 'storage-full')
+      else if (this._groupServed.has(key)) this._dropGroup(key, 'storage-full')
+    }
   }
 
   _serve (key, core, { regate, cert0 = null, pushFrom = core.length }) {
@@ -2857,6 +2981,8 @@ class Seeder {
         this._notices.markPending(key)
         this._postNotices.markPending(key)
         noteGrowth(entry, core.length, Date.now())
+        this._storage.set(key, key, coreCharge(core))
+        this._storageCheck()
       }
     }
     core.on('append', checkQuota)
@@ -3146,6 +3272,7 @@ class Seeder {
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
+    this._storage.leave(key)
     this._stopEntry(entry)
     // The diary leaves the engagement index NOW, before the purge even
     // starts: none of its edges, engagements or hints is readable from here
@@ -3215,6 +3342,7 @@ class Seeder {
         return
       }
       this._dropping.delete(key)
+      this._storage.release(key)
       await this._persist()
     })()
     const tracked = drop.catch(noop).then(() => {
@@ -3944,6 +4072,7 @@ class Seeder {
     if (this._closing) return
     if (!this._mediaStillWanted(diary, entry, key)) return
     if (this._mediaServed.size + this._mediaReserved.size >= this.maxMedia) return this._rejectMedia(key, diary, 'media-full')
+    if (!this._storage.room() || !this._storage.memberRoom(diary)) return this._rejectMedia(key, diary, 'storage-full')
     const sockets = this._peerSockets()
     if (sockets.length === 0) return this._rejectMedia(key, diary, 'no-peers')
     this._mediaReserved.add(key)
@@ -3953,6 +4082,7 @@ class Seeder {
       return await work
     } finally {
       this._mediaReserved.delete(key)
+      this._storage.unreserve(key)
       if (this._inflight.get(key) === work) this._inflight.delete(key)
     }
   }
@@ -3988,6 +4118,7 @@ class Seeder {
     // block 0. (The fetch does not expose the fork; it is checked right
     // after the open below, before anything is served.)
     if (this._overMediaQuota(res)) return this._rejectMedia(key, diary, 'quota')
+    if (!this._storage.reserveCharge(key, coreCharge(res), diary)) return this._rejectMedia(key, diary, 'storage-full')
     if (this._mediaServed.size >= this.maxMedia) return this._rejectMedia(key, diary, 'media-full')
 
     // Persist the binding BEFORE the main store opens K; roll back exactly
@@ -4013,6 +4144,7 @@ class Seeder {
         }
       }
       this._media.delete(key)
+      this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
       return this._rejectMedia(key, diary, 'admission-failed')
@@ -4031,6 +4163,7 @@ class Seeder {
         return
       }
       this._media.delete(key)
+      this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
       return this._rejectMedia(key, diary, late)
@@ -4074,6 +4207,10 @@ class Seeder {
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
       if (this._overMediaQuota(core)) this._dropMedia(key, 'quota')
+      else if (this._mediaServed.get(key) === entry) {
+        this._storage.set(key, diary, coreCharge(core))
+        this._storageCheck()
+      }
     }
     core.on('append', checkQuota)
     entry.stopQuota = () => core.off('append', checkQuota)
@@ -4156,6 +4293,7 @@ class Seeder {
     const binding = this._media.get(key)
     this._media.delete(key)
     this._mediaDropping.set(key, binding)
+    this._storage.leave(key)
     this._stopEntry(entry)
     if (this.swarm) {
       try {
@@ -4173,6 +4311,7 @@ class Seeder {
         return
       }
       this._mediaDropping.delete(key)
+      this._storage.release(key)
       await this._persist()
     })()
     const tracked = drop.catch(noop).then(() => {
@@ -4243,12 +4382,13 @@ class Seeder {
 
   // Live joins whose core is missing for a reason that must keep answers
   // about G from looking final: the seeder's own capacity ('group-full':
-  // maxGroupCores, maxGroupWriters) or a first timeout not yet retried
+  // maxGroupCores, maxGroupWriters; 'storage-full' from the budget, not from
+  // a member's share, whose wait has no group) or a first timeout not yet retried
   // (_groupJoinStale takes over after the retry). For group G (or any when
   // null) and diary D (or any).
   _groupFullFor (group, diary = null) {
     for (const [id, b] of this._groupBackoff) {
-      if (b.group === null || !(b.reason === 'group-full' || (b.reason === 'timeout' && b.step === 0))) continue
+      if (b.group === null || !(b.reason === 'group-full' || b.reason === 'storage-full' || (b.reason === 'timeout' && b.step === 0))) continue
       if (group !== null && b.group !== group) continue
       const d = id.slice(0, 64)
       if (diary !== null && d !== diary) continue
@@ -4712,8 +4852,9 @@ class Seeder {
   // A join whose core timed out again on its retry past the first wait is
   // still retried, but no longer holds group answers back: a core nobody
   // serves would otherwise keep every page of its group incomplete. A
-  // writer missed once stays pending until that retry; 'group-full' never
-  // goes stale (the seeder's own capacity is the reason: _groupFullFor).
+  // writer missed once stays pending until that retry; 'group-full' and
+  // 'storage-full' never go stale (the seeder's own capacity is the
+  // reason: _groupFullFor).
   _groupJoinStale (diary, key) {
     const b = this._groupBackoff.get(diary + ':' + key)
     return b !== undefined && b.reason === 'timeout' && b.step >= 1
@@ -4766,6 +4907,14 @@ class Seeder {
       this._groupBackoffHit(diary, key, 'group-full', group)
       return this._rejectGroup(key, diary, group, 'group-full', seq)
     }
+    // A root uses the joiner's whole share; its writer, only the joiner's
+    // own cores (storage-budget.js memberRoom). Only the seeder's own room
+    // holds the group's answers back (_groupFullFor): the share is the
+    // member's own limit, like the per-diary caps, so its wait has no group.
+    if (!this._storage.room() || !this._storage.memberRoom(diary, { first: key === group })) {
+      this._groupBackoffHit(diary, key, 'storage-full', this._storage.room() ? null : group)
+      return this._rejectGroup(key, diary, group, 'storage-full', seq)
+    }
     // liveGroupJoins already keeps one diary's joins under the caps; this
     // also counts the cores it left (still bound and served).
     const held = this._diaryGroupCores(diary, group)
@@ -4798,6 +4947,7 @@ class Seeder {
     } finally {
       this._groupReserved.delete(key)
       this._groupReservedBy.delete(key)
+      this._storage.unreserve(key)
       this._pruneGroupHeader(group)
       // A core admitted for this join and still awaiting its header in the
       // main store keeps the wait (_gateGroup clears it): a header withheld
@@ -4891,6 +5041,11 @@ class Seeder {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, 'quota', seq)
     }
+    const charge = this._groupCharge(res)
+    if (!this._storage.reserveCharge(key, charge, diary, { first: key === group })) {
+      this._groupBackoffHit(diary, key, 'storage-full', this._storage.fits(key, charge) ? null : group)
+      return this._rejectGroup(key, diary, group, 'storage-full', seq)
+    }
     if (this._groupServed.size >= this.maxGroupCores) {
       this._groupBackoffHit(diary, key, 'group-full', group)
       return this._rejectGroup(key, diary, group, 'group-full', seq)
@@ -4952,6 +5107,7 @@ class Seeder {
         }
       }
       this._groups.delete(key)
+      this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
       return this._rejectGroup(key, diary, group, 'admission-failed', seq)
@@ -4975,6 +5131,7 @@ class Seeder {
         return
       }
       this._groups.delete(key)
+      this._storage.release(key)
       await this._persist().catch(noop)
       if (this._closing) return
       return this._rejectGroup(key, diary, group, late, seq)
@@ -5055,8 +5212,18 @@ class Seeder {
     }
     const checkQuota = () => {
       if (entry.dropped || this._closing) return
-      if (entry.cut !== null) return this._cutGroupCore(key, entry)
-      if (this._overQuota(core)) this._dropGroup(key, 'quota')
+      if (entry.cut !== null) this._cutGroupCore(key, entry)
+      else if (this._overQuota(core)) this._dropGroup(key, 'quota')
+      if (entry.dropped || this._groupServed.get(key) !== entry) return
+      // A root is its own owner: its size is set by its key holder, not by
+      // the members whose joins keep it, so it never weighs on a member's
+      // place in the drop order. It uses the fair share of the member whose
+      // join brought it in (`by`, as the per-diary caps), and past that
+      // share it is dropped, never the member.
+      const b = this._groups.get(key)
+      if (key === group) this._storage.set(key, key, this._groupCharge(core), { member: (b && b.by) || key, first: true })
+      else this._storage.set(key, b ? b.diary : diary, this._groupCharge(core))
+      this._storageCheck()
     }
     // A block below a cut counts toward the bytes kept, read only while the
     // whole log is over the byte quota.
@@ -5542,6 +5709,7 @@ class Seeder {
     const binding = this._groups.get(key)
     this._groups.delete(key)
     this._groupsDropping.set(key, binding)
+    this._storage.leave(key)
     this._stopEntry(entry)
     this._groupIndex.removeWriter(key)
     if (key === entry.group) this._groupIndex.setHeader(key, null)
@@ -5561,6 +5729,7 @@ class Seeder {
         return
       }
       this._groupsDropping.delete(key)
+      this._storage.release(key)
       await this._persist()
     })()
     const tracked = drop.catch(noop).then(() => {
@@ -8669,6 +8838,9 @@ class Seeder {
     if (victim === null || victim.data === null) return
     const { socket, onRefuse } = victim.data
     victim.data.displaced = true
+    // Its socket may stay open for the grace below; it no longer holds a
+    // slot, so it must not hold a place in the local share either.
+    this._localStreams.delete(victim.data)
     this.log({ event: 'peer-dropped', peerKey: remoteKeyHex(socket), reason: 'connection-displaced' })
     if (typeof onRefuse === 'function') {
       let handed = true
@@ -8688,7 +8860,8 @@ class Seeder {
   }
 
   // Whether a slot entry may not be displaced: an external stream from this
-  // host within its share (acceptStream's `local`), a swarm connection of a seeder whose
+  // host within its share (acceptStream's `local`; one outside it is not
+  // protected, not even by a proof), a swarm connection of a seeder whose
   // certificate checked out at hello (one per seeder key), or a member that
   // proved it owns a diary this seeder serves, has gated and does not block
   // or hold. Evaluated when a full table looks for a victim, so a diary
@@ -8752,8 +8925,10 @@ class Seeder {
   // local (optional): true when the caller knows the client runs on this
   // host (seed-ws: a loopback connection that did not come through the
   // proxy, such as the account service's links); its slot is never
-  // displaced while it is among the oldest live local streams within a
-  // quarter of maxExternal (at least 1); any other is an ordinary entry.
+  // displaced while it is among the oldest local streams that hold a slot,
+  // within a quarter of maxExternal (at least 1); any other local stream is
+  // an unprotected entry of its address, even when its peer sends a valid
+  // `prove`.
   acceptStream (rawStream, { handshakeTimeoutMs = 10000, onRefuse = null, address = null, local = false } = {}) {
     rawStream.on('error', noop)
     if (!this._accepting || this._closing) {

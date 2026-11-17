@@ -1035,12 +1035,27 @@ function ascii (b, at, text) {
   return true
 }
 
-// A JPEG, PNG, GIF or WebP start, the formats mediaBounds parses (as loose
-// as its own sniffing, so GIF87a/GIF89a and the full PNG signature match).
+// An AVIF start, as mediaBounds sniffs it: an ftyp box of 16 to 144 bytes,
+// a multiple of 4, all present, whose major brand is avif, or mif1 with avif
+// among the compatible brands. An avis brand anywhere is a sequence, not an image; mif1
+// alone is HEIC and isom, mp42 or M4A are video or audio.
+function looksLikeAvif (b) {
+  if (b.byteLength < 16 || !ascii(b, 4, 'ftyp')) return false
+  const size = ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0
+  if (size < 16 || size > 144 || size % 4 !== 0 || size > b.byteLength) return false
+  const brands = [String.fromCharCode(b[8], b[9], b[10], b[11])]
+  for (let at = 16; at + 4 <= size; at += 4) brands.push(String.fromCharCode(b[at], b[at + 1], b[at + 2], b[at + 3]))
+  if (brands.includes('avis')) return false
+  return brands[0] === 'avif' || (brands[0] === 'mif1' && brands.indexOf('avif', 1) !== -1)
+}
+
+// A JPEG, PNG, GIF, WebP or AVIF start, the formats mediaBounds parses (as
+// loose as its own sniffing, so GIF87a/GIF89a and the full PNG signature
+// match).
 function looksLikeImage (b) {
   if (b.byteLength >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return true
   if (b.byteLength >= 4 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return true
-  return ascii(b, 0, 'GIF8') || (ascii(b, 0, 'RIFF') && ascii(b, 8, 'WEBP'))
+  return ascii(b, 0, 'GIF8') || (ascii(b, 0, 'RIFF') && ascii(b, 8, 'WEBP')) || looksLikeAvif(b)
 }
 
 module.exports = {
@@ -1059,5 +1074,6 @@ module.exports = {
   GET_PACE_MS,
   GET_WINDOW,
   GET_RETRIES,
-  GET_TIMEOUT_MS
+  GET_TIMEOUT_MS,
+  looksLikeImage
 }

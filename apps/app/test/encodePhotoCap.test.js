@@ -47,6 +47,17 @@ test('photoProblem refuses a header past 16384 px on a side or 100 MP', async (t
   t.is(photoProblem(jpeg(100, 100).subarray(0, 8)), 'não foi possível abrir a foto', 'a truncated header')
 })
 
+test('photoProblem refuses any AVIF before a decode, a grid of huge tiles included', async (t) => {
+  const { photoProblem } = await load()
+  const avif = require('../../../packages/rpc/test/helpers/avif')
+  const samples = require('../../../packages/rpc/test/helpers/avif-samples')
+  t.is(photoProblem(samples.ios.opaque), 'formato não aceito', 'an iOS AVIF')
+  t.is(photoProblem(samples.libavif.opaque), 'formato não aceito', 'a libavif AVIF')
+  t.is(photoProblem(samples.ios.grid2048x1536), 'formato não aceito', 'an iOS grid AVIF')
+  const huge = avif.build(avif.grid({ rows: 2, cols: 1, tileWidth: 16384, tileHeight: 8192, width: 1, height: 8193 }))
+  t.is(photoProblem(huge), 'formato não aceito', 'a 1 x 8193 grid over two 16384 x 8192 tiles')
+})
+
 test('encodeFile checks the header before decoding a photo', async (t) => {
   const { encodeFile } = await load()
   let decodes = 0

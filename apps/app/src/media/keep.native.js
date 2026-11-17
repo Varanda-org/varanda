@@ -30,9 +30,9 @@ import { validDescriptor } from './fetch.js'
 
 const ROOT = 'varanda-media-keep'
 const KINDS = Object.freeze(['avatars', 'posts'])
-const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })
+const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif' })
 const HEX64 = /^[0-9a-f]{64}$/
-const NAME = /^([0-9a-f]{64})-([0-9a-f]{64})-([0-9]+)-([0-9]+)-([0-9]+)-([0-9a-f]{64})-([0-9]+)x([0-9]+)\.(jpg|png|webp|gif)$/
+const NAME = /^([0-9a-f]{64})-([0-9a-f]{64})-([0-9]+)-([0-9]+)-([0-9]+)-([0-9a-f]{64})-([0-9]+)x([0-9]+)\.(jpg|png|webp|gif|avif)$/
 const TMP = '.tmp'
 
 export const KEEP_MAX_BYTES = 67108864

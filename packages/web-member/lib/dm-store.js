@@ -122,7 +122,7 @@ const SUMMARY_PAGE = 30
 const MEDIA_INDEX = 'dmMediaIndex'
 const MEDIA_PREFIX = 'dmMedia/'
 const MEDIA_ITEMS_MAX = 4
-const MEDIA_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+const MEDIA_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
 const MEDIA_KEYS = ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms']
 const HEX48 = /^[0-9a-f]{48}$/
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/

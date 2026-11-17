@@ -23,8 +23,9 @@
 // the long cache (force-cache) and retries revalidate (no-cache).
 // only then the bytes go to deps.urlFromBytes (the caller passes the one from
 // ./display: a blob: URL on the web, a cache file:// URI natively) typed with
-// the descriptor's mime (one of the four image types), which the UI shows as
-// an image and nothing else. The display module is injected, not imported,
+// the descriptor's mime (one of the image types), which the UI shows as
+// an image and nothing else, once rpc.mediaBounds accepted the bytes as that
+// format. The display module is injected, not imported,
 // so this file stays loadable in Node. Every function takes injectable
 // dependencies for tests.
 // Chat items (deps.chat === true, public group posts only) may also be a
@@ -293,8 +294,13 @@ export async function fetchMedia (author, d, deps) {
   const url = mediaUrl(author, d, { chat: deps && deps.chat })
   if (url === null) throw fail('foto inválida')
   const bytes = await fetchVerified(url, d, deps, deps && deps.persist === false)
-  // The author's hash proves who stored it, not what it is.
+  // The author's hash proves who stored it, not what it is. Every caller
+  // that makes a display URL of a remote photo (posts, the Feira, avatars,
+  // the keep queue) comes through here, so the strict parser runs before the
+  // platform decoder ever sees the bytes. A file kept on disk by an older
+  // build is handed back by keptUrl without this check.
   if (d.mime === AUDIO_MIME && rpc.audioBounds(bytes) === null) throw fail('conteúdo não confere')
+  if (MEDIA_MIMES.includes(d.mime) && rpc.mediaBounds(bytes, d.mime) === null) throw fail('conteúdo não confere')
   return bytes
 }
 

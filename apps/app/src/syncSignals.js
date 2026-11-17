@@ -6,6 +6,10 @@
 // The echo of a write made on this device ('diário próprio escrito neste
 // aparelho') only moves ownLength, so nothing the person does here reads as
 // news; ownRemote keeps the growth that came from another device.
+// `storageFull`: the verified seeder refused or dropped the own diary for its
+// storage budget ('rejected <own> storage-full'). It outlives run starts and
+// stops, since the refused run ends and the next starts after a backoff, and
+// clears on the own diary's admission or a refusal for another reason.
 
 export const EMPTY_SIGNALS = Object.freeze({
   runId: null,
@@ -26,8 +30,16 @@ export const EMPTY_SIGNALS = Object.freeze({
   ownRemote: null,
   lastDownloadAt: null,
   startedAt: null,
-  idleSince: null
+  idleSince: null,
+  storageFull: false
 })
+
+export const STORAGE_FULL_NOTE = 'O semeador está sem espaço e não está guardando seu diário agora.'
+
+// Offline, the seeder's last answer is old news, so the note waits.
+export function storageFullShown ({ online, signals }) {
+  return online !== false && !!signals && signals.storageFull === true
+}
 
 // The previous object comes back when an event changes nothing, so the
 // provider's setState bails out and no consumer re-renders on that line.
@@ -91,6 +103,10 @@ function foldNext (state, name, data, now) {
     next.reconnecting = false
   }
   if (/^peer seeder [0-9a-f]{8}$/.test(line)) next.seederVerified = true
+  // The nodes print 'rejected' and 'admitted' only for the own diary.
+  const refused = /^rejected [0-9a-f]{64} ([a-z0-9-]{1,64})$/.exec(line)
+  if (refused) next.storageFull = refused[1] === 'storage-full'
+  if (/^admitted [0-9a-f]{64} (0|[1-9][0-9]*)$/.test(line)) next.storageFull = false
   if (/^peer seeder [0-9a-f]{8} não verificado$/.test(line)) {
     next.unverified = true
     next.seederVerified = false

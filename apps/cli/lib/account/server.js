@@ -19,7 +19,7 @@ const { spentCapacity } = require('./start-nonces')
 const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
-const { createDeletionSweep } = require('./deletion')
+const { createDeletionSweep, createModerationRetention } = require('./deletion')
 const { createPasskeyRoutes } = require('./passkey-routes')
 const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, header } = require('./app-return')
@@ -963,6 +963,9 @@ function createAccountServer ({
 
   // Excluir conta: always mounted. The sweep purges the other stores for
   // every deleted key; serve() runs it at start and then periodically.
+  // Six months after a deletion it also purges the key's moderation data,
+  // after a phone sweep, so a late block still burns the number first.
+  const moderationRetention = createModerationRetention({ accounts: store, moderation, beforeForget: () => phoneRoutes.sweepNow(), now, log })
   const deletion = createDeletionSweep({
     accounts: store,
     terms,
@@ -981,6 +984,7 @@ function createAccountServer ({
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
     tick: pages !== null && pages.pagesGroups && typeof pages.pagesGroups.purgeBlocked === 'function' ? () => pages.pagesGroups.purgeBlocked() : null,
+    retention: moderationRetention,
     log
   })
   const publishedList = moderationBlocklist(moderation)

@@ -72,6 +72,23 @@ test('keep then keptUrl gives the same URI, built only from validated fields', a
   t.ok(png.endsWith('.png'), 'extension from the mime table')
   t.ok(keep.keep('posts', A, desc({ mime: 'image/webp', start: 3 }), bytesOf(4)).endsWith('.webp'))
   t.ok(keep.keep('posts', A, desc({ mime: 'image/gif', start: 4 }), bytesOf(4)).endsWith('.gif'))
+  const avif = keep.keep('posts', A, desc({ mime: 'image/avif', start: 5 }), bytesOf(4))
+  t.ok(avif.endsWith('.avif'), 'an AVIF photo keeps as .avif')
+  t.is(keep.keptUrl('posts', A, desc({ mime: 'image/avif', start: 5 })), avif)
+})
+
+test('a kept AVIF is listed like the other photos; a name outside the pattern is not', async (t) => {
+  reset()
+  const keep = await load()
+  const avif = keep.keep('posts', A, desc({ mime: 'image/avif' }), bytesOf(4))
+  const base = ROOT + 'posts/' + [A, CORE, 2, 1, 4, 'e5'.repeat(32), '10x20'].join('-')
+  const strays = [base + '.heic', base + '.avif.jpg', base + '.AVIF']
+  for (const stray of strays) files().set(stray, { bytes: bytesOf(4), mtime: BASE })
+  keep.dropKeptAuthors([A])
+  t.absent(files().has(avif), 'the AVIF file of a dropped author goes')
+  for (const stray of strays) t.ok(files().has(stray), 'a stray name is never touched: ' + stray.slice(base.length))
+  keep.releaseKept(base + '.heic')
+  t.pass('releaseKept ignores a name outside the pattern')
 })
 
 test('invalid kind, author, descriptor or bytes are refused', async (t) => {

@@ -32,7 +32,7 @@ const MAX_MEDIA_CORES = 4 // latest media-core declarations honoured per diary
 const MAX_MEDIA_PER_POST = 10
 const MAX_DELETE_RANGES = 4
 const MAX_MEDIA_ITEM_BLOCKS = 256 // 8 MiB per item
-const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 const MAX_MEDIA_DIMENSION = 16384
 // Voice notes (chats only, never diary posts): one MPEG-4 audio item.
 const AUDIO_MIME = 'audio/mp4'

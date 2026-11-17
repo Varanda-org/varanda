@@ -6,6 +6,7 @@
 // as the real CLI process against VARANDA_ACCOUNT_ORIGIN.
 
 const fs = require('node:fs')
+const http = require('node:http')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
 const test = require('brittle')
@@ -27,6 +28,7 @@ const { createPagesDelegate } = require('../lib/account/pages-delegate')
 const { createPagesNotices } = require('../lib/account/pages-notices')
 const { createAccountServer } = require('../lib/account/server')
 const { accountOrigin, groupStep, serviceError } = require('../lib/commands/page')
+const { ios: avifIos } = require('../../../packages/rpc/test/helpers/avif-samples')
 
 const BIN = path.join(__dirname, '../bin/varanda.js')
 const ORIGIN = 'https://varanda.test'
@@ -57,6 +59,69 @@ function cli (args, env) {
 function lastJson (stdout) {
   const lines = stdout.trim().split('\n')
   return JSON.parse(lines[lines.length - 1])
+}
+
+function isoBox (type, payload) {
+  const head = Buffer.alloc(8)
+  head.writeUInt32BE(8 + payload.length)
+  head.write(type, 4, 4, 'latin1')
+  return Buffer.concat([head, payload])
+}
+
+function isoFtyp (major, brands) {
+  return isoBox('ftyp', Buffer.concat([
+    Buffer.from(major, 'latin1'),
+    Buffer.alloc(4),
+    ...brands.map((brand) => Buffer.from(brand, 'latin1'))
+  ]))
+}
+
+// Records the media upload (op header and raw body) and answers the two
+// steps a page post with one file makes: start, then the upload, then start
+// and the post. Loopback only.
+function avifPageStub (t) {
+  const seen = []
+  const server = http.createServer((req, res) => {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      const body = Buffer.concat(chunks)
+      const pathname = (req.url || '').split('?')[0]
+      if (pathname === '/account/pages/start') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ nonce: 'n'.repeat(43) }))
+        return
+      }
+      if (pathname === '/account/pages/media') {
+        let op = null
+        try {
+          op = JSON.parse(req.headers['x-varanda-page-op'])
+        } catch {}
+        seen.push({ op, body })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ descriptor: { mime: 'image/avif', width: 16, height: 16 } }))
+        return
+      }
+      if (pathname === '/account/pages/post') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ seq: 2, pushed: true }))
+        return
+      }
+      res.writeHead(404).end()
+    })
+    req.on('error', () => {
+      res.destroy()
+    })
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      t.teardown(() => new Promise((resolve) => {
+        server.closeAllConnections()
+        server.close(resolve)
+      }))
+      resolve({ origin: 'http://127.0.0.1:' + server.address().port, seen })
+    })
+  })
 }
 
 test('page cli: VARANDA_ACCOUNT_ORIGIN is https, or http on a loopback host only', (t) => {
@@ -241,4 +306,102 @@ test('page cli: register, terms, create, post, follow, notices, close as a core 
     t.absent(/[0-9a-f]{128}/i.test(out), 'no 128-hex value printed')
     t.absent(out.includes(secretHex), 'no delegate secret printed')
   }
+})
+
+// The T0 iOS sample is a real 16x16 AVIF (ispe). HEIC and video share ftyp,
+// and a cut file is not a photo. The page avatar stays on AVATAR_MIMES.
+test('page cli: an avif file is image/avif at its ispe size; heic, video and a truncated avif are refused', async (t) => {
+  const dir = tmpDir(t, 'varanda-page-avif-')
+  const pageKey = 'ef'.repeat(32)
+  const sample = avifIos.opaque
+  const avifFile = path.join(dir, 'foto.avif')
+  fs.writeFileSync(avifFile, Buffer.from(sample))
+
+  const refused = async (name, bytes) => {
+    const file = path.join(dir, name)
+    fs.writeFileSync(file, bytes)
+    const r = await cli(['page', 'post', '--page', pageKey, '--text', 'foto', '--file', file, '--data', dir], {})
+    t.is(r.status, 2, name + ': ' + r.stderr.split('\n')[0])
+    t.ok(r.stderr.startsWith('uso: foto não aceita: '), name)
+  }
+  const heic = Buffer.concat([isoFtyp('heic', ['heic', 'mif1']), isoBox('mdat', Buffer.from([1]))])
+  const mp4 = Buffer.concat([isoFtyp('isom', ['isom', 'iso2', 'avc1', 'mp41']), isoBox('mdat', Buffer.from([0, 0, 0, 1]))])
+  await refused('foto.heic', heic)
+  await refused('clip.mp4', mp4)
+  await refused('cortado.avif', Buffer.from(sample.subarray(0, sample.length - 1)))
+
+  const avatar = await cli(['page', 'photo', '--page', pageKey, '--name', 'Padaria', '--bio', '', '--file', avifFile, '--data', dir], {})
+  t.is(avatar.status, 2, avatar.stderr.split('\n')[0])
+  t.ok(avatar.stderr.startsWith('uso: foto não aceita: '), 'the avatar path keeps AVATAR_MIMES')
+
+  const pair = crypto.keyPair()
+  const association = 'ab'.repeat(32)
+  fs.mkdirSync(path.join(dir, 'private'), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ v: 1, role: 'member', association }) + '\n')
+  fs.writeFileSync(path.join(dir, 'private', 'page-actor.json'), JSON.stringify({
+    v: 1,
+    publicKey: hex(pair.publicKey),
+    secretKey: hex(pair.secretKey)
+  }), { mode: 0o600 })
+  const stub = await avifPageStub(t)
+  const posted = await cli(
+    ['page', 'post', '--page', pageKey, '--text', 'foto', '--file', avifFile, '--data', dir, '--json'],
+    { VARANDA_ACCOUNT_ORIGIN: stub.origin }
+  )
+  t.is(posted.status, 0, posted.stderr)
+  t.is(stub.seen.length, 1, 'one media upload')
+  const op = stub.seen[0].op
+  t.is(op.mime, 'image/avif')
+  t.is(op.width, 16, 'ispe width')
+  t.is(op.height, 16, 'ispe height')
+  t.is(op.bytes, sample.length)
+  t.ok(stub.seen[0].body.equals(Buffer.from(sample)), 'the file bytes go up unchanged')
+  t.alike(lastJson(posted.stdout), { seq: 2, pushed: true })
+})
+
+// The app refuses a received photo its strict parser refuses, so the CLI must
+// not upload one: every still type is read through the same parser.
+test('page cli: a photo over the pixel or side cap, or a header-less one, is refused; a small jpeg and png go up at their own size', async (t) => {
+  const dir = tmpDir(t, 'varanda-page-photo-')
+  const pageKey = 'ef'.repeat(32)
+  const u32 = (n) => Buffer.from([(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff])
+  const jpeg = (width, height) => Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, height >> 8, height & 0xff, width >> 8, width & 0xff, 3, 1, 0x11, 0, 2, 0x11, 1, 3, 0x11, 1, 0xff, 0xd9])
+  const chunk = (type, data) => Buffer.concat([u32(data.length), Buffer.from(type, 'latin1'), data, u32(0)])
+  const png = (width, height) => Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', Buffer.concat([u32(width), u32(height), Buffer.from([8, 2, 0, 0, 0])])),
+    chunk('IDAT', Buffer.alloc(16, 1))
+  ])
+
+  const refused = async (name, bytes) => {
+    const file = path.join(dir, name)
+    fs.writeFileSync(file, bytes)
+    const r = await cli(['page', 'post', '--page', pageKey, '--text', 'foto', '--file', file, '--data', dir], {})
+    t.is(r.status, 2, name + ': ' + r.stderr.split('\n')[0])
+    t.ok(r.stderr.startsWith('uso: foto não aceita: '), name)
+  }
+  await refused('grande.jpg', jpeg(6000, 4000))
+  await refused('larga.jpg', jpeg(16385, 10))
+  await refused('grande.png', png(6000, 4000))
+  await refused('vazio.jpg', Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]))
+
+  const pair = crypto.keyPair()
+  fs.mkdirSync(path.join(dir, 'private'), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ v: 1, role: 'member', association: 'ab'.repeat(32) }) + '\n')
+  fs.writeFileSync(path.join(dir, 'private', 'page-actor.json'), JSON.stringify({
+    v: 1,
+    publicKey: hex(pair.publicKey),
+    secretKey: hex(pair.secretKey)
+  }), { mode: 0o600 })
+  const stub = await avifPageStub(t)
+  const small = path.join(dir, 'pequena.jpg')
+  const little = path.join(dir, 'pequena.png')
+  fs.writeFileSync(small, jpeg(64, 48))
+  fs.writeFileSync(little, png(10, 20))
+  const posted = await cli(
+    ['page', 'post', '--page', pageKey, '--text', 'fotos', '--file', small, '--file', little, '--data', dir, '--json'],
+    { VARANDA_ACCOUNT_ORIGIN: stub.origin }
+  )
+  t.is(posted.status, 0, posted.stderr)
+  t.alike(stub.seen.map((s) => [s.op.mime, s.op.width, s.op.height]), [['image/jpeg', 64, 48], ['image/png', 10, 20]], 'each goes up at the parsed size')
 })
