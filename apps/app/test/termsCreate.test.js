@@ -101,9 +101,35 @@ test('recoverView: table', async (t) => {
     [{ decision: 'updated' }, false, false, 'updated is never this state']
   ]
   for (const [o, window, wait, label] of rows) {
-    t.alike(recoverView({ ...base, ...o }), { window, wait }, label)
+    t.alike(recoverView({ ...base, ...o }), { window, wait, card: false }, label)
   }
-  t.alike(recoverView(), { window: false, wait: false }, 'no arguments')
+  t.alike(recoverView(), { window: false, wait: false, card: false }, 'no arguments')
+})
+
+test('recoverView: the empty card is rendered instead of the splash or the gate', async (t) => {
+  const { recoverView, RECOVER_WAIT_MS } = await load()
+  const OTHER = 'cd'.repeat(32)
+  const noDiary = { unlocked: true, exists: false, publicKey: null }
+  const base = { hosted: true, locked: false, member: null, claim: null, decision: 'needed', recovering: true, elapsedMs: 0, card: X, status: noDiary }
+  const rows = [
+    // [overrides, window, wait, card, label]
+    [{}, false, false, true, 'card up, recovery on: the shell, no splash'],
+    [{ elapsedMs: RECOVER_WAIT_MS + 1 }, false, false, true, 'card up past the cap: the shell, no gate'],
+    [{ elapsedMs: NaN }, false, false, true, 'window closed while the card is up'],
+    [{ member: X, status: { unlocked: true, exists: true, publicKey: X } }, false, false, true, 'its diary already reads: still the card'],
+    [{ card: null }, true, true, false, 'no card: the splash as before'],
+    [{ card: null, elapsedMs: RECOVER_WAIT_MS }, true, false, false, 'no card, past the cap: the gate as before'],
+    [{ status: { unlocked: true, exists: true, publicKey: OTHER }, member: OTHER }, false, false, false, 'a card for another identity does not count'],
+    [{ card: OTHER, elapsedMs: RECOVER_WAIT_MS }, false, false, true, 'no diary yet: the unlocked identity is the one that raised it'],
+    [{ status: { ...noDiary, unlocked: false }, locked: true }, false, false, false, 'locked: Entrar'],
+    [{ status: null }, true, true, false, 'status unread: no card, the splash as before'],
+    [{ claim: { at: T1 } }, false, false, false, 'Termos accepted in this page load: no gate to skip'],
+    [{ decision: 'accepted' }, false, false, false, 'accepted: no gate to skip'],
+    [{ hosted: false }, false, false, false, 'native or serve: never this state']
+  ]
+  for (const [o, window, wait, card, label] of rows) {
+    t.alike(recoverView({ ...base, ...o }), { window, wait, card }, label)
+  }
 })
 
 test('heldView: asks once, waits, then shows', async (t) => {
@@ -280,10 +306,10 @@ test('Termos: Voltar only on the create gate', (t) => {
 test('App: the boot and recovery windows render the splash, termsOk stays raw', (t) => {
   const src = read('App.js')
   t.ok(src.includes('const modePass = modeUnknownPass({ hostedMode: mode === \'hosted\', hostedPage, installation: installationOrigin(), config: node.config, phase: node.phase, decision })'), 'by capability, never Platform.OS')
-  t.ok(src.includes("const gateDecision = held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision)"), 'render only')
+  t.ok(src.includes("const gateDecision = recoverProbe.card ? 'accepted' : (held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision))"), 'render only')
   t.ok(src.includes("const termsOk = decision === 'accepted' || decision === 'bind'"), 'termsOk is the raw decision')
   t.ok(src.includes("gateNext: gateNext || loadingGate || modePass || opening === 'wait',"), 'an unknown gate keeps the preview away')
-  t.ok(src.includes('recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait'), 'the wait follows the recovery')
+  t.ok(src.includes('status: pkStatus, recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait'), 'the wait follows the recovery')
   t.ok(src.includes('setTimeout(() => setHeldTick((n) => n + 1), Math.max(0, RECOVER_WAIT_MS - recoverElapsed) + 50)'), 'a tick ends the cap')
   t.ok(src.indexOf('const modePass = ') < src.indexOf('const coveringConnect = '), 'the patience sees it')
 })

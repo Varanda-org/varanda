@@ -1745,12 +1745,16 @@ const SPECS = {
     fields: {
       kind: req(isRecoveryKind),
       secret: opt(isPrf),
-      code: opt(str(1, RECOVERY_CODE_MAX))
+      code: opt(str(1, RECOVERY_CODE_MAX)),
+      // The hosted app's check of an unknown passkey without a user handle:
+      // the answer also names the diary key its PRF output would install.
+      withKey: opt(isBool)
     },
     cross (given, value) {
       const m = recoverySecretCross(given, value)
       if (m !== null) return m
       if (value.kind === 'code' && !hasOwn(given, 'code')) return 'parâmetro obrigatório: code'
+      if (value.kind === 'code' && hasOwn(given, 'withKey')) return 'withKey só com kind passkey'
       return null
     }
   },
