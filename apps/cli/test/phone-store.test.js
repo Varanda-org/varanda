@@ -124,8 +124,9 @@ test('record round trip: exact file shape, mode 0600, since fixed, no digits on 
   noDigits(t, file)
 
   const json = readFile(file)
-  t.alike(Object.keys(json), ['v', 'check', 'since', 'rows', 'released'])
-  t.is(json.v, 1)
+  t.alike(Object.keys(json), ['v', 'check', 'since', 'rows', 'released', 'cleared'])
+  t.is(json.v, 2)
+  t.alike(json.cleared, {})
   t.ok(/^[0-9a-f]{64}$/.test(json.check))
   t.is(json.since, iso(T0))
   t.alike(json.released, {})
@@ -590,7 +591,14 @@ test('validation refuses what this module would not write', async (t) => {
     'short iv': (j) => { j.rows[0].sealed.iv = 'AAAA' },
     'extra row key': (j) => { j.rows[0].phone = 'x' },
     'bad released member': (j) => { j.released = { x: iso(T0) } },
-    'bad released time': (j) => { j.released = { [a]: 'soon' } }
+    'bad released time': (j) => { j.released = { [a]: 'soon' } },
+    'no cleared': (j) => { delete j.cleared },
+    'cleared not an object': (j) => { j.cleared = [] },
+    'bad cleared member': (j) => { j.cleared = { ['A'.repeat(64)]: iso(T0) } },
+    'bad cleared time': (j) => { j.cleared = { [a]: '2026-11-11' } },
+    'v 1 with cleared': (j) => { j.v = 1 },
+    'v 2 without cleared': (j) => { delete j.cleared },
+    'v 3': (j) => { j.v = 3 }
   }
   for (const [name, mutate] of Object.entries(variants)) {
     const j = JSON.parse(JSON.stringify(good))
@@ -1020,4 +1028,146 @@ test('a refused mutation adopts the disk state it read', async (t) => {
   deleted.add(b)
   await rejects(t, third.record({ member: b, phone: '+5531991234567' }, cbs), 'conta-excluida', 'refused')
   t.ok(third.verified(d), 'conta-excluida: disk adopted')
+})
+
+// Issue #534: a member unblocked before Excluir conta must not have the old
+// reports burn its number again once the deletion's own block publishes.
+function clearedSetup (t) {
+  const base = setup(t)
+  const held = new Set()
+  // member -> decision times (ms) of its 'bloquear' reports.
+  const reports = new Map()
+  const listed = new Set()
+  const after = (m, since) => (reports.get(m) || []).filter((at) => since === null || iso(at) > since).length
+  const calls = []
+  const rule = {
+    linked: base.cbs.linked,
+    deleted: base.cbs.deleted,
+    blocked: (m) => listed.has(m),
+    burnable: (m, since) => {
+      calls.push(['burnable', m, since])
+      return listed.has(m) && (!base.deleted.has(m) || after(m, since) > 0)
+    },
+    cleared: (m, since) => {
+      calls.push(['cleared', m, since])
+      return !held.has(m) && after(m, since) > 0
+    }
+  }
+  return { ...base, held, reports, listed, rule, calls }
+}
+
+test('cleared: an unblocked member who deletes keeps no burn from the old reports', async (t) => {
+  const { store, file, c, rule, held, reports, listed, deleted } = clearedSetup(t)
+  const a = memberKey()
+  await store.record({ member: a, phone: PHONE }, rule)
+  reports.set(a, [T0 + 1000])
+  held.add(a)
+  listed.add(a)
+  c.t = T0 + 2000
+  const burnt = await store.sweep(rule)
+  t.is(burnt.burned, 1)
+  t.is(burnt.cleared, 0, 'never cleared while held')
+  t.alike(readFile(file).cleared, {})
+
+  held.delete(a)
+  listed.delete(a)
+  c.t = T0 + 3000
+  const lifted = await store.sweep(rule)
+  t.is(lifted.unburned, 1)
+  t.is(lifted.cleared, 1)
+  t.alike(readFile(file).cleared, { [a]: iso(T0 + 3000) })
+  const snap = snapshot(file)
+  c.t = T0 + 4000
+  t.is((await store.sweep(rule)).cleared, 0, 'no report after the clear: nothing to do')
+  unchanged(t, file, snap, 'and nothing written')
+
+  // Excluir conta: the owner block publishes, it alone holds nothing.
+  deleted.add(a)
+  listed.add(a)
+  c.t = T0 + 5000
+  const out = await store.sweep(rule)
+  t.is(out.burned, 0, 'the old reports no longer burn it')
+  t.is(store.counts().burned, 0)
+  t.alike(await store.record({ member: memberKey(), phone: PHONE }, rule), { changed: true }, 'another member records it')
+})
+
+test('cleared: a report decided after the clear burns a deleted member again', async (t) => {
+  const { store, file, c, rule, held, reports, listed, deleted, calls } = clearedSetup(t)
+  const a = memberKey()
+  await store.record({ member: a, phone: PHONE }, rule)
+  reports.set(a, [T0 + 1000])
+  c.t = T0 + 2000
+  await store.sweep(rule)
+  t.alike(readFile(file).cleared, { [a]: iso(T0 + 2000) }, 'cleared at once: no block yet')
+
+  reports.get(a).push(T0 + 3000)
+  held.add(a)
+  listed.add(a)
+  c.t = T0 + 4000
+  calls.length = 0
+  t.is((await store.sweep(rule)).burned, 1)
+  t.alike(calls.filter((x) => x[1] === a).map((x) => x[2]), [iso(T0 + 2000), iso(T0 + 2000)], 'both callbacks get the clear time')
+  deleted.add(a)
+  c.t = T0 + 5000
+  await store.sweep(rule)
+  t.is(store.counts().burned, 1, 'burn kept after the deletion')
+  await rejects(t, store.record({ member: memberKey(), phone: PHONE }, rule), 'telefone-em-uso', 'still held')
+})
+
+test('cleared: set before the burns of the same sweep; release leaves it; dropped with the last row', async (t) => {
+  const { store, file, c, rule, reports, listed, deleted, linked } = clearedSetup(t)
+  const a = memberKey()
+  await store.record({ member: a, phone: PHONE }, rule)
+  reports.set(a, [T0 + 1000])
+  // Deleted and listed (owner block) but no longer held: the clear in this
+  // very sweep keeps the burn from happening.
+  deleted.add(a)
+  listed.add(a)
+  c.t = T0 + 2000
+  const out = await store.sweep(rule)
+  t.is(out.cleared, 1)
+  t.is(out.burned, 0, 'the burn already sees the clear')
+  t.is(out.ended, 1)
+
+  c.t = T0 + 3000
+  await store.release(a)
+  t.alike(readFile(file).cleared, { [a]: iso(T0 + 2000) }, 'release leaves cleared alone')
+
+  // The ended row ages out: its member's entry goes with it.
+  linked.add(a)
+  c.t = T0 + 3000 + RETENTION_MS
+  const gone = await store.sweep(rule)
+  t.is(gone.removed, 1)
+  t.is(gone.cleared, 1)
+  t.alike(readFile(file).rows, [])
+  t.alike(readFile(file).cleared, {}, 'no rows, no entry')
+})
+
+test('cleared: a version 1 file reads and the next write makes it version 2', async (t) => {
+  const { store, open, file, c, cbs, linked } = setup(t)
+  const a = memberKey()
+  linked.add(a)
+  await store.record({ member: a, phone: PHONE }, cbs)
+  const v1 = readFile(file)
+  delete v1.cleared
+  v1.v = 1
+  writeFile(file, v1)
+  const old = open()
+  t.ok(old.available(), 'version 1 still reads')
+  t.ok(old.verified(a))
+  const snap = snapshot(file)
+  await old.sweep(cbs)
+  unchanged(t, file, snap, 'a sweep with nothing to do keeps version 1')
+  c.t = T0 + 1000
+  await old.end(a, 'trocado')
+  const json = readFile(file)
+  t.is(json.v, 2)
+  t.alike(Object.keys(json), ['v', 'check', 'since', 'rows', 'released', 'cleared'])
+  t.alike(json.cleared, {})
+  t.ok(open().available(), 'and reads back')
+})
+
+test('cleared must be a function when given', async (t) => {
+  const { store, cbs } = setup(t)
+  await t.exception.all(store.sweep({ ...cbs, cleared: 1 }), TypeError)
 })

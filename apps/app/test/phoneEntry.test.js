@@ -151,7 +151,7 @@ test('Telefone: a completed code is checked once from the edit, never from an ef
   t.ok(check.indexOf('inFlight.current = mine') < check.indexOf('await verify.check(candidate)'))
   t.ok(check.includes('if (inFlight.current === mine) inFlight.current = null'))
   t.ok(check.includes('if (r !== null && r.uncertain === true) setAwaiting(r.key)'))
-  t.ok(code.includes("import { codeDigits, isCode } from '../phone'"))
+  t.ok(code.includes("import { codeDigits, isCode, phoneChangeOutcome } from '../phone'"))
   t.ok(code.includes('const confirm = () => {\n    if (!canConfirm) return\n    checkCode(code.trim())\n  }'), 'Enter does no more than the button')
   t.ok(code.includes('const codeLocked = locked || awaiting !== null'))
   t.ok(code.includes('const canConfirm = !codeLocked && code.trim().length === 6'))
