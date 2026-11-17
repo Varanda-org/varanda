@@ -217,7 +217,7 @@ test('the iOS minimum is 18.0 everywhere it is set', (t) => {
   t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
   t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
   t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(6).fill(DEPLOYMENT_TARGET_LINE), 'project, app and share extension, Debug and Release')
-  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec', 'modules/video-prep/ios/VideoPrep.podspec']) {
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec', 'modules/video-prep/ios/VideoPrep.podspec', 'modules/sentinel-spike/ios/SentinelSpike.podspec']) {
     t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
   }
 })

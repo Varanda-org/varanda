@@ -1,0 +1,7 @@
+{
+  "name": "sentinel-spike",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dev-only measurement spike: the server's MiniLM ONNX model on native ONNX Runtime",
+  "main": "index.js"
+}

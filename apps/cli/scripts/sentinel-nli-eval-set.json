@@ -1,0 +1,579 @@
+{
+  "info": {
+    "sintetico": true,
+    "aviso": "Conjunto sintético, escrito à mão só para este experimento de desenvolvimento (Sentinela, spike 2). Os exemplos ofensivos são propositalmente leves: sem xingamentos pesados, sem pessoas ou marcas reais, sem descrição sexual explícita (só propostas sugestivas), e usam marcadores como [link] e [grupo]. Isso torna a avaliação mais fraca do que um conjunto real: textos reais são mais sutis, mais longos, cheios de gírias e erros, e há muito mais casos limítrofes. Os números servem para comparar modelos e hipóteses entre si, não como estimativa de desempenho em produção. Uso só em desenvolvimento: nada disto é conteúdo de membros, nada é lido por testes ou CI, e o script nunca imprime o texto dos exemplos, só os ids.",
+    "categorias_fonte": "apps/app/src/legal.js, seção Convivência e denúncias",
+    "campos": "id, text, labels (zero ou mais categorias), tricky (só em exemplos limpos que podem enganar um classificador)"
+  },
+  "categories": [
+    "ofensa",
+    "sexual",
+    "violencia",
+    "odio",
+    "spam"
+  ],
+  "categoryDescriptions": {
+    "ofensa": "insulto ou assédio pessoal",
+    "sexual": "conteúdo sexual explícito ou proposta sexual",
+    "violencia": "ameaça ou incitação à violência",
+    "odio": "discurso de ódio contra um grupo",
+    "spam": "propaganda enganosa, golpe ou links repetidos"
+  },
+  "hypotheses": {
+    "canonical": {
+      "ofensa": "Este texto insulta ou humilha uma pessoa.",
+      "sexual": "Este texto tem conteúdo sexual explícito ou faz uma proposta sexual.",
+      "violencia": "Este texto ameaça ou incita violência contra alguém.",
+      "odio": "Este texto ataca ou humilha um grupo de pessoas por sua origem, religião, cor, gênero ou idade.",
+      "spam": "Este texto é propaganda enganosa, golpe ou spam."
+    },
+    "alt": {
+      "ofensa": "O autor está ofendendo ou assediando alguém.",
+      "sexual": "Este texto fala de sexo de forma explícita.",
+      "violencia": "O autor quer machucar ou matar alguém.",
+      "odio": "Este texto expressa ódio contra um grupo de pessoas.",
+      "spam": "Este texto tenta enganar as pessoas para ganhar dinheiro ou cliques."
+    }
+  },
+  "posts": [
+    {
+      "id": "p001",
+      "text": "Você é um idiota completo e ninguém aguenta o seu jeito.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p002",
+      "text": "Cala a boca, ninguém pediu a sua opinião, seu inútil.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p003",
+      "text": "Que cara burro, não sabe nem escrever uma frase direito.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p004",
+      "text": "Essa moça é feia e chata, não sei como alguém atura ela.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p005",
+      "text": "Você é patético, melhor sumir daqui.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p006",
+      "text": "O seu trabalho é lixo e você é um fracasso.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p007",
+      "text": "Vai estudar, ignorante, que vergonha alheia.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p008",
+      "text": "Todo mundo ri de você pelas costas, otário.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p009",
+      "text": "Ela é uma mentirosa nojenta e todo mundo sabe disso.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p010",
+      "text": "Que gordo ridículo, devia ter vergonha de aparecer na foto.",
+      "labels": [
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p011",
+      "text": "Manda uma foto sem roupa que eu te pago, gata.",
+      "labels": [
+        "sexual"
+      ]
+    },
+    {
+      "id": "p012",
+      "text": "Vamos transar hoje à noite? Sei que você quer.",
+      "labels": [
+        "sexual"
+      ]
+    },
+    {
+      "id": "p013",
+      "text": "Quero te ver pelada, me chama no privado.",
+      "labels": [
+        "sexual"
+      ]
+    },
+    {
+      "id": "p014",
+      "text": "Procuro alguém para sexo casual hoje, chama no privado.",
+      "labels": [
+        "sexual"
+      ]
+    },
+    {
+      "id": "p015",
+      "text": "Te mando um vídeo bem safado se você me seguir.",
+      "labels": [
+        "sexual"
+      ]
+    },
+    {
+      "id": "p016",
+      "text": "Gostosa, tô a fim de uma noite com você, sem compromisso e sem roupa.",
+      "labels": [
+        "sexual",
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p017",
+      "text": "Conteúdo adulto sem censura, assine para ver tudo [link]",
+      "labels": [
+        "sexual",
+        "spam"
+      ]
+    },
+    {
+      "id": "p018",
+      "text": "Tira a roupa na câmera para mim e eu te dou um presente.",
+      "labels": [
+        "sexual"
+      ]
+    },
+    {
+      "id": "p019",
+      "text": "Vou te achar e te encher de porrada, prepare-se.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p020",
+      "text": "Se você aparecer de novo, vou quebrar a sua cara.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p021",
+      "text": "Alguém devia dar uma surra nesse vizinho, vamos juntos amanhã.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p022",
+      "text": "Vou acabar com você, eu sei onde você mora.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p023",
+      "text": "Quem concorda comigo que ele merece apanhar? Vamos pegar ele na saída.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p024",
+      "text": "Vou estragar o seu carro e depois você, é uma promessa.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p025",
+      "text": "Preciso de gente para atacar o bar da esquina hoje, bora quebrar tudo e machucar quem estiver lá.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p026",
+      "text": "Cuidado, porque da próxima vez você não sai inteiro.",
+      "labels": [
+        "violencia"
+      ]
+    },
+    {
+      "id": "p027",
+      "text": "Seu idiota, vou te bater quando eu te encontrar.",
+      "labels": [
+        "violencia",
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p028",
+      "text": "Gente daquela religião é toda burra e perigosa, deviam ser expulsos do país.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p029",
+      "text": "Mulheres não servem para dirigir nem para trabalhar, o lugar delas é na cozinha.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p030",
+      "text": "Esses estrangeiros só trazem sujeira, tinha que fechar a fronteira para essa gente.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p031",
+      "text": "Todo [grupo] é preguiçoso e mentiroso, não dá para confiar.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p032",
+      "text": "Pessoas daquela cor não deveriam frequentar este lugar.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p033",
+      "text": "Velho não devia nem sair de casa, só atrapalha, é um peso para todo mundo.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p034",
+      "text": "Esse povo de fora é inferior, não merece ter os mesmos direitos que a gente.",
+      "labels": [
+        "odio"
+      ]
+    },
+    {
+      "id": "p035",
+      "text": "Esses estrangeiros são burros e nojentos, voltem para o lugar de vocês.",
+      "labels": [
+        "odio",
+        "ofensa"
+      ]
+    },
+    {
+      "id": "p036",
+      "text": "GANHE R$ 5000 POR DIA SEM SAIR DE CASA!!! Clique aqui [link] [link] [link]",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p037",
+      "text": "Parabéns, você ganhou um prêmio! Envie seus dados para [link] e receba agora.",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p038",
+      "text": "Emagreça 10 kg em 3 dias com este chá milagroso, compre já [link]",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p039",
+      "text": "Invista hoje e dobre o seu dinheiro em 24 horas, garantido e sem risco. [link]",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p040",
+      "text": "Siga de volta! Siga de volta! Siga de volta! Entre no grupo [link] [link]",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p041",
+      "text": "Oferta imperdível, só hoje, compre 1 e leve 10 [link] [link] [link]",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p042",
+      "text": "Seu banco bloqueou a sua conta, confirme a senha agora em [link] para evitar perdas.",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p043",
+      "text": "Quer seguidores grátis? Passe a sua senha para a gente e ganhe mil por dia.",
+      "labels": [
+        "spam"
+      ]
+    },
+    {
+      "id": "p044",
+      "text": "Hoje o dia amanheceu lindo, fui caminhar na praça com o cachorro.",
+      "labels": []
+    },
+    {
+      "id": "p045",
+      "text": "Alguém sabe uma boa receita de bolo de cenoura?",
+      "labels": []
+    },
+    {
+      "id": "p046",
+      "text": "Fiz pão caseiro pela primeira vez e ficou ótimo.",
+      "labels": []
+    },
+    {
+      "id": "p047",
+      "text": "Reunião da associação de moradores amanhã às 19h no salão.",
+      "labels": []
+    },
+    {
+      "id": "p048",
+      "text": "Perdi as minhas chaves perto da padaria, se alguém achar me avisa, por favor.",
+      "labels": []
+    },
+    {
+      "id": "p049",
+      "text": "Que saudade da minha avó, ela fazia o melhor café da cidade.",
+      "labels": []
+    },
+    {
+      "id": "p050",
+      "text": "Terminei o livro que comecei no mês passado, recomendo muito.",
+      "labels": []
+    },
+    {
+      "id": "p051",
+      "text": "O ônibus atrasou de novo, cheguei tarde no trabalho.",
+      "labels": []
+    },
+    {
+      "id": "p052",
+      "text": "Feliz aniversário, minha irmã! Te amo muito.",
+      "labels": []
+    },
+    {
+      "id": "p053",
+      "text": "Alguém indica um dentista bom aqui no bairro?",
+      "labels": []
+    },
+    {
+      "id": "p054",
+      "text": "Choveu a tarde toda, ótimo para ficar em casa lendo.",
+      "labels": []
+    },
+    {
+      "id": "p055",
+      "text": "Comecei a aprender violão e já toco duas músicas.",
+      "labels": []
+    },
+    {
+      "id": "p056",
+      "text": "Vamos plantar mudas no sábado na horta comunitária?",
+      "labels": []
+    },
+    {
+      "id": "p057",
+      "text": "Meu filho deu os primeiros passos hoje!",
+      "labels": []
+    },
+    {
+      "id": "p058",
+      "text": "Obrigado a todos pelos parabéns, fiquei emocionado.",
+      "labels": []
+    },
+    {
+      "id": "p059",
+      "text": "Qual o melhor jeito de estudar para concurso trabalhando o dia todo?",
+      "labels": []
+    },
+    {
+      "id": "p060",
+      "text": "A feira de domingo estava cheia de frutas boas.",
+      "labels": []
+    },
+    {
+      "id": "p061",
+      "text": "Novo horário da biblioteca: de segunda a sexta, das 8h às 18h.",
+      "labels": []
+    },
+    {
+      "id": "p062",
+      "text": "Passei a manhã arrumando o quintal, está ficando bonito.",
+      "labels": []
+    },
+    {
+      "id": "p063",
+      "text": "Que filme bom, chorei do começo ao fim.",
+      "labels": []
+    },
+    {
+      "id": "p064",
+      "text": "Alguém quer dividir uma carona para o aeroporto na sexta?",
+      "labels": []
+    },
+    {
+      "id": "p065",
+      "text": "Adotei um gatinho, ele está dormindo no meu colo agora.",
+      "labels": []
+    },
+    {
+      "id": "p066",
+      "text": "Vou ao mercado, preciso trazer alguma coisa?",
+      "labels": []
+    },
+    {
+      "id": "p067",
+      "text": "Fiz a primeira corrida de 5 km hoje, devagar mas cheguei.",
+      "labels": []
+    },
+    {
+      "id": "p068",
+      "text": "Para mim esse político é péssimo e as ideias dele não funcionam, mas respeito quem pensa diferente.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p069",
+      "text": "Discordo totalmente da decisão da prefeitura, foi um erro enorme e vergonhoso para a cidade.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p070",
+      "text": "O uso de preservativo reduz bastante o risco de infecções sexualmente transmissíveis, converse com o seu médico.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p071",
+      "text": "Aula de educação sexual na escola ajuda adolescentes a entender o próprio corpo e a se proteger.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p072",
+      "text": "Hoje vamos matar o jogo no primeiro tempo e acabar com eles em campo!",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p073",
+      "text": "Esse time vai massacrar o adversário no domingo, estou confiante.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p074",
+      "text": "Notícia: a polícia prendeu três homens suspeitos de agressão em um bar do centro ontem à noite.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p075",
+      "text": "Reportagem sobre o aumento de ameaças contra jornalistas no país, entenda o caso.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p076",
+      "text": "Recomendo muito esse fone de ouvido, durou dois anos e o som é ótimo, comprei na loja do bairro.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p077",
+      "text": "Esse livro de terror me matou de medo, não consegui dormir!",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p078",
+      "text": "Esse bolo está uma bomba, vou morrer de tanto comer.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p079",
+      "text": "Meu cachorro é um bobão, destruiu o sofá de novo e eu amo ele.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p080",
+      "text": "O filme mostra a perseguição a um povo durante a guerra, é importante lembrar para que nunca mais aconteça.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p081",
+      "text": "Estou estudando a história da escravidão no Brasil para um trabalho da faculdade.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p082",
+      "text": "Casal de idosos comemorou 60 anos de casamento, que amor bonito.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p083",
+      "text": "Promoção na padaria da esquina: pão francês a R$ 1 até as 10h.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p084",
+      "text": "Cuidado com golpes: o banco nunca pede a sua senha por mensagem, não clique em links desconhecidos.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p085",
+      "text": "Fui assaltado ontem, estou bem, mas muito assustado. Cuidado ao andar pela rua do mercado.",
+      "labels": [],
+      "tricky": true
+    },
+    {
+      "id": "p086",
+      "text": "Vendo uma bicicleta usada em bom estado, aceito proposta.",
+      "labels": [],
+      "tricky": true
+    }
+  ]
+}
