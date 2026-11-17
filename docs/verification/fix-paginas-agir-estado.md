@@ -19,7 +19,7 @@ Caminhada na web, no laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, n
 - [x] Abrir Conversas agindo como Página com o nó ocupado: o topo fica quieto, sem "ocupado" cru nem "tentar de novo", e o cartão carrega sozinho.
 - [x] Encerrar a Página em outro aparelho e abrir Páginas: a linha diz "encerrada" e este aparelho volta a agir como a pessoa (Conversas pessoais), sem recarregar.
 - [x] Remover a pessoa como administradora em outro aparelho: Conversas mostra o aviso de chave até ela abrir Páginas (limite abaixo); ao abrir Páginas, volta a agir como a pessoa, sem recarregar.
-- [ ] Mudar a chave da Página em outro aparelho: o aparelho que agia na chave antiga volta para a pessoa. Mesmo caminho (`actingPageStopped`) e testes de unidade; fica para a caminhada do PR que leva o perfil para a chave nova, que muda a chave de uma Página.
+- [x] Mudar a chave da Página em outro aparelho: Conversas mostra "Esta página mudou para uma nova chave" até abrir Páginas (limite abaixo); Páginas lista a chave antiga "encerrada" e a nova, e o aparelho que agia na chave antiga volta a agir como a pessoa, sem recarregar. Caminhado no laboratório com o PR que leva o perfil para a chave nova.
 
 Android e iOS: os mesmos passos ficam com o Rodrigo, no APK de preview do EAS (o build de debug não entra com passkey).
 
