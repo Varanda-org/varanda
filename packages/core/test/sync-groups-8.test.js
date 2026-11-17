@@ -15,7 +15,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { CAP_HEADER_STUBS } = require('../lib/net')
-const { createCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
+const { createCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writerHeader, groupHeader, groupPost } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
@@ -66,12 +66,12 @@ function recorded (ctx) {
   }
 }
 
-// A diary in `cs` (its certificate at seq 0) under `name`.
-async function diaryIn (cs, kp, name) {
+// A diary in `cs` (its certificate at seq 0, `certFor` its key) under `name`.
+async function diaryIn (cs, kp, name, certFor = (member) => createCert({ member }, kp)) {
   const d = cs.get({ name })
   await d.ready()
   const key = hex(d.key)
-  await d.append(enc(memberCertRecord(createCert({ member: key }, kp))))
+  await d.append(enc(memberCertRecord(certFor(key))))
   return { d, key }
 }
 
@@ -452,11 +452,11 @@ function writeRecord (ctx, stubs) {
   fs.writeFileSync(path.join(ctx.dataDir, 'header-stubs.json'), JSON.stringify({ v: 1, stubs }))
 }
 
-// Offers, through `fake`, a snapshot that blocks `keys`: `holder.snap` is
-// what its `snapshot()` returns.
-function blockLive (kp, fake, holder, keys) {
+// Offers, through `fake`, a snapshot that blocks `keys` (and revokes
+// `revokedIssuers`): `holder.snap` is what its `snapshot()` returns.
+function blockLive (kp, fake, holder, keys, revokedIssuers = []) {
   const mod = crypto.keyPair()
-  holder.snap = createSnapshot({ seq: 1, blocked: keys }, mod, createModeratorCert({ moderator: hex(mod.publicKey) }, kp))
+  holder.snap = createSnapshot({ seq: 1, blocked: keys, revokedIssuers }, mod, createModeratorCert({ moderator: hex(mod.publicKey) }, kp))
   fake.announce()
 }
 
@@ -550,7 +550,7 @@ function slotOf (inspect, key) {
   return slot === null ? null : [slot.group, slot.diary]
 }
 
-test('at start a recorded stub holding a block past 0 is not purged, and keeps its record and the slot of the pair that proved it (#350)', async (t) => {
+test('at start a recorded stub holding a block past 0 is not purged while the diary that proved it is stored, and keeps its record and the slot of the pair that proved it (#350)', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
@@ -558,23 +558,44 @@ test('at start a recorded stub holding a block past 0 is not purged, and keeps i
   const fake = await fakeSeeder(t, bootstrap, kp, [], { answer: () => page([]) })
   const d = await diaryIn(fake.store, kp, 'diary')
   const named = await diaryIn(fake.store, kp, 'named')
+  // O, the diary the record names, stored here: it never joined F.
+  const other = await diaryIn(fake.store, kp, 'other')
   // F, a writer of (G, N) by its header that N never joined, held past
   // block 0: a peer's listing can make this node store such a block.
   const full = await joinedCore(fake.store, 'full', enc(writerHeader({ group, diary: named.key, member: PARENT })), d, group, 1)
   const m = await groupMember(t, kp, group)
   const core = fake.store.get({ name: 'full' })
   await core.ready()
-  await copyInto(fake.store, m, [named.d, core])
-  const nobody = hex(crypto.randomBytes(32))
-  writeRecord(m, [{ key: full.key, group, diary: nobody }])
+  await copyInto(fake.store, m, [named.d, other.d, core])
+  writeRecord(m, [{ key: full.key, group, diary: other.key }])
   for (const run of ['first', 'second']) {
     let inspect = null
     const { result } = await syncOnce(bootstrap, m, { timeoutMs: 8000, inspectHook: (h) => { inspect = h } })
     t.ok(result.ok, result.errors.join('; '))
     t.alike(await heldCopy(m, full.key), { contiguous: 2, held: [0, 1] }, run + ' start: not purged')
-    t.alike(recorded(m), { [full.key]: nobody }, run + ' start: its record stays')
-    t.alike(slotOf(inspect, full.key), [group, nobody], run + ' start: its slot is the pair that proved it, never the pair its header names')
+    t.alike(recorded(m), { [full.key]: other.key }, run + ' start: its record stays')
+    t.alike(slotOf(inspect, full.key), [group, other.key], run + ' start: its slot is the pair that proved it, never the pair its header names')
   }
+})
+
+test('at start a recorded stub holding a block past 0 is purged with its record once the diary that proved it is not stored (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const fake = await fakeSeeder(t, bootstrap, kp, [], { answer: () => page([]) })
+  const d = await diaryIn(fake.store, kp, 'diary')
+  const named = await diaryIn(fake.store, kp, 'named')
+  const full = await joinedCore(fake.store, 'full', enc(writerHeader({ group, diary: named.key, member: PARENT })), d, group, 1)
+  const m = await groupMember(t, kp, group)
+  const core = fake.store.get({ name: 'full' })
+  await core.ready()
+  await copyInto(fake.store, m, [named.d, core])
+  writeRecord(m, [{ key: full.key, group, diary: hex(crypto.randomBytes(32)) }])
+  const { result } = await syncOnce(bootstrap, m, { timeoutMs: 8000 })
+  t.ok(result.ok, result.errors.join('; '))
+  t.absent(await stored(m, full.key), 'nothing here proves it: purged')
+  t.alike(recorded(m), {}, 'and its record goes')
 })
 
 test('a key whose block 0 can never count is read once a run, however many hints list it (#350)', async (t) => {
@@ -991,4 +1012,169 @@ test('a stub refused for a full record is refused before its diary is read when 
   }, { pageRefreshMs: 300, maxHeaderStubs: 1, quarantineHook: async (key) => { if (key === d3.key) reads++ } })
   t.alike(skipped(events, k2.key), ['quota', 'quota'], 'each hint refused as quota, never charged')
   t.is(reads, 0, 'the new hint\'s diary is never read')
+})
+
+test('a stub that lost the cap of the diary that proved it never keeps out the listing of the pair its header names (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const timeout = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  let second = false
+  const events = []
+  let k = null
+  let kOwn = null
+  const ws = []
+  // The second run's first page lists K alone under Da, whose 32 writers
+  // are on disk; its next page, asked for once K lost Da's cap, lists K
+  // under Dv. A --once run never forgets that refusal.
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: async (q) => {
+      if (q.group !== group) return page([])
+      if (!second) return page(sorted(ws))
+      if (q.after === null) return { items: [k], next: '0'.repeat(64), incomplete: false }
+      const end = Date.now() + 6000
+      while (skipped(events, k.key).length === 0 && Date.now() < end) await timeout(50)
+      return page([kOwn])
+    }
+  })
+  const da = await diaryIn(fake.store, kp, 'diary-a')
+  const dv = await diaryIn(fake.store, kp, 'diary-v')
+  // Da joins 32 writers of its own, then K, a writer of (G, Dv) by its
+  // header that Dv joins too.
+  for (let i = 0; i < 32; i++) ws.push(await joinedCore(fake.store, 'w' + i, enc(writerHeader({ group, diary: da.key, member: PARENT })), da, group))
+  k = await joinedCore(fake.store, 'k', enc(writerHeader({ group, diary: dv.key, member: PARENT })), da, group, 1)
+  await dv.d.append(enc(groupJoinRecord({ group, writer: k.key, on: true })))
+  kOwn = { ...k, diary: dv.key, seq: dv.d.length - 1 }
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [da.d])
+  const first = await syncOnce(bootstrap, m, { timeoutMs: 30000 })
+  t.ok(first.result.ok, first.result.errors.join('; '))
+  second = true
+  await syncOnce(bootstrap, m, { timeoutMs: 30000, onEvent: (ev) => events.push(ev) })
+  t.alike(skipped(events, k.key), ['quota'], 'K, a stub of (G, Da), loses Da\'s full cap')
+  t.alike(await heldCopy(m, k.key), { contiguous: 2, held: [0, 1] }, 'and its listing under (G, Dv) is then fetched in full')
+  t.absent(k.key in recorded(m), 'with no record')
+})
+
+test('a record whose diary is blocked only drops the record while its stub is active under another pair (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  let listed = []
+  const holder = { snap: null }
+  const fake = await fakeSeeder(t, bootstrap, kp, [], { snapshot: () => holder.snap, answer: (q) => page(q.group === group ? listed : []) })
+  const da = await diaryIn(fake.store, kp, 'diary-a')
+  const dx = await diaryIn(fake.store, kp, 'diary-x')
+  // K names another diary of G: a stub of (G, Da), and of (G, Dx).
+  const k = await joinedCore(fake.store, 'k', HEADS['another diary'].raw(group), da, group)
+  await dx.d.append(enc(groupJoinRecord({ group, writer: k.key, on: true })))
+  const kByX = { ...k, diary: dx.key, seq: dx.d.length - 1 }
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [da.d, dx.d])
+  listed = [k]
+  await syncOnce(bootstrap, m, { timeoutMs: 15000 })
+  t.alike(recorded(m), { [k.key]: da.key }, 'K held as a stub of (G, Da)')
+  // Next start: K is gated as a stub of (G, Dx), then Da is blocked.
+  listed = [kByX]
+  const adopted = { at: 0 }
+  const { events } = await runUntil(m, bootstrap, (evs) => {
+    if (holder.snap === null && downloaded(evs, k.key, 1)) blockLive(kp, fake, holder, [da.key])
+    return skipped(evs, k.key).length > 0 || adoptedFor(m, adopted, 5000)
+  }, { pageRefreshMs: 300 })
+  t.alike(skipped(events, k.key), [], 'K is never purged')
+  t.alike(await heldCopy(m, k.key), { contiguous: 1, held: [0] }, 'and stays held under (G, Dx)')
+  t.alike(recorded(m), {}, 'only the record of (G, Da) goes')
+})
+
+test('a record whose diary is blocked never purges its key while the key\'s gate as a writer of its own pair runs, and the key is admitted (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  let listed = []
+  const holder = { snap: null }
+  const fake = await fakeSeeder(t, bootstrap, kp, [], { snapshot: () => holder.snap, answer: (q) => page(q.group === group ? listed : []) })
+  const da = await diaryIn(fake.store, kp, 'diary-a')
+  const d2 = await diaryIn(fake.store, kp, 'diary-2')
+  // K, a writer of (G, D2) by its header that Da joins too. D2 is never
+  // stored here, so the next start keeps K's record.
+  const k = await joinedCore(fake.store, 'k', enc(writerHeader({ group, diary: d2.key, member: PARENT })), da, group, 1)
+  await d2.d.append(enc(groupJoinRecord({ group, writer: k.key, on: true })))
+  const kOwn = { ...k, diary: d2.key, seq: d2.d.length - 1 }
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [da.d])
+  listed = [k]
+  await syncOnce(bootstrap, m, { timeoutMs: 15000 })
+  t.alike(recorded(m), { [k.key]: da.key }, 'K held as a stub of (G, Da)')
+  // Next start: K is gated under (G, D2); while D2 is read, Da is blocked
+  // and the snapshot adopted.
+  listed = [kOwn]
+  const timeout = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const quarantineHook = async (key) => {
+    if (key !== d2.key || holder.snap !== null) return
+    blockLive(kp, fake, holder, [da.key])
+    const adopted = { at: 0 }
+    const end = Date.now() + 10000
+    while (!adoptedFor(m, adopted, 2000) && Date.now() < end) await timeout(100)
+  }
+  const { events } = await runUntil(m, bootstrap, (evs) => downloaded(evs, k.key, 2) || skipped(evs, k.key).length > 0, { pageRefreshMs: 300, quarantineHook })
+  t.ok(holder.snap !== null, 'Da was blocked while K\'s gate ran')
+  t.alike(skipped(events, k.key), [], 'K is never purged')
+  t.alike(await heldCopy(m, k.key), { contiguous: 2, held: [0, 1] }, 'and is admitted and fetched in full')
+  t.alike(recorded(m), {}, 'leaving the record')
+})
+
+test('a revoked issuer of the diary that proved a stub stored before this run purges the stub in the same run (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  let listed = []
+  const holder = { snap: null }
+  const fake = await fakeSeeder(t, bootstrap, kp, [], { snapshot: () => holder.snap, answer: (q) => page(q.group === group ? listed : []) })
+  const issuerKp = crypto.keyPair()
+  const issuer = hex(issuerKp.publicKey)
+  const issuerCert = createIssuerCert({ issuer }, kp)
+  const d = await diaryIn(fake.store, kp, 'diary', (member) => createIssuedCert({ member }, issuerKp, issuerCert))
+  const k = await joinedCore(fake.store, 'k', HEADS['another diary'].raw(group), d, group)
+  listed = [k]
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d.d])
+  await syncOnce(bootstrap, m, { timeoutMs: 15000 })
+  t.alike(recorded(m), { [k.key]: d.key }, 'held as a stub of (G, D)')
+  const adopted = { at: 0 }
+  const { events } = await runUntil(m, bootstrap, (evs) => {
+    if (holder.snap === null && downloaded(evs, k.key, 1)) blockLive(kp, fake, holder, [], [issuer])
+    return skipped(evs, k.key).length > 0 || adoptedFor(m, adopted, 5000)
+  }, { pageRefreshMs: 300 })
+  t.alike(skipped(events, k.key), ['revoked-issuer'], 'the stub leaves the table for its diary\'s issuer')
+  t.absent(await stored(m, k.key), 'and is purged in this run')
+  t.alike(recorded(m), {}, 'with its record')
+})
+
+test('a block of the diary that proved a stub not listed in this run purges the stub with its record in the same run (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  let listed = []
+  const holder = { snap: null }
+  const fake = await fakeSeeder(t, bootstrap, kp, [], { snapshot: () => holder.snap, answer: (q) => page(q.group === group ? listed : []) })
+  const d = await diaryIn(fake.store, kp, 'diary')
+  const k = await joinedCore(fake.store, 'k', HEADS['another diary'].raw(group), d, group)
+  listed = [k]
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d.d])
+  await syncOnce(bootstrap, m, { timeoutMs: 15000 })
+  t.alike(recorded(m), { [k.key]: d.key }, 'held as a stub of (G, D)')
+  // Next start: nothing lists K, and the seeder's snapshot blocks D.
+  listed = []
+  blockLive(kp, fake, holder, [d.key])
+  const adopted = { at: 0 }
+  const { events } = await runUntil(m, bootstrap, (evs) => skipped(evs, k.key).length > 0 || adoptedFor(m, adopted, 5000), { pageRefreshMs: 300 })
+  t.alike(skipped(events, k.key), ['blocked'], 'the stub, with no entry in the table, goes for its diary')
+  t.absent(await stored(m, k.key), 'purged in this run')
+  t.alike(recorded(m), {}, 'with its record')
 })
