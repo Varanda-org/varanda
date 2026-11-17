@@ -56,8 +56,9 @@
 // page gets no new block ({ paused: true }).
 //
 // Single writer: every write (state file, diary or media append, a cleared
-// block, the noise key) asks guard() (the account service's lock) first, and
-// fail() refuses every later one; a refused write throws { code:
+// block, the noise key) asks guard() (the account service's lock) first, the
+// state file and the noise key again right before the rename
+// (./guarded-write.js), and fail() refuses every later one; a refused write throws { code:
 // 'indisponivel' }. Two holders appending to one core would fork it.
 //
 // Nothing logged ever names a key.
@@ -69,7 +70,8 @@ const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
@@ -303,6 +305,18 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (!ok) throw fail('indisponivel')
   }
 
+  // A sidecar write with the lock asked again right before the rename
+  // (./guarded-write.js): a holder that lost it meanwhile leaves the file
+  // as the new holder wrote it, and the refusal is check()'s.
+  function writeChecked (file, obj) {
+    try {
+      writeGuarded(file, obj, 0o600, () => !failed && guard() === true)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
+      throw err
+    }
+  }
+
   // The lock is gone: nothing more is written, starting now.
   function failWriter () {
     failed = true
@@ -319,7 +333,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (p.stateLost) throw fail('pausada')
     check()
     refuseSymlinkDir(storeDir)
-    writeJsonAtomic(statePath(p.key), {
+    writeChecked(statePath(p.key), {
       v: STATE_VERSION,
       length: p.length,
       mediaLength: p.mediaLength,
@@ -330,7 +344,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       nonces: p.nonces,
       movedTo: p.movedTo,
       closed: p.closed === true
-    }, 0o600)
+    })
   }
 
   function readState (key) {
@@ -365,7 +379,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     } catch {}
     const kp = generateNoiseKeyPair()
     check()
-    writeJsonAtomic(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) }, 0o600)
+    writeChecked(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) })
     return kp
   }
 
@@ -617,11 +631,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   }
 
   // A committed write whose state could not be saved: memory already holds
-  // it, the file does not, so the page stops until an operator looks.
+  // it, the file does not, so the page stops until an operator looks. A
+  // lock refusal while this writer still holds it is not that: held()
+  // answers false for a moment when one heartbeat runs late, so the page
+  // stays writable and the next write saves the whole state. A lost lock
+  // goes through failWriter(), and a new holder's open finds the diary
+  // longer than the file and pauses it there.
   function saveOrPause (p) {
     try {
       saveState(p)
     } catch (err) {
+      if (!failed && err.code === 'indisponivel') throw err
       pause(p)
       throw err
     }

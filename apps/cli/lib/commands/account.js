@@ -861,6 +861,11 @@ async function serve (flags, env) {
       loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones)
     }
   })
+  // The one guard every sidecar write asks, before it and right before its
+  // rename: the lock is ours and live by mtime (younger than the stale
+  // window minus one heartbeat), so a process whose heartbeat fell behind
+  // never renames over what a process taking the lock over may have written.
+  const held = () => lock.held()
   let listener = null
   let triage = null
   let usage = null
@@ -889,23 +894,21 @@ async function serve (flags, env) {
       if (err.code === 'RESTAURADO') log({ event: 'store', reason: 'restaurado' })
       throw err
     }
-    // The terms acceptances (terms.json): every write asks the lock again.
-    // An invalid file leaves the routes answering 'indisponivel'; the rest
+    // The terms acceptances (terms.json): every write asks held() before
+    // and right before its rename. An invalid file leaves the routes answering 'indisponivel'; the rest
     // of the service still runs.
-    terms = openTermsStore(flags.dataDir, { guard: () => lock.owned(), log })
+    terms = openTermsStore(flags.dataDir, { guard: held, log })
     if (!terms.available()) log({ event: 'terms', reason: 'indisponivel' })
     stopHeal = startTermsHeal(terms, log)
-    // The recovery entries (recovery.json): every write asks lock.held(),
-    // ours and live by mtime, so a process whose heartbeat fell behind never
-    // writes while another may be taking the lock over. An invalid file
+    // The recovery entries (recovery.json): the same guard. An invalid file
     // leaves only the recovery routes answering 'indisponivel'.
-    recovery = openRecoveryStore(flags.dataDir, { guard: () => lock.held(), log })
+    recovery = openRecoveryStore(flags.dataDir, { guard: held, log })
     if (!recovery.available()) log({ event: 'recovery', reason: 'indisponivel' })
     stopRecoveryHeal = startHeal(recovery, 'recovery', log)
     // The passkey public keys and waiting deletions (passkeys.json): the
-    // terms guard, lock.owned(). An invalid file leaves Excluir conta and
+    // same guard. An invalid file leaves Excluir conta and
     // the passkey enrolment answering 'indisponivel'.
-    passkeys = openPasskeyStore(flags.dataDir, { guard: () => lock.owned(), log })
+    passkeys = openPasskeyStore(flags.dataDir, { guard: held, log })
     if (!passkeys.available()) log({ event: 'passkeys', reason: 'indisponivel' })
     stopPasskeysHeal = startHeal(passkeys, 'passkeys', log)
     // Signup invites (invites.json), only when VARANDA_INVITES_PER_WEEK is
@@ -918,12 +921,12 @@ async function serve (flags, env) {
       // issue and summary answer 'indisponivel', never the full week.
       let opened = null
       if (inviteDrops !== null) {
-        drops = openInviteDrops(flags.dataDir, { perWeek: invitesPerWeek, guard: () => lock.owned() })
+        drops = openInviteDrops(flags.dataDir, { perWeek: invitesPerWeek, guard: held })
         log({ event: 'sorteio', reason: drops.available() ? 'ligado' : 'indisponivel' })
         stopDropsHeal = startHeal(drops, 'sorteio', log)
         opened = (member, nowMs) => drops.opened(member, store.linkedAt(member), nowMs)
       }
-      const primary = openInvitesStore(flags.dataDir, { guard: () => lock.owned(), perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
+      const primary = openInvitesStore(flags.dataDir, { guard: held, perWeek: invitesPerWeek, isUsed: (id) => store.inviteUsed(id), opened })
       if (!primary.available()) log({ event: 'invites', reason: 'indisponivel' })
       // The Feira codes (feira-invites.json), only with
       // VARANDA_FEIRA_INVITES_PER_WEEK set (readEnv already required the
@@ -931,7 +934,7 @@ async function serve (flags, env) {
       // pair: sign-up, the heal loop, a lost lock and Excluir conta reach
       // both files.
       if (feiraInvitesPerWeek !== null) {
-        feiraInvites = openInvitesStore(flags.dataDir, { ...FEIRA_INVITES, perWeek: feiraInvitesPerWeek, guard: () => lock.owned(), isUsed: (id) => store.inviteUsed(id) })
+        feiraInvites = openInvitesStore(flags.dataDir, { ...FEIRA_INVITES, perWeek: feiraInvitesPerWeek, guard: held, isUsed: (id) => store.inviteUsed(id) })
         log({ event: 'feira', reason: feiraInvites.available() ? 'ligada' : 'indisponivel' })
       }
       invites = pairInvites(primary, feiraInvites)
@@ -945,7 +948,7 @@ async function serve (flags, env) {
       log({ event: 'push', reason: 'indisponivel' })
       vapid = null
     }
-    pushStore = openPushStore(flags.dataDir, { guard: () => lock.owned() })
+    pushStore = openPushStore(flags.dataDir, { guard: held })
     if (!pushStore.available()) log({ event: 'push', reason: 'indisponivel' })
     stopPushHeal = startHeal(pushStore, 'push', log)
     const push = {
@@ -956,7 +959,7 @@ async function serve (flags, env) {
     log({ event: 'push', reason: vapid !== null ? 'ligado' : 'desligado' })
     // The seen blobs (seen/): every write asks the lock again. A bad
     // directory leaves the seen routes answering 'indisponivel'.
-    seenStore = openSeenStore(flags.dataDir, { guard: () => lock.owned(), log })
+    seenStore = openSeenStore(flags.dataDir, { guard: held, log })
     if (!seenStore.available()) log({ event: 'seen', reason: 'indisponivel' })
     stopSeenHeal = startHeal(seenStore, 'seen', log)
     // Hosted age verification (age.json), only with the Didit pair set. An
@@ -964,7 +967,7 @@ async function serve (flags, env) {
     let didit = null
     if (diditConfig !== null) {
       didit = createDidit({ apiKey: diditConfig.apiKey, workflowId: diditConfig.workflowId })
-      ages = openAgeStore(flags.dataDir, { guard: () => lock.owned() })
+      ages = openAgeStore(flags.dataDir, { guard: held })
       if (!ages.available()) log({ event: 'idade', reason: 'indisponivel' })
       stopAgeHeal = startHeal(ages, 'idade', log)
     }
@@ -977,7 +980,7 @@ async function serve (flags, env) {
     let phoneClient = null
     if (phoneConfig !== null) {
       phoneClient = createPhoneClient({ apiKey: diditConfig.apiKey })
-      phones = openPhoneStore(flags.dataDir, { key: phoneConfig.key, guard: () => lock.owned() })
+      phones = openPhoneStore(flags.dataDir, { key: phoneConfig.key, guard: held })
       if (!phones.available()) log({ event: 'telefone', reason: 'indisponivel' })
       stopPhoneHeal = startHeal(phones, 'telefone', log)
     } else if (fs.existsSync(path.join(flags.dataDir, PHONE_FILE))) {
@@ -994,14 +997,14 @@ async function serve (flags, env) {
     // service; an on start that cannot read it stays up and the since route
     // answers 503.
     const ageOn = didit !== null && ages !== null
-    const ageCheckStart = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: () => lock.owned() })
+    const ageCheckStart = startAgeCheck(flags.dataDir, { on: ageOn, since: ageSince, guard: held })
     if (!ageCheckStart.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
     // Read once, before any link of this run (all of them banded).
     const ageDirectoryStart = ageOn && ageSince !== null ? directoryFloor(store, ages) : null
     if (ageDirectoryStart !== null && !ageDirectoryStart.ok) log({ event: 'idade', reason: 'estado-indisponivel' })
     // A floor that failed here is recomputed by a later since request (at
     // most every 30 s), so the route recovers with the file, not a restart.
-    const ageCheck = ageOn ? retryingFloor(ageCheckStart, () => settleAgeCheck(flags.dataDir, { on: true, since: ageSince, guard: () => lock.owned() })) : ageCheckStart
+    const ageCheck = ageOn ? retryingFloor(ageCheckStart, () => settleAgeCheck(flags.dataDir, { on: true, since: ageSince, guard: held })) : ageCheckStart
     const ageDirectoryFloor = ageDirectoryStart === null ? null : retryingFloor(ageDirectoryStart, () => directoryFloor(store, ages))
     const moderation = openModerationStore(flags.dataDir, { association })
     const issuer = loadIssuer(flags.dataDir, association, log)
@@ -1036,17 +1039,17 @@ async function serve (flags, env) {
     else {
       const { createPagesWriter } = require('../account/pages-writer')
       try {
-        pageKeys = openPageKeys({ dir: flags.dataDir, env, log, guard: () => lock.owned() })
+        pageKeys = openPageKeys({ dir: flags.dataDir, env, log, guard: held })
       } catch (err) {
         if (err.code !== 'indisponivel') throw err
       }
       if (pageKeys === null) log({ event: 'paginas', reason: 'indisponivel' })
       else {
-        pagesWriter = createPagesWriter({ dir: flags.dataDir, keys: pageKeys, association, seederWs: pagesConfig.seederWs, log, guard: () => lock.owned() })
-        pagesStore = openPagesStore(flags.dataDir, { guard: () => lock.owned() })
+        pagesWriter = createPagesWriter({ dir: flags.dataDir, keys: pageKeys, association, seederWs: pagesConfig.seederWs, log, guard: held })
+        pagesStore = openPagesStore(flags.dataDir, { guard: held })
         log({ event: 'paginas', reason: pagesStore.available() ? 'ligada' : 'indisponivel' })
         await closeOrphanPages(store, pagesWriter, pagesStore, log)
-        pageClients = openPageClients({ dataDir: flags.dataDir, env, association, seederWs: pagesConfig.seederWs, moderation, keys: pageKeys, writer: pagesWriter, pagesStore, guard: () => lock.owned(), log })
+        pageClients = openPageClients({ dataDir: flags.dataDir, env, association, seederWs: pagesConfig.seederWs, moderation, keys: pageKeys, writer: pagesWriter, pagesStore, guard: held, log })
       }
     }
     // A signal (or a lost lock) during the model load: do not open the port
@@ -1058,7 +1061,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, guard: held, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -1078,7 +1081,7 @@ async function serve (flags, env) {
           notify: server.notifyInvite,
           room: () => server.inviteRoom(),
           canNotify: (m) => server.inviteConsent(m),
-          guard: () => lock.owned(),
+          guard: held,
           log
         })
         loop.start()
@@ -1470,7 +1473,7 @@ async function releasePhone (dataDir, member, key, { open = openPhoneStore } = {
   try {
     let phones
     try {
-      phones = open(dataDir, { key, guard: () => lock.owned() })
+      phones = open(dataDir, { key, guard: () => lock.held() })
     } finally {
       key.fill(0)
     }

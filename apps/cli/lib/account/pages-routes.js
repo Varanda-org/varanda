@@ -84,7 +84,7 @@ const { canonicalOp, opHash, verifyPage } = require('@varanda/core/lib/page-proo
 const pageLib = require('@varanda/core/lib/page')
 const { createIssuedCert, createUsernameRecord, isPlainObject } = require('@varanda/core/lib/cert')
 const { isUsername } = require('@varanda/core/lib/account-link')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
@@ -268,6 +268,9 @@ function createPagesRoutes ({
   pagesNotices = null,
   pagesGroups = null,
   pagesDelegate = null,
+  // The service lock, asked right before the rename of the nonce key and
+  // the invites file (./guarded-write.js).
+  guard = () => true,
   // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
   phoneChecked = () => {},
   http
@@ -364,7 +367,7 @@ function createPagesRoutes ({
         throw new Error('invalid')
       }
       const key = nodeCrypto.randomBytes(32)
-      writeJsonAtomic(file, { v: 1, key: key.toString('hex') }, 0o600)
+      writeGuarded(file, { v: 1, key: key.toString('hex') }, 0o600, guard)
       return key
     } catch {
       log({ event: 'pagina', action: 'nonce-key', reason: 'indisponivel' })
@@ -814,7 +817,7 @@ function createPagesRoutes ({
       return
     }
     try {
-      writeJsonAtomic(file, { v: 1, rows }, 0o600)
+      writeGuarded(file, { v: 1, rows }, 0o600, guard)
     } catch (err) {
       inviteStale = true
       throw err

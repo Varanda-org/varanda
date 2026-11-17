@@ -17,9 +17,12 @@
 // argument shapes throw TypeError, and no message ever carries a number.
 //
 // No union merge: every mutation runs in one in-process queue, re-reads the
-// file (the service lock can go stale and writeJsonAtomic renames
-// unconditionally), applies its one change to the disk state and only
-// replaces memory after the write. A write that throws or a guard that
+// file (the service lock can go stale, so another holder may have replaced
+// it), applies its one change to the disk state and only replaces memory
+// after the write. guard() is asked before the re-read, before the write and
+// right before the rename (./guarded-write.js, after the temp file is
+// written and fsynced), so a holder that lost the lock meanwhile leaves the
+// file as the new holder wrote it. A write that throws or a guard that
 // refuses marks the store dirty and adopts the file as it then reads (the
 // rename may have landed before the error); when that re-read fails too,
 // every call answers 'indisponivel' until heal() reads the file again.
@@ -30,7 +33,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { isBrMobile } = require('@varanda/core/lib/phone')
 
@@ -324,7 +327,8 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
   }
 
   // Runs one mutation: guard, re-read, apply to the disk state, guard again,
-  // write, and only then replace memory. `apply` returns [changed, result].
+  // write (guard once more right before the rename), and only then replace
+  // memory. `apply` returns [changed, result].
   function mutate (apply) {
     usable()
     if (readOnly) throw fail('indisponivel')
@@ -343,7 +347,7 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
     try {
       guarded()
       refuseSymlinkDir(dataDir)
-      writeJsonAtomic(file, toJson(next, checkHex), 0o600)
+      writeGuarded(file, toJson(next, checkHex), 0o600, guard)
     } catch {
       dirty = true
       try {
