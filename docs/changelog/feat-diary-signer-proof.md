@@ -1,0 +1,3 @@
+### Adicionado
+
+- O semeador aceita a prova de selos de Conversas do diário de um nó core (Hypercore 11), cuja chave é o hash do manifesto do assinante e não a chave pública dele: uma prova v2 no mesmo canal `varanda/dm-stamp/1`, assinada pelo assinante, que o semeador só aceita quando o diário é o desse assinante; a cota continua contada por diário. A prova v1 dos diários do navegador não muda. O semeador precisa ser implantado antes de qualquer nó core usar a prova v2. Verificação em `docs/verification/feat-diary-signer-proof.md`.
