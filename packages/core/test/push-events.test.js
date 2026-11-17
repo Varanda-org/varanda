@@ -39,7 +39,7 @@ function event (fields = {}) {
 
 test('push kinds', (t) => {
   t.alike(PUSH_KINDS, ['follow', 'reply', 'quote', 'mention', 'like', 'repost'])
-  t.is(PUSH_MAX_AGE_MS, 6 * 3600 * 1000)
+  t.is(PUSH_MAX_AGE_MS, 24 * 3600 * 1000)
 })
 
 test('pushCandidate: follow, reply, like and repost reach the target', (t) => {
@@ -102,6 +102,9 @@ test('pushCandidate: stale records give null', (t) => {
   t.is(candidate({ ...follow(true), at: old }), null, 'older than the max age')
   t.is(candidate({ ...engage('like', true), at: old }), null, 'old like')
   t.ok(candidate({ ...follow(true), at: recent }), 'within the max age')
+  t.ok(candidate({ ...follow(true), at: new Date(NOW - PUSH_MAX_AGE_MS).toISOString() }), 'exactly 24 h old still pushes')
+  t.is(candidate({ ...follow(true), at: new Date(NOW - PUSH_MAX_AGE_MS - 1).toISOString() }), null, '24 h and 1 ms is stale')
+  t.ok(candidate({ ...follow(true), at: new Date(NOW - 23 * 3600 * 1000 - 59 * 60 * 1000).toISOString() }), '23 h 59 min pushes')
   t.ok(candidate({ ...follow(true), at: new Date(NOW + 60000).toISOString() }), 'future-dated is not suppressed')
 })
 
@@ -374,4 +377,76 @@ test('module loads without node built-ins', (t) => {
   const requires = [...src.matchAll(/require\(['"]([^'"]+)['"]\)/g)].map((m) => m[1])
   t.alike(requires.sort(), ['./records', '@varanda/rpc'])
   t.absent(/process\.|#fs|#path|#process|node:/.test(src))
+})
+
+test('validatePushCancel: exact shape, follow/like/repost only, ref into the recipient\'s log', (t) => {
+  const { validatePushCancel } = require('../lib/push-events')
+  const ok = { v: 1, op: 'cancel', kind: 'like', actor: B, recipient: A, ref: A + ':7' }
+  t.ok(validatePushCancel(ok))
+  t.ok(validatePushCancel({ ...ok, kind: 'repost' }))
+  t.ok(validatePushCancel({ ...ok, kind: 'follow', ref: null }))
+  t.absent(validatePushCancel({ ...ok, kind: 'follow' }), 'a follow has no ref')
+  t.absent(validatePushCancel({ ...ok, ref: null }), 'a like needs a ref')
+  t.absent(validatePushCancel({ ...ok, ref: B + ':7' }), 'a ref outside the recipient\'s log')
+  t.absent(validatePushCancel({ ...ok, ref: A + ':0' }), 'seq 0')
+  for (const kind of ['reply', 'quote', 'mention', 'dm-wake']) t.absent(validatePushCancel({ ...ok, kind }), kind + ' cannot be recalled')
+  t.absent(validatePushCancel({ ...ok, op: 'push' }), 'op')
+  t.absent(validatePushCancel({ ...ok, v: 2 }), 'v')
+  t.absent(validatePushCancel({ ...ok, recipient: B }), 'self')
+  t.absent(validatePushCancel({ ...ok, actor: B.toUpperCase() }), 'uppercase key')
+  t.absent(validatePushCancel({ ...ok, seq: 3 }), 'extra key')
+  const { op, ...missing } = ok
+  t.absent(validatePushCancel(missing), 'missing op')
+  t.absent(validatePushCancel(null))
+  t.absent(validatePushCancel([]))
+})
+
+test('pushCancel: an off follow, like or repost recalls what its on record would push', (t) => {
+  const { pushCancel, validatePushCancel } = require('../lib/push-events')
+  const cancel = (record, opts = {}) => pushCancel({ author: A, seq: 3, record, now: NOW, ...opts })
+  const follows = cancel(follow(false))
+  const likes = cancel(engage('like', false))
+  const reposts = cancel(engage('repost', false))
+  t.alike(follows, { v: 1, op: 'cancel', kind: 'follow', actor: A, recipient: B, ref: null })
+  t.alike(likes, { v: 1, op: 'cancel', kind: 'like', actor: A, recipient: B, ref: B + ':7' })
+  t.alike(reposts, { v: 1, op: 'cancel', kind: 'repost', actor: A, recipient: B, ref: B + ':7' })
+  t.ok([follows, likes, reposts].every(validatePushCancel), 'every cancel passes validatePushCancel')
+  t.ok(cancel({ ...follow(false), at: undefined }), 'no at is not stale')
+  t.ok(cancel({ ...follow(false), at: new Date(NOW - PUSH_MAX_AGE_MS).toISOString() }), 'exactly 24 h old still recalls')
+})
+
+test('pushCancel: the shape only, whatever membership or blocks (the seeder gates on what it pushed)', (t) => {
+  const { pushCancel } = require('../lib/push-events')
+  const want = { v: 1, op: 'cancel', kind: 'follow', actor: A, recipient: B, ref: null }
+  t.alike(pushCancel({ author: A, seq: 3, record: follow(false), now: NOW }), want, 'no predicates needed')
+  t.alike(pushCancel({ author: A, seq: 3, record: follow(false), isMember: () => false, now: NOW }), want, 'a non-member recipient')
+  t.alike(pushCancel({ author: A, seq: 3, record: follow(false), isBlocked: () => true, now: NOW }), want, 'a block since the push')
+  t.alike(pushCancel({ author: A, seq: 3, record: follow(false), isBlocked: () => { throw new Error('x') }, now: NOW }), want, 'a throwing predicate is not asked')
+})
+
+test('pushCancel: on records, self-targets, stale and garbage give null', (t) => {
+  const { pushCancel } = require('../lib/push-events')
+  const cancel = (record, opts = {}) => pushCancel({ author: A, seq: 3, record, now: NOW, ...opts })
+  t.is(cancel(follow(true)), null, 'follow on')
+  t.is(cancel(engage('like', true)), null, 'like on')
+  t.is(cancel(engage('repost', true)), null, 'repost on')
+  t.is(cancel({ ...follow(true), on: undefined }), null, 'on missing')
+  t.is(cancel({ ...follow(false), on: 0 }), null, 'on falsy but not false')
+  t.is(cancel({ ...post({ author: B, seq: 7 }), on: false }), null, 'a post is never recalled')
+  t.is(cancel(follow(false, A)), null, 'self-unfollow')
+  t.is(cancel(engage('like', false, A)), null, 'self-like off')
+  t.is(cancel(engage('repost', false, A)), null, 'self-repost off')
+  t.is(cancel({ ...engage('like', false), at: new Date(NOW - PUSH_MAX_AGE_MS - 1).toISOString() }), null, 'stale')
+  t.is(cancel({ ...follow(false), key: 'B' }), null, 'bad follow key')
+  t.is(cancel({ type: 'like', to: { author: B, seq: 0 }, on: false, at: AT }), null, 'seq 0 target')
+  t.is(cancel({ type: 'like', to: null, on: false, at: AT }), null, 'null target')
+  t.is(cancel(follow(false), { author: 'x' }), null, 'bad author')
+  t.is(cancel(follow(false), { seq: 0 }), null, 'bad seq')
+  t.is(cancel(follow(false), { now: NaN }), null, 'bad now')
+  t.is(pushCancel(null), null)
+  t.is(pushCancel([]), null)
+  t.is(pushCancel({ author: A, seq: 3, record: null, now: NOW }), null)
+  const trap = { type: 'follow', on: false }
+  Object.defineProperty(trap, 'key', { enumerable: true, get () { throw new Error('x') } })
+  t.is(cancel(trap), null, 'a throwing record never throws')
 })

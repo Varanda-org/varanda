@@ -148,10 +148,12 @@ function createPostNoticeIndex ({
   maxAuthors = POST_NOTICES_MAX_AUTHORS,
   maxPerAuthor = MAX_POST_NOTICES_PER_AUTHOR,
   maxPerPair = MAX_POST_NOTICES_PER_PAIR,
-  maxEdges = POST_NOTICES_MAX_EDGES
+  maxEdges = POST_NOTICES_MAX_EDGES,
+  onOwnersGained = null
 } = {}) {
   if (typeof isMember !== 'function') throw new TypeError('invalid isMember')
   if (typeof verifyUsername !== 'function') throw new TypeError('invalid verifyUsername')
+  if (onOwnersGained !== null && typeof onOwnersGained !== 'function') throw new TypeError('invalid onOwnersGained')
   for (const [name, v] of [['maxAuthors', maxAuthors], ['maxPerAuthor', maxPerAuthor], ['maxPerPair', maxPerPair], ['maxEdges', maxEdges]]) {
     if (!Number.isSafeInteger(v) || v < 0) throw new TypeError('invalid ' + name)
   }
@@ -461,7 +463,10 @@ function createPostNoticeIndex ({
 
   // Rebuilds the author's names from the verified records of its window,
   // newest first so a name held twice maps to its newest issuer, and keeps
-  // owners in sync.
+  // owners in sync. A name whose owner set gains the author is reported to
+  // onOwnersGained(token, [authorHex]) once the state is consistent, so the
+  // seeder can settle a mention it saw before the name was verified; a loss
+  // or an unchanged set is never reported.
   function deriveNames (authorHex) {
     const next = new Map()
     const win = windows.get(authorHex)
@@ -482,6 +487,7 @@ function createPostNoticeIndex ({
         if (who.size === 0) owners.delete(username)
       }
     }
+    const gained = []
     for (const username of next.keys()) {
       if (!prev || !prev.has(username)) dropOwnMentions(authorHex, username)
       let who = owners.get(username)
@@ -489,10 +495,17 @@ function createPostNoticeIndex ({
         who = new Set()
         owners.set(username, who)
       }
+      if (!who.has(authorHex)) gained.push(username)
       who.add(authorHex)
     }
     if (next.size > 0) names.set(authorHex, next)
     else names.delete(authorHex)
+    if (onOwnersGained === null) return
+    for (const username of gained) {
+      try {
+        onOwnersGained(username, [authorHex])
+      } catch {}
+    }
   }
 
   function removeAuthor (authorHex) {

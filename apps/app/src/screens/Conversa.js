@@ -28,7 +28,7 @@ import { mergeChildren, withOwnReply } from '../threadRows'
 import { AUTHOR_TAG, assembleRoda, canSwipeReply, commentOrder, commentRows, rodaOrder, withAnchor } from '../roda'
 import { SEEK_PAGES, resolveRoot, seekTarget } from '../rodaLoad'
 import { isRef } from '../nav'
-import { quickReplyPlan, sendTextReply } from '../replySend'
+import { quickReplyPlan, sendPageTextReply, sendTextReply } from '../replySend'
 import { hasLink } from '../links'
 import { refusalOf } from '../wordCheck'
 import { applyToggle, countsAfter, diaryPeekSlots, emptyState, fromRead, mergeCounts } from '../engagement'
@@ -69,6 +69,12 @@ const BUSY_RETRY_MS = 600
 const BUSY_RETRIES = 3
 const NOT_HOSTED_NOTE = 'Conversa completa disponível na versão web, com internet.'
 const OFFLINE_NOTE = 'Sem internet: a conversa completa aparece quando a conexão voltar.'
+const RESEND_NOTE = 'A mensagem anterior pode ter sido enviada. Envie de novo sem mudar o texto: ela é reenviada, sem duplicar.'
+const MAYBE_SENT_NOTE = 'A resposta pode ter sido enviada. Confira a conversa antes de enviar de novo.'
+// How long held page bytes are resent: the account service accepts a nonce
+// for 600 s (apps/cli/lib/account/pages-routes.js NONCE_TTL_MS); this stops
+// two minutes short, since the bytes were signed before the lost send.
+const HELD_RETRY_MS = 8 * 60 * 1000
 const PARENT_GONE_NOTE = 'A publicação respondida está indisponível.'
 const CUT_NOTE = 'O começo desta conversa está mais acima e não pôde ser mostrado.'
 const MISSING_QUOTE = 'Mensagem indisponível'
@@ -940,6 +946,10 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const [note, setNote] = useState('')
   const [sending, setSending] = useState(false)
   const sendingRef = useRef(false)
+  // A page reply whose answer was lost: { retry, page, ref, text }.
+  const pageRetryRef = useRef(null)
+  // The bar's target ref now, for a send that settles after a change.
+  const barTargetRef = useRef(null)
   const rodaRequests = useRef(new Map())
   // Bumped when the open rodas are dropped, so a page still in flight
   // cannot land in, or release, the roda that replaced it.
@@ -1521,6 +1531,20 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const renderRef = useRef(null)
   const renderItem = useCallback(({ item: row }) => renderRef.current(row), [])
   const extra = useMemo(() => ({ eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, profileOf: names.profileOf }), [eng, follows, now, rodas, rodaBusy, rodaErrors, flashKey, sending, styles, names.profileOf])
+  // Acting as a page, the bar shows the page: the reply is published as it.
+  const barActing = useActing()
+  const barPageKey = barActing.kind === 'page' ? barActing.key : null
+  useEffect(() => { if (barPageKey !== null) resolveMany([barPageKey]) }, [barPageKey, resolveMany])
+  const barPage = barPageKey === null ? null : names.profileOf(barPageKey)
+  const barPageName = barPageKey === null ? '' : displayText((barPage && (barPage.name || barPage.username)) || barActing.name || barActing.username || 'Página').trim()
+  const barPageAvatar = barPage ? barPage.avatar : undefined
+  // A note about one target or identity goes when either changes; a held page
+  // retry stays keyed to its page, target and text.
+  const noteTargetRef = replyTarget ? replyTarget.ref : null
+  useEffect(() => { setNote('') }, [noteTargetRef, barPageKey])
+  const barMe = useMemo(() => (barPageKey === null
+    ? me
+    : { name: barPageName, publicKey: barPageKey, picture: barPageAvatar }), [barPageKey, barPageName, barPageAvatar, me])
 
   const title = 'Comentários'
   const top = <TopBar title={title} onBack={onBack} />
@@ -1553,8 +1577,12 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const rootTarget = rootKey === null || (root !== null && view.proven !== true) ? null : { ref: rootKey, ...(post ? identityOf(names, post.author, post) : {}), text: post ? post.text : '' }
   const target = replyTarget || rootTarget
   const toRoot = target !== null && target.ref === rootKey
+  barTargetRef.current = target !== null ? target.ref : null
+  const barPlaceholder = barPageKey !== null ? (toRoot ? 'Comente como ' : 'Responda como ') + barPageName : (toRoot ? 'Escreva um comentário' : undefined)
   const expandReply = async (draft, target = replyTarget || rootTarget, attach) => {
     if (typeof onReply !== 'function' || !target) return false
+    // Publicar signs a new reply: only this bar resends the held bytes.
+    if (heldRetry(actingPageKey(), target.ref, draft) !== null) setNote(RESEND_NOTE)
     const accepted = await onReply(attach ? { ...target, draft, attach } : { ...target, draft })
     if (accepted === true && replyDraft.current.focal === focal && replyDraft.current.text === draft) replyDraft.current.text = ''
     return accepted
@@ -1562,8 +1590,24 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
   const sendReply = async (text) => {
     if (sendingRef.current || !target) return false
     const refusal = refusalOf(text)
-    const plan = quickReplyPlan({ text, nodeReady: full, actingAsPage: actingPageKey() !== null, hasLink: hasLink(text), refusal })
+    // The identity can change while the service answers: this send stays the page it started as.
+    const pageKey = actingPageKey()
+    const plan = quickReplyPlan({ text, nodeReady: full, actingAsPage: pageKey !== null, hasLink: hasLink(text), refusal })
     if (plan.kind === 'empty') return false
+    // A page reply whose answer was lost keeps its signed bytes: the same
+    // text, target and page resend them (once per tap). Anything else signs
+    // anew, and the held bytes stay until a different reply is sent or they
+    // settle: a refusal, Publicar or a failure before signing keeps them.
+    const resend = heldRetry(pageKey, target.ref, text)
+    const heldAt = resend !== null ? pageRetryRef.current.at : Date.now()
+    // Bytes held past the nonce's life can no longer be resent: they are
+    // dropped and the person is asked to check the conversation first. The
+    // next tap with the same text signs anew.
+    if (resend === null && heldStale(pageKey, target.ref, text)) {
+      pageRetryRef.current = null
+      setNote(MAYBE_SENT_NOTE)
+      return false
+    }
     if (plan.kind === 'refuse') {
       setNote(refusal)
       return false
@@ -1584,17 +1628,44 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       ? target.ref
       : topOf(target.ref, shownView.comments, rodasRef.current) || (resolvedTop !== null && shownView.comments.some((c) => refOf(c.author, c.seq) === resolvedTop) ? resolvedTop : null)
     try {
-      const result = await sendTextReply({ request, text, replyTo: target.ref })
+      let result
+      if (plan.kind === 'send-page') {
+        // memberKeyOf throws before any signature: same note path as a refused send.
+        try {
+          if (resend !== null) {
+            result = await sendPageTextReply({ retry: resend, page: pageKey, text, replyTo: target.ref })
+          } else {
+            const member = await memberKeyOf(node.request, node)
+            result = await sendPageTextReply({
+              act: (op) => actAs(nodeOf(node), { member, action: 'reply', page: pageKey, op }),
+              page: pageKey,
+              text,
+              replyTo: target.ref
+            })
+          }
+          // The optimistic row shows the page's name and photo once the cache has them.
+          if (result.ok) resolveMany([pageKey])
+        } catch (error) {
+          result = { ok: false, ref: null, error }
+        }
+        if (typeof result.retry === 'function') pageRetryRef.current = { retry: result.retry, page: pageKey, ref: target.ref, text, at: heldAt }
+        else if (resend !== null) pageRetryRef.current = null
+      } else {
+        result = await sendTextReply({ request, text, replyTo: target.ref })
+      }
       const sent = result.ok ? parseRef(result.ref) : null
       const item = sent ? { kind: 'post', ...sent, at, text, replyTo: parseRef(target.ref), ...identityOf(names, sent.author) } : null
       if (item && holder !== null && cacheEpoch === cacheGeneration()) cacheOwnReply(holder, item)
       if (result.ok && replyDraft.current.focal === focal && replyDraft.current.text === text) replyDraft.current.text = ''
       if (result.ok && typeof onPublished === 'function') onPublished('quick-reply', target.ref)
       if (session !== sessionRef.current) return result.ok
-      if (result.gated) return expandReply(text, target)
+      // A page has no outbox gate: a refusal stays on the bar.
+      if (pageKey === null && result.gated) return expandReply(text, target)
       if (!result.ok) {
         setNote(result.refused || (result.error && result.error.uncertain === true
-          ? 'A resposta pode ter sido enviada. Confira a conversa antes de enviar de novo.'
+          ? (typeof result.retry === 'function' && actingPageKey() === pageKey && barTargetRef.current === target.ref
+              ? RESEND_NOTE
+              : MAYBE_SENT_NOTE)
           : errorText(result.error)))
         return false
       }
@@ -1617,6 +1688,19 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
       sendingRef.current = false
       setSending(false)
     }
+  }
+  const heldFor = (page, ref, text) => {
+    const held = pageRetryRef.current
+    return held !== null && page !== null && held.page === page && held.ref === ref && held.text === text ? held : null
+  }
+  // The held retry for this page, target and text while its nonce lives.
+  const heldRetry = (page, ref, text) => {
+    const held = heldFor(page, ref, text)
+    return held !== null && Date.now() - held.at < HELD_RETRY_MS ? held.retry : null
+  }
+  const heldStale = (page, ref, text) => {
+    const held = heldFor(page, ref, text)
+    return held !== null && Date.now() - held.at >= HELD_RETRY_MS
   }
   // Same pattern as the chat's quote jump (Mensagem.js): scrollToIndex
   // throws for a row it cannot place, and the first offset can be an
@@ -1843,11 +1927,11 @@ function ConversaList ({ entry, ownKey, me, onBack, onReply, onQuote, onReport, 
               onSend={sendReply}
               onExpand={expandReply}
               onAttach={(draft) => expandReply(draft, undefined, 'photo')}
-              me={me}
+              me={barMe}
               nonFocalTarget={replyTarget !== null && !toRoot}
-              placeholder={toRoot ? 'Escreva um comentário' : undefined}
+              placeholder={barPlaceholder}
               sendLabel={toRoot ? 'Comentar' : undefined}
-              onClearTarget={() => setReplyTarget(null)}
+              onClearTarget={() => { if (!sendingRef.current) setReplyTarget(null) }}
               busy={sending}
               disabled={!target || (!post && !replyTarget)}
               note={note}
