@@ -33,12 +33,12 @@ test('deletion.js loads without the node-only network stack', (t) => {
   }
 })
 
-// The notices, push-proof, age, groups, devices, peer-slots and peer-proof modules ship in the web bundle,
+// The notices, push-proof, age, groups, devices, peer-slots, peer-proof and diary-signer modules ship in the web bundle,
 // which stubs `crypto` and `fs` to throw: neither may be required, by them or anything
 // they load from lib/ (hypercore-crypto's Node backend, sodium-native, requires `fs` to
 // find its addon; the bundle swaps that backend out, so only `crypto` is
 // checked beyond lib/).
-for (const mod of ['./lib/notices.js', './lib/notices-net.js', './lib/push-proof.js', './lib/age.js', './lib/groups-net.js', './lib/group.js', './lib/devices.js', './lib/peer-slots.js', './lib/peer-proof.js']) {
+for (const mod of ['./lib/notices.js', './lib/notices-net.js', './lib/push-proof.js', './lib/age.js', './lib/groups-net.js', './lib/group.js', './lib/devices.js', './lib/peer-slots.js', './lib/peer-proof.js', './lib/diary-signer.js']) {
   test(mod + ' loads without the node-only network stack, fs or crypto', (t) => {
     const code = "const m = require('node:module'); const seen = []; const orig = m.prototype.require; m.prototype.require = function (id) { seen.push([this.filename, id]); return orig.apply(this, arguments) }; require('" + mod + "'); process.stdout.write(JSON.stringify({ cached: Object.keys(require.cache), seen }))"
     const r = spawnSync(process.execPath, ['-e', code], { cwd: coreRoot, encoding: 'utf8' })

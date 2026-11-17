@@ -2191,6 +2191,20 @@ function writeDmCopy (storage, sealed) {
   return storage.writeJson('dmCopy', { nonce: sealed.nonce, box: sealed.box })
 }
 
+// Automatic history copy (./dm-copy.js): kv dmAutoCopy = { nonce, box },
+// the sealed record { v, job, lastClaim, claimed, done, claims } under the
+// local store key.
+async function readDmAutoCopy (storage) {
+  const data = await readKv(storage, 'dmAutoCopy')
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writeDmAutoCopy (storage, sealed) {
+  if (sealed === null) return storage.writeJson('dmAutoCopy', null)
+  if (!validLegacySealed(sealed)) throw new TypeError('registro inválido')
+  return storage.writeJson('dmAutoCopy', { nonce: sealed.nonce, box: sealed.box })
+}
+
 async function readCopyPend (storage) {
   const data = await readKv(storage, 'dmCopyPend')
   if (!isVersioned(data) || !Array.isArray(data.items)) return []
@@ -2278,7 +2292,7 @@ async function deleteDmData (storage) {
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
   // taken from.
-  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'dmCopy', 'seenLocal']) await storage.writeJson(key, null)
+  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'dmCopy', 'dmAutoCopy', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -2386,6 +2400,8 @@ module.exports = {
   readPageCursor,
   readDmCopy,
   writeDmCopy,
+  readDmAutoCopy,
+  writeDmAutoCopy,
   readCopyPend,
   writeCopyPend,
   readCopyPiece,

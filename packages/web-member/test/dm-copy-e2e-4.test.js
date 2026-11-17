@@ -1,10 +1,10 @@
 'use strict'
 
-// More of the history copy (docs/protocol.md section 11, docs/rpc.md 5.156),
-// over the real Seeder and real browser nodes, as dm-copy-e2e.test.js (this
-// file holds what would not fit that one's time): the conversations of a held
-// Página, and the weekly copy allowance spent on photos while the text still
-// travels on it. Local DHT and tmp dirs only.
+// More of the history copy (docs/protocol.md section 11), over the real
+// Seeder and real browser nodes, as dm-copy-e2e.test.js (this file holds what
+// would not fit that one's time): the conversations of a held Página, and the
+// weekly copy allowance spent on photos while the text still travels on it.
+// Local DHT and tmp dirs only.
 
 const test = require('brittle')
 const crypto = require('hypercore-crypto')
@@ -18,6 +18,7 @@ const store = require('../lib/node-store')
 const { errorOf } = require('./helpers/session')
 const { hex, seederHost, memberNode, png } = require('./helpers/dm-e2e')
 const { BLOB, sleep, copyDiary, sweepPool, copyUsed, textsOf } = require('./helpers/dm-copy')
+const { account, sibling, ownDrops, copiesOf, kick, idle, manifestOf } = require('./helpers/dm-auto')
 
 const AT = '2026-11-03T12:00:00.000Z'
 const RNONCE = 'r'.repeat(43)
@@ -59,17 +60,25 @@ function adopt (N, page, made, assoc) {
   return N.web.request('dm.pageSecrets', { page, gen: 1, sealed: s.sealed, by: N.key, sig: s.sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: page }, assoc.kp) })
 }
 
+// The old device A of a new account and its newer device A2 (which knows
+// its own device id, as the session tells the engine).
+async function devicesOf (t, assoc, host, blob) {
+  const acct = await account(t, assoc, host, { old: 1, fresh: 1, blob })
+  const A2 = await sibling(t, assoc, host, acct, acct.fresh[0], { blob })
+  t.is((await A2.web.request('device.list')).self, acct.fresh[0], 'A2 knows its device id')
+  return { acct, A: acct.first, A2 }
+}
+
 test('the conversations of a Página come along: filed at once on a device that holds it, kept sealed until a device adopts it', async (t) => {
-  t.timeout(170000)
+  t.timeout(240000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
   const assoc = { kp, hex: hex(kp.publicKey) }
   const issuerKp = crypto.keyPair()
   const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
   const host = await seederHost(t, bootstrap, assoc, { blob: true })
-  const A = await memberNode(t, assoc, host, { blob: BLOB })
+  const { acct, A, A2 } = await devicesOf(t, assoc, host, BLOB)
   const C = await memberNode(t, assoc, host, { blob: BLOB })
-  const A2 = await memberNode(t, assoc, host, { keyPair: A.keyPair, prf: A.prf, enable: false, blob: BLOB })
   await copyDiary(C, A)
   await copyDiary(A, C)
   const boxA = hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey)
@@ -95,8 +104,11 @@ test('the conversations of a Página come along: filed at once on a device that 
   t.alike(await adopt(A2, P1.page, P1.made, assoc), { ok: true })
   await sweepPool(host)
 
-  const made = await A.web.request('dm.historyCopy')
-  t.is(made.messages, 3, 'the own conversation and the two Páginas')
+  await kick(A)
+  await idle(t, A)
+  const copies = copiesOf(await ownDrops(t, host, acct))
+  t.is(copies.length, 1, 'one text copy, no photo')
+  t.alike((await manifestOf(host, copies[0])).stores.map((s) => s.page).sort(), [null, P1.page, P2.page].sort(), 'the own conversation and the two Páginas')
 
   await A2.web.request('dm.pull')
   await until(() => A2.web.events.some((e) => e.name === 'dm.copyImported'), { name: 'copyImported', timeoutMs: 60000 })
@@ -122,8 +134,8 @@ test('the conversations of a Página come along: filed at once on a device that 
   t.is((await store.readCopyPend(A2.storage)).length, 0, 'the sealed entry is gone')
 })
 
-test('photos spend the weekly copy allowance after the text took its stamps: the daily wallet is untouched', async (t) => {
-  t.timeout(110000)
+test('photos spend the weekly copy allowance after the text took its stamps: the daily wallet pays no photo', async (t) => {
+  t.timeout(240000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
   const assoc = { kp, hex: hex(kp.publicKey) }
@@ -133,14 +145,14 @@ test('photos spend the weekly copy allowance after the text took its stamps: the
   // No background top-up, so the daily wallet only moves when a send or a
   // copy spends it.
   const quiet = { ...BLOB, topUpEveryMs: 3600000, topUpRetryMs: 3600000 }
-  const A = await memberNode(t, assoc, host, { blob: quiet })
+  const { acct, A, A2 } = await devicesOf(t, assoc, host, quiet)
   const P = await memberNode(t, assoc, host, { blob: quiet })
-  const A2 = await memberNode(t, assoc, host, { keyPair: A.keyPair, prf: A.prf, enable: false, blob: quiet })
   await copyDiary(P, A)
   await copyDiary(A, P)
+  const sent = []
   for (const n of [1, 2, 3]) {
     const item = await A.node.dmPutMedia({ bytes: png(500 + n), mime: 'image/png', width: 64, height: 48, to: P.key })
-    await A.web.request('dm.send', { to: P.key, text: 'foto ' + n, media: [item] })
+    sent.push(await A.web.request('dm.send', { to: P.key, text: 'foto ' + n, media: [item] }))
   }
   await sweepPool(host)
 
@@ -155,11 +167,14 @@ test('photos spend the weekly copy allowance after the text took its stamps: the
   }
   t.ok(before > 0, 'the daily wallet holds stamps')
 
-  const made = await A.web.request('dm.historyCopy')
-  t.is(made.messages, 3, 'every message text travelled')
-  t.is(made.photos, 1, 'the allowance the text left went to one photo, the newest')
-  t.is(made.leftOut, 2, 'the photos that did not fit are counted')
-  t.is(await wallet(), before, 'the daily wallet kept every stamp')
+  await kick(A)
+  await idle(t, A)
+  const copies = copiesOf(await ownDrops(t, host, acct))
+  t.is(copies.length, 2, 'the text and one photo batch')
+  t.alike((await manifestOf(host, copies[1])).photos.map((x) => x.id), [sent[2].id], 'the allowance the text left went to one photo, the newest')
+  // The batch manifest must go, as the text manifest: the allowance is
+  // spent, so the daily wallet pays it. Never a photo.
+  t.is(await wallet(), before - 1, 'the daily wallet paid the batch manifest only')
   t.is(copyUsed(host), 4, 'the week\'s allowance is spent, text first')
 
   await A2.web.request('dm.pull')

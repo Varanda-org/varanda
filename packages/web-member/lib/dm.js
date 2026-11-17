@@ -333,6 +333,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // after it (afterLoad); never rejects unhandled.
   let ready = Promise.resolve()
   let pulling = false
+  // Whether the last pull of this unlock read the pool to its end, and the
+  // own key it ran for (the automatic history copy acts only after one).
+  let lastPullComplete = false
+  let lastOwn = null
   let topping = null
   // The earliest time the next unforced top-up may run.
   let nextTopUp = 0
@@ -566,6 +570,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     clearPending()
     forgetAllBlobs()
     publicItems.clear()
+    lastPullComplete = false
+    lastOwn = null
     copy.reset()
     dropQueued(false, LOCKED)
     opening.clear()
@@ -2011,13 +2017,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           const ops = [...local.ops()]
           const mod = await moderation()
           const missed = []
-          // History copy pointers of this page (./dm-copy.js).
+          // History copy pointers and claims of this page (./dm-copy.js).
           const pointers = []
+          const claims = []
           for (const item of page.items) {
             read += item.bytes.byteLength
-            const row = item.seq > cursor ? openItem(own, item.bytes, ops, rows, mod) : null
+            const row = item.seq > cursor ? openItem(own, item.bytes, ops, rows, mod, item.seq) : null
             if (row !== null && row.t === 'copy') {
               pointers.push(row)
+            } else if (row !== null && row.t === 'claim') {
+              claims.push(row)
             } else if (row !== null) {
               // Filed now, on the monotonic clock: a ctl earlier in this page
               // then counts for the items after it (dm-fold ignores a row
@@ -2044,7 +2053,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           }
           // Noted (sealed in kv) before the cursor passes this page: a lock or
           // a kill after the cursor write would otherwise lose the pointer.
-          if (pointers.length > 0) await copy.note(pointers)
+          if (pointers.length > 0 || claims.length > 0) await copy.note(pointers, claims)
           if (page.items.length > 0) {
             after = page.items[page.items.length - 1].seq
             if (after > cursor) {
@@ -2075,6 +2084,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       await pass(cursor)
       const behind = live.filter((p) => !pageStale(p) && p.cursor.after < cursor)
       if (!incomplete && behind.length > 0) await pass(Math.min(...behind.map((p) => p.cursor.after)))
+      if (gen === generation) {
+        lastPullComplete = !incomplete
+        lastOwn = own
+      }
+    } catch (err) {
+      // A pull that failed (no seeder, a cut link) read nothing to count on:
+      // the automatic copy waits for one that completes (./dm-copy.js).
+      if (gen === generation) lastPullComplete = false
+      throw err
     } finally {
       pulling = false
       if (link !== null) link.close()
@@ -2160,15 +2178,17 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
 
   // One pool item -> a row to file, or null (not ours, uncertified, known,
   // blocked here or by the association).
-  function openItem (own, bytes, ops, batch, mod) {
+  function openItem (own, bytes, ops, batch, mod, seq) {
     const drop = dm.decodeDrop(bytes)
     if (drop === null) return null
     const inner = dm.openSealed(drop.sealed, box)
     if (inner === null) return null
     const body = dm.openInner(inner, own, { association, revokedIssuers: mod.revokedIssuers })
     if (body === null || dm.pageInnerStale(body, Date.now())) return null
-    // A history copy pointer is never a row: the pull hands it to ./dm-copy.js.
+    // A history copy pointer or claim is never a row: the pull hands it to
+    // ./dm-copy.js (a claim with its pool seq).
     if (body.kind === 'copy') return { t: 'copy', id: body.id, copy: body.copy }
+    if (body.kind === dm.DM_CLAIM_KIND) return { t: 'claim', id: body.id, copy: body.copy, for: body.for, by: body.by, at: body.at, seq }
     return rowOf(own, body, ops, batch, mod.blocked, local, dm.bodyDigest(body))
   }
 
@@ -2186,8 +2206,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
       // A Página conversation has no reactions: a v4 body is never filed.
       if (body.kind === 'react') return null
-      // Nor a history copy pointer (own box only).
-      if (body.kind === 'copy') return null
+      // Nor a history copy pointer or claim (own box only).
+      if (body.kind === 'copy' || body.kind === dm.DM_CLAIM_KIND) return null
       // Nor a reaction to a momento (v5): a page sends no momento reactions.
       if (body.v === 5) return null
       // Of the body as signed, before a carried legacy key is renamed.
@@ -3225,8 +3245,37 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     unconfirmed,
     folded,
     moderation,
-    openMedia
+    openMedia,
+    // A photo of an automatic copy, opened with its new descriptors: once it
+    // is cached a mark from the original blob being gone no longer applies.
+    openCopied: (m) => openMedia(m, true).then((r) => {
+      gone.delete(personal.prefix + openKey(m.from, m.id))
+      return r
+    }),
+    pull: pullForCopy,
+    pullComplete: () => lastPullComplete
   })
+
+  // The pull the automatic copy waits on: after the one running, if any.
+  async function pullForCopy (own) {
+    const gen = generation
+    const busy = () => pulling && gen === generation
+    for (let i = 0; i < 1200 && busy(); i++) await sleep(100)
+    return pull(own)
+  }
+
+  // { self, off } of this device, from the session. A change lets the
+  // claimed copies waiting for it import now.
+  function setDevice (v) {
+    if (copy.setDevice(v) && lastOwn !== null && unlocked()) track(copy.importAll(lastOwn).catch(noop))
+  }
+
+  // Whether imports of copies wait, from the session (its own diary may lag
+  // behind a record that turns this device off). A release lets what waits
+  // import now.
+  function holdImports (on) {
+    if (copy.holdImports(on) && lastOwn !== null && unlocked()) track(copy.importAll(lastOwn).catch(noop))
+  }
 
   return {
     unlock,
@@ -3256,7 +3305,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     dropPageSummaries,
     set: tracked(set),
     pull: tracked(pull),
-    historyCopy: tracked(copy.historyCopy),
+    setDevice,
+    holdImports,
+    autoCopy: (own, keyPair, view) => unlocked() ? track(copy.autoCopy(own, keyPair, view)) : Promise.resolve(),
     pageGenerate,
     pageShare,
     pageSecrets: tracked(pageSecrets),

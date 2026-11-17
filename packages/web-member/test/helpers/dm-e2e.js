@@ -142,9 +142,9 @@ async function push (t, n, host) {
 }
 
 // offline(): true -> every new socket goes to a closed port.
-async function memberNode (t, assoc, host, { keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), enable = true, blob = {}, storage = memoryNodeStorage(), offline = () => false } = {}) {
+async function memberNode (t, assoc, host, { keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), enable = true, blob = {}, storage = memoryNodeStorage(), offline = () => false, cert: given = null, addCert = true, factory = createBrowserNode } = {}) {
   const url = host.url
-  const node = createBrowserNode({
+  const node = factory({
     storage,
     association: assoc.hex,
     seederUrl: url,
@@ -160,8 +160,12 @@ async function memberNode (t, assoc, host, { keyPair = crypto.keyPair(), prf = c
   await node.setKeyPair(keyPair, { prf })
   const web = await connectClient(node, { timeoutMs: 60000 })
   const { publicKey } = await web.request('identity.create')
-  const cert = createCert({ member: publicKey }, assoc.kp)
-  await web.request('cert.add', { cert })
+  // given: the certificate already in a diary built beforehand (cert.add
+  // then appends nothing).
+  const cert = given !== null ? given : createCert({ member: publicKey }, assoc.kp)
+  // addCert false: another device of an account whose diary it reads from
+  // the seeder; it writes nothing there.
+  if (addCert) await web.request('cert.add', { cert })
   const n = { node, web, storage, key: publicKey, keyPair, prf, cert, enabled: null }
   if (enable) {
     await push(t, n, host)
