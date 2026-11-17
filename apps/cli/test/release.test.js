@@ -3,6 +3,8 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
+const { spawnSync } = require('node:child_process')
 
 const repoRoot = path.resolve(__dirname, '../../..')
 const WORKFLOW = path.join(repoRoot, '.github/workflows/release.yml')
@@ -227,7 +229,7 @@ test('release.yml: a rerun reuses sha-<commit> only when both images verify', (t
   const seq = reuse.indexOf('[ "$' + '{BASH_REMATCH[2]}" = "$SEQ" ] || return 1')
   const web = reuse.indexOf('web="$' + '{BASH_REMATCH[3]}"')
   const verifyWeb = reuse.indexOf('cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$WEB_REPO@$web" > /dev/null || return 1')
-  const print = reuse.indexOf('printf \'%s %s\\n\' "$seeder" "$web"')
+  const print = reuse.indexOf('printf \'%s %s %s\\n\' "$seeder" "$web" "$caddy"')
   t.ok(verifySeeder !== -1 && run !== -1 && commit !== -1 && seq !== -1 && web !== -1 && verifyWeb !== -1 && print !== -1, 'seeder verify, release.json, commit, seq, web verify and result present')
   t.ok(verifySeeder < run, 'the seeder is verified before it is ever run')
   t.ok(run < commit && commit < seq && seq < web && web < verifyWeb && verifyWeb < print, 'a release counts only after every check')
@@ -237,9 +239,9 @@ test('release.yml: a rerun reuses sha-<commit> only when both images verify', (t
   const match = reuse.indexOf('[[ "$release" =~ $re ]] || return 1')
   t.ok(matchRe !== -1 && matchRe < run, 'the reuse step holds the same anchored release.json regex')
   t.ok(match !== -1 && run < match && match < commit, 'release.json is matched whole before its fields are compared')
-  t.ok(/^ {10}rc=0\n {10}found="\$\(signed_release\)" \|\| rc=\$\?\n {10}if \[ "\$rc" -eq 2 \]; then\n {12}echo "::error::[^"\n]*"\n {12}exit 1\n {10}elif \[ "\$rc" -eq 0 \]; then\n {12}read -r seeder web <<< "\$found"\n/m.test(reuse), 'a registry error fails the step; reused only when signed_release succeeds')
+  t.ok(/^ {10}rc=0\n {10}found="\$\(signed_release\)" \|\| rc=\$\?\n {10}if \[ "\$rc" -eq 2 \]; then\n {12}echo "::error::[^"\n]*"\n {12}exit 1\n {10}elif \[ "\$rc" -eq 0 \]; then\n {12}read -r seeder web caddy <<< "\$found"\n/m.test(reuse), 'a registry error fails the step; reused only when signed_release succeeds')
   t.ok(/\n {14}echo "RELEASE_SOURCE=reused"\n {14}echo "VERIFIED_SEEDER_DIGEST=\$seeder"\n {14}echo "VERIFIED_WEB_DIGEST=\$web"\n/.test(reuse), 'the reused digests are the verified ones')
-  t.ok(/\n {10}else\n[^\n]*\n {12}echo "RELEASE_SOURCE=build" >> "\$GITHUB_ENV"\n {10}fi/.test(reuse), 'anything else builds')
+  t.ok(/\n {10}else\n[^\n]*\n {12}echo "RELEASE_SOURCE=build" >> "\$GITHUB_ENV"\n/.test(reuse), 'anything else builds')
   t.is((code.match(/RELEASE_SOURCE=reused/g) || []).length, 1, 'only the reuse step marks a release reused')
 
   // The build and sign steps stop on a reused release and refuse an unknown state.
@@ -261,11 +263,14 @@ test('release.yml: image names, build flags and the digests from the push', (t) 
   t.ok(validate.includes("re='^ghcr\\.io/sigstore/cosign/cosign:v[0-9]+\\.[0-9]+\\.[0-9]+@sha256:[0-9a-f]{64}$'"), 'cosign.ref must be the pinned cosign image')
 
   const builds = lines.filter((l) => /docker (buildx )?build\b/.test(l))
-  t.is(builds.length, 2, 'two image builds')
+  t.is(builds.length, 3, 'three image builds: web, seeder and, when needed, Caddy')
   const build = stepNamed('Build and push both images')
   t.ok(build, 'build step found')
-  const cmds = build.split(/(?=docker build )/).slice(1).map((c) => c.split(/ \.\n/)[0])
-  t.is(cmds.length, 2, 'two build commands')
+  const all = build.split(/(?=docker build )/).slice(1)
+  t.is(all.length, 3, 'three build commands')
+  // The release images carry the commit; the Caddy image is shared by many.
+  const cmds = all.filter((c) => !c.includes('Dockerfile.caddy')).map((c) => c.split(/ \.\n/)[0])
+  t.is(cmds.length, 2, 'two release build commands')
   for (const c of cmds) {
     for (const f of ['--platform linux/amd64', '--provenance=false', '--sbom=false', '--build-arg VARANDA_COMMIT="$GITHUB_SHA"', '--label org.opencontainers.image.revision="$GITHUB_SHA"']) {
       t.ok(c.includes(f), 'build has ' + f)
@@ -293,7 +298,7 @@ test('release.yml: image names, build flags and the digests from the push', (t) 
   t.ok(build.includes("re='^\\{\"v\":1,\"commit\":\"([0-9a-f]{40})\",\"seq\":([1-9][0-9]{0,9}),\"web\":\"ghcr\\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})\"\\}$'"), 'release.json matched whole by one anchored regex')
   t.ok(/\[ "\$\{BASH_REMATCH\[1\]\}" != "\$GITHUB_SHA" \]/.test(build) && /\[ "\$\{BASH_REMATCH\[2\]\}" != "\$SEQ" \]/.test(build), 'release.json names this commit and seq')
   t.ok(/\|\| \[ "\$\{BASH_REMATCH\[3\]\}" != "\$web" \]; then\n[^\n]*\n\s+exit 1/.test(build), 'release.json names the pushed web digest')
-  t.ok(/\n {10}\{\n {12}echo "WEB_DIGEST=\$web"\n {12}echo "SEEDER_DIGEST=\$seeder"\n {10}\} >> "\$GITHUB_ENV"/.test(build), 'the pushed digests are handed to signing')
+  t.ok(/\n {10}\{\n {12}echo "WEB_DIGEST=\$web"\n {12}echo "SEEDER_DIGEST=\$seeder"\n {12}echo "CADDY_DIGEST=\$caddy"\n {10}\} >> "\$GITHUB_ENV"/.test(build), 'the pushed digests are handed to signing')
   t.is((code.match(/echo "(WEB|SEEDER)_DIGEST=/g) || []).length, 2, 'only the build step sets the digests to sign')
 })
 
@@ -317,7 +322,7 @@ test('release.yml: cosign keyless, only as the pinned container, verified', (t) 
   t.ok(/^ {12}cosign sign "\$ref"\n {12}cosign verify --certificate-identity "\$COSIGN_IDENTITY" --certificate-oidc-issuer "\$COSIGN_ISSUER" "\$ref" > \/dev\/null\n {10}done$/m.test(sign), 'each is verified right after signing, with the exact identity and issuer')
   // A verify that cannot fail the job would let an unsigned digest through.
   const verifies = lines.filter((l) => /cosign verify/.test(l))
-  t.is(verifies.length, 3, 'three verifies: the two reuse checks and the post-sign check')
+  t.is(verifies.length, 6, 'six verifies: seeder, web and Caddy of a reused release, a reused Caddy tag, a built Caddy and the post-sign loop')
   for (const l of verifies) {
     t.ok(/--certificate-identity "\$COSIGN_IDENTITY" --certificate-oidc-issuer "\$COSIGN_ISSUER" "[^"]+" > \/dev\/null( \|\| return 1)?$/.test(l), 'verify pins identity and issuer and can fail: ' + l.trim())
     t.absent(/\|\|\s*(true|:)\b|;\s*true\b/.test(l), 'verify failure is never ignored: ' + l.trim())
@@ -326,6 +331,67 @@ test('release.yml: cosign keyless, only as the pinned container, verified', (t) 
   t.ok(sign.indexOf('echo "VERIFIED_WEB_DIGEST') > sign.indexOf('cosign verify'), 'verified digests recorded only after verification')
   t.ok(sign.includes('echo "VERIFIED_WEB_DIGEST=$WEB_DIGEST"') && sign.includes('echo "VERIFIED_SEEDER_DIGEST=$SEEDER_DIGEST"'), 'the verified digests are the signed ones')
   t.is((code.match(/echo "VERIFIED_(WEB|SEEDER)_DIGEST=/g) || []).length, 4, 'only the reuse and sign steps record verified digests')
+})
+
+test('release.yml: the Caddy image is built only for a new Dockerfile.caddy and pinned in caddy.json', (t) => {
+  t.ok(/^ {6}CADDY_REPO:\s*ghcr\.io\/varanda-org\/varanda-caddy\s*$/m.test(publish), 'Caddy image name')
+  const validate = publishSteps.find((s) => /deploy\/seeder\/cosign\.ref/.test(s)) || ''
+  t.ok(validate.includes('caddy_hash="$(sha256sum deploy/seeder/Dockerfile.caddy)"') && validate.includes('echo "CADDY_TAG=caddy-$caddy_hash"'), 'the Caddy tag is the Dockerfile.caddy hash')
+  const reuse = stepNamed('Reuse a release already signed for this commit')
+  const readCaddy = reuse.indexOf('caddy_json="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/caddy.json)" || return 1')
+  const verifyCaddy = reuse.indexOf('cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$caddy" > /dev/null || return 1')
+  const print = reuse.indexOf('printf \'%s %s %s\\n\' "$seeder" "$web" "$caddy"')
+  t.ok(readCaddy !== -1 && verifyCaddy > readCaddy && print > verifyCaddy, 'a reused release reuses only a verified caddy.json digest')
+  t.ok(reuse.includes('found_caddy="$(digest_of "$CADDY_REPO@$caddy")" || return 2\n            [ "$found_caddy" = "$caddy" ] || return 1'), 'the caddy.json digest must exist')
+  const tagged = reuse.indexOf('caddy="$(digest_of "$CADDY_REPO:$CADDY_TAG")" || return 2')
+  const labelCheck = reuse.indexOf('[ "caddy-$label" = "$CADDY_TAG" ] || return 1')
+  t.ok(tagged !== -1 && labelCheck > reuse.indexOf('"$CADDY_REPO@$caddy" > /dev/null || return 1', tagged), 'a Caddy tag is reused only after verify and a matching Dockerfile hash label')
+  t.ok(/\n {16}echo "CADDY_SOURCE=reused"\n {16}echo "VERIFIED_CADDY_DIGEST=\$caddy"\n/.test(reuse) && /\n {14}echo "CADDY_SOURCE=build" >> "\$GITHUB_ENV"\n/.test(reuse), 'reused when verified, built otherwise')
+
+  const build = stepNamed('Build and push both images')
+  t.ok(/^ {14}docker build --platform linux\/amd64 --provenance=false --sbom=false \\\n {16}--label org\.varanda\.dockerfile-caddy="\$\{CADDY_TAG#caddy-\}" \\\n {16}-f deploy\/seeder\/Dockerfile\.caddy -t "\$CADDY_REPO:\$CADDY_TAG" deploy\/seeder\n {14}caddy="\$\(tag="\$CADDY_TAG" push_digest "\$CADDY_REPO"\)"\n/m.test(build), 'Caddy built only in the build branch, labelled, pushed as caddy-<hash>, digest from its push')
+  t.ok(build.includes('reused) caddy="$VERIFIED_CADDY_DIGEST" ;;'), 'a reused Caddy keeps its verified digest')
+  t.ok(build.includes('--build-arg VARANDA_CADDY_IMAGE="$CADDY_REPO@$caddy"'), 'the seeder pins the Caddy image by digest')
+  t.ok(build.indexOf('--build-arg VARANDA_CADDY_IMAGE') > build.indexOf('caddy="$(tag='), 'Caddy pushed before the seeder build')
+  t.ok(build.includes('if [ "$caddy_json" != "{\\"v\\":1,\\"caddy\\":\\"$CADDY_REPO@$caddy\\"}" ]; then'), 'caddy.json read back and compared')
+
+  const sign = stepNamed('Sign and verify the pushed digests')
+  t.ok(/^ {10}if \[ "\$CADDY_SOURCE" = build \]; then\n {12}cosign sign "\$CADDY_REPO@\$CADDY_DIGEST"\n {12}cosign verify [^\n]*"\$CADDY_REPO@\$CADDY_DIGEST" > \/dev\/null\n {12}echo "VERIFIED_CADDY_DIGEST=\$CADDY_DIGEST" >> "\$GITHUB_ENV"\n {10}fi\n/m.test(sign), 'only a Caddy image this run pushed is signed, then verified')
+  t.absent(/CADDY_REPO:edge|CADDY_REPO" "\$VERIFIED_CADDY/.test(code), 'no channel tag for the Caddy image')
+  const summary = publishSteps.find((s) => /GITHUB_STEP_SUMMARY/.test(s)) || ''
+  t.ok(summary.includes('$CADDY_REPO@$VERIFIED_CADDY_DIGEST'), 'summary names the Caddy digest')
+})
+
+test('Dockerfile: caddy.json is written only with a Caddy image, in its own RUN', { skip: process.platform === 'win32' }, (t) => {
+  const df = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/Dockerfile'), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  let i = df.indexOf('ARG VARANDA_CADDY_IMAGE=""')
+  t.ok(i !== -1, 'ARG VARANDA_CADDY_IMAGE with an empty default')
+  while (i !== -1 && i < df.length && !/^RUN\s/.test(df[i])) i++
+  const out = []
+  for (; i !== -1 && i < df.length; i++) {
+    out.push(df[i].replace(/\\$/, ''))
+    if (!/\\$/.test(df[i])) break
+  }
+  t.ok(i < df.findIndex((l) => /^USER\s+node/.test(l)), 'before USER node')
+  const script = out.join('\n').replace(/^RUN\s+/, '')
+  const run = (env) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-caddy-'))
+    const file = path.join(dir, 'caddy.json')
+    const r = spawnSync('sh', ['-c', script.split('/app/caddy.json').join(file)], {
+      env: { PATH: process.env.PATH, VARANDA_COMMIT: '', VARANDA_CADDY_IMAGE: '', ...env }, encoding: 'utf8'
+    })
+    const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
+    fs.rmSync(dir, { recursive: true, force: true })
+    return { status: r.status, content }
+  }
+  const ref = 'ghcr.io/varanda-org/varanda-caddy@sha256:' + 'c'.repeat(64)
+  const commit = 'a'.repeat(40)
+  t.alike(run({}), { status: 0, content: null }, 'no argument, no file')
+  t.alike(run({ VARANDA_COMMIT: commit, VARANDA_CADDY_IMAGE: ref }), { status: 0, content: '{"v":1,"caddy":"' + ref + '"}\n' }, 'the exact line update.sh accepts')
+  t.is(run({ VARANDA_CADDY_IMAGE: ref }).status, 1, 'a Caddy image without a commit is refused')
+  for (const bad of ['ghcr.io/varanda-org/varanda-web@sha256:' + 'c'.repeat(64), ref + 'c', ref.slice(0, -1), ref.toUpperCase(), 'varanda-caddy:local']) {
+    t.alike(run({ VARANDA_COMMIT: commit, VARANDA_CADDY_IMAGE: bad }), { status: 1, content: null }, 'refused: ' + bad)
+  }
 })
 
 test('release.yml: edge moves only from the tip of main, by digest, read back', (t) => {
@@ -346,7 +412,7 @@ test('release.yml: edge moves only from the tip of main, by digest, read back', 
   t.ok(fetch < tip && tip < first, 'the tip check comes before any move')
   t.ok(/if \[ "\$tip" != "\$GITHUB_SHA" \]; then\n(\s+echo[^\n]*\n){2}\s+exit 0\n/.test(edge), 'not the tip: a notice and a green exit, nothing moved')
 
-  t.ok(/for d in "\$\{VERIFIED_WEB_DIGEST:-\}" "\$\{VERIFIED_SEEDER_DIGEST:-\}"; do\n\s+if ! \[\[ "\$d" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]; then\n[^\n]*\n\s+exit 1/.test(edge), 'both verified digests must be present')
+  t.ok(/for d in "\$\{VERIFIED_WEB_DIGEST:-\}" "\$\{VERIFIED_SEEDER_DIGEST:-\}" "\$\{VERIFIED_CADDY_DIGEST:-\}"; do\n\s+if ! \[\[ "\$d" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]; then\n[^\n]*\n\s+exit 1/.test(edge), 'every verified digest must be present, the Caddy one too')
   t.ok(/^ {10}if ! move "\$WEB_REPO" "\$VERIFIED_WEB_DIGEST"; then\n {12}restore "\$WEB_REPO" "\$web_prev"\n {12}exit 1\n/m.test(edge), 'web moves to its verified digest; a failure restores it and fails')
   t.ok(/^ {10}if ! move "\$SEEDER_REPO" "\$VERIFIED_SEEDER_DIGEST"; then\n {12}restore "\$SEEDER_REPO" "\$seeder_prev"\n {12}restore "\$WEB_REPO" "\$web_prev"\n {12}exit 1\n/m.test(edge), 'seeder moves last; a failure restores both and fails')
   t.ok(edge.indexOf('web_prev="$(digest_of "$WEB_REPO:edge")"') < edge.indexOf('if ! move') && edge.indexOf('seeder_prev="$(digest_of "$SEEDER_REPO:edge")"') < edge.indexOf('if ! move'), 'the previous edge digests are read first')
