@@ -2340,7 +2340,7 @@ O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/
 
 ### O que mudou
 
-- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, seis avisos: começou a seguir, respondeu, citou, mencionou, curtiu e republicou. Cada um é uma frase com o nome e a ação ("<nome> citou seu post", "<nome> mencionou você"). O crescimento de um diário seguido não gera push. Um post pode gerar vários pushes, um por destinatário (por exemplo, citar um membro e mencionar outro); o id de deduplicação é `ator:seq:destinatário` e o Topic é um HMAC desse id. Uma menção cujo nome ainda não está assentado no índice do semeador não gera push (o aviso aparece). O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
+- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, seis avisos: começou a seguir, respondeu, citou, mencionou, curtiu e republicou. Cada um é uma frase com o nome e a ação ("<nome> citou seu post", "<nome> mencionou você"). O crescimento de um diário seguido não gera push. Um post pode gerar vários pushes, um por destinatário (por exemplo, citar um membro e mencionar outro); o id de deduplicação é `ator:seq:destinatário` e o Topic é um HMAC desse id. Uma menção cujo nome ainda não está assentado no índice do semeador espera na memória dele e gera push uma vez se o nome assentar em até 24 h (o aviso aparece de qualquer jeito). Desfazer um seguir, uma curtida ou uma republicação recolhe o push que ainda esperava na fila. O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
 - O semeador escolhe o candidato (`packages/core/lib/push-events.js`) e o manda em loopback (`POST /push-event`, `apps/cli/lib/push-relay.js`). O cursor `pushNext` começa no comprimento assinado já guardado (na primeira admissão, o maior entre esse comprimento e o que a quarentena verificou). Reinício, reconstrução de índice e histórico já servido não repetem aviso. O semeador nunca vê a inscrição.
 - O serviço de conta (`apps/cli/lib/account/push-routes.js`) oferece `GET /account/push/key`, `POST /account/push/start`, `POST /account/push/finish` e `POST /account/push/check`. A declaração é `varanda-push-v1`, só por HTTPS até o serviço de conta. O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível (`isEndpoint` em `packages/core/lib/push-proof.js`, `isPushEndpoint` em `packages/rpc/lib/methods.js`, `endpointParam` na conclusão). A frase é cifrada de ponta a ponta (RFC 8291). O fabricante vê o texto cifrado e o endereço.
 - Operação: `account push-key` com o serviço parado (grava `push-vapid.json`, modo 0600, imprime só a chave pública), `VARANDA_PUSH_TOKEN` e `VARANDA_ACCOUNT_HTTP` em `deploy/seeder/.env`. Token vazio desliga. Termos versão 3 (`TERMS_VERSION`). Ligar os avisos pede o aceite dessa versão.
@@ -2350,7 +2350,7 @@ O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/
 
 Arquivos novos:
 
-- `packages/core/test/push-events.test.js`: candidatos (seguir, resposta, citação, menção, curtida, republicação; um por destinatário), nunca a si mesmo, só membro, lista de bloqueio, idade de 6 h, nome e forma do evento.
+- `packages/core/test/push-events.test.js`: candidatos (seguir, resposta, citação, menção, curtida, republicação; um por destinatário), nunca a si mesmo, só membro, lista de bloqueio, idade de 24 h, nome e forma do evento, cancelamento (`validatePushCancel`, `pushCancel`).
 - `packages/core/test/push-proof.test.js`: declaração `varanda-push-v1`, hash do endpoint e URL `https` em ASCII imprimível.
 - `apps/cli/test/seeder-push.test.js`: cursor `pushNext`, silêncio do histórico, primeira admissão, reinício e os seis eventos.
 - `apps/cli/test/push-relay.test.js`: `POST /push-event` em loopback, token, fila e perda sem repetir.
@@ -2397,7 +2397,7 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 ### Limites
 
 - Um evento se perde, e não é repetido, enquanto o serviço de conta está fora ou a fila do repasse está cheia (`maxPending` 256 no semeador, `MAX_QUEUE` 512 no serviço). O cursor do semeador já andou.
-- Um bloco escrito enquanto o semeador estava fora só vira aviso depois do reinício se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado ao servir o diário, na primeira admissão, num reinício ou numa reconstrução de índice, não gera aviso.
+- Um bloco escrito enquanto o semeador estava fora só vira aviso depois do reinício se o `at` do autor tiver menos de 24 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado ao servir o diário, na primeira admissão, num reinício ou numa reconstrução de índice, não gera aviso.
 - Teto de 60 avisos por hora por destinatário (`keyedWindow(60, 3600 * 1000)`, motivo `teto`). Pausa de 600 s para o mesmo autor, destinatário, tipo e `ref` (curtida, republicação e seguir repetidos; `keyedWindow(1, 600 * 1000)`, motivo `descartado`); cada resposta é um aviso próprio, porque a chave leva também o `seq` da resposta.
 - No máximo 4 aparelhos por membro (`PUSH_MAX_PER_MEMBER`). O envio só sai para a lista de hosts (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` e os sufixos `.push.apple.com`, `.push.services.mozilla.com`, `.notify.windows.com`).
 - Não há tratamento de `pushsubscriptionchange`. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
@@ -4005,7 +4005,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum t
 
 - Nenhuma caixa acima foi executada nesta documentação.
 - O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
-- A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
+- A janela de 24 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
 - Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
 
 ## 76. Marca de lido até a mensagem pintada (PR fix/group-seen-corte)
@@ -8143,7 +8143,7 @@ Cobertura automatizada:
 - `packages/core/test/group-media.test.js`: recusa de descritor de vídeo e do par de publicação em grupos.
 - `apps/cli/test/commands.test.js`: marcador `[vídeo]` em `feed` e `log`, com o par preservado em JSON.
 - `apps/cli/test/panel.test.js`: aviso de fotos ou vídeo no painel de moderação.
-- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: recusa de vídeo em Páginas, inclusive de MP4 válido e de imagem com MIME de vídeo, sem gravar registro nem item de mídia.
+- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: uma Página recusa vídeo sem `ms` (`midia-invalida`) e imagem com MIME de vídeo, sem gravar registro nem item; um `video/mp4` com `ms` válido é guardado. Publicação, resposta e citação da Página agora levam o vídeo curto e a prévia de link.
 - `apps/cli/test/ai-triage.test.js`: mídia, inclusive vídeo, fica para decisão humana.
 - `apps/cli/test/ai-read-post.test.js`: par de vídeo reconhecido como mídia, com ou sem legenda, e denúncia mantida aberta para uma pessoa.
 
@@ -8174,7 +8174,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Em aparelhos Android e iOS, publicar um MP4 real de câmera H.264 com AAC e outro sem som, em retrato e paisagem, como post, resposta, citação e momento. Registrar aparelho, sistema e resultado; conferir capa, rotação, duração e reprodução. Um arquivo HEVC, fragmentado ou com faixa de metadados temporizados deve ser recusado; não afrouxar o validador para fazê-lo passar.
 - [ ] Com um arquivo real de câmera de celular contendo uma tag de localização, passar os bytes por `stripVideoMetadata` e conferir que a tag foi removida e que a saída passa em `videoBounds` estrito, sem `metadata: true`; conferir também a reprodução.
 - [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
-- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
+- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia, que oferece o vídeo curto nas publicações de Páginas, como nas de uma pessoa, e que não oferece vídeo em conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
 - [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
 - [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento deixa de abrir com um descritor guardado depois do bloqueio e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
@@ -8243,7 +8243,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar ap
 
 ## 183. Preparar e publicar um vídeo curto
 
-Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 181).
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação. A Página agora leva o vídeo curto e a prévia de link, como a publicação de uma pessoa. Conversa, grupo, Feira, avatar e prévia de link continuam sem vídeo. A comparação com listas de hashes continua ausente (seção 181).
 
 `pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
 
@@ -8297,7 +8297,7 @@ Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparel
 | Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
 | Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |
 | Um app ou uma página anterior pula a publicação com vídeo inteira | [ ] | [ ] | [ ] | [ ] |
-| Página e conversa sem vídeo (também grupo, Feira, avatar e prévia) | [ ] | [ ] | [ ] | [ ] |
+| Página com vídeo curto; conversa, grupo, Feira, avatar e prévia sem vídeo | [ ] | [ ] | [ ] | [ ] |
 | Portão dos Termos e da Política na versão 37, com novo aceite | [ ] | [ ] | [ ] | [ ] |
 
 ### Conferido em 2026-11-12: simulador iOS e emulador Android, sem conta

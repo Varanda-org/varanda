@@ -904,7 +904,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -2020,6 +2020,27 @@ test('visits record: key set, rules and builder', async (t) => {
   t.is(validateRecord(noAt, 1), 'malformed', 'missing at')
   for (const at of ['2026-01-01', 5, null, '2026-11-03T12:00:00Z']) t.is(validateRecord({ ...rec, at }, 1), 'date-invalid', 'at ' + at)
   await t.exception.all(async () => visitsRecord({ on: 'yes' }), /malformed/)
+})
+
+test('garden records: old readers skip all three as malformed', async (t) => {
+  // A copy of TYPES before the Varandinha: an old reader skips each record
+  // as any unknown type, and the diary that carries it is not rejected.
+  const OLD_TYPES = ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits']
+  const oldReader = (r) => (OLD_TYPES.includes(r.type) ? validateRecord(r, 1) : 'malformed')
+  const pot = { plant: 'tomate', at: AT, water: AT, w: 0 }
+  const recs = [
+    { type: 'garden', on: true, at: AT },
+    { type: 'garden-state', pots: [pot, null, null, null, null, null], n: 1, at: AT },
+    { type: 'garden-help', to: K2, pot: 0, at: AT }
+  ]
+  for (const r of recs) {
+    t.is(validateRecord(r, 1), null, r.type + ' valid today')
+    t.is(oldReader(r), 'malformed', r.type + ' skipped by an old reader')
+  }
+  t.is(validateRecord({ ...recs[0], type: 'jardim' }, 1), 'malformed', 'unknown types stay malformed')
+  // None borrows another type's shape.
+  t.is(validateRecord({ type: 'garden', key: K2, on: true, at: AT }, 1), 'malformed')
+  t.is(validateRecord({ type: 'garden-help', key: K2, on: true, at: AT }, 1), 'malformed')
 })
 
 test('fan and top-friends records: key sets, rules and builders', async (t) => {

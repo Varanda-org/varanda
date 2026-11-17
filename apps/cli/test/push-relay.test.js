@@ -177,6 +177,51 @@ test('oversized or invalid events are dropped without a request', async (t) => {
   t.is(fake.requests.length, 0)
 })
 
+test('a cancel is posted as is, after the event it recalls, every time, and bounded by maxPending', async (t) => {
+  const held = []
+  const fake = await fakeAccount(t, (req, res) => held.push(res))
+  const relay = relayFor(t, fake.baseUrl, { maxPending: 3 })
+  const like = event({ kind: 'like', ref: RECIPIENT + ':7' })
+  const undo = { v: 1, op: 'cancel', kind: 'like', actor: ACTOR, recipient: RECIPIENT, ref: RECIPIENT + ':7' }
+  t.is(relay.send(like), true)
+  await until(() => held.length === 1, { name: 'the like in flight' })
+  t.is(relay.send(undo), true)
+  t.is(relay.send(event({ kind: 'like', ref: RECIPIENT + ':7', seq: 4 })), true)
+  t.is(relay.send(undo), true, 'an identical cancel still waiting is kept: it recalls the newer like')
+  t.is(relay.send(undo), false, 'a full queue drops a cancel too')
+  t.is(relay.stats().full, 1)
+  t.is(relay.stats().duplicate, 0, 'a cancel never enters the dedupe set')
+  while (fake.requests.length < 4 || held.length > 0) {
+    if (held.length > 0) held.shift().end()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  await settled(relay)
+  t.alike(fake.requests.map((r) => JSON.parse(r.body)), [like, undo, { ...like, seq: 4 }, undo])
+  t.is(fake.requests[1].headers.authorization, 'Bearer ' + TOKEN)
+  t.is(fake.requests[1].body, JSON.stringify(undo))
+  t.is(relay.send(undo), true, 'the same cancel again is posted again')
+  await until(() => held.length === 1, { name: 'repeat in flight' })
+  held.shift().end()
+  await settled(relay)
+  t.is(relay.stats().sent, 5)
+})
+
+test('an invalid cancel is dropped without a request', async (t) => {
+  const fake = await fakeAccount(t)
+  const relay = relayFor(t, fake.baseUrl)
+  const undo = { v: 1, op: 'cancel', kind: 'follow', actor: ACTOR, recipient: RECIPIENT, ref: null }
+  t.is(relay.send({ ...undo, kind: 'reply', ref: RECIPIENT + ':2' }), false, 'a reply is never recalled')
+  t.is(relay.send({ ...undo, ref: RECIPIENT + ':2' }), false, 'a follow has no ref')
+  t.is(relay.send({ ...undo, kind: 'like' }), false, 'a like needs one')
+  t.is(relay.send({ ...undo, kind: 'like', ref: ACTOR + ':2' }), false, 'the post must be the recipient\'s')
+  t.is(relay.send({ ...undo, op: 'undo' }), false)
+  t.is(relay.send({ ...undo, seq: 3 }), false, 'extra key')
+  t.is(relay.send({ ...undo, recipient: ACTOR }), false)
+  t.is(relay.stats().invalid, 7)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(fake.requests.length, 0)
+})
+
 test('a non-loopback baseUrl or a bad token is refused', async (t) => {
   for (const baseUrl of ['http://example.com:8790', 'https://127.0.0.1:8790', 'http://10.0.0.1:8790', 'http://127.0.0.1', 'http://127.0.0.1:0', 'http://127.0.0.1:8790/x', 'http://127.0.0.1:8790//', undefined]) {
     t.exception.all(() => createPushRelay({ baseUrl, token: TOKEN }), TypeError, String(baseUrl))

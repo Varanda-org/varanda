@@ -144,14 +144,13 @@ test('music snapshots are frozen, sanitized and have no thumbnail', async (t) =>
   t.is(playlist.thumb, null)
 })
 
-test('music blocks photos, a video, pages, empty text and offline sends', async (t) => {
+test('music blocks photos, a video, empty text and offline sends, never a page', async (t) => {
   const { musicBlocks, MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT } = await rules()
   const { MUSIC_NEEDS_TEXT } = await import('../src/music.js')
-  const valid = { hasMedia: false, asPage: null, online: true, textLength: 1 }
+  const valid = { hasMedia: false, online: true, textLength: 1 }
   t.is(musicBlocks(valid), '')
   t.is(musicBlocks({ ...valid, hasMedia: true }), MUSIC_PHOTOS_TEXT)
   t.is(musicBlocks({ ...valid, hasMedia: true, hasVideo: true }), MUSIC_VIDEO_TEXT)
-  t.is(musicBlocks({ ...valid, asPage: 'page' }), 'A música não vai em publicações de página')
   t.is(musicBlocks({ ...valid, textLength: 0 }), MUSIC_NEEDS_TEXT)
   t.is(musicBlocks({ ...valid, online: false }), 'Sem conexão: a música precisa de conexão')
 })
@@ -264,7 +263,6 @@ test('compose-time resolution honors the preview preference and online gate', as
     { musicAvailable: null },
     { open: false },
     { momentMode: true },
-    { asPage: 'page' },
     { hasMedia: true },
     { musicDraft: draft },
     { busy: true },
@@ -502,14 +500,16 @@ function composerFunction (start, end, name, ctx) {
   return new Function(...Object.keys(ctx), code + '\nreturn ' + name)(...Object.values(ctx))
 }
 
-test('switching to a page clears music even while closed or waiting for a page retry', (t) => {
+test('switching identity drops page uploads and the kept video pair, never the music draft', (t) => {
   const end = source.indexOf('  }, [asPage, video.draft])') + '  }, [asPage, video.draft])'.length
   const start = source.lastIndexOf('  useEffect(() => {', end)
   const effect = source.slice(start, end)
   for (const open of [true, false]) {
     for (const pending of ['none', 'retry', 'sending']) {
       let music = draft
+      const kept = { page: 'page', file: {}, poster: {}, video: {} }
       const ctx = {
+        pagePosterRef: { current: kept },
         open,
         asPage: null,
         pageRetryRef: { current: pending === 'retry' ? { page: 'page' } : null },
@@ -523,14 +523,10 @@ test('switching to a page clears music even while closed or waiting for a page r
       }
       // eslint-disable-next-line no-new-func
       const run = () => new Function(...Object.keys(ctx), effect)(...Object.values(ctx))
-      run()
-      t.is(music, draft, 'the person keeps the draft')
       ctx.asPage = 'page'
       run()
-      t.is(music, null, 'the page drops music: open=' + open + ', pending=' + pending)
-      ctx.asPage = null
-      run()
-      t.is(music, null, 'switching back does not restore the music')
+      t.is(music, draft, 'the music draft is kept: open=' + open + ', pending=' + pending)
+      t.is(ctx.pagePosterRef.current, pending === 'none' ? null : kept, 'the video pair goes unless a send holds it')
     }
   }
 })
@@ -855,4 +851,207 @@ test('a share call that throws still publishes the post once and never resends',
   t.is(r.state.published.length, 1)
   t.alike(r.state.published[0][4], { ref: null, result: null })
   t.is(r.state.queued.length, 0)
+})
+
+const photoD = (over = {}) => ({ blocks: 1, bytes: 10, core: 'ab'.repeat(32), height: 1, mime: 'image/jpeg', sha256: 'cd'.repeat(32), start: 1, width: 1, ...over })
+const videoD = (over = {}) => ({ blocks: 1, bytes: 10, core: 'ef'.repeat(32), height: 360, mime: 'video/mp4', ms: 1000, sha256: '12'.repeat(32), start: 2, width: 640, ...over })
+
+// send, then sendAsPage and its helpers, as a page with the service stubbed.
+async function pageSender (overrides = {}) {
+  const base = await sender()
+  const state = { ...base.state, acts: [], uploads: [], preps: [] }
+  const { pagePostOp } = await import('../src/pagePost.js')
+  const { findTerm } = await import('../src/wordCheck.js')
+  const { validDescriptor, validVideoDescriptor } = await import('../src/media/fetch.js')
+  const videoFile = { name: 'video' }
+  const ctx = {
+    ...base.ctx,
+    asPage: 'page',
+    musicDraft: null,
+    text: 'Olá',
+    len: 3,
+    findTerm,
+    validDescriptor,
+    validVideoDescriptor,
+    pagePostOp,
+    prepPageVideo: async ({ poster }) => { state.preps.push(poster); return [poster || photoD(), videoD()] },
+    uploadBytesForPage: async (page, f) => { state.uploads.push({ page, mime: f.mime }); return { descriptor: photoD() } },
+    uploadAll: async () => [photoD()],
+    pagePosterRef: { current: null },
+    pageCardRef: { current: null },
+    pageSendingRef: { current: false },
+    setPageSending: () => {},
+    setPageRetry: (v) => { state.retry = v },
+    openRef: { current: true },
+    asPageRef: { current: 'page' },
+    genRef: { current: 0 },
+    liveRef: { current: new Set() },
+    removeItems: () => {},
+    mediaReady: true,
+    mediaOnline: true,
+    canVideo: true,
+    mediaComposeError: () => '',
+    nodeRef: { current: {} },
+    nodeRequest: async () => ({}),
+    memberKeyOf: async () => 'm',
+    actAs: async (node, args) => { state.acts.push(args); return { ok: true } },
+    published: (...args) => { state.published.push(args) },
+    videoFile,
+    ...overrides
+  }
+  if (ctx.hasVideo && !overrides.video) ctx.video = { draft: { state: { phase: 'ready', file: videoFile }, clear: () => {} } }
+  const a = source.indexOf('  const settledAsPage = (page) => {')
+  const b = source.indexOf('  // A poll post:', a)
+  const start = source.lastIndexOf('  const send = async () => {')
+  const end = source.indexOf('\n  const replyName', start)
+  const code = source.slice(a, b) + source.slice(start, end) + '\nreturn send'
+  // eslint-disable-next-line no-new-func
+  const send = new Function(...Object.keys(ctx), code)(...Object.values(ctx))
+  return { state, send, ctx }
+}
+
+test('a page video sends { text, media: [poster, video] } with no preview', async (t) => {
+  const r = await pageSender({ hasMedia: true, hasVideo: true, linkDraft: { take: () => ({ url: 'https://exemplo.com/a', title: 'T', desc: 'D', thumb: null }) } })
+  await r.send()
+  t.is(r.state.acts.length, 1)
+  t.alike(r.state.acts[0].op, { text: 'Olá', media: [photoD(), videoD()] })
+  t.is(r.state.acts[0].action, 'post')
+  t.is(r.state.published.length, 1)
+  t.is(r.ctx.pagePosterRef.current, null, 'cleared on success')
+})
+
+test('a page reply or quote carries to', async (t) => {
+  for (const [extra, action] of [[{ reply: target }, 'reply'], [{ quote: target }, 'quote']]) {
+    const r = await pageSender(extra)
+    await r.send()
+    t.is(r.state.acts[0].action, action)
+    t.is(r.state.acts[0].op.to, target.ref)
+  }
+})
+
+test('a page link card thumbnail goes up as a page item, or the card goes without it', async (t) => {
+  const thumb = { bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 320, height: 320 }
+  const take = () => ({ url: 'https://exemplo.com/a', host: 'exemplo.com', title: 'Titulo', desc: 'Linha', thumb })
+  const ok = await pageSender({ linkDraft: { take } })
+  await ok.send()
+  t.alike(ok.state.uploads, [{ page: 'page', mime: 'image/jpeg' }])
+  t.alike(ok.state.acts[0].op.preview.image, photoD())
+  t.absent(ok.state.acts[0].op.media)
+  const failed = await pageSender({ linkDraft: { take }, uploadBytesForPage: async () => { throw new Error('falhou') } })
+  await failed.send()
+  t.is(failed.state.acts[0].op.preview.image, null)
+})
+
+test('a refused page post keeps the card and the video pair for the next tap', async (t) => {
+  const thumb = { bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 320, height: 320 }
+  const take = () => ({ url: 'https://exemplo.com/a', host: 'exemplo.com', title: 'Titulo', desc: 'Linha', thumb })
+  const refuse = async () => { throw new Error('recusado') }
+  const card = await pageSender({ linkDraft: { take }, actAs: refuse })
+  await card.send()
+  await card.send()
+  t.is(card.state.uploads.length, 1, 'the thumbnail is uploaded once')
+  const vid = await pageSender({ hasMedia: true, hasVideo: true, actAs: refuse })
+  await vid.send()
+  await vid.send()
+  t.is(vid.state.preps.length, 1, 'the video is uploaded once')
+  t.alike(vid.ctx.pagePosterRef.current.video, videoD())
+})
+
+test('a failed page video upload resumes its poster only for the same page and file', async (t) => {
+  const poster = photoD({ start: 3 })
+  const fail = async () => { throw Object.assign(new Error('falhou'), { poster }) }
+  const r = await pageSender({ hasMedia: true, hasVideo: true, prepPageVideo: fail })
+  await r.send()
+  t.is(r.state.acts.length, 0)
+  t.is(r.ctx.pagePosterRef.current.poster, poster)
+  const same = await pageSender({ hasMedia: true, hasVideo: true, pagePosterRef: { current: r.ctx.pagePosterRef.current } })
+  same.ctx.pagePosterRef.current.file = same.ctx.videoFile
+  await same.send()
+  t.alike(same.state.preps, [poster], 'the poster is reused')
+  t.is(same.ctx.pagePosterRef.current, null)
+  const other = await pageSender({ hasMedia: true, hasVideo: true, asPage: 'outra', pagePosterRef: { current: { page: 'page', file: null, poster, video: null } } })
+  other.ctx.pagePosterRef.current.file = other.ctx.videoFile
+  await other.send()
+  t.alike(other.state.preps, [null], 'another page uploads its own poster')
+})
+
+test('an uncertain page video upload is resent only by its retry on the next tap', async (t) => {
+  const poster = photoD()
+  let retried = 0
+  const retry = async () => { retried++; return { descriptor: videoD() } }
+  const fail = async () => { throw Object.assign(new Error('incerto'), { poster, uncertain: true, retry }) }
+  const r = await pageSender({ hasMedia: true, hasVideo: true, prepPageVideo: fail })
+  await r.send()
+  t.is(retried, 0, 'never automatically')
+  const again = await pageSender({ hasMedia: true, hasVideo: true, pagePosterRef: { current: { ...r.ctx.pagePosterRef.current } } })
+  again.ctx.pagePosterRef.current.file = again.ctx.videoFile
+  await again.send()
+  t.is(retried, 1)
+  t.alike(again.state.acts[0].op.media, [poster, videoD()])
+})
+
+test('page music sends the #varanda-musica card; one that does not fit sends nothing', async (t) => {
+  const r = await pageSender({ musicDraft: draft, text: 'Ouça esta música', len: 16 })
+  await r.send()
+  t.is(r.state.acts[0].op.preview.url, track.url + '#varanda-musica=t:abc')
+  const big = await pageSender({ musicDraft: draft, text: 'Ouça', len: 4, withPreview: () => { throw new Error('too long') } })
+  await big.send()
+  t.is(big.state.errors.at(-1), 'A música não coube: encurte o texto')
+  t.is(big.state.acts.length, 0)
+})
+
+test('a page music title with a listed term is refused before any upload or signature', async (t) => {
+  const term = require('@varanda/rpc').BLOCKED_TERMS[0]
+  const r = await pageSender({ musicDraft: { ...draft, item: { ...track, title: term } }, text: 'Ouça', len: 4 })
+  await r.send()
+  t.is(r.state.acts.length, 0)
+  t.is(r.state.uploads.length, 0)
+  t.ok(r.state.errors.at(-1).includes('título ou no artista da música'))
+})
+
+test('a page never queues, but polls and builds events like a person', (t) => {
+  t.ok(/const offlineQueue = [^\n]*asPage === null/.test(source))
+  t.absent(/const pollOk = [^\n]*asPage/.test(source), 'the poll and event gate does not exclude a page')
+  const link = source.slice(source.indexOf('const linkDraft = useLinkDraft({'), source.indexOf('\n', source.indexOf('const linkDraft = useLinkDraft({')))
+  t.absent(link.includes('asPage'), 'the link card is not gated on the page')
+})
+
+test('a page video upload that goes stale sends nothing and shows no error', async (t) => {
+  for (const kind of ['gen', 'file']) {
+    let r = null
+    const prep = async ({ poster }) => {
+      if (kind === 'gen') r.ctx.genRef.current++
+      else r.ctx.video.draft.state.file = { name: 'outro' }
+      return [photoD(), videoD()]
+    }
+    r = await pageSender({ hasMedia: true, hasVideo: true, prepPageVideo: prep })
+    await r.send()
+    t.is(r.state.acts.length, 0, kind)
+    t.is(r.state.errors.filter(Boolean).length, 0, kind)
+  }
+})
+
+test('a kept video retry is never called for another page or another file', async (t) => {
+  for (const [asPage, sameFile] of [['outra', true], ['page', false]]) {
+    let retried = 0
+    const r = await pageSender({ hasMedia: true, hasVideo: true, asPage })
+    r.ctx.pagePosterRef.current = { page: 'page', file: sameFile ? r.ctx.videoFile : {}, poster: photoD({ start: 3 }), video: null, retry: async () => { retried++; return { descriptor: videoD() } } }
+    await r.send()
+    t.is(retried, 0)
+    t.alike(r.state.preps, [null], 'a fresh upload')
+  }
+})
+
+test('a resend that fails again keeps the poster; the next tap uploads only the video', async (t) => {
+  const poster = photoD({ start: 3 })
+  let retried = 0
+  const r = await pageSender({ hasMedia: true, hasVideo: true, actAs: async () => { throw new Error('recusado') } })
+  r.ctx.pagePosterRef.current = { page: 'page', file: r.ctx.videoFile, poster, video: null, retry: async () => { retried++; throw Object.assign(new Error('incerto'), { uncertain: true, retry: async () => {} }) } }
+  await r.send()
+  t.is(retried, 1)
+  t.is(r.ctx.pagePosterRef.current.poster, poster)
+  t.is(r.ctx.pagePosterRef.current.retry, null, 'the retry is dropped')
+  await r.send()
+  t.is(retried, 1, 'not resent again')
+  t.alike(r.state.preps, [poster], 'only the video is uploaded, with the kept poster')
 })

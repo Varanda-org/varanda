@@ -14,7 +14,7 @@ const { tmpDir } = require('./helpers/tmp')
 const { Seeder } = require('../lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, profileRecord, likeRecord, deleteRecord, deleteRecords, mediaCoreRecord, MEDIA_BLOCK_BYTES, MAX_MEDIA_CORES } = require('../lib/records')
+const { memberCertRecord, postRecord, profileRecord, likeRecord, deleteRecord, deleteRecords, mediaCoreRecord, groupJoinRecord, MEDIA_BLOCK_BYTES, MAX_MEDIA_CORES } = require('../lib/records')
 const { mediaHeader } = require('../lib/media')
 
 function hex (buf) {
@@ -1294,6 +1294,7 @@ function pageFixture (held) {
     tombstones: new Map(),
     effective: null,
     pageSeqs: new Set(),
+    groupSeqs: new Set(),
     core: {
       fork: 0,
       length: PAGE_BLOCKS.length,
@@ -1364,6 +1365,223 @@ test('a leaked-key tombstone of a held page-close never enters the deleted bookk
   await settleIndexQueue(seeder)
   t.is(seeder._names.endSeq(PAGE_KEY), 2)
   t.ok(await seeder.postBlock(PAGE_KEY, 2), 'postBlock serves the close')
+})
+
+// docs/protocol.md "Deletion": a delete of a group-join, group-confirm or
+// group-cut has no effect. A group-join that was a hole when the scan
+// passed it is folded into the diary's group bindings when it arrives.
+const GROUP_AT = '2026-01-01T00:00:00.000Z'
+const GROUP_DIARY = 'a1'.repeat(32)
+const GROUP_KEY = 'b2'.repeat(32)
+const GROUP_WRITER = 'c3'.repeat(32)
+const GROUP_BLOCKS = [
+  { type: 'member-cert', cert: { member: GROUP_DIARY } },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: true, at: GROUP_AT },
+  { type: 'post', text: 'oi', at: GROUP_AT, replyTo: null },
+  { type: 'delete', seq: 1, at: GROUP_AT },
+  { type: 'delete', seq: 2, at: GROUP_AT }
+]
+
+function groupFixture (held, blocks = GROUP_BLOCKS) {
+  const reconciled = []
+  const seeder = Object.create(Seeder.prototype)
+  Object.assign(seeder, {
+    _index: createEngagementIndex(),
+    _topics: { removePost () {} },
+    _postNotices: { removePost () {} },
+    _names: { forget: () => false, note () {}, hints: () => ({ profileSeq: null }) },
+    _served: new Map(),
+    _closing: false,
+    _reconcileGroups: (diary, entry) => reconciled.push([diary, [...entry.groupLive.keys()]])
+  })
+  const entry = {
+    gated: true,
+    dropped: false,
+    indexed: blocks.length,
+    indexPaused: false,
+    topicIndexed: blocks.length,
+    topicPaused: false,
+    present: blocks.length,
+    scanned: blocks.length,
+    gone: new Set(),
+    deleted: new Set(),
+    tombstones: new Map(),
+    effective: null,
+    pageSeqs: new Set(),
+    groupSeqs: new Set(),
+    groupDecls: new Map(),
+    groupBound: new Map(),
+    groupWalks: new Map(),
+    groupEvents: new Map(),
+    groupLive: new Map(),
+    groupRefused: new Map(),
+    recent: [],
+    core: {
+      fork: 0,
+      length: blocks.length,
+      has: async (i) => held.has(i),
+      get: async (i) => held.has(i) ? b4a.from(JSON.stringify(blocks[i])) : null
+    }
+  }
+  seeder._served.set(GROUP_DIARY, entry)
+  return { seeder, entry, reconciled }
+}
+
+async function learnGroupTombstones (seeder, entry) {
+  for (const seq of [3, 4]) {
+    const r = GROUP_BLOCKS[seq]
+    entry.tombstones.set(seq, r.seq)
+    entry.effective = null
+    entry.gone.add(r.seq)
+    await seeder._applyDelete(GROUP_DIARY, entry, seq, r, { media: false })
+  }
+}
+
+test('a deleted group-join that arrives after the scan is folded into the diary bindings', async (t) => {
+  const held = new Set([0, 2, 3, 4])
+  const { seeder, entry, reconciled } = groupFixture(held)
+  await learnGroupTombstones(seeder, entry)
+  t.absent(entry.groupLive.has(GROUP_WRITER), 'the join was a hole at scan time')
+
+  held.add(1)
+  await seeder._pageArrived(GROUP_DIARY, entry, 1)
+  t.absent(entry.deleted.has(1), 'the join leaves the deleted bookkeeping')
+  t.ok(entry.deleted.has(2), 'the deleted post stays deleted')
+  t.alike([...seeder._effectiveDeleted(entry)], [2], 'only the post is in the readers\' fold')
+  t.alike(entry.groupLive.get(GROUP_WRITER), { group: GROUP_KEY, seq: 1, left: false }, 'the writer is live in the diary bindings')
+  t.alike(reconciled, [[GROUP_DIARY, [GROUP_WRITER]]], 'the group cores are reconciled once with the new binding')
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 1)
+  t.is(reconciled.length, 1, 'a second arrival changes nothing')
+})
+
+// Eight writers fill the diary's slots (seq 1 to 8), a cut 0 releases the
+// first (seq 9), a ninth writer joins (seq 10) and the cut is deleted
+// (seq 11). The cut was a hole when the scan passed it: the walk, which the
+// scan steps in seq order, must take it at its seq when it arrives.
+const CUT_WRITERS = Array.from({ length: 9 }, (_, i) => (0xd0 + i).toString(16).repeat(32))
+const CUT_BLOCKS = [
+  { type: 'member-cert', cert: { member: GROUP_DIARY } },
+  ...CUT_WRITERS.slice(0, 8).map((writer) => ({ type: 'group-join', group: GROUP_KEY, writer, on: true, at: GROUP_AT })),
+  { type: 'group-cut', group: GROUP_KEY, writer: CUT_WRITERS[0], cut: 0, at: GROUP_AT },
+  { type: 'group-join', group: GROUP_KEY, writer: CUT_WRITERS[8], on: true, at: GROUP_AT },
+  { type: 'delete', seq: 9, at: GROUP_AT }
+]
+
+test('a deleted group-cut that arrives after the scan steps the slot walk at its seq', async (t) => {
+  const held = new Set(CUT_BLOCKS.keys())
+  const { seeder, entry } = groupFixture(held, CUT_BLOCKS)
+  // The scan's group records, in seq order, through the same fold.
+  for (const seq of [1, 2, 3, 4, 5, 6, 7, 8, 10]) await seeder._pageArrived(GROUP_DIARY, entry, seq)
+  t.ok(entry.groupLive.has(CUT_WRITERS[0]), 'before the cut the first writer counts')
+  t.absent(entry.groupLive.has(CUT_WRITERS[8]), 'and the ninth finds no slot')
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 9)
+  t.alike(entry.groupLive.get(CUT_WRITERS[0]), { group: GROUP_KEY, seq: 1, left: true }, 'the deleted cut released the first writer')
+  t.alike(entry.groupLive.get(CUT_WRITERS[8]), { group: GROUP_KEY, seq: 10, left: false }, 'the ninth takes the slot it freed')
+})
+
+test('a deleted cut that arrives after the scan tries again the join it lowers the cut of (#350)', async (t) => {
+  const held = new Set(CUT_BLOCKS.keys())
+  const { seeder, entry } = groupFixture(held, CUT_BLOCKS)
+  for (const seq of [1, 2, 3, 4, 5, 6, 7, 8, 10]) await seeder._pageArrived(GROUP_DIARY, entry, seq)
+  // Refused at their joins (a boxless writer of a private group, a core
+  // past its quota): only a lower cut on the writer lifts that.
+  entry.groupRefused.set(CUT_WRITERS[0], 1)
+  entry.groupRefused.set(CUT_WRITERS[1], 2)
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 9)
+  t.absent(entry.groupRefused.has(CUT_WRITERS[0]), 'the writer the late cut released is tried again')
+  t.is(entry.groupRefused.get(CUT_WRITERS[1]), 2, 'a writer it does not cut stays refused')
+})
+
+// A member joined a writer (seq 1), left (seq 2, the join off) and deleted
+// the join (seq 3). The scan passed the join as a hole: when it arrives the
+// walk counts the writer, which readers then check by that on join.
+const LEFT_BLOCKS = [
+  { type: 'member-cert', cert: { member: GROUP_DIARY } },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: true, at: GROUP_AT },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: false, at: GROUP_AT },
+  { type: 'delete', seq: 1, at: GROUP_AT }
+]
+
+test('a deleted on join that arrives after the scan lists its left writer by that join (#350)', async (t) => {
+  const held = new Set(LEFT_BLOCKS.keys())
+  const { seeder, entry, reconciled } = groupFixture(held, LEFT_BLOCKS)
+  await seeder._pageArrived(GROUP_DIARY, entry, 2)
+  t.absent(entry.groupLive.has(GROUP_WRITER), 'an off join alone counts no writer')
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 1)
+  t.alike(entry.groupLive.get(GROUP_WRITER), { group: GROUP_KEY, seq: 1, left: true }, 'listed left by the late on join, never the off one')
+  t.alike(reconciled.at(-1), [GROUP_DIARY, [GROUP_WRITER]], 'the group cores are reconciled with it')
+})
+
+test('a held group-join a tombstone targets never enters the deleted bookkeeping', async (t) => {
+  const { seeder, entry } = groupFixture(new Set([0, 1, 2, 3, 4]))
+  await learnGroupTombstones(seeder, entry)
+  t.absent(entry.deleted.has(1), 'the held join is not deleted')
+  t.ok(entry.groupSeqs.has(1))
+  t.alike([...seeder._effectiveDeleted(entry)], [2], 'only the post is in the readers\' fold')
+})
+
+// Copies every block of `core` (in `from`) into the bare store `to`.
+async function backupCore (from, to, core) {
+  const a = from.replicate(true)
+  const b = to.replicate(false)
+  a.pipe(b).pipe(a)
+  try {
+    const copy = to.get({ key: core.key })
+    await copy.ready()
+    for (let i = 0; i < core.length; i++) await copy.get(i, { timeout: 10000 })
+  } finally {
+    a.destroy()
+    b.destroy()
+  }
+}
+
+test('a deleted group-join the seeder learns before holding it is fetched once a peer has it, and folded', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const { seeder } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const group = 'd4'.repeat(32)
+  const first = 'e5'.repeat(32)
+  const second = 'f6'.repeat(32)
+  const A = await member(t, bootstrap, assoc, {
+    records: () => [
+      groupJoinRecord({ group, writer: first, on: true, at: at(1) }),
+      groupJoinRecord({ group, writer: second, on: true, at: at(2) }),
+      deleteRecord({ seq: 2, at: at(3) }),
+      postRecord({ text: 'depois', at: at(4) })
+    ]
+  })
+  const backup = new Corestore(tmpDir(t, 'varanda-backup-'))
+  await backup.ready()
+  t.teardown(() => backup.close(), { force: true })
+  await backupCore(A.store, backup, A.diary)
+  // Nobody serves the deleted join when the seeder first meets the diary.
+  await A.diary.clear(2, 3)
+  await admit(A, assoc)
+  await settled(seeder, A)
+  const entry = seeder._served.get(A.key)
+  t.ok(entry.gone.has(2), 'the tombstone was learned first')
+  t.absent(await entry.core.has(2), 'the deleted join is not held yet')
+  t.absent(entry.groupDecls.has(second), 'nor folded')
+  t.ok(entry.grouped, 'the diary holds a group record')
+
+  // The member gets the block back: a peer now has it.
+  const a = A.store.replicate(true)
+  const b = backup.replicate(false)
+  a.pipe(b).pipe(a)
+  t.teardown(() => { a.destroy(); b.destroy() })
+  await A.diary.get(2, { timeout: 10000 })
+  await until(() => entry.core.has(2), { name: 'join apagado buscado', timeoutMs: 20000 })
+  await until(() => entry.groupSeqs.has(2), { name: 'join apagado lido' })
+  t.alike(entry.groupDecls.get(second), { group, on: true, seq: 2, at: at(2) }, 'the join is folded into the diary bindings')
+  t.absent(entry.deleted.has(2), 'it leaves the deleted bookkeeping')
+  t.absent(seeder._effectiveDeleted(entry).has(2), 'and the readers\' fold')
+  t.ok(await entry.core.has(2), 'the block is kept')
 })
 
 test('seeder recount keeps a preview thumbnail live until the last reference is deleted', async (t) => {

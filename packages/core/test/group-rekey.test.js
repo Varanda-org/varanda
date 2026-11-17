@@ -229,3 +229,27 @@ test('facts: epoch at and the counted, valid envelopes under it', (t) => {
   t.alike(facts.sealedAts, [T0 + DAY, T0 + 2 * DAY], 'other epochs, invalid records and uncounted writers left out')
   t.alike(epochFacts({ logs, counted: new Set([G]), root: G, epoch: null }), { epochAt: null, sealedAts: [] })
 })
+
+test('facts: envelopes of a frozen or released writer at or past its cut do not count (#350)', (t) => {
+  const G = 'cc'.repeat(32)
+  const F = 'dd'.repeat(32)
+  const R = 'ee'.repeat(32)
+  const kid = { writer: G, seq: 1 }
+  const nonce = '00'.repeat(24)
+  const box = Buffer.alloc(40).toString('base64')
+  const at = (d) => new Date(T0 + d * DAY).toISOString()
+  const first = grp.groupKey({ kid: null, basis: [], keys: [{ writer: G, sealed: Buffer.alloc(96).toString('base64') }], commit: 'ab'.repeat(32), at: at(0) })
+  const sealed = (d) => grp.groupSealed({ kid, nonce, box, at: at(d) })
+  const logs = [
+    { key: G, entries: [{ seq: 0, record: { type: 'group-header' } }, { seq: 1, record: first }] },
+    // F frozen at 2: seq 1 below the cut counts, seq 2 and 3 do not.
+    { key: F, entries: [{ seq: 1, record: sealed(1) }, { seq: 2, record: sealed(2) }, { seq: 3, record: sealed(3) }] },
+    // R released (cut 0): no envelope counts.
+    { key: R, entries: [{ seq: 1, record: sealed(4) }] }
+  ]
+  const counted = new Set([G, F, R])
+  const facts = epochFacts({ logs, counted, root: G, epoch: kid, cuts: new Map([[F, 2], [R, 0]]) })
+  t.is(facts.epochAt, T0)
+  t.alike(facts.sealedAts, [T0 + DAY])
+  t.is(epochFacts({ logs, counted, root: G, epoch: kid }).sealedAts.length, 4, 'control: with no cuts every envelope counts')
+})

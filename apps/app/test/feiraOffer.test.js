@@ -214,16 +214,12 @@ test('hostile listing title stays inert through displayText', async (t) => {
   t.absent(Array.from(text).some((ch) => ch.codePointAt(0) < 0x20), 'the draft title is one clean line')
 })
 
-test('a page proposta is the bare offer URL, which the seller node can read', async (t) => {
+test('a page proposta is the same sentence and card as a member, never the bare URL', async (t) => {
   const o = await load()
   const card = o.offerCard({ origin: ORIGIN, listing: LISTING, cents: 8000 })
-  const asPage = o.proposalText(LISTING, 8000, card.url, { asPage: true })
-  t.is(asPage, card.url)
-  t.ok(feira.parseOfferRef(asPage), 'parseOfferRef accepts the whole text')
-  const member = o.proposalText(LISTING, 8000, card.url)
-  t.is(member, o.offerText(LISTING, 8000, card.url), 'a member keeps the sentence beside the card')
-  t.is(feira.parseOfferRef(member), null, 'a sentence alone would not be readable: hence the bare URL for pages')
-  t.is(o.proposalText(LISTING, 8000, URL7, { asPage: true }), '', 'a URL with no offer is never sent as one')
+  const text = o.proposalText(LISTING, 8000, card.url)
+  t.is(text, o.offerText(LISTING, 8000, card.url), 'the sentence beside the card')
+  t.is(o.proposalText(LISTING, 8000, card.url, { asPage: true }), text, 'asPage changes nothing')
 })
 
 test('a proposta counts only in the shape the seller node can sign', async (t) => {

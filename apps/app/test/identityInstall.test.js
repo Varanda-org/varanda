@@ -887,11 +887,15 @@ test('putDmMedia hands the photo to dmPutMedia, zeroes it and unlinks after succ
   t.is(seen[1].to, dest, 'the destination reaches the session (rpc 5.97)')
   await putDmMedia({ ...io, read: async () => ({ file: '/cache/s.bin', bytes: new Uint8Array([5]) }) }, { mime: 'image/png', width: 2, height: 3 })
   t.ok('to' in seen[2] && seen[2].to === undefined, 'a missing destination still reaches the session, which refuses it')
+  const page = '9a'.repeat(32)
+  await putDmMedia({ ...io, read: async () => ({ file: '/cache/t.bin', bytes: new Uint8Array([6]) }) }, { mime: 'image/png', width: 2, height: 3, to: dest, page })
+  t.is(seen[3].page, page, 'a page reaches the session, which keys the blob to that sender (rpc 5.88)')
+  t.absent('page' in seen[1], 'a person put carries no page')
 
   const failing = { ...io, read: async () => ({ file: '/cache/q.bin', bytes: new Uint8Array(1) }), session: { dmPutMedia: () => { throw new TypeError('mídia inválida') } } }
   const err = await putDmMedia(failing, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
   t.is(err.code, 'USAGE')
-  t.alike(unlinked, ['/cache/p.bin', '/cache/r.bin', '/cache/s.bin'], 'a refused file is not unlinked')
+  t.alike(unlinked, ['/cache/p.bin', '/cache/r.bin', '/cache/s.bin', '/cache/t.bin'], 'a refused file is not unlinked')
   const closing = await putDmMedia({ ...io, isClosing: () => true }, { mime: 'image/png', width: 1, height: 1, to: dest }).catch((e) => e)
   t.is(closing.code, 'LOCKED')
 })

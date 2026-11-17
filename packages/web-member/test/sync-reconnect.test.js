@@ -6,6 +6,10 @@
 // retryFastWindowMs 0 is the doubling ladder. A closed TCP port must be
 // dialled at least 12 times within 10 s (the old 1, 2, 4 ... 30 s ladder
 // reaches its 12th dial only after about 20 s when the minimum is 10 ms).
+// A 1012 close (the seeder is stopping for a deploy) is a restart:
+// 'seeder-restarting' before 'link-closed', then a short jittered redial
+// that does not count as a failed attempt. The peer's close reason is
+// never logged or emitted.
 const test = require('brittle')
 const net = require('node:net')
 const b4a = require('b4a')
@@ -17,7 +21,7 @@ const { testnet, until } = require('./helpers/net')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { wsStream } = require('../lib/ws-stream')
-const { runSync, retryWait, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER } = require('../lib/sync')
+const { runSync, retryWait, restartWait, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, RESTART_WAIT_MS, RESTART_JITTER_MS } = require('../lib/sync')
 const ops = require('../lib/member-ops')
 const { memoryNodeStorage } = require('../lib/node-storage')
 
@@ -25,6 +29,7 @@ const FAST_MAX_MS = 5000
 const FAST_WINDOW_MS = 180000
 const RETRY_WARNING = /^aviso: sem conexão com o semeador; nova tentativa em (\d+) s$/
 const BUSY_WARNING = 'aviso: semeador ocupado; tente novamente em instantes'
+const RESTART_WARNING = 'aviso: semeador reiniciando; reconectando em instantes'
 
 function retry (over = {}) {
   return retryWait({
@@ -110,13 +115,43 @@ function retrySeconds (lines) {
   return out
 }
 
+function eventIndex (handle, name) {
+  return handle.events.findIndex((ev) => ev && ev.event === name)
+}
+
+// The peer's close reason must not show up in a log line or an event.
+function leaked (handle, text) {
+  for (const line of handle.lines) {
+    if (String(line).includes(text)) return true
+  }
+  for (const ev of handle.events) {
+    if (JSON.stringify(ev).includes(text)) return true
+  }
+  return false
+}
+
+async function closeServer (t, onConnection) {
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  t.teardown(() => new Promise((resolve) => {
+    for (const client of wss.clients) client.terminate()
+    wss.close(() => resolve())
+  }), { force: true })
+  wss.on('connection', (ws) => {
+    ws.on('error', () => {})
+    onConnection(ws)
+  })
+  return 'ws://127.0.0.1:' + wss.address().port + '/seeder'
+}
+
 // Starts a continuous run and records every dial and log line. The returned
 // done promise settles with a rejection stored on the handle, so a startup
 // failure surfaces from until() instead of as an unhandled rejection.
 function drive (t, seederUrl, storage, opts = {}) {
   const times = []
   const lines = []
-  const handle = { times, lines, failure: null, ac: new AbortController(), done: null }
+  const events = []
+  const handle = { times, lines, events, failure: null, ac: new AbortController(), done: null }
   t.teardown(() => handle.ac.abort(), { force: true })
   handle.done = runSync({
     storage,
@@ -125,6 +160,7 @@ function drive (t, seederUrl, storage, opts = {}) {
     startupSlowMs: 120000,
     ...opts,
     log: (line) => lines.push(line),
+    onEvent: (ev) => events.push(ev),
     createSocket: (url) => {
       times.push(Date.now())
       const ws = new WebSocket(url)
@@ -200,6 +236,19 @@ test('the exported retry defaults', (t) => {
   t.is(RETRY_FAST_MAX_MS, 5000)
   t.is(RETRY_FAST_WINDOW_MS, 180000)
   t.is(RETRY_JITTER, 0.25)
+  t.is(RESTART_WAIT_MS, 500)
+  t.is(RESTART_JITTER_MS, 1000)
+})
+
+test('restartWait is the base plus up to the jitter', (t) => {
+  t.is(restartWait({ waitMs: 500, jitterMs: 1000, random: () => 0 }), 500)
+  t.is(restartWait({ waitMs: 500, jitterMs: 1000, random: () => 1 }), 1500)
+  t.is(restartWait({ waitMs: NaN, jitterMs: 1000, random: () => 1 }), 1000)
+  t.is(restartWait({ waitMs: 500, jitterMs: NaN, random: () => 1 }), 500)
+  t.is(restartWait({ waitMs: -5, jitterMs: -5, random: () => 1 }), 0)
+  t.is(restartWait({ waitMs: '500', jitterMs: 1000, random: () => 1 }), 1000)
+  const picked = restartWait({ waitMs: RESTART_WAIT_MS, jitterMs: RESTART_JITTER_MS })
+  t.ok(picked >= 500 && picked <= 1500, 'default random stays in 500 to 1500, got ' + picked)
 })
 
 test('a maxMs below the fast cap stays the cap', (t) => {
@@ -281,6 +330,215 @@ test('a 1013 close keeps the full retry cap', async (t) => {
     t.ok(span > 5000, 'full cap span ' + span + ' ms')
     t.ok(span < 20000, 'full cap span ' + span + ' ms')
     t.ok(run.lines.includes(BUSY_WARNING), '1013 warning kept')
+    t.ok(!run.lines.includes(RESTART_WARNING), '1013 is not a restart')
+    t.ok(retrySeconds(run.lines).length >= 1, 'retry warning kept')
+    const busyAt = eventIndex(run, 'seeder-busy')
+    const closedAt = eventIndex(run, 'link-closed')
+    t.ok(busyAt !== -1 && closedAt === busyAt + 1, 'seeder-busy before link-closed')
+    t.alike(run.events[busyAt], { event: 'seeder-busy' })
+    t.is(eventIndex(run, 'seeder-restarting'), -1, '1013 is not seeder-restarting')
+    t.ok(!leaked(run, 'lotado'), '1013 reason not logged or emitted')
+  } finally {
+    await stop(run)
+  }
+})
+
+test('a 1012 close warns, emits seeder-restarting, and redials inside the restart window', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const REASON = 'zz-peer-reason-zz'
+  const url = await closeServer(t, (ws) => ws.close(1012, REASON))
+  // random 0 keeps the wait at restartWaitMs. The ordinary ladder would
+  // wait retryMinMs (3 s) and would not emit seeder-restarting.
+  const run = drive(t, url, await memberStorage(), {
+    retryMinMs: 3000,
+    retryFastMaxMs: 3000,
+    retryJitter: 0,
+    restartWaitMs: 70,
+    restartJitterMs: 4000,
+    random: () => 0
+  })
+  try {
+    await until(() => {
+      if (run.failure) throw run.failure
+      return run.times.length >= 2 && retrySeconds(run.lines).length >= 1
+    }, { timeoutMs: 15000, name: 'restart redial' })
+    const gap = run.times[1] - run.times[0]
+    t.ok(run.lines.includes(RESTART_WARNING), '1012 warning kept')
+    t.is(retrySeconds(run.lines)[0], 1, 'restart wait logs 1 s, not the 3 s ladder')
+    const restartAt = eventIndex(run, 'seeder-restarting')
+    const closedAt = eventIndex(run, 'link-closed')
+    t.ok(restartAt !== -1 && closedAt === restartAt + 1, 'seeder-restarting before link-closed')
+    t.alike(run.events[restartAt], { event: 'seeder-restarting' })
+    t.is(eventIndex(run, 'seeder-busy'), -1, '1012 is not seeder-busy')
+    t.ok(!leaked(run, REASON), 'peer reason not logged or emitted')
+    // The log line above is what tells the restart wait from the ladder;
+    // the upper bound is only a guard against a stalled run.
+    t.ok(gap >= 70 && gap < 5000, 'restart window gap ' + gap + ' ms')
+  } finally {
+    await stop(run)
+  }
+})
+
+test('after a 1012 close a failed redial keeps the current failures', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const REASON = 'zz-peer-reason-zz'
+  let n = 0
+  const url = await closeServer(t, (ws) => {
+    n++
+    // Later closes have no close frame: the client records 1006.
+    if (n === 1) {
+      ws.close(1012, REASON)
+    } else {
+      ws.terminate()
+    }
+  })
+  // 1012 does not bump failures. The next two waits are retryWait at
+  // failures 0 then 1 (1200 ms, 2400 ms), still inside the fast window.
+  // A bump would log 3 s then 5 s.
+  const ladderOpts = {
+    minMs: 1200,
+    maxMs: 20000,
+    fastMaxMs: 5000,
+    fastWindowMs: FAST_WINDOW_MS,
+    jitter: 0,
+    random: () => 0
+  }
+  const at = (failures) => retryWait({ failures, downMs: 0, ...ladderOpts })
+  const run = drive(t, url, await memberStorage(), {
+    retryMinMs: ladderOpts.minMs,
+    retryMaxMs: ladderOpts.maxMs,
+    retryFastMaxMs: ladderOpts.fastMaxMs,
+    retryFastWindowMs: ladderOpts.fastWindowMs,
+    retryJitter: 0,
+    restartWaitMs: 50,
+    restartJitterMs: 0,
+    random: () => 0
+  })
+  try {
+    await until(() => {
+      if (run.failure) throw run.failure
+      return run.times.length >= 3 && retrySeconds(run.lines).length >= 3
+    }, { timeoutMs: 20000, name: 'waits after the restart' })
+    t.is(at(0), 1200)
+    t.is(at(1), 2400)
+    t.is(at(2), 4800)
+    t.alike(retrySeconds(run.lines).slice(0, 3), [
+      1,
+      Math.ceil(at(0) / 1000),
+      Math.ceil(at(1) / 1000)
+    ])
+    const restartGap = run.times[1] - run.times[0]
+    const followGap = run.times[2] - run.times[1]
+    t.ok(restartGap < 5000, 'restart redial in ' + restartGap + ' ms')
+    t.ok(followGap >= at(0) - 100, 'unbumped retry gap ' + followGap + ' ms')
+    t.ok(!leaked(run, REASON), 'peer reason not logged or emitted')
+    t.ok(run.lines.includes(RESTART_WARNING), '1012 warning kept')
+  } finally {
+    await stop(run)
+  }
+})
+
+test('only the first 1012 of a down streak skips the backoff', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  // The close code arrives outside Noise, so a server (or anything on the
+  // path) that always answers 1012 must not keep the client on the quick
+  // redial: the first wait is the restart wait, then retryWait from
+  // failures 0, 1, as for any failure.
+  const url = await closeServer(t, (ws) => ws.close(1012, 'reiniciando'))
+  const ladderOpts = {
+    minMs: 1200,
+    maxMs: 20000,
+    fastMaxMs: 5000,
+    fastWindowMs: FAST_WINDOW_MS,
+    jitter: 0,
+    random: () => 0
+  }
+  const at = (failures) => retryWait({ failures, downMs: 0, ...ladderOpts })
+  const run = drive(t, url, await memberStorage(), {
+    retryMinMs: ladderOpts.minMs,
+    retryMaxMs: ladderOpts.maxMs,
+    retryFastMaxMs: ladderOpts.fastMaxMs,
+    retryFastWindowMs: ladderOpts.fastWindowMs,
+    retryJitter: 0,
+    restartWaitMs: 50,
+    restartJitterMs: 0,
+    random: () => 0
+  })
+  try {
+    await until(() => {
+      if (run.failure) throw run.failure
+      return retrySeconds(run.lines).length >= 3
+    }, { timeoutMs: 20000, name: 'three waits' })
+    t.alike(retrySeconds(run.lines).slice(0, 3), [
+      Math.ceil(restartWait({ waitMs: 50, jitterMs: 0 }) / 1000),
+      Math.ceil(at(0) / 1000),
+      Math.ceil(at(1) / 1000)
+    ], 'restart wait once, then the retry ladder')
+    t.ok(run.lines.filter((line) => line === RESTART_WARNING).length >= 2, 'every 1012 still warns')
+    t.ok(eventIndex(run, 'seeder-restarting') !== -1, 'seeder-restarting still emitted')
+  } finally {
+    await stop(run)
+  }
+})
+
+test('a verified link gets the quick redial again after a 1012', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  // Each verified link is closed with 1012 once the diary is admitted. With
+  // a 1.2 s ladder minimum, a redial in under 1 s on both drops means the
+  // verified hello re-armed the restart wait.
+  const seeder = await fakeSeeder(t, assocKp, () => {
+    for (const ws of seeder.connections) {
+      if (ws.readyState === ws.OPEN) ws.close(1012, 'reiniciando')
+    }
+  })
+  const run = drive(t, seeder.url, await memberStorage(assocKp), {
+    retryMinMs: 1200,
+    retryFastMaxMs: 5000,
+    retryJitter: 0,
+    restartWaitMs: 50,
+    restartJitterMs: 0,
+    random: () => 0
+  })
+  try {
+    await until(() => {
+      if (run.failure) throw run.failure
+      return run.lines.filter((line) => line === RESTART_WARNING).length >= 2 && retrySeconds(run.lines).length >= 2
+    }, { timeoutMs: 30000, name: 'two restarts' })
+    t.alike(retrySeconds(run.lines).slice(0, 2), [1, 1], 'restart wait after each verified link')
+  } finally {
+    await stop(run)
+  }
+})
+
+test('a plain close (1006) gives neither seeder-busy nor seeder-restarting', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  // terminate() drops the socket with no close frame: the client records 1006.
+  const url = await closeServer(t, (ws) => ws.terminate())
+  const run = drive(t, url, await memberStorage(), {
+    retryMinMs: 400,
+    retryFastMaxMs: 400,
+    retryJitter: 0,
+    restartWaitMs: 30,
+    restartJitterMs: 0,
+    random: () => 0
+  })
+  try {
+    await until(() => {
+      if (run.failure) throw run.failure
+      return run.times.length >= 2 && eventIndex(run, 'link-closed') !== -1
+    }, { timeoutMs: 15000, name: 'plain redial' })
+    const gap = run.times[1] - run.times[0]
+    t.ok(gap >= 300, 'ordinary retry, not the 30 ms restart, gap ' + gap + ' ms')
+    t.is(eventIndex(run, 'seeder-busy'), -1)
+    t.is(eventIndex(run, 'seeder-restarting'), -1)
+    t.ok(!run.lines.includes(BUSY_WARNING), 'no busy warning')
+    t.ok(!run.lines.includes(RESTART_WARNING), 'no restart warning')
     t.ok(retrySeconds(run.lines).length >= 1, 'retry warning kept')
   } finally {
     await stop(run)

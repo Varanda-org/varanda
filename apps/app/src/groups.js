@@ -205,15 +205,18 @@ export function needsDeviceJoin (info) {
   return MEMBER_ROLES.includes(info.role) && info.writerHere === false
 }
 
-// The seeder never frees a device slot (8 per root); the app stops entering by
-// itself at 6 and leaves the last two to the person.
+// Each account has 8 live device slots per root (writersBound). A slot comes
+// back only when a device is disconnected, and only while the root's frozen
+// reserve lasts (#350); an older node never gives one back. The app stops
+// entering by itself at 6 and leaves the last two to the person.
 export function reserveReachedAny (counts) {
   if (!Array.isArray(counts)) return false
   return counts.some((n) => Number.isSafeInteger(n) && n >= 6)
 }
 
 // At the reserve the first tap only shows the warning; the person confirms
-// with a second tap, because the slot is never given back.
+// with a second tap, because the slot comes back at best by disconnecting a
+// device.
 export function needsReserveConfirm (counts, confirmed) {
   return confirmed !== true && reserveReachedAny(counts)
 }
@@ -228,6 +231,84 @@ export function deviceReserveReached (info) {
 export function communityReserveReached (info) {
   if (!info || typeof info !== 'object') return false
   return reserveReachedAny([info.writersBound, info.generalWritersBound])
+}
+
+const ACCOUNT_SLOTS = 8
+
+// The roots a join spends a slot in, as { bound, room } (writersBound and
+// frozenRoom): group.join in the group, community.join in the community and
+// in Geral.
+export function groupSlots (info) {
+  if (!info || typeof info !== 'object') return []
+  return [{ bound: info.writersBound, room: info.frozenRoom }]
+}
+
+export function communitySlots (info) {
+  if (!info || typeof info !== 'object') return []
+  return [{ bound: info.writersBound, room: info.frozenRoom }, { bound: info.generalWritersBound, room: info.generalFrozenRoom }]
+}
+
+// What disconnecting a device does in those roots, decided by the field the
+// node reports, never by the platform: 'returns' while every root has frozen
+// reserve left, 'final' once one has none, 'legacy' when the node omits
+// frozenRoom (an older node, where a slot never comes back).
+export function slotReturn (slots) {
+  const rooms = (Array.isArray(slots) ? slots : []).map((s) => s && s.room).filter((n) => Number.isSafeInteger(n) && n >= 0)
+  if (rooms.length === 0) return 'legacy'
+  return rooms.some((n) => n === 0) ? 'final' : 'returns'
+}
+
+// The way to the screen, as Ajustes lists it (DEVICES_TITLE in devices.js;
+// the test holds the two together).
+const DEVICES_PATH = 'Ajustes, Aparelhos conectados'
+const SLOT_RETURNS_TEXT = 'Desconectar um aparelho antigo em ' + DEVICES_PATH + ', devolve a vaga.'
+// With no frozen reserve a disconnect's mark of 1 or more frees no slot; a
+// mark at 0 still releases one while the diary has releases left.
+const SLOT_FINAL_TEXT = 'desconectar um aparelho pode não devolver a vaga.'
+
+function slotPlace (where) {
+  return where === 'comunidade' ? 'nesta comunidade' : 'neste grupo'
+}
+
+// The warning at the reserve. `where` is 'grupo' or 'comunidade'.
+export function reserveText (slots, where = 'grupo') {
+  const r = slotReturn(slots)
+  if (r === 'legacy') return DEVICE_RESERVE_TEXT
+  return 'Cada aparelho usa uma das 8 vagas da conta ' + slotPlace(where) + '. ' + (r === 'final' ? 'Aqui, ' + SLOT_FINAL_TEXT : SLOT_RETURNS_TEXT)
+}
+
+// The community info note for a device not in the community yet, at the
+// reserve.
+export function reserveJoinText (slots) {
+  if (slotReturn(slots) === 'legacy') return DEVICE_RESERVE_JOIN_TEXT
+  return 'Este aparelho ainda não participa desta comunidade. Para participar por ele, toque em Participar neste aparelho na lista de grupos. ' + reserveText(slots, 'comunidade')
+}
+
+// The node refuses a full group and an account at its 8 live devices there
+// with the same words: the counts tell them apart. -> the text for the
+// person, or null to keep the node's message (a full group, an older node).
+export function slotFullText (slots, where = 'grupo') {
+  const full = (Array.isArray(slots) ? slots : []).filter((s) => s && Number.isSafeInteger(s.bound) && s.bound >= ACCOUNT_SLOTS)
+  const r = slotReturn(full)
+  if (full.length === 0 || r === 'legacy') return null
+  const head = 'Sua conta já usa as 8 vagas de aparelho ' + slotPlace(where)
+  return r === 'final' ? head + ', e aqui ' + SLOT_FINAL_TEXT : head + '. Para liberar a vaga, desconecte um aparelho antigo em ' + DEVICES_PATH + '.'
+}
+
+const FULL_REFUSALS = Object.freeze(['limite do grupo atingido', 'limite da comunidade atingido'])
+
+// After a full-root refusal the counts are read again (`read`, which may
+// throw): the rendered ones may predate a device that just enrolled.
+// `slotsOf` is groupSlots or communitySlots. -> the error to show: a new one
+// with the slot text, else `err` itself (an uncertain answer always is).
+export async function slotRefusal (err, read, slotsOf, where = 'grupo') {
+  if (!err || err.uncertain === true || !FULL_REFUSALS.includes(err.message)) return err
+  let info = null
+  try {
+    info = await read()
+  } catch {}
+  const text = slotFullText(slotsOf(info), where)
+  return text === null ? err : new Error(text)
 }
 
 export function writerOnDevice (info) {
