@@ -655,3 +655,51 @@ test('a held-back Página store cut after its first chunk keeps its horizon in t
   const resumed = await pageImport(t, true)
   t.alike(resumed, whole, 'every row sits where the uninterrupted filing put it')
 })
+
+test('the pointer is put in the bucket of the own box it is sealed to', async (t) => {
+  const dmCore = require('@varanda/core/lib/dm')
+  const crypto = require('hypercore-crypto')
+  const sodium = require('../lib/sodium-browser')
+  const boxPub = b4a.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  sodium.crypto_box_keypair(boxPub, b4a.alloc(sodium.crypto_box_SECRETKEYBYTES))
+  const boxKey = b4a.toString(boxPub, 'hex')
+  const keyPair = crypto.keyPair()
+  const self = b4a.toString(keyPair.publicKey, 'hex')
+  const row = { t: 'msg', id: id('1'), peer: PEER, from: self, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
+  // The copy state is sealed by a real store, as the node's own.
+  const sealer = await openStore(t)
+  const local = {
+    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
+    seenToken: () => 'f'.repeat(64),
+    hasMedia: () => false,
+    seal: (v) => sealer.seal(v),
+    open: (v) => sealer.open(v)
+  }
+  const blobs = {
+    copySource: () => ({ chunk: 256, reserve: async () => [], take: async (n) => Array.from({ length: n }, () => ({})) }),
+    stamp: async (sealed, kp, source) => { await source.take(1) },
+    put: async () => {}
+  }
+  const puts = []
+  const e = await engine(t, {
+    local,
+    personal: { local, prefix: '', page: null },
+    blobs,
+    boxHex: () => ({ box: boxKey, gen: 1 }),
+    takeStamps: async (n) => Array.from({ length: n }, () => ({})),
+    dropOf: (sealed) => sealed,
+    linkOpts: {},
+    openDmLink: async () => ({
+      put: async (bytes, prefix) => {
+        puts.push(prefix)
+        return { ok: true, reason: null }
+      },
+      close: () => {}
+    }),
+    refusal: (reason) => new UsageError(reason),
+    unconfirmed: () => new UsageError('incerto')
+  })
+  const made = await e.copy.historyCopy(self, keyPair)
+  t.is(made.messages, 1)
+  t.alike(puts, [dmCore.bucketPrefix(boxKey)], 'one put, tagged with the own bucket')
+})

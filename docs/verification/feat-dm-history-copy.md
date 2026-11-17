@@ -80,6 +80,8 @@ O seeder de teste do `blob.test.js` ganhou a opção `copyBudget` (nulo é um se
 
 O `dm-copy-e2e-2` cobre a falha do selo `copy` no semeador real (o selo lança erro): fotos de fora, texto inteiro, descritor original intacto. Parte e manifesto ainda recuam para a cota diária nesse caso, para a cópia completar com um semeador antigo; só as fotos nunca gastam a cota diária. Com a cota semanal funcionando, o texto sai dela primeiro (reserva antes das fotos).
 
+Depois do PR #707 (grupos de envelopes): o aviso da cópia vai para o grupo da própria caixa, a mesma para a qual é lacrado, e não sem grupo, que todo aparelho baixaria. `dm-copy-unit-2.test.js`, "the pointer is put in the bucket of the own box it is sealed to": 19 testes, 95 asserções (eram 18 e 93); com `link.put(bytes)` sem o grupo, falha a asserção "one put, tagged with the own bucket".
+
 Limites conhecidos (não corrigidos de propósito):
 
 - Se várias fotos de uma mensagem batem no limite no meio, todas contam como de fora.

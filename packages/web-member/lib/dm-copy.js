@@ -122,6 +122,16 @@ class Soft extends Error {}
 // The unlock or the generation changed under an import.
 class Stop extends Error {}
 
+// The bucket prefix of a box public key (hex); null for an unusable one, an
+// untagged put that every bucket matches, as prefixOf in ./dm.js.
+function bucketOf (boxKey) {
+  try {
+    return dm.bucketPrefix(boxKey)
+  } catch {
+    return null
+  }
+}
+
 function exactKeys (o, keys) {
   if (o === null || typeof o !== 'object' || Array.isArray(o)) return false
   const have = Object.keys(o)
@@ -406,9 +416,10 @@ function createDmCopy (env) {
 
   // ---- making a copy ----
 
-  // The one place the pointer drop is put: the bucketed pool takes the own
-  // box prefix here (docs/protocol.md section 11).
-  async function putPointer (bytes) {
+  // The one place the pointer drop is put, with the bucket prefix of the box
+  // it is sealed to: the own one, so only the own bucket's pulls carry it
+  // (docs/protocol.md section 11).
+  async function putPointer (bytes, prefix) {
     let link
     try {
       link = await env.openDmLink(env.linkOpts)
@@ -419,7 +430,7 @@ function createDmCopy (env) {
     try {
       let r
       try {
-        r = await link.put(bytes)
+        r = await link.put(bytes, prefix)
       } catch {
         throw env.unconfirmed()
       }
@@ -526,7 +537,7 @@ function createDmCopy (env) {
 
   async function run (keyPair, gen) {
     if (attempt === null || attempt.gen !== gen) {
-      attempt = { gen, id: dm.newMessageId(), at: nowIso(), photos: new Map(), stores: null, counts: null, manifest: null, pointer: null, held: null }
+      attempt = { gen, id: dm.newMessageId(), at: nowIso(), photos: new Map(), stores: null, counts: null, manifest: null, pointer: null, pointerPrefix: null, held: null }
     }
     const a = attempt
     const source = blobs.copySource(keyPair)
@@ -678,9 +689,10 @@ function createDmCopy (env) {
 
     if (a.pointer === null) {
       const inner = dm.buildInner({ kind: 'copy', id: a.id, copy: a.manifest.desc, at: a.at }, keyPair)
+      const boxKey = env.boxHex().box
       let sealed
       try {
-        sealed = dm.sealInner(inner, env.boxHex().box)
+        sealed = dm.sealInner(inner, boxKey)
       } finally {
         inner.fill(0)
       }
@@ -691,11 +703,12 @@ function createDmCopy (env) {
       }
       if (stamps === null) throw new UsageError(NO_STAMPS)
       a.pointer = env.dropOf(sealed, stamps[0])
+      a.pointerPrefix = bucketOf(boxKey)
     }
     checkGen(gen)
     // Recorded before the put: this device never imports its own copy.
     await updateState((s) => { if (!s.made.includes(a.id)) s.made.push(a.id) })
-    await putPointer(a.pointer)
+    await putPointer(a.pointer, a.pointerPrefix)
     done++
     env.emit('dm.copyProgress', { done, total })
     attempt = null
