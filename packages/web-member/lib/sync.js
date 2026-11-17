@@ -332,7 +332,7 @@ const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
-const { decodeBlock, validateRecord, validRecordCopy, PAGE_KEYS, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
+const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
@@ -346,7 +346,10 @@ const {
   deletedRanges,
   clearDeleted,
   downloadExceptPages,
-  pageTargets
+  pageTargets,
+  heldKind,
+  foldTargets,
+  isKeptType
 } = require('@varanda/core/lib/deletion')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
@@ -870,40 +873,29 @@ const HEAD_STALL_MS = 3000
 // so the tail reconnects what is already on screen.
 const TAIL_MAX = 256
 
-// Target seq of the valid tombstone at block seq, null for any other block,
-// undefined for a read error (the checks of tombstoneAt, block read once).
-async function tombstoneTarget (core, seq) {
+// @varanda/core lib/deletion.js heldKind, undefined for a read error.
+async function arrivedKind (core, seq) {
   try {
-    if (!Number.isSafeInteger(seq) || seq < 1 || seq >= core.length || !(await core.has(seq))) return null
-    const copy = validRecordCopy(decodeBlock(await core.get(seq, { wait: false, raw: true })), seq)
-    return copy !== null && copy.type === 'delete' ? copy.seq : null
+    return await heldKind(core, seq)
   } catch {
     return undefined
   }
 }
 
-// The raw block at seq when this replica holds it and it is a page-*
-// record, else null. Local only: a deleted seq is never asked for.
-async function heldPageBlock (core, seq) {
+// The raw block at seq when this replica holds it and it is a record of a
+// kept type (a page-*, group-join, group-confirm or group-cut record, which
+// the fold keeps when held: lib/deletion.js isKeptType), else null. Local
+// only: a deleted seq is never asked for.
+async function heldKeptBlock (core, seq) {
   try {
     if (seq >= core.length || !(await core.has(seq))) return null
     const raw = await core.get(seq, { wait: false, raw: true })
     if (raw === null || raw === undefined) return null
     const copy = validRecordCopy(decodeBlock(raw), seq)
-    return copy !== null && Object.prototype.hasOwnProperty.call(PAGE_KEYS, copy.type) ? raw : null
+    return copy !== null && isKeptType(copy.type) ? raw : null
   } catch {
     return null
   }
-}
-
-// The deletion fold (deletedSeqs) over tombstones already validated, as
-// seq -> target, so a step never copies the records it already checked.
-function foldTargets (tombs) {
-  const deleted = new Set()
-  for (const seq of [...tombs.keys()].sort((a, b) => b - a)) {
-    if (!deleted.has(seq)) deleted.add(tombs.get(seq))
-  }
-  return deleted
 }
 
 // The present length of a diary core (own or followed) and what deletions
@@ -945,20 +937,21 @@ function foldTargets (tombs) {
 // seeder may lack it); a target that grows past that and leaves the
 // history more than `newest` blocks behind runs the head again. The
 // reported length stays the present length on both phases.
-// -> also expect(length), the length a seeder advertised (a hint only).
-// A diary known not to be a page: every deleted target leaves the download.
-const PERSONAL_GUARD = Object.freeze({
-  page: () => false,
-  excludable: async (deleted) => new Set(deleted),
-  watch: () => noop,
-  destroy: noop
-})
-
+// -> also expect(length), the length a seeder advertised (a hint only),
+// and setGroupBound(on).
 // `pages` false: the diary is known not to be a page (this member's own),
-// so the page guard never reads its genesis blocks.
-function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, retrySlowMs = TOMB_RETRY_SLOW_MS, pages = true, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
+// so the page guard never reads its genesis blocks. A group-bound diary
+// (`groupBound`, setGroupBound, or a group history record it holds) keeps
+// an unheld deleted target in the download until it is read once
+// (lib/deletion.js pageTargets, docs/protocol.md "Deletion"); any other
+// personal diary never fetches one.
+function trackPresent (core, { noClear = false, download = true, newest = 0, tailMax = TAIL_MAX, stallMs = HEAD_STALL_MS, retrySlowMs = TOMB_RETRY_SLOW_MS, pages = true, groupBound = false, onScan = noop, onReady = noop, onGrow = noop, onDeleted = noop, onError = noop, onNewest = noop }) {
   const tombs = new Map() // seq -> target of each local valid tombstone
-  const pageGuard = pages ? pageTargets(core) : PERSONAL_GUARD
+  let kept = new Set() // seqs of the held records of a kept type
+  const pageGuard = pageTargets(core, pages ? { groupBound } : { groupBound, page: false })
+  // A guard told the diary is group-bound (or a page) may let targets
+  // through in the newest window too.
+  const fetchesTargets = () => pageGuard.page() === true || pageGuard.groupBound()
   const retry = new Map() // index -> failed reads of a block not yet learned
   let deleted = new Set()
   let present = 0
@@ -982,16 +975,24 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
   let stall = null
 
   const sameSet = (a, b) => a.size === b.size && [...a].every((s) => b.has(s))
+  // A record of a kept type that a tombstone targets also refolds: the fold
+  // gives it back, as deletedSeqs would.
   const learn = async (index) => {
     if (tombs.has(index)) return false
-    const target = await tombstoneTarget(core, index)
-    if (target === undefined) {
+    const kind = await arrivedKind(core, index)
+    if (kind === undefined) {
       retry.set(index, (retry.get(index) || 0) + 1)
       return false
     }
     retry.delete(index)
-    if (target === null || tombs.has(index)) return false
-    tombs.set(index, target)
+    if (kind === null || tombs.has(index)) return false
+    if (kind.kept) {
+      if (kind.group) pageGuard.setGroupBound(true)
+      if (kept.has(index)) return false
+      kept.add(index)
+      return deleted.has(index)
+    }
+    tombs.set(index, kind.target)
     return true
   }
   // A length never covers a block whose read failed: it may be a tombstone.
@@ -1034,8 +1035,9 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       // A page diary keeps an unheld tombstone target in the range until it
       // is read once (docs/protocol.md §12): this follower learns the
       // newest blocks first, so a tombstone often arrives before a
-      // page-close or page-moved it names.
-      range = pages ? downloadExceptPages(core, deleted, { make: linearExcept, guard: pageGuard }) : linearExcept(core, deleted)
+      // page-close or page-moved it names. A group-bound diary keeps its
+      // unheld targets the same way; any other diary excludes them all.
+      range = downloadExceptPages(core, deleted, { make: linearExcept, guard: pageGuard })
     }
   }
 
@@ -1050,7 +1052,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
         if (await learn(index)) learned = true
       }
       if (learned) {
-        const next = foldTargets(tombs)
+        const next = foldTargets(tombs, kept)
         if (!sameSet(next, deleted)) from = Math.min(from, await apply(next))
       }
       if (stopped) return null
@@ -1119,9 +1121,10 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
     // in the newest window, not left to the linear body. An unsettled type
     // skips every deleted seq here: excludable() would let the unheld ones
     // of a personal diary through before block 2 lands; the body still
-    // fetches a page's terminal block once the type settles.
+    // fetches a page's terminal block once the type settles. A group-bound
+    // diary asks for its unheld targets here too.
     let skip = deleted
-    if (!noClear && pageGuard.page() === true) {
+    if (!noClear && fetchesTargets()) {
       try { skip = await pageGuard.excludable(deleted) } catch {}
       if (stopped) return
     }
@@ -1208,6 +1211,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       try { range.destroy() } catch {}
       range = null
     }
+    unwatchGuard()
     pageGuard.destroy()
   }
 
@@ -1215,6 +1219,9 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
   // right after it.
   core.on('download', onDownload)
   core.on('append', onAppend)
+  // Group-bound later: the newest window is chosen again (the body's
+  // download recomputes on its own, downloadExceptPages).
+  const unwatchGuard = pageGuard.watch(() => { if (!stopped && scheduling) queue() })
   const ready = (async () => {
     const state = await presentState(core)
     if (!stopped) onScan(state)
@@ -1222,7 +1229,9 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       const copy = entry.record === null ? null : validRecordCopy(entry.record, entry.seq)
       if (copy !== null && copy.type === 'delete') tombs.set(entry.seq, copy.seq)
     }
+    if (state.grouped) pageGuard.setGroupBound(true)
     deleted = state.deleted
+    kept = state.kept
     present = state.present
     top = Math.max(top, state.raw.length)
     if (stopped) return
@@ -1267,6 +1276,10 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
       // Closed now, before a link just attached sends the body's requests.
       if (phase === 'body' && wantHead(Math.max(core.length, hint))) closeBody()
       queue()
+    },
+    // A group this node holds names the diary (docs/protocol.md "Deletion").
+    setGroupBound (on) {
+      if (!stopped) pageGuard.setGroupBound(on)
     },
     destroy: stop
   }
@@ -1559,7 +1572,7 @@ async function syncRun ({
   const heldAtStart = new Set() // group cores stored when the run started
   const notCommunities = new Set() // parent keys whose root is a group header: never paged again this run
   let changedTimer = null
-  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false, joinEntries: [], joinCursor: 1, scanPending: false, holes: new Set(), readFails: new Map(), retryTimer: null, holeFilled: false, scanLogged: false }
+  const fold = { cursor: 1, seed: null, ops: new Map(), seen: false, running: false, again: false, joinEntries: [], joinCursor: 1, scanPending: false, holes: new Set(), deletedHoles: new Set(), readFails: new Map(), retryTimer: null, holeFilled: false, scanLogged: false }
   const diaryWriters = new Set() // writers the own diary binds on:true, seen by adoptDiaryGroups
   const diaryChase = new Map() // new writer of an adopted root -> its re-page timer
   let diaryLive = new Map() // writer -> root the own diary binds now, as of the last scan
@@ -2271,6 +2284,20 @@ async function syncRun ({
     return true
   }
 
+  // Whether a group core this node holds names diary `key`: the diary is
+  // group-bound (docs/protocol.md "Deletion"), so its tracker fetches a
+  // deleted block it does not hold once.
+  function groupNamed (key) {
+    for (const ge of groupCores.values()) if (ge.diary === key && ge.state === 'active') return true
+    return false
+  }
+
+  function markGroupBound (key) {
+    if (key === ownHex && ownTracker !== null) ownTracker.setGroupBound(true)
+    const entry = follows.get(key)
+    if (entry && entry.tracker) entry.tracker.setGroupBound(true)
+  }
+
   // The quota listener is registered BEFORE the growth watcher, and onGrow
   // checks again, so nothing past the limit is advertised or reported.
   function watchEntry (entry, core) {
@@ -2290,6 +2317,7 @@ async function syncRun ({
       newest: newestBlocks,
       tailMax: tailBlocks,
       stallMs: headStallMs,
+      groupBound: groupNamed(entry.key),
       onReady: (present) => {
         if (entry.core !== core) return
         if (entry.state === 'regate') {
@@ -2982,15 +3010,16 @@ async function syncRun ({
     const limit = Math.max(core.length, theirs(key) || 0)
     // A seq the local fold of the own diary, of a followed core or of a
     // binding diary knows deleted is never asked for (its bytes are cleared everywhere): it is
-    // missing at once. On a temporary core a cleared block simply never
-    // arrives and is missing after the timeout.
+    // missing at once unless held (a record no tombstone deletes, such as
+    // a group-join, is kept). On a temporary core a cleared block simply
+    // never arrives and is missing after the timeout.
     const known = deletedOf(core)
     const blocks = new Map() // seq -> raw bytes, or null when absent
     await Promise.all([...wanted].map(async (seq) => {
       let raw = null
-      // The fold ignores a tombstone whose held target is a page-* record
-      // (docs/protocol.md §12), so that block still shows.
-      if (known.has(seq)) raw = await heldPageBlock(core, seq)
+      // The fold ignores a tombstone whose held target is a record of a kept
+      // type (docs/protocol.md §12 and "Deletion"), so that block still shows.
+      if (known.has(seq)) raw = await heldKeptBlock(core, seq)
       else if (seq < limit) {
         try {
           raw = await core.get(seq, { raw: true, timeout: budget(deadline) })
@@ -3795,6 +3824,7 @@ async function syncRun ({
       const ge = newGroupEntry(x.key, x.group, x.diary, x.seq)
       ge.raw0 = x.raw
       ge.state = 'active'
+      markGroupBound(ge.diary)
       // Stored before this run: a late box mismatch keeps its blocks (I4).
       ge.preStored = true
       ge.proven = x.proven
@@ -3911,11 +3941,14 @@ async function syncRun ({
         if (r === 'revoked-issuer' && !ending) dropRevokedDiary(gd.key)
       }, noop)
     }
-    // A post its author deleted is neither fetched again nor kept and served
-    // back, and its hole never pins the goal below the joins after it: the
-    // same present length as a followed replica.
+    // A post its author deleted is fetched at most once (the diary is
+    // group-bound: a deleted block it does not hold is read once, kept if it
+    // is group history, cleared otherwise), never kept and served back, and
+    // its hole never pins the goal below the joins after it: the same
+    // present length as a followed replica.
     const tracker = trackPresent(core, {
       noClear,
+      groupBound: true,
       onReady: () => {
         if (gd.core !== core) return
         judge()
@@ -4571,6 +4604,7 @@ async function syncRun ({
         return
       }
       ge.state = 'active'
+      markGroupBound(ge.diary)
       if (ge.diary !== ownHex && ge.diaryRaw0) {
         bindingCerts.set(ge.diary, ge.diaryRaw0)
         track(groupKv(() => store.putGroupCert(storage, ge.diary, ge.diaryRaw0)), noop, noop)
@@ -5345,23 +5379,39 @@ async function syncRun ({
   // The roots the own diary binds, from the cursor up to its present length,
   // adopted as they appear (another device of the same identity joined
   // them). Separate from the follow fold: it never sets fold.seen. Every
-  // group-join is kept, a later off one unbinds its writer.
+  // group-join is kept, a later off one unbinds its writer. A deleted one
+  // counts too: group readers ignore deletes of group-join
+  // (docs/protocol.md "Deletion"), and the tracker keeps a held one out of
+  // its deleted set. A deleted block the cursor passed while not held stays
+  // in fold.deletedHoles (bounded) and is read once it leaves the deleted
+  // set: the group-bound own diary fetches it once, and it stays only as a
+  // group history record. A deleted post never leaves it, so it is never
+  // read again.
   async function adoptDiaryGroups () {
     fold.scanLogged = false
     let deleted = new Set()
     try {
       const length = ownPresent()
       if (ownTracker !== null) deleted = ownTracker.deleted()
+      for (const seq of [...fold.deletedHoles]) {
+        if (seq < length && deleted.has(seq)) continue
+        fold.deletedHoles.delete(seq)
+        if (seq < length) await readDiaryJoin(seq)
+      }
       for (const seq of [...fold.holes]) {
         if (deleted.has(seq) || seq >= length) {
           fold.holes.delete(seq)
           fold.readFails.delete(seq)
+          if (seq < length) noteDeletedHole(seq)
           continue
         }
         await readDiaryJoin(seq)
       }
       for (let seq = fold.joinCursor; seq < length; seq = ++fold.joinCursor) {
-        if (deleted.has(seq)) continue
+        if (deleted.has(seq)) {
+          noteDeletedHole(seq)
+          continue
+        }
         await readDiaryJoin(seq)
       }
     } catch {
@@ -5399,6 +5449,21 @@ async function syncRun ({
     }
   }
 
+  function noteDeletedHole (seq) {
+    if (fold.deletedHoles.size < DIARY_HOLES_MAX) fold.deletedHoles.add(seq)
+  }
+
+  // The own tracker's deleted set changed: a deleted hole that left it (a
+  // group history block fetched once and kept) is read now.
+  function onOwnDeleted (deleted) {
+    for (const seq of fold.deletedHoles) {
+      if (!deleted.has(seq)) {
+        scheduleFold()
+        return
+      }
+    }
+  }
+
   async function foldLoop () {
     do {
       fold.again = false
@@ -5426,17 +5491,20 @@ async function syncRun ({
     }
     fold.seed = seed
     fold.cursor = Math.max(1, state.present)
+    const read = new Set()
     for (const entry of state.raw) {
-      if (entry.seq < 1 || entry.seq >= state.present) continue
-      // A block below the present length that is not here (a hole a
-      // tombstone explains, or a block that does not decode) is read again
-      // when it arrives.
-      if (entry.record === null) {
-        if (!state.deleted.has(entry.seq) && fold.holes.size < DIARY_HOLES_MAX) fold.holes.add(entry.seq)
-        continue
-      }
+      if (entry.seq < 1 || entry.seq >= state.present || entry.record === null) continue
+      read.add(entry.seq)
       const record = validRecordCopy(entry.record, entry.seq)
       if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq: entry.seq, record })
+    }
+    // A block below the present length that is not here is read again when
+    // it arrives: a hole a tombstone explains once it leaves the deleted set
+    // (adoptDiaryGroups), a block that does not decode on every scan.
+    for (let seq = 1; seq < state.present; seq++) {
+      if (read.has(seq)) continue
+      if (state.deleted.has(seq)) noteDeletedHole(seq)
+      else if (fold.holes.size < DIARY_HOLES_MAX) fold.holes.add(seq)
     }
     fold.joinCursor = Math.max(1, state.present)
   }
@@ -5511,6 +5579,7 @@ async function syncRun ({
       ownTracker = trackPresent(diary, {
         noClear,
         pages: false,
+        groupBound: groupNamed(ownHex),
         onScan: seedFold,
         onGrow: (length) => {
           send({ type: 'have', key: ownHex, length })
@@ -5518,7 +5587,10 @@ async function syncRun ({
           checkOwnSync()
           evaluate()
         },
-        onDeleted: () => { revokeOwnMedia() }
+        onDeleted: (deleted) => {
+          revokeOwnMedia()
+          onOwnDeleted(deleted)
+        }
       })
       diary.on('download', onDiaryDownload)
       // The first scan cannot be cut short (trackPresent checks `stopped`

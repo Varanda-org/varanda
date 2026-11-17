@@ -168,7 +168,8 @@ async function diaryAndWriter (cs, group, cert, posts = 0) {
 }
 
 // Copies the given cores of a bare Corestore into a member's main store.
-async function copyInto (cs, ctx, cores) {
+// `only(core)` may return the seqs to copy of a core (all when null).
+async function copyInto (cs, ctx, cores, { only = () => null } = {}) {
   const s = await store.openStore(ctx.dataDir)
   const left = cs.replicate(true)
   const right = s.replicate(false)
@@ -177,7 +178,8 @@ async function copyInto (cs, ctx, cores) {
     for (const source of cores) {
       const target = s.get({ key: source.key, writable: false })
       await target.ready()
-      for (let seq = 0; seq < source.length; seq++) await target.get(seq, { raw: true, timeout: 10000 })
+      const seqs = only(source) || Array.from({ length: source.length }, (_, i) => i)
+      for (const seq of seqs) await target.get(seq, { raw: true, timeout: 10000 })
       await target.close()
     }
   } finally {

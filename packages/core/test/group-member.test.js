@@ -305,6 +305,89 @@ test('causal pagination and seen ignore clock skew across writers', async (t) =>
   t.is(oldest.next, null)
 })
 
+// Copies the blocks `from`'s own diary holds into the store of `to`: a block
+// `from` cleared never reaches `to`.
+async function copyHeldDiary (from, to) {
+  const a = await store.openStore(from.dataDir)
+  const b = await store.openStore(to.dataDir)
+  let left
+  let right
+  try {
+    const key = b4a.from(from.key, 'hex')
+    const source = a.get({ key, writable: false })
+    await source.ready()
+    const target = b.get({ key, writable: false })
+    await target.ready()
+    left = a.replicate(true)
+    right = b.replicate(false)
+    left.pipe(right).pipe(left)
+    for (let seq = 0; seq < source.length; seq++) {
+      if (await source.has(seq)) await target.get(seq, { raw: true, timeout: 10000 })
+    }
+  } finally {
+    if (left) left.destroy()
+    if (right) right.destroy()
+    await b.close()
+    await a.close()
+  }
+}
+
+test('a group fold reads no gap in the cut history of a member diary for a deleted block this replica never read', async (t) => {
+  const { a, b, group } = await pair(t)
+  const { seq } = await member.postCreate(b, { text: 'apagado' })
+  await member.postDelete(b, { to: { author: b.key, seq } })
+  await copyHeldDiary(b, a)
+  const s = await store.openStore(a.dataDir)
+  const replica = s.get({ key: b4a.from(b.key, 'hex'), writable: false })
+  await replica.ready()
+  t.absent(await replica.has(seq), 'fixture: the deleted post never reached A')
+  t.ok(await replica.has(seq + 1), 'fixture: its tombstone did')
+  await s.close()
+  const real = groupLib.groupCutHistory
+  const seen = []
+  groupLib.groupCutHistory = (entries, g, ...rest) => {
+    const out = real(entries, g, ...rest)
+    if (g === group && entries.some((e) => e.record && e.record.type === 'delete' && e.record.seq === seq)) seen.push(out)
+    return out
+  }
+  try {
+    await member.groupInfo(a, { group })
+  } finally {
+    groupLib.groupCutHistory = real
+  }
+  t.ok(seen.length > 0, 'the fold read B\'s diary')
+  t.ok(seen.every((out) => !out.some((m) => m.gap === true)), 'B\'s cut history has no gap')
+})
+
+test('a group fold on the core node reads no gap in the own diary for a deleted post cleared with nothing remembered', async (t) => {
+  const { a, group } = await pair(t)
+  const { seq } = await member.postCreate(a, { text: 'apagado' })
+  await member.postDelete(a, { to: { author: a.key, seq } })
+  const s = await store.openStore(a.dataDir)
+  try {
+    const diary = await store.openDiary(s)
+    t.absent(await diary.has(seq), 'fixture: the deleted post is cleared')
+    // As an older node cleared it: nothing remembers the read.
+    await diary.setUserData('varanda/page-read', b4a.alloc(0))
+  } finally {
+    await s.close()
+  }
+  const real = groupLib.groupCutHistory
+  const seen = []
+  groupLib.groupCutHistory = (entries, g, ...rest) => {
+    const out = real(entries, g, ...rest)
+    if (g === group && entries.some((e) => e.record && e.record.type === 'delete' && e.record.seq === seq)) seen.push(out)
+    return out
+  }
+  try {
+    await member.groupInfo(a, { group })
+  } finally {
+    groupLib.groupCutHistory = real
+  }
+  t.ok(seen.length > 0, 'the fold read the own diary')
+  t.ok(seen.every((out) => !out.some((m) => m.gap === true)), 'the own cut history has no gap')
+})
+
 // A loaded group as member.js keeps it, from the fold fixtures: X binds
 // eight writers, then maybe cuts the first, then binds a 9th (#350).
 const slot = (() => {
