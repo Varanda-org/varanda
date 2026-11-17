@@ -13,11 +13,15 @@ Como verificar, a partir da raiz:
 - `node apps/app/test/groupScreen.test.js`, também: "a page outside a private group it holds no key for still sees it named private" falha se o título usar `pageVis` em vez de `pageSeen`. "a page that joined its community clears the stale refusal..." falha sem a limpeza da recusa (ao virar membra e ao trocar de identidade) e sem `onJoined` em `Comunidade.js`. "a community read from the index offers a page its own join, never the person join" falha sem o painel da Página no ramo do índice (`fromIndex`).
 - `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo`.
 
-Caminhada no aparelho (Android primeiro, depois iOS, depois web), ainda não feita:
+Caminhada na web, no laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, navegador sem tela, com os PRs de nomes e de agir como Página juntos):
 
-- [ ] Agindo como uma Página, abrir o grupo público (Geral) de uma comunidade em que a Página não está: o título não diz "grupo privado".
-- [ ] Tocar em "Entrar como a página" no grupo: aparece "A página ainda não está na comunidade deste grupo" e o botão "Entrar na comunidade".
-- [ ] Tocar em "Entrar na comunidade": abre a comunidade; "Entrar como a página" coloca a Página nela.
-- [ ] Voltar ao grupo Geral: a Página já é membra e publica como a Página.
-- [ ] Num grupo privado da mesma comunidade: pedir para entrar como a Página, o criador admite, e a Página publica.
+- [x] Agindo como uma Página, abrir o grupo público (Geral) de uma comunidade em que a Página não está: o título diz "grupo como página", não "grupo privado".
+- [x] Tocar em "Entrar como a página" no grupo: aparece "A página ainda não está na comunidade deste grupo" e o botão "Entrar na comunidade".
+- [x] Tocar em "Entrar na comunidade": abre a comunidade; "Entrar como a página" coloca a Página nela. A comunidade veio do índice do semeador, e foi nessa caminhada que apareceu o "Entrar" da pessoa no lugar do painel da Página (corrigido acima, `fromIndex`).
+- [x] Voltar ao grupo Geral: a comunidade leva a Página de volta ao grupo, sem a recusa; "Entrar como a página" a torna membra, ela publica como a Página e outra pessoa da comunidade lê.
+- [x] Num grupo privado da mesma comunidade: pedir para entrar como a Página ("pedido enviado"), o criador vê o pedido em Ajustes do grupo e admite, e a Página publica; o criador lê.
+Android e iOS: os mesmos passos ficam com o Rodrigo, no APK de preview do EAS (o build de debug não entra com passkey).
+
+Limites:
+
 - Uma primeira entrada incerta seguida de "Conferir de novo" que recebe `fora-da-comunidade` vira `indisponivel` incerto (`pages.js` só aceita códigos definitivos num reenvio) e não mostra o botão. Aceito: a pessoa tenta de novo.
