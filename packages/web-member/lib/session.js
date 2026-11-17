@@ -426,6 +426,7 @@ const INVITE_CARD_PAST = 24 * 60 * 60
 const INVITE_CARD_AHEAD = 8 * 24 * 60 * 60
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
+const LOCAL_LINE = 'diário próprio escrito neste aparelho'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
 const BAD_MEDIA_ARGS = 'mídia inválida'
@@ -1090,6 +1091,7 @@ function createBrowserSession ({
   // handler pushes, an idempotent one included.
   let unpushed = true
   let localLength = null // length after the last write here, when known
+  let localEchoed = null // the greatest local length already announced with LOCAL_LINE
   // diary.peek: the running sync publishes its peek function here once its
   // seeder link verified (runSync `peeker`) and withdraws it when the link
   // closes or the run ends; set() wakes the handlers waiting for one.
@@ -1369,6 +1371,18 @@ function createBrowserSession ({
                 return
               case 'own-synced':
                 synced = true
+                // The reader (the app) must not take the echo of a write
+                // made here for a post from another device. Any length up
+                // to localLength is already in the local core (a later
+                // wrote() may move localLength before an earlier length
+                // is reported, hence <=). Once per length keeps
+                // Ajustes > Sincronização quiet when a new link reports
+                // the same length again.
+                if (localLength !== null && Number.isSafeInteger(ev.length) &&
+                  ev.length <= localLength && (localEchoed === null || ev.length > localEchoed)) {
+                  localEchoed = ev.length
+                  event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
+                }
                 event('diário próprio sincronizado (' + safe(String(ev.length)) + ')')
                 if (!r.ownSynced) {
                   r.ownSynced = true
@@ -6169,6 +6183,7 @@ function createBrowserSession ({
     synced = false
     unpushed = true
     localLength = null
+    localEchoed = null
     groupUnpushed.clear()
     groupLengths.clear()
     drainWanted = false
@@ -6199,6 +6214,9 @@ function createBrowserSession ({
     syncIntent = null
     // The next connection's first own-synced arms afresh.
     resetUpkeep()
+    // The reader starts over with no lengths: the first own-synced it gets
+    // must say again whether that length was written here.
+    localEchoed = null
     return stopRun('stopped').then(noop)
   }
 

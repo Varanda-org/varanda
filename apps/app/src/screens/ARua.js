@@ -49,7 +49,7 @@ import { useNames } from '../names'
 import { cachedRow, countsFlags, pruneRows } from '../namesCache'
 import { pickAvatar } from '../media/avatar'
 import { FEED_SYNCING_END, cursorOf, feedKey, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
-import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
+import { freshKeys, hasFresh, ownGrewElsewhere, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
@@ -2536,15 +2536,16 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     }
   }, [request, commit, learnPage, ingest])
 
-  // Own posts published on another device: A Rua compares the own diary's
-  // synced length (signals.ownLength, never acknowledged, unlike fresh.own,
-  // which Diário clears) with the length it last loaded; the first length
-  // seen after a load is the baseline.
+  // Own posts published on another device: signals.ownRemote is never
+  // acknowledged (unlike fresh.own, which Diário clears) and A Rua compares it
+  // with the own length it last loaded; the first length seen after a load is
+  // the baseline. The echo of a write made here moves only ownLength, so
+  // nothing done on this device lights the pill.
   const ownLength = signals && typeof signals.ownLength === 'number' ? signals.ownLength : null
   useEffect(() => {
     if (ownSeenRef.current === null && ownLength !== null) ownSeenRef.current = ownLength
   }, [ownLength])
-  const ownNew = ownLength !== null && ownSeenRef.current !== null && ownLength > ownSeenRef.current
+  const ownNew = ownGrewElsewhere(signals, ownSeenRef.current)
   const fresh = hasFresh(signals, { except: ownKey }) || ownNew || feed.newer > 0
   const previous = useRef({ active: false, refresh, scrollToTop })
   useEffect(() => {

@@ -86,8 +86,10 @@ async function readMediaFile ({ fs, join, cacheDir, name, max, flags }) {
 //      (an upload still reading its file never starts one: uploadMedia
 //      checks isClosing() right before session.mediaUpload);
 //   4. waits for the uploads, bounded now that the session is closed;
-//   5. closes the storage, which releases the LOCK.
-function createLifecycle ({ session, storage, locking = Promise.resolve() }) {
+//   5. saves the verified signature digests (`sigs`, a promise of
+//      lib/sig-store.js keepVerified's handle or null);
+//   6. closes the storage, which releases the LOCK.
+function createLifecycle ({ session, storage, locking = Promise.resolve(), sigs = Promise.resolve(null) }) {
   const controls = new Set()
   const uploads = new Set()
   let closing = null
@@ -117,6 +119,10 @@ function createLifecycle ({ session, storage, locking = Promise.resolve() }) {
         await drain(uploads)
       } finally {
         await locking.catch(() => {})
+        try {
+          const kept = await sigs
+          if (kept) await kept.close()
+        } catch {}
         await storage.close()
       }
     })()

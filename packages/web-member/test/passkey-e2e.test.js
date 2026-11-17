@@ -28,6 +28,7 @@ const { memoryNodeStorage } = require('../lib/node-storage')
 const BIN = path.join(__dirname, '../../../apps/cli/bin/varanda.js')
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
+const LOCAL_LINE = 'diário próprio escrito neste aparelho'
 const NOT_SYNCED = 'sincronize com o semeador antes de publicar'
 const CORE_FILES = ['oplog', 'tree', 'bitfield', 'data', 'header']
 
@@ -142,6 +143,11 @@ async function gatedWrite (t, web, method, params, label) {
   if (push.stopped.reason !== 'done') t.comment(JSON.stringify(push))
   t.is(push.stopped.reason, 'done', label + ': push done')
   t.is(push.stopped.result.seederConfirmed, true, label + ': the seeder holds the whole diary')
+  const echoed = 'diário próprio sincronizado (' + (result.seq + 1) + ')'
+  const local = LOCAL_LINE + ' (' + (result.seq + 1) + ')'
+  const at = push.lines.indexOf(echoed)
+  t.is(push.lines[at - 1], local, label + ': this session\'s write is named just before its echo')
+  t.absent(gate.lines.some((l) => l.startsWith(LOCAL_LINE)), label + ': the gate run did not write here')
   return { result, gate, push }
 }
 
@@ -209,6 +215,7 @@ test('two devices with the same passkey: gate, push, recovery and a stale device
   t.ok(recoveryLines.includes('diário próprio atrasado (0/3)'), 'B saw itself behind')
   t.ok(recoveryLines.includes('certificado recuperado do semeador'), 'the certificate was recomputed from block 0')
   t.ok(recoveryLines.includes('diário próprio sincronizado (3)'), 'and B caught up')
+  t.absent(recoveryLines.some((l) => l.startsWith(LOCAL_LINE)), 'B recovering A\'s diary did not write it here')
   const logB = await b.web.request('log.read', {})
   t.alike(logB.entries.map((e) => e.seq), [0, 1, 2])
   t.is(logB.entries[0].record.type, 'member-cert')
@@ -250,6 +257,8 @@ test('two devices with the same passkey: gate, push, recovery and a stale device
   const ownSyncedOn = (runId, length) => b.web.events.some((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (' + length + ')')
   const { runId: first } = await b.web.request('sync.start', {})
   await until(() => ownSyncedOn(first, 5), { name: 'B em dia na execução contínua', timeoutMs: 30000 })
+  const tracked = b.web.events.filter((e) => e.name === 'sync.event' && e.data.runId === first).map((e) => e.data.line)
+  t.absent(tracked.some((l) => l.startsWith(LOCAL_LINE)), 'A\'s post arriving on B is not a write made here')
   // The read is served on the run's own cores (no preemption): the gate
   // stands down because this run confirmed own-sync.
   t.is((await b.web.request('log.read', {})).entries.length, 5, 'B received A\'s later post on the continuous run')
@@ -265,6 +274,11 @@ test('two devices with the same passkey: gate, push, recovery and a stale device
   t.ok(after.some((e) => e.name === 'sync.stopped' && e.data.runId === continuous && e.data.reason === 'preempted'), 'the write preempted the continuous run')
   const restarted = after.find((e) => e.name === 'sync.started')
   t.ok(restarted && restarted.data.once === false, 'which restarted')
+  await until(() => ownSyncedOn(restarted.data.runId, 6), { name: 'eco da escrita contínua', timeoutMs: 30000 })
+  const restartedLines = b.web.events.filter((e) => e.name === 'sync.event' && e.data.runId === restarted.data.runId).map((e) => e.data.line)
+  const local6 = LOCAL_LINE + ' (6)'
+  t.is(restartedLines.filter((l) => l === local6).length, 1, 'the restarted run names this session\'s write once')
+  t.is(restartedLines[restartedLines.indexOf('diário próprio sincronizado (6)') - 1], local6, 'directly before its echo')
   await until(() => b.web.events.some((e) => e.name === 'sync.event' && e.data.runId === restarted.data.runId && e.data.line === 'have ' + keyHex + ' 6'), { name: 'semeador com o post contínuo', timeoutMs: 30000 })
   t.alike(await b.web.request('sync.stop'), { stopped: true })
 

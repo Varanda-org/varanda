@@ -49,8 +49,8 @@ const BLOB_CHUNK_BYTES = 32768
 // An 8 MiB plaintext (MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES in
 // records.js) plus the secretbox MAC needs one chunk more than 256.
 const BLOB_MAX_CHUNKS = 257
-const BLOB_RETENTION_MS = 7 * 86400000
-const BLOB_POOL_BYTES = 2 * 1024 * 1024 * 1024
+const BLOB_RETENTION_MS = 14 * 86400000
+const BLOB_POOL_BYTES = 4 * 1024 * 1024 * 1024
 // One base64 frame inside a JSON put must fit.
 const BLOB_MAX_MESSAGE = 65536
 const BLOB_CHECK_PREFIX = 'varanda/blob-chunk/v1\n'

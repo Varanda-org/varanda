@@ -10,7 +10,7 @@
 // replaced by a new one, and a key older than MAX_AGE_MS is forgotten.
 //
 // Invariant (with dm-pool.js): MAX_AGE_MS <= the pool's spent token
-// retention (14 days), so a stamp is never accepted after the pool could
+// retention (STAMP_TOKEN_RETENTION_MS, 14 days), so a stamp is never accepted after the pool could
 // have forgotten that its token was spent.
 //
 // The file is created only when get() is first called, never at startup. A

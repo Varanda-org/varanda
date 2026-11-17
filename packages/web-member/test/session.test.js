@@ -2079,6 +2079,35 @@ test('a continuous run is preempted by a member request and restarted', async (t
   t.alike(await web.request('sync.status'), { state: 'idle' }, 'a stopped run is not restarted')
 })
 
+test('a new connection hears again that the own diary length was written here', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const { node, web } = await certified(t, { assoc, seederUrl: seeder.url, writeGate: true, writeGateTimeoutMs: 15000, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const LOCAL = 'diário próprio escrito neste aparelho'
+  let from = web.events.length
+  const { seq } = await web.request('post.create', { text: 'escrito aqui' })
+  const n = seq + 1
+  const push = (await runsSince(web, from)).pop()
+  t.is(push.lines[push.lines.indexOf('diário próprio sincronizado (' + n + ')') - 1], LOCAL + ' (' + n + ')', 'the echo of the write')
+
+  // The app starts over with no lengths on a new connection: the same
+  // length is announced as local once more, before its sincronizado line.
+  const second = await connectClient(node)
+  from = second.events.length
+  const { runId } = await second.request('sync.start', { once: true })
+  await stoppedOf(second.events, runId)
+  const lines = (await runsSince(second, from))[0].lines
+  const at = lines.indexOf('diário próprio sincronizado (' + n + ')')
+  t.ok(at > 0, 'the length is reported to the new connection')
+  t.is(lines[at - 1], LOCAL + ' (' + n + ')', 'and named local again')
+
+  from = second.events.length
+  const { runId: again } = await second.request('sync.start', { once: true })
+  await stoppedOf(second.events, again)
+  t.absent((await runsSince(second, from))[0].lines.some((l) => l.startsWith(LOCAL)), 'once per length on the same connection')
+})
+
 test('regression: a run unwinding after a connection closed does not report to the next connection', async (t) => {
   await testnet(t)
   const { node, web } = await certified(t, { syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
