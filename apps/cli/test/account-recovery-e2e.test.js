@@ -16,6 +16,7 @@ const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { openAccountStore } = require('../lib/account/store')
 const { openRecoveryStore, MAX_PASSKEYS } = require('../lib/account/recovery-store')
+const { openPasskeyStore } = require('../lib/account/passkey-store')
 const { createAccountServer } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
 // apps/cli does not depend on packages/web-member (see account-e2e.test.js).
@@ -73,6 +74,7 @@ async function setup (t) {
     store: accounts,
     issuer: { keyPair: iss.keyPair, cert: iss.cert },
     recovery,
+    passkeys: openPasskeyStore(dir, { now: c.now }),
     log: (e) => logs.push(JSON.stringify(e)),
     now: c.now
   })

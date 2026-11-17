@@ -5475,8 +5475,8 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 
 ### Limites que sobram
 
-- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta.
-- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca.
+- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta. Decidido na #444: limite do desenho, porque a chave da conta vem dela.
+- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca. Decidido na #444: sem versão mínima; a tela de adicionar passkey avisa para usar o app atualizado.
 - A passkey original abre a conta sem internet em qualquer aparelho (nunca há busca no serviço para ela). Uma passkey extra ou o código precisa do serviço de conta a cada entrada nova com a passkey ou com o código; só uma sessão guardada no aparelho evita isso.
 - Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, o aparelho não vê a marca e essa passkey abre ali uma conta separada e vazia em vez da conta do membro. Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam. Um autenticador que segue o padrão devolve o identificador numa entrada sem registro no aparelho.
 - Remover ou trocar uma entrada não troca a raiz: quem buscou aquele blob enquanto a entrada valia e tem o segredo dela ainda abre a conta. Isso vem do desenho da raiz embrulhada. Remover a entrada ou criar um código novo só impede novas entradas num aparelho que ainda não a usou; quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Se uma passkey adicionada ou o código vazar, o único caminho seguro é criar uma conta nova. O cartão do código, a confirmação de código novo e as duas confirmações de remover dizem isso, e os Termos e a Política também (a versão continua 17).
@@ -5769,7 +5769,7 @@ Limites:
 
 - A chave é confiada no primeiro uso, no cadastro: quem controlar o aparelho da pessoa na hora seguinte ao vínculo pode registrar um autenticador forjado no lugar.
 - Uma sessão aberta guarda a chave do diário e pode agendar uma exclusão; a pessoa vê o pedido em todos os aparelhos e pode cancelar por 7 dias, mas quem não abrir nenhum aparelho nesse prazo perde a conta.
-- As passkeys extras e a troca de passkey não registram chave; quem só tem uma delas espera os 7 dias.
+- Uma passkey criada com o código de recuperação, ou adicionada sem a confirmação de uma passkey registrada, não registra chave; quem só tem uma delas espera os 7 dias.
 - A origem do iOS e o objeto de atestado no iOS dependem do aparelho (passo acima).
 - Nenhuma caixa acima foi executada nesta documentação.
 

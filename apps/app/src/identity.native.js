@@ -499,7 +499,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       // wraps the root, it never becomes a diary key.
       if (isWrapUserId(userId)) {
         if (heldRootValid()) return await finishRecover(gen, rpId, bytes, credentialId, userId)
-        return await finishAdd(gen, rpId, bytes, credentialId, userId)
+        const kept = pendingReg !== null && pendingReg.credentialId === credentialId && typeof pendingReg.attestationObject === 'string' ? pendingReg.attestationObject : null
+        return await finishAdd(gen, rpId, bytes, credentialId, userId, kept)
       }
     } else {
       const known = [bound, installedCred].find((b) => b !== null && b.credentialId === credentialId) || null
@@ -531,7 +532,9 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
 
   // An add: the new passkey's PRF wraps the root held by the unlocked
   // worklet (identity.recoveryWrap); the session stays the original one.
-  async function finishAdd (gen, rpId, bytes, credentialId, userId) {
+  // `attestationObject` (or null) rides along for the new passkey's key at
+  // the account service (src/extraPasskeyKey.js).
+  async function finishAdd (gen, rpId, bytes, credentialId, userId, attestationObject = null) {
     let hex
     try { hex = toHex(bytes) } finally { bytes.fill(0) }
     let wrapped
@@ -546,7 +549,9 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     // An older pending creation replaced by this one stays excluded.
     supersede(credentialId)
     await persist(rpId)
-    return { credentialId, userId, lookupId: wrapped.lookupId, blob: wrapped.blob }
+    const out = { credentialId, userId, lookupId: wrapped.lookupId, blob: wrapped.blob }
+    if (typeof attestationObject === 'string') out.attestationObject = attestationObject
+    return out
   }
 
   // The end of a code recovery: the held ROOT is installed bound to the new
@@ -630,6 +635,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
     const madeNow = !exclude.has(credentialId) || (pendingReg !== null && pendingReg.credentialId === credentialId)
     // A new identity's public key, for the enrolment at the account service.
     const attestation = mode === 'unlock' ? attestationOf(response) : null
+    // An added passkey's, for its own key (never the enrolment record).
+    const addAttestation = mode === 'add' ? attestationOf(response) : null
     if (syncStateOf(response, fromBase64Url) === 'bound') {
       addRefused(credentialId, userId, 'NOT_SYNCED', madeNow)
       if (pendingReg !== null && pendingReg.credentialId === credentialId) pendingReg = null
@@ -657,7 +664,9 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       if (!validId(credentialId)) throw passkeyError('WEBAUTHN')
       supersede(credentialId)
       refused = refused.filter((r) => r.credentialId !== credentialId)
-      pendingReg = { credentialId, userId }
+      // The attestation object stays in memory only: after a restart the
+      // 'concluir' of an add sends no key.
+      pendingReg = addAttestation !== null ? { credentialId, userId, attestationObject: addAttestation } : { credentialId, userId }
       // complete() needs the root as long as the creation is pending: it
       // stays pinned (finishRecovery).
       await persist(rpId)
@@ -668,7 +677,7 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
       bytes.fill(0)
       throw cancelled()
     }
-    if (mode === 'add') return await finishAdd(gen, rpId, bytes, credentialId, userId)
+    if (mode === 'add') return await finishAdd(gen, rpId, bytes, credentialId, userId, addAttestation)
     if (mode === 'recover') return await finishRecover(gen, rpId, bytes, credentialId, userId)
     // The pending creation is superseded only once the new passkey unlocked:
     // a failed install keeps it, and the new passkey is refused instead.
@@ -875,8 +884,8 @@ export function createNativeIdentity ({ request, rpId: rpIdOf, passkey = Passkey
   }
 
   // A second passkey for this account, while unlocked: { credentialId,
-  // userId, lookupId, blob } for the app to register, or { pending: true }
-  // (complete() then returns the same shape).
+  // userId, lookupId, blob, attestationObject? } for the app to register, or
+  // { pending: true } (complete() then returns the same shape).
   async function addPasskey () {
     await resuming
     await loadLocal(rpIdOf())

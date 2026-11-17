@@ -10,6 +10,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { openPasskeyStore, FILE, MAX_KEYS, TOMBSTONE_TTL_MS } = require('../lib/account/passkey-store')
+const { MAX_PASSKEYS } = require('../lib/account/recovery-store')
 const { tmpDir } = require('./helpers/net')
 
 const T0 = Date.parse('2026-11-06T12:00:00.000Z')
@@ -51,13 +52,112 @@ test('passkey store: add, read back after reopen, first refuses a second key, sa
   t.is((fs.statSync(path.join(dir, FILE)).mode & 0o777), 0o600)
 
   const again = openPasskeyStore(dir, { now: c.now })
-  t.alike(again.keys(m), [{ ...k, addedAt: iso(T0) }])
+  t.alike(again.keys(m), [{ ...k, addedAt: iso(T0), lookupId: null, entryAt: null }])
   t.is(again.holds(m), true)
 
-  for (let i = 1; i < MAX_KEYS; i++) await again.add({ member: m, ...key(), first: false })
-  await t.exception(again.add({ member: m, ...key(), first: false }), /passkey-registrada/, 'at most MAX_KEYS')
+  for (let i = 1; i < MAX_KEYS; i++) await again.add({ member: m, ...key(), first: false, lookupId: hex32(), entryAt: iso(T0), voucher: k.credentialId })
+  await t.exception(again.add({ member: m, ...key(), first: false, lookupId: hex32(), entryAt: iso(T0), voucher: k.credentialId }), /limite-recuperacao/, 'at most MAX_KEYS')
   await t.exception.all(s.add({ member: 'zz', ...key() }), /member must be/)
   await t.exception.all(s.add({ member: m, ...key({ alg: -8 }) }), /invalid passkey/)
+})
+
+test('passkey store: MAX_KEYS is the sign-up passkey plus every extra passkey recovery entry', (t) => {
+  t.is(MAX_KEYS, 1 + MAX_PASSKEYS)
+})
+
+test('passkey store: an extra key names its entry and a stored voucher; removeByLookup drops it', async (t) => {
+  const dir = tmpDir(t)
+  const c = clock()
+  const s = openPasskeyStore(dir, { now: c.now })
+  const m = hex32()
+  const other = hex32()
+  const first = key()
+  const lookupId = hex32()
+  const extra = key()
+  await t.exception(s.add({ member: m, ...extra, first: false, lookupId, entryAt: iso(T0), voucher: first.credentialId }), /passkey-invalida/, 'no stored key to vouch')
+  await s.add({ member: m, ...first })
+  await t.exception(s.add({ member: m, ...extra, first: false, lookupId, entryAt: iso(T0), voucher: credId() }), /passkey-invalida/, 'the voucher is not stored')
+  await t.exception.all(s.add({ member: m, ...extra, first: false, voucher: first.credentialId }), /invalid lookupId/, 'an extra key needs its entry')
+  await t.exception.all(s.add({ member: m, ...extra, first: false, lookupId }), /invalid lookupId/, 'and its voucher')
+  await t.exception.all(s.add({ member: m, ...extra, lookupId }), /invalid lookupId/, 'a first key names no entry')
+  await t.exception.all(s.add({ member: m, ...extra, first: false, lookupId, voucher: first.credentialId }), /invalid lookupId/, 'an extra key names its entry\'s createdAt')
+  await t.exception.all(s.add({ member: m, ...extra, entryAt: iso(T0) }), /invalid lookupId/, 'a first key has no entry date')
+  t.alike(await s.add({ member: m, ...extra, first: false, lookupId, entryAt: iso(T0), voucher: first.credentialId }), { changed: true })
+  t.alike(await s.add({ member: m, ...extra, first: false, lookupId, entryAt: iso(T0), voucher: first.credentialId }), { changed: false }, 'same credential again')
+  await t.exception(s.add({ member: m, ...key(), first: false, lookupId, entryAt: iso(T0), voucher: first.credentialId }), /pedido-invalido/, 'one key per entry')
+
+  const reopened = openPasskeyStore(dir, { now: c.now })
+  t.alike(reopened.keys(m).map((k) => k.lookupId), [null, lookupId], 'the link survives a reopen')
+  t.alike(reopened.keys(m).map((k) => k.entryAt), [null, iso(T0)], 'and the entry\'s date')
+  const file = JSON.parse(fs.readFileSync(path.join(dir, FILE), 'utf8'))
+  t.is(file.v, 2, 'written as version 2')
+  t.alike(file.members[m].keys.map((k) => k.lookupId), [null, lookupId])
+  t.alike(file.members[m].keys.map((k) => k.entryAt), [null, iso(T0)])
+
+  t.alike(await reopened.removeByLookup({ member: other, lookupId }), { changed: false }, 'another member\'s entry touches nothing')
+  t.alike(await reopened.removeByLookup({ member: m, lookupId }), { changed: true })
+  t.alike(await reopened.removeByLookup({ member: m, lookupId }), { changed: false })
+  t.alike(reopened.keys(m).map((k) => k.credentialId), [first.credentialId], 'the sign-up key stays')
+  await t.exception.all(reopened.removeByLookup({ member: m, lookupId: 'zz' }), /invalid lookupId/)
+})
+
+test('passkey store: a version 1 file still opens, its keys with lookupId null, and the next write is version 2', async (t) => {
+  const dir = tmpDir(t)
+  const m = hex32()
+  const k = { ...key(), addedAt: iso(T0) }
+  fs.writeFileSync(path.join(dir, FILE), JSON.stringify({ v: 1, seq: 1, members: { [m]: { keys: [k], hold: null, gen: 1 } }, removed: {} }), { mode: 0o600 })
+  const s = openPasskeyStore(dir, { now: clock().now })
+  t.is(s.available(), true)
+  t.alike(s.keys(m), [{ ...k, lookupId: null, entryAt: null }])
+  await s.add({ member: m, ...key(), first: false, lookupId: hex32(), entryAt: iso(T0), voucher: k.credentialId })
+  const file = JSON.parse(fs.readFileSync(path.join(dir, FILE), 'utf8'))
+  t.is(file.v, 2)
+  t.is(file.members[m].keys[0].lookupId, null)
+
+  const good = { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: null, entryAt: null }, { ...key(), addedAt: iso(T0), lookupId: 'ab'.repeat(32), entryAt: iso(T0) }], hold: null, gen: 1 } }, removed: {} }
+  const gd = tmpDir(t)
+  fs.writeFileSync(path.join(gd, FILE), JSON.stringify(good), { mode: 0o600 })
+  t.alike(openPasskeyStore(gd).keys(m), good.members[m].keys, 'a version 2 file with entryAt opens as written')
+
+  for (const bad of [
+    { v: 1, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: null }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [k], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: null }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: 'ab'.repeat(32) }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: null, entryAt: iso(T0) }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: 'ab'.repeat(32), entryAt: null }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: 'ab'.repeat(32), entryAt: '2026-11-06' }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: 'AB'.repeat(32), entryAt: iso(T0) }], hold: null, gen: 1 } }, removed: {} },
+    { v: 2, seq: 1, members: { [m]: { keys: [{ ...k, lookupId: 'ab'.repeat(32), entryAt: iso(T0) }, { ...key(), addedAt: iso(T0), lookupId: 'ab'.repeat(32), entryAt: iso(T0) }], hold: null, gen: 1 } }, removed: {} },
+    { v: 3, seq: 1, members: {}, removed: {} }
+  ]) {
+    const d = tmpDir(t)
+    fs.writeFileSync(path.join(d, FILE), JSON.stringify(bad), { mode: 0o600 })
+    t.is(openPasskeyStore(d).available(), false, 'refused: ' + JSON.stringify(bad).slice(0, 60))
+  }
+})
+
+test('passkey store: only sign-up keys write version 1, the previous build\'s exact shape; a linked key writes version 2', async (t) => {
+  const dir = tmpDir(t)
+  const c = clock()
+  const s = openPasskeyStore(dir, { now: c.now })
+  const m = hex32()
+  const first = key()
+  await s.add({ member: m, ...first })
+  await s.touch({ member: m, credentialId: first.credentialId, signCount: 3 })
+  await s.schedule({ member: m, runAt: iso(T0 + DAY) })
+  const read = () => JSON.parse(fs.readFileSync(path.join(dir, FILE), 'utf8'))
+  let file = read()
+  t.is(file.v, 1)
+  t.alike(Object.keys(file.members[m].keys[0]), ['credentialId', 'alg', 'spki', 'signCount', 'addedAt'], 'no lookupId in version 1')
+  const lookupId = hex32()
+  await s.add({ member: m, ...key(), first: false, lookupId, entryAt: iso(T0), voucher: first.credentialId })
+  file = read()
+  t.is(file.v, 2)
+  t.alike(file.members[m].keys.map((k) => k.lookupId), [null, lookupId])
+  await s.removeByLookup({ member: m, lookupId })
+  t.is(read().v, 1, 'back to version 1 once no key is linked')
+  t.is(openPasskeyStore(dir, { now: c.now }).keys(m).length, 1)
 })
 
 test('passkey store: touch keeps the higher counter only', async (t) => {
