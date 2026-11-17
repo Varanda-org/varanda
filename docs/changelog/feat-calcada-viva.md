@@ -1,0 +1,3 @@
+### Alterado
+
+- A calçada e a faixa preta da onda deixam de deslizar na abertura do app, na abertura da web e na landing do site. Agora a calçada mostra pessoas que se movem: dois passantes indo para a direita, um passante e uma pessoa passeando com o cachorro indo para a esquerda, um grupo de três conversando (um levanta o braço) e duas crianças pulando e passando uma bola. Com redução de movimento, a cena fica parada no primeiro quadro: os grupos parados e um passante de cada lado aparecem, e em tela estreita os outros passantes ficam fora da vista, e o botão de pausa da landing congela as pessoas no quadro atual (PR `feat/calcada-viva`). Verificação em `docs/verification/feat-calcada-viva.md`.
