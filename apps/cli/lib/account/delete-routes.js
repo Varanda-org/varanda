@@ -2,7 +2,8 @@
 
 const nodeCrypto = require('node:crypto')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
-const { verifyAssertion } = require('./webauthn')
+const { verifyAssertion, isAssertion } = require('./webauthn')
+const { countedKeys } = require('./passkey-store')
 
 // Excluir conta (README "Excluir conta", docs/protocol.md "Account
 // deletion"): the member asks, from the app, to delete the account. Mounted
@@ -14,8 +15,9 @@ const { verifyAssertion } = require('./webauthn')
 //     page answers 'paginas-ativas' (closing a page needs the owner's signed
 //     record, and the page's other admins would lose it without warning).
 //     `passkeys` lists the credential ids whose public keys the service holds
-//     for the member (./passkey-store.js, enrolled at sign-up by
-//     ./passkey-routes.js); `scheduled` is the date of a deletion already
+//     for the member (./passkey-store.js: the one enrolled at sign-up and
+//     each extra passkey a stored one vouched for, ./passkey-routes.js);
+//     `scheduled` is the date of a deletion already
 //     waiting, or null. The nonce is single-use, in memory, for
 //     NONCE_TTL_MS; the table is bounded and its oldest row goes first. Its
 //     32 bytes are also the challenge of the passkey ceremony.
@@ -76,22 +78,18 @@ const WAIT_MS = 7 * 24 * 3600 * 1000
 const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
 const NONCE_RE = /^[A-Za-z0-9_-]{43}$/
-const ASSERTION_KEYS = ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature']
 
-function isAssertion (a) {
-  return a !== null && typeof a === 'object' && !Array.isArray(a) &&
-    Object.keys(a).length === ASSERTION_KEYS.length &&
-    ASSERTION_KEYS.every((k) => typeof a[k] === 'string' && a[k].length > 0 && a[k].length <= 2048)
-}
-
-// createDeleteRoutes({ accounts, moderation, pagesStore, passkeys, purge,
-// isBlocked, notify, rpId, origins, association, now, log, memberLimit, send,
-// refuse, fromStore, checkPost, readJsonBody, over })
+// createDeleteRoutes({ accounts, moderation, pagesStore, passkeys, recovery,
+// purge, isBlocked, notify, rpId, origins, association, now, log,
+// memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over })
 // -> { owns, handle, stats, scheduled(member), runScheduled() }.
 // `passkeys` is an openPasskeyStore (null or unavailable: every route answers
 // 503 'indisponivel', since neither a verified nor a scheduled deletion can
-// be recorded). `notify(member)` sends the push notice of a new schedule.
-function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, passkeys = null, purge = async () => ({ pending: 0 }), isBlocked = () => false, notify = () => {}, beforeDelete = async () => {}, rpId, origins = [], association, now = Date.now, log = () => {}, memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over }) {
+// be recorded). `recovery` (an openRecoveryStore or null) says which extra
+// passkey keys still count (passkey-store countedKeys): a key whose recovery
+// entry is gone neither shows in `passkeys` nor deletes at once. `notify(member)`
+// sends the push notice of a new schedule.
+function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, passkeys = null, recovery = null, purge = async () => ({ pending: 0 }), isBlocked = () => false, notify = () => {}, beforeDelete = async () => {}, rpId, origins = [], association, now = Date.now, log = () => {}, memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over }) {
   // nonce -> { member, username, kind, expiresAt }, insertion order = age.
   const nonces = new Map()
 
@@ -176,7 +174,7 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
     const member = memberParam(body.member)
     const username = currentName(member)
     if (ownsLivePage(member)) throw refuse('paginas-ativas')
-    const ids = fromPasskeys(() => passkeys.keys(member).map((k) => k.credentialId))
+    const ids = countedKeys(fromPasskeys(() => passkeys.keys(member)), recovery, member).map((k) => k.credentialId)
     const hold = fromPasskeys(() => passkeys.hold(member))
     const nonce = mint(member, username, 'delete')
     send(res, 200, { nonce, username, passkeys: ids, scheduled: hold === null ? null : hold.runAt })
@@ -218,7 +216,7 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
     if (currentName(member) !== username) throw refuse('expirado')
     if (ownsLivePage(member)) throw refuse('paginas-ativas')
     if (moderation === null) throw refuse('indisponivel')
-    const stored = fromPasskeys(() => passkeys.keys(member))
+    const stored = countedKeys(fromPasskeys(() => passkeys.keys(member)), recovery, member)
     const key = body.assertion === undefined ? undefined : stored.find((k) => k.credentialId === body.assertion.credentialId)
     if (key !== undefined) {
       const checked = verifyAssertion({ assertion: body.assertion, key, challenge: Buffer.from(nonce, 'base64url'), rpId, origins })

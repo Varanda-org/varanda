@@ -1469,6 +1469,20 @@ function putGroupCert (storage, diaryHex, raw0) {
   })
 }
 
+// Removes the groupCerts entries whose diary drop(diaryHex) names (a blocked
+// diary: its cores are purged and its certificate would only name it);
+// rewrites the list only when one went. Resolves the removed diaries.
+function dropGroupCerts (storage, drop) {
+  return withGroupCoreLock(storage, async () => {
+    const map = await readGroupCerts(storage)
+    const removed = [...map.keys()].filter((d) => drop(d))
+    if (removed.length === 0) return removed
+    for (const d of removed) map.delete(d)
+    await storage.writeJson('groupCerts', { v: 1, entries: [...map].map(([d, r]) => [d, b4a.toString(r, 'hex')]) })
+    return removed
+  })
+}
+
 // Every group core and binding replica this device holds, and the three
 // group kv lists (reset; the cores must be closed first): the next person on
 // a shared device must neither read nor push the previous person's groups.
@@ -2560,6 +2574,7 @@ module.exports = {
   readGroupCoreKeys,
   readGroupCerts,
   putGroupCert,
+  dropGroupCerts,
   readBoundRoots,
   addBoundRoot,
   MAX_HEADER_STUBS,

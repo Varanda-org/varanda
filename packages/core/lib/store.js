@@ -657,7 +657,10 @@ function readJson (file, fallback) {
 // the parent directory is fsynced so the rename survives a crash. Two
 // concurrent writers (even across processes) each use their own temp file,
 // so both succeed and the last rename wins; a failure unlinks the temp file.
-function writeJsonAtomic (file, obj, mode) {
+// `beforeRename`, when given, runs after the temp file is fsynced and closed
+// and right before the rename: a throw from it leaves the target untouched,
+// so a caller can re-check a lock as late as the write allows.
+function writeJsonAtomic (file, obj, mode, { beforeRename } = {}) {
   const dir = path.dirname(file)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = path.join(dir, '.' + path.basename(file) + '.' + process.pid + '.' + b4a.toString(randomBytes(6), 'hex') + '.tmp')
@@ -672,6 +675,7 @@ function writeJsonAtomic (file, obj, mode) {
     } finally {
       fs.closeSync(fd)
     }
+    if (beforeRename) beforeRename()
     fs.renameSync(tmp, file)
     published = true
   } finally {

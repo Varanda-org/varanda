@@ -91,7 +91,6 @@ const {
   startRediscovery,
   attachAdmission,
   CAP_HEADER_STUBS,
-  refuseOverConnectionLimit,
   watchContiguous,
   watchPresent,
   watchFork,
@@ -99,8 +98,11 @@ const {
   MAX_CONNECTIONS,
   MAX_INVENTORY,
   MESSAGE_BURST,
-  MESSAGE_RATE
+  MESSAGE_RATE,
+  CAP_PEER_PROOF
 } = require('./net')
+const { addressGroup, createSlots, PROBATION_MS } = require('./peer-slots')
+const { signPeerProof } = require('./peer-proof')
 
 const GATE_TIMEOUT_MS = 15000
 const GATE_MIN_TIMEOUT_MS = 250
@@ -280,6 +282,15 @@ function noop () {}
 
 function key8 (hex) {
   return String(hex).slice(0, 8)
+}
+
+// The peer's own public address (hyperdht with no relay configured).
+function defaultAddressOf (socket) {
+  return socket.rawStream ? socket.rawStream.remoteHost : null
+}
+
+function remoteKeyOf (socket) {
+  return socket && socket.remotePublicKey ? b4a.toString(socket.remotePublicKey, 'hex') : null
 }
 
 // Block-0 verdict (docs §5, identical in the seeder): null = accepted.
@@ -522,7 +533,9 @@ function followRange (core, deleted, { groupBound = false } = {}) {
 // protocol constants. releaseHook(key) is awaited by the release of a
 // binding diary before its session closes, and quarantineHook(key) by a
 // group quarantine read once its core is ready, before it replicates (both
-// test-only).
+// test-only). addressOf(socket) (the remote host a connection slot is
+// grouped by, default the UDX stream's remote host) and probationMs (the
+// slot probation, default PROBATION_MS) are test-only too.
 async function runSync ({
   dataDir,
   associationKey = null,
@@ -554,6 +567,8 @@ async function runSync ({
   inspectHook = null,
   releaseHook = null,
   quarantineHook = null,
+  addressOf = defaultAddressOf,
+  probationMs = PROBATION_MS,
   // true (or VARANDA_NO_CLEAR=1, the rollout kill switch) keeps the bytes of
   // deleted blocks and every unfollowed replica, as before deletion existed;
   // deleted blocks still do not hold the present length back.
@@ -599,6 +614,9 @@ async function runSync ({
   const inflight = new Set() // quarantine fetches
   const settling = new Set() // purges and local re-gates finish() waits for
   const peers = new Set()
+  // Connection slots (S1, issue #32), shared fairly by remote address; a
+  // verified seeder's connection is never displaced.
+  const slots = createSlots({ limit: maxConnections, probationMs, isProtected: slotProtected })
   let lastClosedPeer = null // test-only (inspectHook)
   let recomputes = 0 // test-only (inspectHook)
   let walkReads = 0 // test-only (inspectHook)
@@ -4922,6 +4940,7 @@ async function runSync ({
           peer.peerKey !== null &&
           seederCertForKey(peer.remoteCert, peer.peerKey, association).ok
         if (!peer.verifiedSeeder) startBudget()
+        maybeProve(peer)
         if (!peer.gotHello) {
           peer.gotHello = true
           emit({ event: 'peer', role: peer.remoteRole, peerKey: peer.peerKey, verified: peer.verifiedSeeder })
@@ -4984,10 +5003,60 @@ async function runSync ({
           }
         }
         break
+      case 'prove':
+        return // only a seeder judges proofs; a member keeps no state for them
       default:
         break // members ignore announce
     }
     evaluate()
+  }
+
+  // A verified seeder that accepts `prove` learns, once per connection, that
+  // this connection belongs to our diary, so its slot outlasts a full table.
+  // Same condition as the announce (a valid own cert); never to a member or
+  // an unverified peer. The proof is bound to our Noise static key, which
+  // the seeder reads as remotePublicKey.
+  function maybeProve (peer) {
+    if (peer.proved || !cert || !peer.verifiedSeeder || !(peer.remoteCaps & CAP_PEER_PROOF)) return
+    peer.proved = true
+    try {
+      const proof = signPeerProof({ noiseHex: b4a.toString(peer.socket.publicKey, 'hex'), keyHex: ownHex, keyPair: diary.keyPair })
+      peer.send({ type: 'prove', ...proof })
+    } catch (err) {
+      log('aviso: prova de diário: ' + err.message)
+    }
+  }
+
+  function slotProtected (entry) {
+    const socket = entry.data && entry.data.socket
+    const peer = socket && socket._varandaPeer
+    return !!peer && peer.verifiedSeeder === true
+  }
+
+  // Slot admission (S1, issue #32), before the store replicates the socket:
+  // a full table refuses the newcomer ('connection-limit') or makes room by
+  // displacing an unprotected connection of a busier address
+  // ('connection-displaced'). -> true when the newcomer was refused.
+  function refuseOrDisplace (socket) {
+    let host = null
+    try {
+      host = addressOf(socket)
+    } catch {}
+    const admitted = slots.admit(addressGroup(host))
+    if (admitted === null) {
+      onPeerDropped({ event: 'peer-dropped', peerKey: remoteKeyOf(socket), reason: 'connection-limit' })
+      socket.destroy()
+      return true
+    }
+    const slot = admitted.entry
+    slot.data = { socket }
+    socket.once('close', () => slots.remove(slot))
+    const victim = admitted.victim && admitted.victim.data && admitted.victim.data.socket
+    if (victim) {
+      onPeerDropped({ event: 'peer-dropped', peerKey: remoteKeyOf(victim), reason: 'connection-displaced' })
+      victim.destroy()
+    }
+    return false
   }
 
   // Keys whose advertisements matter to this run: our own and the follows
@@ -5007,8 +5076,7 @@ async function runSync ({
       socket.destroy()
       return
     }
-    // Connection cap (S1), before the store replicates the socket.
-    if (refuseOverConnectionLimit(swarm, socket, { limit: maxConnections, log: onPeerDropped })) return
+    if (refuseOrDisplace(socket)) return
     // Live connections per topic (re-discovery resumes when the last one of a
     // topic goes away); info.topics is known for client-side connections only.
     liveConnections++
@@ -5077,6 +5145,7 @@ async function runSync ({
     peer.lastAdv = new Map() // key -> last length processed (own + follows only)
     peer.emittedHave = new Map() // key -> last length reported as a 'have' event
     peer.withdrawnOwn = false // 'withdrawn' emitted for our diary
+    peer.proved = false // a prove was sent on this connection
     peer.groupHandle = groupHandle
     peer.groupSupported = groupHandle ? null : false // the seeder speaks 'varanda/groups/1'
     peer.groupClosed = !groupHandle // no more pages from this peer (closed, timed out, gone)

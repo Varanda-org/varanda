@@ -206,7 +206,9 @@ export function buildRequest (method, path, body, extra) {
 // caller that validates it (seenFinish's conflict), so it never fetches again.
 // `bareStatus` ({ status: token }) names a refusal that comes without the
 // service's JSON token (the edge's own 429, say).
-async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, sessionToken, signal, messages, bareStatus } = {}) {
+// `withStatus`: a refusal also carries the HTTP status as err.status (a 429
+// is 'pedido-invalido' too, but waiting helps).
+async function call (method, path, body, { allow404 = false, uncertain = false, definite = false, errorBody = false, maxBody = MAX_BODY, timeoutMs = TIMEOUT_MS, headers, origin, sessionToken, signal, messages, bareStatus, withStatus = false } = {}) {
   // The Vitrine has no account service: every call is a definite refusal,
   // before any request leaves the page.
   if (VITRINE) throw toError('indisponivel')
@@ -264,6 +266,7 @@ async function call (method, path, body, { allow404 = false, uncertain = false, 
   const known = definite && (code === 'indisponivel' || Object.hasOwn(ERROR_MESSAGES, code) || (!!messages && Object.hasOwn(messages, code)))
   const err = fail(code, data && data.nextChangeAt, res.status >= 500 && !known)
   if (errorBody && data && typeof data === 'object') err.body = data
+  if (withStatus) err.status = res.status
   throw err
 }
 
@@ -1316,13 +1319,24 @@ export const deleteCancelFinish = async ({ member, nonce, signature }) => {
 }
 // The passkey enrolment right after the link (src/passkeyEnrol.js): the
 // creation's attestation object, signed at account-link phase 'passkey'.
-export const passkeyStart = async ({ member }) => {
-  const data = await call('POST', '/account/passkey/start', { member }, { messages: PASSKEY_MESSAGES })
-  if (!exactKeys(data, ['nonce']) || typeof data.nonce !== 'string') throw toError('indisponivel')
-  return { nonce: data.nonce }
+// With `list: true` (an extra passkey, src/extraPasskeyKey.js) start also
+// answers the credential ids whose keys the service holds and the current
+// @nome -> { nonce, passkeys, username }; an older service ignores `list`
+// and answers { nonce }, read as passkeys and username null. add then also
+// carries the assertion of a stored passkey over the nonce and the lookup id
+// of the new passkey's recovery entry.
+export const passkeyStart = async ({ member, list = false }) => {
+  const data = await call('POST', '/account/passkey/start', list === true ? { member, list: true } : { member }, { messages: PASSKEY_MESSAGES, withStatus: list === true })
+  if (exactKeys(data, ['nonce']) && typeof data.nonce === 'string') return list === true ? { nonce: data.nonce, passkeys: null, username: null } : { nonce: data.nonce }
+  if (list !== true || !exactKeys(data, ['nonce', 'passkeys', 'username']) || typeof data.nonce !== 'string' || !isUsername(data.username) ||
+    !Array.isArray(data.passkeys) || data.passkeys.length > 8 || !data.passkeys.every((id) => typeof id === 'string' && CREDENTIAL_RE.test(id))) throw toError('indisponivel')
+  return { nonce: data.nonce, passkeys: data.passkeys.slice(), username: data.username }
 }
-export const passkeyAdd = async ({ member, nonce, signature, credentialId, attestationObject }) => {
-  const data = await call('POST', '/account/passkey/add', { member, nonce, signature, credentialId, attestationObject }, { messages: PASSKEY_MESSAGES })
+export const passkeyAdd = async ({ member, nonce, signature, credentialId, attestationObject, assertion, lookupId }) => {
+  const body = { member, nonce, signature, credentialId, attestationObject }
+  if (assertion !== undefined && assertion !== null) body.assertion = assertion
+  if (lookupId !== undefined && lookupId !== null) body.lookupId = lookupId
+  const data = await call('POST', '/account/passkey/add', body, { messages: PASSKEY_MESSAGES, withStatus: assertion !== undefined && assertion !== null })
   if (!exactKeys(data, ['added']) || typeof data.added !== 'boolean') throw toError('indisponivel')
   return { added: data.added }
 }

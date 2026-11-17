@@ -10,7 +10,7 @@
 //   identity.status()   -> Promise<{ exists, publicKey, legacy, unlocked, synced,
 //                          webauthn, prf, hybrid, platform, signal (each
 //                          'yes'|'no'|'unknown'), rpId, rpIdError?,
-//                          passkeyKnown, resumed, pending,
+//                          passkeyKnown, credentialId, resumed, pending,
 //                          refused: [{ userId, code, cleaned, created }] }>
 //   identity.unlock({ register = false, any = false, phone = false } = {})
 //                       -> Promise<{ publicKey, created, sessionSaved? } | { pending: true }>
@@ -24,6 +24,9 @@
 //   identity.cancelRecovery() -> Promise
 //   identity.finishRecovery({ phone }) / identity.addPasskey({ phone })
 //                       -> Promise<{ credentialId, userId, lookupId, blob, sessionSaved? } | { pending: true }>
+//                          (addPasskey's also carries the creation's
+//                          attestationObject when the browser gave one, for
+//                          the new passkey's key at the account service)
 //   identity.bindPasskey({ credentialId, userId }) -> Promise<{ sessionSaved? }>
 //   identity.makeRecoveryCode() -> Promise<{ code, lookupId, blob }>
 //   identity.confirm({ challenge })
@@ -1088,7 +1091,7 @@ function createIdentity (node, storage, sessionStore, idb) {
   // install drops the held root (that recovery is over) and refuses the new
   // passkey INSTALL_FAILED unless it ended up bound. `resetEpoch`: the
   // resets count when the creation began (a reset since then records nothing).
-  async function wrappedCreated (gen, mode, prf, { credentialId, userId, epoch, resetEpoch }) {
+  async function wrappedCreated (gen, mode, prf, { credentialId, userId, epoch, resetEpoch, attestationObject = null }) {
     let keys = null
     let rootCopy = null
     try {
@@ -1138,7 +1141,9 @@ function createIdentity (node, storage, sessionStore, idb) {
       keys = await recovery.deriveRecoveryKeys(prf, 'passkey')
       if (gen !== generation || root === null) throw cancelled()
       const blob = recovery.wrapRoot({ root, member: rootMember, kind: 'passkey', wrapKey: keys.wrapKey })
-      return { credentialId, userId, lookupId: keys.lookupId, blob }
+      const out = { credentialId, userId, lookupId: keys.lookupId, blob }
+      if (attestationOk(attestationObject)) out.attestationObject = attestationObject
+      return out
     } finally {
       zero(prf)
       zero(rootCopy)
@@ -1177,7 +1182,7 @@ function createIdentity (node, storage, sessionStore, idb) {
         }
         if (result.pending === true) {
           if (addPending !== null && addPending.credentialId !== result.credentialId) dropAddPending(addPending)
-          const next = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, mode, epoch: rec }
+          const next = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, mode, epoch: rec, attestationObject: result.attestationObject }
           addPending = next
           // addPending is memory only: the refused entry keeps the passkey
           // out of later creations after a reload, which never offers it
@@ -1187,7 +1192,7 @@ function createIdentity (node, storage, sessionStore, idb) {
           if (gen !== generation || addPending !== next) throw cancelled()
           return { pending: true }
         }
-        return wrappedCreated(gen, mode, result.prf, { credentialId: result.credentialId, userId: result.userId, epoch: rec, resetEpoch: epoch })
+        return wrappedCreated(gen, mode, result.prf, { credentialId: result.credentialId, userId: result.userId, epoch: rec, resetEpoch: epoch, attestationObject: result.attestationObject })
       },
       (err) => {
         if (err === deviceBound) return err
@@ -1214,7 +1219,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     return run(
       (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId, hints }),
       async (gen, result) => {
-        const out = await wrappedCreated(gen, target.mode, result.prf, { credentialId: result.credentialId, userId: target.userId, epoch: target.epoch, resetEpoch: epoch })
+        const out = await wrappedCreated(gen, target.mode, result.prf, { credentialId: result.credentialId, userId: target.userId, epoch: target.epoch, resetEpoch: epoch, attestationObject: target.attestationObject })
         if (addPending === target) addPending = null
         // It is an entry now (and, for a recovery, the bound passkey).
         const before = refused.length
@@ -1377,6 +1382,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       platform: support.platform,
       signal: support.signal,
       passkeyKnown: known !== null,
+      credentialId: known !== null ? known.credentialId : null,
       resumed: resumed && stored.unlocked === true,
       pending: pending !== null || addPending !== null,
       refused: refused.map(({ userId, code, cleaned, created }) => ({ userId, code, cleaned, created }))

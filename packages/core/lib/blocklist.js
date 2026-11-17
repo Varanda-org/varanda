@@ -17,13 +17,20 @@ const cert = require('./cert')
 const LF = '\n'
 const PREFIX = 'varanda-blocklist-v1'
 const SNAPSHOT_KEYS = ['v', 'seq', 'date', 'blocked', 'revokedIssuers', 'moderator', 'moderatorDate', 'moderatorSignature', 'signature']
-// Equal to MAX_INVENTORY (packages/core/lib/admission.js:18): a seeder never
-// serves more logs than one snapshot can block.
-const MAX_BLOCKED = 4096
+// At least MAX_INVENTORY (packages/core/lib/admission.js): a seeder never
+// serves more logs than one snapshot can block. Above it because a deleted
+// account's key stays blocked for good (certificates never expire), so the
+// list only grows. Raised from 4096: an older build reads a longer list as
+// 'malformed' and keeps its last valid one (docs/protocol.md section 3).
+const MAX_BLOCKED = 16384
 const MAX_REVOKED_ISSUERS = 64
-// 4096 x 67 bytes (64 hex, two quotes, a comma) + 64 x 67 + the header fits
-// with room to spare, and stays far under MAX_EXTERNAL_FRAME (seeder.js:102).
-const MAX_SNAPSHOT_BYTES = 393216
+// 16384 x 67 bytes (64 hex, two quotes, a comma) + 64 x 67 + the header is
+// 1102534 bytes at most (expanded-year dates, seq MAX_SAFE_INTEGER): 1.125
+// MiB leaves about 75 KB of room and stays far under MAX_EXTERNAL_FRAME
+// (frame-guard.js, 8 MiB). Every bound that carries a snapshot is sized
+// from this one (blocklist-net.js, apps/cli mod-apply.js and
+// account/mod-routes.js).
+const MAX_SNAPSHOT_BYTES = 1179648
 
 // A sorted list of distinct lowercase hex64 keys, at most `max` long.
 // Strictly increasing implies both sorted and distinct.

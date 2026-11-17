@@ -26,7 +26,7 @@ Nó core (`packages/core/lib/sync.js`, `store.js`, `admission.js`, `net.js`):
 - Um toco cujo cabeçalho nomeia outro par cede à listagem desse par (`givesWay`): sai da tabela sem veredito, com os blocos, e a chave passa pelo portão como escritor dali, baixa inteira e sai do registro. Uma listagem desse par vista enquanto o toco passava pelo portão é testada de novo quando ele é aceito (`rescanGroup`).
 - Caminho guardado: um núcleo guardado toma o diário do próprio cabeçalho, salvo quando o registro o nomeia como toco (e o diário do cabeçalho não está condenado aqui). Um núcleo guardado por outro motivo (escritor ou raiz de outro grupo, diário seguido ou de ligação) nunca vira toco: a listagem sai da tabela como antes (I4).
 - Partida: `reviewHeaderStubs` mantém um toco enquanto a réplica guardada do diário que o provou ainda tem a entrada e o apaga senão. Uma chave que o nó agora escreve, segue, guarda como diário de ligação de um escritor aceito aqui, ou não guarda mais, só sai do registro, com os blocos. A varredura de legado (`sweepLegacyGroups`, parâmetro `keep`) não apaga um toco registrado.
-- O nó anuncia `CAP_HEADER_STUBS = 8` no canal de admissão.
+- O nó anuncia `CAP_HEADER_STUBS = 16` no canal de admissão.
 
 Nó do navegador (`packages/web-member/lib/sync.js`, `node-store.js`, `member-ops.js`):
 
@@ -166,6 +166,7 @@ Nó do navegador (`packages/web-member/test/sync-groups-4.test.js`, só o teste 
 - A revisão da partida erra para o lado de manter: `groupCerts` pode ainda ter diários antigos quando ela roda (`pruneGroupCerts` roda depois, em `loadDiskSlots`), e uma chave ali só sai do registro, sem apagar.
 - O toco do caso (a) não é registrado: o cabeçalho nomeia o próprio par, então a partida o julga pelo diário que o cabeçalho nomeia, como qualquer escritor guardado.
 - A capacidade só é anunciada. Nenhum semeador a lê; o próximo PR faz o semeador listar tocos só para quem anuncia o bit.
+- O bit é 16: a `main` deu o 8 a `CAP_PEER_PROOF` (#738) antes do merge, e membro e semeador usam o mesmo espaço de bits no canal, então cada capacidade tem o seu.
 - Asserções antigas que mudaram para a nova regra: em `packages/core/test/group.test.js`, um escritor e um CW com só um bloco 0 inválido não são mais esperados (`incomplete` passa a `false`); em `packages/core/test/sync-private.test.js`, o teste 7 (o escritor recusado pelo `member` não era testado de novo quando o diário o liberava) virou "a writer refused for its member is held as a stub, block 0 alone, once its diary's join is proven"; em `packages/core/test/sync-communities.test.js`, o teste 6 (um escritor com `member` sob uma comunidade era recusado) passou a esperar o toco.
 
 ## Riscos residuais e pontos em aberto

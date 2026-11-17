@@ -11,6 +11,7 @@
 const test = require('brittle')
 const path = require('node:path')
 const fs = require('node:fs')
+const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert, createModeratorCert } = require('@varanda/core/lib/cert')
@@ -85,7 +86,7 @@ function recoveryBlob () {
 }
 
 // A service with `m` linked as 'ana' and every store the deletion purges.
-async function setup (t, { moderation: withModeration = true, enrolled = true } = {}) {
+async function setup (t, { moderation: withModeration = true, enrolled = true, extra = async () => ({}) } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
@@ -109,6 +110,7 @@ async function setup (t, { moderation: withModeration = true, enrolled = true } 
   if (enrolled) await enrol(passkeys, m.hex, pk)
   const logs = []
   const texts = []
+  const more = await extra({ dir, now, store, iss, moderation, m })
   const server = createAccountServer({
     association: iss.association,
     origin: ORIGIN,
@@ -122,7 +124,8 @@ async function setup (t, { moderation: withModeration = true, enrolled = true } 
     moderation,
     passkeys,
     log: (e) => logs.push(JSON.stringify(e)),
-    now
+    now,
+    ...more
   })
   const listener = await server.listen({ host: '127.0.0.1', port: 0 })
   t.teardown(() => listener.close(), { force: true })
@@ -368,6 +371,35 @@ test('Excluir conta: a stored passkey still deletes at once while a wait is pend
   const r = await s.del(s.m)
   t.alike(r.body, { deleted: 'pendente' })
   t.is(s.passkeys.holds(s.m.hex), false)
+})
+
+test('Excluir conta: an extra passkey vouched for by the stored one is listed and deletes at once, not after the wait', async (t) => {
+  const s = await setup(t)
+  const lookupId = b4a.toString(crypto.randomBytes(32), 'hex')
+  await s.recovery.put({ member: s.m.hex, kind: 'passkey', lookupId, blob: { ...recoveryBlob(), kind: 'passkey' } })
+  const extra = createFakePasskey({ rpId: RP })
+  const ps = await s.post('/account/passkey/start', { member: s.m.hex })
+  const att = extra.attestationObject()
+  const sub = nodeCrypto.createHash('sha256').update(Buffer.from(att, 'base64url')).digest('hex')
+  const added = await s.post('/account/passkey/add', {
+    member: s.m.hex,
+    nonce: ps.body.nonce,
+    signature: signAccountLink({ phase: 'passkey', nonce: ps.body.nonce, member: s.m.hex, username: 'ana', association: s.iss.association, sub }, s.m.kp),
+    credentialId: extra.credentialId,
+    attestationObject: att,
+    assertion: assertion(s.pk, ps.body.nonce),
+    lookupId
+  })
+  t.alike(added.body, { added: true }, added.text)
+
+  const started = await s.start(s.m)
+  t.alike(started.body.passkeys, [s.pk.credentialId, extra.credentialId], 'the extra credential is listed')
+  const r = await s.finish(s.m, started.body.nonce, s.sign(s.m, started.body.nonce, 'ana'), { assertion: assertion(extra, started.body.nonce) })
+  t.is(r.status, 200, r.text)
+  t.alike(r.body, { deleted: 'pendente' })
+  t.is(s.passkeys.hold(s.m.hex), null, 'nothing scheduled')
+  t.is(s.store.status(s.m.hex).linked, false, 'deleted now')
+  t.alike(s.passkeys.keys(s.m.hex), [], 'every key of the member went')
 })
 
 // The routes alone, with the server's helpers stubbed.
@@ -625,4 +657,216 @@ test('a corrupt feira-invites.json keeps the purge pending and says so once, wit
   t.is(warns[0].file, 'feira-invites.json')
   t.ok(/pendente/.test(warns[0].aviso) && /operador/.test(warns[0].aviso))
   t.absent(JSON.stringify(logs).includes(secret) || JSON.stringify(logs).includes(m.hex), 'no contents, no member')
+})
+
+// A sealed key share of the size pages-store accepts.
+function sealed () {
+  return b4a.toString(crypto.randomBytes(213), 'base64')
+}
+
+function hex64 () {
+  return b4a.toString(crypto.randomBytes(64), 'hex')
+}
+
+test('Excluir conta: an admin of another member\'s page loses their pending page state, invite rosters and AI copies; the owner\'s page stays', async (t) => {
+  const { openPagesStore } = require('../lib/account/pages-store')
+  const { openLedger } = require('../lib/account/ai/ledger')
+  const { openExemplarStore } = require('../lib/account/ai/exemplar-store')
+  const { createWorker } = require('../lib/account/ai/worker')
+  const { quantize } = require('../lib/account/ai/triage')
+  const { fakeEmbed, makeEmbed } = require('./helpers/fake-embed')
+  const owner = keyPair().hex
+  const other = keyPair().hex
+  const p1 = keyPair().hex
+  const p2 = keyPair().hex
+  const env = {}
+  const s = await setup(t, {
+    extra: async ({ dir, now, moderation, m }) => {
+      const pagesStore = openPagesStore(dir, { now })
+      await pagesStore.create({ page: p1, owner })
+      await pagesStore.create({ page: p2, owner })
+      await pagesStore.invite(p1, m.hex, { gen: 2, rosterSignature: hex64() })
+      const next = pagesStore.accept(p1, m.hex)
+      await pagesStore.setRoster(p1, { gen: next.gen, seq: 3, owner, admins: next.admins })
+      const share = (gen) => ({ gen, sealed: sealed(), by: owner, sig: hex64(), at: new Date(now()).toISOString() })
+      await pagesStore.setDm(p1, {
+        gen: 1,
+        box: keyPair().hex,
+        groupBox: keyPair().hex,
+        shares: { [owner]: share(1), [m.hex]: share(1) },
+        pending: {},
+        reboxPending: false,
+        legacyBundle: null,
+        rotatePending: { kind: 'box', idem: owner + ':' + 'n'.repeat(43), gen: 2, box: keyPair().hex, groupBox: keyPair().hex, shares: { [owner]: share(2), [m.hex]: share(2) } }
+      })
+      await pagesStore.offer(p1, m.hex, new Date(now() + 24 * 3600 * 1000).toISOString())
+      await pagesStore.setDm(p2, { gen: 1, box: keyPair().hex, groupBox: keyPair().hex, shares: { [owner]: share(1) }, pending: {}, reboxPending: false, legacyBundle: null, rotatePending: null })
+      for (const who of [m.hex, other]) await pagesStore.invite(p2, who, { gen: 2, rosterSignature: hex64(), share: { sealed: sealed(), sig: hex64() } })
+      const exp = new Date(now() + 24 * 3600 * 1000).toISOString()
+      fs.writeFileSync(path.join(dir, 'page-invite-rosters.json'), JSON.stringify({
+        v: 1,
+        rows: {
+          [p2 + ':' + m.hex]: { record: { owner, admins: [m.hex] }, expiresAt: exp },
+          [p2 + ':' + other]: { record: { owner, admins: [other] }, expiresAt: exp },
+          [p1 + ':' + other]: { record: { owner, admins: [m.hex, other] }, expiresAt: new Date(now() - 1000).toISOString() }
+        }
+      }), { mode: 0o600 })
+
+      const ledger = openLedger(dir, { now })
+      const exemplars = openExemplarStore(dir, { now, model: 'fake-bow-1' })
+      const text = 'compre agora bitcoin gratis clique aqui no link promocao imperdivel'
+      const reports = {}
+      for (const target of [m.hex, other]) {
+        const { report } = await moderation.add({ reporter: owner, target, seq: 1, reason: 'spam', signature: 'ab'.repeat(64), nonce: b4a.toString(crypto.randomBytes(32), 'base64url') })
+        reports[target] = report.id
+        ledger.putRead(report.id, { target, seq: 1, contentHash: 'cd'.repeat(32), text, hasMedia: false, hasQuote: false, hasPoll: false, textCp: Array.from(text).length, truncated: false, embedding: quantize(fakeEmbed(text)) })
+        ledger.mark(report.id, { code: 'frio' })
+        exemplars.add({ reportId: b4a.toString(crypto.randomBytes(16), 'base64url'), target, seq: 2, reason: 'spam', decision: 'descartar', contentHash: 'ef'.repeat(32), text, hasMedia: false, embedding: quantize(fakeEmbed(text)) })
+      }
+      const worker = createWorker({ moderation, exemplars, ledger, readPost: async () => ({ ok: false, code: 'ausente' }), embed: makeEmbed(), modelId: 'fake-bow-1', gapMs: 0, stopWaitMs: 200 })
+      t.teardown(() => worker.stop(), { force: true })
+      Object.assign(env, { pagesStore, ledger, exemplars, worker, reports, dir })
+      return { pages: { pagesStore, dir }, triage: worker }
+    }
+  })
+  const before = env.pagesStore.get(p1)
+  const done = await s.del(s.m)
+  t.is(done.status, 200, done.text)
+  await env.worker.idle()
+
+  const r1 = env.pagesStore.get(p1)
+  t.is(r1.owner, owner, 'the owner\'s page is unchanged')
+  t.alike(r1.admins, [s.m.hex], 'the admins list waits for the owner\'s Remover')
+  t.is(r1.rosterSeq, before.rosterSeq, 'the roster is unchanged')
+  t.alike(r1.dm.shares, before.dm.shares, 'the current key shares stay')
+  t.is(r1.offer, null, 'the transfer offer to them is gone')
+  t.alike(Object.keys(r1.dm.rotatePending.shares), [owner], 'their pending share is gone')
+  const r2 = env.pagesStore.get(p2)
+  t.alike(Object.keys(r2.invites), [other], 'their pending invite is gone')
+  t.alike(Object.keys(r2.dm.pending), [other], 'the key share sealed for them is gone')
+  t.absent(env.pagesStore.holdsMember(s.m.hex))
+  const rosters = JSON.parse(fs.readFileSync(path.join(env.dir, 'page-invite-rosters.json'), 'utf8')).rows
+  t.alike(Object.keys(rosters), [p2 + ':' + other], 'their invite roster is gone, and the expired one with it')
+
+  const mine = env.reports[s.m.hex]
+  const theirs = env.reports[other]
+  t.is(env.ledger.read(mine), null, 'the cached read with text and embedding is gone')
+  t.is(env.ledger.get(mine), null, 'the mark is gone')
+  t.absent(env.exemplars.list().some((e) => e.target === s.m.hex), 'their precedents are gone')
+  t.ok(env.ledger.read(theirs), 'another member keeps theirs')
+  t.ok(env.ledger.get(theirs))
+  t.ok(env.exemplars.list().some((e) => e.target === other))
+  t.absent(env.worker.holdsMember(s.m.hex))
+  const reopened = openLedger(env.dir)
+  t.is(reopened.get(mine), null, 'the mark does not come back from the marks log')
+  t.is(reopened.read(mine), null)
+  t.ok(s.moderation.get(mine), 'the report itself stays (moderation retention is decided elsewhere)')
+  t.absent(s.logs.join('\n').includes('purga-pendente'), 'nothing left pending')
+})
+
+test('Excluir conta: with the AI triage off, the reads, marks and precedents an earlier run left about the member go at once', async (t) => {
+  const { openLedger } = require('../lib/account/ai/ledger')
+  const { openExemplarStore } = require('../lib/account/ai/exemplar-store')
+  const { createTriageForget } = require('../lib/account/ai/forget')
+  const { quantize } = require('../lib/account/ai/triage')
+  const { fakeEmbed } = require('./helpers/fake-embed')
+  const reporter = keyPair().hex
+  const other = keyPair().hex
+  const env = {}
+  const s = await setup(t, {
+    extra: async ({ dir, now, moderation, m }) => {
+      const ledger = openLedger(dir, { now })
+      const exemplars = openExemplarStore(dir, { now, model: 'fake-bow-1' })
+      const text = 'compre agora bitcoin gratis clique aqui no link promocao imperdivel'
+      const reports = {}
+      for (const target of [m.hex, other]) {
+        const { report } = await moderation.add({ reporter, target, seq: 1, reason: 'spam', signature: 'ab'.repeat(64), nonce: b4a.toString(crypto.randomBytes(32), 'base64url') })
+        reports[target] = report.id
+        ledger.putRead(report.id, { target, seq: 1, contentHash: 'cd'.repeat(32), text, hasMedia: false, hasQuote: false, hasPoll: false, textCp: Array.from(text).length, truncated: false, embedding: quantize(fakeEmbed(text)) })
+        ledger.mark(report.id, { code: 'frio' })
+        exemplars.add({ reportId: b4a.toString(crypto.randomBytes(16), 'base64url'), target, seq: 2, reason: 'spam', decision: 'descartar', contentHash: 'ef'.repeat(32), text, hasMedia: false, embedding: quantize(fakeEmbed(text)) })
+      }
+      Object.assign(env, { reports, dir })
+      return { triage: null, triageForget: createTriageForget({ dataDir: dir, moderation }) }
+    }
+  })
+  const done = await s.del(s.m)
+  t.is(done.status, 200, done.text)
+
+  const ledger = openLedger(env.dir)
+  const exemplars = openExemplarStore(env.dir, { model: 'fake-bow-1' })
+  const mine = env.reports[s.m.hex]
+  const theirs = env.reports[other]
+  t.is(ledger.read(mine), null, 'the cached read with text and embedding is gone')
+  t.is(ledger.get(mine), null, 'the mark is gone')
+  t.absent(exemplars.list().some((e) => e.target === s.m.hex), 'their precedents are gone')
+  t.ok(ledger.read(theirs), 'another member keeps theirs')
+  t.ok(ledger.get(theirs))
+  t.ok(exemplars.list().some((e) => e.target === other))
+  t.absent(s.logs.join('\n').includes('purga-pendente'), 'nothing left pending')
+  t.absent(s.logs.join('\n').includes(s.m.hex), 'no log names the member')
+})
+
+test('Excluir conta: with the AI triage off and no triage files, the deletion creates none', async (t) => {
+  const { createTriageForget } = require('../lib/account/ai/forget')
+  const env = {}
+  const s = await setup(t, {
+    extra: async ({ dir, moderation }) => {
+      env.dir = dir
+      return { triageForget: createTriageForget({ dataDir: dir, moderation }) }
+    }
+  })
+  const done = await s.del(s.m)
+  t.is(done.status, 200, done.text)
+  for (const f of ['exemplars.json', 'triage.json', 'triage-marks.jsonl']) t.absent(fs.existsSync(path.join(env.dir, f)), f + ' not created')
+})
+
+test('deletion sweep: a page store that failed once is finished by the next sweep', async (t) => {
+  const { openPagesStore } = require('../lib/account/pages-store')
+  const iss = issuer()
+  const dir = path.join(tmpDir(t), 'account')
+  const accounts = openAccountStore(dir)
+  const m = keyPair()
+  await linkDirect(accounts, iss, m, 'ana')
+  let up = true
+  const pagesStore = openPagesStore(dir, { guard: () => up })
+  const owner = keyPair().hex
+  const page = keyPair().hex
+  await pagesStore.create({ page, owner })
+  await pagesStore.invite(page, m.hex, { gen: 2, rosterSignature: hex64() })
+  await accounts.deleteMember(m.hex)
+  up = false
+  const sweep = createDeletionSweep({ accounts, pages: pagesStore })
+  t.alike(await sweep.sweep(), { members: 1, pending: 1 }, 'the write failed: pending')
+  t.ok(pagesStore.holdsMember(m.hex))
+  up = true
+  t.alike(await sweep.sweep(), { members: 1, pending: 0 })
+  t.absent(pagesStore.holdsMember(m.hex), 'finished by the next sweep')
+  t.alike(await sweep.purge(m.hex), { pending: 0 })
+})
+
+test('Excluir conta: a corrupt page-invite-rosters.json keeps the purge pending, names the file and is left as it was', async (t) => {
+  const { openPagesStore } = require('../lib/account/pages-store')
+  const env = {}
+  const s = await setup(t, {
+    extra: async ({ dir, now, m }) => {
+      const pagesStore = openPagesStore(dir, { now })
+      // The member's own row is in there, so reading the file as empty
+      // would wrongly finish their purge.
+      const file = path.join(dir, 'page-invite-rosters.json')
+      const bytes = '{"v":1,"rows":{"' + keyPair().hex + ':' + m.hex + '":{"record":{}'
+      fs.writeFileSync(file, bytes, { mode: 0o600 })
+      Object.assign(env, { file, bytes })
+      return { pages: { pagesStore, dir } }
+    }
+  })
+  const done = await s.del(s.m)
+  t.is(done.status, 200, done.text)
+  t.alike(await s.server.deletionSweep(), { members: 1, pending: 1 }, 'pending, never done')
+  const logs = s.logs.map((l) => JSON.parse(l))
+  const warns = logs.filter((e) => e.reason === 'arquivo-invalido')
+  t.alike(warns.map((e) => e.file), ['page-invite-rosters.json'], 'the warning names the file, once')
+  t.ok(logs.some((e) => e.reason === 'purga-pendente'))
+  t.is(fs.readFileSync(env.file, 'utf8'), env.bytes, 'the file is unchanged byte for byte')
+  t.absent(s.logs.join('\n').includes(s.m.hex), 'no member in the logs')
 })

@@ -22,7 +22,7 @@ const { Seeder, DISCOVERY_REBUILD_MS, DISCOVERY_VIEWS_KEPT, DISCOVERY_VIEW_TTL_M
 // new order shows within a test's patience.
 const REBUILD_MS = 200
 const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
-const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY, CAP_WRITER_CUTS } = require('../lib/net')
+const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY, CAP_WRITER_CUTS, CAP_PEER_PROOF } = require('../lib/net')
 const { attachDiscovery } = require('../lib/discovery-net')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
@@ -242,7 +242,7 @@ test('discovery: false offers no discovery, rejects the channel and keeps the fu
 
   const other = await connectMember(t, port, { caps: CAP_NO_INVENTORY })
   const hello = await other.peer.hello
-  t.is(other.peer.remoteCaps, CAP_WRITER_CUTS, 'only the writer cuts bit (#350)')
+  t.is(other.peer.remoteCaps, CAP_WRITER_CUTS | CAP_PEER_PROOF, 'only the writer cuts (#350) and peer proof (#32) bits')
   t.is(hello.count, 2, 'the full inventory, even for a member asking for none')
   t.is(await other.disc.supported, false, 'the discovery open is rejected')
   t.alike(seeder.discoveryPage({ after: null, limit: 8 }), { stale: true })
