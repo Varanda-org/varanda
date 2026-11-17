@@ -745,6 +745,9 @@ function checkRawPost (req, origin) {
 // off) turns the /account/feira/* routes of ./feira-routes.js on together
 // with `listingReader`; `invites` is then the ./invites-pair.js facade over
 // both stores, so sign-up and Excluir conta see the Feira codes too.
+// `triageForget` (a createTriageForget of ./ai/forget.js, or null) is what
+// Excluir conta purges the AI triage's copies with while `triage` is null:
+// it has no other use and is never handed to the moderation routes.
 function createAccountServer ({
   association,
   origin,
@@ -756,6 +759,7 @@ function createAccountServer ({
   googleMod = null,
   modEmails = [],
   triage = null,
+  triageForget = null,
   statsEmails = [],
   usage = null,
   groupCheck = null,
@@ -935,8 +939,13 @@ function createAccountServer ({
     seen,
     passkeys,
     phones,
+    pages: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    // Bound late, like `scheduled`: pagesRoutes is created below.
+    pageInvites: { holds: (m) => pagesRoutes.holdsInvites(m), forget: (m) => pagesRoutes.forgetInvites(m), brokenFiles: () => pagesRoutes.inviteBrokenFiles() },
+    triage: triage !== null && typeof triage.forgetMember === 'function' ? triage : triageForget,
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
+    tick: pages !== null && pages.pagesGroups && typeof pages.pagesGroups.purgeBlocked === 'function' ? () => pages.pagesGroups.purgeBlocked() : null,
     log
   })
   const publishedList = moderationBlocklist(moderation)
