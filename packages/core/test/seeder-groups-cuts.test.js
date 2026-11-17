@@ -621,8 +621,32 @@ test('a seeder fed only by a seeder that keeps a writer sparse reads past cut + 
   const listed = readGroups(second.dataDir)[W]
   t.alike([listed.unsureFrom, listed.unsureTo], [3, length], 'the range read from sparse peers only is listed as such')
 
-  // B comes back with W whole: the range is read again, each chunk whole,
-  // and what is not kept is cleared again.
+  // A peer that joins with nothing there the second seeder lacks (A opens
+  // W, empty) reads nothing again and leaves the backoff. The backoff is
+  // pushed out first, so that only a peer could start a pass.
+  const far = 5 * 60 * 1000
+  e2.rereadDelay = far
+  two.seeder._armReread(W, e2, far)
+  await until(() => !e2.cutting && !e2.reread, { name: 'nenhuma releitura em curso' })
+  let passes = 0
+  const pastRange = two.seeder._groupPastRange
+  two.seeder._groupPastRange = function (...args) {
+    passes++
+    return pastRange.apply(this, args)
+  }
+  let joined = false
+  e2.core.once('peer-add', () => { joined = true })
+  const empty = A.store.get({ key: b4a.from(W, 'hex') })
+  await empty.ready()
+  t.teardown(() => empty.close(), { force: true })
+  await until(() => joined, { name: 'A ligado a W' })
+  await new Promise((resolve) => setTimeout(resolve, 3000))
+  t.is(passes, 0, 'a peer offering nothing there starts no pass')
+  t.is(e2.rereadDelay, far, 'and leaves the backoff')
+  delete two.seeder._groupPastRange
+
+  // B comes back with W whole, which it advertises: the range is read again
+  // at once, each chunk whole, and what is not kept is cleared again.
   const back = createSwarm(localSwarmOptions(bootstrap))
   t.teardown(() => back.destroy(), { force: true })
   back.on('connection', (socket) => {

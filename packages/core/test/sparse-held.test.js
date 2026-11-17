@@ -9,7 +9,7 @@ const b4a = require('b4a')
 const Hypercore = require('hypercore')
 const path = require('node:path')
 const { tmpDir } = require('./helpers/tmp')
-const { advertisedHeld, nextHeld, peerHolds } = require('../lib/sparse-held')
+const { advertisedHeld, nextHeld, peerHolds, peerOffers } = require('../lib/sparse-held')
 const { readHeldBlocks } = require('../lib/store')
 
 function link (a, b) {
@@ -96,4 +96,24 @@ test('a peer holds a block it advertises or was served (#350)', (t) => {
   t.absent(peerHolds(peer, [5, 7], new Set()), 'nor with nothing served')
   t.ok(peerHolds(peer, [5, 7], new Set([7])), 'a block served to it counts')
   t.absent(peerHolds(peer, [5, 7, 9], new Set([7])), 'only that one')
+})
+
+// A seeder reads its unsure range again for a peer that joins only when it
+// advertises a block there the seeder lacks.
+test('a peer offers a block it advertises and the core lacks (#350)', async (t) => {
+  const held = new Set([4, 6])
+  const core = { has: async (i) => held.has(i) }
+  const firstOf = (set, from) => {
+    const next = [...set].filter((i) => i >= from).sort((a, b) => a - b)
+    return next.length > 0 ? next[0] : -1
+  }
+  const peer = (contiguous, set) => ({
+    remoteContiguousLength: contiguous,
+    remoteBitfield: { get: (i) => set.has(i), firstSet: (from) => firstOf(set, from) }
+  })
+  t.absent(await peerOffers(core, peer(0, new Set()), 3, 10), 'nothing advertised')
+  t.absent(await peerOffers(core, peer(0, new Set([4, 6])), 3, 10), 'only what the core holds')
+  t.ok(await peerOffers(core, peer(0, new Set([4, 8])), 3, 10), 'a block the core lacks')
+  t.absent(await peerOffers(core, peer(0, new Set([4, 12])), 3, 10), 'not past the range')
+  t.ok(await peerOffers(core, peer(10, new Set()), 3, 10), 'its contiguous range over a block the core lacks')
 })

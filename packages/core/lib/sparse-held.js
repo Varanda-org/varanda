@@ -102,6 +102,15 @@ async function nextHeld (core, from, end) {
   return -1
 }
 
+// Whether `peer` advertises a block of [from, to) `core` does not hold, one
+// this core could still fetch from it.
+async function peerOffers (core, peer, from, to) {
+  for (let i = nextAdvertised(peer, from, to); i !== -1; i = nextAdvertised(peer, i + 1, to)) {
+    if (!(await core.has(i))) return true
+  }
+  return false
+}
+
 // Whether `peer` holds every block in `seqs`: it advertises it, or this
 // core served it to that peer (`served`, a Set of indexes, or null). A
 // peer never announces a block it gets to one that holds it already, so a
@@ -182,4 +191,4 @@ async function heldRuns (core, from, to, max) {
   return runs
 }
 
-module.exports = { advertisedHeld, peerAnswered, nextHeld, heldRuns, peerHolds, askHeld, keptPastSeqs, BITFIELD_SEGMENT }
+module.exports = { advertisedHeld, peerAnswered, peerOffers, nextHeld, heldRuns, peerHolds, askHeld, keptPastSeqs, BITFIELD_SEGMENT }

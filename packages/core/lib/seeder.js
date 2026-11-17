@@ -229,7 +229,7 @@ const {
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
-const { advertisedHeld } = require('./sparse-held')
+const { advertisedHeld, peerAnswered, peerOffers, askHeld } = require('./sparse-held')
 const { attachGroups } = require('./groups-net')
 const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
@@ -991,10 +991,13 @@ const CUT_CHUNK = 256
 const CUT_POLL_MIN_MS = 100
 const CUT_POLL_MAX_MS = 2000
 // A range past a cut that sparse peers only fed (binding unsureFrom,
-// unsureTo) is read again (_cutGroupCore): REREAD_PEER_MS after a peer
-// joins, so that it has synced, and at intervals growing from
-// REREAD_MIN_MS to REREAD_MAX_MS, until a pass reads each chunk whole.
+// unsureTo) is read again (_cutGroupCore) at intervals growing from
+// REREAD_MIN_MS to REREAD_MAX_MS, until a pass reads each chunk whole, and
+// at once when a peer that joins advertises a block there this seeder
+// lacks (_rereadIfOffered): checked every REREAD_PEER_MS from its join, so
+// that it has synced and answered, up to REREAD_PEER_TRIES times.
 const REREAD_PEER_MS = 1000
+const REREAD_PEER_TRIES = 10
 const REREAD_MIN_MS = 1000
 const REREAD_MAX_MS = 5 * 60 * 1000
 
@@ -4733,10 +4736,10 @@ class Seeder {
       if (entry.cut !== null && index < keptBelow(entry.cut) && core.byteLength > this.maxLogBytes) this._cutGroupCore(key, entry)
     }
     // A peer that joins may hold what sparse peers did not.
-    const onPeer = () => {
+    const onPeer = (peer) => {
       if (entry.dropped || this._closing) return
-      entry.rereadDelay = REREAD_MIN_MS
-      this._armReread(key, entry, REREAD_PEER_MS)
+      const b = this._groups.get(key)
+      if (b && Number.isSafeInteger(b.unsureFrom)) this._rereadIfOffered(key, entry, peer, REREAD_PEER_TRIES)
     }
     core.on('append', checkQuota)
     core.on('download', onDownload)
@@ -4863,6 +4866,32 @@ class Seeder {
     }
     if (entry.past === p) entry.past = null
     return held
+  }
+
+  // Reads writer K's unsure range again at once when `peer`, which joined,
+  // advertises a block there this seeder lacks, checked REREAD_PEER_MS from
+  // now, once it has synced and answered for the range (asked for its
+  // bitfield there, as a seeder holding the blocks below the cut sends no
+  // want past them), up to `tries` times. Any other peer, a reader that
+  // connects or one reconnecting in a loop, leaves the backoff as it is: a
+  // writer whose device is gone keeps its unsure range for good.
+  _rereadIfOffered (key, entry, peer, tries) {
+    const stale = () => entry.dropped || this._closing || this._groupServed.get(key) !== entry || peer.removed === true
+    const timer = setTimeout(async () => {
+      try {
+        const b = this._groups.get(key)
+        if (stale() || !b || !Number.isSafeInteger(b.unsureFrom)) return
+        if (peer.remoteSynced === true) askHeld(peer, [b.unsureFrom])
+        if (!peerAnswered(peer, b.unsureTo, b.unsureFrom)) {
+          if (tries > 1) this._rereadIfOffered(key, entry, peer, tries - 1)
+          return
+        }
+        if (!(await peerOffers(entry.core, peer, b.unsureFrom, b.unsureTo)) || stale()) return
+        entry.rereadDelay = REREAD_MIN_MS
+        this._armReread(key, entry, 0)
+      } catch {}
+    }, REREAD_PEER_MS)
+    if (timer.unref) timer.unref()
   }
 
   // Arms the next read again of writer K's unsure range in `delay` ms (none
