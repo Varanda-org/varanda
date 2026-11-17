@@ -339,6 +339,9 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     // smaller budget could never reserve one legal frame. A literal, not a
     // require, so parsing stays cheap and deploy.test.js can compare it.
     frameMemory: optionalEnvInteger(env, 'VARANDA_FRAME_MEMORY', 8454144, 1073741824),
+    // 1 GiB to 1 PiB: 1 PiB = 2^50 stays a safe integer, and deploy.sh checks
+    // the same 16-digit range with 64-bit bash arithmetic.
+    storageBytes: optionalEnvInteger(env, 'VARANDA_STORAGE_BYTES', 1073741824, 1125899906842624),
     media: {
       maxInFlight: optionalEnvInteger(env, 'VARANDA_MEDIA_MAX_IN_FLIGHT', 1, 1024),
       rate: optionalEnvInteger(env, 'VARANDA_MEDIA_RATE', 1, 100000),

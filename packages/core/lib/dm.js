@@ -133,7 +133,7 @@ const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 const DM_MEDIA_MAX = 4
-const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 const DM_MEDIA_MAX_SIDE = 16384
 // A voice note: the only item of its message. Its blob is the sealed file,
 // so `bytes` adds the MAC to the plaintext cap that group posts share.

@@ -224,6 +224,24 @@ test('og:image: absent without photos, absolute with one, only on an https origi
   }
 })
 
+test('an AVIF item is a photo; og:image skips AVIF and names its type', (t) => {
+  const avif = image(0, 'image/avif')
+  t.is(postPhotos(post({ media: [avif] })).items[0], avif, 'an AVIF item counts as a photo')
+  const only = page({}, { media: [avif] })
+  assertSafe(t, only, 'avif only')
+  t.ok(only.includes('<img src="' + BASE + '/foto/1"'), 'the AVIF photo is shown')
+  t.is(meta(only, 'og:image'), null, 'no og:image when every photo is AVIF')
+  t.is(meta(only, 'og:image:type'), null)
+  const mixed = page({}, { media: [avif, image(1, 'image/webp'), image(2)] })
+  assertSafe(t, mixed, 'avif first')
+  t.is((mixed.match(/<img /g) || []).length, 3)
+  t.is(meta(mixed, 'og:image'), ORIGIN + BASE + '/foto/2', 'the first photo that is not AVIF')
+  t.is(meta(mixed, 'og:image:type'), 'image/webp')
+  t.is(meta(page({}, { media: [image(0), avif] }), 'og:image:type'), 'image/jpeg', 'the type of a JPEG first photo')
+  t.is(meta(page({ origin: 'http://bora.varanda.app' }, { media: [image(0)] }), 'og:image:type'), null, 'no type without og:image')
+  t.is(postPreviewData({ record: post({ media: [avif, image(1)] }) }).photoCount, 2, 'the preview counts the AVIF photo')
+})
+
 test('bad author or seq gives the fallback page pointing at /', (t) => {
   const cases = [
     { author: HEX.toUpperCase(), seq: 7 },

@@ -318,7 +318,7 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(res.headers.get('access-control-allow-origin'), null, 'no CORS')
   const text = await res.text()
   const body = JSON.parse(text)
-  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'groupCores', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
+  t.alike(Object.keys(body), ['status', 'uptimeSeconds', 'admitted', 'dropping', 'activeDay', 'activeWeek', 'blocks', 'bytes', 'connections', 'swarm', 'external', 'maxConnections', 'maxExternal', 'peers', 'firewalled', 'blocked', 'blocklistSeq', 'blocklistHeld', 'mediaCores', 'mediaBytes', 'groupCores', 'storage', 'indexRecords', 'indexSaturated', 'topicPosts', 'topicSaturated'])
   t.is(body.status, 'ok')
   t.is(body.admitted, 1)
   t.is(body.dropping, 0)
@@ -339,6 +339,11 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.is(body.indexSaturated, false)
   t.ok(Number.isInteger(body.topicPosts) && body.topicPosts >= 0, 'topic posts is a count')
   t.is(body.topicSaturated, false)
+  t.alike(Object.keys(body.storage), ['used', 'budget', 'reserve', 'dropped'], 'storage carries counts only')
+  t.is(body.storage.budget, 64 * 1024 * 1024 * 1024, 'default storage budget')
+  t.is(body.storage.reserve, Math.floor(body.storage.budget / 10))
+  t.ok(Number.isSafeInteger(body.storage.used) && body.storage.used > 0, 'the restored diary is charged')
+  t.is(body.storage.dropped, 0)
   t.absent(HEX64_ANYWHERE.test(text), 'no key in /health')
 
   const metrics = await fetch(base + '/metrics?x=1')
@@ -363,6 +368,9 @@ test('seed --health-port: health and metrics, counts only, bound to loopback', a
   t.ok(mtext.includes('# TYPE varanda_seeder_max_external gauge\nvaranda_seeder_max_external 32\n'), 'max external gauge')
   t.ok(/# TYPE varanda_seeder_topic_posts gauge\nvaranda_seeder_topic_posts [0-9]+\n/.test(mtext), 'topic posts gauge (count only)')
   t.ok(mtext.includes('# TYPE varanda_seeder_topic_saturated gauge\nvaranda_seeder_topic_saturated 0\n'), 'topic saturated gauge')
+  t.ok(mtext.includes('# TYPE varanda_seeder_storage_budget_bytes gauge\nvaranda_seeder_storage_budget_bytes 68719476736\n'), 'storage budget gauge')
+  t.ok(mtext.includes('\nvaranda_seeder_storage_used_bytes ' + body.storage.used + '\n'), 'storage used gauge')
+  t.ok(mtext.includes('\nvaranda_seeder_storage_dropped_members 0\n'), 'storage dropped gauge')
   t.absent(HEX64_ANYWHERE.test(mtext), 'no key in /metrics')
   t.absent(mtext.includes(publicKey.slice(0, 8)) || mtext.includes(log.key.slice(0, 8)))
 
@@ -457,6 +465,21 @@ test('metrics: a missing or non-finite connection gauge prints 0', (t) => {
   t.ok(text.includes('\nvaranda_seeder_max_external 0\n'))
   t.ok(text.includes('\nvaranda_seeder_active_diaries_day 0\n'), 'missing active day prints 0')
   t.ok(text.includes('\nvaranda_seeder_active_diaries_week 0\n'), 'missing active week prints 0')
+})
+
+test('metrics: storage budget gauges read stats().storage, 0 when it is missing', (t) => {
+  const text = metricsText({ status: 'ok', storage: { used: 1125899906842624, budget: 68719476736, reserve: 6871947673, dropped: 2 } })
+  t.ok(text.includes('# TYPE varanda_seeder_storage_used_bytes gauge\nvaranda_seeder_storage_used_bytes 1125899906842624\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_storage_budget_bytes gauge\nvaranda_seeder_storage_budget_bytes 68719476736\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_storage_reserve_bytes gauge\nvaranda_seeder_storage_reserve_bytes 6871947673\n'))
+  t.ok(text.includes('# TYPE varanda_seeder_storage_dropped_members gauge\nvaranda_seeder_storage_dropped_members 2\n'))
+  const none = metricsText({ status: 'ok' })
+  for (const name of ['storage_used_bytes', 'storage_budget_bytes', 'storage_reserve_bytes', 'storage_dropped_members']) {
+    t.ok(none.includes('\nvaranda_seeder_' + name + ' 0\n'), name + ' prints 0 without stats().storage')
+  }
+  const bad = metricsText({ status: 'ok', storage: { used: NaN, budget: Infinity } })
+  t.ok(bad.includes('\nvaranda_seeder_storage_used_bytes 0\n'), 'a non-finite value prints 0')
+  t.ok(bad.includes('\nvaranda_seeder_storage_budget_bytes 0\n'), 'an infinite value prints 0')
 })
 
 test('seed list: group cores are indented under their diary, peer text through safe', (t) => {

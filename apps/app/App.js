@@ -130,6 +130,8 @@ import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
 import { DeviceOffNote } from './src/ui/DeviceOffNote'
+import { StorageFullNote } from './src/ui/StorageFullNote'
+import { storageFullShown } from './src/syncSignals'
 import { deviceMemberOf, deviceStep, deviceStore, notePasskeyUnlock, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
 import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
@@ -3848,6 +3850,7 @@ function Member () {
     // The invite note sits above the other notes, so it takes the top inset on
     // Diário and the note under it does not.
     const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
+    const storageNoteShown = storageFullShown({ online: node.online, signals: node.signals })
     const h = screenHandlers.current.update({
       handleStartReply: startReply,
       handleStartQuote: startQuote,
@@ -4197,16 +4200,19 @@ function Member () {
           {deviceOffShown
             ? <DeviceOffNote onReconnect={reconnectThisDevice} inset={tab === 'diario' && node.online !== false && scheduledDeletion === null} />
             : null}
+          {storageNoteShown
+            ? <StorageFullNote inset={tab === 'diario' && !deviceOffShown && scheduledDeletion === null} />
+            : null}
           {inviteNoteShown
-            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null} />
+            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null} />
             : null}
           {updateReady && !updateDismissed
-            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
+            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} />
             : installCardOpen && install.card !== 'none'
-              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
               : install.note !== 'none'
-                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
-                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
+                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} />
+                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
         </Animated.View>
         <TabBarShown.Provider value={!barsHidden}>
           <ScreenCovered.Provider value={covered}>

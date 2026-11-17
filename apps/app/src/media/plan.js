@@ -7,7 +7,7 @@ export const MAX_MEDIA_PER_POST = 10
 // Photos per chat message. DMs and groups stay at four: MAX_GROUP_MEDIA and
 // the DM inner body budget, which were measured for four items.
 export const MAX_MEDIA_PER_MESSAGE = 4
-export const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+export const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 export const MAX_MEDIA_DIMENSION = 16384
 export const MAX_IMAGE_SIDE = 2048
 export const MAX_GIF_BYTES = 8 * 1024 * 1024
