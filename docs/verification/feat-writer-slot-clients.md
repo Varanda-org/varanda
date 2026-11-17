@@ -113,3 +113,4 @@ Confirmadas pela coordenação, sem mudança:
 
 - Leitura esparsa e limpeza no semeador: 8a-3.
 - `heldCatalogue` do nó core continua dando o catálogo sem esperar a dobra completa. Já era assim antes desta branch; esta rodada não muda isso.
+- A troca do escritor sem caixa de um grupo privado (`joinLoaded`, no `member.js` do core e no `member-ops.js` do navegador, o salto por `marked`) continua sem gravar o corte quando o diário já tem uma marca nele no mesmo corte ou abaixo. O caso corrigido para os escritores aposentados (uma marca que deixou o escritor vivo porque a reserva estava cheia) continua possível ali, mas só depois de gastas as 16 liberações.
