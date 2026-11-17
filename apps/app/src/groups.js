@@ -258,7 +258,10 @@ export function slotReturn (slots) {
   return rooms.some((n) => n === 0) ? 'final' : 'returns'
 }
 
-const SLOT_RETURNS_TEXT = 'Desconectar um aparelho antigo em Aparelhos conectados devolve a vaga.'
+// The way to the screen, as Ajustes lists it (DEVICES_TITLE in devices.js;
+// the test holds the two together).
+const DEVICES_PATH = 'Ajustes, Aparelhos conectados'
+const SLOT_RETURNS_TEXT = 'Desconectar um aparelho antigo em ' + DEVICES_PATH + ', devolve a vaga.'
 const SLOT_FINAL_TEXT = 'desconectar um aparelho não devolve mais a vaga.'
 
 function slotPlace (where) {
@@ -287,7 +290,7 @@ export function slotFullText (slots, where = 'grupo') {
   const r = slotReturn(full)
   if (full.length === 0 || r === 'legacy') return null
   const head = 'Sua conta já usa as 8 vagas de aparelho ' + slotPlace(where)
-  return r === 'final' ? head + ', e aqui ' + SLOT_FINAL_TEXT : head + '. Desconecte um aparelho antigo em Aparelhos conectados para liberar uma vaga.'
+  return r === 'final' ? head + ', e aqui ' + SLOT_FINAL_TEXT : head + '. Desconecte um aparelho antigo em ' + DEVICES_PATH + ', para liberar uma vaga.'
 }
 
 const FULL_REFUSALS = Object.freeze(['limite do grupo atingido', 'limite da comunidade atingido'])
