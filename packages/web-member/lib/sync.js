@@ -3765,7 +3765,7 @@ async function syncRun ({
       lastAttempt: 0, // order of the last one (the fair queue)
       raw0: null, // the block 0 the gate accepted
       stub: false, // released with a box that does not match: block 0 alone is held
-      boxRefused: null, // { walked } refused for its box until its diary releases it (liftBoxRefused)
+      boxRefused: false, // refused for its box alone until its diary releases it (liftBoxRefused)
       gating: false,
       waiting: false, // a retry of a gate that got no answer is scheduled
       range: null,
@@ -4447,7 +4447,7 @@ async function syncRun ({
       markGroupChanged(ge.group)
       reconcileGroupDiaries()
       // Gated again only once its purge is done.
-      if (ge.boxRefused !== null && !ge.boxRefused.walked) liftBoxRefused(ge.diary)
+      if (ge.boxRefused) liftBoxRefused(ge.diary)
       evaluate()
     })
   }
@@ -5303,7 +5303,7 @@ async function syncRun ({
     // holds it, below; a diary it does not hold refuses it now, as before,
     // and the diary's arrival or growth tries it again (liftBoxRefused).
     const stub = boxMismatch(probe.raw, ge.key, ge.group, vis)
-    if (stub && openBinding(ge.diary) === null) return refuseBox(ge, false, false)
+    if (stub && openBinding(ge.diary) === null) return refuseBox(ge, false)
     if (ge.key === ge.group) noteRootVisibility(ge.group, rootVisibilityOf(probe.raw, ge.key))
     const proof = await proveGroupJoin(l, ge, timeout)
     if (ge.state !== 'pending' || ending) return
@@ -5316,7 +5316,7 @@ async function syncRun ({
     if (stub) {
       const released = await heldRelease(ge.diary, ge.group, ge.key)
       if (ge.state !== 'pending' || ending) return
-      if (!released) return refuseBox(ge, true, false)
+      if (!released) return refuseBox(ge, false)
     }
     if (ge.key !== ge.group) {
       // The earliest join the held binding diaries show, for the candidate
@@ -5368,20 +5368,21 @@ async function syncRun ({
     const now = rootVis.get(ge.group) || null
     if (!stub && now !== vis && boxMismatch(probe.raw, ge.key, ge.group, now)) {
       ge.core = core
-      return refuseBox(ge, false, !ge.preStored)
+      return refuseBox(ge, !ge.preStored)
     }
     watchGroupEntry(ge, core)
   }
 
   // A writer refused for a box that does not match, kept in groupCores
-  // (failed) for liftBoxRefused under the diary its block 0 names.
-  // `walked`: the gate found no release in that diary as held, so only its
-  // growth tries the writer again.
-  function refuseBox (ge, walked, purge) {
+  // (failed) for liftBoxRefused under the diary its block 0 names. Every
+  // such refusal is followed by one lift, once the entry is failed (here,
+  // or when its purge is done): the diary may have grown between the gate's
+  // read of its walk and this refusal, and that growth found nothing to lift.
+  function refuseBox (ge, purge) {
     if (ge.state === 'failing' || ge.state === 'failed') return
-    ge.boxRefused = { walked }
+    ge.boxRefused = true
     failGroupEntry(ge, 'header-invalid', { purge })
-    if (!walked) liftBoxRefused(ge.diary)
+    liftBoxRefused(ge.diary)
   }
 
   // Whether the slot walk of binding diary d, as this run holds it, gives
@@ -5409,7 +5410,7 @@ async function syncRun ({
   // awaits. One read of d at a time; growth meanwhile reads it again.
   function liftBoxRefused (d) {
     if (ending) return
-    const refused = () => [...groupCores.values()].filter((ge) => ge.boxRefused !== null && ge.diary === d && ge.state === 'failed')
+    const refused = () => [...groupCores.values()].filter((ge) => ge.boxRefused && ge.diary === d && ge.state === 'failed')
     if (refused().length === 0) return
     const known = boxLifts.get(d)
     if (known !== undefined) {
@@ -5459,7 +5460,7 @@ async function syncRun ({
     for (const ge of [...groupCores.values()]) {
       if (ge.group !== group || ge.key === group || ge.raw0 === null || ge.stub) continue
       if (ge.state !== 'regate' && ge.state !== 'active') continue
-      if (boxMismatch(ge.raw0, ge.key, group, visibility)) refuseBox(ge, false, !ge.preStored)
+      if (boxMismatch(ge.raw0, ge.key, group, visibility)) refuseBox(ge, !ge.preStored)
     }
   }
 

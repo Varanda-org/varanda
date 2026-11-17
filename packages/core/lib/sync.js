@@ -630,9 +630,9 @@ async function runSync ({
   const provenLater = createMemo(gateLimit) // 'group:key' -> verified diary whose cap its proven join lost
   const joinCache = new Map() // binding diary -> { core, length, joins } read for the per-diary cap
   const failedWriters = createMemo(gateLimit) // 'group:key' accepted, then failed (fork, quota): not gated again
-  // 'group:key' -> { group, key, diary, walked } refused for a box that does
-  // not match its root's visibility, gated again once the walk of its diary
-  // as held here releases it (liftBoxRefused).
+  // 'group:key' -> { group, key, diary } refused for a box that does not
+  // match its root's visibility (and for nothing else), gated again once the
+  // walk of its diary as held here releases it (liftBoxRefused).
   const boxRefused = createMemo(gateLimit)
   const boxLifts = new Map() // binding diary -> { again } while liftBoxRefused reads it
   // Foreign writer key -> { group, diary } of a writer core on disk that
@@ -2810,7 +2810,8 @@ async function runSync ({
   //     refuses the writer only while the walk of its binding diary, as held
   //     here, does not release it (cut 0): that diary's growth, or its being
   //     held at all, gates it again (liftBoxRefused), and a released one is
-  //     held as a stub, block 0 alone, as the fold reads it.
+  //     held as a stub, block 0 alone, as the fold reads it. Only that box
+  //     refusal is lifted: a writer refused for its member stays refused.
   // I2. A verdict that depends only on the page item (diary, seq, length)
   //     discards THAT hint: remembered per (group, key, diary, seq), charged
   //     once to the listing seeder, then a rescan that skips that seeder for
@@ -3471,6 +3472,8 @@ async function runSync ({
       // ('wrong-diary') before anything about that diary is believed.
       const reason = groupHeaderVerdict(raw0, e.key, e.group, e.diary, roleOf(e.group))
       if (reason) return fail(reason, ownVerdict(reason))
+      // `box`: never charged to the seeder; `boxless`: refused for its box
+      // alone, which its diary's release lifts (a member refusal never is).
       if (memberMismatch(raw0, e.key, e.group, roleOf(e.group))) return { ...(await fail('header-invalid', true)), box: true }
       // Protecting an honest seeder that has not served the root yet (it
       // checks a writer's `box` only once it knows the root): a box that
@@ -3483,7 +3486,7 @@ async function runSync ({
       // this node holds it, below; a diary it does not hold refuses it now,
       // as before, and its growth tries it again (liftBoxRefused).
       const stub = boxMismatch(raw0, e.key, e.group, vis)
-      if (stub && (localVerdict(e.diary) || !(await bindingHeldHere(e.diary)))) return { ...(await fail('header-invalid', true)), box: true }
+      if (stub && (localVerdict(e.diary) || !(await bindingHeldHere(e.diary)))) return { ...(await fail('header-invalid', true)), box: true, boxless: true }
       if (openHook && writerHere) await openHook(e.diary) // test-only
       if (isBlockedKey(e.diary)) return fail('blocked', false, true)
       if (forkedDiaries.has(e.diary)) return fail('fork', false, true)
@@ -3547,7 +3550,7 @@ async function runSync ({
       const verdict = diaryVerdict(e, diaryRaws)
       if (verdict) return fail(verdict)
       if (stub && !(await heldRelease(e.diary === ownHex ? diary : held, e.group, e.key))) {
-        return { ...(await fail('header-invalid', true)), box: true, walked: true }
+        return { ...(await fail('header-invalid', true)), box: true, boxless: true }
       }
       return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis, stub }
     } catch (err) {
@@ -3588,10 +3591,11 @@ async function runSync ({
   }
 
   // A writer refused for a box that does not match, kept for liftBoxRefused
-  // under the diary its block 0 names. `walked`: the gate found no release
-  // in that diary as held, so only its growth tries the writer again.
-  function noteBoxRefused (e, walked) {
-    boxRefused.add(groupKey(e.group, e.key), { group: e.group, key: e.key, diary: e.diary, walked })
+  // under the diary its block 0 names. Every such refusal is followed by one
+  // lift: the diary may have grown between the gate's read of its walk and
+  // this note, and that growth found nothing to lift.
+  function noteBoxRefused (e) {
+    boxRefused.add(groupKey(e.group, e.key), { group: e.group, key: e.key, diary: e.diary })
   }
 
   // The writers refused for their box whose diary d, as held here, now
@@ -3621,8 +3625,9 @@ async function runSync ({
     ;(async () => {
       do {
         run.again = false
+        // A diary the gate would not read refuses the writer again: no lift.
         const core = heldBinding(d, null)
-        if (core === null || core.fork !== 0) break
+        if (core === null || core.fork !== 0 || localVerdict(d)) break
         const entries = await readAll(core)
         if (ending) break
         for (const [gk, b] of [...boxRefused.entries()]) {
@@ -3746,7 +3751,7 @@ async function runSync ({
       if (now !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, now)) {
         const writerHere = r.core !== null && r.core !== undefined
         await closeOpened()
-        r = { reason: 'header-invalid', own: true, box: true, writerHere }
+        r = { reason: 'header-invalid', own: true, box: true, boxless: true, writerHere }
       }
     }
     if (r.reason) {
@@ -3813,10 +3818,10 @@ async function runSync ({
           emit({ event: 'group-skipped', key: e.key, reason: r.reason })
           e.state = 'failed'
           refused.add(groupKey(e.group, e.key))
-          if (r.box === true) noteBoxRefused(e, r.walked === true)
+          if (r.boxless === true) noteBoxRefused(e)
           dropGroupCore(e.key)
           if ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group') badHint(e.peer, e.hint)
-          if (r.box === true && r.walked !== true) liftBoxRefused(e.diary)
+          if (r.boxless === true) liftBoxRefused(e.diary)
           return
         }
         // A verdict about the hinted diary judges the hint alone (I2).
@@ -3826,7 +3831,7 @@ async function runSync ({
       // Purged only when it is a stored writer of this group that is now
       // condemned; a quota failure keeps its blocks.
       e.accepted = r.writerHere === true
-      if (r.box === true) noteBoxRefused(e, r.walked === true)
+      if (r.boxless === true) noteBoxRefused(e)
       failGroupCore(e, r.reason, { purge: e.accepted && condemning(r.reason) })
       return
     }
@@ -4479,7 +4484,7 @@ async function runSync ({
       failedWriters.add(gk)
       dropGroupCore(e.key)
       const box = boxRefused.value(gk)
-      if (box && !box.walked) liftBoxRefused(box.diary)
+      if (box) liftBoxRefused(box.diary)
     }
     if (!purge) {
       e.state = 'failed'
