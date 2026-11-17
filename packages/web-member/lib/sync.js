@@ -1641,6 +1641,7 @@ async function syncRun ({
   const restingCores = new Map() // stored group core not synced this run -> { group, diary }
   const listedAtStart = new Set() // kv groupReplicas keys when the run started
   const joinCache = new Map() // binding diary -> { core, length, joins } (diaryJoins)
+  const boxLifts = new Map() // binding diary -> { again } while liftBoxRefused reads it
   const bindingCerts = new Map() // binding diary -> block 0 its accepted core was gated with (kv groupCerts)
   // Diaries the follow path refused or purged as 'revoked-issuer' this run:
   // their replica may be gone, their group cores still have to go.
@@ -2445,9 +2446,12 @@ async function syncRun ({
         }
         // An inventory sent or answered before the scan finished saw 0.
         if (entry.state === 'active') onScanned(entry, present)
+        liftBoxRefused(entry.key)
       },
       onGrow: (length) => {
-        if (entry.core === core) onGrow(entry, length)
+        if (entry.core !== core) return
+        liftBoxRefused(entry.key)
+        onGrow(entry, length)
       },
       onNewest: (length) => {
         if (entry.core === core) onNewest(entry, length)
@@ -3760,6 +3764,8 @@ async function syncRun ({
       attempts: 0, // gates started this run (MAX_GROUP_GATE_ATTEMPTS)
       lastAttempt: 0, // order of the last one (the fair queue)
       raw0: null, // the block 0 the gate accepted
+      stub: false, // released with a box that does not match: block 0 alone is held
+      boxRefused: null, // { walked } refused for its box until its diary releases it (liftBoxRefused)
       gating: false,
       waiting: false, // a retry of a gate that got no answer is scheduled
       range: null,
@@ -3933,10 +3939,13 @@ async function syncRun ({
         }
       } else if (rootOnly(s.group)) {
         s.rest = true
-      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null) || memberMismatch(s.raw, s.key, s.group)) {
-        // A writer whose box does not match its root's visibility, or whose
-        // member does not match its root's kind, as at the gate.
+      } else if (memberMismatch(s.raw, s.key, s.group)) {
+        // A writer whose member does not match its root's kind, as at the gate.
         s.invalid = true
+      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null)) {
+        // One whose box does not match its root's visibility: judged below
+        // by the walk of its stored binding diary, as at the gate.
+        s.boxless = true
       }
     }
     const live = []
@@ -3953,6 +3962,12 @@ async function syncRun ({
       // block is not stored yet: a restart never frees it from its creator.
       s.rootBound = s.key === s.group && (boundRoots.has(s.key) || storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.group).proven)
       const unboundRoot = s.key === s.group && !s.rootBound
+      // Kept as a stub only while that diary, as stored, releases it (cut
+      // 0): the fold then never awaits it. Otherwise it goes, as before.
+      if (s.boxless === true) {
+        if (diaryWriterCut(await bindingEntries(s.diary, bindings), s.group, s.key) === 0) s.stub = true
+        else s.invalid = true
+      }
       if (s.invalid === true) {
         await s.core.close().catch(noop)
         if (!ending) purgeGroupKey(s.key, 'header-invalid')
@@ -3996,6 +4011,7 @@ async function syncRun ({
       }
       const ge = newGroupEntry(x.key, x.group, x.diary, x.seq)
       ge.raw0 = x.raw
+      ge.stub = x.stub === true
       ge.state = 'active'
       markGroupBound(ge.diary)
       // Stored before this run: a late box mismatch keeps its blocks (I4).
@@ -4125,12 +4141,14 @@ async function syncRun ({
       onReady: () => {
         if (gd.core !== core) return
         judge()
+        liftBoxRefused(gd.key)
         evaluate()
       },
       // Joins and names live there: the groups it binds read anew.
       onGrow: () => {
         if (gd.core !== core) return
         judge()
+        liftBoxRefused(gd.key)
         for (const ge of groupCores.values()) {
           if (ge.diary !== gd.key || ge.state !== 'active') continue
           markGroupChanged(ge.group)
@@ -4428,6 +4446,8 @@ async function syncRun ({
       ge.state = 'failed'
       markGroupChanged(ge.group)
       reconcileGroupDiaries()
+      // Gated again only once its purge is done.
+      if (ge.boxRefused !== null && !ge.boxRefused.walked) liftBoxRefused(ge.diary)
       evaluate()
     })
   }
@@ -4510,7 +4530,8 @@ async function syncRun ({
       if (ended || (ge.state !== 'active' && ge.state !== 'regate')) return
       failGroupEntry(ge, 'fork', { purge: true })
     })
-    ge.range = core.download({ start: 0, end: -1 })
+    // A stub's block 0 is all the fold reads of it: nothing past it is fetched.
+    ge.range = core.download(ge.stub ? { start: 0, end: 1 } : { start: 0, end: -1 })
     ge.stopGrow = watchContiguous(core, () => onGroupGrow(ge))
     if (checkGroupQuota(ge)) return
     const l = seederLink()
@@ -5272,9 +5293,17 @@ async function syncRun ({
     if (ge.state !== 'pending' || ending) return
     if (probe === null) return gateUnanswered(ge)
     const vis = rootVis.get(ge.group) || null
-    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group), vis, writerKind(ge.group))
+    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group), null, writerKind(ge.group))
     if (verdict === 'not-community') return refuseNotCommunity(ge)
     if (verdict !== null) return failGroupEntry(ge, verdict, { purge: false })
+    // A box that does not match the root's visibility refuses the writer
+    // unless its binding diary released it (a replaced boxless writer): the
+    // fold then never awaits it, and it is held as a stub, block 0 alone, as
+    // seeders hold it. That release is read from the diary as this run
+    // holds it, below; a diary it does not hold refuses it now, as before,
+    // and the diary's arrival or growth tries it again (liftBoxRefused).
+    const stub = boxMismatch(probe.raw, ge.key, ge.group, vis)
+    if (stub && openBinding(ge.diary) === null) return refuseBox(ge, false, false)
     if (ge.key === ge.group) noteRootVisibility(ge.group, rootVisibilityOf(probe.raw, ge.key))
     const proof = await proveGroupJoin(l, ge, timeout)
     if (ge.state !== 'pending' || ending) return
@@ -5284,6 +5313,11 @@ async function syncRun ({
     if (isBlockedKey(ge.diary)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (isBlockedKey(ge.group)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (overQuota(probe)) return failGroupEntry(ge, 'quota', { purge: false })
+    if (stub) {
+      const released = await heldRelease(ge.diary, ge.group, ge.key)
+      if (ge.state !== 'pending' || ending) return
+      if (!released) return refuseBox(ge, true, false)
+    }
     if (ge.key !== ge.group) {
       // The earliest join the held binding diaries show, for the candidate
       // and every held writer: a later duplicate join named by the seeder
@@ -5323,13 +5357,87 @@ async function syncRun ({
       return
     }
     ge.raw0 = probe.raw
+    ge.stub = stub
     ge.state = 'regate'
-    watchGroupEntry(ge, core)
     // The root's visibility may have been learned while this gate ran, and
     // recheckGroupBoxes skips a pending writer: its box is checked against
-    // the visibility known now.
+    // the visibility known now, before the core is replicated. A core closed
+    // while its channel is still opening leaves that channel open on the link
+    // (hypercore 10), and every later core of the key there gets no peer:
+    // liftBoxRefused could not fetch it as a stub on this link.
     const now = rootVis.get(ge.group) || null
-    if (now !== vis && boxMismatch(probe.raw, ge.key, ge.group, now)) failGroupEntry(ge, 'header-invalid', { purge: !ge.preStored })
+    if (!stub && now !== vis && boxMismatch(probe.raw, ge.key, ge.group, now)) {
+      ge.core = core
+      return refuseBox(ge, false, !ge.preStored)
+    }
+    watchGroupEntry(ge, core)
+  }
+
+  // A writer refused for a box that does not match, kept in groupCores
+  // (failed) for liftBoxRefused under the diary its block 0 names.
+  // `walked`: the gate found no release in that diary as held, so only its
+  // growth tries the writer again.
+  function refuseBox (ge, walked, purge) {
+    if (ge.state === 'failing' || ge.state === 'failed') return
+    ge.boxRefused = { walked }
+    failGroupEntry(ge, 'header-invalid', { purge })
+    if (!walked) liftBoxRefused(ge.diary)
+  }
+
+  // Whether the slot walk of binding diary d, as this run holds it, gives
+  // writer `key` of `group` cut 0 (released, or kept at cut 0 past the
+  // release cap): the same records and rule as the fold's (group.js
+  // bindCores), which then never awaits a writer whose box does not match.
+  async function heldRelease (d, group, key) {
+    return diaryWriterCut(await heldEntries(d), group, key) === 0
+  }
+
+  // Binding diary d's entries as this run holds it open, else null.
+  async function heldEntries (d) {
+    const core = openBinding(d)
+    if (core === null || core.fork !== 0) return null
+    try {
+      return await store.readAll(core)
+    } catch {
+      return null
+    }
+  }
+
+  // The writers refused for their box whose diary d, as this run holds it,
+  // now releases them are gated again: refused while that diary was not
+  // held or did not show the release, they are a stub the fold never
+  // awaits. One read of d at a time; growth meanwhile reads it again.
+  function liftBoxRefused (d) {
+    if (ending) return
+    const refused = () => [...groupCores.values()].filter((ge) => ge.boxRefused !== null && ge.diary === d && ge.state === 'failed')
+    if (refused().length === 0) return
+    const known = boxLifts.get(d)
+    if (known !== undefined) {
+      known.again = true
+      return
+    }
+    const run = { again: false }
+    boxLifts.set(d, run)
+    const done = () => {
+      boxLifts.delete(d)
+      pumpGroupGates()
+      evaluate()
+    }
+    track((async () => {
+      for (;;) {
+        run.again = false
+        const entries = await heldEntries(d)
+        for (const ge of refused()) {
+          if (diaryWriterCut(entries, ge.group, ge.key) !== 0) continue
+          if (ending || groupCores.get(ge.key) !== ge) continue
+          groupCores.delete(ge.key)
+          const g = groups.get(ge.group)
+          const it = g === undefined ? undefined : g.items.get(ge.key)
+          if (it !== undefined) noteGroupItem(g, it)
+        }
+        if (!run.again || ending) break
+      }
+    })(), done, done)
   }
 
   // Root G's verified visibility, first learned: a writer gated before it
@@ -5344,12 +5452,14 @@ async function syncRun ({
   // accepted writer of G whose gated block 0 does not match the visibility
   // goes with 'header-invalid' (a pending one is checked when its gate
   // lands); a core stored before this run keeps its blocks, as for any
-  // writer its own data refuses.
+  // writer its own data refuses. A stub was gated knowing the mismatch; any
+  // other writer is gated again as one once it is gone, if its diary
+  // released it (liftBoxRefused).
   function recheckGroupBoxes (group, visibility) {
     for (const ge of [...groupCores.values()]) {
-      if (ge.group !== group || ge.key === group || ge.raw0 === null) continue
+      if (ge.group !== group || ge.key === group || ge.raw0 === null || ge.stub) continue
       if (ge.state !== 'regate' && ge.state !== 'active') continue
-      if (boxMismatch(ge.raw0, ge.key, group, visibility)) failGroupEntry(ge, 'header-invalid', { purge: !ge.preStored })
+      if (boxMismatch(ge.raw0, ge.key, group, visibility)) refuseBox(ge, false, !ge.preStored)
     }
   }
 
@@ -5386,12 +5496,15 @@ async function syncRun ({
         unmet.push(ge.key + ':0/' + advertised)
         continue
       }
-      const want = Math.max(ge.core.length, advertised)
+      // A stub is held once its block 0 is.
+      const want = ge.stub ? 1 : Math.max(ge.core.length, advertised)
       const ours = ge.core.contiguousLength
       // A copy past the advertised prefix with a hole (a writer a seeder keeps
       // sparse) is met once its peers' advertised blocks are all held.
-      if (ours < want && (ours < advertised || !sparseMet(ge))) unmet.push(ge.key + ':' + ours + '/' + want)
+      if (ours < want && (ge.stub || ours < advertised || !sparseMet(ge))) unmet.push(ge.key + ':' + ours + '/' + want)
     }
+    // A writer refused for its box whose diary is being read for its release.
+    for (const d of boxLifts.keys()) unmet.push(d + ':liberação')
     // A community's catalogue scan in flight may still add roots to page.
     for (const [c, st] of catalogueScans) if (st.running || st.again) unmet.push(c + ':catalogue')
     // A binding diary is a goal from ensureGroupDiary on: still opening,
@@ -5777,6 +5890,7 @@ async function syncRun ({
         onGrow: (length) => {
           send({ type: 'have', key: ownHex, length })
           if (cert === null) recoverCert()
+          liftBoxRefused(ownHex)
           checkOwnSync()
           evaluate()
         },
