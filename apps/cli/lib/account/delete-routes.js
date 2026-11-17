@@ -1,7 +1,8 @@
 'use strict'
 
 const nodeCrypto = require('node:crypto')
-const { verifyAccountLink } = require('@varanda/core/lib/account-link')
+const { verifyAccountLink, isUsername } = require('@varanda/core/lib/account-link')
+const { isBrMobile } = require('@varanda/core/lib/phone')
 const { verifyAssertion, isAssertion } = require('./webauthn')
 const { countedKeys } = require('./passkey-store')
 const { ownsLivePage: ownsLive } = require('./live-page')
@@ -62,13 +63,36 @@ const { ownsLivePage: ownsLive } = require('./live-page')
 //     and POST /account/delete/cancel/finish { member, nonce, signature } ->
 //     { cancelled }: the account-link proof at phase 'cancel' over the nonce
 //     and the current @nome. `cancelled` is false when nothing was waiting.
-//   - runScheduled() (the deletion sweep calls it every hour) runs each
-//     deletion whose date came. A member who meanwhile came to own a live
-//     page is skipped and retried at the next sweep.
+//   - POST /account/delete/sms/send { username, phone } -> { sent: true }
+//     and POST /account/delete/sms/check { username, phone, code } ->
+//     { requested: true }: Excluir conta sem a passkey. No diary proof: the
+//     @nome and the number the member verified (E.164), then the code the
+//     provider texted to that number (./phone-routes.js deletionCodes, which
+//     compares the typed number's index with the live, verified row and
+//     never unseals one). send answers { sent: true } for an unknown @nome,
+//     a page, a deleted account, a number that is not the member's, a
+//     waiting deletion, a full window and a resend alike, and the code goes
+//     after the answer; check answers 'codigo-invalido' for each of them,
+//     and for a provider failure, at SMS_CHECK_FLOOR_MS from the request's
+//     start. A correct code (the @nome and the number compared again first)
+//     only files a request in `requests` (./deletion-requests.js) and
+//     schedules nothing: the operator schedules with `varanda account
+//     delete` once the owner writes to contato@varanda.app, and the wait
+//     starts then. A code proves the line, not the person holding it, so
+//     the operator talks to the owner first. Limits, none of them read by
+//     another route: the global daily ceiling of deletion codes (a full one
+//     skips the send, same answer), 3 codes a day per (member, number) and
+//     3 a day per number that matched, 60 s between sends, 3 attempts and
+//     10 minutes per code, and smsCheckLimit per member on a check whose
+//     number matched the pending code.
+//   - runScheduled() (the deletion sweep calls it every hour) drops the
+//     requests older than 30 days and runs each deletion whose date came. A
+//     member who meanwhile came to own a live page is skipped and retried at
+//     the next sweep.
 //
 // The residual of the wait: anyone holding an unlocked session can schedule
-// a deletion, which the person sees on every device and can cancel for
-// WAIT_MS. A finish for a key already deleted answers { deleted } as a
+// a deletion, which the person sees on a signed-in device once it reads the
+// account status and can cancel for WAIT_MS. A finish for a key already deleted answers { deleted } as a
 // success, so a retry after an uncertain answer ends well. Logs carry only
 // { event: 'exclusao', reason }: never a key, a name or an address.
 
@@ -79,6 +103,11 @@ const WAIT_MS = 7 * 24 * 3600 * 1000
 const HEX64_RE = /^[0-9a-f]{64}$/
 const HEX128_RE = /^[0-9a-f]{128}$/
 const NONCE_RE = /^[A-Za-z0-9_-]{43}$/
+const CODE_RE = /^[0-9]{6}$/
+// Every refusal of the SMS check that depends on the account leaves at this
+// time from the request's start, so the answer is the same whether or not
+// the number matched or the provider was asked.
+const SMS_CHECK_FLOOR_MS = 3000
 
 // createDeleteRoutes({ accounts, moderation, pagesStore, passkeys, recovery,
 // purge, isBlocked, notify, rpId, origins, association, now, log,
@@ -89,8 +118,11 @@ const NONCE_RE = /^[A-Za-z0-9_-]{43}$/
 // be recorded). `recovery` (an openRecoveryStore or null) says which extra
 // passkey keys still count (passkey-store countedKeys): a key whose recovery
 // entry is gone neither shows in `passkeys` nor deletes at once. `notify(member)`
-// sends the push notice of a new schedule.
-function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, passkeys = null, recovery = null, purge = async () => ({ pending: 0 }), isBlocked = () => false, notify = () => {}, beforeDelete = async () => {}, rpId, origins = [], association, now = Date.now, log = () => {}, memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over }) {
+// sends the push notice of a new schedule. `codes` is the phone routes'
+// deletionCodes and `requests` an openDeletionRequests (either null: the SMS
+// routes answer 'indisponivel'); `smsCheckLimit` is the per-member window of
+// the SMS check.
+function createDeleteRoutes ({ codes = null, requests = null, smsCheckLimit = () => true, smsCheckFloorMs = SMS_CHECK_FLOOR_MS, accounts, moderation = null, pagesStore = null, passkeys = null, recovery = null, purge = async () => ({ pending: 0 }), isBlocked = () => false, notify = () => {}, beforeDelete = async () => {}, rpId, origins = [], association, now = Date.now, log = () => {}, memberLimit, send, refuse, fromStore, checkPost, readJsonBody, over }) {
   // nonce -> { member, username, kind, expiresAt }, insertion order = age.
   const nonces = new Map()
 
@@ -250,6 +282,97 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
     send(res, 200, { scheduled: out.runAt })
   }
 
+  // Excluir conta sem a passkey: the @nome and the verified number, then the
+  // code texted to it. An unknown @nome, a page, a deleted account, a number
+  // that is not the member's live verified one, a full window and a resend
+  // all get the same answers; the code is sent after the answer went.
+  function smsUsable () {
+    usable()
+    // An unreadable request file would answer a paid code with indisponivel.
+    if (moderation === null || codes === null || requests === null || !requests.available()) throw refuse('indisponivel')
+    codes.available()
+  }
+
+  function smsBody (body, keys) {
+    if (Object.keys(body).length !== keys.length || !keys.every((k) => Object.hasOwn(body, k))) throw refuse('pedido-invalido')
+    if (typeof body.username !== 'string') throw refuse('nome-invalido')
+    const raw = body.username.trim()
+    const name = (raw.startsWith('@') ? raw.slice(1) : raw).toLowerCase()
+    if (!isUsername(name)) throw refuse('nome-invalido')
+    if (!isBrMobile(body.phone)) throw refuse('telefone-invalido')
+    return name
+  }
+
+  // The current member holding `name`, or null (a page, a released name).
+  function memberFor (name) {
+    const found = accounts.lookup(name)
+    return found === null || found.kind === 'page' ? null : found.member
+  }
+
+  async function smsSend (req, res, body) {
+    const name = smsBody(body, ['username', 'phone'])
+    smsUsable()
+    // Every request pays for the index, so a match costs no extra time.
+    const index = codes.index(body.phone)
+    const member = memberFor(name)
+    send(res, 200, { sent: true })
+    if (member === null) return
+    // A deletion already waiting shows its date publicly: no code.
+    setImmediate(() => codes.send(member, body.phone, index, scheduled(member) !== null))
+  }
+
+  // The provider call ends before the floor; a short floor (tests) keeps the
+  // client's own deadline.
+  const smsProviderMs = smsCheckFloorMs >= 1000 ? smsCheckFloorMs - 500 : undefined
+
+  async function smsCheck (req, res, body) {
+    const name = smsBody(body, ['username', 'phone', 'code'])
+    if (typeof body.code !== 'string' || !CODE_RE.test(body.code)) throw refuse('codigo-invalido')
+    smsUsable()
+    const index = codes.index(body.phone)
+    const deadline = Date.now() + smsCheckFloorMs
+    let p
+    let member
+    try {
+      member = memberFor(name)
+      if (member === null) throw refuse('codigo-invalido')
+      p = await codes.check(member, index, body.code, { admit: () => smsCheckLimit(member), timeoutMs: smsProviderMs })
+    } catch (err) {
+      const left = deadline - Date.now()
+      if (left > 0) await new Promise((resolve) => setTimeout(resolve, left))
+      throw err
+    }
+    // Past this point only the holder of the code gets here.
+    if (accounts.deletedAt(member) !== null) {
+      codes.drop(member, p)
+      throw refuse('conta-excluida')
+    }
+    // A rename or a new number between the send and now: the code no longer
+    // proves anything about this account. A store that cannot answer keeps
+    // the approved entry, so the same code can be retried.
+    const live = codes.matchesNow(member, p.index)
+    if (live === null) throw refuse('indisponivel')
+    if (memberFor(name) !== member || !live) {
+      codes.drop(member, p)
+      throw refuse('codigo-invalido')
+    }
+    if (ownsLivePage(member)) {
+      codes.drop(member, p)
+      throw refuse('paginas-ativas')
+    }
+    // A failed or uncertain write keeps the approved entry, so the same code
+    // retried files the request without asking the provider again.
+    try {
+      await requests.record(member)
+    } catch {
+      log({ event: 'exclusao', reason: 'pedido-sms-incerto' })
+      throw refuse('indisponivel')
+    }
+    codes.drop(member, p)
+    log({ event: 'exclusao', reason: 'pedido-sms' })
+    send(res, 200, { requested: true })
+  }
+
   async function cancelStart (req, res, body) {
     usable()
     const member = memberParam(body.member)
@@ -286,6 +409,15 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
     running = (async () => {
       let ran = 0
       let skipped = 0
+      // Every sweep pass, so a request leaves the file after 30 days even
+      // when nothing else writes it.
+      if (requests !== null) {
+        try {
+          await requests.prune()
+        } catch {
+          log({ event: 'exclusao', reason: 'pedidos-poda-falhou' })
+        }
+      }
       if (passkeys === null || !passkeys.available() || moderation === null) return { ran, skipped }
       let due = []
       try {
@@ -321,7 +453,9 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
     '/account/delete/start': start,
     '/account/delete/finish': finish,
     '/account/delete/cancel/start': cancelStart,
-    '/account/delete/cancel/finish': cancelFinish
+    '/account/delete/cancel/finish': cancelFinish,
+    '/account/delete/sms/send': smsSend,
+    '/account/delete/sms/check': smsCheck
   }
 
   function owns (pathname) {
