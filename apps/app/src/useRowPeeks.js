@@ -3,7 +3,7 @@
 // list does: the seeder index hints, then one node-verified diary.peek per key
 // (rowPeek.js, peerProfile.js). Only while `enabled`; the core node refuses
 // the peek and a row keeps its unnamed text. `keys` are the first rows on
-// screen, newest asks first; at most PEEK_WINDOW of them are asked.
+// screen, newest asks first; only the first `window` (default PEEK_WINDOW) are asked.
 
 import { useEffect, useRef } from 'react'
 import { useNode } from './node'
@@ -13,11 +13,11 @@ import { diaryPeekSlots } from './engagement'
 import { readPeerEntry } from './peerProfile'
 import { planRowPeeks, runRowPeeks } from './rowPeek'
 
-export function useRowPeeks (keys, enabled) {
+export function useRowPeeks (keys, enabled, window) {
   const node = useNode()
   const { profileOf, isPeeked, learnVerified, forgetVerified, peekScope } = useNames()
   const latest = useRef({})
-  latest.current = { keys, profileOf, isPeeked, learnVerified, forgetVerified, request: node.request, peekScope }
+  latest.current = { keys, window, profileOf, isPeeked, learnVerified, forgetVerified, request: node.request, peekScope }
   const tried = useRef(new Set())
   const run = useRef(0)
   const active = useRef(null)
@@ -35,7 +35,7 @@ export function useRowPeeks (keys, enabled) {
     const current = () => run.current === id && latest.current.peekScope === scope
     active.current = { run: id, scope }
     runRowPeeks({
-      plan: () => planRowPeeks({ peers: latest.current.keys, profileOf: latest.current.profileOf, isPeeked: latest.current.isPeeked, tried: tried.current, scope }),
+      plan: () => planRowPeeks({ peers: latest.current.keys, profileOf: latest.current.profileOf, isPeeked: latest.current.isPeeked, tried: tried.current, scope, window: latest.current.window }),
       tried: tried.current,
       scope,
       read: (peer) => readPeerEntry(peer, {

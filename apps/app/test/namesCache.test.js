@@ -210,25 +210,50 @@ test('names.js drops a peek from an older session scope', async (t) => {
   t.ok(line && line.includes('peekScope'), 'peekScope is in the context value')
 })
 
-test('fillFromPeek keeps a verified peek for what a profile.read answer left empty', async (t) => {
+test('fillFromPeek keeps a verified peek only for an answer with nothing at all', async (t) => {
   const { fillFromPeek } = await load()
   const peeked = { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }
   const bare = { name: null, username: null, bio: null, avatar: null, loaded: true }
-  t.alike(fillFromPeek(bare, peeked), { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }, 'an answer with nothing keeps the whole peek')
-  const named = { name: 'Padaria', username: null, bio: null, avatar: null, loaded: true }
-  t.is(fillFromPeek(named, peeked).name, 'Padaria', 'what the answer brought wins')
-  t.is(fillFromPeek(named, peeked).username, 'padaria', 'the empty @nome comes from the peek')
-  const full = { name: 'A', username: 'a_a', bio: 'b', avatar: AV2, loaded: true }
-  t.is(fillFromPeek(full, peeked), full, 'a complete answer is returned as is')
+  t.alike(fillFromPeek(bare, peeked), { name: 'Padaria do Lab', username: 'padaria', bio: 'pão', avatar: AV, loaded: true }, 'an empty answer keeps the whole peek')
+  const onlyUser = { ...bare, username: 'nova' }
+  t.is(fillFromPeek(onlyUser, peeked).username, 'nova', 'the @nome the answer brought wins')
+  t.is(fillFromPeek(onlyUser, peeked).name, 'Padaria do Lab', 'and the profile group still fills')
+  const renamed = { name: 'Novo', username: null, bio: null, avatar: null, loaded: true }
+  t.is(fillFromPeek(renamed, peeked), renamed, 'a newer profile without bio and photo keeps those nulls, and no revoked @nome comes back')
+  t.is(fillFromPeek({ ...bare, bio: 'x' }, peeked).name, null, 'any profile field makes the answer the newest record')
   t.is(fillFromPeek(bare, undefined), bare, 'no kept peek, nothing to fill')
 })
 
-test('names.js keeps a peek through a profile.read answer without a name', async (t) => {
+test('settleProfile keeps the peek only while it filled the answer', async (t) => {
+  const { settleProfile } = await load()
+  const peeked = { name: 'Padaria', username: 'padaria', bio: null, avatar: null, loaded: true }
+  const bare = { name: null, username: null, bio: null, avatar: null, loaded: true }
+  const a = settleProfile(bare, peeked)
+  t.is(a.entry.name, 'Padaria')
+  t.is(a.peek, peeked, 'the peek stays for the next answer')
+  const named = { ...bare, name: 'Novo' }
+  const b = settleProfile(named, peeked)
+  t.is(b.entry, named)
+  t.is(b.peek, undefined, 'a newer profile drops it')
+  t.is(settleProfile(bare, undefined).peek, undefined)
+})
+
+test('keptProfile is what a save or a rename leaves as the verified entry', async (t) => {
+  const { keptProfile, peekedEntry } = await load()
+  t.is(keptProfile(null, 'padaria'), null, 'no known name, nothing kept')
+  t.is(keptProfile({ name: '', bio: '', avatar: null }, 'x'), null)
+  const kept = keptProfile({ name: 'Padaria', bio: 'pão', avatar: AV }, 'novo_nome')
+  t.alike(kept, { name: 'Padaria', bio: 'pão', avatar: AV, username: 'novo_nome' }, 'the new @nome replaces the old one')
+  t.alike(peekedEntry(kept), { name: 'Padaria', username: 'novo_nome', bio: 'pão', avatar: peekedEntry(kept).avatar, loaded: true })
+  t.is(keptProfile({ name: 'P', bio: '', avatar: null }, undefined).username, null)
+})
+
+test('names.js settles a profile.read answer through settleProfile', async (t) => {
   const fs = require('fs')
   const path = require('path')
   const src = fs.readFileSync(path.join(__dirname, '../src/names.js'), 'utf8')
-  t.ok(src.includes('const filled = fillFromPeek(entry, peekedRef.current.get(key))'), 'a profile answer is filled from the kept peek')
-  t.ok(src.includes('if (filled === entry) peekedRef.current.delete(key)'), 'the peek is dropped only when the answer replaced it')
+  t.ok(src.includes('const settled = settleProfile(entry, peekedRef.current.get(key))'), 'the rule is the pure one')
+  t.ok(src.includes('if (settled.peek === undefined) peekedRef.current.delete(key)'), 'the peek is kept only while it filled the answer')
 })
 
 test('the Páginas screens name people through verified peeks, not seeds', async (t) => {
@@ -239,6 +264,9 @@ test('the Páginas screens name people through verified peeks, not seeds', async
   t.ok(paginas.includes('learnVerified([[author, entry]], scope)'), 'Páginas keeps the peeked name as a verified entry')
   t.absent(paginas.includes('learnMany'), 'and no longer seeds it (a seed does not survive "missing")')
   t.ok(read('NovaPagina.js').includes('learnVerified([[value.page,'), 'a created page is named from what the member wrote')
-  t.ok(read('PaginaAjustes.js').includes('useRowPeeks(peekKeys, hosted)'), 'Ajustes names the page and its roster')
+  const ajustes = read('PaginaAjustes.js')
+  t.ok(ajustes.includes('useRowPeeks(peekKeys, hosted, peekKeys.length)'), 'Ajustes names the page and every person on its roster')
+  t.is(ajustes.split('learnVerified([[page, kept]], peekScope)').length - 1, 2, 'a save and a rename replace the kept peek')
+  t.ok(read('NovaPagina.js').includes('{ name, username, bio }'), 'a created page keeps exactly what was sent')
   t.ok(read('Mensagens.js').includes('useRowPeeks(sortedPeers, unlocked && loaded)'), 'the page requests list names its senders')
 })

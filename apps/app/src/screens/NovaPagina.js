@@ -54,7 +54,7 @@ export default function NovaPagina ({ onBack, onCreated }) {
   // name it: Páginas and Ajustes would show it unnamed until reopened. Kept as
   // a verified entry, it also survives a profile.read that says "missing".
   const learnCreated = (value) => {
-    if (value && typeof value.page === 'string') learnVerified([[value.page, { name: name.trim(), username, bio: bio.trim() }]], peekScope)
+    if (value && typeof value.page === 'string') learnVerified([[value.page, { name, username, bio }]], peekScope)
   }
 
   const submit = async () => {

@@ -47,6 +47,7 @@ import { revokeUrl, urlFromBytes } from '../media/display'
 import { PAGE_DM_CORE_ONLY, TEXTS, actAs, pagesAvatar, pagesGroup, pagesClose, pagesDmAdopt, pagesDmAdoptNew, pagesDmAwaitsAdopt, pagesDmBoxRead, pagesDmExpectAdopt, pagesDmForget, pagesDmForgetAdopt, pagesDmInviteShare, pagesDmPrepare, pagesDmCoreOnly, pagesDmShareTo, pagesMove, pagesOrigin, pagesStart } from '../pages'
 import { PAGE_DM_CONFLICT, PAGE_DM_KEY_PENDING, PAGE_DM_ROTATING, PAGE_DM_SEND_KEY, hasDeviceKeys, missingShares, pageKeyText } from '../pageSecrets'
 import { FRESH_FAILED, mergeProfile, profileOp } from '../pageProfile'
+import { keptProfile } from '../namesCache'
 import { usePageMember } from './Paginas'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
@@ -180,7 +181,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   const styles = useStyles(makeStyles)
   const node = useNode()
   const names = useNames()
-  const { profileOf, resolveMany, invalidate } = names
+  const { profileOf, resolveMany, invalidate, learnVerified, peekScope } = names
   const page = entry && typeof entry.key === 'string' ? entry.key : ''
   const pageMember = usePageMember(node)
   const member = pageMember.member
@@ -285,7 +286,8 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
   // often keys this node does not hold, so profile.read says "missing": they
   // are named by a verified diary.peek, as the Conversas list does.
   const peekKeys = useMemo(() => (read ? peopleKeys(read, page, status) : []), [read, status, page])
-  useRowPeeks(peekKeys, hosted)
+  // Every person on the roster is asked, not only the first rows of a list.
+  useRowPeeks(peekKeys, hosted, peekKeys.length)
   const [form, setForm] = useState(null) // { name, bio } once the current profile is known
   const [draft, setDraft] = useState(undefined) // undefined keep, null remove, { encoded, previewUrl }
   const [editor, setEditor] = useState(null)
@@ -412,7 +414,14 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     setBaseValue(merged)
     setForm({ name, bio })
     return out
-  }, () => { changed(); return 'Página salva.' })
+  }, () => {
+    // What the service accepted replaces the peek kept from before the edit,
+    // which a "missing" answer would bring back.
+    const kept = keptProfile(baseRef.current, (profileOf(page) || {}).username)
+    if (kept !== null) learnVerified([[page, kept]], peekScope)
+    changed()
+    return 'Página salva.'
+  })
 
   // ---- roster ----------------------------------------------------------------
 
@@ -570,6 +579,8 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     return actAs(node, { member, action: 'rename', page, op: { username } })
   }, (data) => {
     setRenameHandle('')
+    const kept = keptProfile(baseRef.current || profileOf(page), isUsername(renameHandle))
+    if (kept !== null) learnVerified([[page, kept]], peekScope)
     changed()
     const when = data && typeof data.nextChangeAt === 'string' ? formatNextChange(data.nextChangeAt) : ''
     return 'Pronto: o @nome da página mudou.' + (when ? ' A próxima troca fica liberada em ' + when + '.' : '')
