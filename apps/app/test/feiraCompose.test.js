@@ -141,27 +141,30 @@ test('feiraCompose: back guard steps back and protects a draft at the first step
 
 test('feiraCompose: App routes hardware back and Escape through the active guard', (t) => {
   const src = source('App.js')
-  t.ok(src.includes('const backGuardRef = useRef(null)'))
+  t.ok(src.includes('const backGuardsRef = useRef(new Set())'))
+  t.ok(src.includes('for (const fn of backGuardsRef.current) if (fn() === true) return true'), 'any registered guard may answer')
   const hardwareStart = src.indexOf("BackHandler.addEventListener('hardwareBackPress'")
   const hardware = src.slice(hardwareStart, src.indexOf('return () => sub.remove()', hardwareStart))
-  t.ok(/if \(helpOpenRef.current \|\| sheetOpenRef.current\) return false\s+if \(backGuardRef.current\?\.\(\) === true\) return true/.test(hardware))
+  t.ok(/if \(helpOpenRef.current \|\| sheetOpenRef.current\) return false\s+if \(guarded\(\)\) return true/.test(hardware))
   const escape = src.slice(src.indexOf('const onKey = (event) =>'), src.indexOf("globalThis.addEventListener('keydown', onKey)"))
-  t.ok(/sheetOpenRef.current\) return\s+if \(backGuardRef.current\?\.\(\) === true\) \{\s+event.preventDefault\(\)\s+return/.test(escape))
+  t.ok(/sheetOpenRef.current\) return\s+if \(guarded\(\)\) \{\s+event.preventDefault\(\)\s+return/.test(escape))
   t.ok(src.includes('const guardRegistrar = entryHandlers.current.for(i + \':anunciar\', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === \'anunciar\' && fn()) }).handleRegisterBackGuard') && src.includes('registerBackGuard={guardRegistrar}'), 'hidden and departing screens cannot consume back')
+  t.ok(src.includes('const guardRegistrar = entryHandlers.current.for(i + \':varandinha\', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === \'varandinha\' && fn()) }).handleRegisterBackGuard'), 'a hidden Varandinha cannot consume back')
   const match = src.match(/const registerBackGuard = useCallback\(\(fn\) => \{([\s\S]*?)\n {2}\}, \[\]\)/)
   t.ok(match, 'registration returns an owned cleanup')
   if (!match) return
-  const ref = { current: null }
-  const register = vm.runInNewContext('(fn) => {' + match[1] + '}', { backGuardRef: ref })
+  const ref = { current: new Set() }
+  const register = vm.runInNewContext('(fn) => {' + match[1] + '}', { backGuardsRef: ref })
   const first = () => true
   const second = () => false
   const clearFirst = register(first)
-  t.is(ref.current, first)
+  t.ok(ref.current.has(first))
   const clearSecond = register(second)
+  t.is(ref.current.size, 2, 'each screen keeps its own guard')
   clearFirst()
-  t.is(ref.current, second, 'an old unmount preserves the newer guard')
+  t.alike([...ref.current], [second], 'an old unmount preserves the newer guard')
   clearSecond()
-  t.is(ref.current, null, 'unmount clears its own guard')
+  t.is(ref.current.size, 0, 'unmount clears its own guard')
 })
 
 const form = (extra = {}) => ({

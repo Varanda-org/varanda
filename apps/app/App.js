@@ -200,6 +200,8 @@ import { refreshMomentSeen } from './src/momentSeenStore'
 import SalvosScreen from './src/screens/Salvos'
 import EventosScreen from './src/screens/Eventos'
 import VisitasScreen from './src/screens/Visitas'
+import VarandinhaScreen from './src/screens/Varandinha'
+import VarandinhaRuaScreen from './src/screens/VarandinhaRua'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -256,6 +258,8 @@ const Assunto = memo(AssuntoScreen)
 const Recados = memo(RecadosScreen)
 const Eventos = memo(EventosScreen)
 const Visitas = memo(VisitasScreen)
+const Varandinha = memo(VarandinhaScreen)
+const VarandinhaRua = memo(VarandinhaRuaScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -2253,6 +2257,11 @@ function Member () {
     pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
   const openVisitas = useCallback(() => pushScreen({ screen: 'visitas' }), [pushScreen])
+  const openVarandinha = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'varandinha', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openVarandinhaRua = useCallback(() => pushScreen({ screen: 'varandinha-rua' }), [pushScreen])
   const openEventos = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'eventos', key: key.toLowerCase(), params: {} })
@@ -2318,11 +2327,13 @@ function Member () {
   const helpOpen = useHelpOpen()
   const helpOpenRef = useRef(helpOpen)
   helpOpenRef.current = helpOpen
-  const backGuardRef = useRef(null)
+  // Every registered guard checks at call time that its own screen is on top,
+  // so at most one of them answers a back press.
+  const backGuardsRef = useRef(new Set())
   const registerBackGuard = useCallback((fn) => {
-    backGuardRef.current = fn
+    backGuardsRef.current.add(fn)
     return () => {
-      if (backGuardRef.current === fn) backGuardRef.current = null
+      backGuardsRef.current.delete(fn)
     }
   }, [])
   // Help opened inside Ajustes or Denunciar keeps sheetOpen true, so it stays.
@@ -3206,10 +3217,14 @@ function Member () {
     })
   }, [action, node.online, inviteTick])
   useEffect(() => {
+    const guarded = () => {
+      for (const fn of backGuardsRef.current) if (fn() === true) return true
+      return false
+    }
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
         if (helpOpenRef.current || sheetOpenRef.current) return false
-        if (backGuardRef.current?.() === true) return true
+        if (guarded()) return true
         if (nav.depth(stackRef.current) === 0) {
           if (tabRef.current !== 'avisos') return false
           closeAvisos()
@@ -3224,7 +3239,7 @@ function Member () {
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current) return
-      if (backGuardRef.current?.() === true) {
+      if (guarded()) {
         event.preventDefault()
         return
       }
@@ -3853,6 +3868,7 @@ function Member () {
       handleOpenRecados: node.hosted === true ? openRecados : undefined,
       handleOpenEventos: node.hosted === true ? openEventos : undefined,
       handleOpenVisitas: node.hosted === true ? openVisitas : undefined,
+      handleOpenVarandinha: node.hosted === true ? openVarandinha : undefined,
       handleOpenAgenda: node.hosted === true ? openAgenda : undefined,
       handleOpenTop: node.hosted === true ? openTop : undefined,
       handleComposeSeen: () => setComposeSignal(null),
@@ -3880,6 +3896,7 @@ function Member () {
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
       onOpenRecados: h.handleOpenRecados,
+      onOpenVarandinha: h.handleOpenVarandinha,
       onOpenEventos: h.handleOpenEventos,
       onOpenListings: h.handleOpenListings
     }
@@ -3932,6 +3949,23 @@ function Member () {
         return (
           <StackLayer key={i + ':visitas:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Visitas active={ready} onBack={goBack} onOpenMember={openMember} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'varandinha') {
+        // Queued acts make Android Back and Escape ask first, as the top bar
+        // arrow does; the guard answers only while this entry is on top.
+        const guardRegistrar = entryHandlers.current.for(i + ':varandinha', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === 'varandinha' && fn()) }).handleRegisterBackGuard
+        return (
+          <StackLayer key={i + ':varandinha:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Varandinha entry={entry} ownKey={ownKey} onBack={goBack} onOpenStreet={openVarandinhaRua} onToast={h.handleShowToast} registerBackGuard={guardRegistrar} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'varandinha-rua') {
+        return (
+          <StackLayer key={i + ':varandinha-rua:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <VarandinhaRua ownKey={ownKey} onBack={goBack} onOpenBalcony={openVarandinha} />
           </StackLayer>
         )
       }
@@ -4051,8 +4085,7 @@ function Member () {
       }
       if (entry.screen === 'anunciar') {
         // Anunciar registers once per mount, so the guard checks the stack at
-        // call time. backGuardRef holds one guard and Anunciar is its only
-        // registrant: a second one would need Anunciar to register again.
+        // call time and answers only while this entry is on top.
         const guardRegistrar = entryHandlers.current.for(i + ':anunciar', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === 'anunciar' && fn()) }).handleRegisterBackGuard
         return (
           <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
@@ -4348,6 +4381,7 @@ function Member () {
                       onOpenRecados={h.handleOpenRecados}
                       onOpenEventos={h.handleOpenEventos}
                       onOpenVisitas={h.handleOpenVisitas}
+                      onOpenVarandinha={h.handleOpenVarandinha}
                       onOpenTop={h.handleOpenTop}
                     />
                   )}
@@ -4487,7 +4521,7 @@ function Member () {
             showToast(text)
           }}
         />
-        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
+        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenVarandinha={!deleteFromAviso && node.hosted === true && ownKey ? () => openVarandinha(ownKey) : undefined} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
         {/* Mounted after the splash, so it wins: while the boot cover shows it
             follows the splash, which stays cream on native (Splash.js). */}
         <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />

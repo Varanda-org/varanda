@@ -20,7 +20,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
     'dm.enable', 'dm.historyCopy', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'garden.help', 'garden.play', 'garden.set', 'garden.state', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
@@ -29,7 +29,7 @@ test('method list and mutating set', (t) => {
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.historyCopy', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'group.admin', 'group.admit', 'group.ban',
+    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.historyCopy', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.help', 'garden.play', 'garden.set', 'group.admin', 'group.admit', 'group.ban',
     'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
@@ -3236,6 +3236,56 @@ test('visits: limits and the five methods', (t) => {
   bad(t, 'visits.note', { key: KEY, extra: 1 }, 'extra field')
   bad(t, 'visits.note', null, 'null params')
   bad(t, 'visits.note', [KEY], 'array params')
+})
+
+test('garden: the four methods', (t) => {
+  const G = require('../lib/garden')
+  t.is(G.GARDEN_ACTS_MAX, 24)
+  t.is(G.GARDEN_POTS, 6)
+  for (const m of ['garden.set', 'garden.play', 'garden.help']) t.ok(isMutating(m), m + ' mutates')
+  t.absent(isMutating('garden.state'), 'garden.state only reads')
+
+  ok(t, 'garden.set', { on: true }, { on: true })
+  ok(t, 'garden.set', { on: false }, { on: false })
+  for (const on of [undefined, null, 1, 0, 'true', 'false', {}, []]) bad(t, 'garden.set', { on }, 'on ' + String(on))
+  bad(t, 'garden.set', {}, 'missing on')
+  bad(t, 'garden.set', { on: true, at: '2026-11-16T12:00:00.000Z' }, 'no at param on garden.set')
+
+  ok(t, 'garden.state', {}, {})
+  bad(t, 'garden.state', { extra: 1 }, 'extra field')
+  bad(t, 'garden.state', { on: true }, 'no on param on garden.state')
+
+  const acts = [
+    { op: 'plant', pot: 0, plant: 'manjericao' },
+    { op: 'water', pot: 0 },
+    { op: 'harvest', pot: 0 },
+    { op: 'clear', pot: 5 }
+  ]
+  ok(t, 'garden.play', { acts }, { acts })
+  for (const p of G.GARDEN_PLANTS) ok(t, 'garden.play', { acts: [{ op: 'plant', pot: 1, plant: p.id }] })
+  ok(t, 'garden.play', { acts: Array.from({ length: 24 }, () => ({ op: 'water', pot: 2 })) })
+  bad(t, 'garden.play', {}, 'missing acts')
+  bad(t, 'garden.play', { acts: [] }, 'empty acts')
+  bad(t, 'garden.play', { acts: Array.from({ length: 25 }, () => ({ op: 'water', pot: 2 })) }, '25 acts')
+  bad(t, 'garden.play', { acts: [{ op: 'dig', pot: 0 }] }, 'unknown op')
+  bad(t, 'garden.play', { acts: [{ op: 'water', pot: 0, extra: 1 }] }, 'act with an extra key')
+  bad(t, 'garden.play', { acts: [{ op: 'water', pot: 0, plant: 'tomate' }] }, 'water with a plant key')
+  bad(t, 'garden.play', { acts: [{ op: 'plant', pot: 0 }] }, 'plant without a plant id')
+  bad(t, 'garden.play', { acts: [{ op: 'plant', pot: 0, plant: 'rosa' }] }, 'unknown plant id')
+  bad(t, 'garden.play', { acts: [{ op: 'water', pot: 6 }] }, 'act pot 6')
+  bad(t, 'garden.play', { acts: [{ op: 'water', pot: 0 }, { op: 'dig', pot: 0 }] }, 'one bad act refuses the batch')
+  for (const v of [null, 1, 'water', { op: 'water', pot: 0 }]) bad(t, 'garden.play', { acts: v }, 'acts ' + JSON.stringify(v))
+  bad(t, 'garden.play', { acts, at: '2026-11-16T12:00:00.000Z' }, 'no at param on garden.play')
+  t.is(validateParams('garden.play', { acts, at: '2026-11-16T12:00:00.000Z' }).message, 'parâmetro desconhecido')
+
+  ok(t, 'garden.help', { to: KEY, pot: 0 }, { to: KEY, pot: 0 })
+  ok(t, 'garden.help', { to: KEY, pot: 5 }, { to: KEY, pot: 5 })
+  for (const pot of [6, -1, 1.5, '0', null, NaN, Infinity, true]) bad(t, 'garden.help', { to: KEY, pot }, 'pot ' + String(pot))
+  for (const to of [KEY.toUpperCase(), KEY.slice(1), KEY + 'a', 'g'.repeat(64), '', null, 1, [KEY]]) bad(t, 'garden.help', { to, pot: 0 }, 'to ' + JSON.stringify(to))
+  bad(t, 'garden.help', { pot: 0 }, 'missing to')
+  bad(t, 'garden.help', { to: KEY }, 'missing pot')
+  bad(t, 'garden.help', { to: KEY, pot: 0, at: '2026-11-16T12:00:00.000Z' }, 'no at param on garden.help')
+  bad(t, 'garden.help', { to: KEY, pot: 0, extra: 1 }, 'extra field')
 })
 
 test('choice.set and choice.mine', (t) => {

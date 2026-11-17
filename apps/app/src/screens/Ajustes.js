@@ -195,7 +195,7 @@ function AccountCard ({ ownKey, profile, onPress }) {
   )
 }
 
-export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, markVerified, recheckPhone, termsBeforeCreate = null }) {
+export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInfo = null, onTermsReset, scheduledDeletion = null, onDeletionChanged, onOpenPaginas, onOpenVarandinha, inviteNudge = 0, node: nodeProp = null, member: gateMember = null, phoneGate = 'off', phoneKey = null, phoneChecking = false, phoneVerified = false, markVerified, recheckPhone, termsBeforeCreate = null }) {
   const styles = useStyles(makeStyles)
   const { colors, mode, setMode } = useTheme()
   const node = useNode()
@@ -279,6 +279,10 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
   const openPaginas = () => {
     onClose()
     onOpenPaginas()
+  }
+  const openVarandinha = () => {
+    onClose()
+    onOpenVarandinha()
   }
   const pushEligible = node.hosted === true && member !== null
   // Avisos no aparelho, from the store the shell's note shares (null: not
@@ -520,6 +524,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {hosted ? <Item icon='recado' label={WALL_TITLE} onPress={() => onNavigate('recados')} /> : null}
               {devicesOffered ? <Item first={!showChangePhone && !hosted} icon='smartphone' label={DEVICES_TITLE} onPress={() => onNavigate('aparelhos')} /> : null}
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
+              {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
               <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
             </View>
             {visitasOn

@@ -161,7 +161,7 @@ function createNoticeIndex ({ maxPerAuthor = MAX_FOLLOW_TARGETS_PER_AUTHOR, maxE
   // Exact number of fold entries over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor, followsPage, followCounts, followSeq, followTargets }
+  return { markPending, foldFollow, commit, removeAuthor, page, rowsFor, followsPage, followCounts, followSeq, followTargets, followersIncomplete, followingIncomplete }
 
   function markPending (authorHex) {
     if (!isHex64(authorHex)) return
