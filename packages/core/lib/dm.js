@@ -24,7 +24,20 @@ const DM_PROTOCOL = 'varanda/dm/1'
 // The quiet visit lane: the same messages and drops as DM_PROTOCOL, into a
 // separate, smaller seeder pool that never wakes anyone (lib/dm-net.js).
 const VISIT_PROTOCOL = 'varanda/visit/1'
+// The bucketed lanes (docs/protocol.md section 11, "Buckets"): the same
+// channel with a bucket in put and a bucket list in page. New names because
+// dm-net.js requires exact keys; the v1 lanes stay as they were for old
+// members and old seeders.
+const DM_PROTOCOL_V2 = 'varanda/dm/2'
+const VISIT_PROTOCOL_V2 = 'varanda/visit/2'
 const DM_STAMP_PROTOCOL = 'varanda/dm-stamp/1'
+// A member never takes more than 6 bits of bucket from a seeder: a seeder
+// that claimed more could narrow a recipient down to a handful of people.
+const DM_BUCKET_BITS_MAX = 6
+// Members one bucket should keep at least (it holds 500 to 1000 once the
+// pool is split at all).
+const DM_BUCKET_MEMBERS = 500
+const DM_BUCKET_DOMAIN = 'varanda/dm-bucket/v1'
 const DM_MAX_TEXT = 1000
 // Sized for DM_MAX_TEXT code points of 4-byte characters plus the sender's
 // membership certificate (a v2 one is the largest, about 700 bytes).
@@ -620,6 +633,31 @@ function openInner (buf, ownKey, opts = {}) {
   }
 }
 
+// The 6-bit prefix (0..63) of a box public key (32 bytes or hex64): the top
+// 6 bits of the first byte of BLAKE2b-256(domain || key). Hashed so that the
+// prefix is uniform whatever the key generator does.
+function bucketPrefix (boxPublicKey) {
+  let key = boxPublicKey
+  if (typeof key === 'string') {
+    if (!isHex64(key)) throw new TypeError('invalid box key')
+    key = b4a.from(key, 'hex')
+  }
+  if (!isBytes(key, 32)) throw new TypeError('invalid box key')
+  const out = b4a.alloc(32)
+  sodium.crypto_generichash(out, b4a.concat([b4a.from(DM_BUCKET_DOMAIN, 'utf8'), key]))
+  return out[0] >> (8 - DM_BUCKET_BITS_MAX)
+}
+
+// How many bits of bucket a seeder serving this many diaries uses: the
+// largest b <= 6 with served >= 500 * 2^b, else 0 (under 1000 diaries there
+// is one bucket), so every bucket keeps 500 to 1000 members. Integer math.
+function bucketBits (served) {
+  if (!Number.isSafeInteger(served) || served < 0) return 0
+  let bits = 0
+  while (bits < DM_BUCKET_BITS_MAX && served >= DM_BUCKET_MEMBERS * 2 ** (bits + 1)) bits++
+  return bits
+}
+
 function boxPublicKey (hex) {
   if (!isHex64(hex) || isWeakBoxKey(hex)) throw new TypeError('chave de caixa inválida')
   return b4a.from(hex, 'hex')
@@ -692,6 +730,12 @@ function decodeDrop (buf) {
 module.exports = Object.freeze({
   DM_PROTOCOL,
   VISIT_PROTOCOL,
+  DM_PROTOCOL_V2,
+  VISIT_PROTOCOL_V2,
+  DM_BUCKET_BITS_MAX,
+  DM_BUCKET_MEMBERS,
+  bucketPrefix,
+  bucketBits,
   DM_STAMP_PROTOCOL,
   DM_MAX_TEXT,
   DM_INNER_BYTES,
