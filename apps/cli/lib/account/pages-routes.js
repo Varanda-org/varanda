@@ -270,20 +270,31 @@ function shareBlocks (entries) {
   return out
 }
 
-// The page's post seqs with a live share whose post is still a live post,
-// ascending, at most POST_SHARES_PER_DIARY: what 'status' answers so an owner
-// or admin sees which posts are on the public web page. folded is the diary
-// after applyDeletes.
-function sharedOf (folded) {
+// The seeder's fold of the raw diary (post-share.js foldShare, block order,
+// tombstoned shares included): post seq -> its highest share seq. A post is
+// on the public web page only while that highest share is live, so every
+// answer here follows that rule, not "any live share".
+function shareFold (raw) {
+  const fold = new Map()
+  for (const [p, seq] of shareBlocks(raw)) foldShare(fold, p, seq)
+  return fold
+}
+
+// The page's post seqs whose highest share is live and whose post is still a
+// live post, ascending, at most POST_SHARES_PER_DIARY: what 'status' answers
+// so an owner or admin sees which posts are on the public web page. raw is
+// the writer's own blocks, tombstones not applied.
+function sharedOf (raw) {
+  const deleted = deletedSeqs(raw)
   const bySeq = new Map()
-  for (const e of folded) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
-  const map = new Map()
-  for (const [postSeq, shareSeq] of shareBlocks(folded)) {
+  for (const e of raw) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+  const out = []
+  for (const [postSeq, shareSeq] of shareFold(raw)) {
     const post = bySeq.get(postSeq)
-    if (post === undefined || post.deleted || !isPlainObject(post.record) || post.record.type !== 'post') continue
-    foldShare(map, postSeq, shareSeq)
+    if (deleted.has(shareSeq) || deleted.has(postSeq) || post === undefined || !isPlainObject(post.record) || post.record.type !== 'post') continue
+    out.push(postSeq)
   }
-  return [...map.keys()].sort((a, b) => a - b)
+  return out.sort((a, b) => a - b)
 }
 
 function has (obj, k) {
@@ -1457,8 +1468,9 @@ function createPagesRoutes ({
 
   // post-share and post-unshare ({ seq }), a person's post.share and
   // post.unshare (web-member member-ops.js): only a live post of the page's
-  // own diary (a reply or quote included). A share already live answers
-  // { created: false } and an unshare with none live { changed: false },
+  // own diary (a reply or quote included). A post whose highest share is
+  // live (the seeder's rule) answers { created: false } and an unshare with
+  // no live share { changed: false },
   // nothing appended; a new post past the bounded fold every reader keeps
   // (post-share.js) is 'limite', as the public page would never show it. An
   // unshare tombstones the newest MAX_UNSHARE live shares of the post in one
@@ -1486,8 +1498,12 @@ function createPagesRoutes ({
       const post = entry === undefined || deleted.has(op.seq) ? null : validRecordCopy(entry.record, op.seq)
       if (post === null || post.type !== 'post') throw refuse('nao-encontrado')
       const live = shareBlocks(raw).filter(([p, seq]) => p === op.seq && !deleted.has(seq)).map(([, seq]) => seq)
+      const fold = shareFold(raw)
+      const highest = fold.get(op.seq)
       let result = null
-      if (action === 'post-share' && live.length > 0) result = { shareSeq: live[live.length - 1], created: false }
+      // Shared as the seeder sees it: the highest share is live. Otherwise a
+      // new share becomes the highest, even beside an older live one.
+      if (action === 'post-share' && highest !== undefined && !deleted.has(highest)) result = { shareSeq: highest, created: false }
       if (action === 'post-unshare' && live.length === 0) result = { ok: true, changed: false }
       if (result !== null) {
         settle(member, nonce, result)
@@ -1496,9 +1512,7 @@ function createPagesRoutes ({
       let records
       const at = iso(now())
       if (action === 'post-share') {
-        const fold = new Map()
-        for (const [p, seq] of shareBlocks(raw)) foldShare(fold, p, seq)
-        if (!fold.has(op.seq) && fold.size >= POST_SHARES_PER_DIARY) throw refuse('limite')
+        if (highest === undefined && fold.size >= POST_SHARES_PER_DIARY) throw refuse('limite')
         records = [postShareRecord({ seq: op.seq, at })]
       } else {
         records = live.slice(-MAX_UNSHARE).flatMap((seq) => deleteRecords({ seq, at }))
@@ -1573,7 +1587,9 @@ function createPagesRoutes ({
       const folded = applyDeletes(await writer.readEntries(page))
       const picked = pickedOf(folded)
       const moments = momentsOf(folded)
-      const shared = sharedOf(folded)
+      // Tombstoned shares count in the seeder's fold: only the raw blocks
+      // carry them.
+      const shared = sharedOf(await writer.readOwn(page))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()

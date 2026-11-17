@@ -82,7 +82,8 @@ export function pageSeqOf (page, ref) {
 // and never rejects, one request per call.
 export function pageShareOps ({ page, status, share, unshare }) {
   const wrong = { state: 'error', shareSeq: null, message: 'Não encontramos esta publicação. Ela pode ter sido apagada.' }
-  return {
+  // The sheet calls each op unbound (ops[action](target)), so none uses this.
+  const ops = {
     async read (ref) {
       const seq = pageSeqOf(page, ref)
       if (seq === null) return wrong
@@ -116,13 +117,14 @@ export function pageShareOps ({ page, status, share, unshare }) {
         if (answer.state !== 'off' || raw.changed !== true) return answer
         // More than MAX_UNSHARE live shares leave older ones live: the state
         // comes from one fresh read, never from a repeated unshare.
-        const after = await this.read(ref)
+        const after = await ops.read(ref)
         return after.state === 'on' || after.state === 'off' ? after : { state: 'uncertain', shareSeq: null, message: READ_FAILED }
       } catch (err) {
         return shareErrorState(err, 'unpublish')
       }
     }
   }
+  return ops
 }
 
 // The acting Page's key when `target` is a ref of that Page's own post, else

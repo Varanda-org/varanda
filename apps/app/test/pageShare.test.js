@@ -119,11 +119,13 @@ test('pageShareOps unpublish re-reads status after a change and never repeats th
   let unshares = 0
   let reads = 0
   const mk = (status) => pageShareOps({ page: PAGE, status, share: async () => ({}), unshare: async () => { unshares++; return { ok: true, changed: true } } })
-  const still = await mk(async () => { reads++; return { shared: [3] } }).unpublish(PAGE + ':3')
+  // Unbound, as PostShareSheet calls ops[action](target).
+  const call = (ops, action, ref) => { const fn = ops[action]; return fn(ref) }
+  const still = await call(mk(async () => { reads++; return { shared: [3] } }), 'unpublish', PAGE + ':3')
   t.is(still.state, 'on', 'older shares stay live: not off')
-  const gone = await mk(async () => { reads++; return { shared: [] } }).unpublish(PAGE + ':3')
+  const gone = await call(mk(async () => { reads++; return { shared: [] } }), 'unpublish', PAGE + ':3')
   t.is(gone.state, 'off')
-  const lost = await mk(async () => { reads++; throw new Error('x') }).unpublish(PAGE + ':3')
+  const lost = await call(mk(async () => { reads++; throw new Error('x') }), 'unpublish', PAGE + ':3')
   t.is(lost.state, 'uncertain')
   t.is(lost.message, 'Não deu para ver se esta publicação está na web.')
   t.is(unshares, 3)
