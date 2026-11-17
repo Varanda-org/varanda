@@ -1,9 +1,9 @@
 'use strict'
 
 // Notices in the browser node (docs/rpc.md 5.28, docs/protocol.md
-// 'Notices link'): `notices.list` answers "who started following me and
-// whom I do not follow yet, who replied to, quoted or mentioned me, and who
-// liked or reposted my posts" HERE, in the browser. One short-lived seeder
+// 'Notices link'): `notices.list` answers "who started following me, who
+// replied to, quoted or mentioned me, and who liked or reposted my posts"
+// HERE, in the browser. One short-lived seeder
 // link per read, or per scroll: a read that ends with a cursor leaves its
 // link open NOTICES_LINGER_MS for the chained page of the SAME own key,
 // which reuses its channel and proof; a first page, another own key, a lost
@@ -41,7 +41,7 @@
 // lists it. The seeder only serves the notices of the key the channel proved (an Ed25519 signature bound to this link's
 // Noise key), and no core is replicated nor any proof signed before its hello
 // verified (role 'seeder' and seederCertForKey on the Noise key, as
-// ./sync.js). The stored follows, blocklist and revoked issuers are
+// ./sync.js). The stored blocklist and revoked issuers are
 // re-applied on every read, cached evidence included.
 // PRIVACY: ephemeral Noise key, empty inventory (and none asked for:
 // CAP_NO_INVENTORY), no announce. The proof
@@ -90,7 +90,6 @@ const { pipeline } = require('./block-window')
 const { guardedWsStream } = require('./ws-stream')
 const { readerModeration } = require('./member-ops')
 const { PEEK_CORE_PAGE_SIZE, PEEK_MAX_FRAME, SEEDER_BUSY, messageBytes } = require('./peek')
-const store = require('./node-store')
 
 const NOTICES_DEADLINE_MS = 25000
 const NOTICES_BUDGET_BYTES = 16777216
@@ -114,7 +113,6 @@ const NOTICES_LINGER_MS = 2000
 const NO_SEEDER = 'sem conexão com o semeador'
 const BUSY = 'avisos já em andamento'
 const UNSUPPORTED = 'aviso: o semeador ainda não envia avisos'
-const HEX64 = /^[0-9a-f]{64}$/
 const TIMEOUT = Symbol('timeout')
 
 function noop () {}
@@ -721,11 +719,10 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     }
   }
 
-  // A follow row: an author already followed is omitted, and an author
-  // listed twice counts once (a seeder's duplicate is dropped). -> whether
-  // the row may stand.
+  // One follow row per follower: a seeder duplicate is dropped. A mutual
+  // follow still stands. -> whether the row may stand.
   function claimFollow (key, ctx) {
-    if (ctx.follows.has(key) || ctx.claimed.has(key)) return false
+    if (ctx.claimed.has(key)) return false
     ctx.claimed.add(key)
     return true
   }
@@ -865,11 +862,6 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     const deadline = Date.now() + L.deadlineMs
     // Preparation: kv reads only, no core is opened.
     const own = await ownKey()
-    const follows = new Set()
-    for (const raw of await store.readFollows(storage)) {
-      const key = typeof raw === 'string' ? raw.toLowerCase() : ''
-      if (HEX64.test(key)) follows.add(key)
-    }
     const mod = await readerModeration(storage, association)
     checkAborted(run)
     // activity is false only on a read that used v1 because the seeder took
@@ -913,7 +905,7 @@ function createNoticer ({ storage, association, seederUrl, createSocket, ownKey,
     run.rowsAt = clock()
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.budget >= L.budgetBytes || run.lost || run.aborted || run.link === null
-    const ctx = { own, follows, mod, deadline, cut, v2, v3, names, posts, claimed: new Set(), claimedSeqs: new Set(), claimedEngagements: new Map() }
+    const ctx = { own, mod, deadline, cut, v2, v3, names, posts, claimed: new Set(), claimedSeqs: new Set(), claimedEngagements: new Map() }
     // Every seeder item in seeder order, with its outcome.
     const seen = []
     let accepted = 0

@@ -220,7 +220,7 @@ function seenOf (seed, own, key, seq) {
   return hex(digest).slice(0, 32)
 }
 
-test('against the real seeder: a verified follower shows, then follows, blocks and an unfollow remove it; nothing stored', async (t) => {
+test('against the real seeder: a verified follower shows, stays after a follow back, then a block and an unfollow remove it; nothing stored', async (t) => {
   t.timeout(240000)
   const { bootstrap } = await testnet(t)
   const assoc = association()
@@ -284,9 +284,11 @@ test('against the real seeder: a verified follower shows, then follows, blocks a
   }, { name: 'A listed', intervalMs: 250, timeoutMs: 30000 })
   t.alike(withoutSeen(t, first), { notices: [{ key: A.key, seq, at: follow.at, kind: 'follow', name: 'Ana', avatar: null, username: 'ana' }], next: null, incomplete: false, supported: true, activity: true })
 
-  // Already followed: omitted.
+  // Already followed: still listed, once.
   await writeFollows(storage, [A.key])
-  t.alike(await read(), { notices: [], next: null, incomplete: false, supported: true, activity: true }, 'a followed diary is omitted')
+  const followed = await read()
+  t.alike(withoutSeen(t, followed), { notices: [{ key: A.key, seq, at: follow.at, kind: 'follow', name: 'Ana', avatar: null, username: 'ana' }], next: null, incomplete: false, supported: true, activity: true }, 'a followed diary is listed once')
+  t.is(followed.notices.length, 1, 'exactly one follow row')
   await writeFollows(storage, [])
 
   // Blocked in the stored blocklist: dropped, and back when unblocked.
@@ -390,14 +392,14 @@ test('a gap of 512 filtered candidates: an empty page with a cursor, and the fol
   const state = { cores: [], page: () => ({ items: [], next: null, incomplete: false }) }
   const seeder = await noticesSeeder(t, { signer: assoc.kp, state })
   const { web, key: me, storage, internal } = await webNode(t, assoc, seeder.url)
-  // 512 followers already followed (8 seeder pages of 64), then D.
-  const followed = []
-  for (let i = 0; i < 512; i++) followed.push(hex(crypto.randomBytes(32)))
-  await writeFollows(storage, followed)
+  // 512 blocked keys (8 seeder pages of 64), dropped before any fetch, then D.
+  const blocked = []
+  for (let i = 0; i < 512; i++) blocked.push(hex(crypto.randomBytes(32)))
+  await writeBlocklist(storage, snapshot(moderator(assoc.kp), { blocked }))
   const f = followRecord({ key: me, on: true, at: iso(now - 600 * HOUR) })
   const D = await diary(t, [certOf(assoc), () => f])
   state.cores = [D]
-  const rows = followed.map((key, i) => ({ key, seq: 1, at: iso(now - (i + 1) * HOUR) }))
+  const rows = blocked.map((key, i) => ({ key, seq: 1, at: iso(now - (i + 1) * HOUR) }))
   rows.push({ key: hex(D.key), seq: 1, at: f.at })
   state.page = (target, after, limit) => {
     const from = after === null ? 0 : rows.findIndex((r) => r.key === after.key) + 1

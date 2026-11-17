@@ -191,7 +191,7 @@ const { attachBlob } = require('./blob-net')
 const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
 const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
-const { pushCandidate, pushName } = require('./push-events')
+const { pushCandidates, pushName } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -1072,8 +1072,9 @@ class Seeder {
   // block 0 in the main store (default GATE_TIMEOUT_MS); admitHook and
   // purgeHook also see group keys.
   // onPush(event) is not a test hook: called synchronously, never awaited,
-  // once per follow, reply, like or repost appended to a served diary past
-  // its push cursor (push-events.js shapes the event; a throw is ignored).
+  // once per recipient of each follow, reply, quote, @mention, like or
+  // repost appended to a served diary past its push cursor (push-events.js
+  // shapes the event; a throw is ignored).
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -5876,25 +5877,53 @@ class Seeder {
         entry.pushReadFailures = 0
         const block = raw === null ? null : decodeBlock(raw)
         const record = block && validRecordCopy(block, i)
-        const c = record && pushCandidate({
-          author: key,
-          seq: i,
-          record,
-          now: Date.now(),
-          isMember: (k) => this._admitted.has(k) || this._served.has(k),
-          isBlocked: (k) => this._isBlocked(k)
-        })
-        if (c) {
-          const exists = c.kind === 'follow' || await this._pushTargetIsPost(c.recipient, record.type === 'post' ? record.replyTo.seq : record.to.seq)
-          if (!live()) return
-          const name = exists ? await this._pushActorName(key, entry) : null
-          if (!live()) return
-          // The recipient may have been dropped or blocked, or the actor
-          // blocked, while the reads above were pending: decide again on the
-          // current state. The cursor still advances (at-most-once).
-          const r = c.recipient
-          const eligible = (this._admitted.has(r) || this._served.has(r)) && !this._isBlocked(r) && !this._isBlocked(key)
-          if (exists && eligible && this.onPush !== null) {
+        // Two phases, so a stop while a read is pending never emits part of
+        // a block's pushes: A awaits (target posts, the actor name), B only
+        // decides and emits, synchronously, then the cursor moves once.
+        let survivors = []
+        let name = null
+        let now = 0
+        if (record) {
+          try {
+            now = Date.now()
+            // Per recipient, the strongest hit whose target is a post the
+            // recipient's replica holds (a reply to a block that is not a
+            // post falls back to a quote or a mention, as the in-app notice
+            // does). A target this replica cannot read yet drops the
+            // recipient: a weaker kind would mislabel a reply or a quote.
+            for (const c of this._pushCandidatesFor(key, i, record, now)) {
+              for (const hit of [c, ...c.alternates]) {
+                if (hit.targetSeq !== null) {
+                  const target = await this._pushTargetIsPost(c.recipient, hit.targetSeq)
+                  if (!live()) return
+                  if (target === null) break
+                  if (!target) continue
+                }
+                survivors.push({ kind: hit.kind, recipient: c.recipient, ref: hit.ref })
+                break
+              }
+            }
+            if (survivors.length > 0) {
+              name = await this._pushActorName(key, entry)
+              if (!live()) return
+            }
+          } catch {
+            // Never thrown by design; if it were, this block emits nothing
+            // and the cursor still moves (at-most-once, no retry).
+            if (!live()) return
+            survivors = []
+          }
+        }
+        if (survivors.length > 0 && this.onPush !== null) {
+          // Recipients may have been dropped or blocked, the actor blocked or
+          // a name's issuer revoked while the reads were pending: decide
+          // again on the current state.
+          const still = new Set()
+          for (const c of this._pushCandidatesFor(key, i, record, now)) {
+            for (const hit of [c, ...c.alternates]) still.add(hit.kind + ':' + c.recipient)
+          }
+          for (const c of survivors) {
+            if (!still.has(c.kind + ':' + c.recipient)) continue
             try {
               this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
             } catch {}
@@ -5907,19 +5936,54 @@ class Seeder {
     }
   }
 
+  // The pushes one record of `key` yields on the current state (pure and
+  // synchronous: push-events.js). Mentions resolve to the members verifiably
+  // holding the name now; a revoked issuer's names never match, as on the
+  // notices page. A lookup that throws counts as nobody (push-events.js).
+  _pushCandidatesFor (key, seq, record, now) {
+    const index = this._postNotices
+    let revoked = null
+    const holders = (token) => {
+      if (!index || typeof index.holders !== 'function') return []
+      if (revoked === null) {
+        const opts = this._certOpts()
+        revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      }
+      return index.holders(token, (issuer) => !revoked.has(issuer))
+    }
+    return pushCandidates({
+      author: key,
+      seq,
+      record,
+      now,
+      isMember: (k) => this._admitted.has(k) || this._served.has(k),
+      isBlocked: (k) => this._isBlocked(k),
+      holders
+    })
+  }
+
   // The engagement index only checks a reference's shape and keeps targets
   // that do not exist: read the target from the recipient's own replica,
-  // without waiting, and accept only a valid post there.
+  // without waiting, and accept only a valid post there. true: a post.
+  // false: no such block in the signed length, a deleted block, or a block
+  // that is not a post. null: unknown (no usable replica, not downloaded yet, a failed
+  // read).
   async _pushTargetIsPost (recipient, seq) {
     const re = this._served.get(recipient)
-    if (!re || re.dropped || !re.gated || seq >= re.present) return false
+    if (!re || re.dropped || !re.gated) return null
+    if (seq >= re.core.length) return false
+    // A deleted post is no post: avisos skip it too, and its bytes may be
+    // cleared (a null read) or still held.
+    if (re.deleted.has(seq)) return false
+    if (seq >= re.present) return null
     let raw
     try {
       raw = await re.core.get(seq, { wait: false, raw: true })
     } catch {
-      return false
+      return null
     }
-    if (raw === null || this._closing || re.dropped || !re.gated || this._served.get(recipient) !== re) return false
+    if (this._closing || re.dropped || !re.gated || this._served.get(recipient) !== re) return null
+    if (raw === null) return null
     const block = decodeBlock(raw)
     const record = block && validRecordCopy(block, seq)
     return !!record && record.type === 'post'

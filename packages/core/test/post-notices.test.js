@@ -299,7 +299,7 @@ test('a page carries no count, total, size or length', (t) => {
   idx.foldPost(B, 2, post('x', D(2), { replyTo: { author: A, seq: 1 } }))
   const keys = allKeys(page(idx, { limit: 1 }))
   for (const bad of ['count', 'total', 'size', 'length']) t.absent(keys.includes(bad), bad)
-  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'markPending', 'pageV2', 'pageV3', 'removeAuthor', 'removePost', 'settle'])
+  t.alike(Object.keys(idx).sort(), ['foldPost', 'foldUsername', 'holders', 'markPending', 'pageV2', 'pageV3', 'removeAuthor', 'removePost', 'settle'])
 })
 
 test('per-pair rotation keeps working for an unresolved name already admitted', (t) => {
@@ -730,4 +730,44 @@ test('the page cache never serves stale rows: rotation, dropped self-mentions an
   }
   add(k(0x302), 9, post('@ana', D(27)), 'mention')
   t.alike(all(), fullSort([...expected.values()]), 'after LRU churn and a new row')
+})
+
+test('holders: verified holders of a token, filtered by issuer, sorted copy', (t) => {
+  const REVOKED = k(0x156)
+  const idx = index()
+  idx.foldUsername(C, 1, username(C, 'ana'))
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(B, 1, username(B, 'ana', REVOKED))
+  // Settled out of key order, so the sort is what puts them in order.
+  for (const m of [C, B, A]) idx.settle(m)
+  const usableIssuer = (issuer) => issuer !== REVOKED
+  t.alike(idx.holders('ana', ok), [A, B, C], 'sorted')
+  t.alike(idx.holders('ana', usableIssuer), [A, C], 'revoked issuer filtered')
+  t.alike(idx.holders('nadie', ok), [])
+  t.alike(idx.holders('', ok), [])
+  t.alike(idx.holders(null, ok), [])
+  t.alike(idx.holders('ana', () => { throw new Error('x') }), [])
+  t.alike(idx.holders('ana', 'nope'), [])
+  const got = idx.holders('ana', ok)
+  got.length = 0
+  got.push('x')
+  t.alike(idx.holders('ana', ok), [A, B, C], 'returned array is a copy')
+})
+
+test('holders matches who gets the mention row from the page', (t) => {
+  const REVOKED = k(0x156)
+  const idx = createPostNoticeIndex({ verifyUsername: (author, record) => record.member !== k(0xd) })
+  const members = [A, B, C, k(0xd)]
+  idx.foldUsername(A, 1, username(A, 'ana'))
+  idx.foldUsername(B, 1, username(B, 'ana', REVOKED))
+  idx.foldUsername(C, 1, username(C, 'ana'))
+  idx.foldUsername(C, 2, username(C, 'ana_nova'))
+  idx.foldUsername(k(0xd), 1, username(k(0xd), 'ana'))
+  for (const m of members) idx.settle(m)
+  idx.foldPost(k(0xe), 1, post('oi @ana', D(1)))
+  const issuerUsable = (issuer) => issuer !== REVOKED
+  const fromPage = members.filter((m) =>
+    idx.pageV2({ target: m, issuerUsable, now: NOW }).items.some((r) => r.kind === 'mention'))
+  t.alike(idx.holders('ana', issuerUsable), fromPage.sort())
+  t.alike(fromPage, [A, C], 'former name still held inside the window')
 })
