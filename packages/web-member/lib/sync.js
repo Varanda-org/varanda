@@ -411,8 +411,11 @@ const GROUP_PAGE_MS = 30000
 // asked again at most this often (the channel allows 2 messages a second).
 const GROUP_PUSH_PAGE_MS = 1000
 // A foreign writer held past its prefix is checked again this often while
-// its goal waits on what its peers advertise (core sparse-held.js).
+// its goal waits on what its peers advertise (core sparse-held.js), and
+// less often, up to SPARSE_CHECK_MAX_MS, while nothing changes: a tab runs
+// that goal for as long as it is open.
 const SPARSE_CHECK_MS = 100
+const SPARSE_CHECK_MAX_MS = 5000
 // Writer page requests on one link are spaced this much, all groups and
 // every re-page together (the seeder refills 2 messages a second).
 const GROUP_REQUEST_MS = 1000
@@ -579,6 +582,14 @@ function earliestJoin (seq, joins, group, writer) {
   let out = seq
   for (const j of joins || []) if (j.group === group && j.writer === writer && j.seq < out) out = j.seq
   return out
+}
+
+// The wait before the next check of a sparse writer's goal: SPARSE_CHECK_MS
+// once its held range changed (or first), else twice the last one, up to
+// SPARSE_CHECK_MAX_MS.
+function sparseCheckDelay (previous, changed) {
+  if (changed || !(previous > 0)) return SPARSE_CHECK_MS
+  return Math.min(previous * 2, SPARSE_CHECK_MAX_MS)
 }
 
 // Whether an own group core's push is confirmed: the replication peer's
@@ -3629,9 +3640,11 @@ async function syncRun ({
       stopGrow: null,
       stopFork: null,
       stopQuota: null,
+      stopSparse: null,
       retryTimer: null,
       sparse: null, // { length, contiguous, done }: the last advertisedHeld check
       sparseTimer: null,
+      sparseDelay: 0, // the wait before the last check (sparseCheckDelay)
       reason: null, // why it failed
       hints: new Set() // 'group:diary:seq' listings whose gate failed on the hint
     }
@@ -4254,9 +4267,10 @@ async function syncRun ({
     if (ge.stopGrow) ge.stopGrow()
     if (ge.stopFork) ge.stopFork()
     if (ge.stopQuota) ge.stopQuota()
+    if (ge.stopSparse) ge.stopSparse()
     if (ge.range) ge.range.destroy()
     clearLater(ge.retryTimer)
-    ge.stopGrow = ge.stopFork = ge.stopQuota = ge.range = ge.retryTimer = null
+    ge.stopGrow = ge.stopFork = ge.stopQuota = ge.stopSparse = ge.range = ge.retryTimer = null
   }
 
   function failGroupEntry (ge, reason, { purge }) {
@@ -4349,6 +4363,19 @@ async function syncRun ({
     }
     core.on('append', check)
     ge.stopQuota = () => core.off('append', check)
+    // A block past the hole, or a peer coming or going, can meet a sparse
+    // goal whose check backed off.
+    const nudge = () => {
+      if (ge.core === core) sparseNudge(ge)
+    }
+    core.on('download', nudge)
+    core.on('peer-add', nudge)
+    core.on('peer-remove', nudge)
+    ge.stopSparse = () => {
+      core.off('download', nudge)
+      core.off('peer-add', nudge)
+      core.off('peer-remove', nudge)
+    }
     ge.stopFork = watchFork(core, () => {
       if (ended || (ge.state !== 'active' && ge.state !== 'regate')) return
       failGroupEntry(ge, 'fork', { purge: true })
@@ -5273,6 +5300,8 @@ async function syncRun ({
     const s = ge.sparse
     if (s && s.length === ge.core.length && s.contiguous === ge.core.contiguousLength && s.done) return true
     if (ge.sparseTimer || ended) return false
+    const changed = !s || s.length !== ge.core.length || s.contiguous !== ge.core.contiguousLength
+    ge.sparseDelay = sparseCheckDelay(ge.sparseDelay, changed)
     ge.sparseTimer = later(() => {
       ge.sparseTimer = null
       const core = ge.core
@@ -5284,8 +5313,18 @@ async function syncRun ({
         ge.sparse = { length, contiguous, done }
         evaluate()
       }, noop)
-    }, SPARSE_CHECK_MS)
+    }, ge.sparseDelay)
     return false
+  }
+
+  // A check that backed off past SPARSE_CHECK_MS runs again shortly.
+  function sparseNudge (ge) {
+    if (!(ge.sparseDelay > SPARSE_CHECK_MS)) return
+    ge.sparseDelay = 0
+    if (!ge.sparseTimer) return
+    clearLater(ge.sparseTimer)
+    ge.sparseTimer = null
+    evaluate()
   }
 
   // ---- the follow fold (see the header) ----
@@ -5862,4 +5901,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, retryWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, retryWait, sparseCheckDelay, SPARSE_CHECK_MS, SPARSE_CHECK_MAX_MS, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

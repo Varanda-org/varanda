@@ -1,7 +1,8 @@
 // A seeder keeps a writer its diary cut sparse (#350, docs/protocol.md
 // "Sparse copies"): below the cut, then only its leaves and key blocks. The
-// owner's --once counts that writer pushed at its cut, and a fresh browser
-// member fed by that seeder alone ends its --once holding the sparse copy.
+// owner's --once counts that writer pushed once the seeder holds it up to
+// its cut and its leaves past it, and a fresh browser member fed by that
+// seeder alone ends its --once holding the sparse copy.
 const test = require('brittle')
 const b4a = require('b4a')
 const { testnet, until } = require('./helpers/net')
@@ -48,6 +49,23 @@ async function offlineLeave (m, group) {
     await core.close()
   }
 }
+
+// A tab checks a sparse writer's goal for as long as it is open: the checks
+// space out while its held range stays the same, and come back to the
+// shortest wait once it changes.
+test('a sparse goal is checked less often while nothing changes (#350)', (t) => {
+  const { sparseCheckDelay, SPARSE_CHECK_MS, SPARSE_CHECK_MAX_MS } = require('../lib/sync')
+  t.is(sparseCheckDelay(0, false), SPARSE_CHECK_MS, 'the first check')
+  t.is(sparseCheckDelay(0, true), SPARSE_CHECK_MS)
+  const waits = []
+  let d = 0
+  for (let i = 0; i < 12; i++) waits.push((d = sparseCheckDelay(d, i === 0)))
+  t.alike(waits.slice(0, 4), [SPARSE_CHECK_MS, 2 * SPARSE_CHECK_MS, 4 * SPARSE_CHECK_MS, 8 * SPARSE_CHECK_MS], 'twice the last wait while unchanged')
+  t.is(waits[waits.length - 1], SPARSE_CHECK_MAX_MS, 'up to the bound')
+  t.ok(waits.every((w) => w <= SPARSE_CHECK_MAX_MS))
+  t.ok(SPARSE_CHECK_MAX_MS <= 5000, 'a goal met is noticed within 5 s')
+  t.is(sparseCheckDelay(SPARSE_CHECK_MAX_MS, true), SPARSE_CHECK_MS, 'a change brings it back')
+})
 
 test('a sparse cut writer: the owner\'s and a fresh reader\'s --once end ok (#350)', async (t) => {
   t.timeout(240000)
@@ -96,7 +114,8 @@ test('a sparse cut writer: the owner\'s and a fresh reader\'s --once end ok (#35
   }
   t.alike(await blocksHeld(seeder._groupServed.get(w).core, 0, length), [...Array(cut).keys(), length - 1], 'the seeder keeps W below its cut and its leave')
 
-  // The owner's --once counts W pushed at its cut.
+  // The seeder holds W up to its cut and its leave: the owner's --once
+  // counts it pushed.
   const rb = await once(b, url, [])
   t.ok(rb.ok, 'B\'s run ends ok before its deadline: ' + JSON.stringify(rb.errors))
 

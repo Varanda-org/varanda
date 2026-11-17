@@ -117,7 +117,8 @@ test('a fresh member fed only by a seeder folds a sparse frozen writer and a rel
   await runUntil(b, bootstrap, sparse)
   t.alike(await blocksHeld(seeder._groupServed.get(w1).core, 0, leave1.seq + 1), [...Array(cut1).keys(), leave1.seq], 'the seeder keeps W1 below its cut and its leave')
   t.alike(await blocksHeld(seeder._groupServed.get(w2).core, 0, leave2.seq + 1), [0, leave2.seq], 'and W2 as a stub')
-  // The owner's --once counts each cut writer pushed at its cut.
+  // The seeder holds each cut writer up to its cut and its leave: the
+  // owner's --once counts both pushed.
   const rb = await syncOnce(bootstrap, b, { timeoutMs: 30000 })
   t.ok(rb.result.ok, 'B\'s run ends ok before its deadline: ' + rb.result.errors.join('; '))
 
