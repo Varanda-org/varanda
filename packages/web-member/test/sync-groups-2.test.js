@@ -23,6 +23,8 @@ test('a key listed with many distinct hostile hints is gated at most the cap', a
   const b = await member(assocKp, 'Bia')
   const c = await member(assocKp, 'Caio')
   const { community, group } = await ops.communityCreate(a.ctx, { name: 'Dicas', join: 'open' })
+  for (let i = 0; i < 4; i++) await ops.postCreate(a.ctx, { text: 'aviso ' + i })
+  const len = (await ops.logRead(a.ctx)).entries.length
   t.ok((await once(a, url, [])).ok, 'creator pushed')
   await until(() => indexed(seeder, group, group), { name: 'root indexed' })
   await store.addGroupReplica(b.storage, group)
@@ -37,7 +39,10 @@ test('a key listed with many distinct hostile hints is gated at most the cap', a
     const page = real(q)
     if (q.group !== group) return page
     calls++
-    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: randomKey() } : it) }
+    // Under the creator's diary, which the seeder serves, at seqs that join
+    // no such writer: a header stub is never proven, so the header's
+    // verdict stands (#350).
+    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: a.ownHex, seq: 1 + (calls % (len - 1)) } : it) }
   }
   await store.addGroupReplica(c.storage, group)
   const ev = []
@@ -120,7 +125,9 @@ test('a gate refused on a hostile listing is tried again for another listing of 
   seeder.groupWriters = (q) => {
     const page = real(q)
     if (q.group !== group || ++calls > 1) return page
-    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: c.ownHex } : it) }
+    // Under the creator's diary at a seq that joins no such writer: the
+    // header stub is never proven, so it is refused on the hint (#350).
+    return { ...page, items: page.items.map((it) => it.key === w ? { ...it, diary: a.ownHex, seq: 1 } : it) }
   }
   await store.addGroupReplica(c.storage, group)
   const ev = []

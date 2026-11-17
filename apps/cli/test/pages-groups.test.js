@@ -1140,3 +1140,76 @@ test('pages-groups: a listed writer of a member whose diary is blocked is purged
   t.is(await held(b.key), 0, 'and her diary')
   t.ok(await held(group) > 0, 'the group root stays cached')
 })
+
+test('pages-groups: another diary\'s join of a listed writer whose diary the service refuses is settled by its block 0, so the group reads whole and a page joins it (#350)', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const issuer = hex(issuerKp.publicKey)
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer }, kp) }
+  const seeder = await startSeeder(t, bootstrap, kp)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const seederWs = 'http://127.0.0.1:' + server.port
+  const a = await person(t, kp, 'Ana')
+  // Bia's certificate comes from an issuer the service already revokes and
+  // the seeder does not yet (its blocklist snapshot lags the service's).
+  const b = { dataDir: tmpDir(t, 'varanda-gsync-'), association }
+  b.key = (await member.idCreate(b)).publicKey
+  await member.certAdd(b, createIssuedCert({ member: b.key }, issuerKp, ctx.issuerCert))
+  await member.profileSet(b, { name: 'Bia' })
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await member.groupPost(a, { group, text: 'primeiro' })
+  await exchange(a, b)
+  await member.communityJoin(b, { community })
+  await member.groupJoin(b, { group })
+  await member.groupPost(b, { group, text: 'oi' })
+  const wb = ownWriter(b, group)
+  // Ana's diary binds Bia's writer too. Its header names Bia, so it can never
+  // count for Ana.
+  const s = await coreStore.openStore(a.dataDir)
+  try {
+    await coreStore.appendRecord(await coreStore.openDiary(s), groupJoinRecord({ group, writer: wb, on: true }))
+  } finally {
+    await s.close()
+  }
+  await syncOnce(bootstrap, b)
+  await syncOnce(bootstrap, a)
+  await until(() => {
+    const l = seederListing(seeder, group)
+    return l.complete && l.rows.has(group) && l.rows.has(wb) && l.rows.get(wb).diary === b.key
+  }, { name: 'the seeder lists Bia\'s writer under her diary', timeoutMs: 60000, intervalMs: 250 })
+
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'horta')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, revokedIssuers: () => new Set([issuer]) })
+  t.teardown(() => pg.close(), { force: true })
+  await pg.ready()
+  await until(() => pg.connected(), { name: 'link up', timeoutMs: 20000 })
+
+  const read = await until(async () => {
+    let r
+    try {
+      r = await pg.groupRead(page.key, group)
+    } catch (err) {
+      if (err.code === 'indisponivel') return null
+      throw err
+    }
+    return !r.incomplete && r.items.some((x) => x.text === 'primeiro') ? r : null
+  }, { name: 'a whole read', timeoutMs: 60000, intervalMs: 500 }).catch(() => null)
+  t.ok(read, 'the group reads whole: Ana\'s join of Bia\'s writer does not hold the fold')
+  t.absent(read !== null && read.items.some((x) => x.text === 'oi'), 'Bia\'s post stays out: the service refuses her diary')
+  t.is((await settled(() => pg.communityJoin(page.key, community), 'community join')).state, 'member', 'the page joins the community')
+  const joined = await settled(() => pg.groupJoin(page.key, group), 'group join', 60000).catch(() => null)
+  t.is(joined && joined.state, 'member', 'and the group: no join answers indisponivel')
+})

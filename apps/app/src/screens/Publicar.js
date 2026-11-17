@@ -62,7 +62,7 @@
 // is never resent, and the post never waits in the outbox.
 // Design: apps/site/artwork/app-design.md.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { AccessibilityInfo, Image, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { MAX_TEXT, activeMention, displayText } from '@varanda/rpc'
 import { MENTION_MIN_QUERY, insertMention } from '../mentions'
@@ -889,6 +889,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // quotes go through the service and never the outbox.
   const names = useNames()
   const acting = useActing()
+  // The visible "Publicar como" names the group: iOS reads no label on a
+  // plain View, so hiding that text left VoiceOver with the options alone.
+  const asLabelId = useId()
   const asPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
   // Momento mode: hosted, with media.putMoment, and a plain post (no reply,
   // quote or page). The post draft is untouched while it shows.
@@ -2318,8 +2321,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
           {modeSwitch}
           {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && roster.length > 0
             ? (
-              <View style={styles.asRow} accessibilityRole='radiogroup' accessibilityLabel='Publicar como'>
-                <Text style={styles.asLabel} aria-hidden importantForAccessibility='no' accessibilityElementsHidden>Publicar como</Text>
+              <View style={styles.asRow} accessibilityRole='radiogroup' aria-labelledby={asLabelId}>
+                <Text style={styles.asLabel} nativeID={asLabelId}>Publicar como</Text>
                 <Chip label='Você' on={asPage === null} disabled={held || moment.canRetry} onPress={() => actingStore.me()} />
                 {roster.map((key) => {
                   const p = names.profileOf(key)
