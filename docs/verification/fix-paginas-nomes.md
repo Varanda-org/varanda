@@ -10,10 +10,12 @@ Causa comum: `profile.read` responde `missing` para quem o nó não guarda (a P�
 - **Salvar e trocar @nome.** Depois de salvar nome, bio ou foto, ou de trocar o @nome, `PaginaAjustes.js` troca o peek guardado pelo que o serviço aceitou (`keptProfile`), para um `profile.read` `missing` não trazer o nome ou o @nome antigos de volta.
 - **Pedidos de mensagem da Página.** `Mensagens.js` nomeia quem enviou o pedido com o mesmo peek.
 - **Encerrar página.** O primeiro aviso cita o @nome porque o @nome agora fica conhecido (`closeWarning` não mudou).
+- **Linha de Páginas sem nome na primeira abertura.** O peek de `Paginas.js` parava quando outra resposta de `profile.read` chegava (`profileOf` muda e o efeito roda de novo), e a nova rodada pulava a chave que ainda estava sendo perguntada; a linha da chave antiga de uma página que mudou de chave ficava "página" até reabrir a tela (visto na caminhada web). Agora só sair da tela para o peek; `learnVerified` já descarta a resposta de outra identidade (`peekScope`).
 
 Como verificar, a partir da raiz:
 
 - `node apps/app/test/namesCache.test.js`: "fillFromPeek keeps a verified peek only for an answer with nothing at all" falha sem `fillFromPeek` (inclui o caso `{ name: 'Novo', bio: null, avatar: null }`); "settleProfile keeps the peek only while it filled the answer" e "names.js settles a profile.read answer through settleProfile" falham sem `settleProfile` em `names.js`; "keptProfile is what a save or a rename leaves as the verified entry" falha sem `keptProfile`; "the Páginas screens name people through verified peeks, not seeds" falha sem `learnVerified` em Páginas e Nova página, sem `useRowPeeks` com a janela inteira e as duas chamadas de `learnVerified` (salvar e trocar @nome) em Ajustes e sem `useRowPeeks` na lista de pedidos.
+- `node apps/app/test/namesCache.test.js`, também: "a Páginas row peek survives a names answer that re-runs the effect" falha com a limpeza antiga (`alive = false` a cada nova rodada).
 - `node apps/app/test/who.test.js`: "whoLabel names a person with the name and the @nome..." falha sem `whoLabel`.
 - `node apps/app/test/pageRoster.test.js`: "peopleKeys lists the page, the roster and an offer target, each once" falha sem `peopleKeys`.
 - `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo`.

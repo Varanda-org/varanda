@@ -270,3 +270,17 @@ test('the Páginas screens name people through verified peeks, not seeds', async
   t.ok(read('NovaPagina.js').includes('{ name, username, bio }'), 'a created page keeps exactly what was sent')
   t.ok(read('Mensagens.js').includes('useRowPeeks(sortedPeers, unlocked && loaded)'), 'the page requests list names its senders')
 })
+
+test('a Páginas row peek survives a names answer that re-runs the effect', async (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Paginas.js'), 'utf8')
+  const start = src.indexOf('// Keys the names cache could not name')
+  const end = src.indexOf('}, [list, profileOf, learnVerified, node])', start)
+  t.ok(start > 0 && end > start, 'peek effect found')
+  const effect = src.slice(start, end)
+  t.ok(effect.includes('const alive = () => mountedRef.current'), 'only unmounting stops a peek')
+  t.absent(/return \(\) => \{ alive = false \}/.test(effect), 'a re-run (profileOf changed) does not cancel the peek in flight')
+  t.ok(effect.includes('if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue'), 'a key another run already asks is skipped')
+  t.ok(src.includes('mountedRef.current = false }, [])'), 'unmount marks the screen gone')
+})

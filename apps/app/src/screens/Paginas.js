@@ -184,7 +184,8 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
     if (active) load()
   }, [active, load])
 
-  useEffect(() => () => { seqRef.current += 1 }, [])
+  const mountedRef = useRef(true)
+  useEffect(() => () => { seqRef.current += 1; mountedRef.current = false }, [])
 
   // Keys the names cache could not name (a page this device does not hold)
   // are peeked once, the way Membro opens a diary it does not hold; the
@@ -201,15 +202,20 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
       if (whoOf(p).title === UNNAMED) missing.push(key)
     }
     if (missing.length === 0) return undefined
-    let alive = true
+    // Only leaving the screen stops a peek. profileOf changes with every
+    // answer of profile.read, and a peek stopped there left its row unnamed:
+    // the next run skips a key still being peeked. learnVerified drops an
+    // answer from another identity (scope).
+    const alive = () => mountedRef.current
     const scope = scopeRef.current
     const peek = async () => {
       for (const key of missing.slice(0, 8)) {
-        if (!alive) return
+        if (!alive()) return
+        if (peekedRef.current.has(key) || peekingRef.current.has(key)) continue
         peekingRef.current.add(key)
         try {
           const res = await fetchMember(key)
-          if (!alive) continue
+          if (!alive()) continue
           triesRef.current.set(key, (triesRef.current.get(key) || 0) + 1)
           if (!res.ok) continue
           const { profileSeq, usernameSeq } = res.value
@@ -217,8 +223,8 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
           // Nothing to peek is an answer too: asking again would say the same.
           if (seqs.length === 0) { peekedRef.current.add(key); continue }
           const peeked = new Map()
-          await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, () => alive)
-          if (!alive) continue
+          await peekAll(node.request, planPeeks({ refs: seqs.map((n) => refOf(key, n)), authors: { [key]: { profileSeq, usernameSeq } } }), peeked, alive)
+          if (!alive()) continue
           // Verified, not a seed: profile.read says "missing" for a page this
           // device does not hold, and a seed would not survive that answer
           // (after Aceitar or a list reload the row lost its name).
@@ -234,7 +240,7 @@ export default function Paginas ({ active = true, onBack, onNewPage, onOpenPage,
       }
     }
     peek()
-    return () => { alive = false }
+    return undefined
   }, [list, profileOf, learnVerified, node])
 
   const dismiss = (id) => setDismissed((prev) => new Set(prev).add(id))
