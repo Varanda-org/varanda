@@ -664,6 +664,7 @@ async function runSync ({
   const blocklistHandles = new Set() // open 'varanda/blocklist/1' handles (fan-out, C4)
   const purgeChains = new Map() // key -> the last purge of that key (serialized per key)
   const releasing = new Map() // binding diary key -> its release (close and purge) in flight
+  const groupPurges = new Map() // group core key -> the purge of a failed entry, while in flight
   let warnedOwnBlocked = false
   let warnedOwnRevoked = false
   const groupList = [] // groups.json entries whose own writer opened: { group, writer, nonce }
@@ -3677,6 +3678,11 @@ async function runSync ({
   // on the page item's hinted diary and judges only the hint.
   async function gateGroupCore (e, sockets, timeoutMs) {
     if (isBlockedKey(e.key) || groupBlocked(e.group)) return { reason: 'blocked', own: true }
+    // An entry evicted from its diary's cap leaves the table before its
+    // purge settles: a listing of the key under another pair is gated only
+    // after it, so the purge never takes the blocks this gate fetches.
+    await groupPurges.get(e.key)
+    await releaseSettled(e.key)
     // Judged on the hinted diary alone, refused at once as a hint, unless
     // the core is stored: its own header then decides, so a stored writer of
     // a blocked or forked diary is condemned.
@@ -4921,12 +4927,14 @@ async function runSync ({
       return
     }
     e.state = 'failing'
-    e.purging = track((async () => {
+    const purging = track((async () => {
       if (core) await core.close()
       await purgeKey(e.key, { ifStored: true })
     })(), () => {
       e.state = 'failed'
-      groupTargets.delete(e.key)
+      // A later entry of the key (an evicted writer leaves the table before
+      // its purge settles) keeps its own target.
+      if (!groupCores.has(e.key)) groupTargets.delete(e.key)
       retire()
       evaluate()
     }, () => {
@@ -4934,6 +4942,9 @@ async function runSync ({
       if (!ended) purgeFailed(e.key)
       else log('aviso: falha ao limpar núcleo de grupo ' + key8(e.key))
     })
+    e.purging = purging
+    groupPurges.set(e.key, purging)
+    purging.finally(() => { if (groupPurges.get(e.key) === purging) groupPurges.delete(e.key) })
   }
 
   // The goal is judged on contiguousLength, and the growth listener of a
