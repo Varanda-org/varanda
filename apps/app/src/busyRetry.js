@@ -6,6 +6,9 @@ export const BUSY_RETRIES = 3
 
 export const isBusy = (err) => !!err && err.code === 'USAGE' && err.message === 'ocupado'
 
+// What a slot run answers when the screen went away while it waited.
+const SKIPPED = Symbol('skipped')
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // Runs `read` through `slots` (an app-wide limiter with run(fn, opts)) and
@@ -17,8 +20,9 @@ export async function readRetryingBusy (read, { slots = null, alive = () => true
   for (let attempt = 0; ; attempt++) {
     if (!alive()) return { busy: true }
     try {
-      const run = () => (alive() ? read() : null)
+      const run = () => (alive() ? read() : SKIPPED)
       const value = slots ? await slots.run(run, { front: true }) : await run()
+      if (value === SKIPPED) return { busy: true }
       return { busy: false, value }
     } catch (err) {
       if (!isBusy(err)) throw err

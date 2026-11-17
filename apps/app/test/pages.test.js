@@ -977,7 +977,8 @@ test('page keys: refreshes re-read, a held activation keeps its resend, Enviar c
   const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
   t.ok(inbox.includes('}, [dmVersion, pageKey, unlocked, read])'), 'the dmVersion bump reads the keys again')
   t.ok(inbox.includes('adopted.get(pageKey) !== held'), 'an adopted share is not stored again')
-  t.absent(/setInterval|setTimeout/.test(inbox), 'no timer of its own')
+  t.absent(/setInterval/.test(inbox), 'no polling timer of its own')
+  t.is((inbox.match(/setTimeout/g) || []).length, 1, 'one timed re-read, only after a busy answer')
   t.ok(inbox.includes("{keys.hold\n          ? <Btn label='Tentar de novo' onPress={retry}") || /keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}[\s\S]*PAGE_DM_ROTATING|PAGE_DM_ROTATING[\s\S]*keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}/.test(inbox), 'mid-rotation the held request can be resent')
   const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
   t.ok(/if \(dmStatus && dmStatus\.share\) await pagesDmAdopt\(node, \{ page, status: dmStatus \}\)\s*return pagesDmShareTo/.test(ajustes), 'the own share is adopted before sharing')
@@ -1698,4 +1699,33 @@ test('pagesList sets the acting identity back to the person when the page acted 
   releaseOld(list([]))
   await older
   t.is(acting.get().kind, 'page', 'an older answer that lands later changes nothing')
+})
+
+test('pagesList: an answer never ends an identity chosen after its request began, and drops the page a momento composer set aside', async (t) => {
+  const { pagesList } = await load()
+  const acting = await import('../src/actingAs.js')
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const list = (owned) => json(200, { owned, admin: [], invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const node = { request: async (method) => (method === 'page.sign' ? { signature: SIG } : { pending: [], ok: true }) }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+  t.teardown(() => acting.reset())
+
+  acting.reset()
+  let release
+  answers.push(new Promise((resolve) => { release = resolve }))
+  const early = pagesList(node, { member: MEM })
+  await flush()
+  acting.asPage({ key: X })
+  release(list([]))
+  await early
+  t.is(acting.get().kind, 'page', 'a list read before acting as the page leaves it')
+
+  acting.enterMoment()
+  answers.push(list([{ page: X, closed: true }]))
+  await pagesList(node, { member: MEM })
+  acting.leaveMoment()
+  t.is(acting.get().kind, 'me', 'the stopped page does not come back after the momento composer')
 })

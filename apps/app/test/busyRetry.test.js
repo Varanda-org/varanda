@@ -33,3 +33,13 @@ test('readRetryingBusy: goes through the shared slots, ahead of the background r
   t.alike(out, { busy: false, value: 7 })
   t.alike(seen, [{ front: true }])
 })
+
+test('readRetryingBusy: a screen gone while the read waited for a slot is skipped, not answered with null', async (t) => {
+  const { readRetryingBusy } = await load()
+  let live = true
+  let asked = 0
+  const slots = { run: async (fn) => { live = false; return fn() } }
+  const out = await readRetryingBusy(async () => { asked++; return { roster: 1 } }, { slots, alive: () => live })
+  t.alike(out, { busy: true })
+  t.is(asked, 0, 'the read was never made')
+})

@@ -865,6 +865,8 @@ let listCalls = 0
 // acting page and the pages the node flagged. A failed read forgets nothing.
 export async function pagesList (node, { member, also = [] } = {}) {
   const seq = ++listCalls
+  // Who the app acted as when this read started: an answer never ends an identity chosen after it.
+  const actedAs = actingStore.pageKey()
   const runKey = String(pagesOrigin(node)) + ' ' + member
   const data = await actAs(node, { member, action: 'list', page: '', op: {} })
   const last = listRuns.get(runKey)
@@ -874,8 +876,7 @@ export async function pagesList (node, { member, also = [] } = {}) {
   listRuns.set(runKey, { seq, run: out.run })
   // The device keeps acting as a page the member stopped running (closed, moved
   // or removed as admin elsewhere) until this answer says otherwise.
-  const acting = actingStore.get()
-  if (acting.kind === 'page' && actingPageStopped(data, acting.key)) actingStore.me()
+  if (actedAs !== null && actingPageStopped(data, actedAs)) actingStore.dropPage(actedAs)
   for (const page of out.gone) {
     forgetTried.add(page)
     pagesDmForget(node, page).then((forgot) => {
