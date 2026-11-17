@@ -95,7 +95,7 @@ Limites conhecidos (não corrigidos de propósito):
 
 ## Conferências no aparelho
 
-Feito com a Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), no Android (emulador, build de debug), no simulador iOS (iPhone 17 Pro) e na web, nessa ordem: a linha "Copiar conversas para outro aparelho" aparece em Conversas, a folha mostra todos os textos (14 dias, cota semanal de fotos, 30 a 50 minutos) e o botão "Copiar agora"; o toque mostra "Preparando a cópia" e depois "método desconhecido" com "Tentar de novo", porque a Vitrine não roda o nó. Pendentes, com uma conta de passkey (#224):
+Feito com a Vitrine (`EXPO_PUBLIC_VARANDA_VITRINE=1`), no Android (emulador, build de debug), no simulador iOS (iPhone 17 Pro) e na web, nessa ordem: a linha "Copiar conversas para outro aparelho" aparece em Conversas, a folha mostra todos os textos (14 dias, cota semanal de fotos, 30 a 50 minutos) e o botão "Copiar agora"; o toque mostra "Preparando a cópia" e depois "método desconhecido" com "Tentar de novo", porque a Vitrine não roda o nó. Depois do merge da `main`, o teste de contrato da Vitrine exige uma resposta para todo método que o app usa: `dm.historyCopy` passou a recusar com "indisponível no modo vitrine", como os métodos de Página (`apps/app/test/vitrine.test.js`, 42 testes; sem a resposta, falham 2 asserções e o arquivo para). A folha mostra esse texto no lugar de "método desconhecido"; não conferido de novo no aparelho. Pendentes, com uma conta de passkey (#224):
 
 - Copiar de um aparelho com fotos para um segundo aparelho da mesma passkey e abrir a conversa.
 - Cota esgotada: texto inteiro, fotos mais antigas de fora, mensagem de resultado correta.
