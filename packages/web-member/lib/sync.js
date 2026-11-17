@@ -342,7 +342,7 @@ const b4a = require('b4a')
 const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
-const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { attachAdmission, MAX_INVENTORY, CAP_HEADER_STUBS } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
@@ -477,6 +477,12 @@ const MAX_GROUP_PAGES = Math.ceil((MAX_GROUP_WRITERS + 1) / GROUPS_LIMIT_MAX) + 
 // gated again.
 const HINT_REASONS = new Set(['wrong-group', 'wrong-diary', 'unbound', 'diary-unavailable'])
 const MAX_GATE_HINTS = 4
+// The verdicts of a writer's block 0 that can never count for the hinted
+// diary (#350): no valid writer header, or one naming another group or
+// another diary. Such a core is held as a header stub, block 0 alone, once
+// that diary's join of it is proven; until then it is refused on the hint,
+// so another listing of the key may still prove it.
+const HEAD_REASONS = new Set(['header-invalid', 'wrong-group', 'wrong-diary'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 // docs/protocol.md "Mudar de chave": a chain of moves stops here.
@@ -732,6 +738,13 @@ function groupHeaderOf (raw, key) {
   } catch {
     return null
   }
+}
+
+// What a header stub's block 0 names -> { group, diary }, both null when it
+// is no header: the listing it gives way to (givesWay in runSync).
+function headOf (raw, key) {
+  const h = groupHeaderOf(raw, key)
+  return h === null ? { group: null, diary: null } : { group: h.group, diary: h.diary }
 }
 
 // What a paged key's root must be (see roleOf in runSync): `root` 'group',
@@ -1661,6 +1674,8 @@ async function syncRun ({
   const parentNamed = new Set() // groups whose root header was read for its parent
   const parentAnnounced = new Set() // communities a 'community-parent' was emitted for
   const writersAnnounced = new Set() // writer cores a 'group-writer' was emitted for
+  const headerStubs = new Map() // kv headerStubs: key -> { key, group, diary }, the pair that proved it
+  const headClosing = new Map() // key -> the close of a header stub that gave way
   const catalogueOf = new Map() // root paged root-only -> Set of communities whose catalogue names it
   const catalogueScans = new Map() // community -> { running, again }
   const createsCache = new Map() // community core key -> { next, creates, grants } (scanCreates)
@@ -1880,6 +1895,8 @@ async function syncRun ({
       attachLinkGroups(l)
       l.peer = attachAdmission(l.noise, {
         role: 'member',
+        // This node holds header stubs (docs/protocol.md section 5).
+        caps: CAP_HEADER_STUBS,
         have: inventory(),
         onmessage: (msg, peer) => onMessage(l, msg, peer),
         oninventory: () => {
@@ -3765,7 +3782,9 @@ async function syncRun ({
       attempts: 0, // gates started this run (MAX_GROUP_GATE_ATTEMPTS)
       lastAttempt: 0, // order of the last one (the fair queue)
       raw0: null, // the block 0 the gate accepted
-      stub: false, // released with a box that does not match: block 0 alone is held
+      stub: false, // block 0 alone is held: released with a box that does not match, or a header stub
+      head: null, // a header stub (#350): { group, diary } its block 0 names
+      headHint: false, // refused as a header stub whose join was not proven: another listing may prove it
       boxRefused: false, // refused for its box alone until its diary releases it (liftBoxRefused)
       boxWalk: null, // the remembered walk that refused it (refuseBox)
       gating: false,
@@ -3821,6 +3840,9 @@ async function syncRun ({
     } catch {
       boundRoots = new Set()
     }
+    try {
+      for (const x of await store.readHeaderStubs(storage)) headerStubs.set(x.key, x)
+    } catch {}
     for (const e of writers) {
       if (ending) return
       if (e.kind === 'community') ownCommunities.add(e.group)
@@ -3857,6 +3879,14 @@ async function syncRun ({
       try {
         raw = await core.get(0, { wait: false, raw: true })
       } catch {}
+      // A header stub is held under the pair that proved it, whatever its
+      // block 0 names: judged below by that diary's join alone.
+      const rec = headerStubs.get(key)
+      if (rec !== undefined && raw !== null && core.fork === 0) {
+        stored.push({ key, core, raw, group: rec.group, diary: rec.diary, headerStub: true })
+        heldAtStart.add(key)
+        continue
+      }
       const h = raw === null ? null : groupHeaderOf(raw, key)
       if (h === null || core.fork !== 0) {
         await core.close().catch(noop)
@@ -3921,6 +3951,10 @@ async function syncRun ({
     }
     // The role of each paged key holds for stored cores too, as at the gate.
     for (const s of stored) {
+      if (s.headerStub === true) {
+        if (rootOnly(s.group)) s.rest = true
+        continue
+      }
       const expect = expectFor(s.group)
       if (s.key === s.group) {
         if (expect.root === 'community' && !s.community) {
@@ -3942,8 +3976,10 @@ async function syncRun ({
       } else if (rootOnly(s.group)) {
         s.rest = true
       } else if (memberMismatch(s.raw, s.key, s.group)) {
-        // A writer whose member does not match its root's kind, as at the gate.
-        s.invalid = true
+        // A writer whose member does not match its root's kind: kept as a
+        // stub below only while its stored binding diary proves the join,
+        // as at the gate.
+        s.memberStub = true
       } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null)) {
         // One whose box does not match its root's visibility: judged below
         // by the walk of its stored binding diary, as at the gate.
@@ -3968,6 +4004,12 @@ async function syncRun ({
       // 0): the fold then never awaits it. Otherwise it goes, as before.
       if (s.boxless === true) {
         if (diaryWriterCut(await bindingEntries(s.diary, bindings), s.group, s.key) === 0) s.stub = true
+        else s.invalid = true
+      }
+      // A header or member stub stays only while the stored replica of the
+      // diary that proved it still holds that join; otherwise it goes.
+      if (s.headerStub === true || s.memberStub === true) {
+        if (storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.key).proven) s.stub = true
         else s.invalid = true
       }
       if (s.invalid === true) {
@@ -4014,6 +4056,7 @@ async function syncRun ({
       const ge = newGroupEntry(x.key, x.group, x.diary, x.seq)
       ge.raw0 = x.raw
       ge.stub = x.stub === true
+      ge.head = x.headerStub === true ? headOf(x.raw, x.key) : null
       ge.state = 'active'
       markGroupBound(ge.diary)
       // Stored before this run: a late box mismatch keeps its blocks (I4).
@@ -4403,6 +4446,7 @@ async function syncRun ({
   // caller), then purged and un-listed. A blocked author's that cannot be
   // purged fails the run, as for a diary.
   function purgeGroupKey (key, reason, core = null) {
+    headerStubs.delete(key)
     return track(groupKv(async () => {
       if (core !== null) await core.close()
       await store.purgeGroupCore(storage, key)
@@ -4807,6 +4851,15 @@ async function syncRun ({
         return
       }
       ge.state = 'active'
+      if (ge.head !== null && !ge.preStored) {
+        const x = { key: ge.key, group: ge.group, diary: ge.diary }
+        headerStubs.set(ge.key, x)
+        track(groupKv(() => store.addHeaderStub(storage, x)), noop, () => log('aviso: falha ao gravar o núcleo de grupo ' + key8(ge.key)))
+      } else if (ge.head === null && ge.key !== ge.group && headerStubs.has(ge.key)) {
+        // Gated as a writer of the pair its header names, which proved it.
+        headerStubs.delete(ge.key)
+        track(groupKv(() => store.removeHeaderStub(storage, ge.key)), noop, noop)
+      }
       markGroupBound(ge.diary)
       if (ge.diary !== ownHex && ge.diaryRaw0) {
         bindingCerts.set(ge.diary, ge.diaryRaw0)
@@ -4815,10 +4868,13 @@ async function syncRun ({
       ensureGroupDiary(ge.diary, ge.seq + 1)
       noteAcceptedGroupCore(ge)
       markGroupChanged(ge.group)
-      if (ge.key !== ge.group && !writersAnnounced.has(ge.key)) {
+      if (ge.key !== ge.group && ge.head === null && !writersAnnounced.has(ge.key)) {
         writersAnnounced.add(ge.key)
         emit({ event: 'group-writer', group: ge.group, writer: ge.key, private: rootVis.get(ge.group) === 'private', own: groupOwn.some((m) => m.group === ge.group), account: ge.diary === ownHex })
       }
+      // A listing of the pair its block 0 names, paged while this stub was
+      // gated, takes its place now (givesWay).
+      if (ge.head !== null && ge.head.group !== null) renoteHeadStub(ge)
       evaluate()
     }, () => {
       ge.gating = false
@@ -5102,12 +5158,17 @@ async function syncRun ({
     if (it.key === ownHex || follows.has(it.key)) return
     const known = groupCores.get(it.key)
     let hints = null
-    if (known !== undefined) {
+    if (known !== undefined && givesWay(known, g.group, it)) {
+      // Its own listing seen: the stub's hint is spent, so a listing that
+      // fails here cannot make it a stub again this run.
+      dropHeadStub(known)
+      hints = known.hints
+    } else if (known !== undefined) {
       // A hostile listing seen first must not hide the key for the run: a
       // gate refused on the hint alone (never stored, never purged) lets a
       // listing with another group, diary or seq be gated again, once each.
       const hint = g.group + ':' + it.diary + ':' + it.seq
-      if (known.state !== 'failed' || known.kept === true || !HINT_REASONS.has(known.reason) || known.hints.has(hint) || known.hints.size >= MAX_GATE_HINTS) return
+      if (known.state !== 'failed' || known.kept === true || !(HINT_REASONS.has(known.reason) || known.headHint === true) || known.hints.has(hint) || known.hints.size >= MAX_GATE_HINTS) return
       groupCores.delete(it.key)
       hints = known.hints
     } else if (groupCores.size >= store.MAX_GROUP_REPLICAS) {
@@ -5126,6 +5187,37 @@ async function syncRun ({
     if (!full) return
     if (victim === null || contenders(ge) >= MAX_CAP_CONTENDERS) failGroupEntry(ge, 'quota', { purge: false })
     else ge.contender = true
+  }
+
+  // A header stub gives way to a listing of the group and diary its block 0
+  // names, which gates the key as a writer there: a stub never keeps a core
+  // from the group it writes in.
+  function givesWay (ge, group, it) {
+    return ge.state === 'active' && ge.head !== null && ge.head.group === group && ge.head.diary === it.diary
+  }
+
+  // Leaves the table without a verdict, its blocks kept; the next open of
+  // the key waits for this close.
+  function dropHeadStub (ge) {
+    stopGroupEntry(ge)
+    ge.hints.add(ge.group + ':' + ge.diary + ':' + ge.seq)
+    const core = ge.core
+    ge.core = null
+    ge.state = 'failed'
+    groupCores.delete(ge.key)
+    markGroupChanged(ge.group)
+    if (core !== null) {
+      const p = groupKv(() => core.close())
+      headClosing.set(ge.key, p.catch(noop))
+      track(p, noop, noop)
+    }
+    reconcileGroupDiaries()
+  }
+
+  function renoteHeadStub (ge) {
+    const g = groups.get(ge.head.group)
+    const it = g === undefined || !g.items ? undefined : g.items.get(ge.key)
+    if (it !== undefined && givesWay(ge, ge.head.group, it)) noteGroupItem(g, it)
   }
 
   // The live accepted cores of ge's (group, diary) besides ge: only
@@ -5295,27 +5387,42 @@ async function syncRun ({
     if (ge.state !== 'pending' || ending) return
     if (probe === null) return gateUnanswered(ge)
     const vis = rootVis.get(ge.group) || null
-    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group), null, writerKind(ge.group))
+    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group))
     if (verdict === 'not-community') return refuseNotCommunity(ge)
-    if (verdict !== null) return failGroupEntry(ge, verdict, { purge: false })
+    // A header stub (HEAD_REASONS), held once the hinted diary's join is
+    // proven (below), else refused on the hint.
+    const head = ge.key !== ge.group && HEAD_REASONS.has(verdict) ? verdict : null
+    if (verdict !== null && head === null) return failGroupEntry(ge, verdict, { purge: false })
+    // A `member` that does not match its root's kind: the fold rejects it at
+    // any cut, so it is held as a stub, block 0 alone, once its diary's
+    // join is proven.
+    const member = head === null && memberMismatch(probe.raw, ge.key, ge.group)
     // A box that does not match the root's visibility refuses the writer
     // unless its binding diary released it (a replaced boxless writer): the
     // fold then never awaits it, and it is held as a stub, block 0 alone, as
     // seeders hold it. That release is read from the diary as this run
     // holds it, below; a diary it does not hold refuses it now, as before,
     // and the diary's arrival or growth tries it again (liftBoxRefused).
-    const stub = boxMismatch(probe.raw, ge.key, ge.group, vis)
-    if (stub && openBinding(ge.diary) === null) return refuseBox(ge, false)
+    const boxless = head === null && !member && boxMismatch(probe.raw, ge.key, ge.group, vis)
+    const stub = head !== null || member || boxless
+    if (boxless && openBinding(ge.diary) === null) return refuseBox(ge, false)
     if (ge.key === ge.group) noteRootVisibility(ge.group, rootVisibilityOf(probe.raw, ge.key))
     const proof = await proveGroupJoin(l, ge, timeout)
     if (ge.state !== 'pending' || ending) return
     if (proof === undefined) return gateUnanswered(ge)
-    if (proof !== null) return failGroupEntry(ge, proof, { purge: false })
+    if (proof !== null) {
+      // Unproven, a header stub keeps its header's verdict, as a hint only.
+      if (head !== null) ge.headHint = true
+      return failGroupEntry(ge, head !== null ? head : proof, { purge: false })
+    }
     ge.proven = true
     if (isBlockedKey(ge.diary)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (isBlockedKey(ge.group)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (overQuota(probe)) return failGroupEntry(ge, 'quota', { purge: false })
-    if (stub) {
+    // A full record refuses a new header stub: the fold waits for it as
+    // before.
+    if (head !== null && !ge.preStored && !headerStubs.has(ge.key) && headerStubs.size >= store.MAX_HEADER_STUBS) return failGroupEntry(ge, 'quota', { purge: false })
+    if (boxless) {
       const rel = await heldRelease(ge.diary, ge.group, ge.key)
       if (ge.state !== 'pending' || ending) return
       if (!rel.released) return refuseBox(ge, false, rel.walk)
@@ -5342,6 +5449,8 @@ async function syncRun ({
     }
     let core
     try {
+      const closing = headClosing.get(ge.key)
+      if (closing !== undefined) await closing
       core = await store.openGroupReplica(storage, ge.key)
     } catch {
       ge.reserved = false
@@ -5360,6 +5469,7 @@ async function syncRun ({
     }
     ge.raw0 = probe.raw
     ge.stub = stub
+    ge.head = head !== null ? headOf(probe.raw, ge.key) : null
     ge.state = 'regate'
     // The root's visibility may have been learned while this gate ran, and
     // recheckGroupBoxes skips a pending writer: its box is checked against
