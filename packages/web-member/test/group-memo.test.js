@@ -15,13 +15,15 @@ const { createGroupKeys } = require('../lib/group-keys')
 const { createBrowserSession } = require('../lib/session')
 const ops = require('../lib/member-ops')
 const store = require('../lib/node-store')
+const { groupCutRecord } = require('@varanda/core/lib/records')
+const { communityBan } = require('@varanda/core/lib/group')
 
 const hex = (buf) => b4a.toString(buf, 'hex')
 
-// Block decodes of group cores (readBlocks) and diary replicas
+// Block decodes of group cores (readBlocks, readHeldBlocks) and diary replicas
 // (readVisible), the work the memo saves.
 const reads = { n: 0 }
-for (const name of ['readBlocks', 'readVisible']) {
+for (const name of ['readBlocks', 'readHeldBlocks', 'readVisible']) {
   const original = store[name]
   store[name] = (...args) => {
     reads.n++
@@ -225,6 +227,73 @@ test('a hide downloaded into a hole of the root invalidates', async (t) => {
   await copyCore(a, b, group)
   t.alike(await heldRange(b, group, false), { contiguous: length, length }, 'same length, hole filled')
   t.alike(await texts(b, group), ['depois', 'oi'], 'the hide counts')
+})
+
+// A seeder keeps a cut writer sparse (#350): below the cut, then its leaves
+// and key blocks only. Read past its hole, such a copy folds like the whole
+// one, and a leave arriving in that range invalidates.
+test('a cut writer held sparse folds like the whole copy, and a leave past its hole invalidates (#350)', async (t) => {
+  const { a, b, community, group } = await world(t)
+  await ops.communityJoin(b.ctx, { community })
+  await ops.groupJoin(b.ctx, { group })
+  await ops.groupPost(b.ctx, { group, text: 'antes' })
+  const wB = await ownWriter(b, group)
+  const cut = await coreLength(b, wB)
+  await ops.groupPost(b.ctx, { group, text: 'depois' })
+  await ops.groupLeave(b.ctx, { group })
+  const length = await coreLength(b, wB)
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group, writer: wB, cut }))
+  } finally {
+    await diary.close()
+  }
+  await copyDiary(b, a)
+  await copyCore(b, a, await ownWriter(b, community))
+  await copyCore(b, a, wB, [[0, cut]])
+  t.alike(await heldRange(a, wB, false), { contiguous: cut, length }, 'the blocks past the cut are not held')
+  t.alike(await memberKeys(a, group), [a.key, b.key].sort(), 'without the leave, still a member')
+  t.alike(await texts(a, group), ['antes', 'oi'])
+  t.is((await counted(a, () => memberKeys(a, group))).n, 0, 'memo warm')
+  await copyCore(b, a, wB, [[length - 1, length]])
+  t.alike(await heldRange(a, wB, false), { contiguous: cut, length }, 'the leave alone past the hole')
+  const sparse = { members: await memberKeys(a, group), texts: await texts(a, group) }
+  t.alike(sparse.members, [a.key], 'the leave past the hole counts')
+  await copyCore(b, a, wB)
+  t.alike(await heldRange(a, wB, false), { contiguous: length, length }, 'now the whole copy')
+  t.alike({ members: await memberKeys(a, group), texts: await texts(a, group) }, sparse, 'the sparse copy folded like the whole one')
+})
+
+test('a cut community writer held sparse folds like the whole copy (#350)', async (t) => {
+  const { a, b, community } = await world(t)
+  await ops.communityJoin(b.ctx, { community })
+  const cw = await ownWriter(b, community)
+  const cut = await coreLength(b, cw)
+  // A record past the cut that the cut drops, so the sparse copy has a hole.
+  const entry = (await store.readGroupWriters(b.storage)).find((x) => x.group === community)
+  const core = await store.openGroupWriter(b.storage, await b.ctx.groupKeyPair(new Uint8Array(b4a.from(entry.nonce, 'hex'))))
+  try {
+    await store.appendGroupRecord(core, communityBan({ member: a.key, on: true, cuts: [] }), { root: false, community: true })
+  } finally {
+    await core.close()
+  }
+  await ops.communityLeave(b.ctx, { community, force: true })
+  const length = await coreLength(b, cw)
+  t.is(length, cut + 2, 'a dropped record, then the leave past the cut')
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    await store.appendRecord(diary, groupCutRecord({ group: community, writer: cw, cut }))
+  } finally {
+    await diary.close()
+  }
+  const members = async () => (await ops.communityMembers(a.ctx, { community })).members.map((m) => m.member).sort()
+  await copyDiary(b, a)
+  await copyCore(b, a, cw, [[0, cut], [length - 1, length]])
+  t.alike(await heldRange(a, cw, false), { contiguous: cut, length }, 'the leave alone past the hole')
+  const sparse = await members()
+  t.alike(sparse, [a.key], 'the leave past the cut counts')
+  await copyCore(b, a, cw)
+  t.alike(await members(), sparse, 'the sparse copy folded like the whole one')
 })
 
 test('a binding diary filling a hole invalidates', async (t) => {
