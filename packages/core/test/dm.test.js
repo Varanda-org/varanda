@@ -399,7 +399,9 @@ test('inner v2: constants and layout', (t) => {
   t.alike(dm.INNER_KEYS_V2, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
   t.alike(dm.DM_MEDIA_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
   t.is(dm.DM_MEDIA_MAX, 4)
-  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
+  t.absent(dm.DM_MEDIA_MIMES.includes('audio/mp4'), 'audio stays out of the image list')
+  t.absent(dm.DM_MEDIA_MIMES.includes('video/mp4'), 'video stays out of the image list')
 
   // Items built in any key order are written in the canonical one.
   const shuffled = Object.fromEntries(Object.entries(blobItem(1)).reverse())
@@ -515,6 +517,8 @@ test('inner v2: descriptors are validated strictly', (t) => {
     t.is(openInner(forge(v2Body({ media }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
   }
   t.ok(msg({ media: [1, 2, 3, 4].map(n => blobItem(n, { mime: dm.DM_MEDIA_MIMES[n - 1] })) }), 'every mime, four items')
+  const avif = blobItem(1, { mime: 'image/avif' })
+  t.alike(openInner(msg({ media: [avif] }), bia.hex, O).media, [avif], 'an avif item')
   t.ok(msg({ media: [blobItem(1, { chunks: 1, bytes: 17 })] }), 'the smallest blob')
 })
 

@@ -24,6 +24,7 @@ const { createSwarm, joinAndFlush, topicFor, attachAdmission, MAX_INVENTORY } = 
 const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
+const { createStorageBudget } = require('@varanda/core/lib/storage-budget')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
 const { createPostNoticeIndex } = require('@varanda/core/lib/post-notices')
 const { signRoster, signClose, issuerCountersign } = require('@varanda/core/lib/page')
@@ -184,6 +185,8 @@ function scanFixture (options = {}) {
     _peers: new Set(),
     _inflight: new Map(),
     _drops: new Map(),
+    // _drop also leaves the storage budget (storage-budget.js).
+    _storage: createStorageBudget({ budget: 1024 * 1024 * 1024 }),
     _purge: async () => {},
     _persist: async () => {},
     _scanDiary: () => {},

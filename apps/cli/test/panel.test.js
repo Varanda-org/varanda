@@ -252,6 +252,11 @@ test('pure helpers', async (t) => {
   t.is(s.net.get(A).changes[0].claimed, true)
   t.is(panel.buildState({ me: ME, blocked: { published: null, blocked: [], pending: [] } }).published.seq, 3, 'falls back to me.published')
   t.is(panel.buildState({ me: { email: 'x', published: null }, blocked: { published: null } }).published, null)
+
+  // A report stripped of its deleted reporter (moderation-store forgetDeleted).
+  const stripped = panel.buildState({ me: ME, decided: { reports: [report({ status: 'bloquear', text: '', reporter: { member: null, username: null }, decidedBy: ME.email, decidedAt: '2026-10-22T00:00:00.000Z' })] } })
+  t.alike(stripped.decided.reports[0].reporter, { member: '', username: '' })
+  t.is(panel.who('', ''), '?', 'shown as an unknown key')
 })
 
 test('a 401 renders the login button and the mapped ?erro notice', async (t) => {
@@ -979,6 +984,28 @@ test('Histórico: Reabrir only on an AI decision; confirm, POST, and the report 
   t.is(buttons(doc, 'Reabrir').length, 0, 'gone from Histórico')
   buttons(doc, 'Abertas')[0].click()
   t.is(cardsOf(doc).length, 1, 'the report is in Abertas')
+})
+
+test('Histórico: a report kept without its deleted reporter says "conta excluída" and offers no Reabrir', async (t) => {
+  const doc = fakeDocument()
+  const routes = signedIn([])
+  // As moderation-store forgetDeleted leaves them: a block still standing
+  // keeps its quote; a dismissed record has none.
+  const gone = { member: null, username: null }
+  routes['GET /account/mod/api/reports?estado=decidida'] = () => [200, {
+    reports: [
+      report({ id: R1, status: 'bloquear', actor: 'ia', text: '', reporter: gone, decidedBy: 'ia', decidedAt: '2026-10-22T00:00:00.000Z' }),
+      report({ id: 'r2abcdefghijklmnopqrst', status: 'descartar', actor: 'ia', text: '', quote: '', reporter: gone, decidedBy: 'ia', decidedAt: '2026-10-22T00:00:00.000Z' })
+    ],
+    truncated: false
+  }]
+  const { fetch } = fakeFetch(routes)
+  const p = panel.createPanel(env(doc, fetch))
+  await p.start()
+  buttons(doc, 'Histórico')[0].click()
+  t.is(doc.main.textContent.split('denunciada por: conta excluída').length - 1, 2, 'one line per card')
+  t.absent(doc.main.textContent.includes('denunciada por: ?'))
+  t.is(buttons(doc, 'Reabrir').length, 0, 'the store would refuse it')
 })
 
 test('Histórico: a declined Reabrir sends nothing; a refusal shows a fixed line, never the token', async (t) => {

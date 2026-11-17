@@ -156,7 +156,7 @@ Seguir ou deixar de seguir também grava um registro `follow` no próprio diári
 
 ### Fotos e GIFs
 
-Só na web hospedada (com o nó no navegador) e no app instalado com a instalação, com a identidade desbloqueada e rede. No app, o botão "Foto" abre a biblioteca de fotos do aparelho, e a imagem é reencodada para JPEG sem EXIF nem GPS (GIFs vão como estão). O botão "Foto" do Publicar escolhe até 10 imagens (JPEG, PNG, WebP ou GIF):
+Só na web hospedada (com o nó no navegador) e no app instalado com a instalação, com a identidade desbloqueada e rede. No app, o botão "Foto" abre a biblioteca de fotos do aparelho, e a imagem é reencodada para JPEG sem EXIF nem GPS (GIFs vão como estão). Uma foto AVIF já publicada é aceita na exibição. A codificação em AVIF fica para os próximos PRs. O app confere toda foto recebida com o leitor estrito (`mediaBounds`) antes de mostrá-la, e o serviço de contas e a CLI recusam no envio a foto que ele recusaria (acima de 16384 px de lado ou 16777216 px no total, ou de tamanho diferente do declarado). O botão "Foto" do Publicar escolhe até 10 imagens (JPEG, PNG, WebP ou GIF):
 
 - As fotos são redesenhadas num canvas (no máximo 2048 px no lado maior) e gravadas como WebP de qualidade 0,85 quando o navegador realmente produz WebP, senão JPEG 0,85. Isso remove os metadados EXIF, inclusive a localização (GPS). Uma foto de origem acima de 50 MiB é recusada, e o resultado tem no máximo 8 MiB.
 - Antes de publicar, cada miniatura tem setas para mover a foto uma posição para antes ou para depois; a primeira foto é a capa (marcada "capa"), define a forma do quadro do carrossel e é a que aparece no Mural; as setas ficam indisponíveis enquanto a publicação é enviada e não aparecem com uma foto só.

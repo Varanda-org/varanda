@@ -261,7 +261,7 @@ for (const [method, params, mutating] of MOMENT_PARAMS) {
 }
 
 test('moment.putMedia: image upload bounds and cache name', (t) => {
-  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']) {
     ok(t, 'moment.putMedia', { ...MOMENT_UPLOAD, mime, width: 16384, height: 16384 })
   }
   for (const mime of ['audio/mp4', 'video/mp4', 'image/svg+xml', '', null]) {
@@ -311,7 +311,7 @@ test('moment.create: text is 0..200 code points and media is one image item', (t
   for (const text of ['a'.repeat(201), '😀'.repeat(201), null, 1, [], {}]) {
     bad(t, 'moment.create', { text, media: MOMENT_MEDIA })
   }
-  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']) {
     ok(t, 'moment.create', { text: '', media: { ...MOMENT_MEDIA, mime, w: 16384, h: 16384, chunks: 257, bytes: 257 * 32768 } })
   }
   for (const field of Object.keys(MOMENT_MEDIA)) {
@@ -995,6 +995,7 @@ test('profile.set avatar', (t) => {
   for (const avatar of [
     { ...d, mime: 'image/png' },
     { ...d, mime: 'image/gif' },
+    { ...d, mime: 'image/avif' },
     { ...d, width: 511, height: 511 },
     { ...d, width: 513, height: 513 },
     { ...d, width: 512, height: 511 },
@@ -1463,7 +1464,7 @@ test('group.post with public media', (t) => {
   ok(t, 'group.post', params, { ...params, fwd: 0 })
   ok(t, 'group.post', { ...params, sealed: false })
   ok(t, 'group.post', { ...params, text: '\u{1f600}'.repeat(MAX_TEXT), replyTo: { writer: KEY, seq: 1 } })
-  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']) {
     ok(t, 'group.post', { ...params, media: [{ ...d, mime }] })
   }
   bad(t, 'group.post', { ...params, text: 'x'.repeat(MAX_TEXT + 1) }, 'text over limit with media')
@@ -1489,7 +1490,7 @@ test('group.post with private media', (t) => {
   const { sealed, ...unmarked } = params
   bad(t, 'group.post', unmarked, 'private media requires sealed')
   bad(t, 'group.post', { ...params, sealed: false }, 'private media requires sealed true')
-  for (const plainMime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'group.post', { ...params, media: [{ ...d, plainMime }] })
+  for (const plainMime of ['image/png', 'image/webp', 'image/gif', 'image/avif']) ok(t, 'group.post', { ...params, media: [{ ...d, plainMime }] })
   for (const field of Object.keys(d)) {
     const missing = { ...d }
     delete missing[field]
@@ -2057,7 +2058,7 @@ test('media.uploadFile with sealed', (t) => {
   const params = { name: 'a'.repeat(32) + '.bin', mime: 'image/jpeg', width: 1, height: 1, sealed: true }
   ok(t, 'media.uploadFile', params, params)
   ok(t, 'media.uploadFile', { ...params, sealed: false })
-  for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...params, mime })
+  for (const mime of ['image/png', 'image/webp', 'image/gif', 'image/avif']) ok(t, 'media.uploadFile', { ...params, mime })
   for (const sealed of [null, 0, 1, 'true']) bad(t, 'media.uploadFile', { ...params, sealed }, 'sealed must be boolean')
   bad(t, 'media.uploadFile', { ...params, mime: 'application/octet-stream' }, 'the node seals: the file is always the image')
   bad(t, 'dm.putMedia', { ...params, to: KEY }, 'group sealing does not use the DM blob channel')
@@ -2157,7 +2158,7 @@ test('media uploads require the explicit voice shape for audio', (t) => {
 test('media.uploadFile', (t) => {
   const base = { name: '0123456789abcdef0123456789abcdef.bin', mime: 'image/jpeg', width: 1, height: 16384 }
   ok(t, 'media.uploadFile', base, base)
-  for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.uploadFile', { ...base, mime })
+  for (const mime of ['image/png', 'image/webp', 'image/gif', 'image/avif']) ok(t, 'media.uploadFile', { ...base, mime })
   ok(t, 'media.uploadFile', { ...base, name: 'f'.repeat(32) + '.bin' })
   for (const k of Object.keys(base)) {
     const p = { ...base }
@@ -2244,7 +2245,7 @@ test('dm.* (Conversas)', (t) => {
   const four = ['a1', 'a2', 'a3', 'a4'].map((h) => ({ ...item, id: h.repeat(32) }))
   ok(t, 'dm.send', { to: KEY, text: 'legenda', replyTo: ID, media: four })
   t.is(validateParams('dm.send', { to: KEY, text: '', media: [item, item] }).message, 'parâmetro inválido: media', 'repeated blob ids refused')
-  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, mime }] })
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']) ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, mime }] })
   ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, chunks: 1, bytes: 17 }] })
   ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, chunks: 1, bytes: 32768 }] })
   ok(t, 'dm.send', { to: KEY, text: '', media: [{ ...item, chunks: 257, bytes: 257 * 32768 }] })
@@ -2818,7 +2819,7 @@ test('post.create, post.reply and post.quote take one video as [JPEG poster, vid
   delete holed[0]
   for (const media of [
     [VIDEO, POSTER], [VIDEO], [POSTER, VIDEO, POSTER], [POSTER, POSTER, VIDEO], [VIDEO, VIDEO],
-    [{ ...POSTER, mime: 'image/png' }, VIDEO], [{ ...POSTER, ms: 1 }, VIDEO],
+    [{ ...POSTER, mime: 'image/png' }, VIDEO], [{ ...POSTER, mime: 'image/avif' }, VIDEO], [{ ...POSTER, ms: 1 }, VIDEO],
     [POSTER, { ...VIDEO, ms: 0 }], [POSTER, { ...VIDEO, ms: 30001 }], [POSTER, { ...VIDEO, ms: '1' }],
     [POSTER, { ...VIDEO, width: 1921, height: 1 }], [POSTER, { ...VIDEO, width: 1920, height: 1920 }],
     [POSTER, { ...VIDEO, extra: 1 }], [POSTER, noMs], [POSTER, { ...VIDEO, mime: 'video/webm' }],

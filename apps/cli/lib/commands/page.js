@@ -12,9 +12,8 @@ const nodeCrypto = require('node:crypto')
 const { jsonLine, safe } = require('@varanda/core/lib/safe')
 const member = require('@varanda/core/lib/member')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
-const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MEDIA_MIMES, AVATAR_MIMES, AVATAR_SIDE, MAX_AVATAR_BYTES, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS } = require('@varanda/core/lib/records')
-const { validateParams } = require('@varanda/rpc')
+const { validateParams, mediaBounds } = require('@varanda/rpc')
 
 const USAGE_TEXT = 'node bin/varanda.js page register|terms|create|list|post|reply|photo|follow|unfollow|notices|close|move|join|leave|group-post'
 const MAX_FILES = 10
@@ -190,14 +189,18 @@ function sniffMime (bytes) {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
   if (bytes.length >= 6 && /^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('latin1'))) return 'image/gif'
   if (bytes.length >= 12 && bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp'
+  // ftyp is shared with HEIC and video, so the mime comes from mediaBounds,
+  // which also keeps the dimension cap.
+  if (mediaBounds(bytes, 'image/avif') !== null) return 'image/avif'
   return null
 }
 
+// The strict parser the app runs on every received photo; a still type is one
+// frame, only a GIF may have more.
 function imageSize (bytes, mime) {
-  if (mime === 'image/jpeg' || mime === 'image/webp') return stillImageSize(bytes, mime)
-  if (mime === 'image/png' && bytes.length >= 24) return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
-  if (mime === 'image/gif' && bytes.length >= 10) return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) }
-  return null
+  const bounds = mediaBounds(bytes, mime)
+  if (bounds === null || (mime !== 'image/gif' && bounds.frames !== 1)) return null
+  return { width: bounds.width, height: bounds.height }
 }
 
 // A photo file: its bytes, sniffed type and size; refused before anything

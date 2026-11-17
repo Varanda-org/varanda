@@ -5,6 +5,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
+const { Worker } = require('node:worker_threads')
 const { tmpDir } = require('./helpers/net')
 const sealed = require('../lib/sealed-secrets')
 
@@ -18,6 +19,15 @@ for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('VARANDA_'))
 // against each other at the end: no error ever carries a secret.
 const secrets = new Set()
 const stderrs = []
+
+// A child still running after 50 s, short of the 60 s kill below, is reported
+// on stderr with where it waits (helpers/stuck-child.js reads /proc, so Linux
+// only). Its errors are ignored: it never changes a result.
+if (process.platform === 'linux') {
+  const watcher = new Worker(path.join(__dirname, 'helpers', 'stuck-child.js'), { workerData: { parent: process.pid, afterMs: 50000 } })
+  watcher.on('error', () => {})
+  watcher.unref()
+}
 
 function varanda (args) {
   const r = spawnSync(process.execPath, [BIN, ...args], { env, encoding: 'utf8', timeout: 60000 })

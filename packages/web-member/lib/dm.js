@@ -259,13 +259,45 @@ function zeroPair (pair) {
   pair.secretKey.fill(0)
 }
 
+// The readers of the person's own identity data. The browser reads them from
+// its diary and kv; a core node keeps them in its own store and passes them.
+// Each returns what the matching ./node-store reader returns, since a wrong
+// shape reads as no blocks: cert() is block 0's raw cert or null,
+// memberBlocks() the normalized entries, blocklist() { v, snapshot } or null,
+// follows() the kv follows. A missing member reads from `storage`.
+function identityReaders (given, storage) {
+  if (given !== undefined && (given === null || typeof given !== 'object' || Array.isArray(given))) throw new TypeError('identity must be an object')
+  const g = given || {}
+  for (const k of ['cert', 'memberBlocks', 'blocklist', 'follows']) {
+    if (g[k] !== undefined && typeof g[k] !== 'function') throw new TypeError('identity.' + k + ' must be a function')
+  }
+  async function diaryCert () {
+    if (!await store.diaryExists(storage)) return null
+    const diary = await store.openDiary(storage)
+    try {
+      const block0 = await store.readBlock0(diary)
+      return block0 !== null && typeof block0 === 'object' ? block0.cert : null
+    } finally {
+      await diary.close()
+    }
+  }
+  // Called on `g`, so a caller's methods keep their `this`.
+  return {
+    cert: g.cert ? () => g.cert() : diaryCert,
+    memberBlocks: g.memberBlocks ? () => g.memberBlocks() : () => store.readMemberBlocks(storage),
+    blocklist: g.blocklist ? () => g.blocklist() : () => store.readBlocklist(storage),
+    follows: g.follows ? () => g.follows() : () => store.readFollows(storage)
+  }
+}
+
 // limits (tests): issueBurst, issuePaceMs, topUpEveryMs, topUpRetryMs,
 // budgetBytes, pageMax, openMax, cacheBytesMax (./dm-store.js), link
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
 // (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls),
 // now (the clock the local compaction reads).
 // createStore, fetch and mediaOrigin: tests only.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue } = {}) {
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue, identity } = {}) {
+  const readers = identityReaders(identity, storage)
   const L = {
     issueBurst: ISSUE_BURST,
     issuePaceMs: ISSUE_PACE_MS,
@@ -398,16 +430,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // -> the own certificate for `own`, or throws NO_CERT.
   async function certOf (own) {
     if (ownCert !== null && ownCert.member === own) return ownCert
-    let block0 = null
-    if (await store.diaryExists(storage)) {
-      const diary = await store.openDiary(storage)
-      try {
-        block0 = await store.readBlock0(diary)
-      } finally {
-        await diary.close()
-      }
-    }
-    const cert = block0 !== null && typeof block0 === 'object' ? block0.cert : null
+    const cert = await readers.cert()
     if (!certForKey(cert, own, association).ok) throw new UsageError(NO_CERT)
     ownCert = cert
     return cert
@@ -426,8 +449,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   async function moderationStrict () {
     // The member's own blocks drop a sender as the association's do, also
     // on a device the conversation op never reached.
-    const own = blockedKeys(await store.readMemberBlocks(storage))
-    const data = await store.readBlocklist(storage)
+    const own = blockedKeys(await readers.memberBlocks())
+    const data = await readers.blocklist()
     const snapshot = data === null ? null : data.snapshot
     if (snapshot !== null && verifySnapshot(snapshot, association).ok) {
       // `association` alone: a page's inbox keeps the association's blocks,
@@ -678,7 +701,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The kv follows (own store only) and seen texts a fold reads, with
   // their sha256 digests (the list summary's).
   async function foldInputs (ctx) {
-    const follows = ctx === personal ? (await store.readFollows(storage)).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
+    const follows = ctx === personal ? (await readers.follows()).map((f) => typeof f === 'string' ? f : f && f.key).filter((k) => typeof k === 'string') : []
     const storedIds = await store.readDmSeen(storage, ctx.prefix)
     const followsText = JSON.stringify(follows)
     const seenText = JSON.stringify(storedIds)

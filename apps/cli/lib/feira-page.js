@@ -18,6 +18,9 @@ const PHOTO_PATH = /^\/f\/[0-9a-f]{64}\/[1-9][0-9]{0,15}\/foto\/[0-9]{1,2}$/
 // link never opens the app from this page; this custom-scheme link does,
 // and only in exactly this shape.
 const APP_URL = /^varanda:\/\/\/anuncio\/[0-9a-f]{64}\/[1-9][0-9]{0,15}$/
+// The photo mimes og:image may point at: the ones the photo route serves,
+// minus image/avif, which some link crawlers cannot render.
+const OG_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
 
 // displayText marks every unsafe code point with U+FFFD; a public page drops
 // them instead, so a hostile title cannot fill the card with marks.
@@ -43,6 +46,20 @@ function safeUrl (value) {
 
 function isPhotoPath (value) {
   return typeof value === 'string' && PHOTO_PATH.test(value)
+}
+
+// The photo og:image names: the first of the listing's first photos whose
+// view.photoMimes entry is an OG_IMAGE_MIMES mime, or null. A photo that is
+// not a same-origin /f/ path stops the search, so a later photo is never
+// promoted past an off-origin one.
+function ogPhoto (view) {
+  const urls = Array.isArray(view.photoUrls) ? view.photoUrls : []
+  const mimes = Array.isArray(view.photoMimes) ? view.photoMimes : []
+  for (let i = 0; i < Math.min(urls.length, MAX_PHOTOS); i++) {
+    if (!isPhotoPath(urls[i])) return null
+    if (OG_IMAGE_MIMES.includes(mimes[i])) return { url: urls[i], mime: mimes[i] }
+  }
+  return null
 }
 
 function originOf (pageUrl) {
@@ -130,8 +147,10 @@ function renderListingPage (view) {
       head += '<link rel="canonical" href="' + esc(pageUrl) + '">\n' +
         '<meta property="og:url" content="' + esc(pageUrl) + '">\n'
     }
-    if (photos.length > 0 && view.photoUrls[0] === photos[0]) {
-      head += '<meta property="og:image" content="' + esc(originOf(pageUrl) + photos[0]) + '">\n'
+    const og = ogPhoto(view)
+    if (og !== null) {
+      head += '<meta property="og:image" content="' + esc(originOf(pageUrl) + og.url) + '">\n' +
+        '<meta property="og:image:type" content="' + esc(og.mime) + '">\n'
     }
 
     let html = '<p class="kicker">Feira' + (cat !== '' ? ' · ' + esc(cat) : '') + '</p>\n' +
