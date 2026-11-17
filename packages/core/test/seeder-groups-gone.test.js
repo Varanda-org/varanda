@@ -702,7 +702,17 @@ test('a lifted goneRoots entry stays below the hard bound: its root, admitted ag
   const list = (seq, extra) => createSnapshot({ seq, blocked: [...others, ...extra], revokedIssuers: [] }, mod.kp, mod.cert)
   const adopted = (seq) => until(() => events.find((e) => e.event === 'blocklist' && e.seq === seq), { name: 'lista ' + seq + ' adotada' })
   writeBlocklist(dataDir, list(1, []))
-  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  // B's live join (group R, writer W) admits R again as soon as a list
+  // lifts A's block, and that admission clears R's goneRoots entry. While R
+  // is held, it fails before it is served, so the entry stays until then.
+  const held = new Set()
+  let refused = 0
+  const admitHook = async (key, step) => {
+    if (step !== 'persist' || !held.has(key)) return
+    refused++
+    throw new Error('held')
+  }
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, admitHook })
 
   const { A, B, R, W } = await creatorAndMember(t, bootstrap, assoc)
   await admit(A, assoc)
@@ -710,6 +720,7 @@ test('a lifted goneRoots entry stays below the hard bound: its root, admitted ag
   await admitted(events, R)
   await admitted(events, W)
   await until(() => readGroups(dataDir)[R] && readGroups(dataDir)[R].bound === true, { name: 'R vinculado' })
+  held.add(R)
   // B keeps a copy of R to serve it once A is gone, so A cannot bind R again.
   const copy = B.store.get({ key: b4a.from(R, 'hex') })
   await copy.ready()
@@ -725,9 +736,12 @@ test('a lifted goneRoots entry stays below the hard bound: its root, admitted ag
   // noted with the map past ROOT_CREATORS_MAX: R's lifted entry stays.
   await reader(t, bootstrap, publicKey, { blocklist: list(3, []) })
   await adopted(3)
+  await until(() => refused > 0, { name: 'readmissão de R retida' })
   fillCovered(seeder, others, 4096)
   seeder._noteGoneRoot(hex(crypto.randomBytes(32)), others[0], 'blocked')
+  t.absent(seeder._groupServed.has(R), 'R not admitted yet')
   t.ok(seeder._goneRoots.has(R), 'R\'s lifted entry stays')
+  held.delete(R)
   await B.diary.append(groupJoinRecord({ group: R, writer: R, on: true }))
   await until(() => readGroups(dataDir)[R] && seeder._groupServed.has(R), { name: 'R de volta' })
   t.is(readGroups(dataDir)[R].bound, true, 'R keeps `bound`')
