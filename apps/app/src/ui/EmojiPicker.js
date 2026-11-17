@@ -5,9 +5,11 @@
 // onPick(emoji) inserts; the composer checks the length limit.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
+import { AccessibilityInfo, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { EMOJI_GROUPS, filterEmoji } from '../emoji'
 import { useStyles, useTheme } from './ThemeProvider'
+
+const EMPTY = 'Nenhum emoji encontrado'
 
 export function EmojiPicker ({ open, onPick }) {
   const styles = useStyles(makeStyles)
@@ -36,9 +38,14 @@ export function EmojiPicker ({ open, onPick }) {
   useLayoutEffect(() => () => {
     if (searchFocused.current) Keyboard.dismiss()
   }, [])
+  const hits = open ? filterEmoji(query) : null
+  const none = open && hits !== null && hits.length === 0
+  // iOS has no accessibilityLiveRegion, so the empty result is spoken here.
+  useEffect(() => {
+    if (none && Platform.OS === 'ios') AccessibilityInfo.announceForAccessibility(EMPTY)
+  }, [none])
   if (!open) return null
   const current = EMOJI_GROUPS[group] || EMOJI_GROUPS[0]
-  const hits = filterEmoji(query)
   const shown = hits || current.emojis
   return (
     <View style={styles.panel} accessibilityLabel='emojis'>
@@ -57,12 +64,13 @@ export function EmojiPicker ({ open, onPick }) {
         style={styles.search}
       />
       {hits === null && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs} keyboardShouldPersistTaps='handled'>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabs} keyboardShouldPersistTaps='handled' accessibilityRole='tablist'>
           {EMOJI_GROUPS.map((g, i) => (
             <Pressable
               key={g.label}
               accessibilityRole='tab'
               accessibilityState={{ selected: i === group }}
+              aria-selected={i === group}
               onPress={() => setGroup(i)}
               style={[styles.tab, i === group && styles.tabOn]}
             >
@@ -71,10 +79,12 @@ export function EmojiPicker ({ open, onPick }) {
           ))}
         </ScrollView>
       )}
+      {/* Mounted before its text changes: a live region inserted together with its text is often not announced. */}
+      <Text style={none ? styles.empty : styles.hidden} accessibilityLiveRegion='polite' aria-live='polite'>{none ? EMPTY : ''}</Text>
       {/* A new key remounts the grid at the top when its rows change. */}
       <ScrollView key={hits ? 'q:' + query.trim() : 'g:' + group} style={styles.scroll} nestedScrollEnabled keyboardShouldPersistTaps='handled'>
         {shown.length === 0
-          ? <Text style={styles.empty}>Nenhum emoji encontrado</Text>
+          ? null
           : (
             <View style={styles.grid}>
               {shown.map((item) => (
@@ -124,6 +134,7 @@ const makeStyles = (colors) => StyleSheet.create({
   tabTextOn: { color: colors.accent },
   scroll: { maxHeight: 220 },
   empty: { color: colors.soft, fontSize: 14, padding: 12 },
+  hidden: { height: 0 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 4 },
   cell: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
   pressed: { backgroundColor: colors.accentSoft },

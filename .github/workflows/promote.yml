@@ -5,7 +5,7 @@
 # only a commit on main whose seeder image (ghcr.io/varanda-org/varanda-seeder,
 # tag sha-<commit>) carries a keyless signature from release.yml on main.
 # With the commit left empty it promotes the release on the edge channel, the
-# newest one release.yml published at the tip of main, under the same checks.
+# newest one release.yml published from main, under the same checks.
 # That release is read only after the release-stable approval, so whoever
 # approves sees the commit in the summary, not in the request. It
 # then signs that same digest with this workflow's identity (servers on the

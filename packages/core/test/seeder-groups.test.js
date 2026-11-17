@@ -83,7 +83,7 @@ test('root and writer need both bindings, are listed before open, served over th
   delete listed[R].by
   t.is(listed[R].bound, true, 'A bound R with its own join')
   delete listed[R].bound
-  t.alike(listed, { [R]: { diary: A.key, group: R, seq: 1 }, [W]: { diary: B.key, group: R, seq: 1 } })
+  t.alike(listed, { [R]: { diary: A.key, group: R, seq: 1, first: 1 }, [W]: { diary: B.key, group: R, seq: 1 } })
   t.is(await stored(seeder, wrongDiary), false)
   t.is(await stored(seeder, wrongGroup), false)
   t.is(seeder.stats().groupCores, 2)
@@ -343,7 +343,7 @@ test('a root admitted through a member join is indexed with its creator\'s own j
   }, { name: 'R indexado para A' })
   t.alike(seeder.indexGroups(A.key).groups, [{ group: R, writer: R, seq: 1, left: true }], 'A\'s own on:true join')
   await until(() => readGroups(dataDir)[R].seq === 1, { name: 'seq de R corrigido no arquivo' })
-  t.alike(readGroups(dataDir)[R], { diary: A.key, group: R, seq: 1, by: B.key, bound: true }, 'charged to B, whose join admitted it; bound by A')
+  t.alike(readGroups(dataDir)[R], { diary: A.key, group: R, seq: 1, by: B.key, bound: true, first: 1 }, 'charged to B, whose join admitted it; bound by A')
   await A.swarm.destroy()
   await B.swarm.destroy()
   const r = await reader(t, bootstrap, publicKey)
@@ -583,6 +583,9 @@ test('seed list shows group cores and seed drop purges one', async (t) => {
   await downloaded(seeder, R, 2)
   await downloaded(seeder, W, 3)
   await seeder.close()
+  const marked = readFile(dataDir)
+  marked.denialsLost = true
+  fs.writeFileSync(path.join(dataDir, 'admitted.json'), JSON.stringify(marked))
 
   const list = await Seeder.list(dataDir, assoc.hex)
   const byKey = Object.fromEntries(list.admitted.map((e) => [e.key, e]))
@@ -592,6 +595,7 @@ test('seed list shows group cores and seed drop purges one', async (t) => {
 
   t.alike(await Seeder.drop(dataDir, assoc.hex, W), { key: W })
   t.alike(Object.keys(readGroups(dataDir)), [R])
+  t.is(readFile(dataDir).denialsLost, true, 'the drop keeps the lost-denial mark')
   t.alike(await Seeder.drop(dataDir, assoc.hex, A.key), { key: A.key })
   t.alike(Object.keys(readGroups(dataDir)), [R], 'dropping the creator keeps the root for the next start to re-gate')
   t.alike(await Seeder.drop(dataDir, assoc.hex, R), { key: R })
@@ -994,7 +998,7 @@ test('a root purged for a revoked creator stays refused after a restart, through
   await rejected(first.events, R, 'revoked-issuer')
   await until(async () => first.seeder._drops.size === 0 && !(R in readGroups(dataDir)), { name: 'R purgado' })
   t.alike(readFile(dataDir).revokedCreators, { [A.key]: issuer.hex }, 'the revoked creator is kept with its issuer')
-  t.alike(readFile(dataDir).goneRoots, { [R]: { creator: A.key, issuer: issuer.hex } }, 'and the root it lost, with the issuer that condemned it')
+  t.alike(readFile(dataDir).goneRoots, { [R]: { creator: A.key, issuer: issuer.hex, first: 1 } }, 'and the root it lost, with the issuer that condemned it')
   await first.seeder.close()
 
   // A restart, then B (still a member) joins R by its own key.
@@ -1100,7 +1104,7 @@ test('4097 minted revoked-issuer announces do not resurrect a root purged for it
     const key = hex(signingKeyPair().publicKey)
     seeder.admit(key, createIssuedCert({ member: key }, issuer.kp, issuer.cert), fakePeer())
   }
-  t.alike(readFile(dataDir).goneRoots, { [R]: { creator: A.key, issuer: issuer.hex } }, 'the purge evidence is intact')
+  t.alike(readFile(dataDir).goneRoots, { [R]: { creator: A.key, issuer: issuer.hex, first: 1 } }, 'the purge evidence is intact')
   const refusals = () => events.filter((e) => e.event === 'group-rejected' && e.key === R && e.reason === 'revoked-issuer').length
   const before = refusals()
   await B.diary.append(groupJoinRecord({ group: R, writer: R, on: true }))
@@ -1477,7 +1481,7 @@ test('a root creator dropped for quota while a member keeps the root is purged o
   await rejected(first.events, R, 'revoked-issuer')
   await until(async () => first.seeder._drops.size === 0 && !(R in readGroups(dataDir)) && !(await stored(first.seeder, R)), { name: 'R purgado' })
   t.ok(first.seeder._groupServed.has(W), 'W kept')
-  t.alike(readFile(dataDir).goneRoots, { [R]: { creator: A.key, issuer: issuer.hex } }, 'the purged root is kept with its creator\'s issuer')
+  t.alike(readFile(dataDir).goneRoots, { [R]: { creator: A.key, issuer: issuer.hex, first: 1 } }, 'the purged root is kept with its creator\'s issuer')
   await first.seeder.close()
 
   const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })

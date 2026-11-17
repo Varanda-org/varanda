@@ -664,8 +664,16 @@ const PAGE_RECIPIENTS_MAX = 17
 // The page-secrets header carries gen as uint32be.
 const PAGE_GEN_MAX = 0xffffffff
 const PAGE_SEALED_MAX = 1024
-const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX &&
-  v.every((r) => isPlainObject(r) && Object.keys(r).length === 2 && isKey(r.member) && isKey(r.box))
+// A core delegate's own signed box (docs/rpc.md 5.161): exactly { gen, at,
+// sig }; the node checks the signature before it seals anything.
+const isPageBoxProof = (v) => isPlainObject(v) && Object.keys(v).length === 3 && Number.isSafeInteger(v.gen) && v.gen >= 1 &&
+  isCanonicalIso(v.at) && isSignature(v.sig)
+const isPageRecipient = (r) => {
+  if (!isPlainObject(r) || !isKey(r.member) || !isKey(r.box)) return false
+  const n = Object.keys(r).length
+  return n === 2 || (n === 3 && hasOwn(r, 'proof') && isPageBoxProof(r.proof))
+}
+const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX && v.every(isPageRecipient)
 const isPageDraftKind = (v) => v === 'msg' || v === 'ctl'
 // dm.pageLegacyChunk (docs/rpc.md 5.114): one chunk of the legacy bundle the
 // service sealed to the owner's own dm-key box; the node opens and checks it.
@@ -748,7 +756,7 @@ function isDmListCursor (v) {
 // diary through the signed cancel offer ({ to: null, exp: null }).
 const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
-  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'group-seal', 'group-rebox', 'follow',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'choice', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
@@ -1541,7 +1549,7 @@ const SPECS = {
   // identity's blob stamps on any frame not yet acked; a repeat finds those
   // frames acked and spends nothing, so it is not marked mutating either.
   'dm.pageGenerate': { fields: { page: req(isKey), gen: req(int(1, PAGE_GEN_MAX)), recipients: req(isPageRecipients) } },
-  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey) } },
+  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey), proof: opt(isPageBoxProof) } },
   'dm.pageSecrets': {
     fields: {
       page: req(isKey),
@@ -1584,6 +1592,9 @@ const SPECS = {
   },
   'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
   'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
+  // The core node's delegate actor signs its own dm box (docs/rpc.md 5.161).
+  // Signs, writes nothing, so it is not mutating.
+  'dm.actorBox': { fields: none },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.

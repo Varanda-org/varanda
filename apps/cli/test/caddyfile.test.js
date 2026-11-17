@@ -279,7 +279,7 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 9, 'exactly nine rate_limit blocks (each Feira entry handle has two)')
+  t.is(count('rate_limit {'), 12, 'exactly twelve rate_limit blocks (each Feira entry handle and the SMS deletion send have two)')
   const limits = {
     'handle /index/* {': ['index', '20', '10s'],
     'handle /media/* {': ['media', '120', '10s'],
@@ -520,4 +520,39 @@ test('Caddyfile: the crawler case gets no no-cache, humans on /convite/* keep it
   }
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel still stamps no-cache')
   t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'humans still get index.html')
+})
+
+// Excluir conta sem a passkey: every matched send is a paid SMS and the
+// account service never reads an address, so the per-address limits live at
+// the edge, before the generic /account/* handle.
+test('Caddyfile: /account/delete/sms/* has per-address zones, a global send ceiling and a 405 for the rest', (t) => {
+  t.is(count('handle /account/delete/sms/* {'), 1, 'exactly one /account/delete/sms/* handle')
+  const sms = lines.findIndex((l) => l.trim() === 'handle /account/delete/sms/* {')
+  const account = lines.findIndex((l) => l.trim() === 'handle /account/* {')
+  t.ok(sms !== -1 && account > sms, 'before the generic /account/* handle')
+  const outer = block('handle /account/delete/sms/* {').map((l) => l.trim())
+  t.alike(block('@exclusaoSmsEnvio {').map((l) => l.trim()), ['@exclusaoSmsEnvio {', 'path /account/delete/sms/send', 'method POST', 'header Content-Type application/json*', '}'], 'send matcher: the path, POST and a JSON Content-Type')
+  t.alike(block('@exclusaoSmsCodigo {').map((l) => l.trim()), ['@exclusaoSmsCodigo {', 'path /account/delete/sms/check', 'method POST', 'header Content-Type application/json*', '}'], 'check matcher: the path, POST and a JSON Content-Type')
+  const zone = (b, name) => {
+    const i = b.indexOf('zone ' + name + ' {')
+    return i === -1 ? [] : b.slice(i, b.indexOf('}', i) + 1)
+  }
+  const envio = block('handle @exclusaoSmsEnvio {').map((l) => l.trim())
+  const codigo = block('handle @exclusaoSmsCodigo {').map((l) => l.trim())
+  t.alike(zone(envio, 'exclusao-sms'), ['zone exclusao-sms {', 'key {remote_host}', 'events 3', 'window 1h', '}'], 'send: 3 per hour per address')
+  t.alike(zone(envio, 'exclusao-sms-total'), ['zone exclusao-sms-total {', 'key static', 'events 30', 'window 1h', '}'], 'send: 30 per hour in all')
+  t.ok(envio.indexOf('zone exclusao-sms {') < envio.indexOf('zone exclusao-sms-total {'), 'per address first')
+  t.is(envio.filter((l) => l === 'rate_limit {').length, 2, 'each ceiling in its own rate_limit')
+  t.alike(zone(codigo, 'exclusao-codigo'), ['zone exclusao-codigo {', 'key {remote_host}', 'events 20', 'window 1h', '}'], 'check: 20 per hour per address')
+  t.is(codigo.filter((l) => l === 'rate_limit {').length, 1)
+  for (const [name, b] of [['send', envio], ['check', codigo]]) {
+    t.is(b[1], 'route {', name + ': the handle holds a route block')
+    const rp = b.findIndex((l) => l.startsWith('reverse_proxy '))
+    t.ok(rp > b.indexOf('rate_limit {'), name + ': rate_limit before reverse_proxy')
+    t.is(b[rp], 'reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {', name + ': to the account service')
+    t.ok(b.includes('header_up -X-Forwarded-For') && b.includes('header_up -X-Real-Ip'), name + ': strips client address headers')
+  }
+  t.alike(block('@exclusaoSmsOutro {').map((l) => l.trim()), ['@exclusaoSmsOutro {', 'not {', 'path /account/delete/sms/send /account/delete/sms/check', 'method POST', 'header Content-Type application/json*', '}', '}'], 'every other request to these paths')
+  t.alike(block('handle @exclusaoSmsOutro {').map((l) => l.trim()), ['handle @exclusaoSmsOutro {', 'respond 405', '}'], 'answered at the edge: no rate_limit, no reverse_proxy')
+  t.absent(outer.includes('handle {'), 'no bare handle inside: the SPA catch-all stays the only one')
 })

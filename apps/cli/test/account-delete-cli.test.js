@@ -26,6 +26,7 @@ const { openPhoneStore } = require('../lib/account/phone-store')
 const { keyFromAttestation } = require('../lib/account/webauthn')
 const { createDeleteRoutes, WAIT_MS } = require('../lib/account/delete-routes')
 const { drainNotices } = require('../lib/account/deletion-notices')
+const { openDeletionRequests, MAX_AGE_MS } = require('../lib/account/deletion-requests')
 const { takeLock } = require('../lib/account/server')
 const { scheduleDeletion, scheduleLines, cancelDeletion } = require('../lib/commands/account')
 const { createFakePasskey } = require('./helpers/fake-passkey')
@@ -35,6 +36,7 @@ const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
 const SIG = 'a'.repeat(128)
 const RP = 'varanda.test'
 const NOTHING = 'nada foi gravado; rode de novo com --yes'
+const NO_SMS = 'pedido por SMS: nenhum nos últimos 30 dias'
 const PAGE_OWNER = 'a conta é dona de uma página: ela precisa ser encerrada ou transferida antes'
 const RESTORED = 'diretório de contas restaurado de uma cópia antiga; confira o backup'
 const EVA_LEFT = 'a conta ainda tem 1 passkey guardada, 1 código de recuperação, 1 passkey extra de recuperação e celular confirmado: confira que a pessoa perdeu o acesso a eles e rode de novo com --force'
@@ -165,12 +167,12 @@ test('account delete: the preview writes nothing and shows the e-mail, or that t
   const r = varanda(s.dir, ['account', 'delete', '--member', s.ana])
   t.is(r.code, 0, r.stderr)
   t.is(r.stderr, '')
-  t.is(r.stdout, [...idLines(s.ana, 'ana_nova', 'ana@example.test'), 'nenhuma exclusão agendada', NOTHING].join('\n') + '\n')
+  t.is(r.stdout, [...idLines(s.ana, 'ana_nova', 'ana@example.test'), NO_SMS, 'nenhuma exclusão agendada', NOTHING].join('\n') + '\n')
   t.alike(bytes(s.file), s.keys0, 'passkeys.json unchanged')
 
   const phone = varanda(s.dir, ['account', 'delete', '--username', 'bia', '--json'])
   t.is(phone.code, 0, phone.stderr)
-  t.alike(JSON.parse(phone.stdout), { member: s.bia, username: 'bia', email: '', ...NONE, scheduled: null, ownsLivePage: false, written: false })
+  t.alike(JSON.parse(phone.stdout), { member: s.bia, username: 'bia', email: '', ...NONE, smsRequest: null, scheduled: null, ownsLivePage: false, written: false })
   const text = varanda(s.dir, ['account', 'delete', '--username', 'bia'])
   t.ok(text.stdout.split('\n').includes('sem e-mail no vínculo'), text.stdout)
 
@@ -197,11 +199,36 @@ test('account delete: the preview shows what the member can still sign in with',
   const passkeys = bytes(s.file)
   const r = varanda(s.dir, ['account', 'delete', '--member', s.eva])
   t.is(r.code, 0, r.stderr)
-  t.is(r.stdout, [...idLines(s.eva, 'eva', 'eva@example.test', EVA), 'nenhuma exclusão agendada', NOTHING].join('\n') + '\n')
+  t.is(r.stdout, [...idLines(s.eva, 'eva', 'eva@example.test', EVA), NO_SMS, 'nenhuma exclusão agendada', NOTHING].join('\n') + '\n')
   const json = varanda(s.dir, ['account', 'delete', '--username', '@eva', '--json'])
-  t.alike(JSON.parse(json.stdout), { member: s.eva, username: 'eva', email: 'eva@example.test', ...EVA, scheduled: null, ownsLivePage: false, written: false })
+  t.alike(JSON.parse(json.stdout), { member: s.eva, username: 'eva', email: 'eva@example.test', ...EVA, smsRequest: null, scheduled: null, ownsLivePage: false, written: false })
   t.alike(bytes(s.file), passkeys, 'passkeys.json unchanged')
   t.is(bytes(s.notices), null)
+})
+
+test('account delete: the preview shows an SMS deletion request of the last 30 days, also while the service runs', async (t) => {
+  const s = await seeded(t)
+  const at = new Date(await openDeletionRequests(s.dir).record(s.eva)).toISOString()
+  await openDeletionRequests(s.dir, { now: () => Date.now() - MAX_AGE_MS - 60000 }).record(s.ana)
+  const file = path.join(s.dir, 'deletion-requests.json')
+  const before = bytes(file)
+  const lock = takeLock(s.dir)
+  const r = varanda(s.dir, ['account', 'delete', '--member', s.eva])
+  const json = varanda(s.dir, ['account', 'delete', '--username', 'eva', '--json'])
+  const old = varanda(s.dir, ['account', 'delete', '--member', s.ana])
+  lock.release()
+  t.is(r.code, 0, r.stderr)
+  t.is(r.stdout, [...idLines(s.eva, 'eva', 'eva@example.test', EVA), 'pedido por SMS: ' + when(at), 'nenhuma exclusão agendada', NOTHING].join('\n') + '\n')
+  t.is(JSON.parse(json.stdout).smsRequest, at)
+  t.is(old.code, 0, old.stderr)
+  t.ok(old.stdout.split('\n').includes(NO_SMS), 'a request older than 30 days is not shown: ' + old.stdout)
+  t.alike(bytes(file), before, 'deletion-requests.json unchanged')
+
+  fs.writeFileSync(file, '{"v":9}')
+  const bad = varanda(s.dir, ['account', 'delete', '--member', s.eva])
+  t.is(bad.code, 1)
+  t.is(bad.stderr, 'erro: deletion-requests.json inválido\n')
+  t.is(bad.stdout, '')
 })
 
 test('account delete --yes: writes the hold 7 days ahead and queues one notice; again keeps the first date', async (t) => {

@@ -1342,6 +1342,9 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
   // included (an admission or grant cut must lie above them).
   const logs = [{ key, diary: header.diary, entries: rootEntries, length: rootCore.contiguousLength, signed: rootCore.length }]
   const localDiaries = new Set([ownHex])
+  // Block 0 of every other stored core, with the diary its header names when
+  // it is a writer header for this root (group.js headerStubs).
+  const firsts = new Map()
   // Discovery-key opens only inspect existing cores, including writers kept
   // after a leave or no longer present in this device's writer list.
   for await (const dk of store.list()) {
@@ -1350,10 +1353,13 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
     try {
       await core.ready()
       if (core.fork !== 0 || core.contiguousLength === 0) continue
+      const k = hex(core.key)
       const h = decodeBlock(await core.get(0, { wait: false, raw: true }))
-      if (validateRecord(h, 0) === null) localDiaries.add(hex(core.key))
-      if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
-      logs.push({ key: hex(core.key), diary: h.diary, entries: await readHeldBlocks(core), length: core.contiguousLength, signed: core.length })
+      if (validateRecord(h, 0) === null) localDiaries.add(k)
+      const own = groups.validateWriterHeader(h) === null && h.group === key
+      firsts.set(k, { entry: { seq: 0, record: h }, diary: own ? h.diary : null })
+      if (!own) continue
+      logs.push({ key: k, diary: h.diary, entries: await readHeldBlocks(core), length: core.contiguousLength, signed: core.length })
     } finally {
       await core.close()
     }
@@ -1387,7 +1393,10 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
   const writers = accepted.filter((l) => l.key !== key)
   // Keep only two-way bindings for observed lengths and record references.
   const bound = accepted.filter((l) => (joins.get(l.diary) || []).some((j) => j.writer === l.key && j.on))
-  return { header, input: { root, writers, joins, marks, confirms }, bound, profiles, diaryEntries }
+  // Header stubs (#350): the fold settles, with a stored core's block 0, a
+  // pair whose writer can never count for its diary, so it never waits for it.
+  const heads = groups.headerStubs(joins, firsts)
+  return { header, input: { root, writers, joins, marks, confirms, heads }, bound, profiles, diaryEntries }
 }
 
 // The local entry of this device in community `key` (its CW, or the root it
@@ -1426,13 +1435,13 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
     throw err
   }
   const { header, profiles, diaryEntries } = parts
-  const { root, writers, joins, marks, confirms } = parts.input
+  const { root, writers, joins, marks, confirms, heads } = parts.input
   // The parent community named by the header, with its CWs and their
   // binding diaries; null while it is not held (or blocked, or no
   // community root): the fold then reads the group as incomplete.
   const cparts = await readCoreParts(identity, header.community, block, 'community')
   const parent = typeof cparts === 'string' ? null : cparts
-  const input = { root, writers, joins, marks, confirms, community: parent === null ? null : parent.input }
+  const input = { root, writers, joins, marks, confirms, heads, community: parent === null ? null : parent.input }
   const priv = header.visibility === 'private'
   let box = null
   let view
