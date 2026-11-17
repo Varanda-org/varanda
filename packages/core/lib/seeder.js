@@ -6236,6 +6236,9 @@ class Seeder {
   // Deletes the waiting mentions `pred` matches (a dropped actor, a
   // deleted post).
   _pushForget (pred) {
+    // A seeder built without the push state (tests use bare prototypes)
+    // holds nothing to forget.
+    if (!(this._pushPending instanceof Map)) return
     for (const [id, entry] of [...this._pushPending]) {
       if (pred(entry)) this._pushPending.delete(id)
     }
