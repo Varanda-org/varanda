@@ -22,7 +22,7 @@ Dobra (`packages/core/lib/group.js`):
 Nó core (`packages/core/lib/sync.js`, `store.js`, `admission.js`, `net.js`):
 
 - Portão: com a chave diferente do grupo, os vereditos `header-invalid`, `wrong-group` e `wrong-diary` do bloco 0 (b a e) e o `member` que não bate (a) viram toco quando o diário listado prova a entrada. A prova é a mesma de qualquer escritor (`diaryVerdict`: bloco 0 do diário e o bloco de entrada, do que o nó tem ou pela quarentena), sem ler a caminhada. Sem prova, a listagem fica com o veredito do cabeçalho e a cobrança de antes (`fail(head)`); um diário que não responde até o prazo é `timeout`, cobrado como tal.
-- Toco: baixa só `[0, 1)`, a meta quer o bloco 0. Os casos b a e ficam em `header-stubs.json` (`{ key, group, diary }`, no máximo 256, o mais novo fica), com a vaga do limite por diário sob o par que o provou (`loadDiskSlots`). Com o registro cheio, um toco novo é recusado com `quota`, sem cobrança, e a dobra o espera como antes.
+- Toco: baixa só `[0, 1)`, a meta quer o bloco 0. Os casos b a e ficam em `header-stubs.json` (`{ key, group, diary }`, no máximo 256), com a vaga do limite por diário sob o par que o provou (`loadDiskSlots`). Com o registro cheio, um toco novo é recusado com `quota`, sem cobrança, e a dobra o espera como antes.
 - Um toco cujo cabeçalho nomeia outro par cede à listagem desse par (`givesWay`): sai da tabela sem veredito, com os blocos, e a chave passa pelo portão como escritor dali, baixa inteira e sai do registro. Uma listagem desse par vista enquanto o toco passava pelo portão é testada de novo quando ele é aceito (`rescanGroup`).
 - Caminho guardado: um núcleo guardado toma o diário do próprio cabeçalho, salvo quando o registro o nomeia como toco (e o diário do cabeçalho não está condenado aqui). Um núcleo guardado por outro motivo (escritor ou raiz de outro grupo, diário seguido ou de ligação) nunca vira toco: a listagem sai da tabela como antes (I4).
 - Partida: `reviewHeaderStubs` mantém um toco enquanto a réplica guardada do diário que o provou ainda tem a entrada e o apaga senão. Uma chave que o nó agora escreve, segue, guarda como diário de ligação de um escritor aceito aqui, ou não guarda mais, só sai do registro, com os blocos. A varredura de legado (`sweepLegacyGroups`, parâmetro `keep`) não apaga um toco registrado.
@@ -44,7 +44,7 @@ Protocolo (`docs/protocol.md`): `CAP_HEADER_STUBS` em "Capabilities"; o cabeçal
 
 ## Como verificar
 
-Cada arquivo rodou sozinho, com o código final, no Node 24.22.1: `VARANDA_TEST_CONCURRENCY=1 node <arquivo>`.
+Cada arquivo rodou sozinho, com o código de antes da rodada de revisão 1 (os números com o código final estão na seção dela), no Node 24.22.1: `VARANDA_TEST_CONCURRENCY=1 node <arquivo>`.
 
 Nó core (`packages/core/test/`):
 
@@ -179,6 +179,109 @@ Serviço de conta (`apps/cli/lib/account/pages-groups.js`, `apps/cli/test/pages-
 - MS1, `partsHeld` não passa `heads` (`heads = []`): as mesmas asserções 1 e 4 falham (2/4).
 - MS2, o bloco 0 dos escritores listados não é anotado (só o dos escritores da Página): as mesmas asserções 1 e 4 falham (2/4).
 
+## Rodada de revisão 1
+
+A revisão do PR pediu as mudanças abaixo, em duas levas. Commits: `6d4d0614` (nó core), `da082e9b` (navegador) e o deste texto.
+
+O que mudou, nos dois nós salvo quando dito:
+
+- Uma raiz que passa pelo portão como raiz do próprio grupo, depois de guardada como toco de outro grupo, sai do registro (antes só um escritor saía). Na partida, um registro sozinho nunca apaga um núcleo que é mais que um toco aqui: a raiz de um grupo de `groups.json` (navegador: kv `groupWriters`), um núcleo com um bloco além do 0, ou um escritor de um desses grupos cujo diário do próprio cabeçalho, como guardado, o ligou (`beyondStub`). Esse núcleo só sai do registro, e a partida o lê pelo próprio cabeçalho. Isso também cobre uma falha de `saveHeaderStubs`: um registro que ficou para trás não apaga um núcleo inteiro. A partida do nó core também apaga um toco cujo grupo está bloqueado; a do navegador tira do registro uma chave que o aparelho escreve.
+- Nó core: o bloco 0 de uma chave que nunca pode contar para o diário listado fica na memória do processo (`MAX_HEAD_BLOCKS` = 256 chaves, cada bloco até `MAX_BLOCK_BYTES`, o mais antigo sai primeiro), e uma dica nova da mesma chave só prova o diário. No navegador, `MAX_GATE_HINTS` (4) já limita as listagens que passam pelo portão por chave numa execução, então nada mudou ali.
+- Nó core: um portão que falha pela listagem (prazo, dica refutada, recusa por veredito deste nó ou pelos dados do próprio escritor) testa de novo, na hora, as listagens da chave sob os outros grupos do nó (`rescanElsewhere`), que esperavam enquanto o portão segurava a chave. Na hora, como `rescanGroup`: numa execução `--once`, um portão que era o último em andamento encerraria a execução antes de um teste adiado.
+- O teto do registro: o texto de "Data-dir files" dizia "o mais novo fica", mas nenhum toco sai por um novo, que é recusado como `quota`. Agora um portão reserva a vaga desde a checagem do teto até o registro entrar ou a entrada sair (`stubSlots` no nó core, `ge.stubSlot` no navegador), então portões em andamento nunca registram além do teto.
+- Nó core: uma listagem recusada por `quota` com o registro cheio fica numa memória por dica (no máximo 256, o mais antigo sai primeiro) e não passa pelo portão de novo a cada página; quando um toco sai do registro (cede, é apagado ou sai na passagem pelo portão), o grupo dela é testado de novo (`stubSlotFreed`).
+- Nó core: todo apagamento do núcleo de um toco tira o registro (`purgeKey`).
+- Nó core: um veredito sobre a listagem de um toco ou sobre o diário que o provou nunca apaga o toco; só um veredito sobre a própria chave apaga (a chave bloqueada, a bifurcação dela, a divergência, a vaga do limite por diário que ele cede, `own: true`). Uma chave que o nó guarda em outro papel (o próprio diário ou um escritor deste aparelho, um diário seguido, um diário de ligação) nunca é apagada por um veredito sobre um núcleo de grupo, salvo bloqueada.
+- Navegador: um núcleo guardado antes do portão só vira toco quando kv `headerStubs` o registra; senão fica com o veredito do cabeçalho, como antes. `failGroupEntry` nunca apaga um toco guardado antes desta execução por um veredito sobre a listagem ou o diário, salvo com a própria chave bloqueada.
+- Navegador: o cache da caminhada de um diário de ligação sai quando o núcleo dele fecha (`dropWalk`), como no nó core.
+- `docs/protocol.md`: as regras (1), (2) e (3) de "Bad hints", o item "Header stubs" (a raiz de outro grupo, a reserva da vaga, os vereditos que apagam, o registro que sai com o núcleo, a partida) e uma frase de compatibilidade: um bloco 0 que esta versão não decodifica conta como (b), então uma versão nova de cabeçalho deixa os escritores dela de fora nos nós antigos até eles atualizarem.
+- Navegador: a varredura dos núcleos guardados depois de um bloqueio (`purgeKeptGroupCores`, de `purgeGroupCoresOf` e `stopBlockedGroup`) deixa um toco registrado para a próxima partida, salvo com a própria chave bloqueada: o bloqueio do diário que o provou ou do grupo da listagem é veredito sobre a listagem.
+
+Testes novos desta rodada, nó core (`packages/core/test/sync-groups-8.test.js`):
+
+- "a group root first held as a stub of another group leaves the record once its own listing gates it, and a record alone never purges it at start": uma execução contínua guarda a raiz R como toco de G, depois a listagem de R como raiz passa pelo portão; R baixa inteira e sai do registro. Depois, um registro escrito à mão nomeando R com um diário que não o prova, e uma partida sem semeador: R fica inteira e o registro sai.
+- "at start a record alone never purges a core that is more than a stub here: the core only leaves the record": registros que nomeiam um diário qualquer para a raiz de um grupo de `groups.json`, para um escritor de um grupo que o nó não segue guardado além do bloco 0, e para um escritor que o diário do próprio cabeçalho, guardado, liga. A partida mantém os três e tira os três do registro.
+- "a key whose block 0 can never count is read once a run, however many hints list it": quatro diários listam a mesma chave indecodificável, uma dica nova por página; o bloco 0 passa pela quarentena uma vez.
+- "a gate that fails for its listing lets the key's listing under another group proceed in the same run": numa execução `--once`, a chave falha sob G e passa pelo portão sob o próprio grupo, baixando inteira, na mesma execução.
+- "gates in flight never record header stubs past the cap": com teto 1, dois portões abertos ao mesmo tempo; um toco entra e o outro é recusado como `quota`, uma vez.
+- "a header stub refused for a full record is not gated again until a stub leaves the record, and is then held": com teto 1 e o registro cheio, o toco novo é recusado uma vez, não a cada página; quando o toco do registro cede à listagem do próprio grupo e sai do registro, o recusado vira toco.
+- "a stub purged for its own key leaves the record, and a restart does not bring it back": o bloqueio da chave do toco apaga o núcleo e o registro, e a partida seguinte não reabre a chave.
+- "a verdict on the diary that proved a stub leaves the stub's core in place": o bloqueio do diário que provou o toco tira a listagem, e o bloco 0 do toco fica.
+
+Nó do navegador (`packages/web-member/test/sync-groups-4.test.js`):
+
+- "a group root first held as a stub of another group leaves the record once gated as its root, and a record alone never purges it at start": o mesmo caso do nó core, com a raiz de um grupo que Ana criou, kv `headerStubs` e uma partida sem semeador.
+- "a core stored before its gate is a header stub only when kv headerStubs records it": um núcleo guardado, sem registro, fica com o veredito do cabeçalho (`wrong-group`) e não entra no registro.
+- "a verdict on the diary that proved a recorded stub leaves the stub's core in place": numa execução contínua, o bloqueio do diário que provou um toco registrado tira a listagem (um veredito `blocked`), e o núcleo do toco fica com o bloco 0.
+
+Cada arquivo tocado rodou sozinho com o código final (`VARANDA_TEST_CONCURRENCY=1 node <arquivo>`, Node 24.22.1). Nó core (`packages/core/test/`):
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `sync-groups-8.test.js` (testes novos) | 19/19 | 81/81 |
+| `sync-groups.test.js` | 16/16 | 75/75 |
+| `sync-groups-2.test.js` | 27/27 | 96/96 |
+| `sync-groups-3.test.js` | 26/26 | 143/143 |
+| `sync-groups-4.test.js` | 14/14 | 73/73 |
+| `sync-groups-5.test.js` | 8/8 | 19/19 |
+| `sync-groups-6.test.js` | 1/1 | 5/5 |
+| `sync-groups-7.test.js` | 1/1 | 12/12 |
+| `sync-groups-sparse.test.js` | 2/2 | 20/20 |
+| `sync-private.test.js` | 9/9 | 44/44 |
+| `sync-communities.test.js` | 7/7 | 37/37 |
+| `sync-slots.test.js` | 8/8 | 27/27 |
+| `admission-caps.test.js` | 11/11 | 50/50 |
+
+Nó do navegador (`packages/web-member/test/`):
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `sync-groups-4.test.js` (testes novos) | 8/8 | 123/123 |
+| `sync-groups-2.test.js` | 29/29 | 139/139 |
+| `sync-groups-3.test.js` | 3/3 | 43/43 |
+| `sync-groups.test.js` | 16/16 | 112/112 |
+| `sync-groups-sparse.test.js` | 3/3 | 27/27 |
+| `sync-private.test.js` | 4/4 | 16/16 |
+| `sync-gate.test.js` | 15/15 | 127/127 |
+| `community-sync.test.js` | 5/5 | 54/54 |
+| `page-groups-sync.test.js` | 3/3 | 26/26 |
+| `session-groups.test.js` | 25/25 | 249/249 |
+| `groups-e2e.test.js` | 2/2 | 94/94 |
+| `private-e2e.test.js` | 2/2 | 85/85 |
+
+`npm run lint` passa. Não rodaram aqui: o `npm test` inteiro e o `npm run demo`.
+
+Prova de regressão desta rodada: cada mutação tira uma parte da correção, roda sozinho o teste que a cobre (`VARANDA_TEST_CONCURRENCY=1`) e volta o código. Todas foram pegas; com o código final, cada teste passa.
+
+Nó core (`packages/core/lib/sync.js`, testes de `sync-groups-8.test.js`):
+
+- C1, uma raiz aceita como raiz do próprio grupo continua no registro (só um escritor sai, como antes): o teste da raiz, a asserção 3 ("and it leaves the record") falha (5/6).
+- C2, a partida julga o registro sozinho, sem `beyondStub`: o teste da raiz, a asserção 5 ("the root of a group of groups.json is kept in full") falha (5/6); o teste da partida, as asserções 2, 3 e 4 falham (os três núcleos são apagados).
+- C3, sem a memória do bloco 0 (`headBlocks`): o teste da leitura única, a asserção 2 ("block 0 is read once; each later hint proves only its diary") falha (1/2).
+- C4, sem `rescanElsewhere`: o teste do portão que falha pela listagem, as asserções 1 e 2 falham (0/2).
+- C5, sem a reserva da vaga (`stubSlots`): o teste dos portões em andamento, as asserções 1 e 2 falham (0/2): os dois tocos entram no registro.
+- C6, sem a memória da recusa por `quota`: o teste do registro cheio, a asserção 1 ("refused once for the full record, not on every page") falha (2/3).
+- C7, um toco que sai do registro não testa de novo o grupo recusado (`stubSlotFreed`): o teste do registro cheio nunca alcança a condição ("tempo esgotado: run condition", saída 1).
+- C8, `purgeKey` não tira o registro: o teste do toco apagado, a asserção 2 ("and its record goes with its core") falha (3/4).
+- C9, sem a guarda de `failGroupCore`: o teste do veredito sobre o diário, a asserção 2 ("but its block 0 stays") falha (1/2).
+
+Nó do navegador (`packages/web-member/lib/sync.js`, testes de `sync-groups-4.test.js`; os números de asserção contam as do `stubWorld`):
+
+- W1, uma raiz aceita como raiz do próprio grupo continua no registro: o teste da raiz, a asserção 18 ("and it leaves the record") falha (19/20).
+- W2, a partida julga o registro sozinho, sem `beyondStub`: o teste da raiz, a asserção 19 ("a core held past block 0 is kept in full") falha (19/20).
+- W3, um núcleo guardado sem registro vira toco (sem `headerStubs.has` na regra do cabeçalho): o teste do núcleo guardado antes do portão, as asserções 12 e 13 ("refused with its header's verdict, not made a stub") falham (12/14).
+- W4, sem a guarda de `failGroupEntry` para um toco guardado antes da execução: o teste do veredito sobre o diário, as asserções 13 ("but its core stays") e 14 falham (12/14).
+- W5, a varredura dos núcleos guardados depois de um bloqueio (`purgeKeptGroupCores`) apaga um toco registrado: o mesmo teste, as asserções 12 ("for the blocked diary that proved it": dois vereditos `blocked`, não um), 13 e 14 falham (11/14). Antes desta correção o teste falhava do mesmo jeito sobre o código da rodada.
+
+Decisões desta rodada e o que ficou sem teste próprio:
+
+- O caso do serviço de conta com o diário bloqueado continua o limite descrito em "Riscos residuais".
+- No navegador, a leitura única do bloco 0 (P2-b) não mudou: `MAX_GATE_HINTS` já limita a 4 as listagens de uma chave que passam pelo portão numa execução.
+- No navegador, o teste de novo das outras listagens da chave quando um portão falha (P3, item 1) não mudou: um portão sem resposta fica pendente e pergunta de novo (`gateUnanswered`) em vez de falhar, e um portão que falha por uma razão de dica deixa a listagem da chave sob outro grupo passar na próxima página desse grupo (até `MAX_GATE_HINTS`).
+- A vaga do limite por diário que um toco cede a um join provado mais cedo é veredito sobre a própria chave (`own: true`) e apaga o toco, como antes.
+- Um bloco 0 maior que `MAX_BLOCK_BYTES` não fica na memória `headBlocks`: uma dica nova da chave lê o bloco de novo.
+- Sem teste próprio: a regra de `heldElsewhere` (só pesa num veredito sobre a própria chave, como bifurcação, divergência ou a vaga cedida, de uma chave que o nó guarda em outro papel); a reserva da vaga no navegador (`ge.stubSlot`; no nó core o teste dos portões em andamento a cobre, C5); a limpeza do cache da caminhada no navegador (`dropWalk`).
+
 ## Decisões tomadas aqui
 
 - Todas as recusas de cabeçalho entram neste PR (escolha do mantenedor): os casos a até e, nos dois nós.
@@ -196,7 +299,7 @@ Serviço de conta (`apps/cli/lib/account/pages-groups.js`, `apps/cli/test/pages-
 ## Riscos residuais e pontos em aberto
 
 - Hoje só o caso (a) chega de um semeador: o semeador recusa b a e na admissão. Esses casos valem quando outro par os lista, e passam a valer de ponta a ponta com o próximo PR do semeador.
-- O registro cheio (`quota` com 256 tocos) não tem teste: exigiria 256 tocos num teste de rede. Pela leitura do código, o toco novo é recusado sem cobrança e a dobra o espera como antes.
+- O registro cheio tem teste com o teto em 1 (`maxHeaderStubs`, rodada de revisão 1), não com 256 tocos, que exigiria 256 tocos num teste de rede.
 - No navegador, a listagem do par do cabeçalho vista enquanto o toco passava pelo portão (`renoteHeadStub`) não tem teste próprio; no nó core o caso tem teste (MG6).
 - No navegador, um escritor que passa pelo portão antes de o tipo da raiz ser conhecido não é julgado pelo `member` e baixa inteiro; a dobra o rejeita do mesmo jeito. Já era assim antes desta branch.
 - Lixo listado sob um diário que nenhum par serve agora espera o prazo do portão (15 s) antes de ser cobrado como timeout.
