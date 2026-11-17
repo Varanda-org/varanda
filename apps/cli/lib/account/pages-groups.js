@@ -45,7 +45,7 @@ const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const Corestore = require('corestore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecord, readAll, readBlocks, openReplica, purgeReplica } = require('@varanda/core/lib/store')
+const { writeJsonAtomic, appendRecord, readAll, readBlocks, readHeldBlocks, openReplica, purgeReplica } = require('@varanda/core/lib/store')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
@@ -711,7 +711,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       if (!got.complete) incomplete = true
       const core = got.core
       if (core.fork !== 0) continue
-      const entries = await readBlocks(core)
+      // A seeder keeps a cut writer sparse (#350): past its first hole, its
+      // leaves and key blocks.
+      const entries = await readHeldBlocks(core)
       const h = entries[0] && entries[0].record
       if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
       logs.push({ key: it.key, diary: h.diary, entries, length: core.contiguousLength, signed: core.length })
