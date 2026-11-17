@@ -271,11 +271,11 @@ export function useSyncSignals () {
 // the own diary's growth: the per-diary maps and lastDownloadAt change on
 // every download line, so they are left to useSyncSignals().
 function useRunFlags (signals) {
-  const { runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength } = signals
+  const { runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, storageFull } = signals
   const freshOwn = signals.fresh ? signals.fresh.own : undefined
   return useMemo(() => ({
-    ...EMPTY_SIGNALS, runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, fresh: freshOwn === undefined ? {} : { own: freshOwn }
-  }), [runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, freshOwn])
+    ...EMPTY_SIGNALS, runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, storageFull, fresh: freshOwn === undefined ? {} : { own: freshOwn }
+  }), [runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, storageFull, freshOwn])
 }
 
 // A screen notice ('publicado', 'seguindo', ...) describes what the current
