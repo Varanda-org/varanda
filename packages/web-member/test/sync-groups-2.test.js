@@ -625,10 +625,13 @@ test('a peek never fetches a seq the binding diary knows deleted, on a diary hel
   // waits for its tracker, so the tombstone is folded by then.
   await until(() => peekFn !== null && ev.some((e) => e.event === 'settled' && e.settled), { name: 'settled with a peek' })
 
+  // Only reads that may wait on a peer: the binding diary is group-bound,
+  // so its tracker fetches the deleted post once and reads it back locally
+  // (wait: false) before clearing it (docs/protocol.md "Deletion").
   const asked = []
   const get = Hypercore.prototype.get
   Hypercore.prototype.get = function (seq, opts) {
-    if (this.key && hex(this.key) === a.ownHex) asked.push(seq)
+    if (this.key && hex(this.key) === a.ownHex && !(opts && opts.wait === false)) asked.push(seq)
     return get.call(this, seq, opts)
   }
   let res

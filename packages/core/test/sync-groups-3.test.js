@@ -9,13 +9,13 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
 const Hypercore = require('hypercore')
-const { testnet, until } = require('./helpers/net')
+const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
 const { runSync, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
-const { writerHeader, groupHeader, groupPost } = require('../lib/group')
-const { memberCertRecord, groupJoinRecord, postRecord, deleteRecord } = require('../lib/records')
+const { writerHeader, groupHeader, groupPost, groupCutHistory } = require('../lib/group')
+const { memberCertRecord, groupJoinRecord, groupConfirmRecord, groupCutRecord, postRecord, deleteRecord } = require('../lib/records')
 const store = require('../lib/store')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, groupMember } = require('./helpers/sync-groups')
 
@@ -405,6 +405,17 @@ async function holdsBlock (ctx, key, seq) {
   }
 }
 
+async function storedLength (ctx, key) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = s.get({ key: b4a.from(key, 'hex'), writable: false })
+    await core.ready()
+    return core.contiguousLength
+  } finally {
+    await s.close()
+  }
+}
+
 test('a binding diary with a deleted post nobody serves completes its goal and its later joins are seen', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
@@ -461,13 +472,11 @@ test('at start a member of a group purges an unfollowed diary no group needs and
   t.ok(await stored(m, wkey), 'the stored writer stays')
 })
 
-test('a writer whose join its author deleted is withdrawn without stalling the run; a writer bound by another join stays', async (t) => {
-  t.timeout(120000)
-  const { bootstrap } = await testnet(t)
-  const kp = generateAssociationKeyPair()
-  const group = hex(crypto.randomBytes(32))
+// A diary that binds two listed writers (joins at seq 1 and 2) and deletes
+// the first join (tombstone at seq 3), on a peer that still serves the
+// deleted block. -> the writer of the deleted join (`first`) and the other.
+async function deletedJoin (t, bootstrap, kp, group) {
   const items = []
-  // A stale peer: it still serves the deleted join block.
   const fake = await fakeSeeder(t, bootstrap, kp, items)
   const d = fake.store.get({ name: 'diary' })
   await d.ready()
@@ -478,8 +487,6 @@ test('a writer whose join its author deleted is withdrawn without stalling the r
     await w.ready()
     ws.push(w)
   }
-  // The writer of the deleted join is listed first, so its gate reads the
-  // join through the quarantine before the fold clears it.
   ws.sort((a, b) => b4a.compare(a.key, b.key))
   await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
   for (const w of ws) await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
@@ -489,19 +496,418 @@ test('a writer whose join its author deleted is withdrawn without stalling the r
     await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
   }
   items.push(...ws.map((w, i) => ({ key: hex(w.key), diary: dkey, length: 2, seq: 1 + i })).sort((a, b) => a.key < b.key ? -1 : 1))
-  const withdrawn = hex(ws[0].key)
-  const kept = hex(ws[1].key)
+  return { fake, d, dkey, first: hex(ws[0].key), other: hex(ws[1].key) }
+}
+
+// No group-downloaded event repeats a core and length (the growth reported
+// at run end is not reported again by the growth listener).
+function growthOnce (events) {
+  const seen = new Set()
+  for (const ev of events) {
+    if (ev.event !== 'group-downloaded') continue
+    const id = ev.key + ':' + ev.length
+    if (seen.has(id)) return false
+    seen.add(id)
+  }
+  return true
+}
+
+async function boundAndDownloaded (t, m, events, first, other) {
+  t.ok(growthOnce(events), 'no growth is reported twice')
+  t.ok(events.some((ev) => ev.event === 'group-downloaded' && ev.key === first && ev.length === 2), 'the writer of the deleted join is downloaded')
+  t.absent(events.some((ev) => ev.event === 'group-skipped' && ev.key === first), 'the writer of the deleted join is never withdrawn')
+  t.ok(events.some((ev) => ev.event === 'group-downloaded' && ev.key === other && ev.length === 2), 'the writer bound by the other join is downloaded')
+  t.absent(events.some((ev) => ev.event === 'group-skipped' && ev.key === other), 'the writer bound by the other join stays')
+  t.is(await storedLength(m, first), 2, 'both blocks of the writer of the deleted join are stored')
+  t.is(await storedLength(m, other), 2, 'both blocks of the other writer are stored')
+}
+
+test('a writer whose join its author deleted stays bound and downloaded without stalling the run, and the join block is kept', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const { dkey, first, other } = await deletedJoin(t, bootstrap, kp, group)
   const m = await groupMember(t, kp, group)
   const started = Date.now()
   const { result, events } = await syncOnce(bootstrap, m, { timeoutMs: 20000 })
   t.ok(result.ok, result.errors.join('; '))
   t.ok(Date.now() - started < 20000, 'the run completes before its deadline')
-  t.ok(events.some((ev) => ev.event === 'group-skipped' && ev.key === withdrawn && ev.reason === 'withdrawn'), 'the writer of the deleted join is withdrawn')
-  const last = events.filter((ev) => ev.key === withdrawn && (ev.event === 'group-skipped' || ev.event === 'group-downloaded')).pop()
-  t.is(last && last.event, 'group-skipped', 'the withdrawn writer is not active at the end')
-  t.ok(events.some((ev) => ev.event === 'group-downloaded' && ev.key === kept && ev.length === 2), 'the writer bound by the other join is downloaded')
-  t.absent(events.some((ev) => ev.event === 'group-skipped' && ev.key === kept), 'the writer bound by the other join stays')
-  t.absent(await holdsBlock(m, dkey, 1), 'the deleted join block is not held')
+  await boundAndDownloaded(t, m, events, first, other)
+  t.ok(await holdsBlock(m, dkey, 1), 'the deleted join block is kept')
+})
+
+test('a writer whose deleted join arrives after its tombstone still ends up bound, and the join block is kept', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const { fake, d, dkey, first, other } = await deletedJoin(t, bootstrap, kp, group)
+  const m = await groupMember(t, kp, group)
+  // The member holds block 0 and the tombstone, not the join it deletes.
+  await copyInto(fake.store, m, [d], { only: () => [0, 3] })
+  t.absent(await holdsBlock(m, dkey, 1), 'the join is not held before the run')
+  t.ok(await holdsBlock(m, dkey, 3), 'the tombstone is')
+  const { result, events } = await syncOnce(bootstrap, m, { timeoutMs: 20000 })
+  t.ok(result.ok, result.errors.join('; '))
+  await boundAndDownloaded(t, m, events, first, other)
+  t.ok(await holdsBlock(m, dkey, 1), 'the deleted join block is fetched and kept')
+})
+
+test('a join whose tombstone the binding diary learns while the gate runs keeps its writer bound', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const { fake, d, dkey, first, other } = await deletedJoin(t, bootstrap, kp, group)
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d], { only: () => [0, 3] })
+  // The writer of the deleted join opens only after the other writer's
+  // binding diary (the same diary, holding the tombstone) is active: its
+  // activation then finds the join deleted.
+  const events = []
+  let otherFirst = false
+  const openHook = async (key) => {
+    if (key !== first) return
+    try {
+      await until(() => events.some((ev) => ev.event === 'group-downloaded' && ev.key === other), { timeoutMs: 10000, name: 'other writer' })
+      otherFirst = true
+    } catch {}
+  }
+  const result = await runSync({ dataDir: m.dataDir, ...localSwarmOptions(bootstrap), once: true, timeoutMs: 25000, onEvent: (ev) => events.push(ev), openHook })
+  t.ok(result.ok, result.errors.join('; '))
+  t.ok(otherFirst, 'the other writer was active first')
+  await boundAndDownloaded(t, m, events, first, other)
+  t.ok(await holdsBlock(m, dkey, 1), 'the deleted join block is fetched and kept')
+})
+
+// One writer listed; its diary also holds a deleted post, a deleted
+// group-confirm, a deleted group-cut and a deleted off join, all stored on
+// the member before the run.
+test('a binding diary keeps the group-confirm, group-cut and off join blocks its author deleted, and clears the deleted post', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  const w = fake.store.get({ name: 'w' })
+  await w.ready()
+  const wkey = hex(w.key)
+  const records = [
+    memberCertRecord(createCert({ member: dkey }, kp)),
+    postRecord({ text: 'apagado' }),
+    groupJoinRecord({ group, writer: wkey, on: true }),
+    groupConfirmRecord({ group, writer: wkey, seq: 1, digest: 'ab'.repeat(32) }),
+    groupCutRecord({ group, writer: wkey, cut: 1 }),
+    groupJoinRecord({ group, writer: wkey, on: false }),
+    deleteRecord({ seq: 1 }),
+    deleteRecord({ seq: 3 }),
+    deleteRecord({ seq: 4 }),
+    deleteRecord({ seq: 5 })
+  ]
+  for (const r of records) await d.append(b4a.from(JSON.stringify(r)))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+  await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
+  items.push({ key: wkey, diary: dkey, length: 2, seq: 2 })
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d])
+  const { result, events } = await syncOnce(bootstrap, m, { timeoutMs: 20000 })
+  t.ok(result.ok, result.errors.join('; '))
+  t.ok(events.some((ev) => ev.event === 'group-downloaded' && ev.key === wkey && ev.length === 2), 'the writer is downloaded')
+  t.is(await storedLength(m, wkey), 2, 'both writer blocks are stored')
+  t.absent(await holdsBlock(m, dkey, 1), 'the deleted post is cleared')
+  t.ok(await holdsBlock(m, dkey, 3), 'the deleted group-confirm is kept')
+  t.ok(await holdsBlock(m, dkey, 4), 'the deleted group-cut is kept')
+  t.ok(await holdsBlock(m, dkey, 5), 'the deleted off join is kept')
+})
+
+// A diary that binds a listed writer (join at seq 1) and a second one
+// (join at seq 2), then writes `target` (seq 3) and deletes it (seq 4). The
+// member holds every block but the target; the fake seeder still serves it
+// and counts each upload of it.
+async function unheldTarget (t, bootstrap, kp, group, target) {
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  const w = fake.store.get({ name: 'w' })
+  await w.ready()
+  const wkey = hex(w.key)
+  const other = hex(crypto.randomBytes(32))
+  const records = [
+    memberCertRecord(createCert({ member: dkey }, kp)),
+    groupJoinRecord({ group, writer: wkey, on: true }),
+    groupJoinRecord({ group, writer: other, on: true }),
+    target(other),
+    deleteRecord({ seq: 3 })
+  ]
+  for (const r of records) await d.append(b4a.from(JSON.stringify(r)))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+  await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
+  items.push({ key: wkey, diary: dkey, length: 2, seq: 1 })
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d], { only: () => [0, 1, 2, 4] })
+  const uploads = []
+  d.on('upload', (index) => { if (index === 3) uploads.push(index) })
+  return { m, dkey, wkey, uploads }
+}
+
+async function storedEntries (ctx, key) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = s.get({ key: b4a.from(key, 'hex'), writable: false })
+    await core.ready()
+    return await store.readAll(core)
+  } finally {
+    await s.close()
+  }
+}
+
+test('a group diary fetches an unheld deleted off join once and keeps it, so the leave still counts', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const { m, dkey, wkey, uploads } = await unheldTarget(t, bootstrap, kp, group, (writer) => groupJoinRecord({ group, writer, on: false }))
+  t.absent(await holdsBlock(m, dkey, 3), 'the off join is not held before the run')
+  const { result, events } = await syncOnce(bootstrap, m, { timeoutMs: 20000 })
+  t.ok(result.ok, result.errors.join('; '))
+  t.ok(events.some((ev) => ev.event === 'group-downloaded' && ev.key === wkey && ev.length === 2), 'the listed writer is downloaded')
+  t.ok(growthOnce(events), 'no growth is reported twice')
+  t.is(await storedLength(m, wkey), 2, 'both writer blocks are stored')
+  t.ok(uploads.length >= 1, 'the peer served the deleted off join')
+  t.ok(await holdsBlock(m, dkey, 3), 'the deleted off join is kept')
+  const entries = await storedEntries(m, dkey)
+  t.is(entries[3].record.on, false, 'block 3 reads as the off join')
+  t.absent(entries[3].deleted, 'the readers still count the leave')
+})
+
+test('a group diary fetches an unheld deleted post once, clears it and does not fetch it again in the run', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const { m, dkey, uploads } = await unheldTarget(t, bootstrap, kp, group, () => postRecord({ text: 'apagado' }))
+  const ac = new AbortController()
+  const run = runSync({ dataDir: m.dataDir, ...localSwarmOptions(bootstrap), signal: ac.signal })
+  t.teardown(() => { ac.abort(); return run.catch(() => {}) }, { force: true })
+  let served = true
+  try {
+    await until(() => uploads.length >= 1, { timeoutMs: 20000, name: 'the deleted post served' })
+  } catch {
+    served = false
+  }
+  // The run goes on a while: a second request would show here.
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+  ac.abort()
+  await run
+  t.ok(served, 'the peer served the deleted post')
+  t.is(uploads.length, 1, 'once')
+  t.absent(await holdsBlock(m, dkey, 3), 'the deleted post is cleared')
+  t.ok((await storedEntries(m, dkey))[3].deleted, 'the readers hide it')
+})
+
+// The binding diary and its writer are both stored before the run, so only
+// the diary's own range can fetch the deleted group-cut (seq 3) the member
+// never held.
+test('a stored group diary fetches an unheld deleted group-cut a peer still serves, keeps it, and the cut counts', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  const w = fake.store.get({ name: 'w' })
+  await w.ready()
+  const wkey = hex(w.key)
+  const other = hex(crypto.randomBytes(32))
+  const records = [
+    memberCertRecord(createCert({ member: dkey }, kp)),
+    groupJoinRecord({ group, writer: wkey, on: true }),
+    groupJoinRecord({ group, writer: other, on: true }),
+    groupCutRecord({ group, writer: other, cut: 1 }),
+    deleteRecord({ seq: 3 })
+  ]
+  for (const r of records) await d.append(b4a.from(JSON.stringify(r)))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+  await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
+  items.push({ key: wkey, diary: dkey, length: 2, seq: 1 })
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d, w], { only: (core) => core === d ? [0, 1, 2, 4] : null })
+  t.absent(await holdsBlock(m, dkey, 3), 'the deleted cut is not held before the run')
+  let uploads = 0
+  d.on('upload', (index) => { if (index === 3) uploads++ })
+  let servedAt = 0
+  const { result } = await runUntil(m, bootstrap, () => {
+    if (servedAt === 0 && uploads > 0) servedAt = Date.now()
+    return servedAt > 0 && Date.now() > servedAt + 3000
+  })
+  t.ok(result.ok, result.errors.join('; '))
+  t.ok(uploads >= 1, 'the peer served the deleted cut')
+  t.ok(await holdsBlock(m, dkey, 3), 'the deleted cut is kept')
+  const entries = await storedEntries(m, dkey)
+  t.absent(entries[3].deleted, 'its tombstone has no effect')
+  t.alike(groupCutHistory(entries, group), [{ writer: other, cut: 1, seq: 3 }], 'the cut counts, with no gap')
+})
+
+// The binding diary and its writer are both stored before the run, so the
+// writer's join (seq 1, not deleted) is held and the gate reads nothing
+// else. The diary deletes an off join (seq 3) and a post (seq 4), and the
+// member holds neither: only the diary's own range can fetch them.
+test('a stored group diary whose writer is active fetches an unheld deleted off join and keeps it, and fetches an unheld deleted post once and clears it', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  const w = fake.store.get({ name: 'w' })
+  await w.ready()
+  const wkey = hex(w.key)
+  const other = hex(crypto.randomBytes(32))
+  const records = [
+    memberCertRecord(createCert({ member: dkey }, kp)),
+    groupJoinRecord({ group, writer: wkey, on: true }),
+    groupJoinRecord({ group, writer: other, on: true }),
+    groupJoinRecord({ group, writer: other, on: false }),
+    postRecord({ text: 'apagado' }),
+    deleteRecord({ seq: 3 }),
+    deleteRecord({ seq: 4 })
+  ]
+  for (const r of records) await d.append(b4a.from(JSON.stringify(r)))
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+  await w.append(b4a.from(JSON.stringify(groupPost({ text: 'p' }))))
+  items.push({ key: wkey, diary: dkey, length: 2, seq: 1 })
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d, w], { only: (core) => core === d ? [0, 1, 2, 5, 6] : null })
+  t.absent(await holdsBlock(m, dkey, 3), 'the off join is not held before the run')
+  t.absent(await holdsBlock(m, dkey, 4), 'nor the post')
+  const uploads = { 3: 0, 4: 0 }
+  d.on('upload', (index) => { if (index in uploads) uploads[index]++ })
+  let servedAt = 0
+  // A once run could end before the range asks for the targets: run until
+  // both were served, then a quiet spell for the clear and any second ask.
+  const { result } = await runUntil(m, bootstrap, () => {
+    if (servedAt === 0 && uploads[3] > 0 && uploads[4] > 0) servedAt = Date.now()
+    return servedAt > 0 && Date.now() > servedAt + 3000
+  })
+  t.ok(result.ok, result.errors.join('; '))
+  t.is(await storedLength(m, wkey), 2, 'both writer blocks are stored')
+  t.ok(uploads[3] >= 1, 'the peer served the deleted off join')
+  t.ok(await holdsBlock(m, dkey, 3), 'the deleted off join is kept')
+  const entries = await storedEntries(m, dkey)
+  t.is(entries[3].record.on, false, 'block 3 reads as the off join')
+  t.absent(entries[3].deleted, 'the readers still count the leave')
+  t.is(uploads[4], 1, 'the deleted post is served once')
+  t.absent(await holdsBlock(m, dkey, 4), 'the deleted post is cleared')
+  t.ok(entries[4].deleted, 'the readers hide it')
+})
+
+test('a followed diary that holds a group record fetches an unheld deleted post once and clears it', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const fake = await fakeSeeder(t, bootstrap, kp, [])
+  const p = fake.store.get({ name: 'grouped' })
+  await p.ready()
+  const pkey = hex(p.key)
+  const records = [
+    memberCertRecord(createCert({ member: pkey }, kp)),
+    groupJoinRecord({ group: hex(crypto.randomBytes(32)), writer: hex(crypto.randomBytes(32)), on: true }),
+    postRecord({ text: 'fica' }),
+    postRecord({ text: 'apagado' }),
+    deleteRecord({ seq: 3 })
+  ]
+  for (const r of records) await p.append(b4a.from(JSON.stringify(r)))
+  const m = await groupMember(t, kp, group)
+  store.writeFollows(m.dataDir, [pkey])
+  // Block 2 is held: the roster probe (docs/protocol.md section 12) has
+  // nothing to ask, so only the group-bound rule can fetch block 3.
+  await copyInto(fake.store, m, [p], { only: () => [0, 1, 2, 4] })
+  const uploads = []
+  p.on('upload', (index) => { if (index === 3) uploads.push(index) })
+  const ac = new AbortController()
+  const run = runSync({ dataDir: m.dataDir, ...localSwarmOptions(bootstrap), signal: ac.signal })
+  t.teardown(() => { ac.abort(); return run.catch(() => {}) }, { force: true })
+  let served = true
+  try {
+    await until(() => uploads.length >= 1, { timeoutMs: 20000, name: 'the deleted post served' })
+  } catch {
+    served = false
+  }
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+  ac.abort()
+  await run
+  t.ok(served, 'the peer served the deleted post')
+  t.is(uploads.length, 1, 'once')
+  t.absent(await holdsBlock(m, pkey, 3), 'the deleted post is cleared')
+  t.ok((await storedEntries(m, pkey))[3].deleted, 'the readers hide it')
+})
+
+test('a followed diary with no group record never fetches an unheld deleted post', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const fake = await fakeSeeder(t, bootstrap, kp, [])
+  const p = fake.store.get({ name: 'plain' })
+  await p.ready()
+  const pkey = hex(p.key)
+  for (const r of [memberCertRecord(createCert({ member: pkey }, kp)), postRecord({ text: 'apagado' }), deleteRecord({ seq: 1 })]) {
+    await p.append(b4a.from(JSON.stringify(r)))
+  }
+  const m = await groupMember(t, kp, group)
+  store.writeFollows(m.dataDir, [pkey])
+  await copyInto(fake.store, m, [p], { only: () => [0, 2] })
+  const uploads = []
+  p.on('upload', (index) => { if (index === 1) uploads.push(index) })
+  const { result } = await syncOnce(bootstrap, m, { timeoutMs: 20000 })
+  t.ok(result.ok, result.errors.join('; '))
+  t.is(result.downloaded[pkey], 3, 'the diary is synced')
+  t.is(uploads.length, 0, 'the deleted post is never asked for')
+  t.absent(await holdsBlock(m, pkey, 1), 'nor held')
+})
+
+test('a listing whose join seq names a deleted post of a plain followed diary leaves that post cleared', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const p = fake.store.get({ name: 'plain' })
+  await p.ready()
+  const pkey = hex(p.key)
+  for (const r of [memberCertRecord(createCert({ member: pkey }, kp)), postRecord({ text: 'apagado' }), deleteRecord({ seq: 1 })]) {
+    await p.append(b4a.from(JSON.stringify(r)))
+  }
+  const w = fake.store.get({ name: 'w' })
+  await w.ready()
+  const wkey = hex(w.key)
+  await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: pkey, member: PARENT }))))
+  // The seeder names the deleted post as the writer's join.
+  items.push({ key: wkey, diary: pkey, length: 1, seq: 1 })
+  const m = await groupMember(t, kp, group)
+  store.writeFollows(m.dataDir, [pkey])
+  await copyInto(fake.store, m, [p], { only: () => [0, 2] })
+  const uploads = []
+  p.on('upload', (index) => { if (index === 1) uploads.push(index) })
+  const { events } = await syncOnce(bootstrap, m, { timeoutMs: 20000 })
+  t.ok(events.some((ev) => ev.event === 'group-skipped' && ev.key === wkey), 'the writer is refused')
+  t.ok(uploads.length >= 1, 'the gate read the hinted block')
+  t.absent(await holdsBlock(m, pkey, 1), 'the deleted post is not held after the run')
 })
 
 test('a member that left its last group keeps its former own writer and the stored group cores at run start', async (t) => {

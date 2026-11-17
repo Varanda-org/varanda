@@ -12,7 +12,7 @@ const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { testnet, until } = require('./helpers/net')
 const { generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { groupJoinRecord, groupCutRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord, deleteRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
@@ -509,4 +509,91 @@ test('a new writer pages only its own group, and a run start chases no writer it
     ac2.abort()
     await run2
   }
+})
+
+// Opens the stored diary of `m` read-only, runs fn(core) and closes it.
+// Only with no run of m live (see held).
+async function withDiary (m, fn) {
+  const core = await store.openDiary(m.storage)
+  try {
+    return await fn(core)
+  } finally {
+    await core.close()
+  }
+}
+
+test('a second device fetches a deleted join of the own diary it lacked and adopts the root it binds', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const assocKp = generateAssociationKeyPair()
+  const { seeder, url } = await seederOverWs(t, assocKp, bootstrap)
+  const a = await member(assocKp, 'Ana')
+  const { community: C, group: G } = await ops.communityCreate(a.ctx, { name: 'Bairro', join: 'open' })
+  t.ok((await once(a, url, [])).ok, 'A pushed its community')
+  await until(() => indexed(seeder, C, C) && indexed(seeder, G, G), { name: 'roots indexed' })
+  const b = await device(a)
+  t.ok((await once(b, url, [])).ok, 'B fetched the diary')
+
+  // A binds R (join at seq s) and deletes that join, keeping a copy of its
+  // diary aside, then clears its own copy of the join: nobody serves it.
+  const R = await craftRoot(a, C, 'Roda')
+  const diary = await store.openDiary(a.storage, a.ctx.keyPair)
+  let s
+  try {
+    s = diary.length - 1
+    await store.appendRecord(diary, deleteRecord({ seq: s }))
+  } finally {
+    await diary.close()
+  }
+  const backup = await store.openReplica(memoryNodeStorage(), a.ownHex)
+  t.teardown(() => backup.close().catch(() => {}))
+  const pipe = (core) => {
+    const x = core.replicate(true)
+    const y = backup.replicate(false)
+    x.pipe(y).pipe(x)
+    return () => { x.destroy(); y.destroy() }
+  }
+  await withDiary(a, async (core) => {
+    const stop = pipe(core)
+    try {
+      for (let i = 0; i < core.length; i++) await backup.get(i, { timeout: 10000 })
+    } finally {
+      stop()
+    }
+    await core.clear(s, s + 1)
+  })
+  // R cannot be admitted while the seeder lacks the join: this run of A
+  // ends unmet, the tombstone pushed.
+  const pushed = await once(a, url, [], { timeoutMs: 10000 })
+  t.absent(pushed.ok, 'A pushed the tombstone, R still unmet')
+  t.ok(await waitFor(t, () => seeder._served.get(a.ownHex)?.gone.has(s), { timeoutMs: 10000, name: 'the seeder learns the tombstone' }), 'the seeder learned the tombstone')
+  t.ok((await once(b, url, [])).ok, 'B fetched the tombstone')
+  t.absent(await withDiary(b, (core) => core.has(s)), 'B lacks the deleted join')
+  t.ok(await withDiary(b, (core) => core.has(s + 1)), 'B holds its tombstone')
+  t.absent(await rootHeld(b, R), 'B holds no R yet')
+
+  // A gets the join back from its copy; live runs of A and B meet the
+  // seeder, which now finds a peer holding it.
+  await withDiary(a, async (core) => {
+    const stop = pipe(core)
+    try {
+      await core.get(s, { timeout: 10000 })
+    } finally {
+      stop()
+    }
+  })
+  // A page names the writers only: the root block downloads after it, so
+  // the run of B is stopped once its own copy of R holds the header.
+  const ac = new AbortController()
+  const events = []
+  const lent = lender()
+  const runA = sync(a, url, [], { signal: ac.signal })
+  const runB = sync(b, url, events, { signal: ac.signal, reader: lent.reader })
+  const paged = await waitFor(t, () => named(events, 'group-paged').some((x) => x.group === R) && (lent.held(R) || { contiguous: 0 }).contiguous > 0, { timeoutMs: 40000, name: 'R paged and held on B' })
+  ac.abort()
+  await Promise.allSettled([runA, runB])
+  t.ok(paged, 'B pages the root the deleted join binds')
+  t.ok(await withDiary(b, (core) => core.has(s)), 'B now holds the deleted join')
+  t.ok(await rootHeld(b, R), 'B holds R')
+  t.alike(await store.readGroupWriters(b.storage), [], 'B created no writer')
 })

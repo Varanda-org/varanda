@@ -2066,3 +2066,64 @@ test('a rejoin repeats the cut on a retired writer a mark left live, once the wa
   t.ok(walk.frozen.has(w1), 'the walk freezes the retired writer now')
   t.ok(walk.live.has(w2), 'the new one is live')
 })
+
+// Copies the blocks `from`'s own diary holds into `to` as a followed replica:
+// a block `from` cleared never reaches `to`.
+async function shareHeldDiary (from, to) {
+  const src = await store.openDiary(from.storage)
+  const dst = await store.openReplica(to.storage, from.ownHex)
+  const s1 = src.replicate(true, { keepAlive: false })
+  const s2 = dst.replicate(false, { keepAlive: false })
+  s1.pipe(s2).pipe(s1)
+  try {
+    await dst.update({ wait: true })
+    for (let i = 0; i < dst.length; i++) {
+      if (await src.has(i)) await dst.get(i)
+    }
+  } finally {
+    s1.destroy()
+    s2.destroy()
+    await src.close()
+    await dst.close()
+  }
+}
+
+// The cut histories a group fold computes for the diary whose entries hold
+// the tombstone of `seq`.
+async function cutHistoriesOf (group, seq, fn) {
+  const real = grp.groupCutHistory
+  const seen = []
+  grp.groupCutHistory = (entries, g, ...rest) => {
+    const out = real(entries, g, ...rest)
+    if (g === group && entries.some((e) => e.record && e.record.type === 'delete' && e.record.seq === seq)) seen.push(out)
+    return out
+  }
+  try {
+    await fn()
+  } finally {
+    grp.groupCutHistory = real
+  }
+  return seen
+}
+
+test('a group fold reads no gap in the cut history of a member diary for a deleted block this replica never read, with or without a memo', async (t) => {
+  const { a, b } = await pair()
+  const { group } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'open' })
+  await shareGroupCore(a, b, group)
+  await shareDiary(a, b)
+  t.alike(await ops.groupJoin(b.ctx, { group }), { state: 'member' })
+  const w = (await store.readGroupWriters(b.storage))[0].key
+  const { seq } = await ops.postCreate(b.ctx, { text: 'apagado' })
+  await ops.postDelete(b.ctx, { to: { author: b.ownHex, seq } })
+  await shareGroupCore(b, a, w)
+  await shareHeldDiary(b, a)
+  const replica = await store.openReplica(a.storage, b.ownHex)
+  t.absent(await replica.has(seq), 'fixture: the deleted post never reached A')
+  t.ok(await replica.has(seq + 1), 'fixture: its tombstone did')
+  await replica.close()
+  for (const [label, ctx] of [['no memo', a.ctx], ['memo', { ...a.ctx, memo: new Map() }]]) {
+    const seen = await cutHistoriesOf(group, seq, () => ops.groupRead(ctx, { group }))
+    t.ok(seen.length > 0, label + ': the fold read B\'s diary')
+    t.ok(seen.every((out) => !out.some((m) => m.gap === true)), label + ': B\'s cut history has no gap')
+  }
+})
