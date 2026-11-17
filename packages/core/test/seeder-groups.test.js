@@ -31,6 +31,7 @@ const {
   reader,
   admitted,
   rejected,
+  stubbed,
   stored,
   downloaded,
   moderator,
@@ -73,8 +74,10 @@ test('root and writer need both bindings, are listed before open, served over th
   t.is(evR.diary, A.key)
   t.is(evR.group, R)
   t.is(evW.diary, B.key)
-  await rejected(events, wrongDiary, 'wrong-diary')
-  await rejected(events, wrongGroup, 'wrong-group')
+  // Each can never count for (R, C): kept as a header stub (#350), block 0
+  // alone, listed only to peers that announce CAP_HEADER_STUBS.
+  await stubbed(events, wrongDiary, 'wrong-diary')
+  await stubbed(events, wrongGroup, 'wrong-group')
   t.is(listedAt[R], true, 'R listed before it is served')
   t.is(listedAt[W], true, 'W listed before it is served')
   const listed = readGroups(dataDir)
@@ -84,8 +87,8 @@ test('root and writer need both bindings, are listed before open, served over th
   t.is(listed[R].bound, true, 'A bound R with its own join')
   delete listed[R].bound
   t.alike(listed, { [R]: { diary: A.key, group: R, seq: 1 }, [W]: { diary: B.key, group: R, seq: 1 } })
-  t.is(await stored(seeder, wrongDiary), false)
-  t.is(await stored(seeder, wrongGroup), false)
+  t.is(await stored(seeder, wrongDiary), true)
+  t.is(await stored(seeder, wrongGroup), true)
   t.is(seeder.stats().groupCores, 2)
   t.ok(!A.messages.some((x) => x.key === R) && !B.messages.some((x) => x.key === W), 'group keys never reach the admission channel')
   await downloaded(seeder, R, 2)
