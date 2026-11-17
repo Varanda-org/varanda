@@ -118,6 +118,10 @@
 // list (one key for both would let a blob request mint a DM stamp), and a
 // separate daily budget per diary in <dataDir>/blob-stamps.json, so blob
 // issuance never spends the DM allowance.
+// A history copy (docs/protocol.md section 11) buys blob stamps of kind 'copy'
+// on the same channel: signed by the blob key, charged to a weekly budget per
+// diary and Brasília ISO week (dm.copyStampsPerWeek = COPY_STAMPS_PER_WEEK) in
+// <dataDir>/copy-stamps.json, never to the daily blob one and the reverse.
 // With dm.blobPostage the seeder also keeps the blob pool (lib/blob-pool.js)
 // under <dataDir>/blobs/, at most dm.blobBytes bytes, answers the anonymous
 // 'varanda/blob/1' channel (lib/blob-net.js) on every peer and hands
@@ -186,7 +190,7 @@ const {
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
-const { noteGrowth, countActive } = require('./activity')
+const { noteGrowth, countActive, weekBefore } = require('./activity')
 const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, VISIT_POOL_MAX, bucketBits } = require('./dm')
 const { tagFor } = require('./dm-pool')
 const { createDmPool, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS } = require('./dm-pool')
@@ -279,6 +283,11 @@ const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
 const DM_STAMPS_FILE = 'dm-stamps.json'
 const BLOB_STAMPS_FILE = 'blob-stamps.json'
+// The weekly allowance of a history copy (docs/protocol.md section 11), kept
+// like blob-stamps.json but per Brasília ISO week.
+const COPY_STAMPS_FILE = 'copy-stamps.json'
+const COPY_STAMP_KEEP_WEEKS = 4
+const DM_WEEK = /^[0-9]{4}-W[0-9]{2}$/
 const DM_SWEEP_MS = 60000
 // How many blocks after a reported topic root groupPostBlock looks at for
 // the root's poll: group.post writes the root, its group-topic and its
@@ -957,7 +966,7 @@ function dmOptions (dm) {
     throw new TypeError('dm.postage.get must be a function')
   }
   const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop, visitMax = VISIT_POOL_MAX } = dm
-  const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, blobBytes = BLOB_POOL_BYTES } = dm
+  const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, copyStampsPerWeek = dmPostage.COPY_STAMPS_PER_WEEK, blobBytes = BLOB_POOL_BYTES } = dm
   if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
   if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
   if (!Number.isSafeInteger(visitMax) || visitMax < 1) throw new TypeError('invalid dm.visitMax')
@@ -966,8 +975,9 @@ function dmOptions (dm) {
   }
   if (blobPostage !== null && blobPostage === postage) throw new TypeError('dm.blobPostage must not be dm.postage')
   if (!Number.isSafeInteger(blobStampsPerDay) || blobStampsPerDay < 1) throw new TypeError('invalid dm.blobStampsPerDay')
+  if (!Number.isSafeInteger(copyStampsPerWeek) || copyStampsPerWeek < 1) throw new TypeError('invalid dm.copyStampsPerWeek')
   if (!Number.isSafeInteger(blobBytes) || blobBytes < BLOB_CHUNK_BYTES) throw new TypeError('invalid dm.blobBytes')
-  return { postage, stampsPerDay, onDrop, visitMax, blobPostage, blobStampsPerDay, blobBytes }
+  return { postage, stampsPerDay, onDrop, visitMax, blobPostage, blobStampsPerDay, copyStampsPerWeek, blobBytes }
 }
 
 // The postage keys usable by the seeder, newest first, at most two (the
@@ -1015,7 +1025,7 @@ function isCount (n) {
 // (the budget restarts, which costs at most one day of stamps). A v1 file
 // ({ diary: { day, count } }) is read as one day per diary. blob-stamps.json
 // has the same v2 shape.
-function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-unreadable') {
+function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-unreadable', period = DM_DAY) {
   const out = new Map()
   let file = null
   try {
@@ -1037,7 +1047,7 @@ function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-
       if (typeof e.day === 'string' && DM_DAY.test(e.day) && isCount(e.count)) row[e.day] = e.count
     } else {
       for (const [d, n] of Object.entries(e)) {
-        if (DM_DAY.test(d) && isCount(n)) row[d] = n
+        if (period.test(d) && isCount(n)) row[d] = n
       }
     }
     if (Object.keys(row).length > 0) out.set(key, trimStampRow(row))
@@ -1071,6 +1081,24 @@ async function modRootPoll (core, read, writerHex, seq, root, visibility) {
 // The text of a group-event a reviewer reads: its title, then its place.
 function eventLines (r) {
   return r.place === '' ? [r.title] : [r.title, r.place]
+}
+
+// Per-phase startup durations (ms, non-negative integers) from the Date.now()
+// marks taken at the step boundaries of Seeder#start. Pure: no clock.
+function startupPhases (m) {
+  const d = (a, b) => Math.max(0, Math.trunc(b - a))
+  return {
+    configMs: d(m.t0, m.config),
+    storeMs: d(m.config, m.store),
+    stateMs: d(m.store, m.state),
+    diariesMs: d(m.state, m.diaries),
+    mediaMs: d(m.diaries, m.media),
+    groupsMs: d(m.media, m.groups),
+    prepareMs: d(m.groups, m.prepare),
+    swarmMs: d(m.prepare, m.swarm),
+    flushMs: d(m.swarm, m.flush),
+    totalMs: d(m.t0, m.flush)
+  }
 }
 
 class Seeder {
@@ -1228,6 +1256,7 @@ class Seeder {
     this._blobKeys = []
     this._blobKeysFrom = null
     this._blobStamps = new Map() // diary key -> { day: count }, apart from _dmStamps
+    this._copyStamps = new Map() // diary key -> { 'YYYY-Www': count }, a history copy's weekly allowance
     this._dmHandles = new Set()
     this._dmStampChannels = new Map() // seeder stamp handle -> { kid, blobKid, socket, release }
     this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
@@ -1614,18 +1643,27 @@ class Seeder {
   async start () {
     if (this._started) throw new Error('semeador já iniciado')
     this._started = true
+    const marks = { t0: Date.now() }
 
     // Step 1: trust root, Noise key pair and seeder certificate.
     this.association = Seeder.ensureConfig(this.dataDir, this.associationKey)
     this._keyPair = loadSeederKey(this.dataDir)
     this._cert = loadSeederCert(this.dataDir)
     checkSeederCert(this._cert, this._keyPair, this.association)
+    marks.config = Date.now()
 
     // Step 2: the main store (data-dir lock) FIRST, then the state: a
     // previous seeder process may write admitted.json until it releases the
     // lock, so it is read only once the lock is held. The main store opens
     // BEFORE the quarantine is wiped (R6.2).
     this.store = await openStore(this.dataDir)
+    marks.store = Date.now()
+    let diariesBefore = 0
+    let mediaBefore = 0
+    let groupsBefore = 0
+    let diariesKept = 0
+    let mediaKept = 0
+    let groupsKept = 0
 
     try {
       this._guardReplication()
@@ -1675,7 +1713,12 @@ class Seeder {
       this._blocklist = state
       this.qstore = await openQuarantine(this.dataDir)
 
+      marks.state = Date.now()
       // Step 3: re-gate every stored replica before anything can serve it.
+      // Ready-event core counts are fixed at the end of this step (media at
+      // the end of 3b, groups at the end of 3c), all before step 4, so they
+      // describe the re-gate alone.
+      diariesBefore = this._admitted.size
       const survivors = []
       for (const key of [...this._admitted.keys()]) {
         const core = await openReplica(this.store, key)
@@ -1715,11 +1758,14 @@ class Seeder {
         await this._persist()
       }
 
+      diariesKept = survivors.length
+      marks.diaries = Date.now()
       // Step 3b: re-gate every listed media core the same way, once the
       // diaries are settled: its diary must have survived (else 'unbound'),
       // the core must not be forked, must hold its header, be within the
       // media quota and its block 0 must be a header naming that diary.
       // Failures are purged BEFORE they leave the file (R6.1 order).
+      mediaBefore = this._media.size
       const mediaSurvivors = []
       const kept = new Set(survivors.map(([key]) => key))
       for (const [key, binding] of [...this._media]) {
@@ -1749,11 +1795,14 @@ class Seeder {
         await this._persist()
       }
 
+      mediaKept = mediaSurvivors.length
+      marks.media = Date.now()
       // Step 3c: listed group cores, the same way (header comment). A writer
       // needs its diary to have survived; a root its creator or a listed
       // writer of the group whose diary survived. A root key in the
       // snapshot takes its group down. The stored block 0 must be the header
       // the binding names.
+      groupsBefore = this._groups.size
       const groupSurvivors = []
       const perGroup = new Map()
       let provisionalRoot = false
@@ -1826,6 +1875,8 @@ class Seeder {
         await this._persist()
       }
 
+      groupsKept = groupSurvivors.length
+      marks.groups = Date.now()
       // Step 4: watchers and live downloads (no swarm yet). A persisted
       // binding is served right away: the scan of its diary (after ready)
       // only confirms or drops it, it never has to rediscover it. The
@@ -1859,9 +1910,11 @@ class Seeder {
       }
       for (const k of [...this._groupHeaders.keys()]) this._pruneGroupHeader(k)
 
+      marks.prepare = Date.now()
       // Step 5: the swarm, with the seeder's Noise key pair.
       this.topic = topicFor(this.association)
       this.swarm = createSwarm({ bootstrap: this.bootstrap, keyPair: this._keyPair, host: this.host })
+      marks.swarm = Date.now()
       this.swarm.on('connection', (socket) => this._onConnection(socket))
       const topics = [
         this.topic,
@@ -1875,6 +1928,7 @@ class Seeder {
       } finally {
         done()
       }
+      marks.flush = Date.now()
       if (this._closing) throw new Error('semeador encerrado')
       this._stopRediscovery = startRediscovery(this.swarm, [this.topic], {
         intervalMs: REDISCOVER_MS,
@@ -1888,7 +1942,17 @@ class Seeder {
     const topic = b4a.toString(this.topic, 'hex')
     const admitted = this.admittedKeys()
     this._ready = true
-    this.log({ event: 'ready', topic, admitted })
+    const phases = startupPhases(marks)
+    // kept is the survivors of that re-gate step. dropped is the size before
+    // the step minus kept. The step only drops keys it walked, so dropped
+    // is >= 0 with no clamp. A diary admitted or dropped while the swarm
+    // flushes is not part of these counts.
+    const cores = {
+      diaries: { kept: diariesKept, dropped: diariesBefore - diariesKept },
+      media: { kept: mediaKept, dropped: mediaBefore - mediaKept },
+      groups: { kept: groupsKept, dropped: groupsBefore - groupsKept }
+    }
+    this.log({ event: 'ready', topic, admitted, phases, cores })
     // Background pass (never inside start()): scan every served diary for
     // media-core records, one diary at a time (_scanQueue), and index it on
     // the separate index queue (`indexing` stays true until every diary
@@ -7842,6 +7906,7 @@ class Seeder {
     this._dmStamps = readDmStamps(this.dataDir, (ev) => this.log(ev))
     if (this._dmOpts.blobPostage !== null) {
       this._blobStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), BLOB_STAMPS_FILE, 'blob-stamps-unreadable')
+      this._copyStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), COPY_STAMPS_FILE, 'copy-stamps-unreadable', DM_WEEK)
     }
     this._dm = createDmPool({
       dir: this.dataDir,
@@ -8065,6 +8130,12 @@ class Seeder {
               check: (diary, day) => this._checkStamp(diary, day, 'blob'),
               take: (diary, day) => this._takeStamp(diary, day, 'blob')
             },
+        copyBudget: blobKey === null
+          ? undefined
+          : {
+              check: (diary, week) => this._checkStamp(diary, week, 'copy'),
+              take: (diary, week) => this._takeStamp(diary, week, 'copy')
+            },
         log: (ev) => this.log(ev)
       })
     } catch {
@@ -8148,14 +8219,11 @@ class Seeder {
   // its own counter, file and daily allowance: neither kind spends the
   // other's.
   _takeStamp (diary, day, kind = 'dm') {
-    const blob = kind === 'blob'
-    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
-    const rows = blob ? this._blobStamps : this._dmStamps
+    const { perPeriod, rows, file, keepFrom } = this._stampKind(kind, day)
     if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
     const known = rows.get(diary)
     const count = known !== undefined && isCount(known[day]) ? known[day] : 0
-    if (count >= stampsPerDay) return false
-    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    if (count >= perPeriod || keepFrom === null) return false
     const next = new Map()
     for (const [k, row] of rows) {
       const kept = {}
@@ -8166,24 +8234,39 @@ class Seeder {
     }
     if (!next.has(diary) && next.size >= this._dmStampRowsMax()) return false
     next.set(diary, trimStampRow({ ...(next.get(diary) || {}), [day]: count + 1 }))
-    writeJsonAtomic(path.join(this.dataDir, blob ? BLOB_STAMPS_FILE : DM_STAMPS_FILE), { v: 2, days: Object.fromEntries(next) }, 0o600)
-    if (blob) this._blobStamps = next
+    writeJsonAtomic(path.join(this.dataDir, file), { v: 2, days: Object.fromEntries(next) }, 0o600)
+    if (kind === 'copy') this._copyStamps = next
+    else if (kind === 'blob') this._blobStamps = next
     else this._dmStamps = next
     return true
+  }
+
+  // One stamp kind's counter table, file, allowance per period and the
+  // oldest period kept when `period` is current (null: a malformed period).
+  // 'copy' counts per ISO week (a history copy's weekly allowance), the
+  // others per day.
+  _stampKind (kind, period) {
+    if (kind === 'copy') {
+      return { perPeriod: this._dmOpts.copyStampsPerWeek, rows: this._copyStamps, file: COPY_STAMPS_FILE, keepFrom: DM_WEEK.test(period) ? weekBefore(period, COPY_STAMP_KEEP_WEEKS) : null }
+    }
+    const blob = kind === 'blob'
+    return {
+      perPeriod: blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay,
+      rows: blob ? this._blobStamps : this._dmStamps,
+      file: blob ? BLOB_STAMPS_FILE : DM_STAMPS_FILE,
+      keepFrom: daysBefore(period, DM_STAMP_KEEP_DAYS)
+    }
   }
 
   // Whether _takeStamp would allow a stamp now, by the same rules, without
   // writing anything: dm-stamp-net asks this before the costly blind
   // signature.
   _checkStamp (diary, day, kind = 'dm') {
-    const blob = kind === 'blob'
-    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
-    const table = blob ? this._blobStamps : this._dmStamps
+    const { perPeriod, rows: table, keepFrom } = this._stampKind(kind, day)
     if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
     const known = table.get(diary)
     const count = known !== undefined && isCount(known[day]) ? known[day] : 0
-    if (count >= stampsPerDay) return false
-    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    if (count >= perPeriod || keepFrom === null) return false
     let rows = 0
     let hasRow = false
     for (const [k, row] of table) {
@@ -8323,6 +8406,7 @@ Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 
 module.exports = {
   Seeder,
+  startupPhases,
   GATE_TIMEOUT_MS,
   MAX_HANDSHAKE_FRAME,
   MAX_HANDSHAKE_BYTES,
