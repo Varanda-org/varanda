@@ -1,10 +1,10 @@
-// Avisos: who followed you (and whom you do not follow yet), who replied,
+// Avisos: who followed you, who replied,
 // quoted or mentioned you, and who liked or reposted your posts, newest
 // first, under day headers, with Todas, Menções and Seguidores chips that
 // only filter what is drawn. A follow row opens the person's profile and,
 // acting as yourself and not following them yet, has a Seguir de volta pill
-// (one follow.add per press, never resent); the row leaves on the next read
-// once you follow back (App.js bumps `refresh` on any follow change). A
+// (one follow.add per press, never resent); following back keeps the row and
+// only the pill goes away (App.js bumps `refresh` on any follow change). A
 // reply, quote or mention has no pill and opens that post. A like or repost
 // has no pill and opens the caller's post when the row has a ref, and stays
 // disabled when it does not. Private and quiet: no counts, a plain dot never
@@ -819,7 +819,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // A poll reads the first page without replacing the list. Tab not shown:
   // only the dot is refreshed (the list reloads when the tab is shown). Tab
   // shown: new rows are merged on top and the cursor is kept. Rows gone
-  // upstream (unfollowed, followed back elsewhere) stay until the next full
+  // upstream (the follower unfollowed) stay until the next full
   // load (pull-to-refresh, show, refresh bump, follows change). It takes a
   // sequence number like any read, so a later full load or page wins.
   const poll = useCallback(async () => {
@@ -929,10 +929,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   // again in the background. Shown, this effect stays out: a follow made on
   // this device reaches App, whose `refresh` bump reads once (each first read
   // dials the seeder). For one made on another device or by sync, the
-  // Seguir de volta pills read the follow set again below at once; the only
-  // row that depends on the member's own follows, the follow row of someone
-  // now followed back, stays without its pill until the next full read
-  // (pull or show).
+  // Seguir de volta pills read the follow set again below at once, so a
+  // follow row of someone now followed back loses its pill without a full read.
   const followsVersion = node.followsVersion
   const followsRef = useRef(followsVersion)
   const followsReadAtRef = useRef(null)

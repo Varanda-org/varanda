@@ -14,6 +14,7 @@ const {
   MAX_HELLO_HAVE,
   CAP_NO_INVENTORY,
   CAP_DISCOVERY,
+  CAP_WRITER_CUTS,
   attachAdmission
 } = require('../lib/admission')
 const net = require('../lib/net')
@@ -95,8 +96,10 @@ function haveKeys (received) {
 test('net.js re-exports the capability bits', (t) => {
   t.is(net.CAP_NO_INVENTORY, CAP_NO_INVENTORY)
   t.is(net.CAP_DISCOVERY, CAP_DISCOVERY)
+  t.is(net.CAP_WRITER_CUTS, CAP_WRITER_CUTS)
   t.is(CAP_NO_INVENTORY, 1)
   t.is(CAP_DISCOVERY, 2)
+  t.is(CAP_WRITER_CUTS, 4)
 })
 
 test('old member against a new lean seeder gets the full inventory', async (t) => {

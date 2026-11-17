@@ -1469,8 +1469,8 @@ None of these was performed for this change. Use two browsers (or profiles) with
 
 - [ ] A follows B. B (after opening the app, or within 5 minutes with the page visible) sees a dot on the Avisos tab and no number.
 - [ ] B opens Avisos: the row "<A's name> começou a seguir você" with "Seguir de volta" shows, and the dot goes away. Reload: the dot does not come back for the same row.
-- [ ] B presses "Seguir de volta": the row leaves, the toast says "seguindo <name>" and A shows up in B's Seguindo.
-- [ ] A follows B again after B followed back: no row (B already follows A).
+- [ ] B presses "Seguir de volta": the row stays and only the pill goes, the toast says "seguindo <name>" and A shows up in B's Seguindo.
+- [ ] A follows B again after B followed back: the row shows, without the "Seguir de volta" pill (B already follows A).
 - [ ] A unfollows B (before B follows back): the row is gone on B's next load (pull to refresh).
 - [ ] The operator blocks A: the row is gone on B's next load.
 - [ ] Nowhere in the app is there a follower count or a followers list; the Diário still says "N seguindo".
@@ -1490,8 +1490,8 @@ None of these was performed for this change. Use two browsers (or profiles) with
 - Accepted rule, arrives late: "Alguns avisos ainda podem chegar." covers a diary not read since it was served, a pending diary whose fold or rows touch this member, the member's own diary pending (replies, quotes and mentions; a follows page does not count it), and rows lost at a cap; it does not cover a follow, reply, quote or mention in blocks of an already read diary that the seeder has not reached yet and that touched this member nowhere before: that row arrives at the next read, never as a false notice.
 - Automated: `node packages/core/test/notices.test.js`, `post-notices.test.js`, `engagement.test.js`, `node apps/cli/test/seeder-notices.test.js`, `node apps/cli/test/seeder-post-notices.test.js`.
 - [ ] Not performed. With A following B and C on one seeder: stop A's diary mid-download after its first full read (the seeder log shows the scan short): B's Avisos and B's Seguidores keep A's row out, and only the targets A's fold names say so (Avisos: "Alguns avisos ainda podem chegar."; Seguidores: "A lista pode estar incompleta."); C, whom A does not follow, sees a complete page.
-- Avisos reads once per follow back: with the tab shown the follows event no longer starts its own read (App's `refresh` bump reads or defers behind one in flight); hidden, it still reads in the background and the later show does not read again for that change (a `refresh` bump within `FOLLOWS_COVER_MS` 2 s of that read; a later bump, such as a block, still reads at show). A press that changed nothing (`changed: false`) asks for no reload; `follow.add` is still sent once per press. Accepted: shown, a follow made on another device no longer reads the list at once. The Seguir de volta pills update at once (the follow set is read again on every follows change); the only row that depends on the member's own follows, the follow row of someone now followed back, stays without its pill until the next full read (pull or show).
-- [ ] Not performed. Tap Seguir de volta on one notice with the Avisos tab shown and count `notices.list` reads (seeder log, `peer` events): one, and the list ends with the row gone from the pill.
+- Avisos reads once per follow back: with the tab shown the follows event no longer starts its own read (App's `refresh` bump reads or defers behind one in flight); hidden, it still reads in the background and the later show does not read again for that change (a `refresh` bump within `FOLLOWS_COVER_MS` 2 s of that read; a later bump, such as a block, still reads at show). A press that changed nothing (`changed: false`) asks for no reload; `follow.add` is still sent once per press. Accepted: shown, a follow made on another device no longer reads the list at once. The Seguir de volta pills update at once (the follow set is read again on every follows change); a follow row of someone now followed back keeps its row and loses only the pill. A follower the reader already follows (mutual follow) is still listed, one row per follower, without the pill.
+- [ ] Not performed. Tap Seguir de volta on one notice with the Avisos tab shown and count `notices.list` reads (seeder log, `peer` events): one, and the list ends with the row kept and the pill gone.
 
 ## 21. Seeder capacity for the hosted web (PR feat/seeder-web-capacity, 2026-10-27)
 
@@ -2206,7 +2206,7 @@ None of these was performed for this change. Use two hosted accounts, A and B, i
 - [ ] Tapping a name that nobody holds shows the not-found message; offline it says "Sem conexão para abrir o @nome."
 - [ ] B (page visible, or after opening the app) sees the dot on Avisos with no number; the row says "<A> mencionou você"; tapping it opens the conversation.
 - [ ] A replies to a post of B: the row says "<A> respondeu à sua publicação". A quotes it: "<A> citou sua publicação". A post that replies and mentions B shows one row, as a reply.
-- [ ] B follows A back from the follow row: the follow row leaves, the reply, quote and mention rows of A stay.
+- [ ] B follows A back from the follow row: the row stays (every verified follow row is listed, also for a mutual follow) and only the "Seguir de volta" pill disappears, at once when the follow list reloads. The reply, quote and mention rows of A stay.
 - [ ] B renames to another @nome; a later post of A that mentions the OLD name still notifies B.
 - [ ] A mentions A's own name: no notice for A. A text like `x@b` or `@b1é` is not linked and notifies nobody.
 - [ ] The operator blocks A: A's rows are gone on B's next load.
@@ -2336,11 +2336,11 @@ Nada abaixo foi feito ainda. Use uma instalação hospedada com o serviço `acco
 
 A especificação pedia a seção 35. A seção 35 já documenta menções e avisos de resposta, citação e menção (2026-10-28), a 36, A Rua com diários seguidos ainda incompletos, e a 37, Convites para entrar na rede. Esta verificação fica na 38. As seções 1 a 37 não mudam.
 
-O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/1` e `varanda/notices/2`) continua dentro do app e inclui citação e menção. O push da web hospedada cobre só seguir, resposta, curtida e republicação.
+O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/1` e `varanda/notices/2`) continua dentro do app e inclui citação e menção. O push da web hospedada cobre seguir, resposta, citação, menção, curtida e republicação.
 
 ### O que mudou
 
-- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, quatro avisos: começou a seguir, respondeu ao seu post, curtiu seu post, republicou seu post. Cada um é uma frase com o nome e a ação. Citação, menção e o crescimento de um diário seguido não geram push. O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
+- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, seis avisos: começou a seguir, respondeu, citou, mencionou, curtiu e republicou. Cada um é uma frase com o nome e a ação ("<nome> citou seu post", "<nome> mencionou você"). O crescimento de um diário seguido não gera push. Um post pode gerar vários pushes, um por destinatário (por exemplo, citar um membro e mencionar outro); o id de deduplicação é `ator:seq:destinatário` e o Topic é um HMAC desse id. Uma menção cujo nome ainda não está assentado no índice do semeador não gera push (o aviso aparece). O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
 - O semeador escolhe o candidato (`packages/core/lib/push-events.js`) e o manda em loopback (`POST /push-event`, `apps/cli/lib/push-relay.js`). O cursor `pushNext` começa no comprimento assinado já guardado (na primeira admissão, o maior entre esse comprimento e o que a quarentena verificou). Reinício, reconstrução de índice e histórico já servido não repetem aviso. O semeador nunca vê a inscrição.
 - O serviço de conta (`apps/cli/lib/account/push-routes.js`) oferece `GET /account/push/key`, `POST /account/push/start`, `POST /account/push/finish` e `POST /account/push/check`. A declaração é `varanda-push-v1`, só por HTTPS até o serviço de conta. O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível (`isEndpoint` em `packages/core/lib/push-proof.js`, `isPushEndpoint` em `packages/rpc/lib/methods.js`, `endpointParam` na conclusão). A frase é cifrada de ponta a ponta (RFC 8291). O fabricante vê o texto cifrado e o endereço.
 - Operação: `account push-key` com o serviço parado (grava `push-vapid.json`, modo 0600, imprime só a chave pública), `VARANDA_PUSH_TOKEN` e `VARANDA_ACCOUNT_HTTP` em `deploy/seeder/.env`. Token vazio desliga. Termos versão 3 (`TERMS_VERSION`). Ligar os avisos pede o aceite dessa versão.
@@ -2350,14 +2350,14 @@ O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/
 
 Arquivos novos:
 
-- `packages/core/test/push-events.test.js`: candidato (seguir, resposta, curtida, republicação), nunca a si mesmo, só membro, lista de bloqueio, idade de 6 h, nome e forma do evento.
+- `packages/core/test/push-events.test.js`: candidatos (seguir, resposta, citação, menção, curtida, republicação; um por destinatário), nunca a si mesmo, só membro, lista de bloqueio, idade de 6 h, nome e forma do evento.
 - `packages/core/test/push-proof.test.js`: declaração `varanda-push-v1`, hash do endpoint e URL `https` em ASCII imprimível.
-- `apps/cli/test/seeder-push.test.js`: cursor `pushNext`, silêncio do histórico, primeira admissão, reinício e os quatro eventos.
+- `apps/cli/test/seeder-push.test.js`: cursor `pushNext`, silêncio do histórico, primeira admissão, reinício e os seis eventos.
 - `apps/cli/test/push-relay.test.js`: `POST /push-event` em loopback, token, fila e perda sem repetir.
 - `apps/cli/test/account-push.test.js`: as quatro rotas da conta, o relé, 404 sem token, cifra e 404/410.
 - `apps/cli/test/web-push.test.js`: cifra RFC 8291 e a lista de endereços permitidos.
 - `apps/cli/test/push-store.test.js`: `push.json`, modo 0600, teto de 4 aparelhos.
-- `apps/cli/test/push-text.test.js`: as quatro frases, "Alguém" e `PUSH_BODY_MAX` 120.
+- `apps/cli/test/push-text.test.js`: as seis frases, "Alguém" e `PUSH_BODY_MAX` 120.
 - `apps/app/test/push-state.test.js`: rótulos, estado do interruptor, `PUSH_RELOAD` e o aviso aberto pelo toque.
 - `apps/cli/test/push-e2e.test.js`: de um registro no diário servido, pelo relé do semeador, a um único `POST` cifrado num serviço de push falso, e todos os caminhos que devem ficar em silêncio.
 
@@ -2386,13 +2386,13 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - [ ] No PWA instalado no Android, o mesmo controle liga e o sistema mostra o aviso (não realizada ainda).
 - [ ] No iPhone ou iPad com iOS 16.4 ou mais novo, com o Varanda na Tela de Início: o primeiro `await` do toque em ligar é `pushManager.subscribe()` (o estado já foi lido ao abrir a folha). A inscrição completa e o aviso do sistema chega (não realizada ainda).
 - [ ] Fora da Tela de Início, no iPhone ou iPad, a linha do interruptor não aparece e o texto diz que os avisos só funcionam na Tela de Início (não realizada ainda).
-- [ ] Com a conta B, um evento de cada tipo para A: seguir, responder, curtir e republicar. A recebe uma frase de cada, com o nome de B e a ação, sem o texto da publicação e sem citação (não realizada ainda).
-- [ ] Tocar no aviso de seguir abre a aba Avisos. Tocar no de resposta, curtida ou republicação abre a Conversa daquela publicação (não realizada ainda).
+- [ ] Com a conta B, um evento de cada tipo para A: seguir, responder, citar, mencionar, curtir e republicar. A recebe uma frase de cada, com o nome de B e a ação, sem o texto da publicação (não realizada ainda).
+- [ ] Tocar no aviso de seguir abre a aba Avisos. Tocar no de resposta, curtida ou republicação abre a Conversa daquela publicação; no de citação ou menção, a Conversa da publicação de quem citou ou mencionou (não realizada ainda).
 - [ ] Desligar em Ajustes para os avisos neste navegador. Um evento novo de B não chega neste aparelho (não realizada ainda).
 - [ ] "Sair" desliga os avisos deste navegador. Entrar de novo não os religa sozinho (não realizada ainda).
 - [ ] Reiniciar o semeador não repete o histórico: os eventos que já estavam no diário não geram aviso de novo (não realizada ainda).
 - [ ] Sem `push-vapid.json` (serviço sem chave), a linha "Avisos no aparelho" não aparece (não realizada ainda).
-- [ ] Uma citação e uma menção de B aparecem na lista de Avisos e não geram aviso do sistema (não realizada ainda).
+- [ ] B cita um post de A e menciona outro membro, C, no mesmo post: A recebe "<nome de B> citou seu post" e C recebe "<nome de B> mencionou você", um push para cada. Os dois também aparecem na lista de Avisos (não realizada ainda).
 
 ### Limites
 
@@ -2400,10 +2400,10 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 - Um bloco escrito enquanto o semeador estava fora só vira aviso depois do reinício se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado ao servir o diário, na primeira admissão, num reinício ou numa reconstrução de índice, não gera aviso.
 - Teto de 60 avisos por hora por destinatário (`keyedWindow(60, 3600 * 1000)`, motivo `teto`). Pausa de 600 s para o mesmo autor, destinatário, tipo e `ref` (curtida, republicação e seguir repetidos; `keyedWindow(1, 600 * 1000)`, motivo `descartado`); cada resposta é um aviso próprio, porque a chave leva também o `seq` da resposta.
 - No máximo 4 aparelhos por membro (`PUSH_MAX_PER_MEMBER`). O envio só sai para a lista de hosts (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` e os sufixos `.push.apple.com`, `.push.services.mozilla.com`, `.notify.windows.com`).
-- Não há tratamento de `pushsubscriptionchange`. Não há citação nem menção no push. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
+- Não há tratamento de `pushsubscriptionchange`. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
 - Em `apps/cli/lib/account/push-store.js`, `byDate` compara `createdAt` como texto. Um ISO de ano expandido (`toISOString` fora de 0000 a 9999, no formato `+275760-...`) ordena antes de um ano de quatro dígitos, e o teto pode tratar essa linha como a mais antiga. Uma transferência de `endpoint` para um membro que já tem 4 aparelhos não é recusada: `put` aceita (o comentário de "transferência que não acrescenta membro" vale para `MAX_MEMBERS`) e `cap` descarta a linha mais antiga desse membro.
 - Não há teste automatizado no navegador da linha de Ajustes nem do fluxo de abrir o app a partir do aviso. A cobertura é dos módulos puros (`pushRowView`, `pushUiState`), do service worker (`notificationclick`, em `apps/app/test/sw.test.js`) e do roteiro acima.
-- Uma resposta, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
+- Uma resposta, citação, curtida ou republicação cujo post alvo ainda não está legível na réplica do destinatário no semeador (fora do prefixo contíguo, ou uma leitura sem espera que falhou) não vira aviso, e o bloco não é lido de novo (no máximo uma vez).
 - Se um envio volta 410 enquanto o mesmo `endpoint` é registrado de novo com chaves novas, a remoção compara as chaves antes de entrar na fila do `push.json`, e uma janela curta ainda pode apagar o registro novo. O navegador costuma gerar outro `endpoint` ao assinar de novo; religar em Ajustes resolve.
 - Ao ligar, um cancelamento local que passa de 5 s (`UNSUBSCRIBE_MS`) é dado como não confirmado; o navegador ainda pode concluí-lo depois.
 - A limpeza de Sair e Recomeçar espera até 3 s (`LEAVE_WAIT_MS`) uma troca do interruptor em andamento e o interruptor não aceita novo toque durante ela. Se o pedido de permissão ficar aberto além disso, um "Permitir" tardio é desligado de novo quando a troca termina (só o cancelamento local, porque o nó já saiu). Conferir num navegador real com o pedido aberto ainda falta.

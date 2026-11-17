@@ -14,7 +14,7 @@ const crypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const { WebSocket, WebSocketServer } = require('ws')
-const { testnet } = require('./helpers/net')
+const { testnet, until } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createIssuerCert, createIssuedCert, createSeederCert, createModeratorCert, createUsernameRecord, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { createAgeVerified, createAgeSince, ageVerifiedPayload } = require('@varanda/core/lib/age-proof')
@@ -40,9 +40,17 @@ const { memoryNodeStorage } = require('../lib/node-storage')
 const { memoryStorage } = require('../lib/storage')
 const { wsStream } = require('../lib/ws-stream')
 const { writeBlocklist } = require('../lib/node-store')
+const store = require('../lib/node-store')
+const ops = require('../lib/member-ops')
+const { groupKeyPairFromPrf } = require('../lib/passkey')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const MISMATCH = 'passkey não corresponde ao diário guardado'
+const NOT_SYNCED = 'sincronize com o semeador antes de publicar'
+const GATE_LINE = 'sincronizando antes de publicar'
+const RETRY = /^aviso: sem conexão com o semeador; nova tentativa em \d+ s$/
+const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function hex (buf) {
   return b4a.toString(buf, 'hex')
@@ -60,6 +68,45 @@ async function deadPort () {
   const { port } = server.address()
   await new Promise((resolve) => server.close(resolve))
   return port
+}
+
+// A loopback port that accepts TCP and never answers: a WebSocket dialled
+// there hangs in its handshake, so the link neither verifies nor closes.
+async function hangingPort (t) {
+  const held = new Set()
+  const server = net.createServer((socket) => {
+    held.add(socket)
+    socket.on('error', () => {})
+    socket.on('close', () => held.delete(socket))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const socket of held) socket.destroy()
+    return new Promise((resolve) => server.close(() => resolve()))
+  }, { force: true })
+  return server.address().port
+}
+
+// A createSocket whose target the test switches (url null = the URL the
+// sync dials); drop() closes every socket it opened, as a seeder that goes.
+function switchableSocket () {
+  const sw = { url: null, sockets: [] }
+  sw.createSocket = (url) => {
+    const ws = new WebSocket(sw.url === null ? url : sw.url)
+    ws.on('error', () => {})
+    sw.sockets.push(ws)
+    return ws
+  }
+  sw.drop = () => {
+    for (const ws of sw.sockets.splice(0)) ws.terminate()
+  }
+  return sw
+}
+
+// How many link losses the sync reported so far: each 'link-closed' is
+// followed by its retry warning, after the session handled the event.
+function retries (web) {
+  return web.events.filter((e) => e.name === 'warning' && RETRY.test(e.data.line)).length
 }
 
 // True when some file of the 'diary' core holds `needle`.
@@ -180,6 +227,18 @@ async function certified (t, options) {
   const { publicKey } = await s.web.request('identity.create')
   await s.web.request('cert.add', { cert: createCert({ member: publicKey }, s.assoc.kp) })
   return { ...s, key: publicKey }
+}
+
+// A certified diary (written with the gate off), reopened with the write
+// gate on: options go to that second node.
+async function gated (t, { assoc = association(), ...options } = {}) {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.node.close()
+  const s = await setup(t, { storage, assoc, keyPair, writeGate: true, syncOptions: { retryMinMs: 100, retryMaxMs: 200 }, ...options })
+  return { ...s, key: first.key }
 }
 
 test('configuration is checked before anything starts', async (t) => {
@@ -1959,7 +2018,8 @@ test('a legacy store (secret in the header) is wiped on first use, refused for w
 test('the write gate: no seeder reached, no write', async (t) => {
   await testnet(t)
   const assoc = association()
-  const { web, node } = await setup(t, { assoc, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  const sw = switchableSocket()
+  const { web, node } = await setup(t, { assoc, createSocket: sw.createSocket, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
   const { publicKey } = await web.request('identity.create')
   t.absent(web.events.some((e) => e.name === 'sync.started'), 'creating the identity is not gated')
   const cert = createCert({ member: publicKey }, assoc.kp)
@@ -1979,10 +2039,16 @@ test('the write gate: no seeder reached, no write', async (t) => {
   t.alike(await web.request('sync.status'), { state: 'idle' })
 
   // A user's continuous intent survives a failed gate: the run restarts.
+  // The dial hangs, so no link loss refuses the write at once (the fast
+  // refusal has its own tests) and the gate waits out its deadline.
+  sw.url = 'ws://127.0.0.1:' + (await hangingPort(t)) + '/seeder'
   const { runId: continuous } = await web.request('sync.start', {})
   const again = await errorOf(web.request('cert.add', { cert }))
   t.is(again.message, 'sincronize com o semeador antes de publicar')
   t.ok(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === continuous && e.data.reason === 'preempted'), 'the continuous run was preempted by the gate')
+  const gate = web.events.find((e) => e.name === 'sync.started' && e.data.runId > continuous)
+  t.is(gate.data.once, true, 'the gate run')
+  t.is((await stoppedOf(web.events, gate.data.runId)).reason, 'timeout', 'which waited out its deadline')
   const status = await web.request('sync.status')
   t.is(status.state, 'running', 'and restarted after the failed gate')
   t.is(status.once, false)
@@ -1999,7 +2065,9 @@ test('the write gate: no seeder reached, no write', async (t) => {
 test('a client that detaches during the gate: nothing is written and no run is restarted', async (t) => {
   await testnet(t)
   const assoc = association()
-  const { web, node } = await setup(t, { assoc, writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  // A hanging dial: no link loss refuses the write at once or ends the gate.
+  const port = await hangingPort(t)
+  const { web, node } = await setup(t, { assoc, seederUrl: 'ws://127.0.0.1:' + port + '/seeder', writeGate: true, writeGateTimeoutMs: 1500, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
   const { publicKey } = await web.request('identity.create')
   const cert = createCert({ member: publicKey }, assoc.kp)
   await web.request('sync.start', {})
@@ -2014,6 +2082,463 @@ test('a client that detaches during the gate: nothing is written and no run is r
   t.alike(await second.request('sync.status'), { state: 'idle' }, 'no continuous run was restarted for a client that is gone')
   t.is((await second.request('node.info')).memberCert, false, 'the certificate was not written after the detach')
   t.is((await second.request('log.read', {})).entries.length, 0)
+})
+
+test('the fast refusal: a write after a link loss refuses at once and leaves the continuous run alone', async (t) => {
+  await testnet(t)
+  // The gate run would wait out 15 s against the dead port.
+  const { web } = await gated(t, { writeGateTimeoutMs: 15000 })
+  const { runId } = await web.request('sync.start', {})
+  await until(() => retries(web) > 0, { name: 'the link loss', timeoutMs: 10000 })
+  const from = web.events.length
+  const refused = await errorOf(web.request('post.create', { text: 'sem semeador' }))
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED])
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started'), 'no once or internal run')
+  t.absent(web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === runId), 'the continuous run was not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  t.is((await web.request('log.read', {})).entries.length, 1, 'nothing appended')
+  await web.request('sync.stop')
+})
+
+test('the fast refusal: a seeder that goes and comes back, reads served on the live run meanwhile', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const sw = switchableSocket()
+  const { web } = await gated(t, { assoc, seederUrl: seeder.url, createSocket: sw.createSocket, writeGateTimeoutMs: 15000 })
+  const ownLines = (runId, from) => web.events.slice(from).filter((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line.startsWith('diário próprio sincronizado'))
+  const { runId } = await web.request('sync.start', {})
+  await until(() => ownLines(runId, 0).length > 0, { name: 'own-synced', timeoutMs: 20000 })
+
+  // The seeder goes (a redeploy): the link drops and every redial fails.
+  sw.url = 'ws://127.0.0.1:' + (await deadPort()) + '/seeder'
+  const lost = retries(web)
+  sw.drop()
+  await until(() => retries(web) > lost, { name: 'the link loss', timeoutMs: 10000 })
+  const from = web.events.length
+  const write = errorOf(web.request('post.create', { text: 'durante a troca' }))
+  const read = web.request('log.read', {})
+  const refused = await write
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED], 'the write refuses')
+  t.is((await read).entries.length, 1, 'the read queued behind it answers, nothing appended')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no run started or stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'on the same run')
+
+  // The seeder is back: the same run redials and reports the own diary.
+  sw.url = null
+  await until(() => ownLines(runId, from).length > 0, { name: 'own-synced again', timeoutMs: 20000 })
+  const { seq } = await web.request('post.create', { text: 'durante a troca' })
+  t.is(seq, 1, 'the same write appends now')
+  t.is((await web.request('log.read', {})).entries.length, 2)
+  await web.request('sync.stop')
+})
+
+test('the fast refusal: a cold start on a dead port, two writes queued, one gate run at most', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const { web } = await gated(t, { writeGateTimeoutMs: 15000 })
+  const from = web.events.length
+  const start = web.request('sync.start', {})
+  const first = errorOf(web.request('post.create', { text: 'um' }))
+  const second = errorOf(web.request('post.create', { text: 'dois' }))
+  const { runId } = await start
+  const refused = await Promise.all([first, second])
+  t.alike(refused.map((e) => e && e.message), [NOT_SYNCED, NOT_SYNCED], 'both writes refused')
+  t.is((await web.request('log.read', {})).entries.length, 1, 'nothing appended')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const runs = await runsSince(web, from)
+  const gates = runs.filter((r) => r.lines[0] === GATE_LINE)
+  t.is(gates.length, 1, 'one gate run')
+  t.is(gates[0].stopped.reason, 'preempted', 'the gate ended at its link loss')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the continuous run it preempted')
+})
+
+test('the fast refusal: seederDownTtlMs 0 keeps the gate run', async (t) => {
+  await testnet(t)
+  const { web } = await gated(t, { writeGateTimeoutMs: 1500, seederDownTtlMs: 0 })
+  const { runId } = await web.request('sync.start', {})
+  await until(() => retries(web) > 0, { name: 'the link loss', timeoutMs: 10000 })
+  const from = web.events.length
+  const refused = await errorOf(web.request('post.create', { text: 'sem semeador' }))
+  t.is(refused.message, NOT_SYNCED)
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the continuous run was preempted')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const gate = (await runsSince(web, from)).find((r) => r.lines[0] === GATE_LINE)
+  t.ok(gate, 'by the gate run')
+  t.is(gate.stopped.reason, 'timeout', 'which waited out its deadline')
+})
+
+// ---- the device upkeep under the fast refusal ----
+// The sync boundary is replaced (as session-upkeep.test.js) so the runs'
+// events are driven by hand.
+
+async function upkeepDevice (t, { assoc = generateAssociationKeyPair(), factory = createBrowserNode, writeGate = false, storage = memoryNodeStorage(), keyPair = crypto.keyPair(), prf = crypto.randomBytes(32), upkeepDelayMs, ...extra } = {}) {
+  const association = hex(assoc.publicKey)
+  const ctx = { storage, association, keyPair, groupKeyPair: (nonce) => groupKeyPairFromPrf(prf, nonce) }
+  const key = hex(keyPair.publicKey)
+  if (!(await store.diaryStatus(storage)).exists) {
+    await ops.idCreate(ctx)
+    await ops.certAdd(ctx, createCert({ member: key }, assoc))
+  }
+  const internal = []
+  const node = factory({
+    storage,
+    association,
+    seederUrl: 'ws://127.0.0.1:9/seeder',
+    createSocket: () => { throw new Error('unexpected socket') },
+    writeGate,
+    upkeepDelayMs,
+    ...extra,
+    onInternalError: (err) => internal.push(err)
+  })
+  t.teardown(() => node.close(), { force: true })
+  await node.setKeyPair(keyPair, { prf })
+  const web = await connectClient(node)
+  return { node, web, key, keyPair, prf, assoc, association, storage, internal }
+}
+
+async function pipeCore (source, target) {
+  const a = source.replicate(true, { keepAlive: false })
+  const b = target.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  try {
+    await target.download({ start: 0, end: source.length }).done()
+  } finally {
+    a.destroy()
+    b.destroy()
+    await source.close()
+    await target.close()
+  }
+}
+
+// A second device's storage for `s`: its diary and the group cores `keys`.
+async function secondDevice (s, keys) {
+  const storage = memoryNodeStorage()
+  await ops.idCreate({ storage, association: s.association, keyPair: s.keyPair })
+  await pipeCore(await store.openDiary(s.storage), await store.openDiary(storage))
+  for (const key of keys) {
+    await pipeCore(await store.openGroupCoreReadOnly(s.storage, key), await store.openGroupReplica(storage, key))
+    await store.addGroupReplica(storage, key)
+  }
+  await store.addGroupDiary(storage, s.key)
+  return storage
+}
+
+// createBrowserNode with runSync replaced; the module cache is restored.
+function handDrivenSync () {
+  const runs = []
+  const sync = require('../lib/sync')
+  const original = sync.runSync
+  const ids = [require.resolve('../lib/node'), require.resolve('../lib/session')]
+  const cached = ids.map((id) => require.cache[id])
+  let factory
+  try {
+    sync.runSync = async ({ storage, onEvent, signal, once, reader }) => {
+      const diary = await store.openDiary(storage)
+      if (reader) reader.set({ diary, replica: () => null, hold: () => true, release: () => {} })
+      let finish
+      const done = new Promise((resolve) => { finish = resolve })
+      const stop = () => finish({ ok: true, errors: [], peers: 1, seederConfirmed: true })
+      signal.addEventListener('abort', stop)
+      if (signal.aborted) stop()
+      const r = { once, emit: onEvent, get aborted () { return signal.aborted } }
+      runs.push(r)
+      try {
+        return await done
+      } finally {
+        signal.removeEventListener('abort', stop)
+        if (reader) reader.clear()
+        diary.close().catch(() => {})
+      }
+    }
+    for (const id of ids) delete require.cache[id]
+    factory = require('../lib/node').createBrowserNode
+  } finally {
+    sync.runSync = original
+    ids.forEach((id, i) => { require.cache[id] = cached[i] })
+  }
+  return {
+    runs,
+    factory,
+    async next (index) {
+      await until(() => runs[index], { name: 'sync run ' + index, timeoutMs: 5000 })
+      return runs[index]
+    }
+  }
+}
+
+test('the fast refusal: upkeep passes it refused are re-armed once the link reports the own diary again', async (t) => {
+  const a = await upkeepDevice(t)
+  const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const sync = handDrivenSync()
+  const storage = await secondDevice(a, [community, group])
+  const b = await upkeepDevice(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, writeGate: true, upkeepDelayMs: 20 })
+  const writers = () => store.readGroupWriters(b.storage)
+  const upkeepWarnings = () => b.web.events.filter((e) => e.name === 'warning' && e.data.line === UPKEEP_WARNING).length
+  const diary = await store.openDiary(b.storage)
+  const length = diary.length
+  await diary.close()
+
+  await b.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length }) // arms the pass (enrol in both roots)
+  live.emit({ event: 'link-closed' }) // the seeder goes
+  await until(() => upkeepWarnings() === 1, { name: 'the refused pass', timeoutMs: 5000 })
+  await pause(200)
+  t.is(upkeepWarnings(), 1, 'no timer retries it against the seeder that went')
+  t.absent(sync.runs.some((r) => r.once), 'no gate run against the seeder that went')
+  t.alike(await writers(), [], 'nothing written')
+
+  // The seeder is back at the same own length: no new arming, so only the
+  // re-arm brings a pass, whose gate run now finds the own diary.
+  await until(() => {
+    const last = sync.runs[sync.runs.length - 1]
+    return last && !last.once && !last.aborted
+  }, { name: 'the continuous run', timeoutMs: 5000 })
+  const current = sync.runs[sync.runs.length - 1]
+  t.is(current.once, false, 'the continuous run, restarted after any pass that preempted it')
+  const before = sync.runs.length
+  current.emit({ event: 'own-synced', length })
+  const gate = await sync.next(before)
+  t.is(gate.once, true, 'a pass reached the gate')
+  gate.emit({ event: 'own-synced', length })
+  await until(async () => (await writers()).length === 2, { name: 'CW and Geral writer', timeoutMs: 5000 })
+  await sync.next(before + 1)
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+// The live continuous run of a hand-driven sync (the last run, not once,
+// not aborted), once the session restarted it.
+async function liveRun (sync) {
+  await until(() => {
+    const last = sync.runs[sync.runs.length - 1]
+    return last && !last.once && !last.aborted
+  }, { name: 'the continuous run', timeoutMs: 5000 })
+  return sync.runs[sync.runs.length - 1]
+}
+
+test('regression: upkeep still enrols after many seeder outages at the same own length, gate link losses included', async (t) => {
+  t.timeout(60000)
+  const a = await upkeepDevice(t)
+  const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const sync = handDrivenSync()
+  const storage = await secondDevice(a, [community, group])
+  const b = await upkeepDevice(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, writeGate: true, upkeepDelayMs: 20 })
+  const writers = () => store.readGroupWriters(b.storage)
+  const upkeepWarnings = () => b.web.events.filter((e) => e.name === 'warning' && e.data.line === UPKEEP_WARNING).length
+  const diary = await store.openDiary(b.storage)
+  const length = diary.length
+  await diary.close()
+
+  await b.web.request('sync.start')
+  // Six outages in all, MAX_UPKEEP_REFUNDS (twice the passes of an arming):
+  // all of them are given back, more would count (the flapping test below).
+  // Three refused at once: each own-synced queues a pass (the first arms),
+  // the link drops before it runs.
+  for (let i = 0; i < 3; i++) {
+    const live = await liveRun(sync)
+    const warned = upkeepWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => upkeepWarnings() > warned, { name: 'fast refusal ' + (i + 1), timeoutMs: 5000 })
+  }
+  // Three outages inside the gate run: the link reports the own diary, the
+  // pass's gate run starts, and its link drops (the six together are more
+  // than the passes of an arming, so they would end the arming if counted).
+  for (let i = 0; i < 3; i++) {
+    const live = await liveRun(sync)
+    const warned = upkeepWarnings()
+    const before = sync.runs.length
+    live.emit({ event: 'own-synced', length })
+    const gate = await sync.next(before)
+    t.is(gate.once, true, 'gate run ' + (i + 1))
+    gate.emit({ event: 'link-closed' })
+    await until(() => upkeepWarnings() > warned, { name: 'gate link loss ' + (i + 1), timeoutMs: 5000 })
+  }
+  t.alike(await writers(), [], 'nothing written while the seeder was down')
+
+  // The seeder is back at the same own length: the pass runs and enrols.
+  const live = await liveRun(sync)
+  const before = sync.runs.length
+  live.emit({ event: 'own-synced', length })
+  const gate = await sync.next(before)
+  t.is(gate.once, true, 'the pass reached the gate')
+  gate.emit({ event: 'own-synced', length })
+  await until(async () => (await writers()).length === 2, { name: 'CW and Geral writer', timeoutMs: 5000 })
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('regression: the follow drain publishes after many fast-refused attempts once the own diary is reported', async (t) => {
+  t.timeout(30000)
+  const sync = handDrivenSync()
+  const d = await upkeepDevice(t, { factory: sync.factory, writeGate: true })
+  const drainWarnings = () => d.web.events.filter((e) => e.name === 'warning' && e.data.line === 'aviso: seguidos ainda não enviados').length
+  const diary = await store.openDiary(d.storage)
+  const length = diary.length
+  await diary.close()
+  await d.web.request('sync.start')
+  const first = await sync.next(0)
+  first.emit({ event: 'own-synced', length })
+  first.emit({ event: 'link-closed' })
+
+  // A follow while the seeder is down: the drain is refused at once.
+  await d.web.request('follow.add', { key: 'cd'.repeat(32) })
+  await until(() => drainWarnings() === 1, { name: 'the first refused drain', timeoutMs: 5000 })
+  // More outages than the drain's retries: each own-synced queues a drain,
+  // the link drops before it runs.
+  for (let i = 0; i < 4; i++) {
+    const live = await liveRun(sync)
+    const warned = drainWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => drainWarnings() > warned, { name: 'refused drain ' + (i + 2), timeoutMs: 5000 })
+  }
+  t.is((await store.readFollowsPending(d.storage)).length, 1, 'still pending')
+
+  // The seeder is back: the next own-synced drains.
+  const live = await liveRun(sync)
+  live.emit({ event: 'own-synced', length })
+  await until(async () => (await store.readFollowsPending(d.storage)).length === 0, { name: 'the drain', timeoutMs: 5000 })
+  t.ok(await diaryHolds(d.storage, 'cd'.repeat(32)), 'the follow is in the diary')
+  await d.web.request('sync.stop')
+  t.alike(d.internal, [])
+})
+
+test('regression: a link that keeps dropping after own-synced stops queuing upkeep passes after a bounded number', async (t) => {
+  t.timeout(60000)
+  const a = await upkeepDevice(t)
+  const { community, group } = await a.web.request('community.create', { name: 'Bairro', join: 'open' })
+  const sync = handDrivenSync()
+  const storage = await secondDevice(a, [community, group])
+  const b = await upkeepDevice(t, { assoc: a.assoc, keyPair: a.keyPair, prf: a.prf, storage, factory: sync.factory, writeGate: true, upkeepDelayMs: 20 })
+  const upkeepWarnings = () => b.web.events.filter((e) => e.name === 'warning' && e.data.line === UPKEEP_WARNING).length
+  const diary = await store.openDiary(b.storage)
+  const length = diary.length
+  await diary.close()
+
+  await b.web.request('sync.start')
+  // MAX_UPKEEP_REFUNDS (6) refused passes are given back, then the next
+  // MAX_UPKEEP_PASSES (3) count: nine refused passes in all at one arming.
+  const bound = 6 + 3
+  for (let i = 0; i < bound; i++) {
+    const live = await liveRun(sync)
+    const warned = upkeepWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => upkeepWarnings() > warned, { name: 'refused pass ' + (i + 1), timeoutMs: 5000 })
+  }
+  // The flapping goes on: no further pass is queued (a pass would warn
+  // within upkeepDelayMs of its own-synced).
+  for (let i = 0; i < 5; i++) {
+    const live = await liveRun(sync)
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await pause(150)
+  }
+  t.is(upkeepWarnings(), bound, 'the refused passes stopped at the bound')
+  t.absent(sync.runs.some((r) => r.once), 'no gate run against the seeder that keeps going')
+  t.alike(await store.readGroupWriters(b.storage), [], 'nothing written')
+  await b.web.request('sync.stop')
+  t.alike(b.internal, [])
+})
+
+test('regression: a link that keeps dropping after own-synced stops retrying the follow drain after a bounded number', async (t) => {
+  t.timeout(30000)
+  const sync = handDrivenSync()
+  const d = await upkeepDevice(t, { factory: sync.factory, writeGate: true })
+  const drainWarnings = () => d.web.events.filter((e) => e.name === 'warning' && e.data.line === 'aviso: seguidos ainda não enviados').length
+  const diary = await store.openDiary(d.storage)
+  const length = diary.length
+  await diary.close()
+  await d.web.request('sync.start')
+  const first = await sync.next(0)
+  first.emit({ event: 'own-synced', length })
+  first.emit({ event: 'link-closed' })
+
+  // MAX_DRAIN_REFUSALS (6) refusals are not counted, then MAX_DRAIN_RETRIES
+  // (3) are: nine refused drains, the first from the follow itself.
+  const bound = 6 + 3
+  await d.web.request('follow.add', { key: 'cd'.repeat(32) })
+  await until(() => drainWarnings() === 1, { name: 'the first refused drain', timeoutMs: 5000 })
+  for (let i = 1; i < bound; i++) {
+    const live = await liveRun(sync)
+    const warned = drainWarnings()
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await until(() => drainWarnings() > warned, { name: 'refused drain ' + (i + 1), timeoutMs: 5000 })
+  }
+  // The flapping goes on: no further drain is queued.
+  for (let i = 0; i < 5; i++) {
+    const live = await liveRun(sync)
+    live.emit({ event: 'own-synced', length })
+    live.emit({ event: 'link-closed' })
+    await pause(150)
+  }
+  t.is(drainWarnings(), bound, 'the refused drains stopped at the bound')
+  t.is((await store.readFollowsPending(d.storage)).length, 1, 'still pending')
+
+  // A new follow change starts the retries afresh.
+  await d.web.request('follow.add', { key: 'ce'.repeat(32) })
+  await until(() => drainWarnings() === bound + 1, { name: 'the drain of the new change', timeoutMs: 5000 })
+  // And the counters were reset: one more flap retries the drain again.
+  const again = await liveRun(sync)
+  again.emit({ event: 'own-synced', length })
+  again.emit({ event: 'link-closed' })
+  await until(() => drainWarnings() === bound + 2, { name: 'a retry after the new change', timeoutMs: 5000 })
+  await d.web.request('sync.stop')
+  t.alike(d.internal, [])
+})
+
+// A hand-driven continuous run that lost its seeder link (the seeder is
+// being redeployed).
+async function downDevice (t, extra) {
+  const sync = handDrivenSync()
+  const d = await upkeepDevice(t, { factory: sync.factory, ...extra })
+  const diary = await store.openDiary(d.storage)
+  const length = diary.length
+  await diary.close()
+  const { runId } = await d.web.request('sync.start')
+  const live = await sync.next(0)
+  live.emit({ event: 'own-synced', length })
+  live.emit({ event: 'link-closed' })
+  return { ...d, sync, live, runId }
+}
+
+const PEEK_PARAMS = { author: 'ab'.repeat(32), seqs: [1] }
+const SEEDER_UNAVAILABLE = 'semeador indisponível'
+
+test('diary.peek fails fast while the seeder is known down', async (t) => {
+  const d = await downDevice(t, { peekTimeoutMs: 4000 })
+  let half = false
+  const timer = setTimeout(() => { half = true }, 2000)
+  const err = await errorOf(d.web.request('diary.peek', PEEK_PARAMS))
+  clearTimeout(timer)
+  t.is(err.message, SEEDER_UNAVAILABLE)
+  t.absent(half, 'settled before half the peek timeout')
+  await d.web.request('sync.stop')
+})
+
+test('diary.peek keeps its wait with seederDownTtlMs 0', async (t) => {
+  const d = await downDevice(t, { peekTimeoutMs: 4000, seederDownTtlMs: 0 })
+  let settled = false
+  const p = errorOf(d.web.request('diary.peek', PEEK_PARAMS)).then((e) => { settled = true; return e })
+  await pause(300)
+  t.absent(settled, 'still waiting for a peek function')
+  t.is((await p).message, SEEDER_UNAVAILABLE, 'then the same error at the deadline')
+  await d.web.request('sync.stop')
+})
+
+test('a read through withCores is served on the live run while the seeder is down', async (t) => {
+  const d = await downDevice(t)
+  const before = d.sync.runs.length
+  await d.web.request('log.read', {})
+  t.is(d.sync.runs.length, before, 'no new run started')
+  t.absent(d.live.aborted, 'the run was not preempted')
+  t.alike(await d.web.request('sync.status'), { state: 'running', runId: d.runId, once: false }, 'same run')
+  await d.web.request('sync.stop')
 })
 
 test('reset removes the diary and locks; config and follows stay', async (t) => {

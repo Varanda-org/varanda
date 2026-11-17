@@ -119,7 +119,7 @@ const devices = require('@varanda/core/lib/devices')
 const store = require('./node-store')
 
 const {
-  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader,
+  buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader, replacedWriterCut, walkHasRoom,
   orderKey, compareOrder, MAX_GROUPS_PER_DIARY, MAX_GROUP_CUTS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY
 } = grp
 
@@ -1666,7 +1666,7 @@ async function readGarden (diary) {
 }
 
 // The own balcony -> { on, state, savesToday, helpsToday, given } (docs/rpc.md
-// 5.157). A state dated after today counts as today's (its n); one
+// 5.158). A state dated after today counts as today's (its n); one
 // saveOrdinal cannot read, or an unreadable clock, reads as every save
 // spent, never as a fresh budget, and an unreadable clock reads every help
 // spent.
@@ -2980,9 +2980,11 @@ async function rootUnfoldable (ctx, group) {
   return root.fork !== 0 || !foldableHeader(root.entries[0].record)
 }
 
-// The writers the fold counts for diary d from its join history alone: the
+// The writers an admit waits for, from diary d's join history alone: the
 // MAX_GROUP_WRITERS_PER_DIARY earliest bound by an on:true join (the bound
-// root is one of its creator's), as @varanda/core lib/group.js capPerDiary.
+// root is one of its creator's), the per-diary rule from before the slot
+// walk (@varanda/core lib/group.js slotWalk), which the fold now uses; the
+// switch to the walk comes with the client nodes (#350).
 function joinedCounted (history, d, rootDiary, group) {
   const first = new Map()
   for (const j of history || []) {
@@ -3175,8 +3177,14 @@ function cutSeq (c, grant) {
   return grant ? Math.max(c.length, c.signed || 0) : c.length
 }
 
+// A writer its diary's slot walk released (#350) still counts for its
+// block 0, leaves and key blocks only: no record names it.
+function releasedWriter (g, writer) {
+  return g.built.released instanceof Set && g.built.released.has(writer)
+}
+
 function cutsFor (g, d, grant = false) {
-  return boundWriters(g, d).filter((writer) => g.built.writers.has(writer)).slice(0, MAX_GROUP_CUTS)
+  return boundWriters(g, d).filter((writer) => g.built.writers.has(writer) && !releasedWriter(g, writer)).slice(0, MAX_GROUP_CUTS)
     .map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), grant) }))
 }
 
@@ -3187,7 +3195,7 @@ function countedCuts (g, d, grant = false) {
   const out = []
   for (const writer of g.built.writers) {
     const c = g.cores.get(writer)
-    if (c !== undefined && c.diary === d) out.push(writer)
+    if (c !== undefined && c.diary === d && !releasedWriter(g, writer)) out.push(writer)
   }
   return out.sort().map((writer) => ({ writer, seq: cutSeq(g.cores.get(writer), grant) }))
 }
@@ -3602,11 +3610,16 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   if (live !== null && usable(live.key) && !cut(live.key)) return { state: joinState(g, ownHex, live.key) }
   // As the core node: the unusable own writer's binding goes first, so
   // nobody waits for a core that seeders refuse.
-  let unbound = null
+  // The off join keeps its slot in the slot walk: a cut before the new join
+  // gives it back (#350). Both are written only once the room check passed.
+  const replace = []
   if (g.private && g.own !== null && g.own.key !== g.group && !usable(g.own.key)) {
     const last = groupJoinHistory(base.ownEntries, g.group).filter((j) => j.writer === g.own.key).pop()
-    if (last !== undefined && last.on) await appendOwn(ctx, diary, groupJoinRecord({ group: g.group, writer: g.own.key, on: false }))
-    unbound = g.own.key
+    if (last !== undefined && last.on) replace.push({ kind: 'join', writer: g.own.key, on: false })
+    const held = g.cores.get(g.own.key)
+    const cut = replacedWriterCut(held === undefined ? null : held.entries)
+    const marked = groupCutHistory(base.ownEntries, g.group).some((m) => m.writer === g.own.key && m.cut <= cut)
+    if (last !== undefined && cut !== null && !marked) replace.push({ kind: 'cut', writer: g.own.key, cut })
   }
   // Listed and still writing but not bound (a join cut short): bind it.
   const current = g.own === null ? undefined : g.cores.get(g.own.key)
@@ -3617,11 +3630,17 @@ async function joinLoaded (ctx, { diary, ownHex, base, g }, member) {
   let writer = !left && sameMember && !cut(g.own.key) && ownPending(g, ownHex) && usable(g.own.key) && await ownWriterDerived(ctx, g.own) ? g.own.key : null
   if (writer === null) {
     if (groupWritersFull(g)) throw new UsageError(store.GROUP_FULL)
-    // The fold counts at most MAX_GROUP_WRITERS_PER_DIARY writers per diary
-    // (the earliest bound): a new one would never count.
-    if (boundWriters(g, ownHex).filter((w) => w !== unbound).length >= MAX_GROUP_WRITERS_PER_DIARY) {
+    // The diary's own slot walk, after the off join and the cut above: a
+    // new writer it would not count live never counts.
+    if (!walkHasRoom(groupJoinHistory(base.ownEntries, g.group), groupCutHistory(base.ownEntries, g.group), g.group, replace)) {
       throw new UsageError(live !== null ? GROUP_BOXLESS_FULL : store.GROUP_FULL)
     }
+  }
+  for (const e of replace) {
+    if (e.kind === 'join') await appendOwn(ctx, diary, groupJoinRecord({ group: g.group, writer: e.writer, on: false }))
+    else await appendOwn(ctx, diary, groupCutRecord({ group: g.group, writer: e.writer, cut: e.cut }))
+  }
+  if (writer === null) {
     await makeGroupRoom(ctx, base, g.group)
     // The causal latest leave, never the newest timestamp.
     const rejoin = latestLeaveOf(g, ownHex)

@@ -54,7 +54,7 @@ export const HELP = Object.freeze({
   avisos: Object.freeze({
     title: 'Como funcionam os Avisos',
     paragraphs: Object.freeze([
-      'Aqui aparece quem começou a seguir você e que você ainda não segue. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta.',
+      'Aqui aparece quem começou a seguir você. Toque no aviso para ver o perfil da pessoa e, se quiser, seguir de volta: o aviso continua na lista e só o botão Seguir de volta some.',
       'Quantas pessoas seguem alguém, e quem são, aparece no Diário e no perfil de cada pessoa. Os Avisos continuam só seus.',
       'Os Avisos abrem pelo sino no canto superior direito. Quando há algo novo, o sino ganha um ponto, nunca um número.',
       'Os Avisos funcionam no site da associação e no app ligado à instalação da associação. Não funcionam com uma configuração manual.'
@@ -80,6 +80,7 @@ export const HELP = Object.freeze({
       'Não há confirmação de leitura.',
       'Bloquear interrompe as mensagens nos seus aparelhos.',
       'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
+      'Copiar conversas leva o texto e as fotos guardadas neste aparelho para os seus outros aparelhos que entram com a mesma passkey, e só você consegue abrir.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
       'A linha Comunidades serve para achar e criar comunidades.'
     ])

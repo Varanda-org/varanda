@@ -13,6 +13,7 @@ const member = require('../lib/member')
 const store = require('../lib/store')
 const devices = require('../lib/devices')
 const { groupJoinRecord, groupCutRecord } = require('../lib/records')
+const groups = require('../lib/group')
 const { hex, person, createGroup, joinGroup, exchange } = require('./helpers/private-member')
 
 const rand = () => hex(crypto.randomBytes(32))
@@ -142,6 +143,29 @@ test('disconnect marks a held writer at its contiguous length', async (t) => {
   t.alike(await member.deviceDisconnect(a, { id: lost }), { cut: 1, empty: 0, groups: [group] })
   const cuts = await onDiary(a, async ({ entries }) => cutsOf(entries))
   t.alike(cuts, [{ group, writer: bw.writer, cut: held }])
+})
+
+test('disconnect walks like any cut: a full walk never blocks it, and a mark at 0 releases each slot (#350)', async (t) => {
+  const a = await person(t, crypto.keyPair(), 'Ana')
+  await member.deviceHello(a, { name: 'Este' })
+  const lost = rand()
+  const group = rand()
+  const pairs = []
+  for (let i = 0; i < groups.MAX_GROUP_WRITERS_PER_DIARY; i++) pairs.push({ group, writer: rand() })
+  await plantDevice(a, lost, 'Perdido', pairs)
+  const walk = () => onDiary(a, async ({ entries }) => {
+    const joins = groups.groupJoinHistory(entries, group)
+    const marks = groups.groupCutHistory(entries, group)
+    return { wk: groups.slotWalk(joins, marks, group), room: groups.walkHasRoom(joins, marks, group) }
+  })
+  const before = await walk()
+  t.is(before.wk.live.size, groups.MAX_GROUP_WRITERS_PER_DIARY)
+  t.is(before.room, false, 'the walk is full')
+  t.alike(await member.deviceDisconnect(a, { id: lost }), { cut: pairs.length, empty: pairs.length, groups: [group] })
+  const after = await walk()
+  t.is(after.wk.live.size, 0)
+  t.alike([...after.wk.released].sort(), pairs.map((p) => p.writer).sort(), 'each writer released')
+  t.is(after.room, true, 'a reconnected device can join again')
 })
 
 test('a repeated disconnect never lowers an earlier mark', async (t) => {

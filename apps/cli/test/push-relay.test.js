@@ -79,6 +79,19 @@ test('the same actor and seq is posted once', async (t) => {
   t.is(relay.stats().sent, 2)
 })
 
+test('one record for two recipients posts both; the exact duplicate is dropped', async (t) => {
+  const fake = await fakeAccount(t)
+  const relay = relayFor(t, fake.baseUrl)
+  const OTHER = 'c3'.repeat(32)
+  const own = ACTOR + ':3'
+  t.is(relay.send(event({ kind: 'quote', ref: own })), true)
+  t.is(relay.send(event({ kind: 'mention', recipient: OTHER, ref: own })), true)
+  t.is(relay.send(event({ kind: 'mention', recipient: OTHER, ref: own })), false)
+  await settled(relay)
+  t.alike(fake.requests.map((r) => JSON.parse(r.body).recipient), [RECIPIENT, OTHER])
+  t.is(relay.stats().duplicate, 1)
+})
+
 test('dedupe keys are evicted oldest first past dedupeMax', async (t) => {
   const fake = await fakeAccount(t)
   const relay = relayFor(t, fake.baseUrl, { dedupeMax: 2 })

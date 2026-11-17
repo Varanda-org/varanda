@@ -527,7 +527,10 @@ self.addEventListener('fetch', (event) => {
 // instead. A notification is always shown because the subscription is
 // userVisibleOnly. The worker cannot import @varanda/rpc, so the display rule
 // for the body is inlined here.
-const PUSH_KINDS = ['follow', 'reply', 'like', 'repost']
+const PUSH_KINDS = ['follow', 'reply', 'like', 'repost', 'quote', 'mention']
+// A quote or a mention points at the actor's own post (the one that quotes
+// or names the recipient); the others point at the recipient's post.
+const ACTOR_REF_KINDS = ['quote', 'mention']
 const PUSH_KEYS = ['v', 'kind', 'body', 'actor', 'recipient', 'ref']
 const PUSH_FALLBACK = 'Você tem um aviso novo na Varanda'
 // The DM wake names nobody (packages/core/lib/dm-wake.js DM_WAKE_TEXT).
@@ -570,7 +573,7 @@ function validTarget (kind, actor, recipient, ref) {
   if (kind === 'follow') return ref === null
   if (typeof ref !== 'string') return false
   const m = REF.exec(ref)
-  return m !== null && m[1] === recipient
+  return m !== null && m[1] === (ACTOR_REF_KINDS.includes(kind) ? actor : recipient)
 }
 
 function validPush (p) {

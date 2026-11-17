@@ -63,7 +63,18 @@
 // live, verified continuous run tracks the own diary; else an internal once
 // run must receive the seeder's hello and reach its advertised length), and
 // after the write it sends the diary to the seeder (an internal once run,
-// or the continuous run that restarts). The internal runs show as normal
+// or the continuous run that restarts). While a continuous run is wanted
+// and a run lost its seeder link less than seederDownTtlMs ago (60 s, a
+// seeder redeploy) with no own-synced or own-behind since, the write is
+// refused at once with the same 'sincronize com o semeador antes de
+// publicar' (the fast refusal): the live run is neither stopped nor
+// replaced by a gate run against a seeder that is gone, so the reads queued
+// behind the write are served on it. A gate run started while a continuous
+// run is wanted ends, refused, at its first link loss. Both only refuse
+// sooner than the gate run would, and neither uses up the retry bound of
+// the follow drain or the device upkeep (they wait for the next own-synced)
+// up to a bounded number of such refusals (MAX_DRAIN_REFUSALS,
+// MAX_UPKEEP_REFUNDS), past which a refusal counts. The internal runs show as normal
 // once runs (sync.started / sync.event / sync.stopped) with the lines
 // 'sincronizando antes de publicar' / 'enviando ao semeador', and never
 // touch the user's sync intent.
@@ -115,7 +126,12 @@
 // after cert.add wrote block 0, and on the first own-synced of a continuous run while a
 // previous drain failed (drainWanted; at most MAX_DRAIN_RETRIES in a row
 // without a new change, so a persistent failure cannot keep restarting the
-// run). A drain never fails an RPC: an error is the warning 'aviso:
+// run; a drain the write gate refused because the seeder is down, the fast
+// refusal or a gate run that lost its link, tried nothing and does not
+// count, up to MAX_DRAIN_REFUSALS such refusals until a drain succeeds or
+// the follows change; past that a refusal counts like any failure, so a link
+// that keeps reaching own-synced and dropping cannot repeat the drain
+// without end). A drain never fails an RPC: an error is the warning 'aviso:
 // seguidos ainda não enviados' and the records stay pending. The drain
 // defers (drainWanted) while a user's once run is alive: the app's recovery
 // run must not be preempted by it. The other way round, the sync folds the
@@ -153,7 +169,15 @@
 // pass's own write does not re-arm it, unless the write gate brought blocks
 // of another device; an unlock arms from the live run's last own length, a
 // reload or a new connection from the next own-synced), and once per
-// arming by a 'settled' report after the passes ran out; a failed pass or
+// arming by a 'settled' report after the passes ran out; a pass the write
+// gate refused because the seeder is down (the fast refusal, or a gate run
+// that lost its link) tried nothing: it counts toward neither bound and
+// queues no timer, the next own-synced of a user's continuous run queues it
+// again (upkeepRefused). At most MAX_UPKEEP_REFUNDS passes per arming are
+// given back this way (a pass that enrols or shares resets the count, as it
+// resets the passes); past that a refused pass counts toward both bounds
+// like a failure, still without a timer, so a link that keeps reaching
+// own-synced and dropping cannot repeat the pass without end; a failed pass or
 // a failed root queues another within the bound; a 'group-writer' (a writer
 // core stored for the first time, either in a PRIVATE group this device
 // writes in, or bound by the own diary, i.e. another device's writer: the
@@ -172,7 +196,8 @@
 // the rebox; while armed, a
 // 'groups-changed' (the root or writer a skipped root waited for) queues
 // another pass. A timer (upkeepDelayMs) coalesces a burst into one pass, at
-// most MAX_UPKEEP_PASSES per arming, so a plan the run's cores cannot serve
+// most MAX_UPKEEP_PASSES per arming (refused passes given back aside, up to
+// MAX_UPKEEP_REFUNDS), so a plan the run's cores cannot serve
 // stops its continuous run a bounded number of times per new own length;
 // progress earns fresh passes for what the write unblocked, and a pass
 // that leaves nothing waiting (no failure, no skip a sync can resolve) and
@@ -203,8 +228,11 @@
 // leaseUntil, so the member reads of the gap (feed, profile, log,
 // engagement, node.info) do not redial. What dials again, inside the gap
 // or after it: a diary write (ensureCaughtUp / pushAfterWrite clear
-// leaseUntil before the handler's finally restarts the run), a diary.peek
-// (awaitPeek clears it and queues its no-op), and sync.start, which starts
+// leaseUntil before the handler's finally restarts the run, the fast
+// refusal of the write gate included), a diary.peek
+// (awaitPeek clears it and queues its no-op; while the seeder is known
+// down and no peek is published it answers SEEDER_UNAVAILABLE at once
+// instead of waiting out the peek deadline), and sync.start, which starts
 // at once while no run exists; sync.stop clears the intent as always, and
 // a stop that lands while an idle run is still unwinding turns its reason
 // into 'stopped' (only the lease produces 'idle', with the intent kept). Two
@@ -375,7 +403,7 @@ const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
 const SCRAP_INDEX_MAX_CHARS = 64 * 1024
 const FOLLOW_INDEX_MAX_CHARS = 1024
 const VISIT_INDEX_MAX_CHARS = 16 * 1024
-// Varandinha (docs/rpc.md 5.159): the help target's refusals, read off the
+// Varandinha (docs/rpc.md 5.160): the help target's refusals, read off the
 // chain from the owner's blocks. The index cap holds the seeder route's
 // largest body (apps/cli/lib/seed-ws.js INDEX_MAX_BODY).
 const GARDEN_PAGE = 'páginas não têm Varandinha'
@@ -518,18 +546,38 @@ const MAX_DIARY_PEEKS = 2
 const PEEK_SLOT_POLL_MS = 20
 // One deadline for the internal catch-up and push runs.
 const WRITE_GATE_TIMEOUT_MS = 15000
+// How long a dropped seeder link refuses gated writes at once while a
+// continuous run is wanted (the write gate's fast refusal, see the header).
+const SEEDER_DOWN_TTL_MS = 60000
 // The longest a read waits for a starting run to publish its cores
 // (withCores) before it preempts the run instead.
 const READER_WAIT_MS = 3000
 const NOT_READY = Symbol('not ready')
+// Marks the write gate's refusal because the seeder is down: the fast
+// refusal, or a gate run that lost its link. The follow drain and the device
+// upkeep do not count it toward their retry bounds until MAX_DRAIN_REFUSALS
+// or MAX_UPKEEP_REFUNDS such refusals; past that it counts like any failure.
+const SEEDER_DOWN = Symbol('seeder down')
 // Failed drains retried from own-synced without a new follow change.
 const MAX_DRAIN_RETRIES = 3
+// Drains refused because the seeder is down that do not count toward
+// MAX_DRAIN_RETRIES, until a drain succeeds or the follows change. A seeder
+// redeploy costs one or two refusals (the fast refusal, a gate run that
+// lost its link); twice the retries leave room for a few redeploys or a
+// short crash loop, while a link that keeps flapping stops after this plus
+// MAX_DRAIN_RETRIES drains.
+const MAX_DRAIN_REFUSALS = 2 * MAX_DRAIN_RETRIES
 // The device upkeep (see the header): passes per arming, and the delay that
 // coalesces a burst of triggers into one pass.
 const MAX_UPKEEP_PASSES = 3
 const UPKEEP_DELAY_MS = 1500
 // Per arming, whatever progress or a 'settled' report granted since.
 const MAX_UPKEEP_TOTAL = 3 * MAX_UPKEEP_PASSES
+// Passes refused because the seeder is down that are given back (counted
+// toward neither bound) per arming, or since a pass that enrolled or shared.
+// Sized as MAX_DRAIN_REFUSALS: a redeploy costs one or two refused passes,
+// and a link that keeps flapping stops after this plus the pass bounds.
+const MAX_UPKEEP_REFUNDS = 2 * MAX_UPKEEP_PASSES
 // Writer keys whose 'group-writer' armed the upkeep, per session: only a
 // private group the device writes in arms it (sync.js tells which).
 const MAX_UPKEEP_WRITERS = 64
@@ -841,6 +889,11 @@ function readyWithin (ready, ms) {
   return Promise.race([ready, late]).finally(() => clearTimeout(timer))
 }
 
+// Whether err is the write gate's refusal because the seeder is down.
+function seederDownError (err) {
+  return err !== null && typeof err === 'object' && err[SEEDER_DOWN] === true
+}
+
 // ---- the session ----
 
 // syncOptions: test-only overrides passed to runSync (limits and timings).
@@ -848,6 +901,8 @@ function readyWithin (ready, ms) {
 // writeGate: the catch-up run before every diary write and the push run
 // after it (test fixtures without a seeder pass false; the browser entry
 // never passes it). writeGateTimeoutMs: their deadline (tests).
+// seederDownTtlMs: how long a dropped link refuses gated writes at once
+// (the fast refusal, header); 0 = off, every write waits for its gate run.
 // readerWaitMs: how long a read waits for a starting run's cores (tests).
 // peekTimeoutMs: the diary.peek deadline (tests; the contract's otherwise).
 // testimonialTimeoutMs: the testimonial.pending deadline (tests).
@@ -879,6 +934,7 @@ function createBrowserSession ({
   limits,
   writeGate = true,
   writeGateTimeoutMs = WRITE_GATE_TIMEOUT_MS,
+  seederDownTtlMs = SEEDER_DOWN_TTL_MS,
   readerWaitMs = READER_WAIT_MS,
   peekTimeoutMs = PEEK_TIMEOUT_MS,
   testimonialTimeoutMs = TESTIMONIAL_PENDING_TIMEOUT_MS,
@@ -930,6 +986,11 @@ function createBrowserSession ({
   let connection = 0 // epoch, bumped by detach()
   let syncIntent = null // 'continuous' while a user-started continuous run should be running
   let syncStops = 0 // sync.stop calls: a one-shot start waiting for the unlock is cancelled by one
+  // When a run last lost its seeder link (ms), null once a run reported the
+  // own diary again or the user started or stopped a sync (the fast refusal,
+  // header). downTtl: seederDownTtlMs, 0 when off or invalid.
+  let seederDownAt = null
+  const downTtl = Number.isFinite(seederDownTtlMs) && seederDownTtlMs > 0 ? seederDownTtlMs : 0
   // The lease (header): no continuous run is restarted before leaseUntil;
   // leaseSettledSince / leaseMediaSince = when the link became settled /
   // started waiting for a media core (kept across preemptions); borrows =
@@ -1056,10 +1117,12 @@ function createBrowserSession ({
   // never lets a write append past what the seeder was compared with.
   const groupLengths = new Map()
   // The follow drain: at most one operation queued; drainWanted after a
-  // failure (retried from own-synced, drainRetries times in a row).
+  // failure (retried from own-synced, drainRetries times in a row);
+  // drainRefusals: the seeder-down refusals not counted in drainRetries.
   let drainQueued = false
   let drainWanted = false
   let drainRetries = 0
+  let drainRefusals = 0
   // The device upkeep (header): a pass queued on the chain, one deferred by
   // a user's once run, armed, the own length it was armed for, passes since
   // the arming, whether a 'settled' report re-armed it already, the passes
@@ -1073,6 +1136,12 @@ function createBrowserSession ({
   let upkeepRearmed = false
   let upkeepTotal = 0
   let upkeepTimer = null
+  // A pass the write gate refused because the seeder is down (seederDownError):
+  // the next own-synced of a user's continuous run queues it again. Such a
+  // pass is not counted, so a seeder redeploy does not use up the arming;
+  // upkeepRefunds: the passes given back so (at most MAX_UPKEEP_REFUNDS).
+  let upkeepRefused = false
+  let upkeepRefunds = 0
   const upkeepWriters = new Set()
   // Bumped by every arming: a pass disarms only the arming it ran for.
   let upkeepArming = 0
@@ -1332,8 +1401,9 @@ function createBrowserSession ({
 
   // internal: a gate or push run of the session itself (its line names it;
   // it never changes syncIntent). onOwnSynced: called on the run's first
-  // own-synced. -> the run record.
-  function startRun ({ once, timeoutMs, groups = true, internal = false, label = null, onOwnSynced = noop, onGroupProgress = noop }) {
+  // own-synced. onLinkLost: called on each 'link-closed' of the run. -> the
+  // run record.
+  function startRun ({ once, timeoutMs, groups = true, internal = false, label = null, onOwnSynced = noop, onGroupProgress = noop, onLinkLost = noop }) {
     lastRunId = lastRunId >= MAX_ID ? 1 : lastRunId + 1
     const runId = lastRunId
     const epoch = connection
@@ -1388,6 +1458,7 @@ function createBrowserSession ({
                 return
               case 'own-synced':
                 synced = true
+                seederDownAt = null
                 // The reader (the app) must not take the echo of a write
                 // made here for a post from another device. Any length up
                 // to localLength is already in the local core (a later
@@ -1413,6 +1484,13 @@ function createBrowserSession ({
                     }
                   }
                   if (!once && drainWanted && drainRetries < MAX_DRAIN_RETRIES) scheduleDrain()
+                }
+                // A pass refused because the seeder was down runs again now
+                // that the link reports the own diary (given back within
+                // MAX_UPKEEP_REFUNDS, else counted: upkeepRoom decides).
+                if (!once && !internal && upkeepRefused) {
+                  upkeepRefused = false
+                  if (upkeepRoom()) scheduleUpkeep()
                 }
                 if (!once && !internal && Number.isSafeInteger(ev.length)) {
                   // Kept while locked too: the link reports each length once,
@@ -1506,6 +1584,7 @@ function createBrowserSession ({
                 return
               case 'own-behind':
                 synced = false
+                seederDownAt = null
                 r.ownSynced = false
                 event('diário próprio atrasado (' + safe(String(ev.length)) + '/' + safe(String(ev.theirs)) + ')')
                 return
@@ -1514,6 +1593,10 @@ function createBrowserSession ({
                 r.groupBehind.clear()
                 synced = false
                 r.ownSynced = false
+                // A 'peer' or verified link does not clear it: the own
+                // state is unknown until the inventory completes.
+                seederDownAt = Date.now()
+                try { onLinkLost(r) } catch {}
                 return
               case 'own-recovered':
                 certKnown = true
@@ -1775,11 +1858,24 @@ function createBrowserSession ({
     return run !== null && !run.once && run.ownSynced === true
   }
 
+  // A run lost its seeder link less than downTtl ago and no run reported the
+  // own diary since (the fast refusal).
+  function seederDown () {
+    if (downTtl <= 0 || seederDownAt === null) return false
+    const age = Date.now() - seederDownAt
+    return age >= 0 && age < downTtl
+  }
+
   // Before a diary write: this device must hold what the seeder holds for
   // its key. Unless a continuous run tracks it, an internal once run must
   // receive the seeder's hello and reach the advertised length (own-synced
   // from THAT run); it is stopped as soon as that happened. The user's sync
   // intent is restored whatever the outcome.
+  // While a continuous run is wanted, a write refuses at once when the link
+  // dropped lately (seederDown), and a gate run ends at its first link loss:
+  // neither waits out the deadline against a seeder that is gone (a
+  // redeploy) nor holds the reads queued behind it. Both only refuse
+  // sooner; nothing is written that the gate run would have refused.
   // epoch: the handler's connection epoch; a client that detached while the
   // gate ran gets 'conexão encerrada' and nothing is written, and the sync
   // intent is restored only when nothing (detach) changed it meanwhile.
@@ -1788,6 +1884,13 @@ function createBrowserSession ({
     if (!writeGate) return
     if (trackingOwn() && groupKeys.every((key) => groupCaughtUp(run, key))) return
     if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    // The fast refusal: the live continuous run (or the restart it waits
+    // for) is not stopped, so it keeps redialling and its reads go on.
+    if (syncIntent === 'continuous' && (run === null || (!run.once && !run.internal)) && seederDown()) {
+      const err = new UsageError(NOT_SYNCED_MESSAGE)
+      err[SEEDER_DOWN] = true
+      throw err
+    }
     if (run !== null) await stopRun('preempted')
     if (generation !== null) checkGroupOperation(epoch, generation)
     const waited = []
@@ -1816,20 +1919,35 @@ function createBrowserSession ({
       }
     }
     const caughtUp = new Promise((resolve) => { arrived = resolve })
+    // A link loss while a continuous run is wanted ends the gate (refused,
+    // marked as the fast refusal: the seeder is down here too).
+    let lost = false
+    const linkLost = intent === 'continuous' && downTtl > 0
+      ? () => {
+          ok = false
+          lost = true
+          arrived()
+        }
+      : noop
     const r = startRun({
       once: true,
       timeoutMs: writeGateTimeoutMs,
       internal: true,
       label: GATE_LINE,
       onOwnSynced: progress,
-      onGroupProgress: progress
+      onGroupProgress: progress,
+      onLinkLost: linkLost
     })
     await Promise.race([caughtUp, r.done])
     await stopRun('preempted')
     if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
     if (generation !== null) checkGroupOperation(epoch, generation)
     syncIntent = intent
-    if (!ok) throw new UsageError(NOT_SYNCED_MESSAGE)
+    if (!ok) {
+      const err = new UsageError(NOT_SYNCED_MESSAGE)
+      if (lost) err[SEEDER_DOWN] = true
+      throw err
+    }
   }
 
   // Whether run r reported own group core `key` in sync at no less than its
@@ -1913,10 +2031,16 @@ function createBrowserSession ({
       if (seq !== null) wrote(seq)
       drainWanted = false
       drainRetries = 0
+      drainRefusals = 0
       await pushAfterWrite()
     } catch (err) {
       drainWanted = true
-      drainRetries++
+      // Refused because the seeder is down: nothing was tried, so the
+      // retries stay for real failures and the next own-synced drains.
+      // Past MAX_DRAIN_REFUSALS a refusal counts, so a flapping link
+      // cannot repeat the drain without end.
+      if (seederDownError(err) && drainRefusals < MAX_DRAIN_REFUSALS) drainRefusals++
+      else drainRetries++
       warning(DRAIN_WARNING)
     }
   })
@@ -1960,6 +2084,10 @@ function createBrowserSession ({
     if (diaryPeeker.peek !== null && diaryPeeker.peek !== not) return Promise.resolve(diaryPeeker.peek)
     kickLease() // the no-op's finally redials, inside the lease's gap too
     if (!closed) serial(async () => {})({}).catch(noop)
+    // The seeder is known down and no usable peek is published: fail at once
+    // (the caller throws SEEDER_UNAVAILABLE); the kick and no-op above still
+    // restart a wanted continuous run.
+    if (seederDown()) return Promise.resolve(null)
     return new Promise((resolve) => {
       let timer = null
       const wake = (fn) => {
@@ -2393,6 +2521,7 @@ function createBrowserSession ({
     upkeepLength = length
     upkeepPasses = 0
     upkeepTotal = 0
+    upkeepRefunds = 0
     upkeepRearmed = false
     scheduleUpkeep()
   }
@@ -2437,6 +2566,8 @@ function createBrowserSession ({
     upkeepPasses = 0
     upkeepTotal = 0
     upkeepRearmed = false
+    upkeepRefused = false
+    upkeepRefunds = 0
     upkeepWanted = false
     upkeepWriters.clear()
     shareChecked = false
@@ -2692,7 +2823,10 @@ function createBrowserSession ({
         // Each progress is a write, so fresh passes cannot loop: they serve
         // what it unblocked (a group after its community's writer), and
         // upkeepTotal bounds them.
-        if (result.enrolled.length > 0 || result.shared.length > 0) upkeepPasses = 0
+        if (result.enrolled.length > 0 || result.shared.length > 0) {
+          upkeepPasses = 0
+          upkeepRefunds = 0
+        }
         const changed = new Set(result.changed)
         failed = result.failed.length
         waiting = waiting.filter((root) => !changed.has(root)).concat(result.failed.map((f) => f.root))
@@ -2713,7 +2847,21 @@ function createBrowserSession ({
       } else if (waiting.length === 0 && arming === upkeepArming) upkeepArmed = false
     } catch (err) {
       upkeepFull = true
-      if (!stale()) {
+      if (seederDownError(err)) {
+        // The gate refused before any write because the seeder is down: the
+        // pass is given back and no timer retries it against the seeder
+        // that is gone; the next own-synced of a user's continuous run
+        // queues it (upkeepRefused). Real failures keep both bounds, and so
+        // does a refusal past MAX_UPKEEP_REFUNDS (a flapping link): it is
+        // still queued by the next own-synced only while upkeepRoom().
+        if (arming === upkeepArming && upkeepRefunds < MAX_UPKEEP_REFUNDS) {
+          upkeepRefunds++
+          upkeepPasses = Math.max(0, upkeepPasses - 1)
+          upkeepTotal = Math.max(0, upkeepTotal - 1)
+        }
+        upkeepRefused = true
+        if (!stale()) warning(UPKEEP_WARNING, epoch)
+      } else if (!stale()) {
         warning(UPKEEP_WARNING, epoch)
         // Still armed: another pass of this bounded arming tries again.
         if (upkeepRoom()) scheduleUpkeep()
@@ -3482,7 +3630,7 @@ function createBrowserSession ({
     if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
   }
 
-  // garden.help's evidence deadline (docs/rpc.md 5.159): scrap.write's.
+  // garden.help's evidence deadline (docs/rpc.md 5.160): scrap.write's.
   const gardenEvidenceMs = Math.min(12000, 2 * peekTimeoutMs)
 
   // Whether pot `pot` of `owner`'s balcony takes a help now, with public
@@ -5044,7 +5192,7 @@ function createBrowserSession ({
       })({}, ident)
     },
 
-    // Varandinha (docs/rpc.md 5.156 to 5.159). The game lives in public
+    // Varandinha (docs/rpc.md 5.157 to 5.160). The game lives in public
     // records of the own diary, written like profile.mood and never retried;
     // a help is checked like scrap.write: the own checks on the chain, the
     // owner's balcony off it (gardenTarget, fail closed), then the checks
@@ -5566,6 +5714,21 @@ function createBrowserSession ({
       }
     },
 
+    // Copies the conversation history for the other devices of this identity
+    // (docs/rpc.md 5.156). Not on the chain: a copy takes minutes (paced
+    // stamps and puts) and must not hold up sends. One at a time, in the
+    // engine; it runs only on this call and repeats nothing by itself.
+    'dm.historyCopy': async () => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const ident = identityTarget
+      const own = await dmIdentity({}, ident)
+      try {
+        return await withDmReady(ident, () => dmEngine.historyCopy(own, keyPair))
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    },
+
     // With `page` (5.114) the page's conversations, held under its secrets;
     // the member's own blocks do not apply to them.
     'dm.list': serialDmList(async (params) => {
@@ -5718,6 +5881,7 @@ function createBrowserSession ({
       if (publicKey === null) throw rpcError('NOT_FOUND', 'identidade não encontrada')
       if (run !== null) throw rpcError('USAGE', 'sincronização já em andamento')
       syncIntent = once ? null : 'continuous'
+      seederDownAt = null
       kickLease() // an explicit start ignores the lease's gap
       const { runId } = startRun({ once, timeoutMs, groups })
       return { runId }
@@ -5726,6 +5890,7 @@ function createBrowserSession ({
     'sync.stop': serial(async () => {
       syncStops++
       syncIntent = null
+      seederDownAt = null
       kickLease()
       // The hold clocks survive a preempted end on purpose; an explicit stop
       // ends the intent, so a later start must earn its own hold.
@@ -5822,6 +5987,7 @@ function createBrowserSession ({
   // A follow change happened: a drain is due, retries start afresh.
   function followChanged () {
     drainRetries = 0
+    drainRefusals = 0
     scheduleDrain()
   }
 
@@ -6471,6 +6637,7 @@ function createBrowserSession ({
     noticer.abort()
     noticing = null
     syncIntent = null
+    seederDownAt = null
     kickLease()
     await stopRun('stopped')
     // Dropped before any delete, so a failed reset never serves a cached
@@ -6518,6 +6685,7 @@ function createBrowserSession ({
     groupLengths.clear()
     drainWanted = false
     drainRetries = 0
+    drainRefusals = 0
     lastFoldLength = null
     foldLength = null
   })
@@ -6542,6 +6710,7 @@ function createBrowserSession ({
     connection++
     emitter = null
     syncIntent = null
+    seederDownAt = null
     // The next connection's first own-synced arms afresh.
     resetUpkeep()
     // The reader starts over with no lengths: the first own-synced it gets
@@ -6564,6 +6733,7 @@ function createBrowserSession ({
     // now, so that call meets the lock instead of holding the close.
     wakeDmWaits()
     syncIntent = null
+    seederDownAt = null
     resetUpkeep()
     if (seenChangedTimer !== null) clearTimeout(seenChangedTimer)
     seenChangedTimer = null

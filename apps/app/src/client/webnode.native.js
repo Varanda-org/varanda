@@ -186,7 +186,11 @@ export function webNodeHandle (request) {
     forgetReadFile,
     clearReadFiles,
     // This worklet measures a video strictly before writing it (media.readFile).
-    video: true
+    video: true,
+    // upload, putDm, putMoment and read each send one request on the same
+    // RPC client as the connection's own requests, so src/node.js counts them
+    // against that client's pending cap (src/requestQueue.js).
+    sharesClient: true
   }
 
   // The in-app web node starts on fresh storage, so it never kept follows

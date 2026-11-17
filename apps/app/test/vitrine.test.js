@@ -124,6 +124,9 @@ const resultKeys = {
   'listing.consent': ['consent'],
   'listing.rate': ['seq', 'ref'],
   'listing.mine': ['items', 'next'],
+  'device.hello': ['id', 'registered', 'off'],
+  'device.list': ['self', 'off', 'devices', 'previous'],
+  'device.disconnect': ['cut', 'empty'],
   'listing.ratings': ['items', 'dropped', 'incomplete'],
   'dm.thread': ['messages', 'next', 'folder', 'blocked'],
   'dm.seen': ['ok'],
@@ -589,7 +592,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget', 'dm.historyCopy']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -711,6 +714,7 @@ function samples (f) {
     'dm.pageLegacyChunk': { page: member, id: member, index: 0, count: 1, sealed: 'abc' },
     'dm.pageLegacyBlocks': { page: member },
     'dm.pageForget': { page: member },
+    'dm.historyCopy': {},
     'dm.seen': { peer: member },
     'dm.set': { peer: member, state: 'accepted' },
     'dm.send': { to: member, text: 'Olá!' },
@@ -745,6 +749,10 @@ function samples (f) {
     'listing.status': { to: `${f.own}:40`, status: 'reservado' },
     'listing.delete': { to: `${f.own}:40` },
     'listing.mine': {},
+    'device.hello': { name: 'Pixel 8' },
+    'device.list': {},
+    'device.disconnect': { id: '2'.repeat(64) },
+    'device.reconnect': { name: 'Pixel 8' },
     'listing.ratings': { author: member, seq: 3, refs: [{ rater: f.own, seq: 4 }] },
     'listing.consent': { to: `${f.own}:40`, rater: f.members[1].author, offer: f.conversations[0].messages.find((m) => m.card?.title === 'Proposta').id },
     'listing.rate': { to: `${f.members[1].author}:40`, offer: f.conversations[0].messages.at(-1).replyTo, consent: f.conversations[0].messages.at(-1).card.url.split('&aceite=')[1], stars: 5, text: 'Tudo certo.' },
@@ -797,9 +805,39 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     const given = method === 'moment.create' ? { ...params[method], media: await request.media.putMoment({ bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]), mime: 'image/jpeg', width: 640, height: 480 }) } : params[method]
     // profile.extra.delete needs a live record; the own fixture diary has none.
     if (method === 'profile.extra.delete') await request('profile.about', params['profile.about'])
-    if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
+    if (method === 'device.reconnect') await refused(t, request, method, given, 'USAGE', 'este aparelho está conectado')
+    else if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
     else await answer(t, request, method, given)
   }
+})
+
+test('device answers: list, disconnect and the node refusals, per instance', async (t) => {
+  const { fixtures: f, createVitrineRequest } = await load()
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const pixel = '2'.repeat(64)
+  const firefox = '3'.repeat(64)
+  const before = await call('device.list', {})
+  t.is(before.self, null, 'no id before the first hello')
+  const hello = await call('device.hello', { name: 'Chrome no Android' })
+  t.alike(hello, { id: '1'.repeat(64), registered: true, off: false })
+  t.is((await call('device.hello', { name: 'Chrome no Android' })).registered, false, 'a second hello writes nothing')
+  const list = await call('device.list', {})
+  t.alike(list.devices.map((d) => [d.name, d.on, d.self]), [['Chrome no Android', true, true], ['Pixel 8', true, false], ['Firefox no Linux', false, false]])
+  t.alike(list.previous, { writers: 2 })
+  await refused(t, request, 'device.disconnect', { id: '1'.repeat(64) }, 'USAGE', 'não dá para desconectar este aparelho por aqui')
+  await refused(t, request, 'device.disconnect', { id: firefox }, 'USAGE', 'aparelho não encontrado')
+  await refused(t, request, 'device.disconnect', { id: 'f'.repeat(64) }, 'USAGE', 'aparelho não encontrado')
+  await refused(t, request, 'device.disconnect', {}, 'USAGE', 'informe id ou previous')
+  const cut = await call('device.disconnect', { id: pixel })
+  t.ok(cut.empty > 0 && cut.empty <= cut.cut, 'one device has empty cuts')
+  t.is((await call('device.list', {})).devices.find((d) => d.id === pixel).on, false, 'flipped to disconnected')
+  await refused(t, request, 'device.disconnect', { id: pixel }, 'USAGE', 'aparelho não encontrado')
+  t.alike(await call('device.disconnect', { previous: true }), { cut: 2, empty: 0 })
+  t.is((await call('device.list', {})).previous, null)
+  await refused(t, request, 'device.reconnect', { name: 'Pixel 8' }, 'USAGE', 'este aparelho está conectado')
+  const other = createVitrineRequest(f)
+  t.is((await other('device.list', {})).devices.length, 0, 'the state is per instance')
 })
 
 test('the own likes and reposts in the fixtures start active and toggle off', async (t) => {

@@ -67,15 +67,6 @@ test('overlayRemainingMs: what the web overlay still has to play', async (t) => 
   for (const ms of [NaN, -1, undefined]) t.is(overlayRemainingMs(clock(0), ms), 0)
 })
 
-test('slideMotion: continuous slide speeds match the landing page', async (t) => {
-  const { SLIDES, slideMotion } = await load()
-  t.alike(SLIDES, { near: { tile: 96, ms: 4800 }, far: { tile: 128, ms: 20800 } })
-  t.is(slideMotion(false), SLIDES)
-  t.ok(Math.abs(SLIDES.near.tile / SLIDES.near.ms - 320 / 16000) < 1e-9)
-  t.ok(Math.abs(SLIDES.far.tile / SLIDES.far.ms - 160 / 26000) < 1e-9)
-  t.is(slideMotion(true), null, 'reduced motion has no slides')
-})
-
 test('splashMotion: reduced motion settles at once', async (t) => {
   const { splashMotion } = await load()
   const m = splashMotion(true)

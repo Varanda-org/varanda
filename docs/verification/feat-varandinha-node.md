@@ -1,6 +1,6 @@
 # Varandinha, o nó (PR feat/varandinha-node)
 
-Este PR acrescenta o contrato `garden.*` ao `@varanda/rpc` (os métodos `garden.set`, `garden.state`, `garden.play` e `garden.help` em `packages/rpc/lib/methods.js` e as seções 5.156 a 5.159 de `docs/rpc.md`), os stubs do nó do core (`packages/core/lib/session.js` responde aos quatro com `USAGE` `'leitura sob demanda só na versão web'`), as operações do nó do navegador (`gardenOwn`, `gardenSet`, `gardenLeave`, `gardenPlay`, `gardenHelpCheck` e `gardenHelp` em `packages/web-member/lib/member-ops.js`), os quatro handlers e a checagem do vaso do dono fora da cadeia (`gardenTarget`, que falha fechado) em `packages/web-member/lib/session.js`, e um teste de ponta a ponta com um semeador local (`packages/web-member/test/garden-e2e.test.js`).
+Este PR acrescenta o contrato `garden.*` ao `@varanda/rpc` (os métodos `garden.set`, `garden.state`, `garden.play` e `garden.help` em `packages/rpc/lib/methods.js` e as seções 5.157 a 5.160 de `docs/rpc.md`), os stubs do nó do core (`packages/core/lib/session.js` responde aos quatro com `USAGE` `'leitura sob demanda só na versão web'`), as operações do nó do navegador (`gardenOwn`, `gardenSet`, `gardenLeave`, `gardenPlay`, `gardenHelpCheck` e `gardenHelp` em `packages/web-member/lib/member-ops.js`), os quatro handlers e a checagem do vaso do dono fora da cadeia (`gardenTarget`, que falha fechado) em `packages/web-member/lib/session.js`, e um teste de ponta a ponta com um semeador local (`packages/web-member/test/garden-e2e.test.js`).
 
 ## Handlers do nó do navegador (`packages/web-member/lib/session.js`)
 
@@ -28,11 +28,11 @@ Não coberto no teste de ponta a ponta: uma página como `to` (`'páginas não t
 
 Conferido que o teste falha sem a checagem: com a chamada a `gardenTarget` tirada de `garden.help`, o arquivo falhou nas recusas de C, do vaso vazio e nos três casos de falha fechada (asserções 27 a 36); com a chamada de volta, passou de novo.
 
-Conferido à mão que as seções 5.156 a 5.159 de `docs/rpc.md` descrevem a ordem das checagens, a saída sem nada a fazer, a leitura de `garden.state` sem a chave destravada e a resposta de falha fechada do código, e que não há travessão (U+2014) nem meia-risca (U+2013) nas linhas novas.
+Conferido à mão que as seções 5.157 a 5.160 de `docs/rpc.md` descrevem a ordem das checagens, a saída sem nada a fazer, a leitura de `garden.state` sem a chave destravada e a resposta de falha fechada do código, e que não há travessão (U+2014) nem meia-risca (U+2013) nas linhas novas.
 
 ## Contrato, stubs e operações (depois da revisão e da sincronização)
 
-Rodado no Node 24.22.1, sobre 9dd4ad75 (a ponta de feat/varandinha-index, já com a `main` em 063a3590), com as mudanças deste PR ainda fora de commit. As seções do `docs/rpc.md` passaram de 5.152 a 5.155 para 5.156 a 5.159, porque a `main` usou 5.152 a 5.155 para `device.*`.
+Rodado no Node 24.22.1, sobre 9dd4ad75 (a ponta de feat/varandinha-index, já com a `main` em 063a3590), com as mudanças deste PR ainda fora de commit. As seções do `docs/rpc.md` passaram de 5.152 a 5.155 para 5.156 a 5.159, porque a `main` usou 5.152 a 5.155 para `device.*`, e depois para 5.157 a 5.160, porque a `main` usou 5.156 para `dm.historyCopy`.
 
 - `npx standard packages/rpc/lib/methods.js packages/rpc/test/methods.test.js packages/core/lib/session.js packages/core/test/engagement-session.test.js packages/web-member/lib/member-ops.js packages/web-member/lib/session.js packages/web-member/test/garden.test.js packages/web-member/test/garden-e2e.test.js`
   resultado: passou.

@@ -304,3 +304,69 @@ test('causal pagination and seen ignore clock skew across writers', async (t) =>
   t.is(oldest.items[0].text, 'primeira')
   t.is(oldest.next, null)
 })
+
+// A loaded group as member.js keeps it, from the fold fixtures: X binds
+// eight writers, then maybe cuts the first, then binds a 9th (#350).
+const slot = (() => {
+  const { K, AT: at } = require('./helpers/groups')
+  const ws = []
+  for (let i = 0; i < 8; i++) ws.push(K(0x4100 + i))
+  return { K, at, Z: K(0x9), X: K(0x4), G1: K(0x100), ws, ninth: K(0x4200) }
+})()
+
+function slotLoaded ({ cut = null, drop = [] } = {}) {
+  const { community, groupIn } = require('./helpers/groups')
+  const { K, Z, X, G1, ws, ninth } = slot
+  const C = community({ creator: Z, members: [{ diary: X, cw: K(0x40), status: 'member' }], creates: [{ by: Z, group: G1 }] })
+  const g = groupIn(C, { key: G1 })
+  for (let i = 0; i < ws.length; i++) {
+    g.add(X, ws[i])
+    g.push(ws[i], groupLib.groupPost({ text: 'p' + i, at: slot.at(10 + i) }))
+  }
+  if (cut !== null) g.mark(X, ws[0], cut)
+  g.add(X, ninth)
+  const input = g.input({ drop })
+  const view = groupLib.buildGroup(input)
+  const logs = input.writers.map((l) => ({ key: l.key, diary: l.diary, length: l.entries.length, signed: l.entries.length }))
+  return { group: G1, logs, view, input }
+}
+
+test('countedCuts: a frozen writer stays in admissions at its cut, out of leaves and grants (#350)', (t) => {
+  const { X, ws, ninth } = slot
+  t.is(member.countedCuts(slotLoaded(), X).length, 8, 'control: eight counted writers')
+  const loaded = slotLoaded({ cut: 1 })
+  const all = member.countedCuts(loaded, X)
+  t.is(all.length, 9, 'eight live and the frozen one')
+  t.alike(all.find((c) => c.writer === ws[0]), { writer: ws[0], seq: 1 }, 'the frozen writer at its cut, below its length')
+  t.ok(all.some((c) => c.writer === ninth))
+  const leave = member.countedCuts(loaded, X, { frozen: false })
+  t.is(leave.length, 8, 'a leave or a grant names the live ones only')
+  t.absent(leave.some((c) => c.writer === ws[0]))
+  t.is(groupLib.validateGroupRecord(groupLib.groupLeave({ cuts: leave, at: slot.at(40) }), 1), null, 'so a new leave stays valid')
+  const released = slotLoaded({ cut: 0 })
+  t.ok(released.view.writers.has(ws[0]), 'a released writer still counts for its block 0, leaves and key blocks')
+  t.absent(member.countedCuts(released, X).some((c) => c.writer === ws[0]), 'but no admission names it')
+  t.is(member.countedCuts(released, X).length, 8, 'seven live and the 9th')
+})
+
+test('unheldCountedWriters follows the slot walk (#350)', (t) => {
+  const { X, ws, ninth } = slot
+  t.alike(member.unheldCountedWriters(slotLoaded(), X), [], 'control: all held, the 9th never counts')
+  t.alike(member.unheldCountedWriters(slotLoaded({ drop: [ninth] }), X), [], 'an unheld writer past the cap is never awaited')
+  t.alike(member.unheldCountedWriters(slotLoaded({ cut: 1, drop: [ninth] }), X), [ninth], 'after a freeze the 9th is awaited')
+  t.alike(member.unheldCountedWriters(slotLoaded({ cut: 1, drop: [ws[0]] }), X), [ws[0]], 'and so is an unheld frozen writer')
+  t.alike(member.unheldCountedWriters(slotLoaded({ cut: 0, drop: [ws[0]] }), X), [ws[0]], 'a released writer is awaited: it may hold a leave')
+})
+
+test('groupCuts: an admit or a ban never names a writer past the diary\'s cut on it (#350)', (t) => {
+  const { X, ws } = slot
+  // ws[0] holds two blocks and is cut at 3, past what it holds: a post it
+  // adds at seq 2 still counts, so a probe keeps it among the cuts.
+  const loaded = slotLoaded({ cut: 3 })
+  const w0 = loaded.logs.find((l) => l.key === ws[0])
+  w0.signed = 6
+  const signed = member.groupCuts(loaded, X, { signed: true })
+  t.alike(signed.find((c) => c.writer === ws[0]), { writer: ws[0], seq: 3 }, 'the signed length past the cut stops at the cut')
+  t.alike(member.groupCuts(loaded, X).find((c) => c.writer === ws[0]), { writer: ws[0], seq: 2 }, 'a local length below the cut stays')
+  t.alike(member.groupCuts(slotLoaded(), X).find((c) => c.writer === ws[1]), { writer: ws[1], seq: 2 }, 'control: an uncut writer at its length')
+})

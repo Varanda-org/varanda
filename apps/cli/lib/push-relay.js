@@ -85,7 +85,8 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
       counts.invalid++
       return false
     }
-    const key = event.actor + ':' + event.seq
+    // One record can notify several members (a quote and a mention).
+    const key = event.actor + ':' + event.seq + ':' + event.recipient
     if (seen.has(key)) {
       counts.duplicate++
       return false

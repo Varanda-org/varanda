@@ -686,6 +686,22 @@ test('rate limits: nothing charged before a proof; per-member windows after a va
   t.is(later.status, 403, 'the window passed')
 })
 
+test('keyedWindow with charge false only peeks: no window is started or spent', (t) => {
+  const c = clock()
+  const w = keyedWindow(2, 1000, c.now)
+  t.ok(w('a', false), 'a fresh key would pass')
+  t.ok(w('a', false), 'still would: a peek spends nothing')
+  t.ok(w('a'))
+  t.ok(w('a'))
+  t.absent(w('a', false), 'a full window would refuse')
+  t.absent(w('a'), 'and does')
+  c.offset += 1000
+  t.ok(w('a', false), 'an expired window would pass')
+  t.ok(w('a'))
+  t.ok(w('a'))
+  t.absent(w('a'), 'the peek did not restart or spend the new window')
+})
+
 test('keyedWindow at capacity admits a new key: expired windows go first, then the oldest', (t) => {
   const c = clock()
   const w = keyedWindow(1, 1000, c.now, 3)
