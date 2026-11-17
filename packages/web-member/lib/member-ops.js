@@ -4762,7 +4762,7 @@ const rekeyPolicy = require('@varanda/core/lib/group-rekey')
 async function periodicDecision (ctx, g, own, now, jitter) {
   const epoch = g.built.epoch
   const logs = [...g.cores].map(([key, c]) => ({ key, entries: c.entries }))
-  const facts = rekeyPolicy.epochFacts({ logs, counted: g.built.writers, root: g.group, epoch })
+  const facts = rekeyPolicy.epochFacts({ logs, counted: g.built.writers, root: g.group, epoch, cuts: g.built.cuts })
   const held = await withGroupCore(ctx, own.key, async (core) => ({ length: core.length, bytes: core.byteLength }))
   if (held === null) return { due: false, at: null, reason: 'unheld' }
   const limits = { maxLogBlocks: MAX_LOG_BLOCKS, maxLogBytes: MAX_LOG_BYTES, ...ctx.limits }

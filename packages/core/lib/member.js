@@ -2649,7 +2649,7 @@ async function groupRekey (ctx, { group }) {
 // `core`. jitter(group, epoch) -> [0, 1), fixed per epoch by the caller.
 function periodicDecision (loaded, core, now, jitter) {
   const { view } = loaded
-  const facts = rekeyPolicy.epochFacts({ logs: [loaded.input.root, ...loaded.input.writers], counted: view.writers, root: loaded.group, epoch: view.epoch })
+  const facts = rekeyPolicy.epochFacts({ logs: [loaded.input.root, ...loaded.input.writers], counted: view.writers, root: loaded.group, epoch: view.epoch, cuts: view.cuts })
   const mine = loaded.secrets === null ? new Set() : loaded.secrets.mine
   const entitled = entitledWriters(loaded)
   return rekeyPolicy.rekeyDue({
