@@ -28,6 +28,9 @@ const CODE_RE = /^[0-9]{6}$/
 // Field names a provider error body may name: schema words, never values.
 const FIELD_RE = /^[a-z][a-z_]{0,39}$/
 const MAX_FIELDS = 5
+// Didit's send docs: options.sms_sender_name, 1 to 30 letters, digits,
+// spaces and ' & - ! (not only digits); a sixth kind would be refused.
+const SENDER_RE = /^(?=.*[^0-9 ])[A-Za-z0-9 '&!-]{1,30}$/
 
 // Didit's send docs: Retry re-sends the code of the pending verification, so
 // a code is on its way exactly as for Success.
@@ -98,9 +101,9 @@ function createPhoneClient (opts = {}) {
   // One request with its own deadline covering headers and body; a redirect
   // is an error, never followed. Any failure after the response arrived
   // releases it so a refused response never holds a connection.
-  async function request (method, path, body, handle) {
+  async function request (method, path, body, handle, ms = timeoutMs) {
     const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+    const timer = setTimeout(() => ctrl.abort(), ms)
     try {
       const init = { method, headers, redirect: 'error', signal: ctrl.signal }
       if (body !== undefined) init.body = JSON.stringify(body)
@@ -144,12 +147,17 @@ function createPhoneClient (opts = {}) {
     }
   }
 
-  async function send ({ phone } = {}) {
+  // `senderName`: the name the SMS carries in place of the application's
+  // (the deletion code names its purpose). Left out, the body is unchanged.
+  async function send ({ phone, senderName } = {}) {
     if (!isBrMobile(phone)) return { ...BAD_INPUT, fields: [] }
+    if (senderName !== undefined && (typeof senderName !== 'string' || !SENDER_RE.test(senderName))) return { ...BAD_INPUT, fields: [] }
+    const options = { preferred_channel: 'sms', locale: 'pt-BR', code_size: 6 }
+    if (senderName !== undefined) options.sms_sender_name = senderName
     try {
       const json = await request('POST', '/v3/phone/send/', {
         phone_number: phone,
-        options: { preferred_channel: 'sms', locale: 'pt-BR', code_size: 6 },
+        options,
         vendor_data: crypto.randomBytes(16).toString('base64url')
       }, getJson)
       const raw = isObject(json) ? json.status : undefined
@@ -161,7 +169,9 @@ function createPhoneClient (opts = {}) {
     }
   }
 
-  async function check ({ phone, code } = {}) {
+  // `timeoutMs`: a shorter deadline for one call (the deletion check answers
+  // at a fixed time, so its provider call must end before it).
+  async function check ({ phone, code, timeoutMs: callMs } = {}) {
     if (!isBrMobile(phone) || typeof code !== 'string' || !CODE_RE.test(code)) return { ...BAD_INPUT, fields: [] }
     try {
       const json = await request('POST', '/v3/phone/check/', {
@@ -170,7 +180,7 @@ function createPhoneClient (opts = {}) {
         voip_number_action: 'DECLINE',
         disposable_number_action: 'DECLINE',
         duplicated_phone_number_action: 'NO_ACTION'
-      }, getJson)
+      }, getJson, Number.isSafeInteger(callMs) && callMs > 0 ? callMs : timeoutMs)
       const { outcome, unknownType } = phoneOutcome(json)
       return { ok: true, outcome, unknownType }
     } catch (err) {
@@ -181,4 +191,4 @@ function createPhoneClient (opts = {}) {
   return { send, check }
 }
 
-module.exports = { createPhoneClient, phoneOutcome }
+module.exports = { createPhoneClient, phoneOutcome, TIMEOUT_MS }

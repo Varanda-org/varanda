@@ -83,6 +83,7 @@ import { dropsHeldInvite } from '../linkReturn'
 import { InvitePaste } from './Idade'
 import { holdUnregistered, releaseUnregistered } from './Passkeys'
 import { KeyboardForm } from './Perfil'
+import { SMS_TEXTS } from '../accountDeletion'
 import { FORCED_LOCK_TEXT } from '../devices'
 import { useDeviceState } from '../useDevices'
 import { Body, Btn, Card, ConfirmStack, ErrorText, Field, Label, Mono, Notice, Page, Row, Soft, Spinner, Title, errorText, useAction, useNow } from '../ui'
@@ -90,11 +91,13 @@ import { refusalOf } from '../wordCheck'
 import { HelpNote } from '../ui/Help'
 import { OptionBlock, OptionList, OptionRow, OptionsToggle } from '../ui/OptionRow'
 import { ShareProfile } from '../ui/ShareProfile'
-import { StepNotice, Stepper } from '../ui/Stepper'
+import { StepLink, StepNotice, Stepper } from '../ui/Stepper'
 import { radius, space, type } from '../ui/theme'
 import { WelcomeHeader } from '../ui/Welcome'
 import { useStyles } from '../ui/ThemeProvider'
 import { atName } from '../who'
+
+const DELETE_WITHOUT_PASSKEY_LABEL = SMS_TEXTS.title
 
 const WELCOME_TEXT = 'Uma rede social feita entre pessoas.'
 // The Stepper's hero for the setup steps after the welcome ('recuperando' spins).
@@ -720,7 +723,7 @@ function LinkCard ({ publicKey, memberCert, active, quiet, recovering = false, s
 // Criar again afterwards. accepted: that gate was accepted in this page load,
 // so Criar stays offered after the remount it caused. Without the prop a
 // hosted node with a passkey refuses to create (fails closed).
-export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, initialInfo = null, onInfo, onInfoError, onAccountRead, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, termsBeforeCreate = null, invite = null, feira = null }) {
+export default function Identidade ({ active, embedded = false, setup = false, view = 'all', step, index = 0, total = 3, initialInfo = null, onInfo, onInfoError, onAccountRead, onLinked, onInviteChanged, onPhoneRecheck, onStepHeld, termsBeforeCreate = null, invite = null, feira = null, onDeleteWithoutPasskey }) {
   // This device was disconnected from the account and the shell locked it (#350).
   const deviceForced = useDeviceState().forced
   const styles = useStyles(makeStyles)
@@ -1502,6 +1505,12 @@ export default function Identidade ({ active, embedded = false, setup = false, v
                     : <OptionRow label={CODE_LABEL} icon='hash' onPress={onCodeOpen} disabled={pkPending || confirmCreate !== false} first={!otherRow && !phoneOk} />}
               </OptionList>
               )
+            : null}
+          {/* Outside 'Outras formas de entrar': it is not a way in. Shown
+              whenever the node reaches the account service (the web page and
+              a native install with its installation). */}
+          {node.hosted === true && typeof onDeleteWithoutPasskey === 'function'
+            ? <StepLink label={DELETE_WITHOUT_PASSKEY_LABEL} onPress={onDeleteWithoutPasskey} disabled={pkPending} />
             : null}
         </>
       )
