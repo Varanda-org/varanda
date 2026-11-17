@@ -51,6 +51,32 @@ Quarta rodada (revisão de `d487e5e7..9b2137f8`, sem P1 nem P2):
 - Releitura da faixa incerta quando um par entra (P3-a, `_rereadIfOffered` em `seeder.js`, `peerOffers` em `sparse-held.js`): só relê na hora quando o par que entrou, depois de sincronizar e responder ao pedido do bitfield dessa faixa (`askHeld`), anuncia ali um bloco que o semeador não tem. Conferido a cada 1 s desde a entrada, até 10 vezes. Qualquer outro par (um leitor que conecta, um par que reconecta em laço) deixa o recuo como está. Antes, cada `peer-add` voltava o recuo a 1 s e relia a faixa inteira, então o recuo de 5 minutos nunca valia para um escritor cujo aparelho sumiu.
 - `peerHolds` ganhou um teste de unidade com blocos servidos (a mutação R4 da terceira rodada passava).
 
+Quinta rodada: merge da `main` em `4e901c15` (#717, #721, #722), commit `955ae568`, com a mensagem padrão do git.
+
+- Conflitos, resolvidos mantendo os dois lados:
+  - `seeder.js`: a varredura dobra o `group-cut` pelo `foldGroupRecord` da #717, dentro de `foldGroupCut`, que guarda a regra deste PR: um corte menor tenta de novo a entrada recusada.
+  - `sync.js` do nó core: os imports das duas.
+  - `sync.js` do navegador:
+    - os imports, o campo `deletedHoles` da #717 e as exportações das duas;
+    - `fold.cutEntries` saiu: a #722 já guarda os cortes em `fold.joinEntries` (`WALK_TYPES`), e `ownCutEntries` passa a ser essas entradas.
+  - `member-ops.js`: um comentário.
+  - `seeder-groups-cuts.test.js`: os imports e o teste novo da #721 antes do de liberação.
+  - `protocol.md`: o texto da `main` com as frases deste PR. O escritor sem caixa substituído é recusado pela sincronização, e o semeador o guarda como toco. `buildCommunity` recebe `signed?`.
+- Além de escolher lados:
+  - `_pageArrived` (#717): um `group-cut` apagado, buscado uma vez depois da varredura, também passa por `foldGroupCut`. Um corte menor que chega assim levanta a recusa da entrada como na varredura. Há teste novo em `seeder-delete.test.js`, cujo fixture ganhou `groupRefused`.
+  - Teste de unidade da #721 "a stored binding the scan no longer lists gets its on join too": montava a entrada do diário sem `core` nem `scanned`. O `_reconcileGroups` deste PR chama `_groupCutScan`, que lê os dois, e o arquivo parava com `TypeError` no commit do merge. O fixture ganhou um diário lido até o fim e uma entrada servida.
+  - Teste "a cut that is gone after a restart fetches again what clearing removed": apagava o registro de corte para o corte sumir. Com a #717 um `group-cut` apagado continua valendo, então o semeador nunca limpava o bloco e o teste esgotava o tempo em "corte apagado no semeador". Virou dois testes:
+    - "a cut its diary deleted still applies at the seeder, after a restart too": o bloco e o corte ficam, também depois de reiniciar, e nada limpo é buscado de novo.
+    - "a persisted cut the diary does not give is dropped once the scan caught up, and what clearing removed is fetched again": o mesmo caminho de antes (`caught && cut !== now`), agora com um corte guardado no `admitted.json` que o diário não tem e W limpo depois dele com o semeador parado.
+- Interações conferidas:
+  1. **Teto de 32 escritores por diário e grupo (#722) e guarda esparsa.** O leitor conta núcleos guardados pelo seq da entrada provada (`othersHolding`, `MAX_GROUP_HELD_PER_DIARY`). O semeador conta ligações por diário e grupo, com o mesmo 8 + 8 + 16. Nenhum dos dois olha os blocos, então um escritor cortado guardado esparso ocupa uma vaga como o inteiro. Quem conta, nos dois, é a caminhada do diário. A guarda esparsa só muda quais blocos ficam, e a dobra (`bindCores`) dobra a cópia esparsa como a inteira.
+  2. **Cortes de substituição automáticos (#722).** `retiredWriterCut` põe o corte um depois do último seq que o aparelho tem, isto é, no comprimento do escritor; o teste 7 de `community-member-leave-5.test.js` confere isso.
+     - A meta do dono vira `min(comprimento, max(corte, 1))`, que é o comprimento. No nó core `ownKeptMissing` nem é chamado, e no navegador `seederHoldsKept` devolve `true` (`cut >= length`).
+     - Só quando o corte vai na marca menor que já estava no escritor sobram saídas e chaves depois dela. Elas são confirmadas como as de qualquer corte, pelo caminho que Q1, Q2, R1 e R3 seguram.
+     - O escritor aposentado também deixa de ser o `writer` do grupo em `groups.json`, então nem entra na meta.
+  3. **O seq da listagem (#721, `onSeq`) é um seq do diário.** Ele vem da caminhada que a varredura do diário monta. A guarda esparsa só vale para núcleos de escritor (raízes e diários seguem pelo contíguo), então não o muda. O teste novo da #721 passa com a guarda esparsa.
+  4. **Busca única dos blocos apagados mantidos (#717).** Acontece nos diários (`entry.deleted`, `groupSeqs`, `fold.deletedHoles`). `keptPast`, `keptPastBytes` e a cota do que fica são dos núcleos de escritor, que não têm registros de apagar. O único encontro é um `group-cut` apagado que chega depois: ele baixa o corte pelo caminho da varredura (`_reconcileGroups`, `_groupCutScan`, `_applyGroupCut`, que tira de `keptPast` o que fica abaixo do novo `clearedFrom`), e agora também levanta a recusa.
+
 ## Como verificar
 
 Cada arquivo sozinho, a partir da raiz, com `node <arquivo>`, e `npx standard` nos arquivos mudados:
@@ -127,6 +153,37 @@ Quarta rodada, cada arquivo sozinho com `VARANDA_TEST_CONCURRENCY=1 node <arquiv
 
 No teste 15, antes de B voltar, o recuo do segundo semeador é empurrado para 5 minutos e A abre W vazio: o par novo não oferece nada na faixa incerta, nenhuma passada começa em 3 s e o recuo fica. B volta com W inteiro e a faixa é relida na hora, pelo anúncio de B, não pelo recuo. O teste 16 (novo, de unidade) chama `_groupPastRange` com um núcleo falso cujo `has()` derruba a entrada e leva os pares durante o `advertisedHeld`: a espera tem de terminar com `null` e sem ouvinte no núcleo. Os testes 3 e 4 de `sparse-held.test.js` (novos, de unidade) cobrem `peerHolds` com blocos servidos e `peerOffers`.
 
+Quinta rodada, depois do merge da `main` em `4e901c15`, cada arquivo sozinho com `VARANDA_TEST_CONCURRENCY=1 node <arquivo>`. Primeiro no commit do merge (`955ae568`), depois de novo nos arquivos que os ajustes mexem:
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `packages/core/test/sparse-held.test.js` | 4/4 | 18/18 |
+| `packages/core/test/sync-groups-sparse.test.js` | 2/2 | 20/20 |
+| `packages/core/test/seeder-groups-cuts.test.js` (no merge: `TypeError` no teste da #721; depois do ajuste do fixture e dos dois testes de corte apagado) | 20/20 | 361/361 |
+| `packages/core/test/sync-groups-3.test.js` (rodado de novo depois do corte tardio) | 26/26 | 143/143 |
+| `packages/core/test/group-member.test.js` | 15/15 | 158/158 |
+| `packages/core/test/group-member-6.test.js` | 10/10 | 72/72 |
+| `packages/core/test/sync-private.test.js` | 4/4 | 16/16 |
+| `packages/core/test/seeder-delete.test.js` (35/35, 288/288 no merge; com o teste do corte tardio) | 36/36 | 290/290 |
+| `packages/core/test/sync-groups-7.test.js` | 1/1 | 12/12 |
+| `packages/core/test/writer-slot-member.test.js` | 9/9 | 61/61 |
+| `packages/core/test/sync-groups-2.test.js` | 27/27 | 96/96 |
+| `packages/core/test/group-rekey.test.js` | 16/16 | 118/118 |
+| `packages/core/test/community-member-leave-5.test.js` | 10/10 | 86/86 |
+| `packages/core/test/deletion.test.js` (rodado de novo depois do corte tardio) | 65/65 | 963/963 |
+| `packages/core/test/community-fold.test.js` | 121/121 | 1111/1111 |
+| `packages/web-member/test/sync-groups-sparse.test.js` | 3/3 | 27/27 |
+| `packages/web-member/test/sync-groups-2.test.js` | 29/29 | 139/139 |
+| `packages/web-member/test/private-ops.test.js` | 24/24 | 231/231 |
+| `packages/web-member/test/group-memo.test.js` | 12/12 | 65/65 |
+| `packages/web-member/test/sync-groups-3.test.js` | 1/1 | 14/14 |
+| `packages/web-member/test/group-ops.test.js` | 64/64 | 487/487 |
+| `packages/web-member/test/community-ops.test.js` | 77/77 | 564/564 |
+| `apps/cli/test/pages-groups-sparse.test.js` | 1/1 | 8/8 |
+| `apps/cli/test/pages-groups.test.js` | 4/4 | 157/157 |
+
+`npm run lint` passa.
+
 Não rodados aqui, por regra do brief: a suíte inteira e a demo (a sessão que abriu esta roda a CI de entrega).
 
 ## Prova de regressão
@@ -202,6 +259,15 @@ Quarta rodada, uma mutação por vez:
 | T4 um par que oferece um bloco não relê nada | o mesmo | tempo esgotado "W relido inteiro" (teste 15: com o recuo em 5 minutos, só o anúncio de B relê) |
 | T3 `peerHolds` sem os blocos servidos (R4) | `packages/core/test/sparse-held.test.js` | 3/4, 17/18, falha "a block served to it counts" |
 
+Quinta rodada, depois do merge, uma mutação por vez:
+
+| Mutação | Arquivo | Resultado |
+|---|---|---|
+| U1 `_pageArrived` dobra o corte apagado tardio só com `foldGroupRecord` (o código da #717) | `packages/core/test/seeder-delete.test.js` | 35/36, 289/290, falha "the writer the late cut released is tried again" (teste 32) |
+| V1 sem `caught && cut !== now` (a M4 de antes) | `packages/core/test/seeder-groups-cuts.test.js` | tempo esgotado "W buscado de novo" (teste 15) |
+
+A M4 rodou sobre o teste que apagava o registro de corte, que a #717 tornou impossível (acima); a V1 é a mesma mutação sobre o teste que o substitui. No commit do merge, antes do ajuste do fixture, `seeder-groups-cuts.test.js` parava com `TypeError` em `scanCaughtUp` no teste da #721: é o encontro do `_groupCutScan` deste PR com o `_reconcileGroups` da #721, não uma mutação.
+
 ## Decisões tomadas aqui
 
 - A regra do buraco mora na dobra (`bindCores`), não só nos leitores: assim o nó core, o nó do navegador e o serviço de contas dobram igual mesmo com cópias diferentes do mesmo escritor, e um bloco depois de um buraco abaixo do corte nunca conta.
@@ -224,7 +290,7 @@ Quarta rodada, uma mutação por vez:
 - (a) e (b) feitos na segunda rodada (acima).
 - (c), (d) e (e): decisões mantidas (acima). Riscos que ficam: (c) uma dobra de catálogo vê menos de um CW cortado do que a dobra completa (só o prefixo), nunca mais; (d) um escritor esparso perto da cota de um leitor conta pelo comprimento assinado, não pelo que o leitor guarda; (e) a banda do semeador para um escritor cortado longo continua a do escritor inteiro até `MAX_LOG_BLOCKS`.
 - (f) Não feito: parado para decisão (pedido da rodada). As sincronizações (core e navegador) ainda recusam com `header-invalid` o cabeçalho sem caixa num grupo privado antes de guardá-lo, então um leitor que nunca o teve fica com a dobra `incomplete`, embora o semeador mantenha o toco. Fazer exige que o veredito do portão dependa da caminhada do diário que liga o escritor (o registro de corte 0, não só o bloco de entrada que o I1 admite), levantar a recusa da rodada (`refused`) quando essa caminhada muda, guardar só `[0, 1)`, pular esse escritor em `recheckGroupBoxes`, na revalidação da partida e na meta de conclusão, e decidir o que acontece quando a liberação some (registro de corte apagado). Isso muda as regras de admissão (I1 a I4) nas duas sincronizações.
-- (g) Encontrado na segunda rodada, anterior a este PR (vem da #713): o semeador lista um escritor que o diário desligou com `group.leave` com o seq desse `group-join` `on: false`, e o portão do leitor exige `on: true` naquele seq, então recusa como `unbound` (no navegador, visto no teste: `group-skipped` com `reason: 'unbound'`; no nó core pela leitura do código, `joinVerdict`), cobra como dica ruim do semeador e nunca guarda o escritor. Com o diário guardado, a caminhada espera o escritor e a dobra pode ficar `incomplete`. Não mexido aqui.
+- (g) Encontrado na segunda rodada, anterior a este PR (vem da #713): o semeador lista um escritor que o diário desligou com `group.leave` com o seq desse `group-join` `on: false`, e o portão do leitor exige `on: true` naquele seq, então recusa como `unbound` (no navegador, visto no teste: `group-skipped` com `reason: 'unbound'`; no nó core pela leitura do código, `joinVerdict`), cobra como dica ruim do semeador e nunca guarda o escritor. Com o diário guardado, a caminhada espera o escritor e a dobra pode ficar `incomplete`. Não mexido aqui. Quinta rodada: a #721, que entrou no merge, lista o escritor que saiu pelo seq do `group-join` `on: true` mais novo (`onSeq`). Conferido só pela leitura do código e pelo teste de unidade da #721, que passa aqui; o teste do navegador com `group.leave` não foi refeito.
 - O "respondeu" de `advertisedHeld` é uma aproximação: a primeira página de um segmento criada por outra mensagem do par (o anúncio de um bloco só, um `range` de comprimento 1, por exemplo) antes da resposta ao pedido faz o par contar como respondido cedo. A faixa contígua do par não cria página, então isso só acontece com um bloco anunciado avulso nos primeiros 32768 blocos do segmento. O efeito é um `--once` terminar antes de um bloco anunciado chegar: a dobra trata a cópia como o prefixo (o que está depois do buraco e não chegou não conta) até a próxima sincronização, sem erro.
 - Um semeador que só tem pares esparsos de um escritor cortado guarda o que eles têm depois do corte; uma saída ou um bloco de chave que nenhum par conectado tem só chega quando um par mais completo aparece (a faixa incerta é relida na hora quando um par que entra anuncia ali um bloco que falta e, sem isso, a cada até 5 minutos). Um par que só tem esse bloco depois da faixa contígua dele conta pela resposta ao pedido do bitfield; se ela não chega em 10 s, vale o recuo.
 - No nó core, os cortes do próprio diário são lidos uma vez, quando a sincronização abre os escritores: um corte escrito durante a mesma execução só vale na próxima.
