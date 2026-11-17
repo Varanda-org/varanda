@@ -461,6 +461,32 @@ Navegador:
 - Apagar sem dono na rodada: um registro de chave que virou própria durante a rodada (`ownGroupKeys`) só perde o registro, nunca o núcleo, como o `ownKey` do nó do core. Sem teste (sem montagem barata).
 - Verificação por remoção (revertida, `git diff --stat -- packages/web-member` igual antes e depois): WM (volta a apagar o registro e a entrada em repouso) falha por tempo esgotado em "the record moves to (G, C)"; sem remoção, o teste passa (23/23 asserções).
 
+## Rodada de revisão 5
+
+Nó core (`packages/core/lib/sync.js`, testes de `packages/core/test/sync-groups-8.test.js`):
+
+- R2 caso b. Um escritor guardado listado sob outro diário, cujo portão termina pela marca do diário do próprio cabeçalho, agora fica lembrado (`cappedHints`, memória com o mesmo teto de `provenLater`, chave por grupo, chave e diário da listagem, valor o diário do bloco 0 guardado). Na admissão, uma listagem lembrada é recusada sem portão enquanto a marca desse diário vale e ele continua cheio; senão a lembrança sai. O diário vem do bloco 0 guardado: nada que um par manda o define.
+- Auditoria F1. Na recusa pelo limite e no fim do portão pela marca, a vaga guardada só sai quando nomeia o par da entrada (`dropSlotOf`). Um toco registrado sob (G, Da), listado sob um (G, Dx) cheio, mantém a vaga de (G, Da).
+- P3-a. O fim do portão pela marca só vale para um escritor guardado sem registro de toco e listado sob outro diário (`!recorded && e.diary !== e.hintDiary`): um toco registrado nunca toma esse caminho.
+- Só para teste: `inspectHook` ganha `storedGateCount(key)`, os portões que abriram o núcleo guardado da chave.
+- `docs/protocol.md`, item "Header stubs": a primeira listagem sob outro diário passa por um portão que lê só o bloco 0 guardado, e as seguintes são recusadas sem portão enquanto a marca vale; a recusa pelo limite não tira a vaga de outro par; a chave ativa como escritor do par do cabeçalho só sai do registro nos dois nós.
+
+Navegador (`packages/web-member/lib/sync.js`):
+
+- P3-b. Quando a chave é admitida sob o par do próprio cabeçalho e o registro sai, a entrada em repouso do par do registro sai também (`restingCores`), para uma varredura daquele diário não apagar uma chave viva.
+- P3-c. A proteção de chave própria foi para o começo de `reviewStubRecord`, como o `ownKey` do nó core, com o comentário corrigido. Hoje ela não dispara (`ownGroupKeys` só se enche no início, e os registros dessas chaves já saem ali). Sem teste.
+
+Testes novos:
+
+- "a stored writer that lost the full cap of the diary its header names is opened for one gate under another diary, however many pages list it there" (R2 caso b): 33 escritores de (G, Dh) guardados de uma execução anterior; K, o último, perde o limite de Dh; três páginas listam K sob Dx depois da recusa, e o núcleo de K é aberto por dois portões (o de Dh e um de Dx), não um por página. A nova varredura (`rescanDue`) não tem montagem própria: ela entra pela mesma admissão.
+- "a recorded stub refused for the full cap of another diary keeps the slot of the pair that proved it" (F1): K, toco de (G, Da), listado sob (G, Dx), cheio com 32 escritores guardados; K perde o limite de Dx e `diskSlotOf(K)` continua (G, Da), com o registro.
+
+Prova de regressão (cada remoção revertida, `shasum` dos dois `sync.js` igual antes e depois; com as correções os dois testes passam, 4/4):
+
+- 1, o fim do portão pela marca não lembra a listagem: o teste do caso b falha em "and its stored core is opened for its gate under Dh and for one gate under Dx, not one per page" (3 aberturas, não 2; 3/4).
+- 2, a recusa pelo limite tira a vaga de qualquer par: o teste F1 falha em "and keeps its slot of (G, Da)" (vaga nula; 3/4).
+- Sem remoção própria: `dropSlotOf` no fim do portão pela marca (o caminho só vale sem registro, e a vaga desse escritor é a do próprio cabeçalho), P3-a, P3-b e P3-c.
+
 ## Decisões tomadas aqui
 
 - Todas as recusas de cabeçalho entram neste PR (escolha do mantenedor): os casos a até e, nos dois nós.
