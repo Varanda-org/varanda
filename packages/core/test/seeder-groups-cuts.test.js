@@ -12,6 +12,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const { testnet, until, localSwarmOptions } = require('./helpers/net')
 const { createSwarm, attachAdmission } = require('../lib/net')
+const { openStore } = require('../lib/store')
 const { Seeder, liveGroupJoins, groupWalkStep, groupWalkCut } = require('../lib/seeder')
 const {
   groupJoinRecord,
@@ -141,14 +142,16 @@ test('a stored binding the scan no longer lists gets its on join too, never an o
   const H = 'bb'.repeat(32)
   const W = key(0)
   const { decls, walks } = diary([join(W), join(W, false), join(W, true, H)])
-  const entry = { gated: true, dropped: false, groupDecls: decls, groupWalks: walks, groupBound: new Map(), groupRefused: new Map(), groupLive: liveGroupJoins(decls, walks) }
+  // A diary the scan read to its length (its certificate and three records),
+  // as _groupCutScan reads it on every reconcile.
+  const entry = { gated: true, dropped: false, scanned: 4, core: { length: 4 }, groupDecls: decls, groupWalks: walks, groupBound: new Map(), groupRefused: new Map(), groupLive: liveGroupJoins(decls, walks) }
   t.is(entry.groupLive.get(W).group, H, 'the scan lists W in H only')
   const rows = []
   const seeder = Object.create(Seeder.prototype)
   Object.assign(seeder, {
     _closing: false,
     _groups: new Map([[W, { diary: D, group: G, seq: 2 }]]),
-    _groupServed: new Map([[W, {}]]),
+    _groupServed: new Map([[W, { dropped: false, cut: null, cutConfirmed: false }]]),
     _groupIndex: {
       addWriter: (group, k, d, seq) => rows.push({ group, key: k, diary: d, seq }),
       setLeft: (k, left) => rows.push({ key: k, left })
@@ -493,7 +496,7 @@ test('a restart restores a writer at its persisted cut and the scan lowers it or
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('a cut that is gone after a restart fetches again what clearing removed (#350)', async (t) => {
+test('a cut its diary deleted still applies at the seeder, after a restart too (#350)', async (t) => {
   t.timeout(240000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -508,13 +511,54 @@ test('a cut that is gone after a restart fetches again what clearing removed (#3
   await until(async () => first.seeder._groups.get(W).clearedTo === 6 && !first.seeder._groupServed.get(W).cutting, { name: 'W lido depois do corte' })
   t.alike(await blocksHeld(first.seeder._groupServed.get(W).core, 0, 6), [0, 1, 2], 'cleared past its cut')
 
-  // B deletes the cut record: the seeder clears that block, so after a
-  // restart its scan never sees the cut.
+  // B deletes the cut record: a group-cut ignores deletes (docs/protocol.md
+  // "Deletion"), so the seeder keeps both the block and the cut.
   await B.diary.append(deleteRecord({ seq: 2 }))
-  const diaryCopy = first.seeder._served.get(B.key).core
-  await until(async () => !(await diaryCopy.has(2)), { name: 'corte apagado no semeador' })
-  t.is(first.seeder._groups.get(W).cut, 3, 'the running seeder keeps the cut')
+  await settledFor(first.seeder, B)
+  t.ok(await first.seeder._served.get(B.key).core.has(2), 'the deleted cut stays at the seeder')
+  t.is(first.seeder._groups.get(W).cut, 3, 'and so does the cut')
   await first.seeder.close()
+
+  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const entry = second.seeder._groupServed.get(W)
+  t.ok(entry, 'W served at ready')
+  await settledFor(second.seeder, B)
+  t.is(entry.cut, 3, 'the scan reads the deleted cut again')
+  t.alike(readGroups(dataDir)[W], { diary: B.key, group: R, seq: 1, cut: 3, clearedFrom: 3, clearedTo: 6 }, 'the binding keeps it')
+  t.alike(await blocksHeld(entry.core, 0, 6), [0, 1, 2], 'and nothing it cleared is fetched again')
+  t.is(first.events.filter((e) => e.event === 'fatal').length + second.events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('a persisted cut the diary does not give is dropped once the scan caught up, and what clearing removed is fetched again (#350)', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const first = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+
+  // B's diary: certificate and the join of W, no cut.
+  const { A, B, R, W } = await cutWorld(t, bootstrap, assoc)
+  await admit(A, assoc)
+  await admit(B, assoc)
+  await admitted(first.events, W)
+  await downloaded(first.seeder, W, 6)
+  await first.seeder.close()
+
+  // A cut stored with W's binding and cleared past it, as admitted.json
+  // keeps one whose record the scan no longer gives (a store restored from
+  // an older copy, say): a deleted cut still counts since #717, so a
+  // delete cannot make one go.
+  const file = path.join(dataDir, 'admitted.json')
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+  Object.assign(data.groups[W], { cut: 3, clearedFrom: 3, clearedTo: 6 })
+  fs.writeFileSync(file, JSON.stringify(data))
+  const store = await openStore(dataDir)
+  const core = store.get({ key: b4a.from(W, 'hex') })
+  await core.ready()
+  await core.clear(3, 6)
+  t.alike(await blocksHeld(core, 0, 6), [0, 1, 2], 'cleared past the stored cut')
+  await core.close()
+  await store.close()
 
   const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
   const entry = second.seeder._groupServed.get(W)
