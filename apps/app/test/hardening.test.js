@@ -217,7 +217,7 @@ test('the iOS minimum is 18.0 everywhere it is set', (t) => {
   t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
   t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
   t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(6).fill(DEPLOYMENT_TARGET_LINE), 'project, app and share extension, Debug and Release')
-  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec', 'modules/video-prep/ios/VideoPrep.podspec']) {
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec', 'modules/video-prep/ios/VideoPrep.podspec', 'modules/image-prep/ios/ImagePrep.podspec']) {
     t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
   }
 })
@@ -347,6 +347,68 @@ test('the Android video watchdog leaves room for the muxer, the finished file is
     const mutated = kt.replace(from, to)
     t.not(mutated, kt, name + ' applies')
     t.ok(androidWatchdogProblems(mutated).length > 0, name + ' is caught')
+  }
+})
+
+// The image-prep encoder cannot run here either, so the guards that keep a
+// huge source from being decoded and the source's metadata out of the AVIF
+// are checked in the source, each against its own mutation.
+const IMAGE_PREP_IOS = 'modules/image-prep/ios/ImagePrepModule.swift'
+const PIXEL_GUARD = 'sourceWidth * sourceHeight <= maxSourcePixels'
+const THUMBNAIL_FLAGS = ['kCGImageSourceCreateThumbnailFromImageAlways: true', 'kCGImageSourceCreateThumbnailWithTransform: true']
+const EVEN_SIDES = ['let width = decoded.width / 2 * 2', 'let height = decoded.height / 2 * 2']
+const ADD_IMAGE = 'CGImageDestinationAddImage(destination, image, properties)'
+const IMAGE_PREP_DIR = '.appendingPathComponent("image-prep", isDirectory: true)'
+
+function imagePrepProblems (swift) {
+  const problems = []
+  // Comments are dropped first: their prose names what the code must not do.
+  const code = swift.replace(/\/\/.*$/gm, '')
+  const guard = code.indexOf(PIXEL_GUARD)
+  const decode = code.indexOf('CGImageSourceCreateThumbnailAtIndex(')
+  if (guard === -1 || decode === -1 || guard > decode) problems.push('the pixel guard before the decode')
+  for (const flag of THUMBNAIL_FLAGS) {
+    if (!code.includes(flag)) problems.push(flag)
+  }
+  for (const line of EVEN_SIDES) {
+    if (!code.includes(line)) problems.push('rounded down to even: ' + line)
+  }
+  if (code.split('CGImageDestinationAddImage(').length !== 2) problems.push('exactly one CGImageDestinationAddImage')
+  for (const banned of ['AddImageFromSource', 'CopyImageSource', 'kCGImageDestinationMetadata', 'kCGImagePropertyExif']) {
+    if (code.includes(banned)) problems.push('no ' + banned)
+  }
+  if (!code.includes('CGImageAlphaInfo.noneSkipLast.rawValue')) problems.push('an opaque bitmap')
+  if (!code.includes(IMAGE_PREP_DIR) || !code.includes('.cachesDirectory')) problems.push('the caches/image-prep directory')
+  if (/\bprint\(|NSLog|os_log/.test(code)) problems.push('no logging')
+  return problems
+}
+
+test('the iOS AVIF encoder: pixel cap before decoding, orientation applied, even sides, opaque, no source metadata, no logs', (t) => {
+  const swift = read(IMAGE_PREP_IOS)
+  t.alike(imagePrepProblems(swift), [], 'the committed source passes')
+  const moved = (s) => s.replace(PIXEL_GUARD, 'true').replace('    let width = decoded.width', '    guard ' + PIXEL_GUARD + ' else { return nil }\n    let width = decoded.width')
+  const mutations = [
+    ['pixel guard removed', PIXEL_GUARD, 'true'],
+    ['pixel guard after the decode', moved],
+    ['decode from an embedded thumbnail', THUMBNAIL_FLAGS[0], 'kCGImageSourceCreateThumbnailFromImageIfAbsent: true'],
+    ['orientation not applied', THUMBNAIL_FLAGS[1], 'kCGImageSourceCreateThumbnailWithTransform: false'],
+    ['odd width kept', EVEN_SIDES[0], 'let width = decoded.width'],
+    ['odd height kept', EVEN_SIDES[1], 'let height = decoded.height'],
+    ['a second image added', ADD_IMAGE, ADD_IMAGE + '\n    ' + ADD_IMAGE],
+    ['the source image copied', ADD_IMAGE, ADD_IMAGE + '\n    CGImageDestinationAddImageFromSource(destination, source, 0, properties)'],
+    ['the source container copied', ADD_IMAGE, ADD_IMAGE + '\n    _ = CGImageDestinationCopyImageSource(destination, source, nil, nil)'],
+    ['source metadata passed', 'kCGImageDestinationLossyCompressionQuality: quality]', 'kCGImageDestinationLossyCompressionQuality: quality, kCGImageDestinationMetadata: metadata]'],
+    ['EXIF passed', 'kCGImageDestinationLossyCompressionQuality: quality]', 'kCGImageDestinationLossyCompressionQuality: quality, kCGImagePropertyExifDictionary: exif]'],
+    ['a bitmap with alpha', 'CGImageAlphaInfo.noneSkipLast.rawValue', 'CGImageAlphaInfo.premultipliedLast.rawValue'],
+    ['another directory', IMAGE_PREP_DIR, '.appendingPathComponent("photos", isDirectory: true)'],
+    ['the path printed', '    return ["uri"', '    print(output.path)\n    return ["uri"'],
+    ['the path sent to NSLog', '    return ["uri"', '    NSLog("%@", output.path)\n    return ["uri"'],
+    ['the path sent to os_log', '    return ["uri"', '    os_log("%{public}@", output.path)\n    return ["uri"']
+  ]
+  for (const [name, from, to] of mutations) {
+    const mutated = typeof from === 'function' ? from(swift) : swift.replace(from, to)
+    t.not(mutated, swift, name + ' applies')
+    t.ok(imagePrepProblems(mutated).length > 0, name + ' is caught')
   }
 })
 

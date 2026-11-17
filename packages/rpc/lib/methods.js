@@ -1584,11 +1584,6 @@ const SPECS = {
   },
   'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
   'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
-  // Copy the conversations (text and cached photos, the held Páginas' too) to
-  // the other devices of the same passkey (docs/rpc.md 5.156). Browser node
-  // only. It puts blobs and one pointer drop, so an uncertain failure is left
-  // to the user's retry; the node never repeats it by itself.
-  'dm.historyCopy': { fields: none, mutating: true },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
@@ -1745,12 +1740,16 @@ const SPECS = {
     fields: {
       kind: req(isRecoveryKind),
       secret: opt(isPrf),
-      code: opt(str(1, RECOVERY_CODE_MAX))
+      code: opt(str(1, RECOVERY_CODE_MAX)),
+      // The hosted app's check of an unknown passkey without a user handle:
+      // the answer also names the diary key its PRF output would install.
+      withKey: opt(isBool)
     },
     cross (given, value) {
       const m = recoverySecretCross(given, value)
       if (m !== null) return m
       if (value.kind === 'code' && !hasOwn(given, 'code')) return 'parâmetro obrigatório: code'
+      if (value.kind === 'code' && hasOwn(given, 'withKey')) return 'withKey só com kind passkey'
       return null
     }
   },

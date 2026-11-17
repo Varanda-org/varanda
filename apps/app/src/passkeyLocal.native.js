@@ -10,7 +10,13 @@
 // key: only credential ids, user ids and codes.
 //
 // { v: 1, byRp: { [rpId]: { pending: { credentialId, userId } | null,
-//   refused: [{ credentialId, userId, code, cleaned: false, created }] } } }
+//   refused: [{ credentialId, userId, code, cleaned: false, created }],
+//   intent?: { userId } } } }
+// intent is the trace of a sign-up creation, written before create() so a
+// crash before the pending write still leaves the user id to recognize the
+// passkey by. A separate field, never a pending with no credential id: a
+// build without it drops the unknown field (cleanEntry) and reads the entry
+// as before, and no null id can reach an exclude or allow list.
 // A missing file reads as empty. A file that cannot be read or parsed is a
 // failure, not an empty record: the last good copy is served from memory and
 // no write goes out until a read works again, so one bad read never wipes the
@@ -28,6 +34,7 @@ const ID = /^[A-Za-z0-9_-]{1,1024}$/
 const validId = (id) => typeof id === 'string' && ID.test(id) && id.length % 4 !== 1
 const USER_ID = /^([0-9a-f]{64})?$/
 const CODE = /^[A-Z_]{1,32}$/
+const INTENT_USER_ID = /^[0-9a-f]{64}$/
 
 // A passkey this app created and refused as bound to one device. Its entry is
 // what keeps it from ever signing in (src/identity.native.js), so the cap and
@@ -79,9 +86,19 @@ function cleanRefused (list) {
   return capRefused(out)
 }
 
+function cleanIntent (i) {
+  if (i === null || typeof i !== 'object') return null
+  if (typeof i.userId !== 'string' || !INTENT_USER_ID.test(i.userId)) return null
+  return { userId: i.userId }
+}
+
+// intent only when present, so an entry without one keeps today's shape.
 function cleanEntry (entry) {
   if (entry === null || typeof entry !== 'object') return empty()
-  return { pending: cleanPending(entry.pending), refused: cleanRefused(entry.refused) }
+  const out = { pending: cleanPending(entry.pending), refused: cleanRefused(entry.refused) }
+  const intent = cleanIntent(entry.intent)
+  if (intent !== null) out.intent = intent
+  return out
 }
 
 function parseDoc (text) {
@@ -177,8 +194,8 @@ export function createPasskeyLocal ({ file = () => new File(Paths.document, FILE
     // An unreadable file is read once more; still unreadable, the write is
     // skipped (it would replace the other rp.ids with nothing) and only the
     // memory copy changes.
-    save (rpId, { pending = null, refused = [] } = {}) {
-      const entry = cleanEntry({ pending, refused })
+    save (rpId, { pending = null, refused = [], intent = null } = {}) {
+      const entry = cleanEntry({ pending, refused, intent })
       try {
         promote()
       } catch (err) {
@@ -195,7 +212,7 @@ export function createPasskeyLocal ({ file = () => new File(Paths.document, FILE
     },
     // keepBound: the passkeys refused as bound to one device stay (they
     // describe this device's managers, not the account); the pending
-    // creation and every other refusal go.
+    // creation, its intent and every other refusal go.
     clear (rpId, { keepBound = false } = {}) {
       const kept = (entry) => {
         const refused = keepBound && entry ? cleanEntry(entry).refused.filter(isBound) : []

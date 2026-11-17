@@ -96,6 +96,8 @@ PODS:
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
   - hermes-engine/Pre-built (0.14.1)
+  - ImagePrep (0.1.0):
+    - ExpoModulesCore
   - libwebp (1.6.0):
     - libwebp/demux (= 1.6.0)
     - libwebp/mux (= 1.6.0)
@@ -2142,6 +2144,7 @@ DEPENDENCIES:
   - ExpoVideo (from `../../../node_modules/expo-video/ios`)
   - FBLazyVector (from `../../../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
+  - ImagePrep (from `../modules/image-prep/ios`)
   - PasskeyPrf (from `../modules/passkey-prf/ios`)
   - RCTDeprecation (from `../../../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../../../node_modules/react-native/Libraries/Required`)
@@ -2279,6 +2282,8 @@ EXTERNAL SOURCES:
   hermes-engine:
     :podspec: "../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec"
     :tag: hermes-v0.14.1
+  ImagePrep:
+    :path: "../modules/image-prep/ios"
   PasskeyPrf:
     :path: "../modules/passkey-prf/ios"
   RCTDeprecation:
@@ -2466,6 +2471,7 @@ SPEC CHECKSUMS:
   ExpoVideo: d060cc8f61ef6ad74b078969478b7242fc121b13
   FBLazyVector: b88945378388c6651d3725b0e8c2624fbb37ec64
   hermes-engine: a2a9fc7160af80292783f30b771f14a477f29712
+  ImagePrep: 28f15953bf68907f2a07ed8488837562f50543b8
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
   PasskeyPrf: 1301f9140e7ccbe8d4c48397119a6e0a45c97ea0
   RCTDeprecation: 86774ca0048c2293d01cc7dfb71811fd32ebbd46

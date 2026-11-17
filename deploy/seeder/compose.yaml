@@ -29,6 +29,9 @@ services:
       # Só para uma DHT privada. Sem esta linha o semeador usa a DHT pública;
       # um valor vazio é erro de uso.
       # VARANDA_BOOTSTRAP: "host:porta,host:porta"
+      # Orçamento total de bytes do que o semeador guarda (padrão 64 GiB). Use
+      # cerca de 70% do disco do volume; --blob-bytes fica fora dele.
+      # VARANDA_STORAGE_BYTES: "68719476736"
     volumes:
       - seeder-data:/data
     read_only: true

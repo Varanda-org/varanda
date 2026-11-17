@@ -19,7 +19,7 @@ const { spentCapacity } = require('./start-nonces')
 const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
-const { createDeletionSweep } = require('./deletion')
+const { createDeletionSweep, createModerationRetention } = require('./deletion')
 const { createPasskeyRoutes } = require('./passkey-routes')
 const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, header } = require('./app-return')
@@ -963,6 +963,9 @@ function createAccountServer ({
 
   // Excluir conta: always mounted. The sweep purges the other stores for
   // every deleted key; serve() runs it at start and then periodically.
+  // Six months after a deletion it also purges the key's moderation data,
+  // after a phone sweep, so a late block still burns the number first.
+  const moderationRetention = createModerationRetention({ accounts: store, moderation, beforeForget: () => phoneRoutes.sweepNow(), now, log })
   const deletion = createDeletionSweep({
     accounts: store,
     terms,
@@ -981,6 +984,7 @@ function createAccountServer ({
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
     tick: pages !== null && pages.pagesGroups && typeof pages.pagesGroups.purgeBlocked === 'function' ? () => pages.pagesGroups.purgeBlocked() : null,
+    retention: moderationRetention,
     log
   })
   const publishedList = moderationBlocklist(moderation)
@@ -1914,7 +1918,26 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
+  // A notice `account delete --yes` queued while the service was stopped
+  // (./deletion-notices.js): pushed as the app's wait path pushes it, only
+  // while the hold is still there. -> 'sent', 'skip' (deleted or no hold),
+  // or 'keep' when the stores cannot tell, so the notice waits for the next
+  // start instead of being dropped.
+  function notifyScheduledDeletion (member) {
+    let hold
+    try {
+      if (store.deletedAt(member) !== null) return 'skip'
+      if (passkeys === null || !passkeys.available()) return 'keep'
+      hold = passkeys.hold(member)
+    } catch {
+      return 'keep'
+    }
+    if (hold === null) return 'skip'
+    if (pushRoutes !== null) pushRoutes.notifyDeletion({ member })
+    return 'sent'
+  }
+
+  return { listen, notifyInvite, notifyScheduledDeletion, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
 }
 
 module.exports = {

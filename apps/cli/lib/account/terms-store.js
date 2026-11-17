@@ -20,30 +20,35 @@
 //
 // Every accept runs in one in-process queue against a copy of the state and
 // first re-reads the file: the service lock goes stale after 30 s
-// (account/server.js LOCK_STALE_MS) and writeJsonAtomic renames
-// unconditionally, so another holder may have replaced the file meanwhile.
-// Disk and memory are union-merged (per member and version the earliest
-// acceptedAt wins) and the merge is written whenever it differs from the
-// file, an entry is new, or a previous write failed ('dirty'), so no answer
-// relies on a write whose fsync failed. The state is swapped only after the
-// write returned, and guard() is asked again afterwards: a holder that lost
-// the lock meanwhile does not acknowledge.
+// (account/server.js LOCK_STALE_MS), so another holder may have replaced the
+// file meanwhile. Disk and memory are union-merged (per member and version
+// the earliest acceptedAt wins) and the merge is written whenever it differs
+// from the file, an entry is new, or a previous write failed ('dirty'), so
+// no answer relies on a write whose fsync failed. guard() is asked before
+// the re-read, right before the rename (./guarded-write.js, after the temp
+// file is written and fsynced) and after the rename: a false answer right
+// before the rename leaves the file as the new holder wrote it, and a holder
+// that lost the lock by the check after the rename does not acknowledge.
+// The state is swapped only after the write returned.
 //
-// guard() === false (before or after the write) refuses THAT request only
-// ({ code: 'indisponivel' }): lock.owned() also answers false on a transient
-// read error of the lock file, so it never wedges the store. A refusal after
-// the write leaves the store dirty, so the next accept or heal merge-writes
-// before it answers. The store becomes unavailable for good only through
-// fail() (the heartbeat confirmed the lock is lost) or a malformed file.
+// guard() === false (at any of the three checks) refuses THAT request only
+// ({ code: 'indisponivel' }): the service's lock.held() also answers false
+// on a transient read error of the lock file, so it never wedges the store.
+// A refusal before the re-read or right before the rename leaves file and
+// memory as they were; one after the rename leaves the store dirty, so the
+// next accept or heal merge-writes before it answers. The store becomes
+// unavailable for good only through fail() (the heartbeat confirmed the lock
+// is lost) or a malformed file.
 //
 // heal() runs in the same queue: it re-reads the file, union-merges it with
 // memory and writes the merge back when the file lacks anything this holder
 // knows (or the store is dirty). The service calls it on the lock heartbeat's
 // interval and once on a clean stop.
 //
-// Remaining window, inherent without OS file locks: the guard and the rename
-// are separate syscalls, so a stalled writer's rename can still land after a
-// takeover and replace the new holder's file. That write is never
+// Remaining window, inherent without OS file locks: the check right before
+// the rename and the rename are separate steps, so a writer suspended between
+// them can still land its rename after a takeover and replace the new
+// holder's file. That write is never
 // acknowledged (the re-guard refuses it, the client keeps its pending
 // acceptance and retries), and whatever it dropped from the new holder's
 // file is written back within one heal interval by the current holder (or on
@@ -52,7 +57,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 
 const FILE = 'terms.json'
@@ -255,11 +260,14 @@ function openTermsStore (dataDir, { now = Date.now, readOnly = false, guard = ()
   // After a failed write the file holds the previous state or `next`: merge
   // it back in (nothing acknowledged is ever dropped from memory); an
   // unreadable file marks the store unavailable. The store stays dirty, so
-  // the next accept rewrites before it answers.
+  // the next accept rewrites before it answers. A refusal right before the
+  // rename left the file untouched: like the check before the re-read, it
+  // refuses the request and changes nothing else.
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         state = merge(state, readState(file))

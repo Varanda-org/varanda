@@ -15,9 +15,11 @@
 // anything, a readOnly store never writes, validation is total (a file this
 // module would not have written makes every method throw
 // { code: 'indisponivel' } until an operator repairs it), every write runs in
-// one queue, re-reads the file first and asks guard() before and after, and
-// memory changes only once the write landed. Reads after an uncertain write
-// adopt the merge of file and memory first, or throw.
+// one queue, re-reads the file first and asks guard() before the re-read,
+// right before the rename (./guarded-write.js; a false answer there leaves
+// file and memory as they were) and after the rename, and memory changes
+// only once the write landed. Reads after an uncertain write adopt the merge
+// of file and memory first, or throw.
 //
 // A cancelled hold must never come back from a stale copy (that would delete
 // an account its owner kept), so a plain union is not enough. Each member's
@@ -42,7 +44,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { fromB64url, MAX_CREDENTIAL_ID, ES256, RS256 } = require('./webauthn')
 const { MAX_PASSKEYS } = require('./recovery-store')
@@ -273,8 +275,9 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
 
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         readState(file)

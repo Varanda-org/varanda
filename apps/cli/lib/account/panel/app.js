@@ -139,6 +139,9 @@ const TEXT = {
   byAi: 'pedido pela IA',
   byOwner: 'exclusão da conta pedida pela própria pessoa (não pode ser cancelada aqui)',
   commentLabel: 'Comentário de quem denunciou',
+  // A report kept after its reporter's account was deleted carries no
+  // reporter key (retention, docs/protocol.md).
+  reporterDeleted: 'conta excluída',
   listingChip: 'Anúncios',
   listingLink: 'Página pública do anúncio',
   listingShow: 'Ver anúncio',
@@ -1242,7 +1245,7 @@ function createPanel (env) {
         r.anexo ? h('p', { className: 'label', text: r.anexoAudio ? TEXT.anexoAudioProvenance : TEXT.anexoProvenance }) : null,
         r.text !== '' ? h('p', { className: 'label', text: TEXT.commentLabel }) : null,
         r.text !== '' ? untrusted('p', r.text) : null,
-        h('p', { className: 'meta', text: 'denunciada por: ' + who(r.reporter.member, r.reporter.username) }),
+        h('p', { className: 'meta', text: 'denunciada por: ' + (r.reporter.member === '' ? TEXT.reporterDeleted : who(r.reporter.member, r.reporter.username)) }),
         h('label', { text: TEXT.noteLabel }, note),
         h('p', { className: 'warning', text: listing ? TEXT.listingBlockWarning : TEXT.blockWarning }),
         waiting ? h('p', { className: 'waiting', text: TEXT.waiting }) : null,
@@ -1379,10 +1382,13 @@ function createPanel (env) {
       h('h2', { text: r.status === 'descartar' ? 'descartada' : r.status === 'bloquear' ? 'bloquear' : '?' }),
       h('p', { className: 'meta', text: reasonLabel(r.reason) + ' · ' + formatDate(r.decidedAt) + ' · ' + kindLabel(r) + (r.actor === 'ia' ? ' · pela IA' : ' · por uma pessoa') }),
       h('p', { text: 'denunciada: ' + who(r.reported.member, r.reported.username) }),
+      r.reporter.member === '' ? h('p', { className: 'meta', text: 'denunciada por: ' + TEXT.reporterDeleted }) : null,
       r.kind === 'listing' ? null : verifiedBlock(r.verified),
       r.note !== '' ? h('p', { className: 'label', text: 'motivo da decisão' }) : null,
       r.note !== '' ? untrusted('p', r.note) : null,
-      r.actor === 'ia'
+      // A report kept without its deleted reporter cannot reopen: an open
+      // row needs the reporter's key and signature (the store refuses it).
+      r.actor === 'ia' && r.reporter.member !== ''
         ? button(TEXT.reopen, () => mutate(TEXT.reopenQuestion, API + 'reports/' + encodeURIComponent(r.id) + '/reopen', {}, TEXT.reopened), { disabled: busy })
         : null
     ))

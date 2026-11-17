@@ -124,7 +124,7 @@ function fakeWorklet ({ diary = null, credentialId = null, userId = null, openAs
         return {}
       case 'identity.recoveryLookup':
         if (params.kind === 'code' && params.code !== GOOD_CODE) throw rpcError('USAGE', 'código de recuperação inválido')
-        return { lookupId: LOOKUP }
+        return params.withKey === true ? { lookupId: LOOKUP, publicKey: pkOf(params.secret) } : { lookupId: LOOKUP }
       case 'identity.recoveryOpen':
         if (w.openGate) await w.openGate
         if (!params.blob || params.blob.ok !== true) throw rpcError('USAGE', BAD_ENTRY)
@@ -318,11 +318,147 @@ test('no handle and not known: installs directly, no lookup and no fetch', async
     t.is(install.params.userId, '')
     t.is(fetched, 0)
     const err = await id.unlockDirect().catch((e) => e)
-    t.is(err.code, 'USAGE', 'no direct install after a lookup exists any more')
+    t.is(err.code, 'RECOVERY_BAD', 'nothing held for a direct install without check')
     t.is(w.calls.filter((c) => c.method === 'identity.install').length, 1)
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+test('check: no handle and not known on a hosted app: held, then the member blob or the direct install', async (t) => {
+  resetStubs()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  let w = fakeWorklet()
+  let made = await makeIdentity(w)
+  t.alike(await made.id.unlock({ any: true, check: true }), { check: true, publicKey: pkOf(OTHER_PRF_HEX), lookupId: LOOKUP })
+  t.alike(w.calls.find((c) => c.method === 'identity.recoveryLookup').params, { kind: 'passkey', secret: OTHER_PRF_HEX, withKey: true })
+  t.absent(w.methods().includes('identity.install'), 'nothing installed yet')
+  // The member's entry found: the root installs, bound marked.
+  t.alike(await made.id.unlockWrapped({ blob: { ok: true }, member: pkOf(ROOT_HEX) }), { publicKey: pkOf(ROOT_HEX), created: false }, 'the member identity, not a new one')
+  let installs = w.calls.filter((c) => c.method === 'identity.install')
+  t.is(installs.length, 1)
+  t.is(installs[0].params.prf, ROOT_HEX)
+  t.is(installs[0].params.userId, '00'.repeat(16) + MARK, 'bound with the unknown wrap user id')
+  t.is((await made.id.unlockDirect().catch((e) => e)).code, 'RECOVERY_BAD', 'the held PRF went with the install')
+
+  // Nothing found (or the key has an account): the held PRF installs directly.
+  resetStubs()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  w = fakeWorklet()
+  made = await makeIdentity(w)
+  t.is((await made.id.unlock({ any: true, check: true })).check, true)
+  t.alike(await made.id.unlockDirect(), { publicKey: pkOf(OTHER_PRF_HEX), created: false })
+  installs = w.calls.filter((c) => c.method === 'identity.install')
+  t.is(installs.length, 1)
+  t.is(installs[0].params.prf, OTHER_PRF_HEX)
+  t.is(installs[0].params.userId, '')
+  t.is(made.store.log[0][1].prfHex, OTHER_PRF_HEX, 'the session is saved as for a plain sign-in')
+
+  // A blob that does not open keeps the held PRF; cancelRecovery drops it.
+  resetStubs()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  w = fakeWorklet()
+  made = await makeIdentity(w)
+  await made.id.unlock({ any: true, check: true })
+  t.is((await made.id.unlockWrapped({ blob: { ok: false }, member: pkOf(ROOT_HEX) }).catch((e) => e)).code, 'RECOVERY_BAD')
+  await made.id.cancelRecovery()
+  t.is((await made.id.unlockDirect().catch((e) => e)).code, 'RECOVERY_BAD', 'nothing held after cancelRecovery')
+  t.absent(w.methods().includes('identity.install'))
+  await made.id.unlock({ any: true, check: true })
+  t.is((await made.id.unlockWrapped({ blob: { ok: false }, member: pkOf(ROOT_HEX) }).catch((e) => e)).code, 'RECOVERY_BAD')
+  t.alike(await made.id.unlockDirect(), { publicKey: pkOf(OTHER_PRF_HEX), created: false }, 'a failed open falls back to the direct install')
+
+  // A lock drops it; the bound passkey and a plain handle are unchanged.
+  await made.id.lock()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  const lookups = w.calls.filter((c) => c.method === 'identity.recoveryLookup').length
+  t.alike(await made.id.unlock({ check: true }), { publicKey: pkOf(OTHER_PRF_HEX), created: false }, 'the bound passkey installs directly')
+  t.is(w.calls.filter((c) => c.method === 'identity.recoveryLookup').length, lookups, 'no lookup for the bound passkey')
+  resetStubs()
+  fakePasskey({ get: () => assertion(ORIG, ROOT_HEX, PLAIN_ID) })
+  w = fakeWorklet()
+  made = await makeIdentity(w)
+  t.alike(await made.id.unlock({ any: true, check: true }), { publicKey: pkOf(ROOT_HEX), created: false }, 'a plain handle installs directly')
+  t.absent(w.methods().includes('identity.recoveryLookup'))
+  resetStubs()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  w = fakeWorklet()
+  made = await makeIdentity(w)
+  await made.id.unlock({ any: true, check: true })
+  await made.id.lock()
+  t.is((await made.id.unlockDirect().catch((e) => e)).code, 'RECOVERY_BAD', 'nothing held after a lock')
+})
+
+// Every zero fill of a Uint8Array while it runs, with what it held before:
+// the held PRF output is private to the module, so its fill is the only
+// trace of the zeroing. Patched only for the call under test.
+function watchZeroFills () {
+  const orig = Uint8Array.prototype.fill
+  const seen = []
+  // eslint-disable-next-line no-extend-native
+  Uint8Array.prototype.fill = function (value, ...rest) {
+    if (value === 0) seen.push({ bytes: this, was: Buffer.from(this).toString('hex') })
+    return orig.call(this, value, ...rest)
+  }
+  // eslint-disable-next-line no-extend-native
+  return { seen, restore: () => { Uint8Array.prototype.fill = orig } }
+}
+
+test('check: an expired held PRF output is zero-filled by unlockDirect', async (t) => {
+  resetStubs()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  const w = fakeWorklet()
+  let clock = 1000
+  const { id } = await makeIdentity(w, { now: () => clock, setTimer: () => 'timer', clearTimer: () => {} })
+  await id.unlock({ any: true, check: true })
+  clock += 121 * 1000
+  const fills = watchZeroFills()
+  let err
+  try {
+    err = await id.unlockDirect().catch((e) => e)
+  } finally {
+    fills.restore()
+  }
+  t.is(err.code, 'RECOVERY_BAD')
+  const held = fills.seen.find((f) => f.was === OTHER_PRF_HEX)
+  t.ok(held, 'the held output was zero-filled')
+  t.ok(held && held.bytes.every((b) => b === 0), 'every byte is zero')
+  t.absent(w.methods().includes('identity.install'))
+})
+
+test('check: the held PRF output is dropped and zero-filled by its 120 s timer', async (t) => {
+  resetStubs()
+  fakePasskey({ get: () => assertion(FRESH, OTHER_PRF_HEX, null) })
+  const w = fakeWorklet()
+  const timers = []
+  const cleared = []
+  const { id } = await makeIdentity(w, {
+    setTimer: (fn, ms) => { const h = { fn, ms }; timers.push(h); return h },
+    clearTimer: (h) => { cleared.push(h) }
+  })
+  await id.unlock({ any: true, check: true })
+  t.is(timers.length, 1, 'one timer armed for the held output')
+  t.is(timers[0].ms, 120 * 1000)
+  const fills = watchZeroFills()
+  try {
+    timers[0].fn()
+  } finally {
+    fills.restore()
+  }
+  const held = fills.seen.find((f) => f.was === OTHER_PRF_HEX)
+  t.ok(held && held.bytes.every((b) => b === 0), 'zero-filled when the timer fires')
+  t.is((await id.unlockDirect().catch((e) => e)).code, 'RECOVERY_BAD', 'nothing held after the timer')
+  t.absent(w.methods().includes('identity.install'))
+
+  // A drop before the timer clears it; a timer of an older entry is a no-op.
+  await id.unlock({ any: true, check: true })
+  t.is(timers.length, 2)
+  await id.cancelRecovery()
+  t.ok(cleared.includes(timers[1]), 'cancelRecovery clears the timer')
+  await id.unlock({ any: true, check: true })
+  timers[1].fn()
+  t.alike(await id.unlockDirect(), { publicKey: pkOf(OTHER_PRF_HEX), created: false }, 'a stale timer leaves the newer entry')
+  t.ok(cleared.includes(timers[2]), 'the install clears its timer')
 })
 
 test('code: a bad code keeps its text; a good one needs a passkey, then installs the root', async (t) => {

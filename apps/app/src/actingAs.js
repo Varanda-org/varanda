@@ -91,8 +91,17 @@ export function createActingAs () {
   }
   const reset = me
 
-  return { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment }
+  // The page the person acts as, or set aside for a momento's composer.
+  const pageKey = () => (state.kind === 'page' ? state.key : (saved !== null ? saved.key : null))
+
+  // The person no longer runs this page: act as them, and never put it back.
+  function dropPage (key) {
+    if (saved !== null && saved.key === key) saved = null
+    return state.kind === 'page' && state.key === key ? toMe() : state
+  }
+
+  return { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment, pageKey, dropPage }
 }
 
 const shared = createActingAs()
-export const { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment } = shared
+export const { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment, pageKey, dropPage } = shared

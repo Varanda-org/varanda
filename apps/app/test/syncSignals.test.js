@@ -615,3 +615,36 @@ test('Sincronizar shows one status row with a coloured dot and the log behind Ve
   t.ok(src.includes('aria-expanded={logOpen}'), 'the web hears whether the log is open')
   t.ok(src.includes("summary === 'sincronizando…' || summary === 'recuperando…') return colors.accent"), 'recovering after an unlock is activity, not a warning')
 })
+
+test('a storage-full refusal of the own diary holds across runs until the seeder admits it', async (t) => {
+  const { EMPTY_SIGNALS, foldSignal, storageFullShown } = await load()
+  t.is(EMPTY_SIGNALS.storageFull, false)
+  let state = foldSignal(freeze(EMPTY_SIGNALS), 'sync.started', { runId: 1, once: false }, 0)
+  const fold = (runId, line) => { state = foldSignal(freeze(state), 'sync.event', freeze({ runId, line }), 1) }
+  fold(1, 'rejected ' + K + ' storage-full')
+  t.is(state.storageFull, true, 'the refusal sets the flag')
+  t.is(storageFullShown({ online: true, signals: state }), true)
+  t.is(storageFullShown({ online: undefined, signals: state }), true, 'native has no network hint and shows it')
+  t.is(storageFullShown({ online: false, signals: state }), false, 'offline, the last answer waits')
+  state = foldSignal(freeze(state), 'sync.stopped', { runId: 1, reason: 'error' }, 2)
+  t.is(state.storageFull, true, 'the refused run ending keeps it')
+  state = foldSignal(freeze(state), 'sync.started', { runId: 2, once: false }, 3)
+  t.is(state.storageFull, true, 'the next run keeps it')
+  fold(9, 'admitted ' + K + ' 4')
+  t.is(state.storageFull, true, 'a line of another run is ignored')
+  fold(2, 'admitted ' + K + ' 4')
+  t.is(state.storageFull, false, 'the admission clears it')
+  t.is(storageFullShown({ online: true, signals: state }), false)
+  fold(2, 'rejected ' + K + ' storage-full')
+  fold(2, 'rejected ' + K + ' blocked')
+  t.is(state.storageFull, false, 'a refusal for another reason clears it')
+  fold(2, 'rejected ' + K + ' storage-full')
+  const same = state
+  fold(2, 'rejected ' + K + ' storage-full')
+  t.is(state, same, 'a repeated refusal is a no-op')
+  for (const line of ['rejected ' + K + ' storage-full extra', 'rejected ' + K.slice(1) + ' storage-full', 'admitted ' + K + ' x', 'admitted ' + K]) {
+    fold(2, line)
+    t.is(state.storageFull, true, 'malformed: ' + line)
+  }
+  t.is(storageFullShown({ online: true, signals: null }), false)
+})

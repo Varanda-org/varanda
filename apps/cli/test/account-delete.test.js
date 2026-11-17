@@ -34,7 +34,7 @@ const { keyFromAttestation } = require('../lib/account/webauthn')
 const { createFakePasskey } = require('./helpers/fake-passkey')
 const { createAccountServer } = require('../lib/account/server')
 const { createDeleteRoutes, WAIT_MS } = require('../lib/account/delete-routes')
-const { createDeletionSweep } = require('../lib/account/deletion')
+const { createDeletionSweep, createModerationRetention, MODERATION_RETENTION_MS } = require('../lib/account/deletion')
 const { tmpDir } = require('./helpers/net')
 
 const ORIGIN = 'https://varanda.test'
@@ -86,7 +86,7 @@ function recoveryBlob () {
 }
 
 // A service with `m` linked as 'ana' and every store the deletion purges.
-async function setup (t, { moderation: withModeration = true, enrolled = true, extra = async () => ({}) } = {}) {
+async function setup (t, { moderation: withModeration = true, enrolled = true, phones = null, phoneClient = null, extra = async () => ({}) } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
@@ -123,6 +123,8 @@ async function setup (t, { moderation: withModeration = true, enrolled = true, e
     invites,
     moderation,
     passkeys,
+    phones,
+    phoneClient,
     log: (e) => logs.push(JSON.stringify(e)),
     now,
     ...more
@@ -869,4 +871,343 @@ test('Excluir conta: a corrupt page-invite-rosters.json keeps the purge pending,
   t.ok(logs.some((e) => e.reason === 'purga-pendente'))
   t.is(fs.readFileSync(env.file, 'utf8'), env.bytes, 'the file is unchanged byte for byte')
   t.absent(s.logs.join('\n').includes(s.m.hex), 'no member in the logs')
+})
+
+const DAY_MS = 86400000
+
+// A directory, a moderation desk and a moderator on one movable clock.
+async function retentionSetup (t) {
+  const dir = path.join(tmpDir(t), 'account')
+  const clock = { t: Date.parse('2026-11-01T12:00:00.000Z') }
+  const now = () => clock.t
+  const iss = issuer()
+  const accounts = openAccountStore(dir, { now })
+  const moderation = openModerationStore(dir, { now, association: iss.association })
+  const modKp = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: b4a.toString(modKp.publicKey, 'hex'), date: '2026-10-01T00:00:00.000Z' }, iss.assoc)
+  let seq = 0
+  async function apply (blocked) {
+    const pulled = await moderation.pull()
+    const snapshot = createSnapshot({ seq: ++seq, date: new Date(now()).toISOString(), blocked }, modKp, modCert)
+    await moderation.ack({ changeIds: pulled.changes.map((c) => c.id), snapshot, moderatorCert: modCert })
+  }
+  const m = keyPair()
+  await linkDirect(accounts, iss, m, 'ana')
+  const report = (target, reporter) => moderation.add({ reporter, target, seq: 2, reason: 'assedio', text: 'comentário', quote: 'ofensa', signature: 'ab'.repeat(64), nonce: 'n'.repeat(43) })
+  return { dir, clock, now, iss, accounts, moderation, apply, m, report }
+}
+
+test('deletion sweep: the moderation data of a deleted key goes 180 days after the deletion, not a day sooner', async (t) => {
+  const { clock, now, accounts, moderation, apply, m, report } = await retentionSetup(t)
+  const other = keyPair().hex
+  const about = (await report(m.hex, keyPair().hex)).report
+  const filed = (await report(other, m.hex)).report
+  await moderation.decide(about.id, { decision: 'bloquear', by: 'mod@example.test' })
+  await moderation.decide(filed.id, { decision: 'bloquear', by: 'mod@example.test' })
+  await apply([m.hex, other])
+  await accounts.deleteMember(m.hex)
+  t.is(MODERATION_RETENTION_MS, 180 * DAY_MS)
+  const logs = []
+  let phoneSweeps = 0
+  const retention = createModerationRetention({ accounts, moderation, beforeForget: async () => { phoneSweeps++ }, now, log: (e) => logs.push(e) })
+  const sweep = createDeletionSweep({ accounts, retention, log: (e) => logs.push(e) })
+  clock.t += 179 * DAY_MS
+  t.alike(await sweep.sweep(), { members: 1, pending: 0 })
+  t.ok(moderation.get(about.id) !== null, 'kept at 179 days')
+  t.is(moderation.get(filed.id).reporter, m.hex)
+  t.is(phoneSweeps, 0, 'no phone sweep without a purge')
+  clock.t += DAY_MS
+  t.alike(await sweep.sweep(), { members: 1, pending: 0 }, 'the result keeps its shape')
+  t.is(moderation.get(about.id), null, 'the report about the member is gone at 180 days')
+  t.is(moderation.get(filed.id).reporter, null, 'the report it filed against a blocked key is stripped')
+  t.is(phoneSweeps, 1, 'the phone sweep ran first')
+  t.alike(moderation.blocked().map((b) => b.member).sort(), [m.hex, other].sort(), 'both blocks stay')
+  const purged = logs.filter((e) => e.reason === 'moderacao-expurgada')
+  t.alike(purged, [{ event: 'exclusao', reason: 'moderacao-expurgada', members: 1, reports: 1, stripped: 1, records: 0, kept: 0, deferred: 0 }])
+  t.absent(JSON.stringify(logs).includes(m.hex), 'logs carry no key')
+  await sweep.sweep()
+  t.is(phoneSweeps, 1, 'nothing left: no second purge')
+  t.is(logs.filter((e) => e.reason === 'moderacao-expurgada').length, 1)
+})
+
+test('moderation retention: a failing phone sweep skips the pass; a failing desk is counted as pending', async (t) => {
+  const { clock, now, accounts, moderation, m, report } = await retentionSetup(t)
+  const about = (await report(m.hex, keyPair().hex)).report
+  await accounts.deleteMember(m.hex)
+  clock.t += 180 * DAY_MS
+  const logs = []
+  const failing = createModerationRetention({ accounts, moderation, beforeForget: async () => { throw new Error('telefone') }, now, log: (e) => logs.push(e) })
+  await failing()
+  t.ok(moderation.get(about.id) !== null, 'nothing purged before the burn is written')
+  t.alike(logs, [{ event: 'exclusao', reason: 'moderacao-telefone-pendente' }], 'its own code, apart from a stale purge')
+  const broken = { holdsDeleted: () => { throw new Error('indisponivel') }, forgetDeleted: async () => { throw new Error('no call') } }
+  const brokenLogs = []
+  await createModerationRetention({ accounts, moderation: broken, now, log: (e) => brokenLogs.push(e) })()
+  t.alike(brokenLogs, [{ event: 'exclusao', reason: 'moderacao-pendente', count: 1 }])
+  t.is(createModerationRetention({ accounts, moderation: null }), null, 'no desk, no pass')
+  const noDirectory = { deletedMembers: () => { throw new Error('diretorio') }, deletedAt: () => null }
+  const dirLogs = []
+  await createModerationRetention({ accounts: noDirectory, moderation, now, log: (e) => dirLogs.push(e) })()
+  t.alike(dirLogs, [{ event: 'exclusao', reason: 'moderacao-pendente' }], 'a directory that throws is logged, not thrown')
+})
+
+test('moderation retention: an anexo whose unlink keeps failing is logged with its count every pass', async (t) => {
+  const { dir, clock, now, accounts, moderation, m } = await retentionSetup(t)
+  const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 2, 3])
+  const sha256 = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+  const r = (await moderation.add({ reporter: keyPair().hex, target: m.hex, seq: 2, reason: 'assedio', text: 'comentário', quote: '', writer: keyPair().hex, group: keyPair().hex, anexo: { bytes, mime: 'image/gif', sha256 }, signature: 'ab'.repeat(64), nonce: 'n'.repeat(43) })).report
+  await accounts.deleteMember(m.hex)
+  clock.t += 180 * DAY_MS
+  const file = path.join(dir, 'report-media', r.id)
+  const real = fs.unlinkSync
+  fs.unlinkSync = function (target) {
+    if (target === file) {
+      const err = new Error('EACCES')
+      err.code = 'EACCES'
+      throw err
+    }
+    return real.apply(this, arguments)
+  }
+  t.teardown(() => { fs.unlinkSync = real })
+  const logs = []
+  const retain = createModerationRetention({ accounts, moderation, now, log: (e) => logs.push(e) })
+  await retain()
+  t.is(moderation.get(r.id), null, 'the row goes')
+  t.ok(fs.existsSync(file), 'the file stays')
+  t.alike(logs.filter((e) => e.reason === 'moderacao-anexo-pendente'), [{ event: 'exclusao', reason: 'moderacao-anexo-pendente', count: 1 }])
+  logs.length = 0
+  await retain()
+  t.alike(logs, [{ event: 'exclusao', reason: 'moderacao-anexo-pendente', count: 1 }], 'a later pass with only the failing file says so too')
+  t.absent(JSON.stringify(logs).includes(r.id), 'no id in the log')
+  fs.unlinkSync = real
+  logs.length = 0
+  await retain()
+  t.absent(fs.existsSync(file), 'the file goes once the unlink works')
+  t.absent(logs.some((e) => e.reason === 'moderacao-anexo-pendente'), 'and the line stops')
+})
+
+test('deletion sweep: a retention pass that throws never fails the sweep', async (t) => {
+  const { accounts } = await retentionSetup(t)
+  let calls = 0
+  const sweep = createDeletionSweep({ accounts, retention: async () => { calls++; throw new Error('retencao') } })
+  t.alike(await sweep.sweep(), { members: 0, pending: 0 })
+  t.is(calls, 1)
+})
+
+test('moderation retention: a block acked late burns the number before its report goes', async (t) => {
+  const { dir, clock, now, accounts, moderation, apply, m, report } = await retentionSetup(t)
+  const phones = openPhoneStore(dir, { key: Buffer.alloc(32, 7), now })
+  // As server.js wires them.
+  const cbs = {
+    linked: (k) => accounts.status(k).linked,
+    deleted: (k) => accounts.deletedAt(k) !== null,
+    burnable: (k, since) => moderation.blocked().some((x) => x.member === k) &&
+      (accounts.deletedAt(k) === null || moderation.blockReportsAfter(k, since) > 0),
+    cleared: (k, since) => {
+      if (moderation.held(k) || moderation.blockReportsAfter(k, since) === 0) return false
+      const at = accounts.deletedAt(k)
+      return at === null || moderation.blockReportsAfter(k, at) === 0
+    },
+    blocked: (k) => moderation.blocked().some((x) => x.member === k)
+  }
+  const PHONE = '+5511987654321'
+  await phones.record({ member: m.hex, phone: PHONE }, cbs)
+  const about = (await report(m.hex, keyPair().hex)).report
+  await moderation.decide(about.id, { decision: 'bloquear', by: 'mod@example.test' })
+  // The block is still pending at the deletion: nothing burns yet.
+  await accounts.deleteMember(m.hex)
+  await phones.sweep(cbs)
+  t.is(phones.counts().burned, 0)
+  clock.t += 180 * DAY_MS - 3600 * 1000
+  await apply([m.hex])
+  clock.t += 3600 * 1000
+  // The purge comes before the hourly phone sweep.
+  const retention = createModerationRetention({ accounts, moderation, beforeForget: () => phones.sweep(cbs), now })
+  await retention()
+  t.is(moderation.get(about.id), null, 'the report is gone')
+  t.is(phones.counts().burned, 1, 'the number was burned first')
+  await phones.sweep(cbs)
+  t.is(phones.counts().burned, 1, 'the burn holds after the purge: the key stays on the list')
+  const next = keyPair().hex
+  try {
+    await phones.record({ member: next, phone: PHONE }, cbs)
+    t.fail('recorded a burned number')
+  } catch (err) {
+    t.is(err.code, 'telefone-em-uso', 'nobody else can take it')
+  }
+})
+
+test('moderation retention: an ack between the phone sweep and the purge makes it sweep again first', async (t) => {
+  const { dir, clock, now, accounts, moderation, apply, m, report } = await retentionSetup(t)
+  const phones = openPhoneStore(dir, { key: Buffer.alloc(32, 7), now })
+  const cbs = {
+    linked: (k) => accounts.status(k).linked,
+    deleted: (k) => accounts.deletedAt(k) !== null,
+    burnable: (k, since) => moderation.blocked().some((x) => x.member === k) &&
+      (accounts.deletedAt(k) === null || moderation.blockReportsAfter(k, since) > 0),
+    cleared: (k, since) => {
+      if (moderation.held(k) || moderation.blockReportsAfter(k, since) === 0) return false
+      const at = accounts.deletedAt(k)
+      return at === null || moderation.blockReportsAfter(k, at) === 0
+    },
+    blocked: (k) => moderation.blocked().some((x) => x.member === k)
+  }
+  const PHONE = '+5511987654321'
+  await phones.record({ member: m.hex, phone: PHONE }, cbs)
+  const about = (await report(m.hex, keyPair().hex)).report
+  await moderation.decide(about.id, { decision: 'bloquear', by: 'mod@example.test' })
+  // An open report the member filed: the pass has work while the block
+  // waits (rows about the member wait with the named one).
+  const open = (await report(keyPair().hex, m.hex)).report
+  await accounts.deleteMember(m.hex)
+  clock.t += 180 * DAY_MS
+  let sweeps = 0
+  let acked = false
+  // The operator's ack lands after the phone sweep read the list and before
+  // the purge runs: the row the block rests on is no longer named.
+  const desk = {
+    holdsDeleted: (members) => moderation.holdsDeleted(members),
+    revision: () => moderation.revision(),
+    forgetDeleted: async (members, opts) => {
+      if (!acked) {
+        acked = true
+        await apply([m.hex])
+      }
+      return moderation.forgetDeleted(members, opts)
+    }
+  }
+  const logs = []
+  const retention = createModerationRetention({ accounts, moderation: desk, beforeForget: async () => { sweeps++; await phones.sweep(cbs) }, now, log: (e) => logs.push(e) })
+  await retention()
+  t.is(sweeps, 2, 'the phone sweep ran again after the stale answer')
+  t.is(phones.counts().burned, 1, 'the number burned before the report went')
+  t.is(moderation.get(about.id), null)
+  t.is(moderation.get(open.id), null)
+  t.is(logs.filter((e) => e.reason === 'moderacao-expurgada').length, 1)
+})
+
+test('moderation retention: a decision during the phone sweep makes the purge stale, and the pass sweeps again', async (t) => {
+  const { clock, now, accounts, moderation, m, report } = await retentionSetup(t)
+  const about = (await report(m.hex, keyPair().hex)).report
+  const other = (await report(keyPair().hex, keyPair().hex)).report
+  await accounts.deleteMember(m.hex)
+  clock.t += 180 * DAY_MS
+  let sweeps = 0
+  const writes = []
+  const desk = {
+    holdsDeleted: (members) => moderation.holdsDeleted(members),
+    revision: () => moderation.revision(),
+    forgetDeleted: async (members, opts) => {
+      const r = await moderation.forgetDeleted(members, opts)
+      writes.push(r.stale)
+      return r
+    }
+  }
+  const beforeForget = async () => {
+    // A moderator decides while the phone sweep runs.
+    if (sweeps++ === 0) await moderation.decide(other.id, { decision: 'bloquear', by: 'mod@example.test' })
+  }
+  await createModerationRetention({ accounts, moderation: desk, beforeForget, now })()
+  t.alike(writes, [true, false], 'stale first, then the retry purges')
+  t.is(sweeps, 2)
+  t.is(moderation.get(about.id), null)
+})
+
+test('moderation retention: stale twice leaves the member to the next pass', async (t) => {
+  const { clock, now, accounts, moderation, m, report } = await retentionSetup(t)
+  const about = (await report(m.hex, keyPair().hex)).report
+  await accounts.deleteMember(m.hex)
+  clock.t += 180 * DAY_MS
+  let sweeps = 0
+  const desk = {
+    holdsDeleted: (members) => moderation.holdsDeleted(members),
+    revision: () => -1,
+    forgetDeleted: (members, opts) => moderation.forgetDeleted(members, opts)
+  }
+  const logs = []
+  await createModerationRetention({ accounts, moderation: desk, beforeForget: async () => { sweeps++ }, now, log: (e) => logs.push(e) })()
+  t.is(sweeps, 2, 'one retry')
+  t.ok(moderation.get(about.id) !== null, 'nothing written')
+  t.alike(logs, [{ event: 'exclusao', reason: 'moderacao-adiada' }])
+})
+
+test('moderation retention: an absent, invalid or non-canonical deletion date is never due; due members go in one call', async (t) => {
+  const [A, B, C, D, E] = [keyPair().hex, keyPair().hex, keyPair().hex, keyPair().hex, keyPair().hex]
+  const t0 = Date.parse('2026-11-01T12:00:00.000Z')
+  const dates = { [A]: null, [B]: 'ontem', [C]: new Date(t0 - 200 * DAY_MS).toISOString(), [D]: new Date(t0 - 190 * DAY_MS).toISOString(), [E]: '2025-01-01' }
+  const accounts = { deletedMembers: () => [A, B, C, D, E], deletedAt: (k) => dates[k] }
+  const calls = []
+  const desk = {
+    holdsDeleted: (members) => { calls.push(['holds', members]); return true },
+    revision: () => 7,
+    forgetDeleted: async (members, opts) => {
+      calls.push(['forget', members, opts])
+      return { stale: false, reports: 0, stripped: 0, records: 0, appeals: 0, events: 0, deferred: 0, kept: 0, files: 0, filesLeft: 0 }
+    }
+  }
+  await createModerationRetention({ accounts, moderation: desk, now: () => t0 })()
+  t.alike(calls, [['holds', [C, D]], ['forget', [C, D], { revision: 7 }]], 'a parseable but non-canonical date is not due either')
+  calls.length = 0
+  dates[C] = null
+  dates[D] = 'x'
+  await createModerationRetention({ accounts, moderation: desk, now: () => t0 })()
+  t.alike(calls, [], 'nobody due: the desk is not asked')
+})
+
+test('Excluir conta: on the server, a block acked late burns the number from its reports before the 180-day pass removes them', async (t) => {
+  let phones = null
+  const phoneClient = { send: async () => ({ ok: false }), check: async () => ({ ok: false }) }
+  const s = await setup(t, {
+    phoneClient,
+    extra: async ({ dir, now }) => {
+      phones = openPhoneStore(dir, { key: Buffer.alloc(32, 7), now })
+      return { phones }
+    }
+  })
+  const PHONE = '+5511987654321'
+  await phones.record({ member: s.m.hex, phone: PHONE }, { linked: () => true, deleted: () => false, burnable: () => false })
+  const about = (await s.moderation.add({ reporter: keyPair().hex, target: s.m.hex, seq: 2, reason: 'assedio', text: 'x', quote: 'y', signature: 'ab'.repeat(64), nonce: 'n'.repeat(43) })).report
+  await s.moderation.decide(about.id, { decision: 'bloquear', by: 'mod@example.test' })
+  // Deleted while the block still waits for the operator: nothing burns.
+  await s.store.deleteMember(s.m.hex)
+  await s.server.deletionSweep()
+  t.is(phones.counts().burned, 0)
+  s.clock.offset = 180 * DAY_MS - 3600 * 1000
+  await s.apply([s.m.hex])
+  // A deleted key burns only through its 'bloquear' reports
+  // (blockReportsAfter), so the phone sweep must run before they go.
+  s.clock.offset = 180 * DAY_MS + 60000
+  await s.server.deletionSweep()
+  t.is(s.moderation.get(about.id), null, 'the report is gone')
+  t.is(s.moderation.blockReportsAfter(s.m.hex, null), 0, 'no block report is left to burn from')
+  t.is(phones.counts().burned, 1, 'the number was burned first')
+  await s.server.deletionSweep()
+  t.is(phones.counts().burned, 1, 'the burn holds after the purge: the key stays on the list')
+  try {
+    await phones.record({ member: keyPair().hex, phone: PHONE }, { linked: () => true, deleted: () => false, burnable: () => false })
+    t.fail('recorded a burned number')
+  } catch (err) {
+    t.is(err.code, 'telefone-em-uso', 'nobody else can take it')
+  }
+})
+
+test('Excluir conta: the server wires the retention pass into the sweep, after a phone sweep', async (t) => {
+  let sweeps = 0
+  const phones = {
+    sweep: async () => { sweeps++ },
+    live: () => null,
+    end: async () => {},
+    verified: () => false
+  }
+  const phoneClient = { send: async () => ({ ok: false }), check: async () => ({ ok: false }) }
+  const s = await setup(t, { phones, phoneClient })
+  const about = (await s.moderation.add({ reporter: keyPair().hex, target: s.m.hex, seq: 2, reason: 'assedio', text: 'x', quote: 'y', signature: 'ab'.repeat(64), nonce: 'n'.repeat(43) })).report
+  await s.store.deleteMember(s.m.hex)
+  await s.server.deletionSweep()
+  t.ok(s.moderation.get(about.id) !== null, 'kept before 180 days')
+  s.clock.offset = 180 * DAY_MS + 60000
+  const before = sweeps
+  await s.server.deletionSweep()
+  t.is(s.moderation.get(about.id), null, 'purged by the sweep')
+  t.is(sweeps, before + 1, 'the phone sweep ran before the purge')
 })

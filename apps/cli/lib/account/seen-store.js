@@ -19,16 +19,18 @@
 // until heal() finds it fixed. fail() (the lock is lost) is for good.
 //
 // Every mutation runs in one in-process queue, re-reads the file, and asks
-// guard() before it touches anything and again after the rename: the service
-// lock goes stale after 30 s, so a holder that lost it meanwhile does not
-// acknowledge (the terms-store.js discipline). Its remaining window applies
-// here too, without OS file locks: a stalled rename can land after a
-// takeover and replace a blob the new holder already acknowledged. Unlike
+// guard() before it touches anything, right before the rename or the unlink
+// (after the temp file is written and fsynced) and again after it: the
+// service lock goes stale after 30 s, so a holder that lost it meanwhile
+// leaves the blob as the new holder wrote it, or does not acknowledge (the
+// terms-store.js discipline). Its remaining window applies here too,
+// without OS file locks: a rename suspended right after that check can land
+// after a takeover and replace a blob the new holder already acknowledged. Unlike
 // terms-store, this store keeps nothing in memory to write it back. The
 // marks are not lost for good: every device keeps its own marks locally and
 // the merge is a union, so the device whose write was replaced finds its
 // marks missing from the blob on its next pass and writes them again. The
-// same window lets a stalled forget remove a blob the new holder just wrote
+// same window lets a suspended forget remove a blob the new holder just wrote
 // (the devices write it again) or a stalled write bring back one it just
 // removed; no client of this version asks for a delete.
 // guard() === false refuses that call only.
@@ -41,6 +43,7 @@ const nodeCrypto = require('node:crypto')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { blobHash, HASH_NONE } = require('@varanda/core/lib/seen-proof')
 const { SEEN_BLOB_BYTES } = require('@varanda/core/lib/seen-blob')
+const { held } = require('./guarded-write')
 
 const DIR = 'seen'
 const MAX_MEMBERS = 100000
@@ -229,6 +232,7 @@ function openSeenStore (dataDir, { guard = () => true, readOnly = false, log = n
       } finally {
         fs.closeSync(fd)
       }
+      lastCheck()
       fs.renameSync(tmp, path.join(dir, member))
       published = true
     } finally {
@@ -252,6 +256,7 @@ function openSeenStore (dataDir, { guard = () => true, readOnly = false, log = n
       // The name goes first, then the bytes are zeroed through the open fd:
       // a crash in between leaves no file at all, never a zeroed one that
       // would be served as a blob and block both a create and a delete.
+      lastCheck()
       fs.unlinkSync(file)
       fsyncDir(dir)
       writeAll(fd, Buffer.alloc(SEEN_BLOB_BYTES))
@@ -278,6 +283,16 @@ function openSeenStore (dataDir, { guard = () => true, readOnly = false, log = n
     usable()
     if (readOnly) throw fail('indisponivel')
     if (!guard()) {
+      note('guarda-recusou')
+      throw fail('indisponivel')
+    }
+  }
+
+  // Right before the rename or the unlink: a holder that lost the lock while
+  // it read or fsynced leaves the blob as the new holder wrote it. Refuses
+  // like begin(), with nothing written.
+  function lastCheck () {
+    if (!held(guard)) {
       note('guarda-recusou')
       throw fail('indisponivel')
     }

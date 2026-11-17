@@ -98,6 +98,9 @@ function toBlob (canvas, mime) {
 export function photoProblem (bytes) {
   const size = rpc.mediaSize(bytes)
   if (size === null) return 'não foi possível abrir a foto'
+  // AVIF intake stays closed on the web: a grid's reported size is the
+  // cropped output, not the tiles the decoder allocates.
+  if (rpc.mediaSize(bytes, 'image/avif') !== null) return 'formato não aceito'
   if (size.width > MAX_PHOTO_SIDE || size.height > MAX_PHOTO_SIDE || size.width * size.height > MAX_PHOTO_PIXELS) return 'foto grande demais'
   return null
 }

@@ -93,6 +93,10 @@ test('display.native: writes under the cache, returns file://, deletes and sweep
   t.ok(files().has(url), 'later uses do not sweep')
   t.ok(display.urlFromBytes(new Uint8Array([6]), 'image/webp').endsWith('.webp'))
   t.ok(display.urlFromBytes(new Uint8Array([7]), 'image/gif').endsWith('.gif'))
+  const avif = display.urlFromBytes(new Uint8Array([8]), 'image/avif')
+  t.ok(/^file:\/\/\/stub\/Caches\/varanda-media\/[0-9a-f]{32}\.avif$/.test(avif), 'an AVIF payload ends in .avif')
+  display.revokeUrl(avif)
+  t.absent(files().has(avif), 'revoke deletes an AVIF file')
 
   display.revokeUrl(url)
   t.absent(files().has(url), 'revoke deletes the file')
@@ -105,6 +109,14 @@ test('display.native: writes under the cache, returns file://, deletes and sweep
   display.revokeUrl(outside)
   display.revokeUrl(DIR + '../' + 'cd'.repeat(16) + '.jpg')
   display.revokeUrl(DIR + 'varanda-config.json')
+  // Inside the media directory, but not a name urlFromBytes writes.
+  const strays = [DIR + 'ef'.repeat(16) + '.heic', DIR + 'ef'.repeat(15) + '.avif', DIR + 'ef'.repeat(16) + '.avif.jpg', DIR + 'EF'.repeat(16) + '.avif']
+  for (const stray of strays) {
+    files().set(stray, new Uint8Array([9]))
+    display.revokeUrl(stray)
+    t.ok(files().has(stray), 'revokeUrl ignores ' + stray.slice(DIR.length))
+    files().delete(stray)
+  }
   display.revokeUrl('blob:x')
   display.revokeUrl(null)
   t.ok(files().has(outside), 'a file outside the media directory stays')

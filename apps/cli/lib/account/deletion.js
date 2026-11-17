@@ -40,10 +40,16 @@
 // stays is decided elsewhere: the deleted row and
 // the burned names in the directory, the reports and decisions in
 // moderation.json (issue #38), and the pending block (./moderation-store.js).
+// After MODERATION_RETENTION_MS (6 months, 180 days) the `retention` pass
+// (createModerationRetention) runs moderation.forgetDeleted for the key; the
+// block itself stays on the list.
 //
 // Never throws. Logs carry only counts, never a key.
 
+const { isCanonicalIso } = require('@varanda/core/lib/cert')
+
 const SWEEP_MS = 3600 * 1000
+const MODERATION_RETENTION_MS = 180 * 24 * 3600 * 1000
 
 function usable (s) {
   return s !== null && s !== undefined && (typeof s.available !== 'function' || s.available())
@@ -51,12 +57,13 @@ function usable (s) {
 
 // createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites,
 // drops, seen, passkeys, phones, pages, pageInvites, triage, scheduled, tick,
-// log }) -> { purge(member), sweep(), start() -> stop }. Every store but
-// `accounts` may be null (the feature is off: no file to purge). `pages` is
-// an openPagesStore, `pageInvites` { holds(m), forget(m) } and `triage`
-// { holdsMember(m), forgetMember(m) }. `scheduled` and `tick` are async
-// functions that never throw.
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, log = () => {} }) {
+// retention, log }) -> { purge(member), sweep(), start() -> stop }. Every
+// store but `accounts` may be null (the feature is off: no file to purge).
+// `pages` is an openPagesStore, `pageInvites` { holds(m), forget(m) } and
+// `triage` { holdsMember(m), forgetMember(m) }. `scheduled` and `tick` are
+// async functions that never throw. `retention` (createModerationRetention)
+// runs after the per-member purge of every sweep.
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, retention = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
@@ -138,6 +145,11 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
         return { members: 0, pending: 1 }
       }
       for (const member of members) pending += await purgeOne(member)
+      if (retention !== null) {
+        try {
+          await retention()
+        } catch {}
+      }
       if (pending > 0) log({ event: 'exclusao', reason: 'purga-pendente', count: pending })
       return { members: members.length, pending }
     })().finally(() => { running = null })
@@ -154,7 +166,67 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
   return { purge, sweep, start }
 }
 
+// The moderation data of keys deleted at least MODERATION_RETENTION_MS ago
+// (moderation-store.js forgetDeleted, every due key in one call): -> an
+// async function for createDeletionSweep's `retention`, or null without a
+// desk. `beforeForget` (the phone sweep) runs before the purge, so a block
+// acked late burns the number while its report still names the key. The
+// purge is pinned to the store revision read right before it: any write in
+// between (an ack, a decision) makes the store answer `stale`, and the pass
+// sweeps again and retries once, then leaves it to the next pass
+// (`moderacao-adiada`). A throwing beforeForget skips the pass
+// (`moderacao-telefone-pendente`); a directory or desk that throws is
+// logged as `moderacao-pendente`; anexo files whose unlink keeps failing
+// (still listed after the pass) as `moderacao-anexo-pendente`, so a
+// persistent failure is not silent. An absent or non-canonical deletion
+// date is never due. Logs counts only.
+function createModerationRetention ({ accounts, moderation = null, beforeForget = null, now = Date.now, log = () => {} }) {
+  if (moderation === null || moderation === undefined) return null
+  return async function retain () {
+    let due = null
+    let r = null
+    try {
+      const cut = now() - MODERATION_RETENTION_MS
+      due = accounts.deletedMembers().filter((m) => {
+        const date = accounts.deletedAt(m)
+        if (!isCanonicalIso(date)) return false
+        const at = Date.parse(date)
+        return Number.isFinite(at) && at <= cut
+      })
+      if (due.length === 0) return
+      if (!moderation.holdsDeleted(due)) return
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const revision = moderation.revision()
+        if (beforeForget !== null) {
+          try {
+            await beforeForget()
+          } catch {
+            log({ event: 'exclusao', reason: 'moderacao-telefone-pendente' })
+            return
+          }
+        }
+        r = await moderation.forgetDeleted(due, { revision })
+        if (!r.stale) break
+      }
+    } catch {
+      if (due === null) log({ event: 'exclusao', reason: 'moderacao-pendente' })
+      else log({ event: 'exclusao', reason: 'moderacao-pendente', count: due.length })
+      return
+    }
+    if (r.stale) {
+      log({ event: 'exclusao', reason: 'moderacao-adiada' })
+      return
+    }
+    if (r.reports + r.stripped + r.records + r.appeals + r.events + r.files > 0) {
+      log({ event: 'exclusao', reason: 'moderacao-expurgada', members: due.length, reports: r.reports, stripped: r.stripped, records: r.records, kept: r.kept, deferred: r.deferred })
+    }
+    if (r.filesLeft > 0) log({ event: 'exclusao', reason: 'moderacao-anexo-pendente', count: r.filesLeft })
+  }
+}
+
 module.exports = {
   SWEEP_MS,
-  createDeletionSweep
+  MODERATION_RETENTION_MS,
+  createDeletionSweep,
+  createModerationRetention
 }

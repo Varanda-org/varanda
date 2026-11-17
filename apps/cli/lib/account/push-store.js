@@ -21,16 +21,19 @@
 //
 // Every write runs in one in-process queue against a copy of the state and
 // first re-reads the file: the service lock goes stale after 30 s
-// (account/server.js LOCK_STALE_MS) and writeJsonAtomic renames
-// unconditionally, so another holder may have replaced the file meanwhile.
+// (account/server.js LOCK_STALE_MS), so another holder may have replaced the
+// file meanwhile.
 // Disk and memory are merged (per endpoint the latest createdAt wins, ties
 // keep memory, then each member keeps its newest PUSH_MAX_PER_MEMBER rows)
 // and the merge is written whenever it differs from the file or a previous
 // write failed ('dirty'). Memory and tombstones change only after the write
 // returned and guard() answered true again: a holder that lost the lock
 // meanwhile does not acknowledge, and a refused or failed request leaves both
-// as they were. guard() === false refuses that request only; fail() and a
-// malformed file make the store unavailable for good.
+// as they were. guard() is also asked right before the rename
+// (./guarded-write.js, after the temp file is written and fsynced): a false
+// answer there leaves the file as the new holder wrote it. guard() === false
+// refuses that request only; fail() and a malformed file make the store
+// unavailable for good.
 //
 // Every row a write creates or updates gets createdAt = max(now, the latest
 // createdAt known for that member or endpoint + 1 ms). With a clock that went
@@ -55,7 +58,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 
 const FILE = 'push.json'
@@ -285,11 +288,13 @@ function openPushStore (dataDir, { now = Date.now, readOnly = false, guard = () 
   // failed request leaves both exactly as they were. The file may still hold
   // `next` after a failure; the store stays dirty, so the next write or heal
   // merges and rewrites before it answers. An unreadable file marks the
-  // store unavailable.
+  // store unavailable. A refusal right before the rename left the file
+  // untouched, so the store does not turn dirty.
   function persist (next, buried) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         readState(file)

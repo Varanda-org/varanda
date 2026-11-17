@@ -17,7 +17,9 @@
 //   or none: untagged, every bucket), which dm-net truncates to the seeder's
 //   bits and a v1 lane ignores. A put is never repeated here.
 // - openStampLink: 'varanda/dm-stamp/1' (lib/dm-stamp-net.js, member role),
-//   the proof signed by the identity key over THIS link's Noise key. Used
+//   the proof signed by the identity key over THIS link's Noise key: v1 for
+//   a diary whose key is that public key, v2 when `diary` names a Hypercore
+//   11 diary key that the identity key signs (a core node's). Used
 //   for a wallet top-up and closed right after; never the dm link, never the
 //   sync socket. key(kind) and issue(blinded, kind) take the stamp kind,
 //   'dm' (the default, sent without a kind field), 'blob' or 'copy'.
@@ -39,6 +41,7 @@ const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachDm, DM_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/dm-net')
 const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
+const { isDiaryOfSigner } = require('@varanda/core/lib/diary-signer')
 const { attachBlob } = require('@varanda/core/lib/blob-net')
 const { DM_MAX_MESSAGE, DM_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2 } = require('@varanda/core/lib/dm')
 const { UsageError } = require('@varanda/core/lib/errors')
@@ -304,11 +307,15 @@ async function openBlobLink ({ seederUrl, createSocket, association, log = noop,
 }
 
 // keyPair: the identity pair (in memory, the session's copy); the proof is
-// signed only after the hello verified.
-async function openStampLink ({ seederUrl, createSocket, association, keyPair, log = noop, limits = {} } = {}) {
+// signed only after the hello verified. diary (optional, hex64): the
+// Hypercore 11 diary key that keyPair signs; the budget is then that diary's.
+async function openStampLink ({ seederUrl, createSocket, association, keyPair, diary = null, log = noop, limits = {} } = {}) {
   if (keyPair === null || typeof keyPair !== 'object' || !(keyPair.secretKey instanceof Uint8Array)) throw new TypeError('par de chaves inválido')
   let stamp = null
-  const ownKey = b4a.toString(keyPair.publicKey, 'hex')
+  const signerHex = b4a.toString(keyPair.publicKey, 'hex')
+  if (diary !== null && !isDiaryOfSigner(diary, signerHex)) throw new TypeError('diário inválido')
+  const ownKey = diary === null ? signerHex : diary
+  const ownSigner = diary === null ? null : signerHex
   const link = await dial({
     seederUrl,
     createSocket,
@@ -320,6 +327,7 @@ async function openStampLink ({ seederUrl, createSocket, association, keyPair, l
       stamp = attachDmStamp(noise, {
         role: 'member',
         ownKey,
+        ownSigner,
         ...(limits.requestTimeoutMs ? { requestTimeoutMs: limits.requestTimeoutMs } : {}),
         sign: (payload) => {
           if (!l.verified) throw new Error(NO_SEEDER)

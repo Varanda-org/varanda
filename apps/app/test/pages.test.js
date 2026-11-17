@@ -977,7 +977,8 @@ test('page keys: refreshes re-read, a held activation keeps its resend, Enviar c
   const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
   t.ok(inbox.includes('}, [dmVersion, pageKey, unlocked, read])'), 'the dmVersion bump reads the keys again')
   t.ok(inbox.includes('adopted.get(pageKey) !== held'), 'an adopted share is not stored again')
-  t.absent(/setInterval|setTimeout/.test(inbox), 'no timer of its own')
+  t.absent(/setInterval/.test(inbox), 'no polling timer of its own')
+  t.is((inbox.match(/setTimeout/g) || []).length, 1, 'one timed re-read, only after a busy answer')
   t.ok(inbox.includes("{keys.hold\n          ? <Btn label='Tentar de novo' onPress={retry}") || /keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}[\s\S]*PAGE_DM_ROTATING|PAGE_DM_ROTATING[\s\S]*keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}/.test(inbox), 'mid-rotation the held request can be resent')
   const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
   t.ok(/if \(dmStatus && dmStatus\.share\) await pagesDmAdopt\(node, \{ page, status: dmStatus \}\)\s*return pagesDmShareTo/.test(ajustes), 'the own share is adopted before sharing')
@@ -1592,6 +1593,7 @@ test('pagesList forgets, once, the keys of a page the newest list no longer show
   const node = {
     request: async (method, params) => {
       if (method === 'page.sign') return { signature: SIG }
+      if (method === 'page.read') return {}
       if (method === 'dm.pageLegacyBlocks') return { pending: [] }
       if (method === 'dm.pageForget') {
         forgot.push(params.page)
@@ -1641,9 +1643,241 @@ test('pagesList forgets, once, the keys of a page the newest list no longer show
   t.absent(forgot.includes(Z), 'another account origin\'s list forgets none of this one\'s pages')
 })
 
+test('pagesList sets the acting identity back to the person when the page acted as is closed, moved or no longer run; a failed or older answer changes nothing', async (t) => {
+  const { pagesList } = await load()
+  const acting = await import('../src/actingAs.js')
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const Z = '78'.repeat(32)
+  const list = (owned, admin = []) => json(200, { owned, admin, invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const node = {
+    request: async (method) => {
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'dm.pageLegacyBlocks') return { pending: [] }
+      if (method === 'dm.pageForget') return { ok: true }
+      throw new Error('unexpected ' + method)
+    }
+  }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+  t.teardown(() => acting.reset())
+
+  acting.asPage({ key: X, name: 'Casa' })
+  answers.push(list([{ page: X }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'page', 'a page still run stays')
+
+  answers.push(new Error('offline'))
+  await caught(t, pagesList(node, { member: MEM }))
+  t.is(acting.get().kind, 'page', 'a failed read changes nothing')
+
+  answers.push(list([{ page: X, closed: true }]))
+  await pagesList(node, { member: MEM })
+  await flush()
+  t.is(acting.get().kind, 'me', 'a closed page: back to the person')
+
+  acting.asPage({ key: X })
+  answers.push(list([{ page: X, closed: true, movedTo: Z }, { page: Z }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'me', 'the old key of a moved page: back to the person')
+  acting.asPage({ key: Z })
+  answers.push(list([{ page: X, closed: true, movedTo: Z }, { page: Z }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().key, Z, 'the new key stays')
+
+  answers.push(list([]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'me', 'removed as admin: back to the person')
+
+  acting.asPage({ key: Z })
+  let releaseOld
+  answers.push(new Promise((resolve) => { releaseOld = resolve }))
+  answers.push(list([{ page: Z }]))
+  const older = pagesList(node, { member: MEM })
+  await flush()
+  await pagesList(node, { member: MEM })
+  releaseOld(list([]))
+  await older
+  t.is(acting.get().kind, 'page', 'an older answer that lands later changes nothing')
+})
+
+test('pagesList: an answer never ends an identity chosen after its request began, and drops the page a momento composer set aside', async (t) => {
+  const { pagesList } = await load()
+  const acting = await import('../src/actingAs.js')
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const list = (owned) => json(200, { owned, admin: [], invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const node = { request: async (method) => (method === 'page.sign' ? { signature: SIG } : { pending: [], ok: true }) }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+  t.teardown(() => acting.reset())
+
+  acting.reset()
+  let release
+  answers.push(new Promise((resolve) => { release = resolve }))
+  const early = pagesList(node, { member: MEM })
+  await flush()
+  acting.asPage({ key: X })
+  release(list([]))
+  await early
+  t.is(acting.get().kind, 'page', 'a list read before acting as the page leaves it')
+
+  acting.enterMoment()
+  answers.push(list([{ page: X, closed: true }]))
+  await pagesList(node, { member: MEM })
+  acting.leaveMoment()
+  t.is(acting.get().kind, 'me', 'the stopped page does not come back after the momento composer')
+})
+
 test('pageError has plain words for a join refused because the page is outside the community', async (t) => {
   const { pageError } = await load()
   const err = pageError('fora-da-comunidade')
   t.is(err.code, 'fora-da-comunidade')
   t.is(err.message, 'A página ainda não está na comunidade deste grupo')
+})
+
+// A node for the move-chain walk: page.read answers from `movedFrom`, or
+// runs `read` first when given; every forget and read is recorded.
+function chainNode (movedFrom, { read = null, hosted } = {}) {
+  const forgot = []
+  const reads = []
+  const node = {
+    forgot,
+    reads,
+    request: async (method, params) => {
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'page.read') {
+        reads.push(params.key)
+        if (read !== null) await read(params.key)
+        return movedFrom[params.key] ? { movedFrom: { from: movedFrom[params.key] } } : {}
+      }
+      if (method === 'dm.pageLegacyBlocks') return { pending: [] }
+      if (method === 'dm.pageForget') {
+        forgot.push(params.page)
+        return { ok: true }
+      }
+      throw new Error('unexpected ' + method)
+    }
+  }
+  if (hosted !== undefined) node.hosted = hosted
+  return node
+}
+const pageList = (owned, admin = []) => json(200, { owned, admin, invites: [], offers: [] })
+const listAnswers = (t) => {
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  return answers
+}
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+test('pagesList also forgets the keys a dropped page moved from, unless the list still shows them', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '9a'.repeat(32)
+  const K0 = '9b'.repeat(32)
+  const K1 = '9c'.repeat(32)
+  const K2B = '9d'.repeat(32)
+  const L1 = '9e'.repeat(32)
+  const L2 = '9f'.repeat(32)
+  const C1 = '8a'.repeat(32)
+  const C2 = '8b'.repeat(32)
+  const answers = listAnswers(t)
+  const node = chainNode({ [K2B]: K1, [K1]: K0, [L2]: L1, [C2]: C1 })
+
+  // After a restart no earlier answer names K1 or K0; only the node's flag names K2.
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike([...node.forgot].sort(), [K0, K1, K2B].sort(), 'the dropped key and every key it moved from')
+
+  node.forgot.length = 0
+  answers.push(pageList([{ page: L1, closed: true, movedTo: L2 }]))
+  await pagesList(node, { member: MEM, also: [L2] })
+  await settle()
+  t.alike(node.forgot, [L2], 'an old key the list still shows as moved stays')
+
+  node.forgot.length = 0
+  node.reads.length = 0
+  answers.push(pageList([{ page: C2, closed: true }]))
+  await pagesList(node, { member: '8c'.repeat(32) })
+  await settle()
+  t.alike(node.forgot, [C2], 'a closed page goes')
+  t.alike(node.reads, [], 'and its move chain is not read')
+})
+
+test('pagesList: a failed read of the move chain marks nothing tried, and a later list read forgets the old keys', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '7a'.repeat(32)
+  const K0 = '7b'.repeat(32)
+  const K1 = '7c'.repeat(32)
+  const K2B = '7d'.repeat(32)
+  const answers = listAnswers(t)
+  let fail = true
+  const node = chainNode({ [K2B]: K1, [K1]: K0 }, {
+    read: async (key) => { if (key === K1 && fail) throw new Error('LOCKED') }
+  })
+
+  answers.push(pageList([], [{ page: K2B }]))
+  await pagesList(node, { member: MEM })
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM })
+  await settle()
+  t.alike(node.reads, [K2B, K1], 'the walk stopped at the read that failed')
+  t.alike(node.forgot, [], 'nothing in the chain is forgotten or marked tried')
+
+  fail = false
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM })
+  await settle()
+  t.alike([...node.forgot].sort(), [K0, K1, K2B].sort(), 'the next list read walks again and forgets the whole chain')
+
+  node.forgot.length = 0
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(node.forgot, [], 'each key is still tried once per session')
+})
+
+test('pagesList: a newer list that shows the keys again keeps them when an earlier walk lands', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '6a'.repeat(32)
+  const K1 = '6b'.repeat(32)
+  const K2B = '6c'.repeat(32)
+  const answers = listAnswers(t)
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const node = chainNode({ [K2B]: K1 }, { read: () => gate })
+
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  answers.push(pageList([], [{ page: K1, closed: true, movedTo: K2B }, { page: K2B }]))
+  await pagesList(node, { member: MEM })
+  release()
+  await settle()
+  t.alike(node.forgot, [], 'an admin added back keeps the old and the new key')
+})
+
+test('pagesList walks no move chain on a core node or a malformed answer', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '5a'.repeat(32)
+  const K1 = '5b'.repeat(32)
+  const K2B = '5c'.repeat(32)
+  const answers = listAnswers(t)
+
+  const core = chainNode({ [K2B]: K1 }, { hosted: false })
+  answers.push(pageList([]))
+  await pagesList(core, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(core.reads, [], 'a core node reads no move chain')
+  t.alike(core.forgot, [], 'and holds no page keys to forget')
+
+  const node = chainNode({ [K2B]: K1 })
+  answers.push(json(200, { owned: [{ page: 'nope' }], admin: [] }))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  answers.push(json(200, { owned: null }))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(node.reads, [], 'a malformed answer reads no move chain')
+  t.alike(node.forgot, [], 'and forgets nothing')
 })

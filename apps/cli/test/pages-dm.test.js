@@ -1127,6 +1127,33 @@ test('pages-dm: chunks written before a crash without their record are removed; 
   t.absent(s.keys.get(page).boxSecretKey)
 })
 
+test('pages-dm: a guard lost right before a bundle chunk\'s rename writes no chunk and keeps the legacy secret', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const page = (await s.create(ana, 'padaria')).page
+  await makeLegacy(s, page, hex(crypto.randomBytes(32)))
+  await s.pagesDm.close()
+  // Refuses only while a temp file sits in the bundle directory, that is
+  // right before a chunk's rename: every earlier check passes.
+  const tmpNear = () => {
+    try {
+      return fs.readdirSync(bundleDir(s.dir, page)).some((n) => n.endsWith('.tmp'))
+    } catch {
+      return false
+    }
+  }
+  const again = createPagesDm({ writer: s.writer, pagesStore: s.pagesStore, keys: s.keys, association: s.association, dir: s.dir, env: s.env, guard: () => !tmpNear(), limits: { refreshEveryMs: 0 } })
+  t.teardown(() => again.close(), { force: true })
+  await again.ready()
+  const own = boxPair()
+  await t.exception(again.applyBox(page, { by: ana.hex, dmBox: boxOp({ expectedGen: 1, members: [ana.hex], ownBox: own.hex }), idem: { member: ana.hex, nonce: 'r'.repeat(43) } }), /indisponivel/, 'the dm-box is refused')
+  t.absent(fs.existsSync(path.join(bundleDir(s.dir, page), '0')), 'no chunk was renamed into place')
+  t.absent(tmpNear(), 'no temp file is left')
+  t.absent(s.pagesStore.get(page).dm, 'no record, no rotation')
+  t.ok(s.keys.get(page).boxSecretKey, 'the legacy secret stays')
+})
+
 test('pages-dm: the legacy bundle holds every old row and op, no cap; rotations and a remove keep it; a transfer hides it from the new owner; done removes it', async (t) => {
   t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)
@@ -1250,6 +1277,26 @@ test('pages-dm: a move before dm-legacy-done carries the bundle to K2, readable 
   t.alike(await again.legacyDone(k2, { member: ana.hex, id: rec.id }), { ok: true })
   t.absent(fs.existsSync(bundleDir(s.dir, k2)))
   t.is(s.pagesStore.get(k2).dm.legacyBundle, null)
+})
+
+test('pages-dm: an admin removed from K2 after a move gets movida from the dm reads of K1', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const page = (await s.create(ana, 'padaria')).page
+  t.is((await s.invite(ana, page, bia)).status, 200)
+  t.is((await s.accept(bia, page)).status, 200)
+  const moved = await s.move(ana, page)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  const removed = await s.remove(ana, moved.to, bia.hex)
+  t.is(removed.status, 200, JSON.stringify(removed.body))
+  for (const [action, op] of [['dm-box-read', {}], ['dm-legacy-read', { from: 0 }]]) {
+    const r = await s.act(bia, action, page, op)
+    t.is(r.status, 409, action)
+    t.is(r.body.error, 'movida', action + ' of K1 refuses the removed admin')
+    t.is((await s.act(bia, action, moved.to, op)).body.error, 'sem-permissao', action + ' of K2 too')
+  }
 })
 
 test('pages-dm: a first dm-box that never published does not block a move; the bundle rides alone in a gen 0 row', async (t) => {

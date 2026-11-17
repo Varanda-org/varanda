@@ -85,6 +85,13 @@ const DM_VISIT_KIND = 'visit'
 const DM_SIG_PREFIX_V7 = 'varanda-dm-v7\n'
 // The only kind of a v7 body. Not in DM_KINDS: no v1 to v6 body is a copy.
 const DM_COPY_KIND = 'copy'
+// A history copy claim (v8) signs under its own domain as well, so a pointer,
+// a ctl or a message never verifies as a claim, nor a claim as one of them.
+const DM_SIG_PREFIX_V8 = 'varanda-dm-v8\n'
+// The only kind of a v8 body. Not in DM_KINDS: no v1 to v7 body is a claim.
+const DM_CLAIM_KIND = 'claim'
+// The most own devices one claim names.
+const DM_CLAIM_FOR_MAX = 8
 // A reaction's revision: per (target, reactor) the op with the highest rev wins.
 const DM_REACT_REV_MAX = 1000000
 // The service signs a v3 digest with an expiry it chooses (now + TTL). A drop
@@ -129,11 +136,12 @@ const INNER_KEYS_V4 = rpc.DM_INNER_KEYS_V4
 const INNER_KEYS_V5 = rpc.DM_INNER_KEYS_V5
 const INNER_KEYS_V6 = rpc.DM_INNER_KEYS_V6
 const INNER_KEYS_V7 = rpc.DM_INNER_KEYS_V7
+const INNER_KEYS_V8 = rpc.DM_INNER_KEYS_V8
 const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 const DM_MEDIA_MAX = 4
-const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const DM_MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 const DM_MEDIA_MAX_SIDE = 16384
 // A voice note: the only item of its message. Its blob is the sealed file,
 // so `bytes` adds the MAC to the plaintext cap that group posts share.
@@ -151,6 +159,7 @@ const SIG_PREFIX_V4 = b4a.from(DM_SIG_PREFIX_V4, 'utf8')
 const SIG_PREFIX_V5 = b4a.from(DM_SIG_PREFIX_V5, 'utf8')
 const SIG_PREFIX_V6 = b4a.from(DM_SIG_PREFIX_V6, 'utf8')
 const SIG_PREFIX_V7 = b4a.from(DM_SIG_PREFIX_V7, 'utf8')
+const SIG_PREFIX_V8 = b4a.from(DM_SIG_PREFIX_V8, 'utf8')
 const MAGIC = b4a.from(DM_MAGIC, 'ascii')
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64_DIGEST = /^[0-9a-f]{64}$/
@@ -267,11 +276,13 @@ function validDmCard (card) {
 // reply needs v2, so v1 keeps the bare id only.
 // v6 is a visit ping (kind 'visit', see validVisit), and only v6 is.
 // v7 is a history copy pointer (kind 'copy', see validCopy), and only v7 is.
+// v8 is a history copy claim (kind 'claim', see validClaim), and only v8 is.
 function validBody (b) {
   if (!isPlainObject(b)) return false
   if (b.v === 4) return validReaction(b)
   if (b.v === 6) return validVisit(b)
   if (b.v === 7) return validCopy(b)
+  if (b.v === 8) return validClaim(b)
   if (b.v === 1) {
     if (!hasExactKeys(b, INNER_KEYS)) return false
   } else if (b.v === 2) {
@@ -347,12 +358,27 @@ function validCopy (b) {
   return validateBlobDescriptor(b.copy)
 }
 
+// A history copy claim: own device `by` says it will make the copy whose v7
+// pointer carries the id `copy`, for the own devices `for` (device ids,
+// strictly ascending so a set has one encoding, never `by` itself). from ===
+// to is the own key and there is no certificate, as in a v7 pointer.
+function validClaim (b) {
+  if (!hasExactKeys(b, INNER_KEYS_V8) || b.kind !== DM_CLAIM_KIND) return false
+  if (!isHex32(b.id) || !isHex32(b.copy) || !isHex64(b.from) || b.to !== b.from || !isCanonicalIso(b.at)) return false
+  if (!isHex64(b.by) || !Array.isArray(b.for) || b.for.length < 1 || b.for.length > DM_CLAIM_FOR_MAX) return false
+  for (let i = 0; i < b.for.length; i++) {
+    if (!isHex64(b.for[i]) || b.for[i] === b.by) return false
+    if (i > 0 && !(b.for[i - 1] < b.for[i])) return false
+  }
+  return true
+}
+
 function canonicalJson (b) {
   return rpc.canonicalDmInnerJson(b)
 }
 
 function sigPrefix (v) {
-  return v === 7 ? SIG_PREFIX_V7 : v === 6 ? SIG_PREFIX_V6 : v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
+  return v === 8 ? SIG_PREFIX_V8 : v === 7 ? SIG_PREFIX_V7 : v === 6 ? SIG_PREFIX_V6 : v === 5 ? SIG_PREFIX_V5 : v === 4 ? SIG_PREFIX_V4 : v === 2 ? SIG_PREFIX_V2 : SIG_PREFIX
 }
 
 function digestBytes (json) {
@@ -449,6 +475,7 @@ function buildInner (fields, signKeyPair) {
   if (kind === 'react') return signInner(reactionBody(fields, from), signKeyPair)
   if (kind === DM_VISIT_KIND) return signInner(visitBody(fields, from), signKeyPair)
   if (kind === DM_COPY_KIND) return signInner(copyBody(fields, from), signKeyPair)
+  if (kind === DM_CLAIM_KIND) return signInner(claimBody(fields, from), signKeyPair)
   const media = fields.media === undefined ? null : fields.media
   const card = fields.card === undefined ? null : fields.card
   const fwd = fields.fwd === undefined ? 0 : fields.fwd
@@ -539,6 +566,27 @@ function copyBody (fields, from) {
     from,
     to: fields.to === undefined ? from : fields.to,
     copy: isPlainObject(fields.copy) ? { id: fields.copy.id, key: fields.copy.key, nonce: fields.copy.nonce, chunks: fields.copy.chunks, bytes: fields.copy.bytes, sha256: fields.copy.sha256 } : fields.copy,
+    at: fields.at === undefined ? nowIso() : fields.at
+  }
+}
+
+const CLAIM_FIELDS = Object.freeze(['kind', 'id', 'copy', 'for', 'by', 'at', 'to', 'from'])
+
+// { kind: 'claim', id?, copy, for, by, at?, to? }: to is the own key or
+// absent, `for` is written sorted. Any other field is refused, never dropped.
+function claimBody (fields, from) {
+  for (const k of Object.keys(fields)) {
+    if (!CLAIM_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+  }
+  return {
+    v: 8,
+    kind: DM_CLAIM_KIND,
+    id: fields.id === undefined ? newMessageId() : fields.id,
+    from,
+    to: fields.to === undefined ? from : fields.to,
+    copy: fields.copy,
+    for: Array.isArray(fields.for) ? fields.for.slice().sort() : fields.for,
+    by: fields.by,
     at: fields.at === undefined ? nowIso() : fields.at
   }
 }
@@ -655,7 +703,7 @@ function openInner (buf, ownKey, opts = {}) {
       if (buf[i] !== 0) return null
     }
     if (!hcrypto.verify(signed, sig, b4a.from(body.from, 'hex'))) return null
-    if (body.kind === 'ctl' || body.kind === DM_COPY_KIND) {
+    if (body.kind === 'ctl' || body.kind === DM_COPY_KIND || body.kind === DM_CLAIM_KIND) {
       if (body.from !== ownKey) return null
       return { ...body, ...extra, mine: true }
     }
@@ -803,8 +851,11 @@ module.exports = Object.freeze({
   DM_SIG_PREFIX_V5,
   DM_SIG_PREFIX_V6,
   DM_SIG_PREFIX_V7,
+  DM_SIG_PREFIX_V8,
   DM_VISIT_KIND,
   DM_COPY_KIND,
+  DM_CLAIM_KIND,
+  DM_CLAIM_FOR_MAX,
   DM_REACT_REV_MAX,
   DM_V3_TTL_MS,
   DM_V3_STALE_MS,
@@ -822,6 +873,7 @@ module.exports = Object.freeze({
   INNER_KEYS_V5,
   INNER_KEYS_V6,
   INNER_KEYS_V7,
+  INNER_KEYS_V8,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,

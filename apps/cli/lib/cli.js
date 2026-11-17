@@ -33,6 +33,8 @@ Comandos:
   account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
   account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
+  account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
+  account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -337,6 +339,9 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     // smaller budget could never reserve one legal frame. A literal, not a
     // require, so parsing stays cheap and deploy.test.js can compare it.
     frameMemory: optionalEnvInteger(env, 'VARANDA_FRAME_MEMORY', 8454144, 1073741824),
+    // 1 GiB to 1 PiB: 1 PiB = 2^50 stays a safe integer, and deploy.sh checks
+    // the same 16-digit range with 64-bit bash arithmetic.
+    storageBytes: optionalEnvInteger(env, 'VARANDA_STORAGE_BYTES', 1073741824, 1125899906842624),
     media: {
       maxInFlight: optionalEnvInteger(env, 'VARANDA_MEDIA_MAX_IN_FLIGHT', 1, 1024),
       rate: optionalEnvInteger(env, 'VARANDA_MEDIA_RATE', 1, 100000),

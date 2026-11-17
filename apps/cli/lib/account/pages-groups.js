@@ -52,7 +52,8 @@ const Hypercore = require('hypercore')
 const Corestore = require('corestore')
 const { WebSocket, createWebSocketStream } = require('ws')
 const storeLib = require('@varanda/core/lib/store')
-const { writeJsonAtomic, appendRecord, readAll, readBlocks, readHeldBlocks, openReplica } = storeLib
+const { appendRecord, readAll, readBlocks, readHeldBlocks, openReplica } = storeLib
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
@@ -236,6 +237,18 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     if (!guardOk()) throw fail('indisponivel')
   }
 
+  // A sidecar write with the lock asked again right before the rename
+  // (./guarded-write.js): a holder that lost it meanwhile leaves the file
+  // as the new holder wrote it, and the refusal is check()'s.
+  function writeChecked (file, obj) {
+    try {
+      writeGuarded(file, obj, 0o600, () => !failed && guard() === true)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
+      throw err
+    }
+  }
+
   function note (event, extra = {}) {
     try { log({ event: 'page-groups', ...extra, step: event }) } catch {}
   }
@@ -304,7 +317,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     } catch {}
     const kp = generateNoiseKeyPair()
     check()
-    writeJsonAtomic(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) }, 0o600)
+    writeChecked(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) })
     return kp
   }
 
@@ -1332,7 +1345,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     check()
     refuseSymlinkDir(groupsDir)
     fs.mkdirSync(pageDir(page), { recursive: true, mode: 0o700 })
-    writeJsonAtomic(stepsFile(page), { v: 1, steps: Object.fromEntries([...steps].sort((a, b) => a[0].localeCompare(b[0]))) }, 0o600)
+    writeChecked(stepsFile(page), { v: 1, steps: Object.fromEntries([...steps].sort((a, b) => a[0].localeCompare(b[0]))) })
   }
 
   function endStep (page, steps, G) {

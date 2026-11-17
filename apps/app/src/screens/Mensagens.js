@@ -23,6 +23,8 @@ import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../d
 import { pagesDm, pagesDmActivate, pagesDmAdopt, pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPeers } from '../pages'
 import { PAGE_DM_ACTIVATE_TEXT, PAGE_DM_ACTIVATE_TITLE, PAGE_DM_ASK_OWNER, PAGE_DM_CONFLICT, PAGE_DM_ROTATE_TEXT, PAGE_DM_ROTATE_TITLE, PAGE_DM_ROTATING, PAGE_DM_BLOCKS_FAILED, PAGE_KEYS_IDLE, blockPeersLine, legacyBundleOf, legacyCardLabel, pageDmState, pageKeyText, pageKeysOf, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
+import { isBusy, readRetryingBusy } from '../busyRetry'
+import { diaryPeekSlots } from '../engagement'
 import { OLD_KEY_NOTE, OLD_KEY_TITLE, oldThreadClient } from '../pageOldKeys'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { ConversationRow } from '../ui/ConversationRow'
@@ -92,15 +94,22 @@ function usePageKeys (pageKey) {
   const blocksAct = useAction()
   const gen = useRef(0)
   const lastRead = useRef(0)
+  const busyTimer = useRef(null)
+  useEffect(() => () => clearTimeout(busyTimer.current), [])
 
   const read = useCallback(async () => {
     const g = ++gen.current
     const n = nodeRef.current
     lastRead.current = Date.now()
+    clearTimeout(busyTimer.current)
+    // Peek slots taken: no failure card; one timed re-read, spaced by KEYS_REREAD_MS, unless a newer read started.
+    const later = () => { busyTimer.current = setTimeout(() => { if (g === gen.current) readRef.current() }, KEYS_REREAD_MS) }
     setState((s) => (s.page === pageKey && s.phase !== 'idle' ? s : { ...PAGE_KEYS_IDLE, page: pageKey, phase: 'reading' }))
     try {
       const member = await memberKeyOf(n.request, n)
-      const roster = await n.request('page.read', { key: pageKey })
+      const probe = await readRetryingBusy(() => n.request('page.read', { key: pageKey }), { slots: diaryPeekSlots, alive: () => g === gen.current })
+      if (probe.busy) return later()
+      const roster = probe.value
       const status = await pagesDmBoxRead(n, { member, page: pageKey })
       const owner = !!roster && roster.isOwner === true
       const kind = pageDmState(status, { owner })
@@ -109,6 +118,7 @@ function usePageKeys (pageKey) {
         try {
           await pagesDmAdopt(n, { page: pageKey, status })
         } catch (err) {
+          if (isBusy(err)) return later()
           if (g === gen.current) setState({ ...PAGE_KEYS_IDLE, page: pageKey, phase: 'failed', status, owner, roster, member, error: pageKeyText(err) || errorText(err) })
           return
         }
@@ -122,9 +132,12 @@ function usePageKeys (pageKey) {
       const peers = kind === 'share' ? await pagesDmLegacyPeers(n, { page: pageKey }) : []
       if (g === gen.current) setState({ page: pageKey, phase: kind, status, owner, roster, member, error: '', pending: peers.length, peers })
     } catch (err) {
+      if (isBusy(err)) return later()
       if (g === gen.current) setState({ ...PAGE_KEYS_IDLE, page: pageKey, phase: 'failed', error: pageKeyText(err) || errorText(err) })
     }
   }, [pageKey])
+  const readRef = useRef(read)
+  readRef.current = read
 
   useEffect(() => {
     setHoldOf(null)

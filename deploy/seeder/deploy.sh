@@ -416,7 +416,7 @@ conferir_antes() {
   # valor fora dela derrubaria o semeador só depois da troca, e a volta usa o
   # mesmo .env. A tabela é NOME:mínimo:máximo; o teste a compara com cli.js.
   for faixa in VARANDA_MAX_EXTERNAL:1:4096 VARANDA_MAX_SOCKETS:1:8192 \
-    VARANDA_FRAME_MEMORY:8454144:1073741824 \
+    VARANDA_FRAME_MEMORY:8454144:1073741824 VARANDA_STORAGE_BYTES:1073741824:1125899906842624 \
     VARANDA_MEDIA_MAX_IN_FLIGHT:1:1024 VARANDA_MEDIA_RATE:1:100000 VARANDA_MEDIA_BURST:1:100000 \
     VARANDA_INDEX_MAX_IN_FLIGHT:1:1024 VARANDA_INDEX_RATE:1:100000 VARANDA_INDEX_BURST:1:100000; do
     IFS=: read -r limite minimo maximo <<<"$faixa"
@@ -425,8 +425,9 @@ conferir_antes() {
     valor=$(sed -n "s/^[[:space:]]*${limite}[[:space:]]*=//p" "$env_file" | tail -n 1 | tr -d '\r' |
       sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
     [ -n "$valor" ] || continue
-    # No máximo dez dígitos: a comparação inteira do bash não transborda.
-    if ! [[ $valor =~ ^[1-9][0-9]{0,9}$ ]] || [ "$valor" -lt "$minimo" ] || [ "$valor" -gt "$maximo" ]; then
+    # No máximo dezesseis dígitos: o inteiro de 64 bits do bash compara até
+    # 9999999999999999 sem transbordar (VARANDA_STORAGE_BYTES chega a 1 PiB).
+    if ! [[ $valor =~ ^[1-9][0-9]{0,15}$ ]] || [ "$valor" -lt "$minimo" ] || [ "$valor" -gt "$maximo" ]; then
       log "$limite inválido em deploy/seeder/.env"
       exit 1
     fi

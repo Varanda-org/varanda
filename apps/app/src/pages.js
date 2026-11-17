@@ -21,7 +21,9 @@ import { buildRequest, readJson, formatNextChange } from './account.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 import { VIDEO_MIME } from './media/plan.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
-import { isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
+import * as actingStore from './actingAs.js'
+import { actingPageStopped, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
+import { oldPageKeys } from './pageOldKeys.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -853,30 +855,67 @@ export async function pagesDmForget (node, page) {
 }
 
 // The newest 'list' answer applied per account origin and member this
-// session (another origin's list never names this one's pages), and the
-// pages a forget was tried for (each once).
+// session (another origin's list never names this one's pages), the pages a
+// forget was tried for (each once), the pages whose move chain could not be
+// read (the next list read for that origin and member walks it again) and the
+// walks in flight.
 const listRuns = new Map()
 const forgetTried = new Set()
+const walkAgain = new Map()
+const walking = new Set()
 let listCalls = 0
 
 // The signed 'list' read. An answer newer than the last one applied for the
 // member also forgets, on this device, the keys of the pages it shows the
-// member no longer runs (pageSecrets.js pagesNoLongerRun); `also` names the
-// acting page and the pages the node flagged. A failed read forgets nothing.
+// member no longer runs (pageSecrets.js pagesNoLongerRun) and of the keys
+// those pages moved from (pageOldKeys.js); `also` names the acting page and
+// the pages the node flagged. A failed read forgets nothing.
 export async function pagesList (node, { member, also = [] } = {}) {
   const seq = ++listCalls
+  // Who the app acted as when this read started: an answer never ends an identity chosen after it.
+  const actedAs = actingStore.pageKey()
   const runKey = String(pagesOrigin(node)) + ' ' + member
   const data = await actAs(node, { member, action: 'list', page: '', op: {} })
   const last = listRuns.get(runKey)
   if (last !== undefined && last.seq > seq) return data
-  const out = pagesNoLongerRun(data, { before: last ? last.run : [], also, tried: forgetTried })
+  const before = [...(last ? last.run : []), ...(walkAgain.get(runKey) || [])]
+  const out = pagesNoLongerRun(data, { before, also, tried: forgetTried })
   if (out === null) return data
   listRuns.set(runKey, { seq, run: out.run })
-  for (const page of out.gone) {
+  // The device keeps acting as a page the member stopped running (closed, moved
+  // or removed as admin elsewhere) until this answer says otherwise.
+  if (actedAs !== null && actingPageStopped(data, actedAs)) actingStore.dropPage(actedAs)
+  walkAgain.delete(runKey)
+  const forget = (page) => {
     forgetTried.add(page)
     pagesDmForget(node, page).then((forgot) => {
       if (forgot && typeof node.clearPageMismatch === 'function') node.clearPageMismatch(page)
     }).catch(() => {})
+  }
+  const call = signer(node)
+  const closed = pagesRun(data).closed
+  for (const page of out.gone) {
+    // A closed page is not walked: the keys it moved from are still listed to
+    // its roster. A core node holds no page keys.
+    if (call === null || pagesDmCoreOnly(node) || closed.includes(page)) {
+      forget(page)
+      continue
+    }
+    if (walking.has(page)) continue
+    // The keys it moved from go with it unless still run: after a restart no
+    // earlier answer names them, and the service lists them to no one who
+    // lost the newest key. The chain is read before the page goes, so a
+    // failed read keeps the page (and the node's flag on it) for a retry.
+    walking.add(page)
+    oldPageKeys(call, page, { strict: true }).then((keys) => {
+      walking.delete(page)
+      const { run } = listRuns.get(runKey)
+      for (const k of [page, ...keys]) if (!run.includes(k) && !forgetTried.has(k)) forget(k)
+    }, () => {
+      walking.delete(page)
+      const later = walkAgain.get(runKey) || []
+      if (!later.includes(page)) walkAgain.set(runKey, [...later, page])
+    })
   }
   return data
 }

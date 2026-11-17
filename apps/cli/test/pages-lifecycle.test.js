@@ -314,7 +314,15 @@ async function setup (t, { pagesDelegate = null, pagesGroups = null, pagesNotice
     return { status: res.status, body: await res.json() }
   }
 
-  return { ctx, store, api, logs, newMember, start, sign, act, create, addAdmin, invite, close, move, avatar, restart }
+  // The owner's signed roster without `who`.
+  async function removeAdmin (owner, page, who) {
+    const { nonce } = await start(owner, 'remove')
+    const row = ctx.pagesStore.get(page)
+    const record = roster(owner, page, { gen: row.gen + 1, owner: owner.hex, admins: row.admins.filter((a) => a !== who.hex), prev: row.rosterSeq }, nonce)
+    return api('POST', '/account/pages/remove', { member: owner.hex, nonce, page, record })
+  }
+
+  return { ctx, store, api, logs, newMember, start, sign, act, create, addAdmin, removeAdmin, invite, close, move, avatar, restart }
 }
 
 test('pages lifecycle: close, move, successor and delegate recipients', async (t) => {
@@ -438,6 +446,41 @@ test('pages lifecycle: close, move, successor and delegate recipients', async (t
   const other = member()
   await ctx.pagesStore.setDelegate(other.hex, { diary: 'ef'.repeat(32), length: 3, termsVersion: TERMS_VERSION - 1 })
   t.is((await s.invite(bia, D, other)).body.error, 'nao-vinculado', 'a delegate on older terms is not')
+})
+
+test('pages lifecycle: an admin removed from K2 after a move gets nothing of K1', async (t) => {
+  t.timeout(300000)
+  const pagesNotices = { read: async () => ({ notices: [], next: null, incomplete: false, activity: [] }) }
+  const s = await setup(t, { pagesNotices })
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const caio = await s.newMember('caio')
+  const K1 = await s.create(ana, 'padaria')
+  await s.addAdmin(ana, K1, bia)
+  await s.addAdmin(ana, K1, caio)
+  const moved = await s.move(ana, K1)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  const K2 = moved.to
+  t.is((await s.act(bia, 'status', K1, {})).body.movedTo, K2, 'before the remove, K1 answers its admin')
+  const rem = await s.removeAdmin(ana, K2, bia)
+  t.is(rem.status, 200, JSON.stringify(rem.body))
+
+  const listed = (r) => [...r.body.owned, ...r.body.admin].map((p) => p.page)
+  const ofBia = await s.act(bia, 'list', '', {})
+  t.is(ofBia.status, 200, JSON.stringify(ofBia.body))
+  t.alike(listed(ofBia), [], 'the removed admin is listed neither K1 nor K2')
+  for (const action of ['status', 'follows']) {
+    const r = await s.act(bia, action, K1, {})
+    t.is(r.body.error, 'sem-permissao', action + ' of K1 refuses the removed admin')
+  }
+  t.is((await s.act(bia, 'notices', K1, {})).body.error, 'movida', 'notices of K1 answer movida')
+  t.is((await s.act(bia, 'notices', K2, {})).body.error, 'sem-permissao', 'notices of K2 refuse the removed admin')
+  const ofCaio = await s.act(caio, 'list', '', {})
+  t.is(ofCaio.body.admin.find((p) => p.page === K1).movedTo, K2, 'a remaining admin still sees K1 as moved')
+  t.is((await s.act(caio, 'status', K1, {})).body.movedTo, K2, 'and reads its status')
+  t.is((await s.act(caio, 'follows', K1, {})).status, 200)
+  t.is((await s.act(ana, 'status', K1, {})).body.movedTo, K2, 'the owner reads K1')
+  t.is((await s.act(ana, 'list', '', {})).body.owned.find((p) => p.page === K1).movedTo, K2)
 })
 
 test('pages lifecycle: a move that failed after the writer step finishes on its resend, and the lifecycle cap charges a use once', async (t) => {

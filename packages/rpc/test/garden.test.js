@@ -600,3 +600,268 @@ test('saveOrdinal: a clock whose Brasília day starts below the Date range answe
   t.is(garden.saveOrdinal(prev(2, T0 - H), T0), 3, 'n + 1')
   t.is(garden.saveOrdinal(prev(6, T0 - H), T0), null, 'past the max')
 })
+
+// Phase 2: Enfeites and the Barraquinha. 12:00 Brasília on a Saturday.
+const SAT = Date.parse('2026-11-14T15:00:00.000Z')
+const SAT_START = Date.parse('2026-11-14T03:00:00.000Z')
+const WEEK = 7 * 24 * H
+const gift = (to, item, atMs) => ({ type: 'garden-gift', to, item, at: iso(atMs) })
+const take = (from, seq, atMs) => ({ type: 'garden-take', from, seq, at: iso(atMs) })
+const decor = (items, atMs = SAT) => ({ type: 'garden-decor', items, at: iso(atMs) })
+
+test('phase 2 constants', (t) => {
+  t.alike(garden.GARDEN_DECOR_IDS, ['rede', 'varal', 'gato', 'pisca'])
+  t.ok(Object.isFrozen(garden.GARDEN_DECOR_IDS))
+  t.alike([
+    garden.GARDEN_STALL_WEEKDAY, garden.GARDEN_STALL_WINDOW_MS, garden.GARDEN_GIFTS_DAILY_MAX,
+    garden.GARDEN_TAKES_DAILY_MAX, garden.GARDEN_GIFT_ROWS, garden.GARDEN_SHELF_ROWS, garden.GARDEN_SHELF_SHOWN
+  ], [6, 604800000, 3, 6, 12, 8, 4])
+  t.is(garden.GARDEN_STALL_WINDOW_MS, 7 * garden.GARDEN_DAY_MS)
+  t.is(garden.GARDEN_TAKE_ROWS, 54)
+  t.is(garden.GARDEN_TAKE_ROWS, garden.GARDEN_TAKES_DAILY_MAX * 9, 'six takes a day across the nine Brasília days the eight-day take window touches')
+  t.alike(garden.DECOR_KEYS, ['type', 'items', 'at'])
+  t.alike(garden.GIFT_KEYS, ['type', 'to', 'item', 'at'])
+  t.alike(garden.TAKE_KEYS, ['type', 'from', 'seq', 'at'])
+  t.ok([garden.DECOR_KEYS, garden.GIFT_KEYS, garden.TAKE_KEYS].every((k) => Object.isFrozen(k)))
+})
+
+test('isDecorId, isDecor and isGiftItem', (t) => {
+  for (const id of garden.GARDEN_DECOR_IDS) t.ok(garden.isDecorId(id), id)
+  for (const bad of ['Rede', 'vaso', '', 'toString', null, 0, ['rede']]) t.absent(garden.isDecorId(bad), String(bad))
+  t.ok(garden.isDecor([]), 'no enfeite')
+  t.ok(garden.isDecor(['rede', 'varal', 'gato', 'pisca']), 'all four in order')
+  t.ok(garden.isDecor(['varal', 'pisca']), 'a gap is fine')
+  t.absent(garden.isDecor(['varal', 'rede']), 'out of order')
+  t.absent(garden.isDecor(['gato', 'gato']), 'a duplicate')
+  t.absent(garden.isDecor(['rede', 'vaso']), 'an unknown id')
+  t.absent(garden.isDecor(['rede', 'varal', 'gato', 'pisca', 'pisca']), 'length 5')
+  for (const bad of [null, undefined, 'rede', { 0: 'rede', length: 1 }, 3]) t.absent(garden.isDecor(bad), 'non-array ' + String(bad))
+  // eslint-disable-next-line no-sparse-arrays
+  t.absent(garden.isDecor(['rede', , 'gato']), 'sparse')
+  t.absent(garden.isDecor(new Proxy(['rede'], { ownKeys () { throw new Error('boom') } })), 'a throwing proxy')
+  const getter = ['rede']
+  Object.defineProperty(getter, 0, { enumerable: true, get () { return 'rede' } })
+  t.absent(garden.isDecor(getter), 'an index getter')
+  for (const p of garden.GARDEN_PLANTS) t.ok(garden.isGiftItem(p.id), p.id)
+  for (const bad of ['rede', 'Tomate', null, 1]) t.absent(garden.isGiftItem(bad), String(bad))
+})
+
+test('stallDay: Saturdays in Brasília', (t) => {
+  t.absent(garden.stallDay(Date.parse('2026-11-14T02:59:59.999Z')), 'Friday night in Brasília')
+  t.ok(garden.stallDay(Date.parse('2026-11-14T03:00:00.000Z')), 'Saturday from 03:00Z')
+  t.ok(garden.stallDay(Date.parse('2026-11-15T02:59:59.999Z')), 'the last instant of Saturday')
+  t.absent(garden.stallDay(Date.parse('2026-11-15T03:00:00.000Z')), 'Sunday')
+  for (const bad of [NaN, Infinity, '1', null, undefined, 9e15, -8.64e15]) t.absent(garden.stallDay(bad), String(bad))
+})
+
+test('offerListable: a Saturday gift for a week from the start of its day', (t) => {
+  const at = Date.parse('2026-10-31T03:00:00.000Z')
+  t.ok(garden.offerListable(at, Date.parse('2026-11-05T15:00:00.000Z')), 'mid week')
+  t.ok(garden.offerListable(at, Date.parse('2026-11-07T02:59:59.999Z')), 'the last instant')
+  t.absent(garden.offerListable(at, Date.parse('2026-11-07T03:00:00.000Z')), 'the next Saturday')
+  t.ok(garden.offerListable(at, at), 'at the gift')
+  t.absent(garden.offerListable(Date.parse('2026-10-30T15:00:00.000Z'), Date.parse('2026-11-01T15:00:00.000Z')), 'a Friday date')
+  t.ok(garden.offerListable(SAT, SAT - 24 * H), 'at the future tolerance')
+  t.absent(garden.offerListable(SAT, SAT - 24 * H - 1), 'more than 24 h ahead')
+  for (const [a, n] of [[NaN, SAT], [SAT, NaN], ['1', SAT], [SAT, null], [9e15, SAT]]) t.absent(garden.offerListable(a, n), String([a, n]))
+})
+
+test('applyGive: a ripe pot empties and names the mimo', (t) => {
+  const state = { type: 'garden-state', pots: six(pot('manjericao', T0), pot('tomate', T0)), n: 1, at: iso(T0) }
+  const before = JSON.stringify(state)
+  const out = garden.applyGive(state, 0, T0 + 6 * H)
+  t.alike(out, { ok: true, state: { pots: six(null, pot('tomate', T0)) }, item: 'manjericao' })
+  t.is(JSON.stringify(state), before, 'the input is unchanged')
+  out.state.pots[1].w = 9
+  t.is(state.pots[1].w, 0, 'the result shares nothing with the input')
+  t.alike(garden.applyGive(state, 0, T0 + 6 * H - 1), { ok: false, reason: 'not-ripe' })
+  t.ok(garden.applyGive(state, 0, T0 + 3 * H, { received: [3, 0, 0, 0, 0, 0] }).ok, 'helps count as in a harvest')
+  t.ok(garden.applyGive(state, 0, T0 + 4.5 * H, { given: [3, 0, 0, 0, 0, 0] }).ok, 'given counts as in a harvest')
+  t.is(garden.applyGive(state, 1, T0 + 3 * H, { received: [3, 0, 0, 0, 0, 0] }).reason, 'not-ripe', 'the counts of another pot')
+  t.is(garden.applyGive(state, 2, T0 + 6 * H).reason, 'empty')
+  t.is(garden.applyGive(null, 0, T0).reason, 'empty', 'no state is six empty pots')
+  for (const bad of [6, -1, 1.5, '0', null]) t.is(garden.applyGive(state, bad, T0 + 6 * H).reason, 'pot', String(bad))
+  t.is(garden.applyGive({ pots: six(pot('tomate', T0 + H)) }, 0, T0).reason, 'state', 'a state watered after now')
+  t.is(garden.applyGive({}, 0, T0).reason, 'state')
+  t.is(garden.applyGive('x', 0, T0).reason, 'state')
+  t.is(garden.applyGive({}, 9, T0).reason, 'state', 'state before pot')
+  for (const bad of [NaN, '1', null, undefined, Infinity]) t.is(garden.applyGive(state, 0, bad).reason, 'invalid', String(bad))
+  t.is(JSON.stringify(state), before, 'refusals change nothing')
+})
+
+test('giveAllowed: reasons', (t) => {
+  const follows = new Set([B, C])
+  const base = { self: OWNER, to: B, follows, own: [], now: SAT }
+  t.alike(garden.giveAllowed(base), { ok: true })
+  t.alike(garden.giveAllowed({ ...base, to: OWNER }), { ok: false, reason: 'self' })
+  t.alike(garden.giveAllowed({ ...base, to: D }), { ok: false, reason: 'not-following' })
+  t.alike(garden.giveAllowed({ ...base, follows: [B] }), { ok: false, reason: 'not-following' }, 'follows must be a Set')
+  t.alike(garden.giveAllowed({ ...base, follows: new Proxy(new Set([B]), {}) }), { ok: false, reason: 'not-following' }, 'a proxied Set never throws')
+  t.alike(garden.giveAllowed({ ...base, now: SAT + 24 * H }), { ok: false, reason: 'closed' }, 'Sunday')
+  t.alike(garden.giveAllowed({ ...base, now: SAT_START - 1 }), { ok: false, reason: 'closed' }, 'Friday night')
+  t.alike(garden.giveAllowed({ ...base, now: SAT_START }), { ok: true }, 'Saturday from 03:00Z')
+  t.alike(garden.giveAllowed({ ...base, own: [{ to: B, at: iso(SAT - H) }] }), { ok: false, reason: 'same-day' })
+  t.alike(garden.giveAllowed({ ...base, own: [{ to: B, at: SAT - H }] }), { ok: false, reason: 'same-day' }, 'a row in ms')
+  t.alike(garden.giveAllowed({ ...base, own: [{ to: B, at: iso(SAT_START - 1) }] }), { ok: true }, 'yesterday in Brasília')
+  t.alike(garden.giveAllowed({ ...base, own: [{ to: B, at: iso(SAT + WEEK) }] }), { ok: false, reason: 'same-day' }, 'a clock turned back: a later row counts as today')
+  const three = [C, D, E].map((to) => ({ to, at: iso(SAT - H) }))
+  t.alike(garden.giveAllowed({ ...base, own: three }), { ok: false, reason: 'daily' })
+  t.alike(garden.giveAllowed({ ...base, own: three.slice(0, 2) }), { ok: true })
+  t.alike(garden.giveAllowed({ ...base, own: three.map((r) => ({ ...r, at: iso(SAT + 4 * WEEK) })) }), { ok: false, reason: 'daily' }, 'later rows still use the budget')
+  t.alike(garden.giveAllowed({ ...base, own: three.map((r) => ({ ...r, at: iso(SAT - WEEK) })) }), { ok: true }, 'last Saturday frees the budget')
+  for (const bad of [{ ...base, now: NaN }, { ...base, now: -8.64e15 }, { ...base, self: 'x' }, { ...base, to: null }, { ...base, own: 'x' }, { ...base, own: undefined }, null]) {
+    t.alike(garden.giveAllowed(bad), { ok: false, reason: 'invalid' })
+  }
+})
+
+test('takeAllowed: reasons', (t) => {
+  const g = gift(OWNER, 'tomate', SAT - H)
+  const base = { self: OWNER, from: B, seq: 7, gift: g, own: [], now: SAT }
+  t.alike(garden.takeAllowed(base), { ok: true }, 'no follow is needed')
+  t.alike(garden.takeAllowed({ ...base, from: OWNER }), { ok: false, reason: 'self' })
+  t.alike(garden.takeAllowed({ ...base, gift: gift(C, 'tomate', SAT - H) }), { ok: false, reason: 'not-found' }, 'a gift to someone else')
+  t.alike(garden.takeAllowed({ ...base, gift: null }), { ok: false, reason: 'not-found' }, 'no gift')
+  t.alike(garden.takeAllowed({ ...base, gift: { ...g, extra: 1 } }), { ok: false, reason: 'not-found' }, 'an extra key')
+  t.alike(garden.takeAllowed({ ...base, gift: { ...g, type: 'garden-help' } }), { ok: false, reason: 'not-found' }, 'another type')
+  t.alike(garden.takeAllowed({ ...base, gift: { ...g, item: 'rosa' } }), { ok: false, reason: 'not-found' }, 'an unknown item')
+  t.alike(garden.takeAllowed({ ...base, gift: { ...g, at: g.at.replace('.000Z', 'Z') } }), { ok: false, reason: 'not-found' }, 'a non-canonical at')
+  t.alike(garden.takeAllowed({ ...base, now: SAT_START + WEEK }), { ok: false, reason: 'expired' }, 'a week later')
+  t.alike(garden.takeAllowed({ ...base, now: SAT_START + WEEK - 1 }), { ok: true }, 'the last instant of the week')
+  t.alike(garden.takeAllowed({ ...base, gift: gift(OWNER, 'tomate', SAT - 24 * H) }), { ok: false, reason: 'expired' }, 'a Friday gift')
+  t.alike(garden.takeAllowed({ ...base, now: SAT - H - 24 * H - 1 }), { ok: false, reason: 'expired' }, 'a gift more than 24 h ahead')
+  t.alike(garden.takeAllowed({ ...base, own: [{ from: B, seq: 7, at: iso(SAT - 3 * 24 * H) }] }), { ok: false, reason: 'taken' })
+  t.alike(garden.takeAllowed({ ...base, own: [{ from: B, seq: 7, at: 'x' }] }), { ok: false, reason: 'taken' }, 'a row with an unreadable at still marks the gift')
+  t.alike(garden.takeAllowed({ ...base, own: [{ from: B, seq: 8, at: iso(SAT - 3 * 24 * H) }, { from: C, seq: 7, at: iso(SAT - 3 * 24 * H) }] }), { ok: true }, 'another gift')
+  const full = [1, 2, 3, 4, 5, 6].map((seq) => ({ from: C, seq, at: iso(SAT - H) }))
+  t.alike(garden.takeAllowed({ ...base, own: full }), { ok: false, reason: 'daily' })
+  t.alike(garden.takeAllowed({ ...base, own: full.slice(0, 5) }), { ok: true })
+  t.alike(garden.takeAllowed({ ...base, own: full.map((r) => ({ ...r, at: SAT - H })) }), { ok: false, reason: 'daily' }, 'rows in ms')
+  t.alike(garden.takeAllowed({ ...base, own: full.map((r) => ({ ...r, at: iso(SAT + 48 * H) })) }), { ok: false, reason: 'daily' }, 'a clock turned back: later rows count as today')
+  t.alike(garden.takeAllowed({ ...base, own: full.map((r) => ({ ...r, at: iso(SAT_START - 1) })) }), { ok: true }, 'yesterday frees the budget')
+  for (const bad of [{ ...base, now: NaN }, { ...base, now: -8.64e15 }, { ...base, self: 'x' }, { ...base, from: null }, { ...base, seq: 0 }, { ...base, seq: '7' }, { ...base, own: 'x' }, { ...base, own: undefined }, null]) {
+    t.alike(garden.takeAllowed(bad), { ok: false, reason: 'invalid' })
+  }
+})
+
+test('foldDecor: the live enfeites', (t) => {
+  const items = ['rede', 'gato']
+  const none = { items: [] }
+  t.alike(garden.foldDecor({ record: decor(items), seq: 5, since: 4, now: SAT }), { items })
+  t.alike(garden.foldDecor({ record: decor(items), seq: 4, since: 4, now: SAT }), none, 'seq equal to since')
+  t.alike(garden.foldDecor({ record: decor(items), seq: 3, since: 4, now: SAT }), none, 'seq below since')
+  t.alike(garden.foldDecor({ record: decor(items), seq: 5, now: SAT }), none, 'since missing')
+  for (const since of [0, -1, 1.5, '4', null]) t.alike(garden.foldDecor({ record: decor(items), seq: 5, since, now: SAT }), none, 'since ' + String(since))
+  t.alike(garden.foldDecor({ record: decor(items), seq: '5', since: 4, now: SAT }), none, 'a bad seq')
+  t.alike(garden.foldDecor({ record: decor(items, SAT + 24 * H), seq: 5, since: 4, now: SAT }), { items }, 'at the future tolerance')
+  t.alike(garden.foldDecor({ record: decor(items, SAT + 24 * H + 1), seq: 5, since: 4, now: SAT }), none, 'past the future tolerance')
+  t.alike(garden.foldDecor({ record: decor(['gato', 'rede']), seq: 5, since: 4, now: SAT }), none, 'non-canonical items')
+  t.alike(garden.foldDecor({ record: { ...decor(items), extra: 1 }, seq: 5, since: 4, now: SAT }), none, 'an extra key')
+  t.alike(garden.foldDecor({ record: { ...decor(items), type: 'garden' }, seq: 5, since: 4, now: SAT }), none, 'another type')
+  t.alike(garden.foldDecor({ record: { ...decor(items), at: '2026-11-14T15:00:00Z' }, seq: 5, since: 4, now: SAT }), none, 'a non-canonical at')
+  t.alike(garden.foldDecor({ record: decor(items), seq: 5, since: 4, now: NaN }), none, 'no clock')
+  t.alike(garden.foldDecor(null), none)
+  const record = decor(['rede'])
+  garden.foldDecor({ record, seq: 5, since: 4, now: SAT }).items.push('gato')
+  t.alike(record.items, ['rede'], 'the result is a copy')
+})
+
+test('foldPending: open mimos from followers', (t) => {
+  const offer = (author, seq, atMs, extra = {}) => ({ author, seq, record: gift(OWNER, 'tomate', atMs), follow: follow(), ...extra })
+  const fold = (gifts, taken = [], now = SAT) => garden.foldPending({ owner: OWNER, gifts, taken, now }).rows
+  t.alike(fold([offer(B, 3, SAT - H), offer(C, 9, SAT)]), [
+    { author: C, seq: 9, item: 'tomate', at: iso(SAT) },
+    { author: B, seq: 3, item: 'tomate', at: iso(SAT - H) }
+  ], 'newest first')
+  t.alike(fold([offer(C, 2, SAT), offer(B, 3, SAT)]).map((r) => r.author), [B, C], 'then author ascending')
+  t.alike(fold([offer(B, 1, SAT, { follow: null })]), [], 'no follow')
+  t.alike(fold([offer(B, 1, SAT, { follow: follow(OWNER, false) })]), [], 'an unfollow')
+  t.alike(fold([offer(B, 1, SAT, { follow: follow(C) })]), [], 'a follow of someone else')
+  t.alike(fold([offer(B, 1, SAT - 24 * H)]), [], 'a non-Saturday date')
+  t.alike(fold([offer(OWNER, 1, SAT)]), [], 'from the owner')
+  t.alike(fold([{ ...offer(B, 1, SAT), record: gift(C, 'tomate', SAT) }]), [], 'a gift to someone else')
+  t.alike(fold([{ ...offer(B, 1, SAT), record: { ...gift(OWNER, 'tomate', SAT), extra: 1 } }]), [], 'an extra key')
+  t.alike(fold([offer(B, 0, SAT)]), [], 'seq 0')
+  t.alike(fold([offer(B, 1, SAT)], [], SAT_START + WEEK), [], 'past its week')
+  t.alike(fold([offer(B, 1, SAT)], [], SAT - 24 * H - 1), [], 'more than 24 h ahead')
+  t.alike(fold([offer(B, 5, SAT), offer(B, 4, SAT - H)]).map((r) => r.seq), [4], 'a second same-day gift: one per giver per day, the lowest seq')
+  t.alike(fold([offer(B, 5, SAT), offer(B, 4, SAT - H)], [{ from: B, seq: 4 }]), [], 'the day is picked before the taken filter, so the second gift never surfaces')
+  t.alike(fold([offer(B, 5, SAT), offer(C, 4, SAT)], [{ from: B, seq: 5 }]).map((r) => r.author), [C], 'a taken pair is dropped')
+  t.is(fold([offer(B, 5, SAT)], [{ from: C, seq: 5 }, { from: B, seq: 6 }]).length, 1, 'another pair is not')
+  t.is(fold([B, C, D, E].map((a, i) => offer(a, i + 1, SAT))).length, 4, 'the daily cap is the writer check')
+  const many = []
+  for (let i = 0; i < 20; i++) many.push(offer(i.toString(16).padStart(64, '0'), 1, SAT - i * 1000))
+  const capped = fold(many)
+  t.is(capped.length, 12, 'capped at GARDEN_GIFT_ROWS')
+  t.is(capped[0].at, iso(SAT))
+  const ahead = []
+  for (let i = 0; i < 12; i++) ahead.push(offer(i.toString(16).padStart(64, '1'), 1, SAT + (i + 1) * 1000))
+  const mixed = fold([...ahead, offer(B, 7, SAT - H)])
+  t.is(mixed.length, 12)
+  t.alike(mixed[0], { author: B, seq: 7, item: 'tomate', at: iso(SAT - H) }, 'a row dated after now never pushes one dated before it out of the cut')
+  t.is(mixed[1].at, iso(SAT + 1000), 'rows dated after now: nearest to now first')
+  const TUE = SAT + 3 * 24 * H
+  const lastInstant = SAT_START + 24 * H - 1
+  const backdated = []
+  for (let i = 0; i < 12; i++) backdated.push(offer(i.toString(16).padStart(64, '2'), 1, lastInstant))
+  const flood = [...backdated, offer(B, 7, SAT - H)]
+  const withFollowed = (followed) => garden.foldPending({ owner: OWNER, gifts: flood, taken: [], now: TUE, followed }).rows
+  t.ok(fold(flood, [], TUE).every((r) => r.author !== B), 'without followed, twelve gifts backdated to the end of Saturday fill the cut')
+  const ranked = withFollowed(new Set([B]))
+  t.is(ranked.length, 12)
+  t.alike(ranked[0], { author: B, seq: 7, item: 'tomate', at: iso(SAT - H) }, 'a giver the owner follows ranks before every giver the owner does not follow')
+  t.alike(ranked.slice(1).map((r) => r.at), Array(11).fill(iso(lastInstant)), 'then the date order')
+  t.alike(withFollowed(new Set([B, backdated[0].author])).slice(0, 2).map((r) => r.author), [backdated[0].author, B], 'inside the followed group, the date order')
+  const revoked = Proxy.revocable(new Set([B]), {})
+  revoked.revoke()
+  const bad = [revoked.proxy, new Proxy(new Set([B]), {}), [B], B, { has: () => true }, null]
+  for (const followed of bad) t.alike(withFollowed(followed), fold(flood, [], TUE), 'an unreadable followed set reads as empty and never throws')
+  const big = []
+  for (let i = 0; i < 1025; i++) big.push(offer(B, i + 1, SAT))
+  t.alike(fold(big), [], '1025 rows count nothing')
+  t.is(fold(big.slice(0, 1024)).length, 1, '1024 rows are read')
+  t.alike(fold([offer(B, 1, SAT)], 'x'), [], 'an unreadable taken list shows nothing')
+  t.alike(garden.foldPending({ owner: 'x', gifts: [offer(B, 1, SAT)], taken: [], now: SAT }).rows, [])
+  t.alike(garden.foldPending({ owner: OWNER, gifts: [offer(B, 1, SAT)], taken: [], now: NaN }).rows, [])
+  t.alike(garden.foldPending(null), { rows: [] })
+  const hostile = offer(C, 2, SAT)
+  Object.defineProperty(hostile.record, 'item', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(fold([hostile, offer(B, 1, SAT)]).length, 1, 'a hostile record is skipped, the others count')
+})
+
+test('foldShelf: the mimos the owner took', (t) => {
+  const tk = (seq, from, gseq, giftAt, extra = {}) => ({ seq, record: take(from, gseq, SAT), gift: gift(OWNER, 'tomate', giftAt), ...extra })
+  const fold = (takes, since = 2, now = SAT) => garden.foldShelf({ owner: OWNER, since, takes, now }).rows
+  t.alike(fold([tk(5, B, 7, SAT - H), tk(6, C, 9, SAT)]), [
+    { seq: 6, from: C, gseq: 9, item: 'tomate', at: iso(SAT) },
+    { seq: 5, from: B, gseq: 7, item: 'tomate', at: iso(SAT - H) }
+  ], 'newest gift first, no follow needed')
+  t.alike(fold([tk(5, C, 9, SAT), tk(6, B, 7, SAT)]).map((r) => r.from), [B, C], 'then giver ascending')
+  t.alike(fold([tk(5, B, 7, SAT, { gift: gift(C, 'tomate', SAT) })]), [], 'a gift to another owner')
+  t.alike(fold([tk(5, B, 7, SAT, { gift: null })]), [], 'a missing gift')
+  t.alike(fold([tk(2, B, 7, SAT)]), [], 'a take at since')
+  t.alike(fold([tk(1, B, 7, SAT)]), [], 'a take below since')
+  t.alike(garden.foldShelf({ owner: OWNER, takes: [tk(5, B, 7, SAT)], now: SAT }).rows, [], 'no since')
+  t.alike(fold([tk(5, B, 7, SAT)], 0), [], 'since 0')
+  t.alike(fold([tk(5, B, 7, SAT)], 2, SAT_START + WEEK), [], 'an expired gift')
+  t.alike(fold([tk(5, B, 7, SAT - 24 * H)]), [], 'a Friday gift')
+  t.alike(fold([tk(5, OWNER, 7, SAT)]), [], 'a take from the owner')
+  t.alike(fold([tk(5, B, 7, SAT, { record: take(B, 7, SAT + 24 * H + 1) })]), [], 'a take past the future tolerance')
+  t.alike(fold([tk(5, B, 7, SAT, { record: { ...take(B, 7, SAT), extra: 1 } })]), [], 'a take with an extra key')
+  t.alike(fold([tk(5, B, 7, SAT, { record: { ...take(B, 7, SAT), type: 'garden-gift' } })]), [], 'another type')
+  t.alike(fold([tk(5, B, 7, SAT, { record: take(B, 0, SAT) })]), [], 'a gift seq 0')
+  t.alike(fold([tk(6, B, 7, SAT), tk(5, B, 7, SAT)]).map((r) => r.seq), [5], 'one row per gift, the lowest take seq')
+  t.alike(fold([tk(5, B, 8, SAT), tk(6, B, 7, SAT - H)]).map((r) => r.gseq), [7], 'one per giver per day, the lowest gift seq')
+  const seven = [1, 2, 3, 4, 5, 6, 7].map((i) => tk(10 + i, i.toString(16).padStart(64, '0'), 1, SAT))
+  t.is(fold(seven).length, 7, 'the daily take cap is the writer check')
+  const many = []
+  for (let i = 0; i < 12; i++) many.push(tk(10 + i, i.toString(16).padStart(64, '0'), 1, SAT - i * 1000))
+  t.is(fold(many).length, 8, 'capped at GARDEN_SHELF_ROWS')
+  const big = []
+  for (let i = 0; i < 1025; i++) big.push(tk(10 + i, B, 7, SAT))
+  t.alike(fold(big), [], '1025 rows count nothing')
+  t.is(fold(big.slice(0, garden.GARDEN_TAKE_ROWS)).length, 1, 'GARDEN_TAKE_ROWS rows are read')
+  t.alike(fold(big.slice(0, garden.GARDEN_TAKE_ROWS + 1)), [], 'one row past GARDEN_TAKE_ROWS counts nothing')
+  t.alike(garden.foldShelf({ owner: 'x', since: 2, takes: [tk(5, B, 7, SAT)], now: SAT }).rows, [])
+  t.alike(garden.foldShelf({ owner: OWNER, since: 2, takes: [tk(5, B, 7, SAT)], now: NaN }).rows, [])
+  t.alike(garden.foldShelf(null), { rows: [] })
+})
