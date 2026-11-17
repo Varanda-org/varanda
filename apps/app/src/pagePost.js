@@ -1,19 +1,26 @@
 // A page post, reply or quote: the same media and link preview a person's
-// post carries. A video and a preview cannot travel together. No I/O of its
-// own; the screen injects the upload.
+// post carries, or (a root post only) a poll or an event. A video and a
+// preview cannot travel together. No I/O of its own; the screen injects the
+// upload.
 
 import { readyVideo } from './videoCompose.js'
 import { pageError } from './pages.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 
 // { text } always. media when it is a non-empty array. preview when it is
-// not null. Media with a preview is pedido-invalido: no record carries both.
-export function pagePostOp ({ text, media = null, preview = null }) {
+// not null. poll (the bare options array) or event (the event object) when
+// not null. Media with a preview, and a poll or an event with media, a
+// preview or each other, are pedido-invalido: no record carries both.
+export function pagePostOp ({ text, media = null, preview = null, poll = null, event = null }) {
   const hasMedia = Array.isArray(media) && media.length > 0
   if (hasMedia && preview !== null) throw pageError('pedido-invalido')
+  if (poll !== null && event !== null) throw pageError('pedido-invalido')
+  if ((poll !== null || event !== null) && (hasMedia || preview !== null)) throw pageError('pedido-invalido')
   const op = { text }
   if (hasMedia) op.media = media
   if (preview !== null) op.preview = preview
+  if (poll !== null) op.poll = poll
+  if (event !== null) op.event = event
   return op
 }
 

@@ -361,6 +361,21 @@ test('op shapes of like, delete, profile, rename, follow and the reads are sent 
   }
 })
 
+test('choice: pageChoiceOp builds { to, pick } and pagesChoice posts it to the choice route', async (t) => {
+  const { pageChoiceOp, pagesChoice } = await load()
+  t.alike(pageChoiceOp(M + ':4', 2), { to: M + ':4', pick: 2 })
+  t.alike(pageChoiceOp(M + ':4', null), { to: M + ':4', pick: null })
+  t.alike(pageChoiceOp(M + ':4'), { to: M + ':4', pick: null }, 'an absent pick withdraws')
+  t.alike(pageChoiceOp(M + ':4', -1), { to: M + ':4', pick: -1 }, 'a bad pick is not turned into a withdrawal')
+  const calls = stub(t, flow(() => json(200, { seq: 9 })))
+  const node = fakeNode()
+  const data = await pagesChoice(node, { member: M, page: P, to: M + ':4', pick: 1 })
+  t.is(data.seq, 9)
+  t.ok(calls[1].url.endsWith('/account/pages/choice'))
+  t.alike(body(calls[1]).op, { to: M + ':4', pick: 1 })
+  t.is(node.signs[0].params.action, 'choice')
+})
+
 test('offer-cancel is no action: the cancel is the signed offer record', async (t) => {
   const { actAs } = await load()
   const calls = stub(t, flow(() => json(200, {})))

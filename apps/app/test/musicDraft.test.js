@@ -1009,9 +1009,9 @@ test('a page music title with a listed term is refused before any upload or sign
   t.ok(r.state.errors.at(-1).includes('título ou no artista da música'))
 })
 
-test('a page never queues, polls or builds events', (t) => {
+test('a page never queues, but polls and builds events like a person', (t) => {
   t.ok(/const offlineQueue = [^\n]*asPage === null/.test(source))
-  t.ok(/const pollOk = [^\n]*asPage === null/.test(source))
+  t.absent(/const pollOk = [^\n]*asPage/.test(source), 'the poll and event gate does not exclude a page')
   const link = source.slice(source.indexOf('const linkDraft = useLinkDraft({'), source.indexOf('\n', source.indexOf('const linkDraft = useLinkDraft({')))
   t.absent(link.includes('asPage'), 'the link card is not gated on the page')
 })

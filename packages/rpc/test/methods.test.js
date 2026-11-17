@@ -2424,6 +2424,11 @@ test('page.* (Páginas)', (t) => {
     ok(t, 'page.sign', { ...base, action })
   }
   for (const action of ['create', 'list', 'terms']) ok(t, 'page.sign', { ...base, action, page: '' })
+  // A page's vote or RSVP, and its poll and event posts (pick null withdraws).
+  ok(t, 'page.sign', { ...base, action: 'choice', op: { to: KEY + ':3', pick: 1 } })
+  ok(t, 'page.sign', { ...base, action: 'choice', op: { to: KEY + ':3', pick: null } })
+  ok(t, 'page.sign', { ...base, op: { text: 'Qual pão?', poll: ['Francês', 'Integral'] } })
+  bad(t, 'page.sign', { ...base, action: 'choice', page: '', op: { to: KEY + ':3', pick: 0 } }, 'choice needs the page')
   // A core delegate's terms acceptance (5.84): the op the node also signs a
   // terms signature for.
   ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })

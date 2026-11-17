@@ -38,6 +38,9 @@
 //     short video/mp4 already free of metadata, for a post's [poster, video]
 //     pair; a post, reply or quote carries photos, that pair or a link card
 //     (its thumbnail one of the page's items), as a person's post does.
+//   - a root post may carry a poll or an event, and 'choice' writes the
+//     page's vote or RSVP, the same records a person writes (records.js
+//     postRecord, choiceRecord); 'status' answers the page's live choices.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -88,13 +91,14 @@ const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
 const { feira, cardUrlHost } = require('@varanda/rpc')
+const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
-  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST
+  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -115,8 +119,9 @@ const HEX32_RE = /^[0-9a-f]{32}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
-// record (pages-writer.js DELETABLE).
-const CLOSE_DELETES = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
+// record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
+// no earlier vote comes back.
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -141,6 +146,11 @@ function placeTexts (place) {
   return isPlainObject(place) ? [place.city, place.bairro] : []
 }
 
+// The texts an event post shows besides its text: the title and the place.
+function eventTexts (event) {
+  return isPlainObject(event) ? [event.title, event.place] : []
+}
+
 // Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
@@ -151,18 +161,21 @@ const GROUP_READ_LIMIT = 32
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent']
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice']
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
 // The newest refs 'status' answers per engagement list, so the answer stays
 // inside the app's 1 MiB read cap (about 80 bytes a ref).
 const MAX_STATUS_REFS = 4096
+// The newest polls and events 'status' answers the page's live choice on
+// (about 75 bytes each), so the whole answer still fits that cap.
+const MAX_STATUS_PICKS = 1024
 const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
-const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename', 'follow', 'media', 'avatar',
+const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', 'rename', 'follow', 'media', 'avatar',
   ...LISTING_ACTIONS]
 
 const WRITER_TOKENS = Object.freeze({
@@ -188,6 +201,29 @@ const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso
   'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia', 'termo-recusado'])
 
 function noop () {}
+
+// The page's choices per poll or event, from its own diary, in the form
+// readers fold them: a null pick (a withdrawal) clears the target's history
+// and a deleted choice never counted. The service cannot know a foreign
+// poll's option count, so it hands back every distinct pick since the last
+// withdrawal, newest first; the first one below the poll's count is the live
+// pick, as polls.js livePick (which skips a pick out of range). ->
+// { 'author:seq': [pick, ...] } for the MAX_STATUS_PICKS targets whose last
+// pick is newest.
+function pickedOf (entries) {
+  const live = new Map()
+  for (const e of applyDeletes(entries)) {
+    if (!e || e.deleted || !isPlainObject(e.record) || e.record.type !== 'choice') continue
+    const { to, pick } = e.record
+    if (!isPlainObject(to) || !HEX64_RE.test(to.author) || !Number.isSafeInteger(to.seq)) continue
+    if (pick !== null && !(Number.isSafeInteger(pick) && pick >= 0 && pick < POLL_MAX)) continue
+    const ref = to.author + ':' + to.seq
+    const prior = live.get(ref) || []
+    live.delete(ref)
+    if (pick !== null) live.set(ref, [pick, ...prior.filter((p) => p !== pick)])
+  }
+  return Object.fromEntries([...live].slice(-MAX_STATUS_PICKS))
+}
 
 function has (obj, k) {
   return Object.prototype.hasOwnProperty.call(obj, k)
@@ -1025,7 +1061,21 @@ function createPagesRoutes ({
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
-        if (!exactKeys(op, ['text'], ['media', 'preview'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['text'], ['media', 'preview', 'poll', 'event'])) throw refuse('pedido-invalido')
+        // A root post with a poll or an event, as a person's post.create
+        // (methods.js postPollCross): never beside media, a link card or
+        // each other, and never null.
+        if (has(op, 'poll') || has(op, 'event')) {
+          if (has(op, 'media') || has(op, 'preview') || (has(op, 'poll') && has(op, 'event'))) throw refuse('pedido-invalido')
+          if (has(op, 'event')) {
+            if (!isPlainObject(op.event)) throw refuse('pedido-invalido')
+            termFree(op.text, ...eventTexts(op.event))
+            return [postRecord({ text: op.text, event: op.event })]
+          }
+          if (!Array.isArray(op.poll)) throw refuse('pedido-invalido')
+          termFree(op.text, ...op.poll)
+          return [postRecord({ text: op.text, poll: op.poll })]
+        }
         termFree(op.text)
         return [postRecord({ text: op.text, ...postParts(page, op) })]
       }
@@ -1043,6 +1093,26 @@ function createPagesRoutes ({
         if (!exactKeys(op, ['to', 'on']) || typeof op.on !== 'boolean') throw refuse('pedido-invalido')
         const build = action === 'like' ? likeRecord : repostRecord
         return [build({ to: target(op.to), on: op.on })]
+      }
+      if (action === 'choice') {
+        if (!exactKeys(op, ['to', 'pick'])) throw refuse('pedido-invalido')
+        const t = target(op.to)
+        if (t.seq < 1) throw refuse('pedido-invalido')
+        const record = choiceRecord({ to: t, pick: op.pick })
+        // A withdrawal needs no read, as a person's choice.set. A pick on a
+        // blocked author is refused, as a follow is. Only the page's own
+        // diary is readable here: on it the target must be a live poll with
+        // that option or an event; elsewhere a pick no poll has counts for
+        // no reader (polls.js).
+        if (op.pick !== null) {
+          if (blocked(t.author)) throw refuse('sem-permissao')
+          if (t.author === page) {
+            const live = applyDeletes(await writer.readEntries(page)).find((e) => e && e.seq === t.seq && !e.deleted)
+            const count = live === undefined ? null : pickCount(live.record, t.seq)
+            if (count === null || !(op.pick < count)) throw refuse('pedido-invalido')
+          }
+        }
+        return [record]
       }
       if (action === 'delete') {
         if (!exactKeys(op, ['to'])) throw refuse('pedido-invalido')
@@ -1259,6 +1329,7 @@ function createPagesRoutes ({
       need(row, member, 'admin')
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
+      const picked = pickedOf(await writer.readEntries(page))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1274,6 +1345,7 @@ function createPagesRoutes ({
           reposted: reposted.slice(-MAX_STATUS_REFS),
           truncated: liked.length > MAX_STATUS_REFS || reposted.length > MAX_STATUS_REFS
         },
+        picked,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
@@ -2542,7 +2614,7 @@ function createPagesRoutes ({
     const body = await readJsonBody(req, MAX_BODY)
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
-    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
     if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)

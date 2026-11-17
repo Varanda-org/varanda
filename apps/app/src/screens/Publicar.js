@@ -977,9 +977,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
   const [musicPickerOpen, setMusicPickerOpen] = useState(false)
   // Enquete: the editor state while the poll is being written (hosted node
-  // only, a plain post without media, music, reply, quote or page).
+  // only, a plain post without media, music, reply or quote; as a page too).
   const [pollDraft, setPollDraft] = useState(null)
-  const pollOk = node.hosted === true && node.online !== false && asPage === null && !reply && !quote && !hasMedia && musicDraft === null && !momentMode
+  const pollOk = node.hosted === true && node.online !== false && !reply && !quote && !hasMedia && musicDraft === null && !momentMode
   const pollActive = pollDraft !== null && pollOk
   // While a poll draft exists the post is never a plain post or an outbox
   // entry: send refuses with a message and keeps the draft.
@@ -1544,9 +1544,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sentReply = reply
     const sentQuote = quote
     if (sentQuote && countChars(sent) < 1) return
+    const structured = pageStructured()
+    if (structured.error !== undefined) { setCheckError(structured.error); return }
     setPageSending(true)
     try {
-      await sendNewAsPage(page, sent, sentReply, sentQuote, musicDraft)
+      await sendNewAsPage(page, sent, sentReply, sentQuote, musicDraft, structured)
     } finally {
       setPageSending(false)
     }
@@ -1598,7 +1600,27 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     return null
   }
 
-  const sendNewAsPage = async (page, sent, sentReply, sentQuote, sentMusic) => {
+  // The poll or the event of the draft as a page post's extra: {} for a plain
+  // post, { poll } or { event } (what a person's post.create carries), or
+  // { error } with the text to show.
+  const pageStructured = () => {
+    if (pollDraft !== null) {
+      const built = editorPoll(pollDraft)
+      if (!built.ok) return { error: built.error }
+      if (countChars(text) < 1) return { error: POLL_NEEDS_TEXT }
+      return { poll: built.poll.options }
+    }
+    if (eventDraft !== null) {
+      const built = eventEditorEvent(eventDraft)
+      if (!built.ok) return { error: built.error }
+      if (countChars(text) < 1) return { error: EVENT_NEEDS_TEXT }
+      return { event: built.event }
+    }
+    return {}
+  }
+
+  const sendNewAsPage = async (page, sent, sentReply, sentQuote, sentMusic, structured = {}) => {
+    const plain = structured.poll === undefined && structured.event === undefined
     const videoFile = hasVideo ? video.draft.state.file : null
     const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
     let sentMedia = null
@@ -1625,7 +1647,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // The same link or music card a person's post carries; its thumbnail is
     // uploaded as one of the page's items.
     let card = null
-    const snapshot = sentMedia === null ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
+    const snapshot = sentMedia === null && plain ? (musicSnapshot(sentMusic) ?? linkDraft.take(sent)) : null
     // A music title comes from the provider: refused before any signature.
     const musicRefused = sentMusic !== null && snapshot !== null ? findPreviewTerm(snapshot) : null
     if (musicRefused !== null) {
@@ -1658,7 +1680,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     try {
       built = withCardFallback((c) => {
         const checked = c ? withPreview(pageMethod, to !== null ? { to, text: sent } : { text: sent }, c) : null
-        return pagePostOp({ text: sent, media: sentMedia, preview: checked !== null ? checked.preview : null })
+        return pagePostOp({ text: sent, media: sentMedia, preview: checked !== null ? checked.preview : null, ...(plain ? {} : structured) })
       }, card)
     } catch (err) {
       setCheckError(errorText(err))
@@ -1728,11 +1750,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     if (pollDraft !== null && pageRetryRef.current === null) {
       if (!pollOk) { setCheckError(node.online === false ? POLL_NEEDS_ONLINE : POLL_ALONE); return }
-      return sendPoll()
+      return asPage !== null ? sendAsPage() : sendPoll()
     }
     if (eventDraft !== null && pageRetryRef.current === null) {
       if (!pollOk) { setCheckError(node.online === false ? EVENT_NEEDS_ONLINE : EVENT_ALONE); return }
-      return sendEvent()
+      return asPage !== null ? sendAsPage() : sendEvent()
     }
     const sentMusic = musicDraft
     if (sentMusic !== null) {
