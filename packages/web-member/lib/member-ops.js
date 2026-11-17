@@ -2922,7 +2922,8 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
     diaries.set(d, entries)
     if (entries !== null) {
       joins.set(d, groupJoinHistory(entries, group))
-      marks.set(d, groupCutHistory(entries, group))
+      // Through the module object: the group-ops test replaces groupCutHistory.
+      marks.set(d, grp.groupCutHistory(entries, group))
       confirms.set(d, groupConfirmHistory(entries, group))
     }
   }
