@@ -41,6 +41,11 @@
 //   - a root post may carry a poll or an event, and 'choice' writes the
 //     page's vote or RSVP, the same records a person writes (records.js
 //     postRecord, choiceRecord); 'status' answers the page's live choices.
+//   - moment writes a momento, the record a person's moment.create writes
+//     (records.js momentRecord): the admin's device seals and uploads the
+//     public blob itself, so the op carries only its descriptor and there is
+//     nothing here to resolve. delete takes a live momento of the page, and
+//     close tombstones them with the rest.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -90,13 +95,13 @@ const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@va
 const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
-const { feira, cardUrlHost } = require('@varanda/rpc')
+const { feira, cardUrlHost, isMomentMusic } = require('@varanda/rpc')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, validMomentMedia, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
 } = require('@varanda/core/lib/records')
@@ -121,7 +126,7 @@ const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
 // record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
 // no earlier vote comes back.
-const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -161,7 +166,7 @@ const GROUP_READ_LIMIT = 32
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice']
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment']
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
@@ -175,7 +180,7 @@ const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
-const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', 'rename', 'follow', 'media', 'avatar',
+const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', 'rename', 'follow', 'media', 'avatar',
   ...LISTING_ACTIONS]
 
 const WRITER_TOKENS = Object.freeze({
@@ -1114,6 +1119,16 @@ function createPagesRoutes ({
         }
         return [record]
       }
+      // A person's moment.create input: text and media required, music
+      // optional and never null. The descriptor is the public blob the
+      // admin's device uploaded; it names no page item.
+      if (action === 'moment') {
+        if (!exactKeys(op, ['text', 'media'], ['music'])) throw refuse('pedido-invalido')
+        if (!validMomentMedia(op.media)) throw refuse('midia-invalida')
+        if (has(op, 'music') && !isMomentMusic(op.music)) throw refuse('pedido-invalido')
+        termFree(op.text)
+        return [momentRecord({ text: op.text, media: op.media, music: has(op, 'music') ? op.music : null })]
+      }
       if (action === 'delete') {
         if (!exactKeys(op, ['to'])) throw refuse('pedido-invalido')
         const t = target(op.to)
@@ -1126,8 +1141,9 @@ function createPagesRoutes ({
           return deletePlan(entries, t.seq)
         }
         // Never a tombstone over a page record: a delete must not undo a
-        // roster, an accept or an offer.
-        if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
+        // roster, an accept or an offer. A momento names no media range (its
+        // blob expires on the seeder by itself), as a person's moment.delete.
+        if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost', 'moment'].includes(e.record.type)) throw refuse('pedido-invalido')
         return deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
       }
       if (action === 'listing') {
@@ -1174,6 +1190,28 @@ function createPagesRoutes ({
   }
 
   // A statement whose records the page appends: owner or admin.
+  // A delete whose target is already tombstoned answers that tombstone:
+  // nothing appended and no op charged, as a person's moment.delete
+  // (web-member member-ops.js recordDelete). A bad op goes on to recordsFor,
+  // which refuses it.
+  async function deletedAlready (page, op) {
+    let t
+    try {
+      if (!exactKeys(op, ['to'])) return null
+      t = target(op.to)
+    } catch {
+      return null
+    }
+    if (t.author !== page) return null
+    const folded = applyDeletes(await writer.readEntries(page))
+    if (!folded.some((e) => e && e.seq === t.seq && e.deleted === true)) return null
+    let seq = null
+    for (const e of folded) {
+      if (e && !e.deleted && isPlainObject(e.record) && e.record.type === 'delete' && e.record.seq === t.seq && (seq === null || e.seq > seq)) seq = e.seq
+    }
+    return seq === null ? null : { seq, length: writer.info(page).length, pushed: false }
+  }
+
   async function write (action, body) {
     const { member, page, nonce, op, hash } = await statement(body, action, false)
     const prior = claim(member, nonce, hash, false, page, action)
@@ -1181,6 +1219,13 @@ function createPagesRoutes ({
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
+      if (action === 'delete') {
+        const done = await deletedAlready(page, op)
+        if (done !== null) {
+          settle(member, nonce, done)
+          return done
+        }
+      }
       chargeOps(page)
       const records = await recordsFor(action, page, op)
       // A listing's checks read the diary: the role is read again after.
@@ -2614,7 +2659,7 @@ function createPagesRoutes ({
     const body = await readJsonBody(req, MAX_BODY)
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
-    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
     if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)

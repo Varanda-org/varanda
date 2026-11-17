@@ -911,12 +911,16 @@ test('putMomentMedia hands the photo to momentPutMedia with only the image field
   t.alike(seen[0].copy, new Uint8Array([1, 2, 3]))
   t.ok(bytes.every((b) => b === 0), 'the bytes are zeroed')
   t.alike(unlinked, ['/cache/m.bin'])
+  await putMomentMedia({ ...io, read: async () => ({ file: '/cache/a.bin', bytes: new Uint8Array(1) }) }, { mime: 'image/jpeg', width: 2, height: 3, ahead: true })
+  t.is(seen[1].ahead, true, 'a Página momento passes ahead')
+  await putMomentMedia({ ...io, read: async () => ({ file: '/cache/b.bin', bytes: new Uint8Array(1) }) }, { mime: 'image/jpeg', width: 2, height: 3, ahead: false })
+  t.absent('ahead' in seen[2], 'ahead only when true')
 
   const failing = { ...io, read: async () => ({ file: '/cache/n.bin', bytes: new Uint8Array(1) }), session: { momentPutMedia: () => { throw new TypeError('mídia inválida') } } }
   const err = await putMomentMedia(failing, { mime: 'image/jpeg', width: 1, height: 1 }).catch((e) => e)
   t.is(err.code, 'USAGE')
   t.is(err.message, 'mídia inválida')
-  t.alike(unlinked, ['/cache/m.bin'], 'a refused file is not unlinked')
+  t.alike(unlinked, ['/cache/m.bin', '/cache/a.bin', '/cache/b.bin'], 'a refused file is not unlinked')
   const closing = await putMomentMedia({ ...io, isClosing: () => true }, { mime: 'image/jpeg', width: 1, height: 1 }).catch((e) => e)
   t.is(closing.code, 'LOCKED')
 })

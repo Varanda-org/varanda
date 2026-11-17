@@ -238,6 +238,7 @@ const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
+const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
 const { feira, mentionTokens, MENTION_MAX } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
@@ -391,6 +392,33 @@ async function momentBlobIds (core) {
     if (r !== null) ids.add(r.media.id)
   }
   return ids
+}
+
+// How far back from a diary's end recentMomentIds looks: a momento lives
+// 24 h, and an honest diary writes far fewer blocks than this in a day.
+const MOMENT_SHARE_SCAN = 512
+
+// The ids among `wanted` that a valid momento of this diary dated between
+// `since` and `until` also names, reading the last MOMENT_SHARE_SCAN blocks.
+// Append order is not time order (a page roster refresh keeps its old `at`),
+// so the scan never stops early on an old date. A momento dated after
+// `until` is one readers hide (foldMoments), so it shields nothing. A block
+// in the window that is not stored yet may be the momento naming the id, so
+// it throws like a read error and the caller keeps every id.
+async function recentMomentIds (core, wanted, since, until) {
+  const found = new Set()
+  const stop = Math.max(1, core.length - MOMENT_SHARE_SCAN)
+  for (let i = core.length - 1; i >= stop && found.size < wanted.size; i--) {
+    const raw = await core.get(i, { wait: false, raw: true })
+    if (raw === null) throw new Error('moment scan: block not stored')
+    const block = decodeBlock(raw)
+    if (block === null || block.type !== 'moment') continue
+    const at = typeof block.at === 'string' ? Date.parse(block.at) : NaN
+    if (!(at >= since) || at > until) continue
+    const r = validRecordCopy(block, i)
+    if (r !== null && wanted.has(r.media.id)) found.add(r.media.id)
+  }
+  return found
 }
 
 // Media cores whose deletion counters one diary keeps (a diary entry's
@@ -7659,16 +7687,46 @@ class Seeder {
 
   // A blocked diary's momento blobs go before its log, which is what names
   // them: on a failure the diary stays listed and the next start scans it
-  // again (the caller's purge failure path).
+  // again (the caller's purge failure path). A blob that a recent momento of
+  // another listed, unblocked diary also names stays: any record can name
+  // any blob id, so a blocked diary naming someone else's media must not
+  // remove it early (it expires by itself).
   async _purgeMomentBlobs (key) {
     if (!this._blob) return
     const core = await openReplica(this.store, key)
+    let ids
     try {
-      const ids = await momentBlobIds(core)
-      if (ids.size > 0) this._blob.purge(ids)
+      ids = await momentBlobIds(core)
     } finally {
       await core.close().catch(noop)
     }
+    if (ids.size === 0) return
+    for (const id of await this._sharedMomentIds(key, ids)) ids.delete(id)
+    if (ids.size > 0) this._blob.purge(ids)
+  }
+
+  // The ids among `ids` that a momento of the last day in another listed
+  // diary, not blocked and not being dropped, also names. A diary that
+  // cannot be read keeps every id: the blobs expire by themselves.
+  async _sharedMomentIds (key, ids) {
+    const shared = new Set()
+    const since = Date.now() - MOMENT_TTL_MS - MOMENT_SKEW_MS
+    for (const other of [...this._admitted.keys()]) {
+      if (shared.size === ids.size) break
+      if (other === key || this._isBlocked(other) || this._dropping.has(other)) continue
+      if (this._purgingKeys.has(b4a.toString(crypto.discoveryKey(b4a.from(other, 'hex')), 'hex'))) continue
+      let core = null
+      try {
+        core = await openReplica(this.store, other)
+        const wanted = new Set([...ids].filter((id) => !shared.has(id)))
+        for (const id of await recentMomentIds(core, wanted, since, Date.now() + MOMENT_SKEW_MS)) shared.add(id)
+      } catch {
+        return ids
+      } finally {
+        if (core !== null) await core.close().catch(noop)
+      }
+    }
+    return shared
   }
 
   async _purge (key) {
@@ -8825,5 +8883,6 @@ module.exports = {
   DISCOVERY_VIEW_MAX_KEYS,
   // For tests.
   liveGroupJoins,
-  groupWalkStep
+  groupWalkStep,
+  recentMomentIds
 }

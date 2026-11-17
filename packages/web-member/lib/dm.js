@@ -136,6 +136,9 @@ const UPLOAD_FAILED = 'não deu para enviar a mídia: tente de novo'
 // A momento's photo that cannot be fetched or does not verify (the same
 // answer for both, so it never says why).
 const MOMENT_PHOTO_GONE = 'foto indisponível'
+// putPublicMedia `ahead`: the wallet lacks the stamps, a fill started and
+// nothing was uploaded; a later explicit press uploads.
+const MOMENT_PREPARING = 'envio em preparo'
 // Sealed blobs kept for a send or a retry (each holds its plaintext and
 // ciphertext in memory).
 const BLOBS_MAX = 8
@@ -1181,7 +1184,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // A short video (mime video/mp4, the caller's stripped copy) must pass the
   // strict check a reader makes with exactly the given sides and ms: the
   // item's sides and duration are the container's. DM media never takes one.
-  async function putPublicMedia (own, keyPair, { bytes, mime, width, height, ms = 0 }) {
+  // `ahead` (a Página's momento): never buy stamps right before this upload,
+  // whose blob the Página's record then names. A short wallet starts a full
+  // fill in the background, the shape of a routine one, and refuses
+  // MOMENT_PREPARING with nothing uploaded.
+  async function putPublicMedia (own, keyPair, { bytes, mime, width, height, ms = 0, ahead = false }) {
     requireUnlocked()
     const gen = generation
     let ok
@@ -1208,7 +1215,13 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     }
     const entry = { sealed, lock: Promise.resolve() }
     const missing = sealed.frames.filter((f) => f === null).length
-    if (missing > 0 && (await blobs.walletSize()) < missing) await blobs.topUp(keyPair, { force: true })
+    if (missing > 0 && (await blobs.walletSize()) < missing) {
+      if (ahead === true) {
+        track(blobs.topUp(keyPair, { force: true }).catch(() => 0))
+        throw new UsageError(MOMENT_PREPARING)
+      }
+      await blobs.topUp(keyPair, { force: true })
+    }
     if (gen !== generation) throw new UsageError(LOCKED)
     await upload(entry, keyPair)
     if (gen !== generation) throw new UsageError(LOCKED)
@@ -3279,6 +3292,7 @@ module.exports = {
   MEDIA_STALE,
   UPLOAD_FAILED,
   MOMENT_PHOTO_GONE,
+  MOMENT_PREPARING,
   BLOBS_MAX,
   NO_PAGE_KEY,
   KEY_MISMATCH,
