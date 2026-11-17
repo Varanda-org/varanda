@@ -17,7 +17,8 @@ const { lockDataDir } = require('@varanda/core/lib/store')
 const { loadKeyPairFile } = require('@varanda/core/lib/cert')
 const { verifySnapshot, createSnapshot, MAX_BLOCKED } = require('@varanda/core/lib/blocklist')
 const { verifyModRequest, canonicalBody } = require('@varanda/core/lib/mod-request')
-const { apply, checkServer, MAX_UNATTENDED_BLOCKS } = require('../lib/mod-apply')
+const { apply, checkServer, MAX_UNATTENDED_BLOCKS, PULL_BODY_CAP, REQUEST_TIMEOUT_MS, TRANSFER_TIMEOUT_MS } = require('../lib/mod-apply')
+const { ACK_READ_MAX_MS } = require('../lib/account/mod-routes')
 const { testnet, tmpDir } = require('./helpers/net')
 
 const BIN = path.join(__dirname, '..', 'bin', 'varanda.js')
@@ -446,6 +447,7 @@ test('a full list takes an unblock and a replacement block in one run', async (t
     ],
     published: { snapshot: full }
   }
+  t.ok(Buffer.byteLength(JSON.stringify(srv.pull)) > 1048576, 'the pull answer is over the old cap')
   const pub = publisher(true)
   const res = await run(ctx, srv, pub.publish)
   t.is(res.error, null, res.error && res.error.message)
@@ -477,6 +479,42 @@ test('a published snapshot ahead of the local list exits writing nothing', async
   t.is(srv.byPath('/account/mod/api/ack').length, 0)
 })
 
+test('pull and ack wait longer than the service gives an ack body; the challenges keep 10 s', async (t) => {
+  t.is(REQUEST_TIMEOUT_MS, 10000)
+  t.ok(TRANSFER_TIMEOUT_MS >= ACK_READ_MAX_MS + 5000, 'past the ack read deadline with room for the answer')
+  await testnet(t)
+  const ctx = setup(t)
+  const first = seedList(t, ctx.modDir, X)
+  const srv = await fakeServer(t)
+  srv.pull = { changes: [{ id: 'c1', op: 'block', member: A, at: '2026-10-24T10:00:01.000Z', actor: 'pessoa' }], published: { snapshot: first } }
+  // request() arms its abort timer right before it calls fetch: the last
+  // setTimeout delay seen when fetch is called is that request's timeout.
+  const timeouts = []
+  let lastDelay = null
+  const realSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = function (fn, ms, ...rest) {
+    lastDelay = ms
+    return realSetTimeout.call(this, fn, ms, ...rest)
+  }
+  const fetch = (url, init) => {
+    timeouts.push([new URL(url).pathname, lastDelay])
+    return globalThis.fetch(url, init)
+  }
+  let res
+  try {
+    res = await run(ctx, srv, publisher(true).publish, { fetch })
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+  }
+  t.is(res.error, null, res.error && res.error.message)
+  t.alike(timeouts, [
+    ['/account/mod/api/challenge', REQUEST_TIMEOUT_MS],
+    ['/account/mod/api/pull', TRANSFER_TIMEOUT_MS],
+    ['/account/mod/api/challenge', REQUEST_TIMEOUT_MS],
+    ['/account/mod/api/ack', TRANSFER_TIMEOUT_MS]
+  ])
+})
+
 test('malformed answers and a stale ack exit 1', async (t) => {
   await testnet(t)
   const ctx = setup(t)
@@ -496,7 +534,7 @@ test('malformed answers and a stale ack exit 1', async (t) => {
     { status: 200, body: { changes: new Array(1001).fill(0).map((_, i) => ({ ...change, id: 'c' + i })), published: { snapshot: null } } },
     { status: 200, body: '{"changes":[],', type: 'application/json' },
     { status: 200, body: '{"changes":[],"published":{"snapshot":null}}', type: 'text/html' },
-    { status: 200, body: JSON.stringify({ changes: [], published: { snapshot: null }, pad: 'x'.repeat(1048576) }) },
+    { status: 200, body: JSON.stringify({ changes: [], published: { snapshot: null }, pad: 'x'.repeat(PULL_BODY_CAP) }) },
     { status: 403, body: { error: 'nao-autorizado', detail: 1 } }
   ]
   for (const answer of bad) {

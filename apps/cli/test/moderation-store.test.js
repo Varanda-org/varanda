@@ -814,11 +814,17 @@ test('strict open: every report field, change and event is checked, never filter
 async function fullList (t) {
   const s = setup(t)
   const keys = []
-  for (let i = 0; i < MAX_BLOCKED; i++) keys.push(key())
+  for (let i = 0; i < MAX_BLOCKED; i++) keys.push(b4a.toString(crypto.randomBytes(32), 'hex'))
   await s.store.ack({ changeIds: [], snapshot: s.m.snap(1, keys), moderatorCert: s.m.cert })
   t.is(s.store.stats().blocked, MAX_BLOCKED)
   return { ...s, keys }
 }
+
+test('capacity: the mirror holds MAX_BLOCKED (16384) keys and reopens from disk', async (t) => {
+  t.is(MAX_BLOCKED, 16384)
+  const s = await fullList(t)
+  t.is(s.open().stats().blocked, MAX_BLOCKED, 'moderation.json read back whole')
+})
 
 async function refusedUnchanged (t, s, p, msg) {
   const before = fs.readFileSync(path.join(s.dir, FILE), 'utf8')

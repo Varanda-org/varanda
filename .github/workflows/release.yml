@@ -12,6 +12,15 @@
 # back. Servers pull and verify; nothing here connects to a server. The
 # channel stable moves only in promote.yml.
 #
+# The Caddy image (ghcr.io/varanda-org/varanda-caddy, from
+# deploy/seeder/Dockerfile.caddy) is built only when that Dockerfile changes:
+# it is tagged caddy-<sha256 of Dockerfile.caddy>, and an existing tag is
+# reused when its digest verifies under this workflow's identity and carries
+# the same Dockerfile hash label. The seeder pins it by digest in
+# /app/caddy.json (release.json keeps its format, which installed servers
+# check), so update.sh recreates Caddy only when that digest or the Caddyfile
+# changes. It has no channel tag: servers pull it by digest.
+#
 # Runs are queued per ref and a newer push replaces a pending run, so a main
 # commit can end up with no image; a manual run builds only the tip.
 #
@@ -29,8 +38,9 @@
 #      environment without any protection the first time a job names it.
 #   2. Settings > Secrets and variables > Actions > Variables:
 #      VARANDA_RELEASE = true (any other value pauses releases).
-#   3. After the first run: organization Packages > varanda-seeder and
-#      varanda-web > Package settings > Change visibility > Public.
+#   3. After the first run: organization Packages > varanda-seeder,
+#      varanda-web and varanda-caddy > Package settings > Change visibility >
+#      Public.
 #   4. Only after step 1: VARANDA_PROMOTE = true enables promote.yml.
 name: release
 
@@ -222,6 +232,7 @@ jobs:
     env:
       SEEDER_REPO: ghcr.io/varanda-org/varanda-seeder
       WEB_REPO: ghcr.io/varanda-org/varanda-web
+      CADDY_REPO: ghcr.io/varanda-org/varanda-caddy
       COSIGN_ISSUER: https://token.actions.githubusercontent.com
       COSIGN_IDENTITY: https://github.com/Varanda-org/varanda/.github/workflows/release.yml@refs/heads/main
     steps:
@@ -249,8 +260,15 @@ jobs:
             echo "::error::deploy/seeder/cosign.ref inválido (ghcr.io/sigstore/cosign/cosign:v<semver>@sha256:<64 hex>)"
             exit 1
           fi
+          caddy_hash="$(sha256sum deploy/seeder/Dockerfile.caddy)"
+          caddy_hash="${caddy_hash%% *}"
+          if ! [[ "$caddy_hash" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::sha256 de deploy/seeder/Dockerfile.caddy ilegível"
+            exit 1
+          fi
           {
             echo "SEQ=$seq"
+            echo "CADDY_TAG=caddy-$caddy_hash"
             echo "COSIGN_IMAGE=$cosign_ref"
             echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config"
           } >> "$GITHUB_ENV"
@@ -275,7 +293,10 @@ jobs:
       # rebuilt from scratch, both images, overwriting the sha-<commit> tags.
       # A registry that does not answer fails the step instead: an outage must
       # not lead to a second build of a released commit. The image is verified
-      # before it is ever run.
+      # before it is ever run. A release reused whole reuses the Caddy digest
+      # its caddy.json names (verified the same way); otherwise the Caddy image
+      # of caddy-<Dockerfile.caddy hash> is reused when it verifies and its
+      # label names the same hash, and is built when it does not.
       - name: Reuse a release already signed for this commit
         run: |
           set -Eeuo pipefail
@@ -308,12 +329,13 @@ jobs:
           }
           tag="sha-$GITHUB_SHA"
           re='^\{"v":1,"commit":"([0-9a-f]{40})","seq":([1-9][0-9]{0,9}),"web":"ghcr\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})"\}$'
-          # Prints "<seeder digest> <web digest>" of a release this workflow
+          caddy_re='^\{"v":1,"caddy":"ghcr\.io/varanda-org/varanda-caddy@(sha256:[0-9a-f]{64})"\}$'
+          # Prints "<seeder digest> <web digest> <caddy digest>" of a release this workflow
           # already signed for this commit. Returns 1 when there is none to
           # reuse (build) and 2 when the registry did not answer (the step
           # fails: an outage must not produce a second build of a commit).
           signed_release() {
-            local seeder release web found_web
+            local seeder release web found_web caddy_json caddy found_caddy
             seeder="$(digest_of "$SEEDER_REPO:$tag")" || return 2
             [ -n "$seeder" ] || return 1
             cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$SEEDER_REPO@$seeder" > /dev/null || return 1
@@ -325,7 +347,27 @@ jobs:
             found_web="$(digest_of "$WEB_REPO@$web")" || return 2
             [ "$found_web" = "$web" ] || return 1
             cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$WEB_REPO@$web" > /dev/null || return 1
-            printf '%s %s\n' "$seeder" "$web"
+            caddy_json="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/caddy.json)" || return 1
+            [[ "$caddy_json" =~ $caddy_re ]] || return 1
+            caddy="${BASH_REMATCH[1]}"
+            found_caddy="$(digest_of "$CADDY_REPO@$caddy")" || return 2
+            [ "$found_caddy" = "$caddy" ] || return 1
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$caddy" > /dev/null || return 1
+            printf '%s %s %s\n' "$seeder" "$web" "$caddy"
+          }
+          # Prints the digest of caddy-<Dockerfile.caddy hash> when this
+          # workflow signed it and its label names the same hash. Returns 1
+          # when there is none to reuse (build) and 2 when the registry did
+          # not answer.
+          signed_caddy() {
+            local caddy label
+            caddy="$(digest_of "$CADDY_REPO:$CADDY_TAG")" || return 2
+            [ -n "$caddy" ] || return 1
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$caddy" > /dev/null || return 1
+            docker pull --quiet "$CADDY_REPO@$caddy" > /dev/null || return 1
+            label="$(docker image inspect -f '{{index .Config.Labels "org.varanda.dockerfile-caddy"}}' "$CADDY_REPO@$caddy")" || return 1
+            [ "caddy-$label" = "$CADDY_TAG" ] || return 1
+            printf '%s\n' "$caddy"
           }
           rc=0
           found="$(signed_release)" || rc=$?
@@ -333,21 +375,39 @@ jobs:
             echo "::error::o registro não respondeu sobre $tag; nada foi construído nem assinado, rode de novo mais tarde"
             exit 1
           elif [ "$rc" -eq 0 ]; then
-            read -r seeder web <<< "$found"
+            read -r seeder web caddy <<< "$found"
             echo "::notice::$SEEDER_REPO:$tag já foi publicado e assinado pelo release; nada é construído nem assinado de novo"
             {
               echo "RELEASE_SOURCE=reused"
               echo "VERIFIED_SEEDER_DIGEST=$seeder"
               echo "VERIFIED_WEB_DIGEST=$web"
+              echo "CADDY_SOURCE=reused"
+              echo "VERIFIED_CADDY_DIGEST=$caddy"
             } >> "$GITHUB_ENV"
           else
             echo "::notice::nenhuma versão assinada de $tag; as duas imagens são construídas agora"
             echo "RELEASE_SOURCE=build" >> "$GITHUB_ENV"
+            rc=0
+            caddy="$(signed_caddy)" || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "::error::o registro não respondeu sobre $CADDY_REPO:$CADDY_TAG; rode de novo mais tarde"
+              exit 1
+            elif [ "$rc" -eq 0 ]; then
+              echo "::notice::$CADDY_REPO:$CADDY_TAG já foi assinado pelo release; a imagem do Caddy é reaproveitada"
+              {
+                echo "CADDY_SOURCE=reused"
+                echo "VERIFIED_CADDY_DIGEST=$caddy"
+              } >> "$GITHUB_ENV"
+            else
+              echo "CADDY_SOURCE=build" >> "$GITHUB_ENV"
+            fi
           fi
 
       # Both images, always together: the web image of an earlier attempt is
       # never reused. Each digest comes from the output of its own push, and
-      # the seeder embeds the web image by that digest.
+      # the seeder embeds the web image by that digest. The Caddy image is
+      # built first, only when no signed one exists for this Dockerfile.caddy,
+      # pushed as caddy-<hash>, and the seeder embeds it by digest too.
       - name: Build and push both images
         run: |
           set -Eeuo pipefail
@@ -403,10 +463,25 @@ jobs:
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             -f deploy/seeder/Dockerfile.web -t "$WEB_REPO:$tag" .
           web="$(push_digest "$WEB_REPO")"
+          case "$CADDY_SOURCE" in
+            reused) caddy="$VERIFIED_CADDY_DIGEST" ;;
+            build)
+              docker build --platform linux/amd64 --provenance=false --sbom=false \
+                --label org.varanda.dockerfile-caddy="${CADDY_TAG#caddy-}" \
+                -f deploy/seeder/Dockerfile.caddy -t "$CADDY_REPO:$CADDY_TAG" deploy/seeder
+              caddy="$(tag="$CADDY_TAG" push_digest "$CADDY_REPO")"
+              ;;
+            *) echo "::error::CADDY_SOURCE inválido"; exit 1 ;;
+          esac
+          if ! [[ "$caddy" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest da imagem do Caddy inválido"
+            exit 1
+          fi
           docker build --platform linux/amd64 --provenance=false --sbom=false \
             --build-arg VARANDA_COMMIT="$GITHUB_SHA" \
             --build-arg VARANDA_SEQ="$SEQ" \
             --build-arg VARANDA_WEB_IMAGE="$WEB_REPO@$web" \
+            --build-arg VARANDA_CADDY_IMAGE="$CADDY_REPO@$caddy" \
             --label org.opencontainers.image.revision="$GITHUB_SHA" \
             -f deploy/seeder/Dockerfile -t "$SEEDER_REPO:$tag" .
           seeder="$(push_digest "$SEEDER_REPO")"
@@ -417,9 +492,15 @@ jobs:
             echo "::error::/app/release.json de $SEEDER_REPO@$seeder não confere com este commit"
             exit 1
           fi
+          caddy_json="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/caddy.json)"
+          if [ "$caddy_json" != "{\"v\":1,\"caddy\":\"$CADDY_REPO@$caddy\"}" ]; then
+            echo "::error::/app/caddy.json de $SEEDER_REPO@$seeder não confere com a imagem do Caddy"
+            exit 1
+          fi
           {
             echo "WEB_DIGEST=$web"
             echo "SEEDER_DIGEST=$seeder"
+            echo "CADDY_DIGEST=$caddy"
           } >> "$GITHUB_ENV"
 
       # Keyless signing with the job's GitHub OIDC token; the request URL and
@@ -440,6 +521,13 @@ jobs:
               -v "$DOCKER_CONFIG:/docker-config:ro" \
               "$COSIGN_IMAGE" "$@"
           }
+          # A reused Caddy digest was verified by the reuse step; only one this
+          # run pushed is signed.
+          if [ "$CADDY_SOURCE" = build ]; then
+            cosign sign "$CADDY_REPO@$CADDY_DIGEST"
+            cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$CADDY_DIGEST" > /dev/null
+            echo "VERIFIED_CADDY_DIGEST=$CADDY_DIGEST" >> "$GITHUB_ENV"
+          fi
           for ref in "$WEB_REPO@$WEB_DIGEST" "$SEEDER_REPO@$SEEDER_DIGEST"; do
             cosign sign "$ref"
             cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$ref" > /dev/null
@@ -485,7 +573,7 @@ jobs:
               return 1
             fi
           }
-          for d in "${VERIFIED_WEB_DIGEST:-}" "${VERIFIED_SEEDER_DIGEST:-}"; do
+          for d in "${VERIFIED_WEB_DIGEST:-}" "${VERIFIED_SEEDER_DIGEST:-}" "${VERIFIED_CADDY_DIGEST:-}"; do
             if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "::error::falta um digest verificado"
               exit 1
@@ -544,6 +632,7 @@ jobs:
             echo "- origem: $RELEASE_SOURCE"
             echo "- web: $WEB_REPO@$VERIFIED_WEB_DIGEST"
             echo "- seeder: $SEEDER_REPO@$VERIFIED_SEEDER_DIGEST"
+            echo "- caddy: $CADDY_REPO@$VERIFIED_CADDY_DIGEST"
             echo "- edge: $EDGE_STATUS"
           } >> "$GITHUB_STEP_SUMMARY"
 
