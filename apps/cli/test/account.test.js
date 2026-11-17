@@ -702,6 +702,39 @@ test('keyedWindow with charge false only peeks: no window is started or spent', 
   t.absent(w('a'), 'the peek did not restart or spend the new window')
 })
 
+test('keyedWindow release gives back one charge, never more, and never starts a window', (t) => {
+  const c = clock()
+  const w = keyedWindow(1, 1000, c.now)
+  w.release('a', c.now())
+  t.ok(w('a'), 'a release before any charge changes nothing')
+  t.absent(w('a'), 'and grants no extra charge')
+  w.release('a', c.now())
+  t.ok(w('a'), 'a released charge can be spent again')
+  t.absent(w('a'), 'once')
+  w.release('a', c.now())
+  w.release('a', c.now())
+  t.ok(w('a'))
+  t.absent(w('a'), 'two releases give back one charge, not two')
+})
+
+test('keyedWindow release of a charge from an earlier window leaves the later one alone', (t) => {
+  const c = clock()
+  const w = keyedWindow(1, 1000, c.now, 1)
+  t.ok(w('a'))
+  const charged = c.now()
+  c.offset += 1000
+  t.ok(w('a'), 'a new window')
+  w.release('a', charged)
+  t.absent(w('a'), 'the old charge is not taken from the new window')
+  c.offset += 1
+  const old = c.now()
+  c.offset += 1
+  t.ok(w('b'), 'b evicts a')
+  t.ok(w('a'), 'a starts again, after the release time')
+  w.release('a', old)
+  t.absent(w('a'), 'nor from a window the key started again after eviction')
+})
+
 test('keyedWindow at capacity admits a new key: expired windows go first, then the oldest', (t) => {
   const c = clock()
   const w = keyedWindow(1, 1000, c.now, 3)

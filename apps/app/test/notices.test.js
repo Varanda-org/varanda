@@ -496,6 +496,28 @@ test('markSeenPadded keeps the newest new ids that fit when too few entries can 
   t.is(none.ids, stored)
 })
 
+test('markSeenPadded never evicts a row of keep, which is protected without being marked', async (t) => {
+  const { markSeenPadded } = await load()
+  const stored = Object.freeze([d(1), d(2), d(3), d(4)])
+  for (let run = 0; run < 30; run++) {
+    const { ids, changed } = markSeenPadded(stored, Object.freeze([tok(20), tok(21)]), seeded(700 + run), 4, Object.freeze([tok(1), tok(2), row('n', 1, undefined)]))
+    t.is(changed, true)
+    t.is(ids.length, 4)
+    for (const id of [d(1), d(2)]) if (!ids.includes(id)) t.fail('evicted a kept row ' + id)
+    if (ids.includes(d(3)) || ids.includes(d(4))) t.fail('an evictable slot was not replaced')
+  }
+  // Only protected slots are left: nothing fits, nothing is marked.
+  const none = markSeenPadded(stored, Object.freeze([tok(20)]), seeded(9), 4, Object.freeze([tok(1), tok(2), tok(3), tok(4)]))
+  t.is(none.changed, false)
+  t.is(none.ids, stored)
+  // keep marks nothing: a kept row that is not stored stays unstored.
+  const same = markSeenPadded(stored, Object.freeze([tok(1)]), seeded(9), 4, Object.freeze([tok(30)]))
+  t.is(same.changed, false)
+  // Default behaviour (no keep) is unchanged.
+  const dflt = markSeenPadded(stored, Object.freeze([tok(20), tok(1), tok(2), tok(3)]), seeded(9), 4)
+  t.alike(dflt.ids, [d(1), d(2), d(3), d(20)])
+})
+
 test('parseSeen round-trips serializeSeen v3 and rejects anything else, v1 and v2 included', async (t) => {
   const { parseSeen, serializeSeen, SEEN_MAX } = await load()
   const ids = [d(2), d(1), d(3)]
@@ -1251,4 +1273,42 @@ test('snippetCut: a cut snippet is plain, an intact one may carry links', async 
   t.is(snippetCut(row, long), true, 'a cut address is never a link')
   t.is(snippetCut(Object.freeze({ kind: 'follow', key }), long), false, 'a follow has no snippet')
   t.is(snippetCut(row, null), false)
+})
+
+test('oldFollowSeen: the seen tokens of old follow rows of followed authors', async (t) => {
+  const { FOLLOW_SEEN_CUTOFF, oldFollowSeen } = await load()
+  const a = 'ab'.repeat(32)
+  const b = 'cd'.repeat(32)
+  const cut = Date.parse(FOLLOW_SEEN_CUTOFF)
+  const row = (key, at, seen, kind) => ({ key, seq: 1, at: new Date(at).toISOString(), seen, ...(kind ? { kind } : {}) })
+  const follows = new Set([a])
+  t.is(FOLLOW_SEEN_CUTOFF, '2026-11-17T12:00:00.000Z')
+  t.alike(oldFollowSeen([row(a, cut - 1, '1'.repeat(32))], follows), ['1'.repeat(32)], '1 ms before the cutoff is returned')
+  t.alike(oldFollowSeen([row(a, cut, '2'.repeat(32))], follows), [], 'at the cutoff is not')
+  t.alike(oldFollowSeen([row(a, cut + 1, '2'.repeat(32))], follows), [], 'after the cutoff is not')
+  t.alike(oldFollowSeen([row(b, cut - 1, '3'.repeat(32))], follows), [], 'an author not followed is not')
+  t.alike(oldFollowSeen([row(a, cut - 1, '4'.repeat(32), 'like')], follows), [], 'a non-follow row is not')
+  t.alike(oldFollowSeen([row(a, cut - 1, '5'.repeat(32), 'follow')], follows), ['5'.repeat(32)], 'an explicit follow counts')
+  t.alike(oldFollowSeen([row(a, cut - 1, 'zz')], follows), [], 'no valid token gives nothing')
+  t.alike(oldFollowSeen([{ ...row(a, cut - 1, '6'.repeat(32)), at: 'x' }, { key: a, seen: '7'.repeat(32) }], follows), [], 'invalid or missing at')
+  t.alike(oldFollowSeen([row(b, cut - 1, '1'.repeat(32))], null), ['1'.repeat(32)], 'null follows: any pre-cutoff follow')
+  t.alike(oldFollowSeen([row(b, cut, '1'.repeat(32)), row(b, cut + 1, '2'.repeat(32))], null), [], 'null follows: at or after the cutoff is not')
+  t.alike(oldFollowSeen([row(b, cut - 1, '1'.repeat(32), 'like')], null), [], 'null follows: a non-follow row is not')
+  t.alike(oldFollowSeen([row(a, cut - 1, '1'.repeat(32))], {}), [], 'a non-Set follows')
+  t.alike(oldFollowSeen(null, follows), [])
+  t.alike(oldFollowSeen([null, 3, 'x'], follows), [])
+  t.alike(oldFollowSeen([row(a, cut - 1, '1'.repeat(32))], follows, 'bad'), [], 'bad cutoff')
+})
+
+test('Avisos marks old follows seen in settle, before the dot, members only', (t) => {
+  const fs = require('node:fs')
+  const path = require('node:path')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
+  const at = source.indexOf('const settle = useCallback(')
+  const body = source.slice(at, source.indexOf('}, [seenNamespace, badge])', at))
+  const mark = body.indexOf('oldFollowSeen(list, followsSetRef.current)')
+  t.ok(mark > 0 && body.includes('!isPageSeenNamespace(seenNamespace)'), 'never a page')
+  t.ok(body.includes('markSeenPadded(') && body.includes('writeSeen(seenNamespace'), 'same seen-marking path')
+  t.ok(mark < body.indexOf('const fresh = '), 'before the unread computation') && t.ok(body.includes('!old.has(item.seen)'), 'no dot for them')
+  t.ok(source.includes('followsSetRef.current = follows'))
 })
