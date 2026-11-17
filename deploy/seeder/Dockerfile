@@ -71,6 +71,21 @@ RUN set -eu; \
     fi; \
     printf '{"v":1,"commit":"%s","seq":%s,"web":"%s"}\n' "$VARANDA_COMMIT" "$VARANDA_SEQ" "$VARANDA_WEB_IMAGE" > /app/release.json; \
     chmod 0444 /app/release.json
+# A imagem do Caddy (Dockerfile.caddy), fixada por digest num arquivo à parte:
+# o release.json fica com o formato que os servidores já instalados conferem.
+# Com ela, o update.sh roda o web dessa imagem e só o recria quando ela ou o
+# Caddyfile mudam. Sem o argumento, nada muda e não há caddy.json.
+ARG VARANDA_CADDY_IMAGE=""
+RUN set -eu; \
+    [ -n "$VARANDA_CADDY_IMAGE" ] || exit 0; \
+    [ -n "$VARANDA_COMMIT" ] || { echo 'caddy.json: VARANDA_CADDY_IMAGE exige VARANDA_COMMIT' >&2; exit 1; }; \
+    digest="${VARANDA_CADDY_IMAGE#ghcr.io/varanda-org/varanda-caddy@sha256:}"; \
+    case "$digest" in ''|*[!0-9a-f]*) echo 'caddy.json: VARANDA_CADDY_IMAGE inválido' >&2; exit 1 ;; esac; \
+    if [ "$digest" = "$VARANDA_CADDY_IMAGE" ] || [ "${#digest}" -ne 64 ]; then \
+      echo 'caddy.json: VARANDA_CADDY_IMAGE inválido' >&2; exit 1; \
+    fi; \
+    printf '{"v":1,"caddy":"%s"}\n' "$VARANDA_CADDY_IMAGE" > /app/caddy.json; \
+    chmod 0444 /app/caddy.json
 USER node
 VOLUME /data
 # SIGTERM fecha o semeador (store, quarentena e lock) e ele sai com 0.

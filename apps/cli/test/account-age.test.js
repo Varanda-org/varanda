@@ -236,7 +236,7 @@ async function setup (t, { age = true, phone = false, inviting = false, maxMembe
   const decisions = () => fake.seen.filter((r) => r.method === 'GET')
   const lastSession = () => [...fake.sessions.keys()].pop()
 
-  return { dir, base, numbers, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, api, post, signFor, start, step, feiraStep, raw, creates, deletes, decisions, lastSession }
+  return { dir, base, numbers, c, iss, store, ages, invites, feiraStore, fake, google, linked, logs, texts, server, api, post, signFor, start, step, feiraStep, raw, creates, deletes, decisions, lastSession }
 }
 
 // Opens a session for `who` and scripts its Didit decision.
@@ -922,13 +922,17 @@ test('age nonces: single-use, member-bound, expiring, action-bound, never a term
   const m = member()
   const other = member()
 
-  // Issued to m, presented by other with its own signature: spent.
+  // Issued to m, presented by other with its own signature: refused, and
+  // not spent for m (the nonce is bound to m), which a failed proof then
+  // spends.
   const a = await s.start(m)
   const stolen = await s.post('/account/age/session', { member: other.hex, nonce: a.body.nonce, signature: s.signFor(other, 'session', a.body.nonce) })
   t.is(stolen.status, 404)
   t.alike(stolen.body, { error: 'expirado' })
+  const own = await s.post('/account/age/session', { member: m.hex, nonce: a.body.nonce, signature: s.signFor(m, 'result', a.body.nonce) })
+  t.alike(own.body, { error: 'assinatura-invalida' }, 'still live for m after the other member\'s attempt')
   const late = await s.post('/account/age/session', { member: m.hex, nonce: a.body.nonce, signature: s.signFor(m, 'session', a.body.nonce) })
-  t.is(late.status, 404, 'spent by the other member\'s attempt')
+  t.is(late.status, 404, 'spent by m\'s failed proof')
 
   // Expired.
   const b = await s.start(m)
@@ -961,6 +965,22 @@ test('age nonces: single-use, member-bound, expiring, action-bound, never a term
   }
   t.is(s.creates().length, 0, 'no session opened by a failed proof')
   noPersonalData(t, s)
+})
+
+test('age nonces: a flood of unsigned starts never pushes out a member\'s unspent nonce', async (t) => {
+  const s = await setup(t, { burst: 5000 })
+  const m = member()
+  const nonce = (await s.start(m)).body.nonce
+  // More than the 1000 nonces the old table held, each for a fresh key.
+  let failed = 0
+  for (let i = 0; i < 1100; i++) {
+    if ((await s.start(member())).status !== 200) failed++
+  }
+  t.is(failed, 0, '1100 unsigned starts answered')
+  t.is(s.server.ageStats().nonces, 0, 'start stores nothing')
+  const r = await s.post('/account/age/session', { member: m.hex, nonce, signature: s.signFor(m, 'session', nonce) })
+  t.is(r.status, 200, r.text)
+  t.is(s.server.ageStats().nonces, 1, 'only the spent nonce is kept')
 })
 
 test('age decisions: bands stored, refusals and inconclusive store nothing, every final decision deletes the session', async (t) => {

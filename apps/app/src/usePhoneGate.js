@@ -14,17 +14,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { phonePolicy as readPhonePolicy, phoneSince as readPhoneSince, phoneStart, phoneStatus } from './account'
 import { installationOrigin } from './installation'
-import { phoneGate, phoneReadAllowed } from './phone.js'
+import { isIsoDate, phoneGate, phoneReadAllowed } from './phone.js'
+
+export { isIsoDate }
 
 export const phoneRetryDelay = (n) => (n === 0 ? 5000 : n === 1 ? 15000 : 60000)
 // The node.info read the gate waits on, as the age step's in App.js.
 export const phoneInfoDelay = (n) => (n === 0 ? 2000 : n === 1 ? 5000 : n === 2 ? 15000 : 30000)
-
-export function isIsoDate (s) {
-  if (typeof s !== 'string' || s.length !== 24) return false
-  const d = new Date(s)
-  return !Number.isNaN(d.getTime()) && d.toISOString() === s
-}
 
 // Pure: what node.info says for this member only (an info read for another
 // key, or none yet, proves nothing).
@@ -126,6 +122,9 @@ export function usePhoneGate ({ node, info, hosted, ready, termsOk, locked, memb
   lockedRef.current = locked
   const [answer, setAnswer] = useState(null)
   const state = answer !== null && answer.key === key ? answer.state : undefined
+  // The date of the proof in the latest 'verificado' this gate took for this
+  // key (a status read or markVerified), or null.
+  const proofDate = answer !== null && answer.key === key && typeof answer.date === 'string' ? answer.date : null
   const [checkTick, setCheckTick] = useState(0)
   const readKey = key + '#' + checkTick
   const readKeyRef = useRef(readKey)
@@ -143,8 +142,13 @@ export function usePhoneGate ({ node, info, hosted, ready, termsOk, locked, memb
 
   // The only sender of a phone-verified attestation and of its clearing: a
   // service answer for the member and installation the request started with.
-  const take = (k, who, st, proof) => {
-    setAnswer({ key: k, state: st })
+  // The proof's date rides along: Trocar o celular compares it with the date
+  // known before (src/phone.js phoneChangeOutcome).
+  // keep: a proofless markVerified (the screen closing on a status recheck)
+  // leaves the date that read brought.
+  const take = (k, who, st, proof, keep = false) => {
+    const date = st === 'verificado' && isProof(proof) && isIsoDate(proof.date) ? proof.date : null
+    setAnswer((cur) => ({ key: k, state: st, date: date === null && keep && cur !== null && cur.key === k ? cur.date : date }))
     if (st === 'verificado' && isProof(proof)) queueProof(k, who, proof)
     else if (st === 'nenhum') queueProof(k, who, null)
     else if (st === 'verificado') setProofOp((cur) => (cur !== null && cur.verified === null && cur.member === who ? null : cur))
@@ -250,7 +254,7 @@ export function usePhoneGate ({ node, info, hosted, ready, termsOk, locked, memb
     if (startedKey !== keyRef.current || lockedRef.current) return
     seq.current += 1
     setFailure(null)
-    take(startedKey, memberRef.current, 'verificado', proof)
+    take(startedKey, memberRef.current, 'verificado', proof, true)
   }, [])
 
   // --- the installation's signed since, handed to the node ---
@@ -338,6 +342,10 @@ export function usePhoneGate ({ node, info, hosted, ready, termsOk, locked, memb
   // policy read keeps the step in the meantime.
   const sinceAccepted = sinceUnseen && sinceShown.since !== null
   const gate = phoneGate({ hosted, policy: gatePolicy, state, vouched: proofs.vouched && !clearPending, sinceHeld: proofs.sinceHeld || sinceAccepted })
+  // The date Trocar o celular starts from: the service's latest proof for
+  // this key, else the one node.info reports for this member (verified by
+  // the node against the issuer) when the status read gave none.
+  const knownDate = proofDate !== null ? proofDate : (proofs.vouched && !clearPending ? info.phoneVerifiedDate : null)
   const error = failure !== null && failure.key === readKey ? failure.err : null
   // A status read for the current key has not finished, or the policy is
   // still unknown (its read is retried; the status cannot be asked before).
@@ -376,5 +384,5 @@ export function usePhoneGate ({ node, info, hosted, ready, termsOk, locked, memb
     setInfoTick((n) => n + 1)
   }, [online, infoNow])
 
-  return { gate, state, error, pending, key, recheck, markVerified }
+  return { gate, state, error, pending, key, proofDate, knownDate, recheck, markVerified }
 }

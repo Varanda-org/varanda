@@ -814,11 +814,17 @@ test('strict open: every report field, change and event is checked, never filter
 async function fullList (t) {
   const s = setup(t)
   const keys = []
-  for (let i = 0; i < MAX_BLOCKED; i++) keys.push(key())
+  for (let i = 0; i < MAX_BLOCKED; i++) keys.push(b4a.toString(crypto.randomBytes(32), 'hex'))
   await s.store.ack({ changeIds: [], snapshot: s.m.snap(1, keys), moderatorCert: s.m.cert })
   t.is(s.store.stats().blocked, MAX_BLOCKED)
   return { ...s, keys }
 }
+
+test('capacity: the mirror holds MAX_BLOCKED (16384) keys and reopens from disk', async (t) => {
+  t.is(MAX_BLOCKED, 16384)
+  const s = await fullList(t)
+  t.is(s.open().stats().blocked, MAX_BLOCKED, 'moderation.json read back whole')
+})
 
 async function refusedUnchanged (t, s, p, msg) {
   const before = fs.readFileSync(path.join(s.dir, FILE), 'utf8')
@@ -1546,4 +1552,72 @@ test('reopen: humanReversed remembers a reopened AI block a person later undid, 
   const later = openModerationStore(dir, { now: c.now, association: m.association })
   t.is(later.get(r.id).status, 'descartar')
   t.is(later.humanReversed(target), true, 'the reopened AI block row still counts')
+})
+
+test('held: published and pending blocks count, a pending unblock does not lift, an owner deletion block counts', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const leaver = key()
+  t.absent(store.held(target), 'nothing at all')
+  t.absent(store.held('nope'), 'an invalid member is false')
+  const { report: row } = await store.add(report(target))
+  const { change } = await store.decide(row.id, { decision: 'bloquear', by: MOD })
+  t.ok(store.held(target), 'a pending moderator block holds')
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.held(target), 'published')
+  const u = await store.unblock(target, { by: MOD })
+  t.ok(store.held(target), 'a pending unblock does not let go: it may still be cancelled')
+  await store.ack({ changeIds: [u.change.id], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.absent(store.held(target), 'unblocked')
+
+  const del = await store.requestDeletion(target)
+  t.ok(store.held(target), 'the owner block, pending, holds')
+  await store.requestDeletion(leaver)
+  t.ok(store.held(leaver), 'so does one with no report behind it')
+  // Once published, the owner block is in the snapshot like any other.
+  await store.ack({ changeIds: [del.change.id], snapshot: m.snap(3, [target]), moderatorCert: m.cert })
+  t.ok(store.held(target), 'a published key is held whoever asked')
+  t.is(store.pending().changes.length, 1, 'read-only: nothing else changed')
+})
+
+test('held: a lift waiting next to the claimed block it lifts still holds, and lets go once both publish', async (t) => {
+  const { store, m } = setup(t)
+  const target = key()
+  const { report: row } = await store.add(report(target))
+  const { change } = await store.decide(row.id, { decision: 'bloquear', by: MOD })
+  await store.pull()
+  const lift = await store.unblock(target, { by: MOD })
+  t.is(lift.change.op, 'unblock', 'appended: the block is claimed')
+  t.ok(store.held(target), 'still held while both wait')
+  await store.ack({ changeIds: [change.id], snapshot: m.snap(1, [target]), moderatorCert: m.cert })
+  t.ok(store.held(target), 'the block published, the lift still waits')
+  await store.ack({ changeIds: [lift.change.id], snapshot: m.snap(2, []), moderatorCert: m.cert })
+  t.absent(store.held(target), 'both published')
+})
+
+test('blockReportsAfter: counts the bloquear reports decided at or after since, all of them with null', async (t) => {
+  const { store, c } = setup(t)
+  const target = key()
+  const other = key()
+  t.is(store.blockReportsAfter(target, null), 0)
+  const a = (await store.add(report(target))).report
+  const b = (await store.add(report(target))).report
+  const d = (await store.add(report(target))).report
+  const o = (await store.add(report(other))).report
+  await store.decide(a.id, { decision: 'bloquear', by: MOD })
+  c.t += HOUR
+  const mid = new Date(c.t).toISOString()
+  c.t += 1000
+  await store.decide(b.id, { decision: 'bloquear', by: AI_ACTOR })
+  await store.decide(d.id, { decision: 'descartar', by: MOD })
+  await store.decide(o.id, { decision: 'bloquear', by: MOD })
+  t.is(store.blockReportsAfter(target, null), 2, 'descartar and another member do not count')
+  t.is(store.blockReportsAfter(target, mid), 1, 'only the one decided after since')
+  t.is(store.blockReportsAfter(target, new Date(c.t).toISOString()), 1, 'decided at since counts')
+  t.is(store.blockReportsAfter(target, new Date(c.t + 1).toISOString()), 0, 'decided before since does not')
+  t.is(store.blockReportsAfter('nope', null), 0)
+  t.exception.all(() => store.blockReportsAfter(target, '2026-10-24'), TypeError)
+  t.exception.all(() => store.blockReportsAfter(target, undefined), TypeError)
+  await store.reopen(b.id, { by: MOD })
+  t.is(store.blockReportsAfter(target, mid), 0, 'a report a person reopened no longer counts')
 })
