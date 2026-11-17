@@ -172,6 +172,98 @@ test('termsStart/termsFinish: nao-vinculado and unexpected bodies', async (t) =>
   try { await a.termsFinish({ member: M, nonce: 'n', signature: 'ff' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
 })
 
+test('termsHeldStart/termsHeldFinish: same-origin no-store POSTs with exactly those keys', async (t) => {
+  const a = await load()
+  const at = '2026-10-27T12:00:00.000Z'
+  const nonce = 'N'.repeat(43)
+  const calls = stub(t, () => calls.length === 1 ? json(200, { nonce }) : json(200, { version: 7, acceptedAt: at }))
+  t.alike(await a.termsHeldStart({ member: M }), { nonce })
+  t.alike(await a.termsHeldFinish({ member: M, nonce, signature: 'ff', version: 7 }), { version: 7, acceptedAt: at })
+  t.alike(calls.map(c => c.init.method + ' ' + c.url), ['POST /account/terms/held/start', 'POST /account/terms/held/finish'])
+  for (const c of calls) {
+    t.is(c.init.credentials, 'same-origin')
+    t.is(c.init.cache, 'no-store')
+    t.is(c.init.headers['content-type'], 'application/json')
+    t.ok(c.init.signal)
+  }
+  t.alike(JSON.parse(calls[0].init.body), { member: M })
+  t.alike(JSON.parse(calls[1].init.body), { member: M, nonce, signature: 'ff', version: 7 })
+
+  stub(t, json(200, { version: 7, acceptedAt: null }))
+  t.alike(await a.termsHeldFinish({ member: M, nonce: 'n1', signature: 'ff', version: 7 }), { version: 7, acceptedAt: null }, 'not accepted on any device')
+})
+
+test('termsHeldFinish: null only when the route does not exist; refusals keep their token', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', version: 7 }
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.termsHeldFinish(args), null, 'an older service')
+  stub(t, json(404, { error: 'expirado' }))
+  try { await a.termsHeldFinish(args); t.fail('expirado must throw') } catch (e) { t.is(e.code, 'expirado') }
+  for (const [status, token] of [[403, 'nao-vinculado'], [400, 'assinatura-invalida'], [400, 'pedido-invalido'], [503, 'indisponivel']]) {
+    const calls = stub(t, json(status, { error: token }))
+    try { await a.termsHeldFinish(args); t.fail(token) } catch (e) { t.is(e.code, token, token) }
+    t.is(calls.length, 1, token + ' never retried')
+  }
+  const calls = stub(t, json(429, {}))
+  try { await a.termsHeldFinish(args); t.fail('429') } catch (e) { t.is(e.code, 'indisponivel', 'a bare 429') }
+  t.is(calls.length, 1)
+  stub(t, () => { throw new Error('network') })
+  try { await a.termsHeldFinish(args); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  // The start route falls back the same way: an older service has neither.
+  stub(t, json(404, { error: 'nao-encontrado' }))
+  t.is(await a.termsHeldStart({ member: M }), null, 'an older service, start')
+  stub(t, json(403, { error: 'nao-vinculado' }))
+  try { await a.termsHeldStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
+  stub(t, json(503, { error: 'indisponivel' }))
+  try { await a.termsHeldStart({ member: M }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+  // The same strict check as the member sessions' start: exactly a token.
+  const token = 'N'.repeat(43)
+  for (const body of [{}, { nonce: 5 }, { nonce: null }, { nonce: 'n1' }, { nonce: 'N'.repeat(42) }, { nonce: 'N'.repeat(42) + '=' },
+    { nonce: token, extra: 1 }, { nonce: token, version: 7 }]) {
+    stub(t, json(200, body))
+    try { await a.termsHeldStart({ member: M }); t.fail(JSON.stringify(body)) } catch (e) { t.is(e.code, 'indisponivel') }
+  }
+})
+
+test('termsHeldFinish: malformed answers are unavailable', async (t) => {
+  const a = await load()
+  const args = { member: M, nonce: 'n1', signature: 'ff', version: 7 }
+  const at = '2026-10-27T12:00:00.000Z'
+  const bad = [
+    null, [], {}, 'x',
+    { version: 7 }, { acceptedAt: at },
+    { version: 7, acceptedAt: at, extra: 1 },
+    { version: 7, acceptedAt: null, member: M },
+    { version: 6, acceptedAt: at }, { version: 8, acceptedAt: null },
+    { version: '7', acceptedAt: at }, { version: 7.5, acceptedAt: at }, { version: null, acceptedAt: at },
+    { version: true, acceptedAt: at }, { version: [7], acceptedAt: at },
+    { version: 7, acceptedAt: '2026-10-27T12:00:00Z' },
+    { version: 7, acceptedAt: '2026-10-27T12:00:00.0Z' },
+    { version: 7, acceptedAt: '2026-10-27T09:00:00.000-03:00' },
+    { version: 7, acceptedAt: '2026-02-30T12:00:00.000Z' },
+    { version: 7, acceptedAt: '2026-10-27' },
+    { version: 7, acceptedAt: 'lixo' },
+    { version: 7, acceptedAt: '' },
+    { version: 7, acceptedAt: 0 },
+    { version: 7, acceptedAt: false },
+    { version: 7, acceptedAt: {} },
+    { version: 7, acceptedAt: [at] }
+  ]
+  for (const body of bad) {
+    stub(t, json(200, body))
+    try { await a.termsHeldFinish(args); t.fail(JSON.stringify(body)) } catch (e) {
+      t.is(e.code, 'indisponivel', JSON.stringify(body))
+      t.is(e.message, 'serviço indisponível')
+    }
+  }
+  // The answer must name the version asked, so a bad ask never matches.
+  for (const version of [undefined, null, '7', 7.5, Number.MAX_SAFE_INTEGER + 1]) {
+    stub(t, json(200, { version, acceptedAt: at }))
+    try { await a.termsHeldFinish({ ...args, version }); t.fail(String(version)) } catch (e) { t.is(e.code, 'indisponivel', String(version)) }
+  }
+})
+
 // A valid uncompressed P-256 point: 0x04 then 64 bytes, unpadded base64url.
 const VAPID = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString('base64url')
 const SUB = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', p256dh: 'p', auth: 'a' }

@@ -9,11 +9,13 @@ const path = require('node:path')
 const b4a = require('b4a')
 const sodium = require('sodium-universal')
 const { createBlobPool, BLOBS_DIR, META_FILE, ACKS_FILE, ACK_BYTES, TOKENS_FILE, BLOB_PARTIAL_MS } = require('../lib/blob-pool')
-const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, encodeChunk, newBlobId } = require('../lib/blob')
+const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, BLOB_RETENTION_MS, encodeChunk, newBlobId } = require('../lib/blob')
+const { STAMP_TOKEN_RETENTION_MS } = require('../lib/dm')
 const { tmpDir } = require('./helpers/tmp')
 const { until } = require('./helpers/net')
 
 const DAY = 86400000
+const RET = BLOB_RETENTION_MS
 const HOUR = 3600000
 const GOOD_KID = b4a.from('00112233aabbccdd', 'hex')
 const OLD_KID = b4a.from('ffeeddccbbaa9988', 'hex')
@@ -94,11 +96,37 @@ test('an identical repeat succeeds without a stamp check and does not refresh ex
   const b = blob(1)
   t.alike(pool.submit(b.frames[0]), { ok: true, complete: true })
   accept = false
-  c.t += 6 * DAY
+  c.t += RET - DAY
   t.alike(pool.submit(b.frames[0]), { ok: true, complete: true, repeated: true })
   c.t += DAY
-  t.is(pool.sweep(), 1, 'expires 7 days after the first put')
+  t.is(pool.sweep(), 1, 'expires after the retention counted from the first put')
   t.is(pool.info(b.id), null)
+})
+
+test('on its defaults a blob is served at 10 days and swept past 14, with its spent tokens', (t) => {
+  // One blob pool holds DM photos, voice notes and moment media: all of them
+  // live 14 days, so a device offline for two weeks still opens them. A
+  // spent stamp is remembered for the key acceptance window, 14 days too.
+  t.is(BLOB_RETENTION_MS, 14 * DAY)
+  t.is(STAMP_TOKEN_RETENTION_MS, 14 * DAY)
+  const dir = tmpDir(t)
+  const c = clock(1700000000000)
+  const pool = open(t, dir, { now: c.now })
+  const b = blob(1)
+  t.ok(pool.submit(b.frames[0]))
+  c.t += 10 * DAY
+  t.is(pool.sweep(), 0, 'nothing swept at 10 days')
+  t.alike(pool.info(b.id), { count: 1, have: 1, complete: true })
+  const r = pool.read(b.id, 0)
+  t.ok(r && b4a.equals(r, b.frames[0]), 'still served at 10 days')
+  c.t += 4 * DAY - 1
+  t.is(pool.sweep(), 0, 'kept just before 14 days')
+  c.t += 1
+  t.is(pool.sweep(), 1, 'swept at 14 days')
+  t.is(pool.info(b.id), null)
+  c.t += 1
+  pool.sweep()
+  t.alike(pool.submit(b.frames[0]), { ok: true, complete: true }, 'its token is forgotten once the blob is gone')
 })
 
 test('a mismatched re-put and a different count are refused', (t) => {
@@ -161,7 +189,7 @@ test('a spent token is refused after its blob is swept, across a reload, until i
   const b = blob(2)
   t.ok(pool.submit(b.frames[0]))
   t.ok(pool.submit(b.frames[1]))
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 1)
   t.is(pool.info(b.id), null)
   t.is(pool.submit(b.frames[0]), null, 'replay of a swept chunk refused')
@@ -194,7 +222,7 @@ test('sweep after retention; an incomplete blob goes after partialMs', (t) => {
   t.is(pool.info(part.id), null, 'partial swept')
   t.ok(pool.info(done.id))
   t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(part.id, 'hex'))))
-  c.t += 6 * DAY
+  c.t += RET - DAY
   t.is(pool.sweep(), 1)
   t.is(pool.size, 0)
   t.is(pool.bytes, 0)
@@ -215,7 +243,7 @@ test('the byte cap counts stored chunks and answers cheio for the chunk that wou
   t.is(pool.submit(a.frames[1]), 'cheio', 'the chunk that would pass the cap')
   t.is(pool.submit(blob(1).frames[0]), 'cheio')
   t.alike(pool.info(a.id), { count: 2, have: 1, complete: false })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 3)
   t.is(pool.bytes, 0)
   t.alike(pool.submit(a.frames[1]), { ok: true, complete: false }, 'a cheio chunk keeps its token unspent')
@@ -295,7 +323,7 @@ test('a crash after meta.json is removed leaves a directory the next load remove
     return unlink(file)
   }
   t.teardown(() => { fs.unlinkSync = unlink })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 0, 'the removal stopped half way')
   fs.unlinkSync = unlink
   pool.close()
@@ -358,7 +386,7 @@ test('a receivedAt far in the future is read as the load time', (t) => {
   fs.writeFileSync(meta, JSON.stringify({ v: 2, count: 1, receivedAt: c.t + 365 * DAY }))
   c.t += DAY
   const again = open(t, dir, { now: c.now })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(again.sweep(), 1)
 })
 
@@ -368,7 +396,7 @@ test('the pool sweeps on its own timer', async (t) => {
   const pool = open(t, dir, { now: c.now, sweepMs: 20 })
   const b = blob(1)
   t.ok(pool.submit(b.frames[0]))
-  c.t += 7 * DAY
+  c.t += RET
   await until(() => pool.size === 0, { name: 'timed sweep' })
   t.pass('swept')
 })
@@ -415,10 +443,10 @@ test('a clamped future receivedAt is written back, so a restart does not renew i
   open(t, dir, { now: c.now }).close()
   t.is(JSON.parse(fs.readFileSync(meta, 'utf8')).receivedAt, start + DAY, 'meta.json holds the load time')
   t.is(fs.statSync(meta).mode & 0o777, 0o600)
-  c.t += 6 * DAY
+  c.t += RET - DAY
   const again = open(t, dir, { now: c.now })
   c.t += DAY
-  t.is(again.sweep(), 1, 'expires 7 days after the first clamp')
+  t.is(again.sweep(), 1, 'expires after the retention counted from the first clamp')
 })
 
 function noIdIn (t, logged, id) {
@@ -472,7 +500,7 @@ test('a blob past its retention is neither read nor added to before the sweep ru
   t.is(pool.read(half.id, 2), null)
   t.is(pool.submit(half.frames[0]), null, 'the swept chunks stay spent')
   t.ok(b4a.equals(pool.read(done.id, 0), done.frames[0]))
-  c.t += 7 * DAY - HOUR
+  c.t += RET - HOUR
   t.is(pool.read(done.id, 0), null, 'a complete blob past retention is not served')
   t.is(pool.info(done.id), null)
   t.is(pool.submit(done.frames[0]), null, 'nor repeated')
@@ -849,7 +877,7 @@ test('a failed directory delete keeps the reservation and the next sweep retries
   const d = path.join(dir, BLOBS_DIR, b4a.toString(a.id, 'hex'))
   fs.chmodSync(d, 0o500)
   t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
-  c.t += 7 * DAY
+  c.t += RET
   t.is(pool.sweep(), 0, 'nothing removed')
   t.is(pool.bytes, 2 * BLOB_CHUNK_BYTES, 'still reserved')
   t.is(pool.info(a.id), null, 'no longer served')
@@ -862,4 +890,63 @@ test('a failed directory delete keeps the reservation and the next sweep retries
   t.is(pool.bytes, 0)
   t.absent(fs.existsSync(d))
   t.alike(pool.submit(blob(1).frames[0]), { ok: true, complete: true })
+})
+
+test('purge removes the named blobs now, leaves the others and keeps their tokens spent across a restart', (t) => {
+  const dir = tmpDir(t)
+  const pool = open(t, dir)
+  const a = blob(2)
+  const b = blob(1)
+  const kept = blob(1)
+  for (const f of [...a.frames, ...b.frames, ...kept.frames]) t.ok(pool.submit(f))
+  t.is(pool.purge([a.id, b4a.toString(b.id, 'hex'), newBlobId(), 'nao-e-id', a.id]), 2)
+  t.is(pool.info(a.id), null)
+  t.is(pool.read(b.id, 0), null)
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(a.id, 'hex'))))
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))))
+  t.is(pool.bytes, BLOB_CHUNK_BYTES)
+  t.ok(pool.read(kept.id, 0), 'another blob is still served')
+  t.is(pool.purge([]), 0)
+  pool.close()
+  const again = open(t, dir)
+  t.is(again.info(a.id), null, 'not back after a restart')
+  t.ok(again.info(kept.id))
+  t.is(again.submit(a.frames[0]), null, 'its frames stay spent')
+  t.is(again.submit(b.frames[0]), null)
+})
+
+test('a purge that cannot remove a blob throws, stops serving it, and the next sweep removes it', (t) => {
+  const dir = tmpDir(t)
+  const logged = []
+  const pool = open(t, dir, { log: (e) => logged.push(e) })
+  const a = blob(1)
+  const b = blob(1)
+  for (const f of [...a.frames, ...b.frames]) t.ok(pool.submit(f))
+  const d = path.join(dir, BLOBS_DIR, b4a.toString(a.id, 'hex'))
+  fs.chmodSync(d, 0o500)
+  t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
+  t.exception(() => pool.purge([a.id, b.id]), /blob pool purge failed/)
+  t.is(pool.info(a.id), null, 'no longer served')
+  t.is(pool.info(b.id), null)
+  t.absent(fs.existsSync(path.join(dir, BLOBS_DIR, b4a.toString(b.id, 'hex'))), 'the other one is removed')
+  t.is(pool.bytes, BLOB_CHUNK_BYTES, 'still counted')
+  t.alike(logged, [{ event: 'blob-pool-remove-failed', blobs: 1 }])
+  fs.chmodSync(d, 0o700)
+  t.is(pool.sweep(), 1, 'the sweep removes it')
+  t.absent(fs.existsSync(d))
+})
+
+test('a purge that cannot write tokens.json throws and serves none of the named blobs', (t) => {
+  const dir = tmpDir(t)
+  const pool = open(t, dir)
+  const a = blob(1)
+  t.ok(pool.submit(a.frames[0]))
+  const d = path.join(dir, BLOBS_DIR)
+  fs.chmodSync(d, 0o500)
+  t.teardown(() => { try { fs.chmodSync(d, 0o700) } catch {} })
+  t.exception(() => pool.purge([a.id]))
+  t.is(pool.info(a.id), null, 'no longer served')
+  fs.chmodSync(d, 0o700)
+  t.is(pool.sweep(), 1, 'the sweep writes the tokens and removes it')
+  t.absent(fs.existsSync(path.join(d, b4a.toString(a.id, 'hex'))))
 })

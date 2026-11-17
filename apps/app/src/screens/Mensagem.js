@@ -10,7 +10,8 @@
 // the profile and one icon opens the conversation options. Rows are shared
 // Bubbles (tails, day chips, five-minute runs); a long press offers Responder, Copiar,
 // Encaminhar (ui/ForwardSheet, forward.js; a forwarded message shows
-// "Encaminhada" and never its original author) and
+// "Encaminhada" and never its original author; as a page, only the text goes
+// to the page's own conversations) and
 // Denunciar. An @nome in the text opens its profile. Whether the conversation is a request or blocked
 // comes from dm.thread itself (docs/rpc.md 5.78), never from a dm.list page;
 // until the first answer neither the composer nor the request actions show.
@@ -81,7 +82,7 @@ import { ReactionChips, QuickReactions } from '../ui/Reactions'
 import { ReactionPicker } from '../ui/ReactionPicker'
 import { olderInitial, olderStep } from '../olderTrigger'
 import { actAs, pagesDm } from '../pages'
-import { pageKeyText } from '../pageSecrets'
+import { pageKeyText, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
 import { cardFits, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'
 import { cardForSend, draftView, freezeSnapshot, linkDraftIdle, linkDraftStep, withCardFallback } from '../linkCard'
@@ -109,7 +110,7 @@ import { ActionsSheet } from '../ui/ActionsSheet'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, Skeleton } from '../ui/States'
 import { ForwardSheet } from '../ui/ForwardSheet'
-import { dmForwardSource } from '../forward'
+import { dmForwardSource, pageForwardSource } from '../forward'
 import { TopBar } from '../ui/TopBar'
 import { memberKeyOf, useActing } from './Conversa'
 
@@ -331,6 +332,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
   const [confirmDelete, setConfirmDelete] = useState(false)
   // { source, refs } of the message the Encaminhar sheet forwards.
   const [forwarding, setForwarding] = useState(null)
+  // A sheet opened as the person never sends as the page, nor the reverse.
+  useEffect(() => { setForwarding(null) }, [pageKey])
   const post = useAction()
   const act = useAction()
   // Offers: the "Fazer oferta" sheet and its value, the offer an Aceitar
@@ -848,6 +851,8 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       setReplyTo((rt) => (rt && rt.id === quoteId ? null : rt))
       if (ctx !== null) setContext((c) => (c === ctx ? null : c))
       setHold(null)
+      // The node refuses a page's sends while its key differs.
+      if (pageKey !== null && typeof node.clearPageMismatch === 'function') node.clearPageMismatch(pageKey)
     } else if (r.uncertain || (err && err.message === UNSURE_SEND)) {
       // The held text is now a faded bubble, so the composer is free for a new
       // message; sendPlan asks before sending a different one.
@@ -1292,8 +1297,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
     (context !== null && draft.trim() === '' ? false : staged ? attachments.ready && !sendingMedia : draft.trim() !== '')
   const mediaOf = new Map(raw.map((m) => [messageKey(m), m.media]))
   const fwdOf = new Map(raw.map((m) => [messageKey(m), m.fwd]))
-  // Forwarding writes as the person, never as a page.
-  const canForward = pageKey === null && unlocked
+  // As a page, a forward goes through the page client (dm.pageSend), text
+  // only, to the page's own conversations.
+  const canForward = unlocked
+  const pageForward = pageKey !== null && forwarding ? pageForwardSource(forwarding.source) : null
 
   const rowLive = useRef(null)
   rowLive.current = { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, mentionTap, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct }
@@ -1398,6 +1405,9 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         {/* The conversation menu closes before its action runs: a failed
             block or delete says so here. */}
         <ErrorText>{act.error}</ErrorText>
+        {/* Not a block: the flag may be stale until the next pull, and a
+            send the node refuses shows the block note instead. */}
+        {pageMismatchNote(node.pageMismatch, pageKey) !== '' ? <Soft>{pageMismatchNote(node.pageMismatch, pageKey)}</Soft> : null}
         {showListingReplies(rows, pageKey !== null ? pageKey : ownKey) && !hold && !mediaHold && !sendingMedia && !post.pending
           ? (
             <View style={styles.inline}>
@@ -1579,9 +1589,10 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
       <ForwardSheet
         open={forwarding !== null}
         onClose={() => setForwarding(null)}
-        source={forwarding ? forwarding.source : null}
-        refs={forwarding ? forwarding.refs : []}
+        source={pageForward !== null ? pageForward.source : (forwarding ? forwarding.source : null)}
+        refs={pageForward !== null ? [] : (forwarding ? forwarding.refs : [])}
         identity={ownKey}
+        {...(pageKey !== null ? { request: dm, mediaLeft: pageForward !== null ? pageForward.left : 0 } : {})}
       />
       <Sheet open={isTop && offerOpen && offerListing !== null && folder === 'inbox' && blockNote === null} onClose={() => { if (!offerAct.pending) setOfferOpen(false) }} title='Fazer oferta'>
         <View style={styles.sheet}>
@@ -1623,7 +1634,7 @@ function MensagemThread ({ peer, initial, isTop = true, onBack, onOpenMember, on
         // so a second Enter after "Apagar conversa" never deletes by accident.
         actions={[
           { icon: 'fechar', label: 'Cancelar', onPress: () => {} },
-          { icon: 'lixeira', label: 'Apagar', danger: true, description: 'Só neste aparelho. A outra pessoa continua com a cópia dela.', pending: act.pending, onPress: () => decide('deleted') }
+          { icon: 'lixeira', label: 'Apagar', danger: true, description: 'A conversa sai dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir. A outra pessoa continua com a cópia dela.', pending: act.pending, onPress: () => decide('deleted') }
         ]}
       />
     </KeyboardAvoidingView>
@@ -1661,14 +1672,17 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
   const listing = item.listingLink
   const offerRow = item.deleted || offerKey === null ? null : offerOfRow(index)
   const actions = []
-  const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media })
+  // As a Página, its items are read from the Página's store on this device.
+  const pageOf = pageKey !== null ? { page: pageKey } : {}
+  const refs = item.deleted ? [] : chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })
   if (!item.deleted) {
     actions.push({ icon: 'responder', label: 'Responder', onPress: () => setReplyTo({ id: item.id, text: item.text, mine, name: mine ? OWN_LABEL : quoteName }) })
     actions.push({ icon: 'copiar', label: 'Copiar', onPress: () => { copyText(shareNav(), displayText(item.rawText, { multiline: true })) } })
   }
-  // A message with no text whose media expired has nothing to forward.
+  // A message with no text whose media expired has nothing to forward, and a
+  // page forwards text only.
   const forwardSource = !item.deleted && canForward ? dmForwardSource(item.rawText, media) : null
-  if (forwardSource !== null) {
+  if (forwardSource !== null && (pageKey === null || pageForwardSource(forwardSource) !== null)) {
     actions.push({ icon: 'encaminhar', label: 'Encaminhar', onPress: () => setForwarding({ source: forwardSource, refs }) })
   }
   if (!mine && !item.deleted && reportable) {
@@ -1689,7 +1703,7 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
           media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
           item={{ key: item.key, text: link ? plainOf(item.rawText, { full: true }) : item.text, rawText: link ? undefined : item.rawText, at: item.at, deleted: item.deleted, dayMark: item.dayMark, card: link && stored ? cardBesideSpoilers(parseRich(item.rawText), stored) : stored }}
           mine={mine}
-          cardThumb={item.deleted || pageKey !== null ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey }}
+          cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}
           plainCard={folder === 'request'}
           shape={shape}
           forwarded={!item.deleted && fwd === 1}

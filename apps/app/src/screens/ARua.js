@@ -49,10 +49,11 @@ import { useNames } from '../names'
 import { cachedRow, countsFlags, pruneRows } from '../namesCache'
 import { pickAvatar } from '../media/avatar'
 import { FEED_SYNCING_END, cursorOf, feedKey, feedSyncing, isLastFeedPage, mergeRange, olderPagePatch, planSyncRead, quietNewestPlan, rangeEnd, rangePageCap, rangeStart, rangeStep, rearmTimer, resetWith, sequenceBase, shouldReloadOnShow, syncBaseline, syncTruncated } from '../paging'
-import { freshKeys, hasFresh, syncLengths } from '../syncSignals'
+import { freshKeys, hasFresh, ownGrewElsewhere, syncLengths } from '../syncSignals'
 import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
+import { feedSeeds } from '../feedSeeds'
 import { commentedLabel, foldFeed, foldNeeds, previewName } from '../feedFold'
 import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
@@ -1861,7 +1862,8 @@ function PageARua ({ active, refresh, acting, onReply, onReport, ownKey, scrollT
       } else {
         const items = Array.isArray(read.items) ? read.items : []
         commit({ items: resetWith(items), loadedAt: Date.now(), loading: false, incomplete: read.incomplete === true })
-        learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+        // Name only: page.feed's avatar can be an older head profile.
+        learnMany(feedSeeds(items, { avatar: false }))
         resolveMany(items.map((i) => i.author))
         // The page's follows are not the member's: their photos are kept
         // only for authors the member follows (persistOf).
@@ -2164,7 +2166,7 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const { request, ackFresh } = node
   const { learnMany, resolveMany, seedMany } = names
   const learnPage = useCallback((items) => {
-    learnMany(items.map((i) => [i.author, { name: i.name, username: i.username }]))
+    learnMany(feedSeeds(items))
     resolveMany(items.map((i) => i.author))
     resolveMany(items.filter((i) => i.replyTo).map((i) => i.replyTo.author))
   }, [learnMany, resolveMany])
@@ -2534,15 +2536,16 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
     }
   }, [request, commit, learnPage, ingest])
 
-  // Own posts published on another device: A Rua compares the own diary's
-  // synced length (signals.ownLength, never acknowledged, unlike fresh.own,
-  // which Diário clears) with the length it last loaded; the first length
-  // seen after a load is the baseline.
+  // Own posts published on another device: signals.ownRemote is never
+  // acknowledged (unlike fresh.own, which Diário clears) and A Rua compares it
+  // with the own length it last loaded; the first length seen after a load is
+  // the baseline. The echo of a write made here moves only ownLength, so
+  // nothing done on this device lights the pill.
   const ownLength = signals && typeof signals.ownLength === 'number' ? signals.ownLength : null
   useEffect(() => {
     if (ownSeenRef.current === null && ownLength !== null) ownSeenRef.current = ownLength
   }, [ownLength])
-  const ownNew = ownLength !== null && ownSeenRef.current !== null && ownLength > ownSeenRef.current
+  const ownNew = ownGrewElsewhere(signals, ownSeenRef.current)
   const fresh = hasFresh(signals, { except: ownKey }) || ownNew || feed.newer > 0
   const previous = useRef({ active: false, refresh, scrollToTop })
   useEffect(() => {

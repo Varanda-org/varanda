@@ -8124,7 +8124,7 @@ Uma publicação, resposta ou citação aceita exatamente o par `[capa JPEG, ví
 
 Não há comparação de fotos, GIFs ou vídeos com listas de hashes de material ilegal conhecido antes de exibir ou repassar.
 
-Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário, mas não os blobs de momentos; quem reteve o descritor público pode abri-los até expirarem. Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
+Os controles são os limites, denúncia e bloqueio, com toda publicação denunciada que contém mídia destinada a uma pessoa. A IA não vê imagens nem vídeos. O bloqueio purga os núcleos de mídia do diário e os blobs que os momentos dele nomeiam (`docs/verification/fix-short-video-leftovers.md`). Os riscos residuais estão em `protocol.md`, seção 8: núcleo de 256 MiB sem rotação, vídeo de até 8 MiB mais capa, H.264 não inspecionado, SEI não apagado, contêineres não percorridos e decodificador da plataforma recebendo bytes de pares.
 
 Cobertura automatizada:
 
@@ -8176,7 +8176,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
 - [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
 - [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
-- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento ainda abre com um descritor guardado até a retenção expirar e que a interface esconde o momento após 24 horas.
+- [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento deixa de abrir com um descritor guardado depois do bloqueio e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
 
 ## 182. Reprodução de vídeos curtos em publicações e momentos
@@ -8561,7 +8561,7 @@ Quando o clipe está pronto, "ver em tela cheia" aparece num botão redondo no c
 
 Um toque, dois toques ou Enter/Espaço sobre o player com foco na web não abrem a publicação nem curtem o post. O quadro impede que o clique e as teclas Enter e Espaço cheguem ao post e recebe o toque. As outras teclas seguem para o app: Escape com o player em foco continua voltando para a tela anterior.
 
-O mural continua mostrando a capa que abre a publicação. Momentos não mudam e anúncios da Feira continuam sem vídeo. Leitores de tela ficam fora desta verificação. A imagem da capa e suas marcas já ficam ocultas para eles, mas o botão da capa mantém o rótulo "vídeo de N segundos". O código não oculta explicitamente os controles do player dentro do post.
+O mural continua mostrando a capa que abre a publicação. Momentos não mudam e anúncios da Feira continuam sem vídeo. Leitores de tela ficaram fora desta verificação. Foram conferidos depois, com TalkBack e com o teclado na web, em `docs/verification/fix-short-video-leftovers.md`, que tirou o vídeo da camada oculta do post e devolve o foco ao player quando o controle tocado some.
 
 Como verificar, a partir da raiz:
 

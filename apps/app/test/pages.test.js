@@ -1430,3 +1430,94 @@ test('Páginas: Nova página is a plus in the top bar and openable rows end in a
   t.absent(src.includes("<Btn label='Nova página'"), 'no body button')
   t.ok(src.includes("{onOpen ? <Icon name='seta' size={20} color={colors.soft} /> : null}"), 'a chevron only on rows that open')
 })
+
+test('pagesDmForget asks the node only for a page whose keys it holds, never on a core node, and never throws', async (t) => {
+  const { pagesDmForget } = await load()
+  const calls = []
+  const request = async (method, params) => {
+    calls.push([method, params.page])
+    if (method === 'dm.pageLegacyBlocks') {
+      if (params.page !== P) throw new Error('sem chave da página')
+      return { pending: [] }
+    }
+    if (method === 'dm.pageForget') return { ok: true }
+    throw new Error('unexpected ' + method)
+  }
+  t.is(await pagesDmForget({ request }, P), true)
+  t.alike(calls, [['dm.pageLegacyBlocks', P], ['dm.pageForget', P]])
+  calls.length = 0
+  t.is(await pagesDmForget({ request }, K2), false, 'a page whose keys the node does not hold')
+  t.alike(calls, [['dm.pageLegacyBlocks', K2]], 'nothing is written for it')
+  calls.length = 0
+  t.is(await pagesDmForget({ request, hosted: false }, P), false, 'a core node holds no page keys')
+  t.is(await pagesDmForget({ request }, 'x'), false)
+  t.is(await pagesDmForget({}, P), false)
+  t.alike(calls, [])
+  const failing = async (method) => {
+    if (method === 'dm.pageForget') throw new Error('erro interno')
+    return { pending: [] }
+  }
+  t.is(await pagesDmForget({ request: failing }, P), false, 'a failed forget is swallowed and not repeated')
+})
+
+test('pagesList forgets, once, the keys of a page the newest list no longer shows; a failed or older answer forgets nothing', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const Y = '56'.repeat(32)
+  const Z = '78'.repeat(32)
+  const list = (owned, admin = []) => json(200, { owned, admin, invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const forgot = []
+  const node = {
+    request: async (method, params) => {
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'dm.pageLegacyBlocks') return { pending: [] }
+      if (method === 'dm.pageForget') {
+        forgot.push(params.page)
+        return { ok: true }
+      }
+      throw new Error('unexpected ' + method)
+    }
+  }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  answers.push(list([{ page: Z }], [{ page: X }]))
+  const first = await pagesList(node, { member: MEM, also: [Z] })
+  t.alike(first.admin, [{ page: X }], 'the answer is handed back as read')
+  await flush()
+  t.alike(forgot, [], 'every page is still run')
+
+  answers.push(list([{ page: Z }, { page: Y, closed: true }]))
+  await pagesList(node, { member: MEM })
+  await flush()
+  t.alike([...forgot].sort(), [X, Y].sort(), 'the admin page the list dropped and the closed page')
+
+  answers.push(list([{ page: Z }, { page: Y, closed: true }]))
+  await pagesList(node, { member: MEM, also: [X] })
+  await flush()
+  t.is(forgot.length, 2, 'a page is tried once per session')
+
+  answers.push(new Error('offline'))
+  await caught(t, pagesList(node, { member: MEM }))
+  await flush()
+  t.is(forgot.length, 2, 'a failed read forgets nothing')
+
+  let releaseOld
+  answers.push(new Promise((resolve) => { releaseOld = resolve }))
+  answers.push(list([{ page: Z }]))
+  const older = pagesList(node, { member: MEM })
+  await flush()
+  await pagesList(node, { member: MEM })
+  releaseOld(list([]))
+  await older
+  await flush()
+  t.absent(forgot.includes(Z), 'an older answer that lands later forgets nothing')
+
+  await reachOn(t)
+  answers.push(list([]))
+  await pagesList({ ...node, accountOrigin: 'https://outra.example' }, { member: MEM })
+  await flush()
+  t.absent(forgot.includes(Z), 'another account origin\'s list forgets none of this one\'s pages')
+})

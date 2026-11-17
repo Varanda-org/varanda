@@ -182,6 +182,17 @@ test('build keeps only the first FEED_LIMIT_DEFAULT rows', async (t) => {
   t.alike(s.cursor, { at: at(last), author: FOLLOW, seq: last }, 'the cursor moves to the last kept row')
 })
 
+test('a snapshot saved with 26 rows (before feed items carried avatar) still parses', async (t) => {
+  const { buildSnapshot, parseSnapshot } = await load()
+  const s = buildSnapshot(fixture())
+  const rows = Array.from({ length: 26 }, (_, i) => post(FOLLOW, 200 - i))
+  const old = { ...s, items: rows, cursor: { at: at(175), author: FOLLOW, seq: 175 }, counts: {}, liked: [], reposted: [], names: { [FOLLOW]: { name: 'Bia', username: 'bia' } }, originals: {} }
+  t.alike(parseSnapshot(JSON.stringify(old), ctx).items.length, 26)
+  const refs = rows.map((r) => r.author + ':' + r.seq)
+  t.is(parseSnapshot(JSON.stringify({ ...old, liked: refs, reposted: refs, counts: Object.fromEntries(refs.map((r) => [r, counts(1)])) }), ctx).liked.length, 26)
+  t.is(parseSnapshot(JSON.stringify({ ...old, items: [...rows, post(FOLLOW, 1)] }), ctx), null, '27 rows are still too many')
+})
+
 test('over the cap, rows go from the end with their dependents', async (t) => {
   const { buildSnapshot, parseSnapshot, SNAPSHOT_MAX_BYTES } = await load()
   // A lone surrogate is 6 bytes in JSON: 2000 of them is 12 KB per post.

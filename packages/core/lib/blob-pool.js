@@ -73,12 +73,16 @@
 // directory, after its tokens are in tokens.json. A crash midway leaves a
 // directory without meta.json, which the next load removes; it never leaves a
 // meta.json whose blob lost chunks that were acked.
+//
+// Retention is never cut short on request, with one exception: the seeder
+// purges the blobs a blocked diary's momentos name (purge(ids)).
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const fs = require('#fs')
 const path = require('#path')
 const { writeJsonAtomic } = require('./store')
 const { BLOB_CHUNK_BYTES, BLOB_FRAME_BYTES, BLOB_MAX_CHUNKS, BLOB_RETENTION_MS, BLOB_POOL_BYTES, decodeChunk } = require('./blob')
+const { STAMP_TOKEN_RETENTION_MS } = require('./dm')
 
 const BLOBS_DIR = 'blobs'
 const META_FILE = 'meta.json'
@@ -181,7 +185,7 @@ function createBlobPool (opts = {}) {
     now = Date.now,
     retentionMs = BLOB_RETENTION_MS,
     partialMs = Math.min(BLOB_PARTIAL_MS, retentionMs),
-    tokenRetentionMs = 2 * retentionMs,
+    tokenRetentionMs = Math.max(retentionMs, STAMP_TOKEN_RETENTION_MS),
     maxBytes = BLOB_POOL_BYTES,
     verifyStamp,
     isKidAccepted = () => false,
@@ -225,6 +229,7 @@ function createBlobPool (opts = {}) {
     submit,
     info,
     read,
+    purge,
     sweep,
     close,
     get size () { return blobs.size },
@@ -656,6 +661,47 @@ function createBlobPool (opts = {}) {
     if (isStoredFrame(idHex, blob, index, frame)) return frame
     dropBroken(idHex, blob)
     return null
+  }
+
+  // Removes the named blobs now, for a blocked author's momentos: each stops
+  // being served at once, its tokens stay spent (tokens.json first) and its
+  // directory goes. Unknown ids are skipped. When tokens.json or a directory
+  // cannot be written or removed, the blobs left stay expired (not served,
+  // still counted, retried by the next sweep) and purge throws, because a
+  // restart would load them back: the caller keeps its reason to purge.
+  // Returns the count removed.
+  function purge (ids) {
+    usable()
+    const named = new Set()
+    for (const id of ids) {
+      const idHex = idHexOf(id)
+      if (idHex !== null && blobs.has(idHex)) named.add(idHex)
+    }
+    if (named.size === 0) return 0
+    for (const idHex of named) blobs.get(idHex).expired = true
+    try {
+      writeTokens(new Set())
+    } catch (err) {
+      tokensDirty = true
+      throw err
+    }
+    let removed = 0
+    for (const idHex of named) {
+      const blob = blobs.get(idHex)
+      try {
+        removeBlobDir(idHex)
+      } catch {
+        continue
+      }
+      blobs.delete(idHex)
+      stored -= blob.chunks.size * BLOB_CHUNK_BYTES
+      removed++
+    }
+    if (removed < named.size) {
+      log({ event: 'blob-pool-remove-failed', blobs: named.size - removed })
+      throw new Error('blob pool purge failed')
+    }
+    return removed
   }
 
   // Removes every complete blob older than retentionMs, every incomplete one

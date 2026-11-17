@@ -11,9 +11,12 @@
 // spent-nonce table that makes a replayed request answer the seq it already
 // produced. Never a secret key, never a core. And the detached page-moved
 // statements of pages moved while paused (served by the successor route).
+// And the closes and moves charged to the 2 per owner per 24 h cap, so a
+// restart does not reset it. The charges key is left out of the file while
+// the table is empty, so a build that predates it can still open the file.
 //
 // ONE sidecar file, <dataDir>/pages.json (mode 0o600): { v, seq, pages,
-// delegates, nonces, statements }, always replaced whole through writeJsonAtomic
+// delegates, nonces, statements, charges }, always replaced whole through writeJsonAtomic
 // (packages/core/lib/store.js: O_EXCL temp, fsync, rename, dir fsync), as
 // invites-store.js does; at most 256 pages keeps it small. It is NOT part of
 // account/store.js on purpose: that store's applyEntry throws on an op it
@@ -60,6 +63,8 @@ const MAX_PAGE_WRITERS = 16
 const MAX_FOLLOWS = 4095
 const MAX_DELEGATES = 4096
 const MAX_NONCES = 4096
+const MAX_CHARGES = 4096
+const CHARGE_WINDOW_MS = 24 * 3600 * 1000
 const MAX_TERMS_VERSION = 9999
 const MAX_GEN = 4294967295
 const NONCE_TTL_MS = 600 * 1000
@@ -76,6 +81,7 @@ const OFFER_KEYS = ['to', 'exp', 'gen', 'seq']
 const WRITER_KEYS = ['group', 'writer', 'kind', 'state']
 const DELEGATE_KEYS = ['diary', 'length', 'termsVersion']
 const NONCE_KEYS = ['seq', 'expiresAt']
+const CHARGE_KEYS = ['at', 'page']
 const MAX_STATEMENT_BYTES = 4096
 // The optional row key of a page whose Conversas keys live on devices.
 const DM_KEYS = ['gen', 'box', 'groupBox', 'shares', 'pending', 'reboxPending', 'legacyBundle', 'rotatePending']
@@ -259,12 +265,21 @@ function validNonceRow (id, v) {
     exactKeys(v, NONCE_KEYS) && validInt(v.seq, 0, Number.MAX_SAFE_INTEGER) && isCanonicalIso(v.expiresAt)
 }
 
+// '<member>:<nonce>:<page>': the nonce binds the member and the action but
+// not the page, so a use is the nonce on one page.
+function validChargeRow (id, v) {
+  const i = id.indexOf(':')
+  const j = id.lastIndexOf(':')
+  return i === 64 && j > i && validKey(id.slice(0, i)) && validNonce(id.slice(i + 1, j)) && exactKeys(v, CHARGE_KEYS) &&
+    isCanonicalIso(v.at) && validKey(v.page) && id.slice(j + 1) === v.page
+}
+
 function copy (v) {
   return v === null || v === undefined ? null : JSON.parse(JSON.stringify(v))
 }
 
 function emptyState () {
-  return { v: VERSION, seq: 0, tag: '', pages: {}, delegates: {}, nonces: {}, statements: {} }
+  return { v: VERSION, seq: 0, tag: '', pages: {}, delegates: {}, nonces: {}, statements: {}, charges: {} }
 }
 
 function checkMaps (obj) {
@@ -280,15 +295,22 @@ function checkMaps (obj) {
   for (const [k, st] of Object.entries(obj.statements)) {
     if (!validKey(k) || !validStatement(k, st) || !has(obj.pages, k) || obj.pages[k].movedTo !== st.to) throw new Error('páginas inválidas')
   }
+  if (Object.keys(obj.charges).length > MAX_CHARGES) throw new Error('páginas inválidas')
+  for (const [k, c] of Object.entries(obj.charges)) {
+    if (!validChargeRow(k, c)) throw new Error('páginas inválidas')
+  }
 }
 
-// A file written before the statements table had none: it reads as empty.
+// A file written before the statements or charges table had none: it reads
+// as empty.
 function fromJson (raw) {
-  const obj = isPlainObject(raw) && !has(raw, 'statements') ? { ...raw, statements: {} } : raw
-  if (!exactKeys(obj, ['v', 'seq', 'tag', 'pages', 'delegates', 'nonces', 'statements']) || obj.v !== VERSION) throw new Error('páginas inválidas')
+  let obj = raw
+  if (isPlainObject(obj) && !has(obj, 'statements')) obj = { ...obj, statements: {} }
+  if (isPlainObject(obj) && !has(obj, 'charges')) obj = { ...obj, charges: {} }
+  if (!exactKeys(obj, ['v', 'seq', 'tag', 'pages', 'delegates', 'nonces', 'statements', 'charges']) || obj.v !== VERSION) throw new Error('páginas inválidas')
   if (!validInt(obj.seq, 0, Number.MAX_SAFE_INTEGER)) throw new Error('páginas inválidas')
   if (typeof obj.tag !== 'string' || !/^([0-9a-f]{32})?$/.test(obj.tag)) throw new Error('páginas inválidas')
-  if (!isPlainObject(obj.pages) || !isPlainObject(obj.delegates) || !isPlainObject(obj.nonces) || !isPlainObject(obj.statements)) throw new Error('páginas inválidas')
+  if (!isPlainObject(obj.pages) || !isPlainObject(obj.delegates) || !isPlainObject(obj.nonces) || !isPlainObject(obj.statements) || !isPlainObject(obj.charges)) throw new Error('páginas inválidas')
   checkMaps(obj)
   return copy(obj)
 }
@@ -354,7 +376,7 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
   function commit (change) {
     const nowMs = now()
     const next = copy(state)
-    for (const name of ['pages', 'delegates', 'nonces', 'statements']) {
+    for (const name of ['pages', 'delegates', 'nonces', 'statements', 'charges']) {
       for (const [k, v] of Object.entries(change[name] || {})) {
         if (v === null) delete next[name][k]
         else next[name][k] = copy(v)
@@ -363,12 +385,16 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     for (const [k, v] of Object.entries(next.nonces)) {
       if (!has(change.nonces || {}, k) && Date.parse(v.expiresAt) <= nowMs) delete next.nonces[k]
     }
+    for (const [k, v] of Object.entries(next.charges)) {
+      if (!has(change.charges || {}, k) && Date.parse(v.at) <= nowMs - CHARGE_WINDOW_MS) delete next.charges[k]
+    }
     // Every commit rewrites the whole file, so live nonces are capped like
     // every other table; only a commit that adds a nonce meets the cap, and
     // at the cap it drops the live rows that expire first rather than fail
     // an unrelated page. A dropped row only guarded a replay inside its TTL:
-    // that resend runs again as new, and the writer's own idempotence (the
-    // diary nonces) still answers it with the seq already appended.
+    // that resend runs again as new. The writer's diary nonces still answer
+    // an append it already made, but a group post has none, so an evicted
+    // group-post or group-seal row can post again.
     const adding = Object.keys(change.nonces || {}).filter((k) => change.nonces[k] !== null && !has(state.nonces, k))
     if (adding.length > 0) {
       const ids = Object.keys(next.nonces)
@@ -407,7 +433,9 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
       throw fail('indisponivel')
     }
     try {
-      writeJson(file, next, 0o600)
+      const out = { ...next }
+      if (Object.keys(out.charges).length === 0) delete out.charges
+      writeJson(file, out, 0o600)
     } catch {
       failed = true
       throw fail('indisponivel')
@@ -1064,6 +1092,46 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     })
   }
 
+  // One close or move charged to the owner's 2 per 24 h: a use already
+  // charged is free again, `extra` (a per-minute window, memory only) runs
+  // only for a new use. Throws 'limite' at the cap.
+  function charge (member, nonce, page, { limit = 2, extra = () => true } = {}) {
+    return enqueue(() => {
+      writable()
+      needKey(member, 'member')
+      needKey(page, 'page')
+      if (!validNonce(nonce)) throw new TypeError('nonce must match NONCE_RE')
+      const nowMs = now()
+      const id = nonceId(member, nonce) + ':' + page
+      const mine = member + ':'
+      const live = Object.entries(state.charges).filter(([, c]) => Date.parse(c.at) > nowMs - CHARGE_WINDOW_MS)
+      if (live.some(([k]) => k === id)) return false
+      if (live.filter(([k]) => k.startsWith(mine)).length >= limit || !extra()) throw fail('limite')
+      const change = { [id]: { at: iso(nowMs), page } }
+      // At the cap the oldest charge goes rather than refuse everyone.
+      if (live.length >= MAX_CHARGES) {
+        const oldest = live.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at))[0][0]
+        change[oldest] = null
+      }
+      commit({ charges: change })
+      return true
+    })
+  }
+
+  // A definite refusal gives the use back; unknown ids write nothing.
+  function refund (member, nonce, page) {
+    return enqueue(() => {
+      writable()
+      needKey(member, 'member')
+      needKey(page, 'page')
+      if (!validNonce(nonce)) throw new TypeError('nonce must match NONCE_RE')
+      const id = nonceId(member, nonce) + ':' + page
+      if (!has(state.charges, id)) return false
+      commit({ charges: { [id]: null } })
+      return true
+    })
+  }
+
   function stats () {
     usable()
     const out = { pages: 0, closed: 0, moved: 0, paused: 0, admins: 0, invites: 0, offers: 0, writers: 0, delegates: 0, nonces: 0 }
@@ -1116,6 +1184,8 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     setDelegate,
     spent,
     spend,
+    charge,
+    refund,
     stats,
     snapshot () {
       usable()

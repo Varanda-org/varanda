@@ -1,4 +1,4 @@
-// Copying the conversation history to another device (rpc 5.151,
+// Copying the conversation history to another device (rpc 5.152,
 // docs/protocol.md section 11): the texts of the Conversas option and its
 // sheet, the result lines, and the small store the two events feed
 // (dm.copyProgress on the device that copies, dm.copyImported on the device

@@ -64,12 +64,12 @@ export const HELP = Object.freeze({
     paragraphs: Object.freeze([
       'Conversas e grupos de comunidades ficam numa lista só, a mais recente primeiro. Todas mostra a lista inteira; Não lidas e Grupos mostram só parte dela.',
       'Mensagens são textos privados entre duas pessoas, cifrados de ponta a ponta.',
-      'A associação guarda só envelopes lacrados por sete dias e não consegue ver quem escreve para quem.',
+      'A associação guarda só envelopes lacrados por 14 dias e não consegue ver quem escreve para quem.',
       'Quem você segue aparece na lista. Qualquer outra pessoa aparece em Pedidos de mensagem, e a mensagem é enviada antes de você aceitar.',
       'Aceitar ou recusar não avisa a outra pessoa.',
       'Não há confirmação de leitura.',
       'Bloquear interrompe as mensagens nos seus aparelhos.',
-      'Apagar remove a conversa só nos seus aparelhos.',
+      'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
       'Copiar conversas leva o texto e as fotos guardadas neste aparelho para os seus outros aparelhos que entram com a mesma passkey, e só você consegue abrir.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
       'A linha Comunidades serve para achar e criar comunidades.'
