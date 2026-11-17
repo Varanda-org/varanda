@@ -4530,6 +4530,11 @@ async function syncRun ({
 
   async function reviewStubRecord (x, reason, cache) {
     if (headerStubs.get(x.key) !== x) return
+    // A key this device writes is never judged as a stub, as on the core node.
+    if (ownGroupKeys.has(x.key)) {
+      dropStubRecord(x.key)
+      return
+    }
     const kept = !isBlockedKey(x.key) && await provenBeyondStub(x.key, cache)
     if (ending || headerStubs.get(x.key) !== x) return
     const ge = groupCores.get(x.key)
@@ -4561,9 +4566,6 @@ async function syncRun ({
       purgeKeptEntry(ge, reason)
     } else if (restingCores.has(x.key)) {
       purgeResting(x.key, reason)
-    } else if (ownGroupKeys.has(x.key)) {
-      // Written by this device since the start: never a stub, never purged.
-      dropStubRecord(x.key)
     } else {
       // Held by nothing in this run (its stub left the table): the core
       // and its record go now, as the core node does.
@@ -5101,7 +5103,10 @@ async function syncRun ({
       } else if (ge.head === null) {
         // Gated as a writer, or as the root, of the pair its header names,
         // which proved it: a root too, or the next start would judge the
-        // full core by the record alone.
+        // full core by the record alone. Its resting entry of the record's
+        // pair goes too, or a sweep of that diary would purge a live key.
+        const r = restingCores.get(ge.key)
+        if (headerStubs.has(ge.key) && r !== undefined && (r.group !== ge.group || r.diary !== ge.diary)) restingCores.delete(ge.key)
         dropStubRecord(ge.key)
       }
       ge.stubSlot = false
