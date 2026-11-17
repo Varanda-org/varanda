@@ -66,8 +66,8 @@ import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_RESERVE_TEXT, DEVICE_WAIT_TEXT,
-  EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, PRIVATE_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageGroupErrorText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
+  EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, reserveReachedAny, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -216,6 +216,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const [pageRole, setPageRole] = useState(null)
   const [pageError, setPageError] = useState('')
   const [pageRetry, setPageRetry] = useState(null)
+  const [pageJoinError, setPageJoinError] = useState(null)
   const [pagePending, setPagePending] = useState(false)
   // As a page: the group's visibility as the node read it, for this page
   // and group only ({ id, value }; value 'public' | 'private', or null until
@@ -710,6 +711,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setPagePending(true)
     setPageError('')
     setPageRetry(null)
+    setPageJoinError(null)
     try {
       const answer = await fn()
       const mine = pageRoleOf(answer)
@@ -720,6 +722,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         setPageRetry(() => () => pageMembership(err.retry))
         setPageError(CHECK_UNKNOWN)
       } else {
+        setPageJoinError(err)
         setPageError(pageGroupErrorText(err))
       }
     } finally {
@@ -1259,12 +1262,11 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, markSeen])
   olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
-  const nameText = info && typeof info.name === 'string' && info.name !== ''
-    ? info.name
-    : (isPrivate || info === null ? PRIVATE_LABEL : 'grupo')
+  const nameText = groupNameText({ info, page: asPage.page, visibility: pageVis })
   const subtitle = info ? membersLabel(info.members) || visibilityLabel(info.visibility) : ''
   const heldCommunity = info && typeof info.community === 'string' && HEX64.test(info.community) ? info.community : null
   const communityKey = heldCommunity || indexCommunity
+  const pageEnterCommunity = pageCommunityToEnter({ error: pageJoinError, communityKey })
   const orphan = info !== null && info.orphan === true
   // Role 'pending' on a held root: the account is in by another device and
   // its writers are still arriving here, so nothing is joined from this screen.
@@ -1776,6 +1778,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
               {pageRole === 'member' || pageRole === 'requested'
                 ? <MoreButton title={AS_PAGE_LABEL} actions={[{ icon: 'sair', label: PAGE_LEAVE_LABEL, danger: true, pending: pagePending, onPress: () => pageMembership(pageStatement('group-leave', { group })) }]} />
                 : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
+              {pageEnterCommunity !== null && typeof onOpenCommunity === 'function' ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(pageEnterCommunity, { group })} /> : null}
               {pageRetry ? <Pill label='Conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
               {sealAgain !== null ? <Pill label={PAGE_SEAL_AGAIN_LABEL} onPress={() => sendPost(sealAgain)} pending={pagePending} /> : null}
             </View>

@@ -267,3 +267,32 @@ test('groupRows ignores null and primitive reaction entries', async (t) => {
   const reactions = [null, '👍', { emoji: '👍', count: 2, mine: false }]
   t.alike(groupRows([message(A, 1, 0, { reactions })], A)[0].reactions, [{ emoji: '👍', count: 2, mine: false }])
 })
+
+test('pageCommunityToEnter offers the community only for a definite fora-da-comunidade refusal', async (t) => {
+  const { pageCommunityToEnter } = await import('../src/groups.js')
+  const key = 'ab'.repeat(32)
+  const refused = Object.assign(new Error('x'), { code: 'fora-da-comunidade' })
+  t.is(pageCommunityToEnter({ error: refused, communityKey: key }), key)
+  t.is(pageCommunityToEnter({ error: refused, communityKey: null }), null, 'community not known yet')
+  t.is(pageCommunityToEnter({ error: Object.assign(new Error('x'), { code: 'fora-da-comunidade', uncertain: true }), communityKey: key }), null, 'uncertain')
+  t.is(pageCommunityToEnter({ error: Object.assign(new Error('x'), { code: 'indisponivel' }), communityKey: key }), null, 'other error')
+  t.is(pageCommunityToEnter({ error: null, communityKey: key }), null)
+})
+
+test('groupNameText: a page outside a public group does not call it private', async (t) => {
+  const { groupNameText, PRIVATE_LABEL } = await import('../src/groups.js')
+  t.is(groupNameText({ info: null, page: true, visibility: 'public' }), 'grupo')
+  t.is(groupNameText({ info: null, page: true, visibility: null }), 'grupo')
+  t.is(groupNameText({ info: null, page: true, visibility: 'private' }), PRIVATE_LABEL)
+  t.is(groupNameText({ info: null, page: false, visibility: null }), PRIVATE_LABEL, 'a person keeps the old rule')
+  t.is(groupNameText({ info: { name: 'Geral', visibility: 'private' }, page: true, visibility: null }), 'Geral')
+  t.is(groupNameText({ info: { name: '', visibility: 'private' }, page: false, visibility: null }), PRIVATE_LABEL)
+  t.is(groupNameText({ info: { name: '', visibility: 'public' }, page: false, visibility: null }), 'grupo')
+})
+
+test('Grupo wires the page community path and the neutral name', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  t.ok(src.includes('pageCommunityToEnter({ error: pageJoinError, communityKey })'))
+  t.ok(src.includes('onOpenCommunity(pageEnterCommunity, { group })'), 'the page opens the community like a person')
+  t.ok(src.includes('groupNameText({ info, page: asPage.page, visibility: pageVis })'))
+})

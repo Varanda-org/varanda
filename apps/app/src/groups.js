@@ -628,6 +628,26 @@ export function pageGroupErrorText (err) {
   return pageErrorText(err)
 }
 
+// The service refuses a page's group join with 'fora-da-comunidade' until
+// the page has a writer in the group's community (docs/protocol.md,
+// "Comunidades como página"). The page then enters the community first, as a
+// person does. -> the community to open, or null when there is nothing to
+// offer: another error, an uncertain answer (the join may have landed) or a
+// community the screen does not know yet.
+export function pageCommunityToEnter ({ error, communityKey }) {
+  if (!error || error.code !== 'fora-da-comunidade' || error.uncertain === true) return null
+  return typeof communityKey === 'string' && communityKey !== '' ? communityKey : null
+}
+
+// The header name of a group. A page that is not in the group has no group
+// info on this node: it says 'grupo privado' only when the node's own verified
+// read of the header (visibility) said private, never before that.
+export function groupNameText ({ info, page, visibility }) {
+  if (info && typeof info.name === 'string' && info.name !== '') return info.name
+  if (info === null && page === true) return visibility === 'private' ? PRIVATE_LABEL : 'grupo'
+  return info === null || info.visibility === 'private' ? PRIVATE_LABEL : 'grupo'
+}
+
 // A page's read of a group (Grupo.js). The visibility is the node's alone,
 // read from the verified header with the page's key: the service's answer
 // never decides it, so a lying service cannot get a private post sent in
