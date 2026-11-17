@@ -147,6 +147,9 @@ const COMPACT_RANGES_MAX = 256
 const MAX_TIME = 8.64e15
 const CACHE_BYTES_MAX = 256 * 1048576
 
+// The most a row's shownAt (ms) may be: the fold's own time bound.
+const SHOWN_MAX = 8.64e15
+
 function isCount (n, max) {
   return Number.isSafeInteger(n) && n >= 1 && n <= max
 }
@@ -184,6 +187,7 @@ function validRow (r) {
   if (r.t === 'rx') return validReactionRow(r)
   if (r.t !== 'msg') return false
   if (r.legacy !== undefined && r.legacy !== true) return false
+  if (r.shownAt !== undefined && !(Number.isSafeInteger(r.shownAt) && r.shownAt >= 0 && r.shownAt <= SHOWN_MAX)) return false
   if (r.digest !== undefined && !HEX64.test(r.digest)) return false
   if ((r.replyFrom === undefined) !== (r.replyDigest === undefined)) return false
   if (r.replyFrom !== undefined && (r.replyTo === null || !HEX64.test(r.replyFrom) || !HEX64.test(r.replyDigest))) return false
@@ -223,6 +227,7 @@ function plainRow (r) {
   }
   if (typeof r.digest === 'string' && HEX64.test(r.digest)) out.digest = r.digest
   if (r.legacy === true) out.legacy = true
+  if (r.shownAt !== undefined) out.shownAt = r.shownAt
   if (r.moment !== undefined && validMomentRow(r)) out.moment = r.moment
   return out
 }
@@ -1176,4 +1181,4 @@ function createDmStore ({ storage, cacheBytesMax = CACHE_BYTES_MAX, prefix = '',
   return { unlock, lock, unlocked, keyReady, keyStage, loaded, summaryFor, saveSummary, nextFiled, append, snapshot, ops, version: currentVersion, hasMessage, hasReaction, reactionRev, hasOp, seenToken, seal, open, sealBytes, openBytes, hasMedia, putMedia, getMedia, wipeCache, dropDeletedMedia, hiddenByDelete, compact, visits, visitsOn, writeVisits, visitSeen, writeVisitSeen, visitToken, visitSent, writeVisitSent, visitQueue, writeVisitQueue, visitCursor, writeVisitCursor, clearVisits, idle, close }
 }
 
-module.exports = { createDmStore, COMPACT_AFTER_MS, COMPACT_RANGES_MAX, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }
+module.exports = { createDmStore, validRow, COMPACT_AFTER_MS, COMPACT_RANGES_MAX, SUMMARY_PAGE, VISIT_QUEUE_MAX, VISIT_SEEN_MAX }

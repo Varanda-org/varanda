@@ -156,7 +156,7 @@ test('a mention counts only against a username the own diary verifiably held, th
   t.alike(internal, [])
 })
 
-test('an author already followed: their post rows stay, their follow rows drop, whatever the hint', async (t) => {
+test('an author already followed: their post rows and one follow row each stay, whatever the hint', async (t) => {
   t.timeout(90000)
   const now = Date.now()
   const { assoc, state, web, key: me, storage, internal } = await setup(t)
@@ -179,7 +179,9 @@ test('an author already followed: their post rows stay, their follow rows drop, 
 
   await writeFollows(storage, [hex(F.key), hex(G.key)])
   const r = await web.request('notices.list', {})
-  t.alike(rowsOf(r), [[hex(F.key), 2, 'reply']])
+  t.alike(rowsOf(r), [[hex(F.key), 2, 'reply'], [hex(G.key), 1, 'follow'], [hex(F.key), 1, 'follow']], 'a followed author keeps every row, each follow once')
+  t.is(r.notices.filter((n) => n.kind === 'follow' && n.key === hex(F.key)).length, 1, 'F follow once')
+  t.is(r.notices.filter((n) => n.kind === 'follow' && n.key === hex(G.key)).length, 1, 'G follow once')
   t.is(r.incomplete, false)
   t.alike(internal, [])
 })

@@ -676,3 +676,19 @@ test('visits: never a reaction', (t) => {
   const real = reaction(ANA, ANA, m, HEART, 1, 30)
   t.alike(rowOf(runR({ messages: [m], follows: [ANA] }, [real]), m).reactions, [{ emoji: HEART, mine: false }], 'the control')
 })
+
+test('shownAt: an imported row shows min(at, shownAt) while filedAt still orders it against the ops', (t) => {
+  // Filed far below its real time, as a history copy files it.
+  const row = (extra) => ({ ...from(ANA, 30, 'do tempo off-line'), filedAt: F(-600), ...extra })
+  const shownWithout = run({ messages: [row({})], follows: [ANA] }).inbox[0].messages[0]
+  t.is(shownWithout.at, new Date(F(-600)).toISOString(), 'without shownAt the filing time caps it')
+  const shown = run({ messages: [row({ shownAt: F(30) })], follows: [ANA] }).inbox[0].messages[0]
+  t.is(shown.at, T(30), 'with shownAt the real time shows')
+  const late = run({ messages: [row({ shownAt: F(90) })], follows: [ANA] }).inbox[0].messages[0]
+  t.is(late.at, T(30), 'a shownAt after at never raises it')
+  const bad = run({ messages: [row({ shownAt: 'x' })], follows: [ANA] }).inbox[0].messages[0]
+  t.is(bad.at, new Date(F(-600)).toISOString(), 'a malformed shownAt is ignored')
+  // The ops still compare filedAt: a delete filed after the row hides it.
+  const hidden = run({ messages: [row({ shownAt: F(30) })], ops: [op('deleted', ANA, 1)], follows: [ANA] })
+  t.is(hidden.inbox.length, 0, 'filedAt, not shownAt, orders against a delete')
+})

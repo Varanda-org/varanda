@@ -8,7 +8,9 @@
 // dropped. Acting as a page (actingAs.js), the folder is the page's, kept on
 // this device (useDmRequest, docs/rpc.md 5.114); PageInboxNote reads the
 // page's keys ('dm-box-read'), stores a share, and lets the owner activate
-// the page's private Conversas. Props: { onOpenThread(peer), onBack }.
+// the page's private Conversas. With `oldPage` (a key the Página moved away
+// from) it lists that key's conversations read-only (pageOldKeys.js).
+// Props: { onOpenThread(peer, { oldPage }), onBack, oldPage }.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
@@ -20,6 +22,7 @@ import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../d
 import { pagesDm, pagesDmActivate, pagesDmAdopt, pagesDmBoxRead, pagesDmLegacyFinish, pagesDmLegacyPeers } from '../pages'
 import { PAGE_DM_ACTIVATE_TEXT, PAGE_DM_ACTIVATE_TITLE, PAGE_DM_ASK_OWNER, PAGE_DM_CONFLICT, PAGE_DM_ROTATE_TEXT, PAGE_DM_ROTATE_TITLE, PAGE_DM_ROTATING, PAGE_DM_BLOCKS_FAILED, PAGE_KEYS_IDLE, blockPeersLine, legacyBundleOf, legacyCardLabel, pageDmState, pageKeyText, pageKeysOf, pageMismatchNote } from '../pageSecrets'
 import { pagesOn } from '../pageGate'
+import { OLD_KEY_NOTE, OLD_KEY_TITLE, oldThreadClient } from '../pageOldKeys'
 import { Btn, ErrorText, Notice, Soft, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { ConversationRow } from '../ui/ConversationRow'
 import { Pill } from '../ui/Pill'
@@ -314,13 +317,16 @@ export function PageInboxNote ({ pageKey }) {
   )
 }
 
-export function Mensagens ({ onOpenThread, onBack }) {
+export function Mensagens ({ onOpenThread, onBack, oldPage }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const bottomPad = useBottomPad()
   const now = useNow(60000)
   const hosted = node.hosted === true
-  const { dm, pageKey } = useDmRequest()
+  const { dm: ownDm, pageKey } = useDmRequest()
+  const old = typeof oldPage === 'string' && /^[0-9a-f]{64}$/.test(oldPage) ? oldPage : null
+  const nodeRequest = node.request
+  const dm = useMemo(() => (old !== null ? oldThreadClient({ request: nodeRequest, page: old }) : ownDm), [old, nodeRequest, ownDm])
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
   const [rows, setRows] = useState([])
   const [next, setNext] = useState(null)
@@ -337,11 +343,19 @@ export function Mensagens ({ onOpenThread, onBack }) {
   const list = useCallback(async () => {
     const gen = ++genRef.current
     try {
-      const r = await dm('dm.list', { folder: 'request' })
+      const r = await dm('dm.list', { folder: old !== null ? 'inbox' : 'request' })
+      // An old key lists its requests too, the newest first (sortConversations).
+      // Only the inbox cursor pages further: requests past the first page of an
+      // old key are not loaded.
+      // A failed request read keeps the inbox rows.
+      const extra = old !== null ? await dm('dm.list', { folder: 'request' }).catch(() => null) : null
       if (gen !== genRef.current) return
       // A refresh starts over from the first page: older pages are loaded
       // again on scroll, never left stale.
-      setRows(Array.isArray(r.conversations) ? r.conversations : [])
+      const first = Array.isArray(r.conversations) ? r.conversations : []
+      const have = new Set(first.map((row) => row && row.peer))
+      const more = extra && Array.isArray(extra.conversations) ? extra.conversations.filter((row) => row && !have.has(row.peer)) : []
+      setRows(first.concat(more))
       setNext(r.next || null)
       setPageError('')
       setError('')
@@ -351,7 +365,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
       setError(errorText(err))
       setLoaded(true)
     }
-  }, [dm])
+  }, [dm, old])
 
   // A pull that failed may still have filed messages: read again either way.
   const refresh = useCallback(async () => {
@@ -389,7 +403,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
     setLoadingMore(true)
     setPageError('')
     try {
-      const r = await dm('dm.list', { folder: 'request', before: cursor })
+      const r = await dm('dm.list', { folder: old !== null ? 'inbox' : 'request', before: cursor })
       if (gen === genRef.current && cursor === nextRef.current) {
         const page = Array.isArray(r.conversations) ? r.conversations : []
         setRows((cur) => {
@@ -413,13 +427,15 @@ export function Mensagens ({ onOpenThread, onBack }) {
   }, [peers, resolveMany])
   const sorted = useMemo(() => sortConversations(rows), [rows])
 
-  const bar = <TopBar title={requestsRow(null).title} onBack={onBack} />
+  const bar = <TopBar title={old !== null ? OLD_KEY_TITLE : requestsRow(null).title} onBack={onBack} />
   if (!hosted) return <View style={styles.root}>{bar}</View>
 
   const header = (
     <View>
-      <PageInboxNote pageKey={pageKey} />
-      {unlocked ? <View style={styles.note}><Soft>{LABELS.requestNote}</Soft></View> : null}
+      {old !== null
+        ? <View style={styles.note}><Soft>{OLD_KEY_NOTE}</Soft></View>
+        : <PageInboxNote pageKey={pageKey} />}
+      {unlocked && old === null ? <View style={styles.note}><Soft>{LABELS.requestNote}</Soft></View> : null}
     </View>
   )
 
@@ -427,7 +443,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
   if (!unlocked) empty = <EmptyState icon='conversas' title='Mensagens bloqueadas' body={LOCKED_TEXT} actionLabel='Voltar' onAction={onBack} />
   else if (!loaded) empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   else if (error) empty = <View style={styles.pad}><ErrorText>{error}</ErrorText><Pill label='tentar de novo' onPress={() => list()} /></View>
-  else empty = <EmptyState icon='conversas' title={LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />
+  else empty = <EmptyState icon='conversas' title={old !== null ? 'Nenhuma conversa da chave antiga.' : LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />
 
   return (
     <View style={styles.root}>
@@ -440,7 +456,7 @@ export function Mensagens ({ onOpenThread, onBack }) {
           <ConversationRow
             item={{ kind: 'dm', key: item.peer, preview: previewLine(item.preview), mine: item.mine === true, at: item.at, unread: item.unread === true }}
             now={now}
-            onPress={() => onOpenThread(item.peer)}
+            onPress={() => (old !== null ? onOpenThread(item.peer, { oldPage: old }) : onOpenThread(item.peer))}
           />
         )}
         extraData={{ now, names: names.profileOf }}

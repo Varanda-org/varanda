@@ -447,7 +447,7 @@ test('a message request never loads a provider player', (t) => {
 
 test('acting as a Página, its photos and the card thumbnail are read from the Página\'s store', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(src.includes('const pageOf = pageKey !== null ? { page: pageKey } : {}'), 'the row knows the Página it acts as')
+  t.ok(src.includes('const pageOf = mediaPage !== null ? { page: mediaPage } : {}'), 'the row knows the Página it acts as')
   t.ok(src.includes("chatMediaRefs('dm', { from: item.from || (mine ? ownKey : null), id: item.id, media, ...pageOf })"), 'the photo refs carry page: pageKey')
   t.ok(src.includes("cardThumb={item.deleted ? undefined : { kind: 'dm', from: item.from || (mine ? ownKey : null), id: item.id, identity: ownKey, ...pageOf }}"), 'the card thumb too, and the identity stays the person\'s')
   t.absent(src.includes('pageKey !== null ? undefined'), 'a Página card is never left without its thumb')
@@ -676,7 +676,7 @@ test('Mensagem discards initial state across identity changes, including switchi
   t.is(member.initial, null)
   t.is(messageEntry(member, 'member-a', initial).initial, null, 'the original snapshot is never restored')
   const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
-  t.ok(src.includes("key={identity + ':' + props.peer}"), 'identity and peer changes remount the whole composer and its holds')
+  t.ok(src.includes('key={scope}'), 'identity and peer changes remount the whole composer and its holds')
   t.ok(src.includes('if (!live.current) return null'), 'an upload finishing after unmount cannot send')
   t.ok(src.includes('if (!live.current) return\n'), 'a late send answer cannot restore a held message')
 })

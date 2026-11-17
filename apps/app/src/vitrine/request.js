@@ -617,6 +617,8 @@ export function createVitrineRequest (fixtures, options) {
     'dm.pageLegacyChunk': unavailable,
     'dm.pageLegacyBlocks': unavailable,
     'dm.pageForget': unavailable,
+    // The history copy seals real blobs to the account's own box.
+    'dm.historyCopy': unavailable,
     'identity.sessionSaved': () => ({}),
     'identity.recoveryLookup': unavailable,
     'identity.recoveryOpen': unavailable,

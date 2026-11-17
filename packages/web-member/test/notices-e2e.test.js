@@ -180,14 +180,16 @@ test('follow notices end to end: follow, other member, follow back, unfollow, re
   t.is(cList.incomplete, false)
   t.alike(cList.notices, [], 'C cannot see B\'s followers')
 
-  // 5. B follows A back: A is omitted.
+  // 5. B follows A back: A stays, once.
   spy.recording = true
   await web.request('follow.add', { key: A.key })
-  t.alike(rowsOf(await read('followed settled')), [], 'a followed diary is omitted')
+  const followed = await read('followed settled')
+  t.alike(rowsOf(followed), [A.key], 'a followed diary stays, once')
+  t.is(followed.notices.filter((n) => n.key === A.key).length, 1, 'exactly one follow row')
 
-  // 6. B unfollows A: shown again. Then A unfollows B and syncs: gone.
+  // 6. B unfollows A: still listed. Then A unfollows B and syncs: gone.
   await web.request('follow.remove', { key: A.key })
-  t.alike(rowsOf(await read('unfollowed settled')), [A.key], 'back after the unfollow')
+  t.alike(rowsOf(await read('unfollowed settled')), [A.key], 'still listed after the unfollow')
   await A.web.request('follow.remove', { key: B.key })
   await push(t, A, 'A pushed the unfollow')
   const gone = await waitFor('A gone', (r) => r.notices.length === 0)

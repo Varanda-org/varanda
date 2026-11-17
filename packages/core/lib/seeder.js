@@ -112,6 +112,10 @@
 // list (one key for both would let a blob request mint a DM stamp), and a
 // separate daily budget per diary in <dataDir>/blob-stamps.json, so blob
 // issuance never spends the DM allowance.
+// A history copy (docs/protocol.md section 11) buys blob stamps of kind 'copy'
+// on the same channel: signed by the blob key, charged to a weekly budget per
+// diary and Brasília ISO week (dm.copyStampsPerWeek = COPY_STAMPS_PER_WEEK) in
+// <dataDir>/copy-stamps.json, never to the daily blob one and the reverse.
 // With dm.blobPostage the seeder also keeps the blob pool (lib/blob-pool.js)
 // under <dataDir>/blobs/, at most dm.blobBytes bytes, answers the anonymous
 // 'varanda/blob/1' channel (lib/blob-net.js) on every peer and hands
@@ -179,7 +183,7 @@ const {
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
-const { noteGrowth, countActive } = require('./activity')
+const { noteGrowth, countActive, weekBefore } = require('./activity')
 const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, VISIT_POOL_MAX, bucketBits } = require('./dm')
 const { tagFor } = require('./dm-pool')
 const { createDmPool, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS } = require('./dm-pool')
@@ -191,7 +195,7 @@ const { attachBlob } = require('./blob-net')
 const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
 const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
-const { pushCandidate, pushName } = require('./push-events')
+const { pushCandidates, pushName } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -270,6 +274,11 @@ const CERT_FILE = 'seeder-cert.json'
 const ADMITTED_FILE = 'admitted.json'
 const DM_STAMPS_FILE = 'dm-stamps.json'
 const BLOB_STAMPS_FILE = 'blob-stamps.json'
+// The weekly allowance of a history copy (docs/protocol.md section 11), kept
+// like blob-stamps.json but per Brasília ISO week.
+const COPY_STAMPS_FILE = 'copy-stamps.json'
+const COPY_STAMP_KEEP_WEEKS = 4
+const DM_WEEK = /^[0-9]{4}-W[0-9]{2}$/
 const DM_SWEEP_MS = 60000
 // How many blocks after a reported topic root groupPostBlock looks at for
 // the root's poll: group.post writes the root, its group-topic and its
@@ -919,7 +928,7 @@ function dmOptions (dm) {
     throw new TypeError('dm.postage.get must be a function')
   }
   const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop, visitMax = VISIT_POOL_MAX } = dm
-  const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, blobBytes = BLOB_POOL_BYTES } = dm
+  const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, copyStampsPerWeek = dmPostage.COPY_STAMPS_PER_WEEK, blobBytes = BLOB_POOL_BYTES } = dm
   if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
   if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
   if (!Number.isSafeInteger(visitMax) || visitMax < 1) throw new TypeError('invalid dm.visitMax')
@@ -928,8 +937,9 @@ function dmOptions (dm) {
   }
   if (blobPostage !== null && blobPostage === postage) throw new TypeError('dm.blobPostage must not be dm.postage')
   if (!Number.isSafeInteger(blobStampsPerDay) || blobStampsPerDay < 1) throw new TypeError('invalid dm.blobStampsPerDay')
+  if (!Number.isSafeInteger(copyStampsPerWeek) || copyStampsPerWeek < 1) throw new TypeError('invalid dm.copyStampsPerWeek')
   if (!Number.isSafeInteger(blobBytes) || blobBytes < BLOB_CHUNK_BYTES) throw new TypeError('invalid dm.blobBytes')
-  return { postage, stampsPerDay, onDrop, visitMax, blobPostage, blobStampsPerDay, blobBytes }
+  return { postage, stampsPerDay, onDrop, visitMax, blobPostage, blobStampsPerDay, copyStampsPerWeek, blobBytes }
 }
 
 // The postage keys usable by the seeder, newest first, at most two (the
@@ -977,7 +987,7 @@ function isCount (n) {
 // (the budget restarts, which costs at most one day of stamps). A v1 file
 // ({ diary: { day, count } }) is read as one day per diary. blob-stamps.json
 // has the same v2 shape.
-function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-unreadable') {
+function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-unreadable', period = DM_DAY) {
   const out = new Map()
   let file = null
   try {
@@ -999,7 +1009,7 @@ function readDmStamps (dataDir, log, name = DM_STAMPS_FILE, reason = 'dm-stamps-
       if (typeof e.day === 'string' && DM_DAY.test(e.day) && isCount(e.count)) row[e.day] = e.count
     } else {
       for (const [d, n] of Object.entries(e)) {
-        if (DM_DAY.test(d) && isCount(n)) row[d] = n
+        if (period.test(d) && isCount(n)) row[d] = n
       }
     }
     if (Object.keys(row).length > 0) out.set(key, trimStampRow(row))
@@ -1072,8 +1082,9 @@ class Seeder {
   // block 0 in the main store (default GATE_TIMEOUT_MS); admitHook and
   // purgeHook also see group keys.
   // onPush(event) is not a test hook: called synchronously, never awaited,
-  // once per follow, reply, like or repost appended to a served diary past
-  // its push cursor (push-events.js shapes the event; a throw is ignored).
+  // once per recipient of each follow, reply, quote, @mention, like or
+  // repost appended to a served diary past its push cursor (push-events.js
+  // shapes the event; a throw is ignored).
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -1189,6 +1200,7 @@ class Seeder {
     this._blobKeys = []
     this._blobKeysFrom = null
     this._blobStamps = new Map() // diary key -> { day: count }, apart from _dmStamps
+    this._copyStamps = new Map() // diary key -> { 'YYYY-Www': count }, a history copy's weekly allowance
     this._dmHandles = new Set()
     this._dmStampChannels = new Map() // seeder stamp handle -> { kid, blobKid, socket, release }
     this.noClear = noClear === null ? (process.env || {}).VARANDA_NO_CLEAR === '1' : noClear === true
@@ -5876,25 +5888,53 @@ class Seeder {
         entry.pushReadFailures = 0
         const block = raw === null ? null : decodeBlock(raw)
         const record = block && validRecordCopy(block, i)
-        const c = record && pushCandidate({
-          author: key,
-          seq: i,
-          record,
-          now: Date.now(),
-          isMember: (k) => this._admitted.has(k) || this._served.has(k),
-          isBlocked: (k) => this._isBlocked(k)
-        })
-        if (c) {
-          const exists = c.kind === 'follow' || await this._pushTargetIsPost(c.recipient, record.type === 'post' ? record.replyTo.seq : record.to.seq)
-          if (!live()) return
-          const name = exists ? await this._pushActorName(key, entry) : null
-          if (!live()) return
-          // The recipient may have been dropped or blocked, or the actor
-          // blocked, while the reads above were pending: decide again on the
-          // current state. The cursor still advances (at-most-once).
-          const r = c.recipient
-          const eligible = (this._admitted.has(r) || this._served.has(r)) && !this._isBlocked(r) && !this._isBlocked(key)
-          if (exists && eligible && this.onPush !== null) {
+        // Two phases, so a stop while a read is pending never emits part of
+        // a block's pushes: A awaits (target posts, the actor name), B only
+        // decides and emits, synchronously, then the cursor moves once.
+        let survivors = []
+        let name = null
+        let now = 0
+        if (record) {
+          try {
+            now = Date.now()
+            // Per recipient, the strongest hit whose target is a post the
+            // recipient's replica holds (a reply to a block that is not a
+            // post falls back to a quote or a mention, as the in-app notice
+            // does). A target this replica cannot read yet drops the
+            // recipient: a weaker kind would mislabel a reply or a quote.
+            for (const c of this._pushCandidatesFor(key, i, record, now)) {
+              for (const hit of [c, ...c.alternates]) {
+                if (hit.targetSeq !== null) {
+                  const target = await this._pushTargetIsPost(c.recipient, hit.targetSeq)
+                  if (!live()) return
+                  if (target === null) break
+                  if (!target) continue
+                }
+                survivors.push({ kind: hit.kind, recipient: c.recipient, ref: hit.ref })
+                break
+              }
+            }
+            if (survivors.length > 0) {
+              name = await this._pushActorName(key, entry)
+              if (!live()) return
+            }
+          } catch {
+            // Never thrown by design; if it were, this block emits nothing
+            // and the cursor still moves (at-most-once, no retry).
+            if (!live()) return
+            survivors = []
+          }
+        }
+        if (survivors.length > 0 && this.onPush !== null) {
+          // Recipients may have been dropped or blocked, the actor blocked or
+          // a name's issuer revoked while the reads were pending: decide
+          // again on the current state.
+          const still = new Set()
+          for (const c of this._pushCandidatesFor(key, i, record, now)) {
+            for (const hit of [c, ...c.alternates]) still.add(hit.kind + ':' + c.recipient)
+          }
+          for (const c of survivors) {
+            if (!still.has(c.kind + ':' + c.recipient)) continue
             try {
               this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
             } catch {}
@@ -5907,19 +5947,54 @@ class Seeder {
     }
   }
 
+  // The pushes one record of `key` yields on the current state (pure and
+  // synchronous: push-events.js). Mentions resolve to the members verifiably
+  // holding the name now; a revoked issuer's names never match, as on the
+  // notices page. A lookup that throws counts as nobody (push-events.js).
+  _pushCandidatesFor (key, seq, record, now) {
+    const index = this._postNotices
+    let revoked = null
+    const holders = (token) => {
+      if (!index || typeof index.holders !== 'function') return []
+      if (revoked === null) {
+        const opts = this._certOpts()
+        revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      }
+      return index.holders(token, (issuer) => !revoked.has(issuer))
+    }
+    return pushCandidates({
+      author: key,
+      seq,
+      record,
+      now,
+      isMember: (k) => this._admitted.has(k) || this._served.has(k),
+      isBlocked: (k) => this._isBlocked(k),
+      holders
+    })
+  }
+
   // The engagement index only checks a reference's shape and keeps targets
   // that do not exist: read the target from the recipient's own replica,
-  // without waiting, and accept only a valid post there.
+  // without waiting, and accept only a valid post there. true: a post.
+  // false: no such block in the signed length, a deleted block, or a block
+  // that is not a post. null: unknown (no usable replica, not downloaded yet, a failed
+  // read).
   async _pushTargetIsPost (recipient, seq) {
     const re = this._served.get(recipient)
-    if (!re || re.dropped || !re.gated || seq >= re.present) return false
+    if (!re || re.dropped || !re.gated) return null
+    if (seq >= re.core.length) return false
+    // A deleted post is no post: avisos skip it too, and its bytes may be
+    // cleared (a null read) or still held.
+    if (re.deleted.has(seq)) return false
+    if (seq >= re.present) return null
     let raw
     try {
       raw = await re.core.get(seq, { wait: false, raw: true })
     } catch {
-      return false
+      return null
     }
-    if (raw === null || this._closing || re.dropped || !re.gated || this._served.get(recipient) !== re) return false
+    if (this._closing || re.dropped || !re.gated || this._served.get(recipient) !== re) return null
+    if (raw === null) return null
     const block = decodeBlock(raw)
     const record = block && validRecordCopy(block, seq)
     return !!record && record.type === 'post'
@@ -7735,6 +7810,7 @@ class Seeder {
     this._dmStamps = readDmStamps(this.dataDir, (ev) => this.log(ev))
     if (this._dmOpts.blobPostage !== null) {
       this._blobStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), BLOB_STAMPS_FILE, 'blob-stamps-unreadable')
+      this._copyStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), COPY_STAMPS_FILE, 'copy-stamps-unreadable', DM_WEEK)
     }
     this._dm = createDmPool({
       dir: this.dataDir,
@@ -7958,6 +8034,12 @@ class Seeder {
               check: (diary, day) => this._checkStamp(diary, day, 'blob'),
               take: (diary, day) => this._takeStamp(diary, day, 'blob')
             },
+        copyBudget: blobKey === null
+          ? undefined
+          : {
+              check: (diary, week) => this._checkStamp(diary, week, 'copy'),
+              take: (diary, week) => this._takeStamp(diary, week, 'copy')
+            },
         log: (ev) => this.log(ev)
       })
     } catch {
@@ -8041,14 +8123,11 @@ class Seeder {
   // its own counter, file and daily allowance: neither kind spends the
   // other's.
   _takeStamp (diary, day, kind = 'dm') {
-    const blob = kind === 'blob'
-    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
-    const rows = blob ? this._blobStamps : this._dmStamps
+    const { perPeriod, rows, file, keepFrom } = this._stampKind(kind, day)
     if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
     const known = rows.get(diary)
     const count = known !== undefined && isCount(known[day]) ? known[day] : 0
-    if (count >= stampsPerDay) return false
-    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    if (count >= perPeriod || keepFrom === null) return false
     const next = new Map()
     for (const [k, row] of rows) {
       const kept = {}
@@ -8059,24 +8138,39 @@ class Seeder {
     }
     if (!next.has(diary) && next.size >= this._dmStampRowsMax()) return false
     next.set(diary, trimStampRow({ ...(next.get(diary) || {}), [day]: count + 1 }))
-    writeJsonAtomic(path.join(this.dataDir, blob ? BLOB_STAMPS_FILE : DM_STAMPS_FILE), { v: 2, days: Object.fromEntries(next) }, 0o600)
-    if (blob) this._blobStamps = next
+    writeJsonAtomic(path.join(this.dataDir, file), { v: 2, days: Object.fromEntries(next) }, 0o600)
+    if (kind === 'copy') this._copyStamps = next
+    else if (kind === 'blob') this._blobStamps = next
     else this._dmStamps = next
     return true
+  }
+
+  // One stamp kind's counter table, file, allowance per period and the
+  // oldest period kept when `period` is current (null: a malformed period).
+  // 'copy' counts per ISO week (a history copy's weekly allowance), the
+  // others per day.
+  _stampKind (kind, period) {
+    if (kind === 'copy') {
+      return { perPeriod: this._dmOpts.copyStampsPerWeek, rows: this._copyStamps, file: COPY_STAMPS_FILE, keepFrom: DM_WEEK.test(period) ? weekBefore(period, COPY_STAMP_KEEP_WEEKS) : null }
+    }
+    const blob = kind === 'blob'
+    return {
+      perPeriod: blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay,
+      rows: blob ? this._blobStamps : this._dmStamps,
+      file: blob ? BLOB_STAMPS_FILE : DM_STAMPS_FILE,
+      keepFrom: daysBefore(period, DM_STAMP_KEEP_DAYS)
+    }
   }
 
   // Whether _takeStamp would allow a stamp now, by the same rules, without
   // writing anything: dm-stamp-net asks this before the costly blind
   // signature.
   _checkStamp (diary, day, kind = 'dm') {
-    const blob = kind === 'blob'
-    const stampsPerDay = blob ? this._dmOpts.blobStampsPerDay : this._dmOpts.stampsPerDay
-    const table = blob ? this._blobStamps : this._dmStamps
+    const { perPeriod, rows: table, keepFrom } = this._stampKind(kind, day)
     if (this._isBlocked(diary) || !(this._admitted.has(diary) || this._served.has(diary))) return false
     const known = table.get(diary)
     const count = known !== undefined && isCount(known[day]) ? known[day] : 0
-    if (count >= stampsPerDay) return false
-    const keepFrom = daysBefore(day, DM_STAMP_KEEP_DAYS)
+    if (count >= perPeriod || keepFrom === null) return false
     let rows = 0
     let hasRow = false
     for (const [k, row] of table) {
