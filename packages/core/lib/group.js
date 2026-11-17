@@ -796,13 +796,17 @@ function slotEvents (joins, marks) {
       events.push({ kind: 'cut', writer: m.writer, on: false, seq: m.seq, cut: m.cut })
     }
   }
-  // A diary has one record per seq; ties only come from malformed input and
-  // still sort one way: joins first (on before off), then writer, then cut.
-  events.sort((a, b) => (a.seq === b.seq ? 0 : a.seq < b.seq ? -1 : 1) ||
+  events.sort(slotEventOrder)
+  return { events, gap }
+}
+
+// A diary has one record per seq; ties only come from malformed input and
+// still sort one way: joins first (on before off), then writer, then cut.
+function slotEventOrder (a, b) {
+  return (a.seq === b.seq ? 0 : a.seq < b.seq ? -1 : 1) ||
     (a.kind === b.kind ? 0 : a.kind === 'join' ? -1 : 1) ||
     (a.on === b.on ? 0 : a.on ? -1 : 1) ||
-    cmp(a.writer, b.writer) || a.cut - b.cut)
-  return { events, gap }
+    cmp(a.writer, b.writer) || a.cut - b.cut
 }
 
 // The cut a diary marks on an own writer of a private group it replaces, so
@@ -892,23 +896,26 @@ function groupJoinHistory (entries, group) {
 function diaryGroupKeys (entries, max = MAX_GROUPS_PER_DIARY) {
   try {
     if (!Array.isArray(entries)) return []
-    // group -> the walk's joins and marks: a later leave does not free the
-    // writer's slot, only a diary cut does.
+    // group -> the walk's events: a later leave does not free the writer's
+    // slot, only a diary cut does. The events are built from the validated
+    // copies and stepped as they are, so the walk copies no record twice.
     const events = new Map()
     eachEntry(entries, (seq, record) => {
       const copy = validRecordCopyOfType(record, seq, 'group-join') || validRecordCopyOfType(record, seq, 'group-cut')
       if (copy === null) return
       let ev = events.get(copy.group)
       if (ev === undefined) {
-        ev = { joins: [], marks: [] }
+        ev = []
         events.set(copy.group, ev)
       }
-      if (copy.type === 'group-join') ev.joins.push({ writer: copy.writer, on: copy.on, seq })
-      else ev.marks.push({ writer: copy.writer, cut: copy.cut, seq })
+      if (copy.type === 'group-join') ev.push({ kind: 'join', writer: copy.writer, on: copy.on, seq, cut: 0 })
+      else ev.push({ kind: 'cut', writer: copy.writer, on: false, seq, cut: copy.cut })
     })
     const allowed = new Set()
     for (const [group, ev] of events) {
-      const wk = slotWalk(ev.joins, ev.marks, group)
+      const s = slotWalkState()
+      for (const e of ev.sort(slotEventOrder)) slotWalkStep(s, e, group)
+      const wk = slotWalkResult(s)
       // The root's own key always takes one slot.
       if (wk.rootSlot) allowed.add(group + ':' + group)
       for (const writer of [...wk.live, ...wk.frozen]) allowed.add(group + ':' + writer)
