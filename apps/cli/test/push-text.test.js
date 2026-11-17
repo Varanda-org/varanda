@@ -25,8 +25,15 @@ test('push text: the four sentences for a normal name', (t) => {
   t.is(pushBody({ kind: 'repost', name: 'Ana Souza' }), 'Ana Souza republicou seu post')
 })
 
+test('push text: quote and mention name the actor', (t) => {
+  t.is(pushBody({ kind: 'quote', name: 'Ana Souza' }), 'Ana Souza citou seu post')
+  t.is(pushBody({ kind: 'mention', name: 'Ana Souza' }), 'Ana Souza mencionou você')
+  t.is(pushBody({ kind: 'quote', name: null }), 'Alguém citou seu post')
+  t.is(pushBody({ kind: 'mention', name: null }), 'Alguém mencionou você')
+})
+
 test('push text: unknown kind is a TypeError', (t) => {
-  for (const kind of ['quote', 'mention', '', 'toString', '__proto__', undefined, null, 1]) {
+  for (const kind of ['', 'toString', '__proto__', undefined, null, 1]) {
     t.exception.all(() => pushBody({ kind, name: 'Ana' }), TypeError, String(kind))
   }
   t.exception.all(() => pushBody(), TypeError, 'no argument')

@@ -29,6 +29,13 @@ const DM_INNER_KEYS_V5 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyT
 // sender's certificate holds; without `to` a ping could be re-sealed to
 // someone else. Signed under its own domain.
 const DM_INNER_KEYS_V6 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'day', 'cert'])
+// v7 is a history copy pointer (kind 'copy', docs/protocol.md section 11): the
+// copy's id, the blob descriptor of its manifest and the time, sealed to the
+// own box and signed by the own key under its own domain. `from` and `to` are
+// both the own key and there is no certificate, as a ctl has none.
+const DM_INNER_KEYS_V7 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'copy', 'at'])
+// The six keys of a blob descriptor (core lib/blob.js), in wire order.
+const DM_BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 // A reaction's target, and a bound reply's replyTo (v2 and v3): the
 // message's sender and id, and the hex64 sha256 of the canonical JSON of
 // that message's opened inner body, so it names only the message it was
@@ -100,21 +107,30 @@ function canonicalTarget (t) {
   return o
 }
 
+function canonicalBlobDescriptor (d) {
+  if (!isObject(d)) return d
+  const o = {}
+  for (const k of DM_BLOB_KEYS) o[k] = d[k]
+  return o
+}
+
 function canonicalInnerJson (body) {
-  const keys = body.v === 4
-    ? DM_INNER_KEYS_V4
-    : body.v === 5
-      ? DM_INNER_KEYS_V5
-      : body.v === 6
-        ? DM_INNER_KEYS_V6
-        : body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
+  const keys = body.v === 7
+    ? DM_INNER_KEYS_V7
+    : body.v === 4
+      ? DM_INNER_KEYS_V4
+      : body.v === 5
+        ? DM_INNER_KEYS_V5
+        : body.v === 6
+          ? DM_INNER_KEYS_V6
+          : body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
   const o = {}
   for (const k of keys) {
     o[k] = k === 'media' && Array.isArray(body.media)
       ? body.media.map(canonicalMediaItem)
       : k === 'card'
         ? canonicalCard(body.card)
-        : k === 'target' || k === 'replyTo' ? canonicalTarget(body[k]) : body[k]
+        : k === 'copy' ? canonicalBlobDescriptor(body.copy) : k === 'target' || k === 'replyTo' ? canonicalTarget(body[k]) : body[k]
   }
   return JSON.stringify(o)
 }
@@ -163,6 +179,8 @@ module.exports = {
   DM_INNER_KEYS_V4,
   DM_INNER_KEYS_V5,
   DM_INNER_KEYS_V6,
+  DM_INNER_KEYS_V7,
+  DM_BLOB_KEYS,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_CARD_KEYS,

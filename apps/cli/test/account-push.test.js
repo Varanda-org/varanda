@@ -504,8 +504,8 @@ test('relay: a like reaches every subscription encrypted, once, with the actor n
     const got = s.delivered.find((d) => d.url === sub.endpoint)
     t.ok(got, 'one send to each subscription')
     t.is(got.headers['Content-Encoding'], 'aes128gcm')
-    t.is(got.headers.Topic, nodeCrypto.createHmac('sha256', TOPIC_KEY).update(event.actor + ':' + event.seq).digest('hex').slice(0, 32))
-    t.not(got.headers.Topic, sha256(event.actor + ':' + event.seq).toString('hex').slice(0, 32), 'never the bare hash of public values')
+    t.is(got.headers.Topic, nodeCrypto.createHmac('sha256', TOPIC_KEY).update(event.actor + ':' + event.seq + ':' + event.recipient).digest('hex').slice(0, 32))
+    t.not(got.headers.Topic, sha256(event.actor + ':' + event.seq + ':' + event.recipient).toString('hex').slice(0, 32), 'never the bare hash of public values')
     const payload = JSON.parse(decrypt(got.body, sub.uaPrivate, sub.auth))
     t.alike(payload, { v: 1, kind: 'like', body: 'Bia Souza curtiu seu post', actor: s.actor.hex, recipient: s.m.hex, ref: event.ref })
   }
@@ -622,6 +622,31 @@ test('relay: two replies to the same post within 600 s are two notices', async (
   await s.relay(s.like(s.actor, s.m, { kind: 'reply' }))
   await until(() => s.delivered.length === 2, { name: 'both replies sent' })
   cleanLogs(t, s, [sub.endpoint])
+})
+
+test('relay: a quote and a mention from one record reach both recipients with their own text', async (t) => {
+  const s = await setup(t)
+  const author = member()
+  const subM = subscription()
+  const subA = subscription()
+  await s.acceptTerms(s.m)
+  await s.acceptTerms(s.actor)
+  await s.toggle(s.m, 'on', subM)
+  await s.toggle(s.actor, 'on', subA)
+  const base = { v: 1, actor: author.hex, seq: 5, ref: author.hex + ':5', name: 'Caio' }
+  const quote = { ...base, kind: 'quote', recipient: s.m.hex }
+  const mention = { ...base, kind: 'mention', recipient: s.actor.hex }
+  t.is((await s.relay(quote)).status, 202)
+  t.is((await s.relay(mention)).status, 202)
+  t.is((await s.relay(mention)).status, 202, 'the same event again')
+  await until(() => s.delivered.length === 2, { name: 'both recipients' })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(s.delivered.length, 2, 'the duplicate sent nothing')
+  const toM = s.delivered.find((d) => d.url === subM.endpoint)
+  const toA = s.delivered.find((d) => d.url === subA.endpoint)
+  t.alike(JSON.parse(decrypt(toM.body, subM.uaPrivate, subM.auth)), { v: 1, kind: 'quote', body: 'Caio citou seu post', actor: author.hex, recipient: s.m.hex, ref: base.ref })
+  t.alike(JSON.parse(decrypt(toA.body, subA.uaPrivate, subA.auth)), { v: 1, kind: 'mention', body: 'Caio mencionou você', actor: author.hex, recipient: s.actor.hex, ref: base.ref })
+  t.not(toM.headers.Topic, toA.headers.Topic, 'one topic per recipient')
 })
 
 test('relay: a 410 for keys that were replaced meanwhile keeps the new row', async (t) => {
@@ -1511,4 +1536,64 @@ test('serve: the invite loop and the deletion sweep stop before the push queue c
   t.ok(loop > 0 && loop < close, 'the invite loop stops first')
   const sweep = src.indexOf('if (stopDeletionSweep !== null) stopDeletionSweep()')
   t.ok(sweep > 0 && sweep < close, 'the deletion sweep stops first')
+})
+
+test('relay: one actor gets 30 pushes an hour across all recipients; another actor and the next hour still go through', async (t) => {
+  const { keyedWindow } = require('../lib/account/server')
+  const token = 'cd'.repeat(32)
+  const hexOf = (s) => nodeCrypto.createHash('sha256').update(s).digest('hex')
+  const recipients = []
+  for (let i = 0; i < 40; i++) recipients.push(hexOf('r' + i))
+  const pushStore = {
+    available: () => true,
+    all: () => [],
+    list: (m) => recipients.includes(m) ? [{ endpoint: 'https://fcm.googleapis.com/fcm/send/' + m.slice(0, 8), p256dh: 'p', auth: 'a' }] : [],
+    remove: async () => ({ changed: true })
+  }
+  const logs = []
+  const clock = { t: Date.parse('2026-11-03T12:00:00.000Z') }
+  let next = null
+  const http = {
+    send: () => {},
+    sendError: () => { throw new Error('refused') },
+    readJsonBody: async () => next,
+    checkPost: () => {},
+    RouteError: Error,
+    refuse: (code) => new Error(code),
+    fromStore: (e) => e,
+    keyedWindow
+  }
+  const r = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    delayMs: () => 0,
+    relayTokenHash: sha256(token),
+    pushStore,
+    vapid: {},
+    send: () => Promise.resolve('ok'),
+    log: (e) => logs.push(e),
+    now: () => clock.t,
+    http
+  })
+  let seq = 0
+  const mention = (actor, recipient) => {
+    next = { v: 1, kind: 'mention', actor, recipient, seq: ++seq, ref: actor + ':' + seq, name: null }
+    return r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  }
+  const capped = () => logs.filter((e) => e.reason === 'teto').length
+  const spammer = hexOf('spammer')
+
+  // 15 to one recipient: the pair cap refuses 5, and those spend no actor slot.
+  for (let i = 0; i < 15; i++) await mention(spammer, recipients[0])
+  t.is(capped(), 5, 'the pair cap refuses the 11th to 15th')
+  for (let i = 1; i <= 20; i++) await mention(spammer, recipients[i])
+  t.is(capped(), 5, '30 queued pushes pass: refused ones spent no actor slot')
+  await mention(spammer, recipients[21])
+  t.is(capped(), 6, 'the 31st queued push is teto')
+  await mention(hexOf('other'), recipients[22])
+  t.is(capped(), 6, 'another actor still reaches a recipient')
+  clock.t += 3600 * 1000
+  await mention(spammer, recipients[23])
+  t.is(capped(), 6, 'the next hour opens a new window')
+  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'drained' })
 })

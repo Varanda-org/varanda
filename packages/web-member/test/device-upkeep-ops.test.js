@@ -123,6 +123,15 @@ async function diaryJoins (s) {
   }
 }
 
+async function diaryRecords (s) {
+  const core = await store.openDiary(s.storage)
+  try {
+    return (await store.readAll(core)).map((e) => e.record)
+  } finally {
+    await core.close()
+  }
+}
+
 async function coreRecords (s, key) {
   const core = await store.openGroupCoreReadOnly(s.storage, key)
   try {
@@ -708,7 +717,16 @@ test('a boxless private writer is reboxed once the root arrives, then nothing is
   t.is((await coreRecords(b, boxed))[0].box, hex(b.ctx.groupKeys.boxPublicKey()), 'this device\'s box')
   const joins = (await diaryJoins(b)).filter((j) => j.group === group)
   t.alike(joins.slice(-2).map((j) => [j.writer, j.on]), [[boxless, false], [boxed, true]], 'the old writer is unbound, the new one bound')
-  t.is(await diaryLength(b), before + 2)
+  // The join off keeps the slot in the slot walk: one cut on the header-only
+  // boxless writer, between the two joins, gives it back (#350).
+  const own = await diaryRecords(b)
+  const at = (type, writer) => own.findIndex((r) => r.type === type && r.group === group && r.writer === writer && (type !== 'group-join' || r.on === (writer === boxed)))
+  t.alike(own.filter((r) => r.type === 'group-cut' && r.group === group).map((r) => [r.writer, r.cut]), [[boxless, 0]], 'one cut at 0 on the boxless writer')
+  t.ok(at('group-join', boxless) < at('group-cut', boxless) && at('group-cut', boxless) < at('group-join', boxed), 'after the join off, before the new join')
+  t.is(await diaryLength(b), before + 3)
+  const entries = own.map((record, seq) => ({ seq, record }))
+  const walk = grp.slotWalk(grp.groupJoinHistory(entries, group), grp.groupCutHistory(entries, group), group)
+  t.ok(walk.released.has(boxless) && walk.live.has(boxed), 'the slot walk releases the boxless writer and counts the new one')
 
   t.alike(await ops.deviceUpkeepPlan(b.ctx), { enrol: [], share: [], skipped: [] }, 'nothing left: no loop')
   const still = await footprint(b)

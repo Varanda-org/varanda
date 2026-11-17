@@ -336,6 +336,7 @@ test('a video keeps its duration and kind across the IPC for a post and a moment
   const { request, calls } = mockRequest((method) => method === 'media.readFile' ? { name, mime: 'video/mp4', w: 360, h: 640, ms: 3000 } : { ok: true })
   const { media } = webNodeHandle(request)
   t.is(media.video, true, 'the native handle reports the video capability')
+  t.is(media.sharesClient, true, 'its media requests share the connection client, so src/node.js queues them')
   await media.upload({ bytes: new Uint8Array([1]), mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video', sealed: 'no' })
   await media.putMoment({ bytes: new Uint8Array([2]), mime: 'video/mp4', width: 720, height: 1280, ms: 9000, kind: 'video', to: 'ef'.repeat(32), sealed: true })
   await media.putMoment({ bytes: new Uint8Array([3]), mime: 'image/jpeg', width: 3, height: 4, ms: 9, kind: 'voice' })
@@ -371,6 +372,7 @@ test('web: mediaOf reports video and passes a video read through without measuri
   }
   const media = mediaOf(facade)
   t.is(media.video, true)
+  t.absent(media.sharesClient, 'the browser node keeps its bytes in the page: no RPC request to queue')
   const bytes = new Uint8Array([1])
   await media.upload({ bytes, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' })
   t.alike(calls.at(-1), ['upload', { bytes, mime: 'video/mp4', width: 360, height: 640, ms: 12000, kind: 'video' }])

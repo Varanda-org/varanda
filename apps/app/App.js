@@ -35,9 +35,9 @@
 // gets the profile opened.
 // A notification click (hosted web, src/pushClient.web.js) arrives as
 // /?aviso=... at load or as a worker message: held in memory only, it opens
-// Avisos (a follow) or Conversa (a reply, like or repost) for the key it
-// names, or Convidar pessoas (a convite, which names nobody) once the tabs
-// show; nothing is written, followed or retried.
+// Avisos (a follow) or Conversa (a reply, quote, mention, like or repost)
+// for the key it names, or Convidar pessoas (a convite, which names nobody)
+// once the tabs show; nothing is written, followed or retried.
 // A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
 // opens the screen once the tabs show; it is never consent to join.
 // A splash stays until its whole presentation has been seen, in every phase,
@@ -129,6 +129,9 @@ import { InstallNote } from './src/ui/InstallNote'
 import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
+import { DeviceOffNote } from './src/ui/DeviceOffNote'
+import { deviceMemberOf, deviceStep, deviceStore, notePasskeyUnlock, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
+import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
 import { InviteArrival } from './src/ui/InviteArrival'
 import { InviteCardOpen } from './src/ui/InviteCardOpen'
@@ -2610,6 +2613,54 @@ function Member () {
   useEffect(() => {
     if (seenMember !== null && seenSchedulerRef.current) seenSchedulerRef.current.wake('unlock')
   }, [seenMember, seenGeneration])
+
+  // --- Aparelhos conectados (#350, src/devices.js) ---
+  // The member is the unlocked passkey key, or on a node without a passkey
+  // (the core kind) the own key; not hosted-only. Once per app open and
+  // member, after the unlock: device.hello with this device's short name. An
+  // unknown method or any failure is silent and never retried (the next open
+  // tries again). The answers (and devices.changed) feed the shared store,
+  // which also tells whether the account disconnected this device. A member
+  // that comes back after a lock gets one device.list read (hello is not
+  // sent again, and the lock wiped the state); the own diary catching up
+  // later arrives as devices.changed.
+  const deviceMember = deviceMemberOf({ ready, termsOk, hasPasskey: passkey !== null, status: pkStatus, ownKey })
+  const deviceState = visibleDevices(useDeviceState(), deviceMember)
+  const helloSentRef = useRef(null)
+  const deviceReadRef = useRef(null)
+  const passkeyHereRef = useRef(new Set())
+  const [lockFailed, setLockFailed] = useState(false)
+  useEffect(() => {
+    deviceStore.bind(deviceMember)
+    if (deviceMember === null) {
+      deviceReadRef.current = null
+      setLockFailed(false)
+      return
+    }
+    const step = deviceStep({ member: deviceMember, online: node.online, helloSent: helloSentRef.current, readFor: deviceReadRef.current })
+    if (step === 'hello') {
+      helloSentRef.current = deviceMember
+      deviceReadRef.current = deviceMember
+      sendHello({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() })
+    } else if (step === 'read') {
+      deviceReadRef.current = deviceMember
+      readDevices({ request: seenRequestRef.current, store: deviceStore }).catch(() => {})
+    }
+  }, [deviceMember, node.online])
+  // A disconnected device whose identity came from a kept session forgets it
+  // and locks: only the passkey opens it again (the unlock screen says why).
+  // After a passkey unlock in this open it never locks again, even when a
+  // later reconnect reports resumed again: it only shows the note. If the
+  // sign-out fails the note shows too.
+  const passkeyHere = notePasskeyUnlock(passkeyHereRef.current, { member: deviceMember, unlocked: !locked, resumed: pkStatus ? pkStatus.resumed === true : undefined })
+  const deviceForceLock = deviceMember !== null && shouldForceLock({ off: deviceState.off, hasPasskey: passkey !== null, unlocked: !locked, resumed: !!(pkStatus && pkStatus.resumed === true), passkeyHere })
+  useEffect(() => {
+    if (!deviceForceLock) return
+    deviceStore.forceLock()
+    Promise.resolve(passkey.signOut()).catch(() => setLockFailed(true))
+  }, [deviceForceLock])
+  const deviceOffShown = deviceMember !== null && deviceState.off && (!deviceForceLock || lockFailed)
+  const reconnectThisDevice = useCallback(() => reconnectDevice({ request: seenRequestRef.current, store: deviceStore, name: currentDeviceName() }), [])
   // The connection came back: marks made offline go out once the minimum
   // interval allows.
   const seenWasOnlineRef = useRef(node.online)
@@ -4107,16 +4158,19 @@ function Member () {
           {scheduledDeletion !== null
             ? <DeletionNote scheduled={scheduledDeletion} onOpen={() => setAjustes('excluir')} inset={tab === 'diario' && node.online !== false} />
             : null}
+          {deviceOffShown
+            ? <DeviceOffNote onReconnect={reconnectThisDevice} inset={tab === 'diario' && node.online !== false && scheduledDeletion === null} />
+            : null}
           {inviteNoteShown
-            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false} />
+            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null} />
             : null}
           {updateReady && !updateDismissed
-            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
+            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
             : installCardOpen && install.card !== 'none'
-              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
               : install.note !== 'none'
-                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} />
-                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !inviteNoteShown} /> : null}
+                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
+                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
         </Animated.View>
         <TabBarShown.Provider value={!barsHidden}>
           <ScreenCovered.Provider value={covered}>

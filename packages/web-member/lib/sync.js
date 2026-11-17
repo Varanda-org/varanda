@@ -3,8 +3,9 @@
 // Seeder#acceptStream): the counterpart of @varanda/core lib/sync.js runSync
 // for a node with no DHT and no swarm. Same follow states, same gates, same
 // quota, same events and the same SyncResult; what changes is the transport
-// (one link, re-dialled with a backoff when it drops) and that the only peer
-// that counts is a verified seeder.
+// (one link, re-dialled with a jittered backoff when it drops: doubled from
+// 1 s, capped at 5 s for the first 3 min the seeder is down and at 30 s
+// after that) and that the only peer that counts is a verified seeder.
 //
 // Follow entry states (as in @varanda/core lib/sync.js):
 //   pending  nothing stored; advertised with length 0; the quarantine gate
@@ -362,8 +363,38 @@ const MAX_PARALLEL_GATES = 8
 const MAX_PARALLEL_OPENS = 8
 // One deadline for the WebSocket, the Noise handshake and the seeder's hello.
 const CONNECT_TIMEOUT_MS = 15000
+// Re-dial wait. It doubles from RETRY_MIN_MS per failed attempt (the exponent
+// stops at 16 so a long streak cannot overflow) up to a cap. For the first
+// RETRY_FAST_WINDOW_MS of an outage the cap is RETRY_FAST_MAX_MS, so a seeder
+// that dropped for a redeploy is redialled within a few seconds; after that
+// the cap is RETRY_MAX_MS. Each wait is shortened by up to RETRY_JITTER, so
+// clients retry at different times. A caller whose retryMaxMs is already
+// below RETRY_FAST_MAX_MS keeps that shorter cap. A socket closed with 1013
+// (the seeder is full) uses the full retryMaxMs cap for that one wait.
 const RETRY_MIN_MS = 1000
 const RETRY_MAX_MS = 30000
+const RETRY_FAST_MAX_MS = 5000
+const RETRY_FAST_WINDOW_MS = 180000
+const RETRY_JITTER = 0.25
+
+// Pure. The wait before the next dial, in milliseconds. jitter is clamped
+// to [0, 1] (NaN counts as 0); random defaults to Math.random.
+function retryWait ({
+  failures,
+  downMs,
+  minMs,
+  maxMs,
+  fastMaxMs,
+  fastWindowMs,
+  jitter,
+  random = Math.random
+}) {
+  const j = Number.isNaN(jitter) ? 0 : Math.min(1, Math.max(0, jitter))
+  const cap = downMs < fastWindowMs ? Math.min(maxMs, fastMaxMs) : maxMs
+  const base = Math.min(cap, minMs * 2 ** Math.min(failures, 16))
+  return Math.round(base * (1 - j * random()))
+}
+
 // Push confirmation poll of the own media cores (see the header).
 const MEDIA_POLL_MS = 1000
 // Longest wait for the socket's close after the run destroyed its link.
@@ -1186,7 +1217,7 @@ function trackPresent (core, { noClear = false, download = true, newest = 0, tai
   core.on('append', onAppend)
   const ready = (async () => {
     const state = await presentState(core)
-    onScan(state)
+    if (!stopped) onScan(state)
     for (const entry of state.raw) {
       const copy = entry.record === null ? null : validRecordCopy(entry.record, entry.seq)
       if (copy !== null && copy.type === 'delete') tombs.set(entry.seq, copy.seq)
@@ -1369,8 +1400,12 @@ async function syncRun ({
   maxFollows = MAX_INVENTORY - 1,
   gateTimeoutMs = GATE_TIMEOUT_MS,
   connectTimeoutMs = CONNECT_TIMEOUT_MS,
+  // Re-dial backoff: defaults and rules at the RETRY_* constants.
   retryMinMs = RETRY_MIN_MS,
   retryMaxMs = RETRY_MAX_MS,
+  retryFastMaxMs = RETRY_FAST_MAX_MS,
+  retryFastWindowMs = RETRY_FAST_WINDOW_MS,
+  retryJitter = RETRY_JITTER,
   mediaPollMs = MEDIA_POLL_MS,
   groupPageMs = GROUP_PAGE_MS,
   groupRetryMs = GROUP_RETRY_MS,
@@ -1396,9 +1431,11 @@ async function syncRun ({
   // no group channel attached, no group page asked; the reader still
   // publishes, its group lend answering null.
   groups: syncGroups = true,
-  // Tests only: async (point) awaited at 'follows' (before the follow pass)
-  // and at 'sweeps' (once the follows are open, before the index and the
-  // sweeps), to hold the startup there.
+  // Tests only: async (point) awaited at 'groups' (on entering openGroups),
+  // at 'group-replicas' (once openGroups has opened the stored replicas,
+  // before any binding diary is read), at 'follows' (before the follow
+  // pass) and at 'sweeps' (once the follows are open, before the index and
+  // the sweeps), to hold the startup there.
   startupGate = null
 } = {}) {
   if (typeof createSocket !== 'function') throw new TypeError('createSocket required')
@@ -1448,6 +1485,10 @@ async function syncRun ({
   let result = null
   let settle
   const finished = new Promise((resolve) => { settle = resolve })
+  // Resolves once finish() starts: a startup step that cannot be cancelled
+  // (the own tracker's first scan) is raced against it.
+  let stopNow = noop
+  const stopping = new Promise((resolve) => { stopNow = resolve })
   const timers = new Set()
   const inflight = new Set() // quarantine fetches
   const settling = new Set() // purges and local re-gates finish() waits for
@@ -1459,6 +1500,7 @@ async function syncRun ({
   let lastSocket = null // the last socket opened, awaited at run end
   let readyEmitted = false
   let failures = 0 // consecutive connections that ended without a verified hello
+  let downSince = null // ms timestamp of the first miss of this streak
   let fetching = 0
   let admittedEver = false
   let rejectedReason = null
@@ -1682,9 +1724,20 @@ async function syncRun ({
     noise.once('close', () => onLinkClose(l))
   }
 
-  function reconnectLater () {
+  // Schedule the next dial (backoff rules at the RETRY_* constants).
+  function reconnectLater ({ fastMaxMs = retryFastMaxMs } = {}) {
     if (ending) return
-    const wait = Math.min(retryMaxMs, retryMinMs * Math.pow(2, Math.min(failures, 16)))
+    const now = Date.now()
+    if (downSince === null) downSince = now
+    const wait = retryWait({
+      failures,
+      downMs: now - downSince,
+      minMs: retryMinMs,
+      maxMs: retryMaxMs,
+      fastMaxMs,
+      fastWindowMs: retryFastWindowMs,
+      jitter: retryJitter
+    })
     failures++
     log('aviso: sem conexão com o semeador; nova tentativa em ' + Math.ceil(wait / 1000) + ' s')
     later(connect, wait)
@@ -1754,17 +1807,20 @@ async function syncRun ({
     for (const m of pushCores()) m.pushed = -1
     for (const m of groupOwn) m.synced = null
     lastOwnBehind = null
-    if (l.ws.closeCode === 1013) {
+    // 1013 keeps the long cap for this wait (see RETRY_*).
+    const seederFull = l.ws.closeCode === 1013
+    if (seederFull) {
       log('aviso: semeador ocupado; tente novamente em instantes')
       emit({ event: 'seeder-busy' })
     }
     emit({ event: 'link-closed' })
     evaluate()
-    reconnectLater()
+    reconnectLater(seederFull ? { fastMaxMs: retryMaxMs } : {})
   }
 
   function onVerified (l) {
     failures = 0
+    downSince = null
     clearLater(l.timer)
     l.timer = null
     // Verified: only now are the diary, the own media cores (never
@@ -2088,6 +2144,7 @@ async function syncRun ({
     // coalescing window (a once run met right after the last block).
     flushGroupsChanged()
     ending = true
+    stopNow()
     if (link !== null) withdrawPeek(link)
     discardRegate()
     discardGroupRegate()
@@ -3526,6 +3583,8 @@ async function syncRun ({
   // The stored own group cores and foreign group cores, before any
   // connection. Groups never fail a run: a read error leaves them out.
   async function openGroups () {
+    if (startupGate !== null) await startupGate('groups')
+    if (ending) return
     let writers
     let replicas
     // The legacy sweep: protocol v1 cores no seeder or fold takes any more.
@@ -3598,6 +3657,15 @@ async function syncRun ({
       heldAtStart.add(key)
       if (key === h.group) noteRootVisibility(key, h.visibility)
     }
+    if (startupGate !== null) await startupGate('group-replicas')
+    // Stopped while the replicas opened: the binding diaries (the whole own
+    // diary among them) are never read. The stored cores are held nowhere
+    // else yet, and each goes as the stop below would take it in the live
+    // pass: closed, no purge, not at rest.
+    if (ending) {
+      for (const s of stored) await s.core.close().catch(noop)
+      return
+    }
     // The roots the stored own diary binds (another device's joins), here
     // only when a stored core may belong to one (kept live, its catalogue
     // read): the startup scan adopts the rest (adoptDiaryGroups) without
@@ -3633,6 +3701,7 @@ async function syncRun ({
     }
     // The catalogue of every community paged, from what is stored.
     for (const c of [...ownCommunities, ...parentCommunities, ...diaryCommunities]) {
+      if (ending) break
       const root = rootSource(c, stored)
       if (root === null) continue
       const ws = stored.filter((x) => x.group === c && x.key !== c).map((x) => ({ key: x.key, core: x.core, diary: x.diary }))
@@ -3670,6 +3739,11 @@ async function syncRun ({
     }
     const live = []
     for (const s of stored) {
+      // Stopped: no binding diary is read and nothing is purged.
+      if (ending) {
+        await s.core.close().catch(noop)
+        continue
+      }
       // A root goes with its header's diary only when that diary bound it
       // (anyone can name any diary in a header, and a blocked stranger must
       // not take down a group it never created); an unbound root stays.
@@ -3709,6 +3783,10 @@ async function syncRun ({
     // of them), the rest at rest.
     const excess = capExcess(live)
     for (const x of live) {
+      if (ending) {
+        await x.core.close().catch(noop)
+        continue
+      }
       if (excess.has(x)) {
         await x.core.close().catch(noop)
         restingCores.set(x.key, { group: x.group, diary: x.diary, rootBound: x.rootBound })
@@ -3725,6 +3803,11 @@ async function syncRun ({
       // the core was accepted: a later revocation re-judges it.
       if (x.diary !== ownHex) {
         const entries = await bindingEntries(x.diary, bindings)
+        // A stop during that read: close it like the head check, unwatched.
+        if (ending) {
+          await x.core.close().catch(noop)
+          continue
+        }
         ge.diaryRaw0 = (entries && entries.raw0) || bindingCerts.get(x.diary) || null
       }
       groupCores.set(x.key, ge)
@@ -4328,7 +4411,9 @@ async function syncRun ({
     }
     try {
       const end = Math.min(core.contiguousLength, maxLogBlocks)
+      // A stopping run scans no further; the cache resumes from c.next.
       for (; c.next < end; c.next++) {
+        if (ending) break
         const r = decodeBlock(await core.get(c.next, { wait: false, raw: true }))
         if (r === null || validateGroupRecord(r, c.next, { root: true, community: true }) !== null) continue
         if (r.type === 'group-create') c.creates.push(r.group)
@@ -4342,25 +4427,32 @@ async function syncRun ({
   // until then the hint, up to twice that (a creator's leave may withdraw
   // root creates the hint still counts). `entriesOf(d)` -> d's diary
   // entries or null. Never throws.
+  // A stopping run gets no keys at once, between every read.
   async function communityCatalogue (c, root, writers, entriesOf) {
     try {
       const ws = []
-      for (const w of writers) ws.push({ key: w.key, entries: await store.readBlocks(w.core), diary: w.diary })
+      for (const w of writers) {
+        if (ending) return []
+        ws.push({ key: w.key, entries: await store.readBlocks(w.core), diary: w.diary })
+      }
       const joins = new Map()
       // A creator's confirmed leave bounds the root's creates.
       const confirms = new Map()
       for (const d of new Set([root.diary, ...writers.map((w) => w.diary)])) {
+        if (ending) return []
         const entries = await entriesOf(d)
         if (!entries) continue
         joins.set(d, groupJoinHistory(entries, c))
         confirms.set(d, groupConfirmHistory(entries, c))
       }
+      if (ending) return []
       const built = buildCommunity({ root: { key: c, entries: await store.readBlocks(root.core) }, writers: ws, joins, confirms, now: Date.now() })
       if (built.creator !== null && !built.incomplete) {
         const keys = built.created instanceof Map ? [...built.created.keys()] : built.groups
         return keys.slice(0, MAX_GROUPS_PER_COMMUNITY)
       }
     } catch {}
+    if (ending) return []
     return catalogueKeys(c, root, 2 * MAX_GROUPS_PER_COMMUNITY)
   }
 
@@ -5392,41 +5484,60 @@ async function syncRun ({
     if (block0 !== null && validateRecord(block0, 0) === null && certForKey(block0.cert, ownHex, association).ok) cert = block0.cert
     else log('sem certificado válido no bloco 0: o diário não será anunciado')
     ownRefused()
-    startup.step('mídia própria')
-    await openOwnMedia()
-    startup.step('grupos')
-    if (syncGroups) await openGroups()
-    // The own diary is lent before its deleted blocks are cleared: a read
-    // folds the tombstones itself (presentState), cleared or not.
-    if (!ending) reader.set({ diary, replica, group: lentGroup, hold, release, opened: lendOpened, settled: lendSettledP })
-    startup.step('leitura do próprio diário')
-    // Deleted blocks and media are cleared, and growth is measured on the
-    // present length, before any connection; whatever the verified seeder
-    // holds beyond us is fetched (only a verified link replicates the
-    // diary, onVerified), deleted blocks never.
-    ownTracker = trackPresent(diary, {
-      noClear,
-      pages: false,
-      onScan: seedFold,
-      onGrow: (length) => {
-        send({ type: 'have', key: ownHex, length })
-        if (cert === null) recoverCert()
-        checkOwnSync()
-        evaluate()
-      },
-      onDeleted: () => { revokeOwnMedia() }
-    })
-    diary.on('download', onDiaryDownload)
-    await ownTracker.ready
-    await mediaRevoke
-    // What the own diary already holds is folded before any connection.
-    scheduleFold()
-
-    if (once) deadlineTimer = setTimeout(onDeadline, Math.max(0, deadline - Date.now()))
+    // The stop is honoured from here on (the result only needs the diary):
+    // a stop during the local startup below never waits it out, each later
+    // step is skipped once the run is ending.
     if (signal) {
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort)
     }
+    if (!ending) {
+      startup.step('mídia própria')
+      await openOwnMedia()
+    }
+    if (!ending) {
+      startup.step('grupos')
+      if (syncGroups) await openGroups()
+    }
+    // The own diary is lent before its deleted blocks are cleared: a read
+    // folds the tombstones itself (presentState), cleared or not.
+    if (!ending) reader.set({ diary, replica, group: lentGroup, hold, release, opened: lendOpened, settled: lendSettledP })
+    if (!ending) {
+      startup.step('leitura do próprio diário')
+      // Deleted blocks and media are cleared, and growth is measured on the
+      // present length, before any connection; whatever the verified seeder
+      // holds beyond us is fetched (only a verified link replicates the
+      // diary, onVerified), deleted blocks never.
+      ownTracker = trackPresent(diary, {
+        noClear,
+        pages: false,
+        onScan: seedFold,
+        onGrow: (length) => {
+          send({ type: 'have', key: ownHex, length })
+          if (cert === null) recoverCert()
+          checkOwnSync()
+          evaluate()
+        },
+        onDeleted: () => { revokeOwnMedia() }
+      })
+      diary.on('download', onDiaryDownload)
+      // The first scan cannot be cut short (trackPresent checks `stopped`
+      // only once presentState returns): a stop destroys the tracker and
+      // goes on without it, the finally block closes the diary.
+      await Promise.race([ownTracker.ready, stopping])
+      if (ending) ownTracker.destroy()
+      else await mediaRevoke
+    }
+    // Stopped during the local startup: no fold, no follow pass, no sweeps,
+    // no connection. The finally block closes what was opened.
+    if (ending) {
+      await finished
+      return result
+    }
+    // What the own diary already holds is folded before any connection.
+    scheduleFold()
+
+    if (once) deadlineTimer = setTimeout(onDeadline, Math.max(0, deadline - Date.now()))
 
     if (startupGate !== null) await startupGate('follows')
     // Follow gate at start (R5.8 a), before any connection.
@@ -5656,4 +5767,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, retryWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

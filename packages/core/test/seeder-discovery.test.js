@@ -22,7 +22,7 @@ const { Seeder, DISCOVERY_REBUILD_MS, DISCOVERY_VIEWS_KEPT, DISCOVERY_VIEW_TTL_M
 // new order shows within a test's patience.
 const REBUILD_MS = 200
 const { createCert, createSeederCert, createModeratorCert, generateAssociationKeyPair } = require('../lib/cert')
-const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY } = require('../lib/net')
+const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY, CAP_WRITER_CUTS } = require('../lib/net')
 const { attachDiscovery } = require('../lib/discovery-net')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
@@ -164,6 +164,7 @@ test('pages cover every eligible diary once in recentAt order; lean and legacy h
   t.is(hello.count, 0, 'a lean member gets count 0')
   t.alike(hello.have, [])
   t.ok(lean.peer.remoteCaps & CAP_DISCOVERY, 'the seeder offers discovery')
+  t.ok(lean.peer.remoteCaps & CAP_WRITER_CUTS, 'and announces that it keeps the writers a diary cut (#350)')
   t.ok(await lean.disc.supported, 'the discovery channel opens')
 
   await announceAll(assoc, lean, author.diaries)
@@ -227,7 +228,7 @@ test('pages cover every eligible diary once in recentAt order; lean and legacy h
   t.is(fresh.items.length, 5)
 })
 
-test('discovery: false offers no capability, rejects the channel and keeps the full hello', async (t) => {
+test('discovery: false offers no discovery, rejects the channel and keeps the full hello', async (t) => {
   t.timeout(90000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -241,7 +242,7 @@ test('discovery: false offers no capability, rejects the channel and keeps the f
 
   const other = await connectMember(t, port, { caps: CAP_NO_INVENTORY })
   const hello = await other.peer.hello
-  t.is(other.peer.remoteCaps, 0, 'no capability offered')
+  t.is(other.peer.remoteCaps, CAP_WRITER_CUTS, 'only the writer cuts bit (#350)')
   t.is(hello.count, 2, 'the full inventory, even for a member asking for none')
   t.is(await other.disc.supported, false, 'the discovery open is rejected')
   t.alike(seeder.discoveryPage({ after: null, limit: 8 }), { stale: true })

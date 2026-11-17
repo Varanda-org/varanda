@@ -847,32 +847,6 @@ test('readNotices carries activity false when any page says so, else true', asyn
   t.is((await readNotices(omitted.request, { limit: 30 })).activity, true, 'a page that omits activity counts as true')
 })
 
-test('withoutAuthor drops every notice of one key and keeps the rest in order', async (t) => {
-  const { withoutAuthor } = await load()
-  const items = Object.freeze([item('a', 1), item('b', 1), item('a', 2), item('c', 1)])
-  t.alike(withoutAuthor(items, 'a'), [item('b', 1), item('c', 1)])
-  t.alike(withoutAuthor(items, 'z'), [...items])
-  t.alike(withoutAuthor([], 'a'), [])
-  t.is(items.length, 4, 'the input is not changed')
-})
-
-test('withoutAuthor keeps a reply, quote, mention, like or repost of the key it drops follows for', async (t) => {
-  const { withoutAuthor } = await load()
-  const K = 'ab'.repeat(32)
-  const follow = Object.freeze({ key: K, seq: 1, kind: 'follow' })
-  const reply = Object.freeze({ key: K, seq: 5, kind: 'reply' })
-  const quote = Object.freeze({ key: K, seq: 6, kind: 'quote' })
-  const mention = Object.freeze({ key: K, seq: 7, kind: 'mention' })
-  const like = Object.freeze({ key: K, seq: 8, kind: 'like' })
-  const repost = Object.freeze({ key: K, seq: 9, kind: 'repost' })
-  const otherFollow = Object.freeze({ key: 'b', seq: 1, kind: 'follow' })
-  const otherReply = Object.freeze({ key: 'b', seq: 2, kind: 'reply' })
-  const bare = Object.freeze({ key: K, seq: 10 })
-  const items = Object.freeze([follow, reply, otherFollow, quote, mention, like, repost, otherReply, bare])
-  t.alike(withoutAuthor(items, K), [reply, otherFollow, quote, mention, like, repost, otherReply])
-  t.is(items.length, 9, 'the input is not changed')
-})
-
 test('a web-only error is a USAGE error with one of the two known messages', async (t) => {
   const { isWebOnlyError } = await load()
   t.is(isWebOnlyError({ code: 'USAGE', message: 'método desconhecido' }), true)
