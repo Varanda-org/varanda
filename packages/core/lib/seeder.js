@@ -8304,21 +8304,24 @@ class Seeder {
   // text, returned as stored: the caller renders it with displayText. null
   // unless the highest share the scan recorded for that post is a live,
   // valid post-share naming it and the post is a live post of a visible,
-  // scanned diary that is not a page. Every doubt answers null: a post with
-  // no recorded share (past the cap included), a scan or a name index
-  // behind, a hold, a block, a date too far ahead.
+  // scanned diary, a person's or an open page's (the account service writes
+  // a page's share, section 16). Every doubt answers null: a post with no
+  // recorded share (past the cap included), a scan or a name index behind,
+  // a hold, a block, a closed or moved page, a date too far ahead.
   async postPublic (hex, seq) {
     try {
       if (typeof hex !== 'string' || !HEX64.test(hex) || !Number.isSafeInteger(seq) || seq < 1) return null
       const entry = this._served.get(hex)
       if (!entry || !scanCaughtUp(entry)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
-      // The page flag comes from the name index, on its own cursor
-      // (entry.indexed): until it has read the whole diary a page reads as
-      // a person, so nothing is shown. The bound is the signed length, not
-      // the present length, which is raised asynchronously and can lag it.
+      // The page close or move comes from the name index, on its own cursor
+      // (entry.indexed): until it has read the whole diary a closed page
+      // reads as open, so nothing is shown. The bound is the signed length,
+      // not the present length, which is raised asynchronously and can lag it.
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
-      if (this._names.hint(hex).page === true) return null
+      // A close or move that no longer verifies (its issuer revoked since)
+      // leaves endSeq null: the page may be closed, so nothing is shown.
+      if (this._names.endUnverified(hex)) return null
       const shareSeq = newestShare(entry.shares, seq)
       if (shareSeq === null) return null
       const share = await this._liveRecord(hex, shareSeq)
@@ -8350,7 +8353,7 @@ class Seeder {
       if (hidden.has(seq) || hidden.has(shareSeq)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
-      if (this._names.hint(hex).page === true) return null
+      if (this._names.endUnverified(hex)) return null
       // A profile or @nome deleted meanwhile drops only its own field: it
       // does not withdraw the post.
       if (hints.profileSeq !== null && hidden.has(hints.profileSeq)) name = null

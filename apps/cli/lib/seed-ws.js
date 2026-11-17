@@ -341,8 +341,9 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   every peer string), X-Robots-Tag noindex, nofollow, noarchive and
 //   no-store, only when the switch is on and Seeder#postPublic answers.
 //   Every other case (switch off, nothing shared, withdrawn, deleted,
-//   unknown or page diary, a non-canonical seq, no slot, deadline passed)
-//   is ONE 302 to /publicacao/<D>/<seq> built from the matched path only,
+//   unknown diary or closed or moved page, a non-canonical seq, no slot,
+//   deadline passed) is ONE 302 to /publicacao/<D>/<seq> built from the
+//   matched path only,
 //   with the same headers and an empty body, so the answer is no oracle of
 //   which posts exist or are shared. Own budget (POST_PAGE_MAX_IN_FLIGHT,
 //   POST_PAGE_RATE per second, burst POST_PAGE_BURST, an answer within

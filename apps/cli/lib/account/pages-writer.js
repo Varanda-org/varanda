@@ -176,7 +176,8 @@ function copyJson (value) {
   }
 }
 
-const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'profile', 'listing', 'listing-edit']
+// A post-share's tombstone is how a page post leaves the public web page.
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first

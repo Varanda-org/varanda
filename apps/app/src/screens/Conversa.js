@@ -693,7 +693,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     // The seeder's public page shows diary posts only. Chats, groups and
     // moments never come through here and are not kind 'post'; a page's diary
     // is told apart by its profile.
-    const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)
+    const actingPage = actingPageKey()
+    const actingOwn = actingPage !== null && String(item.author).toLowerCase() === actingPage
+    const diaryPost = item.kind === 'post' && hasSeq && (!(authorProfile && authorProfile.page === true) || actingOwn)
     // A poll or an event shows for a page's post too: a page votes and
     // answers like a person. Only the public web link stays off for a page.
     const pollable = item.kind === 'post' && hasSeq
@@ -703,8 +705,9 @@ export function rowProps ({ item, names, peeked, now, ownKey, follows, eng, hand
     // The member's own diary only, never the page acted as: the writer refuses
     // a post-share for any diary but the caller's own. Membro passes a repost's
     // original with extra.repostedBy.
-    const publishable = postRef !== null && typeof ownKey === 'string' && authorKey === ownKey.toLowerCase() &&
-      authorKey !== actingPageKey() && (extra.repostedBy === undefined || extra.repostedBy === null)
+    // The acting Page's own posts are published through the page action (pageShare.js).
+    const publishable = postRef !== null && typeof ownKey === 'string' && ((authorKey === ownKey.toLowerCase() && authorKey !== actingPage) || actingOwn) &&
+      (extra.repostedBy === undefined || extra.repostedBy === null)
     return {
       author: item.author,
       name: who.name,

@@ -1,0 +1,3 @@
+### Adicionado
+
+- Página pública na web para uma Página (PR `feat/page-web-share`): agindo como uma Página, o dono ou um administrador pode pôr uma publicação da Página na página pública da instalação (`/p/`) e tirá-la de lá, como uma pessoa: pela caixa "Publicar também na web" ao publicar e pelo menu "Página pública na web" nas publicações da própria Página. O serviço de conta ganha as ações de Página `post-share` e `post-unshare`, e a leitura assinada `status` passa a responder `shared`. O semeador mostra a publicação compartilhada de uma Página aberta como a de uma pessoa; uma Página encerrada, que mudou de chave ou cujo encerramento não se confere mais continua fora. Termos e Política versão 85, com novo aceite.

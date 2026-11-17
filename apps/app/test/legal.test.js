@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 84)
+  t.is(LEGAL_VERSION, 85)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 84, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 85, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -358,12 +358,25 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
   }
 })
 
+test('legal: version 85 describes web share of a page post', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 85)
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
+  t.ok(terms.includes('O dono ou um administrador de uma página pode fazer o mesmo com uma publicação da página. A escolha é um registro no diário da página'), 'terms: an owner or admin shares a page post, recorded in the page diary')
+  t.ok(terms.includes('encerrar a página retira todas'), 'terms: closing the page withdraws every share')
+  t.ok(terms.includes('a associação poderia publicar ou retirar uma publicação da página sem que ninguém da página pedisse'), 'terms: the residual risk of the service-held page key')
+  t.ok(terms.includes('A escolha de publicar uma publicação da página na web também é pública como a página.'), 'terms: the page lists the share as public')
+  t.ok(privacy.includes('Numa página, o dono ou um administrador faz a escolha, o serviço de conta a registra no diário da página com a chave da página e fica sabendo quem pediu e quando'), 'privacy: who chooses and what the service learns')
+  t.ok(privacy.includes('As escolhas de publicar uma publicação da página na web também ficam no diário da página e são públicas como ele.'), 'privacy: the page diary holds the share')
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '02f6101b9f1174e74bb45b5a65d08a944c23ee0f5e80fb59cb6f2be930023986', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '451d1292dae84a794c3bab94fc94ebd656a25044ae559e40c6ac0cbce4b7ba5f', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

@@ -74,7 +74,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
-import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesStart } from '../pages'
+import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesPostShare, pagesStart } from '../pages'
 import { pagePostOp, prepPageVideo } from '../pagePost'
 import { MOMENT_PAGE_UNCERTAIN, MOMENT_PREPARING_NOTICE, createMomentItems, isMomentPreparing, momentComposerOn, momentFailure, momentPublishedAs, momentPutArgs } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
@@ -134,6 +134,7 @@ import { momentMusicOf } from '../moments'
 import { momentsChanged } from './Momentos'
 import { usePostPublic } from '../postPublicContext'
 import { POST_SHARE_CONSENT } from '../ui/PostShareSheet'
+import { shareNewAsPage } from '../pageShare'
 import { WEB_SHARE_LABEL, shareNew, webShareOffered } from '../postShareCompose'
 
 export const MOMENT_TEXT_MAX = 200
@@ -1082,7 +1083,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const eventHeldBack = eventDraft !== null && !pollOk
   const postPublic = usePostPublic()
   const [webShare, setWebShare] = useState(false)
-  const webShareOk = webShareOffered({ enabled: postPublic.enabled, online: node.online, author: self.publicKey, page: asPage !== null || locked, moment: momentMode, reply: !!reply, quote: !!quote, poll: pollDraft !== null, event: eventDraft !== null })
+  const webShareOk = webShareOffered({ enabled: postPublic.enabled, online: node.online, author: self.publicKey, locked, moment: momentMode, reply: !!reply, quote: !!quote, poll: pollDraft !== null, event: eventDraft !== null })
   const webOn = webShare && webShareOk
   // Consent is per post: the tick never survives a close, nor a state where
   // the box is not offered.
@@ -1783,17 +1784,25 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     const op = to !== null ? { ...built.op, to } : built.op
     let raw = null
+    // One post-share for the post just written, inside the same pending
+    // action; shareNewAsPage never rejects and is never resent.
+    const sentWeb = webOn && kind === 'post'
+    let web = null
     const r = await action.run(async () => {
+      const member = await memberKeyOf(nodeRequest, nodeRef.current)
+      let value
       try {
-        return await actAs(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), action: kind, page, op })
+        value = await actAs(nodeRef.current, { member, action: kind, page, op })
       } catch (err) {
         raw = err
         throw err
       }
+      if (sentWeb) web = await shareNewAsPage((o) => pagesPostShare(nodeRef.current, { member, page, seq: o.seq }), page, seqOf(value))
+      return value
     })
     if (r.ok) {
       pagePosterRef.current = null
-      return published(sent, sentReply, sentIds, sentQuote)
+      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null)
     }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
       setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds })

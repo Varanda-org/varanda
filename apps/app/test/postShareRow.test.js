@@ -74,7 +74,8 @@ const social = () => ({
   persistOf: () => true
 })
 
-const profiles = { [PAGE]: { name: 'Página', username: 'pagina', page: true } }
+const OTHER_PAGE = 'd'.repeat(64)
+const profiles = { [PAGE]: { name: 'Página', username: 'pagina', page: true }, [OTHER_PAGE]: { name: 'Outra', username: 'outra', page: true } }
 const profileOf = (key) => profiles[key] || null
 
 function ruaRow (socialRowProps, p, more = {}) {
@@ -146,8 +147,10 @@ test('socialRowProps: never the page acted as', async (t) => {
   reset()
   const { socialRowProps } = await builders()
   env.acting = PAGE
-  t.is(ruaRow(socialRowProps, post(PAGE, 2), { ownKey: PAGE }).publishable, false, 'ownKey holding the acting page')
-  t.is(ruaRow(socialRowProps, post(PAGE, 2)).publishable, false, 'the page\'s own post while acting as it')
+  t.is(ruaRow(socialRowProps, post(PAGE, 2), { ownKey: PAGE }).publishable, true, 'the acting page\'s own post (page mode)')
+  t.is(ruaRow(socialRowProps, post(PAGE, 2)).publishable, true, 'the page\'s own post while acting as it')
+  t.is(ruaRow(socialRowProps, post(OTHER_PAGE, 2)).publishable, false, 'another page\'s post, never')
+  t.is(ruaRow(socialRowProps, post(THEM, 2)).publishable, false, 'a person\'s post, never')
   t.is(ruaRow(socialRowProps, post(ME, 2)).publishable, true, 'the member\'s own diary post stays publishable')
   reset()
 })
@@ -156,22 +159,22 @@ test('socialRowProps: the row cache keys on link, origin and publishable', async
   reset()
   const { socialRowProps } = await builders()
   const cache = new Map()
-  const p = post(ME, 9)
+  const p = post(PAGE, 9)
   const s = social()
-  const at = (more = {}) => socialRowProps({ post: p, ref: ME + ':9', social: s, profileOf, now: 0, ownKey: ME, h: {}, cache, rowKey: ME + ':9', ...more })
+  const at = (more = {}) => socialRowProps({ post: p, ref: PAGE + ':9', social: s, profileOf, now: 0, ownKey: ME, h: {}, cache, rowKey: PAGE + ':9', ...more })
   const first = at()
   t.is(at(), first, 'same inputs, same props object')
-  env.acting = ME
+  t.is(first.publishable, false, 'a page\'s post while not acting as it')
+  env.acting = PAGE
   const acting = at()
   t.not(acting, first, 'a change of publishable builds new props')
-  t.is(acting.publishable, false)
+  t.is(acting.publishable, true)
   env.acting = null
   const back = at()
-  t.is(back.publishable, true)
+  t.is(back.publishable, false)
   env.origin = 'https://outra.varanda.app'
   const moved = at()
   t.not(moved, back, 'a new origin builds new props')
-  t.is(moved.link, 'https://outra.varanda.app/p/' + ME + '/9')
   reset()
 })
 
@@ -199,7 +202,9 @@ test('rowProps: diary link, own publishable, repost and an offer link', async (t
   }
   t.is(conversaRow(rowProps, post(ME, null)).publishable, false, 'no seq')
   env.acting = PAGE
-  t.is(conversaRow(rowProps, post(PAGE, 2), { ownKey: PAGE }).publishable, false, 'ownKey holding the acting page')
+  t.is(conversaRow(rowProps, post(PAGE, 2), { ownKey: PAGE }).publishable, true, 'the acting page\'s own post (page mode)')
+  t.is(conversaRow(rowProps, post(OTHER_PAGE, 2), { ownKey: PAGE }).publishable, false, 'another page\'s post, never')
+  t.is(conversaRow(rowProps, post(THEM, 2), { ownKey: PAGE }).publishable, false, 'a person\'s post, never')
   t.is(conversaRow(rowProps, post(ME, 2)).publishable, true, 'the member\'s own post while acting as a page')
   reset()
 })
@@ -209,16 +214,16 @@ test('builders: the link comes from the colon ref through postLink', (t) => {
   t.ok(props.includes('const postRef = diaryPost ? refOf(post) : null'), 'socialRowProps: the colon ref of a diary post')
   t.ok(props.includes('const link = postRef !== null ? postLink(origin, postRef) : null'))
   t.ok(props.includes('const origin = installationOrigin() || globalThis.location?.origin || null'), 'the origin precedent')
-  t.ok(props.includes("const diaryPost = post.kind === 'post' && !(prof && prof.page === true)"), 'not a page, not another kind')
-  t.ok(props.includes('authorKey === own && authorKey !== actingPageKey()'), 'own key, never the acting page')
+  t.ok(props.includes("const diaryPost = post.kind === 'post' && (!(prof && prof.page === true) || actingOwn)"), 'not a page (the acting page\'s own aside), not another kind')
+  t.ok(props.includes('((authorKey === own && authorKey !== actingPage) || actingOwn)'), 'own key, or the acting page\'s own post')
   t.ok(props.includes('repostedBy === null && Number.isSafeInteger(post.seq)'))
   const inputs = props.slice(props.indexOf('const inputs = {'), props.indexOf('return cachedRow('))
   t.ok(/\n\s+link,\n\s+origin,\n\s+publishable,\n/.test(inputs), 'the cache inputs carry link, origin and publishable')
   const rows = fnText(CONVERSA, 'rowProps')
-  t.ok(rows.includes("const diaryPost = item.kind === 'post' && hasSeq && !(authorProfile && authorProfile.page === true)"))
+  t.ok(rows.includes("const diaryPost = item.kind === 'post' && hasSeq && (!(authorProfile && authorProfile.page === true) || actingOwn)"))
   t.ok(rows.includes("const postRef = diaryPost ? authorKey + ':' + item.seq : null"))
   t.ok(rows.includes('postLink(installationOrigin() || globalThis.location?.origin || null, postRef)'))
-  t.ok(rows.includes('authorKey !== actingPageKey() && (extra.repostedBy === undefined || extra.repostedBy === null)'))
+  t.ok(rows.includes('((authorKey === ownKey.toLowerCase() && authorKey !== actingPage) || actingOwn) &&\n      (extra.repostedBy === undefined || extra.repostedBy === null)'))
   t.ok(rows.indexOf('    publishable,\n') < rows.indexOf('    ...extra\n'), 'extra (an offer link) is spread last')
 })
 

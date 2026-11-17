@@ -2440,6 +2440,10 @@ test('page.* (Páginas)', (t) => {
   ok(t, 'page.sign', { ...base, action: 'moment', op: { text: '', media: momentMedia, music: { p: 'audius', id: 'abc123', start: 30 } } })
   ok(t, 'page.sign', { ...base, action: 'delete', op: { to: KEY + ':7' } })
   bad(t, 'page.sign', { ...base, action: 'moment', page: '', op: { text: '', media: momentMedia } }, 'moment needs the page')
+  // A page post put on the public web page and withdrawn.
+  ok(t, 'page.sign', { ...base, action: 'post-share', op: { seq: 4 } })
+  ok(t, 'page.sign', { ...base, action: 'post-unshare', op: { seq: 4 } })
+  bad(t, 'page.sign', { ...base, action: 'post-share', page: '', op: { seq: 4 } }, 'post-share needs the page')
   // A core delegate's terms acceptance (5.84): the op the node also signs a
   // terms signature for.
   ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })

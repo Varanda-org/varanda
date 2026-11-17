@@ -751,7 +751,7 @@ const PAGE_ACTIONS = [
   'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
-  'choice', 'moment', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
+  'choice', 'moment', 'post-share', 'post-unshare', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
 const PAGE_OP_MAX_BYTES = 16 * 1024

@@ -179,7 +179,9 @@ import { ComunidadeInfo as ComunidadeInfoScreen } from './src/screens/Comunidade
 import Ajustes from './src/screens/Ajustes'
 import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
-import ConversaScreen, { useActing } from './src/screens/Conversa'
+import ConversaScreen, { memberKeyOf, useActing } from './src/screens/Conversa'
+import { actAs, pagesPostShare, pagesPostUnshare } from './src/pages'
+import { pageShareOps } from './src/pageShare'
 import CurtidasScreen from './src/screens/Curtidas'
 import CitacoesScreen from './src/screens/Citacoes'
 import Denunciar from './src/screens/Denunciar'
@@ -2770,6 +2772,24 @@ function Member () {
   }, [])
   // A lock, an unlock or another identity closes it: the post is the old one's.
   useEffect(() => setShareTarget(null), [ownKey, nodeEpoch])
+  // The acting Page's own post opens the sheet in page mode (pageShare.js):
+  // the page's status and actions, never the person's post.* methods.
+  const shareNodeRef = useRef(node)
+  shareNodeRef.current = node
+  const sharePage = shareTarget !== null && acting.kind === 'page' && shareTarget.slice(0, 64).toLowerCase() === acting.key ? acting.key : null
+  const shareOps = useMemo(() => {
+    if (sharePage === null) return null
+    const run = async (fn) => {
+      const n = shareNodeRef.current
+      return fn(n, await memberKeyOf(n.request, n))
+    }
+    return pageShareOps({
+      page: sharePage,
+      status: () => run((n, member) => actAs(n, { member, action: 'status', page: sharePage })),
+      share: (seq) => run((n, member) => pagesPostShare(n, { member, page: sharePage, seq })),
+      unshare: (seq) => run((n, member) => pagesPostUnshare(n, { member, page: sharePage, seq }))
+    })
+  }, [sharePage, nodeEpoch])
   // Hidden tabs and covered stack entries stay mounted, so playback follows
   // the visible screen and whatever covers or replaces it (a lock or reset,
   // the report sheet, help, the page notice), not component lifetimes. The
@@ -4448,6 +4468,7 @@ function Member () {
           target={shareTarget}
           link={postLink(installationOrigin() || globalThis.location?.origin || null, shareTarget)}
           notice={shareNotice}
+          ops={shareOps}
           onClose={() => setShareTarget(null)}
         />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
