@@ -11,7 +11,6 @@ export const ENTRANCE_MS = 1280
 // The rest on the finished picture before the splash may leave.
 export const REST_MS = 220
 export const PRESENTATION_MS = ENTRANCE_MS + REST_MS
-export const SLIDES = { near: { tile: 96, ms: 4800 }, far: { tile: 128, ms: 20800 } }
 
 const GROUND_FROM = { opacity: 0, translateY: 24 }
 const GROUND_TO = { opacity: 1, translateY: 0 }
@@ -50,10 +49,6 @@ export function splashMotion (reduced) {
     letters: Array.from(SPLASH_WORD, (_, i) => step(520 + i * 40, 280, LETTER_FROM, LETTER_TO)),
     hint: step(960, 320, HINT_FROM, HINT_TO)
   }
-}
-
-export function slideMotion (reduced) {
-  return reduced === true ? null : SLIDES
 }
 
 // The sky's flyers. Each bird crosses the whole width once per `ms`, starts

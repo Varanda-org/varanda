@@ -42,6 +42,9 @@
 //   refuses as 'invalido' (a spent token once its partial blob was swept, a
 //   stamp under a dropped key) is cleared, so the next send stamps it again;
 //   a blob swept after part of it was put is then stored anew.
+// - createBlobClient().copySource(keyPair): the stamps of a history copy,
+//   bought in memory over the stamp link (kind 'copy'), for stamp(sealed,
+//   keyPair, source) and send(sealed, keyPair, source); see its comment.
 // - fetchBlob(descriptor, seederHttpOrigin): GET /blob/<id>/<index> from the
 //   seeder origin only, credentials omitted and redirects refused; every
 //   frame decoded and checked against the descriptor, the whole ciphertext's
@@ -101,6 +104,11 @@ const PUT_PACE_MS = 135
 // A forced top-up at send time buys the shortfall plus this many stamps; the
 // background topUp fills the rest of the wallet later.
 const FORCE_MARGIN = 8
+// A history copy buys its stamps this many at a time over one stamp link.
+const COPY_BATCH = 32
+// reserve() asks for the text's stamps in batches of this many, so the caller
+// can check the unlock and show progress between them.
+const COPY_RESERVE_CHUNK = 256
 // The seeder's /blob route shares the /media bucket (128 at 64/s, for every
 // client); a download stays well under it.
 const GET_BURST = 32
@@ -126,6 +134,8 @@ const BAD_MEDIA = 'mídia inválida'
 const NO_STAMPS = 'o limite de envio de mídia de hoje acabou'
 const STAMP_FAILED = 'não deu para preparar o envio da mídia'
 const UNCONFIRMED = 'não deu para confirmar o envio da mídia'
+const NO_COPY_STAMPS = 'o limite semanal de cópia de conversas acabou'
+const NO_COPY_ALLOWANCE = 'o semeador não oferece a cópia de conversas'
 const SEEDER_FULL = 'o semeador está cheio: tente mais tarde'
 const SEEDER_RATE = 'muitos envios seguidos: aguarde um pouco'
 const REFUSED = 'mídia recusada pelo semeador'
@@ -146,10 +156,12 @@ function unconfirmed () {
   return err
 }
 
+// `reason` is the seeder's word, kept so a caller can tell a refused stamp
+// ('invalido') from the rest.
 function refusal (reason) {
-  if (reason === 'cheio') return new UsageError(SEEDER_FULL)
-  if (reason === 'ritmo') return new UsageError(SEEDER_RATE)
-  return new UsageError(REFUSED)
+  const err = new UsageError(reason === 'cheio' ? SEEDER_FULL : reason === 'ritmo' ? SEEDER_RATE : REFUSED)
+  err.reason = reason
+  return err
 }
 
 function sha256 (bytes) {
@@ -209,8 +221,8 @@ function sealBlob (plain) {
 // open({ nonce, box }) -> value or null: the caller's local key, as the DM
 // wallet uses it (./dm-store.js); both may throw while locked.
 // limits (tests): wallet, walletLow, issueBurst, issuePaceMs, topUpEveryMs,
-// topUpRetryMs, keyCheckMs, rotationMs, putBurst, putPaceMs, forceMargin,
-// link (dm-link limits).
+// topUpRetryMs, keyCheckMs, rotationMs, putBurst, putPaceMs, forceMargin, copyBatch,
+// copyReserveChunk, link (dm-link limits).
 function createBlobClient ({ seederUrl, createSocket, association, storage, seal, open, log = noop, limits = {} } = {}) {
   if (storage === null || typeof storage !== 'object') throw new TypeError('storage is required')
   if (typeof seal !== 'function' || typeof open !== 'function') throw new TypeError('seal and open are required')
@@ -226,6 +238,8 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     putBurst: PUT_BURST,
     putPaceMs: PUT_PACE_MS,
     forceMargin: FORCE_MARGIN,
+    copyBatch: COPY_BATCH,
+    copyReserveChunk: COPY_RESERVE_CHUNK,
     link: {},
     ...(limits || {})
   }
@@ -506,14 +520,160 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     return stamps
   }
 
+  // A history copy's stamps (docs/protocol.md section 11): bought one
+  // batch at a time over the identified stamp link (kind 'copy', the
+  // seeder's weekly allowance for a copy), held in memory only and never
+  // put in the wallet, so a copy never spends the daily blob allowance nor
+  // the reverse. take(n) resolves n stamps, or throws once the allowance is
+  // gone, the seeder cannot be reached (an old seeder never answers the
+  // kind) or answers badly. reserve(n) is take that gives what it got instead
+  // of throwing. `exhausted` says the weekly allowance ended.
+  // take(n, { stop }): stop() is checked before every link and every issue; once
+  // it returns true no further issue is sent and no link opened (the app locked,
+  // so more stamps would only be thrown away). A stopped take ends like any
+  // short purchase, a plain failure that keeps what was bought in the stock, so
+  // reserve hands those stamps over and the source stays ended.
+  // Nothing here repeats a request: a batch that fails is a normal error
+  // and only the user's next copy asks again.
+  function copySource (keyPair, { batch = L.copyBatch } = {}) {
+    let stock = []
+    let failure = null
+    // A chunk of 0 or a fraction would never shrink what reserve has left.
+    const chunk = Math.max(1, Math.floor(L.copyReserveChunk))
+    const source = {
+      // reserve's batch size, so a caller can count the batches.
+      chunk,
+      exhausted: false,
+      bought: 0,
+      async take (n, { stop = null } = {}) {
+        // Stamps already bought are spent first. One failed purchase ends
+        // the source for this copy: no request is repeated, and `exhausted`
+        // tells the caller whether the weekly allowance ended.
+        if (stock.length >= n) {
+          const out = stock.slice(0, n)
+          stock = stock.slice(n)
+          return out
+        }
+        if (failure !== null) throw failure
+        try {
+          // A link has one deadline, so a large ask outlives it: a link cut
+          // after it bought something goes on over a new one. A refusal, the
+          // end of the allowance or a link that bought nothing ends it.
+          while (stock.length < n) {
+            if (stop !== null && stop()) break
+            const { fresh, cut } = await buyCopyStamps(keyPair, Math.max(n - stock.length, batch), source, stop)
+            stock = stock.concat(fresh)
+            source.bought += fresh.length
+            if (!cut || source.exhausted) break
+          }
+        } catch (err) {
+          failure = err
+          throw err
+        }
+        if (stock.length < n) {
+          failure = new UsageError(source.exhausted ? NO_COPY_STAMPS : STAMP_FAILED)
+          throw failure
+        }
+        const out = stock.slice(0, n)
+        stock = stock.slice(n)
+        return out
+      },
+      // Up to n stamps for the caller to hold: fewer, down to none, when the
+      // allowance ends or a purchase fails (whatever was bought is handed
+      // over, and the source stays ended as take leaves it). Bought in
+      // batches of copyReserveChunk, each over its own link; after each,
+      // between(held so far) may return false to stop with what is held, and
+      // stop() ends a purchase in progress (see take). Never throws.
+      async reserve (n, between = null, stop = null) {
+        const out = []
+        let left = n
+        while (left > 0) {
+          let got
+          try {
+            got = await source.take(Math.min(left, chunk), { stop })
+          } catch {
+            out.push(...stock)
+            stock = []
+            break
+          }
+          for (const s of got) out.push(s)
+          left -= got.length
+          if (between !== null) {
+            let go = false
+            try {
+              go = (await between(out.length)) !== false
+            } catch {}
+            if (!go) break
+          }
+        }
+        return out
+      }
+    }
+    return source
+  }
+
+  // One stamp link: the key, then up to `count` stamps -> { fresh, cut }.
+  // Stops quietly at a 'teto' (marking the source exhausted) so the stamps
+  // already bought still count; no link or no key at all throws. cut: the
+  // link itself ended (its deadline, a lost socket) rather than the seeder
+  // refusing or the allowance ending.
+  async function buyCopyStamps (keyPair, count, source, stop = null) {
+    let link
+    try {
+      link = await openStampLink({ ...linkOpts, limits: { stampDeadlineMs: BLOB_STAMP_LINK_DEADLINE_MS, ...L.link }, keyPair })
+    } catch (err) {
+      if (err instanceof UsageError) throw err
+      throw new UsageError(NO_SEEDER)
+    }
+    const fresh = []
+    let cut = false
+    try {
+      let p
+      try {
+        p = await link.key('copy')
+      } catch {
+        throw new UsageError(NO_COPY_ALLOWANCE)
+      }
+      const parsed = postage.parsePublicKey(p)
+      if (parsed === null) throw new UsageError(STAMP_FAILED)
+      while (fresh.length < count) {
+        if (stop !== null && stop()) break
+        if (fresh.length >= L.issueBurst && L.issuePaceMs > 0) await sleep(L.issuePaceMs)
+        const token = postage.newToken(parsed.n, 'blob')
+        const { blinded, r } = postage.blind(postage.representative(token, 'blob'), parsed.n)
+        let res
+        try {
+          res = await link.issue(postage.toBase64(blinded), 'copy')
+        } catch {
+          cut = true
+          break
+        }
+        if (res.error === 'teto') {
+          source.exhausted = true
+          break
+        }
+        if (res.error !== undefined || res.kid !== p.kid) break
+        const sg = postage.fromBase64(res.sig)
+        const sig = sg === null ? null : postage.unblind(sg, r, parsed.n)
+        if (sig === null || !postage.verify(token, sig, p, 'blob')) break
+        fresh.push({ kid: p.kid, token: b4a.toString(token, 'hex'), sig: postage.toBase64(sig) })
+      }
+    } finally {
+      link.close()
+    }
+    if (fresh.length === 0 && !source.exhausted) throw new UsageError(STAMP_FAILED)
+    return { fresh, cut }
+  }
+
   // Builds the frame of every chunk without one yet, spending one wallet
-  // stamp each. Frames already built keep their stamp.
-  async function stamp (sealed, keyPair) {
+  // stamp each (or one stamp of `source`, a copySource). Frames already built
+  // keep their stamp.
+  async function stamp (sealed, keyPair, source = null) {
     if (!isSealed(sealed)) throw new TypeError('invalid sealed blob')
     const missing = []
     for (let i = 0; i < sealed.frames.length; i++) if (sealed.frames[i] === null) missing.push(i)
     if (missing.length === 0) return
-    const stamps = await stampsFor(missing.length, keyPair)
+    const stamps = source === null ? await stampsFor(missing.length, keyPair) : await source.take(missing.length)
     const count = sealed.descriptor.chunks
     for (const [k, index] of missing.entries()) {
       const s = stamps[k]
@@ -569,12 +729,12 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
     if (refused !== null) throw refusal(refused)
   }
 
-  async function send (sealed, keyPair) {
-    await stamp(sealed, keyPair)
+  async function send (sealed, keyPair, source = null) {
+    await stamp(sealed, keyPair, source)
     await put(sealed)
   }
 
-  return { stamp, put, send, topUp, walletSize }
+  return { stamp, put, send, topUp, walletSize, copySource }
 }
 
 // The seeder's HTTP origin, exactly scheme://host[:port]: https, or http on
