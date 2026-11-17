@@ -125,6 +125,10 @@
 // fails start() (fail closed: without it a stamp could be spent twice). A stored visit ping never calls
 // dm.onDrop (no push wake), and a full visit pool refuses visit puts only.
 // A stamp spent in either pool is refused by the other. Swept on the DM tick.
+// Both lanes also come as 'varanda/dm/2' and 'varanda/visit/2' with buckets
+// (docs/protocol.md section 11): the same pools, each drop stored with a tag
+// from the put's bucket, a page filtered by the buckets asked for, the bits
+// from the served count (lib/dm.js bucketBits) once per channel.
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
@@ -176,7 +180,8 @@ const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./bl
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive } = require('./activity')
-const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, VISIT_POOL_MAX } = require('./dm')
+const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, VISIT_POOL_MAX, bucketBits } = require('./dm')
+const { tagFor } = require('./dm-pool')
 const { createDmPool, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS } = require('./dm-pool')
 const { attachDm } = require('./dm-net')
 const { attachDmStamp } = require('./dm-stamp-net')
@@ -7682,6 +7687,24 @@ class Seeder {
       }
       this._dmHandles.add(visit)
       release.push(() => this._dmHandles.delete(visit))
+      // The bucketed lanes next to the v1 ones (an old member never opens
+      // them): the bits come from the served count once per channel, and no
+      // log line below ever carries a bucket, a tag or the bits.
+      const bits = this._dmBucketBits()
+      for (const lane of [
+        { protocol: DM_PROTOCOL_V2, put: (b, t) => this._dmPut(b, t), page: (q) => this._dm.page(q) },
+        { protocol: VISIT_PROTOCOL_V2, put: (b, t) => this._visitPut(b, t), page: (q) => this._visit.page(q) }
+      ]) {
+        let h = null
+        try {
+          h = attachDm(socket, { role: 'seeder', protocol: lane.protocol, bits, put: lane.put, page: lane.page, log: (ev) => this.log(ev) })
+        } catch {
+          socket.destroy()
+          return
+        }
+        this._dmHandles.add(h)
+        release.push(() => this._dmHandles.delete(h))
+      }
       if (this._blob !== null) {
         let blob = null
         try {
@@ -7880,28 +7903,35 @@ class Seeder {
   // A failure of our own (the key file, the disk) throws: dm-net then closes
   // the channel without an ack and the member's put stays uncertain. Only a
   // drop that is itself bad is answered 'invalido', which is final.
-  async _dmPut (bytes) {
+  // How many bits of bucket the v2 lanes advertise, from the served count at
+  // attach time (a channel keeps the value it opened with).
+  _dmBucketBits () {
+    return bucketBits(this._served.size)
+  }
+
+  // info: { bucket, bits } from a v2 channel, absent on a v1 one.
+  async _dmPut (bytes, info) {
     try {
       await this._dmPostageKeys()
     } catch (err) {
       this.log({ event: 'dm', reason: 'postage' })
       throw err
     }
-    const result = this._dm.submit(bytes)
+    const result = this._dm.submit(bytes, info === undefined ? 0 : tagFor(info.bits, info.bucket))
     const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
     this.log({ event: 'dm', reason })
     return result
   }
 
   // As _dmPut, into the visit pool: same keys, its own log event.
-  async _visitPut (bytes) {
+  async _visitPut (bytes, info) {
     try {
       await this._dmPostageKeys()
     } catch (err) {
       this.log({ event: 'visit', reason: 'postage' })
       throw err
     }
-    const result = this._visit.submit(bytes)
+    const result = this._visit.submit(bytes, info === undefined ? 0 : tagFor(info.bits, info.bucket))
     const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
     this.log({ event: 'visit', reason })
     return result
