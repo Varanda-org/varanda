@@ -143,3 +143,9 @@ Sem mudança em `packages/web-member/lib/dm.js` (as mutações abaixo foram feit
 
 - Um aparelho que abre v1 e v2 ao mesmo tempo ganha o dobro de orçamento de páginas e de puts por canal; as senhas de postagem continuam limitando os puts.
 - Um byte de cima corrompido no carregamento de um registro vira "sem marca": inofensivo (o envelope é servido a todos).
+
+## Conferência no aparelho (2026-11-16)
+
+Na Vitrine (dados fixos, sem semeador), depois do merge da `main` com os Termos 72: em Ajustes, "Termos e privacidade" mostra "Você aceitou a versão 73" e, na Política, o parágrafo "Envelopes das mensagens diretas" com "por até 14 dias" e o texto dos grupos (a partir de 1.000 contas, grupo de cerca de 500 pessoas, Páginas pedem todos os grupos, grupo sorteado nas cópias da Página, 1/64 das contas). Conferido no Android (emulador, `app.varanda.debug`), depois no simulador iOS (iPhone 17 Pro) e por fim na web.
+
+O pedido por grupo no semeador real não aparece na tela: fica coberto pelos testes acima e pela linha do #224 (semeador antes do app).
