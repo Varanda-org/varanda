@@ -2090,7 +2090,7 @@ class Seeder {
       media: { kept: mediaKept, dropped: mediaBefore - mediaKept },
       groups: { kept: groupsKept, dropped: groupsBefore - groupsKept }
     }
-    this.log({ event: 'ready', topic, admitted, phases, cores })
+    this.log({ event: 'ready', topic, admitted, phases, cores, at: Date.now() })
     // Background pass (never inside start()): scan every served diary for
     // media-core records, one diary at a time (_scanQueue), and index it on
     // the separate index queue (`indexing` stays true until every diary
