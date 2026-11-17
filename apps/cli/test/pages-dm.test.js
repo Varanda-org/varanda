@@ -1279,6 +1279,26 @@ test('pages-dm: a move before dm-legacy-done carries the bundle to K2, readable 
   t.is(s.pagesStore.get(k2).dm.legacyBundle, null)
 })
 
+test('pages-dm: an admin removed from K2 after a move gets movida from the dm reads of K1', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const page = (await s.create(ana, 'padaria')).page
+  t.is((await s.invite(ana, page, bia)).status, 200)
+  t.is((await s.accept(bia, page)).status, 200)
+  const moved = await s.move(ana, page)
+  t.is(moved.status, 200, JSON.stringify(moved.body))
+  const removed = await s.remove(ana, moved.to, bia.hex)
+  t.is(removed.status, 200, JSON.stringify(removed.body))
+  for (const [action, op] of [['dm-box-read', {}], ['dm-legacy-read', { from: 0 }]]) {
+    const r = await s.act(bia, action, page, op)
+    t.is(r.status, 409, action)
+    t.is(r.body.error, 'movida', action + ' of K1 refuses the removed admin')
+    t.is((await s.act(bia, action, moved.to, op)).body.error, 'sem-permissao', action + ' of K2 too')
+  }
+})
+
 test('pages-dm: a first dm-box that never published does not block a move; the bundle rides alone in a gen 0 row', async (t) => {
   t.timeout(TEST_TIMEOUT_MS)
   let crash = true

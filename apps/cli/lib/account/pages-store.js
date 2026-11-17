@@ -637,15 +637,40 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     return copy(state.pages[page] || null)
   }
 
+  function rowRole (r, member) {
+    if (r.owner === member) return 'owner'
+    if (r.admins.includes(member)) return 'admin'
+    return null
+  }
+
+  // The row at the end of a page's move chain (a closed end keeps its
+  // roster), or null for a chain past MAX_PAGE_MOVES or a missing row.
+  function chainEnd (page) {
+    let r = state.pages[page]
+    for (let hops = 0; r && r.movedTo !== null; hops++) {
+      if (hops >= MAX_PAGE_MOVES) return null
+      r = state.pages[r.movedTo]
+    }
+    return r || null
+  }
+
+  // A moved row's frozen roster counts only for whoever still holds a role
+  // at the end of its chain: an admin removed from the live key loses the
+  // old keys too, as if the page had never moved.
+  function heldRole (page, r, member) {
+    const got = rowRole(r, member)
+    if (got === null || r.movedTo === null) return got
+    const end = chainEnd(page)
+    return end !== null && rowRole(end, member) !== null ? got : null
+  }
+
   function role (page, member) {
     needKey(page, 'page')
     needKey(member, 'member')
     usable()
     const r = state.pages[page]
     if (!r) return null
-    if (r.owner === member) return 'owner'
-    if (r.admins.includes(member)) return 'admin'
-    return null
+    return heldRole(page, r, member)
   }
 
   // need: 'owner' or 'admin' (the owner is also an admin here).
@@ -666,8 +691,9 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     const out = { owned: [], admin: [], invites: [], offers: [] }
     for (const page of Object.keys(state.pages).sort()) {
       const r = state.pages[page]
-      if (r.owner === member) out.owned.push(summary(page, r))
-      else if (r.admins.includes(member)) out.admin.push(summary(page, r))
+      const got = heldRole(page, r, member)
+      if (got === 'owner') out.owned.push(summary(page, r))
+      else if (got === 'admin') out.admin.push(summary(page, r))
       if (!live(r)) continue
       const inv = freshInvites(r, nowMs)[member]
       if (inv) out.invites.push({ page, owner: r.owner, gen: inv.gen, rosterSignature: inv.rosterSignature, expiresAt: inv.expiresAt })
