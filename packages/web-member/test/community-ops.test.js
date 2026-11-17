@@ -1827,6 +1827,15 @@ test('a community rejoin after another device left plans the cut past the leave 
   t.ok(walk.live.has(now), 'the new CW is live')
 })
 
+test('a community demotion past MAX_GROUP_CUTS writers names the first by key and is never refused; a grant is, as in the core node (#350)', (t) => {
+  const cuts = Array.from({ length: grp.MAX_GROUP_CUTS + 1 }, () => ({ writer: hex(crypto.randomBytes(32)), seq: 3 })).sort((x, y) => x.writer.localeCompare(y.writer))
+  t.alike(ops.adminCuts(cuts, false), cuts.slice(0, grp.MAX_GROUP_CUTS), 'the first writers by key keep their length, the rest are cut at 0')
+  t.exception(() => ops.adminCuts(cuts, true), /limite da comunidade atingido/, 'a grant past the cap is refused')
+  const fit = cuts.slice(0, grp.MAX_GROUP_CUTS)
+  t.alike(ops.adminCuts(fit, true), fit, 'a grant within the cap names every writer')
+  t.alike(ops.adminCuts(fit, false), fit, 'a demotion within the cap names every writer')
+})
+
 test('with no frozen room left, a community rejoin after a leave gets COMMUNITY_FULL with nothing written (#350)', async (t) => {
   const { members: [b], community } = await world(t, 1)
   // Eight CWs of other devices this node never held, cut past 0: the frozen

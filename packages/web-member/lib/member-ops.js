@@ -5658,6 +5658,16 @@ function communityRemoveGroup (ctx, { community, group, undo = false }) {
   })
 }
 
+// The cuts of a community admin record over `cuts` (countedCuts, lowest
+// keys first): a grant past MAX_GROUP_CUTS is refused; a demotion never is,
+// as in the core node: the first writers by key keep their length and the
+// rest are cut at 0.
+function adminCuts (cuts, grant) {
+  if (cuts.length <= MAX_GROUP_CUTS) return cuts
+  if (grant) throw new UsageError(COMMUNITY_FULL)
+  return cuts.slice(0, MAX_GROUP_CUTS)
+}
+
 // -> { community, member, on }: a group-admin in the community root, by its
 // creator only, with cuts over the member's counted community writers (on
 // at max(contiguous, signed) length, off at the contiguous one).
@@ -5677,8 +5687,7 @@ async function communitySetAdmin (ctx, { community, member, on }) {
     // outlives it as a shield against a ban.
     if (on === true && statusOf(c, d) !== 'member') throw new UsageError(COMMUNITY_MEMBER_NEEDED)
     if (on !== true && !everGranted(c, d)) throw new UsageError(GROUP_UNCHANGED)
-    const cuts = countedCuts(c, d, on === true, { frozen: on !== true })
-    if (cuts.length > MAX_GROUP_CUTS) throw new UsageError(COMMUNITY_FULL)
+    const cuts = adminCuts(countedCuts(c, d, on === true, { frozen: on !== true }), on === true)
     await appendToOwnGroupCore(ctx, root, rootGone
       ? buildRecord(() => grp.communityDemote({ member: d, cuts, seen: c.built.last }))
       : buildRecord(() => grp.groupAdmin({ member: d, on: on === true, cuts, seen: c.built.last })))
@@ -6578,6 +6587,7 @@ module.exports = {
   moderation,
   memberBlocks,
   readerModeration,
+  adminCuts,
   idCreate,
   idShow,
   identityState,
