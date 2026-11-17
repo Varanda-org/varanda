@@ -86,15 +86,21 @@
 // naming W AND W's block 0 is a group-writer header naming that group and D;
 // a root G once its block 0 is a valid group header and some admitted,
 // unblocked diary joins G (the diary its header names counts only through
-// its own join for writer G: _rootBound). At most MAX_GROUP_WRITERS_PER_DIARY
-// writers of one diary count per group (liveGroupJoins). Listed in
-// admitted.json (`groups: { K: { diary, group, seq } }`), persisted before
-// the open, purged before un-listing.
+// its own join for writer G: _rootBound). Per group, the writers of one
+// diary that count are the ones its slot walk counts (lib/group.js
+// slotWalk, over its group-join and group-cut records): at most
+// MAX_GROUP_WRITERS_PER_DIARY live and MAX_FROZEN_WRITERS_PER_DIARY frozen,
+// plus each of the up to MAX_WRITER_RELEASES_PER_DIARY writers it released
+// (liveGroupJoins). Listed in admitted.json (`groups: { K: { diary, group,
+// seq } }`), persisted before the open, purged before un-listing.
 // Leaving (a join turned off) NEVER purges: it only marks the writer as
 // left in the group index (lib/group-index.js), so the moderation record of
-// a departed member stays verifiable. Purges happen for a dropped or
-// blocked diary, a root its blocked or revoked creator bound, a root key in
-// the blocklist snapshot, a fork or the quota.
+// a departed member stays verifiable, and a counted writer whose join is
+// off is still admitted. A writer its diary cut (frozen or released) is
+// held whole, like any writer: a reader folds from a contiguous copy, so
+// nothing past the cut is cleared yet. Purges happen for a dropped or blocked diary, a root its blocked or revoked
+// creator bound, a root key in the blocklist snapshot, a fork or the
+// quota.
 // Group keys never travel on the admission channel; members learn writer
 // sets over 'varanda/groups/1' (lib/groups-net.js) and the /index routes.
 //
@@ -161,7 +167,8 @@ const {
   startQuarantineFetch,
   MAX_CONNECTIONS,
   MAX_INVENTORY,
-  CAP_DISCOVERY
+  CAP_DISCOVERY,
+  CAP_WRITER_CUTS
 } = require('./net')
 const { attachDiscovery, newViewId, MAX_DISCOVERY_LIMIT } = require('./discovery-net')
 const {
@@ -208,11 +215,13 @@ const {
   MAX_GROUP_WRITERS,
   MAX_GROUPS_PER_DIARY,
   MAX_GROUP_WRITERS_PER_DIARY,
+  MAX_FROZEN_WRITERS_PER_DIARY,
+  MAX_WRITER_RELEASES_PER_DIARY,
   MAX_TOP_FRIENDS,
   PAGE_KEYS
 } = require('./records')
 const { validateMediaHeader, latestMediaCores } = require('./media')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins } = require('./group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
 const { attachGroups } = require('./groups-net')
 const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia } = require('./deletion')
@@ -824,9 +833,14 @@ async function localGroupVerdict (core, key, binding, visibility = null) {
   }
 }
 
-// Writer cores one diary may hold at a seeder across all its groups, left
-// ones included (leaving never frees a slot): its share of the group cores.
-const MAX_GROUP_CORES_PER_DIARY = MAX_GROUPS_PER_DIARY * MAX_GROUP_WRITERS_PER_DIARY
+// Writer cores one diary may hold at a seeder in one group, left ones
+// included (leaving never frees a slot): its live and frozen slots, and
+// each released writer, held whole (#350).
+const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
+// And across all its groups: its share of the group cores, each released
+// writer, held whole, included. It stays at the live and frozen slots of
+// every group (owner decision).
+const MAX_GROUP_CORES_PER_DIARY = MAX_GROUPS_PER_DIARY * (MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY)
 // Waits before a group core that timed out or found no peer is tried again
 // for the same diary, so scans and connections do not restart fetches.
 const GROUP_BACKOFF_MS = [2000, 10000, 30000, 60000, 300000, 900000]
@@ -846,44 +860,68 @@ const GROUP_STALL_WINDOW_MS = 10 * 60 * 1000
 const ROOT_CREATORS_MAX = 4096
 const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
 
-// The live joins of a diary from its newest join per writer (lib/group.js
-// groupJoins), keeping only joins of its first MAX_GROUPS_PER_DIARY groups
-// by diary seq, so the extra joins are ignored the same way on every scan.
-// Per group only the MAX_GROUP_WRITERS_PER_DIARY writers with the earliest
-// on:true join count, a root joined by its own key holding one of them (the
-// fold's rule, lib/group.js capPerDiary): this protects a group's writer cap
-// and the seeder's group cores from one diary declaring hundreds of writers.
-// `first` is group -> Map(writer -> earliest on:true seq).
-// writer -> { group, seq }.
-function liveGroupJoins (decls, first = new Map()) {
+// The joins a diary's group cores are kept for, from its newest join per
+// writer (lib/group.js groupJoins) and its slot walk per group (lib/group.js
+// slotWalk, stepped by the scan: `walks` is group -> walk state). Only the
+// writers the walk counts live or frozen, and the root key G once the diary
+// joined it (the root always counts), take one of its groups: one diary
+// declaring hundreds of writers never takes more than
+// MAX_GROUP_WRITERS_PER_DIARY live and MAX_FROZEN_WRITERS_PER_DIARY frozen
+// slots of a group. The live joins of its first MAX_GROUPS_PER_DIARY groups
+// by diary seq count (the choice of lib/group.js diaryGroupKeys). A counted
+// writer whose newest join is off, and a writer the walk released (up to
+// MAX_WRITER_RELEASES_PER_DIARY, whatever its join), are kept too, `left`,
+// in those groups and in any group the diary has no live join in: the fold
+// still counts their records (below the cut, and block 0, leaves and key
+// blocks at any cut) and waits for them, but their join never picks a
+// group, fetches a root or supports one (a root already held stays by the
+// retention rule, _groupSupported).
+// writer -> { group, seq, left }.
+function liveGroupJoins (decls, walks = new Map()) {
   const allowed = new Set()
-  for (const [group, writers] of first) {
-    const list = [...writers].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    let room = MAX_GROUP_WRITERS_PER_DIARY
-    if (writers.has(group)) {
-      allowed.add(group + ':' + group)
-      room--
-    }
-    for (const [writer] of list) {
-      if (writer === group) continue
-      if (room <= 0) break
-      allowed.add(group + ':' + writer)
-      room--
+  const released = new Set()
+  for (const [group, s] of walks) {
+    if (s.rootSlot) allowed.add(group + ':' + group)
+    for (const [writer, st] of s.state) {
+      if (st === 'live' || st === 'frozen') allowed.add(group + ':' + writer)
+      else if (st === 'released') released.add(group + ':' + writer)
     }
   }
   const entries = [...decls].map(([writer, d]) => ({ seq: d.seq, record: { type: 'group-join', group: d.group, writer, on: d.on, at: d.at } }))
   const live = [...groupJoins(entries).values()].sort((a, b) => a.seq - b.seq)
   const groups = new Set()
+  const joined = new Set()
   const out = new Map()
   for (const j of live) {
     if (!allowed.has(j.group + ':' + j.writer)) continue
+    joined.add(j.group)
     if (!groups.has(j.group)) {
       if (groups.size >= MAX_GROUPS_PER_DIARY) continue
       groups.add(j.group)
     }
-    out.set(j.writer, { group: j.group, seq: j.seq })
+    out.set(j.writer, { group: j.group, seq: j.seq, left: false })
+  }
+  for (const [writer, d] of decls) {
+    if (writer === d.group || out.has(writer)) continue
+    const pair = d.group + ':' + writer
+    if (!released.has(pair) && (d.on || !allowed.has(pair))) continue
+    if (joined.has(d.group) && !groups.has(d.group)) continue
+    out.set(writer, { group: d.group, seq: d.seq, left: true })
   }
   return out
+}
+
+// Steps one group-join or group-cut of a diary into its walk for that group
+// (`walks`, group -> walk state), each seq once: the scan reads a diary in
+// seq order and never steps back.
+function groupWalkStep (walks, group, e) {
+  let s = walks.get(group)
+  if (s === undefined) {
+    s = slotWalkState()
+    walks.set(group, s)
+  }
+  if (e.seq <= s.last) return
+  slotWalkStep(s, e, group)
 }
 
 // blocklist.json as stored, unwrapped ({ v: 1, snapshot }: store.js
@@ -1775,7 +1813,7 @@ class Seeder {
         if (chargedTo !== null) {
           held = perDiary.get(chargedTo) || { total: 0, roots: 0, groups: new Map() }
           if (held.total >= MAX_GROUP_CORES_PER_DIARY) reason = 'group-full'
-          else if (isRoot ? held.roots >= MAX_GROUPS_PER_DIARY : (held.groups.get(binding.group) || 0) >= MAX_GROUP_WRITERS_PER_DIARY) reason = 'group-full'
+          else if (isRoot ? held.roots >= MAX_GROUPS_PER_DIARY : (held.groups.get(binding.group) || 0) >= MAX_GROUP_HELD_PER_DIARY) reason = 'group-full'
         }
         if (reason === null) {
           if (held !== null) {
@@ -2231,8 +2269,9 @@ class Seeder {
       latest: [],
       refused: new Map(),
       // Group scan state: `groupDecls` the newest group-join per writer
-      // (writer -> { group, on, seq, at }), `groupLive` the live joins kept
-      // under MAX_GROUPS_PER_DIARY (writer -> { group, seq }) and
+      // (writer -> { group, on, seq, at }), `groupLive` the joins kept under
+      // MAX_GROUPS_PER_DIARY and the slot walk (writer -> { group, seq,
+      // left }) and
       // `groupRefused` the joins whose core failed the gate (writer -> seq),
       // `groupBound` the newest on:true join of each root key G naming G
       // itself (G -> { group: G, seq }), which keeps binding after a later
@@ -2240,11 +2279,12 @@ class Seeder {
       // entry per root key, so a creator cannot unbind its own root (and
       // escape its purge) by naming the root key as a writer elsewhere, and
       // the map grows no faster than groupDecls; and
-      // `groupFirst` the earliest on:true join per group and writer (group
-      // -> Map(writer -> seq)), which ranks writers for the per-diary cap.
+      // `groupWalks` the slot walk per group (group -> lib/group.js walk
+      // state) over its group-join and group-cut records, which picks the
+      // writers that count (liveGroupJoins).
       groupDecls: new Map(),
       groupBound: new Map(),
-      groupFirst: new Map(),
+      groupWalks: new Map(),
       groupLive: new Map(),
       groupRefused: new Map(),
       // Public share hint, rebuilt by every scan from block 1 (in memory
@@ -2846,14 +2886,12 @@ class Seeder {
         if (prev === undefined || i > prev.seq) entry.groupDecls.set(r.writer, { group: r.group, on: r.on, seq: i, at: r.at })
         const bound = r.writer === r.group ? entry.groupBound.get(r.writer) : undefined
         if (r.on && r.writer === r.group && (bound === undefined || i > bound.seq)) entry.groupBound.set(r.writer, { group: r.group, seq: i })
-        if (r.on) {
-          let firsts = entry.groupFirst.get(r.group)
-          if (firsts === undefined) {
-            firsts = new Map()
-            entry.groupFirst.set(r.group, firsts)
-          }
-          if (!firsts.has(r.writer) || i < firsts.get(r.writer)) firsts.set(r.writer, i)
-        }
+        groupWalkStep(entry.groupWalks, r.group, { kind: 'join', writer: r.writer, on: r.on, seq: i })
+        continue
+      }
+      if (block.type === 'group-cut') {
+        const r = validRecordCopy(block, i)
+        if (r !== null) groupWalkStep(entry.groupWalks, r.group, { kind: 'cut', writer: r.writer, cut: r.cut, seq: i })
         continue
       }
       // Folded here, not in _runIndex: that queue pauses at capacity and
@@ -2914,7 +2952,7 @@ class Seeder {
       if (!entry.latest.some((b) => b.key === k)) entry.refused.delete(k)
     }
     this._reconcileMedia(key, entry)
-    entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupFirst)
+    entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupWalks)
     this._reconcileGroups(key, entry)
     this._groupStartupScanned(key)
     if (scanCaughtUp(entry) && !entry.mediaIrregular && entry.mediaRecounts < MEDIA_TRACK_MAX &&
@@ -3732,7 +3770,7 @@ class Seeder {
       const j = e.groupLive.get(key)
       if (j !== undefined && j.group === b.group && e.groupRefused.get(key) !== j.seq) return true
       if (key === b.group) {
-        for (const lj of e.groupLive.values()) if (lj.group === key && e.groupRefused.get(key) !== lj.seq) return true
+        for (const lj of e.groupLive.values()) if (lj.group === key && !lj.left && e.groupRefused.get(key) !== lj.seq) return true
       }
     }
     return false
@@ -3993,14 +4031,15 @@ class Seeder {
 
   // Brings the group cores of a diary in line with its scan: index rows for
   // the cores bound to it (left once no live join names them; leaving never
-  // drops a core) and admissions for live joins not yet bound, the writer
-  // itself and the group root.
+  // drops a core) and admissions for the joins not yet bound, the writer
+  // itself and, for a live join, the group root.
   _reconcileGroups (diary, entry) {
     if (entry.dropped || !entry.gated || this._closing) return
-    for (const [k, b] of this._groups) {
-      if (b === null || b.diary !== diary || !this._groupServed.has(k)) continue
+    for (const [k, b] of [...this._groups]) {
+      if (b === null || b.diary !== diary) continue
+      if (!this._groupServed.has(k)) continue
       const live = entry.groupLive.get(k)
-      const bound = live !== undefined && live.group === b.group
+      const bound = live !== undefined && live.group === b.group && !live.left
       let seq = bound ? live.seq : b.seq
       if (k === b.group) {
         // A root's row must point at a join in its creator's own diary: the
@@ -4035,7 +4074,7 @@ class Seeder {
     }
     if (this._isBlocked(diary)) return
     for (const [writer, j] of entry.groupLive) {
-      const keys = writer === j.group ? [writer] : [writer, j.group]
+      const keys = writer === j.group || j.left ? [writer] : [writer, j.group]
       for (const k of keys) {
         if (this._groups.has(k) || this._groupsDropping.has(k)) continue
         if (this._inflight.has(k) || this._groupReserved.has(k)) continue
@@ -4116,7 +4155,7 @@ class Seeder {
     if (this._isBlocked(diary) || this._isBlocked(group) || this._blocklistHeld) return false
     if (key === group) {
       let joined = false
-      for (const j of entry.groupLive.values()) if (j.group === group) joined = true
+      for (const j of entry.groupLive.values()) if (j.group === group && !j.left) joined = true
       if (!joined) return false
     } else {
       const j = entry.groupLive.get(key)
@@ -4148,11 +4187,11 @@ class Seeder {
       this._groupBackoffHit(diary, key, 'group-full', group)
       return this._rejectGroup(key, diary, group, 'group-full', seq)
     }
-    // liveGroupJoins already keeps one diary's live joins under the caps;
-    // this also counts the cores it left (still bound and served).
+    // liveGroupJoins already keeps one diary's joins under the caps; this
+    // also counts the cores it left (still bound and served).
     const held = this._diaryGroupCores(diary, group)
     if (held.total >= MAX_GROUP_CORES_PER_DIARY ||
-      (key === group ? held.roots >= MAX_GROUPS_PER_DIARY : held.inGroup >= MAX_GROUP_WRITERS_PER_DIARY)) {
+      (key === group ? held.roots >= MAX_GROUPS_PER_DIARY : held.inGroup >= MAX_GROUP_HELD_PER_DIARY)) {
       return this._rejectGroup(key, diary, group, 'group-full', seq)
     }
     // Bounded fan-out: scans, connections and blocklist adoptions may ask
@@ -4228,7 +4267,7 @@ class Seeder {
     if (!e || e.dropped) return false
     for (const [writer, j] of e.groupLive) {
       if (group !== null && j.group !== group) continue
-      for (const k of writer === j.group ? [writer] : [writer, j.group]) {
+      for (const k of writer === j.group || j.left ? [writer] : [writer, j.group]) {
         if (!this._groups.has(k) && !this._groupJoinStale(diary, k)) return true
       }
     }
@@ -4266,7 +4305,8 @@ class Seeder {
     // kind on /index/group while members' writers stay served.
     if (key === group) this._keepGroupHeader(group, decodeBlock(res.raw))
     // Refusals after a fetch are remembered (this join) or backed off, so a
-    // rescan does not fetch the same core again.
+    // rescan does not fetch the same core again. A writer its diary cut is
+    // held whole, so its whole log is judged.
     if (this._overQuota(res)) {
       entry.groupRefused.set(key, seq)
       return this._rejectGroup(key, diary, group, 'quota', seq)
@@ -4308,7 +4348,8 @@ class Seeder {
       rootBinding.bound = true
       if (wasGone.issuer !== null) rootBinding.issuer = wasGone.issuer
     }
-    this._groups.set(key, key === group ? rootBinding : { diary: owner, group, seq: ownSeq })
+    const writerBinding = { diary: owner, group, seq: ownSeq }
+    this._groups.set(key, key === group ? rootBinding : writerBinding)
     let core
     let opening = false
     try {
@@ -4341,6 +4382,7 @@ class Seeder {
     else if (!this._groupStillWanted(diary, entry, key, group)) late = 'unbound'
     else if (core.fork !== 0) late = 'fork'
     else if (this._overQuota(core)) late = 'quota'
+    if (late === null && this._closing) return
     if (late !== null) {
       await core.close().catch(noop)
       try {
@@ -4684,7 +4726,7 @@ class Seeder {
     }
     for (const [d, e] of this._served) {
       if (!live(d)) continue
-      for (const j of e.groupLive.values()) if (j.group === group) return true
+      for (const j of e.groupLive.values()) if (j.group === group && !j.left) return true
     }
     return false
   }
@@ -7780,7 +7822,8 @@ class Seeder {
         // A member that asks for no inventory (CAP_NO_INVENTORY) gets a
         // lean hello and pages over discovery instead; any other member
         // gets the full inventory as before.
-        caps: this.discovery ? CAP_DISCOVERY : 0,
+        // CAP_WRITER_CUTS: this seeder keeps the writers a diary cut.
+        caps: (this.discovery ? CAP_DISCOVERY : 0) | CAP_WRITER_CUTS,
         lean: this.discovery,
         onmessage: (msg, p) => this._onMessage(msg, p),
         onclose: (p) => this._peers.delete(p),
@@ -8324,5 +8367,8 @@ module.exports = {
   DISCOVERY_REBUILD_MS,
   DISCOVERY_VIEWS_KEPT,
   DISCOVERY_VIEW_TTL_MS,
-  DISCOVERY_VIEW_MAX_KEYS
+  DISCOVERY_VIEW_MAX_KEYS,
+  // For tests.
+  liveGroupJoins,
+  groupWalkStep
 }

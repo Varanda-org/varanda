@@ -14,26 +14,46 @@ const BASE = Date.parse('2026-01-01T00:00:00.000Z')
 const AT = (s) => new Date(BASE + s * 1000).toISOString()
 const NOW = BASE + 365 * 86400000
 
-// Cores and joins shared by both builders: `root` is the root core's key.
+// Cores, joins and group-cut marks shared by both builders: `root` is the
+// root core's key. Joins and marks of one diary share its seq order, as in
+// a real diary, so a mark lands after the joins written before it.
 function cores (root) {
   const logs = new Map()
   const joins = new Map()
+  const marks = new Map()
+  const next = (diary) => {
+    let seq = 0
+    for (const list of [joins.get(diary) || [], marks.get(diary) || []]) {
+      for (const e of list) if (Number.isSafeInteger(e.seq) && e.seq > seq) seq = e.seq
+    }
+    return seq + 1
+  }
   const bind = (diary, key, rejoin = null) => {
     const list = joins.get(diary) || []
-    list.push({ writer: key, on: true, seq: list.length + 1, rejoin })
+    list.push({ writer: key, on: true, seq: next(diary), rejoin })
     joins.set(diary, list)
   }
   // The diary's off join for a writer, after its on join.
   const unbind = (diary, key) => {
     const list = joins.get(diary) || []
-    list.push({ writer: key, on: false, seq: list.length + 1 })
+    list.push({ writer: key, on: false, seq: next(diary) })
     joins.set(diary, list)
+  }
+  // A diary's group-cut mark (records at seq >= cut stop counting). `seq` is
+  // the mark's own seq in the diary, after everything written so far by
+  // default.
+  const mark = (diary, writer, cut, seq) => {
+    const list = marks.get(diary) || []
+    list.push({ writer, cut, seq: seq === undefined ? next(diary) : seq })
+    marks.set(diary, list)
   }
   return {
     logs,
     joins,
+    marks,
     bind,
     unbind,
+    mark,
     push (key, record) {
       const log = logs.get(key)
       const seq = log.entries.length
@@ -59,7 +79,7 @@ function community ({ key = K(0xc0), creator, join = 'open', name = 'Bairro', me
   const c = cores(key)
   const cw = new Map([[creator, key]])
   const confirms = new Map()
-  const marks = new Map()
+  const marks = c.marks
   const confirmLeave = (diary, wkey, dseq) => {
     const entries = c.logs.get(wkey).entries
     let leave = null
@@ -130,9 +150,7 @@ function community ({ key = K(0xc0), creator, join = 'open', name = 'Bairro', me
     // A diary's group-cut mark for C on one of its CWs (records at seq >=
     // cut stop counting). `seq` is the mark's own seq in the diary.
     mark (diary, writer, cut, seq) {
-      const list = marks.get(diary) || []
-      list.push({ writer, cut, seq: seq === undefined ? list.length + 1 : seq })
-      marks.set(diary, list)
+      c.mark(diary, writer, cut, seq)
       return C
     },
     rootHeaderFor (group, diary, opts = {}) {
@@ -161,7 +179,7 @@ function groupIn (C, { key = K(0x100), diary = C.creator, join = 'open', visibil
   })
   g.logs.set(key, { key, diary, entries: [{ seq: 0, record: header }] })
   if (bindRoot) g.joins.set(diary, [{ writer: key, on: true, seq: 1 }])
-  const marks = new Map()
+  const marks = g.marks
   const w = {
     key,
     logs: g.logs,
@@ -177,9 +195,7 @@ function groupIn (C, { key = K(0x100), diary = C.creator, join = 'open', visibil
     // writer's records at seq >= cut carry no authority). `seq` is the
     // mark's own seq in the diary.
     mark (diary, writer, cut, seq) {
-      const list = marks.get(diary) || []
-      list.push({ writer, cut, seq: seq === undefined ? list.length + 1 : seq })
-      marks.set(diary, list)
+      g.mark(diary, writer, cut, seq)
       return w
     },
     input ({ drop = [], community = C.input() } = {}) {

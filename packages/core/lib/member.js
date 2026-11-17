@@ -2043,13 +2043,21 @@ async function makeGroupRoom (ctx, identity, group, need = 1) {
 }
 
 // buildGroup does not list the writers it counted. A probe post asks the
-// same fold (rejoin binding and the writer cap) so a cut names only those.
+// same fold (rejoin binding and the writer cap) so a cut names only those,
+// never past the diary's own cut on a writer (#350): a frozen writer cut
+// past its local length still takes the probe, and its signed length may
+// be past the cut.
 function groupCuts (loaded, member, { signed = false } = {}) {
   const accepted = new Set(probePosts(loaded).map((p) => p.writer))
+  const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
   return loaded.logs.filter((l) => accepted.has(l.key) && l.diary === member)
     .sort((a, b) => a.key.localeCompare(b.key))
     .slice(0, groups.MAX_GROUP_CUTS)
-    .map((l) => ({ writer: l.key, seq: cutLength(l, signed) }))
+    .map((l) => {
+      const seq = cutLength(l, signed)
+      const cut = cuts.get(l.key)
+      return { writer: l.key, seq: Number.isSafeInteger(cut) && cut < seq ? cut : seq }
+    })
 }
 
 // A positive admission or grant covers only records written after it: the
@@ -2062,32 +2070,39 @@ function cutLength (log, signed) {
   return signed ? Math.max(log.length, log.signed || 0) : log.length
 }
 
-// Every writer of `diary` the fold counts, at its local length. A leave or a
-// grant must list them all: the fold withdraws an unlisted writer's records
-// from seq 0 on a leave and gives it no authority on a grant.
-function countedCuts (loaded, diary, { signed = false } = {}) {
-  return loaded.logs.filter((l) => l.diary === diary && loaded.view.writers.has(l.key))
+// Every writer of `diary` the fold counts, at its local length (never past
+// the diary's own cut on it). A leave or a grant must list them all: the
+// fold withdraws an unlisted writer's records from seq 0 on a leave and
+// gives it no authority on a grant. `frozen: false` leaves out the writers
+// a diary cut froze (#350): a new leave or grant never names them (their
+// cut already fixes them), an admission or a demotion does. A writer the
+// walk released (cut 0) is never named: only its block 0, leaves and key
+// blocks count, and up to 16 of them would not fit MAX_GROUP_CUTS.
+function countedCuts (loaded, diary, { signed = false, frozen = true } = {}) {
+  const cuts = loaded.view.cuts instanceof Map ? loaded.view.cuts : new Map()
+  const still = loaded.view.frozen instanceof Set ? loaded.view.frozen : new Set()
+  const released = loaded.view.released instanceof Set ? loaded.view.released : new Set()
+  return loaded.logs.filter((l) => l.diary === diary && loaded.view.writers.has(l.key) && !released.has(l.key) && (frozen || !still.has(l.key)))
     .sort((a, b) => a.key.localeCompare(b.key))
-    .map((l) => ({ writer: l.key, seq: cutLength(l, signed) }))
+    .map((l) => {
+      const seq = cutLength(l, signed)
+      const cut = cuts.get(l.key)
+      return { writer: l.key, seq: Number.isSafeInteger(cut) && cut < seq ? cut : seq }
+    })
 }
 
-// The writers `diary` binds in this group that the fold would count (its
-// MAX_GROUP_WRITERS_PER_DIARY earliest on:true joins, a bound root of the
-// creator always among them, as group.js capPerDiary) and that this node
-// does not hold. Null when the diary itself is not held.
+// The writers `diary` binds in this group that the fold awaits (the live,
+// frozen and released writers of its slot walk, group.js slotWalk: a
+// released one may hold a leave; a bound root of the creator always among
+// them) and that this node does not hold. Null when the diary itself is
+// not held.
 function unheldCountedWriters (loaded, diary) {
   const joins = loaded.input.joins.get(diary)
   if (!joins) return null
-  const first = new Map()
-  for (const j of joins) {
-    if (j.on && (!first.has(j.writer) || j.seq < first.get(j.writer))) first.set(j.writer, j.seq)
-  }
-  const rootBound = diary === loaded.view.creator && first.has(loaded.group)
-  const others = [...first.keys()].filter((w) => !(rootBound && w === loaded.group))
-    .sort((a, b) => (first.get(a) - first.get(b)) || a.localeCompare(b))
-  const counted = rootBound
-    ? [loaded.group, ...others.slice(0, groups.MAX_GROUP_WRITERS_PER_DIARY - 1)]
-    : others.slice(0, groups.MAX_GROUP_WRITERS_PER_DIARY)
+  const marks = loaded.input.marks instanceof Map ? loaded.input.marks.get(diary) : undefined
+  const walk = groups.slotWalk(joins, marks, loaded.group)
+  const counted = [...walk.live, ...walk.frozen, ...walk.released]
+  if (diary === loaded.view.creator && walk.rootSlot) counted.unshift(loaded.group)
   const held = new Set(loaded.logs.map((l) => l.key))
   // A private group: a writer the diary unbound (a boxless writer replaced
   // by group.join) is refused by seeders and sync, so it is never held and
@@ -2303,7 +2318,7 @@ async function ownRejoinLeave (ctx, identity, c, C) {
     // Every counted own CW held here, as any leave of the diary: the fold
     // withdraws an unlisted one from seq 0. Never C's root: a creator back
     // after a forged leave keeps its powers (cycle 14).
-    const cuts = countedCuts(c, ownHex).filter((x) => x.writer !== C)
+    const cuts = countedCuts(c, ownHex, { frozen: false }).filter((x) => x.writer !== C)
     const record = buildRecord(() => groups.groupLeave({ seen, cuts }))
     const seq = await appendCommunityRecord(writer, C, record)
     // The diary confirms it, as for any honest leave.
@@ -2340,8 +2355,17 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   // device's key can open nothing: its binding goes and a new writer with
   // this device's box takes its place.
   const boxStale = loaded.private && !!loaded.local && loaded.local.writer !== group && writerBox(loaded, loaded.local.writer) !== ownBoxPublic(ctx)
-  if (boxStale && (groups.groupJoinHistory(await readAll(diary), group).filter((j) => j.writer === loaded.local.writer).pop() || {}).on) {
-    await appendRecord(diary, groupJoinRecord({ group, writer: loaded.local.writer, on: false }))
+  // The off join keeps its slot in the slot walk: a cut before the new join
+  // gives it back (#350). Both are written only once the room check passed.
+  const replace = []
+  if (boxStale) {
+    const own = await readAll(diary)
+    const last = groups.groupJoinHistory(own, group).filter((j) => j.writer === loaded.local.writer).pop()
+    if (last && last.on) replace.push({ kind: 'join', writer: loaded.local.writer, on: false })
+    const held = loaded.input.writers.find((l) => l.key === loaded.local.writer)
+    const cut = groups.replacedWriterCut(held ? held.entries : null)
+    const marked = groups.groupCutHistory(own, group).some((m) => m.writer === loaded.local.writer && m.cut <= cut)
+    if (last && cut !== null && !marked) replace.push({ kind: 'cut', writer: loaded.local.writer, cut })
   }
   // A writer the fold no longer takes (retired by a leave of any device, or
   // naming a CW the gate retired) is replaced by a new one naming the live
@@ -2359,9 +2383,16 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   if (!stale && !left && unboundLocal(loaded) && !(await localWriterHasLeave(store, loaded.local))) writerKey = loaded.local.writer
   if (writerKey === null) {
     if (groupWritersFull(loaded.view, group)) throw new UsageError(GROUP_FULL)
-    // The fold counts only the first writers a diary binds: a new one past
-    // that cap would never count.
-    if (boundWriterCount(loaded, ownHex) - (boxStale ? 1 : 0) >= groups.MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(GROUP_FULL)
+    // The diary's own slot walk, after the off join and the cut above: a
+    // new writer it would not count live never counts.
+    const own = await readAll(diary)
+    if (!groups.walkHasRoom(groups.groupJoinHistory(own, group), groups.groupCutHistory(own, group), group, replace)) throw new UsageError(GROUP_FULL)
+  }
+  for (const e of replace) {
+    if (e.kind === 'join') await appendRecord(diary, groupJoinRecord({ group, writer: e.writer, on: false }))
+    else await appendRecord(diary, groupCutRecord({ group, writer: e.writer, cut: e.cut }))
+  }
+  if (writerKey === null) {
     await makeGroupRoom(ctx, identity, group)
     const rejoin = foldRejoin(loaded.view, ownHex)
     const box = loaded.private ? ownBoxPublic(ctx) : null
@@ -2415,7 +2446,7 @@ async function groupLeave (ctx, { group }) {
     // The creator's bound root keeps the cut rule: a leave that does not list
     // it would withdraw every root record from seq 0, so the creator leaves
     // only from a device whose cuts list the root.
-    const cuts = countedCuts(loaded, identity.ownHex)
+    const cuts = countedCuts(loaded, identity.ownHex, { frozen: false })
     const rootBound = (loaded.input.joins.get(identity.ownHex) || []).some((j) => j.on && j.writer === group)
     if (loaded.view.creator === identity.ownHex && rootBound && !cuts.some((c) => c.writer === group)) {
       throw new UsageError('saia pelo aparelho que criou o grupo')
@@ -2547,7 +2578,7 @@ function groupModerate (ctx, type, { group, member, on }) {
     // A grant names the promoted diary's writers at their local lengths, so
     // only records written after it gain authority.
     const cuts = type === 'groupAdmin' && on
-      ? countedCuts(loaded, member, { signed: true })
+      ? countedCuts(loaded, member, { signed: true, frozen: false })
       : groupCuts(loaded, member, { signed: (type === 'groupAdmit' && on === true) || (type === 'groupBan' && !on) })
     if (cuts.length > groups.MAX_GROUP_CUTS) throw new UsageError(GROUP_FULL)
     let lifts = null
@@ -3407,7 +3438,7 @@ async function leaveHeldGroup (loaded, identity) {
   const group = loaded.group
   const own = liveOwnWriter(loaded, ownHex)
   if (!own || !loaded.view.writers.has(own.writer)) return null
-  const cuts = countedCuts(loaded, ownHex)
+  const cuts = countedCuts(loaded, ownHex, { frozen: false })
   const rootBound = (loaded.input.joins.get(ownHex) || []).some((j) => j.on && j.writer === group)
   if (loaded.view.creator === ownHex && rootBound && !cuts.some((c) => c.writer === group)) return null
   const writer = await ownGroupWriter(loaded, identity)
@@ -3494,7 +3525,7 @@ async function communityLeave (ctx, { community, force = false }, { affected = n
     const own = liveOwnWriter(c, ownHex) || (status === 'member' ? leavingWriter(c, ownHex) : null)
     if (!own) throw new UsageError('nada a alterar')
     if (!c.view.writers.has(own.writer)) throw new UsageError(COMMUNITY_FULL)
-    const cuts = countedCuts(c, ownHex)
+    const cuts = countedCuts(c, ownHex, { frozen: false })
     const rootBound = (c.input.joins.get(ownHex) || []).some((j) => j.on && j.writer === C)
     if (c.view.creator === ownHex && rootBound && !cuts.some((x) => x.writer === C)) {
       throw new UsageError('saia pelo aparelho que criou a comunidade')
@@ -3721,7 +3752,7 @@ async function communitySetAdmin (ctx, { community, member, on }, { affected = n
     // never shields it from a ban or lets it rejoin as admin.
     if (on && c.view.members.get(member) !== 'member') throw new UsageError('a pessoa precisa ser membro da comunidade')
     if (!on && !everGranted(c, member)) throw new UsageError('nada a alterar')
-    let cuts = countedCuts(c, member, { signed: on })
+    let cuts = countedCuts(c, member, { signed: on, frozen: !on })
     // A demotion is never refused for its size: the first writers by key
     // keep their length and the rest are cut at 0, the safe side.
     if (cuts.length > groups.MAX_GROUP_CUTS) {
@@ -4272,5 +4303,9 @@ module.exports = {
   deviceDisconnect,
   deviceReconnect,
   deviceOff,
-  readDeviceId
+  readDeviceId,
+  // Pure helpers over a loaded group, for tests.
+  countedCuts,
+  groupCuts,
+  unheldCountedWriters
 }

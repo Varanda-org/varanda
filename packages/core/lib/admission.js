@@ -45,6 +45,10 @@ const MAX_SEND_BACKLOG = 2 * MAX_INVENTORY + 64
 // ignored, so either side may be older than the other.
 const CAP_NO_INVENTORY = 1 // a member asks for no inventory
 const CAP_DISCOVERY = 2 // a seeder offers lean hellos and varanda/discovery/1
+// A seeder keeps the writers a diary cut (docs/protocol.md section 10): up
+// to MAX_FROZEN_WRITERS_PER_DIARY frozen writers per diary and group, each
+// below its cut, next to the live ones.
+const CAP_WRITER_CUTS = 4
 
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX64_ANY = /^[0-9a-fA-F]{64}$/
@@ -590,6 +594,7 @@ module.exports = {
   MAX_SEND_BACKLOG,
   CAP_NO_INVENTORY,
   CAP_DISCOVERY,
+  CAP_WRITER_CUTS,
   HEX64,
   HEX64_ANY,
   REASON_RE,

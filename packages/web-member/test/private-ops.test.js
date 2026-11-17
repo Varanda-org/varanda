@@ -538,6 +538,41 @@ test('at the writer cap a boxed rejoin does not count the boxless writer it unbi
   t.alike(await b.web.request('group.join', { group }), { state: 'requested' })
 })
 
+test('a full diary whose boxless writer never counted gets GROUP_FULL with nothing written (#350)', async (t) => {
+  const a = await setup(t)
+  const b = await setup(t, { assoc: a.assoc })
+  const { group } = await a.web.request('group.create', { name: 'Segredo', join: 'open', visibility: 'private' })
+  await share(a, b, group)
+  const plant = async (box) => {
+    const nonce = new Uint8Array(crypto.randomBytes(32))
+    const kp = await groupKeyPairFromPrf(b.prf, nonce)
+    const core = await store.openGroupWriter(b.storage, kp)
+    await store.appendGroupRecord(core, grp.writerHeader({ group, diary: b.key, box }), { root: false })
+    await core.close()
+    await store.addGroupReplica(b.storage, hex(kp.publicKey))
+    const diary = await store.openDiary(b.storage, b.keyPair)
+    await store.appendRecord(diary, groupJoinRecord({ group, writer: hex(kp.publicKey), on: true }))
+    await diary.close()
+    return { key: hex(kp.publicKey), nonce: hex(nonce) }
+  }
+  // Eight writers boxed to another key take every slot, then a ninth,
+  // boxless one is bound: the walk never counts it.
+  for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY; i++) await plant(hex(crypto.randomBytes(32)))
+  const boxless = await plant(null)
+  await store.putGroupWriter(b.storage, { group, key: boxless.key, nonce: boxless.nonce, rootNonce: null })
+  // The request may enrol the community's other roots first: only this
+  // group's records count here.
+  const log = async () => (await ops.logRead({ storage: b.storage, association: hex(b.assoc.publicKey), keyPair: b.keyPair })).entries
+    .filter((e) => e.record && e.record.group === group)
+  const before = (await log()).length
+  const err = await errorOf(b.web.request('group.join', { group }))
+  t.is(err.message, store.GROUP_FULL, 'no slot even after cutting the boxless writer')
+  const after = await log()
+  t.is(after.length, before, 'nothing written: no off join, no cut, no new join')
+  t.alike(after.filter((e) => e.record.type === 'group-cut'), [], 'no cut')
+  t.is(await writerOf(b, group), boxless.key, 'the boxless writer is still the local one')
+})
+
 test('weak box keys, the top bit included, are never sealed to', async (t) => {
   for (const weak of ['00'.repeat(31) + '80', '00'.repeat(32), 'ec' + 'ff'.repeat(30) + '7f', 'ec' + 'ff'.repeat(31), 'ee' + 'ff'.repeat(31)]) {
     t.absent(ops.canSealTo(weak), weak)
