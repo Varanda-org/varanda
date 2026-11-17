@@ -209,6 +209,10 @@ Regenerate the pods lock from the repo root with `npm run prepare:native -w apps
 
 The browser does not use this module. It accepts only a file that already fits (`apps/app/src/media/videoPrep.web.js`).
 
+## Still image preparation
+
+`apps/app/modules/image-prep` encodes one still photo as AVIF. `index.js` is the JavaScript entry (`canEncodeAvif`, `encodeAvif`). It is autolinked from `apps/app/modules` and is iOS only. `ios/ImagePrepModule.swift` uses ImageIO. The pod name is `ImagePrep` (`ios/ImagePrep.podspec`). No new codec library was added. Android has no AVIF encoder and falls back to WebP through expo-image-manipulator.
+
 ## Instalação hospedada local
 
 `apps/cli/scripts/hosted-lab.js` sobe uma instalação hospedada inteira nesta máquina, para conferir o app web entrado no Chrome, sem Google, sem domínio e sem SMS real. O laboratório simula o SMS: aceita qualquer número de celular brasileiro e só o código `123456`, sem precisar de um aparelho. Com a interface do Expo já rodando (`npm run web -w apps/app`, porta 8081):
