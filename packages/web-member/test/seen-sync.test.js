@@ -882,6 +882,28 @@ test('session: seen.sign and seen.merge open no diary core; locked refuses and w
   t.is(writes.length, before, 'nothing written while locked')
 })
 
+test('session: seen.onceKey is the identity\'s own secret key, refused while locked', async (t) => {
+  const seed = crypto.randomBytes(32)
+  const a = await sessionNode(t, { keyPair: crypto.keyPair(seed) })
+  const b = await sessionNode(t, { keyPair: crypto.keyPair(seed) })
+  const other = await sessionNode(t)
+  const writes = spyWrites(a.storage)
+  const { key } = await a.web.request('seen.onceKey')
+  t.ok(/^[0-9a-f]{64}$/.test(key), 'hex64')
+  t.alike(await a.web.request('seen.onceKey', {}), { key }, 'stable')
+  t.is((await b.web.request('seen.onceKey')).key, key, 'same seed, another session')
+  t.not((await other.web.request('seen.onceKey')).key, key, 'another identity')
+  const expected = b4a.toString(crypto.hash([b4a.from('varanda-once-key-v1\n'), a.keyPair.secretKey.subarray(0, 32), b4a.from(a.key)]), 'hex')
+  t.is(key, expected, 'BLAKE2b over the domain, the secret and the own key')
+  const notice = b4a.toString(crypto.hash([b4a.from('varanda-notices-seen-v1\n'), a.keyPair.secretKey.subarray(0, 32), b4a.from(a.key)]), 'hex')
+  t.not(key, notice, 'not a notice seen token')
+  t.not(key.slice(0, 32), notice.slice(0, 32))
+  t.is(writes.length, 0, 'nothing stored')
+  await a.node.clearKeyPair()
+  const err = await errorOf(a.web.request('seen.onceKey'))
+  t.alike([err.code, err.message], ['USAGE', LOCKED], 'locked')
+})
+
 test('session: seen.changed after a changing group.seen or merge, coalesced to one per 5 s', async (t) => {
   t.timeout(60000)
   const s = await sessionNode(t)

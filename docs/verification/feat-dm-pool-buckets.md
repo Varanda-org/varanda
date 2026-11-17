@@ -32,7 +32,7 @@ Branch `feat/dm-pool-buckets`. O conjunto de envelopes de mensagens diretas e o 
 
 ## Nota para quem opera
 
-Atualize os semeadores antes do app. Um app novo num semeador antigo usa o v1 (sem grupo); um app antigo num semeador novo usa o v1 e baixa tudo. O texto legal mudou (Termos e Privacidade); `LEGAL_VERSION` e `TERMS_VERSION` sobem para 73 (depois da 72 da `feat/dm-retention-14-days`, com os 14 dias), com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo. Quem já aceitou aceita de novo. O texto da Privacidade agora diz "a partir de 1.000 contas", "grupos de até 1/64 das contas", que quem cuida de uma Página pede todos os grupos, que as cópias das respostas da Página e das mudanças nas conversas dela vão com um número de grupo sorteado, para parecerem um envelope qualquer, e que um semeador que observe horário e endereço de internet poderia descobrir de qual Página o aparelho cuida e, como a lista de quem cuida de cada Página é pública, que essas mensagens são de quem cuida.
+Atualize os semeadores antes do app. Um app novo num semeador antigo usa o v1 (sem grupo); um app antigo num semeador novo usa o v1 e baixa tudo. O texto legal mudou (Termos e Privacidade); `LEGAL_VERSION` e `TERMS_VERSION` sobem para 74 (depois da 72 da `feat/dm-retention-14-days`, com os 14 dias, e da 73 da `feat/sync-once-notices`), com o digest de `apps/app/test/legal.test.js` e as páginas do site geradas de novo. Quem já aceitou aceita de novo. O texto da Privacidade agora diz "a partir de 1.000 contas", "grupos de até 1/64 das contas", que quem cuida de uma Página pede todos os grupos, que as cópias das respostas da Página e das mudanças nas conversas dela vão com um número de grupo sorteado, para parecerem um envelope qualquer, e que um semeador que observe horário e endereço de internet poderia descobrir de qual Página o aparelho cuida e, como a lista de quem cuida de cada Página é pública, que essas mensagens são de quem cuida.
 
 ## Testes
 
@@ -85,7 +85,7 @@ Em `packages/web-member/lib/dm.js`:
 
 Com todo o `dm.js` do commit revisado (9f07f89f) e os testes novos: `page-dm.test.js` 20/26 (13 asserções falham; só o teste da adoção passa), `dm.test.js` 73/74 (2 falham).
 
-`apps/app/test/legal.test.js`: 48/49 na época, só o digest fixo falhava; depois do merge da `main` e da versão 73, 50/50.
+`apps/app/test/legal.test.js`: 48/49 na época, só o digest fixo falhava; depois do merge da `main` e da versão 74, 51/51.
 
 ## Terceira rodada de correções da revisão (2026-11-16)
 
@@ -146,6 +146,6 @@ Sem mudança em `packages/web-member/lib/dm.js` (as mutações abaixo foram feit
 
 ## Conferência no aparelho (2026-11-16)
 
-Na Vitrine (dados fixos, sem semeador), depois do merge da `main` com os Termos 72: em Ajustes, "Termos e privacidade" mostra "Você aceitou a versão 73" e, na Política, o parágrafo "Envelopes das mensagens diretas" com "por até 14 dias" e o texto dos grupos (a partir de 1.000 contas, grupo de cerca de 500 pessoas, Páginas pedem todos os grupos, grupo sorteado nas cópias da Página, 1/64 das contas). Conferido no Android (emulador, `app.varanda.debug`), depois no simulador iOS (iPhone 17 Pro) e por fim na web.
+Na Vitrine (dados fixos, sem semeador), depois do merge da `main` com os Termos 72: em Ajustes, "Termos e privacidade" mostra "Você aceitou a versão 73" e, na Política, o parágrafo "Envelopes das mensagens diretas" com "por até 14 dias" e o texto dos grupos (a partir de 1.000 contas, grupo de cerca de 500 pessoas, Páginas pedem todos os grupos, grupo sorteado nas cópias da Página, 1/64 das contas). Conferido no Android (emulador, `app.varanda.debug`), depois no simulador iOS (iPhone 17 Pro) e por fim na web. Depois disso a `main` subiu para a versão 73 (`feat/sync-once-notices`) e este PR passou para a 74, sem mudar o parágrafo conferido.
 
 O pedido por grupo no semeador real não aparece na tela: fica coberto pelos testes acima e pela linha do #224 (semeador antes do app).
