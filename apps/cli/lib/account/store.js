@@ -1954,8 +1954,10 @@ function openAccountStore (dataDir, { now = Date.now, readOnly = false, maxMembe
     return Object.keys(state.links).sort().map((member) => ({ member, linkedAt: state.links[member].linkedAt }))
   }
 
-  // For the moderation desk (apps/cli/lib/account/mod-routes.js and
-  // `account reports`): the contact of a linked member, or null. Never part
+  // For the moderation desk (apps/cli/lib/account/mod-routes.js,
+  // `account reports`) and the operator's `account delete`, which shows the
+  // e-mail to check a deletion request against: the contact of a linked
+  // member, or null. Never part
   // of a public answer (status() and lookup() stay without e-mail and sub);
   // the panel shows only the username.
   function contact (member) {

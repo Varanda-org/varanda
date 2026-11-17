@@ -40,6 +40,8 @@ Comandos:
   account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
   account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
+  account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
+  account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista

@@ -1918,7 +1918,26 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
+  // A notice `account delete --yes` queued while the service was stopped
+  // (./deletion-notices.js): pushed as the app's wait path pushes it, only
+  // while the hold is still there. -> 'sent', 'skip' (deleted or no hold),
+  // or 'keep' when the stores cannot tell, so the notice waits for the next
+  // start instead of being dropped.
+  function notifyScheduledDeletion (member) {
+    let hold
+    try {
+      if (store.deletedAt(member) !== null) return 'skip'
+      if (passkeys === null || !passkeys.available()) return 'keep'
+      hold = passkeys.hold(member)
+    } catch {
+      return 'keep'
+    }
+    if (hold === null) return 'skip'
+    if (pushRoutes !== null) pushRoutes.notifyDeletion({ member })
+    return 'sent'
+  }
+
+  return { listen, notifyInvite, notifyScheduledDeletion, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
 }
 
 module.exports = {
