@@ -297,7 +297,7 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onOpenVisitas, onTabChange, onOpenTop }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onOpenVisitas, onOpenVarandinha, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const node = useNode()
@@ -835,6 +835,20 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                   >
                     <Icon name='recado' size={20} color={colors.soft} />
                     <Text style={styles.salvosText}>Recados</Text>
+                    <Icon name='seta' size={20} color={colors.soft} />
+                  </Pressable>
+                  )
+                : null}
+              {node.hosted === true && ownPublicKey && typeof onOpenVarandinha === 'function'
+                ? (
+                  <Pressable
+                    accessibilityRole='button'
+                    accessibilityLabel='Varandinha'
+                    onPress={() => onOpenVarandinha(ownPublicKey)}
+                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
+                  >
+                    <Icon name='droplet' size={20} color={colors.soft} />
+                    <Text style={styles.salvosText}>Varandinha</Text>
                     <Icon name='seta' size={20} color={colors.soft} />
                   </Pressable>
                   )

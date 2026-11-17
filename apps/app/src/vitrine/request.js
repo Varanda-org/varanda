@@ -344,11 +344,12 @@ export function createVitrineRequest (fixtures, options) {
   // Varandinha (5.157 to 5.160): the own balcony is read from the own diary
   // records, so the fixtures, a play, a help and a leave all agree with
   // diary.peek and the /index/garden answers. The rules are rpc.garden, on
-  // the demo clock; answered dates move with options.clock like momentos.
+  // the demo clock. Unlike momentos, answered dates stay on that clock: a
+  // peeked garden block cannot move, so the app reads the demo clock for the
+  // whole game in a Vitrine bundle (src/gardenClock.js).
   const gardenOf = (type) => (logs.get(data.own) || []).filter((e) => e.record.type === type && !deleted.has(`${data.own}:${e.seq}`)).sort((a, b) => b.seq - a.seq)
   const gardenOn = () => gardenOf('garden')[0]?.record.on === true
-  const shownPot = (p) => p === null ? null : { ...p, at: shown(p.at), water: shown(p.water) }
-  const gardenShape = (e) => e ? { seq: e.seq, pots: e.record.pots.map(shownPot), n: e.record.n, at: shown(e.record.at) } : null
+  const gardenShape = (e) => e ? { seq: e.seq, pots: e.record.pots.map((p) => p === null ? null : { ...p }), n: e.record.n, at: e.record.at } : null
   const gardenTombstone = (seq) => deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
   // Latest wins, as the node's publishLatest: every earlier live block of the
   // type is tombstoned before the new one.
@@ -945,7 +946,7 @@ export function createVitrineRequest (fixtures, options) {
         savesToday: state && Date.parse(state.record.at) >= today ? state.record.n : 0,
         helpsToday: helps.filter((h) => h.atMs >= today).length,
         given: helps.filter((h) => h.atMs >= now - rpc.garden.GARDEN_HELP_WINDOW_MS && h.atMs <= now + rpc.garden.GARDEN_MAX_FUTURE_MS)
-          .slice(0, rpc.garden.GARDEN_HELP_ROWS).map(({ seq, to, pot, at }) => ({ seq, to, pot, at: shown(at) }))
+          .slice(0, rpc.garden.GARDEN_HELP_ROWS).map(({ seq, to, pot, at }) => ({ seq, to, pot, at }))
       }
     },
     'garden.play': ({ acts }) => {

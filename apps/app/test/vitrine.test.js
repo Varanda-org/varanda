@@ -1905,6 +1905,16 @@ test('garden.state answers the seeded balcony of Lia, with the helps she gave to
   for (const e of records3) t.ok(f.diaryRecords.some((x) => x.author === e.author && x.record.type === 'follow' && x.record.key === f.own && x.record.on === true), 'the helper follows Lia')
 })
 
+test('garden.state answers on the demo clock whatever options.clock says, as diary.peek does', async (t) => {
+  const { fixtures: f, request, createVitrineRequest } = await load()
+  const plain = await answer(t, request, 'garden.state', {})
+  const moved = await answer(t, createVitrineRequest(f, { clock: () => Date.parse(f.now) + 12 * 86400000 }), 'garden.state', {})
+  t.alike(moved, plain, 'the device clock moves no garden date')
+  const peek = await answer(t, request, 'diary.peek', { author: f.own, seqs: [plain.state.seq], profileSeq: 1, usernameSeq: 2 })
+  t.alike(peek.entries[0].record.pots, plain.state.pots, 'the pots match the peeked block')
+  t.is(peek.entries[0].record.at, plain.state.at)
+})
+
 test('garden.play saves a valid plant act as a new state and refuses an invalid one without change', async (t) => {
   const { request } = await load()
   const call = (method, params) => answer(t, request, method, params)

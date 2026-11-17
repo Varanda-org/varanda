@@ -249,7 +249,7 @@ test('grupo and comunidade are keyed by a lowercase hex64 root key', async (t) =
   for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1']) t.absent(validEntry({ screen: 'fas', key }), String(key))
   t.ok(validEntry({ screen: 'melhores-amigos' }))
   t.absent(validEntry({ screen: 'melhores-amigos', key: A }))
-  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos', 'visitas'])
+  t.alike(SCREENS, ['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos', 'visitas', 'varandinha', 'varandinha-rua'])
   t.absent(validEntry({ screen: 'cadeira', key: A }))
   t.ok(SCREENS.includes('comunidade'))
   for (const screen of ['grupo', 'comunidade', 'comunidade-info']) {
@@ -386,7 +386,7 @@ test('momentos is keyed by a lowercase hex64 author', async (t) => {
 test('popTo drops back to an index and refuses bounds outside the stack', async (t) => {
   const { EMPTY, MAX_DEPTH, SCREENS, push, pop, popTo, top } = await loadNav()
   t.is(MAX_DEPTH, 20)
-  t.is(SCREENS.length, 30, 'popTo adds no screen id')
+  t.is(SCREENS.length, 32, 'popTo adds no screen id')
   let stack = EMPTY
   for (let i = 1; i <= 4; i++) stack = push(stack, { screen: 'conversa', key: A + ':' + i })
   t.is(popTo(stack, 3), stack, 'the top index is a no-op')
@@ -522,6 +522,18 @@ test('visitas takes no key', async (t) => {
   t.ok(validEntry({ screen: 'visitas' }))
   t.absent(validEntry({ screen: 'visitas', key: 'a'.repeat(64) }))
   t.is(top(push(EMPTY, { screen: 'visitas' })).screen, 'visitas')
+})
+
+test('varandinha is keyed by the balcony owner hex64 and varandinha-rua takes no key', async (t) => {
+  const { EMPTY, SCREENS, push, top, validEntry } = await loadNav()
+  t.ok(SCREENS.includes('varandinha'))
+  t.ok(SCREENS.includes('varandinha-rua'))
+  t.ok(validEntry({ screen: 'varandinha', key: A }))
+  for (const key of [undefined, null, '', 'ceu', A.toUpperCase(), A + ':1', 42]) t.absent(validEntry({ screen: 'varandinha', key }), String(key))
+  t.is(push(EMPTY, { screen: 'varandinha', key: 'ceu' }), EMPTY)
+  t.ok(validEntry({ screen: 'varandinha-rua' }))
+  t.absent(validEntry({ screen: 'varandinha-rua', key: A }))
+  t.is(top(push(EMPTY, { screen: 'varandinha-rua' })).screen, 'varandinha-rua')
 })
 
 test('an old key list and thread carry a valid oldPage only', async (t) => {

@@ -490,3 +490,58 @@ test('assembleBalcony folds nothing while block 1 or 2 is unread', async (t) => 
   const page = assembleBalcony({ owner: OWNER, index: baseIndex(), ownerReads: [peek(OWNER, [e(1, { type: 'page-roster' }), ...body], { missing: [2] })], helperReads: new Map(), now: NOW })
   t.is(page.isPage, true)
 })
+
+test('the garden clock is the reader clock outside the Vitrine', async (t) => {
+  const { gardenTime } = await import('../src/gardenClock.js')
+  t.is(gardenTime(NOW), NOW)
+  const before = Date.now()
+  const read = gardenTime()
+  t.ok(read >= before && read <= Date.now())
+})
+
+test('assembleBalcony counts a neighbour watering one pot on two days twice', async (t) => {
+  const { assembleBalcony } = await import('../src/garden.js')
+  const planted = NOW - 30 * H
+  const ownerReads = [peek(OWNER, [e(1, { type: 'profile' }), e(3, flag()), e(4, state(potsWith(0, pot('espada', planted))))])]
+  const helps = [helpRow(BOB, 9, 5), helpRow(BOB, 12, 5)]
+  const reads = new Map([[BOB, peek(BOB, [e(5, follow(OWNER)), e(9, help(OWNER, 0, NOW - 20 * H)), e(12, help(OWNER, 0, NOW - H))])]])
+  const r = assembleBalcony({ owner: OWNER, index: baseIndex({ helps }), ownerReads, helperReads: reads, now: NOW })
+  t.is(r.helpers.length, 1, 'one row per neighbour')
+  t.is(r.helpers[0].seq, 12)
+  t.alike(r.received, [2, 0, 0, 0, 0, 0])
+  t.is(r.pots[0].ripeAt, planted + 48 * H - 4 * H, 'both days shorten the wait')
+  const off = assembleBalcony({ owner: OWNER, index: baseIndex({ helps }), ownerReads: [peek(OWNER, [e(1, { type: 'profile' }), e(3, flag(false)), e(4, state(potsWith(0, pot('espada', planted))))])], helperReads: reads, now: NOW })
+  t.alike(off.received, [0, 0, 0, 0, 0, 0])
+  t.alike(assembleBalcony({}).received, [0, 0, 0, 0, 0, 0])
+})
+
+test('provenOff is true only for an off balcony read in full', async (t) => {
+  const { assembleBalcony, provenOff } = await import('../src/garden.js')
+  const offReads = [peek(OWNER, [e(1, { type: 'profile' }), e(3, flag(false)), e(4, state(ownerPots()))])]
+  const off = assembleBalcony({ owner: OWNER, index: baseIndex(), ownerReads: offReads, helperReads: new Map(), now: NOW })
+  t.is(provenOff(off, false), true)
+  t.is(provenOff(off, true), false, 'a second stale pointer proves nothing')
+  t.is(provenOff({ ...off, indexing: true }, false), false)
+  t.is(provenOff({ ...off, stale: true }, false), false)
+  const unread = assembleBalcony({ owner: OWNER, index: baseIndex(), ownerReads: [peek(OWNER, [e(3, flag())], { missing: [1, 2] })], helperReads: new Map(), now: NOW })
+  t.is(unread.on, false)
+  t.is(provenOff(unread, false), false, 'unread first blocks read as unknown, not off')
+  const partial = assembleBalcony({ owner: OWNER, index: baseIndex({ complete: false }), ownerReads: offReads, helperReads: new Map(), now: NOW })
+  t.is(provenOff(partial, false), false)
+  const on = assembleBalcony({ owner: OWNER, index: baseIndex(), ownerReads: ownerRead(), helperReads: new Map(), now: NOW })
+  t.is(provenOff(on, false), false)
+  t.is(provenOff(null, false), false)
+  t.is(provenOff({ ...off, isPage: true }, false), false)
+})
+
+test('streetKeys offers only followed keys, once each, in the seeder order', async (t) => {
+  const { streetKeys } = await import('../src/garden.js')
+  const follows = new Set([BOB, CAROL])
+  const items = [{ key: DAVE, on: 1 }, { key: CAROL, on: 2 }, { key: BOB.toUpperCase(), on: 3 }, { key: CAROL, on: 4 }]
+  t.alike(streetKeys(items, follows), [CAROL, BOB], 'a key the viewer does not follow never shows')
+  t.alike(streetKeys([{ key: 'b'.repeat(63) }, { key: 7 }, null, 'x', { key: BOB }], follows), [BOB], 'a malformed row is dropped')
+  t.alike(streetKeys(items, null), [], 'without a follow set nothing is offered')
+  t.alike(streetKeys(items, [BOB, CAROL]), [], 'a follow array is not a follow set')
+  t.alike(streetKeys(null, follows), [])
+  t.alike(streetKeys(items, new Set()), [])
+})
