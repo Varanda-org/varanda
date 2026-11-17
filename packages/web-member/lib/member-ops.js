@@ -3091,8 +3091,7 @@ async function ownRejoinLeave (ctx, base, diary, c, ownHex) {
   const own = c.own
   const ref = (r) => ({ writer: r.writer, seq: r.seq })
   if (own !== null && leaveOfIn(c).has(own.key) && current(c, own.key)) return { c, rejoin: ref(leaveOfIn(c).get(own.key)) }
-  const core = own === null || own.key === c.key ? undefined : c.cores.get(own.key)
-  if (core !== undefined && !hasLeave(core.entries) && boundWriters(c, ownHex).includes(own.key) && c.built.writers.has(own.key)) {
+  if (rejoinLeaveDue(c, ownHex)) {
     // Every counted own CW held here, as any leave of the diary: the fold
     // withdraws an unlisted one from seq 0. Never C's root: a creator back
     // after a forged leave keeps its powers (cycle 14).
@@ -3108,6 +3107,14 @@ async function ownRejoinLeave (ctx, base, diary, c, ownHex) {
     if (mine && current(c, own.key)) return { c, rejoin: ref(mine) }
   }
   return { c, rejoin: diaryRejoin(c, ownHex) }
+}
+
+// Whether ownRejoinLeave appends a leave to this device's CW: bound by the
+// own diary, still counted, and holding no leave of its own.
+function rejoinLeaveDue (c, ownHex) {
+  const own = c.own
+  const core = own === null || own.key === c.key ? undefined : c.cores.get(own.key)
+  return core !== undefined && !hasLeave(core.entries) && boundWriters(c, ownHex).includes(own.key) && c.built.writers.has(own.key)
 }
 
 // A new device: the first leave of the latest set this diary confirmed
@@ -3483,14 +3490,19 @@ function ownWalkHasRoom (ownEntries, group) {
 // community writer than the live one, it would keep its live slot in the
 // diary's walk for good. The cut sits at the length this device holds of
 // its own core (retiredWriterCut), so every record it wrote keeps counting.
-function retireOwnWriter (g, ownEntries) {
+// `leaving`: a community join appends a leave to it first (ownRejoinLeave),
+// so the cut planned before anything is written sits past that leave, as
+// the one written after it does.
+function retireOwnWriter (g, ownEntries, { leaving = false } = {}) {
   if (g.own === null || g.own.key === g.group) return []
   const key = g.own.key
   const joins = groupJoinHistory(ownEntries, g.group)
   const marks = groupCutHistory(ownEntries, g.group)
   if (!slotWalk(joins, marks, g.group).live.has(key)) return []
   const held = g.cores.get(key)
-  const cut = retiredWriterCut(held === undefined ? null : held.entries)
+  let entries = held === undefined ? null : held.entries
+  if (leaving && Array.isArray(entries)) entries = [...entries, { seq: entries.reduce((n, e) => Math.max(n, e.seq + 1), 0), record: null }]
+  const cut = retiredWriterCut(entries)
   if (cut === null) return []
   const out = []
   const last = joins.filter((j) => j.writer === key).pop()
@@ -5163,7 +5175,11 @@ async function communityJoin (ctx, { community }, { general: withGeneral = true 
       let writer = !left && !cut && current !== undefined && ownPending(c, ownHex) && await ownWriterDerived(ctx, c.own) ? c.own.key : null
       let rejoin = writer === null ? null : headerRejoin(current)
       if (writer === null) {
-        if (groupWritersFull(c) || !ownWalkHasRoom(base.ownEntries, c.key)) throw new UsageError(COMMUNITY_FULL)
+        // The CW this join replaces is retired as in a group join (#350):
+        // its off join and its cut count in the walk check, before anything
+        // is written.
+        const planned = retireOwnWriter(c, base.ownEntries, { leaving: !cut && rejoinLeaveDue(c, ownHex) })
+        if (groupWritersFull(c) || !walkHasRoom(groupJoinHistory(base.ownEntries, c.key), groupCutHistory(base.ownEntries, c.key), c.key, planned)) throw new UsageError(COMMUNITY_FULL)
         // Geral's slot only when this call joins it: the upkeep's room
         // check must not refuse, or evict a left entry, for a slot unused.
         await makeGroupRoom(ctx, base, c.key, general === null || !withGeneral ? [] : [general])
@@ -5173,6 +5189,15 @@ async function communityJoin (ctx, { community }, { general: withGeneral = true 
         const named = cut ? { c, rejoin: diaryRejoin(c, ownHex) } : await ownRejoinLeave(ctx, base, diary, c, ownHex)
         c = named.c
         rejoin = named.rejoin
+        // The cut goes after the leave ownRejoinLeave may have appended, so
+        // that leave counts below it too, and before the new CW's join.
+        const now = await store.readAll(diary)
+        const retire = retireOwnWriter(c, now)
+        if (!walkHasRoom(groupJoinHistory(now, c.key), groupCutHistory(now, c.key), c.key, retire)) throw new UsageError(COMMUNITY_FULL)
+        for (const e of retire) {
+          if (e.kind === 'join') await appendOwn(ctx, diary, groupJoinRecord({ group: c.key, writer: e.writer, on: false }))
+          else await appendOwn(ctx, diary, groupCutRecord({ group: c.key, writer: e.writer, cut: e.cut }))
+        }
         const record = buildRecord(() => grp.writerHeader({ group: c.key, diary: ownHex, member: null, rejoin }))
         const created = await newOwnGroupCore(ctx)
         try {

@@ -135,3 +135,93 @@ test('community.join takes a slot a cut freed in the own diary\'s walk', async (
   const { walk } = await ownWalk(c, community)
   t.ok(walk.live.has(entryOf(c, community).writer), 'the new CW is live')
 })
+
+// A CW of another device of `ctx` in community `community`, held here and
+// bound by its diary.
+function siblingCw (ctx, community) {
+  const nonce = (++nonces).toString(16).padStart(32, '0')
+  return otherDevice(ctx, community, nonce, groupLib.writerHeader({ group: community, diary: ctx.key, member: null }), [], true)
+}
+
+test('a community rejoin after a leave cuts the retired CW at its length before the new join, and takes its slot (#350)', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp)
+  const c = await person(t, kp, 'Caio')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  await exchange(a, c)
+  await member.communityJoin(c, { community })
+  const old = entryOf(c, community).writer
+  // Seven CWs of other devices of the diary: every live slot is taken.
+  for (let i = 0; i < MAX - 1; i++) await siblingCw(c, community)
+  await member.communityLeave(c, { community })
+  const held = (await coreEntries(c, old)).length
+  t.ok(held >= 2, 'the old CW holds its header and its leave')
+  t.is((await member.communityJoin(c, { community })).state, 'member')
+  const now = entryOf(c, community).writer
+  t.not(now, old, 'a new CW')
+  const { entries, walk } = await ownWalk(c, community)
+  const cuts = groupLib.groupCutHistory(entries, community).filter((m) => m.writer === old)
+  t.alike(cuts.map((m) => m.cut), [held], 'the old CW is cut once, at its length')
+  const join = entries.findIndex((e) => e.record && e.record.type === 'group-join' && e.record.writer === now && e.record.on)
+  t.ok(indexOf(entries, 'group-cut', old) < join, 'the cut comes before the new join')
+  t.ok(walk.frozen.has(old), 'the old CW is frozen')
+  t.ok(walk.live.has(now), 'the new CW is live')
+})
+
+test('a community rejoin after another device left plans the cut past the leave it writes on the own CW (#350)', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp)
+  const c = await person(t, kp, 'Caio')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  await exchange(a, c)
+  // Every release is spent (each join released before the next, so all of
+  // them count), so only a cut past 0 frees a slot: one planned at 0 for the
+  // header-only CW would refuse the join.
+  const released = Array.from({ length: groupLib.MAX_WRITER_RELEASES_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  await diaryAppend(c, released.flatMap((writer) => [
+    groupJoinRecord({ group: community, writer, on: true }),
+    groupCutRecord({ group: community, writer, cut: 0 })
+  ]))
+  t.is((await ownWalk(c, community)).walk.released.size, groupLib.MAX_WRITER_RELEASES_PER_DIARY, 'every release spent')
+  await member.communityJoin(c, { community })
+  const old = entryOf(c, community).writer
+  t.is((await coreEntries(c, old)).length, 1, 'the own CW holds its header only')
+  const sibs = []
+  for (let i = 0; i < MAX - 2; i++) sibs.push(await siblingCw(c, community))
+  // The eighth CW, of another device, leaves for the diary.
+  const nonce = (++nonces).toString(16).padStart(32, '0')
+  await otherDevice(c, community, nonce, groupLib.writerHeader({ group: community, diary: c.key, member: null }), [
+    (key) => groupLib.groupLeave({ cuts: [old, ...sibs, key].map((writer) => ({ writer, seq: 1 })).sort((x, y) => x.writer.localeCompare(y.writer)) })
+  ], true)
+  t.is((await member.communityJoin(c, { community })).state, 'member')
+  const now = entryOf(c, community).writer
+  const entries = await coreEntries(c, old)
+  t.alike(entries.map((e) => e.record.type), ['group-writer', 'group-leave'], 'the join wrote a leave on the own CW first')
+  const { entries: log, walk } = await ownWalk(c, community)
+  t.alike(groupLib.groupCutHistory(log, community).filter((m) => m.writer === old).map((m) => m.cut), [2], 'then the cut, past that leave')
+  t.ok(walk.frozen.has(old), 'the old CW is frozen')
+  t.ok(walk.live.has(now), 'the new CW is live')
+})
+
+test('with no frozen room left, a community rejoin after a leave gets COMMUNITY_FULL with nothing written (#350)', async (t) => {
+  const kp = crypto.keyPair()
+  const a = await person(t, kp)
+  const c = await person(t, kp, 'Caio')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  await exchange(a, c)
+  // Eight CWs of other devices this node never held, cut past 0: the frozen
+  // reserve is spent.
+  const frozen = Array.from({ length: groupLib.MAX_FROZEN_WRITERS_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  await diaryAppend(c, [
+    ...frozen.map((writer) => groupJoinRecord({ group: community, writer, on: true })),
+    ...frozen.map((writer) => groupCutRecord({ group: community, writer, cut: 1 }))
+  ])
+  await member.communityJoin(c, { community })
+  for (let i = 0; i < MAX - 1; i++) await siblingCw(c, community)
+  await member.communityLeave(c, { community })
+  const before = (await member.logRead(c)).entries.length
+  const old = entryOf(c, community).writer
+  await rejects(t, member.communityJoin(c, { community }), 'limite da comunidade atingido')
+  t.is((await member.logRead(c)).entries.length, before, 'nothing written')
+  t.is(entryOf(c, community).writer, old, 'no new CW')
+})
