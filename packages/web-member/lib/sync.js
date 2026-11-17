@@ -621,6 +621,26 @@ function liveDiaryWriters (entries, roots) {
   return out
 }
 
+// The groups community C's held cores fold to, in causal order (at most
+// MAX_GROUPS_PER_COMMUNITY), or null while the fold is unbound or
+// incomplete. The community fold reads the diaries' cuts, like the group
+// fold (#350); a creator's confirmed leave bounds the root's creates.
+// `writers` [{ key, entries, diary }], `diaries` Map diary -> entries.
+function foldedCatalogue (c, rootEntries, writers, diaries) {
+  const joins = new Map()
+  const marks = new Map()
+  const confirms = new Map()
+  for (const [d, entries] of diaries) {
+    joins.set(d, groupJoinHistory(entries, c))
+    marks.set(d, groupCutHistory(entries, c))
+    confirms.set(d, groupConfirmHistory(entries, c))
+  }
+  const built = buildCommunity({ root: { key: c, entries: rootEntries }, writers, joins, marks, confirms, now: Date.now() })
+  if (built.creator === null || built.incomplete) return null
+  const keys = built.created instanceof Map ? [...built.created.keys()] : built.groups
+  return keys.slice(0, MAX_GROUPS_PER_COMMUNITY)
+}
+
 const NO_READER = { set: noop, clear: noop }
 // A startup that has not reached the seeder link ('ready') by then logs the
 // step it is on, and again at the same interval (local diagnostics only).
@@ -4462,22 +4482,15 @@ async function syncRun ({
         if (ending) return []
         ws.push({ key: w.key, entries: await store.readBlocks(w.core), diary: w.diary })
       }
-      const joins = new Map()
-      // A creator's confirmed leave bounds the root's creates.
-      const confirms = new Map()
+      const diaries = new Map()
       for (const d of new Set([root.diary, ...writers.map((w) => w.diary)])) {
         if (ending) return []
         const entries = await entriesOf(d)
-        if (!entries) continue
-        joins.set(d, groupJoinHistory(entries, c))
-        confirms.set(d, groupConfirmHistory(entries, c))
+        if (entries) diaries.set(d, entries)
       }
       if (ending) return []
-      const built = buildCommunity({ root: { key: c, entries: await store.readBlocks(root.core) }, writers: ws, joins, confirms, now: Date.now() })
-      if (built.creator !== null && !built.incomplete) {
-        const keys = built.created instanceof Map ? [...built.created.keys()] : built.groups
-        return keys.slice(0, MAX_GROUPS_PER_COMMUNITY)
-      }
+      const keys = foldedCatalogue(c, await store.readBlocks(root.core), ws, diaries)
+      if (keys !== null) return keys
     } catch {}
     if (ending) return []
     return catalogueKeys(c, root, 2 * MAX_GROUPS_PER_COMMUNITY)
@@ -5765,4 +5778,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, retryWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, WALK_TYPES, liveDiaryWriters, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, retryWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, WALK_TYPES, liveDiaryWriters, foldedCatalogue, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

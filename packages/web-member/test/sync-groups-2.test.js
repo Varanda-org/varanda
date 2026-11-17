@@ -8,7 +8,7 @@ const { createIssuerCert, createIssuedCert, generateAssociationKeyPair } = requi
 const { groupJoinRecord, groupCutRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY } = grp
-const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY: HELD, WALK_TYPES, liveDiaryWriters } = require('../lib/sync')
+const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY: HELD, WALK_TYPES, liveDiaryWriters, foldedCatalogue } = require('../lib/sync')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
@@ -690,4 +690,29 @@ test('the own diary scan keeps the cuts: a writer joined after released slots bi
   t.alike([...liveDiaryWriters(entries, new Set([g]))], [[late, g]], 'the later writer is live, so a new one is chased')
   const joinsOnly = entries.filter((e) => e.record.type === 'group-join')
   t.alike(grp.diaryGroupKeys(joinsOnly), [], 'control: without the cuts the walk has no slot for it')
+})
+
+test('the catalogue fold reads the diaries\' cuts, like the group fold: a CW a cut let in waits to be held (#350)', async (t) => {
+  const assocKp = generateAssociationKeyPair()
+  const a = await member(assocKp, 'Ana')
+  const b = await member(assocKp, 'Bia')
+  const { community, group } = await ops.communityCreate(a.ctx, { name: 'Dicas', join: 'open' })
+  const root = await store.openGroupCoreReadOnly(a.storage, community)
+  let rootEntries
+  try { rootEntries = await store.readBlocks(root) } finally { await root.close() }
+  // Bia's diary binds the eight live CWs it may, releases one with a cut at
+  // 0 and binds a ninth in the slot it freed; this node holds the eight.
+  const eight = Array.from({ length: MAX_GROUP_WRITERS_PER_DIARY }, () => randomKey())
+  const ninth = randomKey()
+  const diary = await store.openDiary(b.storage, b.ctx.keyPair)
+  try {
+    for (const writer of eight) await store.appendRecord(diary, groupJoinRecord({ group: community, writer, on: true }))
+    await store.appendRecord(diary, groupCutRecord({ group: community, writer: eight[0], cut: 0 }))
+    await store.appendRecord(diary, groupJoinRecord({ group: community, writer: ninth, on: true }))
+  } finally { await diary.close() }
+  const cw = (key) => ({ key, diary: b.ownHex, entries: [{ seq: 0, record: grp.writerHeader({ group: community, diary: b.ownHex, member: null }) }] })
+  const bia = (await ops.logRead(b.ctx)).entries
+  const diaries = new Map([[a.ownHex, (await ops.logRead(a.ctx)).entries], [b.ownHex, bia]])
+  t.is(foldedCatalogue(community, rootEntries, eight.map(cw), diaries), null, 'the ninth CW counts and is not held: no catalogue from the fold yet')
+  t.alike(foldedCatalogue(community, rootEntries, [...eight, ninth].map(cw), diaries), [group], 'once it is held, the fold gives the catalogue')
 })
