@@ -13,7 +13,7 @@ const { createGoogle } = require('../account/google')
 const { openAccountStore } = require('../account/store')
 const { openTermsStore } = require('../account/terms-store')
 const { openRecoveryStore } = require('../account/recovery-store')
-const { openPasskeyStore } = require('../account/passkey-store')
+const { openPasskeyStore, countedKeys } = require('../account/passkey-store')
 const { openInvitesStore } = require('../account/invites-store')
 const { pairInvites } = require('../account/invites-pair')
 const { createListingReader } = require('../account/feira-read')
@@ -40,6 +40,10 @@ const { createUsageStats } = require('../account/usage-stats')
 const { createSeederHealthReader, parseSeederHealthUrl } = require('../account/seeder-health')
 const { createGroupCheck } = require('../account/group-check')
 const { localDay } = require('@varanda/core/lib/activity')
+const { WAIT_MS } = require('../account/delete-routes')
+const { ownsLivePage } = require('../account/live-page')
+const { readNotices, queueNotice, dropNotice, drainNotices } = require('../account/deletion-notices')
+const { dateOf } = require('../post-page')
 const {
   DEFAULT_HOST,
   DEFAULT_PORT,
@@ -84,7 +88,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -1072,6 +1076,11 @@ async function serve (flags, env) {
       // Excluir conta: data of keys deleted before this start that a store
       // could not drop then (or a stale writer brought back) goes now, and
       // then every hour.
+      // Before the first sweep, so the notices are decided on the holds as
+      // the operator left them. It does not save a hold already due: the
+      // sweep deletes it before the push (queued 0-60 s ahead) goes out, a
+      // limit README "Excluir conta" states.
+      drainNotices(flags.dataDir, { notify: server.notifyScheduledDeletion, guard: held, log })
       await server.deletionSweep()
       stopDeletionSweep = server.startDeletionSweep()
       if (drops !== null) {
@@ -1406,7 +1415,270 @@ async function run (flags) {
     return 0
   }
 
+  // Excluir conta for a member who has no passkey, no recovery code and no
+  // phone to ask from the app (README "Excluir conta"): the operator checks
+  // the request against the link's e-mail and schedules the same WAIT_MS
+  // hold the app's wait path writes. The running service's hourly sweep
+  // runs it at the date, so the purge never diverges from the app's.
+  // Without --yes or --undo it only reads, also while the service runs;
+  // both write under the service's lock, so they refuse while it runs. The
+  // e-mail can come from whoever took over the mailbox, so the member's
+  // sign-in factors are shown and --yes refuses while any is left (--force
+  // overrides), and the push notice waits in deletion-notices.json for the
+  // service's next start.
+  if (sub === 'delete' && subsub === undefined) {
+    if ((flags.member === null) === (flags.username == null)) throw new UsageError('use --member ou --username')
+    if (flags.yes && flags.undo) throw new UsageError('use --yes ou --undo')
+    checkConfig(flags.dataDir, flags.association)
+    const by = { member: flags.member, username: flags.username ?? null }
+    if (flags.undo) {
+      const out = await cancelDeletion(flags.dataDir, by)
+      print(flags, out, out.cancelled ? 'exclusão cancelada' : 'nenhuma exclusão agendada')
+      return 0
+    }
+    if (flags.yes) {
+      const out = await scheduleDeletion(flags.dataDir, by, { force: flags.force })
+      print(flags, out, scheduleLines(out))
+      return 0
+    }
+    const out = previewDeletion(flags.dataDir, by)
+    print(flags, out, previewLines(out))
+    return 0
+  }
+
   throw new UsageError(USAGE)
+}
+
+// -> { member, username, email } of the account `account delete` targets:
+// by key, a linked member; by name ('@nome' or 'nome', current or past, as
+// lookupPhone reads it), a member's name. `email` is '' when the link has
+// none (a phone sign-up).
+function deleteTarget (accounts, { member, username }) {
+  if (username !== null) {
+    const holder = accounts.nameHolder((username.startsWith('@') ? username.slice(1) : username).toLowerCase())
+    if (holder === null) throw new Error('nome não encontrado')
+    if (holder.kind === 'pagina') throw new Error('o nome é de uma página')
+    member = holder.key
+  }
+  if (accounts.deletedAt(member) !== null) throw new Error('conta já excluída')
+  const st = accounts.status(member)
+  if (!st.linked) throw new Error('chave sem vínculo')
+  const contact = accounts.contact(member)
+  return { member, username: st.username, email: contact === null ? '' : contact.email }
+}
+
+// A restored copy may have lost links or names the live directory had, so
+// the write paths refuse it as the service does; the preview only warns.
+function openDeleteDirectory (dataDir, { write = false } = {}) {
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  if (write && accounts.restored) throw new Error('diretório de contas restaurado de uma cópia antiga; confira o backup')
+  warnRestored(accounts)
+  return accounts
+}
+
+function livePageOf (dataDir, member) {
+  try {
+    return ownsLivePage(openPagesStore(dataDir, { readOnly: true }), member)
+  } catch {
+    throw new Error('pages.json inválido')
+  }
+}
+
+function holdOf (passkeys, member) {
+  if (!passkeys.available()) throw new Error('passkeys.json inválido')
+  try {
+    return passkeys.hold(member)
+  } catch {
+    throw new Error('passkeys.json inválido')
+  }
+}
+
+// The phone store needs the seal key only to open a number; whether a live
+// sealed row exists is in the row shape, so the operator needs no key here.
+function phoneVerified (dataDir, member) {
+  const raw = fileBytes(path.join(dataDir, PHONE_FILE))
+  if (raw === null) return false
+  let rows
+  try {
+    rows = JSON.parse(raw.toString('utf8')).rows
+  } catch {
+    throw new Error('phone.json inválido')
+  }
+  if (!Array.isArray(rows)) throw new Error('phone.json inválido')
+  return rows.some((r) => r !== null && typeof r === 'object' && r.member === member && r.end === null && r.sealed !== null)
+}
+
+// What the member can still sign in with: the stored passkey keys the
+// service counts (as /account/delete/start lists them), the live recovery
+// entries by kind, and a verified phone.
+function factorsOf (dataDir, passkeys, member) {
+  const recovery = openRecoveryStore(dataDir, { readOnly: true })
+  let entries, keys
+  try {
+    entries = recovery.list(member)
+  } catch {
+    throw new Error('recovery.json inválido')
+  }
+  try {
+    keys = countedKeys(passkeys.keys(member), recovery, member)
+  } catch {
+    throw new Error('passkeys.json inválido')
+  }
+  return {
+    passkeys: keys.length,
+    recoveryCodes: entries.filter((e) => e.kind === 'code').length,
+    recoveryPasskeys: entries.filter((e) => e.kind === 'passkey').length,
+    phone: phoneVerified(dataDir, member)
+  }
+}
+
+function plural (n, one, many) {
+  return n + ' ' + (n === 1 ? one : many)
+}
+
+// -> 'a, b e c' of what is left, or '' when nothing is.
+function factorsLeft (f) {
+  const parts = []
+  if (f.passkeys > 0) parts.push(plural(f.passkeys, 'passkey guardada', 'passkeys guardadas'))
+  if (f.recoveryCodes > 0) parts.push(plural(f.recoveryCodes, 'código de recuperação', 'códigos de recuperação'))
+  if (f.recoveryPasskeys > 0) parts.push(plural(f.recoveryPasskeys, 'passkey extra de recuperação', 'passkeys extras de recuperação'))
+  if (f.phone) parts.push('celular confirmado')
+  return parts.length <= 1 ? parts.join('') : parts.slice(0, -1).join(', ') + ' e ' + parts[parts.length - 1]
+}
+
+function whenLine (iso) {
+  return dateOf(iso) + ' (' + iso + ')'
+}
+
+const PAGE_OWNER = 'a conta é dona de uma página: ela precisa ser encerrada ou transferida antes'
+
+function memberLines (out) {
+  return [
+    'membro: ' + out.member,
+    '@nome: ' + out.username,
+    out.email === '' ? 'sem e-mail no vínculo' : 'e-mail: ' + safe(out.email),
+    'passkeys guardadas: ' + out.passkeys,
+    'códigos de recuperação: ' + out.recoveryCodes,
+    'passkeys extras de recuperação: ' + out.recoveryPasskeys,
+    'celular: ' + (out.phone ? 'confirmado' : 'sem registro')
+  ]
+}
+
+function previewDeletion (dataDir, by) {
+  const target = deleteTarget(openDeleteDirectory(dataDir), by)
+  const passkeys = openPasskeyStore(dataDir, { readOnly: true })
+  const hold = holdOf(passkeys, target.member)
+  return { ...target, ...factorsOf(dataDir, passkeys, target.member), scheduled: hold === null ? null : hold.runAt, ownsLivePage: livePageOf(dataDir, target.member), written: false }
+}
+
+function previewLines (out) {
+  return [
+    ...memberLines(out),
+    out.scheduled === null ? 'nenhuma exclusão agendada' : 'exclusão já agendada para ' + whenLine(out.scheduled),
+    ...(out.ownsLivePage ? [PAGE_OWNER] : []),
+    'nada foi gravado; rode de novo com --yes'
+  ].join('\n')
+}
+
+function scheduleLines (out) {
+  return [
+    ...memberLines(out),
+    (out.already ? 'exclusão já agendada para ' : 'exclusão agendada para ') + whenLine(out.scheduled)
+  ].join('\n')
+}
+
+async function underLock (dataDir, verb, fn) {
+  let lock
+  try {
+    lock = takeLock(dataDir)
+  } catch (err) {
+    if (lockHeld(dataDir)) throw new Error('pare o serviço de conta antes de ' + verb + ' uma exclusão')
+    throw err
+  }
+  try {
+    return await fn(lock)
+  } finally {
+    lock.release()
+  }
+}
+
+// A write that failed may have landed (a lost lock after the rename), so it
+// is reported for the operator to check, never retried here.
+function unsureWrite (member) {
+  return new Error('não foi possível confirmar a gravação: confira com account delete --member ' + member)
+}
+
+function noticesOf (dataDir) {
+  try {
+    return readNotices(dataDir)
+  } catch {
+    throw new Error('deletion-notices.json inválido')
+  }
+}
+
+// -> { member, username, email, ...factors, scheduled, already }: the date
+// of the hold, and whether it was already there (schedule() keeps the first
+// date). `open` and `now` are for tests.
+async function scheduleDeletion (dataDir, by, { force = false, open = openPasskeyStore, now = Date.now } = {}) {
+  return underLock(dataDir, 'agendar', async (lock) => {
+    const guard = () => lock.held()
+    const target = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
+    const { member } = target
+    const passkeys = open(dataDir, { now, guard })
+    // An unreadable file is named as such here, before schedule() could
+    // only call its failure an unsure write.
+    holdOf(passkeys, member)
+    const factors = factorsOf(dataDir, passkeys, member)
+    const left = factorsLeft(factors)
+    if (left !== '' && !force) throw new Error('a conta ainda tem ' + left + ': confira que a pessoa perdeu o acesso a eles e rode de novo com --force')
+    if (livePageOf(dataDir, member)) throw new Error(PAGE_OWNER)
+    noticesOf(dataDir)
+    let out
+    try {
+      out = await passkeys.schedule({ member, runAt: new Date(now() + WAIT_MS).toISOString() })
+    } catch {
+      // The hold may have landed, so its notice is queued too: the service
+      // pushes only for a member it finds with a hold.
+      let queued = false
+      try {
+        queueNotice(dataDir, member, guard)
+        queued = true
+      } catch {}
+      throw new Error(unsureWrite(member).message + (queued ? ', e o aviso push entrou na fila' : ', e o aviso push não entrou na fila: rode de novo com --yes antes de ligar o serviço'))
+    }
+    // Also for a hold already on file: queueNotice keeps one entry per
+    // member and the service pushes only while the hold exists, so a rerun
+    // repairs a queue an unsure write or a failed queue left without it.
+    try {
+      queueNotice(dataDir, member, guard)
+    } catch {
+      throw new Error('exclusão agendada para ' + whenLine(out.runAt) + ', mas o aviso push não entrou na fila: rode de novo com --yes antes de ligar o serviço')
+    }
+    return { ...target, ...factors, scheduled: out.runAt, already: !out.changed }
+  })
+}
+
+// -> { member, cancelled }. `open` is for tests.
+async function cancelDeletion (dataDir, by, { open = openPasskeyStore } = {}) {
+  return underLock(dataDir, 'cancelar', async (lock) => {
+    const guard = () => lock.held()
+    const { member } = deleteTarget(openDeleteDirectory(dataDir, { write: true }), by)
+    const passkeys = open(dataDir, { guard })
+    // As in scheduleDeletion: an unreadable file is named, not unsure.
+    holdOf(passkeys, member)
+    let out
+    try {
+      out = await passkeys.cancel(member)
+    } catch {
+      throw unsureWrite(member)
+    }
+    // Best effort: the service skips a queued member that has no hold, so a
+    // notice left behind is never pushed.
+    try {
+      dropNotice(dataDir, member, guard)
+    } catch {}
+    return { member, cancelled: out.changed }
+  })
 }
 
 // One line per holder of `username` ('@nome' or 'nome'): usedNames keeps a
@@ -1526,6 +1798,9 @@ module.exports = {
   readEnv,
   releasePhone,
   lookupPhone,
+  scheduleDeletion,
+  scheduleLines,
+  cancelDeletion,
   closeIfOwned,
   loseLock,
   startTermsHeal,

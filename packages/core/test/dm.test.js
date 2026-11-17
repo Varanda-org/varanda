@@ -1638,6 +1638,89 @@ test('inner v7: its own signature domain', (t) => {
   }
 })
 
+// A history copy claim (v8): the account's own, to itself.
+const DEV_A = '1'.repeat(64)
+const DEV_B = '2'.repeat(64)
+const DEV_C = '3'.repeat(64)
+const CLAIM_ID = 'f'.repeat(32)
+function claim (over = {}, from = ana) {
+  return buildInner({ kind: 'claim', id: CLAIM_ID, copy: CID, for: [DEV_B], by: DEV_A, at: AT, ...over }, from)
+}
+function claimBodyOf (over = {}) {
+  return { v: 8, kind: 'claim', id: CLAIM_ID, from: ana.hex, to: ana.hex, copy: CID, for: [DEV_B], by: DEV_A, at: AT, ...over }
+}
+
+test('inner v8: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V8, 'varanda-dm-v8\n')
+  t.is(dm.DM_CLAIM_KIND, 'claim')
+  t.is(dm.DM_CLAIM_FOR_MAX, 8)
+  t.alike(dm.INNER_KEYS_V8, ['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+  t.alike(dm.INNER_KEYS_V8, require('@varanda/rpc').DM_INNER_KEYS_V8)
+  const inner = claim()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V8)
+  const got = openInner(claim(), ana.hex, O)
+  t.is(got.kind, 'claim')
+  t.is(got.mine, true)
+  t.is(got.id, CLAIM_ID)
+  t.is(got.copy, CID)
+  t.alike(got.for, [DEV_B])
+  t.is(got.by, DEV_A)
+  t.alike(openInner(claim({ for: [DEV_C, DEV_B] }), ana.hex, O).for, [DEV_B, DEV_C], 'for is written sorted')
+  const many = []
+  for (let i = 0; i < dm.DM_CLAIM_FOR_MAX; i++) many.push(i.toString(16) + 'a'.repeat(63))
+  const full = claim({ for: many })
+  t.is(openInner(full, ana.hex, O).for.length, dm.DM_CLAIM_FOR_MAX, 'the most devices fit')
+})
+
+test('inner v8: only the owner opens it, never a stranger or the visit lane', (t) => {
+  t.is(openInner(claim(), bia.hex, O), null, 'a recipient that is not the sender')
+  t.is(openInner(claim(), ana.hex, { ...O, visit: true }), null, 'never on the visit lane')
+  t.is(openInner(forge(claimBodyOf({ from: bia.hex, to: ana.hex }), bia, dm.DM_SIG_PREFIX_V8), ana.hex, O), null, 'from must be the opener')
+  t.is(openInner(forge(claimBodyOf(), bia, dm.DM_SIG_PREFIX_V8), ana.hex, O), null, 'signed by another key')
+  t.ok(openInner(forge(claimBodyOf(), ana, dm.DM_SIG_PREFIX_V8), ana.hex, O), 'the owner signature opens')
+})
+
+test('inner v8: shape rules', (t) => {
+  const ok = (over) => openInner(forge(claimBodyOf(over), ana, dm.DM_SIG_PREFIX_V8), ana.hex, O)
+  t.ok(ok({}))
+  t.ok(ok({ for: [DEV_B, DEV_C] }))
+  t.is(ok({ kind: 'copy' }), null)
+  t.is(ok({ v: 7 }), null)
+  t.is(ok({ id: 'x' }), null)
+  t.is(ok({ copy: COPY_DESC }), null, 'copy is an id, not a descriptor')
+  t.is(ok({ copy: 'e'.repeat(64) }), null)
+  t.is(ok({ at: 'yesterday' }), null)
+  t.is(ok({ by: 'x' }), null)
+  t.is(ok({ for: [] }), null, 'at least one device')
+  t.is(ok({ for: DEV_B }), null, 'a list')
+  t.is(ok({ for: [DEV_C, DEV_B] }), null, 'strictly ascending')
+  t.is(ok({ for: [DEV_B, DEV_B] }), null, 'no repeats')
+  t.is(ok({ for: [DEV_A] }), null, 'never the claimant itself')
+  t.is(ok({ for: ['B'.repeat(64)] }), null, 'lowercase hex')
+  const nine = []
+  for (let i = 0; i < 9; i++) nine.push(i.toString(16) + 'a'.repeat(63))
+  t.is(ok({ for: nine }), null, 'at most DM_CLAIM_FOR_MAX')
+  t.is(ok({ extra: 1 }), null, 'exact keys')
+  t.is(ok({ to: bia.hex }), null, 'to is the sender')
+  t.exception.all(() => claim({ text: 'x' }), /./, 'no other field')
+  t.exception.all(() => claim({ for: [DEV_A] }))
+  t.exception.all(() => claim({ for: [] }))
+})
+
+test('inner v8: its own signature domain', (t) => {
+  const { json, sig } = frameParts(claim())
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V8), json]), sig, ana.publicKey))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5], ['v6', dm.DM_SIG_PREFIX_V6], ['v7', dm.DM_SIG_PREFIX_V7]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, ana.publicKey), 'not under ' + name)
+    t.is(openInner(forge(claimBodyOf(), ana, prefix), ana.hex, O), null, 'a v8 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v7', copyPtr()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V8), p.json]), p.sig, ana.publicKey), name + ' under the v8 domain')
+  }
+})
+
 test('bucketPrefix: a fixed vector, bytes and hex alike, 0..63', (t) => {
   const key = b4a.alloc(32)
   for (let i = 0; i < 32; i++) key[i] = i + 1

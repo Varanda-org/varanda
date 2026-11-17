@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 83)
+  t.is(LEGAL_VERSION, 84)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 83, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 84, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '3444158f9dfcffc9095d9dafaebdf3ad5cfa6fba723d306bda605f8d7fb98893', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '02f6101b9f1174e74bb45b5a65d08a944c23ee0f5e80fb59cb6f2be930023986', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -998,4 +998,23 @@ test('legal: version 82 says the moderation data of a deleted account goes 6 mon
   t.ok(text(PRIVACY).includes('Para contas ativas, a retenção está em aberto (issue #38).'))
   t.absent(text(PRIVACY).includes('Denúncias, recursos e decisões não são apagados automaticamente.'), 'no longer true for a deleted account')
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 83 describes the automatic history copy to a new device', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    const all = text(doc)
+    t.absent(all.includes('Copiar conversas para outro aparelho'), doc.title + ': no option to tap any more')
+    t.ok(all.includes('um dos aparelhos da conta que já existiam'), doc.title + ': one existing device copies')
+    t.ok(all.includes('em segundo plano') && all.includes('uma vez para cada aparelho novo'), doc.title + ': in the background, once per new device')
+    t.ok(all.includes('das mais recentes para as mais antigas, dentro da cota semanal de cópia do semeador'), doc.title + ': photos newest first, within the weekly allowance')
+    t.ok(all.includes('Uma cópia interrompida continua na próxima vez que o app abrir.'), doc.title + ': it resumes')
+    t.ok(all.includes('Um aparelho desconectado em "Aparelhos conectados" não faz nem recebe cópia.'), doc.title + ': a disconnected device is left out')
+    t.ok(all.includes('Qualquer aparelho novo que entrar com a sua passkey recebe assim, dos seus outros aparelhos, o histórico das suas conversas privadas, com texto e fotos, sem nenhum aviso nesses outros aparelhos.'), doc.title + ': the passkey alone gets the history, with no notice')
+    t.ok(all.includes('guarde bem a sua passkey e desconecte em "Aparelhos conectados" todo aparelho que você não reconheça: isso também interrompe uma cópia em andamento'), doc.title + ': what to do about it')
+    t.ok(all.includes('14 dias'), doc.title + ': retention')
+  }
+  t.ok(text(PRIVACY).includes('um reserva a cópia, para que só um aparelho a faça'), 'the claim, plainly')
+  t.ok(text(TERMS).includes('As fotos das Páginas não vão.'))
 })

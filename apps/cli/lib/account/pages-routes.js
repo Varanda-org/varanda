@@ -675,6 +675,18 @@ function createPagesRoutes ({
     if (got === null || (role === 'owner' && got !== 'owner')) throw refuse('sem-permissao')
   }
 
+  // For a row that may have moved: the store counts its frozen roster only
+  // for whoever still holds a role at the end of the move chain.
+  function needHeld (page, member) {
+    let got
+    try {
+      got = pagesStore.role(page, member)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    if (got === null) throw refuse('sem-permissao')
+  }
+
   // At most 2 closes or moves per owner per 24 h, kept in pages.json so a
   // restart does not reset it: a use is charged once, however often it is
   // resent, and a definite refusal gives it back. A store failure refuses.
@@ -1428,7 +1440,7 @@ function createPagesRoutes ({
     try {
       if (action === 'list') return pagesStore.listFor(member)
       const row = rowOf(page)
-      need(row, member, 'admin')
+      needHeld(page, member)
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
       const picked = pickedOf(await writer.readEntries(page))

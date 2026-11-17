@@ -2,16 +2,17 @@
 
 // The history copy's filing and import rules (lib/dm-copy.js) that need no
 // network: the shown time against the receiver's clock, an import cut short,
-// one import job at a time and one counted failure per pull, the late
-// refusal of a copy that outgrew the reader's limits, and the stamps the text
-// needs. A stub engine stands in for the node's pieces.
+// one import job at a time and one counted failure per pull, a copy that
+// outgrew the reader's limits, the stamps the text needs and how the text
+// stage of the automatic copy keeps them across a retry. A stub engine stands
+// in for the node's pieces.
 
 const test = require('brittle')
 const b4a = require('b4a')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const blobCore = require('@varanda/core/lib/blob')
 const { UsageError } = require('@varanda/core/lib/errors')
-const { createDmCopy, fileRows, stampsNeeded, LIMITS, TOO_BIG } = require('../lib/dm-copy')
+const { createDmCopy, fileRows, stampsNeeded, LIMITS } = require('../lib/dm-copy')
 const { createDmStore } = require('../lib/dm-store')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { sealBlob } = require('../lib/blob')
@@ -140,7 +141,7 @@ test('an import cut between two chunks files the rest where an uninterrupted one
   t.ok(cutB.snapshot().ops[0].filedAt < cutB.snapshot().ops[1].filedAt)
 })
 
-// The stub engine of a node: the pieces importAll and historyCopy use.
+// The stub engine of a node: the pieces importAll and autoCopy use.
 async function engine (t, over = {}) {
   const s = await openStore(t)
   const storage = memoryNodeStorage()
@@ -160,7 +161,15 @@ async function engine (t, over = {}) {
     moderation: async () => ({ blocked: new Set(), association: new Set() }),
     ...over
   }
-  return { s, storage, env, copy: createDmCopy(env) }
+  return { s, storage, env, copy: told(env) }
+}
+
+// A copier told which device it runs on, as the session does: imports wait
+// until it is.
+function told (env) {
+  const copy = createDmCopy(env)
+  copy.setDevice({ self: 'e'.repeat(64), off: false })
+  return copy
 }
 
 function pointer (c) {
@@ -228,54 +237,66 @@ test('overlapping pulls count one failure against a todo, not one per pass', asy
   t.is((await todoOf(e)).length, 0, 'the third ends it')
 })
 
-test('a copy refused late for its size does not upload everything again on a retry', async (t) => {
-  // The rows fill one part to within a few bytes; a photo's new descriptor
-  // (and c: 1) tips them into a second, past a limit of one part.
-  const PART = 1048576
-  const media = (c) => [{ id: c.repeat(64), key: c.repeat(64), nonce: c.repeat(48), chunks: 1, bytes: 1016, sha256: c.repeat(64), mime: 'image/png', w: 64, h: 48 }]
-  const FILED = 1700000000000
-  const row = (i, text, extra = {}) => ({ t: 'msg', id: String(i).padStart(32, '0'), peer: PEER, from: SELF, text, replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: FILED + i, ...extra })
-  const sizeOf = (r, n) => {
-    const item = { ...r }
-    delete item.filedAt
-    return b4a.byteLength(JSON.stringify({ ...item, n, shownAt: r.filedAt })) + 1
-  }
-  const photo = row(1, 'foto', { media: media('1') })
-  const rows = [photo]
-  let size = sizeOf(photo, 0)
-  while (size + sizeOf(row(2 + rows.length, 'x'.repeat(3000)), rows.length) < PART - 4000) {
-    const r = row(2 + rows.length, 'x'.repeat(3000))
-    size += sizeOf(r, rows.length)
-    rows.push(r)
-  }
-  // The last row takes the part to PART - 3.
-  const last = row(2 + rows.length, '')
-  const room = PART - 3 - size - sizeOf(last, rows.length)
-  rows.push({ ...last, text: 'y'.repeat(room) })
+// The automatic copy: this device (BY) holds a text-stage job whose claim for
+// TARGET already won, kept in the record as a pull would have left it.
+const BY = 'c'.repeat(64)
+const TARGET = 'd'.repeat(64)
+const VIEW = { self: BY, off: false, targets: [TARGET] }
 
-  const local = {
+async function seedJob (storage, sealer) {
+  const now = Date.now()
+  const job = { id: id('e'), copy: id('f'), for: [TARGET], put: now, stage: 'text', top: null, cursor: null, batches: 0, bytes: 0 }
+  const claim = { id: job.id, copy: job.copy, for: [TARGET], by: BY, at: new Date(now).toISOString(), seq: 1, seen: now, done: false }
+  await store.writeDmAutoCopy(storage, sealer.seal({ v: 1, job, lastClaim: now, claimed: { [TARGET]: 1 }, done: [], claims: [claim] }))
+  return job
+}
+
+async function autoRecord (e, sealer) {
+  return sealer.open(await store.readDmAutoCopy(e.storage))
+}
+
+// A stub local store holding `rows`, whose records a real store seals.
+function stubLocal (sealer, rows, over = {}) {
+  return {
     snapshot: () => ({ messages: rows, ops: [], reactions: [] }),
     seenToken: () => 'f'.repeat(64),
-    hasMedia: () => true,
-    getMedia: async () => [new Uint8Array(1000).fill(1)],
-    seal: (v) => v,
-    open: (v) => v
+    hasMedia: () => false,
+    seal: (v) => sealer.seal(v),
+    open: (v) => sealer.open(v),
+    ...over
   }
+}
+
+// An engine whose record holds the seeded job; `logs` collects the warnings
+// of a run that ended early.
+async function autoEngine (t, sealer, local, over = {}) {
+  const logs = []
+  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, log: (m) => logs.push(m), pullComplete: () => true, ...over })
+  const job = await seedJob(e.storage, sealer)
+  return { ...e, logs, job }
+}
+
+test('a copy too big for the reader uploads nothing and ends the job for its targets', async (t) => {
+  const FILED = 1700000000000
+  const rows = Array.from({ length: 4 }, (_, i) => ({ t: 'msg', id: String(i).padStart(32, '0'), peer: PEER, from: SELF, text: 'x'.repeat(400000), replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: FILED + i }))
+  const sealer = await openStore(t)
+  const local = stubLocal(sealer, rows)
   const counts = { stamps: 0, puts: 0 }
   const blobs = {
     copySource: () => ({ chunk: 256, reserve: async () => [], take: async () => { throw new UsageError('sem selo') } }),
     stamp: async () => { counts.stamps++ },
     put: async () => { counts.puts++ }
   }
-  const small = { ...LIMITS, parts: 1 }
-  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, limits: small, mediaItem: (d) => d })
-
-  const first = await e.copy.historyCopy(SELF, {}).catch((err) => err)
-  t.ok(first instanceof UsageError && first.message === TOO_BIG, 'refused for its size once the photo is swapped in')
-  t.is(counts.puts, 1, 'only the photo was put')
-  const again = await e.copy.historyCopy(SELF, {}).catch((err) => err)
-  t.ok(again instanceof UsageError && again.message === TOO_BIG, 'the retry is refused the same way, not a crash')
-  t.is(counts.puts, 1, 'and put nothing more')
+  const e = await autoEngine(t, sealer, local, { blobs, limits: { ...LIMITS, parts: 1 } })
+  await e.copy.autoCopy(SELF, {}, VIEW)
+  t.is(counts.puts, 0, 'nothing was put')
+  const rec = await autoRecord(e, sealer)
+  t.is(rec.job, null, 'the job ended')
+  t.alike(rec.done, [TARGET], 'its target counts as done')
+  await e.copy.autoCopy(SELF, {}, VIEW)
+  t.is(counts.puts, 0, 'a later kick puts nothing more')
+  t.is((await autoRecord(e, sealer)).lastClaim, rec.lastClaim, 'and claims nothing for that target')
+  t.alike(e.logs, [], 'a copy that can never go is no failure to warn about')
 })
 
 test('the text needs a stamp per chunk of every part and of the manifest, and one more per part', (t) => {
@@ -312,16 +333,12 @@ test('the stamps of a part count its MAC: a part that lands within 16 bytes of a
 
 // A stub blob client: the copy source holds three stamps in reserve and
 // buys 'fresh' ones; put refuses the failAt-th frame as invalid ("the
-// seeder's key rotated"), and the call after it stops at its put.
+// seeder's key rotated"), and the call after it stops at its put. The job
+// stays, so the next kick retries it.
 async function staleHeldRun (t, failAt) {
   const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
-  const local = {
-    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
-    seenToken: () => 'f'.repeat(64),
-    hasMedia: () => false,
-    seal: (v) => v,
-    open: (v) => v
-  }
+  const sealer = await openStore(t)
+  const local = stubLocal(sealer, [row])
   const stamped = []
   let puts = 0
   const blobs = {
@@ -339,27 +356,23 @@ async function staleHeldRun (t, failAt) {
       if (puts > failAt) throw new UsageError('parou aqui')
     }
   }
-  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs })
-  const first = await e.copy.historyCopy(SELF, {}).catch((err) => err)
-  t.ok(first instanceof UsageError && first.message === 'mídia recusada pelo semeador', 'the refused frame fails the copy')
-  const second = await e.copy.historyCopy(SELF, {}).catch((err) => err)
-  t.ok(second instanceof UsageError && second.message === 'parou aqui', 'the retry got as far as its put')
+  const e = await autoEngine(t, sealer, local, { blobs })
+  await e.copy.autoCopy(SELF, {}, VIEW)
+  t.is(e.logs.length, 1, 'the refused frame ends the run')
+  t.is((await autoRecord(e, sealer)).job.id, e.job.id, 'and the job stays for the next kick')
+  await e.copy.autoCopy(SELF, {}, VIEW)
+  t.is(puts, failAt + 1, 'the retry got as far as its put')
   return stamped
 }
 
-test('between the batches of the reservation the copy shows progress and stops at a lock', async (t) => {
+test('between the batches of the reservation the copy stops at a lock', async (t) => {
   const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
-  const local = {
-    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
-    seenToken: () => 'f'.repeat(64),
-    hasMedia: () => false,
-    seal: (v) => v,
-    open: (v) => v
-  }
+  const sealer = await openStore(t)
+  const local = stubLocal(sealer, [row])
   let unlocked = true
   const answers = []
   const stops = []
-  const events = []
+  const counts = { stamps: 0, puts: 0 }
   const blobs = {
     // The text needs 3 stamps: with a chunk of 1, three batches.
     copySource: () => ({
@@ -374,61 +387,20 @@ test('between the batches of the reservation the copy shows progress and stops a
         return []
       }
     }),
-    stamp: async () => { throw new Error('nothing is stamped after a lock') },
-    put: async () => { throw new Error('nothing is put after a lock') }
+    stamp: async () => { counts.stamps++ },
+    put: async () => { counts.puts++ }
   }
-  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, unlocked: () => unlocked, emit: (name, data) => events.push([name, data]) })
-  const err = await e.copy.historyCopy(SELF, {}).catch((x) => x)
-  t.ok(err instanceof UsageError, 'the lock ends the copy')
+  const e = await autoEngine(t, sealer, local, { blobs, unlocked: () => unlocked })
+  await e.copy.autoCopy(SELF, {}, VIEW)
   t.alike(answers, [true, true, false], 'the reservation goes on while unlocked and stops after a lock')
   t.alike(stops, [false, true], 'the stop predicate is the lock, so a purchase in progress ends at once')
-  t.alike(events, [
-    ['dm.copyProgress', { done: 0, total: 5 }],
-    ['dm.copyProgress', { done: 1, total: 5 }],
-    ['dm.copyProgress', { done: 2, total: 5 }]
-  ], 'one step per batch: total is the 2 fixed steps plus the 3 batches, and done moves after each')
+  t.alike(counts, { stamps: 0, puts: 0 }, 'nothing is stamped or put after the lock')
 })
 
-test('the reservation batches are steps of the progress, and the unbought ones count as done when it ends early', async (t) => {
+test('a retry that holds the stamps does not buy them again', async (t) => {
   const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
-  const local = {
-    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
-    seenToken: () => 'f'.repeat(64),
-    hasMedia: () => false,
-    seal: (v) => v,
-    open: (v) => v
-  }
-  const events = []
-  const blobs = {
-    // 3 stamps in batches of 2: two batches, but the allowance ends after one.
-    copySource: () => ({
-      chunk: 2,
-      reserve: async (n, between) => {
-        await between(2)
-        return [{ token: 'held-0' }, { token: 'held-1' }]
-      },
-      take: async () => { throw new UsageError('sem selo') }
-    }),
-    stamp: async (sealed, keyPair, source) => { await source.take(1) },
-    put: async () => { throw new Error('parou aqui') }
-  }
-  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, emit: (name, data) => events.push(data) })
-  await e.copy.historyCopy(SELF, {}).catch(() => null)
-  t.alike(events, [{ done: 0, total: 4 }, { done: 1, total: 4 }, { done: 2, total: 4 }], 'one step per batch, then done = the batches')
-})
-
-test('a retry that holds the stamps has no batch to count', async (t) => {
-  const media = [{ id: '1'.repeat(64), key: '1'.repeat(64), nonce: '1'.repeat(48), chunks: 1, bytes: 1016, sha256: '1'.repeat(64), mime: 'image/png', w: 64, h: 48 }]
-  const row = { t: 'msg', id: id('1'), peer: PEER, from: SELF, text: 'foto', replyTo: null, fwd: 0, media, card: null, at: AT, mine: true, filedAt: 1700000000001 }
-  const local = {
-    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
-    seenToken: () => 'f'.repeat(64),
-    hasMedia: () => true,
-    getMedia: async () => [new Uint8Array(1000).fill(1)],
-    seal: (v) => v,
-    open: (v) => v
-  }
-  const events = []
+  const sealer = await openStore(t)
+  const local = stubLocal(sealer, [row])
   let puts = 0
   let reserves = 0
   const blobs = {
@@ -445,20 +417,17 @@ test('a retry that holds the stamps has no batch to count', async (t) => {
     stamp: async () => {},
     put: async () => {
       puts++
-      // The photo fails the first time, then goes; the part stops the run.
+      // The part fails the first time, then goes; the manifest stops the run.
       if (puts === 1) throw new Error('rede caiu')
       if (puts === 3) throw new Error('parou aqui')
     }
   }
-  const e = await engine(t, { local, personal: { local, prefix: '', page: null }, blobs, mediaItem: (d) => d, emit: (name, data) => events.push(data) })
-  const first = await e.copy.historyCopy(SELF, {}).catch((x) => x)
-  t.ok(first instanceof Error && first.message === 'rede caiu', 'the photo failed the first call')
-  t.alike(events, [{ done: 0, total: 5 }, { done: 1, total: 5 }, { done: 2, total: 5 }, { done: 2, total: 5 }], 'the photo, the 2 fixed steps and 2 batches')
-  events.length = 0
-  const second = await e.copy.historyCopy(SELF, {}).catch((x) => x)
-  t.ok(second instanceof Error && second.message === 'parou aqui', 'the retry got as far as the part')
+  const e = await autoEngine(t, sealer, local, { blobs })
+  await e.copy.autoCopy(SELF, {}, VIEW)
+  t.is(puts, 1, 'the part failed the first run')
+  await e.copy.autoCopy(SELF, {}, VIEW)
+  t.is(puts, 3, 'the retry got as far as the manifest')
   t.is(reserves, 1, 'the held stamps are reused, not bought again')
-  t.alike(events, [{ done: 0, total: 3 }, { done: 1, total: 3 }], 'no batch: the photo and the 2 fixed steps')
 })
 
 test('a part refused as invalid drops the held stamps: the retry buys fresh ones', async (t) => {
@@ -601,7 +570,7 @@ async function ownImport (t, interrupt) {
     const [todo] = await todoOf(e)
     t.ok(todo && Number.isSafeInteger(todo.horizons.own), 'the horizon was kept with the todo before the first chunk')
     t.is(e.s.snapshot().messages.length, 501, 'only the first chunk was filed')
-    await createDmCopy(e.env).importAll(SELF)
+    await told(e.env).importAll(SELF)
   } else {
     await e.copy.importAll(SELF)
   }
@@ -641,7 +610,7 @@ async function pageImport (t, interrupt) {
     heal()
     t.is(pageStore.snapshot().messages.length, 501, 'only the first chunk was filed')
     t.is((await store.readCopyPend(e.storage)).length, 1, 'the entry waits for the rest')
-    await createDmCopy(e.env).importAll(SELF)
+    await told(e.env).importAll(SELF)
   } else {
     await e.copy.importAll(SELF)
   }
@@ -666,24 +635,15 @@ test('the pointer is put in the bucket of the own box it is sealed to', async (t
   const keyPair = crypto.keyPair()
   const self = b4a.toString(keyPair.publicKey, 'hex')
   const row = { t: 'msg', id: id('1'), peer: PEER, from: self, text: 'oi', replyTo: null, fwd: 0, media: null, card: null, at: AT, mine: true, filedAt: 1700000000001 }
-  // The copy state is sealed by a real store, as the node's own.
   const sealer = await openStore(t)
-  const local = {
-    snapshot: () => ({ messages: [row], ops: [], reactions: [] }),
-    seenToken: () => 'f'.repeat(64),
-    hasMedia: () => false,
-    seal: (v) => sealer.seal(v),
-    open: (v) => sealer.open(v)
-  }
+  const local = stubLocal(sealer, [row])
   const blobs = {
     copySource: () => ({ chunk: 256, reserve: async () => [], take: async (n) => Array.from({ length: n }, () => ({})) }),
     stamp: async (sealed, kp, source) => { await source.take(1) },
     put: async () => {}
   }
   const puts = []
-  const e = await engine(t, {
-    local,
-    personal: { local, prefix: '', page: null },
+  const e = await autoEngine(t, sealer, local, {
     blobs,
     boxHex: () => ({ box: boxKey, gen: 1 }),
     takeStamps: async (n) => Array.from({ length: n }, () => ({})),
@@ -699,7 +659,10 @@ test('the pointer is put in the bucket of the own box it is sealed to', async (t
     refusal: (reason) => new UsageError(reason),
     unconfirmed: () => new UsageError('incerto')
   })
-  const made = await e.copy.historyCopy(self, keyPair)
-  t.is(made.messages, 1)
+  await e.copy.autoCopy(self, keyPair, VIEW)
+  t.alike(e.logs, [], 'the copy went')
   t.alike(puts, [dmCore.bucketPrefix(boxKey)], 'one put, tagged with the own bucket')
+  const rec = await autoRecord(e, sealer)
+  t.is(rec.job, null, 'with no photo to send the job ends after the text')
+  t.ok(rec.claims[0].done, 'and its claim is done')
 })

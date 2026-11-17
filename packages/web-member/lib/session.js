@@ -538,6 +538,9 @@ const DM_PULL_EVERY_MS = 120000
 // The published dm-key checks after a pull (checkPageKeys), all pages at once.
 const PAGE_KEY_CHECK_MS = 8000
 const DM_TICK_MS = 60000
+// How long the automatic history copy reuses a device view while the own
+// diary keeps its length (copyKick).
+const COPY_VIEW_MS = 600000
 const DM_LOOKUP_WINDOWS = 8
 // An internal wire window of the node's own peeks, not an rpc page cap.
 const PEEK_WINDOW = 36
@@ -1052,6 +1055,11 @@ function createBrowserSession ({
   // The last `off` sent in devices.changed for the current key pair, and
   // the own length last checked for it.
   let deviceOffSent = false
+  // The key pair of the unlock a run (once or continuous) caught the own
+  // diary up for, or null: until then the history copy is not told this
+  // device is on (feedDevice). The continuous run clears it when its link
+  // drops or the own diary falls behind (holdCopyImports).
+  let ownCaught = null
   let deviceCheckLength = null
   let mediaKeyPair = null
   let groupPrf = null
@@ -1344,6 +1352,7 @@ function createBrowserSession ({
         checkPageKeys().catch(noop)
         visitPull(own, identityTarget)
       }
+      copyKick().catch(noop)
       if (keyPair !== null) await dmEngine.topUp(keyPair)
     } catch {}
   }
@@ -1480,6 +1489,10 @@ function createBrowserSession ({
                   event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
                 }
                 event('diário próprio sincronizado (' + safe(String(ev.length)) + ')')
+                if (keyPair !== null && run === r) {
+                  ownCaught = keyPair
+                  dmEngine.holdImports(false)
+                }
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
@@ -1594,6 +1607,7 @@ function createBrowserSession ({
                 synced = false
                 seederDownAt = null
                 r.ownSynced = false
+                holdCopyImports(r)
                 event('diário próprio atrasado (' + safe(String(ev.length)) + '/' + safe(String(ev.theirs)) + ')')
                 return
               case 'link-closed':
@@ -1601,6 +1615,7 @@ function createBrowserSession ({
                 r.groupBehind.clear()
                 synced = false
                 r.ownSynced = false
+                holdCopyImports(r)
                 // A 'peer' or verified link does not clear it: the own
                 // state is unknown until the inventory completes.
                 seederDownAt = Date.now()
@@ -2993,10 +3008,82 @@ function createBrowserSession ({
         if (out === null || run !== r || keyPair !== kp || epoch !== connection) continue
         deviceCheckLength = next
         noteDeviceOff(out.off, epoch)
+        // An off record only adds up, so off read on a diary still behind is
+        // already true: the copy stops now, not when the run catches up.
+        if (out.off === true) feedDevice({ self: null, off: true })
+        copyKick().catch(noop)
       }
     } finally {
       deviceChecking = false
     }
+  }
+
+  // The automatic history copy (./dm-copy.js): this device's id, state and
+  // copy targets read on the run's cores (borrowed as deviceCheck does: a run
+  // that cannot lend them skips it, never preempted), then the engine's job.
+  // Not awaited and not a dmCall: a same-key setKeyPair must not wait for a
+  // copy that takes minutes; the engine's lock stops it. Never throws.
+  // The last view read, reused while the own diary keeps its length: the
+  // tick kicks every minute, and the view reads the whole own diary.
+  // COPY_VIEW_MS bounds it so a target still leaves the window on time.
+  let copyKicking = false
+  let copyViewLast = null
+  async function copyKick () {
+    if (copyKicking) return
+    copyKicking = true
+    try {
+      const r = run
+      // Only on an own diary this run caught up: one that lags may still
+      // show a disconnected device as on.
+      if (closed || keyPair === null || ownKey === null || r === null || r.once || !r.ownSynced || !dmEngine.unlocked()) return
+      if ((await store.readDmKey(storage)) === null) return
+      const own = ownKey
+      const kp = keyPair
+      const api = await readyWithin(r.ready, 0)
+      if (api === NOT_READY || api === null || !api.hold()) return
+      let view = null
+      try {
+        const length = api.diary && Number.isSafeInteger(api.diary.length) ? api.diary.length : null
+        const last = copyViewLast
+        if (length !== null && last !== null && last.r === r && last.kp === kp && last.length === length && Date.now() - last.at < COPY_VIEW_MS) {
+          view = last.view
+        } else {
+          view = await member.deviceCopyView({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group, opened: undefined, settled: undefined } })
+          copyViewLast = view === null || length === null ? null : { r, kp, length, at: Date.now(), view }
+        }
+      } catch (err) {
+        if (!member.isNeedsExclusive(err)) throw err
+      } finally {
+        api.release()
+      }
+      if (view === null || closed || run !== r || !r.ownSynced || keyPair !== kp || ownKey !== own || !dmEngine.unlocked()) return
+      dmEngine.setDevice(view)
+      dmEngine.autoCopy(own, kp, view).catch(noop)
+    } catch {
+    } finally {
+      copyKicking = false
+    }
+  }
+
+  // This device's state for the history copy, from device.hello,
+  // device.list or deviceCheck: off at once, on only once the own diary is
+  // caught up, by a run of this unlock or by the live continuous run (one
+  // read before that, as an app open after days offline reads it, may not
+  // hold the record that turned this device off), so until then an import
+  // waits. copyKick gives it with the targets later.
+  function feedDevice (v) {
+    if (v.off === true || trackingOwn() || (keyPair !== null && ownCaught === keyPair)) dmEngine.setDevice(v)
+  }
+
+  // The live continuous run lost its link or its own diary fell behind: a
+  // record that turns this device off may be on the way, so the device state
+  // the copy engine holds may be stale. Imports wait until the own diary is
+  // caught up again (own-synced releases them); a copy this device makes
+  // goes on, checked against its own targets.
+  function holdCopyImports (r) {
+    if (run !== r || r.once) return
+    ownCaught = null
+    dmEngine.holdImports(true)
   }
 
   function scheduleDeviceCheck (length) {
@@ -5120,17 +5207,20 @@ function createBrowserSession ({
       const quick = await withCores((c) => member.deviceHello(c, { name }, { write: false }))
       if (quick !== null) {
         noteDeviceOff(quick.off, epoch)
+        feedDevice({ self: quick.id, off: quick.off })
         return quick
       }
       await ensureCaughtUp(epoch)
       const r = await deviceWrite((c) => member.deviceHello(c, { name }))
       noteDeviceOff(r.off, epoch)
+      feedDevice({ self: r.id, off: r.off })
       return r
     }),
     'device.list': serial(async (_, epoch) => {
       await requireUnlocked()
       const r = await withCores((c) => member.deviceList(c))
       noteDeviceOff(r.off, epoch)
+      feedDevice({ self: r.self, off: r.off })
       return r
     }),
     // The cuts need no group key; the rotation after them is best effort
@@ -5722,21 +5812,6 @@ function createBrowserSession ({
       }
     },
 
-    // Copies the conversation history for the other devices of this identity
-    // (docs/rpc.md 5.156). Not on the chain: a copy takes minutes (paced
-    // stamps and puts) and must not hold up sends. One at a time, in the
-    // engine; it runs only on this call and repeats nothing by itself.
-    'dm.historyCopy': async () => {
-      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      const ident = identityTarget
-      const own = await dmIdentity({}, ident)
-      try {
-        return await withDmReady(ident, () => dmEngine.historyCopy(own, keyPair))
-      } catch (err) {
-        throw toRpcError(err, reportInternal)
-      }
-    },
-
     // With `page` (5.114) the page's conversations, held under its secrets;
     // the member's own blocks do not apply to them.
     'dm.list': serialDmList(async (params) => {
@@ -5972,6 +6047,7 @@ function createBrowserSession ({
     noticeCtxCache = null
     zeroPair(keyPair)
     keyPair = null
+    ownCaught = null
     keyFresh = false
     deviceOffSent = false
     deviceCheckLength = null

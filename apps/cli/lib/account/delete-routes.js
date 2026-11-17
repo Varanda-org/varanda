@@ -4,6 +4,7 @@ const nodeCrypto = require('node:crypto')
 const { verifyAccountLink } = require('@varanda/core/lib/account-link')
 const { verifyAssertion, isAssertion } = require('./webauthn')
 const { countedKeys } = require('./passkey-store')
+const { ownsLivePage: ownsLive } = require('./live-page')
 
 // Excluir conta (README "Excluir conta", docs/protocol.md "Account
 // deletion"): the member asks, from the app, to delete the account. Mounted
@@ -130,12 +131,9 @@ function createDeleteRoutes ({ accounts, moderation = null, pagesStore = null, p
     return isBlocked(member) ? 'concluida' : 'pendente'
   }
 
-  // Pages the member owns that are neither closed nor moved. A store that
-  // cannot answer refuses: deleting the owner would orphan the page.
   function ownsLivePage (member) {
-    if (pagesStore === null) return false
     try {
-      return pagesStore.listFor(member).owned.some((p) => !p.closed && p.movedTo === null)
+      return ownsLive(pagesStore, member)
     } catch {
       throw refuse('indisponivel')
     }

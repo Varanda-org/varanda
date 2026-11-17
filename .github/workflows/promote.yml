@@ -3,7 +3,11 @@
 #
 # A maintainer runs it by hand on main with the commit to promote. It accepts
 # only a commit on main whose seeder image (ghcr.io/varanda-org/varanda-seeder,
-# tag sha-<commit>) carries a keyless signature from release.yml on main. It
+# tag sha-<commit>) carries a keyless signature from release.yml on main.
+# With the commit left empty it promotes the release on the edge channel, the
+# newest one release.yml published at the tip of main, under the same checks.
+# That release is read only after the release-stable approval, so whoever
+# approves sees the commit in the summary, not in the request. It
 # then signs that same digest with this workflow's identity (servers on the
 # stable channel require it) and moves :stable by digest, web first and seeder
 # last, reading each tag back from the registry. A seq lower than or equal to
@@ -34,16 +38,18 @@
 #   3. Only then, Settings > Secrets and variables > Actions > Variables:
 #      VARANDA_PROMOTE = true (any other value pauses promotions).
 #
-# Run: Actions > promote > Run workflow on main, commit = the 40-character SHA.
+# Run: Actions > promote > Run workflow on main, commit = the 40-character SHA,
+# or empty for the edge release.
 name: promote
 
 on:
   workflow_dispatch:
     inputs:
       commit:
-        description: 'Commit on main to promote (40 lower-case hex characters)'
-        required: true
+        description: 'Commit on main to promote (40 lower-case hex characters); empty promotes the edge release'
+        required: false
         type: string
+        default: ''
       allow_older:
         description: 'Allow a seq lower than or equal to the current stable (rollback)'
         required: false
@@ -87,6 +93,10 @@ jobs:
 
       - name: Check the commit
         run: |
+          if [ -z "$COMMIT" ]; then
+            echo "Sem commit: promove a versão do canal edge."
+            exit 0
+          fi
           if ! [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::o commit precisa ter 40 caracteres hexadecimais minúsculos"
             exit 1
@@ -145,11 +155,20 @@ jobs:
               return 1
             fi
           }
-          if ! digest="$(digest_of "$SEEDER:sha-$COMMIT")"; then
+          if [ -n "$COMMIT" ]; then
+            ref="$SEEDER:sha-$COMMIT"
+          else
+            ref="$SEEDER:edge"
+          fi
+          if ! digest="$(digest_of "$ref")"; then
             exit 1
           fi
           if [ -z "$digest" ]; then
-            echo "::error::$SEEDER:sha-$COMMIT não existe: esta versão não foi publicada pelo release; publique a ponta ou escolha um commit publicado"
+            if [ -n "$COMMIT" ]; then
+              echo "::error::$ref não existe: esta versão não foi publicada pelo release; publique a ponta ou escolha um commit publicado"
+            else
+              echo "::error::$ref não existe: o release ainda não publicou nenhuma versão"
+            fi
             exit 1
           fi
           docker pull "$SEEDER@$digest"
@@ -217,10 +236,16 @@ jobs:
             exit 1
           fi
           read -r rel_commit seq web_digest <<< "$out"
-          if [ "$rel_commit" != "$COMMIT" ]; then
+          if [ -z "$COMMIT" ]; then
+            if ! git merge-base --is-ancestor "$rel_commit" origin/main; then
+              echo "::error::a versão do edge aponta o commit $rel_commit, que não está em origin/main"
+              exit 1
+            fi
+          elif [ "$rel_commit" != "$COMMIT" ]; then
             echo "::error::release.json aponta o commit $rel_commit, não $COMMIT"
             exit 1
           fi
+          echo "RELEASE_COMMIT=$rel_commit" >> "$GITHUB_ENV"
 
           stable=unknown
           stable_seq=""
@@ -356,7 +381,7 @@ jobs:
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| commit | \`$COMMIT\` |"
+            echo "| commit | \`$RELEASE_COMMIT\` |"
             echo "| seq | $SEQ |"
             echo "| seeder | \`$SEEDER@$SEEDER_DIGEST\` |"
             echo "| web | \`$WEB@$WEB_DIGEST\` |"
