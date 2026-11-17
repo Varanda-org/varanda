@@ -869,6 +869,19 @@ function walkHasRoom (joins, marks, G, extra = []) {
   }
 }
 
+// The cut a diary's slot walk for G gives its writer W, as a seeder keeps W
+// (seeder.js groupWalkCut): 0 once released, its lowest cut while counted,
+// null with none. `entries`: the diary's records as read ({ seq, record }).
+// Never throws.
+function diaryWriterCut (entries, G, W) {
+  try {
+    const w = slotWalk(groupJoinHistory(entries, G), groupCutHistory(entries, G), G)
+    if (w.released.has(W)) return 0
+    if ((w.live.has(W) || w.frozen.has(W)) && w.cut.has(W)) return w.cut.get(W)
+  } catch {}
+  return null
+}
+
 function slotWalkResult (s, gap = false, bound = false) {
   const live = new Set()
   const frozen = new Set()
@@ -3929,6 +3942,7 @@ module.exports = {
   groupCutHistory,
   groupConfirmHistory,
   slotWalk,
+  diaryWriterCut,
   slotWalkState,
   replacedWriterCut,
   slotWalkStep,
