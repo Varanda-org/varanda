@@ -185,17 +185,17 @@ A revisão do PR pediu as mudanças abaixo, em duas levas. Commits: `6d4d0614` (
 
 O que mudou, nos dois nós salvo quando dito:
 
-- Uma raiz que passa pelo portão como raiz do próprio grupo, depois de guardada como toco de outro grupo, sai do registro (antes só um escritor saía). Na partida, um registro sozinho nunca apaga um núcleo que é mais que um toco aqui: a raiz de um grupo de `groups.json` (navegador: kv `groupWriters`), um núcleo com um bloco além do 0, ou um escritor de um desses grupos cujo diário do próprio cabeçalho, como guardado, o ligou (`beyondStub`). Esse núcleo só sai do registro, e a partida o lê pelo próprio cabeçalho. Isso também cobre uma falha de `saveHeaderStubs`: um registro que ficou para trás não apaga um núcleo inteiro. A partida do nó core também apaga um toco cujo grupo está bloqueado; a do navegador tira do registro uma chave que o aparelho escreve.
+- Uma raiz que passa pelo portão como raiz do próprio grupo, depois de guardada como toco de outro grupo, sai do registro (antes só um escritor saía). Na partida, um registro sozinho nunca apaga um núcleo que é mais que um toco aqui: a raiz de um grupo de `groups.json` (navegador: kv `groupWriters`), um núcleo com um bloco além do 0 (na rodada 2 esse fica com o registro), ou um escritor de um desses grupos cujo diário do próprio cabeçalho, como guardado, o ligou (`beyondStub`). Esse núcleo só sai do registro, e a partida o lê pelo próprio cabeçalho. Isso também cobre uma falha de `saveHeaderStubs`: um registro que ficou para trás não apaga um núcleo inteiro. A partida do nó core também apaga um toco cujo grupo está bloqueado; a do navegador tira do registro uma chave que o aparelho escreve.
 - Nó core: o bloco 0 de uma chave que nunca pode contar para o diário listado fica na memória do processo (`MAX_HEAD_BLOCKS` = 256 chaves, cada bloco até `MAX_BLOCK_BYTES`, o mais antigo sai primeiro), e uma dica nova da mesma chave só prova o diário. No navegador, `MAX_GATE_HINTS` (4) já limita as listagens que passam pelo portão por chave numa execução, então nada mudou ali.
 - Nó core: um portão que falha pela listagem (prazo, dica refutada, recusa por veredito deste nó ou pelos dados do próprio escritor) testa de novo, na hora, as listagens da chave sob os outros grupos do nó (`rescanElsewhere`), que esperavam enquanto o portão segurava a chave. Na hora, como `rescanGroup`: numa execução `--once`, um portão que era o último em andamento encerraria a execução antes de um teste adiado.
 - O teto do registro: o texto de "Data-dir files" dizia "o mais novo fica", mas nenhum toco sai por um novo, que é recusado como `quota`. Agora um portão reserva a vaga desde a checagem do teto até o registro entrar ou a entrada sair (`stubSlots` no nó core, `ge.stubSlot` no navegador), então portões em andamento nunca registram além do teto.
 - Nó core: uma listagem recusada por `quota` com o registro cheio fica numa memória por dica (no máximo 256, o mais antigo sai primeiro) e não passa pelo portão de novo a cada página; quando um toco sai do registro (cede, é apagado ou sai na passagem pelo portão), o grupo dela é testado de novo (`stubSlotFreed`).
 - Nó core: todo apagamento do núcleo de um toco tira o registro (`purgeKey`).
-- Nó core: um veredito sobre a listagem de um toco ou sobre o diário que o provou nunca apaga o toco; só um veredito sobre a própria chave apaga (a chave bloqueada, a bifurcação dela, a divergência, a vaga do limite por diário que ele cede, `own: true`). Uma chave que o nó guarda em outro papel (o próprio diário ou um escritor deste aparelho, um diário seguido, um diário de ligação) nunca é apagada por um veredito sobre um núcleo de grupo, salvo bloqueada.
+- Nó core (mudou na rodada 2: um toco desta execução sai com a listagem, e o bloqueio ou a revogação do par que provou um toco revê o registro na hora): um veredito sobre a listagem de um toco ou sobre o diário que o provou nunca apaga o toco; só um veredito sobre a própria chave apaga (a chave bloqueada, a bifurcação dela, a divergência, a vaga do limite por diário que ele cede, `own: true`). Uma chave que o nó guarda em outro papel (o próprio diário ou um escritor deste aparelho, um diário seguido, um diário de ligação) nunca é apagada por um veredito sobre um núcleo de grupo, salvo bloqueada.
 - Navegador: um núcleo guardado antes do portão só vira toco quando kv `headerStubs` o registra; senão fica com o veredito do cabeçalho, como antes. `failGroupEntry` nunca apaga um toco guardado antes desta execução por um veredito sobre a listagem ou o diário, salvo com a própria chave bloqueada.
 - Navegador: o cache da caminhada de um diário de ligação sai quando o núcleo dele fecha (`dropWalk`), como no nó core.
 - `docs/protocol.md`: as regras (1), (2) e (3) de "Bad hints", o item "Header stubs" (a raiz de outro grupo, a reserva da vaga, os vereditos que apagam, o registro que sai com o núcleo, a partida) e uma frase de compatibilidade: um bloco 0 que esta versão não decodifica conta como (b), então uma versão nova de cabeçalho deixa os escritores dela de fora nos nós antigos até eles atualizarem.
-- Navegador: a varredura dos núcleos guardados depois de um bloqueio (`purgeKeptGroupCores`, de `purgeGroupCoresOf` e `stopBlockedGroup`) deixa um toco registrado para a próxima partida, salvo com a própria chave bloqueada: o bloqueio do diário que o provou ou do grupo da listagem é veredito sobre a listagem.
+- Navegador (mudou na rodada 2, com a revisão do registro na hora): a varredura dos núcleos guardados depois de um bloqueio (`purgeKeptGroupCores`, de `purgeGroupCoresOf` e `stopBlockedGroup`) deixa um toco registrado para a próxima partida, salvo com a própria chave bloqueada: o bloqueio do diário que o provou ou do grupo da listagem é veredito sobre a listagem.
 
 Testes novos desta rodada, nó core (`packages/core/test/sync-groups-8.test.js`):
 
@@ -281,6 +281,106 @@ Decisões desta rodada e o que ficou sem teste próprio:
 - A vaga do limite por diário que um toco cede a um join provado mais cedo é veredito sobre a própria chave (`own: true`) e apaga o toco, como antes.
 - Um bloco 0 maior que `MAX_BLOCK_BYTES` não fica na memória `headBlocks`: uma dica nova da chave lê o bloco de novo.
 - Sem teste próprio: a regra de `heldElsewhere` (só pesa num veredito sobre a própria chave, como bifurcação, divergência ou a vaga cedida, de uma chave que o nó guarda em outro papel); a reserva da vaga no navegador (`ge.stubSlot`; no nó core o teste dos portões em andamento a cobre, C5); a limpeza do cache da caminhada no navegador (`dropWalk`).
+
+## Rodada de revisão 2
+
+A revisão e a auditoria de `6d4d0614..0dc5e2ae` pediram as mudanças abaixo (itens A a F). Os commits desta rodada são os que vêm depois de `0dc5e2ae`.
+
+O que mudou:
+
+- A, nó core e navegador. Na partida, um bloco além do 0 guardado só impede que o toco seja apagado: o registro fica, e com ele a vaga do limite sob o par que provou o toco (`loadDiskSlots`). Uma listagem de outra chave pode fazer o nó guardar esse bloco, então ele não prova nada. Só a raiz de um grupo de `groups.json` (navegador: kv `groupWriters`) e um escritor que o diário do próprio cabeçalho ligou saem do registro (`beyondStub` devolve `'root'`, `'joined'`, `'held'` ou `false`; `PROVEN_STUB`).
+- A, nó core. Quando o diário de uma dica é lido por uma réplica do armazenamento principal (`replicaStored`/`openMain`), o bloco 0 dela é lido e julgado como registro de diário antes do bloco `e.seq`. Um núcleo guardado por outro motivo (um toco, um núcleo de grupo) nunca recebe assim um bloco posterior. Uma dica não é recusada só porque a chave do diário é um toco registrado ou um núcleo de grupo.
+- B, nó core. Quando o registro de um toco sai porque a chave passou pelo portão inteira sob outro par, a vaga que ele ocupava no par que o provou sai junto (`leaveRecord`, com `slotFreed`). Na saída de uma vaga guardada pelo limite do par, uma chave aceita aqui sob outro par, guardada em outro papel ou cujo registro não nomeia mais esse par só perde a vaga, sem ser apagada. Os caminhos de `condemnGroupCore` que apagam direto também respeitam `heldElsewhere`.
+- C, nó core. `failGroupCore` só poupa um toco guardado em outro papel (`heldElsewhere`) ou guardado antes desta execução (`e.wasStored`); um toco desta execução sai com a listagem e leva o registro (`purgeKey`). Quando um snapshot bloqueia ou revoga um diário ou bloqueia um grupo, cada registro que o nomeia é revisto na hora, como na partida (`reviewStubRecords`): o toco é apagado com o registro, salvo guardado em outro papel, seguido, raiz de um grupo de `groups.json` ou escritor ligado pelo diário do próprio cabeçalho (aí só o registro sai). `groupsAdopted` deixa para essa revisão o toco guardado antes, aceito sob o par do registro.
+- C, navegador. `failGroupEntry` ganha `review`: um toco guardado antes desta execução continua poupado por um veredito sobre a listagem, mas não pela revisão do registro. `dropGroupsOfDiary` e `stopBlockedGroup` deixam o toco guardado antes, aceito sob o par do registro, para `reviewStubRecords`, que apaga o toco (ativo, em nova checagem, falho mas guardado, ou em repouso) com o registro, salvo raiz de um grupo de kv `groupWriters` ou escritor ligado pelo diário do cabeçalho (`provenBeyondStub`). `purgeKeptGroupCores` continua deixando um toco registrado para essa revisão.
+- D, nó core. A checagem tardia da caixa em `onGroupGate` não vale para um toco (`r.stub`): o toco é guardado pelo bloco 0, nunca pela caixa.
+- E, nó core. Um bloco 0 conhecido de uma chave que só pode ser toco é recusado como `quota` antes de ler o diário da dica quando o registro está cheio.
+- F, nó core. Teste da regra `heldElsewhere`.
+- `docs/protocol.md`, item "Header stubs": a leitura do bloco 0 do diário da dica, os vereditos que apagam um toco desta execução, a revisão do registro no bloqueio ou na revogação, a vaga que sai com o registro, e o bloco além do 0 que mantém o registro.
+- Gancho de teste `diskSlotOf(key)` em `inspectHook`.
+
+Testes novos ou mudados, nó core (`packages/core/test/sync-groups-8.test.js`):
+
+- "at start a record alone never purges the root of a listed group or a writer its header's diary joined" (mudou: o núcleo além do bloco 0 saiu deste teste) e "at start a recorded stub holding a block past 0 is not purged, and keeps its record and the slot of the pair that proved it" (A).
+- "a listing whose diary is a stub held here never makes this node store a later block of it, and the stub keeps its record and slot across a restart" (A): Ki, toco de (G, Da) cujo cabeçalho nomeia (G, Dv); uma listagem de Z com o diário Ki e seq 1 é recusada, o bloco 1 de Ki nunca é guardado, e depois de reiniciar o registro fica e o 32º escritor de Dv baixa inteiro.
+- "a slot a stub record held never purges a core gated here under another pair or held in another role when the cap of the pair that proved it fills" (B): K e KD, tocos de (G, Da); K passa inteiro sob D2 (a vaga de (G, Da) sai na hora) e KD liga X; os 32 escritores de Da não apagam nenhum dos dois.
+- "a recorded stub gated as a stub of another pair is never refused when the cap of the pair that proved it fills" (B): K, toco registrado de (G, Da), aceito como toco de (G, Dx); os 32 escritores de Da não o recusam.
+- "a block of the diary that proved a stub stored in this run purges the stub with its record" (C, era "a verdict on the diary that proved a stub leaves the stub's core in place").
+- "a block of the diary that proved a stub stored before this run purges the stub in the same run" (C).
+- "a block of the diary that proved a stub leaves the stub's core in place while it is held here in another role" (F): D2, toco de (G, DX) e diário de ligação de W; o bloqueio de DX tira o toco da tabela, e D2 e W ficam.
+- "a stub stays held when its root's visibility is learned while its gate runs" (D).
+- "a stub refused for a full record is refused before its diary is read when a new hint lists it" (E).
+
+Navegador (`packages/web-member/test/sync-groups-4.test.js`):
+
+- "a group root first held as a stub of another group leaves the record once gated as its root, and a record alone never purges it at start, where a block past 0 keeps the record" (A, mudou): com um registro escrito à mão e duas partidas sem semeador, a raiz fica inteira e o registro fica.
+- "a block of the diary that proved a stub stored in this run purges the stub with its record" (C).
+- "a block of the diary that proved a stub stored before this run purges the stub in the same run" (C, era "a verdict on the diary that proved a recorded stub leaves the stub's core in place").
+
+Prova de regressão desta rodada: cada mutação tira uma parte da correção, roda sozinho o teste que a cobre (`VARANDA_TEST_CONCURRENCY=1`) e volta o código.
+
+Nó core:
+
+- A1, um bloco além do 0 tira o registro na partida: o teste do bloco além do 0 falha nas asserções do registro e da vaga, nas duas partidas (4/8).
+- A2, o bloco 0 do diário da dica não é julgado antes do bloco `e.seq`: o teste da listagem com o diário Ki falha em "and Ki's block 1 is never stored" (7/8).
+- B1, o registro sai e deixa a vaga sob o par que provou o toco: o teste da vaga falha em "K's slot of (G, Da) went with its record when K was gated in full" (6/7).
+- B2, a saída de uma vaga guardada apaga o que a ocupa: o teste do toco aceito sob outro par falha em "K is never refused" (3/4).
+- B3, `condemnGroupCore` apaga uma chave guardada em outro papel: sozinha não é pega, porque o único caminho que chega lá com essa chave passa antes pela checagem de B2. Com B2 e B3 tiradas juntas, o teste da vaga falha em "KD, the binding diary of X, stays" (5/6).
+- C1, `failGroupCore` poupa um toco desta execução: o teste do toco desta execução falha em "the stub leaves the table for its diary" (dois vereditos, 2/3).
+- C2a, sem a revisão do registro no bloqueio: o teste do toco guardado antes falha (1/4: o toco fica, com o registro).
+- C2b, `groupsAdopted` julga também o toco guardado antes sob o par do registro: o mesmo teste falha em "the stub leaves the table for its diary, once" (3/4).
+- D, a checagem tardia da caixa vale para um toco: o teste da visibilidade falha (1/4: o toco é recusado pela caixa).
+- E, o diário da dica é lido com o registro cheio: o teste falha em "the new hint's diary is never read" (1/2).
+- F, `failGroupCore` apaga uma chave guardada em outro papel: o teste F falha em "but D2, the binding diary of W, stays" (2/4).
+
+Navegador:
+
+- WA1, um bloco além do 0 tira o registro na partida: o teste da raiz falha em "and keeps its record", nas duas partidas (20/22, contando as asserções do `stubWorld`).
+- WC1, `failGroupEntry` poupa também um toco desta execução: o teste do toco desta execução falha em "once, for the blocked diary that proved it" (a revisão do registro apaga depois, com um segundo veredito; 11/12).
+- WC2, a revisão do registro não apaga um toco guardado antes: o teste do toco guardado antes falha em "it is purged in this run" e "and its record goes with it" (12/14).
+- WC3, sem a revisão do registro no bloqueio de um diário: o mesmo teste nunca vê o toco sair da tabela ("tempo esgotado: the stub leaves the table").
+
+Cada arquivo tocado rodou sozinho com o código final (`VARANDA_TEST_CONCURRENCY=1 node <arquivo>`, Node 24.22.1).
+
+Nó core (`packages/core/test/`):
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `sync-groups-8.test.js` | 27/27 | 122/122 |
+| `sync-groups.test.js` | 16/16 | 75/75 |
+| `sync-groups-2.test.js` | 27/27 | 96/96 |
+| `sync-groups-3.test.js` | 26/26 | 143/143 |
+| `sync-groups-4.test.js` | 14/14 | 73/73 |
+| `sync-groups-5.test.js` | 8/8 | 19/19 |
+| `sync-groups-6.test.js` | 1/1 | 5/5 |
+| `sync-groups-7.test.js` | 1/1 | 12/12 |
+| `sync-groups-sparse.test.js` | 2/2 | 20/20 |
+| `sync-private.test.js` | 9/9 | 44/44 |
+| `sync-slots.test.js` | 8/8 | 27/27 |
+| `admission-caps.test.js` | 11/11 | 50/50 |
+
+Nó do navegador (`packages/web-member/test/`):
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `sync-groups-4.test.js` | 9/9 | 137/137 |
+| `sync-groups.test.js` | 16/16 | 112/112 |
+| `sync-groups-2.test.js` | 29/29 | 139/139 |
+| `sync-groups-3.test.js` | 3/3 | 43/43 |
+| `sync-groups-sparse.test.js` | 3/3 | 27/27 |
+| `sync-gate.test.js` | 15/15 | 126/126 |
+| `sync-private.test.js` | 4/4 | 16/16 |
+| `session-groups.test.js` | 25/25 | 249/249 |
+| `groups-e2e.test.js` | 2/2 | 94/94 |
+| `private-e2e.test.js` | 2/2 | 85/85 |
+
+`npm test` e `npm run demo` não rodaram nesta rodada (ficam para a CI da integração).
+
+Decisões desta rodada e o que ficou sem teste próprio:
+
+- No navegador, os núcleos de grupo ficam guardados à parte dos diários, então apagar o núcleo de grupo de um toco nunca toca a réplica do diário de mesma chave; não há guarda `heldElsewhere` ali. Um teste com a chave de um diário de ligação listada também como toco não chegou a montar o caso no navegador (o escritor saiu com `diary-unavailable`), e ficou de fora.
+- No navegador, a revisão do registro julga um toco em repouso como toco (sem ler o bloco 0 dele), e uma entrada pendente (sem núcleo aberto) fica para a próxima partida, que apaga o toco de um diário bloqueado.
+- Nenhum caminho do navegador guarda um bloco além do 0 de um toco a partir da listagem de outra chave (os diários das dicas são lidos por `lendCore`); a mudança A1 ali só acompanha o nó core.
 
 ## Decisões tomadas aqui
 
