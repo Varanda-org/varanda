@@ -550,7 +550,56 @@ export function createVitrineRequest (fixtures, options) {
     return { community, name, join, state, role, general }
   }
 
+  // docs/rpc.md 5.152 to 5.155, per instance: this device, one other
+  // connected device, one already disconnected and "Aparelhos anteriores".
+  const deviceSelf = '1'.repeat(64)
+  const devices = {
+    hello: false,
+    off: false,
+    previous: 2,
+    rows: [
+      { id: deviceSelf, name: 'Aparelho', since: data.now, on: true, writers: 3, empty: 0 },
+      { id: '2'.repeat(64), name: 'Pixel 8', since: new Date(Date.parse(data.now) - 9 * 864e5).toISOString(), on: true, writers: 4, empty: 1 },
+      { id: '3'.repeat(64), name: 'Firefox no Linux', since: new Date(Date.parse(data.now) - 40 * 864e5).toISOString(), on: false, writers: 0, empty: 0 }
+    ]
+  }
+  const deviceRows = () => [
+    ...devices.rows.filter((d) => d.id === deviceSelf),
+    ...devices.rows.filter((d) => d.id !== deviceSelf && d.on).sort((a, b) => b.since.localeCompare(a.since)),
+    ...devices.rows.filter((d) => !d.on).sort((a, b) => b.since.localeCompare(a.since))
+  ]
+
   const handlers = {
+    'device.hello': ({ name }) => {
+      const registered = !devices.hello
+      if (registered) devices.rows[0].name = name.trim()
+      devices.hello = true
+      return { id: deviceSelf, registered, off: devices.off }
+    },
+    'device.list': () => ({
+      self: devices.hello ? deviceSelf : null,
+      off: devices.off,
+      devices: devices.hello ? deviceRows().map((d) => ({ id: d.id, name: d.name, since: d.since, on: d.on, writers: d.writers, self: d.id === deviceSelf })) : [],
+      previous: devices.previous > 0 ? { writers: devices.previous } : null
+    }),
+    'device.disconnect': ({ id, previous }) => {
+      if (devices.off) refuse('USAGE', 'este aparelho foi desconectado da conta')
+      if (previous === true) {
+        const cut = devices.previous
+        devices.previous = 0
+        return { cut, empty: 0 }
+      }
+      if (id === deviceSelf) refuse('USAGE', 'não dá para desconectar este aparelho por aqui')
+      const row = devices.rows.find((d) => d.id === id && d.on)
+      if (!row) refuse('USAGE', 'aparelho não encontrado')
+      const result = { cut: row.writers, empty: row.empty }
+      row.on = false
+      row.writers = 0
+      return result
+    },
+    // The vitrine device is always connected, so the node's answer for a
+    // connected device is the only one.
+    'device.reconnect': () => refuse('USAGE', 'este aparelho está conectado'),
     'session.open': () => ({ protocol: 1 }),
     'identity.show': () => ({ publicKey: data.own, association }),
     'identity.create': unavailable,

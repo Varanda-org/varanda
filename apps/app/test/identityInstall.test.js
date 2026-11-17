@@ -795,7 +795,7 @@ test('setKeyPair receives the media pair and the prf, as the browser entry', asy
   }
   const host = createIdentityHost({ session, storage, hkdf, randomBytes })
   await host.install(params())
-  t.alike(calls, [{ keys: ['media', 'prf'], prf: PRF }])
+  t.alike(calls, [{ keys: ['fresh', 'media', 'prf'], prf: PRF }])
   t.is(b4a.toString(b4a.from(session.prf), 'hex'), PRF, 'the session keeps its own copy')
   await host.clear()
   t.is(session.prf, null, 'clear drops the session copy')

@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 75
+export const LEGAL_VERSION = 76
 export const LEGAL_DATE = '16/11/2026'
-export const REVIEW_NOTE = 'Versão 75, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 76, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -40,6 +40,14 @@ export const TERMS = {
         'O número não prova quem você é e nunca serve para recuperar a conta. Cada conta tem um número, e um número só pode estar em uma conta. O número de uma conta bloqueada não pode ser usado por uma conta nova enquanto o bloqueio durar. Se o bloqueio for desfeito (um recurso aceito ou uma ordem judicial), o número pode voltar a ser usado. Se a conta não puder voltar, a associação pode liberar o número para uma conta nova por ordem judicial. No app com configuração manual, em que o certificado é dado diretamente pela associação, essa confirmação não é feita. Esse texto está sujeito a revisão jurídica.',
         'No app com configuração manual, em que o certificado é dado diretamente pela associação, essa verificação não é feita.',
         'O guardião e a recuperação por e-mail continuam planejados.'
+      ]
+    },
+    {
+      heading: 'Aparelhos conectados',
+      paragraphs: [
+        'Cada aparelho em que você entra com a sua passkey ganha um nome e um número de identificação aleatório, que o app grava no seu diário. Em Ajustes, "Aparelhos conectados" lista os aparelhos da conta.',
+        'Se você perder um aparelho, toque em "Desconectar" ao lado dele. O Varanda corta o que aquele aparelho escreve em todas as comunidades e grupos e, num grupo privado, troca a chave do grupo para que o aparelho não leia o que vier depois. O aparelho desconectado esquece a sessão guardada e fica trancado até alguém entrar de novo com a passkey. Os dados que já estavam nele continuam lá.',
+        'Nos grupos privados, a chave também é trocada de tempos em tempos enquanto o grupo está em uso, mesmo que ninguém saia: num grupo pequeno, a cada 7 dias ou 1000 mensagens, o que vier antes; num grupo grande, com intervalos maiores. Um grupo parado não troca a chave.'
       ]
     },
     {
@@ -253,6 +261,14 @@ export const PRIVACY = {
       paragraphs: [
         'Onde a instalação ligou essa função, quem escreve uma publicação pode torná-la pública na web, uma de cada vez e por escolha própria. O semeador entrega o nome, o @nome, a data, o texto, até 4 fotos (de um vídeo, só a capa) e o título e o domínio de um link a qualquer pessoa que abra o endereço, inclusive a robôs de prévia de links. Não é só para quem tem o link: quem conhece o perfil pode encontrar as publicações publicadas. Respostas, curtidas, a publicação a que uma resposta ou citação se refere e outras publicações nunca aparecem na página.',
         'A escolha fica registrada no diário de quem publicou e dura até a pessoa retirar a publicação da web ou apagá-la. A página pede aos buscadores que não a indexem e não há mapa do site. O semeador não guarda cópia da página nem registra nada nessas páginas, mas o registro de erros do servidor web pode guardar o endereço pedido e o endereço de internet (IP). Cópias, prévias e caches feitos por outras pessoas ou por buscadores enquanto a página esteve pública ficam fora do controle da associação.'
+      ]
+    },
+    {
+      heading: 'Aparelhos conectados',
+      paragraphs: [
+        'Cada aparelho da conta tem um número de identificação aleatório e um nome, como "Pixel 8" ou "Chrome no Mac". O app grava os dois no seu próprio diário, dentro de um registro cifrado com uma chave da sua passkey: só os aparelhos da conta conseguem abri-lo. Quem guarda o diário, como os semeadores e quem segue você, vê apenas que a sua conta gravou um registro desse tipo e a data dele, não o número, o nome nem os grupos. O número também fica guardado no próprio aparelho.',
+        'Em Ajustes, "Aparelhos conectados" lista os aparelhos da conta, e "Desconectar" corta os escritores daquele aparelho em todas as comunidades e grupos. Cada corte fica no diário como uma marca pública, com o grupo ou a comunidade, o escritor cortado e o ponto do corte. Num grupo privado, a chave do grupo é trocada. Nos grupos privados a chave também é trocada de tempos em tempos enquanto o grupo está em uso: num grupo pequeno, a cada 7 dias ou 1000 mensagens, o que vier antes; num grupo grande, com intervalos maiores. Um grupo parado não troca a chave.',
+        'O aparelho desconectado esquece a sessão guardada e trava até a passkey. Os dados locais ficam no aparelho. Os registros de aparelho e as marcas de corte ficam no diário: o app não tem como apagá-los, e o corte é definitivo, para que o que o aparelho escreveu depois dele nunca volte a valer. Ao excluir a conta, vale o que está em "Seus direitos e os limites do P2P" para o diário inteiro.'
       ]
     },
     {
