@@ -16,13 +16,16 @@
 // -> openImage(file) resolves { uri, width, height, encode, release }; every
 // failure is an Error with a message for the person.
 
-import { MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, MEDIA_MIMES, fitWithin } from './plan.js'
+import { MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, fitWithin } from './plan.js'
 
 const OUTPUT_SIDE = 512
 const QUALITIES = [0.85, 0.70, 0.55]
 const PREVIEW_QUALITY = 0.8
 // Larger source files are refused before decoding (memory).
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024
+// Pinned here, not plan.js MEDIA_MIMES: that list now takes AVIF posts, and
+// an AVIF avatar source was never decided or tested.
+const SOURCE_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 function fail (message) {
   return new Error(message)
@@ -115,7 +118,7 @@ async function firstFit (canvas, mime, maxBytes) {
 }
 
 export async function openImage (file) {
-  if (!file || !MEDIA_MIMES.includes(file.type)) throw fail('formato não aceito')
+  if (!file || !SOURCE_MIMES.includes(file.type)) throw fail('formato não aceito')
   if (!(file.size <= MAX_SOURCE_BYTES)) throw fail('arquivo grande demais')
   const frozen = await freeze(file)
   const preview = await toBlob(frozen, 'image/jpeg', PREVIEW_QUALITY)

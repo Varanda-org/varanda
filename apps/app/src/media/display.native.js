@@ -11,8 +11,8 @@
 import { Directory, File, Paths } from 'expo-file-system'
 
 const DIR = 'varanda-media'
-const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'video/mp4': 'mp4' })
-const NAME = /^[0-9a-f]{32}\.(jpg|png|webp|gif|mp4)$/
+const EXT = Object.freeze({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif', 'video/mp4': 'mp4' })
+const NAME = /^[0-9a-f]{32}\.(jpg|png|webp|gif|avif|mp4)$/
 // media.readFile output (../client/webnode.native.js readFileUri): the
 // worklet names every file it writes there <32 hex>.bin.
 const READ_NAME = /^[0-9a-f]{32}\.bin$/

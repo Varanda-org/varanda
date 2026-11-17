@@ -6,7 +6,7 @@ const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
 const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
-const { feira, garden: gardenRules } = require('@varanda/rpc')
+const { feira, garden: gardenRules, mediaBounds } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 
@@ -316,7 +316,8 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   not-found page with 404. Budget of /index.
 // - GET|HEAD /f/<D>/<seq>/foto/<1..4> and /f/<D>/<seq>/capa (= foto 1): the
 //   photo of the CURRENT content, assembled through Seeder#mediaRead and
-//   served only when its size, sha256 and magic bytes match the descriptor
+//   served only when its size, sha256 and magic bytes (for an AVIF, the
+//   whole container parsed) match the descriptor
 //   (the declared mime is the Content-Type, exact Content-Length), else
 //   404. An edit changes what the same URL serves, so it is no-store. Own
 //   in-flight cap FEIRA_PHOTO_MAX_IN_FLIGHT and deadline
@@ -529,7 +530,9 @@ const IMAGE_MAGIC = {
   'image/jpeg': (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
   'image/png': (b) => b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
   'image/webp': (b) => b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP',
-  'image/gif': (b) => b.length >= 6 && (b.toString('latin1', 0, 6) === 'GIF87a' || b.toString('latin1', 0, 6) === 'GIF89a')
+  'image/gif': (b) => b.length >= 6 && (b.toString('latin1', 0, 6) === 'GIF87a' || b.toString('latin1', 0, 6) === 'GIF89a'),
+  // No fixed magic: the whole container must parse as an AVIF image.
+  'image/avif': (b) => mediaBounds(b, 'image/avif') !== null
 }
 const FEIRA_PAGE_HEADERS = {
   'Content-Type': 'text/html; charset=utf-8',
@@ -1510,6 +1513,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       username: card.username,
       name: card.name,
       photoUrls: photosOf(r).map((_, i) => base + '/foto/' + (i + 1)),
+      photoMimes: photosOf(r).map((d) => d && typeof d === 'object' && typeof d.mime === 'string' ? d.mime : ''),
       pageUrl: origin + base,
       enterUrl: origin + '/anuncio/' + hex + '/' + seq,
       appUrl: 'varanda:///anuncio/' + hex + '/' + seq
@@ -1588,7 +1592,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   // The bytes of the still image descriptor `d` of diary `hex`, read through
   // mediaRead and checked against the descriptor (size, sha256) and the
-  // declared mime (magic bytes), or null. Shared by the Feira and post photos.
+  // declared mime (IMAGE_MAGIC), or null. Shared by the Feira and post photos.
   async function descriptorBytes (hex, d, isClosed) {
     if (typeof seeder.mediaRead !== 'function') return null
     if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return null

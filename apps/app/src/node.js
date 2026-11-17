@@ -44,7 +44,10 @@
 // is offline, ends the recovery at once without any sync request, so the
 // local tabs open immediately; going offline during a recovery ends it too,
 // and stops its run (it cannot reach the seeder, and Identidade holds its
-// reads while a once run is active).
+// reads while a once run is active). `emptyCard` is the key of the card
+// 'Esta passkey não abriu nenhuma conta' (src/emptyAccount.js): Identidade
+// sets and clears it with setEmptyCard(key | null), and any operation that
+// changes who is unlocked clears it.
 //
 // `online` (web) is the browser's network hint (online.web.js; always true on
 // native). `visible` is the page visibility on web; on native it follows
@@ -144,7 +147,8 @@ import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
 import { vitrineEnabled, vitrineLarge, vitrineRich, vitrineEmbeds } from './vitrine/enabled'
 import { createMarks, devHookRequest, perfEnabled } from './perfMarks'
-import { recoveryFetch } from './account'
+import { accountStatus, recoveryFetch } from './account'
+import { settleSignIn } from './emptyAccount'
 import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
 import * as shareIntake from './shareIntake'
@@ -169,11 +173,11 @@ const ARG_OPS = new Set(['unlock', 'unlockWrapped', 'unlockWithCode', 'bindPassk
 // installed nothing ({ pending }, { wrapped }, { needsPasskey }) keeps the
 // epoch and the generation. The rest (addPasskey, makeRecoveryCode,
 // cancelRecovery, bindPasskey) never change who is unlocked.
-const IDENTITY_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'finishRecovery', 'lock', 'signOut', 'reset'])
-const UNLOCK_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'finishRecovery'])
+const IDENTITY_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'unlockDirect', 'finishRecovery', 'lock', 'signOut', 'reset'])
+const UNLOCK_OPS = new Set(['unlock', 'complete', 'unlockWrapped', 'unlockDirect', 'finishRecovery'])
 
 function installedNothing (result) {
-  return !!result && (result.pending === true || result.wrapped === true || result.needsPasskey === true)
+  return !!result && (result.pending === true || result.wrapped === true || result.needsPasskey === true || result.check === true)
 }
 
 // A complete() that only finished an added passkey: its wrapped root for the
@@ -271,11 +275,11 @@ export function useSyncSignals () {
 // the own diary's growth: the per-diary maps and lastDownloadAt change on
 // every download line, so they are left to useSyncSignals().
 function useRunFlags (signals) {
-  const { runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength } = signals
+  const { runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, storageFull } = signals
   const freshOwn = signals.fresh ? signals.fresh.own : undefined
   return useMemo(() => ({
-    ...EMPTY_SIGNALS, runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, fresh: freshOwn === undefined ? {} : { own: freshOwn }
-  }), [runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, freshOwn])
+    ...EMPTY_SIGNALS, runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, storageFull, fresh: freshOwn === undefined ? {} : { own: freshOwn }
+  }), [runId, once, ready, peer, seederVerified, reconnecting, unverified, startedAt, idleSince, ownLength, storageFull, freshOwn])
 }
 
 // A screen notice ('publicado', 'seguindo', ...) describes what the current
@@ -428,6 +432,8 @@ function VitrineNodeProvider ({ children }) {
         recovering: false,
         beginRecovery: () => {},
         endRecovery: () => {},
+        emptyCard: null,
+        setEmptyCard: () => {},
         recover: () => Promise.resolve(false)
       },
       // Dev-only fixture photos (src/vitrine/media.js), never the network.
@@ -542,6 +548,10 @@ function LiveNodeProvider ({ children }) {
   // Passkey identity of the browser node (see the header).
   const [hasPasskey, setHasPasskey] = useState(false)
   const [pkStatus, setPkStatus] = useState(null)
+  // The last status read, for an Entrar that must know whether this device
+  // had a diary before it (src/emptyAccount.js newHere).
+  const pkStatusRef = useRef(null)
+  pkStatusRef.current = pkStatus
   const [pkError, setPkError] = useState('')
   const [pkGeneration, setPkGeneration] = useState(0)
   // The handle has media.upload (browser node).
@@ -570,6 +580,12 @@ function LiveNodeProvider ({ children }) {
   const clearPageMismatch = useCallback((page) => setPageMismatch((set) => dropPageMismatch(set, page)), [])
   // null, or { runId: null (not started yet) | integer, restarted }
   const [recovery, setRecovery] = useState(null)
+  // The key of the empty card (src/emptyAccount.js) that a sign-in raised,
+  // or null. Held here, not in Identidade, so the shell renders the card in
+  // place of the recovery's splash and the Termos gate (src/termsCreate.js
+  // recoverView). Any identity change clears it (passkeyOp).
+  const [emptyCard, setEmptyCardKey] = useState(null)
+  const setEmptyCard = useCallback((key) => setEmptyCardKey(typeof key === 'string' ? key : null), [])
   const recoveryRef = useRef(null)
   recoveryRef.current = recovery
   // The connection whose resumed session was already checked for a recovery.
@@ -1241,6 +1257,7 @@ function LiveNodeProvider ({ children }) {
         // navigation although the account did not change.
         const added = name === 'complete' && pendingKind === 'add' && addedOnly(result)
         const changed = IDENTITY_OPS.has(name) && !installedNothing(result) && !added
+        if (changed) setEmptyCardKey(null)
         // Locked at once: a failed re-read below keeps this, never the
         // previous unlocked status.
         if ((name === 'lock' || name === 'signOut' || name === 'reset') && connRef.current === conn) {
@@ -1293,7 +1310,39 @@ function LiveNodeProvider ({ children }) {
     return passkeyOp('unlockWrapped', { blob: entry.blob, member: entry.member })
   }, [passkeyOp])
 
-  const pkUnlock = useCallback((opts = {}) => passkeyOp('unlock', opts).then(resolveWrapped), [passkeyOp, resolveWrapped])
+  // A hosted Entrar (src/emptyAccount.js): an unknown passkey without a
+  // user handle comes back { check } and is settled against the account
+  // status of its key; a sign-in of a key new here with no account comes
+  // back `empty: true`. The status before the ceremony is read now, with no
+  // await, so the ceremony stays in the click.
+  const pkUnlock = useCallback((opts = {}) => {
+    const hosted = hostedRef.current === true && opts.register !== true
+    if (!hosted) return passkeyOp('unlock', opts).then(resolveWrapped)
+    const before = pkStatusRef.current
+    const attempt = ++wrappedAttemptRef.current
+    const stale = () => wrappedAttemptRef.current !== attempt
+    return passkeyOp('unlock', { ...opts, check: true }).then(async (r) => {
+      if (r && r.wrapped === true) return resolveWrapped(r)
+      let out
+      try {
+        out = await settleSignIn(r, {
+          before,
+          accountStatus: (key) => accountStatus(key),
+          recoveryFetch: (lookupId) => recoveryFetch(lookupId),
+          direct: () => passkeyOp('unlockDirect'),
+          wrapped: (arg) => passkeyOp('unlockWrapped', arg),
+          stale
+        })
+      } catch (err) {
+        // A refused open leaves the PRF output held: dropped now rather than
+        // at its 120 s timer. A newer attempt owns it.
+        if (r && r.check === true && !stale()) passkeyOp('cancelRecovery').catch(() => {})
+        throw err
+      }
+      if (out === null) throw recoveryError('outra tentativa de entrar começou; esta foi deixada de lado', 'SUPERSEDED')
+      return out
+    })
+  }, [passkeyOp, resolveWrapped])
   const pkComplete = useCallback(() => passkeyOp('complete').then(resolveWrapped), [passkeyOp, resolveWrapped])
   // No ceremony: the code is checked in the node, then the same fetch.
   const pkUnlockWithCode = useCallback((code) => passkeyOp('unlockWithCode', { code }).then(resolveWrapped), [passkeyOp, resolveWrapped])
@@ -1737,8 +1786,8 @@ function LiveNodeProvider ({ children }) {
 
   const recovering = recovery !== null
   const passkey = useMemo(() => (hasPasskey
-    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, confirm: pkConfirm, enrolment: pkEnrolment, dropEnrolment: pkDropEnrolment, recovering, beginRecovery, endRecovery, recover }
-    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, pkConfirm, pkEnrolment, pkDropEnrolment, recovering, beginRecovery, endRecovery, recover])
+    ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, confirm: pkConfirm, enrolment: pkEnrolment, dropEnrolment: pkDropEnrolment, recovering, beginRecovery, endRecovery, recover, emptyCard, setEmptyCard }
+    : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, pkConfirm, pkEnrolment, pkDropEnrolment, recovering, beginRecovery, endRecovery, recover, emptyCard, setEmptyCard])
 
   // A media call that sends one request on the connection's RPC client
   // (media.sharesClient, the native hosted handle) takes a queue slot, since

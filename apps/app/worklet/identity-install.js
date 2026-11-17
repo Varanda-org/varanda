@@ -12,7 +12,7 @@
 //   host.install({ prf, credentialId, userId, rpId, resumed }) -> { publicKey, resumed }
 //   host.clear({ keepMedia? }) / host.reset() / host.forget() / host.sessionSaved() -> {}
 //   host.status() -> docs/rpc.md 5.52
-//   host.recoveryLookup({ kind, secret, code }) -> { lookupId }     (5.91)
+//   host.recoveryLookup({ kind, secret, code, withKey }) -> { lookupId, publicKey? } (5.91)
 //   host.recoveryOpen({ blob, member }) -> { prf }                  (5.92)
 //   host.recoveryWrap({ kind, secret }) -> { lookupId, blob, code? } (5.93)
 //   host.recoveryBind({ credentialId, userId }) -> {}               (5.94)
@@ -302,12 +302,21 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
     return root
   }
 
-  const recoveryLookup = serial(async ({ kind, secret: secretHex, code } = {}) => {
+  // withKey (kind 'passkey'): the hosted app's check of an unknown passkey
+  // without a user handle also gets the diary key that PRF output would
+  // install, to read its account status before sending the lookup id.
+  const recoveryLookup = serial(async ({ kind, secret: secretHex, code, withKey } = {}) => {
     let secret = null
     let derived = null
+    let kp = null
     try {
+      let publicKey = null
       if (kind === 'passkey') {
         secret = prfBytes(secretHex)
+        if (withKey === true) {
+          kp = await keys.keyPairFromPrf(secret, { hkdf })
+          publicKey = b4a.toString(kp.publicKey, 'hex')
+        }
       } else if (kind === 'code') {
         secret = recovery.decodeCode(code)
         if (secret === null) throw usage(BAD_CODE)
@@ -319,10 +328,11 @@ function createIdentityHost ({ session, storage, hkdf, randomBytes, keys = passk
       pending = { wrapKey: derived.wrapKey, kind, expiresAt: now() + RECOVERY_PENDING_MS }
       const lookupId = derived.lookupId
       derived = null
-      return { lookupId }
+      return publicKey !== null ? { lookupId, publicKey } : { lookupId }
     } finally {
       if (secret !== null) secret.fill(0)
       if (derived !== null) derived.wrapKey.fill(0)
+      zeroPair(kp)
     }
   })
 
