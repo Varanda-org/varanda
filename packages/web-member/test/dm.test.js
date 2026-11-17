@@ -884,7 +884,7 @@ test('an empty thread with a peer not followed is inbox (the composer shows); th
   const A = await memberNode(t, assoc, seeder.url)
   const B = await memberNode(t, assoc, seeder.url)
   await copyDiary(A, B)
-  t.alike(await A.web.request('dm.thread', { peer: B.key }), { messages: [], next: null, folder: 'inbox', blocked: false })
+  t.alike(await A.web.request('dm.thread', { peer: B.key }), { messages: [], next: null, folder: 'inbox', blocked: false, firstUnread: null })
   await B.web.request('dm.send', { to: A.key, text: 'primeira' })
   await A.web.request('dm.pull')
   const th = await A.web.request('dm.thread', { peer: B.key })
@@ -965,6 +965,67 @@ test('dm.thread: an unknown before pages from the newest', async (t) => {
   const older = await A.web.request('dm.thread', { peer: B.key, before: page.next, limit: 2 })
   t.alike(older.messages.map((m) => m.text), ['um'])
   t.is(older.next, null)
+})
+
+test('dm.thread firstUnread: where reading stopped; dm.seen upTo marks only what was shown', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(A, B)
+  await copyDiary(B, A)
+  for (const text of ['um', 'dois', 'três']) await B.web.request('dm.send', { to: A.key, text })
+  await A.web.request('dm.pull')
+  await A.web.request('dm.set', { peer: B.key, state: 'accepted' })
+  const thread = (params = {}) => A.web.request('dm.thread', { peer: B.key, ...params })
+  const unread = async () => (await A.web.request('dm.list', {})).conversations.find((c) => c.peer === B.key).unread
+  const rows = (await thread()).messages
+  t.alike(rows.map((m) => m.text), ['um', 'dois', 'três'])
+  const [m1, m2, m3] = rows.map((m) => m.id)
+
+  t.is((await thread()).firstUnread, null, 'no token and no own message: no position, even in a short thread')
+  t.is(Object.keys(await thread()).pop(), 'firstUnread', 'the key comes last')
+
+  const before = await store.readDmSeen(A.storage)
+  t.alike(await A.web.request('dm.seen', { peer: B.key, upTo: 'f'.repeat(32) }), { ok: true })
+  t.alike(await store.readDmSeen(A.storage), before, 'an unknown upTo writes nothing')
+  t.is(await unread(), true, 'still unread')
+
+  await A.web.request('dm.seen', { peer: B.key, upTo: m1 })
+  t.is((await store.readDmSeen(A.storage)).length, 1, 'one token: only the message shown')
+  t.is((await thread()).firstUnread, m2, 'the next incoming message')
+  t.is(await unread(), true)
+  t.is((await thread({ before: m3, limit: 1 })).firstUnread, m2, 'a before page carries the same position')
+
+  // Tokens are kept in thread order: drop m1's to leave a hole behind m2.
+  await A.web.request('dm.seen', { peer: B.key, upTo: m2 })
+  const [, t2] = await store.readDmSeen(A.storage)
+  await store.writeDmSeen(A.storage, [t2])
+  t.is((await thread()).firstUnread, m3, 'a hole behind a newer token is ignored')
+
+  // An own message after unread incoming ones moves the position past them.
+  await store.writeDmSeen(A.storage, [])
+  t.is((await thread()).firstUnread, null)
+  await A.web.request('dm.send', { to: B.key, text: 'de A' })
+  t.alike((await thread()).messages.map((m) => m.text), ['um', 'dois', 'três', 'de A'])
+  t.is((await thread()).firstUnread, null, 'nothing incoming after the own message')
+  await B.web.request('dm.send', { to: A.key, text: 'quatro' })
+  await A.web.request('dm.pull')
+  const after = (await thread()).messages
+  t.is(after[after.length - 1].text, 'quatro')
+  t.is((await thread()).firstUnread, after[after.length - 1].id, 'the first incoming message after the own one')
+  t.is((await thread({ before: after[after.length - 1].id, limit: 2 })).firstUnread, after[after.length - 1].id, 'a before page computes over the whole thread')
+
+  // An own id as upTo marks the incoming messages before it.
+  await A.web.request('dm.seen', { peer: B.key, upTo: after[3].id })
+  t.is((await store.readDmSeen(A.storage)).length, 3)
+  t.is(await unread(), true)
+
+  await A.web.request('dm.seen', { peer: B.key })
+  t.is((await store.readDmSeen(A.storage)).length, 4, '{ peer } alone marks every incoming message')
+  t.is(await unread(), false)
+  t.is((await thread()).firstUnread, null, 'everything seen')
 })
 
 test('dmLookup needs no identity and never deletes a replica', async (t) => {
@@ -1852,6 +1913,47 @@ test('a reaction drop to a Página is dropped, never filed, and the pull goes on
   t.alike(rows.map((x) => x.text), ['da página', 'depois da reação'], 'the message after it is filed')
   t.absent(rows.some((x) => 'reactions' in x), 'no reaction in a Página conversation')
   t.is((await A.web.request('dm.pull')).added, 0, 'a second pull is clean')
+})
+
+test('a Página inbox thread: firstUnread and dm.seen upTo use the page\'s own seen tokens', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc)
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey) }] })
+  const m = await createMember({ storage: memoryStorage(), association: hex(assoc.publicKey), keyPair: pageKp })
+  t.teardown(() => m.close(), { force: true })
+  await m.setCert(pageCert)
+  const fields = { page: P, gen: 1, owner: A.key, admins: [], prev: null, at: PAGE_AT, nonce: PAGE_NONCE, association: hex(assoc.publicKey) }
+  await m.core.append(issuerCountersign({ type: 'page-roster', ...fields, signature: signRoster(fields, A.keyPair) }, issuerKp, issuerCert))
+  await m.core.append({ type: 'dm-key', box: made.box, gen: 1, at: PAGE_AT })
+  for (const n of [A, C]) await holdCore(m.core, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+
+  for (const text of ['um', 'dois']) await C.web.request('dm.send', { to: P, text })
+  await A.web.request('dm.pull')
+  const thread = () => A.web.request('dm.thread', { page: P, peer: C.key })
+  const rows = (await thread()).messages
+  t.alike(rows.map((x) => x.text), ['um', 'dois'])
+  t.is((await thread()).firstUnread, null, 'no position yet')
+
+  const personal = await store.readDmSeen(A.storage)
+  t.alike(await A.web.request('dm.seen', { page: P, peer: C.key, upTo: 'f'.repeat(32) }), { ok: true })
+  t.is((await thread()).firstUnread, null, 'an unknown upTo marks nothing')
+  await A.web.request('dm.seen', { page: P, peer: C.key, upTo: rows[0].id })
+  t.is((await thread()).firstUnread, rows[1].id, 'the next message of the page thread')
+  t.alike(await store.readDmSeen(A.storage), personal, 'the personal seen tokens are untouched')
+  t.is((await A.web.request('dm.thread', { peer: P })).firstUnread, null, 'the personal thread with the page is apart')
+  await A.web.request('dm.seen', { page: P, peer: C.key })
+  t.is((await thread()).firstUnread, null, 'everything seen')
 })
 
 async function holdCore (core, storage) {

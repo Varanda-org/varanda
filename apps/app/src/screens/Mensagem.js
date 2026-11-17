@@ -76,6 +76,7 @@ import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
 import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
+import { GROWTH_PLACES, dmTarget as openTargetOf, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
 import { hasRich, parseRich, plainOf } from '../richText'
 import { cardBesideSpoilers } from '../ui/RichText'
@@ -411,6 +412,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   // clears it, never a thread read's own error.
   const olderErr = useRef(false)
   const listRef = useRef(null)
+  const openLatch = useRef(null)
+  const openScope = useRef('')
+  openScope.current = peer + '|' + pageKey + '|' + ownKey
   const bumpDm = node.bumpDm
   const reread = useCallback(() => { if (typeof bumpDm === 'function') bumpDm() }, [bumpDm])
 
@@ -441,6 +445,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       if (!held.keepOlder) { olderRef.current = false; context.pages.clear() }
       rawRef.current = held.messages
       setRaw(held.messages)
+      // The first answer decides where this open lands; a reread after
+      // dm.seen does not move it.
+      openLatch.current = latchOpen(openLatch.current, { scope: openScope.current, value: r.firstUnread })
       setNewest(newestOf(page))
       if (!olderRef.current) setNext(r.next || null)
       setFolder(r.folder === 'request' ? 'request' : 'inbox')
@@ -674,12 +681,6 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     })
   }, [ready, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
 
-  useEffect(() => {
-    if (!ready || !loaded || !visible || !isTop || newest === '') return
-    // Local mark only; a lost answer may still have marked it, so read again.
-    dm('dm.seen', { peer }).catch(() => {}).then(reread)
-  }, [ready, loaded, visible, isTop, dm, peer, reread, newest])
-
   // The newest line sits at the bottom: show it on open and when a newer one
   // arrives; an older page loaded above leaves the position alone (loading it
   // releases the pin).
@@ -703,6 +704,37 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const userScrolled = useRef(false)
   const olderState = useRef(olderInitial())
   const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
+  // One open of this conversation: whether its landing ran, finished
+  // (placed), how many older pages it asked for and how often it retried.
+  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0 })
+  const openTimer = useRef(null)
+  const [placed, setPlaced] = useState(false)
+  // An older page failed during this open. It stays failed for the whole open:
+  // a later read of the newest page clears loadError, but the walk must not
+  // ask again, and no mark may pass the unread run that page held.
+  const [openFailed, setOpenFailed] = useState(false)
+  // The newest row the person had on screen since the landing: dm.seen never
+  // marks past it.
+  const [cursor, setCursor] = useState(null)
+  const cursorRef = useRef(null)
+  const viewableRef = useRef([])
+  // Which scrollToIndex is in flight, so one onScrollToIndexFailed serves the
+  // quote jump and the opening placement.
+  const indexJump = useRef(null)
+  const rowKeys = useMemo(() => gestureRows.map((row) => row.key), [gestureRows])
+  const rowKeysRef = useRef(rowKeys)
+  rowKeysRef.current = rowKeys
+  const openId = openLatch.current !== null && openLatch.current.scope === openScope.current ? openTargetOf(openLatch.current.value) : null
+  const openRow = openId === null ? null : gestureRows.find((row) => row.id === openId)
+  // Unloaded target: its id is no row key, so openPlan asks for older pages.
+  const openKey = openId === null ? null : openRow ? openRow.key : openId
+  const plan = loaded ? openPlan({ targetKey: openKey, rowKeys, hasOlder: !!next, olderPagesLoaded: openRun.current.older, loading: loadingMore, failed: openFailed }) : null
+  // The first unread sits on an older page that failed to load: a mark up to
+  // a newer row would also mark that unread run, so only the end marks.
+  const openMissed = openKey !== null && !rowKeys.includes(openKey) && openFailed
+  // Read by the effects of this same render.
+  const planRef = useRef(plan)
+  planRef.current = plan
   useEffect(() => {
     away.current = false
     userScrolled.current = false
@@ -711,7 +743,14 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     setShowJump(false)
     setFlashKey(null)
     setQuoteToast(false)
+    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0 }
+    cursorRef.current = null
+    viewableRef.current = []
+    setPlaced(false)
+    setOpenFailed(false)
+    setCursor(null)
     return () => {
+      clearTimeout(openTimer.current)
       clearTimeout(quoteTimer.current)
       clearTimeout(jumpTimer.current)
     }
@@ -743,6 +782,78 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     clearTimeout(jumpTimer.current)
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
   }, [])
+  // Moves the read cursor over the rows on screen, only after the landing:
+  // the rows the opening scroll passed over were not read.
+  const moveCursor = useCallback(() => {
+    if (!openRun.current.placed) return
+    const at = readCursor(cursorRef.current, { rowKeys: rowKeysRef.current, viewableKeys: viewableRef.current })
+    if (at === cursorRef.current) return
+    cursorRef.current = at
+    setCursor(at)
+  }, [])
+  // The landing is done: from here what the person sees moves the cursor.
+  const settleOpen = useCallback((atEnd) => {
+    const run = openRun.current
+    if (run.placed) return
+    run.placed = true
+    clearTimeout(openTimer.current)
+    if (indexJump.current !== null && indexJump.current.kind === 'open') indexJump.current = null
+    setPlaced(true)
+    // An open at the end shows the newest row: the cursor starts there.
+    if (atEnd === true && latestKeyRef.current !== null) {
+      cursorRef.current = latestKeyRef.current
+      setCursor(latestKeyRef.current)
+    }
+    moveCursor()
+  }, [moveCursor])
+  // Puts the first unread row at the top. Rows past the first batch are not
+  // measured yet, so a failed scrollToIndex jumps near it by estimate and
+  // tries again, a bounded number of times.
+  const placeOpenRow = useCallback((growth) => {
+    const run = openRun.current
+    const plan = planRef.current
+    if (!run.started || run.placed || plan === null || plan.kind !== 'row') return
+    const index = rowKeysRef.current.indexOf(plan.key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    // A content-size frame places the row again without spending a try: the
+    // first batches grow the list many times in a row.
+    let wait
+    if (growth === true) {
+      if (run.grown >= GROWTH_PLACES) return
+      run.grown++
+      wait = settleStep(run.tries).wait
+    } else {
+      const step = settleStep(run.tries)
+      run.tries = step.next
+      if (!step.again) return settleOpen()
+      wait = step.wait
+    }
+    const retry = () => {
+      clearTimeout(openTimer.current)
+      openTimer.current = setTimeout(placeOpenRow, wait)
+    }
+    const jump = {
+      kind: 'open',
+      fail: (info) => {
+        const average = info && Number.isFinite(info.averageItemLength) ? info.averageItemLength : 0
+        if (typeof list.scrollToOffset === 'function') list.scrollToOffset({ offset: Math.max(0, average * index), animated: false })
+        retry()
+      }
+    }
+    indexJump.current = jump
+    try {
+      list.scrollToIndex({ index, viewPosition: 0, animated: false })
+    } catch {
+      if (indexJump.current === jump) indexJump.current = null
+      return retry()
+    }
+    if (indexJump.current !== jump) return
+    indexJump.current = null
+    // Landed; growth before this timer places it again.
+    clearTimeout(openTimer.current)
+    openTimer.current = setTimeout(settleOpen, 250)
+  }, [settleOpen])
   useEffect(() => {
     if (!loaded || newest === '' || newest === endPin.current.newest) return
     opened.current = endPin.current.newest !== ''
@@ -753,8 +864,45 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       setShowJump(false)
     }
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest })
+    const run = openRun.current
+    if (!run.started) {
+      run.started = true
+      const first = planRef.current
+      if (first !== null && first.kind !== 'end') {
+        // Unread messages: the open lands on the first one, not at the end.
+        away.current = true
+        releaseEnd()
+        return
+      }
+      settleOpen(true)
+    }
     followEnd()
-  }, [loaded, newest, gestureRows, followEnd])
+  }, [loaded, newest, gestureRows, followEnd, releaseEnd, settleOpen])
+
+  const openKind = plan === null ? null : plan.kind
+  const openRowKey = plan !== null && plan.kind === 'row' ? plan.key : null
+  const openHeading = () => !openRun.current.placed && planRef.current !== null && planRef.current.kind !== 'end'
+  useEffect(() => {
+    const run = openRun.current
+    if (!run.started || run.placed || openKind === null) return
+    if (openKind === 'older') {
+      const live = olderLive.current
+      if (live.loading || typeof live.loadOlder !== 'function') return
+      run.older++
+      live.loadOlder()
+      return
+    }
+    if (openKind === 'end') {
+      // Nothing to land on after all: back to the end.
+      settleOpen(true)
+      away.current = false
+      setLastSeenKey(latestKeyRef.current)
+      endPin.current = { ...endPin.current, pinned: true }
+      followEnd()
+      return
+    }
+    placeOpenRow()
+  }, [openKind, openRowKey, loadingMore, newest, settleOpen, placeOpenRow, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it.
@@ -763,17 +911,59 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   // the state, or the newest line stayed behind the composer afterwards.
   const atBottom = useRef(true)
   const lastY = useRef(null)
+  // Given to the list from its first render (it fixes the choice then). It
+  // only moves the cursor; marking waits for the effect below.
+  const viewable = useCallback(({ viewableItems }) => {
+    viewableRef.current = (Array.isArray(viewableItems) ? viewableItems : []).filter((v) => v && v.isViewable !== false && v.item).map((v) => v.item.key)
+    moveCursor()
+  }, [moveCursor])
+  const seenAt = useRef(null)
+  const seenTimer = useRef(null)
+  const flushSeen = useRef(null)
+  flushSeen.current = () => {
+    clearTimeout(seenTimer.current)
+    const at = seenAt.current
+    seenAt.current = null
+    if (at === null) return
+    // Local mark only; a lost answer may still have marked it, so read again.
+    dm('dm.seen', at).catch(() => {}).then(reread)
+  }
+  useEffect(() => () => { if (flushSeen.current) flushSeen.current() }, [])
+  // The end was on screen: the cursor reached the newest row. A message that
+  // arrives while the person reads further up waits until it is shown.
+  const endShown = placed && latestKey !== null && cursor === latestKey
+  const cursorRow = cursor === null ? null : gestureRows.find((row) => row.key === cursor)
+  const upTo = !openMissed && cursorRow && typeof cursorRow.id === 'string' ? cursorRow.id : null
+  useEffect(() => {
+    // Nothing is marked before the landing: until then no row was read.
+    if (!ready || !loaded || !visible || !isTop || newest === '' || !placed) {
+      clearTimeout(seenTimer.current)
+      return
+    }
+    if (endShown) {
+      seenAt.current = { peer }
+      flushSeen.current()
+      return
+    }
+    if (upTo === null) return
+    // Only what was on screen; a short wait so a scroll sends one mark.
+    seenAt.current = { peer, upTo }
+    clearTimeout(seenTimer.current)
+    seenTimer.current = setTimeout(() => flushSeen.current(), 400)
+  }, [ready, loaded, visible, isTop, peer, newest, placed, endShown, upTo])
   const userScroll = useCallback(() => {
     userScrolled.current = true
     releaseEnd()
-  }, [releaseEnd])
+    // The person took over: the landing stops where they are.
+    if (openRun.current.started) settleOpen()
+  }, [releaseEnd, settleOpen])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
     setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
-    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
+    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight, opening: userScrolled.current !== true })
     const live = olderLive.current
     const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
     olderState.current = older.state
@@ -1204,6 +1394,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     } catch (err) {
       olderErr.current = true
       setLoadError(errorText(err))
+      if (context.live && context === reactionContextRef.current) setOpenFailed(true)
     }
     setLoadingMore(false)
   }
@@ -1292,27 +1483,49 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     const before = { away: away.current, pin: endPin.current }
     away.current = true
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+    // A row not measured yet fails through onScrollToIndexFailed instead of
+    // throwing: the same way back.
+    let failed = false
+    const fail = () => {
+      failed = true
+      away.current = before.away
+      endPin.current = before.pin
+      missing()
+    }
+    indexJump.current = { kind: 'quote', fail }
     try {
       list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
     } catch {
-      away.current = before.away
-      endPin.current = before.pin
-      return missing()
+      indexJump.current = null
+      if (!failed) fail()
+      return
     }
+    indexJump.current = null
+    if (failed) return
     // The first offset can be an estimate even when scrollToIndex succeeds.
     jumpTimer.current = setTimeout(() => {
       if (listRef.current !== list) return
       // An older page can land in between and shift the index.
       const at = rowsRef.current.findIndex((row) => row.key === key)
       if (at < 0) return missing()
+      let lost = false
+      indexJump.current = { kind: 'quote', fail: () => { lost = true; missing() } }
       try {
         list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
-        setFlashKey(key)
-        quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
       } catch {
-        missing()
+        if (!lost) missing()
+        lost = true
       }
+      indexJump.current = null
+      if (lost) return
+      setFlashKey(key)
+      quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
     }, 120)
+  }
+  const indexFailed = (info) => {
+    const jump = indexJump.current
+    indexJump.current = null
+    if (jump !== null) jump.fail(info)
   }
 
   // The thread as offer input: every row with its card, sender and the id of
@@ -1372,7 +1585,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const offered = [onReport, onOpenListing, onAvaliar, mentionTap].reduce((out, fn) => out + (typeof fn === 'function' ? '1' : '0'), '')
   // What renderItem reads besides `rows`: a change re-renders the cells, and
   // the rows whose props did not change skip their render.
-  const extra = useMemo(() => ({ now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, online: node.online, styles, sending: reactionContext.sending }), [now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, node.online, styles, reactionContext.sending])
+  const extra = useMemo(() => ({ now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, openKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, online: node.online, styles, sending: reactionContext.sending }), [now, nameText, folder, ownKey, reactionOverrides, reactionsDisabled, reactionsHidden, flashKey, openKey, pageKey, peer, quoteName, quoteHandle, canForward, canAnswer, origin, invitable, offered, node.online, styles, reactionContext.sending])
   // One renderItem for the list's life. Each render of this screen (each
   // keystroke in the composer) still runs it for every mounted cell, since
   // the list is not strictMode and gets an inline keyExtractor, header and
@@ -1402,6 +1615,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
         media={mediaOf.get(item.key)}
         fwd={fwdOf.get(item.key)}
         dayMark={item.dayMark}
+        newMark={item.key === openKey}
         origin={origin}
         invitable={invitable}
         pageKey={pageKey}
@@ -1647,9 +1861,14 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
             const { y, layoutHeight } = scrollFrame.current
             scrollFrame.current.contentHeight = height
             setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
-            followEnd()
+            // While the open heads for an unread row, growth places that row
+            // and never follows the end.
+            if (openHeading()) placeOpenRow(true)
+            else followEnd()
           }}
           onUserScroll={userScroll}
+          onScrollToIndexFailed={indexFailed}
+          onViewableItemsChanged={viewable}
         />
       </EmbedBandBottom.Provider>
       {quoteToast ? <View pointerEvents='none' style={styles.quoteToast}><Text accessibilityLiveRegion='polite' style={styles.quoteToastText}>Mensagem fora do trecho carregado</Text></View> : null}
@@ -1737,7 +1956,7 @@ export function sameMessageRow (prev, next) {
   return true
 }
 
-const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, mediaPage, readOnly, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
+const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape, flash, newMark, chipsReady, reactionOff, offerKey, card, media, fwd, pageKey, mediaPage, readOnly, folder, ownKey, peer, quoteName, quoteHandle, canForward, canAnswer, reportable, listable, canMention }) {
   const { reactionsFor, quoteAuthor, quoteMine, quoteMissing, quoteTarget, offerOfRow, scrollToKey, setReplyTo, setForwarding, toggleReaction, openReactionPicker, onReport, onOpenInvite, onOpenListing, onAvaliar, setConfirming, declineOffer, offerAct } = calls
   const mentionTap = canMention ? calls.mentionTap : undefined
   const mine = item.mine === true
@@ -1774,6 +1993,15 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
   return (
     <SwipeReply disabled={!reply} onReply={reply?.onPress}>
       <View style={flash ? styles.quoteFlash : undefined}>
+        {newMark
+          ? (
+            <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
+              <View style={styles.newLine} />
+              <Text style={styles.newText}>Mensagens novas</Text>
+              <View style={styles.newLine} />
+            </View>
+            )
+          : null}
         <Bubble
           moment={pageKey === null && !item.deleted && isMomentReaction(item) ? { author: momentAuthor(item, { peer, ownKey }), seq: item.moment, identity: ownKey, folder } : undefined}
           media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} deferred={folder === 'request'} /> : null}
@@ -1822,6 +2050,9 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   quoteFlash: { backgroundColor: colors.line },
+  newMark: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
+  newLine: { flex: 1, height: 1, backgroundColor: colors.line },
+  newText: { color: colors.soft, fontSize: 13 },
   quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
   quoteToastText: { color: colors.bg, textAlign: 'center' },
   // The offer and accept sheets' body, with the side margins of the other sheets.

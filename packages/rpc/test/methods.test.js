@@ -2359,6 +2359,8 @@ test('dm.* (Conversas)', (t) => {
   ok(t, 'dm.seen', { peer: KEY }, { peer: KEY })
   bad(t, 'dm.seen', {})
   bad(t, 'dm.seen', { peer: KEY, id: ID }, 'no read receipt by id')
+  ok(t, 'dm.seen', { peer: KEY, upTo: ID }, { peer: KEY, upTo: ID })
+  for (const upTo of ['cd'.repeat(15), 'cd'.repeat(17), 'CD'.repeat(16), 'zz'.repeat(16), '', null, 1, true, [ID]]) bad(t, 'dm.seen', { peer: KEY, upTo }, 'upTo ' + JSON.stringify(upTo))
 
   const base = { nonce, target: KEY, reason: 'assedio', quote: 'mensagem' }
   t.absent(isMutating('dm.reportSign'))

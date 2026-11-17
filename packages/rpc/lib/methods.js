@@ -1533,7 +1533,7 @@ const SPECS = {
   },
   'dm.thread': { fields: { page: opt(isKey), peer: req(isKey), before: opt(isDmId), limit: opt(int(1, L.DM_THREAD_LIMIT_MAX), L.DM_THREAD_LIMIT_DEFAULT) } },
   'dm.set': { fields: { page: opt(isKey), peer: req(isKey), state: req(isDmState) }, mutating: true },
-  'dm.seen': { fields: { page: opt(isKey), peer: req(isKey) } },
+  'dm.seen': { fields: { page: opt(isKey), peer: req(isKey), upTo: opt(isDmId) } },
   // Páginas de ponta a ponta no nó (docs/rpc.md 5.114), browser node only.
   // dm.pageGenerate and dm.pageShare write nothing remote, so they are not
   // mutating. dm.pageDraft holds a draft in memory and also finishes the
