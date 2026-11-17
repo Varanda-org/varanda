@@ -1018,9 +1018,12 @@ function foldGroupRecord (entry, i, r) {
 }
 
 // A lower cut keeps less (the quota) and a release keeps a boxless writer
-// (groupVerdict): a join refused before is tried again, once per lower cut,
-// whether the scan read the cut or fetched it late as a deleted hole.
-function foldGroupCut (entry, i, r) {
+// (groupVerdict): a join refused before is tried again, once per lower cut
+// the walk gives its writer. A cut record lowers it, and so does a late
+// join (a deleted hole the scan passed, fetched once): the walk is stepped
+// again from its first record, and a cut it had ignored on a writer it did
+// not count yet now applies.
+function foldGroupWalk (entry, i, r) {
   const before = groupWalkCut(entry.groupWalks, r.group, r.writer)
   foldGroupRecord(entry, i, r)
   const after = groupWalkCut(entry.groupWalks, r.group, r.writer)
@@ -3223,14 +3226,9 @@ class Seeder {
         if (r !== null && !foldShare(entry.shares, r.seq, i, { maxPosts: POST_SHARES_PER_DIARY })) entry.sharesOverflow = true
         continue
       }
-      if (block.type === 'group-join') {
+      if (block.type === 'group-join' || block.type === 'group-cut') {
         const r = validRecordCopy(block, i)
-        if (r !== null) foldGroupRecord(entry, i, r)
-        continue
-      }
-      if (block.type === 'group-cut') {
-        const r = validRecordCopy(block, i)
-        if (r !== null) foldGroupCut(entry, i, r)
+        if (r !== null) foldGroupWalk(entry, i, r)
         continue
       }
       // Folded here, not in _runIndex: that queue pauses at capacity and
@@ -3740,8 +3738,7 @@ class Seeder {
       if (r === null || entry.groupSeqs.has(seq)) return
       this._noteGroupKept(entry, seq)
       if (r.type !== 'group-join' && r.type !== 'group-cut') return
-      if (r.type === 'group-cut') foldGroupCut(entry, seq, r)
-      else foldGroupRecord(entry, seq, r)
+      foldGroupWalk(entry, seq, r)
       entry.groupLive = liveGroupJoins(entry.groupDecls, entry.groupWalks)
       this._reconcileGroups(key, entry)
       return
