@@ -22,7 +22,7 @@ import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 import { VIDEO_MIME } from './media/plan.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
 import * as actingStore from './actingAs.js'
-import { actingPageStopped, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
+import { actingPageStopped, actorBoxOf, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
 import { oldPageKeys } from './pageOldKeys.js'
 
 const { MAX_AVATAR_BYTES } = rpc
@@ -601,7 +601,21 @@ export async function pagesDmPrepare (node, args) {
   }
 }
 
-async function prepare (node, { member, page, status, roster, gen }) {
+// The boxes core delegates signed for themselves, for planShares: read fresh
+// from `page` only when some roster member has no dm-key, because the given
+// status may be the screen's older read (a delegate restated since) or a
+// move's K2 placeholder, while the statements live on the old page. A failed
+// read keeps the given status's statements.
+async function statedBoxes (node, { member, page, owner, admins, boxes, status }) {
+  if ([owner, ...admins].filter(isKey).every((m) => isKey(boxes[m]))) return status
+  try {
+    const fresh = await pagesDmBoxRead(node, { member, page })
+    if (isObject(fresh)) return { actorBoxes: fresh.actorBoxes }
+  } catch {}
+  return status
+}
+
+async function prepare (node, { member, page, status, roster, gen, boxesFrom = page }) {
   const owner = roster && roster.owner
   const admins = roster && Array.isArray(roster.admins) ? roster.admins : []
   // A device that never opened the page's inbox holds no gen yet: the
@@ -615,10 +629,11 @@ async function prepare (node, { member, page, status, roster, gen }) {
   if (unadopted.has(page)) throw pageError('rotacao-necessaria')
   const ownBox = await ownDmBox(node)
   const boxes = await pagesDmBoxes(node, [owner, ...admins, member])
-  const { recipients, missing } = planShares({ owner, admins, boxes })
   // The legacy bundle is sealed to ownBox: only a box this node derives will
   // open it, so a published dm-key that is not this node's is refused here.
   if (boxes[member] !== ownBox) throw new Error(PAGE_DM_OWN_BOX_PENDING)
+  const stated = await statedBoxes(node, { member, page: boxesFrom, owner, admins, boxes, status })
+  const { recipients, missing } = planShares({ owner, admins, boxes, status: stated })
   if (!recipients.some((r) => r.member === owner)) throw new Error(PAGE_DM_NO_OWN_BOX)
   const g = Number.isInteger(gen) ? gen : nextGen(status)
   const made = await nodeCall(node)('dm.pageGenerate', { page, gen: g, recipients })
@@ -805,11 +820,21 @@ export async function pagesDmActivate (node, { member, page, status, roster }) {
 }
 
 // 'Enviar chave' to one member of the roster: seal the held secrets for the
-// member's dm-key and file the share. A write: { uncertain, retry }.
+// member's dm-key, or for the box a core delegate signed for itself (a fresh
+// 'dm-box-read', only when it has no dm-key; a failed read counts as no
+// statement), and file the share. A write: { uncertain, retry }.
 export async function pagesDmShareTo (node, { member, page, to }) {
   const boxes = await pagesDmBoxes(node, [to])
-  if (!isKey(boxes[to])) throw new Error(PAGE_DM_NO_BOX)
-  const s = await nodeCall(node)('dm.pageShare', { page, member: to, box: boxes[to] })
+  let params = isKey(boxes[to]) ? { page, member: to, box: boxes[to] } : null
+  if (params === null) {
+    let stated = null
+    try {
+      stated = actorBoxOf(await pagesDmBoxRead(node, { member, page }), to)
+    } catch {}
+    if (stated !== null) params = { page, member: to, box: stated.box, proof: stated.proof }
+  }
+  if (params === null) throw new Error(PAGE_DM_NO_BOX)
+  const s = await nodeCall(node)('dm.pageShare', params)
   if (!isObject(s) || !Number.isInteger(s.gen)) throw pageError('indisponivel')
   return pagesDm(node, { member, page, action: 'dm-box-share', op: { member: to, gen: s.gen, sealed: s.sealed, sig: s.sig } })
 }

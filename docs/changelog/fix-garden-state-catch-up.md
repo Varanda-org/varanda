@@ -1,0 +1,3 @@
+### Corrigido
+
+- Varandinha num segundo aparelho da mesma passkey (PR `fix/garden-state-catch-up`): a própria varanda podia aparecer vazia ou antiga num aparelho que ainda não tinha recebido do semeador o que outro aparelho guardou, e convidava a plantar de novo. Agora `garden.state` sincroniza o diário próprio com o semeador antes de ler, como uma escrita já fazia, a menos que o aparelho já esteja em dia nesta sessão; sem conexão com o semeador, a tela mostra o aviso de conexão em vez de uma varanda vazia. Nada guardado se perdia: guardar já sincronizava antes de escrever. Verificação em `docs/verification/fix-garden-state-catch-up.md`.

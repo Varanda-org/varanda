@@ -93,7 +93,8 @@ export const HELP = Object.freeze({
       'Num computador, use o celular: para criar a conta, toque em Outras formas de entrar e em criar com o celular; para entrar, toque em Entrar ou Já tenho conta e escolha usar outro aparelho na janela do sistema. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
       'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
       LOSS_TEXT,
-      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.'
+      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.',
+      'Sem passkey e sem código, Excluir conta sem a passkey, abaixo dos botões, registra um pedido de exclusão com o seu @nome, o celular que você confirmou e um código por SMS. Depois, ainda falta escrever para contato@varanda.app: nada acontece antes disso.'
     ])
   }),
   vinculo: Object.freeze({

@@ -19,7 +19,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
-    'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'garden.help', 'garden.play', 'garden.set', 'garden.state', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
@@ -2709,6 +2709,22 @@ test('page end-to-end node methods', (t) => {
   bad(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY }] }, 'recipient without box')
   ok(t, 'dm.pageShare', { page: PAGE, member: KEY, box: KEY })
   bad(t, 'dm.pageShare', { page: PAGE, member: KEY })
+  // A core delegate's signed box (5.161): exactly { gen, at, sig }.
+  const proof = { gen: 2, at: '2026-11-17T12:00:00.000Z', sig }
+  ok(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY, box: KEY, proof }, { member: PAGE, box: KEY }] })
+  ok(t, 'dm.pageShare', { page: PAGE, member: KEY, box: KEY, proof })
+  for (const [bp, why] of [
+    [{ ...proof, gen: 0 }, 'gen 0'], [{ ...proof, gen: 1.5 }, 'fractional gen'], [{ ...proof, at: '2026-11-17T12:00:00Z' }, 'non-canonical at'],
+    [{ ...proof, sig: 'ab' }, 'short sig'], [{ gen: 2, at: proof.at }, 'no sig'], [{ ...proof, box: KEY }, 'extra key'], [null, 'null'], ['x', 'string']
+  ]) {
+    bad(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY, box: KEY, proof: bp }] }, 'recipient proof: ' + why)
+    bad(t, 'dm.pageShare', { page: PAGE, member: KEY, box: KEY, proof: bp }, 'proof: ' + why)
+  }
+  bad(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY, box: KEY, other: proof }] }, 'a third key that is not proof')
+  bad(t, 'dm.pageGenerate', { page: PAGE, gen: 1, recipients: [{ member: KEY, box: KEY, proof, x: 1 }] }, 'four keys')
+  ok(t, 'dm.actorBox', {}, {})
+  bad(t, 'dm.actorBox', { page: PAGE }, 'extra key')
+  t.absent(isMutating('dm.actorBox'))
   const secrets = { page: PAGE, gen: 1, sealed: 'abc', by: KEY, sig, box: KEY, groupBox: KEY, cert: {} }
   ok(t, 'dm.pageSecrets', secrets)
   bad(t, 'dm.pageSecrets', { ...secrets, gen: 0x100000000 }, 'gen above uint32')
