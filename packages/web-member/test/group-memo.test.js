@@ -151,6 +151,38 @@ test('the entries stamp follows the seq of a sparse read', (t) => {
   t.not(entriesStamp([{ seq: 0, record: rec }, { seq: 1, record: null }]), entriesStamp(dense), 'a hole is stamped')
 })
 
+// A released stub or a writer cut early holds a few blocks far past its
+// prefix (#350): its stamp names them, so the fold memo still holds.
+test('a replica holding a few blocks far past its prefix keeps a stamp (#350)', async (t) => {
+  const Hypercore = require('hypercore')
+  const RAM = require('random-access-memory')
+  const source = new Hypercore(RAM)
+  await source.append(Array.from({ length: 6000 }, (_, i) => b4a.from('b' + i)))
+  const copy = new Hypercore(RAM, source.key)
+  await copy.ready()
+  t.teardown(async () => {
+    await source.close()
+    await copy.close()
+  })
+  const a = source.replicate(true, { keepAlive: false })
+  const b = copy.replicate(false, { keepAlive: false })
+  a.pipe(b).pipe(a)
+  t.teardown(() => {
+    a.destroy()
+    b.destroy()
+  })
+  await copy.download({ start: 0, end: 10 }).done()
+  await copy.download({ start: 5000, end: 5001 }).done()
+  t.is(copy.contiguousLength, 10)
+  t.is(copy.length, 6000)
+  const first = await ops.replicaStamp(copy)
+  t.ok(first !== null, 'signed with 5990 blocks missing past its prefix')
+  t.is(await ops.replicaStamp(copy), first, 'the same copy, the same stamp')
+  await copy.download({ start: 5500, end: 5501 }).done()
+  const second = await ops.replicaStamp(copy)
+  t.ok(second !== null && second !== first, 'a block arriving past the hole changes it')
+})
+
 test('a second group.list decodes no block and answers the same', async (t) => {
   const { a } = await world(t)
   const first = await counted(a, () => ops.groupList(a.ctx))

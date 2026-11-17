@@ -149,4 +149,37 @@ async function keptPastSeqs (core, from, to) {
   return out
 }
 
-module.exports = { advertisedHeld, peerAnswered, nextHeld, peerHolds, askHeld, keptPastSeqs, BITFIELD_SEGMENT }
+// The runs of blocks of [from, to) `core` holds, as [start, end) pairs, or
+// null past `max` runs. Without the bitfield (heldBits null) it asks has()
+// per block, and only over at most `max` blocks (null past that).
+async function heldRuns (core, from, to, max) {
+  const runs = []
+  const bits = heldBits(core)
+  if (bits === null) {
+    if (to - from > max) return null
+    let start = -1
+    for (let i = from; i < to; i++) {
+      if (await core.has(i)) {
+        if (start === -1) start = i
+      } else if (start !== -1) {
+        runs.push([start, i])
+        start = -1
+      }
+    }
+    if (start !== -1) runs.push([start, to])
+    return runs.length > max ? null : runs
+  }
+  let i = from
+  while (i < to) {
+    const start = bits.firstSet(i)
+    if (start === -1 || start >= to) break
+    if (runs.length === max) return null
+    let end = bits.firstUnset(start)
+    if (end === -1 || end > to) end = to
+    runs.push([start, end])
+    i = end
+  }
+  return runs
+}
+
+module.exports = { advertisedHeld, peerAnswered, nextHeld, heldRuns, peerHolds, askHeld, keptPastSeqs, BITFIELD_SEGMENT }

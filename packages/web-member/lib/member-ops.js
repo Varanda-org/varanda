@@ -102,6 +102,7 @@ const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/enga
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { heldRuns } = require('@varanda/core/lib/sparse-held')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
@@ -2508,8 +2509,8 @@ async function readGroupCore (ctx, key, rec = null) {
 
 const MEMO_MAX = 64
 const MEMO_TTL_MS = 30000
-// A replica with more missing blocks than this above its contiguous length
-// is not signed: its stamp would cost as much as the read.
+// A replica holding more runs of blocks than this past its contiguous
+// length is not signed: its stamp would cost as much as the read.
 const MEMO_MAX_HOLES = 4096
 // Tests only: VARANDA_MEMO_CHECK=1 turns the check mode on for every ctx
 // and gives a ctx without a memo one per storage.
@@ -2545,13 +2546,15 @@ function groupStamp (core) {
 }
 
 // readVisible also shows the stored blocks past a hole, so a replica's
-// stamp names each of them (null: too many to sign).
+// stamp names the runs of them (null: too many to sign). A long stub or a
+// writer cut early holds a few runs far past its prefix.
 async function replicaStamp (core) {
   const contiguous = core.contiguousLength
   const length = core.length
+  const runs = await heldRuns(core, contiguous, length, MEMO_MAX_HOLES)
+  if (runs === null) return null
   let out = contiguous + ',' + length + ',' + core.fork
-  if (length - contiguous > MEMO_MAX_HOLES) return null
-  for (let i = contiguous; i < length; i++) if (await core.has(i)) out += '.' + i
+  for (const [start, end] of runs) out += '.' + start + '-' + end
   return out
 }
 
@@ -6639,5 +6642,6 @@ module.exports = {
   isNeedsExclusive,
   needsExclusive,
   lentCore,
-  entriesStamp
+  entriesStamp,
+  replicaStamp
 }
