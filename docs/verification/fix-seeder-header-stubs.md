@@ -205,6 +205,8 @@ Depois desta rodada, cada arquivo sozinho (`VARANDA_TEST_CONCURRENCY=1 node <arq
 | `seeder-groups-gone.test.js` | 25/25 | 153/153 |
 | `seeder-groups-waits.test.js` | 12/12 | 61/61 |
 
+Revisão da rodada 4: sem P1 nem P2. Três ajustes P3 entraram depois dela: a reconciliação do fim da admissão não vale para a admissão de uma raiz (`key !== group`, pois `groupLive` é indexado pelo escritor); o texto da asserção do teste 24 diz que a segunda mudança é recusada com `stub-full`; e o limite da espera pela varredura está em "Pontos em aberto". O estado do teste 24 (uma saída anterior de Kd ainda em andamento numa passagem seguinte) é montado à mão: o código só o mantém por um instante, e `Math.min(moved, 1)` fica como limite de defesa.
+
 A saída só de remoção no fim da admissão continua sem teste próprio: um teste como o 19 com a espera ignorada (`_groupBackingOff` sempre falso) passou também com a reconciliação da rodada 2 de volta (1 gravação), então não foi mantido. O teste 19 ainda passa com no máximo 2 gravações.
 
 ## Pontos em aberto (padrões do responsável)
@@ -213,6 +215,7 @@ A saída só de remoção no fim da admissão continua sem teste próprio: um te
 - "G sai" quer dizer G bloqueado. Uma raiz apagada por outro motivo deixa os escritores servidos, e os tocos seguem a mesma regra.
 - Escritores `v: 1` de grupos antigos dividem o limite de 256, sem guarda extra.
 - `stub-full` só é julgado de novo numa nova entrada (outro seq) ou na partida seguinte.
+- Enquanto a varredura de D não alcança o fim do diário (um bloco que nenhum par serve), uma entrada movida que uma linha só de lista responderia fica sem resposta, e a linha antiga continua listada sob o grupo antigo.
 - O nó core deixa de cobrar a listagem de um núcleo guardado sem provar a entrada: no máximo um portão por (grupo, chave) por execução, sobre chaves que o nó já guarda, sem busca.
 
 ## Ordem de implantação (#224)
