@@ -35,4 +35,15 @@ Conferido à mão que a rota, a regex e as chaves JSON descritas na seção 7 de
 
 ## CI de integração
 
-O orquestrador preenche esta seção ao integrar a pilha: `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo` (`DEMO OK`).
+Node 24.22.1, sobre `origin/main` 8dd11de3 (merge sem conflito):
+
+- `npm ci --ignore-scripts`: passou.
+- `npm run lint`: passou.
+- `npm test -- --affected=origin/main`: 884 arquivos, 878 passaram. A máquina estava com load average entre 17 e 22 (outras suítes rodando). Os seis que falharam passaram sozinhos, exceto um:
+  - `packages/core/test/seeder-groups.test.js`: sozinho, 44/44 testes, 271/271 asserções.
+  - `packages/core/test/seeder-slots.test.js`: sozinho, 10/10, 90/90.
+  - `packages/core/test/community-member.test.js`: sozinho, 25/25, 262/262.
+  - `packages/core/test/group-member-3.test.js`: sozinho, 10/10, 84/84.
+  - `apps/cli/test/update.test.js`: sozinho, 80/80, 1952/1952.
+  - `packages/core/test/private-member-3.test.js`: "private: fake bans from an unadmitted writer never inflate a rotation" esgotou os 30 s duas vezes sozinho; com o tempo por teste em 300 s (preload do brittle, sem mudar o repositório) passou 7/7, 37/37, e esse teste levou 67 s. Lento sob carga, não travado; este PR não toca grupos privados.
+- `npm run demo`: terminou com "DEMO OK".
