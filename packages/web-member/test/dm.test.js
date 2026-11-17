@@ -2170,18 +2170,18 @@ function engineWithVisitPool (pool) {
   }
 }
 
-async function visitEngine (t, pool, assoc, { stamps = 8, limits = {}, visitsDue } = {}) {
+async function visitEngine (t, pool, assoc, { stamps = 8, limits = {}, visitsDue, identity, certified = true, kp = crypto.keyPair() } = {}) {
   const storage = memoryNodeStorage()
-  const kp = crypto.keyPair()
   const prf = crypto.randomBytes(32)
   const engine = engineWithVisitPool(pool)({
     storage,
     association: hex(assoc.publicKey),
     limits: { visitDelay: () => 0, ...limits },
-    visitsDue
+    visitsDue,
+    identity
   })
   t.teardown(() => engine.close(), { force: true })
-  await certify(storage, kp, assoc)
+  if (certified) await certify(storage, kp, assoc)
   await engine.unlock(prf)
   await engine.loaded()
   const local = await opener(prf)
@@ -2260,6 +2260,49 @@ test('visitas: a ping replayed after visits.clear never files the visitor again;
   pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(C, B, assoc, today) })
   t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1, 'the same sender unblocked files')
   t.alike((await B.engine.visitList(B.own, now)).map((r) => r.key), [C.own])
+})
+
+test('an injected identity is what the engine reads: the cert, the blocklist, the member blocks and the follows', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const pool = visitPool()
+  const kpA = crypto.keyPair()
+  const folds = []
+  const A = await visitEngine(t, pool, assoc, { kp: kpA, certified: false })
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: 'ee'.repeat(32), box: A.box, now: Date.now() }), { queued: false }, 'no diary and no identity.cert: no certificate')
+
+  const cert = createCert({ member: hex(kpA.publicKey) }, assoc)
+  const S = await visitEngine(t, pool, assoc, { kp: kpA, certified: false, identity: { cert: async () => cert } })
+  const mod = crypto.keyPair()
+  const modCert = createModeratorCert({ moderator: hex(mod.publicKey) }, assoc)
+  let snapshot = createSnapshot({ seq: 1, blocked: [S.own] }, mod, modCert)
+  let blocks = []
+  const B = await visitEngine(t, pool, assoc, {
+    identity: {
+      memberBlocks: async () => blocks,
+      blocklist: async () => snapshot === null ? null : { v: 1, snapshot },
+      follows: async () => [{ key: 'f1'.repeat(32) }, 'f2'.repeat(32)]
+    },
+    limits: { fold: (args) => { folds.push(args); return require('@varanda/core/lib/dm-fold').fold(args) } }
+  })
+  const now = Date.now()
+  const today = visitsCore.visitDay(now)
+  t.alike(await S.engine.visitQueue(S.own, S.kp, { to: B.own, box: B.box, now }), { queued: true }, 'the cert served by identity.cert lets it send')
+  await until(() => pool.puts === 1)
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a sender on identity.blocklist is dropped; the storage has no blocklist')
+  snapshot = null
+  blocks = [{ key: S.own, on: true, t: 1 }]
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(S, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 0, 'a sender in identity.memberBlocks is dropped; the storage has no blocks')
+  blocks = []
+  pool.entries.push({ seq: pool.entries.length + 1, bytes: handPing(S, B, assoc, today) })
+  t.is((await B.engine.pullVisits(B.own, { since: today })).added, 1, 'unblocked there, it files')
+
+  await B.engine.list(B.own, { folder: 'inbox' })
+  t.alike(folds[folds.length - 1].followSet, ['f1'.repeat(32), 'f2'.repeat(32)], 'identity.follows reaches the fold')
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: { cert: 1 } }), /identity\.cert/)
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: 'x' }), /identity/)
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: null }), /identity/)
+  t.exception.all(() => createDmEngine({ storage: memoryNodeStorage(), association: hex(assoc.publicKey), identity: [] }), /identity/)
 })
 
 test('visitas: the budget keeps the last 5 stamps; an uncertain put is never sent again; no visit lane keeps the queue', async (t) => {
