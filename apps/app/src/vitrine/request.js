@@ -341,7 +341,7 @@ export function createVitrineRequest (fixtures, options) {
     return { seq, ref: `${data.own}:${seq}` }
   }
 
-  // Varandinha (5.156 to 5.159): the own balcony is read from the own diary
+  // Varandinha (5.157 to 5.160): the own balcony is read from the own diary
   // records, so the fixtures, a play, a help and a leave all agree with
   // diary.peek and the /index/garden answers. The rules are rpc.garden, on
   // the demo clock; answered dates move with options.clock like momentos.
