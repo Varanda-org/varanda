@@ -299,7 +299,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -5029,7 +5029,7 @@ class Seeder {
           // A closed or moved page leaves the Feira at once.
           if (isPage && this._names.endSeq(key) !== null && this._feira) this._feiraClose(key)
           // Page records only feed the name index's hint.
-          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true } : null)) {
+          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true, now: Date.now() } : { now: Date.now() })) {
             entry.indexPaused = true
             return
           }
@@ -6337,13 +6337,82 @@ class Seeder {
     }
   }
 
+  // GET /index/garden/<owner>: pointers to the owner's Varandinha, { on,
+  // state, helps: [{ author, seq, followSeq }], given: [seq], indexing,
+  // complete } (engagement-index.js garden): on and state are the seqs of
+  // the newest live `garden` (on or off: the node peeks it) and
+  // `garden-state` blocks or null; helps are the neighbours' waterings
+  // inside the reader window of now, from visible writers only, each with
+  // followSeq, the seq of that HELPER's committed live follow of the owner
+  // (a help from someone who does not follow the owner counts for nothing,
+  // so it is left out); given are the owner's own help seqs. A balcony that
+  // is off, or was never opened, answers state null and no helps or given.
+  // A held or hidden writer is left out and the answer says complete false,
+  // as it does while the writers cap refused a help that may still be
+  // listed (garden hidden) and while the follow index may miss a follow of
+  // the owner (followersIncomplete: a pending or capped helper has no
+  // followSeq, so its help is left out); a throw there reads incomplete. Null
+  // when the owner is not visible or held (_searchHeld), never an empty
+  // balcony. Fails closed while the owner's own diary is not fully indexed
+  // and scanned (its newest blocks and tombstones may be missing): nothing
+  // listed, indexing true, complete false. Keys and seqs only: no pot,
+  // plant, date or name, which the node reads from the diaries and verifies.
+  indexGarden (ownerHex) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const g = this._index.garden(ownerHex, Date.now(), {
+        visible: v.visible,
+        followSeq: (hex) => this._notices.followSeq(hex, ownerHex)
+      })
+      if (g === null) return null
+      if (this._ownerIndexPending(ownerHex)) return { on: null, state: null, helps: [], given: [], indexing: true, complete: false }
+      const flags = this._indexFlags()
+      let followsComplete = false
+      try { followsComplete = this._notices.followersIncomplete(ownerHex) === false } catch {}
+      return { on: g.on, state: g.state, helps: g.helps, given: g.given, indexing: flags.indexing, complete: flags.complete && !g.hidden && !v.held && followsComplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/garden/<owner>/rua[/<cursor>]: Varandas da rua, the
+  // balconies of the accounts the owner follows that show theirs, { items:
+  // [{ key, on, state }], next, indexing, complete } (engagement-index.js
+  // gardenStreet): on is the seq of the key's newest live `garden` block,
+  // which is on, state its newest `garden-state` seq or null; keys
+  // ascending, strictly after the cursor (a key), `next` the cursor of the
+  // following page or null. Visible keys only; a held one is left out and
+  // the answer says complete false, as it does while the owner's own follows
+  // are pending, truncated or capped (followingIncomplete, a throw reading
+  // incomplete), since the street may be short. Null when the owner is not visible or
+  // held or the cursor is malformed. Fails closed while the owner's own
+  // diary is not fully indexed and scanned (an unfollow may be missing): no
+  // items, complete false. Keys and seqs only.
+  indexGardenStreet (ownerHex, cursor = null) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const page = this._index.gardenStreet(ownerHex, this._notices.followTargets(ownerHex), { visible: v.visible, cursor })
+      if (page === null) return null
+      const flags = this._indexFlags()
+      if (this._ownerIndexPending(ownerHex)) return { items: [], next: null, indexing: flags.indexing, complete: false }
+      let followsComplete = false
+      try { followsComplete = this._notices.followingIncomplete(ownerHex) === false } catch {}
+      return { items: page.rows, next: page.next, indexing: flags.indexing, complete: flags.complete && !v.held && followsComplete }
+    } catch {
+      return null
+    }
+  }
+
   // GET /index/profile/<author>: pointers to the author's perfil rico blocks,
   // { about: seq | null, mood: seq | null, fans: { count, indexing }, top:
   // { seq, back: { <friend>: followSeq | null } } | null, visits: seq | null,
-  // indexing, complete } (engagement-index.js profileExtra, fanCount): the
-  // newest live `profile-about`, `mood`, `top-friends` and `visits` block
-  // (visits is a pointer only: the node peeks the block and checks on === true,
-  // an off block still has a seq). fans.count is the number
+  // garden: seq | null, indexing, complete } (engagement-index.js
+  // profileExtra, fanCount): the newest live `profile-about`, `mood`,
+  // `top-friends`, `visits` and `garden` block (visits and garden are
+  // pointers only: the node peeks the block and checks on === true, an off
+  // block still has a seq). fans.count is the number
   // of visible fas indexed so far (held ones, and writers whose own diary
   // is pending, left out: _fansShown), a claim like the follower counts;
   // fans.indexing is true while it may still grow (any diary not fully
@@ -6354,8 +6423,8 @@ class Seeder {
   // readers ignore keys they do not know. Null when the author is not
   // visible or held (_searchHeld). Fails closed while the author's own diary
   // is not fully indexed and scanned (the newest block may be missing, a
-  // tombstone not yet applied): about, mood, top and visits null, fans.indexing,
-  // indexing true and complete false. Seqs only: the node reads and verifies
+  // tombstone not yet applied): about, mood, top, visits and garden null,
+  // fans.indexing, indexing true and complete false. Seqs only: the node reads and verifies
   // the blocks.
   indexProfile (authorHex) {
     try {
@@ -6363,8 +6432,8 @@ class Seeder {
       const v = this._followsVisible()
       const shown = this._fansShown(v)
       const count = this._index.fanCount(authorHex, shown.visible)
-      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, visits: null, indexing: true, complete: false }
-      const { about, mood, top, visits } = this._index.profileExtra(authorHex)
+      if (this._ownerIndexPending(authorHex)) return { about: null, mood: null, fans: { count, indexing: true }, top: null, visits: null, garden: null, indexing: true, complete: false }
+      const { about, mood, top, visits, garden } = this._index.profileExtra(authorHex)
       let pointers = null
       if (top !== null) {
         const back = {}
@@ -6375,7 +6444,7 @@ class Seeder {
         pointers = { seq: top.seq, back }
       }
       const flags = this._indexFlags()
-      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, visits, indexing: flags.indexing, complete: true }
+      return { about, mood, fans: { count, indexing: !flags.complete || v.held || shown.left() }, top: pointers, visits, garden, indexing: flags.indexing, complete: true }
     } catch {
       return null
     }
