@@ -633,8 +633,8 @@ test('Publicar holds the ordinary Audius build while availability is unknown or 
   const src = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
   t.ok(src.includes('useMusicAvailable(node, member, open)'), 'opening the composer refreshes music availability')
   t.ok(src.includes('musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())'), 'resolution requires confirmed music and online previews')
-  t.ok(src.includes('{musicAvailable === true && asPage === null'), 'the music button requires confirmed availability')
-  t.ok(src.includes('asPage === null && musicAvailable === true && musicPickerOpen'), 'the picker requires confirmed availability')
+  t.ok(src.includes('{musicAvailable === true && pollDraft === null'), 'the music button requires confirmed availability')
+  t.ok(src.includes('!momentMode && musicAvailable === true && musicPickerOpen'), 'the picker requires confirmed availability')
 
   const slots = []
   const effects = []

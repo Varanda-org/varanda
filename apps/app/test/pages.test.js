@@ -107,7 +107,7 @@ test('pageError maps tokens to pt-BR and everything else to unavailable', async 
   t.is(pageError('expirado').message, 'Convite ou oferta expirada')
   t.is(pageError('pausada').message, 'Página pausada; fale com a associação')
   t.is(pageError('encerrada').message, 'Esta página foi encerrada')
-  t.is(pageError('midia-invalida').message, 'Foto não aceita')
+  t.is(pageError('midia-invalida').message, 'Foto ou vídeo não aceito')
   t.is(pageError('limite').message, 'Limite atingido')
   t.is(pageError('termos-pendentes').message, 'Aceite os Termos para continuar')
   t.is(pageError('termo-recusado').code, 'termo-recusado', 'the service word check')
@@ -178,6 +178,110 @@ test('post, reply and quote carry 1..10 media descriptors, never more', async (t
     t.is(err.code, 'pedido-invalido')
     t.is(calls.length, before, 'nothing is sent')
   }
+})
+
+function photoDescriptor (over = {}) {
+  return {
+    blocks: 1,
+    bytes: 10,
+    core: 'ab'.repeat(32),
+    height: 1,
+    mime: 'image/jpeg',
+    sha256: 'cd'.repeat(32),
+    start: 1,
+    width: 1,
+    ...over
+  }
+}
+
+function videoDescriptor (over = {}) {
+  return {
+    blocks: 1,
+    bytes: 10,
+    core: 'ef'.repeat(32),
+    height: 360,
+    mime: 'video/mp4',
+    ms: 1000,
+    sha256: '12'.repeat(32),
+    start: 2,
+    width: 640,
+    ...over
+  }
+}
+
+test('post, reply and quote accept a poster and video pair, and a link preview', async (t) => {
+  const { actAs } = await load()
+  const { validDescriptor, validVideoDescriptor } = await import('../src/media/fetch.js')
+  const poster = photoDescriptor()
+  const video = videoDescriptor()
+  t.ok(validDescriptor(poster))
+  t.ok(validVideoDescriptor(video))
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { seq: 1, length: 2, pushed: true }))
+  const preview = { url: 'https://exemplo.com/a', title: 'Padaria', desc: 'Abre cedo', image: poster }
+  for (const action of ['post', 'reply', 'quote']) {
+    const before = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { text: 'x', media: [poster, video] } })
+    t.alike(body(calls[before + 1]).op.media, [poster, video], action + ' sends the pair')
+    const at = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { text: 'x', preview } })
+    t.alike(body(calls[at + 1]).op.preview, preview, action + ' sends the preview')
+  }
+  const loose = { sha256: 'a'.repeat(64), mime: 'image/png', width: 1, height: 1, bytes: 10 }
+  const bp = { url: 'https://exemplo.com/b', extra: 1 }
+  for (const media of [[loose, loose], [poster, video]]) {
+    const before = calls.length
+    const err = await caught(t, actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', media, preview: bp } }))
+    t.is(err.code, 'pedido-invalido', 'media with a preview is refused')
+    t.is(calls.length, before, 'nothing is sent')
+  }
+  await actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', preview: bp } })
+  t.is(body(calls[calls.length - 1]).op.preview.url, 'https://exemplo.com/b')
+})
+
+test('a video list that is not the poster-then-video pair is refused before send', async (t) => {
+  const { actAs } = await load()
+  const poster = photoDescriptor()
+  const video = videoDescriptor()
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { seq: 1 }))
+  const bad = [
+    [video, poster],
+    [poster, video, poster],
+    [video, video, video],
+    [photoDescriptor({ mime: 'image/png' }), video],
+    [{ mime: 'video/mp4' }, { mime: 'video/mp4' }, { mime: 'video/mp4' }]
+  ]
+  for (const media of bad) {
+    const before = calls.length
+    const err = await caught(t, actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', media } }))
+    t.is(err.code, 'pedido-invalido')
+    t.is(calls.length, before, 'nothing is sent')
+  }
+  for (const preview of [null, 'https://exemplo.com', { title: 'sem url' }, { url: 1 }, []]) {
+    const before = calls.length
+    const err = await caught(t, actAs(fakeNode(), { member: M, action: 'reply', page: P, op: { text: 'x', preview } }))
+    t.is(err.code, 'pedido-invalido')
+    t.is(calls.length, before, 'a bad preview sends nothing')
+  }
+})
+
+test('a video/mp4 upload sends the signed op whole', async (t) => {
+  const { pagesMedia, MAX_MEDIA_BYTES: cap } = await load()
+  const calls = stub(t, json(200, { descriptor: { mime: 'video/mp4' } }))
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  const op = { sha256: 'ab'.repeat(32), mime: 'video/mp4', width: 640, height: 360, bytes: 4, ms: 1500 }
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op, signature: SIG, bytes })
+  t.alike(JSON.parse(calls[0].init.headers['x-varanda-page-op']), op, 'ms is inside the op')
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op: { ...op, ms: undefined }, signature: SIG, bytes, ms: 99 })
+  t.absent(JSON.parse(calls[1].init.headers['x-varanda-page-op']).ms, 'a top-level ms is not copied into the op')
+  const image = { sha256: 'cd'.repeat(32), mime: 'image/jpeg', width: 1, height: 1, bytes: 4 }
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op: image, signature: SIG, bytes })
+  const exact = new Uint8Array(cap)
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op: { ...op, bytes: exact.byteLength }, signature: SIG, bytes: exact })
+  t.is(calls.length, 4)
+  const over = new Uint8Array(cap + 1)
+  const err = await caught(t, pagesMedia({ member: M, nonce: NONCE, page: P, op: { ...op, bytes: over.byteLength }, signature: SIG, bytes: over }))
+  t.is(err.code, 'midia-invalida')
+  t.is(calls.length, 4, 'over the cap sends nothing')
 })
 
 test('listing actions reach the signer and post to their own route', async (t) => {
@@ -479,7 +583,7 @@ test('a refusal token maps to its pt-BR text and is never uncertain', async (t) 
     [409, 'nome-em-uso', 'Esse @nome já está em uso'],
     [403, 'pausada', 'Página pausada; fale com a associação'],
     [403, 'encerrada', 'Esta página foi encerrada'],
-    [400, 'midia-invalida', 'Foto não aceita'],
+    [400, 'midia-invalida', 'Foto ou vídeo não aceito'],
     [403, 'termos-pendentes', 'Aceite os Termos para continuar'],
     [503, 'indisponivel', 'Serviço indisponível']
   ]) {

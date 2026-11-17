@@ -22,7 +22,7 @@ test('a poll draft never falls through to a plain post or the outbox', (t) => {
 
 test('a poll draft turns off the link card and the music button', (t) => {
   t.ok(/useLinkDraft\(\{ text, enabled: [^\n]*pollDraft === null/.test(src), 'no link card draft while polling')
-  t.ok(src.includes('musicAvailable === true && asPage === null && pollDraft === null'), 'music button hidden while polling')
+  t.ok(src.includes('musicAvailable === true && pollDraft === null'), 'music button hidden while polling')
   t.ok(src.includes('refusalOf(text, ...(pollDraft !== null ? pollDraft.options : []), ...(eventDraft !== null ? eventEditorTexts(eventDraft) : []))'), 'options are word-checked whenever a draft exists')
 })
 
