@@ -21,7 +21,7 @@ const { writerHeader, groupHeader, groupPost } = require('../lib/group')
 const { memberCertRecord, groupJoinRecord } = require('../lib/records')
 const store = require('../lib/store')
 const member = require('../lib/member')
-const { hex, PARENT, person, exchange, syncOnce, stored, fakeSeeder, groupMember, copyInto, runUntil } = require('./helpers/sync-groups')
+const { hex, PARENT, person, exchange, syncOnce, stored, heldCopy, recorded, fakeSeeder, groupMember, copyInto, runUntil } = require('./helpers/sync-groups')
 
 const enc = (record) => b4a.from(JSON.stringify(record))
 const AT = '2026-01-01T00:00:00.000Z'
@@ -38,32 +38,6 @@ const HEADS = {
   legacy: { raw: (group, diary) => enc({ type: 'group-writer', v: 1, group, diary, box: null, rejoin: null, at: AT }), verdict: 'header-invalid' },
   'another group': { raw: (group, diary) => enc(writerHeader({ group: hex(crypto.randomBytes(32)), diary, member: PARENT })), verdict: 'wrong-group' },
   'another diary': { raw: (group) => enc(writerHeader({ group, diary: hex(crypto.randomBytes(32)), member: PARENT })), verdict: 'wrong-diary' }
-}
-
-// The blocks of `key` ctx holds: { contiguous, held }.
-async function heldCopy (ctx, key) {
-  const s = await store.openStore(ctx.dataDir)
-  try {
-    const core = s.get({ key: b4a.from(key, 'hex'), writable: false })
-    await core.ready()
-    const held = []
-    for (let i = 0; i < core.length; i++) if (await core.has(i)) held.push(i)
-    const out = { contiguous: core.contiguousLength, held }
-    await core.close()
-    return out
-  } finally {
-    await s.close()
-  }
-}
-
-// header-stubs.json as key -> the diary that proved the stub.
-function recorded (ctx) {
-  try {
-    const data = JSON.parse(fs.readFileSync(path.join(ctx.dataDir, 'header-stubs.json'), 'utf8'))
-    return Object.fromEntries(data.stubs.map((x) => [x.key, x.diary]))
-  } catch {
-    return {}
-  }
 }
 
 // A diary in `cs` (its certificate at seq 0, `certFor` its key) under `name`.
@@ -181,6 +155,51 @@ test('a header stub listed with a diary that does not prove its join keeps its v
   }
   t.ok(refused >= 32, refused + ' listings refused, each with its header\'s verdict')
   t.ok(logs.some((l) => l.includes('listou escritores errados demais')), 'and each one charged: the seeder is cut off')
+})
+
+test('cores already stored here in another role, listed as writers of a group whose block 0 can never count for them, are skipped and never charged to the seeder (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = await diaryIn(fake.store, kp, 'diary')
+  // Past MAX_BAD_HINTS: roots of other groups, followed diaries and writers
+  // of other groups, each joined to G by D (a seeder lists them as D's
+  // header stubs).
+  const kinds = {
+    root: { raw: () => enc(groupHeader({ community: PARENT, member: PARENT, diary: d.key, name: 'Outra', join: 'open' })), verdict: 'header-invalid' },
+    diary: { raw: (key) => enc(memberCertRecord(createCert({ member: key }, kp))), verdict: 'header-invalid' },
+    writer: { raw: () => enc(writerHeader({ group: hex(crypto.randomBytes(32)), diary: d.key, member: PARENT })), verdict: 'wrong-group' }
+  }
+  const cores = [d.d]
+  const followed = []
+  const verdicts = new Map()
+  for (const [name, { raw, verdict }] of Object.entries(kinds)) {
+    for (let i = 0; i < 11; i++) {
+      const core = fake.store.get({ name: name + i })
+      await core.ready()
+      await core.append(raw(hex(core.key)))
+      cores.push(core)
+      if (name === 'diary') followed.push(hex(core.key))
+      await d.d.append(enc(groupJoinRecord({ group, writer: hex(core.key), on: true })))
+      items.push({ key: hex(core.key), diary: d.key, length: 1, seq: d.d.length - 1 })
+      verdicts.set(hex(core.key), verdict)
+    }
+  }
+  items.splice(0, items.length, ...sorted(items))
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, cores)
+  for (const key of followed) await member.followAdd(m, key)
+  const logs = []
+  const { events } = await syncOnce(bootstrap, m, { timeoutMs: 30000, log: (line) => logs.push(line) })
+  for (const [key, verdict] of verdicts) {
+    t.alike(skipped(events, key), [verdict], 'skipped with its header\'s verdict')
+    t.ok(await stored(m, key), 'and kept in its own role')
+    t.absent(recorded(m)[key], 'never recorded as a stub')
+  }
+  t.absent(logs.some((l) => l.includes('listou escritores errados demais')), 'none is charged: the seeder is not cut off')
 })
 
 test('a header stub whose first listing did not prove its join is held once another listing does (#350)', async (t) => {
