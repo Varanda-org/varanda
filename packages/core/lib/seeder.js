@@ -101,8 +101,9 @@
 // cut and, past it, only its group-leave and group-key blocks, which the
 // fold still counts and readers read past a hole (_cutGroupCore): the rest
 // is fetched, read and cleared, and the quota counts what is kept. A writer
-// cut at 0 (released) is such a stub: block 0, its leaves and its key
-// blocks, also a replaced boxless writer of a private group, which readers
+// cut at 0 (released, or cut at 0 while counted once the releases are
+// spent) is such a stub: block 0, its leaves and its key blocks, also a
+// replaced boxless writer of a private group, which readers
 // then reject by its header. Purges happen for a dropped or blocked diary,
 // a root its blocked or revoked creator bound, a root key in the blocklist snapshot, a fork or the
 // quota.
@@ -819,9 +820,11 @@ async function localMediaVerdict (core, diaryHex) {
 // public one, else 'header-invalid' as in the fold and member sync. A
 // version 1 header (the validators' 'legacy') is 'header-invalid' too: no
 // wire reason of its own, and the startup re-gate purges it. `released`: the
-// writer's diary cut it at 0, so a boxless writer of a private group (one
-// its diary replaced) is kept as a stub, which readers fetch and reject by
-// its header instead of waiting for it (#350).
+// writer is kept as a stub, cut at 0 (groupWalkCut: released by its diary,
+// or cut at 0 while still counted once the releases are spent), so a
+// boxless writer of a private group (one its diary replaced) stays as a
+// stub, which readers fetch and reject by its header instead of waiting
+// for it (#350).
 function groupVerdict (raw, key, group, diary, visibility = null, released = false) {
   try {
     const header = decodeBlock(raw)
@@ -4285,8 +4288,8 @@ class Seeder {
       entry.keptPastBytes -= bytes
     }
     this._rearmGroupDownload(entry)
-    // A boxless writer kept as a stub is judged again once no longer
-    // released.
+    // A boxless writer kept as a stub is judged again once its cut is no
+    // longer 0.
     if (old === 0 && cut !== 0) {
       const visibility = this._groupVisibility(entry.group)
       if (visibility !== null) this._recheckGroupBoxes(entry.group, visibility)
