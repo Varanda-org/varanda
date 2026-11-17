@@ -9,7 +9,9 @@
 // fetch rewrites the origin, so the allowlist is never widened and no socket
 // leaves 127.0.0.1. The members are linked in-process; B opts in with a real
 // diary-key proof and A's follow, reply, like and repost reach B's browser, and a quote and an
-// @mention reach each recipient's own subscription.
+// @mention reach each recipient's own subscription. A like undone while its
+// send still waits is recalled, and a mention of a name nobody holds yet
+// pushes once the name settles.
 const test = require('brittle')
 const fs = require('node:fs')
 const http = require('node:http')
@@ -200,6 +202,9 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
   const relayToken = nodeCrypto.randomBytes(32).toString('hex')
   const push = await fakePushService(t)
   const logs = []
+  // The send delay, read on each enqueue. Due times are on the shifted
+  // clock, so a delay only elapses when the test advances clock.offset.
+  let pushDelay = 0
   const server = createAccountServer({
     association: assoc.hex,
     origin: ORIGIN,
@@ -211,7 +216,7 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
       pushStore,
       vapid,
       send: (args) => sendPush({ ...args, fetch: push.fetch, now: now() }),
-      delayMs: () => 0,
+      delayMs: () => pushDelay,
       relayTokenHash: sha256(relayToken),
       topicKey: TOPIC_KEY
     },
@@ -268,6 +273,15 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
       const p = server.pushStats()
       return r.pending === 0 && r.inflight === 0 && r.sent + r.failed === accepted && p.queued === 0 && p.inFlight === 0
     }, { name: 'relay e envios em dia', timeoutMs: 30000 })
+  }
+
+  // Every relayed event answered and no send in flight; jobs waiting for
+  // their delay may stay queued.
+  async function settle0 () {
+    await until(() => {
+      const r = relay.stats()
+      return r.pending === 0 && r.inflight === 0 && r.sent + r.failed === accepted && server.pushStats().inFlight === 0
+    }, { name: 'relay em dia', timeoutMs: 30000 })
   }
 
   // B: the recipient, admitted first so A's records aim at a served member.
@@ -454,6 +468,60 @@ test('push e2e: diary append to one encrypted POST, and every silent path stays 
   B.messages.length = 0
   s = await sentinel()
   t.alike(topics(mark), [s], 'restart sent nothing for stored blocks')
+
+  // A like undone within the send delay: the recall drops the queued job,
+  // so no POST. Deterministic without sleeps: the job is due on the shifted
+  // clock, which stands still until the recall has been answered, and its
+  // real timer (an hour, unref'd) never fires within the test. A fresh hour
+  // keeps the pair budget and the like's cooldown whole.
+  await settle()
+  clock.offset += 3600 * 1000
+  pushDelay = 3600 * 1000
+  mark = push.received.length
+  let pmark = pushes.length
+  const held = await grown(A, likeRecord({ to: bPost, on: true, at: recent() }))
+  await until(() => pushes.slice(pmark).some((p) => p.actor === A.key && p.seq === held), { name: 'curtida emitida', timeoutMs: 30000 })
+  await settle0()
+  t.is(server.pushStats().queued, 1, 'recall: the like waits for its delay')
+  pmark = pushes.length
+  await grown(A, likeRecord({ to: bPost, on: false, at: recent() }))
+  await until(() => pushes.slice(pmark).some((p) => p.op === 'cancel' && p.kind === 'like' && p.actor === A.key && p.recipient === B.key && p.ref === ref), { name: 'recall emitido', timeoutMs: 30000 })
+  await settle0()
+  t.is(server.pushStats().queued, 0, 'recall: the cancel dropped the queued like')
+  // Past the delay: a like still queued would go out with the next send.
+  pushDelay = 0
+  clock.offset += 3600 * 1000
+  const after = await grown(A, followRecord({ key: B.key, on: true, at: recent() }))
+  const afterTopic = topicOf(A.key, after, B.key)
+  await until(() => push.received.some((r) => r.headers.topic === afterTopic), { name: 'marcador após recall', timeoutMs: 30000 })
+  await settle()
+  await delay(300)
+  t.alike(topics(mark), [afterTopic], 'recall: no POST for the undone like')
+
+  // A mention of a name nobody holds yet: silent until C's username record
+  // settles, then exactly one mention POST to C.
+  mark = push.received.length
+  const lateText = 'até logo @carlinha'
+  const late = await grown(A, postRecord({ text: lateText, at: recent() }))
+  await until(() => seeder._served.get(A.key).pushNext > late, { name: 'cursor após menção' })
+  await settle()
+  await delay(300)
+  t.is(push.received.length, mark, 'late mention: no POST before the name is held')
+  await grown(C, username(C.key, 'carlinha'))
+  await until(() => holds('carlinha', C.key), { name: 'nome tardio verificado' })
+  d = await delivered(late, C.key, subC)
+  await settle()
+  await delay(300)
+  t.is(d.got.length, 1, 'late mention: one POST')
+  t.is(d.got[0].path, subCPath, 'late mention: to C\'s subscription')
+  t.alike(d.payload, { v: 1, kind: 'mention', body: 'Ana Lima mencionou você', actor: A.key, recipient: C.key, ref: A.key + ':' + late }, 'late mention: decrypts with C\'s keys')
+  shape('late mention', d, lateText)
+  t.is(push.received.length - mark, 1, 'late mention: nothing else sent')
+  // The name verified again and a further pass: still nothing more.
+  mark = push.received.length
+  await grown(C, username(C.key, 'carlinha'))
+  s = await sentinel()
+  t.alike(topics(mark), [s], 'late mention: no second POST after a further settle')
 
   // The push service answers 410: the row goes and the next event sends
   // nothing.
