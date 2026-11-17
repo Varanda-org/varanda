@@ -6,7 +6,8 @@
 // writeJsonAtomic (packages/core/lib/store.js):
 //
 //   invite-drops-key.json = { v: 1, secret, enabledAt }. Created once, at
-//   open, only when neither file exists. A valid key is never rewritten and
+//   open (or at the next call or heal when the lock refused it there), only
+//   when neither file exists. A valid key is never rewritten and
 //   heal never recreates one that disappears while running: a new secret
 //   draws new minutes, and the slot indexes in the ledger only mean something
 //   under the old one. So a missing key next to an existing ledger, or a key
@@ -19,8 +20,9 @@
 //   add-only and union-merged by member+week (slots union), and a week that
 //   ended is dropped on each write.
 //
-// Writes follow ./invites-store.js: one in-process queue, guard() before and
-// after the write, a re-read and union merge first (the service lock goes
+// Writes follow ./invites-store.js: one in-process queue, guard() before the
+// write, right before the rename (./guarded-write.js; a false answer there
+// leaves the file as it was and refuses the request) and after it, a re-read and union merge first (the service lock goes
 // stale after 30 s and another holder may have replaced the file), a dirty
 // flag that makes the next write or heal rewrite, and a file this module
 // would not have written is never rewritten. Errors carry only a token in
@@ -39,7 +41,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused, held } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { weekStartMs, inWindow, windowEndMs, grantMinutes, grantsOpened, WEEK_MS } = require('./invite-drop-time')
 
@@ -207,6 +209,9 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
   let rows = new Map()
   let failed = false
   let dirty = false
+  // The key's creation was refused by the lock: held() answers false for a
+  // moment when one heartbeat runs late, so the next call tries again.
+  let keyRefused = false
   let tail = Promise.resolve()
   const cache = new Map()
   let cacheWeek = null
@@ -226,16 +231,40 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
       }
     }
     if (readOnly || exists(file)) return null
-    if (!guard()) return null
+    if (!held(guard)) return refusedKey()
     const fresh = { v: VERSION, secret: nodeCrypto.randomBytes(32).toString('hex'), enabledAt: iso(now()) }
-    writeJsonAtomic(keyFile, fresh, 0o600)
-    if (!guard()) return null
+    try {
+      writeGuarded(keyFile, fresh, 0o600, guard)
+    } catch (err) {
+      if (isRefused(err)) return refusedKey()
+      throw err
+    }
+    // Written but not acknowledged: the retry reads it back.
+    if (!held(guard)) return refusedKey()
     return fromKeyJson(fresh)
+  }
+
+  function refusedKey () {
+    keyRefused = true
+    return null
+  }
+
+  // Once per call while the key's creation stays refused; anything else
+  // that leaves no key marks the drops unavailable as at the open.
+  function retryKey () {
+    if (failed || key !== null || !keyRefused) return
+    keyRefused = false
+    try {
+      key = openKey()
+    } catch {
+      failed = true
+    }
+    if (key === null && !keyRefused) failed = true
   }
 
   try {
     key = openKey()
-    if (key === null) failed = true
+    if (key === null && !keyRefused) failed = true
     rows = readLedger(file) || new Map()
   } catch {
     failed = true
@@ -248,6 +277,7 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
   }
 
   function usable () {
+    retryKey()
     if (failed || key === null) throw fail('indisponivel')
   }
 
@@ -269,10 +299,13 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
     return { next, stale }
   }
 
+  // A refusal right before the rename left the file untouched: it refuses
+  // the request and changes nothing else.
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         rows = merge(rows, readLedger(file), now())
@@ -365,6 +398,7 @@ function openInviteDrops (dataDir, { perWeek, now = Date.now, guard = () => true
 
   function heal () {
     return enqueue(() => {
+      retryKey()
       if (failed || key === null || readOnly || !guard()) return false
       const { next, stale } = reread()
       if (stale) {

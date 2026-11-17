@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 81)
+  t.is(LEGAL_VERSION, 82)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 81, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 82, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '40a911bc822c1ab3b279307f5c67b67598ed855f5357fc2058a792b8e47222a0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'adb6ef8e9e3e4677ef133654b53bb1211a65dfb8370507e3e6050956997645e5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -939,6 +939,21 @@ test('legal: version 79 describes video and link previews in page posts', async 
   t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links'))
 })
 
+test('legal: version 81 describes the keys of added passkeys, the recovery floor and the passkey lookup', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('e a de uma passkey adicionada em Ajustes com a confirmação de uma passkey cuja chave ele já tem'))
+  t.ok(text(TERMS).includes('uma passkey adicionada sem essa confirmação ou uma passkey criada com o código de recuperação), a exclusão fica agendada por 7 dias'))
+  t.ok(text(TERMS).includes('o código de recuperação e as chaves públicas das passkeys, e o app apaga a conta do aparelho'))
+  t.absent(text(TERMS).includes('e a chave pública da passkey, e o app'))
+  t.ok(text(PRIVACY).includes('ele guarda também a chave pública dela, ligada à entrada de recuperação dessa passkey e apagada quando essa entrada é removida'))
+  t.ok(text(PRIVACY).includes('fica, para cada conta, só a chave pública da conta e um número de controle, sem prazo, também depois de Excluir conta'))
+  t.ok(text(PRIVACY).includes('e as chaves públicas das passkeys com o pedido agendado'))
+  t.ok(text(PRIVACY).includes('um identificador que ele não consegue ligar a uma passkey, salvo quando guarda a chave pública dela, como descrito abaixo.'))
+  t.ok(text(PRIVACY).includes('Ao entrar com uma passkey que o app não reconhece, a versão hospedada pergunta ao serviço de conta, só pela chave pública, se ela tem conta.'))
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
 test('legal: version 80 describes polls, events, votes and RSVPs of a page', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -950,7 +965,7 @@ test('legal: version 80 describes polls, events, votes and RSVPs of a page', asy
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })
 
-test('legal: version 81 describes momentos of a page and who the seeder can tie them to', async (t) => {
+test('legal: version 82 describes momentos of a page and who the seeder can tie them to', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela, os momentos e quem ela segue, é público como a página'))

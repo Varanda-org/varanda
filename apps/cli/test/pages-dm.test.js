@@ -1127,6 +1127,33 @@ test('pages-dm: chunks written before a crash without their record are removed; 
   t.absent(s.keys.get(page).boxSecretKey)
 })
 
+test('pages-dm: a guard lost right before a bundle chunk\'s rename writes no chunk and keeps the legacy secret', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const s = await setup(t)
+  const ana = await s.newMember('ana')
+  const page = (await s.create(ana, 'padaria')).page
+  await makeLegacy(s, page, hex(crypto.randomBytes(32)))
+  await s.pagesDm.close()
+  // Refuses only while a temp file sits in the bundle directory, that is
+  // right before a chunk's rename: every earlier check passes.
+  const tmpNear = () => {
+    try {
+      return fs.readdirSync(bundleDir(s.dir, page)).some((n) => n.endsWith('.tmp'))
+    } catch {
+      return false
+    }
+  }
+  const again = createPagesDm({ writer: s.writer, pagesStore: s.pagesStore, keys: s.keys, association: s.association, dir: s.dir, env: s.env, guard: () => !tmpNear(), limits: { refreshEveryMs: 0 } })
+  t.teardown(() => again.close(), { force: true })
+  await again.ready()
+  const own = boxPair()
+  await t.exception(again.applyBox(page, { by: ana.hex, dmBox: boxOp({ expectedGen: 1, members: [ana.hex], ownBox: own.hex }), idem: { member: ana.hex, nonce: 'r'.repeat(43) } }), /indisponivel/, 'the dm-box is refused')
+  t.absent(fs.existsSync(path.join(bundleDir(s.dir, page), '0')), 'no chunk was renamed into place')
+  t.absent(tmpNear(), 'no temp file is left')
+  t.absent(s.pagesStore.get(page).dm, 'no record, no rotation')
+  t.ok(s.keys.get(page).boxSecretKey, 'the legacy secret stays')
+})
+
 test('pages-dm: the legacy bundle holds every old row and op, no cap; rotations and a remove keep it; a transfer hides it from the new owner; done removes it', async (t) => {
   t.timeout(TEST_TIMEOUT_MS)
   const s = await setup(t)

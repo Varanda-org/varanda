@@ -31,17 +31,22 @@
 // first re-reads the file. `seq` grows by one per write, so a disk seq other
 // than memory's means another holder (the service lock goes stale after
 // 30 s) replaced the file meanwhile. ACL rows mutate, so unlike invites they
-// cannot be union-merged: the store fails closed without writing. The state
-// is swapped only after the write returned and guard() still holds. Any
-// failure once writeJsonAtomic was called (it can throw after the rename, a
-// directory fsync, or the lock was lost meanwhile) fails the holder closed,
-// reads included, until reopened: the file may already hold the new state,
-// so stale memory must not authorize anything.
+// cannot be union-merged: the store fails closed without writing. guard()
+// is also asked right before the rename (./guarded-write.js, after the temp
+// file is written and fsynced): a false answer there leaves the file as it
+// was and refuses that request only, like the check before the re-read. A
+// false guard() after the rename refuses that request only too, with memory
+// moved to the state just written (the file holds it, and the next write's
+// seq and tag check still sees another holder): held() answers false for a
+// moment when one heartbeat runs late, and a lost lock reaches the store
+// through fail(). Any other failure once the write started (it can throw
+// after the rename, a directory fsync) fails the holder closed, reads
+// included, until reopened: the file may already hold the new state, so
+// stale memory must not authorize anything.
 //
 // Residual window, accepted as in invites-store.js and terms-store.js: the
-// service lock goes stale after 30 s and writeJsonAtomic renames
-// unconditionally, so a holder that stalls inside a write past a takeover
-// can overwrite a newer file. The seq check then makes the next writer of
+// check right before the rename and the rename are separate steps, so a
+// holder suspended between them past a takeover can overwrite a newer file. The seq check then makes the next writer of
 // either holder fail closed, and an operator reopens.
 //
 // Errors carry only a token in `code`; bad argument shapes throw TypeError.
@@ -50,6 +55,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { randomBytes } = require('node:crypto')
 const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused, held } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { NONCE_RE } = require('@varanda/core/lib/account-link')
 const { PAGE_SECRETS_SEALED_BYTES } = require('@varanda/core/lib/page-secrets')
@@ -435,16 +441,18 @@ function openPagesStore (dataDir, { now = Date.now, readOnly = false, guard = ()
     try {
       const out = { ...next }
       if (Object.keys(out.charges).length === 0) delete out.charges
-      writeJson(file, out, 0o600)
-    } catch {
+      writeGuarded(file, out, 0o600, guard, writeJson)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       failed = true
       throw fail('indisponivel')
     }
-    if (!guard()) {
-      failed = true
-      throw fail('indisponivel')
-    }
+    // The file holds `next` now, so memory follows it and the next write's
+    // seq and tag check still sees any other holder. held() answers false
+    // for a moment when one heartbeat runs late, so this refuses only this
+    // request; a lost lock reaches every store through fail().
     state = next
+    if (!held(guard)) throw fail('indisponivel')
   }
 
   // The seq an earlier request with this spend produced, or null.

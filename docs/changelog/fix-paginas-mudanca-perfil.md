@@ -1,0 +1,3 @@
+### Corrigido
+
+- Mudar a chave de uma Página mantém o perfil (PR `fix/paginas-mudanca-perfil`): depois da mudança, a chave nova aparecia só com o @nome, sem o nome, a bio e a foto da página. Agora o serviço de conta copia para a chave nova, logo depois da gênese, o perfil que a chave antiga mostra: o mesmo nome e a mesma bio, e a foto guardada de novo na mídia da chave nova. A cópia faz parte da mudança e não conta nos limites de fotos da página. Se ela falhar, a mudança vale do mesmo jeito, o serviço registra `perfil-pendente` (ou `foto-pendente`, quando só a foto falha e a chave nova fica com nome e bio) e o dono pode editar o perfil na chave nova. Sem mudança de RPC nem de Termos. Verificação em `docs/verification/fix-paginas-mudanca-perfil.md`.

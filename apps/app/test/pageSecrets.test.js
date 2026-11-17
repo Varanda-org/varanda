@@ -172,3 +172,17 @@ test('pagesNoLongerRun: closed pages, and pages named before or flagged that the
   t.is(pagesNoLongerRun({ owned: [{ page: 'x' }], admin: [] }, { before: [O] }), null, 'a malformed row forgets nothing')
   t.is(pagesNoLongerRun(null), null)
 })
+
+test('actingPageStopped: a closed, moved or no longer run page stops; a run page, the new key and a malformed answer do not', async (t) => {
+  const { actingPageStopped } = await load()
+  const list = { owned: [{ page: O }, { page: B, closed: true, movedTo: null }], admin: [{ page: A, closed: true, movedTo: P }, { page: P }], invites: [] }
+  t.is(actingPageStopped(list, O), false, 'a page still run stays')
+  t.is(actingPageStopped(list, P), false, 'the new key after a move stays')
+  t.is(actingPageStopped(list, B), true, 'a closed page stops')
+  t.is(actingPageStopped(list, A), true, 'the old key of a moved page stops')
+  t.is(actingPageStopped(list, BOX), true, 'a page the list no longer shows stops')
+  t.is(actingPageStopped({ owned: [], admin: [] }, O), true, 'a member who runs none stops')
+  t.is(actingPageStopped({ owned: [] }, O), false, 'a malformed answer changes nothing')
+  t.is(actingPageStopped(null, O), false)
+  t.is(actingPageStopped(list, 'x'), false, 'not a key')
+})

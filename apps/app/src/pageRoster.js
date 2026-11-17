@@ -45,6 +45,21 @@ export function peopleKeys (read, page, status) {
   return out
 }
 
+// The admin rows to mark 'Conta excluída': rows from rosterRows, answers the
+// /account/status answers by key (a lookup that is pending, failed or
+// unavailable has none). Only an admin whose answer names a deletion is
+// flagged; the owner never is, since an owner cannot delete the account.
+export function deletedAdmins (rows, answers) {
+  const out = new Set()
+  if (!Array.isArray(rows) || !isObject(answers)) return out
+  for (const row of rows) {
+    if (!isObject(row) || row.role !== 'admin' || !isKey(row.key) || !Object.hasOwn(answers, row.key)) continue
+    const a = answers[row.key]
+    if (isObject(a) && (a.deleted === 'pendente' || a.deleted === 'concluida')) out.add(row.key)
+  }
+  return out
+}
+
 // A pending admin invite for this member, from the owner-side `status` read
 // ({ invites: [{ member, gen, expiresAt }] }); expired ones do not count.
 export function hasInvite (read, member, now = Date.now()) {

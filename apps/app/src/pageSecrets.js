@@ -199,6 +199,17 @@ export function pagesRun (data) {
   return { run: run.filter((p) => !closed.includes(p)), closed }
 }
 
+// True when a signed 'list' answer shows the page the device acts as (`key`)
+// is closed, moved to a new key (the old key comes back closed with movedTo)
+// or no longer among the pages the member runs. A malformed answer says false,
+// so it never drops the acting identity.
+export function actingPageStopped (data, key) {
+  const got = pagesRun(data)
+  if (got === null || !isKey(key)) return false
+  if (!got.run.includes(key)) return true
+  return [...data.owned, ...data.admin].some((row) => row.page === key && row.closed === true)
+}
+
 // After a list read: `run`, and `gone`, the pages whose keys this device
 // should forget: the closed ones, and those an earlier answer for the same
 // member (`before`) or `also` (the acting page, the pages the node flagged)

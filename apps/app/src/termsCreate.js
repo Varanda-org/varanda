@@ -8,6 +8,7 @@
 // sent (createNeedsTerms).
 
 import { heldGate, shouldAskHeld } from './terms.js'
+import { emptyCardShown } from './emptyAccount.js'
 
 const isObject = (x) => x !== null && typeof x === 'object' && !Array.isArray(x)
 
@@ -45,16 +46,24 @@ export function modeUnknownPass ({ hostedMode, hostedPage, installation, config,
 // and termsDecision says 'needed': the splash stands in for the gate while
 // the recovery runs, at most RECOVER_WAIT_MS from when that state began.
 // window: that state (the caller times it); wait: the splash.
+//
+// A sign-in that opened no account stops on the empty card
+// (src/emptyAccount.js) with the recovery still on, before any diary: on a
+// device without accepted Termos that is this same state. card: the card is
+// up for the unlocked identity (emptyCardShown), so the shell renders it,
+// neither the splash nor the gate; the window is closed meanwhile, so its
+// wait starts again when 'Criar conta com ela' takes the card down.
 export const RECOVER_WAIT_MS = 15000
 
-export function recoverView ({ hosted, locked, member, claim, decision, recovering, elapsedMs } = {}) {
-  const window = hosted === true && locked === false &&
-    (member === null || member === undefined) &&
+export function recoverView ({ hosted, locked, member, claim, decision, recovering, elapsedMs, card, status } = {}) {
+  const open = hosted === true && locked === false &&
     (claim === null || claim === undefined) &&
     decision === 'needed'
+  const shown = open && emptyCardShown(card, { locked, status })
+  const window = open && !shown && (member === null || member === undefined)
   const wait = window && recovering === true &&
     Number.isFinite(elapsedMs) && elapsedMs >= 0 && elapsedMs < RECOVER_WAIT_MS
-  return { window, wait }
+  return { window, wait, card: shown }
 }
 
 // The held check in one render. ask: start the question now (the render

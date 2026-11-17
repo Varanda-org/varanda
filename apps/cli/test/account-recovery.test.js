@@ -18,6 +18,7 @@ const { signRecovery, blobHashOf } = require('@varanda/core/lib/recovery-proof')
 const { signTerms, TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { openAccountStore } = require('../lib/account/store')
 const { openRecoveryStore, FILE } = require('../lib/account/recovery-store')
+const { openPasskeyStore } = require('../lib/account/passkey-store')
 const { createAccountServer } = require('../lib/account/server')
 const { tmpDir } = require('./helpers/net')
 
@@ -69,8 +70,8 @@ function blobOf (kind) {
 
 // A service with `m` linked (as 'ana') and a recovery store on the same dir.
 // `recovery: false` passes null; `corrupt: true` writes a recovery.json the
-// store refuses before opening it.
-async function setup (t, { recovery = true, corrupt = false, guard, bucket = {} } = {}) {
+// store refuses before opening it; `passkeys: false` mounts no passkey store.
+async function setup (t, { recovery = true, corrupt = false, guard, bucket = {}, passkeys: withPasskeys = true } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0 }
   c.now = () => Date.now() + c.offset
@@ -80,6 +81,7 @@ async function setup (t, { recovery = true, corrupt = false, guard, bucket = {} 
   await linkDirect(store, iss, m, 'ana')
   if (corrupt) fs.writeFileSync(path.join(dir, FILE), '{"not":"a recovery file"}', { mode: 0o600 })
   const rec = recovery ? openRecoveryStore(dir, { now: c.now, ...(guard ? { guard } : {}) }) : null
+  const passkeys = withPasskeys ? openPasskeyStore(dir, { now: c.now }) : null
   const logs = []
   const texts = []
   const server = createAccountServer({
@@ -89,6 +91,7 @@ async function setup (t, { recovery = true, corrupt = false, guard, bucket = {} 
     store,
     issuer: { keyPair: iss.keyPair, cert: iss.cert },
     recovery: rec,
+    passkeys,
     log: (e) => logs.push(JSON.stringify(e)),
     now: c.now,
     ...bucket
@@ -144,7 +147,7 @@ async function setup (t, { recovery = true, corrupt = false, guard, bucket = {} 
 
   const fetchId = (lookupId) => post('/account/recovery/fetch', { lookupId })
 
-  return { dir, c, iss, store, recovery: rec, server, m, logs, texts, post, get, start, sign, nonce, put, remove, list, fetchId }
+  return { dir, c, iss, store, recovery: rec, passkeys, server, m, logs, texts, post, get, start, sign, nonce, put, remove, list, fetchId }
 }
 
 function noSecrets (t, s, secrets) {
@@ -203,6 +206,62 @@ test('recovery: put, fetch, list and remove; a repeat put is idempotent; logs ca
     t.ok(s.logs.includes(JSON.stringify({ event: 'recovery', reason })), 'logged ' + reason)
   }
   noSecrets(t, s, [lookupId, blob.nonce, blob.ciphertext])
+})
+
+// Stores a passkey key for `who`: the sign-up one, or with `lookupId` an
+// extra one vouched for by `voucher` (as ./passkey-routes.js does).
+async function storeKey (passkeys, who, { lookupId = null, voucher = null } = {}) {
+  const credentialId = nodeCrypto.randomBytes(16).toString('base64url')
+  const entryAt = lookupId === null ? null : new Date().toISOString()
+  await passkeys.add({ member: who.hex, credentialId, alg: -7, spki: 'ab'.repeat(91), signCount: 0, first: lookupId === null, lookupId, entryAt, voucher })
+  return credentialId
+}
+
+test('recovery: removing a passkey entry drops the key linked to it first; a code entry needs no passkey store', async (t) => {
+  const s = await setup(t)
+  const first = await storeKey(s.passkeys, s.m)
+  const lookupId = hex(32)
+  const kept = hex(32)
+  t.is((await s.put(s.m, 'passkey', lookupId, blobOf('passkey'))).status, 200)
+  t.is((await s.put(s.m, 'passkey', kept, blobOf('passkey'))).status, 200)
+  await storeKey(s.passkeys, s.m, { lookupId, voucher: first })
+  const keptKey = await storeKey(s.passkeys, s.m, { lookupId: kept, voucher: first })
+  t.is(s.passkeys.keys(s.m.hex).length, 3)
+
+  const removed = await s.remove(s.m, 'passkey', lookupId)
+  t.is(removed.status, 200, removed.text)
+  t.alike(removed.body, { changed: true })
+  t.alike(s.passkeys.keys(s.m.hex).map((k) => k.credentialId), [first, keptKey], 'only that entry\'s key went')
+
+  // A request naming the wrong kind still drops the key of a passkey row.
+  const wrongKind = await s.remove(s.m, 'code', kept)
+  t.is(wrongKind.status, 200, wrongKind.text)
+  t.alike(s.passkeys.keys(s.m.hex).map((k) => k.credentialId), [first])
+
+  const s2 = await setup(t, { passkeys: false })
+  const code = hex(32)
+  t.is((await s2.put(s2.m, 'code', code, blobOf('code'))).status, 200)
+  const r = await s2.remove(s2.m, 'code', code)
+  t.is(r.status, 200, r.text)
+  t.alike(r.body, { changed: true })
+})
+
+test('recovery: removing a passkey entry with no usable passkey store still removes the entry', async (t) => {
+  for (const opts of [{ passkeys: false }, { broken: true }]) {
+    const s = await setup(t, opts.broken ? {} : opts)
+    const lookupId = hex(32)
+    const blob = blobOf('passkey')
+    t.is((await s.put(s.m, 'passkey', lookupId, blob)).status, 200)
+    if (opts.broken) {
+      const first = await storeKey(s.passkeys, s.m)
+      await storeKey(s.passkeys, s.m, { lookupId, voucher: first })
+      s.passkeys.fail()
+    }
+    const r = await s.remove(s.m, 'passkey', lookupId)
+    t.is(r.status, 200, JSON.stringify(opts) + ' ' + r.text)
+    t.alike(r.body, { changed: true })
+    t.is((await s.fetchId(lookupId)).status, 404, 'the entry is gone: its key, if any, counts for nothing')
+  }
 })
 
 test('recovery: an unlinked member is refused at start and at put', async (t) => {

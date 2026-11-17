@@ -585,3 +585,30 @@ test('forget drops a member\'s marks (Excluir conta) and keeps the others', asyn
   t.alike(await drops.forget(m), { changed: false })
   t.alike(JSON.parse(fs.readFileSync(s.file, 'utf8')).rows.map((r) => r.member), [other])
 })
+
+test('a key refused right before the rename is not created, and the next heal creates it once the lock answers', async (t) => {
+  const s = setup(t)
+  const tempNext = () => fs.readdirSync(s.dir).some((n) => n.endsWith('.tmp'))
+  let calls = 0
+  let armed = true
+  const drops = s.open({ guard: () => { calls++; return !armed || !tempNext() } })
+  t.is(calls, 2, 'asked before the write and right before the rename')
+  t.absent(drops.available())
+  t.absent(fs.existsSync(s.keyFile), 'no key file')
+  t.alike(fs.readdirSync(s.dir), [], 'no temp file is left')
+  armed = false
+  await drops.heal()
+  t.ok(drops.available(), 'the refusal was for that moment only: the drops are on')
+  t.ok(fs.existsSync(s.keyFile), 'the key file is created')
+  t.ok(s.open().available(), 'and a later open reads it')
+})
+
+test('a key refused at the open is retried by the next call too', async (t) => {
+  const s = setup(t)
+  let ok = false
+  const drops = s.open({ guard: () => ok })
+  t.absent(drops.available())
+  ok = true
+  t.ok(Number.isSafeInteger(drops.opened(member(), LINKED, s.c.t)), 'opened answers once the lock does')
+  t.ok(drops.available())
+})

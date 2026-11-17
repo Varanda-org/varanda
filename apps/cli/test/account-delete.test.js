@@ -11,6 +11,7 @@
 const test = require('brittle')
 const path = require('node:path')
 const fs = require('node:fs')
+const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert, createModeratorCert } = require('@varanda/core/lib/cert')
@@ -370,6 +371,35 @@ test('Excluir conta: a stored passkey still deletes at once while a wait is pend
   const r = await s.del(s.m)
   t.alike(r.body, { deleted: 'pendente' })
   t.is(s.passkeys.holds(s.m.hex), false)
+})
+
+test('Excluir conta: an extra passkey vouched for by the stored one is listed and deletes at once, not after the wait', async (t) => {
+  const s = await setup(t)
+  const lookupId = b4a.toString(crypto.randomBytes(32), 'hex')
+  await s.recovery.put({ member: s.m.hex, kind: 'passkey', lookupId, blob: { ...recoveryBlob(), kind: 'passkey' } })
+  const extra = createFakePasskey({ rpId: RP })
+  const ps = await s.post('/account/passkey/start', { member: s.m.hex })
+  const att = extra.attestationObject()
+  const sub = nodeCrypto.createHash('sha256').update(Buffer.from(att, 'base64url')).digest('hex')
+  const added = await s.post('/account/passkey/add', {
+    member: s.m.hex,
+    nonce: ps.body.nonce,
+    signature: signAccountLink({ phase: 'passkey', nonce: ps.body.nonce, member: s.m.hex, username: 'ana', association: s.iss.association, sub }, s.m.kp),
+    credentialId: extra.credentialId,
+    attestationObject: att,
+    assertion: assertion(s.pk, ps.body.nonce),
+    lookupId
+  })
+  t.alike(added.body, { added: true }, added.text)
+
+  const started = await s.start(s.m)
+  t.alike(started.body.passkeys, [s.pk.credentialId, extra.credentialId], 'the extra credential is listed')
+  const r = await s.finish(s.m, started.body.nonce, s.sign(s.m, started.body.nonce, 'ana'), { assertion: assertion(extra, started.body.nonce) })
+  t.is(r.status, 200, r.text)
+  t.alike(r.body, { deleted: 'pendente' })
+  t.is(s.passkeys.hold(s.m.hex), null, 'nothing scheduled')
+  t.is(s.store.status(s.m.hex).linked, false, 'deleted now')
+  t.alike(s.passkeys.keys(s.m.hex), [], 'every key of the member went')
 })
 
 // The routes alone, with the server's helpers stubbed.

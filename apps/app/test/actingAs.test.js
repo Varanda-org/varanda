@@ -118,3 +118,18 @@ test('a momento is published as whoever is acting: the store has no momento swit
   a.me()
   t.is(a.get().kind, 'me')
 })
+
+test('dropPage acts as me; another page stays', async (t) => {
+  const { createActingAs } = await load()
+  const OTHER = 'ab'.repeat(32)
+  const a = createActingAs()
+  a.asPage({ key: K })
+  t.is(a.pageKey(), K)
+  t.is(a.dropPage(OTHER).kind, 'page', 'another page changes nothing')
+  t.is(a.dropPage(K).kind, 'me')
+  t.is(a.pageKey(), null)
+
+  a.asPage({ key: OTHER })
+  a.dropPage(K)
+  t.is(a.get().key, OTHER, 'a page not dropped stays')
+})

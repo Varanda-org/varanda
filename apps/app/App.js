@@ -934,12 +934,15 @@ function Member () {
   if (held.offline) termsHeld.current.set(heldEntryKey, { state: 'none' })
   // After Entrar with no diary here, until the key is known (src/termsCreate.js
   // recoverView). Render-time ref writes: the window's start, cleared with it.
+  // An empty card up for this identity (src/emptyAccount.js) is rendered
+  // instead, and closes the window until it is taken down.
   const recoverAt = useRef(null)
-  const recoverProbe = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision })
+  const emptyCard = passkey !== null ? passkey.emptyCard : null
+  const recoverProbe = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, card: emptyCard, status: pkStatus })
   if (!recoverProbe.window) recoverAt.current = null
   else if (recoverAt.current === null) recoverAt.current = Date.now()
   const recoverElapsed = recoverAt.current === null ? NaN : Date.now() - recoverAt.current
-  const recoverWait = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait
+  const recoverWait = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, card: emptyCard, status: pkStatus, recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait
   useEffect(() => {
     if (!recoverWait) return
     const t = setTimeout(() => setHeldTick((n) => n + 1), Math.max(0, RECOVER_WAIT_MS - recoverElapsed) + 50)
@@ -949,7 +952,7 @@ function Member () {
   // if the terms passed (src/termsCreate.js modeUnknownPass): the splash,
   // then Conexão, never the gate ahead of Entrar.
   const modePass = modeUnknownPass({ hostedMode: mode === 'hosted', hostedPage, installation: installationOrigin(), config: node.config, phase: node.phase, decision })
-  const gateDecision = held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision)
+  const gateDecision = recoverProbe.card ? 'accepted' : (held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision))
   useEffect(() => {
     if (!held.ask || member === null) return
     const who = member

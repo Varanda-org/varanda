@@ -89,7 +89,7 @@ const { canonicalOp, opHash, verifyPage } = require('@varanda/core/lib/page-proo
 const pageLib = require('@varanda/core/lib/page')
 const { createIssuedCert, createUsernameRecord, isPlainObject } = require('@varanda/core/lib/cert')
 const { isUsername } = require('@varanda/core/lib/account-link')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
@@ -101,7 +101,7 @@ const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, validMomentMedia, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
 } = require('@varanda/core/lib/records')
@@ -273,6 +273,9 @@ function createPagesRoutes ({
   pagesNotices = null,
   pagesGroups = null,
   pagesDelegate = null,
+  // The service lock, asked right before the rename of the nonce key and
+  // the invites file (./guarded-write.js).
+  guard = () => true,
   // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
   phoneChecked = () => {},
   http
@@ -369,7 +372,7 @@ function createPagesRoutes ({
         throw new Error('invalid')
       }
       const key = nodeCrypto.randomBytes(32)
-      writeJsonAtomic(file, { v: 1, key: key.toString('hex') }, 0o600)
+      writeGuarded(file, { v: 1, key: key.toString('hex') }, 0o600, guard)
       return key
     } catch {
       log({ event: 'pagina', action: 'nonce-key', reason: 'indisponivel' })
@@ -819,7 +822,7 @@ function createPagesRoutes ({
       return
     }
     try {
-      writeJsonAtomic(file, { v: 1, rows }, 0o600)
+      writeGuarded(file, { v: 1, rows }, 0o600, guard)
     } catch (err) {
       inviteStale = true
       throw err
@@ -2012,6 +2015,69 @@ function createPagesRoutes ({
     return e.record
   }
 
+  // K1's profile as readers fold it, with the avatar's bytes, or null.
+  // Deletes are folded over the service's own blocks only: a paused K1's
+  // longer log holds blocks written with a leaked key, and its tombstone
+  // must not hide the real profile. Never throws.
+  async function profileToCarry (page) {
+    let profile
+    try {
+      profile = latestProfile(applyDeletes(await writer.readOwn(page)))
+    } catch {
+      note('move', 'perfil-pendente')
+      return null
+    }
+    if (profile === null) return null
+    let avatar = null
+    if (profile.avatar !== null) {
+      try {
+        avatar = { bytes: await writer.itemBytes(page, profile.avatar), mime: profile.avatar.mime }
+      } catch {
+        note('move', 'foto-pendente')
+      }
+    }
+    return { name: profile.name, bio: profile.bio, avatar }
+  }
+
+  // K1's profile appended to K2 once, best effort. It is part of the move:
+  // no media or avatar cap is spent and no statement is recorded. A photo
+  // that cannot be stored leaves name and bio. K2's lock keeps an admin's
+  // profile edit from landing between the check and the append; the caller
+  // holds K1's, and no route takes K2's and then K1's (each locks one page,
+  // and K2 is a new key). -> K2's length.
+  function carryProfile (to, carry, at, length) {
+    return withLock(to, async () => {
+      try {
+        if (latestProfile(await writer.readEntries(to)) !== null) return length
+        let avatar = null
+        if (carry.avatar !== null) {
+          try {
+            avatar = await writer.avatarItem(to, carry.avatar.bytes, carry.avatar.mime)
+          } catch {
+            note('move', 'foto-pendente')
+          }
+        }
+        await writer.append(to, profileRecords({ name: carry.name, bio: carry.bio, avatar, at }))
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      // A stored photo declares K2's media core even when the append failed.
+      let n = length
+      try {
+        n = writer.info(to).length
+        await pagesStore.expectLength(to, n)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      try {
+        await pagesStore.setMedia(to, writer.items(to).length)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      return n
+    })
+  }
+
   // `pending` null: a resumed move, whose writer step already ran.
   async function moveLocked ({ member, page, nonce, record, to, origin, roster, dmBox: rawBox, pending }) {
     const resume = pending === null
@@ -2061,6 +2127,9 @@ function createPagesRoutes ({
       }
       if (published === null || published.gen !== 1 || published.box !== dmBox.box) throw refuse('conflito')
     }
+    // Read before movePage. A resumed move's K1 is still readable: the wipe
+    // after a move takes its keys, never its diary or media core.
+    const carry = await profileToCarry(page)
     if (resume) {
       try {
         cert = writer.certOf(to)
@@ -2143,6 +2212,9 @@ function createPagesRoutes ({
         note('move', 'vinculo-pendente')
       }
     }
+    // The link above shows the owner's diary for the owner only; the page's
+    // own name, bio and photo come from its profile records.
+    if (carry !== null) length = await carryProfile(to, carry, date, length)
     rejoin(to, left)
     const result = { page: to, seq, length, pushed: res.pushed }
     if (res.paused) result.paused = true

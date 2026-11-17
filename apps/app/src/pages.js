@@ -21,7 +21,8 @@ import { buildRequest, readJson, formatNextChange } from './account.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 import { VIDEO_MIME } from './media/plan.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
-import { isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
+import * as actingStore from './actingAs.js'
+import { actingPageStopped, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -879,6 +880,8 @@ let listCalls = 0
 // acting page and the pages the node flagged. A failed read forgets nothing.
 export async function pagesList (node, { member, also = [] } = {}) {
   const seq = ++listCalls
+  // Who the app acted as when this read started: an answer never ends an identity chosen after it.
+  const actedAs = actingStore.pageKey()
   const runKey = String(pagesOrigin(node)) + ' ' + member
   const data = await actAs(node, { member, action: 'list', page: '', op: {} })
   const last = listRuns.get(runKey)
@@ -886,6 +889,9 @@ export async function pagesList (node, { member, also = [] } = {}) {
   const out = pagesNoLongerRun(data, { before: last ? last.run : [], also, tried: forgetTried })
   if (out === null) return data
   listRuns.set(runKey, { seq, run: out.run })
+  // The device keeps acting as a page the member stopped running (closed, moved
+  // or removed as admin elsewhere) until this answer says otherwise.
+  if (actedAs !== null && actingPageStopped(data, actedAs)) actingStore.dropPage(actedAs)
   for (const page of out.gone) {
     forgetTried.add(page)
     pagesDmForget(node, page).then((forgot) => {

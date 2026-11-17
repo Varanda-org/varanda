@@ -56,8 +56,9 @@
 // page gets no new block ({ paused: true }).
 //
 // Single writer: every write (state file, diary or media append, a cleared
-// block, the noise key) asks guard() (the account service's lock) first, and
-// fail() refuses every later one; a refused write throws { code:
+// block, the noise key) asks guard() (the account service's lock) first, the
+// state file and the noise key again right before the rename
+// (./guarded-write.js), and fail() refuses every later one; a refused write throws { code:
 // 'indisponivel' }. Two holders appending to one core would fork it.
 //
 // Nothing logged ever names a key.
@@ -69,7 +70,8 @@ const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
@@ -274,9 +276,11 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     movePage,
     append,
     readEntries,
+    readOwn,
     mediaItem,
     avatarItem,
     items,
+    itemBytes,
     nonceRecord,
     nonceFirst,
     follows,
@@ -303,6 +307,18 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (!ok) throw fail('indisponivel')
   }
 
+  // A sidecar write with the lock asked again right before the rename
+  // (./guarded-write.js): a holder that lost it meanwhile leaves the file
+  // as the new holder wrote it, and the refusal is check()'s.
+  function writeChecked (file, obj) {
+    try {
+      writeGuarded(file, obj, 0o600, () => !failed && guard() === true)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
+      throw err
+    }
+  }
+
   // The lock is gone: nothing more is written, starting now.
   function failWriter () {
     failed = true
@@ -319,7 +335,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (p.stateLost) throw fail('pausada')
     check()
     refuseSymlinkDir(storeDir)
-    writeJsonAtomic(statePath(p.key), {
+    writeChecked(statePath(p.key), {
       v: STATE_VERSION,
       length: p.length,
       mediaLength: p.mediaLength,
@@ -330,7 +346,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       nonces: p.nonces,
       movedTo: p.movedTo,
       closed: p.closed === true
-    }, 0o600)
+    })
   }
 
   function readState (key) {
@@ -365,7 +381,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     } catch {}
     const kp = generateNoiseKeyPair()
     check()
-    writeJsonAtomic(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) }, 0o600)
+    writeChecked(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) })
     return kp
   }
 
@@ -617,11 +633,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   }
 
   // A committed write whose state could not be saved: memory already holds
-  // it, the file does not, so the page stops until an operator looks.
+  // it, the file does not, so the page stops until an operator looks. A
+  // lock refusal while this writer still holds it is not that: held()
+  // answers false for a moment when one heartbeat runs late, so the page
+  // stays writable and the next write saves the whole state. A lost lock
+  // goes through failWriter(), and a new holder's open finds the diary
+  // longer than the file and pauses it there.
   function saveOrPause (p) {
     try {
       saveState(p)
     } catch (err) {
+      if (!failed && err.code === 'indisponivel') throw err
       pause(p)
       throw err
     }
@@ -826,6 +848,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     return readAll(pageOf(key).core)
   }
 
+  // The blocks this writer wrote, tombstones not applied, so the caller
+  // folds only its own: a paused page's longer log holds blocks, deletes
+  // among them, written with a leaked key. A forked core or a lost state
+  // cannot tell which blocks are ours, so nothing comes back.
+  async function readOwn (key) {
+    await opening
+    const p = pageOf(key)
+    if (p.core.fork !== 0 || p.stateLost) return []
+    return (await readRaw(p.core)).filter((e) => e.seq < p.length)
+  }
+
   function info (key) {
     const p = pageOf(key)
     return { length: p.core.length, paused: p.paused, announced: p.announced, movedTo: p.movedTo }
@@ -987,6 +1020,24 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   function items (key) {
     return pageOf(key).items.map((it) => ({ ...it }))
+  }
+
+  // The bytes of one of the page's own items, so a move can copy the avatar
+  // to the new key. No secret is needed: a moved page keeps its media core
+  // open read only after its keys are wiped.
+  async function itemBytes (key, descriptor) {
+    await opening
+    const p = pageOf(key)
+    if (!isPlainObject(descriptor) || p.media === null || descriptor.core !== p.mediaKey || !p.items.some((it) => sameItem(it, descriptor))) throw fail('midia-invalida')
+    const chunks = []
+    for (let i = descriptor.start; i < descriptor.start + descriptor.blocks; i++) {
+      const block = await p.media.get(i, { wait: false })
+      if (block === null) throw fail('midia-invalida')
+      chunks.push(block)
+    }
+    const bytes = b4a.concat(chunks)
+    if (bytes.byteLength !== descriptor.bytes || sha256Hex(bytes) !== descriptor.sha256) throw fail('midia-invalida')
+    return bytes
   }
 
   // ---- follows, engagement, deletion ----------------------------------

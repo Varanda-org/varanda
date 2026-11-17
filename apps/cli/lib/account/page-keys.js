@@ -40,8 +40,10 @@
 // that inode with zeros, because only wipe() removes a row.
 //
 // Single writer: every put() and wipe() asks guard() (the account service's
-// lock, as the other sidecars do) before it changes anything and again right
-// before the file is replaced, and fail() refuses every later write; a
+// lock, as the other sidecars do) before it changes anything, before the
+// temp file is written and again right before the rename
+// (./guarded-write.js, after the temp file is fsynced), and fail() refuses
+// every later write; a
 // refused write throws { code: 'indisponivel' } and leaves the file and the
 // table as they were.
 //
@@ -52,7 +54,7 @@ const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { refuseSymlinkDir, isPlainObject } = require('@varanda/core/lib/cert')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { NONCE_RE } = require('@varanda/core/lib/account-link')
@@ -288,7 +290,12 @@ function openPageKeys ({ dir, env = process.env, now = Date.now, log = noop, gua
     try {
       const sealed = seal(key, plain)
       check()
-      writeJsonAtomic(file, sealed, 0o600)
+      try {
+        writeGuarded(file, sealed, 0o600, () => !failed && guard() === true)
+      } catch (err) {
+        if (isRefused(err)) throw fail('indisponivel')
+        throw err
+      }
     } finally {
       plain.fill(0)
     }

@@ -5419,10 +5419,8 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - No Android, a limpeza de passkeys é só exclusão, e depende de androidx.credentials 1.5.0 ou mais novo, fixado em versão exata no `build.gradle` do módulo; `apps/app/test/passkeyPrfAndroid.test.js` falha se a versão cair ou deixar de ser exata (#444).
 - No iOS nativo, o domínio associado já está no projeto (`Varanda.entitlements`); entrar com passkey numa instalação de produção depende da conta Apple Developer.
 - O build de debug do Android (`app.varanda.debug`) não usa passkeys de produção.
-- Entrar com uma passkey do Varanda antiga, num aparelho sem diário, ainda abre um diário vazio.
 - Depois de recarregar a página, o cartão não lembra mais quais passkeys criadas aqui não serviram: a pessoa não recebe o nome para apagar. É de propósito, para nunca mandar apagar uma passkey que virou a conta em outro aparelho.
 - Uma passkey recusada no "concluir" nunca recebe pedido de remoção, mesmo quando foi criada nesta carga da página: ela fica no gerenciador até a pessoa apagá-la.
-- Há uma janela entre o autenticador criar a passkey e o registro local ser gravado: se a página cair nessa janela, a passkey existe no gerenciador sem registro local.
 - A recusa de uma passkey presa a um aparelho (chave de segurança, Windows Hello) vale só no navegador ou na instalação que a recusou: ela sobrevive ao "recomeçar" e ao limite de 32 registros, mas em outro navegador, depois de limpar os dados do site ou depois de reinstalar o app, a mesma passkey pode entrar e abrir uma conta nova presa àquele aparelho. A entrada não lê a flag BE, por decisão do dono: passkeys que já existem continuam entrando. Por isso o cartão de passkey recusada nunca manda abrir o Varanda em outro navegador. Decisão registrada na auditoria de segurança deste PR.
 - Pela mesma regra, uma chave de segurança que este navegador recusou na criação nunca entra neste navegador, mesmo que a pessoa tenha criado a conta com ela em outro computador; a conta continua acessível nos outros aparelhos.
 
@@ -5475,10 +5473,10 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 
 ### Limites que sobram
 
-- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta.
-- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca.
+- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta. Decidido na #444: limite do desenho, porque a chave da conta vem dela.
+- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca. Decidido na #444: sem versão mínima; a tela de adicionar passkey avisa para usar o app atualizado.
 - A passkey original abre a conta sem internet em qualquer aparelho (nunca há busca no serviço para ela). Uma passkey extra ou o código precisa do serviço de conta a cada entrada nova com a passkey ou com o código; só uma sessão guardada no aparelho evita isso.
-- Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, o aparelho não vê a marca e essa passkey abre ali uma conta separada e vazia em vez da conta do membro. Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam. Um autenticador que segue o padrão devolve o identificador numa entrada sem registro no aparelho.
+- Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, e o aparelho está sem internet ou o serviço de conta está fora do ar, essa passkey ainda abre ali uma conta separada e vazia, sem o cartão. Com o status da conta legível, o app procura a entrada dela no serviço e abre a conta do membro, ou mostra o cartão "Esta passkey não abriu nenhuma conta". Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam.
 - Remover ou trocar uma entrada não troca a raiz: quem buscou aquele blob enquanto a entrada valia e tem o segredo dela ainda abre a conta. Isso vem do desenho da raiz embrulhada. Remover a entrada ou criar um código novo só impede novas entradas num aparelho que ainda não a usou; quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Se uma passkey adicionada ou o código vazar, o único caminho seguro é criar uma conta nova. O cartão do código, a confirmação de código novo e as duas confirmações de remover dizem isso, e os Termos e a Política também (a versão continua 17).
 - Cancelar a recuperação não desfaz o que já terminou: uma instalação que concluiu antes do cancelamento continua (a conta fica aberta e presa à passkey nova), uma passkey criada durante a cerimônia continua no gerenciador (o Varanda não consegue apagá-la; no navegador ela fica recusada como `SUPERSEDED` e fora das próximas criações) e um put já enviado ao serviço pode ter sido gravado (a lista confirma).
 - Remover uma entrada não desconecta um aparelho que já desembrulhou a raiz com ela.
@@ -5769,7 +5767,7 @@ Limites:
 
 - A chave é confiada no primeiro uso, no cadastro: quem controlar o aparelho da pessoa na hora seguinte ao vínculo pode registrar um autenticador forjado no lugar.
 - Uma sessão aberta guarda a chave do diário e pode agendar uma exclusão; a pessoa vê o pedido em todos os aparelhos e pode cancelar por 7 dias, mas quem não abrir nenhum aparelho nesse prazo perde a conta.
-- As passkeys extras e a troca de passkey não registram chave; quem só tem uma delas espera os 7 dias.
+- Uma passkey criada com o código de recuperação, ou adicionada sem a confirmação de uma passkey registrada, não registra chave; quem só tem uma delas espera os 7 dias.
 - A origem do iOS e o objeto de atestado no iOS dependem do aparelho (passo acima).
 - Nenhuma caixa acima foi executada nesta documentação.
 

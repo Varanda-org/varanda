@@ -39,7 +39,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { isCanonicalIso, isPlainObject } = require('@varanda/core/lib/cert')
 
 const FILE = 'age-check.json'
@@ -68,8 +68,10 @@ function readAgeCheck (dataDir) {
   return valid(obj) ? { state: obj } : { error: 'indisponivel' }
 }
 
-// { ok: true, on, enabledAt } or { ok: false }. `guard` is checked before
-// the write (the service lock).
+// { ok: true, on, enabledAt } or { ok: false }. `guard` (the service lock)
+// is checked before the write and right before the rename
+// (./guarded-write.js), so a start that lost the lock meanwhile leaves the
+// file as the new holder wrote it.
 function settleAgeCheck (dataDir, { on, since = null, now = Date.now, guard = () => true }) {
   if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be a canonical ISO timestamp')
   const read = readAgeCheck(dataDir)
@@ -87,7 +89,7 @@ function settleAgeCheck (dataDir, { on, since = null, now = Date.now, guard = ()
   if (read.state && read.state.on === next.on && read.state.enabledAt === next.enabledAt) return { ok: true, on: next.on, enabledAt: next.enabledAt }
   try {
     if (!guard()) return { ok: false }
-    writeJsonAtomic(path.join(dataDir, FILE), next, 0o600)
+    writeGuarded(path.join(dataDir, FILE), next, 0o600, guard)
   } catch {
     return { ok: false }
   }

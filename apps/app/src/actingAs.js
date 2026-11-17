@@ -67,8 +67,16 @@ export function createActingAs () {
   const set = (next) => (next && next.kind === 'page' ? asPage(next) : me())
   const reset = me
 
-  return { get, set, me, asPage, isPage, label, subscribe, reset }
+  // The page the person acts as.
+  const pageKey = () => (state.kind === 'page' ? state.key : null)
+
+  // The person no longer runs this page: act as them.
+  function dropPage (key) {
+    return state.kind === 'page' && state.key === key ? toMe() : state
+  }
+
+  return { get, set, me, asPage, isPage, label, subscribe, reset, pageKey, dropPage }
 }
 
 const shared = createActingAs()
-export const { get, set, me, asPage, isPage, label, subscribe, reset } = shared
+export const { get, set, me, asPage, isPage, label, subscribe, reset, pageKey, dropPage } = shared

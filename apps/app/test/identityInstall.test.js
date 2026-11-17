@@ -651,6 +651,17 @@ test('recoveryLookup + recoveryOpen of a passkey blob return the original root',
   await t.exception(host.recoveryOpen({ blob: made.blob, member }), /entrada de recuperação inválida/, 'the pending key is consumed')
 })
 
+test('recoveryLookup withKey also names the diary key of a passkey PRF, and installs nothing', async (t) => {
+  const { host, session } = recoverySetup()
+  const member = await expectedPublicKey(PRF)
+  const made = await blobFor(PRF, bytesOf(WRAP_PRF), 'passkey', member)
+  const out = await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF, withKey: true })
+  t.alike(out, { lookupId: made.lookupId, publicKey: await expectedPublicKey(WRAP_PRF) })
+  t.is(session.keyPair, null, 'nothing installed')
+  t.alike(await host.recoveryOpen({ blob: made.blob, member }), { prf: PRF }, 'the wrap key is held as without withKey')
+  t.alike(Object.keys(await host.recoveryLookup({ kind: 'passkey', secret: WRAP_PRF })), ['lookupId'], 'no key without withKey')
+})
+
 test('recoveryLookup + recoveryOpen of a code blob return the root once', async (t) => {
   const { host } = recoverySetup()
   const member = await expectedPublicKey(PRF)
