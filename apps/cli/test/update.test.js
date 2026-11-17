@@ -29,7 +29,7 @@ const shLines = sh.split('\n')
 const shCode = shLines.filter((l) => !/^\s*#/.test(l)).join('\n')
 
 const SEEDER_LIMITS = [
-  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY',
+  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES',
   'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST',
   'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST'
 ]
@@ -744,6 +744,12 @@ test('update.sh: the env pre-flight refuses a bad limit before anything runs', (
   t.is(check(FULL_ENV + 'VARANDA_INVITE_DROPS=1\n', 'full'), 1, 'invite drops without the weekly number are refused')
   t.is(check('VARANDA_DOMAIN=Exemplo.org\n', 'full'), 1, 'a bad domain is refused for profile full')
   t.is(check('VARANDA_MEDIA_RATE=0\n', 'seeder'), 1, 'profile seeder still checks the seeder limits')
+  t.is(check('VARANDA_STORAGE_BYTES=1073741823\n', 'seeder'), 1, 'VARANDA_STORAGE_BYTES below 1 GiB is refused')
+  t.is(check('VARANDA_STORAGE_BYTES=1073741824\n', 'seeder'), 0, 'VARANDA_STORAGE_BYTES=1073741824 passes')
+  t.is(check('VARANDA_STORAGE_BYTES=1125899906842624\n', 'seeder'), 0, 'VARANDA_STORAGE_BYTES at 1 PiB (16 digits) passes')
+  t.is(check('VARANDA_STORAGE_BYTES=1125899906842625\n', 'seeder'), 1, 'VARANDA_STORAGE_BYTES above 1 PiB is refused')
+  t.is(check('VARANDA_STORAGE_BYTES=11258999068426240\n', 'seeder'), 1, '17 digits are refused')
+  t.is(check('VARANDA_STORAGE_BYTES=01073741824\n', 'seeder'), 1, 'a leading zero is refused')
   t.is(check('VARANDA_DOMAIN=\n', 'seeder'), 0, 'profile seeder does not need the web variables')
 })
 
