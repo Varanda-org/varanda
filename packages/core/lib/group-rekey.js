@@ -107,21 +107,24 @@ const parseAt = (at) => {
 
 // The policy's facts from a private group's cores: `logs` [{ key, entries:
 // [{ seq, record }] }], `counted` the writer keys the fold counts, `root`
-// the group key, `epoch` the fold's { writer, seq }. Only records valid for
-// their place count. -> { epochAt, sealedAts }.
-function epochFacts ({ logs, counted, root, epoch }) {
+// the group key, `epoch` the fold's { writer, seq }, `cuts` the fold's cut
+// per writer (its `cuts`). Only records valid for their place count, and a
+// frozen or released writer's envelopes stop at its cut as the fold drops
+// them (#350); its key blocks stay. -> { epochAt, sealedAts }.
+function epochFacts ({ logs, counted, root, epoch, cuts = null }) {
   const out = { epochAt: null, sealedAts: [] }
   if (epoch === null || typeof epoch !== 'object') return out
   for (const log of Array.isArray(logs) ? logs : []) {
     if (!log || !(counted instanceof Set) || !counted.has(log.key)) continue
     const opts = { root: log.key === root, private: true }
+    const cut = cuts instanceof Map && Number.isSafeInteger(cuts.get(log.key)) ? Math.max(cuts.get(log.key), 1) : Infinity
     for (const e of Array.isArray(log.entries) ? log.entries : []) {
       const r = e && e.record
       if (!r || typeof r !== 'object' || (r.type !== 'group-sealed' && r.type !== 'group-key')) continue
       if (validateGroupRecord(r, e.seq, opts) !== null) continue
       if (r.type === 'group-key') {
         if (r.kid === null && log.key === epoch.writer && e.seq === epoch.seq) out.epochAt = parseAt(r.at)
-      } else if (r.kid.writer === epoch.writer && r.kid.seq === epoch.seq) {
+      } else if (e.seq < cut && r.kid.writer === epoch.writer && r.kid.seq === epoch.seq) {
         const ms = parseAt(r.at)
         out.sealedAts.push(ms === null ? NaN : ms)
       }

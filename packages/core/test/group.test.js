@@ -8,7 +8,7 @@ const {
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
   GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
-  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut
 } = require('../lib/group')
 const { groupJoinRecord, groupCutRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn, diaryLog } = require('./helpers/groups')
@@ -3583,6 +3583,23 @@ test('walkHasRoom: a new writer counts only where the walk has a live slot, afte
   t.absent(walkHasRoom(spent, marks, G, [{ kind: 'cut', writer: ws[0], cut: 0 }]), 'no release left: no room')
   t.ok(walkHasRoom(null, null, G, [null]), 'bad items read as an empty diary, never throwing')
   t.absent(walkHasRoom(full, [], G, 5), 'a bad event list: no room')
+})
+
+test('retiredWriterCut and replacedWriterCut: the cut a node marks on the own writer it replaces (#350)', (t) => {
+  const header = (extra = {}) => ({ seq: 0, record: { type: 'group-writer', box: 'ab'.repeat(32), rejoin: null, ...extra } })
+  const post = (seq) => ({ seq, record: { type: 'group-post' } })
+  const rejoin = { writer: K(0x7400), seq: 3 }
+  t.is(retiredWriterCut([header()]), 0, 'header only, no rejoin: released')
+  t.is(retiredWriterCut([header({ rejoin })]), 1, 'header only with a rejoin: the generation still reads block 0')
+  t.is(retiredWriterCut([header(), post(1), post(2)]), 3, 'more blocks: the length held')
+  t.is(retiredWriterCut([post(2), header({ rejoin }), post(1)]), 3, 'any order of the held entries')
+  t.is(retiredWriterCut([header({ box: null }), post(1)]), 2, 'a retired writer of a public group keeps its records')
+  t.is(retiredWriterCut([post(1)]), null, 'block 0 not held: no cut')
+  t.is(retiredWriterCut(null), null)
+  t.is(replacedWriterCut([header({ box: null }), post(1)]), 0, 'a boxless writer of a private group is released whatever it holds')
+  t.is(replacedWriterCut([header(), post(1)]), 2, 'a writer boxed to another key is cut like a retired one')
+  t.is(replacedWriterCut([header({ rejoin })]), 1)
+  t.is(replacedWriterCut([]), null)
 })
 
 // The slot walk reads the diary's joins and marks as the nodes hand them to

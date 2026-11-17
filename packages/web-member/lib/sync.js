@@ -53,7 +53,10 @@
 //   link-closed                   the link dropped: nothing is tracked
 //                                 (preceded by 'seeder-busy' and a warning
 //                                 when the socket closed with 1013, the
-//                                 seeder at its connection cap)
+//                                 seeder at its connection cap; preceded by
+//                                 'seeder-restarting' and a warning when
+//                                 the socket closed with 1012, the seeder
+//                                 stopping for a deploy)
 // They are emitted by checkOwnSync() from the hello / have handlers and the
 // diary watcher, in once and continuous runs alike.
 //
@@ -256,7 +259,7 @@
 //                is the fold's business. A stored group core is purged only
 //                when D or its group is blocked, D's issuer is revoked, on a
 //                fork, or when its local block 0 differs. At most
-//                MAX_GROUP_WRITERS_PER_DIARY cores per (diary, group) are
+//                MAX_GROUP_HELD_PER_DIARY cores per (diary, group) are
 //                gated, the rest fail 'quota' (never purged); a gate refused
 //                on the page item alone is tried again for another listing
 //                of the key. Gates take
@@ -339,7 +342,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
-const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupJoins, buildCommunity, diaryGroupKeys, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
+const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoinHistory, groupConfirmHistory, groupCutHistory, groupJoins, buildCommunity, diaryGroupKeys, slotWalk, MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('@varanda/core/lib/group')
 const {
   presentState,
   presentLength,
@@ -372,13 +375,20 @@ const CONNECT_TIMEOUT_MS = 15000
 // that dropped for a redeploy is redialled within a few seconds; after that
 // the cap is RETRY_MAX_MS. Each wait is shortened by up to RETRY_JITTER, so
 // clients retry at different times. A caller whose retryMaxMs is already
-// below RETRY_FAST_MAX_MS keeps that shorter cap. A socket closed with 1013
-// (the seeder is full) uses the full retryMaxMs cap for that one wait.
+// below RETRY_FAST_MAX_MS keeps that shorter cap. A socket closed with 1012
+// (the seeder is stopping for a deploy) waits RESTART_WAIT_MS plus up to
+// RESTART_JITTER_MS, and that wait does not count as a failed attempt; the
+// fast window still starts (downSince). The close code is unauthenticated,
+// so only the first 1012 of a down streak gets that wait: another 1012
+// before a verified hello counts like any failure. A socket closed with
+// 1013 (the seeder is full) uses the full retryMaxMs cap for that one wait.
 const RETRY_MIN_MS = 1000
 const RETRY_MAX_MS = 30000
 const RETRY_FAST_MAX_MS = 5000
 const RETRY_FAST_WINDOW_MS = 180000
 const RETRY_JITTER = 0.25
+const RESTART_WAIT_MS = 500
+const RESTART_JITTER_MS = 1000
 
 // Pure. The wait before the next dial, in milliseconds. jitter is clamped
 // to [0, 1] (NaN counts as 0); random defaults to Math.random.
@@ -396,6 +406,16 @@ function retryWait ({
   const cap = downMs < fastWindowMs ? Math.min(maxMs, fastMaxMs) : maxMs
   const base = Math.min(cap, minMs * 2 ** Math.min(failures, 16))
   return Math.round(base * (1 - j * random()))
+}
+
+// Pure. The wait after a 1012 close, in milliseconds: waitMs plus up to
+// jitterMs (500 to 1500 with the defaults). NaN, a non-number, or a
+// negative value counts as 0. random defaults to Math.random and is
+// expected in [0, 1].
+function restartWait ({ waitMs, jitterMs, random = Math.random }) {
+  const base = typeof waitMs === 'number' && !Number.isNaN(waitMs) ? Math.max(0, waitMs) : 0
+  const span = typeof jitterMs === 'number' && !Number.isNaN(jitterMs) ? Math.max(0, jitterMs) : 0
+  return Math.round(base + span * random())
 }
 
 // Push confirmation poll of the own media cores (see the header).
@@ -467,8 +487,15 @@ const DIARY_UNAVAILABLE = 'diário indisponível'
 
 function noop () {}
 
-// The per-diary writer cap, as @varanda/core lib/group.js capPerDiary keeps
-// the MAX_GROUP_WRITERS_PER_DIARY EARLIEST joins, not the first stored:
+// The cores of one (group, diary) the fold may await, as the seeder holds
+// them (#350): the slot walk of the diary (@varanda/core lib/group.js
+// slotWalk) counts 8 live, 8 frozen and 16 released writers at most, so a
+// frozen or released writer, which may hold a leave, is still fetched.
+const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
+
+// The per-diary writer cap keeps the MAX_GROUP_HELD_PER_DIARY EARLIEST
+// joins, not the first stored: the walk gives slots in join order, and only
+// the diary itself can bind a writer past its walk, never a seeder.
 // held = the live accepted cores of (group, diary) besides the candidate,
 // each { key, group, seq, proven }; seq = the candidate's proven join seq.
 // -> { full, victim }: when full, the held writer with the highest PROVEN
@@ -477,7 +504,7 @@ function noop () {}
 // seeder listing later writers first to push out the one holding a leave
 // or moderation.
 function capVictim (held, seq) {
-  if (held.length < MAX_GROUP_WRITERS_PER_DIARY) return { full: false, victim: null }
+  if (held.length < MAX_GROUP_HELD_PER_DIARY) return { full: false, victim: null }
   let victim = null
   for (const x of held) {
     if (!x.proven || x.key === x.group || !(x.seq > seq)) continue
@@ -521,7 +548,7 @@ function capExcess (live) {
   }
   for (const list of byPair.values()) {
     const { group, diary: d } = list[0]
-    const room = MAX_GROUP_WRITERS_PER_DIARY - (live.some((r) => r.key === group && r.diary === d) ? 1 : 0)
+    const room = MAX_GROUP_HELD_PER_DIARY - (live.some((r) => r.key === group && r.diary === d) ? 1 : 0)
     if (list.length <= room) continue
     list.sort((x, y) => (y.proven - x.proven) || (x.seq - y.seq) || (x.key < y.key ? -1 : 1))
     for (const x of list.slice(room)) excess.add(x)
@@ -596,6 +623,46 @@ function ownGroupVerdict (length, pageLength, peerLength) {
 
 // Listings of a full (group, diary) gated at once as contenders.
 const MAX_CAP_CONTENDERS = 2
+
+// The own diary's records the scan keeps for diaryGroupKeys and
+// liveDiaryWriters: the slot walk reads the cuts with the joins (#350).
+const WALK_TYPES = new Set(['group-join', 'group-cut'])
+
+// The on:true writers the own diary binds now to the roots it binds, as
+// diaryGroupKeys counts them: the root's own key once bound, then the live
+// and frozen writers of the diary's slot walk (#350). `entries` the diary's
+// [{ seq, record }]. -> Map writer -> group.
+function liveDiaryWriters (entries, roots) {
+  const allowed = new Set()
+  for (const group of roots) {
+    const walk = slotWalk(groupJoinHistory(entries, group), groupCutHistory(entries, group), group)
+    if (walk.rootSlot) allowed.add(group + ':' + group)
+    for (const writer of [...walk.live, ...walk.frozen]) allowed.add(group + ':' + writer)
+  }
+  const out = new Map()
+  for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
+  return out
+}
+
+// The groups community C's held cores fold to, in causal order (at most
+// MAX_GROUPS_PER_COMMUNITY), or null while the fold is unbound or
+// incomplete. The community fold reads the diaries' cuts, like the group
+// fold (#350); a creator's confirmed leave bounds the root's creates.
+// `writers` [{ key, entries, diary }], `diaries` Map diary -> entries.
+function foldedCatalogue (c, rootEntries, writers, diaries) {
+  const joins = new Map()
+  const marks = new Map()
+  const confirms = new Map()
+  for (const [d, entries] of diaries) {
+    joins.set(d, groupJoinHistory(entries, c))
+    marks.set(d, groupCutHistory(entries, c))
+    confirms.set(d, groupConfirmHistory(entries, c))
+  }
+  const built = buildCommunity({ root: { key: c, entries: rootEntries }, writers, joins, marks, confirms, now: Date.now() })
+  if (built.creator === null || built.incomplete) return null
+  const keys = built.created instanceof Map ? [...built.created.keys()] : built.groups
+  return keys.slice(0, MAX_GROUPS_PER_COMMUNITY)
+}
 
 const NO_READER = { set: noop, clear: noop }
 // A startup that has not reached the seeder link ('ready') by then logs the
@@ -1419,6 +1486,10 @@ async function syncRun ({
   retryFastMaxMs = RETRY_FAST_MAX_MS,
   retryFastWindowMs = RETRY_FAST_WINDOW_MS,
   retryJitter = RETRY_JITTER,
+  // 1012 close: RESTART_WAIT_MS plus up to RESTART_JITTER_MS (see RETRY_*).
+  restartWaitMs = RESTART_WAIT_MS,
+  restartJitterMs = RESTART_JITTER_MS,
+  random = Math.random, // injectable for tests; also the retryWait jitter
   mediaPollMs = MEDIA_POLL_MS,
   groupPageMs = GROUP_PAGE_MS,
   groupRetryMs = GROUP_RETRY_MS,
@@ -1514,6 +1585,10 @@ async function syncRun ({
   let readyEmitted = false
   let failures = 0 // consecutive connections that ended without a verified hello
   let downSince = null // ms timestamp of the first miss of this streak
+  // A 1012 close already got its quick redial in this streak. The close code
+  // arrives outside Noise (anyone on the path can send it), so only one per
+  // streak skips the backoff; the next counts as a failed attempt.
+  let restartUsed = false
   let fetching = 0
   let admittedEver = false
   let rejectedReason = null
@@ -1693,7 +1768,7 @@ async function syncRun ({
     const l = {
       socket,
       noise,
-      ws, // the WebSocketStream: its closeCode tells a full seeder (1013)
+      ws, // the WebSocketStream: its closeCode tells a restart (1012) or a full seeder (1013)
       peer: null,
       verified: false,
       hello: false, // the seeder's actual hello arrived (and verified)
@@ -1738,20 +1813,28 @@ async function syncRun ({
   }
 
   // Schedule the next dial (backoff rules at the RETRY_* constants).
-  function reconnectLater ({ fastMaxMs = retryFastMaxMs } = {}) {
+  // restart: a 1012 close. The first in a streak waits restartWait and
+  // failures stays put; a later one before a verified hello is an ordinary
+  // failure. downSince still marks the start of the fast window.
+  function reconnectLater ({ fastMaxMs = retryFastMaxMs, restart = false } = {}) {
     if (ending) return
     const now = Date.now()
     if (downSince === null) downSince = now
-    const wait = retryWait({
-      failures,
-      downMs: now - downSince,
-      minMs: retryMinMs,
-      maxMs: retryMaxMs,
-      fastMaxMs,
-      fastWindowMs: retryFastWindowMs,
-      jitter: retryJitter
-    })
-    failures++
+    const quick = restart && !restartUsed
+    if (quick) restartUsed = true
+    const wait = quick
+      ? restartWait({ waitMs: restartWaitMs, jitterMs: restartJitterMs, random })
+      : retryWait({
+        failures,
+        downMs: now - downSince,
+        minMs: retryMinMs,
+        maxMs: retryMaxMs,
+        fastMaxMs,
+        fastWindowMs: retryFastWindowMs,
+        jitter: retryJitter,
+        random
+      })
+    if (!quick) failures++
     log('aviso: sem conexão com o semeador; nova tentativa em ' + Math.ceil(wait / 1000) + ' s')
     later(connect, wait)
   }
@@ -1820,20 +1903,34 @@ async function syncRun ({
     for (const m of pushCores()) m.pushed = -1
     for (const m of groupOwn) m.synced = null
     lastOwnBehind = null
-    // 1013 keeps the long cap for this wait (see RETRY_*).
+    // 1013 keeps the long cap for this wait. The first 1012 of a streak
+    // waits a short jittered delay and does not count as a failed attempt
+    // (see RETRY_*). The peer's close reason is never logged or emitted.
     const seederFull = l.ws.closeCode === 1013
+    const seederRestarting = l.ws.closeCode === 1012
     if (seederFull) {
       log('aviso: semeador ocupado; tente novamente em instantes')
       emit({ event: 'seeder-busy' })
     }
+    if (seederRestarting) {
+      log('aviso: semeador reiniciando; reconectando em instantes')
+      emit({ event: 'seeder-restarting' })
+    }
     emit({ event: 'link-closed' })
     evaluate()
-    reconnectLater(seederFull ? { fastMaxMs: retryMaxMs } : {})
+    if (seederRestarting) {
+      reconnectLater({ restart: true })
+    } else if (seederFull) {
+      reconnectLater({ fastMaxMs: retryMaxMs })
+    } else {
+      reconnectLater()
+    }
   }
 
   function onVerified (l) {
     failures = 0
     downSince = null
+    restartUsed = false
     clearLater(l.timer)
     l.timer = null
     // Verified: only now are the diary, the own media cores (never
@@ -3807,7 +3904,7 @@ async function syncRun ({
       live.push(s)
     }
     // Kept victims of an earlier run come back from the storage: the cap
-    // holds across runs only if at most MAX_GROUP_WRITERS_PER_DIARY of a
+    // holds across runs only if at most MAX_GROUP_HELD_PER_DIARY of a
     // (group, diary) go live, the earliest proven joins (a bound root is one
     // of them), the rest at rest.
     const excess = capExcess(live)
@@ -4468,22 +4565,15 @@ async function syncRun ({
         if (ending) return []
         ws.push({ key: w.key, entries: await store.readBlocks(w.core), diary: w.diary })
       }
-      const joins = new Map()
-      // A creator's confirmed leave bounds the root's creates.
-      const confirms = new Map()
+      const diaries = new Map()
       for (const d of new Set([root.diary, ...writers.map((w) => w.diary)])) {
         if (ending) return []
         const entries = await entriesOf(d)
-        if (!entries) continue
-        joins.set(d, groupJoinHistory(entries, c))
-        confirms.set(d, groupConfirmHistory(entries, c))
+        if (entries) diaries.set(d, entries)
       }
       if (ending) return []
-      const built = buildCommunity({ root: { key: c, entries: await store.readBlocks(root.core) }, writers: ws, joins, confirms, now: Date.now() })
-      if (built.creator !== null && !built.incomplete) {
-        const keys = built.created instanceof Map ? [...built.created.keys()] : built.groups
-        return keys.slice(0, MAX_GROUPS_PER_COMMUNITY)
-      }
+      const keys = foldedCatalogue(c, await store.readBlocks(root.core), ws, diaries)
+      if (keys !== null) return keys
     } catch {}
     if (ending) return []
     return catalogueKeys(c, root, 2 * MAX_GROUPS_PER_COMMUNITY)
@@ -5274,7 +5364,7 @@ async function syncRun ({
       const record = validRecordCopy(decodeBlock(await diary.get(seq, { wait: false, raw: true })), seq)
       fold.holes.delete(seq)
       fold.readFails.delete(seq)
-      if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq, record })
+      if (record !== null && WALK_TYPES.has(record.type)) fold.joinEntries.push({ seq, record })
     } catch {
       // Once per scan: a diary of failing blocks must not flood the log.
       if (!ended && !fold.scanLogged) {
@@ -5318,35 +5408,6 @@ async function syncRun ({
       return
     }
     scheduleFold()
-  }
-
-  // The on:true writers the own diary binds now to the roots it binds, as
-  // diaryGroupKeys counts them: the root's own key always, then the earliest
-  // MAX_GROUP_WRITERS_PER_DIARY by first join seq. -> Map writer -> group.
-  function liveDiaryWriters (entries, roots) {
-    const first = new Map()
-    for (const { seq, record } of entries) {
-      if (record.type !== 'group-join' || record.on !== true || !roots.has(record.group)) continue
-      let writers = first.get(record.group)
-      if (writers === undefined) first.set(record.group, (writers = new Map()))
-      if (!writers.has(record.writer) || seq < writers.get(record.writer)) writers.set(record.writer, seq)
-    }
-    const allowed = new Set()
-    for (const [group, writers] of first) {
-      let room = MAX_GROUP_WRITERS_PER_DIARY
-      if (writers.has(group)) {
-        allowed.add(group + ':' + group)
-        room--
-      }
-      for (const [writer] of [...writers].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1))) {
-        if (writer === group) continue
-        if (room-- <= 0) break
-        allowed.add(group + ':' + writer)
-      }
-    }
-    const out = new Map()
-    for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
-    return out
   }
 
   // Pages `group` for its new diary-bound writer, and again on a short
@@ -5496,7 +5557,7 @@ async function syncRun ({
       if (entry.seq < 1 || entry.seq >= state.present || entry.record === null) continue
       read.add(entry.seq)
       const record = validRecordCopy(entry.record, entry.seq)
-      if (record !== null && record.type === 'group-join') fold.joinEntries.push({ seq: entry.seq, record })
+      if (record !== null && WALK_TYPES.has(record.type)) fold.joinEntries.push({ seq: entry.seq, record })
     }
     // A block below the present length that is not here is read again when
     // it arrives: a hole a tombstone explains once it leaves the deleted set
@@ -5839,4 +5900,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, retryWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, retryWait, restartWait, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, WALK_TYPES, liveDiaryWriters, foldedCatalogue, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, RETRY_FAST_MAX_MS, RETRY_FAST_WINDOW_MS, RETRY_JITTER, RESTART_WAIT_MS, RESTART_JITTER_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

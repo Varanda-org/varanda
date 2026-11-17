@@ -2340,7 +2340,7 @@ O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/
 
 ### O que mudou
 
-- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, seis avisos: começou a seguir, respondeu, citou, mencionou, curtiu e republicou. Cada um é uma frase com o nome e a ação ("<nome> citou seu post", "<nome> mencionou você"). O crescimento de um diário seguido não gera push. Um post pode gerar vários pushes, um por destinatário (por exemplo, citar um membro e mencionar outro); o id de deduplicação é `ator:seq:destinatário` e o Topic é um HMAC desse id. Uma menção cujo nome ainda não está assentado no índice do semeador não gera push (o aviso aparece). O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
+- Na versão web hospedada, Ajustes ganha "Avisos no aparelho". A pessoa liga, só neste navegador, seis avisos: começou a seguir, respondeu, citou, mencionou, curtiu e republicou. Cada um é uma frase com o nome e a ação ("<nome> citou seu post", "<nome> mencionou você"). O crescimento de um diário seguido não gera push. Um post pode gerar vários pushes, um por destinatário (por exemplo, citar um membro e mencionar outro); o id de deduplicação é `ator:seq:destinatário` e o Topic é um HMAC desse id. Uma menção cujo nome ainda não está assentado no índice do semeador espera na memória dele e gera push uma vez se o nome assentar em até 24 h (o aviso aparece de qualquer jeito). Desfazer um seguir, uma curtida ou uma republicação recolhe o push que ainda esperava na fila. O app nativo, o `varanda-serve` e a CLI ficam na lista de Avisos.
 - O semeador escolhe o candidato (`packages/core/lib/push-events.js`) e o manda em loopback (`POST /push-event`, `apps/cli/lib/push-relay.js`). O cursor `pushNext` começa no comprimento assinado já guardado (na primeira admissão, o maior entre esse comprimento e o que a quarentena verificou). Reinício, reconstrução de índice e histórico já servido não repetem aviso. O semeador nunca vê a inscrição.
 - O serviço de conta (`apps/cli/lib/account/push-routes.js`) oferece `GET /account/push/key`, `POST /account/push/start`, `POST /account/push/finish` e `POST /account/push/check`. A declaração é `varanda-push-v1`, só por HTTPS até o serviço de conta. O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível (`isEndpoint` em `packages/core/lib/push-proof.js`, `isPushEndpoint` em `packages/rpc/lib/methods.js`, `endpointParam` na conclusão). A frase é cifrada de ponta a ponta (RFC 8291). O fabricante vê o texto cifrado e o endereço.
 - Operação: `account push-key` com o serviço parado (grava `push-vapid.json`, modo 0600, imprime só a chave pública), `VARANDA_PUSH_TOKEN` e `VARANDA_ACCOUNT_HTTP` em `deploy/seeder/.env`. Token vazio desliga. Termos versão 3 (`TERMS_VERSION`). Ligar os avisos pede o aceite dessa versão.
@@ -2350,7 +2350,7 @@ O push é outro caminho que a lista de Avisos. A lista (canais `varanda/notices/
 
 Arquivos novos:
 
-- `packages/core/test/push-events.test.js`: candidatos (seguir, resposta, citação, menção, curtida, republicação; um por destinatário), nunca a si mesmo, só membro, lista de bloqueio, idade de 6 h, nome e forma do evento.
+- `packages/core/test/push-events.test.js`: candidatos (seguir, resposta, citação, menção, curtida, republicação; um por destinatário), nunca a si mesmo, só membro, lista de bloqueio, idade de 24 h, nome e forma do evento, cancelamento (`validatePushCancel`, `pushCancel`).
 - `packages/core/test/push-proof.test.js`: declaração `varanda-push-v1`, hash do endpoint e URL `https` em ASCII imprimível.
 - `apps/cli/test/seeder-push.test.js`: cursor `pushNext`, silêncio do histórico, primeira admissão, reinício e os seis eventos.
 - `apps/cli/test/push-relay.test.js`: `POST /push-event` em loopback, token, fila e perda sem repetir.
@@ -2397,7 +2397,7 @@ Nenhuma verificação foi feita ainda. Todos os itens abaixo estão desmarcados 
 ### Limites
 
 - Um evento se perde, e não é repetido, enquanto o serviço de conta está fora ou a fila do repasse está cheia (`maxPending` 256 no semeador, `MAX_QUEUE` 512 no serviço). O cursor do semeador já andou.
-- Um bloco escrito enquanto o semeador estava fora só vira aviso depois do reinício se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado ao servir o diário, na primeira admissão, num reinício ou numa reconstrução de índice, não gera aviso.
+- Um bloco escrito enquanto o semeador estava fora só vira aviso depois do reinício se o `at` do autor tiver menos de 24 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado ao servir o diário, na primeira admissão, num reinício ou numa reconstrução de índice, não gera aviso.
 - Teto de 60 avisos por hora por destinatário (`keyedWindow(60, 3600 * 1000)`, motivo `teto`). Pausa de 600 s para o mesmo autor, destinatário, tipo e `ref` (curtida, republicação e seguir repetidos; `keyedWindow(1, 600 * 1000)`, motivo `descartado`); cada resposta é um aviso próprio, porque a chave leva também o `seq` da resposta.
 - No máximo 4 aparelhos por membro (`PUSH_MAX_PER_MEMBER`). O envio só sai para a lista de hosts (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com` e os sufixos `.push.apple.com`, `.push.services.mozilla.com`, `.notify.windows.com`).
 - Não há tratamento de `pushsubscriptionchange`. Não há push nativo (APNs e FCM do app continuam fora). Não há aviso quando um diário seguido cresce (o TODO de `packages/core/lib/sync.js`).
@@ -4005,7 +4005,7 @@ Do repositório: `npm ci --ignore-scripts`, `npm run lint`, `npm test`. Nenhum t
 
 - Nenhuma caixa acima foi executada nesta documentação.
 - O índice esquece linhas antigas (`NOTICE_ROWS_PER_ENGAGER` 64 por pessoa, `NOTICE_ROWS_MAX` 4096 no total) e não devolve contagem. Uma data mais de 24 h à frente fica escondida até a hora chegar. Uma data anterior a 1970, ou exatamente `1970-01-01T00:00:00.000Z`, não vira linha.
-- A janela de 6 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
+- A janela de 24 h do push (`PUSH_MAX_AGE_MS`) continua só no relé de push. A lista de Avisos não usa esse prazo.
 - Desfazer a republicação tira a linha dela do mesmo jeito que descurtir tira a da curtida. Um registro apagado (lápide) da curtida ou da republicação também tira a linha.
 
 ## 76. Marca de lido até a mensagem pintada (PR fix/group-seen-corte)

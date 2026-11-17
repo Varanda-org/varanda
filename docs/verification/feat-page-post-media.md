@@ -6,7 +6,7 @@
 - `apps/cli/lib/account/pages-writer.js`: `validItem`, a carga e `sameItem` aceitam o item de vídeo com `ms`, então um reinício não pausa a página.
 - `apps/app/src/pages.js`, `pagePost.js` e `videoCompose.js`: a Página publica, responde e cita com o mesmo par de vídeo e a mesma prévia que uma pessoa.
 - `apps/app/src/screens/Publicar.js`, `musicDraft.js`: como Página, a tela Publicar anexa vídeo, prévia de link e música. Um título ou artista de música com termo bloqueado mostra o aviso antes de enviar. Momento, enquete, evento, publicar na web e a fila offline continuam só para a pessoa (próximos PRs).
-- `apps/app/src/legal.js`: Termos e Política versão 77, com novo aceite. As publicações da página aceitam um vídeo curto, e o diário da página inclui vídeos e imagens de prévias de links.
+- `apps/app/src/legal.js`: Termos e Política versão 78, com novo aceite. As publicações da página aceitam um vídeo curto, e o diário da página inclui vídeos e imagens de prévias de links.
 
 ## Como verificar
 
