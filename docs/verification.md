@@ -8143,7 +8143,7 @@ Cobertura automatizada:
 - `packages/core/test/group-media.test.js`: recusa de descritor de vídeo e do par de publicação em grupos.
 - `apps/cli/test/commands.test.js`: marcador `[vídeo]` em `feed` e `log`, com o par preservado em JSON.
 - `apps/cli/test/panel.test.js`: aviso de fotos ou vídeo no painel de moderação.
-- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: recusa de vídeo em Páginas, inclusive de MP4 válido e de imagem com MIME de vídeo, sem gravar registro nem item de mídia.
+- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: uma Página recusa vídeo sem `ms` (`midia-invalida`) e imagem com MIME de vídeo, sem gravar registro nem item; um `video/mp4` com `ms` válido é guardado. Publicação, resposta e citação da Página agora levam o vídeo curto e a prévia de link.
 - `apps/cli/test/ai-triage.test.js`: mídia, inclusive vídeo, fica para decisão humana.
 - `apps/cli/test/ai-read-post.test.js`: par de vídeo reconhecido como mídia, com ou sem legenda, e denúncia mantida aberta para uma pessoa.
 
@@ -8174,7 +8174,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Em aparelhos Android e iOS, publicar um MP4 real de câmera H.264 com AAC e outro sem som, em retrato e paisagem, como post, resposta, citação e momento. Registrar aparelho, sistema e resultado; conferir capa, rotação, duração e reprodução. Um arquivo HEVC, fragmentado ou com faixa de metadados temporizados deve ser recusado; não afrouxar o validador para fazê-lo passar.
 - [ ] Com um arquivo real de câmera de celular contendo uma tag de localização, passar os bytes por `stripVideoMetadata` e conferir que a tag foi removida e que a saída passa em `videoBounds` estrito, sem `metadata: true`; conferir também a reprodução.
 - [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
-- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
+- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia, que oferece o vídeo curto nas publicações de Páginas, como nas de uma pessoa, e que não oferece vídeo em conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
 - [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
 - [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento deixa de abrir com um descritor guardado depois do bloqueio e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
@@ -8243,7 +8243,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar ap
 
 ## 183. Preparar e publicar um vídeo curto
 
-Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 181).
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação. A Página agora leva o vídeo curto e a prévia de link, como a publicação de uma pessoa. Conversa, grupo, Feira, avatar e prévia de link continuam sem vídeo. A comparação com listas de hashes continua ausente (seção 181).
 
 `pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
 
@@ -8297,7 +8297,7 @@ Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparel
 | Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
 | Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |
 | Um app ou uma página anterior pula a publicação com vídeo inteira | [ ] | [ ] | [ ] | [ ] |
-| Página e conversa sem vídeo (também grupo, Feira, avatar e prévia) | [ ] | [ ] | [ ] | [ ] |
+| Página com vídeo curto; conversa, grupo, Feira, avatar e prévia sem vídeo | [ ] | [ ] | [ ] | [ ] |
 | Portão dos Termos e da Política na versão 37, com novo aceite | [ ] | [ ] | [ ] | [ ] |
 
 ### Conferido em 2026-11-12: simulador iOS e emulador Android, sem conta

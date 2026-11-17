@@ -12,10 +12,9 @@ export function musicSnapshot (draft) {
   return fields === null ? null : Object.freeze({ ...fields, thumb: null })
 }
 
-export function musicBlocks ({ hasMedia, hasVideo = false, asPage, online, textLength }) {
+export function musicBlocks ({ hasMedia, hasVideo = false, online, textLength }) {
   if (hasVideo) return MUSIC_VIDEO_TEXT
   if (hasMedia) return MUSIC_PHOTOS_TEXT
-  if (asPage !== null) return 'A música não vai em publicações de página'
   if (textLength < 1) return MUSIC_NEEDS_TEXT
   if (online === false) return 'Sem conexão: a música precisa de conexão'
   return ''

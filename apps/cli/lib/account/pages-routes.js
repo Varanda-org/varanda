@@ -33,8 +33,11 @@
 //     bundle of a legacy page's old Conversas and drop it once imported.
 //     dm-list and dm-thread serve the old rows only while the service still
 //     holds them.
-//   - media and avatar take the raw image as the body and the statement in
-//     x-varanda-page-* headers.
+//   - media and avatar take the raw bytes as the body and the statement in
+//     x-varanda-page-* headers. media is a still image or, with its `ms`, a
+//     short video/mp4 already free of metadata, for a post's [poster, video]
+//     pair; a post, reply or quote carries photos, that pair or a link card
+//     (its thumbnail one of the page's items), as a person's post does.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -81,16 +84,17 @@ const { isUsername } = require('@varanda/core/lib/account-link')
 const { writeJsonAtomic } = require('@varanda/core/lib/store')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
-const { applyDeletes } = require('@varanda/core/lib/deletion')
+const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
-const { feira } = require('@varanda/rpc')
+const { feira, cardUrlHost } = require('@varanda/rpc')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
   postRecord, likeRecord, repostRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
-  parseRef, validDescriptor, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST
+  parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
+  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -943,22 +947,67 @@ function createPagesRoutes ({
 
   // ---- posts and engagement ------------------------------------------------
 
-  function mediaOf (page, media, max = MAX_MEDIA_PER_POST) {
+  // The page's own stored items for these descriptors, or 'midia-invalida'.
+  // Photos, or, for a post (`video`), exactly the pair [JPEG poster, video]
+  // as a person's post carries it (records.js validPostMedia). Every key
+  // must equal the stored row's, a video's `ms` included, and a row only
+  // answers a descriptor of its own kind (a still row has no `ms`).
+  function mediaOf (page, media, max = MAX_MEDIA_PER_POST, { video = false } = {}) {
     if (media === undefined) return undefined
     if (!Array.isArray(media) || media.length < 1 || media.length > max) throw refuse('midia-invalida')
+    const withVideo = video && media.some((d) => isPlainObject(d) && d.mime === VIDEO_MIME)
+    if (withVideo ? !validPostMedia(media) : !media.every((d) => isPlainObject(d) && validDescriptor(d))) throw refuse('midia-invalida')
     let table
     try {
       table = writer.items(page)
     } catch (err) {
       throw tokenOf(err)
     }
-    const same = (a, b) => ['core', 'start', 'blocks', 'sha256', 'mime', 'bytes', 'width', 'height'].every((k) => a[k] === b[k])
     return media.map((d) => {
-      if (!isPlainObject(d) || !validDescriptor(d)) throw refuse('midia-invalida')
+      const keys = d.mime === VIDEO_MIME ? VIDEO_DESCRIPTOR_KEYS : DESCRIPTOR_KEYS
       const row = table.find((it) => it.core === d.core && it.start === d.start && it.blocks === d.blocks && it.sha256 === d.sha256)
-      if (row === undefined || !same(row, d)) throw refuse('midia-invalida')
+      if (row === undefined || Object.keys(row).length !== keys.length || !keys.every((k) => row[k] === d[k])) throw refuse('midia-invalida')
       return row
     })
+  }
+
+  // A post's link card (docs/protocol.md, "Link cards"), the music card
+  // included (a link card whose URL ends in #varanda-musica). The app sends
+  // { url, title?, desc?, image? }; a `host` given must be the URL's. The
+  // thumbnail must be one of the page's own items and pass the check a
+  // person's post preview passes (a JPEG of at most MAX_CARD_IMAGE_BYTES).
+  // The URL and texts go through the blocklist like the post text. -> the card, or
+  // undefined for none.
+  function previewOf (page, preview) {
+    if (preview === undefined || preview === null) return undefined
+    if (!exactKeys(preview, ['url'], ['host', 'title', 'desc', 'image'])) throw refuse('pedido-invalido')
+    const host = cardUrlHost(preview.url)
+    if (host === null || (preview.host !== undefined && preview.host !== host)) throw refuse('pedido-invalido')
+    const text = (v) => v === undefined || v === null ? '' : v
+    let image = null
+    if (preview.image !== undefined && preview.image !== null) {
+      if (!validPreviewImage(preview.image)) throw refuse('midia-invalida')
+      image = mediaOf(page, [preview.image], 1)[0]
+    }
+    const card = { url: preview.url, host, title: text(preview.title), desc: text(preview.desc), image }
+    if (!validPreview(card)) throw refuse('pedido-invalido')
+    termFree(card.url, card.title, card.desc)
+    return card
+  }
+
+  // A post, reply or quote op's media and preview: never both, as a
+  // person's post (records.js postRecord matches no key set with the two).
+  function postParts (page, op) {
+    const hasPreview = op.preview !== undefined && op.preview !== null
+    if (op.media !== undefined && hasPreview) throw refuse('pedido-invalido')
+    return { media: mediaOf(page, op.media, MAX_MEDIA_PER_POST, { video: true }), preview: previewOf(page, op.preview) }
+  }
+
+  // The media ranges a tombstone of this record frees: everything it shows
+  // (deletion.js shownMedia), a post's link card thumbnail included.
+  function rangesOf (record) {
+    const items = shownMedia(record).filter(isPlainObject)
+    return items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
   }
 
   function target (ref) {
@@ -976,19 +1025,19 @@ function createPagesRoutes ({
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
-        if (!exactKeys(op, ['text'], ['media'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['text'], ['media', 'preview'])) throw refuse('pedido-invalido')
         termFree(op.text)
-        return [postRecord({ text: op.text, media: mediaOf(page, op.media) })]
+        return [postRecord({ text: op.text, ...postParts(page, op) })]
       }
       if (action === 'reply') {
-        if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
         termFree(op.text)
-        return [postRecord({ text: op.text, replyTo: target(op.to), media: mediaOf(page, op.media) })]
+        return [postRecord({ text: op.text, replyTo: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'quote') {
-        if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
         termFree(op.text)
-        return [postRecord({ text: op.text, quote: target(op.to), media: mediaOf(page, op.media) })]
+        return [postRecord({ text: op.text, quote: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'like' || action === 'repost') {
         if (!exactKeys(op, ['to', 'on']) || typeof op.on !== 'boolean') throw refuse('pedido-invalido')
@@ -1009,8 +1058,7 @@ function createPagesRoutes ({
         // Never a tombstone over a page record: a delete must not undo a
         // roster, an accept or an offer.
         if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
-        const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-        return deleteRecords({ seq: t.seq, media })
+        return deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
@@ -1662,9 +1710,7 @@ function createPagesRoutes ({
       if (!e || e.deleted || !Number.isSafeInteger(e.seq) || e.seq < 1) continue
       const r = e.record
       if (!isPlainObject(r) || !CLOSE_DELETES.includes(r.type)) continue
-      const items = Array.isArray(r.media) ? r.media : isPlainObject(r.avatar) ? [r.avatar] : []
-      const media = items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-      out.push(...deleteRecords({ seq: e.seq, media }))
+      out.push(...deleteRecords({ seq: e.seq, media: rangesOf(r) }))
     }
     return out
   }
@@ -2036,13 +2082,20 @@ function createPagesRoutes ({
     const body = { member: header(req, 'member'), nonce: header(req, 'nonce'), page: header(req, 'page'), signature: header(req, 'signature'), op }
     const proof = await statement(body, action, false)
     const keysOk = action === 'media'
-      ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'])
+      ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
     if (!keysOk) throw refuse('pedido-invalido')
-    const mimes = action === 'media' ? MEDIA_MIMES : AVATAR_MIMES
+    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME] : AVATAR_MIMES
     const max = action === 'media' ? MAX_MEDIA_BODY : MAX_AVATAR_BYTES
     const { sha256, mime, bytes } = proof.op
     if (!mimes.includes(mime) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > max) throw refuse('midia-invalida')
+    // A short video (the second item of a post's [poster, video] pair) and
+    // only a video carries its duration; the writer checks the container.
+    if (action === 'media') {
+      const ms = proof.op.ms
+      const video = mime === VIDEO_MIME
+      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : ms !== undefined) throw refuse('midia-invalida')
+    }
     const row = writableRow(proof.page)
     need(row, proof.member, 'admin')
     const raw = await readRaw(req, max)
@@ -2060,7 +2113,9 @@ function createPagesRoutes ({
       if (!caps.media(page)) throw refuse('limite')
       let descriptor
       try {
-        descriptor = await writer.mediaItem(page, { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }, { member, nonce })
+        const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
+        if (op.ms !== undefined) item.ms = op.ms
+        descriptor = await writer.mediaItem(page, item, { member, nonce })
       } catch (err) {
         if (err && typeof err.code === 'string' && has(WRITER_TOKENS, err.code)) throw tokenOf(err)
         throw new Uncertain()
