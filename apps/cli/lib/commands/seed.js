@@ -130,8 +130,9 @@ async function runSeeder (flags) {
   // Handlers go in BEFORE start(): a signal during startup (DHT join) must not
   // take Node's default terminate path; the seeder is closed once start settles.
   let onSignal
+  let stopStartedAt = 0
   const stopped = new Promise((resolve) => {
-    onSignal = () => resolve()
+    onSignal = () => { if (stopStartedAt === 0) stopStartedAt = Date.now(); resolve() }
     process.once('SIGINT', onSignal)
     process.once('SIGTERM', onSignal)
   })
@@ -147,7 +148,7 @@ async function runSeeder (flags) {
     }
     if (flags.wsPort !== null) {
       ws = await listenWs(flags, seeder)
-      log({ event: 'ws', host: ws.host, port: ws.port })
+      log({ event: 'ws', host: ws.host, port: ws.port, at: Date.now() })
     }
     await seeder.start()
   } catch (err) {
@@ -162,6 +163,11 @@ async function runSeeder (flags) {
     // A fatal purge failure closes the seeder by itself.
     await Promise.race([stopped, seeder.closed])
   } finally {
+    // Drain start: the signal. When the seeder closed itself (fatal), its
+    // store is already closed here, so closeMs would measure nothing: it is
+    // left out and `fatal: true` is logged instead.
+    const selfClosed = stopStartedAt === 0
+    if (selfClosed) stopStartedAt = Date.now()
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (relay) relay.close()
@@ -169,8 +175,19 @@ async function runSeeder (flags) {
     // 1006): they get 1012 'reiniciando' instead. Adds at most about 1 s.
     // drain() also stops listening, so a redial during seeder.close() is
     // refused (Caddy retries it for up to 5 s) rather than answered 503.
+    // stopListeningAt: drain() stops listening first, so this is its epoch ms
+    // to within the call; with the next process's ws `at` it gives the dark
+    // port time across a deploy.
+    const stopListeningAt = Date.now()
     if (ws) await ws.drain()
+    const drainedAt = Date.now()
     await seeder.close()
+    const timing = { event: 'stopped', drainMs: drainedAt - stopStartedAt }
+    if (selfClosed) timing.fatal = true
+    else timing.closeMs = Date.now() - stopStartedAt
+    // Only when a WebSocket listener actually stopped.
+    if (ws) timing.stopListeningAt = stopListeningAt
+    log(timing)
     if (health) await health.close()
     if (ws) await ws.close()
   }
