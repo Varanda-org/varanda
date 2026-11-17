@@ -488,6 +488,9 @@ const MAX_GATE_HINTS = 4
 // that diary's join of it is proven; until then it is refused on the hint,
 // so another listing of the key may still prove it.
 const HEAD_REASONS = new Set(['header-invalid', 'wrong-group', 'wrong-diary'])
+// What beyondStub finds that makes a stored core more than a header stub,
+// so its record goes and its blocks stay ('held' is not among them).
+const PROVEN_STUB = new Set(['root', 'joined'])
 
 const HEX64 = /^[0-9a-f]{64}$/
 // docs/protocol.md "Mudar de chave": a chain of moves stops here.
@@ -3925,13 +3928,15 @@ async function syncRun ({
       } catch {}
       // A header stub is held under the pair that proved it, whatever its
       // block 0 names: judged below by that diary's join alone. A record
-      // alone never purges a core that is more than a stub here
-      // (beyondStub): the record goes, and the core is read below by its
-      // own header.
+      // alone never purges the root of a group of kv groupWriters or a
+      // writer its header's diary joined (beyondStub): the record goes, and
+      // the core is read below by its own header. One holding a block past
+      // 0 keeps its record and is not purged for a missing join.
       const rec = headerStubs.get(key)
       if (rec !== undefined && raw !== null && core.fork === 0) {
-        if (!(await beyondStub(key, core, raw, writers, bindings))) {
-          stored.push({ key, core, raw, group: rec.group, diary: rec.diary, headerStub: true })
+        const beyond = await beyondStub(key, core, raw, writers, bindings)
+        if (!PROVEN_STUB.has(beyond)) {
+          stored.push({ key, core, raw, group: rec.group, diary: rec.diary, headerStub: true, held: beyond === 'held' })
           heldAtStart.add(key)
           continue
         }
@@ -4056,9 +4061,10 @@ async function syncRun ({
         else s.invalid = true
       }
       // A header or member stub stays only while the stored replica of the
-      // diary that proved it still holds that join; otherwise it goes.
+      // diary that proved it still holds that join; otherwise it goes. A
+      // header stub holding a block past 0 is not purged for that.
       if (s.headerStub === true || s.memberStub === true) {
-        if (storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.key).proven) s.stub = true
+        if (s.held === true || storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.key).proven) s.stub = true
         else s.invalid = true
       }
       if (s.invalid === true) {
@@ -4128,16 +4134,18 @@ async function syncRun ({
     }
   }
 
-  // Whether stored group core `key` is more than a header stub here: the
-  // root of a group of kv groupWriters, a block past 0 held, or a writer of
-  // such a group whose header's own diary, as stored, joined it. A header
-  // naming a diary that never joined it stays a stub.
+  // How stored group core `key` is more than a header stub here: 'root' of
+  // a group of kv groupWriters, 'joined' (a writer of such a group whose
+  // header's own diary, as stored, joined it), 'held' (a block past 0 held,
+  // which only rules out a purge at start: the record stays), or false. A
+  // header naming a diary that never joined it stays a stub.
   async function beyondStub (key, core, raw, writers, cache) {
-    if (writers.some((e) => e.group === key)) return true
-    if (core.length > 1 && (await nextHeld(core, 1, core.length)) !== -1) return true
+    if (writers.some((e) => e.group === key)) return 'root'
+    const past = core.length > 1 && (await nextHeld(core, 1, core.length)) !== -1
     const h = groupHeaderOf(raw, key)
-    if (h === null || h.group === key || !writers.some((e) => e.group === h.group) || ending) return false
-    return storedJoinProof(await bindingEntries(h.diary, cache), h.group, key).proven
+    if (h !== null && h.group !== key && writers.some((e) => e.group === h.group) && !ending &&
+      storedJoinProof(await bindingEntries(h.diary, cache), h.group, key).proven) return 'joined'
+    return past ? 'held' : false
   }
 
   function dropStubRecord (key) {
@@ -4440,24 +4448,105 @@ async function syncRun ({
 
   // Failed-but-kept and resting foreign cores matching `match`. Each match
   // is a verdict on a listing's group or diary, so a recorded header stub
-  // is left to the next start, unless its own key is blocked.
+  // is left to the review of its record (reviewStubRecords), unless its own
+  // key is blocked.
   function purgeKeptGroupCores (match, reason) {
     const spared = (key) => headerStubs.has(key) && !isBlockedKey(key)
     for (const ge of groupCores.values()) {
       if (!match(ge) || ge.state !== 'failed' || ge.kept !== true || spared(ge.key)) continue
-      ge.kept = false
-      const core = ge.core
-      ge.core = null
-      emit({ event: 'group-skipped', key: ge.key, group: ge.group, reason })
-      purgeGroupKey(ge.key, reason, core)
-      markGroupChanged(ge.group)
+      purgeKeptEntry(ge, reason)
     }
     for (const [key, r] of [...restingCores]) {
       if (!match({ key, ...r }) || spared(key)) continue
-      restingCores.delete(key)
-      emit({ event: 'group-skipped', key, group: r.group, reason })
-      purgeGroupKey(key, reason)
+      purgeResting(key, reason)
     }
+  }
+
+  function purgeKeptEntry (ge, reason) {
+    ge.kept = false
+    const core = ge.core
+    ge.core = null
+    emit({ event: 'group-skipped', key: ge.key, group: ge.group, reason })
+    purgeGroupKey(ge.key, reason, core)
+    markGroupChanged(ge.group)
+  }
+
+  function purgeResting (key, reason) {
+    const r = restingCores.get(key)
+    restingCores.delete(key)
+    emit({ event: 'group-skipped', key, group: r.group, reason })
+    purgeGroupKey(key, reason)
+  }
+
+  // A header stub stored before this run, live under the pair its record
+  // names, where `match` is the verdict: the record review rules on it.
+  function reviewed (ge, match) {
+    const x = headerStubs.get(ge.key)
+    return ge.preStored === true && ge.head !== null && (ge.state === 'active' || ge.state === 'regate') && !isBlockedKey(ge.key) &&
+      x !== undefined && x.group === ge.group && x.diary === ge.diary && match(x)
+  }
+
+  // Records whose proving diary or group a snapshot blocks or revokes are
+  // reviewed at once, as at start: the stub goes, with its record, unless
+  // it is the root of a group of kv groupWriters or a writer its header's
+  // diary joined (the record then goes alone). A block past 0 held proves
+  // nothing here.
+  function reviewStubRecords (match, reason) {
+    const due = [...headerStubs.values()].filter(match)
+    if (due.length === 0) return
+    track((async () => {
+      for (const x of due) {
+        if (ending) return
+        await reviewStubRecord(x, reason)
+      }
+    })(), noop, noop)
+  }
+
+  async function reviewStubRecord (x, reason) {
+    if (headerStubs.get(x.key) !== x) return
+    const kept = !isBlockedKey(x.key) && await provenBeyondStub(x.key)
+    if (ending || headerStubs.get(x.key) !== x) return
+    const ge = groupCores.get(x.key)
+    const live = ge !== undefined && (ge.state === 'active' || ge.state === 'regate')
+    if (kept) {
+      dropStubRecord(x.key)
+      if (live && ge.head !== null && ge.group === x.group && ge.diary === x.diary) failGroupEntry(ge, reason, { purge: false })
+      return
+    }
+    if (live) failGroupEntry(ge, reason, { purge: true, review: true })
+    else if (ge !== undefined && ge.state === 'failed' && ge.kept === true) purgeKeptEntry(ge, reason)
+    else if (restingCores.has(x.key)) purgeResting(x.key, reason)
+  }
+
+  // Whether recorded stub `key` is more than a stub here, as beyondStub at
+  // start without its block-past-0 branch. Read from the live entry's block
+  // 0: a resting stub is judged a stub.
+  async function provenBeyondStub (key) {
+    const own = (g) => localGroups.has(g) || ownCommunities.has(g)
+    if (own(key)) return true
+    const ge = groupCores.get(key)
+    const h = ge !== undefined && ge.raw0 ? groupHeaderOf(ge.raw0, key) : null
+    if (h === null || h.group === key || !own(h.group)) return false
+    return storedJoinProof(await heldEntries(h.diary), h.group, key).proven
+  }
+
+  // The entries of diary d as this device holds it, read through the core
+  // already open for it (the own diary, a follow, a binding diary), else
+  // from the storage; null when not held or unreadable.
+  async function heldEntries (d) {
+    if (d === ownHex) return bindingEntries(d, new Map())
+    const f = follows.get(d)
+    const gd = groupDiaries.get(d)
+    if (f !== undefined || gd !== undefined) {
+      const core = f !== undefined ? f.core : await gd.opening
+      if (!core || core.closing || (gd !== undefined && gd.dropped)) return null
+      try {
+        return await store.readAll(core)
+      } catch {
+        return null
+      }
+    }
+    return groupKv(() => follows.has(d) || groupDiaries.has(d) ? null : bindingEntries(d, new Map()))
   }
 
   function reconcileGroupDiaries () {
@@ -4546,13 +4635,16 @@ async function syncRun ({
   }
 
   // `own`: the verdict is about the key itself (its fork, its block 0, its
-  // length), not its listing or the diary that listing names.
-  function failGroupEntry (ge, reason, { purge, own = false }) {
+  // length), not its listing or the diary that listing names. `review`: the
+  // verdict is on the diary or group that proved a recorded stub
+  // (reviewStubRecord).
+  function failGroupEntry (ge, reason, { purge, own = false, review = false }) {
     if (ge.state === 'failing' || ge.state === 'failed') return
     // A header stub stored before this run may write in another group: a
     // verdict on its listing or its hinted diary never purges it, unless
-    // its own key is blocked.
-    if (purge && !own && ge.head !== null && ge.preStored === true && !isBlockedKey(ge.key)) purge = false
+    // its own key is blocked or the record review condemns it. A stub
+    // stored in this run is held for its listing alone and goes with it.
+    if (purge && !own && !review && ge.head !== null && ge.preStored === true && !isBlockedKey(ge.key)) purge = false
     const stored = ge.state === 'active' || ge.state === 'regate'
     stopGroupEntry(ge)
     ge.reason = reason
@@ -4586,12 +4678,14 @@ async function syncRun ({
   // Every foreign group core of diary D (a blocked author or one from a
   // revoked issuer) is purged; a core still being gated fails at its end.
   function dropGroupsOfDiary (diaryKey, reason) {
+    const match = (x) => x.diary === diaryKey
     for (const ge of groupCores.values()) {
-      if (ge.diary !== diaryKey) continue
+      if (ge.diary !== diaryKey || reviewed(ge, match)) continue
       // An unbound stored root stays; one still gating fails (never stored).
       if (ge.key === ge.group && ge.rootBound !== true && ge.state !== 'pending') continue
       failGroupEntry(ge, reason, { purge: true })
     }
+    reviewStubRecords(match, reason)
   }
 
   // A blocked root: every accepted foreign core of its group goes, as in the
@@ -4599,10 +4693,12 @@ async function syncRun ({
   // association blocked). Own cores are never in these maps; a core never
   // accepted is never purged.
   function stopBlockedGroup (key) {
+    const match = (x) => x.group === key
     for (const ge of groupCores.values()) {
-      if (ge.group === key) failGroupEntry(ge, 'blocked', { purge: true })
+      if (ge.group === key && !reviewed(ge, match)) failGroupEntry(ge, 'blocked', { purge: true })
     }
-    purgeKeptGroupCores((x) => x.group === key, 'blocked')
+    purgeKeptGroupCores(match, 'blocked')
+    reviewStubRecords(match, 'blocked')
   }
 
   // A group core in regate on ending never passed its local check: closed
