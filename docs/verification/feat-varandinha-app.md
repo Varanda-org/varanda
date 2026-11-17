@@ -12,9 +12,9 @@ Este arquivo confere as telas Varandinha e Varandas da rua, onde o nó é hosped
 
 ## CI completa
 
-- [ ] `npm run lint`
-- [ ] `npm test -- --affected=<ref>` (a referência da linha `affected since:` do `ci-gate.sh check`)
-- [ ] `npm run demo` termina com "DEMO OK"
+- [x] `npm run lint`
+- [x] `npm test -- --affected=origin/main`: 844 arquivos de teste, 0 falha (Node 24). A primeira rodada falhou em `apps/app/test/feiraCompose.test.js`, que fixava o texto antigo de `backGuardRef`; o teste agora fixa o conjunto de guardas e passou.
+- [x] `npm run demo` termina com "DEMO OK"
 
 ## No aparelho
 
