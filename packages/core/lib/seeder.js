@@ -346,7 +346,7 @@ const FEIRA_OFFERS_PER_DIARY = 4096
 const FEIRA_RESCAN_MS = 60000
 const FEIRA_RESCAN_MAX_MS = 3600000
 const FEIRA_TYPES = new Set(['listing', 'listing-edit', 'listing-status', 'listing-rate'])
-const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help'])
+const INDEX_TYPES = new Set(['post', 'like', 'repost', 'profile', 'username', 'page-roster', 'page-close', 'page-moved', 'testimonial', 'testimonial-show', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take'])
 
 // Frame guard for external streams (acceptStream): see lib/frame-guard.js
 // for the limits, how they were measured, the frame deadlines and the
@@ -6856,6 +6856,17 @@ class Seeder {
   // the cursor AT that block and pauses the diary: nothing is ever skipped.
   async _runIndex (key, entry) {
     const core = entry.core
+    // A gift's follow rank at the Barraquinha writers cap (engagement-index.js
+    // add opts.giftRank): 2 when the addressee follows the writer, 1 when the
+    // writer follows the addressee, else 0, read at the scan.
+    const giftRank = (writer, to) => {
+      try {
+        if (this._notices.followSeq(to, writer) !== null) return 2
+        return this._notices.followSeq(writer, to) !== null ? 1 : 0
+      } catch {
+        return 0
+      }
+    }
     try {
       while (!entry.dropped && !this._closing && entry.gated && this._served.get(key) === entry && entry.indexed < entry.present) {
         const i = entry.indexed
@@ -6892,7 +6903,7 @@ class Seeder {
           // A closed or moved page leaves the Feira at once.
           if (isPage && this._names.endSeq(key) !== null && this._feira) this._feiraClose(key)
           // Page records only feed the name index's hint.
-          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true, now: Date.now() } : { now: Date.now() })) {
+          if (record !== null && !isPage && !this._index.add(key, i, record, removed ? { removed: true, now: Date.now(), giftRank } : { now: Date.now(), giftRank })) {
             entry.indexPaused = true
             return
           }
@@ -8473,6 +8484,42 @@ class Seeder {
       let followsComplete = false
       try { followsComplete = this._notices.followersIncomplete(ownerHex) === false } catch {}
       return { on: g.on, state: g.state, helps: g.helps, given: g.given, indexing: flags.indexing, complete: flags.complete && !g.hidden && !v.held && followsComplete }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/garden/<owner>/mimos: the Barraquinha and Enfeites pointers
+  // of the owner's balcony, { decor, pending: [{ author, seq, followSeq }],
+  // shelf: [{ seq, from, gseq }], indexing, complete } (engagement-index.js
+  // gardenStall on the seeder clock): decor the newest live `garden-decor`
+  // seq above the newest `garden` block that is on, or null; pending the
+  // open mimos addressed to the owner, each with followSeq, the seq of the
+  // GIVER's committed live follow of the owner (as indexGarden), givers the
+  // owner follows first; shelf the owner's live takes of still listable
+  // gifts. A balcony that is off, or was never opened, answers decor null
+  // and no rows. A held or hidden giver is left out and the answer says
+  // complete false, as it does when a list was cut, the writers cap refused
+  // a gift (gardenStall hidden) and whenever indexGarden would. Null when
+  // the owner is not visible or held. Fails closed while the owner's own
+  // diary is not fully indexed and scanned (its takes, decor and tombstones
+  // may be missing): nothing listed, indexing true, complete false. Keys and
+  // seqs only: no pot, plant or decor id, which the node reads and verifies.
+  indexGardenStall (ownerHex) {
+    try {
+      if (!this._indexVisible(ownerHex) || this._searchHeld(ownerHex)) return null
+      const v = this._followsVisible()
+      const g = this._index.gardenStall(ownerHex, Date.now(), {
+        visible: v.visible,
+        followSeq: (hex) => this._notices.followSeq(hex, ownerHex),
+        followed: (hex) => this._notices.followSeq(ownerHex, hex) !== null
+      })
+      if (g === null) return null
+      if (this._ownerIndexPending(ownerHex)) return { decor: null, pending: [], shelf: [], indexing: true, complete: false }
+      const flags = this._indexFlags()
+      let followsComplete = false
+      try { followsComplete = this._notices.followersIncomplete(ownerHex) === false } catch {}
+      return { decor: g.decor, pending: g.pending, shelf: g.shelf, indexing: flags.indexing, complete: flags.complete && !g.hidden && !v.held && followsComplete }
     } catch {
       return null
     }
