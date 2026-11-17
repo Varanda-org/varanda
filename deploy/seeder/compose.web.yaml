@@ -72,10 +72,15 @@ services:
       # Chave pública da associação, servida em /varanda.json (Caddyfile).
       VARANDA_ASSOCIATION: "${VARANDA_ASSOCIATION:?defina VARANDA_ASSOCIATION em deploy/seeder/.env}"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Sem as variáveis (deploy.sh e o compose à mão), ./Caddyfile e ./www.
+      # O update.sh, com a imagem do Caddy, passa caminhos fixos em
+      # /opt/varanda-release (o Caddyfile por sha256 e o diretório inteiro em
+      # /srv, onde o link web aponta para o www da versão): uma versão só de
+      # app não muda nada aqui e o Caddy não é recriado.
+      - ${VARANDA_CADDYFILE_SRC:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       # Preenchido por deploy/seeder/build-web.sh (nunca recriado, só o
       # conteúdo: o mount continua valendo depois de cada atualização).
-      - ./www:/srv/web:ro
+      - ${VARANDA_WWW_SRC:-./www}:${VARANDA_WWW_DST:-/srv/web}:ro
       - caddy-data:/data
       - caddy-config:/config
     read_only: true
