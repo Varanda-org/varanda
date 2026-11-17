@@ -1187,7 +1187,7 @@ O `endpoint` tem de ser uma URL `https` canônica, em ASCII imprimível. `isEndp
 
 O semeador nunca vê a inscrição. Ele só manda o candidato em loopback (`POST /push-event`, `Authorization: Bearer` com `VARANDA_PUSH_TOKEN`). O Caddy não encaminha essa rota (`apps/cli/test/caddyfile.test.js`). O serviço compara o sha256 do token com `timingSafeEqual`. Sem o token, a rota não existe (404) e o corpo não é lido.
 
-Um aviso que chega com o serviço de conta fora, ou com a fila do repasse cheia (256 no semeador, 512 no serviço), se perde e não é repetido. Um bloco escrito enquanto o semeador estava fora só vira aviso depois que ele volta se o `at` do autor tiver menos de 6 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado quando o diário passou a ser servido não gera aviso, inclusive depois de reiniciar ou de reconstruir o índice.
+Um aviso que chega com o serviço de conta fora, ou com a fila do repasse cheia (256 no semeador, 512 no serviço), se perde e não é repetido. Um bloco escrito enquanto o semeador estava fora só vira aviso depois que ele volta se o `at` do autor tiver menos de 24 h (`PUSH_MAX_AGE_MS`, só para suprimir). O que já estava guardado quando o diário passou a ser servido não gera aviso, inclusive depois de reiniciar ou de reconstruir o índice.
 
 ##### Estado de vistos entre aparelhos
 

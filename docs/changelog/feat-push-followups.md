@@ -1,0 +1,7 @@
+### Alterado
+
+- O aviso no aparelho agora vale para o que aconteceu nas últimas 24 horas (antes, 6 horas): um seguir, resposta, citação, menção, curtida ou republicação escrito enquanto o semeador estava fora ainda gera aviso se tiver menos de 24 horas.
+- Uma menção cujo @nome o semeador ainda não tinha resolvido não se perde mais: ele guarda a menção na memória e manda o aviso uma vez, se o nome for resolvido em até 24 horas. Cada autor guarda até 32 menções (1024 no total); cada pessoa que passar a ter o nome depois recebe um aviso. Se o semeador reiniciar nesse meio tempo, a menção some; o aviso na lista continua aparecendo.
+- Quem desfaz um seguir, uma curtida ou uma republicação recolhe o aviso que ainda esperava na fila do serviço de contas. Um aviso que já saiu não volta atrás. O limite de um aviso a cada 10 minutos para a mesma ação e os três tetos por hora são devolvidos, uma vez, quando nenhum aparelho chegou a recebê-lo e nenhuma cópia está em andamento. O semeador só recolhe o que avisou nos últimos 5 minutos (e guarda isso só na memória): fechar uma página não gera um recolhimento por seguidor, só pelos seguidos nesse intervalo. Se o recolhimento se perder, o aviso é entregue.
+- Os Termos de Uso passaram à versão 75: a lista dos avisos no aparelho agora cita os seis tipos (seguidor, resposta, citação, menção, curtida e republicação). É preciso aceitar de novo.
+- Avisos de seguir anteriores a esta versão, que voltam à lista porque agora todo seguidor aparece, chegam já marcados como vistos: o sino não acende por eles.

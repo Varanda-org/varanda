@@ -191,7 +191,7 @@ const { attachBlob } = require('./blob-net')
 const { BLOB_CHUNK_BYTES, BLOB_POOL_BYTES } = require('./blob')
 const { attachNotices, attachNoticesV2, attachNoticesV3 } = require('./notices-net')
 const { createPostNoticeIndex } = require('./post-notices')
-const { pushCandidates, pushName } = require('./push-events')
+const { CANCEL_KINDS, pushCancel, pushCandidates, pushName, PUSH_MAX_AGE_MS } = require('./push-events')
 const {
   validateRecord,
   validRecordCopy,
@@ -225,7 +225,7 @@ const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
-const { feira } = require('@varanda/rpc')
+const { feira, mentionTokens, MENTION_MAX } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
 const clock = require('./clock')
 const {
@@ -381,6 +381,20 @@ async function momentBlobIds (core) {
 // while a diary declaring thousands of keys holds at most this many cores x
 // MAX_MEDIA_BLOCKS x 2 counter entries, whatever it writes.
 const MEDIA_TRACK_MAX = 2 * MAX_MEDIA_CORES
+// Mentions of a name not yet verified when the push cursor passed the post,
+// kept in memory to push once the name settles (_pushHold). Oldest first out.
+const PUSH_PENDING_MAX = 1024
+// Per actor, its own oldest out first, so one member cannot evict everyone
+// else's waiting mentions.
+const PUSH_PENDING_PER_ACTOR = 32
+// A recall (on: false) cancels only a follow, like or repost this seeder
+// emitted this recently: comfortably above the account service send delay
+// (PUSH_DELAY_MAX_MS, 60 s, apps/cli/lib/account/push-routes.js), after
+// which the push is out and a cancel would drop nothing. Bounded, oldest
+// out first, and never persisted: after a restart the queued push is
+// delivered (no recall), as before recalls existed.
+const PUSH_RECALL_MS = 5 * 60 * 1000
+const PUSH_RECALL_MAX = 4096
 
 // Fresh counters for a core first declared at seq `since`. Sparse (one entry
 // per block actually referenced, never above MAX_MEDIA_BLOCKS), so an honest
@@ -1073,8 +1087,11 @@ class Seeder {
   // purgeHook also see group keys.
   // onPush(event) is not a test hook: called synchronously, never awaited,
   // once per recipient of each follow, reply, quote, @mention, like or
-  // repost appended to a served diary past its push cursor (push-events.js
-  // shapes the event; a throw is ignored).
+  // repost appended to a served diary past its push cursor, and once with
+  // { op: 'cancel' } for each such follow, like or repost undone there
+  // within PUSH_RECALL_MS of its push (push-events.js shapes both; a throw
+  // is ignored). A mention of a name
+  // nobody verifiably held then pushes when the name settles, within 24 h.
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -1369,6 +1386,12 @@ class Seeder {
     // the v1, v2 and v3 channels.
     this._notices = createNoticeIndex({ isMember: (k) => this._admitted.has(k) || this._served.has(k) })
     this._postNotices = this._createPostNoticeIndex()
+    // id (actor:seq:token) -> { actor, seq, token, at, added, post }: never
+    // persisted, so a restart forgets them (no push, the aviso still shows).
+    this._pushPending = new Map()
+    // kind:actor:recipient:ref -> emit time (ms) of each follow, like or
+    // repost pushed, for recalls (PUSH_RECALL_MS).
+    this._pushSent = new Map()
     this._noticeHandles = new Set()
     // Moderation generation: bumped on every adoption that blocks a key or
     // revokes an issuer. A block-0 verdict computed across an await under an
@@ -2640,6 +2663,7 @@ class Seeder {
     this._served.delete(key)
     this._notices.removeAuthor(key)
     this._postNotices.removeAuthor(key)
+    this._pushForget((e) => e.actor === key)
     const cert = this._admitted.get(key)
     this._admitted.delete(key)
     this._dropping.set(key, cert)
@@ -3212,6 +3236,7 @@ class Seeder {
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
     this._postNotices.removePost(key, target)
+    this._pushForget((e) => e.actor === key && e.seq === target)
     // Removing a block a paused cursor never indexed (the refused one, or a
     // later one) frees nothing, so onFreed never fires: resume this diary's
     // pass so it skips the deleted seq instead of staying paused.
@@ -5104,6 +5129,7 @@ class Seeder {
     return createPostNoticeIndex({
       isMember: (k) => this._admitted.has(k) || this._served.has(k),
       maxAuthors: this.maxServed,
+      onOwnersGained: (token, owners) => this._pushSettle(token, owners),
       verifyUsername: (author, record) => {
         try {
           return cert.verifyUsernameRecord(record, author, this.association).ok === true
@@ -5877,10 +5903,17 @@ class Seeder {
         entry.pushReadFailures = 0
         const block = raw === null ? null : decodeBlock(raw)
         const record = block && validRecordCopy(block, i)
+        // The scan may not have applied this tombstone yet (scans run one at
+        // a time), so a name settling before it would push a deleted post.
+        if (record && record.type === 'delete') this._pushForget((e) => e.actor === key && e.seq === record.seq)
+        // Before any await on this block, so a settle that lands while it is
+        // read still finds the mentions nobody holds yet.
+        const held = record && this.onPush !== null ? this._pushHold(key, i, record, Date.now(), entry) : null
         // Two phases, so a stop while a read is pending never emits part of
         // a block's pushes: A awaits (target posts, the actor name), B only
         // decides and emits, synchronously, then the cursor moves once.
         let survivors = []
+        const decided = []
         let name = null
         let now = 0
         if (record) {
@@ -5892,6 +5925,7 @@ class Seeder {
             // does). A target this replica cannot read yet drops the
             // recipient: a weaker kind would mislabel a reply or a quote.
             for (const c of this._pushCandidatesFor(key, i, record, now)) {
+              decided.push(c.recipient)
               for (const hit of [c, ...c.alternates]) {
                 if (hit.targetSeq !== null) {
                   const target = await this._pushTargetIsPost(c.recipient, hit.targetSeq)
@@ -5903,7 +5937,7 @@ class Seeder {
                 break
               }
             }
-            if (survivors.length > 0) {
+            if (survivors.length > 0 || held !== null) {
               name = await this._pushActorName(key, entry)
               if (!live()) return
             }
@@ -5924,10 +5958,20 @@ class Seeder {
           }
           for (const c of survivors) {
             if (!still.has(c.kind + ':' + c.recipient)) continue
+            this._pushNoteSent(c.kind, key, c.recipient, c.ref)
             try {
               this.onPush({ v: 1, kind: c.kind, actor: key, recipient: c.recipient, seq: i, ref: c.ref, name })
             } catch {}
           }
+        }
+        if (held !== null) this._pushRelease(held, name, decided)
+        // An undone follow, like or repost recalls the push the service may
+        // still hold queued; it needs no target read, so it is decided here.
+        const cancel = record && this.onPush !== null ? this._pushCancelFor(key, i, record, now) : null
+        if (cancel !== null) {
+          try {
+            this.onPush(cancel)
+          } catch {}
         }
         entry.pushNext = i + 1
       }
@@ -5941,16 +5985,6 @@ class Seeder {
   // holding the name now; a revoked issuer's names never match, as on the
   // notices page. A lookup that throws counts as nobody (push-events.js).
   _pushCandidatesFor (key, seq, record, now) {
-    const index = this._postNotices
-    let revoked = null
-    const holders = (token) => {
-      if (!index || typeof index.holders !== 'function') return []
-      if (revoked === null) {
-        const opts = this._certOpts()
-        revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
-      }
-      return index.holders(token, (issuer) => !revoked.has(issuer))
-    }
     return pushCandidates({
       author: key,
       seq,
@@ -5958,8 +5992,172 @@ class Seeder {
       now,
       isMember: (k) => this._admitted.has(k) || this._served.has(k),
       isBlocked: (k) => this._isBlocked(k),
-      holders
+      holders: (token) => this._pushHolders(token)
     })
+  }
+
+  // The members verifiably holding `token` now, a revoked issuer's names
+  // never matching, as on the notices page. A throw counts as nobody.
+  _pushHolders (token) {
+    try {
+      const index = this._postNotices
+      if (!index || typeof index.holders !== 'function') return []
+      const opts = this._certOpts()
+      const revoked = opts && opts.revokedIssuers instanceof Set ? opts.revokedIssuers : new Set()
+      return index.holders(token, (issuer) => !revoked.has(issuer))
+    } catch {
+      return []
+    }
+  }
+
+  // Records each mention of a valid, recent post whose name nobody holds
+  // now; null when there is none. The entries of one post share `post`,
+  // open while the block is read: a gain reported then waits for
+  // _pushRelease, which knows who the normal path decided for.
+  // `source` is the served entry whose push pass held it: a re-served diary
+  // is a new entry, so what the old one held never pushes (_pushSettleEntry).
+  _pushHold (key, seq, record, now, source = null) {
+    try {
+      if (record.type !== 'post' || typeof record.text !== 'string') return null
+      const at = Date.parse(record.at)
+      if (!Number.isFinite(at) || now - at > PUSH_MAX_AGE_MS) return null
+      let post = null
+      for (const token of mentionTokens(record.text, MENTION_MAX)) {
+        if (this._pushHolders(token).length > 0) continue
+        if (post === null) post = { open: true, name: null, sent: new Set() }
+        const id = key + ':' + seq + ':' + token
+        this._pushPending.delete(id)
+        this._pushPending.set(id, { actor: key, seq, token, at, added: now, post, source })
+        let own = 0
+        let oldest = null
+        for (const [k, e] of this._pushPending) {
+          if (e.actor !== key) continue
+          if (oldest === null) oldest = k
+          own++
+        }
+        if (own > PUSH_PENDING_PER_ACTOR) this._pushPending.delete(oldest)
+        if (this._pushPending.size > PUSH_PENDING_MAX) this._pushPending.delete(this._pushPending.keys().next().value)
+      }
+      return post
+    } catch {
+      return null
+    }
+  }
+
+  // The block passed phase B: every recipient the normal path decided for
+  // (pushed, or dropped so a reply or quote is never relabelled) is done for
+  // this post, and a name gained while the block was read settles now.
+  _pushRelease (post, name, decided) {
+    for (const recipient of decided) post.sent.add(recipient)
+    post.name = name
+    post.open = false
+    const now = Date.now()
+    for (const [id, entry] of [...this._pushPending]) {
+      if (entry.post !== post) continue
+      if (this._pushExpired(entry, now)) this._pushPending.delete(id)
+      else this._pushSettleEntry(id, entry, this._pushHolders(entry.token))
+    }
+  }
+
+  // onOwnersGained of the post notice index: a name just verified for
+  // `owners` settles the mentions of it the push cursor passed unresolved.
+  // Synchronous, like every other emit; a throw in onPush is ignored.
+  _pushSettle (token, owners) {
+    if (this.onPush === null || this._closing || !Array.isArray(owners)) return
+    const now = Date.now()
+    for (const [id, entry] of [...this._pushPending]) {
+      if (this._pushExpired(entry, now)) {
+        this._pushPending.delete(id)
+      } else if (entry.token === token && owners.includes(entry.actor)) {
+        // The author gained the name: the index dropped the post's mention
+        // rows as self-mentions (dropOwnMentions), so no later holder may
+        // get a push without an aviso.
+        this._pushPending.delete(id)
+      } else if (entry.token === token && !entry.post.open) {
+        this._pushSettleEntry(id, entry, owners)
+      }
+    }
+  }
+
+  // By the record's `at`, which is author-supplied, and by when it was
+  // held, so a future `at` cannot keep an entry past the window either.
+  _pushExpired (entry, now) {
+    return now - entry.at > PUSH_MAX_AGE_MS || now - entry.added > PUSH_MAX_AGE_MS
+  }
+
+  // The gates of a mention push (_pushCandidatesFor) on the current state:
+  // a member holding the name under a usable issuer, not the actor, neither
+  // side blocked (a throw counts as blocked), and nothing for this post yet.
+  // The name is the one the block's own pass read (null if it held none).
+  // An entry stays until it expires or is evicted: a name can have several
+  // verified holders settling at different times, and post.sent keeps each
+  // recipient to one push. It goes once the actor holds the name too (the
+  // mention is then a self-mention, with no aviso for anyone).
+  _pushSettleEntry (id, entry, recipients) {
+    const { actor, seq, token, post } = entry
+    // Only while the author is served by the entry that held it (live, as
+    // in _runPush), and a deleted post has no aviso either. A re-served
+    // diary's deleted set may not be rescanned yet, so its old entries are
+    // deleted, never pushed.
+    const source = this._served.get(actor)
+    if (!source || source !== entry.source || !source.gated || source.dropped || source.deleted.has(seq)) {
+      this._pushPending.delete(id)
+      return
+    }
+    const blocked = (k) => {
+      try {
+        return this._isBlocked(k)
+      } catch {
+        return true
+      }
+    }
+    const holders = this._pushHolders(token)
+    if (holders.includes(actor)) {
+      this._pushPending.delete(id)
+      return
+    }
+    for (const recipient of recipients) {
+      if (recipient === actor || post.sent.has(recipient) || !holders.includes(recipient)) continue
+      if (!this._admitted.has(recipient) && !this._served.has(recipient)) continue
+      if (blocked(actor) || blocked(recipient)) continue
+      post.sent.add(recipient)
+      try {
+        this.onPush({ v: 1, kind: 'mention', actor, recipient, seq, ref: actor + ':' + seq, name: post.name })
+      } catch {}
+    }
+  }
+
+  // Deletes the waiting mentions `pred` matches (a dropped actor, a
+  // deleted post).
+  _pushForget (pred) {
+    for (const [id, entry] of [...this._pushPending]) {
+      if (pred(entry)) this._pushPending.delete(id)
+    }
+  }
+
+  // Notes a follow, like or repost just emitted, for a recall within
+  // PUSH_RECALL_MS. Oldest out first past PUSH_RECALL_MAX.
+  _pushNoteSent (kind, actor, recipient, ref) {
+    if (!CANCEL_KINDS.includes(kind)) return
+    const id = kind + ':' + actor + ':' + recipient + ':' + ref
+    this._pushSent.delete(id)
+    this._pushSent.set(id, Date.now())
+    if (this._pushSent.size > PUSH_RECALL_MAX) this._pushSent.delete(this._pushSent.keys().next().value)
+  }
+
+  // The cancel one `on: false` record of `key` yields, or null: only for a
+  // push this seeder emitted within PUSH_RECALL_MS, so closing a page (up
+  // to thousands of follow-offs) never floods the relay with cancels of
+  // nothing. A matched cancel goes out even after a block or a lost
+  // membership: it only drops a queued job and carries no content.
+  _pushCancelFor (key, seq, record, now) {
+    const cancel = pushCancel({ author: key, seq, record, now })
+    if (cancel === null) return null
+    const id = cancel.kind + ':' + key + ':' + cancel.recipient + ':' + cancel.ref
+    const at = this._pushSent.get(id)
+    if (at === undefined) return null
+    this._pushSent.delete(id)
+    return Date.now() - at <= PUSH_RECALL_MS ? cancel : null
   }
 
   // The engagement index only checks a reference's shape and keeps targets
@@ -8209,6 +8407,8 @@ class Seeder {
       this._served.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
       this._postNotices = createPostNoticeIndex()
+      this._pushPending.clear()
+      this._pushSent.clear()
       for (const entry of this._mediaServed.values()) this._stopEntry(entry)
       this._mediaServed.clear()
       for (const entry of this._groupServed.values()) this._stopEntry(entry)
