@@ -9,6 +9,7 @@ const sodium = require('sodium-universal')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { presentState } = require('./deletion')
+const { nextHeld } = require('./sparse-held')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -532,6 +533,9 @@ async function readHeldBlocks (core) {
     const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
     if (block === null) {
       hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
       continue
     }
     const record = decodeBlock(block)

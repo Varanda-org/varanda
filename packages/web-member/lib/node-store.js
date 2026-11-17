@@ -50,6 +50,7 @@ const {
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
+const { nextHeld } = require('@varanda/core/lib/sparse-held')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
@@ -623,6 +624,9 @@ async function readHeldBlocks (core) {
     const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
     if (block === null) {
       hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
       continue
     }
     const record = decodeBlock(block)
