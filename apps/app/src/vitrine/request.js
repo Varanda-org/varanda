@@ -550,7 +550,7 @@ export function createVitrineRequest (fixtures, options) {
     return { community, name, join, state, role, general }
   }
 
-  // docs/rpc.md 5.151 to 5.154, per instance: this device, one other
+  // docs/rpc.md 5.152 to 5.155, per instance: this device, one other
   // connected device, one already disconnected and "Aparelhos anteriores".
   const deviceSelf = '1'.repeat(64)
   const devices = {
