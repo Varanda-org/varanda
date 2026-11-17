@@ -157,6 +157,42 @@ test('a header stub listed with a diary that does not prove its join keeps its v
   t.ok(logs.some((l) => l.includes('listou escritores errados demais')), 'and each one charged: the seeder is cut off')
 })
 
+test('one unstored listing of a writer of another group, its join not proven, is charged to the seeder (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = await diaryIn(fake.store, kp, 'diary')
+  const real = fake.store.get({ name: 'real' })
+  await real.ready()
+  await real.append(enc(writerHeader({ group, diary: d.key, member: PARENT })))
+  await d.d.append(enc(groupJoinRecord({ group, writer: hex(real.key), on: true })))
+  // MAX_BAD_HINTS - 1 listings charged as another diary's, and one writer of
+  // another group: the seeder is cut off only when that one is charged too.
+  const wrong = []
+  for (let i = 0; i < 31; i++) {
+    const core = fake.store.get({ name: 'other-diary' + i })
+    await core.ready()
+    await core.append(HEADS['another diary'].raw(group, d.key))
+    items.push({ key: hex(core.key), diary: d.key, length: 1, seq: 1 })
+  }
+  const one = fake.store.get({ name: 'other-group' })
+  await one.ready()
+  await one.append(HEADS['another group'].raw(group, d.key))
+  items.push({ key: hex(one.key), diary: d.key, length: 1, seq: 1 })
+  wrong.push(hex(one.key))
+  items.splice(0, items.length, ...sorted(items))
+  const m = await groupMember(t, kp, group)
+  await copyInto(fake.store, m, [d.d])
+  const logs = []
+  const { events } = await syncOnce(bootstrap, m, { timeoutMs: 30000, log: (line) => logs.push(line) })
+  t.alike(skipped(events, wrong[0]), ['wrong-group'], 'refused with its header\'s verdict')
+  t.absent(await stored(m, wrong[0]), 'never stored')
+  t.ok(logs.some((l) => l.includes('listou escritores errados demais')), 'and charged: the seeder is cut off')
+})
+
 test('cores already stored here in another role, listed as writers of a group whose block 0 can never count for them, are skipped and never charged to the seeder (#350)', async (t) => {
   t.timeout(180000)
   const { bootstrap } = await testnet(t)
