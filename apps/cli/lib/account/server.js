@@ -284,7 +284,7 @@ function fixedWindow (limit, windowMs, now) {
 // `charge` false only asks whether the key would pass, changing nothing.
 function keyedWindow (limit, windowMs, now, max = 10000) {
   const windows = new Map()
-  return (key, charge = true) => {
+  const check = (key, charge = true) => {
     const t = now()
     let w = windows.get(key)
     if (w !== undefined && t - w.start >= windowMs) {
@@ -305,6 +305,14 @@ function keyedWindow (limit, windowMs, now, max = 10000) {
     w.count++
     return true
   }
+  // Gives back one charge, for a use the caller undid before it took effect.
+  // `at` is a time read after that charge: a window started later (it
+  // restarted, or the key was evicted) never held it and is left alone.
+  check.release = (key, at) => {
+    const w = windows.get(key)
+    if (w !== undefined && w.start <= at && w.count > 0) w.count--
+  }
+  return check
 }
 
 // --- issuer and data-dir lock -------------------------------------------------

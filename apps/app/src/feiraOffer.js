@@ -98,13 +98,9 @@ export function offerText (listing, cents, url) {
   return withUrl('Ofereço ' + centsLabel(cents) + ' pelo seu anúncio' + named + ' na Feira', url)
 }
 
-// The proposta's message text. A page sends text only, and the seller's
-// node (listing.consent, the page action listing-consent) reads an offer
-// only from a card URL or a text that IS the offer URL (feira.parseOfferRef),
-// so a page's proposta is the bare URL; a member's carries the sentence and
-// the card.
-export function proposalText (listing, cents, url, { asPage = false } = {}) {
-  if (asPage === true) return typeof url === 'string' && feira.parseOfferRef(url) !== null ? url : ''
+// The proposta's message text: the sentence and the link, for a page as for
+// a member (a page's dm.pageDraft carries the card like dm.send).
+export function proposalText (listing, cents, url) {
   return offerText(listing, cents, url)
 }
 

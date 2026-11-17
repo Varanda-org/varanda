@@ -35,7 +35,7 @@ const { validateParams, MAX_TEXT, dmTextBudget, dmTextBytes, MEMBER_CERT_STANDIN
 // author. confirm: 'audience' asks AUDIENCE_QUESTION before a private item
 // goes to a public group. A DM destination is measured first: a text that
 // cannot fit next to its media fails with 'mensagem longa demais' before any
-// upload.
+// upload. A page source (`page: true`) is a v3 inner, 8 bytes tighter.
 //
 // runForward then reads each item (the device cache first, then the source),
 // uploads it and sends one request with fwd: 1. An item neither read gives
@@ -168,20 +168,25 @@ function plan (source, target) {
       to: target.to,
       fwd: FORWARD_FLAG,
       media: count > 0 ? Array(count).fill(voice ? WIDEST_DM_VOICE : WIDEST_DM_ITEM) : undefined,
-      cert: MEMBER_CERT_STANDIN
+      cert: MEMBER_CERT_STANDIN,
+      ...(source.page === true ? { v: 3 } : {})
     })
     if (dmTextBytes(source.text) > budget) return fail(TOO_LONG)
   }
 
   const result = { ok: true, fwd: FORWARD_FLAG, text: source.text, uploads }
+  // runForward measures the uploaded descriptors with the same version.
+  if (toDm && source.page === true) result.v = 3
   if (toPublic && shape.private && uploads.length > 0) result.confirm = AUDIENCE
   if (dropped) result.dropped = EXPIRED
   return result
 }
 
-// The request target composePlan takes for a forward destination.
-function composeTarget (target) {
-  if (target.kind === 'dm') return { kind: 'dm', to: target.to, fwd: FORWARD_FLAG }
+// The request target composePlan takes for a forward destination. A page
+// plan (v: 3) is measured as a page inner; the field is not part of the send.
+function composeTarget (target, plan) {
+  const page = plan && plan.v === 3 ? { v: 3 } : {}
+  if (target.kind === 'dm') return { kind: 'dm', to: target.to, fwd: FORWARD_FLAG, ...page }
   return { kind: 'group', group: target.group, visibility: target.visibility, fwd: FORWARD_FLAG }
 }
 
@@ -223,6 +228,9 @@ function uploadArgs (step, file) {
 // Runs one forward plan into `target`. readCache(index) and
 // readSource(index) give an item's plaintext ({ bytes, mime, w, h, ms }) or
 // null; media is the node's { putDm, upload }; request(method, params) sends.
+// page: the Página key when forwarding as a page (its client is `request`):
+// every DM upload names it, so the node keys each blob to that sender and the
+// page draft takes it (rpc 5.88).
 // -> { phase: 'done' | 'uncertain' | 'failed' | 'cancelled', op?, error?,
 // dropped? }; never rejects, and sends at most once. Every plaintext read is
 // zero-filled once the forward settles: the upload made its own copy.
@@ -237,8 +245,8 @@ export async function runForward (args = {}) {
   }
 }
 
-async function forwardOnce ({ plan: p, target, readCache, readSource, media, request, live = () => true, onPhase, uncertain }, files) {
-  if (!p || p.ok !== true || !Array.isArray(p.uploads) || checkTarget(target) !== null) {
+async function forwardOnce ({ plan: p, target, readCache, readSource, media, request, page = null, live = () => true, onPhase, uncertain }, files) {
+  if (!p || p.ok !== true || !Array.isArray(p.uploads) || checkTarget(target) !== null || (page !== null && !isKey(page))) {
     return { phase: 'failed', error: new Error('encaminhamento inválido') }
   }
   let dropped = typeof p.dropped === 'string'
@@ -261,7 +269,7 @@ async function forwardOnce ({ plan: p, target, readCache, readSource, media, req
     const staged = files.map((f, i) => f.ms !== undefined
       ? stagedVoice({ ms: f.ms }, i)
       : { name: i.toString(16).padStart(32, '0') + '.bin', mime: f.mime, width: f.width, height: f.height })
-    send = composePlan({ text: p.text, attachments: staged, target: composeTarget(target) })
+    send = composePlan({ text: p.text, attachments: staged, target: composeTarget(target, p) })
   } catch (error) {
     return { phase: 'failed', error, ...extra }
   }
@@ -276,7 +284,7 @@ async function forwardOnce ({ plan: p, target, readCache, readSource, media, req
           if (!media || typeof media.putDm !== 'function') throw new Error('anexos indisponíveis')
           // A blob of its own per destination (rpc 5.97): an uncertain send
           // to one conversation never lends its blob to the next.
-          return await media.putDm({ ...uploadArgs(step, file), to: target.to })
+          return await media.putDm({ ...uploadArgs(step, file), to: target.to, ...(page !== null ? { page } : {}) })
         }
         if (!media || typeof media.upload !== 'function') throw new Error('anexos indisponíveis')
         return await media.upload(uploadArgs(step, file))
@@ -471,17 +479,16 @@ export function needsAudience (source, rows) {
 // ---- forwarding as a page --------------------------------------------------
 
 // A page's sends go through dm.pageDraft and dm.pageSend (rpc 5.114), which
-// carry text only: a page forward keeps the text and leaves the photos and
-// voice notes out, and says so. -> { source, left }, left the count of items
-// left out, or null when there is no text to forward.
-export const PAGE_MEDIA_LEFT = 'Como página, só o texto é encaminhado: fotos e áudios ficam de fora.'
-
+// take the media and card of a person's dm.send: a page forwards a message
+// as it is, media included. -> { source, left } with left always 0 (nothing
+// is left out), or null when the source is not a DM or has nothing to send.
 export function pageForwardSource (source) {
   if (!source || typeof source !== 'object' || source.kind !== 'dm') return null
-  if (typeof source.text !== 'string' || source.text === '') return null
+  if (typeof source.text !== 'string') return null
   const media = Array.isArray(source.media) ? source.media : []
-  const left = media.filter((m) => !(m && typeof m === 'object' && m.unavailable === true)).length
-  return { source: { kind: 'dm', text: source.text, media: [] }, left }
+  const usable = media.some((m) => !(m && typeof m === 'object' && m.unavailable === true))
+  if (source.text === '' && !usable) return null
+  return { source, left: 0 }
 }
 
 // Whether the sheet offers "Tentar de novo" for a page destination: only

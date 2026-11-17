@@ -155,6 +155,42 @@ function seenOf (item) {
   return item && isHex32(item.seen) ? item.seen : null
 }
 
+// Follow rows older than this predate the change that lists mutual follows:
+// they are marked seen, so the rows that change brings back do not light the
+// bell as unread.
+export const FOLLOW_SEEN_CUTOFF = '2026-11-17T12:00:00.000Z'
+
+// The `seen` tokens of the follow rows (noticeKind) with `at` before
+// `cutoff`. `follows` null (not read yet): every such row. A Set of lowercase
+// keys: only rows whose author is in it. Anything else, non-array rows, a
+// bad cutoff or a missing or bad `at` gives []. Never throws.
+// Before the change that lists mutual follows, rows of authors the reader
+// followed were hidden. A non-followed pre-cutoff follow row the reader had
+// not opened loses only its dot; the row stays listed.
+export function oldFollowSeen (rows, follows, cutoff = FOLLOW_SEEN_CUTOFF) {
+  try {
+    if (!Array.isArray(rows) || (follows !== null && !(follows instanceof Set))) return []
+    const limit = Date.parse(cutoff)
+    if (Number.isNaN(limit)) return []
+    const out = []
+    for (const item of rows) {
+      if (noticeKind(item) !== 'follow') continue
+      if (follows !== null) {
+        const key = typeof item.key === 'string' ? item.key.toLowerCase() : ''
+        if (!follows.has(key)) continue
+      }
+      if (typeof item.at !== 'string') continue
+      const at = Date.parse(item.at)
+      if (Number.isNaN(at) || at >= limit) continue
+      const id = seenOf(item)
+      if (id !== null) out.push(id)
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 // True when some loaded notice with a valid seen token is absent from the
 // seen list. A row without a valid token never counts as new.
 export function hasNew (items, seenIds) {
@@ -248,13 +284,18 @@ export function padSeen (ids, randomBytes, size = SEEN_MAX) {
 // shorter than `size` (the first write, or an older unpadded v3 entry) is
 // padded with every real id kept. Otherwise each new token replaces an entry
 // chosen uniformly at random among the entries that are not tokens of
-// `items` (a row on screen is never evicted), so the length stays `size`;
+// `items` or of the optional `keep` rows, which are protected without being
+// marked (a row on screen is never evicted), so the length stays `size`;
 // should there be fewer such entries than new tokens, the newest new tokens
 // that fit are kept. A row without a valid token is never stored. The
 // inputs are never mutated.
-export function markSeenPadded (stored, items, randomBytes, size = SEEN_MAX) {
+export function markSeenPadded (stored, items, randomBytes, size = SEEN_MAX, keep = []) {
   const have = new Set(stored)
   const onScreen = new Set()
+  for (const item of keep) {
+    const id = seenOf(item)
+    if (id !== null) onScreen.add(id)
+  }
   const newIds = []
   for (const item of items) {
     const id = seenOf(item)

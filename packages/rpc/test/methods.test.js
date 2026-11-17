@@ -2306,6 +2306,13 @@ test('dm.* (Conversas)', (t) => {
   // lowercase hex64 diary key.
   ok(t, 'dm.putMedia', { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 }, { ...put, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 })
   for (const to of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) bad(t, 'dm.putMedia', { ...put, to }, 'to ' + JSON.stringify(to))
+  // `page` (optional) keys the blob to the Página as sender: an exact
+  // lowercase hex64 key, for a photo or a voice note.
+  ok(t, 'dm.putMedia', { ...put, page: KEY }, { ...put, page: KEY })
+  ok(t, 'dm.putMedia', { ...put, page: KEY, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 }, { ...put, page: KEY, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 2500 })
+  for (const page of ['ab', KEY.toUpperCase(), KEY + '0', KEY.slice(1), 1, null, true, [KEY], { key: KEY }]) {
+    t.is(validateParams('dm.putMedia', { ...put, page }).message, 'parâmetro inválido: page', 'page ' + JSON.stringify(page))
+  }
 
   t.ok(isMutating('dm.react'))
   const target = { from: KEY, id: ID }
@@ -2695,6 +2702,51 @@ test('page end-to-end node methods', (t) => {
   ok(t, 'dm.pageDraft', { page: PAGE, kind: 'msg', to: KEY, text: 'oi' }, { page: PAGE, kind: 'msg', to: KEY, text: 'oi', fwd: 0 })
   ok(t, 'dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted' })
   bad(t, 'dm.pageDraft', { page: PAGE, kind: 'other' })
+
+  // A page msg carries dm.send's media and card, under the same checks.
+  const item = { id: 'a1'.repeat(32), key: 'b2'.repeat(32), nonce: 'c3'.repeat(24), mime: 'image/jpeg', chunks: 2, bytes: 32768 + 17, sha256: 'd4'.repeat(32), w: 1080, h: 1920, ms: 0 }
+  const voice = { ...item, mime: 'audio/mp4', w: 0, h: 0, ms: 3000 }
+  const msg = { page: PAGE, kind: 'msg', to: KEY, text: '' }
+  ok(t, 'dm.pageDraft', { ...msg, media: [item] }, { ...msg, media: [item], fwd: 0 })
+  ok(t, 'dm.pageDraft', { ...msg, media: [voice] })
+  ok(t, 'dm.pageDraft', { ...msg, text: 'encaminhada', fwd: 1, media: [item] })
+  ok(t, 'dm.pageDraft', { ...msg, text: 'oi', card: { ...LINK_CARD, image: CARD_DM_IMAGE } })
+  ok(t, 'dm.pageDraft', { ...msg, text: 'oi', card: LINK_CARD })
+  const four = ['a1', 'a2', 'a3', 'a4'].map((h) => ({ ...item, id: h.repeat(32) }))
+  const mediaCases = [
+    ['four photos', four],
+    ['five photos', [...four, { ...item, id: 'a5'.repeat(32) }]],
+    ['repeated blob ids', [item, item]],
+    ['a voice note next to a photo', [voice, { ...item, id: 'a2'.repeat(32) }]],
+    ['empty list', []],
+    ['null', null],
+    ['not a list', item],
+    ['video mime', [{ ...item, mime: 'video/mp4' }]],
+    ['ms on a photo', [{ ...item, ms: 1 }]],
+    ['chunks not ceil(bytes / 32768)', [{ ...item, chunks: 3 }]],
+    ['an extra key', [{ ...item, width: 1 }]]
+  ]
+  for (const [label, media] of mediaCases) {
+    const person = validateParams('dm.send', { to: KEY, text: 'oi', media })
+    const asPage = validateParams('dm.pageDraft', { ...msg, text: 'oi', media })
+    t.is(asPage === null ? null : asPage.message, person === null ? null : person.message, 'media as dm.send: ' + label)
+  }
+  const cardCases = [
+    ['a png image', { ...LINK_CARD, image: { ...CARD_DM_IMAGE, mime: 'image/png' } }],
+    ['an image with ms', { ...LINK_CARD, image: { ...CARD_DM_IMAGE, ms: 1 } }],
+    ['a public image', { ...LINK_CARD, image: CARD_PUBLIC_IMAGE }],
+    ['an extra key', { ...LINK_CARD, extra: 1 }],
+    ['a long title', { ...LINK_CARD, title: 'x'.repeat(81) }],
+    ['null', null]
+  ]
+  for (const [label, card] of cardCases) {
+    const person = validateParams('dm.send', { to: KEY, text: 'oi', card })
+    t.ok(person !== null, 'dm.send refuses the card: ' + label)
+    t.is(validateParams('dm.pageDraft', { ...msg, text: 'oi', card }).message, person.message, 'card as dm.send: ' + label)
+  }
+  t.is(validateParams('dm.pageDraft', { ...msg, text: 'oi', media: [item], card: LINK_CARD }).message, 'parâmetro inválido: media', 'media and card, never both')
+  t.is(validateParams('dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted', media: [item] }).message, 'parâmetro inválido: kind', 'a ctl carries no media')
+  t.is(validateParams('dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted', card: LINK_CARD }).message, 'parâmetro inválido: kind', 'nor a card')
   const expiresAt = Date.parse('2026-01-01T00:10:00.000Z')
   ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt })
   ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: 1 })

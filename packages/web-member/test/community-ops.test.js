@@ -130,9 +130,9 @@ test('community create writes the root and Geral; info shapes and refusals', asy
 
   const geralRow = { group: general, name: 'Geral', visibility: 'public', join: 'open', role: 'creator', general: true, last: null, unread: 0 }
   t.alike(await ops.communityInfo(a.ctx, { community }), {
-    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, authorityHere: true, writersBound: 1, generalWritersBound: 1
+    community, name: 'Bairro', join: 'open', creator: a.key, role: 'creator', state: 'ready', members: 1, admins: 1, groups: [geralRow], general, incomplete: false, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: true, canWrite: true, rootHere: true, authorityHere: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 1, generalWritersFrozen: 0, generalFrozenRoom: 8
   })
-  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, writersBound: 1 })
+  t.alike(await ops.groupInfo(a.ctx, { group: general }), { group: general, name: 'Geral', join: 'open', creator: a.key, role: 'creator', members: 1, state: 'member', community, orphan: false, visibility: 'public', memberInvite: false, writerHere: true, canWrite: true, writersBound: 1, writersFrozen: 0, frozenRoom: 8 })
   t.alike(await ops.groupList(a.ctx), { groups: [{ group: general, name: 'Geral', join: 'open', role: 'creator', members: 1, community }], total: 1 }, 'a community is not listed as a group')
 
   const { group: horta } = await ops.groupCreate(a.ctx, { name: 'Horta', join: 'approval', community })
@@ -158,7 +158,7 @@ test('community create writes the root and Geral; info shapes and refusals', asy
   await t.exception(() => ops.groupCreate(b.ctx, { name: 'Feira', join: 'open', community }), /só quem criou a comunidade cria grupos/)
   await t.exception(() => ops.groupJoin(b.ctx, { group: general }), /entre na comunidade primeiro/)
   const pending = 'cd'.repeat(32)
-  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, writersBound: 0, generalWritersBound: 0 })
+  t.alike(await ops.communityInfo(b.ctx, { community: pending }), { community: pending, name: null, join: null, creator: null, role: 'pending', state: 'pending', members: 0, admins: 0, groups: [], general: null, incomplete: true, leavePending: false, repair: false, dropped: [], memberInvite: false, writerHere: false, canWrite: false, rootHere: false, authorityHere: false, writersBound: 0, writersFrozen: 0, frozenRoom: 8, generalWritersBound: 0, generalWritersFrozen: 0, generalFrozenRoom: 8 })
   await t.exception(() => ops.communityInfo(b.ctx, { community: general }), /comunidade não encontrada/, 'a group root is no community')
 })
 
@@ -1716,4 +1716,141 @@ test('invitePolicy: the creator toggles C, an admin sets C and a group through i
   const cFlag = await lastRecord(c, ccw)
   t.alike([cFlag.type, cFlag.group, cFlag.on], ['group-invites', null, true], 'an admin on its own CW')
   t.is((await ops.communityInfo(c.ctx, { community })).memberInvite, true)
+})
+
+// Appends diary records of `s` with no other check.
+async function diaryAppend (s, list) {
+  const diary = await store.openDiary(s.storage, s.ctx.keyPair)
+  try {
+    for (const r of list) await store.appendRecord(diary, r)
+  } finally {
+    await diary.close()
+  }
+}
+
+test('community.join counts the own diary\'s slot walk, not the CWs held: COMMUNITY_FULL with nothing written (#350)', async (t) => {
+  const { members: [b], community } = await world(t, 1)
+  // Eight CWs of other devices this node never held take every live slot.
+  await diaryAppend(b, Array.from({ length: grp.MAX_GROUP_WRITERS_PER_DIARY }, () => groupJoinRecord({ group: community, writer: hex(crypto.randomBytes(32)), on: true })))
+  const before = (await ops.logRead(b.ctx)).entries.length
+  await t.exception(() => ops.communityJoin(b.ctx, { community }), /limite da comunidade atingido/)
+  t.is((await ops.logRead(b.ctx)).entries.length, before, 'no CW bound')
+  t.is(await ownWriter(b, community), null, 'no CW made')
+})
+
+test('community.join takes a slot a cut freed; community.info counts live and frozen slots, Geral\'s too (#350)', async (t) => {
+  const { members: [b], community, general } = await world(t, 1)
+  const ws = Array.from({ length: grp.MAX_GROUP_WRITERS_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  const gw = hex(crypto.randomBytes(32))
+  await diaryAppend(b, [
+    ...ws.map((writer) => groupJoinRecord({ group: community, writer, on: true })),
+    groupJoinRecord({ group: general, writer: gw, on: true }),
+    // A cut at 0 releases a writer, a cut past 0 freezes one.
+    groupCutRecord({ group: community, writer: ws[0], cut: 0 }),
+    groupCutRecord({ group: community, writer: ws[1], cut: 2 }),
+    groupCutRecord({ group: general, writer: gw, cut: 1 })
+  ])
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member')
+  const info = await ops.communityInfo(b.ctx, { community })
+  t.alike([info.writersBound, info.writersFrozen, info.frozenRoom], [grp.MAX_GROUP_WRITERS_PER_DIARY - 1, 1, grp.MAX_FROZEN_WRITERS_PER_DIARY - 1], 'six old CWs and the new one live, one frozen')
+  t.alike([info.generalWritersBound, info.generalWritersFrozen, info.generalFrozenRoom], [1, 1, grp.MAX_FROZEN_WRITERS_PER_DIARY - 1], 'Geral: the new writer live, the old one frozen')
+  const gi = await ops.groupInfo(b.ctx, { group: general })
+  t.alike([gi.writersBound, gi.writersFrozen, gi.frozenRoom], [info.generalWritersBound, info.generalWritersFrozen, info.generalFrozenRoom], 'group.info of Geral agrees')
+})
+
+// A CW of another device of `s`'s diary, bound by it: its header, then the
+// records `make(key)` returns.
+async function siblingCw (s, community, make = () => []) {
+  const kp = await s.ctx.groupKeyPair(new Uint8Array(crypto.randomBytes(32)))
+  const key = hex(kp.publicKey)
+  const core = await store.openGroupWriter(s.storage, kp)
+  try {
+    for (const record of [grp.writerHeader({ group: community, diary: s.key, member: null }), ...make(key)]) {
+      await store.appendGroupRecord(core, record, { root: false, community: true })
+    }
+  } finally { await core.close() }
+  await store.addGroupReplica(s.storage, key)
+  await diaryAppend(s, [groupJoinRecord({ group: community, writer: key, on: true })])
+  return key
+}
+
+async function ownWalk (s, group) {
+  const entries = (await ops.logRead(s.ctx)).entries
+  return { entries, walk: grp.slotWalk(grp.groupJoinHistory(entries, group), grp.groupCutHistory(entries, group), group) }
+}
+
+const recordAt = (entries, type, writer, on) => entries.findIndex((e) => e.record && e.record.type === type && e.record.writer === writer && (on === undefined || e.record.on === on))
+
+test('a community rejoin after a leave cuts the retired CW at its length before the new join, and takes its slot (#350)', async (t) => {
+  const { members: [b], community } = await world(t, 1)
+  await ops.communityJoin(b.ctx, { community })
+  const old = await ownWriter(b, community)
+  // Seven CWs of other devices of the diary: every live slot is taken.
+  for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY - 1; i++) await siblingCw(b, community)
+  t.alike(await ops.communityLeave(b.ctx, { community }), { state: 'left' })
+  const held = await coreLength(b, old)
+  t.ok(held >= 2, 'the old CW holds its header and its leave')
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member')
+  const now = await ownWriter(b, community)
+  t.not(now, old, 'a new CW')
+  const { entries, walk } = await ownWalk(b, community)
+  t.alike(grp.groupCutHistory(entries, community).filter((m) => m.writer === old).map((m) => m.cut), [held], 'the old CW is cut once, at its length')
+  t.ok(recordAt(entries, 'group-cut', old) < recordAt(entries, 'group-join', now, true), 'the cut comes before the new join')
+  t.ok(walk.frozen.has(old), 'the old CW is frozen')
+  t.ok(walk.live.has(now), 'the new CW is live')
+})
+
+test('a community rejoin after another device left plans the cut past the leave it writes on the own CW (#350)', async (t) => {
+  const { members: [b], community } = await world(t, 1)
+  // Every release is spent (each join released before the next, so all of
+  // them count), so only a cut past 0 frees a slot: one planned at 0 for the
+  // header-only CW would refuse the join.
+  const released = Array.from({ length: grp.MAX_WRITER_RELEASES_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  await diaryAppend(b, released.flatMap((writer) => [
+    groupJoinRecord({ group: community, writer, on: true }),
+    groupCutRecord({ group: community, writer, cut: 0 })
+  ]))
+  t.is((await ownWalk(b, community)).walk.released.size, grp.MAX_WRITER_RELEASES_PER_DIARY, 'every release spent')
+  await ops.communityJoin(b.ctx, { community })
+  const old = await ownWriter(b, community)
+  t.is(await coreLength(b, old), 1, 'the own CW holds its header only')
+  const sibs = []
+  for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY - 2; i++) sibs.push(await siblingCw(b, community))
+  // The eighth CW, of another device, leaves for the diary.
+  await siblingCw(b, community, (key) => [grp.groupLeave({ cuts: [old, ...sibs, key].map((writer) => ({ writer, seq: 1 })).sort((x, y) => x.writer.localeCompare(y.writer)) })])
+  t.is((await ops.communityJoin(b.ctx, { community })).state, 'member')
+  const now = await ownWriter(b, community)
+  t.alike((await records(b, old)).map((r) => r.type), ['group-writer', 'group-leave'], 'the join wrote a leave on the own CW first')
+  const { entries, walk } = await ownWalk(b, community)
+  t.alike(grp.groupCutHistory(entries, community).filter((m) => m.writer === old).map((m) => m.cut), [2], 'then the cut, past that leave')
+  t.ok(walk.frozen.has(old), 'the old CW is frozen')
+  t.ok(walk.live.has(now), 'the new CW is live')
+})
+
+test('a community demotion past MAX_GROUP_CUTS writers names the first by key and is never refused; a grant is, as in the core node (#350)', (t) => {
+  const cuts = Array.from({ length: grp.MAX_GROUP_CUTS + 1 }, () => ({ writer: hex(crypto.randomBytes(32)), seq: 3 })).sort((x, y) => x.writer.localeCompare(y.writer))
+  t.alike(ops.adminCuts(cuts, false), cuts.slice(0, grp.MAX_GROUP_CUTS), 'the first writers by key keep their length, the rest are cut at 0')
+  t.exception(() => ops.adminCuts(cuts, true), /limite da comunidade atingido/, 'a grant past the cap is refused')
+  const fit = cuts.slice(0, grp.MAX_GROUP_CUTS)
+  t.alike(ops.adminCuts(fit, true), fit, 'a grant within the cap names every writer')
+  t.alike(ops.adminCuts(fit, false), fit, 'a demotion within the cap names every writer')
+})
+
+test('with no frozen room left, a community rejoin after a leave gets COMMUNITY_FULL with nothing written (#350)', async (t) => {
+  const { members: [b], community } = await world(t, 1)
+  // Eight CWs of other devices this node never held, cut past 0: the frozen
+  // reserve is spent.
+  const frozen = Array.from({ length: grp.MAX_FROZEN_WRITERS_PER_DIARY }, () => hex(crypto.randomBytes(32)))
+  await diaryAppend(b, [
+    ...frozen.map((writer) => groupJoinRecord({ group: community, writer, on: true })),
+    ...frozen.map((writer) => groupCutRecord({ group: community, writer, cut: 1 }))
+  ])
+  await ops.communityJoin(b.ctx, { community })
+  for (let i = 0; i < grp.MAX_GROUP_WRITERS_PER_DIARY - 1; i++) await siblingCw(b, community)
+  await ops.communityLeave(b.ctx, { community })
+  const before = (await ops.logRead(b.ctx)).entries.length
+  const old = await ownWriter(b, community)
+  await t.exception(() => ops.communityJoin(b.ctx, { community }), /limite da comunidade atingido/)
+  t.is((await ops.logRead(b.ctx)).entries.length, before, 'nothing written')
+  t.is(await ownWriter(b, community), old, 'no new CW')
 })

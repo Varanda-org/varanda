@@ -136,10 +136,18 @@ test('putDm goes through dm.putMedia; a failure deletes the file here', async (t
     await t.exception.all(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to: bad }), /mídia inválida/, 'to ' + JSON.stringify(bad))
   }
   t.is(calls.filter((c) => c.method === 'dm.putMedia').length, 1, 'a put without a valid destination never reaches the worklet')
+  const page = '9a'.repeat(32)
+  t.is(await media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to, page }), item)
+  const asPage = calls.filter((c) => c.method === 'dm.putMedia')[1]
+  t.alike(asPage.params, { name: asPage.params.name, to, page, mime: 'image/webp', width: 2, height: 2 }, 'a page crosses the IPC (rpc 5.88)')
+  for (const bad of ['9A'.repeat(32), 'ef', null]) {
+    await t.exception.all(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to, page: bad }), /mídia inválida/, 'page ' + JSON.stringify(bad))
+  }
+  t.is(calls.filter((c) => c.method === 'dm.putMedia').length, 2, 'a malformed page never reaches the worklet')
 
   fail = true
   await t.exception(media.putDm({ bytes: new Uint8Array([9]), mime: 'image/webp', width: 2, height: 2, to }))
-  const failed = calls.filter((c) => c.method === 'dm.putMedia')[1]
+  const failed = calls.filter((c) => c.method === 'dm.putMedia')[2]
   t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed put leaves no upload file')
   await t.exception.all(media.putDm({ bytes: new Uint8Array(0), mime: 'image/webp', width: 2, height: 2, to }), /mídia inválida/)
 })

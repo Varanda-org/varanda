@@ -353,6 +353,9 @@ const CHECK_INTERVAL_MS = 1000
 // refused by the seeder for capacity its 1013 close, before the socket is
 // destroyed anyway.
 const REFUSE_GRACE_MS = 1000
+// How often a /seeder upgrade held while the seeder starts (startHoldMs)
+// checks whether the seeder accepts streams yet.
+const HOLD_CHECK_MS = 100
 
 const MEDIA_PREFIX = '/media'
 // Canonical decimals only (no sign, no leading zero); the digit caps keep the
@@ -777,7 +780,12 @@ function refuse (socket, code, reason) {
 // postPublic(hex, seq) and mediaRead; postsLimits: overrides
 // ({ pageMaxInFlight, pageRate, pageBurst, pageDeadlineMs, photoMaxInFlight,
 // photoDeadlineMs, previewMaxInFlight, previewRate, previewBurst,
-// previewDeadlineMs }), for tests.
+// previewDeadlineMs }), for tests. startHoldMs (default 0): while the
+// seeder's status is 'starting', a /seeder upgrade that passed the host, path
+// and origin checks is held up to this long (at most maxExternal at once) and
+// accepted as soon as the seeder accepts streams, instead of a 503 at once.
+// The resolved object also has drain(): closes every /seeder WebSocket with
+// 1012 'reiniciando' (see below) before the seeder shuts down.
 // The listener's socket cap: `sockets` when it is an integer >= 1
 // (VARANDA_MAX_SOCKETS), else room for every external WebSocket, every
 // /media and /index response in flight and 64 more for keep-alives and
@@ -790,7 +798,7 @@ function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null 
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {} }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, startHoldMs = 0 }) {
   if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
     throw new TypeError('publicOrigin inválido')
   }
@@ -1847,25 +1855,81 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // Sockets between the 'upgrade' event and either their hand-off to ws
   // (then tracked by wss.clients) or their destruction; close() destroys them.
   const upgrading = new Set()
+  // Upgrades held while the seeder starts (a subset of upgrading), each with
+  // its check timer; at most maxExternal at once.
+  const held = new Map()
+  // The stream handed to the seeder for each open /seeder WebSocket, so
+  // drain() can stop the seeder writing to it.
+  const streams = new Map()
   let closing = null
+  let draining = null
+
+  // Whether the seeder takes a stream now: accepting() when the seeder has
+  // it (it accepts before its status turns 'ok'), else the status as before.
+  const ready = () => {
+    try {
+      if (typeof seeder.accepting === 'function') return seeder.accepting() === true
+      return seeder.stats().status === 'ok'
+    } catch {
+      return false
+    }
+  }
+  const starting = () => {
+    try {
+      return seeder.stats().status === 'starting'
+    } catch {
+      return false
+    }
+  }
+  const release = (socket) => {
+    const timer = held.get(socket)
+    if (timer === undefined) return
+    clearInterval(timer)
+    held.delete(socket)
+  }
 
   server.on('upgrade', (req, socket, head) => {
     socket.on('error', () => {})
     if (closing) return socket.destroy()
     upgrading.add(socket)
-    socket.once('close', () => upgrading.delete(socket))
+    socket.once('close', () => {
+      upgrading.delete(socket)
+      release(socket)
+    })
     if (!hostOk(req)) return refuse(socket, '421 Misdirected Request', 'host inválido')
     if (req.url.split('?')[0] !== PATH) return refuse(socket, '404 Not Found', 'não encontrado')
     if (!originAllowed(req.headers.origin, allowList)) return refuse(socket, '403 Forbidden', 'origem não permitida')
-    let ok = false
-    try {
-      ok = seeder.stats().status === 'ok'
-    } catch {}
-    if (!ok) return refuse(socket, '503 Service Unavailable', 'indisponível')
+    const unavailable = () => refuse(socket, '503 Service Unavailable', 'indisponível')
+    if (draining) return unavailable()
+    if (ready()) return accept(req, socket, head)
+    if (startHoldMs <= 0 || held.size >= maxExternal || !starting()) return unavailable()
+    // Held in upgrading, so close() and drain() destroy it like any other
+    // socket mid-upgrade; its 'close' listener above clears the timer.
+    const deadline = Date.now() + startHoldMs
+    const timer = setInterval(() => {
+      if (closing || draining || socket.destroyed) return release(socket)
+      if (ready()) {
+        release(socket)
+        return accept(req, socket, head)
+      }
+      // starting() is not re-read on each tick: ready() reads accepting(),
+      // which is cheap, and only a seeder without it falls back to stats(),
+      // which walks every served core. A seeder that fails to start has the
+      // listener closed by its caller.
+      if (Date.now() >= deadline) {
+        release(socket)
+        unavailable()
+      }
+    }, HOLD_CHECK_MS)
+    timer.unref()
+    held.set(socket, timer)
+  })
+
+  function accept (req, socket, head) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       upgrading.delete(socket)
       ws.on('error', () => {})
-      if (closing) return ws.terminate()
+      if (closing || draining) return ws.terminate()
       let duplex
       // Set when the seeder refuses for capacity: the socket is then ours to
       // close with 1013 (try again later) instead of the bare 1006 a
@@ -1892,9 +1956,13 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       try {
         duplex = createWebSocketStream(ws)
         duplex.on('error', () => {})
+        streams.set(ws, duplex)
         // A closed WebSocket only ends the duplex's readable side; destroy it
         // so the seeder releases the connection slot at once.
-        ws.once('close', () => duplex.destroy())
+        ws.once('close', () => {
+          streams.delete(ws)
+          duplex.destroy()
+        })
         Promise.resolve(seeder.acceptStream(duplex, { onRefuse })).then((noise) => {
           if (!noise && !refused) ws.terminate()
         }, () => { if (!refused) ws.terminate() })
@@ -1902,14 +1970,82 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         if (!refused) ws.terminate()
       }
     })
-  })
+  }
+
+  // Drops a write the seeder makes after drain() began, as if it had been
+  // sent, so it never reaches ws.send on a CLOSING WebSocket.
+  const dropWrite = (chunk, encoding, callback) => callback()
+
+  // Stops accepting connections; the promise settles once every open one
+  // has ended. Shared by drain() and close(): a second server.close() on a
+  // closed server only reports ERR_SERVER_NOT_RUNNING on a later 'close'
+  // event, which never comes once the first 'close' has been emitted.
+  let stopped = null
+  const stopListening = () => {
+    if (!stopped) stopped = new Promise((resolve) => server.close(() => resolve()))
+    return stopped
+  }
+
+  // Closes every /seeder WebSocket with 1012 (service restart) instead of the
+  // bare 1006 seeder.close() would give, so a client can tell a restart from
+  // a network loss. Resolves once they are all closed, or after
+  // REFUSE_GRACE_MS, terminating the ones whose client never answered.
+  const drain = () => {
+    if (draining) return draining
+    if (closing) return closing
+    // The port stops listening first, so the client's quick redial after the
+    // 1012 meets a refused dial, which Caddy holds and retries for up to 5 s,
+    // instead of a 503 for the whole of seeder.close(),
+    // which Caddy passes on. /media, /blob and the other HTTP routes share
+    // this port and are refused too from here on: the seeder is going away,
+    // and Caddy answers 502 once its retry runs out.
+    // Connections already open (the WebSockets below) are left to finish.
+    stopListening()
+    draining = new Promise((resolve) => {
+      for (const socket of upgrading) socket.destroy()
+      upgrading.clear()
+      for (const socket of [...held.keys()]) release(socket)
+      const open = []
+      for (const ws of wss.clients) {
+        if (ws.readyState === ws.CLOSED) continue
+        open.push(ws)
+        if (ws.readyState !== ws.OPEN) continue // already closing (a 1013): its own timer ends it
+        // Same order as the 1013 path. The seeder's writes are cut off
+        // first: a write after close() would make ws.send fail on the
+        // CLOSING socket, the duplex would error and destroy itself, and
+        // createWebSocketStream's _destroy terminates an unclosed WebSocket,
+        // turning the 1012 back into a 1006. With _write dropped, nothing
+        // destroys the duplex until ws emits 'close' (the listener in
+        // accept()), when terminate() is a no-op. A write already handed to
+        // ws.send went out on the socket before the close frame.
+        const duplex = streams.get(ws)
+        if (duplex) duplex._write = dropWrite
+        try {
+          ws.close(1012, 'reiniciando')
+        } catch {
+          ws.terminate()
+        }
+      }
+      const gone = open.map((ws) => ws.readyState === ws.CLOSED ? null : new Promise((resolve) => ws.once('close', resolve)))
+      const timer = setTimeout(() => {
+        for (const ws of open) ws.terminate()
+      }, REFUSE_GRACE_MS)
+      timer.unref()
+      Promise.all(gone).then(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+    return draining
+  }
 
   const close = () => {
     if (closing) return closing
     closing = new Promise((resolve) => {
-      server.close(() => resolve())
+      stopListening().then(resolve)
       for (const socket of upgrading) socket.destroy()
       upgrading.clear()
+      for (const socket of [...held.keys()]) release(socket)
       for (const ws of wss.clients) ws.terminate()
       server.closeAllConnections()
     })
@@ -1923,7 +2059,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       server.on('error', () => {})
       const address = server.address()
       hosts = allowedHosts(host, address.address, address.port)
-      resolve({ host: address.address, port: address.port, close })
+      resolve({ host: address.address, port: address.port, close, drain })
     })
   })
 }

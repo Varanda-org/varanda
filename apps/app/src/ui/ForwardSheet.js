@@ -10,8 +10,7 @@
 // Acting as a page, the caller passes the page's Conversas client as
 // `request` (dm-screen.js pageDmClient): the rows are the page's inbox only,
 // no groups, and each send is one dm.pageDraft and dm.pageSend with the text
-// alone (forward.js pageForwardSource; `mediaLeft` counts the items left out and
-// PAGE_MEDIA_LEFT says so). An uncertain page send keeps the client's re-put
+// and the media of a person's forward (forward.js pageForwardSource). An uncertain page send keeps the client's re-put
 // of the same signed draft, and "Tentar de novo" calls only that: a page
 // never drafts and signs the message again.
 //
@@ -37,10 +36,11 @@
 // note must not go through one). runForward wipes them after the upload, and
 // nothing here names the original author.
 //
-// Props: { open, onClose, source, refs, identity, request?, mediaLeft? }, where
+// Props: { open, onClose, source, refs, identity, request?, page? }, where
 // source is the forwardPlan source, refs[i] the chatMedia ref of
 // source.media[i] (chatSend.js chatMediaRefs), and request the page client
-// when acting as a page.
+// and page its key when acting as a page: every upload names the page, as
+// its draft requires (rpc 5.88).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetch as expoFetch } from 'expo/fetch'
@@ -52,7 +52,7 @@ import { isAppClient } from '../appClient'
 import { whoOf, UNNAMED } from '../who'
 import { UNSURE_SEND } from '../dm'
 import {
-  AUDIENCE_QUESTION, EXPIRED, FORWARD_MAX, PAGE_MEDIA_LEFT, canRetry, canRetryPage, forwardBusy, forwardPlan, loadForwardDestinations,
+  AUDIENCE_QUESTION, EXPIRED, FORWARD_MAX, canRetry, canRetryPage, forwardBusy, forwardPlan, loadForwardDestinations,
   loadMoreForwardDestinations, needsAudience, retryForward, retryPageForward, runForward, stateOfPhase, targetOf, toggleSelection
 } from '../forward'
 import { createChatMedia, pinChatMedia, sourceFor } from '../media/chatMedia'
@@ -72,12 +72,16 @@ const STATE_TEXT = Object.freeze({
   pending: 'Enviando…',
   sent: 'Encaminhada',
   uncertain: 'Não deu para confirmar o envio.',
-  failed: 'Não foi enviada.'
+  failed: 'Não foi enviada.',
+  maybe: 'Pode ter sido enviada. Confira na conversa.'
 })
 const WAIT_HINT = 'Aguarde o envio terminar.'
 const PARTIAL_NOTE = 'Alguns grupos não puderam ser carregados.'
 
 const unsure = (err) => !!(err && (err.uncertain === true || err.message === UNSURE_SEND))
+// The node's answer when a page draft is gone or already used (rpc 5.114).
+// After an uncertain send it means the first put may have landed.
+const PAGE_DRAFT_GONE = 'rascunho expirado'
 
 // The plaintext of one chat item the chat already holds: the device-local
 // URL of a cache hit, read back into bytes while pinned. A miss reads
@@ -95,7 +99,7 @@ async function readCached (ref, ctx) {
   }
 }
 
-export function ForwardSheet ({ open, onClose, source, refs, identity, request: pageRequest = null, mediaLeft = 0 }) {
+export function ForwardSheet ({ open, onClose, source, refs, identity, request: pageRequest = null, page = null }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -243,7 +247,7 @@ export function ForwardSheet ({ open, onClose, source, refs, identity, request: 
           continue
         }
         setOne(row.key, { state: 'pending' })
-        const r = await runForward({ plan, target, readCache, readSource, media: node.media, request, live, uncertain: unsure })
+        const r = await runForward({ plan, target, readCache, readSource, media: node.media, request, ...(pageMode ? { page } : {}), live, uncertain: unsure })
         if (!live() && r.phase === 'cancelled') break
         // A page keeps only the client's re-put of the same signed draft.
         const kept = pageMode
@@ -270,6 +274,10 @@ export function ForwardSheet ({ open, onClose, source, refs, identity, request: 
     setOne(key, { ...entry, state: 'pending' })
     if (pageMode) {
       const p = await retryPageForward({ retry: entry.retry, uncertain: unsure })
+      if (p.phase === 'failed' && p.error && p.error.message === PAGE_DRAFT_GONE) {
+        setOne(key, { state: 'maybe', retry: null, error: '', dropped: entry.dropped })
+        return
+      }
       setOne(key, { state: stateOfPhase(p.phase), retry: p.retry || null, error: p.error ? errorText(p.error) : '', dropped: entry.dropped })
       return
     }
@@ -329,7 +337,6 @@ export function ForwardSheet ({ open, onClose, source, refs, identity, request: 
       <ScrollView contentContainerStyle={styles.list} keyboardShouldPersistTaps='handled'>
         {waitHint && busy ? <View style={styles.pad}><Soft>{WAIT_HINT}</Soft></View> : null}
         {!started ? <View style={styles.pad}><Soft>{'Escolha até ' + FORWARD_MAX + ' conversas.'}</Soft></View> : null}
-        {!started && pageMode && mediaLeft > 0 ? <View style={styles.pad}><Soft>{PAGE_MEDIA_LEFT}</Soft></View> : null}
         {!started && partial ? <View style={styles.pad}><Soft>{PARTIAL_NOTE}</Soft></View> : null}
         {shown.map((row) => {
           const chosen = selected.includes(row.key)

@@ -27,8 +27,8 @@ import { useMemberSearch } from '../useMemberSearch'
 import { whoOf } from '../who'
 import { shortKey } from '../format'
 import {
-  COMMUNITY_JOIN_LABELS, DEVICE_PENDING_JOIN_TEXT, DEVICE_RESERVE_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
-  authorityHere, can, communityReserveReached, deviceStaffNote, membersLabel, rootAdminHere, roleLabel, writerOnDevice
+  COMMUNITY_JOIN_LABELS, DEVICE_PENDING_JOIN_TEXT, DEVICE_ROOT_TEXT, DEVICE_STAFF_TEXT,
+  authorityHere, can, communityReserveReached, communitySlots, deviceStaffNote, membersLabel, reserveJoinText, rootAdminHere, roleLabel, writerOnDevice
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
@@ -493,7 +493,7 @@ export function ComunidadeInfo ({ community, onBack, onOpenMember, onMessage }) 
             </View>
             )
           : null}
-        {staffNote ? <View style={styles.block}><Soft>{staffNote === 'join' ? (communityReserveReached(info) ? DEVICE_RESERVE_JOIN_TEXT : DEVICE_PENDING_JOIN_TEXT) : staffNote === 'root' ? DEVICE_ROOT_TEXT : DEVICE_STAFF_TEXT}</Soft></View> : null}
+        {staffNote ? <View style={styles.block}><Soft>{staffNote === 'join' ? (communityReserveReached(info) ? reserveJoinText(communitySlots(info)) : DEVICE_PENDING_JOIN_TEXT) : staffNote === 'root' ? DEVICE_ROOT_TEXT : DEVICE_STAFF_TEXT}</Soft></View> : null}
         {staff && authOk
           ? (
             <View>

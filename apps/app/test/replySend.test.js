@@ -62,12 +62,21 @@ test('quickReplyPlan covers every branch and priority with code points', async (
   const { quickReplyPlan } = await load()
   const base = { text: 'oi', nodeReady: true, actingAsPage: false, hasLink: false, refusal: '' }
   const plan = (patch) => quickReplyPlan({ ...base, ...patch })
-  for (const text of ['', ' \n ', null, undefined]) t.alike(plan({ text, refusal: 'recusa' }), { kind: 'empty' })
+  for (const text of ['', ' \n ', null, undefined]) t.alike(plan({ text, refusal: 'recusa', actingAsPage: true }), { kind: 'empty' })
   t.alike(plan({ refusal: 'recusa', actingAsPage: true }), { kind: 'refuse' })
-  for (const patch of [{ actingAsPage: true }, { nodeReady: false }, { hasLink: true }, { text: 'x'.repeat(1001) }, { text: '🌱'.repeat(1001) }]) {
+  t.alike(plan({ actingAsPage: true }), { kind: 'send-page' })
+  t.alike(plan({ actingAsPage: true, nodeReady: false }), { kind: 'send-page' })
+  t.alike(plan({ actingAsPage: true, hasLink: true }), { kind: 'expand' })
+  t.alike(plan({ actingAsPage: true, hasLink: true, nodeReady: false }), { kind: 'expand' })
+  t.alike(plan({ actingAsPage: true, text: 'x'.repeat(1001) }), { kind: 'expand' })
+  t.alike(plan({ actingAsPage: true, text: '🌱'.repeat(1001) }), { kind: 'expand' })
+  for (const patch of [{ nodeReady: false }, { hasLink: true }, { text: 'x'.repeat(1001) }, { text: '🌱'.repeat(1001) }]) {
     t.alike(plan(patch), { kind: 'expand' })
   }
   for (const text of ['oi', ' oi ', 'x'.repeat(1000), '🌱'.repeat(1000)]) t.alike(plan({ text }), { kind: 'send' })
+  for (const text of ['oi', ' oi ', 'x'.repeat(1000), '🌱'.repeat(1000)]) {
+    t.alike(plan({ text, actingAsPage: true, nodeReady: false }), { kind: 'send-page' })
+  }
 })
 
 test('sendTextReply sends text verbatim once and returns the published reference', async (t) => {
@@ -282,4 +291,135 @@ test('public word refusal prevents every request including the floor read', asyn
     t.alike(result, { ok: false, ref: null, error: null, refused })
     t.is(calls, 0)
   }
+})
+
+test('sendPageTextReply returns page:seq and calls act once with the text', async (t) => {
+  const { sendPageTextReply } = await load()
+  const calls = []
+  const result = await sendPageTextReply({
+    page: A,
+    text: ' resposta ',
+    replyTo: TO,
+    act: async (op) => { calls.push(op); return { seq: 8, pushed: true } }
+  })
+  t.alike(calls, [{ to: TO, text: ' resposta ' }])
+  t.alike(result, { ok: true, ref: A + ':8', error: null })
+  const zero = await sendPageTextReply({
+    page: A.toUpperCase(),
+    text: 'oi',
+    replyTo: TO,
+    act: async () => ({ seq: 0 })
+  })
+  t.alike(zero, { ok: true, ref: A.toUpperCase() + ':0', error: null })
+})
+
+test('sendPageTextReply calls act once on failure and keeps the uncertain flag', async (t) => {
+  const { sendPageTextReply } = await load()
+  let calls = 0
+  let retried = 0
+  const definite = Object.assign(new Error('recusa'), { retry: () => { retried++ } })
+  const failed = await sendPageTextReply({
+    page: A,
+    text: 'resposta',
+    replyTo: TO,
+    act: async () => { calls++; throw definite }
+  })
+  t.is(calls, 1)
+  t.is(retried, 0)
+  t.alike(failed, { ok: false, ref: null, error: definite })
+  const uncertain = Object.assign(new Error('sem resposta'), { uncertain: true, retry: () => { retried++ } })
+  const lost = await sendPageTextReply({
+    page: A,
+    text: 'resposta',
+    replyTo: TO,
+    act: async () => { calls++; throw uncertain }
+  })
+  t.is(calls, 2)
+  t.is(retried, 0)
+  t.alike(lost, { ok: false, ref: null, error: uncertain, retry: uncertain.retry })
+  t.is(lost.error.uncertain, true)
+  const sure = Object.assign(new Error('nao'), { uncertain: false, retry: () => { retried++ } })
+  const kept = await sendPageTextReply({
+    page: A,
+    text: 'resposta',
+    replyTo: TO,
+    act: async () => { calls++; throw sure }
+  })
+  t.is(calls, 3)
+  t.is(retried, 0)
+  t.is(kept.error, sure)
+  t.is(kept.error.uncertain, false)
+})
+
+test('sendPageTextReply treats an answer without a seq as uncertain and does not retry', async (t) => {
+  const { sendPageTextReply } = await load()
+  for (const value of [
+    null, undefined, 8, '8', {}, { seq: -1 }, { seq: 1.5 }, { seq: '8' },
+    { seq: NaN }, { seq: Infinity }, { seq: 9007199254740992 }, []
+  ]) {
+    let calls = 0
+    let retried = 0
+    const result = await sendPageTextReply({
+      page: A,
+      text: 'resposta',
+      replyTo: TO,
+      act: async () => {
+        calls++
+        if (value !== null && typeof value === 'object') value.retry = () => { retried++ }
+        return value
+      }
+    })
+    t.is(calls, 1, JSON.stringify(value))
+    t.is(retried, 0)
+    t.is(result.ok, false)
+    t.is(result.ref, null)
+    t.is(result.error && result.error.message, 'resposta inesperada')
+    t.is(result.error.uncertain, true)
+  }
+})
+
+test('sendPageTextReply word refusal never calls act', async (t) => {
+  const { sendPageTextReply } = await load()
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
+  const { refusalOf } = await import('../src/wordCheck.js')
+  const text = 'texto ' + BLOCKED_TERMS[0]
+  const refused = refusalOf(text)
+  t.ok(refused)
+  let calls = 0
+  const result = await sendPageTextReply({
+    page: A,
+    text,
+    replyTo: TO,
+    act: () => { calls++; return { seq: 8 } }
+  })
+  t.alike(result, { ok: false, ref: null, error: null, refused })
+  t.is(calls, 0)
+})
+
+test('sendPageTextReply resends through retry: no act, no new signature', async (t) => {
+  const { sendPageTextReply } = await load()
+  let acts = 0
+  let retries = 0
+  const act = async () => { acts++; return { seq: 9 } }
+  const ok = await sendPageTextReply({ act, retry: async () => { retries++; return { seq: 7 } }, page: A, text: 'resposta', replyTo: TO })
+  t.is(acts, 0, 'the retry replaces act')
+  t.is(retries, 1)
+  t.alike(ok, { ok: true, ref: A + ':7', error: null }, 'settles from the seq like a first answer')
+
+  const next = async () => ({ seq: 3 })
+  const again = Object.assign(new Error('sem resposta'), { uncertain: true, retry: next })
+  const lost = await sendPageTextReply({ act, retry: async () => { retries++; throw again }, page: A, text: 'resposta', replyTo: TO })
+  t.is(acts, 0)
+  t.is(retries, 2)
+  t.is(lost.retry, next, 'a retry lost again hands back the newer retry')
+
+  const definite = new Error('recusa')
+  const refused = await sendPageTextReply({ act, retry: async () => { retries++; throw definite }, page: A, text: 'resposta', replyTo: TO })
+  t.alike(refused, { ok: false, ref: null, error: definite }, 'a definite refusal leaves nothing to resend')
+
+  const odd = async () => { retries++; return {} }
+  const unexpected = await sendPageTextReply({ act, retry: odd, page: A, text: 'resposta', replyTo: TO })
+  t.is(unexpected.error.uncertain, true)
+  t.is(unexpected.retry, odd, 'an answer without a seq keeps the same bytes to resend')
+  t.is(acts, 0)
 })

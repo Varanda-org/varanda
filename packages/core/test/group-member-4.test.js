@@ -121,7 +121,7 @@ test('a leave lists every counted writer of the own diary at its local length', 
   t.alike(after.entries[after.length - 1].record.cuts, [{ writer: group, seq: root.length }])
 })
 
-test('a grant lists every counted writer of the promoted diary at its local length', async (t) => {
+test('a grant lists every live writer of the promoted diary at its local length', async (t) => {
   const { a, b, group } = await pair(t)
   await member.groupPost(b, { group, text: 'antes' })
   await member.groupLeave(b, { group })
@@ -133,7 +133,11 @@ test('a grant lists every counted writer of the promoted diary at its local leng
   t.alike(await member.groupAdmin(a, { group, member: b.key, on: true }), { ok: true })
   const root = await writerEntries(a, group)
   const cuts = root.entries[root.length - 1].record.cuts
-  t.alike(cuts, [{ writer: first.key, seq: first.length }, { writer: second.key, seq: second.length }].sort((x, y) => x.writer.localeCompare(y.writer)))
+  // The rejoin cut the retired writer at its length, so the diary's walk
+  // froze it: a grant names the live writers only (#350).
+  t.alike(cuts, [{ writer: second.key, seq: second.length }])
+  const { entries } = await member.logRead(b)
+  t.alike(groupLib.groupCutHistory(entries, group).map((m) => [m.writer, m.cut]), [[first.key, first.length]], 'the retired writer is fixed by the diary cut')
   t.absent(cuts.some((c) => c.seq === 0))
 })
 

@@ -322,6 +322,13 @@ function postCross (given, value) {
   return null
 }
 
+// dm.pageDraft: media and card as dm.send's, never both, and only on a msg.
+function pageDraftCross (given, value) {
+  if (value.kind === 'ctl' && (hasOwn(value, 'media') || hasOwn(value, 'card'))) return 'parâmetro inválido: kind'
+  if (hasOwn(value, 'media') && hasOwn(value, 'card')) return 'parâmetro inválido: media'
+  return null
+}
+
 // post.create `poll`: the poll post key set carries no media and no link
 // card, and a poll always has its question as text.
 function postPollCross (given, value) {
@@ -1528,7 +1535,10 @@ const SPECS = {
   'dm.seen': { fields: { page: opt(isKey), peer: req(isKey) } },
   // Páginas de ponta a ponta no nó (docs/rpc.md 5.114), browser node only.
   // dm.pageGenerate and dm.pageShare write nothing remote, so they are not
-  // mutating; dm.pageDraft only holds a draft in memory.
+  // mutating. dm.pageDraft holds a draft in memory and also finishes the
+  // upload of its media (put with dm.putMedia for this page), spending the
+  // identity's blob stamps on any frame not yet acked; a repeat finds those
+  // frames acked and spends nothing, so it is not marked mutating either.
   'dm.pageGenerate': { fields: { page: req(isKey), gen: req(int(1, PAGE_GEN_MAX)), recipients: req(isPageRecipients) } },
   'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey) } },
   'dm.pageSecrets': {
@@ -1552,9 +1562,12 @@ const SPECS = {
       text: opt(str(0, L.MAX_TEXT)),
       replyTo: opt(isDmId),
       fwd: opt(int(0, 1), 0),
+      media: opt(isDmMediaList),
+      card: opt(isDmCard),
       op: opt(isDmState),
       peer: opt(isKey)
-    }
+    },
+    cross: pageDraftCross
   },
   // expiresAt (ms) is what the service signed with the digest, never chosen here.
   'dm.pageSend': { fields: { page: req(isKey), id: req(isDmId), signature: req(isSignature), expiresAt: req(int(1, Number.MAX_SAFE_INTEGER)) }, mutating: true },
@@ -1803,10 +1816,13 @@ const SPECS = {
   // the node's media facade instead. `to` (5.97, required) keys the sealed
   // blob to one destination, so the same photo for two conversations never
   // shares a blob, and dm.send refuses the item for any other destination.
+  // `page` (optional) puts the item for that Página: only its dm.pageDraft
+  // takes it, and dm.send refuses it, so a blob never ties the two senders.
   'dm.putMedia': {
     fields: {
       name: req(isMediaName),
       to: req(isKey),
+      page: opt(isKey),
       mime: req(isUploadMime),
       width: req(int(0, MEDIA_SIDE_MAX)),
       height: req(int(0, MEDIA_SIDE_MAX)),

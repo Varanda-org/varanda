@@ -65,6 +65,11 @@ function setKeys (limits) {
   return out
 }
 
+// How long the WebSocket listener holds an app's /seeder upgrade while the
+// seeder starts, instead of a 503 at once: 8 s plus Caddy's 5 s dial hold
+// stays under the app's 15 s dial timeout.
+const WS_START_HOLD_MS = 8000
+
 async function listenWs (flags, seeder) {
   // Loaded only with --ws-port: without it the ws module is never touched.
   const { startSeedWs, DEFAULT_HOST: WS_HOST } = require('../seed-ws')
@@ -79,7 +84,8 @@ async function listenWs (flags, seeder) {
       index: setKeys(flags.index),
       triageToken: flags.triageToken,
       publicOrigin: flags.publicOrigin ?? null,
-      postsOrigin: flags.postsOrigin ?? null
+      postsOrigin: flags.postsOrigin ?? null,
+      startHoldMs: WS_START_HOLD_MS
     })
   } catch (err) {
     if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
@@ -130,7 +136,8 @@ async function runSeeder (flags) {
     process.once('SIGTERM', onSignal)
   })
   // The health and WebSocket endpoints listen before start(), so a busy port fails before
-  // the data dir or the network is touched; it answers 503 until ready.
+  // the data dir or the network is touched; until the seeder accepts, a /seeder upgrade is
+  // held up to WS_START_HOLD_MS and the other routes answer 503.
   let health = null
   let ws = null
   try {
@@ -158,6 +165,11 @@ async function runSeeder (flags) {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (relay) relay.close()
+    // Before seeder.close(), which destroys the app clients' sockets (a bare
+    // 1006): they get 1012 'reiniciando' instead. Adds at most about 1 s.
+    // drain() also stops listening, so a redial during seeder.close() is
+    // refused (Caddy retries it for up to 5 s) rather than answered 503.
+    if (ws) await ws.drain()
     await seeder.close()
     if (health) await health.close()
     if (ws) await ws.close()

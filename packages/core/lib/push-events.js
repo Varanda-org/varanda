@@ -13,7 +13,7 @@ const OWN_REF_KINDS = ['quote', 'mention']
 // quotes or mentions them notifies once, as the strongest kind whose target
 // the seeder can confirm (the weaker kinds travel as alternates).
 const PRIORITY = { reply: 3, quote: 2, mention: 1 }
-const PUSH_MAX_AGE_MS = 6 * 3600 * 1000
+const PUSH_MAX_AGE_MS = 24 * 3600 * 1000
 const MAX_PUSH_NAME = 64
 const EVENT_KEYS = ['v', 'kind', 'actor', 'recipient', 'seq', 'ref', 'name']
 
@@ -246,11 +246,54 @@ function validatePushEvent (obj) {
   }
 }
 
+// A recall of a push not sent yet: the actor undid a follow, like or
+// repost (`on: false`). The account service drops its still-queued job for
+// the same kind, actor, recipient and ref; anything already sent stays.
+const CANCEL_KINDS = ['follow', 'like', 'repost']
+const CANCEL_KEYS = ['v', 'op', 'kind', 'actor', 'recipient', 'ref']
+
+function validatePushCancel (obj) {
+  try {
+    if (!isPlainObject(obj) || !hasExactKeys(obj, CANCEL_KEYS)) return false
+    const { v, op, kind, actor, recipient, ref } = obj
+    if (v !== 1 || op !== 'cancel' || !CANCEL_KINDS.includes(kind)) return false
+    if (!isHex64(actor) || !isHex64(recipient) || actor === recipient) return false
+    if (kind === 'follow') return ref === null
+    const parsed = parseRef(ref)
+    return parsed !== null && parsed.seq >= 1 && formatRef(parsed) === ref && parsed.author === recipient
+  } catch {
+    return false
+  }
+}
+
+// The cancel an `on: false` follow, like or repost yields, or null: the
+// shape only. Membership and blocks are not asked: the seeder emits it only
+// for a push it emitted itself recently, so a recall never names someone the
+// actor did not notify, and a block or a lost membership since then still
+// recalls (a cancel only drops a queued job and carries no content).
+function pushCancel (args) {
+  try {
+    if (!isPlainObject(args)) return null
+    const { author, seq, record, now } = args
+    if (!isHex64(author) || !Number.isSafeInteger(seq) || seq < 1) return null
+    if (!Number.isFinite(now) || !isPlainObject(record)) return null
+    if (record.on !== false || !CANCEL_KINDS.includes(record.type) || tooOld(record.at, now)) return null
+    const hit = target({ ...record, on: true }, author)
+    if (hit === null) return null
+    return { v: 1, op: 'cancel', kind: hit.kind, actor: author, recipient: hit.recipient, ref: hit.ref }
+  } catch {
+    return null
+  }
+}
+
 module.exports = {
+  CANCEL_KINDS,
   PUSH_KINDS,
   PUSH_MAX_AGE_MS,
+  pushCancel,
   pushCandidate,
   pushCandidates,
   pushName,
+  validatePushCancel,
   validatePushEvent
 }
