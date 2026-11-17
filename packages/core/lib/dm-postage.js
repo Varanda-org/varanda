@@ -27,6 +27,9 @@ const KID_BYTES = 8
 const E = 65537n
 const BLOB_STAMP_FDH_DOMAIN = 'varanda/blob-stamp-fdh/v1'
 const BLOB_STAMPS_PER_DAY = 1024
+// A history copy (docs/protocol.md section 11, 'copy' stamps) is a blob stamp
+// under its own weekly budget: 8192 chunks of 32 KiB, 256 MiB.
+const COPY_STAMPS_PER_WEEK = 8192
 const STAMP_KINDS = Object.freeze(['dm', 'blob'])
 const DOMAINS = Object.freeze({
   dm: b4a.from(DM_STAMP_FDH_DOMAIN, 'utf8'),
@@ -237,6 +240,7 @@ module.exports = Object.freeze({
   E,
   BLOB_STAMP_FDH_DOMAIN,
   BLOB_STAMPS_PER_DAY,
+  COPY_STAMPS_PER_WEEK,
   STAMP_KINDS,
   representative,
   isUsableToken,

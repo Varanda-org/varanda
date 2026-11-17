@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 74)
+  t.is(LEGAL_VERSION, 76)
   t.is(LEGAL_DATE, '16/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 74, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 76, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '55eebe02444ebee52bb29ffd2e8d9f69f95ce9a9bdf372cf4dfcc55026559884', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ff8c9d0e4077049a6f46fe9873ae5d8661226ed9918ad5b7c5b3822f1194097b', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -875,6 +875,22 @@ test('legal: version 71 shares the Sorte do dia and the acceptance across device
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes('\u2014'), 'no em dash')
   t.ok(text(PRIVACY).includes('O serviço só responde para conta vinculada, e responde só a versão e a data desse aceite.'), 'signed check answers only version and date')
   t.ok(text(PRIVACY).includes('com um pedido assinado pela chave do seu diário'), 'signed by the diary key')
+})
+
+test('legal: version 76 describes connected devices and the periodic key change', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(doc.sections.some(({ heading }) => heading === 'Aparelhos conectados'), 'a section for it')
+    t.ok(text(doc).includes('num grupo pequeno, a cada 7 dias ou 1000 mensagens, o que vier antes; num grupo grande, com intervalos maiores'), 'the periodic key change')
+    t.ok(text(doc).includes('Um grupo parado não troca a chave.'), 'an idle group does not rotate')
+    t.ok(text(doc).includes('"Aparelhos conectados"'), 'names the screen')
+    t.absent(text(doc).includes('\u2014'), 'no em dash')
+  }
+  t.ok(text(PRIVACY).includes('dentro de um registro cifrado com uma chave da sua passkey: só os aparelhos da conta conseguem abri-lo.'), 'the record is encrypted')
+  t.ok(text(PRIVACY).includes('não o número, o nome nem os grupos'), 'holders see neither the id, the name nor the groups')
+  t.ok(text(PRIVACY).includes('o app não tem como apagá-los, e o corte é definitivo'), 'records and cuts cannot be deleted')
+  t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
 })
 
 test('legal: version 73 keeps the one-time notes from repeating on another device', async (t) => {

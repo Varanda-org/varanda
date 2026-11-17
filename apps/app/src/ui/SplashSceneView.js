@@ -1,13 +1,15 @@
 // The splash scene: the varanda with the chair, an araucária beside it and a
-// sunset band behind, above a sliding petit-pavê street. Purely decorative;
-// the geometry and every box come from the pure splashScene.js, and Splash.js
-// owns the Animated values.
+// sunset band behind, above a still petit-pavê street where people walk.
+// Purely decorative; the geometry and every box come from the pure
+// splashScene.js, the cast from splashStreet.js, and Splash.js owns the
+// Animated values.
 
 import { useMemo } from 'react'
 import { Animated, StyleSheet, View } from 'react-native'
 import Svg, { Defs, G, LinearGradient, Path, RadialGradient, Rect, Stop } from 'react-native-svg'
 import { FLYERS, birdBob, butterflyDrift } from './splashMotion'
-import { CHAIR_PATHS, CHAIR_VIEWBOX, LETTERING, SCENE, SKY_STOPS, SUN_STOPS, birdArt, butterflyArt, farTile, nearTiles, stripLoops, treeArt, varandaArt } from './splashScene'
+import { CHAIR_PATHS, CHAIR_VIEWBOX, LETTERING, SCENE, SKY_STOPS, SUN_STOPS, birdArt, butterflyArt, farTile, nearTiles, treeArt, varandaArt } from './splashScene'
+import { STREET, ballArc, figureArt, kidHop, poseSwap, streetLayout } from './splashStreet'
 
 // react-native-web 0.21 reads only aria-hidden; native reads the other two.
 export const hiddenFromReaders = {
@@ -132,18 +134,113 @@ function flyerArt (layout, palette, flyers) {
   }
 }
 
-export function SplashScene ({ layout, palette, bottomInset = 0, ground, varanda, chair, slideNear, slideFar, flyers }) {
+// `street` holds the Animated values Splash.js loops: one 0..1 crossing per
+// lane, one stride per lane, and the standing row's idle clock. Each walker
+// is drawn twice, one track apart, so when its lane loop jumps back the copy
+// already stands where it was and the jump never shows. `start` includes the
+// mover's phase, the way a bird's start includes its phase, so one lane value
+// keeps the two walkers half a track apart.
+function streetArt (layout, palette, street) {
+  const placed = streetLayout(layout)
+  const k = layout.k
+  // One pose swap per stride: the stride value runs 0..1 over strideMs and
+  // pose a is showing again at 1, so the restart never flashes a leg.
+  const swap = poseSwap(1)
+  const strideOpacity = [0, 1].map((i) => ({
+    a: street.strides[i].interpolate({ inputRange: swap.input, outputRange: swap.a }),
+    b: street.strides[i].interpolate({ inputRange: swap.input, outputRange: swap.b })
+  }))
+  const lanes = [[], []]
+  placed.movers.forEach((mover, n) => {
+    const art = figureArt(mover.figure, mover.tint)
+    const i = mover.lane === 'vindo' ? 1 : 0
+    const track = mover.track
+    const start = mover.start + mover.phase * track
+    const bodySvg = artSvg({ viewBox: art.viewBox, shapes: art.body }, mover.w, mover.h, palette)
+    const aSvg = artSvg({ viewBox: art.viewBox, shapes: art.a }, mover.w, mover.h, palette)
+    const bSvg = artSvg({ viewBox: art.viewBox, shapes: art.b }, mover.w, mover.h, palette)
+    for (const offset of [0, -track]) {
+      const translateX = street.lanes[i].interpolate({ inputRange: [0, 1], outputRange: [start + offset, start + offset + track] })
+      lanes[i].push(
+        <Animated.View
+          key={n + ':' + offset}
+          style={[styles.at, { left: 0, top: mover.top, width: mover.w, height: mover.h, transform: [{ translateX }] }]}
+        >
+          {bodySvg}
+          <Animated.View style={[StyleSheet.absoluteFill, { opacity: strideOpacity[i].a }]}>
+            {aSvg}
+          </Animated.View>
+          <Animated.View style={[StyleSheet.absoluteFill, { opacity: strideOpacity[i].b }]}>
+            {bSvg}
+          </Animated.View>
+        </Animated.View>
+      )
+    }
+  })
+  const idleSwap = poseSwap(STREET.idle.poseCycles)
+  const idleA = street.idle.interpolate({ inputRange: idleSwap.input, outputRange: idleSwap.a })
+  const idleB = street.idle.interpolate({ inputRange: idleSwap.input, outputRange: idleSwap.b })
+  let kid = 0
+  const standing = placed.standing.map((s, index) => {
+    const art = figureArt(s.figure, s.tint)
+    const body = artSvg({ viewBox: art.viewBox, shapes: art.body }, s.w, s.h, palette)
+    const place = [styles.at, { left: s.left, top: s.top, width: s.w, height: s.h }]
+    // The whole figure moves, so a hop or a toss cannot be clipped by its own box.
+    if (s.figure === 'crianca') {
+      const hop = kidHop(kid)
+      kid += 1
+      const translateY = street.idle.interpolate({ inputRange: hop.input, outputRange: hop.y.map((y) => y * k) })
+      const transform = s.mirrored ? [{ translateY }, { scaleX: -1 }] : [{ translateY }]
+      return (
+        <Animated.View key={index} style={[place, { transform }]}>
+          {body}
+        </Animated.View>
+      )
+    }
+    if (s.figure === 'bola') {
+      const arc = ballArc()
+      const translateX = street.idle.interpolate({ inputRange: arc.input, outputRange: arc.x.map((x) => x * k) })
+      const translateY = street.idle.interpolate({ inputRange: arc.input, outputRange: arc.y.map((y) => y * k) })
+      return (
+        <Animated.View key={index} style={[place, { transform: [{ translateX }, { translateY }] }]}>
+          {body}
+        </Animated.View>
+      )
+    }
+    return (
+      <View key={index} style={place}>
+        {body}
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: idleA }]}>
+          {artSvg({ viewBox: art.viewBox, shapes: art.a }, s.w, s.h, palette)}
+        </Animated.View>
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: idleB }]}>
+          {artSvg({ viewBox: art.viewBox, shapes: art.b }, s.w, s.h, palette)}
+        </Animated.View>
+      </View>
+    )
+  })
+  // The vindo lane is the full band flipped about its middle, so the same
+  // left-to-right walk reads from the right edge. Back lane, then the people
+  // standing, then the front lane passing in front of them.
+  const laneBox = { position: 'absolute', left: 0, top: 0, width: placed.band.width, height: placed.band.height }
+  return (
+    <>
+      <View style={[laneBox, { transform: [{ scaleX: -1 }] }]}>{lanes[1]}</View>
+      {standing}
+      <View style={laneBox}>{lanes[0]}</View>
+    </>
+  )
+}
+
+export function SplashScene ({ layout, palette, bottomInset = 0, ground, varanda, chair, street, flyers }) {
   const { width, k } = layout
   // Splash re-renders on every progress step; the paths are built once per
   // size and scheme so a frame only moves already drawn layers.
   const art = useMemo(() => {
-    const loops = stripLoops(k)
     const v = varandaArt()
     return {
       near: stripSvg(nearTiles(), layout.nearCount, k, palette),
       far: stripSvg([farTile()], layout.farCount, k, palette),
-      nearX: slideNear.interpolate({ inputRange: [0, 1], outputRange: [0, -loops.near.distance] }),
-      farX: slideFar.interpolate({ inputRange: [0, 1], outputRange: [0, -loops.far.distance] }),
       varanda: (
         <Svg width={layout.varanda.w} height={layout.varanda.h} viewBox={v.viewBox}>
           {v.shapes.map((shape, j) => <Shape key={j} shape={shape} palette={palette} />)}
@@ -157,7 +254,8 @@ export function SplashScene ({ layout, palette, bottomInset = 0, ground, varanda
       tree: artSvg(treeArt(), layout.tree.w, layout.tree.h, palette),
       sky: skySvg(width, layout.sky.height, palette),
       sun: sunSvg(layout.sun.size, palette),
-      flyers: flyerArt(layout, palette, flyers)
+      flyers: flyerArt(layout, palette, flyers),
+      street: streetArt(layout, palette, street)
     }
   }, [width, k, palette])
 
@@ -175,22 +273,13 @@ export function SplashScene ({ layout, palette, bottomInset = 0, ground, varanda
         <View style={[styles.band, { top: sky.y, height: sky.height }]}>{art.sky}</View>
         <View style={[styles.at, { left: sun.x, top: sun.y }]}>{art.sun}</View>
         <View style={[styles.band, { top: far.y, height: far.height }]}>
-          <Animated.View
-            renderToHardwareTextureAndroid
-            shouldRasterizeIOS
-            style={{ width: art.far.width, transform: [{ translateX: art.farX }] }}
-          >
-            {art.far.svg}
-          </Animated.View>
+          {art.far.svg}
         </View>
         <View style={[styles.band, { top: near.y, height: near.height }]}>
-          <Animated.View
-            renderToHardwareTextureAndroid
-            shouldRasterizeIOS
-            style={{ width: art.near.width, transform: [{ translateX: art.nearX }] }}
-          >
-            {art.near.svg}
-          </Animated.View>
+          {art.near.svg}
+        </View>
+        <View style={[styles.band, { top: near.y, height: near.height, overflow: 'hidden' }]}>
+          {art.street}
         </View>
         <View style={[styles.band, { top: kerb.y, height: kerb.height, backgroundColor: palette.meioFio }]} />
         {/* Runs on under the home indicator, so the street reaches the screen's bottom edge. */}

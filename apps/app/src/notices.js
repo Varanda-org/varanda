@@ -409,12 +409,6 @@ export async function readNotices (request, { limit, after = null, maxContinuati
   }
 }
 
-// Following back clears that diary's follow notice. A reply, quote, mention,
-// like or repost from the same key is about a post and stays in the list.
-export function withoutAuthor (items, key) {
-  return items.filter((item) => item.key !== key || noticeKind(item) !== 'follow')
-}
-
 export function isWebOnlyError (err) {
   return Boolean(err && err.code === 'USAGE' && WEB_ONLY_MESSAGES.includes(err.message))
 }

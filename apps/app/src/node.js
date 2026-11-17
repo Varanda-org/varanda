@@ -64,7 +64,8 @@
 // and bumps `followsVersion`.
 // `media` (browser node only, while unlocked; null otherwise): `{ upload(args)
 // }`, a pass-through to the handle's media.upload({ bytes, mime, width,
-// height, sealed?, onProgress }) -> Promise<descriptor or private item>; the
+// height, sealed?, onProgress }) -> Promise<descriptor or private item>,
+// queued when the handle reports media.sharesClient (mediaCall); the
 // caller shows its errors (errorText). When the handle has them, also the
 // chat media calls (client/webnode.native.js, client/browser.js mediaOf):
 // putDm(args), putMoment(args), read(ref), forgetReadFile(name),
@@ -124,6 +125,7 @@ import { displayText, isMutating } from '@varanda/rpc'
 import { connectNode } from './client/connect'
 import * as configStore from './configStore'
 import { installationOrigin } from './installation'
+import { copyStore } from './historyCopy'
 import { isOnline, subscribeOnline } from './online'
 import { effectiveVisible, isVisible, subscribeVisible } from './visibility'
 import { askPersist } from './persist'
@@ -136,7 +138,7 @@ import { errorText } from './ui'
 import { accountOriginOf } from './pageGate'
 import { slowRequestLine } from './slowRequest'
 import { createIdleTracker } from './idle'
-import { createRequestQueue } from './requestQueue'
+import { createRequestQueue, notSent } from './requestQueue'
 import { createAttempts } from './attempts'
 import { noteOwnDmDrop } from './dmWakeMute'
 import { setDmDropObserver } from './pages'
@@ -147,6 +149,7 @@ import { NOT_FOUND_TEXT, SERVICE_DOWN_TEXT } from './recovery'
 import { wipeLocalCaches } from './localCaches'
 import * as shareIntake from './shareIntake'
 import { clearMomentSeen } from './momentSeenStore'
+import { deviceStore } from './devices'
 import { NO_PAGE_MISMATCH, clearPageMismatch as dropPageMismatch, notePageMismatch } from './pageSecrets'
 import { cancelBackgroundRefresh, noteForegroundUse, unregisterBackgroundRefresh, whenActive, whenForeground } from './backgroundTask'
 
@@ -214,6 +217,9 @@ const MemberKeyContext = createContext(null)
 
 // The chat media calls a handle may offer besides upload (see the header).
 const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
+// The media calls that send a request to the node; the other two only
+// delete local files.
+const MEDIA_RPC_CALLS = new Set(['upload', 'putDm', 'putMoment', 'read'])
 
 export function useNode () {
   return useContext(NodeContext)
@@ -619,6 +625,9 @@ function LiveNodeProvider ({ children }) {
   const awaitingRef = useRef(0)
   // true from the auto-start's sync.start until its continuation ran.
   const autoInflightRef = useRef(false)
+  // Aborts that sync.start while it still waits in the queue (the hidden
+  // stop path); once handed to send, the abort does nothing.
+  const autoAbortRef = useRef(null)
   const runStartedAtRef = useRef(0)
   // The one re-evaluation timer (backoff end, grace end).
   const autoTimerRef = useRef(null)
@@ -751,8 +760,20 @@ function LiveNodeProvider ({ children }) {
       setGroupVersions((versions) => bumpGroupVersion(versions, data && data.group))
       return
     }
+    // The own diary's device records changed: the node says whether this
+    // device is now disconnected (src/devices.js; the shell reacts).
+    if (name === 'devices.changed') {
+      deviceStore.event(data && data.off === true)
+      return
+    }
     if (name === 'dm.changed') {
       setDmVersion((n) => n + 1)
+      return
+    }
+    // History copy: progress on the device that copies, a notice on the one
+    // that receives (src/historyCopy.js). Neither is a sync line.
+    if (name === 'dm.copyProgress' || name === 'dm.copyImported') {
+      copyStore.apply(name, data)
       return
     }
     // Sent on every pull while the held key differs: no sync line.
@@ -1100,7 +1121,14 @@ function LiveNodeProvider ({ children }) {
   const request = useCallback((method, params, options) => {
     const conn = connRef.current
     if (!conn) return noConnection()
-    return requestQueueRef.current.run(method, params, (method, params) => {
+    // A sync.start can park in the queue's control lane, so it is counted
+    // before run() and released when the request settles or is rejected.
+    const starts = method === 'sync.start'
+    if (starts) {
+      startingRef.current += 1
+      setStarting(true)
+    }
+    const result = requestQueueRef.current.run(method, params, (method, params) => {
       const waiting = awaitingRef.current !== 0
       if (waiting) extendWait()
       const startedAt = Date.now()
@@ -1118,11 +1146,7 @@ function LiveNodeProvider ({ children }) {
         if (waiting) pending.then(extendWait, extendWait)
         return pending
       }
-      startingRef.current += 1
-      setStarting(true)
       const settled = () => {
-        startingRef.current -= 1
-        if (startingRef.current === 0) setStarting(false)
         if (waiting) extendWait()
       }
       const pending = conn.request(method, params)
@@ -1130,6 +1154,13 @@ function LiveNodeProvider ({ children }) {
       pending.then(settled, settled)
       return pending
     }, options)
+    if (!starts) return result
+    const release = () => {
+      startingRef.current -= 1
+      if (startingRef.current === 0) setStarting(false)
+    }
+    result.then(release, release)
+    return result
   }, [extendWait])
 
   const promote = useCallback((token) => (requestQueueRef.current ? requestQueueRef.current.promote(token) : false), [])
@@ -1471,7 +1502,13 @@ function LiveNodeProvider ({ children }) {
     let st
     try {
       st = await request('sync.status', {})
-    } catch {
+    } catch (err) {
+      // Dropped from the queue before it was sent (an identity operation
+      // cleared it): the read never reached the node, so it is queued again
+      // at once, in the same continuation, while the context is current. A
+      // read is safe to send again, and the run is still unknown, so
+      // `reconciling` must not be cleared blindly.
+      if (notSent(err) && stillCurrent(conn, ep, gen)) return reconcile()
       if (stillCurrent(conn, ep, gen)) failWaits()
       return
     }
@@ -1506,8 +1543,11 @@ function LiveNodeProvider ({ children }) {
     const gen = pkGenRef.current
     autoInflightRef.current = true
     runStartedAtRef.current = Date.now()
-    request('sync.start', {}).then((r) => {
+    const abort = new AbortController()
+    autoAbortRef.current = abort
+    request('sync.start', {}, { signal: abort.signal }).then((r) => {
       autoInflightRef.current = false
+      if (autoAbortRef.current === abort) autoAbortRef.current = null
       if (!stillCurrent(conn, ep, gen)) return
       // sync.started precedes this response; adopted only if it was missed
       // and the run has not ended already.
@@ -1517,7 +1557,16 @@ function LiveNodeProvider ({ children }) {
       trackWaits(runId, false, stopped !== null && stopped.runId === runId)
     }, (err) => {
       autoInflightRef.current = false
+      if (autoAbortRef.current === abort) autoAbortRef.current = null
       if (connRef.current !== conn) return
+      // Never sent (aborted while waiting, or dropped by a clear): nothing
+      // happened on the node, so no backoff; the gate decides again. A
+      // pull-to-refresh waiting on this start ends now (failWaits), and the
+      // screen reads what the node already has.
+      if (notSent(err)) {
+        if (stillCurrent(conn, ep, gen)) failWaits()
+        return
+      }
       const action = startFailure({ code: err && err.code, message: err && err.message, uncertain: Boolean(err) && err.uncertain === true })
       // Reconciling only reads; it is safe even when the epoch moved on.
       // It hands an adopted run to the refresh waits, or resolves them.
@@ -1583,6 +1632,10 @@ function LiveNodeProvider ({ children }) {
   // if React evaluates again before rendering. Only an authoritative status
   // after an uncertain stop permits the second attempt in this hidden period.
   useEffect(() => {
+    // An auto start still waiting in the queue is aborted on a hidden page,
+    // so it is never sent; its continuation then runs this effect again with
+    // no start pending. One already handed to send is waited for.
+    if (autoInflightRef.current && autoAbortRef.current !== null && visibleRef.current === false) autoAbortRef.current.abort()
     if (phase !== 'ready' || startingRef.current > 0 || autoInflightRef.current || reconcilingRef.current) return
     const idleIntent = signalsRef.current.runId === null && signalsRef.current.idleSince !== null
     if (!shouldStopForHidden({ active: syncRef.current.active, visible: visibleRef.current, idleIntent })) return
@@ -1592,6 +1645,7 @@ function LiveNodeProvider ({ children }) {
     if (!conn) return
     const ep = epochRef.current
     const gen = pkGenRef.current
+    const wasRetry = period.retry
     period.attempts += 1
     period.retry = false
     const idlePath = syncRef.current.active === null
@@ -1602,6 +1656,16 @@ function LiveNodeProvider ({ children }) {
       if (signalsRef.current.runId === null) resetSignals(endIdle(signalsRef.current))
       setBackoff({ idle: 0 })
     }, async (err) => {
+      // Dropped from the queue before it was sent: the attempt did not
+      // happen, so it is given back and the stop is decided again.
+      if (notSent(err)) {
+        if (hiddenStopRef.current === period) {
+          period.attempts -= 1
+          period.retry = wasRetry
+        }
+        if (connRef.current === conn) setAutoTick((t) => t + 1)
+        return
+      }
       if (!stillCurrent(conn, ep, gen) || !err || err.uncertain !== true) return
       const st = await reconcile()
       if (!stillCurrent(conn, ep, gen) || hiddenStopRef.current !== period || visibleRef.current !== false) return
@@ -1676,12 +1740,23 @@ function LiveNodeProvider ({ children }) {
     ? { status: pkStatus, error: pkError, generation: pkGeneration, refresh: pkRefresh, unlock: pkUnlock, complete: pkComplete, lock: pkLock, signOut: pkSignOut, reset: pkReset, unlockWithCode: pkUnlockWithCode, finishRecovery: pkFinishRecovery, addPasskey: pkAddPasskey, bindPasskey: pkBindPasskey, makeRecoveryCode: pkMakeRecoveryCode, cancelRecovery: pkCancelRecovery, confirm: pkConfirm, enrolment: pkEnrolment, dropEnrolment: pkDropEnrolment, recovering, beginRecovery, endRecovery, recover }
     : null), [hasPasskey, pkStatus, pkError, pkGeneration, pkRefresh, pkUnlock, pkComplete, pkLock, pkSignOut, pkReset, pkUnlockWithCode, pkFinishRecovery, pkAddPasskey, pkBindPasskey, pkMakeRecoveryCode, pkCancelRecovery, pkConfirm, pkEnrolment, pkDropEnrolment, recovering, beginRecovery, endRecovery, recover])
 
-  // Thin pass-through to the handle (see the header).
-  const mediaUpload = useCallback((args) => {
+  // A media call that sends one request on the connection's RPC client
+  // (media.sharesClient, the native hosted handle) takes a queue slot, since
+  // it shares that client's pending cap (requestQueue.js). A read waits in
+  // the visible lane. A write (upload, putDm, putMoment) goes in the control
+  // lane: hung reads never hold it back, and it is never refused for
+  // capacity. A clear drops a waiting call unsent (queued: true), which the
+  // screens show as a failed upload to try again. Elsewhere (the browser
+  // node keeps its bytes in the page) the handle is called directly.
+  const mediaCall = useCallback((name, args) => {
     const conn = connRef.current
-    if (!conn || !conn.media) return noConnection()
-    return conn.media.upload(args)
+    if (!conn || !conn.media || typeof conn.media[name] !== 'function') return noConnection()
+    if (!MEDIA_RPC_CALLS.has(name) || conn.media.sharesClient !== true) return conn.media[name](args)
+    const queue = requestQueueRef.current
+    if (!queue) return noConnection()
+    return queue.run('media.' + name, null, () => conn.media[name](args), name === 'read' ? undefined : { priority: 'control' })
   }, [])
+  const mediaUpload = useCallback((args) => mediaCall('upload', args), [mediaCall])
   const unlocked = pkStatus !== null && pkStatus.unlocked === true
   // A lock drops the held page keys: what the node flagged goes with them.
   useEffect(() => {
@@ -1691,15 +1766,11 @@ function LiveNodeProvider ({ children }) {
     if (!(hasPasskey && hasMedia && unlocked)) return null
     const out = { upload: mediaUpload }
     for (const k of mediaCaps === '' ? [] : mediaCaps.split(',')) {
-      out[k] = (args) => {
-        const conn = connRef.current
-        if (!conn || !conn.media || typeof conn.media[k] !== 'function') return noConnection()
-        return conn.media[k](args)
-      }
+      out[k] = (args) => mediaCall(k, args)
     }
     if (mediaVideo) out.video = true
     return out
-  }, [hasPasskey, hasMedia, unlocked, mediaUpload, mediaCaps, mediaVideo])
+  }, [hasPasskey, hasMedia, unlocked, mediaUpload, mediaCall, mediaCaps, mediaVideo])
 
   const [legacyKeys, setLegacyKeys] = useState(null)
   const legacyCheckedRef = useRef(null)

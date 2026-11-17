@@ -4,12 +4,15 @@
 // or atob), so Node tests load it directly. Not named push.js: a platform
 // file push.web.js would shadow a './push' import under Metro.
 
-export const PUSH_KINDS = Object.freeze(['follow', 'reply', 'like', 'repost'])
+export const PUSH_KINDS = Object.freeze(['follow', 'reply', 'like', 'repost', 'quote', 'mention'])
+// A quote or a mention points at the actor's own post (the one that quotes
+// or names the recipient); the others point at the recipient's post.
+const ACTOR_REF_KINDS = ['quote', 'mention']
 
 export const PUSH_LABEL = 'Avisos no aparelho'
 export const PUSH_ON = 'Ativar avisos neste aparelho'
 export const PUSH_OFF = 'Desligar avisos neste aparelho'
-export const PUSH_HINT = 'Receba um aviso quando alguém seguir você, comentar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.'
+export const PUSH_HINT = 'Receba um aviso quando alguém seguir ou mencionar você, comentar, citar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.'
 export const PUSH_DENIED = 'Os avisos do sistema estão desligados neste aparelho.'
 export const PUSH_UNAVAILABLE = 'Os avisos ainda não estão disponíveis nesta associação.'
 export const PUSH_UNSUPPORTED = 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.'
@@ -179,7 +182,7 @@ function notice (kind, actor, recipient, ref) {
     if (ref !== null) return null
   } else {
     const m = typeof ref === 'string' ? REF_RE.exec(ref) : null
-    if (m === null || m[1] !== recipient) return null
+    if (m === null || m[1] !== (ACTOR_REF_KINDS.includes(kind) ? actor : recipient)) return null
   }
   return { kind, actor, recipient, ref }
 }

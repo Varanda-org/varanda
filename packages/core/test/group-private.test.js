@@ -9,10 +9,11 @@ const {
   validateGroupRecord, validateWriterHeader, validateGroupHeader, isWeakBoxKey,
   groupHeader, writerHeader, groupPost, groupHide, groupMeta, groupAdmit, groupBan, groupAdmin, groupLeave,
   groupKey, groupSealed, sealedInner, communityAdmit, communityBan, buildGroup, buildCommunity, groupInvites, communityInvites,
-  groupReact
+  groupReact, replacedWriterCut
 } = require('../lib/group')
 const { community } = require('./helpers/groups')
 const { newBoxKeyPair, newEpochKey, sealEpochKey, openFrom, sealRecord, keyTag, keyCommit } = require('../lib/group-crypto')
+const { cutUnknownEntitled, rekeyDue, REKEY_PERIOD_MS, REKEY_CHECK_MS } = require('../lib/group-rekey')
 
 const K = (n) => n.toString(16).padStart(64, '0')
 const BASE = Date.parse('2026-01-01T00:00:00.000Z')
@@ -535,6 +536,8 @@ test('a key block past a diary cut stays readable, never sendable (#350)', (t) =
   let { g, E2 } = hist(null)
   t.is(kidOf(g.epoch), kidOf(E2))
   t.alike(g.posts.map((p) => p.text), ['p8', 'p9', 'p10'])
+  // Cut 0 releases the writer's slot, but its key block still counts (#693
+  // filtering): what was sealed under it stays readable.
   for (const cut of [0, 1, 2]) {
     ;({ g } = hist(cut))
     t.alike(g.posts.map((p) => p.text), ['p8', 'p9'], 'cut ' + cut + ': the history others sealed stays readable, the cut writer post past the cut does not count')
@@ -543,6 +546,7 @@ test('a key block past a diary cut stays readable, never sendable (#350)', (t) =
     t.is(g.rekeyPending, true, 'cut ' + cut)
     t.is(g.removals.length, 1, 'cut ' + cut + ': the removal the block covered still counts')
   }
+  t.ok(hist(0).g.released.has(wA), 'cut 0: the writer is released')
 })
 
 test('a key block citing a cut community writer stays readable (#350)', (t) => {
@@ -578,13 +582,77 @@ test('a diary cut below its own leave keeps the diary left and the removal (#350
     return { E2, g: buildGroup(w.input(w.reader(wY), extra)) }
   }
   const control = unleave(null)
+  t.absent(control.g.entitled.includes(wX2), 'control: the other writer of a left diary is entitled to nothing')
+  // Cut 0 releases the writer that holds the leave, but the leave still
+  // counts (#693 filtering): the diary stays left.
   for (const cut of [0, 1]) {
     const { g, E2 } = unleave(cut)
     t.is(g.members.get(X), 'left', 'cut ' + cut)
     t.alike(g.removals, control.g.removals, 'cut ' + cut + ': the leave is still a requirement')
+    t.ok(g.removals.length > 0)
     t.is(kidOf(g.epoch), kidOf(E2), 'cut ' + cut + ': the rotation covering it stays the one to send under')
     t.alike(g.entitled, control.g.entitled)
+    t.absent(g.entitled.includes(wX2), 'cut ' + cut + ': the other writer gets no key')
   }
+})
+
+test('a hole in an entitled writer\'s diary holds the periodic rekey under the slot walk; a mark it holds still cuts (#350)', (t) => {
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 10)
+  const due = (g, input) => {
+    const cutUnknown = cutUnknownEntitled({ cutUnknown: g.cutUnknown, writers: input.writers, entitled: g.entitled })
+    const at = Date.parse(AT(4))
+    return rekeyDue({ epoch: g.epoch, epochAt: at, sealedAts: [Date.parse(AT(10))], entitled: g.entitled.length, ownEpoch: true, cutUnknown, now: at + REKEY_PERIOD_MS })
+  }
+  const plain = w.input(w.reader(wY))
+  const control = buildGroup(plain)
+  t.ok(control.entitled.includes(wX))
+  t.is(due(control, plain).due, true, 'control: the epoch is due')
+  const holed = w.input(w.reader(wY), { marks: new Map([[X, [{ gap: true }]]]) })
+  const g = buildGroup(holed)
+  t.alike([...g.cutUnknown], [X], 'the hole is reported')
+  t.ok(g.entitled.includes(wX), 'wX is still entitled: a hole cuts nothing')
+  t.is(g.incomplete, true, 'and the walk takes the fold as incomplete')
+  const d = due(g, holed)
+  t.is(d.due, false, 'the periodic path waits')
+  t.is(d.reason, 'cut-unknown')
+  t.is(d.at, Date.parse(AT(4)) + REKEY_PERIOD_MS + REKEY_CHECK_MS)
+  // A mark held next to the hole still freezes wX: it leaves the entitled
+  // set, so the hole no longer holds the rotation that drops it.
+  const marked = w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut: w.len(wX), seq: 5 }, { gap: true }]]]) })
+  const m = buildGroup(marked)
+  t.ok(m.frozen.has(wX))
+  t.absent(m.entitled.includes(wX))
+  t.is(m.rekeyPending, true, 'the cut asks for a new key on its own')
+})
+
+test('a released writer whose join is off is awaited in a private group: a node without it never folds past its leave (#350)', (t) => {
+  // X leaves through its boxed writer wX, then turns wX off and cuts it at
+  // 0. A node that does not hold wX must not take the fold as complete
+  // without the leave.
+  const w = pworld()
+  w.add(X, wX2)
+  w.push(G, groupAdmit({ member: X, on: true, cuts: [{ writer: wX, seq: 1 }, { writer: wX2, seq: 1 }], at: AT(6) }))
+  w.push(wX, groupLeave({ cuts: [{ writer: wX, seq: w.len(wX) }, { writer: wX2, seq: 1 }], at: AT(7) }))
+  w.joins.get(X).push({ writer: wX, on: false, seq: 3 })
+  const marks = new Map([[X, [{ writer: wX, cut: 0, seq: 4 }]]])
+  const full = buildGroup(w.input(w.reader(wY), { marks }))
+  t.ok(full.released.has(wX), 'wX is released')
+  t.is(full.members.get(X), 'left', 'with wX held, the leave counts')
+  t.is(full.incomplete, false)
+  const input = w.input(w.reader(wY), { marks })
+  const g = buildGroup({ ...input, writers: input.writers.filter((l) => l.key !== wX) })
+  t.is(g.incomplete, true, 'without wX the fold waits for it')
+  t.absent(g.writers.has(wX))
+  // A replaced boxless writer is still rejected by its header once held.
+  const b = pworld()
+  const boxless = K(0x4ff)
+  b.add(X, boxless, { box: false })
+  b.joins.get(X).push({ writer: boxless, on: false, seq: 3 })
+  const bmarks = new Map([[X, [{ writer: boxless, cut: 0, seq: 4 }]]])
+  const held = buildGroup(b.input(b.reader(wY), { marks: bmarks }))
+  t.is(held.incomplete, false, 'a held boxless header is rejected, never awaited')
+  t.absent(held.writers.has(boxless))
 })
 
 test('a cut is final: a basis ref at or past the cut never revives a sealed post, the rotation still works (#350)', (t) => {
@@ -2653,4 +2721,63 @@ test('last never names a sealed reaction', (t) => {
   const g = buildGroup(w.input(w.reader(wX)))
   t.alike(g.last, p)
   t.alike(g.posts[0].reactions, [{ emoji: '\u{1f44d}', count: 1, by: [Y] }])
+})
+
+test('slot walk: an old boxless writer holds its slot until a cut 0 releases it (#350)', (t) => {
+  const boxless = K(0x4ff)
+  const more = []
+  for (let i = 0; i < 6; i++) more.push(K(0x410 + i))
+  const ninth = K(0x420)
+  // X binds wX (seq 1), a boxless writer (seq 2) and six more (seq 3 to 8),
+  // then maybe cuts the boxless one at 0 (seq 9) before a 9th (seq 10).
+  const build = (release) => {
+    const w = pworld()
+    w.add(X, boxless, { box: false })
+    for (const k of more) w.add(X, k)
+    w.add(X, ninth)
+    w.joins.get(X)[w.joins.get(X).length - 1].seq = 10
+    const marks = release ? new Map([[X, [{ writer: boxless, cut: 0, seq: 9 }]]]) : new Map()
+    return buildGroup(w.input(w.reader(wX), { marks }))
+  }
+  let g = build(false)
+  t.absent(g.writers.has(boxless), 'the boxless writer is no candidate')
+  t.absent(g.writers.has(ninth), 'but it holds its slot: the 9th does not count')
+  t.alike(g.slots.get(X), { live: 8, frozen: 0, released: 0 })
+  g = build(true)
+  t.ok(g.writers.has(ninth), 'released with cut 0, its slot goes to the 9th')
+  t.alike(g.slots.get(X), { live: 8, frozen: 0, released: 1 })
+})
+
+test('slot walk: a cut on an entitled writer asks for a new key, the frozen writer is entitled to none (#350)', (t) => {
+  const w = pworld()
+  sealedPost(w, wX, w.E1, 10)
+  const control = buildGroup(w.input(w.reader(wY)))
+  t.ok(control.entitled.includes(wX))
+  t.is(control.rekeyPending, false)
+  const g = buildGroup(w.input(w.reader(wY), { marks: new Map([[X, [{ writer: wX, cut: w.len(wX), seq: 5 }]]]) }))
+  t.ok(g.frozen.has(wX), 'cut at its length: frozen')
+  t.alike(g.posts.map((p) => p.text), control.posts.map((p) => p.text), 'nothing it sealed is lost')
+  t.absent(g.entitled.includes(wX), 'no new epoch for the frozen writer')
+  t.is(g.rekeyPending, true, 'the epoch it holds must rotate')
+  t.is(g.epoch, null, 'and no longer sends')
+})
+
+test('replacedWriterCut: a boxless writer is released whatever it holds, a writer boxed to another key keeps what counts (#350)', (t) => {
+  const box = hex(newBoxKeyPair().publicKey)
+  const ref = { writer: wX, seq: 1, digest: 'a'.repeat(64) }
+  const head = (opts) => ({ seq: 0, record: writerHeader({ group: G, diary: X, member: K(0x600), at: AT(1), ...opts }) })
+  const post = (seq) => ({ seq, record: groupPost({ text: 'p' + seq, at: AT(seq + 1) }) })
+  t.is(replacedWriterCut(null), null, 'nothing held')
+  t.is(replacedWriterCut([]), null)
+  t.is(replacedWriterCut([post(1)]), null, 'no block 0 held: no cut')
+
+  t.is(replacedWriterCut([head({})]), 0, 'boxless header alone')
+  t.is(replacedWriterCut([head({ rejoin: ref })]), 0, 'boxless with a rejoin: still nothing of it counts')
+  t.is(replacedWriterCut([head({}), post(1), post(2)]), 0, 'boxless with records: still released')
+  t.is(replacedWriterCut([head({ rejoin: ref }), post(1)]), 0)
+
+  t.is(replacedWriterCut([head({ box })]), 0, 'boxed to another key, header alone')
+  t.is(replacedWriterCut([head({ box, rejoin: ref })]), 1, 'boxed with a rejoin: block 0 stays')
+  t.is(replacedWriterCut([head({ box }), post(1), post(2)]), 3, 'boxed with records: past its last record')
+  t.is(replacedWriterCut([head({ box }), post(1), post(4)]), 5, 'past the last seq held, not the count held')
 })

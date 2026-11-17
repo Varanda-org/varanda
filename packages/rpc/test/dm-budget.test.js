@@ -262,3 +262,19 @@ test('dm-budget: the largest v6 inner fits one drop', (t) => {
   t.is(dm.DM_DROP_BYTES, 5501)
   t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds it')
 })
+
+test('dm-budget: v7 is a history copy pointer, canonical in wire order, and fits one drop', (t) => {
+  t.alike(budget.DM_INNER_KEYS_V7, ['v', 'kind', 'id', 'from', 'to', 'copy', 'at'])
+  t.ok(Object.isFrozen(budget.DM_INNER_KEYS_V7))
+  t.alike(budget.DM_BLOB_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
+  t.alike(budget.DM_INNER_KEYS_V7, dm.INNER_KEYS_V7, 'core signs the key list the rpc measures')
+  const desc = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 1, bytes: 100, sha256: 'd'.repeat(64) }
+  const body = { v: 7, kind: 'copy', id: 'e'.repeat(32), from: 'f'.repeat(64), to: 'f'.repeat(64), copy: desc, at: '2026-11-16T12:00:00.000Z' }
+  const shuffled = Object.fromEntries(Object.entries({ ...body, text: 'leak', cert: null, copy: Object.fromEntries(Object.entries({ ...desc, extra: 1 }).reverse()) }).reverse())
+  const parsed = JSON.parse(budget.canonicalInnerJson(shuffled))
+  t.alike(Object.keys(parsed), budget.DM_INNER_KEYS_V7, 'wire order whatever the caller built, nothing else')
+  t.alike(Object.keys(parsed.copy), budget.DM_BLOB_KEYS)
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(body))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds it')
+  t.is(budget.innerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1, 'innerVersion never picks v7')
+})

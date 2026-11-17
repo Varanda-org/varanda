@@ -376,6 +376,7 @@ module.exports = {
   MAX_SEND_BACKLOG: admission.MAX_SEND_BACKLOG,
   CAP_NO_INVENTORY: admission.CAP_NO_INVENTORY,
   CAP_DISCOVERY: admission.CAP_DISCOVERY,
+  CAP_WRITER_CUTS: admission.CAP_WRITER_CUTS,
   topicFor: admission.topicFor,
   parseBootstrap,
   generateNoiseKeyPair,
