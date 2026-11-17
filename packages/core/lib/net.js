@@ -377,6 +377,7 @@ module.exports = {
   CAP_NO_INVENTORY: admission.CAP_NO_INVENTORY,
   CAP_DISCOVERY: admission.CAP_DISCOVERY,
   CAP_WRITER_CUTS: admission.CAP_WRITER_CUTS,
+  CAP_HEADER_STUBS: admission.CAP_HEADER_STUBS,
   topicFor: admission.topicFor,
   parseBootstrap,
   generateNoiseKeyPair,

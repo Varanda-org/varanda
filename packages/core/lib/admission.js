@@ -49,6 +49,10 @@ const CAP_DISCOVERY = 2 // a seeder offers lean hellos and varanda/discovery/1
 // to MAX_FROZEN_WRITERS_PER_DIARY frozen writers per diary and group, each
 // below its cut, next to the live ones.
 const CAP_WRITER_CUTS = 4
+// A member holds a listed writer whose block 0 can never count for the
+// diary that joined it as a header stub, block 0 alone, once that diary
+// proves the join (docs/protocol.md section 10, "Header stubs").
+const CAP_HEADER_STUBS = 8
 
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX64_ANY = /^[0-9a-fA-F]{64}$/
@@ -595,6 +599,7 @@ module.exports = {
   CAP_NO_INVENTORY,
   CAP_DISCOVERY,
   CAP_WRITER_CUTS,
+  CAP_HEADER_STUBS,
   HEX64,
   HEX64_ANY,
   REASON_RE,

@@ -2862,3 +2862,64 @@ test('replacedWriterCut: a boxless writer is released whatever it holds, a write
   t.is(replacedWriterCut([head({ box }), post(1), post(2)]), 3, 'boxed with records: past its last record')
   t.is(replacedWriterCut([head({ box }), post(1), post(4)]), 5, 'past the last seq held, not the count held')
 })
+
+test('a writer whose held block 0 cannot count for the diary that bound it is never awaited (#350)', (t) => {
+  const k2 = K(0x4a0)
+  const other = K(0x999)
+  // X binds wX and k2; k2's block 0, as held, is one of the five headers
+  // that can never count for X here.
+  const world = () => {
+    const w = pworld()
+    w.joins.get(X).push({ writer: k2, on: true, seq: w.joins.get(X).length + 1 })
+    return w
+  }
+  const box = () => hex(newBoxKeyPair().publicKey)
+  const v1 = { type: 'group-writer', v: 1, group: G, diary: X, box: null, rejoin: null, at: AT(1) }
+  const fold = (w, extra) => buildGroup(w.input(w.reader(wY), extra))
+  const none = world()
+  t.is(fold(none).incomplete, true, 'control: k2 not held, the fold waits for it')
+  // (a) A `member` that does not match the kind, held as a writer copy for
+  // X, posts past block 0 included: rejected at any cut.
+  for (const boxed of [true, false]) {
+    const w = world()
+    w.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: boxed ? box() : null, at: AT(1) }) }, { seq: 1, record: groupPost({ text: 'nada', at: AT(9) }) }] })
+    const g = fold(w)
+    t.is(g.incomplete, false, 'member mismatch, ' + (boxed ? 'box matches' : 'box does not match either') + ': never awaited')
+    t.absent(g.writers.has(k2))
+    t.absent(g.posts.some((p) => p.writer === k2), 'and nothing it wrote counts')
+  }
+  // (b) to (e): block 0 alone, as a header stub.
+  const stubs = {
+    undecodable: { seq: 0, record: null },
+    invalid: { seq: 0, record: { type: 'group-writer', v: 2, group: G } },
+    legacy: { seq: 0, record: v1 },
+    'another group': { seq: 0, record: writerHeader({ group: other, diary: X, member: cwKey(X), box: box(), at: AT(1) }) },
+    'another diary': { seq: 0, record: writerHeader({ group: G, diary: Y, member: cwKey(Y), box: box(), at: AT(1) }) }
+  }
+  for (const [name, e0] of Object.entries(stubs)) {
+    const g = fold(world(), { heads: [{ key: k2, entries: [e0] }] })
+    t.is(g.incomplete, false, name + ': settled, never awaited')
+    t.absent(g.writers.has(k2), name + ': and never counted')
+  }
+  // Only block 0 of a stub is read.
+  const extra = fold(world(), { heads: [{ key: k2, entries: [stubs.legacy, { seq: 1, record: groupPost({ text: 'nada', at: AT(9) }) }] }] })
+  t.is(extra.incomplete, false)
+  t.absent(extra.posts.some((p) => p.writer === k2))
+  // A stub whose header counts for X settles nothing: k2 is still awaited
+  // until a copy for X is held.
+  const own = writerHeader({ group: G, diary: X, member: cwKey(X), box: box(), at: AT(1) })
+  t.is(fold(world(), { heads: [{ key: k2, entries: [{ seq: 0, record: own }] }] }).incomplete, true, 'a header that counts for X: still awaited')
+  // A stub never settles the pair its header names: another diary that
+  // also bound Y's writer cannot make wY read as ruled out without wY.
+  const y = pworld()
+  y.joins.get(X).push({ writer: wY, on: true, seq: y.joins.get(X).length + 1 })
+  t.is(fold(y).incomplete, false, 'control: wY held, X\'s join of it changes nothing')
+  const yIn = y.input(y.reader(wY))
+  const head = { key: wY, entries: [y.logs.get(wY).entries[0]] }
+  const g = buildGroup({ ...yIn, writers: yIn.writers.filter((l) => l.key !== wY), heads: [head] })
+  t.is(g.incomplete, true, 'without wY\'s copy for Y the fold waits for it, whatever X bound')
+  // Copies that disagree on block 0 are a fork: awaited.
+  const f = world()
+  f.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: box(), at: AT(1) }) }] })
+  t.is(fold(f, { heads: [{ key: k2, entries: [stubs.legacy] }] }).incomplete, true, 'a forked block 0 is awaited')
+})
