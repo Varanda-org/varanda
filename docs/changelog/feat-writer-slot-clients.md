@@ -1,0 +1,7 @@
+### Alterado
+
+- Os aparelhos passam a contar as vagas de escritor pela caminhada do próprio diário (PR `feat/writer-slot-clients`, parte da #350): ao entrar num grupo ou numa comunidade, o nó core e o nó do navegador conferem as 8 vagas vivas da conta ali, e não mais os escritores guardados nem as 8 primeiras entradas. Um aparelho que troca o próprio escritor (depois de uma saída, ou quando o escritor de comunidade que ele citava foi retirado) grava, antes da entrada nova, a entrada desligada e um corte no escritor antigo, que devolve a vaga enquanto houver reserva; sem vaga, nada é gravado e a entrada é recusada. A sincronização busca até 32 escritores por diário e grupo (8 vivos, 8 congelados e 16 liberados), como os semeadores guardam, e a troca periódica de chave deixa de contar os envelopes que um escritor cortado escreveu depois do corte. O app diz que desconectar um aparelho antigo em Aparelhos conectados devolve a vaga, ou que ali já não devolve, e a recusa com as 8 vagas em uso aponta para lá. Conferência em `docs/verification/feat-writer-slot-clients.md`.
+
+### Adicionado
+
+- `group.info` e `community.info` do nó do navegador informam `writersFrozen` e `frozenRoom` (na comunidade, também `generalWritersFrozen` e `generalFrozenRoom`, os de Geral), e `writersBound` passa a ser o número de vagas vivas, de 0 a 8 (rpc.md 5.42 e 5.59).
