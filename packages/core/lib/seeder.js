@@ -5037,6 +5037,14 @@ class Seeder {
     }
     if (entry.groupRefused.get(key) === j.seq) return false
     if (!this._stubHeldElsewhere(key, j.group, diary)) return false
+    // A moved join read before D's scan caught up waits for it: the
+    // caught-up pass drops D's old row first, so a diary delivered block by
+    // block cannot list K under one group after another.
+    if (!scanCaughtUp(entry)) {
+      for (const r of this._headerStubs.values()) {
+        if (r.diary === diary && r.key === key && r.group !== j.group && !r.dropping) return true
+      }
+    }
     this._listHeaderStub(diary, entry, key, j.group, j.seq)
     return true
   }
@@ -5268,6 +5276,12 @@ class Seeder {
       const kept = awaiting !== undefined && !awaiting.dropped && !awaiting.headerOk && awaiting.by === diary
       if (!kept && waitBefore !== undefined && this._groupBackoff.get(diary + ':' + key) === waitBefore) this._deleteGroupBackoff(diary + ':' + key)
       if (this._inflight.get(key) === work) this._inflight.delete(key)
+      // D's join of K moved again while this admission ran: the join loop
+      // skipped it (in flight) and no wait or block will start it, so it
+      // starts now, before the settle drops the row the held core answers.
+      // The failing-write exit names this group, so this cannot loop.
+      const live = entry.groupLive.get(key)
+      if (!this._closing && live !== undefined && live.group !== group && this._served.get(diary) === entry && entry.gated && !entry.dropped) this._reconcileGroups(diary, entry)
       if (!this._closing) this._settleStubRows(key)
       this._resumeDeferredGroups()
     }
@@ -5622,9 +5636,10 @@ class Seeder {
 
   // Room for one more row of D: the per-diary and total caps count every
   // row, listing-only and dropping ones included. For a row of K under G,
-  // D's own rows of K under another group are left out: K moved, and they
-  // go when this row is set (_dropMovedStubRows) or are already going (a
-  // listing-only row is marked dropping before the new row is listed).
+  // one of D's own rows of K under another group is left out: K moved, and
+  // it goes when this row is set (_dropMovedStubRows) or is already going.
+  // Only one, so a diary holds at most one row past its cap and the seeder
+  // one past its own, whatever order rows leave in.
   _stubRoom (diary, key = null, group = null) {
     let mine = 0
     let moved = 0
@@ -5633,7 +5648,9 @@ class Seeder {
       if (key !== null && r.key === key && r.group !== group) moved++
       else mine++
     }
-    return this._headerStubs.size - moved < this.maxHeaderStubs && mine < MAX_HEADER_STUBS_PER_DIARY
+    const out = Math.min(moved, 1)
+    mine += moved - out
+    return this._headerStubs.size - out < this.maxHeaderStubs && mine < MAX_HEADER_STUBS_PER_DIARY
   }
 
   // A row for D's join of K in G whose block 0 is already held elsewhere
