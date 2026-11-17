@@ -34,13 +34,13 @@ No laboratório web, o dono de uma Página que tinha mudado de chave (K1 para K2
 
 No laboratório, com uma Página de dono A e administradores B e C: A muda a Página de chave, depois remove B da chave nova. Em B: Páginas não mostra nenhuma das duas chaves, e as Conversas da chave antiga somem desse aparelho. Em C e em A: a chave antiga continua em Páginas como encerrada e a caixa "Chave antiga" continua nas Conversas da chave nova.
 
-Conferência em aparelho (não conferido em aparelho):
+Conferência na web, 2026-11-17, laboratório (`apps/cli/scripts/hosted-lab.js`, interface exportada desta branch), Chrome sem janela, uma instância por pessoa, passkey virtual. Dono A, administradores B, C e D, membro E. A ativou as Conversas da Página, E mandou uma mensagem e os quatro administradores a receberam. A mudou a chave (K1 para K2): os quatro viram a caixa "Chave antiga" e listavam K2 e K1 "encerrada".
 
-- [ ] Android: B, com o app aberto durante a remoção, perde as duas chaves em Páginas e a caixa "Chave antiga".
-- [ ] Android: B, com o app fechado durante a remoção, abre o app, espera uma sincronização e abre Páginas: as duas chaves somem e as conversas da chave antiga saem do aparelho.
-- [ ] Android: C e A continuam com a chave antiga só para ler.
-- [ ] iOS: os mesmos três casos.
-- [ ] Web (navegador e PWA): os mesmos três casos.
+- [x] Web, app aberto: A removeu B da K2 com B parado em Páginas. A tela aberta continuou com as duas linhas por 90 s (numa rodada anterior, a lista se esvaziou sozinha em cerca de 45 s); ao abrir Páginas de novo, "Nenhuma página ainda". No IndexedDB de B, as 16 entradas `pages/<K1>/…` e `pages/<K2>/…` ficaram com o valor `null` e não sobrou nenhum armazenamento de página.
+- [x] Web, app fechado: D fechou o app (`about:blank`) antes de A removê-lo da K2. Ao reabrir e esperar a sincronização, Páginas mostrou "Nenhuma página ainda", e o IndexedDB de D ficou como o de B: só entradas `null` para K1 e K2.
+- [x] Web, quem fica: A e C continuam com K2 e K1 "encerrada" em Páginas. Em C, as Conversas da K2 mostram "Chave antiga"; a conversa de E abre com "Conversa da chave antiga da página: só leitura." e sem campo de mensagem.
+- [ ] PWA instalado: não conferido.
+- [ ] Android e iOS: os mesmos três casos, pendentes com o APK de preview do EAS e o TestFlight (não conferidos aqui).
 
 ## Limites conhecidos
 
