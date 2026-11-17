@@ -74,19 +74,15 @@ Grade: com largura ou altura a partir de 1024 (1024x768, 1024x100, 100x1024, 204
 
 ## Comandos
 
-Resultados a preencher. Marcar só o que tiver sido executado.
+Rodados localmente no Node 24, depois do merge da `main`, com `npm ci --ignore-scripts`:
 
-- [ ] `npm run lint`
-- [ ] `npm test -w packages/rpc`
-- [ ] `npm test -w packages/core`
-- [ ] `npm test -w packages/web-member`
-- [ ] `npm test -w apps/cli`
-- [ ] `npm test -w apps/app`
-- [ ] `npm run demo`
+- [x] `npm run lint`
+- [x] `npm test -- --affected=origin/main` (866 arquivos: rpc 26, core 172, web-member 127, cli 145, app 396). Quatro arquivos estouraram o tempo na execução paralela (`apps/cli/test/update.test.js`, `packages/core/test/community-member.test.js`, `packages/core/test/group-member-3.test.js`, `packages/core/test/private-member-3.test.js`, todos com "tempo esgotado") e passaram sozinhos com `VARANDA_TEST_CONCURRENCY=1` (1945/1945, 262/262, 84/84 e 37/37 asserções). Nenhum deles toca em mídia.
+- [x] `npm run demo` (DEMO OK)
 
 ## Conferência manual
 
-- [ ] As listas fechadas de mime em `docs/protocol.md` e `docs/rpc.md` batem com `MEDIA_MIMES` de `packages/rpc/lib/limits.js` e `packages/core/lib/records.js` e com `DM_MEDIA_MIMES` de `packages/core/lib/dm.js`: `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/avif`.
-- [ ] Avatar (`image/jpeg`, `image/webp`), capa de vídeo (`image/jpeg`) e miniatura de link (`image/jpeg`) seguem iguais.
-- [ ] Nos semeadores, JPEG, PNG, WebP e GIF continuam por magic bytes, e AVIF só pelo parser `mediaBounds`.
-- [ ] O texto novo não contém U+2014.
+- [x] As listas fechadas de mime em `docs/protocol.md` e `docs/rpc.md` batem com `MEDIA_MIMES` de `packages/rpc/lib/limits.js` e `packages/core/lib/records.js` e com `DM_MEDIA_MIMES` de `packages/core/lib/dm.js`: `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/avif`.
+- [x] Avatar (`image/jpeg`, `image/webp`), capa de vídeo (`image/jpeg`) e miniatura de link (`image/jpeg`) seguem iguais.
+- [x] Nos semeadores, JPEG, PNG, WebP e GIF continuam por magic bytes, e AVIF só pelo parser `mediaBounds`.
+- [x] O texto novo não contém U+2014.
