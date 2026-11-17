@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 81)
+  t.is(LEGAL_VERSION, 82)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 81, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 82, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -345,7 +345,7 @@ test('legal: appeals are disclosed in the terms and in the privacy policy', asyn
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('o recurso'))
   t.ok(text(TERMS).includes('depois de 30 dias'))
-  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'o recurso não aparece para a própria pessoa nem para quem decidiu a denúncia que bloqueou a conta', 'pode ser revisto por qualquer moderador', 'Denúncias, recursos e decisões não são apagados automaticamente']) {
+  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'o recurso não aparece para a própria pessoa nem para quem decidiu a denúncia que bloqueou a conta', 'pode ser revisto por qualquer moderador', 'Enquanto a conta existe, denúncias, recursos e decisões ligados a ela não são apagados automaticamente']) {
     t.ok(text(PRIVACY).includes(required), required)
   }
 })
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ef02615b2f9b2da63122e4f341a1d5b02f5cd556532647884544925a2b2a8ebe', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '017772a30bb3d0f94076a1b29bdcec3864127170236e0d2522f522302c366d12', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -962,5 +962,26 @@ test('legal: version 80 describes polls, events, votes and RSVPs of a page', asy
   t.ok(text(TERMS).includes('ao que uma página publica por ele (publicações, com as opções de uma enquete e o título e o lugar de um evento, respostas,'))
   t.ok(text(PRIVACY).includes('imagens das prévias de links, enquetes, eventos, os votos e as respostas de presença da página e a lista de quem a página segue'))
   t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links, votos, respostas de presença e quem ela segue)'))
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 82 says the moderation data of a deleted account goes 6 months after the deletion', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('As denúncias sobre a conta, os seus recursos, as imagens e os áudios anexados a essas denúncias e o registro de decisões ligado à conta são apagados 6 meses (180 dias) depois da exclusão ou, se um bloqueio ainda espera a publicação da lista, logo depois dela. Uma denúncia sobre a conta que levou ao bloqueio de um grupo inteiro fica enquanto o grupo estiver bloqueado. Uma denúncia que você fez e que levou a um bloqueio que continua (de uma conta ou de um grupo) fica, sem a sua chave, o seu comentário e a sua assinatura, com o trecho e a imagem ou o áudio que você anexou, enquanto o bloqueio durar. As outras denúncias que você fez são apagadas no mesmo prazo, mas de uma denúncia já decidida sobre uma conta que ainda existe fica só um registro, sem nenhum dado seu, de que a denúncia foi analisada e do que foi decidido; é o que fica também quando aquele bloqueio é desfeito.'))
+  t.ok(text(PRIVACY).includes('Uma denúncia que ela fez e que levou a um bloqueio que continua (de uma conta ou de um grupo) fica, sem a chave pública, a observação e a assinatura de quem denunciou, enquanto o bloqueio durar. De uma denúncia que ela fez e que já foi decidida sobre uma conta que ainda existe fica só um registro, sem os dados de quem denunciou, de que a denúncia foi analisada e do que foi decidido.'))
+  t.ok(text(PRIVACY).includes('são apagados 6 meses (180 dias) depois da exclusão ou, se um bloqueio ainda espera a publicação da lista, logo depois dela (uma denúncia que ela fez e que levou a um bloqueio que continua fica'))
+  t.ok(text(PRIVACY).includes('uma denúncia sobre ela que levou ao bloqueio de um grupo inteiro fica enquanto o grupo estiver bloqueado), e as cópias'))
+  t.ok(text(PRIVACY).includes('as decisões dos moderadores, para moderação e pedidos legais, por 6 meses (180 dias), como descrito acima;'))
+  t.absent(text(PRIVACY).includes('sem prazo definido ainda (issue #38)'), 'the deletion paragraph follows the retention')
+  t.ok(text(TERMS).includes('As cópias da triagem automática com o texto das suas publicações, e os precedentes tirados delas, também são apagadas na exclusão (um arquivo corrompido que o serviço separou fica até a operação do servidor apagá-lo).'))
+  t.ok(text(PRIVACY).includes('com os precedentes, são apagadas na exclusão (um arquivo corrompido que o serviço separou fica até a operação do servidor apagá-lo).'), 'a set-aside triage file is named in Privacy too')
+  t.ok(text(PRIVACY).includes('Seis meses (180 dias) depois da exclusão de uma conta ou, se um bloqueio ainda espera a publicação da lista, logo depois dela, o serviço apaga as denúncias sobre ela e as que ela fez'))
+  t.ok(text(PRIVACY).includes('Seis meses (180 dias) depois da exclusão da conta, o recurso e o registro de decisões ligado a ela são apagados.'))
+  t.ok(text(PRIVACY).includes('A imagem é apagada com a denúncia, 6 meses (180 dias) depois da exclusão da conta denunciada ou de quem denunciou. Numa denúncia que fica enquanto um bloqueio durar (sem os dados de quem denunciou, ou porque levou ao bloqueio de um grupo inteiro), a imagem fica com ela; um registro sem conteúdo não guarda imagem.'))
+  t.ok(text(PRIVACY).includes('de uma que ela fez e que já foi decidida sobre uma conta que ainda existe fica só um registro sem conteúdo;'))
+  t.ok(text(PRIVACY).includes('O áudio é apagado com a denúncia, no mesmo prazo da imagem.'))
+  t.ok(text(PRIVACY).includes('Para contas ativas, a retenção está em aberto (issue #38).'))
+  t.absent(text(PRIVACY).includes('Denúncias, recursos e decisões não são apagados automaticamente.'), 'no longer true for a deleted account')
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })
