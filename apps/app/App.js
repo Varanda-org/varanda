@@ -35,9 +35,9 @@
 // gets the profile opened.
 // A notification click (hosted web, src/pushClient.web.js) arrives as
 // /?aviso=... at load or as a worker message: held in memory only, it opens
-// Avisos (a follow) or Conversa (a reply, like or repost) for the key it
-// names, or Convidar pessoas (a convite, which names nobody) once the tabs
-// show; nothing is written, followed or retried.
+// Avisos (a follow) or Conversa (a reply, quote, mention, like or repost)
+// for the key it names, or Convidar pessoas (a convite, which names nobody)
+// once the tabs show; nothing is written, followed or retried.
 // A group or community link (/g/<key>, /c/<key>) is announced on Entrar and
 // opens the screen once the tabs show; it is never consent to join.
 // A splash stays until its whole presentation has been seen, in every phase,

@@ -197,10 +197,11 @@ test('post notices end to end: reply, quote, mention, follow, self and forged re
   t.is(follow.seen, seenOf(seedA, A.key, B.key, follow.seq), 'the seen formula is unchanged')
   t.alike(rowsOf(withFollow).filter((r) => r[2] !== 'follow'), expected, 'the post rows stay')
 
-  // A follows B back: only the follow row goes.
+  // A follows B back: the follow row stays, once, with the post rows.
   await A.web.request('follow.add', { key: B.key })
-  const back = await settledRead(A.web, 'follow back settled')
-  t.alike(rowsOf(back), expected, 'a followed author keeps the post rows, not the follow row')
+  const back = await settledRead(A.web, 'follow back settled', (r) => r.notices.filter((n) => n.kind === 'follow').length === 1)
+  t.alike(rowsOf(back).filter((row) => row[2] !== 'follow'), expected, 'a followed author keeps the post rows')
+  t.alike(rowsOf(back).filter((row) => row[2] === 'follow'), [[B.key, follow.seq, 'follow']], 'the follow row stays, once')
   await A.web.request('follow.remove', { key: B.key })
 
   // A renames to @ana2: a later mention of @ana still arrives.
