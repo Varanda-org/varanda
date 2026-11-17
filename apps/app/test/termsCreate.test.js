@@ -235,11 +235,12 @@ test('App: after Entrar, nothing about the member leaves before the terms pass',
   t.ok(okAt > 0)
   // The public status read stays ahead of the gate (a deleted account sees
   // its notice first); the enrolment write it leaves due waits for termsOk.
-  const status = src.slice(src.indexOf('accountStatus(member).then('), src.indexOf('}, [node.hosted, member, accountTick])'))
-  t.ok(status.length > 0, 'the status read')
-  t.ok(status.includes('setDeletedState(deletedOf(st))'))
+  const statusEnd = src.indexOf('}, [node.hosted, member, accountTick, refreshAccount])')
+  const status = src.slice(src.lastIndexOf('useEffect(() => {', statusEnd), statusEnd)
+  t.ok(statusEnd > 0 && status.includes('accountStatus(member).then('), 'the status read')
+  t.ok(status.includes('setDeletedState(next.deletedState)'))
   t.absent(status.includes('enrolWith('), 'no account write from the status read')
-  t.ok(status.includes('setEnrolDue({ member, username: st.username })'))
+  t.ok(status.includes('if (next.enrolDue !== null) setEnrolDue(next.enrolDue)'))
   const enrolAt = src.indexOf('enrolWith({')
   t.ok(enrolAt > okAt, 'the enrolment comes after termsOk is declared')
   const enrol = src.slice(src.lastIndexOf('useEffect(() => {', enrolAt), src.indexOf('}, [termsOk, locked, enrolDue, member])', enrolAt))
