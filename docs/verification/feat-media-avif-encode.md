@@ -10,18 +10,18 @@ Rodados: os comandos marcados abaixo e o codificador do `image-prep` compilado n
 
 ## Comandos
 
-- [ ] `npm run lint`
-- [ ] `node apps/app/test/stillPlan.test.js`
-- [ ] `node apps/app/test/imagePrepModule.test.js`
-- [ ] `node apps/app/test/encodeNative.test.js`
-- [ ] `node apps/app/test/hardening.test.js`
-- [ ] `node apps/app/test/podsLock.test.js`
-- [ ] `node apps/app/test/videoPrep.test.js`
-- [ ] `node apps/app/test/linkCardBuild.test.js`
-- [ ] `node apps/app/test/platformGate.test.js`
-- [ ] `node apps/app/test/encodePhotoCap.test.js`
-- [ ] `npm test -- --affected=origin/main`
-- [ ] `npm run demo`
+- [x] `npm run lint`
+- [x] `node apps/app/test/stillPlan.test.js`
+- [x] `node apps/app/test/imagePrepModule.test.js`
+- [x] `node apps/app/test/encodeNative.test.js`
+- [x] `node apps/app/test/hardening.test.js`
+- [x] `node apps/app/test/podsLock.test.js`
+- [x] `node apps/app/test/videoPrep.test.js`
+- [x] `node apps/app/test/linkCardBuild.test.js`
+- [x] `node apps/app/test/platformGate.test.js`
+- [x] `node apps/app/test/encodePhotoCap.test.js`
+- [x] `npm test -- --affected=origin/main` (549 arquivos, 0 falhas, Node 24, depois do merge da `main`)
+- [x] `npm run demo` (DEMO OK)
 
 ## Conferência manual
 
