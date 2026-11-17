@@ -620,6 +620,7 @@ function engineWithDmLink (link) {
   try {
     transport.openDmLink = async () => {
       if (link.offline) throw new Error('offline')
+      if (link.onOpen) await link.onOpen()
       return link
     }
     delete require.cache[id]
@@ -634,8 +635,11 @@ async function sendingEngine (t, { stamps = 2, failPut = false, options = {} } =
   const calls = []
   const link = {
     failPut,
-    async put () {
+    // The bucket prefix each put was given, in order.
+    prefixes: [],
+    async put (bytes, prefix) {
       calls.push(['put'])
+      link.prefixes.push(prefix === undefined ? null : prefix)
       if (link.failPut) throw new Error('lost ack')
       return { ok: true, reason: null }
     },
@@ -717,6 +721,29 @@ test('a throwing ctl put and its later unlock flush each emit dm.sending first',
   await engine.loaded()
   await engine.idle()
   t.alike(calls, [['dm.sending', {}], ['put']], 'unlock announces the queued stamped ctl before putting it')
+  t.alike(await store.readDmCtlQueue(storage), [])
+})
+
+test('a lock while the pull opens its link fails with the locked message, not a TypeError', async (t) => {
+  const { engine, link, own } = await sendingEngine(t)
+  link.onOpen = () => engine.lock()
+  link.page = async () => ({ items: [], next: null, oldest: 0 })
+  const err = await errorOf(engine.pull(own))
+  t.is(err && err.message, LOCKED)
+  t.is(err && err.constructor.name, 'UsageError')
+})
+
+test('a lock while a ctl flush opens its link puts nothing; the stamped ctl goes out at the next unlock', async (t) => {
+  const { set, calls, engine, link, storage, prf } = await sendingEngine(t)
+  link.onOpen = () => engine.lock()
+  t.alike(await set(), { ok: true })
+  t.alike(calls, [], 'no dm.sending and no put after the lock')
+  t.is((await store.readDmCtlQueue(storage)).length, 1, 'still queued')
+  link.onOpen = null
+  await engine.unlock(prf)
+  await engine.loaded()
+  await engine.idle()
+  t.alike(calls, [['dm.sending', {}], ['put']], 'put at the next unlock')
   t.alike(await store.readDmCtlQueue(storage), [])
 })
 
@@ -2410,6 +2437,166 @@ test('visitas: rows older than 30 days are dropped at rest when the list is read
   t.alike(await B.engine.visitList(B.own, now + visitsCore.VISIT_KEEP_DAYS * 86400000), [], 'past 30 days: not listed')
   t.not((await B.storage.readJson('dmVisits')).box, before, 'rewritten at rest')
   t.alike(await B.engine.visitList(B.own, now), [], 'and gone, not only hidden')
+})
+
+// ---- buckets (docs/protocol.md section 11, "Buckets") ----
+
+const prefixOfBox = (boxHex) => dmCore.bucketPrefix(boxHex)
+
+// A prf whose box prefix is not among `taken`: three nodes then sit in three
+// buckets at 6 bits, whatever the random keys are.
+async function prfWithPrefix (taken) {
+  for (;;) {
+    const prf = crypto.randomBytes(32)
+    const p = prefixOfBox(hex((await dmBoxKeyPairFromPrf(prf, 1)).publicKey))
+    if (!taken.includes(p)) return { prf, p }
+  }
+}
+
+test('buckets: a pull downloads only its own bucket and the untagged drops; every drop is tagged by the box it is sealed to', async (t) => {
+  t.timeout(300000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6 })
+  const a = await prfWithPrefix([])
+  const b = await prfWithPrefix([a.p])
+  const c = await prfWithPrefix([a.p, b.p])
+  const A = await memberNode(t, assoc, seeder.url, { prf: a.prf })
+  const B = await memberNode(t, assoc, seeder.url, { prf: b.prf })
+  const C = await memberNode(t, assoc, seeder.url, { prf: c.prf })
+  await copyDiary(B, A)
+  await copyDiary(C, A)
+  await copyDiary(A, B)
+
+  await A.web.request('dm.send', { to: C.key, text: 'um' })
+  await A.web.request('dm.send', { to: C.key, text: 'dois' })
+  await A.web.request('dm.send', { to: B.key, text: 'tres' })
+  t.is(seeder.puts.length, 6)
+  t.alike(seeder.putInfos.map((i) => i.bucket), [c.p, a.p, c.p, a.p, b.p, a.p], 'recipient copy by the peer box, self copy by the own box')
+  t.ok(seeder.putInfos.every((i) => i.bits === 6))
+
+  seeder.served = 0
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.served, 1, 'B downloaded its own drop only, not the five others')
+  t.is((await C.web.request('dm.pull')).added, 2)
+  t.is(seeder.served, 3, 'C downloaded its two')
+  await A.web.request('dm.pull')
+  t.is(seeder.served, 6, 'A downloaded its three self copies: every drop once')
+  t.ok(seeder.pageQueries.length > 0)
+  t.alike(seeder.pageQueries[0], { buckets: [b.p], bits: 6 }, 'the page names one bucket')
+})
+
+test('buckets: a seeder without the v2 lane gets v1: untagged puts, the whole pool, and the message still arrives', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await copyDiary(A, B)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.is(seeder.puts.length, 2)
+  t.ok(seeder.putInfos.every((i) => i === null), 'v1 puts carry no bucket')
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.pageQueries.length, 0)
+  t.is(seeder.served, 2, 'v1 returns the whole pool')
+})
+
+test('buckets: a seeder that opens v2 claiming more than 6 bits is dropped for v1 and the message still arrives', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 6, spoofBits: 7 })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await copyDiary(A, B)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.is(seeder.puts.length, 2)
+  t.ok(seeder.putInfos.every((i) => i === null), 'the puts went on v1, untagged')
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.is(seeder.pageQueries.length, 0, 'no page on the lane that claimed 7 bits')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages.map((m) => m.text), ['oi'])
+})
+
+test('buckets: a seeder at 0 bits gets everything tagged as bucket 0 and the pull still delivers', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await dmSeeder(t, { signer: assoc, bits: 0 })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.ok(seeder.putInfos.every((i) => i.bits === 0 && i.bucket === 0))
+  t.is((await B.web.request('dm.pull')).added, 1)
+  t.alike(seeder.pageQueries[0], { buckets: [0], bits: 0 })
+})
+
+test('buckets: send, reaction and ctl puts carry the prefix of the box they are sealed to', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const own = prefixOfBox(s.engine.boxHex().box)
+  const peer = prefixOfBox(s.recipientBox)
+  const sent = await s.send()
+  t.alike(s.link.prefixes, [peer, own], 'recipient first, then the self copy')
+  s.link.prefixes.length = 0
+  await s.engine.react(s.own, s.kp, { to: s.peer, target: { from: s.own, id: sent.id }, emoji: '\u{1f44d}' }, s.recipientBox)
+  t.alike(s.link.prefixes, [peer, own])
+  s.link.prefixes.length = 0
+  await s.set()
+  t.alike(s.link.prefixes, [own], 'a ctl goes to the own box')
+})
+
+test('buckets: a stored reaction keeps its prefixes across a reload; one stored before has none and goes untagged', async (t) => {
+  const s = await sendingEngine(t, { stamps: 6 })
+  const ownPrefix = prefixOfBox(s.engine.boxHex().box)
+  const sent = await s.send()
+  s.link.prefixes.length = 0
+  const target = { from: s.own, id: sent.id }
+  const react = (engine) => engine.react(s.own, s.kp, { to: s.peer, target, emoji: '\u{1f44d}' }, s.recipientBox)
+  s.link.offline = true
+  await errorOf(react(s.engine))
+  const engine = await reloaded(t, s)
+  s.link.offline = false
+  await react(engine)
+  t.alike(s.link.prefixes, [prefixOfBox(s.recipientBox), ownPrefix], 'kept inside the sealed item')
+
+  // The same op as an earlier build stored it: no prefixes in the item.
+  const s2 = await sendingEngine(t, { stamps: 6 })
+  const sent2 = await s2.send()
+  s2.link.prefixes.length = 0
+  s2.link.offline = true
+  await errorOf(s2.engine.react(s2.own, s2.kp, { to: s2.peer, target: { from: s2.own, id: sent2.id }, emoji: '\u{1f44d}' }, s2.recipientBox))
+  const local = await opener(s2.prf)
+  const items = await reactPending(s2.storage)
+  const meta = local.open(items[0].meta)
+  t.ok(Array.isArray(meta.prefixes), 'the new build stores prefixes')
+  delete meta.prefixes
+  await s2.storage.writeJson('dmReactPending', { v: 1, items: [{ ...items[0], meta: local.seal(meta) }] })
+  const engine2 = await reloaded(t, s2)
+  s2.link.offline = false
+  await engine2.react(s2.own, s2.kp, { to: s2.peer, target: { from: s2.own, id: sent2.id }, emoji: '\u{1f44d}' }, s2.recipientBox)
+  t.alike(s2.link.prefixes, [null, null], 'an item from before goes untagged')
+})
+
+test('buckets: a queued visit ping is put with the prefix of the recipient box', async (t) => {
+  const assoc = generateAssociationKeyPair()
+  const seen = []
+  const pool = visitPool()
+  const link = pool.link
+  pool.link = () => {
+    const l = link()
+    const put = l.put
+    l.put = (bytes, prefix) => {
+      seen.push(prefix === undefined ? null : prefix)
+      return put(bytes)
+    }
+    return l
+  }
+  const A = await visitEngine(t, pool, assoc)
+  const B = await visitEngine(t, pool, assoc)
+  const now = Date.now()
+  t.alike(await A.engine.visitQueue(A.own, A.kp, { to: B.own, box: B.box, now }), { queued: true })
+  await until(() => seen.length === 1)
+  await A.engine.idle()
+  t.alike(seen, [prefixOfBox(B.box)])
 })
 
 // ---- local compaction of deleted conversations (lib/dm-store.js compact) ----

@@ -2,7 +2,9 @@
 
 // A seeder stand-in for the direct message tests: a loopback WebSocket
 // server that speaks admission (role 'seeder', certified by the
-// association), 'varanda/dm/1' over an in-memory pool and
+// association), 'varanda/dm/1' over an in-memory pool (and 'varanda/dm/2' with buckets
+// when opts.bits is a number: a seeder from before the buckets has none, and
+// a member then falls back to v1) and
 // 'varanda/dm-stamp/1' with an RSA-2048 postage key generated here (no key
 // material in the repository). Every put and page is recorded, so a test can
 // check what crossed the anonymous channel.
@@ -16,7 +18,8 @@ const { createSeederCert } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachDm } = require('@varanda/core/lib/dm-net')
 const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
-const { decodeDrop } = require('@varanda/core/lib/dm')
+const { decodeDrop, DM_PROTOCOL_V2 } = require('@varanda/core/lib/dm')
+const { tagFor, tagMatches } = require('@varanda/core/lib/dm-pool')
 const postage = require('@varanda/core/lib/dm-postage')
 const { wsStream } = require('../../lib/ws-stream')
 
@@ -49,7 +52,7 @@ function memoryPool (pub) {
   let nextSeq = 1
   return {
     entries,
-    submit (bytes) {
+    submit (bytes, tag = 0) {
       const drop = decodeDrop(bytes)
       if (drop === null) return null
       if (hex(drop.kid) !== pub.kid || !postage.verify(drop.token, drop.rsaSig, pub)) return null
@@ -57,13 +60,13 @@ function memoryPool (pub) {
       if (known) return b4a.equals(known.bytes, bytes) ? { seq: known.seq, repeated: true } : null
       if (tokens.has(hex(drop.token))) return null
       tokens.add(hex(drop.token))
-      const e = { seq: nextSeq++, bytes: b4a.from(bytes) }
+      const e = { seq: nextSeq++, bytes: b4a.from(bytes), tag }
       entries.push(e)
       byDrop.set(hex(drop.dropId), e)
       return { seq: e.seq }
     },
-    page ({ after, limit }) {
-      const rest = entries.filter((e) => e.seq > after)
+    page ({ after, limit, buckets, bits }) {
+      const rest = entries.filter((e) => e.seq > after && (buckets === undefined || tagMatches(e.tag, buckets, bits)))
       const items = rest.slice(0, limit)
       return { items, next: rest.length > items.length ? items[items.length - 1].seq : null, oldest: entries.length ? entries[0].seq : nextSeq }
     }
@@ -73,7 +76,7 @@ function memoryPool (pub) {
 // opts.dropPutAck(n): true -> the n-th put (0-based) is stored and the link
 // is then destroyed before the ack (an uncertain put). opts.budget: stamps
 // per diary (default 1000).
-async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000 } = {}) {
+async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000, bits = null, spoofBits = null } = {}) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const rsa = rsaKey()
@@ -87,6 +90,12 @@ async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000 } 
     pool,
     pub,
     puts: [],
+    // The bucket info of each put on the v2 lane ({ bucket, bits }), null on v1.
+    putInfos: [],
+    // What each page asked for on the v2 lane, and how many drops the seeder
+    // handed out in all (the bytes a member downloaded, in drops).
+    pageQueries: [],
+    served: 0,
     pages: 0,
     traffic: [],
     stampProofs: [],
@@ -102,28 +111,41 @@ async function dmSeeder (t, { signer, dropPutAck = () => false, budget = 1000 } 
     noise.on('error', noop)
     noise.once('connect', () => {
       Hypercore.createProtocolStream(noise)
-      attachDm(noise, {
-        role: 'seeder',
-        putRate: 1000,
-        putBurst: 1000,
-        put: (bytes) => {
-          const n = seeder.puts.length
-          seeder.puts.push(b4a.from(bytes))
-          seeder.traffic.push(b4a.toString(bytes, 'base64'))
-          const r = pool.submit(bytes)
-          if (dropPutAck(n)) {
-            setImmediate(() => noise.destroy())
-            return new Promise(noop)
-          }
-          return r
-        },
-        page: (q) => {
-          seeder.pages++
-          const r = pool.page(q)
-          seeder.traffic.push(JSON.stringify({ after: q.after, limit: q.limit }))
-          return r
+      const put = (bytes, info) => {
+        const n = seeder.puts.length
+        seeder.puts.push(b4a.from(bytes))
+        seeder.putInfos.push(info === undefined ? null : info)
+        seeder.traffic.push(b4a.toString(bytes, 'base64'))
+        const r = pool.submit(bytes, info === undefined ? 0 : tagFor(info.bits, info.bucket))
+        if (dropPutAck(n)) {
+          setImmediate(() => noise.destroy())
+          return new Promise(noop)
         }
-      })
+        return r
+      }
+      const page = (q) => {
+        seeder.pages++
+        if (q.buckets !== undefined) seeder.pageQueries.push({ buckets: q.buckets, bits: q.bits })
+        const r = pool.page(q)
+        seeder.served += r.items.length
+        seeder.traffic.push(JSON.stringify({ after: q.after, limit: q.limit }))
+        return r
+      }
+      attachDm(noise, { role: 'seeder', putRate: 1000, putBurst: 1000, put, page })
+      if (spoofBits !== null) {
+        // A seeder that opens the v2 lane claiming more bits than the app takes.
+        const mux = noise.userData
+        const createChannel = mux.createChannel.bind(mux)
+        mux.createChannel = (o) => {
+          const ch = createChannel(o)
+          if (ch !== null && o.protocol === DM_PROTOCOL_V2) {
+            const open = ch.open.bind(ch)
+            ch.open = () => open(spoofBits)
+          }
+          return ch
+        }
+      }
+      if (bits !== null) attachDm(noise, { role: 'seeder', protocol: DM_PROTOCOL_V2, bits, putRate: 1000, putBurst: 1000, put, page })
       attachDmStamp(noise, {
         role: 'seeder',
         issueBurst: 1000,
