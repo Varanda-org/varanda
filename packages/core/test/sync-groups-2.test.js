@@ -12,11 +12,11 @@ const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
 const { testnet, until } = require('./helpers/net')
 const { tmpDir } = require('./helpers/tmp')
-const { runSync, recordBoundRoot, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
+const { runSync, recordBoundRoot, heldCatalogue, MAX_GROUP_HELD_PER_DIARY: CAP } = require('../lib/sync')
 const { createCert, createModeratorCert, createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
-const { writerHeader, groupHeader, groupPost, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
-const { memberCertRecord, groupJoinRecord, groupCutRecord } = require('../lib/records')
+const { writerHeader, groupHeader, groupPost, groupCreateRecord, groupLeave, leaveDigest, MAX_GROUP_WRITERS_PER_DIARY } = require('../lib/group')
+const { memberCertRecord, groupJoinRecord, groupCutRecord, groupConfirmRecord } = require('../lib/records')
 const store = require('../lib/store')
 const { hex, PARENT, syncOnce, stored, fakeSeeder, diaryAndWriter, copyInto, runUntil, hasBlocklist, groupMember, never, inBackground, joinedRoot, blockDiary, readCerts, revokeIssuer } = require('./helpers/sync-groups')
 
@@ -790,4 +790,39 @@ test('a corrupt group-certs record reads as none: a writer without binding evide
   t.ok(r2.ok, r2.errors.join('; '))
   t.absent(await stored(m, wkey), 'a writer with no binding evidence goes while an issuer is revoked')
   t.ok(events.some((ev) => ev.event === 'group-skipped' && ev.key === wkey && ev.reason === 'not-in-log'))
+})
+
+test('the catalogue fold reads the diaries\' cuts, like the group fold: a creator CW a cut let in bounds the root\'s creates (#350)', (t) => {
+  const kp = generateAssociationKeyPair()
+  const key = () => hex(crypto.randomBytes(32))
+  const community = key()
+  const creator = key()
+  const geral = key()
+  const later = key()
+  const log = (k, header) => ({ key: k, diary: creator, entries: [{ seq: 0, record: header }] })
+  const push = (l, record) => l.entries.push({ seq: l.entries.length, record })
+  const root = log(community, groupHeader({ kind: 'community', diary: creator, join: 'open', name: 'Bairro' }))
+  push(root, groupCreateRecord({ group: geral }))
+  const geralLength = root.entries.length
+  push(root, groupCreateRecord({ group: later }))
+  // The root takes one of the creator's live slots: seven CWs fill the rest,
+  // a cut at 0 releases the first and the eighth takes its place. The eighth
+  // leaves, listing the root before the second create, and the diary
+  // confirms it.
+  const cws = Array.from({ length: MAX_GROUP_WRITERS_PER_DIARY }, () => log(key(), writerHeader({ group: community, diary: creator })))
+  const eighth = cws[cws.length - 1]
+  const leave = groupLeave({ cuts: [{ writer: community, seq: geralLength }, { writer: eighth.key, seq: 1 }] })
+  push(eighth, leave)
+  const diary = (cut) => {
+    const d = { key: creator, entries: [{ seq: 0, record: memberCertRecord(createCert({ member: creator }, kp)) }] }
+    push(d, groupJoinRecord({ group: community, writer: community, on: true }))
+    for (const cw of cws.slice(0, -1)) push(d, groupJoinRecord({ group: community, writer: cw.key, on: true }))
+    if (cut) push(d, groupCutRecord({ group: community, writer: cws[0].key, cut: 0 }))
+    push(d, groupJoinRecord({ group: community, writer: eighth.key, on: true }))
+    push(d, groupConfirmRecord({ group: community, writer: eighth.key, seq: 1, digest: leaveDigest(leave) }))
+    push(d, groupJoinRecord({ group: community, writer: eighth.key, on: false }))
+    return new Map([[creator, d.entries]])
+  }
+  t.alike(heldCatalogue(community, root, cws, diary(true)), [geral], 'the cut lets the eighth in: its confirmed leave bounds the root, so the later create does not count')
+  t.alike(heldCatalogue(community, root, cws, diary(false)), [geral, later], 'with no cut the eighth is over the cap and bounds nothing')
 })
