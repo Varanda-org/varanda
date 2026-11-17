@@ -1022,7 +1022,12 @@ function foldGroupRecord (entry, i, r) {
 // the walk gives its writer. A cut record lowers it, and so does a late
 // join (a deleted hole the scan passed, fetched once): the walk is stepped
 // again from its first record, and a cut it had ignored on a writer it did
-// not count yet now applies.
+// not count yet now applies. Only r.writer's cut is compared: a refused join
+// was counted when it was gated, so its writer had room at its join. A
+// record about another writer changes only the room left there (a late
+// join takes some, a late release frees some): the refused writer keeps its
+// slot or is over (never awaited), and its own marks apply whatever the
+// frozen and release room, so its cut never drops.
 function foldGroupWalk (entry, i, r) {
   const before = groupWalkCut(entry.groupWalks, r.group, r.writer)
   foldGroupRecord(entry, i, r)
