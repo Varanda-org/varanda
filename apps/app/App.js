@@ -54,7 +54,7 @@
 // The service is still asked in the background and its answer wins.
 // Design: apps/site/artwork/app-design.md.
 
-import { Profiler, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Profiler, memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { StatusBar } from 'expo-status-bar'
 import { Animated, AppState, BackHandler, Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -85,7 +85,9 @@ import { clearPostLink, savePostLink, takePostLink } from './src/postLinkStore'
 import { forgetSalt } from './src/sorteStore'
 import { fetchMember } from './src/indexClient'
 import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
-import { pageNoticeStore } from './src/pageNoticeStore'
+import { pageNoticeStore, wipeLegacyPageNotices } from './src/pageNoticeStore'
+import { inviteDropOnceId, syncedPageNoticeStore, withOnceTokens } from './src/onceMarks'
+import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, onceKeyOf, onceMember, onceMemberFor, onceRegistry, setOnceMember } from './src/onceSync'
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
@@ -2477,6 +2479,13 @@ function Member () {
     : null
   const seenMemberRef = useRef(seenMember)
   seenMemberRef.current = seenMember
+  // Screens read the page notice through the shared registry: set during
+  // render, like the ref above, so a handler never sees an older member.
+  setOnceMember(seenMember)
+  const [firstPass, stepFirstPass] = useReducer(firstPassStep, FIRST_PASS_IDLE)
+  // Bumped on every seenMember change: after A, null, A a late answer of the
+  // earlier appearance names the same member and must still be dropped.
+  const seenAppearanceRef = useRef(0)
   const seenOnlineRef = useRef(node.online)
   seenOnlineRef.current = node.online
   const seenRequestRef = useRef(node.request)
@@ -2502,15 +2511,49 @@ function Member () {
     // within the debounce, not only at the next poll.
     if (fresh && seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
   }, [ownKey])
+  // A one-time notice shown here travels as an own avisos token: every pass
+  // of its member sends the registry's unsynced marks, and a new one asks
+  // for a pass without the debounce.
+  useEffect(() => onceRegistry.onMark(({ member }) => {
+    if (member !== seenMemberRef.current || !seenSchedulerRef.current) return
+    seenSchedulerRef.current.wake('once')
+  }), [])
   useEffect(() => {
     avisosSeenRef.current = { own: [], pages: {} }
     avisosMergedRef.current = null
     avisosDeliveredRef.current = new Set()
     setRemoteSeen(null)
+    stepFirstPass({ type: 'member', member: seenMember })
+    const appearance = ++seenAppearanceRef.current
+    if (seenMember === null) return
+    // A pass that never starts (offline) must not hold the invite note.
+    const member = seenMember
+    let live = true
+    const t = setTimeout(() => stepFirstPass({ type: 'timeout', member }), FIRST_PASS_MS)
+    // The once-marks key, asked once per appearance of the member and never
+    // again after a failure: without it the marks stay on this device.
+    Promise.resolve()
+      .then(() => seenRequestRef.current('seen.onceKey', {}))
+      .then((answer) => {
+        const key = onceKeyOf(answer)
+        if (live && seenAppearanceRef.current === appearance && seenMemberRef.current === member && key !== null) {
+          onceRegistry.setKey(member, key)
+          // From here the page notice flags of this install are opaque: the
+          // page-named ones of earlier builds go, never turned into marks.
+          wipeLegacyPageNotices()
+        }
+      }, () => {})
+      .then(() => { if (live) stepFirstPass({ type: 'key', member }) })
+    return () => {
+      live = false
+      clearTimeout(t)
+      onceRegistry.forget(member)
+    }
   }, [seenMember])
   useEffect(() => {
     if (seenMember === null) return
     const member = seenMember
+    const appearance = seenAppearanceRef.current
     const run = async () => {
       // caughtUp describes the groups as the merge saw them when it
       // answered: the versions known at that answer are acknowledged, so a
@@ -2520,20 +2563,24 @@ function Member () {
         versions: groupVersionsRef.current,
         epoch: nodeEpochRef.current
       }))
-      const sent = cleanAvisos(avisosSeenRef.current)
+      const sent = cleanAvisos(withOnceTokens(avisosSeenRef.current, onceRegistry.unsynced(member)))
       const result = await runSeenPass({
         member,
         request,
         http: { seenStart, seenFinish },
         avisos: sent
       })
-      if (seenMemberRef.current !== member) return
+      if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return
+      // Answered or failed, the invite monitor no longer waits for it.
+      stepFirstPass({ type: 'pass', member })
       if (result.avisos) {
         // The first merge stored what was sent in the node's document.
         avisosSeenRef.current = dropSent(avisosSeenRef.current, sent)
         rememberSent(avisosDeliveredRef.current, sent)
         avisosMergedRef.current = result.avisos
         setRemoteSeen(result.avisos)
+        onceRegistry.delivered(member, sent.own)
+        onceRegistry.setRemote(member, result.avisos.own)
       }
       if (result.dmChanged) bumpDm()
       // Another device of the passkey blocked or unblocked someone.
@@ -2725,7 +2772,7 @@ function Member () {
         hosted: node.hosted,
         enabled: pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })
       })
-      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(pageNoticeStore(), key), canConverse })
+      const plan = pageDmPlan({ hint, read, seen: pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), key), canConverse })
       if (plan === 'open') return open()
       if (plan === 'direct') return pushScreen({ screen: 'mensagem', key, params: {} })
       if (plan === 'notice') return setPageDmAsk({ key })
@@ -2909,12 +2956,22 @@ function Member () {
   const [avisosReload, setAvisosReload] = useState(0)
   const [threadReload, setThreadReload] = useState({ ref: null, n: 0 })
   const [inviteNudge, setInviteNudge] = useState(0)
+  // The note marks its record in the seen document, so a second device of
+  // the passkey does not show it again; nothing syncs for any other member.
+  const inviteOnce = onceMemberFor(seenMember, member)
+  const inviteSeenElsewhere = useCallback((record) => inviteOnce !== null && onceRegistry.has('invite-drop', inviteOnce, inviteDropOnceId(record)), [inviteOnce])
+  const inviteMarked = useCallback((record) => { if (inviteOnce !== null) onceRegistry.mark('invite-drop', inviteOnce, inviteDropOnceId(record)) }, [inviteOnce])
   const inviteDrop = useInviteDrop({
-    enabled: node.hosted === true && node.visible !== false && ready && !locked && pkStatus?.unlocked === true && termsOk,
+    enabled: node.hosted === true && node.visible !== false && ready && !locked && pkStatus?.unlocked === true && termsOk && !inviteWaitsForSeen(firstPass, seenMember),
     member,
-    request: node.request
+    request: node.request,
+    seenElsewhere: inviteSeenElsewhere,
+    onMarked: inviteMarked
   })
   const handleInviteShown = inviteDrop.markSeen
+  // A mark from another device that arrives while the note is on screen.
+  const recheckInvite = inviteDrop.recheck
+  useEffect(() => onceRegistry.onChange(recheckInvite), [recheckInvite])
   const openInvites = useCallback(() => {
     setAjustes('convites')
     setInviteNudge((n) => n + 1)

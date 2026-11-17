@@ -1570,3 +1570,33 @@ test('inner v6: the largest certificate fits', (t) => {
   t.is(largest, 947, 'the largest v6 frame')
   t.ok(largest <= DM_INNER_BYTES)
 })
+
+test('bucketPrefix: a fixed vector, bytes and hex alike, 0..63', (t) => {
+  const key = b4a.alloc(32)
+  for (let i = 0; i < 32; i++) key[i] = i + 1
+  // BLAKE2b-256('varanda/dm-bucket/v1' || key), top 6 bits of byte 0.
+  const out = b4a.alloc(32)
+  sodium.crypto_generichash(out, b4a.concat([b4a.from('varanda/dm-bucket/v1', 'utf8'), key]))
+  t.is(dm.bucketPrefix(key), out[0] >> 2)
+  t.is(dm.bucketPrefix(b4a.toString(key, 'hex')), out[0] >> 2)
+  t.is(dm.bucketPrefix(key), 36, 'the pinned vector (hashlib blake2b, independently)')
+  const seen = new Set()
+  for (let i = 0; i < 400; i++) {
+    const p = dm.bucketPrefix(boxPair().publicKey)
+    t.ok(Number.isInteger(p) && p >= 0 && p <= 63)
+    seen.add(p)
+  }
+  t.ok(seen.size > 40, 'spread over the 64 prefixes')
+  t.exception.all(() => dm.bucketPrefix('zz'))
+  t.exception.all(() => dm.bucketPrefix(b4a.alloc(31)))
+})
+
+test('bucketBits: 500 to 1000 members per bucket, at most 6 bits', (t) => {
+  const table = [[0, 0], [999, 0], [1000, 1], [1999, 1], [2000, 2], [3999, 2], [4000, 3], [31999, 5], [32000, 6], [1000000, 6]]
+  for (const [served, bits] of table) t.is(dm.bucketBits(served), bits, served + ' served')
+  t.is(dm.bucketBits(-1), 0)
+  t.is(dm.bucketBits(1.5), 0)
+  t.is(dm.DM_BUCKET_BITS_MAX, 6)
+  t.is(dm.DM_PROTOCOL_V2, 'varanda/dm/2')
+  t.is(dm.VISIT_PROTOCOL_V2, 'varanda/visit/2')
+})
