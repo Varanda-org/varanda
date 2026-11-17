@@ -40,6 +40,8 @@ import { RATINGS_NOTE, collectRatings, reviewModel, starsLabel, summaryLabel } f
 import { installationOrigin } from '../installation'
 import { pageNoticeSeen } from '../pageNotice'
 import { pageNoticeStore } from '../pageNoticeStore'
+import { syncedPageNoticeStore } from '../onceMarks'
+import { onceMember, onceRegistry } from '../onceSync'
 import { isAppClient } from '../appClient'
 import { fetchMedia, validDescriptor } from '../media/fetch'
 import { encodeThumbnail } from '../media/encode'
@@ -256,7 +258,7 @@ export default function Anuncio ({
   // Both ways of contacting a Página share its one-time notice.
   const contactSeller = async (id) => {
     if (action.pending || !barActions.some((item) => item.id === id)) return
-    if (listing.page === true && !pageNoticeSeen(pageNoticeStore(), listing.author)) {
+    if (listing.page === true && !pageNoticeSeen(syncedPageNoticeStore(pageNoticeStore(), onceMember(), onceRegistry), listing.author)) {
       setPageNotice(id)
       return
     }

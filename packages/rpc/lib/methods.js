@@ -1636,6 +1636,8 @@ const SPECS = {
       return value.unchanged && value.blob !== null ? 'unchanged só com blob nulo' : null
     }
   },
+  // Result { key }: the account's secret for the app's once-marks (5.151).
+  'seen.onceKey': { fields: none },
   // Marks a momento seen for the member's devices (5.149); an idempotent local
   // store like dm.seen, synced in the seen document. Result { changed }.
   'moment.seen': { fields: { author: req(isKey), seq: req(int(1, 4294967295)) } },
