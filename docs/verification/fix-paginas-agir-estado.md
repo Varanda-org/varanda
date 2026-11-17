@@ -14,14 +14,14 @@ Como verificar, a partir da raiz:
 - `node apps/app/test/pages.test.js`: "pagesList sets the acting identity back to the person..." falha sem a chamada de `actingPageStopped` em `pagesList` (a identidade fica na Página encerrada, trocada de chave ou removida).
 - `npm run lint`, `npm test -- --affected=origin/main` e `npm run demo`.
 
-Caminhada no aparelho (Android primeiro, depois iOS, depois web), ainda não feita:
+Caminhada na web, no laboratório hospedado (`apps/cli/scripts/hosted-lab.js`, navegador sem tela, com os PRs de nomes e de entrar na comunidade juntos):
 
-- [ ] Android: abrir Conversas agindo como Página com o nó ocupado: sem "ocupado" cru, o cartão carrega sozinho.
-- [ ] Android: encerrar a Página em outro aparelho e abrir Páginas: este aparelho volta a agir como a pessoa, sem "sem chave da página".
-- [ ] Android: mudar a chave da Página em outro aparelho: o aparelho que agia na chave antiga volta para a pessoa.
-- [ ] Android: remover a pessoa como admin em outro aparelho: ao abrir Páginas, volta a agir como a pessoa.
-- [ ] iOS: os mesmos quatro passos.
-- [ ] Web: os mesmos quatro passos.
+- [x] Abrir Conversas agindo como Página com o nó ocupado: o topo fica quieto, sem "ocupado" cru nem "tentar de novo", e o cartão carrega sozinho.
+- [x] Encerrar a Página em outro aparelho e abrir Páginas: a linha diz "encerrada" e este aparelho volta a agir como a pessoa (Conversas pessoais), sem recarregar.
+- [x] Remover a pessoa como administradora em outro aparelho: Conversas mostra o aviso de chave até ela abrir Páginas (limite abaixo); ao abrir Páginas, volta a agir como a pessoa, sem recarregar.
+- [ ] Mudar a chave da Página em outro aparelho: o aparelho que agia na chave antiga volta para a pessoa. Mesmo caminho (`actingPageStopped`) e testes de unidade; fica para a caminhada do PR que leva o perfil para a chave nova, que muda a chave de uma Página.
+
+Android e iOS: os mesmos passos ficam com o Rodrigo, no APK de preview do EAS (o build de debug não entra com passkey).
 
 Limites:
 
