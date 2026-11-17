@@ -487,6 +487,13 @@ Prova de regressão (cada remoção revertida, `shasum` dos dois `sync.js` igual
 - 2, a recusa pelo limite tira a vaga de qualquer par: o teste F1 falha em "and keeps its slot of (G, Da)" (vaga nula; 3/4).
 - Sem remoção própria: `dropSlotOf` no fim do portão pela marca (o caminho só vale sem registro, e a vaga desse escritor é a do próprio cabeçalho), P3-a, P3-b e P3-c.
 
+## Ajustes da CI
+
+- `packages/web-member/test/sync-groups-4.test.js` passava do limite de 180 s por arquivo da CI (13 testes, cerca de 287 s). Foi dividido sem mudar nenhum teste: `sync-groups-4.test.js` (testes 1 a 6), `sync-groups-5.test.js` (7 a 10) e `sync-groups-6.test.js` (11 a 13). `scripts/run-tests.js` acha os arquivos novos sozinho.
+- Nó core, corrida na expulsão pelo limite (`packages/core/lib/sync.js`): um toco expulso do limite do diário que o provou sai da tabela antes de a limpeza do núcleo terminar. A listagem dele sob o par do próprio cabeçalho, na mesma execução, abria o núcleo ainda guardado e baixava os blocos, e a limpeza que estava na fila apagava tudo depois. Agora o portão de uma chave espera a limpeza em andamento dessa chave (`groupPurges`, depois `releaseSettled`), e o fim dessa limpeza só tira o alvo da chave (`groupTargets`) quando nenhuma entrada nova ocupa a chave. Falhava na CI (Linux, Node 20 e 24) e localmente sob carga.
+- Teste "a stub evicted from the cap of the diary that proved it is admitted under the pair its header names in the same run": a limpeza de K pela expulsão (`purgeHook`) só termina depois que a página com K sob (G, Dv) é servida, então essa listagem pode chegar com a limpeza em andamento (as duas ordens passam). Prova de regressão: com o `sync.js` anterior o teste falha 3 de 3 vezes em "and K's listing under (G, Dv) is then fetched in full"; com a correção passa. `docs/protocol.md` não muda: o comportamento descrito é o mesmo.
+- Cursores das páginas falsas nos testes 30, 31, 32 e 37 de `sync-groups-8.test.js`: eram `'1'.repeat(64)` e `'2'.repeat(64)`, e o nó descarta um item cuja chave não passa do cursor que enviou. Com chaves aleatórias, o teste 31 falhava em cerca de 6,6% das execuções e o 32 em cerca de 19%. Agora são `'0'.repeat(63) + '1'` e `'0'.repeat(63) + '2'`, que ficam antes de qualquer chave.
+
 ## Decisões tomadas aqui
 
 - Todas as recusas de cabeçalho entram neste PR (escolha do mantenedor): os casos a até e, nos dois nós.

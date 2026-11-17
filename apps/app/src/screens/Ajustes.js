@@ -84,6 +84,8 @@ import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import Conexao from './Conexao'
 import ExcluirConta from './ExcluirConta'
+import ExcluirSemPasskey from './ExcluirSemPasskey'
+import { SMS_TEXTS } from '../accountDeletion'
 import Convites from './Convites'
 import Identidade from './Identidade'
 import Passkeys from './Passkeys'
@@ -122,7 +124,8 @@ const TITLES = {
   bloqueados: BLOCK_TEXTS.listTitle,
   aparelhos: DEVICES_TITLE,
   recados: WALL_TITLE,
-  excluir: 'Excluir conta'
+  excluir: 'Excluir conta',
+  excluirSms: SMS_TEXTS.title
 }
 
 const PREVIEW_PREF_NOTE = 'Desligada, o app nunca consulta os links que você cola e nenhum player de música carrega: os cartões aparecem como links. Prévias que outras pessoas enviam continuam aparecendo.'
@@ -769,6 +772,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               <ExcluirConta
                 active={ready && screen === 'excluir'}
                 member={member}
+                canChangePhone={showChangePhone}
                 onOpenPaginas={pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function' ? openPaginas : undefined}
                 onTermsReset={onTermsReset}
                 scheduledDeletion={scheduledDeletion}
@@ -799,6 +803,16 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 onRetryKey={() => setInfoTick((n) => n + 1)}
                 inviteNudge={inviteNudge}
               />
+            </View>
+            )
+          : null}
+        {/* Reached from the Entrar step, before any account is open on this
+            device: it needs only the account service. */}
+        {/* Mounted only while shown: its countdown ticks every second. */}
+        {hosted && screen === 'excluirSms'
+          ? (
+            <View style={shown('excluirSms')}>
+              <ExcluirSemPasskey active={ready} offline={node.online === false} onDone={onClose} />
             </View>
             )
           : null}

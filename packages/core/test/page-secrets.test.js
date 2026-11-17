@@ -131,6 +131,50 @@ test('page-secrets: share signature', (t) => {
   t.exception.all(() => ps.signShare({ ...share, sealed: 'x' }, owner), /compartilhamento inválido/)
 })
 
+test('page-secrets: actor box statement', (t) => {
+  const actor = hcrypto.keyPair()
+  const actorHex = b4a.toString(actor.publicKey, 'hex')
+  const box = boxPair().hex
+  const at = '2026-11-17T12:00:00.000Z'
+  const st = { actor: actorHex, box, gen: 3, at }
+  const bytes = ps.actorBoxBytes(st)
+  t.alike(bytes.subarray(0, 26), b4a.from('varanda-page-actor-box-v1\n'))
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, b4a.from(JSON.stringify({ actor: actorHex, at, box, gen: 3 })))
+  t.alike(bytes.subarray(26), d, 'sha256 of the canonical json')
+  t.is(bytes.byteLength, 58)
+  const sig = ps.signActorBox(st, actor)
+  t.is(sig.length, 128)
+  t.ok(ps.verifyActorBox(st, sig))
+  t.ok(ps.verifyActorBox({ gen: 3, at, box, actor: actorHex }, sig), 'key order does not matter')
+  t.absent(ps.verifyActorBox({ ...st, actor: b4a.toString(hcrypto.keyPair().publicKey, 'hex') }, sig), 'another actor')
+  t.absent(ps.verifyActorBox({ ...st, box: boxPair().hex }, sig), 'another box')
+  t.absent(ps.verifyActorBox({ ...st, gen: 2 }, sig), 'another gen')
+  t.absent(ps.verifyActorBox({ ...st, at: '2026-11-17T12:00:00.001Z' }, sig), 'another at')
+  const other = hcrypto.keyPair()
+  t.absent(ps.verifyActorBox(st, b4a.toString(hcrypto.sign(bytes, other.secretKey), 'hex')), 'signed by another key')
+  // The same digest under the share prefix, or with no prefix, is refused.
+  const shareLike = b4a.concat([b4a.from('varanda-page-share-v1\n'), d])
+  t.absent(ps.verifyActorBox(st, b4a.toString(hcrypto.sign(shareLike, actor.secretKey), 'hex')), 'wrong prefix')
+  t.absent(ps.verifyActorBox(st, b4a.toString(hcrypto.sign(d, actor.secretKey), 'hex')), 'no prefix')
+  t.absent(ps.verifyActorBox(st, sig.slice(0, 126)))
+  t.absent(ps.verifyActorBox(st, sig.toUpperCase()))
+  t.absent(ps.verifyActorBox(st, null))
+  t.absent(ps.verifyActorBox(null, sig))
+  for (const bad of [
+    { ...st, actor: actorHex.toUpperCase() }, { ...st, actor: null }, { ...st, box: WEAK }, { ...st, box: 'x' },
+    { ...st, gen: 0 }, { ...st, gen: 1.5 }, { ...st, gen: '3' }, { ...st, gen: Number.MAX_SAFE_INTEGER + 1 },
+    { ...st, at: '2026-11-17T12:00:00Z' }, { ...st, at: 'ontem' }, { ...st, at: 1 }, { actor: actorHex, box, gen: 3 }
+  ]) {
+    t.absent(ps.verifyActorBox(bad, sig))
+    t.exception.all(() => ps.actorBoxBytes(bad), /caixa inválida/)
+  }
+  t.absent(ps.verifyActorBox({ get actor () { throw new Error('boom') }, box, gen: 3, at }, sig), 'never throws')
+  t.exception.all(() => ps.signActorBox(st, other), /chave de assinatura inválida/, 'only the actor signs its own box')
+  t.exception.all(() => ps.signActorBox(st, null), /chave de assinatura inválida/)
+  t.exception.all(() => ps.signActorBox({ ...st, gen: 0 }, actor), /caixa inválida/)
+})
+
 test('page-secrets: legacy box seal and open', (t) => {
   const me = boxPair()
   const secret = b4a.alloc(32)

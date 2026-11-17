@@ -1133,7 +1133,7 @@ test('a stub refused for the full cap of the diary that proved it is gated once,
       }
       served++
       if (q.after === null) return { items: [k], next: '0'.repeat(64), incomplete: false }
-      if (q.after === '0'.repeat(64)) return { items: [k], next: '1'.repeat(64), incomplete: false }
+      if (q.after === '0'.repeat(64)) return { items: [k], next: '0'.repeat(63) + '1', incomplete: false }
       return page([k])
     }
   })
@@ -1169,9 +1169,14 @@ test('a stub evicted from the cap of the diary that proved it is admitted under 
   let k = null
   let w = null
   let kOwn = null
+  let servedOwn = null
+  const ownServed = new Promise((resolve) => { servedOwn = resolve })
   // Page 1: Da's 31 writers and K fill Da's cap. Page 2, once they are
   // held: W, whose join by Da is earlier than K's, evicts K. Page 3, once K
-  // is evicted: K under (G, Dv), the pair its header names.
+  // is evicted: K under (G, Dv), the pair its header names. The eviction's
+  // purge of K is held until page 3 is served, so that listing can reach the
+  // node while the purge is in flight (both orders must pass). The cursors
+  // sort before any random key: the node drops an item not past its cursor.
   const fake = await fakeSeeder(t, bootstrap, kp, [], {
     answer: async (q) => {
       if (q.group !== group || kOwn === null) return page([])
@@ -1179,12 +1184,17 @@ test('a stub evicted from the cap of the diary that proved it is admitted under 
       const end = Date.now() + 10000
       if (q.after === '0'.repeat(64)) {
         while (![...ws, k].every((x) => downloaded(events, x.key, 1)) && Date.now() < end) await timeout(50)
-        return { items: [w], next: '1'.repeat(64), incomplete: false }
+        return { items: [w], next: '0'.repeat(63) + '1', incomplete: false }
       }
       while (skipped(events, k.key).length === 0 && Date.now() < end) await timeout(50)
+      servedOwn()
       return page([kOwn])
     }
   })
+  const purgeHook = async (key, s) => {
+    if (key === k.key) await Promise.race([ownServed, timeout(10000)])
+    await store.purgeReplica(s, key)
+  }
   const da = await diaryIn(fake.store, kp, 'diary-a')
   const dv = await diaryIn(fake.store, kp, 'diary-v')
   for (let i = 0; i < 31; i++) ws.push(await joinedCore(fake.store, 'w' + i, enc(writerHeader({ group, diary: da.key, member: PARENT })), da, group))
@@ -1193,7 +1203,7 @@ test('a stub evicted from the cap of the diary that proved it is admitted under 
   await dv.d.append(enc(groupJoinRecord({ group, writer: k.key, on: true })))
   kOwn = { ...k, diary: dv.key, seq: dv.d.length - 1 }
   const m = await groupMember(t, kp, group)
-  await syncOnce(bootstrap, m, { timeoutMs: 30000, onEvent: (ev) => events.push(ev) })
+  await syncOnce(bootstrap, m, { timeoutMs: 30000, onEvent: (ev) => events.push(ev), purgeHook })
   t.alike(skipped(events, k.key), ['quota'], 'K, a stub of (G, Da), gives way to W\'s earlier join')
   t.ok(downloaded(events, w.key, 1), 'W is held')
   t.alike(await heldCopy(m, k.key), { contiguous: 2, held: [0, 1] }, 'and K\'s listing under (G, Dv) is then fetched in full')
@@ -1223,11 +1233,11 @@ test('a stub held here in another role, evicted from the cap of the diary that p
       if (q.after === null) return { items: sorted([...ws, kdStub]), next: '0'.repeat(64), incomplete: false }
       if (q.after === '0'.repeat(64)) {
         while (![...ws, kdStub].every((y) => downloaded(events, y.key, 1)) && Date.now() < end) await timeout(50)
-        return { items: [x], next: '1'.repeat(64), incomplete: false }
+        return { items: [x], next: '0'.repeat(63) + '1', incomplete: false }
       }
-      if (q.after === '1'.repeat(64)) {
+      if (q.after === '0'.repeat(63) + '1') {
         while (!downloaded(events, x.key, 2) && Date.now() < end) await timeout(50)
-        return { items: [w], next: '2'.repeat(64), incomplete: false }
+        return { items: [w], next: '0'.repeat(63) + '2', incomplete: false }
       }
       while (skipped(events, kdStub.key).length === 0 && Date.now() < end) await timeout(50)
       return page([kdByX])
@@ -1401,8 +1411,8 @@ test('a stored writer that lost the full cap of the diary its header names is op
       while (skipped(events, k.key).length === 0 && Date.now() < end) await timeout(50)
       await timeout(500)
       served++
-      if (q.after === '0'.repeat(64)) return { items: [kByX], next: '1'.repeat(64), incomplete: false }
-      if (q.after === '1'.repeat(64)) return { items: [kByX], next: '2'.repeat(64), incomplete: false }
+      if (q.after === '0'.repeat(64)) return { items: [kByX], next: '0'.repeat(63) + '1', incomplete: false }
+      if (q.after === '0'.repeat(63) + '1') return { items: [kByX], next: '0'.repeat(63) + '2', incomplete: false }
       return page([kByX])
     }
   })
