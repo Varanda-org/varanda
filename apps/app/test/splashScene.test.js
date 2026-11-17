@@ -269,14 +269,14 @@ test('splashScene: scene sizes and scale', async (t) => {
   const at1 = m.sceneLayout({ width: 390, height: 844 })
   t.is(at1.k, 1)
   t.is(at1.height, 440)
-  t.is(at1.nearCount, 7)
-  t.is(at1.farCount, 5)
+  t.is(at1.nearCount, 5)
+  t.is(at1.farCount, 4)
   t.alike(at1.varanda, { x: 79, y: 80, w: 232, h: 174 })
   const at75 = m.sceneLayout({ width: 390, height: 500 })
   t.is(at75.k, 0.75)
   t.is(at75.height, 330)
-  t.is(at75.nearCount, 8)
-  t.is(at75.farCount, 6)
+  t.is(at75.nearCount, 6)
+  t.is(at75.farCount, 5)
 })
 
 test('splashScene: tiles stay lean for the static overlay', async (t) => {
@@ -377,25 +377,6 @@ test('splashScene: near joints look hand-set', async (t) => {
   }
 })
 
-test('splashScene: strip loops match the slide speed', async (t) => {
-  const m = await load()
-  const { SLIDES } = await import('../src/ui/splashMotion.js')
-  t.is(SLIDES.near.tile, m.nearTile().width, 'SLIDES near tile is the near tile width')
-  t.is(SLIDES.far.tile, m.farTile().width, 'SLIDES far tile is the far tile width')
-  const n = m.NEAR_SEQUENCE.length
-  for (const { k } of m.SCALE_STEPS) {
-    const loops = m.stripLoops(k)
-    t.alike(loops, {
-      near: { distance: SLIDES.near.tile * n * k, ms: SLIDES.near.ms * n },
-      far: { distance: SLIDES.far.tile * k, ms: SLIDES.far.ms }
-    })
-    t.ok(Number.isInteger(loops.near.distance) && Number.isInteger(loops.far.distance), 'whole pixels at k ' + k)
-    t.is(loops.near.ms / (loops.near.distance / k), SLIDES.near.ms / SLIDES.near.tile, 'same near speed per tile')
-    t.is(loops.far.ms / (loops.far.distance / k), SLIDES.far.ms / SLIDES.far.tile, 'same far speed per tile')
-  }
-  t.ok(Object.isFrozen(m.stripLoops(1)))
-})
-
 function chairBox (paths) {
   const b = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
   for (const p of paths) {
@@ -466,10 +447,10 @@ test('splashScene: scene layout boxes', async (t) => {
       t.ok(art.x0 >= vx + s * 24 && art.x1 <= vx + s * 186, tag + ': chair inside the posts, clear of the plant')
       t.ok(art.y0 >= vy + s * S.roof, tag + ': chair under the roof')
 
-      const loops = m.stripLoops(k)
-      t.ok(L.nearCount * S.near * k >= width + loops.near.distance, tag + ': near strip covers a full loop')
-      t.ok(L.farCount * 128 * k >= width + loops.far.distance, tag + ': far strip covers a full loop')
-      t.is(L.nearCount, Math.ceil(width / (96 * k)) + m.NEAR_SEQUENCE.length, tag + ': near count')
+      t.ok(L.nearCount * 96 * k >= width, tag + ': near strip covers the width')
+      t.ok((L.nearCount - 1) * 96 * k < width, tag + ': near strip has at most one tile to spare')
+      t.ok(L.farCount * 128 * k >= width, tag + ': far strip covers the width')
+      t.ok((L.farCount - 1) * 128 * k < width, tag + ': far strip has at most one tile to spare')
     }
   }
 })

@@ -33,8 +33,8 @@ test('splash wiring: the scene draws with plain react-native-svg shapes', (t) =>
     t.absent(new RegExp('\\b' + name + '\\b').test(src), 'no ' + name)
   }
   t.ok(src.includes("pointerEvents='none'"), 'never takes a touch')
-  t.ok(src.includes('renderToHardwareTextureAndroid'), 'strips slide as a compositor layer')
-  t.ok(src.includes('shouldRasterizeIOS'), 'strips slide as a compositor layer on iOS')
+  t.absent(src.includes('renderToHardwareTextureAndroid'), 'the still strips are not a compositor layer')
+  t.absent(src.includes('shouldRasterizeIOS'), 'the still strips are not a compositor layer on iOS')
 })
 
 test('splash wiring: gradients only for the sunset band and the sun', (t) => {
@@ -60,13 +60,11 @@ test('splash wiring: Splash mounts the scene and keeps one accessible header', (
   const src = withoutComments(read(SPLASH))
   t.ok(/import \{[^}]*\bSplashScene\b[^}]*\} from '\.\/SplashSceneView'/.test(src), 'imports SplashScene')
   t.ok(/import \{[^}]*\bsceneLayout\b[^}]*\bscenePalette\b[^}]*\} from '\.\/splashScene'/.test(src), 'imports sceneLayout and scenePalette')
-  t.ok(/import \{[^}]*\bslideMotion\b[^}]*\} from '\.\/splashMotion'/.test(src), 'imports slideMotion')
   t.absent(src.includes('cadeira.png'), 'no raster chair')
   t.absent(/\bImage\b/.test(src), 'no Image')
   t.is((src.match(/<SplashScene\b/g) || []).length, 1, 'one scene')
   t.ok(/\{!underShell && \([\s\S]{0,400}<SplashScene\b/.test(src), 'mounted only when not under the web overlay')
   t.is((src.match(/\{SPLASH_LABEL\}/g) || []).length, 1, 'one accessible label in the JSX')
-  t.is((src.match(/Animated\.loop\(Animated\.timing\(slide(Near|Far)\.current, loopTiming\(\{ toValue: 1, duration: [^,]+, easing: Easing\.linear, useNativeDriver: native \}\)\)\)/g) || []).length, 2, 'both slide loops are linear and go through loopTiming')
 })
 
 test('splash wiring: the word is the logo lettering, not text', async (t) => {
@@ -113,12 +111,53 @@ test('splash wiring: the splash reports its presentation once, never after unmou
   const entered = src.slice(src.indexOf('else if (enteredRef.current)'), src.indexOf('watchReduceMotion()', src.indexOf('else if (enteredRef.current)')))
   t.ok(entered.includes('resumeMoving()'), 'the entered path moves on')
   const resume = src.slice(src.indexOf('const resumeMoving'), src.indexOf('const skip'))
-  t.ok(resume.includes('startPulse()') && resume.includes('startSlides()') && resume.includes('startFlyers()'), 'resumeMoving pulses, slides and flies')
+  t.ok(resume.includes('startPulse()') && resume.includes('startStreet()') && resume.includes('startFlyers()'), 'resumeMoving pulses, starts the street and the flyers')
   t.absent(entered.includes('play()'), 'the entered path never replays the entrance')
   t.ok(entered.includes('cancelled || motionOff || reduce === true'), 'a stale answer never resumes motion')
   const listener = src.slice(src.indexOf("addEventListener('reduceMotionChanged'"), src.indexOf('let sub = null'))
   t.ok(listener.includes('motionOff = true'), 'the listener marks Reduce Motion switched on')
   t.ok(src.includes('if (cancelled || motionOff) return'), 'a stale answer never starts the entrance')
+})
+
+test('splash wiring: the street walks and the strips stay still', (t) => {
+  const scene = withoutComments(read(SCENE))
+  const splash = withoutComments(read(SPLASH))
+  const both = scene + '\n' + splash
+  for (const name of ['slideNear', 'slideFar', 'stripLoops', 'slideMotion', 'startSlides']) {
+    t.absent(both.includes(name), 'no ' + name)
+  }
+  t.ok(/from '\.\/splashStreet'/.test(scene), 'the scene imports from ./splashStreet')
+  t.ok(scene.includes('streetLayout(layout)'), 'built from streetLayout(layout)')
+  t.ok(scene.includes('street.lanes[i].interpolate({ inputRange: [0, 1], outputRange: [start + offset, start + offset + track] })'), 'each copy walks one track, linear')
+  t.ok(scene.includes('for (const offset of [0, -track])'), 'each mover is drawn twice, one track apart')
+  t.ok(/scaleX: -1/.test(scene), 'the vindo lane is a static mirror')
+  t.ok(/overflow: 'hidden'/.test(scene.slice(scene.indexOf('{art.near.svg}'), scene.indexOf('{art.street}'))), 'the people band clips')
+  const near = scene.indexOf('{art.near.svg}')
+  const people = scene.indexOf('{art.street}')
+  const kerb = scene.indexOf('palette.meioFio')
+  t.ok(near !== -1 && near < people && people < kerb, 'people sit on the near band, before the kerb')
+  const start = splash.slice(splash.indexOf('const startStreet'), splash.indexOf('const startFlyers'))
+  t.ok(/const s = streetMotion\(reduced\)/.test(start) && /if \(!s\) return/.test(start), 'streetMotion(reduced) guards the start')
+  const loop = /Animated\.loop\(Animated\.timing\([^,]+, loopTiming\(\{ toValue: 1, duration: [^,]+, easing: Easing\.linear, useNativeDriver: native \}\)\)\)/g
+  t.is((start.match(loop) || []).length, 5, 'exactly five street loops in the pinned form')
+  const drives = [
+    ['v.lanes[0]', 's.lanes.indo.ms'],
+    ['v.lanes[1]', 's.lanes.vindo.ms'],
+    ['v.strides[0]', 's.lanes.indo.strideMs'],
+    ['v.strides[1]', 's.lanes.vindo.strideMs'],
+    ['v.idle', 's.idle.ms']
+  ]
+  for (const [value, duration] of drives) {
+    const pair = 'Animated.timing(' + value + ', loopTiming({ toValue: 1, duration: ' + duration + ','
+    t.is(start.split(pair).length - 1, 1, value + ' loops once over ' + duration)
+  }
+  const stopAll = /const stopAll = \(\) => \{([\s\S]*?)\n {4}\}/.exec(splash)
+  t.ok(stopAll && stopAll[1].includes('walkers.forEach((w) => w.stop())') && stopAll[1].includes('walkers = []'), 'stopAll stops the walkers and clears them')
+  const settle = /const settle = \(\) => \{([\s\S]*?)\n {4}\}/.exec(splash)
+  t.ok(settle && /\[\.\.\.street\.current\.lanes, \.\.\.street\.current\.strides, street\.current\.idle\]/.test(settle[1]) && /setValue\(0\)/.test(settle[1]), 'settle sets every street value to 0')
+  t.is((splash.match(/startStreet\(\)/g) || []).length, 2, 'startStreet() appears exactly twice as a call')
+  t.ok(splash.includes('street={street.current}'), 'the scene gets the values')
+  t.absent(splash.includes('layoutRef'), 'layout is not read from a ref')
 })
 
 test('splash wiring: the bar slides a full-width fill by translateX on the native driver', (t) => {
