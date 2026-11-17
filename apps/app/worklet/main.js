@@ -4,7 +4,7 @@
 // The Varanda node inside the app: a Bare worklet (react-native-bare-kit)
 // started by src/client/native.js with one JSON argument
 //   { kind, dataDir, association, bootstrap, dhtHost, allowPublicDht, recover,
-//     diagnostics, seederUrl, cacheDir }
+//     diagnostics, seederUrl, cacheDir, accountOrigin }
 // It runs ONE node session over the worklet IPC, framed as docs/rpc.md
 // section 3 (4-byte big-endian length + UTF-8 JSON). kind 'core' (the
 // default, also when kind is absent) is @varanda/core/lib/session on the
@@ -93,6 +93,31 @@ function diagnostics () {
     ' bare=' + String(Bare.version)
 }
 
+// Conversas on the core node (text): only when the host names the account
+// origin (accountOrigin, https; http only on loopback). Bare has no
+// WebCrypto HKDF nor globalThis.fetch: both are given here, as web-node.js
+// does.
+function coreDm (args) {
+  if (typeof args.accountOrigin !== 'string' || args.accountOrigin === '') return null
+  // As mainWeb: WebCrypto and TextEncoder before web-member loads.
+  require('bare-crypto/global')
+  require('bare-encoding/global')
+  const crypto = require('bare-crypto')
+  const { Socket } = require('bare-ws')
+  const { createCoreDm } = require('@varanda/web-member/lib/core-dm')
+  const { duplexSocket } = require('@varanda/web-member/lib/duplex-socket')
+  const { hkdfSha256 } = require('@varanda/web-member/lib/hkdf')
+  const { createBareFetch } = require('./bare-fetch')
+  const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest()
+  return (hooks) => createCoreDm({
+    ...hooks,
+    accountOrigin: args.accountOrigin,
+    createSocket: (url) => duplexSocket(new Socket(url)),
+    fetch: createBareFetch({ http: require('bare-http1'), https: require('bare-https') }),
+    hkdf: (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
+  })
+}
+
 function main () {
   const args = readArgs()
   if (args === null) {
@@ -112,6 +137,7 @@ function main () {
       dhtHost: args.dhtHost === undefined ? null : args.dhtHost,
       allowPublicDht: args.allowPublicDht === true,
       storeOptions: { lock: 'worklet', recover: args.recover === true, suspend: true },
+      dm: coreDm(args),
       onInternalError: (err) => console.error('varanda worklet: internal error', err && err.stack ? err.stack : err)
     })
   } catch (err) {

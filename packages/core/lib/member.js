@@ -76,6 +76,7 @@ const { pageState, signRoster, signAccept, signOffer, signOrigin, signClose, sig
 const { pageLifecycle, cutEntries, originOf, latestDelegate } = require('./page-lifecycle')
 const { signPage, canonicalOp, opHash: pageOpHash, ACTIONS: PAGE_STATEMENTS } = require('./page-proof')
 const { signTerms } = require('./terms')
+const { signActorBox } = require('./page-secrets')
 const groupCrypto = require('./group-crypto')
 const devices = require('./devices')
 const rekeyPolicy = require('./group-rekey')
@@ -1282,6 +1283,138 @@ function pageSign (ctx, { action, nonce, page, op }) {
   } catch (err) {
     if (err instanceof TypeError || err instanceof SyntaxError) throw new UsageError(BAD_PAGE)
     throw err
+  } finally {
+    pair.secretKey.fill(0)
+  }
+}
+
+// ---- direct messages (docs/protocol.md section 11) ----
+
+const BAD_BOX = 'chave de caixa inválida'
+
+// The newest valid dm-key of a diary's entries ({ seq, record }): highest
+// gen, ties by highest seq; a weak box key is invalid (records.js). ->
+// { box, gen, seq } | null. Same rule as the browser node (web-member
+// member-ops.js), so both nodes answer dm.lookup alike.
+function newestDmKey (entries) {
+  let best = null
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (e === null || typeof e !== 'object' || e.record === null || typeof e.record !== 'object') continue
+    if (e.record.type !== 'dm-key' || validateRecord(e.record, e.seq) !== null) continue
+    if (best === null || e.record.gen > best.gen || (e.record.gen === best.gen && e.seq > best.seq)) {
+      best = { box: e.record.box, gen: e.record.gen, seq: e.seq }
+    }
+  }
+  return best
+}
+
+// Readers that hold no complete replica find a dm-key by a bounded
+// newest-first scan (8 windows of 36 seqs), so the owner keeps its newest
+// dm-key within the newest DM_KEY_REFRESH_BLOCKS blocks of its diary: an
+// older one is appended again, same box and gen (a refresh, not a rotation).
+const DM_KEY_REFRESH_BLOCKS = 256
+
+function dmKeyCurrent (current, length, { box, gen }) {
+  return current !== null && current.box === box && current.gen === gen && current.seq >= length - DM_KEY_REFRESH_BLOCKS
+}
+
+function dmKeyRecord ({ box, gen }) {
+  const record = { type: 'dm-key', box, gen, at: nowIso() }
+  if (typeof box !== 'string' || !/^[0-9a-f]{64}$/.test(box) || validateRecord(record, 1) !== null) throw new UsageError(BAD_BOX)
+  return record
+}
+
+// Whether dmKeyEnsure would append (nothing written).
+async function dmKeyStale (ctx, { box, gen }) {
+  dmKeyRecord({ box, gen })
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) return false
+    return !dmKeyCurrent(newestDmKey(await readAll(diary)), diary.length, { box, gen })
+  })
+}
+
+// Appends a dm-key for { box, gen }, signed by the diary signer like every
+// own record, unless the diary's newest valid one is exactly that and
+// recent. -> { box, gen, seq | null }.
+async function dmKeyEnsure (ctx, { box, gen }) {
+  const record = dmKeyRecord({ box, gen })
+  return withIdentity(ctx, async ({ diary }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const current = newestDmKey(await readAll(diary))
+    if (dmKeyCurrent(current, diary.length, { box, gen })) return { box, gen, seq: null }
+    const seq = await appendRecord(diary, record)
+    return { box, gen, seq }
+  })
+}
+
+// The newest dm-key of `member` from local data (the local half of
+// dm.lookup): the own diary -> { box, gen } (box and gen null without one);
+// a stored replica -> { box, gen } | null. null means "not known here" (no
+// replica, a partial one, or a blocked author, which answers like no local
+// data): the caller then asks the network, never answering "none". Never
+// creates a core and never deletes one.
+async function dmLookup (ctx, member) {
+  if (typeof member !== 'string' || !HEX64.test(member)) throw new UsageError('chave inválida')
+  const key = member.toLowerCase()
+  const association = trustRoot(ctx)
+  const store = await openStore(ctx)
+  try {
+    const diary = await openDiary(store)
+    if (hex(diary.key) === key) {
+      const best = newestDmKey(await readAll(diary))
+      return best === null ? { box: null, gen: null } : { box: best.box, gen: best.gen }
+    }
+    const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    if (blocked.has(key)) return null
+    if (!(await replicaStored(store, key))) return null
+    const replica = await openReplica(store, key)
+    const entries = await readAll(replica)
+    // Checked BEFORE an empty core is purged, as pageRead does.
+    const forked = replica.fork !== 0
+    const empty = replica.contiguousLength === 0
+    if (empty) await purgeReplica(store, key)
+    if (forked || empty) return null
+    // A dm-key rotation in a tail not downloaded yet must not be hidden by
+    // an older one in the prefix.
+    if (replica.contiguousLength < replica.length) return null
+    if (revokedIssuers.size > 0 && revokedIssuerReason(entries, key, association, revokedIssuers)) return null
+    const best = newestDmKey(entries)
+    return best === null ? null : { box: best.box, gen: best.gen }
+  } finally {
+    await store.close()
+  }
+}
+
+// The diary signer for the DM engine, which signs with it outside any
+// member.* call (stamp link proof v2, blob uploads): { diary: hex64, keyPair }
+// where diary is the Hypercore 11 diary key (the hash of the signer's
+// manifest, ./diary-signer.js) and keyPair is a copy of the signer pair.
+// Never reaches RPC; the caller keeps it in memory only while Conversas is
+// unlocked and zeroes keyPair.secretKey when it locks or closes.
+async function dmSigner (ctx) {
+  return withIdentity(ctx, ({ diary, ownHex }) => {
+    const { publicKey, secretKey } = diary.keyPair
+    return { diary: ownHex, keyPair: { publicKey: b4a.from(publicKey), secretKey: b4a.from(secretKey) } }
+  })
+}
+
+// dm.actorBox (docs/rpc.md 5.161): the page delegate's statement that `box`
+// (the node's own DM box, gen `gen`) is its box, signed by the delegate key,
+// which never leaves this function. -> { actor, box, gen, at, sig }.
+function dmActorBox (ctx, { box, gen }) {
+  trustRoot(ctx)
+  const pair = readDelegate(ctx)
+  if (pair === null) throw new UsageError(PAGE_KEY_MISSING)
+  try {
+    const statement = { actor: hex(pair.publicKey), box, gen, at: nowIso() }
+    let sig
+    try {
+      sig = signActorBox(statement, pair)
+    } catch (err) {
+      if (err instanceof TypeError) throw new UsageError(BAD_BOX)
+      throw err
+    }
+    return { ...statement, sig }
   } finally {
     pair.secretKey.fill(0)
   }
@@ -4336,6 +4469,13 @@ module.exports = {
   pageRegister,
   pageSign,
   readDelegate,
+  newestDmKey,
+  DM_KEY_REFRESH_BLOCKS,
+  dmKeyStale,
+  dmKeyEnsure,
+  dmLookup,
+  dmSigner,
+  dmActorBox,
   groupCreate,
   groupJoin,
   groupLeave,

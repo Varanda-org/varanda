@@ -222,8 +222,8 @@ function sealBlob (plain) {
 // wallet uses it (./dm-store.js); both may throw while locked.
 // limits (tests): wallet, walletLow, issueBurst, issuePaceMs, topUpEveryMs,
 // topUpRetryMs, keyCheckMs, rotationMs, putBurst, putPaceMs, forceMargin, copyBatch,
-// copyReserveChunk, link (dm-link limits).
-function createBlobClient ({ seederUrl, createSocket, association, storage, seal, open, log = noop, limits = {} } = {}) {
+// copyReserveChunk, link (dm-link limits). stampDiary: as ./dm.js's.
+function createBlobClient ({ seederUrl, createSocket, association, storage, seal, open, log = noop, limits = {}, stampDiary = () => null } = {}) {
   if (storage === null || typeof storage !== 'object') throw new TypeError('storage is required')
   if (typeof seal !== 'function' || typeof open !== 'function') throw new TypeError('seal and open are required')
   const L = {
@@ -401,7 +401,7 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
       const first = pub === null
       let link
       try {
-        link = await openStampLink({ ...linkOpts, limits: { stampDeadlineMs: BLOB_STAMP_LINK_DEADLINE_MS, ...L.link }, keyPair })
+        link = await openStampLink({ ...linkOpts, limits: { stampDeadlineMs: BLOB_STAMP_LINK_DEADLINE_MS, ...L.link }, keyPair, diary: stampDiary() })
       } catch (err) {
         shortBy = 'seeder'
         if (first) throw err
@@ -620,7 +620,7 @@ function createBlobClient ({ seederUrl, createSocket, association, storage, seal
   async function buyCopyStamps (keyPair, count, source, stop = null) {
     let link
     try {
-      link = await openStampLink({ ...linkOpts, limits: { stampDeadlineMs: BLOB_STAMP_LINK_DEADLINE_MS, ...L.link }, keyPair })
+      link = await openStampLink({ ...linkOpts, limits: { stampDeadlineMs: BLOB_STAMP_LINK_DEADLINE_MS, ...L.link }, keyPair, diary: stampDiary() })
     } catch (err) {
       if (err instanceof UsageError) throw err
       throw new UsageError(NO_SEEDER)

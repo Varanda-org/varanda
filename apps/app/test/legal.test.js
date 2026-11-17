@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 84)
+  t.is(LEGAL_VERSION, 88)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 84, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 88, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '58faae50b2411f0243a4fbe1ddc314c276534302265eba92a3b8dbd6b13c0b85', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'f0f1e69ff6acf9da4526d0ae12cc47881612c18b9ba05db292f2d1b559d1dc41', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -1019,4 +1019,14 @@ test('legal: version 84 describes Excluir conta sem a passkey and the e-mail pat
   t.ok(text(PRIVACY).includes('para você pedir a exclusão da conta sem a passkey'))
   t.ok(text(PRIVACY).includes('Só o operador consegue ler o número, com um comando do servidor, para atender uma ordem judicial ou um pedido seu.'), 'the operator line is unchanged: the service never unseals the number')
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 88 says the Conversas keys of a core node sit in a file with no passkey', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const sentence = 'Num nó core, as chaves das Conversas, as do próprio nó e as das Páginas que ele administra, ficam guardadas num arquivo naquele aparelho, sem nenhuma passkey que as proteja: quem tiver a pasta de dados desse nó consegue ler essas conversas, e quem perder essa pasta perde essas conversas.'
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes(sentence), doc.title + ': the core seed file and what losing it means')
+    t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+  }
 })
