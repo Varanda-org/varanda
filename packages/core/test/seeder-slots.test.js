@@ -454,6 +454,71 @@ test('slots: the oldest external streams from this host keep their slots, up to 
   t.is(seeder._localStreams.size, 2)
 })
 
+test('slots: a displaced local stream leaves the local share at once, not when its socket closes', async (t) => {
+  t.timeout(60000)
+  const { bootstrap } = await testnet(t)
+  // maxExternal 4: the local share is one stream.
+  const { seeder, events } = await startSeeder(t, bootstrap, { maxExternal: 4, probationMs: 60000 })
+  const serve = (optsFor) => {
+    const server = net.createServer((raw) => seeder.acceptStream(raw, optsFor(raw)))
+    t.teardown(() => new Promise((resolve) => server.close(() => resolve())), { force: true })
+    return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+  }
+  // Like seed-ws while it sends 1013, the local caller keeps a displaced
+  // stream open, so its socket closes only after DISPLACED_GRACE_MS. The
+  // clients never finish a handshake: a long deadline keeps them open on a
+  // slow machine.
+  const portLocal = await serve((raw) => ({
+    address: '127.0.0.1',
+    local: true,
+    handshakeTimeoutMs: 50000,
+    onRefuse: (r) => { if (r.reason !== 'connection-displaced') raw.destroy() }
+  }))
+  const remote = (address) => serve(() => ({ address }))
+  const portB = await remote('192.0.2.50')
+  const portC = await remote('192.0.2.51')
+  const portG = await remote('192.0.2.52')
+  const dial = (port) => {
+    const s = net.connect(port, '127.0.0.1')
+    s.on('error', () => {})
+    t.teardown(() => s.destroy(), { force: true })
+    return s
+  }
+  const closed = (s) => s.destroyed ? Promise.resolve() : new Promise((resolve) => s.once('close', resolve))
+
+  const l1 = dial(portLocal)
+  await until(() => seeder.stats().external === 1, { name: 'local 1' })
+  const l2 = dial(portLocal)
+  await until(() => seeder.stats().external === 2, { name: 'local 2' })
+  dial(portLocal)
+  await until(() => seeder.stats().external === 3, { name: 'local 3' })
+  dial(portB)
+  await until(() => seeder.stats().external === 4, { name: 'B' })
+  // C displaces the newest unprotected local stream, l3, which stays open
+  // for its grace period.
+  dial(portC)
+  await until(() => displaced(events).length === 1, { name: 'l3 displaced' })
+  t.is(seeder._localStreams.size, 2, 'the displaced stream left the local share')
+
+  // The older local streams close while l3 is still open: l4, now the
+  // oldest local stream that holds a slot, takes the share, not l3.
+  l1.destroy()
+  l2.destroy()
+  await until(() => seeder.stats().external === 2, { name: 'l1 and l2 closed' })
+  const l4 = dial(portLocal)
+  await until(() => seeder.stats().external === 3, { name: 'local 4' })
+  const l5 = dial(portLocal)
+  await until(() => seeder.stats().external === 4, { name: 'local 5' })
+  // 127.0.0.1 holds one unprotected stream (l5) and G's address none, all
+  // in probation: G is refused and nothing is displaced.
+  const g = dial(portG)
+  await closed(g)
+  t.is(limited(events).length, 1, 'G is refused')
+  t.is(displaced(events).length, 1, 'l4 holds the local share, so l5 is not displaced')
+  t.absent(l4.destroyed)
+  t.absent(l5.destroyed)
+})
+
 test('prove: rules on order, role, count, signature and ownership', async (t) => {
   t.timeout(180000)
   const { bootstrap } = await testnet(t)

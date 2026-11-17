@@ -1,0 +1,7 @@
+### Alterado
+
+- A cópia das conversas para outro aparelho agora é automática (#351): quando um aparelho novo entra com a mesma passkey, um dos aparelhos da conta registrados antes dele copia as conversas para ele em segundo plano, uma vez por aparelho novo. Primeiro vai o texto das conversas e das Páginas que esse aparelho guarda, depois as fotos das conversas da pessoa já guardadas nele, das mais recentes para as mais antigas, dentro da cota semanal de cópia do semeador. Uma reserva lacrada para a própria conta (inner v8 no protocolo) faz um só aparelho copiar quando vários estão abertos; o texto vai num manifesto v3, que nomeia os aparelhos que o recebem, e as fotos vão em lotes (manifesto v2). Versões anteriores do app ignoram uma cópia automática. Uma cópia interrompida continua na próxima vez que o app abre. Um aparelho desconectado em "Aparelhos conectados" não faz nem recebe cópia. O aparelho novo continua mostrando o aviso "Conversas copiadas de outro aparelho". Termos e Política descrevem a cópia automática e dizem que qualquer aparelho novo que entrar com a passkey recebe assim o histórico das conversas, sem aviso nos outros aparelhos, e que desconectar um aparelho em "Aparelhos conectados" interrompe uma cópia em andamento (Termos 83). Verificação em `docs/verification/feat-auto-history-copy.md`.
+
+### Removido
+
+- A linha "Copiar conversas para outro aparelho" de Conversas e a folha dela. O RPC `dm.historyCopy` (5.156, o número fica reservado) e o evento `dm.copyProgress` saem; `dm.copyImported` continua.

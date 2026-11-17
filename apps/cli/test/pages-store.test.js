@@ -550,18 +550,30 @@ test('pages-store: a replaced file at the same path but another seq is refused',
   t.absent(fs.existsSync(file), 'nothing was written')
 })
 
-test('pages-store: a lost lock after the write is not acknowledged and stops later writes', async (t) => {
+test('pages-store: a lock refused after the write is not acknowledged; the store keeps working once it answers again', async (t) => {
   const { open } = setup(t)
   let calls = 0
-  let lostAt = 1
+  // Asked before the re-read (0), right before the rename (1), after it (2).
+  let lostAt = 2
   const store = open({ guard: () => calls++ !== lostAt })
   const page = key()
   await rejects(t, store.create({ page, owner: key() }), 'indisponivel', 'guard false after the write')
-  throwsCode(t, () => store.get(page), 'indisponivel', 'reads fail closed after a lost lock')
-  throwsCode(t, () => store.isPage(page), 'indisponivel', 'isPage fails closed after a lost lock')
-  lostAt = -1
-  await rejects(t, store.create({ page: key(), owner: key() }), 'indisponivel', 'dirty until reopened')
   t.ok(open().isPage(page), 'the write itself is on disk for the next holder')
+  t.ok(store.isPage(page), 'memory follows the file')
+  lostAt = -1
+  const other = key()
+  await store.create({ page: other, owner: key() })
+  t.ok(open().isPage(other), 'the next write lands: the store did not stop')
+})
+
+test('pages-store: after fail() every write and read is refused', async (t) => {
+  const { open } = setup(t)
+  const store = open()
+  const page = key()
+  await store.create({ page, owner: key() })
+  store.fail()
+  await rejects(t, store.create({ page: key(), owner: key() }), 'indisponivel', 'writes refused')
+  throwsCode(t, () => store.get(page), 'indisponivel', 'reads fail closed')
 })
 
 test('pages-store: a write that throws after the rename fails reads closed too', async (t) => {
@@ -702,6 +714,97 @@ test('pages-store: at most MAX_PAGE_MOVES moves through movedFrom', async (t) =>
   }
   await rejects(t, store.move(page, key()), 'pedido-invalido', 'the 5th move')
   t.is(store.stats().moved, MAX_PAGE_MOVES)
+})
+
+test('pages-store: an admin removed from the live key loses the old keys too', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const a = key()
+  const b = key()
+  const c = key()
+  const k1 = key()
+  const k2 = key()
+  const k3 = key()
+  const pages = (list) => [...list.owned, ...list.admin].map((p) => p.page)
+  const removeAdmin = async (page, member, seq) => {
+    const rm = store.remove(page, member)
+    await store.setRoster(page, { gen: rm.gen, seq, owner, admins: rm.admins })
+  }
+  await store.create({ page: k1, owner })
+  await addAdmin(store, k1, a, 3)
+  await addAdmin(store, k1, b, 4)
+  await addAdmin(store, k1, c, 5)
+  await removeAdmin(k1, c, 6)
+  await store.move(k1, k2)
+  t.is(store.role(k1, b), 'admin', 'before the remove, the old key still counts')
+  await removeAdmin(k2, b, 5)
+
+  t.alike(pages(store.listFor(b)), [], 'the removed admin is listed neither the old key nor the new one')
+  t.is(store.role(k1, b), null)
+  t.is(store.role(k2, b), null)
+  throwsCode(t, () => store.authorize(k1, b), 'sem-permissao', 'the old key refuses the removed admin')
+  t.alike(pages(store.listFor(c)), [], 'an admin removed before the move stays unlisted')
+  t.is(store.role(k1, c), null)
+  const ofA = store.listFor(a).admin
+  t.is(ofA.find((p) => p.page === k1).movedTo, k2, 'a remaining admin still sees the old key as moved')
+  t.ok(ofA.some((p) => p.page === k2))
+  t.is(store.role(k1, a), 'admin')
+  t.is(store.listFor(owner).owned.find((p) => p.page === k1).movedTo, k2, 'the owner still sees the old key')
+  t.is(store.authorize(k1, owner, 'owner'), 'owner')
+  t.is(open().role(k1, b), null, 'the same after a reopen')
+
+  // A second move: the end of the chain decides for every key behind it.
+  await store.move(k2, k3)
+  await removeAdmin(k3, a, 3)
+  t.alike(pages(store.listFor(a)), [], 'removed from K3, nothing of K1 or K2 is listed')
+  t.is(store.role(k1, a), null)
+  t.is(store.role(k2, a), null)
+  throwsCode(t, () => store.authorize(k2, a), 'sem-permissao', 'K2 refuses the admin removed from K3')
+  t.alike(pages(store.listFor(owner)).sort(), [k1, k2, k3].sort(), 'the owner keeps the whole chain')
+  t.alike(pages(store.listFor(b)), [], 'the admin removed from K2 stays unlisted')
+})
+
+test('pages-store: a closed end of the move chain keeps its roster for the old keys', async (t) => {
+  const { store } = setup(t)
+  const owner = key()
+  const a = key()
+  const k1 = key()
+  const k2 = key()
+  await store.create({ page: k1, owner })
+  await addAdmin(store, k1, a, 3)
+  await store.move(k1, k2)
+  await store.close(k2)
+  t.is(store.role(k1, a), 'admin')
+  const listed = store.listFor(a).admin
+  t.is(listed.find((p) => p.page === k1).movedTo, k2, 'the old key is still listed as moved')
+  t.ok(listed.find((p) => p.page === k2).closed)
+})
+
+test('pages-store: a move chain whose end row is missing, or that loops, counts no old roster', async (t) => {
+  const { store, open, file } = setup(t)
+  const owner = key()
+  const a = key()
+  const k1 = key()
+  const k2 = key()
+  await store.create({ page: k1, owner })
+  await addAdmin(store, k1, a, 3)
+  await store.move(k1, k2)
+  const obj = JSON.parse(fs.readFileSync(file, 'utf8'))
+  delete obj.pages[k2]
+  fs.writeFileSync(file, JSON.stringify(obj))
+  const gone = open()
+  t.ok(gone.available(), 'the file still loads')
+  t.is(gone.role(k1, owner), null, 'no end row: the owner role on K1 does not count')
+  t.is(gone.role(k1, a), null, 'nor the admin role')
+  t.alike(gone.listFor(a).admin, [], 'K1 is listed to no one')
+  t.alike(gone.listFor(owner).owned, [])
+
+  obj.pages[k2] = { ...obj.pages[k1], movedTo: k1, movedFrom: k1 }
+  fs.writeFileSync(file, JSON.stringify(obj))
+  const loop = open()
+  t.ok(loop.available(), 'a loop loads')
+  t.is(loop.role(k1, a), null, 'a loop never reaches an end')
+  t.is(loop.role(k2, owner), null)
 })
 
 test('pages-store: a file it would not write makes it unavailable, readOnly never writes', async (t) => {

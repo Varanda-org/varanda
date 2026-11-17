@@ -10,8 +10,9 @@ export const OLD_KEY_READONLY = 'Conversa da chave antiga da página: só leitur
 
 const HEX64 = /^[0-9a-f]{64}$/
 
-// The keys this Página moved from, newest first. A failed read ends the walk.
-export async function oldPageKeys (request, page, { max = 4 } = {}) {
+// The keys this Página moved from, newest first. A failed read ends the walk,
+// or with `strict` rejects, so a caller can tell it from a chain that ends.
+export async function oldPageKeys (request, page, { max = 4, strict = false } = {}) {
   const found = []
   const seen = new Set([page])
   let key = page
@@ -19,7 +20,8 @@ export async function oldPageKeys (request, page, { max = 4 } = {}) {
     let read
     try {
       read = await request('page.read', { key })
-    } catch {
+    } catch (err) {
+      if (strict) throw err
       break
     }
     const from = read && read.movedFrom && typeof read.movedFrom === 'object' ? read.movedFrom.from : null

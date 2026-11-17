@@ -278,3 +278,20 @@ test('dm-budget: v7 is a history copy pointer, canonical in wire order, and fits
   t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds it')
   t.is(budget.innerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1, 'innerVersion never picks v7')
 })
+
+test('dm-budget: v8 is a history copy claim, canonical in wire order, and fits one drop', (t) => {
+  t.alike(budget.DM_INNER_KEYS_V8, ['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+  t.ok(Object.isFrozen(budget.DM_INNER_KEYS_V8))
+  t.alike(budget.DM_INNER_KEYS_V8, dm.INNER_KEYS_V8, 'core signs the key list the rpc measures')
+  const devices = []
+  for (let i = 0; i < dm.DM_CLAIM_FOR_MAX; i++) devices.push(i.toString(16) + 'a'.repeat(63))
+  const body = { v: 8, kind: 'claim', id: 'e'.repeat(32), from: 'f'.repeat(64), to: 'f'.repeat(64), copy: 'd'.repeat(32), for: devices, by: 'b'.repeat(64), at: '2026-11-17T12:00:00.000Z' }
+  const shuffled = Object.fromEntries(Object.entries({ ...body, text: 'leak', cert: null }).reverse())
+  const parsed = JSON.parse(budget.canonicalInnerJson(shuffled))
+  t.alike(Object.keys(parsed), budget.DM_INNER_KEYS_V8, 'wire order whatever the caller built, nothing else')
+  t.is(parsed.copy, body.copy, 'the copy id is kept as is, not read as a descriptor')
+  t.alike(parsed.for, devices)
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(body))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds the largest claim')
+  t.is(budget.canonicalInnerJson({ v: 'constructor', id: 'x' }), budget.canonicalInnerJson({ v: 1, id: 'x' }).replace('"v":1', '"v":"constructor"'), 'an unknown version takes the v1 keys')
+})

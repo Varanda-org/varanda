@@ -23,6 +23,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { startSeedWs } = require('../lib/seed-ws')
+const avifSamples = require('../../../packages/rpc/test/helpers/avif-samples')
 
 const ORIGIN = 'https://varanda.test'
 const ROBOTS = 'noindex, nofollow, noarchive'
@@ -65,13 +66,20 @@ function jpeg (size, fill) {
   return b
 }
 
-// Media core blocks 1..6 are JPEGs (IMG[0..5]) and block 7 the video bytes.
+// Media core blocks 1..6 are JPEGs (IMG[0..5]), block 7 the video bytes,
+// block 8 a real AVIF and block 9 an AVIF cut short (its ftyp still there).
 const IMG = [0, 1, 2, 3, 4, 5].map((i) => jpeg(300 + i, i + 1))
 const VIDEO = b4a.concat([b4a.from([0, 0, 0, 0x18]), b4a.from('ftypmp42'), b4a.alloc(500, 9)])
+const AVIF = b4a.from(avifSamples.ios.opaque)
+const BAD_AVIF = b4a.from(AVIF.subarray(0, 100))
 
 function descriptor (core, start, bytes, hash = sha(bytes)) {
   const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
   return { core, mime: 'image/jpeg', start, blocks, bytes: bytes.byteLength, sha256: hash, width: 100, height: 100 }
+}
+
+function avifDescriptor (core, start, bytes) {
+  return { core, mime: 'image/avif', start, blocks: 1, bytes: bytes.byteLength, sha256: sha(bytes), width: 16, height: 16 }
 }
 
 function videoDescriptor (core, start, bytes) {
@@ -95,6 +103,8 @@ async function member (t, bootstrap, assoc, records) {
   await mediaCore.append(b4a.from(JSON.stringify(mediaHeader({ diary: key }))))
   for (const block of IMG) await mediaCore.append(block)
   await mediaCore.append(VIDEO)
+  await mediaCore.append(AVIF)
+  await mediaCore.append(BAD_AVIF)
   const mediaKey = hex(mediaCore.key)
   await diary.append(memberCertRecord(validCert(assoc, key)))
   for (const r of records(key, mediaKey)) await diary.append(r)
@@ -213,7 +223,11 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
     share(12, 12), // 13
     postRecord({ text: 'hash errado', at: at(13), media: [descriptor(K, 1, IMG[0], sha(IMG[1]))] }), // 14
     share(14, 14), // 15
-    listingRecord({ kind: 'produto', title: 'Bicicleta', text: 'Pouco usada.', price: 35000, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null }, at: at(15) }) // 16
+    listingRecord({ kind: 'produto', title: 'Bicicleta', text: 'Pouco usada.', price: 35000, cat: 'esporte', place: { uf: 'SP', city: 'São Paulo', bairro: null }, at: at(15) }), // 16
+    postRecord({ text: 'avif', at: at(16), media: [avifDescriptor(K, 8, AVIF), descriptor(K, 1, IMG[0])] }), // 17
+    share(17, 17), // 18
+    postRecord({ text: 'avif cortado', at: at(18), media: [avifDescriptor(K, 9, BAD_AVIF)] }), // 19
+    share(19, 19) // 20
   ])
   const K = A.mediaKey
   await admit(A, assoc)
@@ -387,6 +401,24 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
     t.is(res.status, 404, 'video post foto ' + n)
     t.absent(res.body.includes(VIDEO.subarray(0, 12)), 'no video bytes')
   }
+
+  // An AVIF post: the AVIF counts as a photo and is served as image/avif,
+  // og:image names the JPEG after it, and AVIF bytes that fail the parser
+  // are a 404.
+  const avifPage = await get(on.port, '/p/' + A.key + '/17')
+  t.is(avifPage.status, 200)
+  const avifHtml = avifPage.body.toString()
+  t.is((avifHtml.match(/<img /g) || []).length, 2, 'the AVIF is a photo on the page')
+  t.ok(avifHtml.includes('<meta property="og:image" content="' + ORIGIN + '/p/' + A.key + '/17/foto/2">\n<meta property="og:image:type" content="image/jpeg">'), 'og:image skips the AVIF first photo')
+  t.absent(avifHtml.includes(AVIF.subarray(0, 32).toString('latin1')), 'no peer bytes in the HTML')
+  const avifFoto = await get(on.port, '/p/' + A.key + '/17/foto/1')
+  t.is(avifFoto.status, 200, 'the AVIF photo')
+  t.is(avifFoto.headers['content-type'], 'image/avif')
+  t.alike(avifFoto.body, AVIF, 'the AVIF bytes')
+  t.is((await get(on.port, '/p/' + A.key + '/17/foto/2')).headers['content-type'], 'image/jpeg', 'the JPEG after it')
+  t.is(JSON.parse((await get(on.port, '/p/' + A.key + '/17/previa')).body.toString()).post.photoCount, 2, 'the preview counts the AVIF')
+  t.is((await get(on.port, '/p/' + A.key + '/19/foto/1')).status, 404, 'AVIF bytes that fail the parser')
+  t.absent((await get(on.port, '/p/' + A.key + '/19')).body.toString().includes('og:image'), 'no og:image when the only photo is AVIF')
 
   // The share tombstoned while the photo bytes are read: the second
   // postPublic sees it and nothing is written.

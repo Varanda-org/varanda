@@ -11,6 +11,13 @@ const load = () => import('../src/media/fetch.js')
 const AUTHOR = 'ab'.repeat(32)
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
+// Stamps a minimal JPEG frame header (SOF0, 1x1, one component) on the start
+// of `bytes`, so rpc.mediaBounds accepts the photo fetchMedia now checks.
+function photo (bytes) {
+  bytes.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00])
+  return bytes
+}
+
 function descriptor (bytes, over = {}) {
   return {
     core: 'cd'.repeat(32),
@@ -62,7 +69,7 @@ const reason = async (p) => {
 
 test('an injected digest is used with the exact bytes, and noble is not', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(70000).map((_, i) => i % 251)
+  const bytes = photo(new Uint8Array(70000).map((_, i) => i % 251))
   const { calls, subtle, sha256 } = spies()
   const got = await fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response(bytes), subtle, sha256 })
   t.alike(Array.from(got), Array.from(bytes))
@@ -74,7 +81,7 @@ test('an injected digest is used with the exact bytes, and noble is not', async 
 
 test('a wrong injected digest still fails with conteúdo não confere', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(1000).fill(5)
+  const bytes = photo(new Uint8Array(1000).fill(5))
   const { subtle, sha256 } = spies(async () => new Uint8Array(32).buffer)
   const err = await reason(fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response(bytes), subtle, sha256 }))
   t.is(err && err.message, 'conteúdo não confere')
@@ -83,7 +90,7 @@ test('a wrong injected digest still fails with conteúdo não confere', async (t
 
 test('without a digest (subtle null) noble is used', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(1000).fill(9)
+  const bytes = photo(new Uint8Array(1000).fill(9))
   const { calls, sha256 } = spies()
   await fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response(bytes), subtle: null, sha256 })
   t.is(calls.noble, 1)
@@ -99,7 +106,7 @@ test('hash.web.js keeps WebCrypto; hash.native.js without expo-crypto leaves nob
   const native = await import('../src/media/hash.native.js')
   t.is(native.nativeSubtle, undefined)
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(500).fill(1)
+  const bytes = photo(new Uint8Array(500).fill(1))
   const { calls, sha256 } = spies()
   await fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response(bytes), subtle: web.nativeSubtle, sha256 })
   t.is(calls.noble, 0, 'undefined subtle falls back to the global WebCrypto')
@@ -107,7 +114,7 @@ test('hash.web.js keeps WebCrypto; hash.native.js without expo-crypto leaves nob
 
 test('media-hash timing: one line per photo, both paths, result unchanged', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(4096).fill(2)
+  const bytes = photo(new Uint8Array(4096).fill(2))
   const lines = []
   const marks = { mark: (name, extra) => lines.push([name, extra]) }
   const { calls, subtle, sha256 } = spies()
@@ -190,7 +197,7 @@ test('every app media download passes the native digest', (t) => {
 
 test('without marks nothing extra runs', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(4096).fill(4)
+  const bytes = photo(new Uint8Array(4096).fill(4))
   const { calls, subtle, sha256 } = spies()
   await fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response(bytes), subtle, sha256 })
   t.is(calls.noble, 0)

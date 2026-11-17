@@ -16,7 +16,7 @@
 // repair is picked up without a restart. fail() is final. Bad argument shapes throw TypeError.
 //
 // Every write runs in one in-process queue and first re-reads the file (the
-// service lock can go stale and writeJsonAtomic renames unconditionally), so
+// service lock can go stale, so another holder may have replaced it), so
 // memory and disk are union-merged: per member the earliest checkedAt wins
 // and, on a tie, the more protective '16-17'. A later '18+' never replaces a
 // '16-17'.
@@ -27,6 +27,10 @@
 // that may not be on disk. The store is then marked dirty, which only forces
 // the next record or heal to rewrite the merge before answering; an entry
 // the failed write did land is adopted from the file on that re-read.
+// guard() is also asked right before the rename (./guarded-write.js, after
+// the temp file is written and fsynced): a false answer there leaves file
+// and memory as they were and refuses that request, like the check before
+// the re-read.
 //
 // heal() runs in the same queue: it re-reads the file and writes the merge
 // back when the file lacks anything this holder knows (or the store is
@@ -34,7 +38,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 
 const FILE = 'age.json'
@@ -185,8 +189,9 @@ function openAgeStore (dataDir, { now = Date.now, guard = () => true, readOnly =
   // re-reads the file, so whatever did land is adopted then.
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
-    } catch {
+      writeGuarded(file, toJson(next), 0o600, guard)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         readState(file)

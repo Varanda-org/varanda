@@ -25,6 +25,9 @@ services:
       VARANDA_MAX_EXTERNAL: "${VARANDA_MAX_EXTERNAL:-}"
       VARANDA_MAX_SOCKETS: "${VARANDA_MAX_SOCKETS:-}"
       VARANDA_FRAME_MEMORY: "${VARANDA_FRAME_MEMORY:-}"
+      # Orçamento total de bytes do semeador (diários, mídia e grupos).
+      # Vazio usa o padrão do semeador, 64 GiB.
+      VARANDA_STORAGE_BYTES: "${VARANDA_STORAGE_BYTES:-}"
       VARANDA_MEDIA_MAX_IN_FLIGHT: "${VARANDA_MEDIA_MAX_IN_FLIGHT:-}"
       VARANDA_MEDIA_RATE: "${VARANDA_MEDIA_RATE:-}"
       VARANDA_MEDIA_BURST: "${VARANDA_MEDIA_BURST:-}"

@@ -2,12 +2,19 @@
 // bytes that are uploaded, like encode.web.js.
 // - A GIF passes through UNCHANGED (the animation is kept), at most
 //   MAX_GIF_BYTES; its size comes from the header (gif.js).
-// - Other photos go through expo-image-manipulator: resized to
-//   fitWithin(w, h, MAX_IMAGE_SIDE) and re-encoded as JPEG (0.85). Decoding
-//   and re-encoding the pixels STRIPS all metadata: EXIF, GPS position,
-//   camera data. The temporary file the module writes is deleted at once.
-// Sources over 50 MiB are refused before decoding (memory). Every result
-// passes checkFile.
+// - Other photos are re-encoded in the order stillPlan.js gives: AVIF when
+//   the device's system encoder passed its probe (modules/image-prep, loaded
+//   only when a photo needs it; a probe or encode past AVIF_BUDGET_MS turns
+//   AVIF off for later photos), then WebP, then JPEG; a source that can be
+//   transparent tries WebP, then PNG. AVIF is written straight from the
+//   source; the others go through expo-image-manipulator, resized to
+//   fitWithin(w, h, MAX_IMAGE_SIDE). Decoding and re-encoding the pixels
+//   STRIPS all metadata: EXIF, GPS position, camera data. Every output is
+//   parsed as a peer would parse it (stillPlan accept), the first one that
+//   passes wins with the size its header declares, and each temporary file
+//   is deleted at once, kept or not. encodeFile(asset, { format: 'jpeg' })
+//   writes JPEG only (a video poster).
+// Sources over 50 MiB are refused before decoding (memory).
 // -> { bytes: Uint8Array, mime, width, height }; throws an Error with a
 // message for the person.
 
@@ -19,9 +26,15 @@ import { orientedSize } from './exif.js'
 import { gifProblem, gifSize } from './gif.js'
 import { acceptedSource, canHaveAlpha, gifOverCap } from './source.js'
 import { MAX_GIF_BYTES, MAX_IMAGE_SIDE, MAX_MEDIA_DIMENSION, checkFile, fitWithin } from './plan.js'
+import { AVIF_BUDGET_MS, JPEG_QUALITY, WEBP_QUALITY, accept, avifQuality, mimeOf, noteAvifTimeout, stillAttempts, withBudget } from './stillPlan.js'
 
-const QUALITY = 0.85
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024
+const PREPARE_FAILED = 'não foi possível preparar a foto'
+const SAVE_FORMATS = {
+  webp: { format: SaveFormat.WEBP, compress: WEBP_QUALITY },
+  jpeg: { format: SaveFormat.JPEG, compress: JPEG_QUALITY },
+  png: { format: SaveFormat.PNG }
+}
 
 function fail (message) {
   return new Error(message)
@@ -29,6 +42,11 @@ function fail (message) {
 
 function discard (file) {
   try { if (file.exists) file.delete() } catch {}
+}
+
+function discardUri (uri) {
+  if (typeof uri !== 'string') return
+  try { discard(new File(uri)) } catch {}
 }
 
 async function encodeGif (source, bytes) {
@@ -42,46 +60,105 @@ async function encodeGif (source, bytes) {
   return { bytes, mime: 'image/gif', ...size }
 }
 
-async function encodePhoto (asset) {
+async function encodePhoto (asset, force) {
   const w = asset.width
   const h = asset.height
   if (!(Number.isInteger(w) && Number.isInteger(h) && w >= 1 && h >= 1)) throw fail('não foi possível abrir a foto')
   if (w > MAX_MEDIA_DIMENSION || h > MAX_MEDIA_DIMENSION) throw fail('foto grande demais')
   const fit = fitWithin(w, h, MAX_IMAGE_SIDE)
   const actions = fit.width === w && fit.height === h ? [] : [{ resize: { width: fit.width, height: fit.height } }]
-  // PNG and WebP can be transparent and the manipulator cannot fill a white
-  // background here, so they are saved as PNG to keep the alpha. Only when
-  // that PNG breaks the byte limit does JPEG take over (residual: transparent
-  // pixels of a very large image turn black).
-  if (canHaveAlpha(asset.mimeType)) {
-    const png = await save(asset.uri, actions, SaveFormat.PNG, 'image/png')
-    if (png.ok) return png.value
+  const mime = typeof asset.mimeType === 'string' ? asset.mimeType.toLowerCase() : ''
+  // PNG, WebP and AVIF can be transparent and the manipulator cannot fill a
+  // white background here, so they never become JPEG (transparent pixels
+  // would turn black), nor AVIF, whose profile refuses alpha.
+  const alpha = canHaveAlpha(asset.mimeType) || mime === 'image/avif'
+  // The probe loads the native module, so it runs only when AVIF could be tried.
+  const prep = stillAttempts({ avif: true, webp: true, alpha, force }).includes('avif') ? await avifEncoder() : null
+  let problem = PREPARE_FAILED
+  for (const format of stillAttempts({ avif: prep !== null, webp: true, alpha, force })) {
+    const out = format === 'avif' ? await saveAvif(prep, asset.uri) : await save(asset.uri, actions, format)
+    if (out.value) return out.value
+    problem = out.problem
   }
-  const jpeg = await save(asset.uri, actions, SaveFormat.JPEG, 'image/jpeg')
-  if (!jpeg.ok) throw fail(jpeg.problem)
-  return jpeg.value
+  throw fail(problem)
 }
 
-// -> { ok: true, value } or { ok: false, problem } when checkFile refuses.
-async function save (uri, actions, format, mime) {
-  let result
+// -> { value, timedOut }. The system encoder runs on one serial queue, so a
+// stalled probe or encode would hang the photo without a deadline. value is
+// null when the call failed or ran past the budget; a late value goes to onLate.
+async function budgeted (call, onLate) {
+  let pending = true
+  // A synchronous throw from native code becomes a rejection here.
+  const settled = (async () => call())().finally(() => { pending = false })
+  const value = await withBudget(settled, AVIF_BUDGET_MS, onLate)
+  return { value, timedOut: value === null && pending }
+}
+
+// -> the image-prep module when this device encodes AVIF, else null.
+async function avifEncoder () {
+  const probe = await budgeted(async () => {
+    const prep = await import('../../modules/image-prep')
+    return (await prep.canEncodeAvif()) === true ? prep : null
+  }, () => {})
+  if (probe.timedOut) noteAvifTimeout()
+  return probe.value || null
+}
+
+// -> { value } or { problem }. The system encoder reads the source itself, so
+// there is no manipulator intermediate to delete.
+async function saveAvif (prep, uri) {
+  const { value: out, timedOut } = await budgeted(() => prep.encodeAvif(uri, { maxSide: MAX_IMAGE_SIDE, quality: avifQuality() }), (late) => {
+    if (late && late.uri !== uri) discardUri(late.uri)
+  })
+  if (timedOut) noteAvifTimeout()
+  // Never the picked original, which is not ours to delete.
+  if (!out || typeof out.uri !== 'string' || out.uri === uri) return { problem: PREPARE_FAILED }
+  let file
   try {
-    result = await manipulateAsync(uri, actions, { compress: QUALITY, format })
+    file = new File(out.uri)
   } catch {
-    throw fail('não foi possível preparar a foto')
+    return { problem: PREPARE_FAILED }
   }
-  const out = new File(result.uri)
   try {
-    const bytes = await out.bytes()
-    const problem = checkFile({ mime, bytes: bytes.byteLength, width: result.width, height: result.height })
-    if (problem) return { ok: false, problem }
-    return { ok: true, value: { bytes, mime, width: result.width, height: result.height } }
+    const bytes = await file.bytes()
+    const size = accept(bytes, 'image/avif', rpc.mediaBounds)
+    if (size) return { value: { bytes, mime: 'image/avif', width: size.width, height: size.height } }
+    return { problem: PREPARE_FAILED }
+  } catch {
+    return { problem: PREPARE_FAILED }
   } finally {
-    discard(out)
+    discard(file)
   }
 }
 
-export async function encodeFile (asset) {
+// -> { value } or { problem }: checkFile's message when the output breaks a
+// limit, so the person reads why.
+async function save (uri, actions, format) {
+  const mime = mimeOf(format)
+  let result
+  let file
+  try {
+    result = await manipulateAsync(uri, actions, SAVE_FORMATS[format])
+    file = new File(result.uri)
+  } catch {
+    return { problem: PREPARE_FAILED }
+  }
+  try {
+    const bytes = await file.bytes()
+    const size = accept(bytes, mime, rpc.mediaBounds)
+    if (size) return { value: { bytes, mime, width: size.width, height: size.height } }
+    return { problem: checkFile({ mime, bytes: bytes.byteLength, width: result.width, height: result.height }) || PREPARE_FAILED }
+  } catch {
+    return { problem: PREPARE_FAILED }
+  } finally {
+    discard(file)
+  }
+}
+
+// options.format 'jpeg' forces JPEG: a video poster must be image/jpeg.
+export async function encodeFile (asset, options) {
+  const force = options ? options.format : undefined
+  if (force !== undefined && force !== 'jpeg') throw new TypeError('Expected format to be jpeg')
   if (!asset || typeof asset.uri !== 'string' || !acceptedSource(asset.mimeType)) throw fail('formato não aceito')
   let file
   let size
@@ -94,9 +171,10 @@ export async function encodeFile (asset) {
   if (!(size >= 1)) throw fail('não foi possível abrir a foto')
   if (size > MAX_SOURCE_BYTES) throw fail('arquivo grande demais')
   const mime = typeof asset.mimeType === 'string' ? asset.mimeType.toLowerCase() : ''
-  // A GIF is told by its signature too: a picker may report a wrong type.
-  if (mime === 'image/gif' && gifOverCap(size, MAX_GIF_BYTES)) throw fail('arquivo grande demais')
-  if (mime === 'image/gif' || size <= MAX_GIF_BYTES) {
+  // A GIF is told by its signature too: a picker may report a wrong type. A
+  // forced JPEG never passes a GIF through, so it skips the sniff.
+  if (force === undefined && mime === 'image/gif' && gifOverCap(size, MAX_GIF_BYTES)) throw fail('arquivo grande demais')
+  if (force === undefined && (mime === 'image/gif' || size <= MAX_GIF_BYTES)) {
     let bytes
     try {
       bytes = await file.bytes()
@@ -106,7 +184,7 @@ export async function encodeFile (asset) {
     if (gifSize(bytes)) return encodeGif(asset, bytes)
     if (mime === 'image/gif') throw fail('formato não aceito')
   }
-  return encodePhoto(asset)
+  return encodePhoto(asset, force)
 }
 
 // A link card's thumbnail (../linkCard.js): the page image re-encoded as a

@@ -118,6 +118,7 @@ const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-sha
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const devices = require('@varanda/core/lib/devices')
 const store = require('./node-store')
+const { COPY_WINDOW_MS } = require('./dm-copy')
 
 const {
   buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader, replacedWriterCut, retiredWriterCut, walkHasRoom, slotWalk,
@@ -6578,6 +6579,14 @@ async function deviceOff (ctx) {
   return withIdentity(ctx, async ({ diary, ownHex }) => ({ off: (await deviceStateIn(ctx, await store.readAll(diary), ownHex)).off }))
 }
 
+// -> { self, off, targets } for the automatic history copy
+// (devices.copyView over COPY_WINDOW_MS), or null while locked. Only the own
+// diary and kv are read, so the run's cores may be borrowed.
+async function deviceCopyView (ctx) {
+  if (keyPairOf(ctx) === null) return null
+  return withDevices(ctx, async ({ self, own, view }) => devices.copyView({ fold: view.fold, self, own, cuts: view.cuts, now: Date.now(), windowMs: COPY_WINDOW_MS }))
+}
+
 // A disconnected device binds no new writer by hand either (group.join,
 // community.join, group.create, community.create): only device.reconnect,
 // after the passkey, brings it back (rpc.md 5.154). Checked before anything
@@ -6981,6 +6990,7 @@ module.exports = {
   deviceDisconnect,
   deviceReconnect,
   deviceOff,
+  deviceCopyView,
   DEVICE_PARTIAL,
   AUTO_ENROL_RESERVE,
   isNeedsExclusive,

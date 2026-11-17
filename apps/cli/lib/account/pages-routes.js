@@ -84,7 +84,7 @@ const { canonicalOp, opHash, verifyPage } = require('@varanda/core/lib/page-proo
 const pageLib = require('@varanda/core/lib/page')
 const { createIssuedCert, createUsernameRecord, isPlainObject } = require('@varanda/core/lib/cert')
 const { isUsername } = require('@varanda/core/lib/account-link')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
 const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
@@ -268,6 +268,9 @@ function createPagesRoutes ({
   pagesNotices = null,
   pagesGroups = null,
   pagesDelegate = null,
+  // The service lock, asked right before the rename of the nonce key and
+  // the invites file (./guarded-write.js).
+  guard = () => true,
   // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
   phoneChecked = () => {},
   http
@@ -364,7 +367,7 @@ function createPagesRoutes ({
         throw new Error('invalid')
       }
       const key = nodeCrypto.randomBytes(32)
-      writeJsonAtomic(file, { v: 1, key: key.toString('hex') }, 0o600)
+      writeGuarded(file, { v: 1, key: key.toString('hex') }, 0o600, guard)
       return key
     } catch {
       log({ event: 'pagina', action: 'nonce-key', reason: 'indisponivel' })
@@ -667,6 +670,18 @@ function createPagesRoutes ({
     if (got === null || (role === 'owner' && got !== 'owner')) throw refuse('sem-permissao')
   }
 
+  // For a row that may have moved: the store counts its frozen roster only
+  // for whoever still holds a role at the end of the move chain.
+  function needHeld (page, member) {
+    let got
+    try {
+      got = pagesStore.role(page, member)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    if (got === null) throw refuse('sem-permissao')
+  }
+
   // At most 2 closes or moves per owner per 24 h, kept in pages.json so a
   // restart does not reset it: a use is charged once, however often it is
   // resent, and a definite refusal gives it back. A store failure refuses.
@@ -814,7 +829,7 @@ function createPagesRoutes ({
       return
     }
     try {
-      writeJsonAtomic(file, { v: 1, rows }, 0o600)
+      writeGuarded(file, { v: 1, rows }, 0o600, guard)
     } catch (err) {
       inviteStale = true
       throw err
@@ -1380,7 +1395,7 @@ function createPagesRoutes ({
     try {
       if (action === 'list') return pagesStore.listFor(member)
       const row = rowOf(page)
-      need(row, member, 'admin')
+      needHeld(page, member)
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
       const picked = pickedOf(await writer.readEntries(page))

@@ -8,7 +8,7 @@ export const MOMENT_PHOTO_MAX_AGE_MS = 5 * 60 * 1000
 export const MOMENT_PHOTO_AHEAD_STALL_MS = 30 * 1000
 export const MOMENT_PHOTO_MAX_READS = 2
 export const MOMENT_PHOTO_MAX_STALLED = 2
-export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
 
 const OFF = Object.freeze({ phase: 'off' })
 // The hold of a read() made without an owner: any want() can end it.

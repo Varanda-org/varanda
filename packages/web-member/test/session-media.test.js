@@ -28,6 +28,7 @@ const { wsStream } = require('../lib/ws-stream')
 const { MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MAX_MEDIA_BLOCKS, VIDEO_DESCRIPTOR_KEYS, validVideoDescriptor } = require('@varanda/core/lib/records')
 const { videoBounds, stripVideoMetadata } = require('@varanda/rpc')
 const { validateDescriptor } = require('@varanda/core/lib/media')
+const avif = require('../../rpc/test/helpers/avif-samples')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
@@ -267,6 +268,49 @@ test('mediaUpload stores the item, declares the core once, and a post carries th
     t.alike([err && err.code, err && err.message], ['USAGE', BAD_MEDIA], label)
   }
   t.is((await s.web.request('log.read', {})).entries.length, 6, 'nothing appended for a forged descriptor')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+// An ftyp box with these brands (minor version 0), then filler.
+function ftypBody (major, compatible, tail = 400) {
+  const box = 16 + 4 * compatible.length
+  const b = b4a.alloc(box + tail, 0x11)
+  b.writeUInt32BE(box, 0)
+  b.write('ftyp' + major, 4, 'latin1')
+  b.writeUInt32BE(0, 12)
+  compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+  return new Uint8Array(b)
+}
+
+test('mediaUpload of an AVIF: a whole one is stored, a truncated or mislabelled one never is', async (t) => {
+  await testnet(t, 1)
+  const s = await certified(t)
+  const sample = avif.libavif.opaque
+  const d = await upload(s.node, sample, { mime: 'image/avif', width: 16, height: 16 })
+  t.alike([d.mime, d.bytes, d.width, d.height], ['image/avif', sample.byteLength, 16, 16], 'the descriptor names the AVIF')
+  t.is(validateDescriptor(d), null, 'a valid descriptor')
+  t.alike((await readItem(s.storage, d)).bytes, b4a.from(sample), 'the bytes read back from the media core')
+  const ios = await Promise.resolve().then(() => upload(s.node, avif.ios.opaque, { mime: 'image/avif', width: 16, height: 16 })).catch((err) => err)
+  t.alike([ios.mime, ios.bytes], ['image/avif', avif.ios.opaque.byteLength], 'the iOS encoder\'s AVIF is stored too')
+  const length = (await readItem(s.storage, d)).length
+
+  const cut = sample.subarray(0, sample.byteLength - 40)
+  for (const [label, args] of [
+    ['a truncated AVIF', { bytes: cut }],
+    ['a truncated AVIF, sealed', { bytes: cut, sealed: true }],
+    ['an AVIF labelled PNG', { bytes: sample, mime: 'image/png' }],
+    ['an AVIF labelled JPEG', { bytes: sample, mime: 'image/jpeg' }],
+    ['a HEIC labelled AVIF', { bytes: ftypBody('heic', ['mif1', 'heic']) }],
+    ['a mif1 HEIC labelled AVIF', { bytes: ftypBody('mif1', ['mif1', 'heic']) }],
+    ['an audio MP4 labelled AVIF', { bytes: ftypBody('M4A ', ['M4A ', 'mp42', 'isom']) }],
+    ['an AVIF sequence labelled AVIF', { bytes: ftypBody('avis', ['avis', 'avif', 'mif1']) }]
+  ]) {
+    t.exception.all(() => upload(s.node, sample, { mime: 'image/avif', width: 16, height: 16, ...args }), /mídia inválida/, label)
+  }
+  const voice = await errorOf(Promise.resolve().then(() => upload(s.node, sample, { mime: 'audio/mp4', width: 0, height: 0, ms: 1000, kind: 'voice' })))
+  t.is(voice && voice.message, BAD_MEDIA, 'an AVIF is not a voice note')
+  t.alike(await store.readMediaCores(s.storage), [d.core], 'only the one media core')
+  t.is((await readItem(s.storage, d)).length, length, 'nothing stored by a refused call')
   t.alike(s.internal, [], 'no internal error')
 })
 

@@ -527,7 +527,8 @@ function followRange (core, deleted, { groupBound = false } = {}) {
 // topicHasPeer(topic), lastClosedPeer(), recomputeCount(), groupTargetCount(),
 // groupCoreCount(), diskSlotOf(key) (the cap slot a stored key holds, or
 // null), swarmTopicCount(), walkReadCount() and boxLiftCount()
-// (the binding diary walks read and the box lifts run), createMemo(limit)
+// (the binding diary walks read and the box lifts run), storedGateCount(key)
+// (the gates that opened the stored core of key), createMemo(limit)
 // (a gate memory of this run's mode), divergeDiary(key) (the verdict of a
 // binding diary whose stored blocks differ from the gated ones),
 // hardError(msg) and groupDiverged(key) (record a hard error, a group
@@ -634,6 +635,7 @@ async function runSync ({
   let recomputes = 0 // test-only (inspectHook)
   let walkReads = 0 // test-only (inspectHook)
   let boxLiftRuns = 0 // test-only (inspectHook)
+  const storedGates = new Map() // test-only (inspectHook): key -> gates that opened its stored core
   const follows = new Map() // key -> entry
   let followWrites = Promise.resolve() // migrate's follows.json updates, one at a time
   const topicKeys = new Map() // topic hex -> key hex (own diary and follows)
@@ -704,6 +706,7 @@ async function runSync ({
   const refused = createMemo(gateLimit) // 'group:key' refused by the writer's own data
   const capRefused = createMemo(gateLimit) // 'group:key' refused for the per-diary cap whose skip was emitted
   const provenLater = createMemo(gateLimit) // 'group:key:diary' whose cap the key's proven join lost
+  const cappedHints = createMemo(gateLimit) // 'group:key:listed diary' -> the stored header's diary whose cap it lost
   const joinCache = new Map() // binding diary -> { core, length, joins } read for the per-diary cap
   const failedWriters = createMemo(gateLimit) // 'group:key' accepted, then failed (fork, quota): not gated again
   // 'group:key' -> { group, key, diary, walk } refused for a box that does
@@ -3100,6 +3103,13 @@ async function runSync ({
     }
   }
 
+  // A slot charged to another pair (a recorded stub listed under a full
+  // diary) stays, so that pair never counts one writer fewer than it holds.
+  function dropSlotOf (key, group, diary) {
+    const s = diskSlots.get(key)
+    if (s !== undefined && s.group === group && s.diary === diary) diskSlots.delete(key)
+  }
+
   // A header stub active under another pair that proved it: its record and
   // stub slot move there, so the next start reviews it against that pair
   // and never counts it by its own header.
@@ -3299,6 +3309,17 @@ async function runSync ({
     if (capLost(group, item.key, item.diary)) {
       refuseForCap(group, item.key)
       return
+    }
+    // A stored writer listed under another diary is opened once: later
+    // listings of it are refused here while its header's diary stays full.
+    const capHint = groupKey(group, item.key) + ':' + item.diary
+    const capDiary = cappedHints.value(capHint)
+    if (capDiary !== undefined) {
+      if (capLost(group, item.key, capDiary)) {
+        refuseForCap(group, item.key)
+        return
+      }
+      cappedHints.delete(capHint)
     }
     // A writer already on disk holds its place; a new key waits for one.
     // Protecting a group whose writers fill the cap from never fetching its
@@ -3690,6 +3711,7 @@ async function runSync ({
       let raw0
       if (storedHere) {
         e.wasStored = true
+        if (inspectHook) storedGates.set(e.key, (storedGates.get(e.key) || 0) + 1) // test-only
         core = await openGroupReplica(store, e.key)
         raw0 = await readHeld(core, 0, until)
         if (raw0 === null) return fail('timeout')
@@ -3702,7 +3724,7 @@ async function runSync ({
         if (own !== null && (!recorded || localVerdict(own))) e.diary = own
         // A listing under another diary never regates a writer whose proven
         // join lost the cap of the diary its header names, still full.
-        if (e.key !== e.group && capLost(e.group, e.key, e.diary)) return { ...(await fail('quota', false, true)), capped: true }
+        if (e.key !== e.group && !recorded && e.diary !== e.hintDiary && capLost(e.group, e.key, e.diary)) return { ...(await fail('quota', false, true)), capped: true }
         const header = groupHeaderVerdict(raw0, e.key, e.group, e.diary, roleOf(e.group))
         // A core stored for anything else (another group's writer or root, a
         // binding or followed diary) is never made a header stub: it is held
@@ -4100,10 +4122,11 @@ async function runSync ({
     if (r.reason) {
       // Refused as the cap check below refuses it.
       if (r.capped === true) {
+        cappedHints.add(groupKey(e.group, e.key) + ':' + e.hintDiary, e.diary)
         refuseForCap(e.group, e.key)
         e.state = 'failed'
         dropGroupCore(e.key)
-        diskSlots.delete(e.key)
+        dropSlotOf(e.key, e.group, e.diary)
         return
       }
       // The stub table was full: nothing about the listing is judged or
@@ -4243,7 +4266,7 @@ async function runSync ({
           dropGroupCore(e.key)
           // A refused stored writer keeps its blocks but no slot, so the
           // excess of an earlier run never starves the diary's other writers.
-          diskSlots.delete(e.key)
+          dropSlotOf(e.key, e.group, e.diary)
           return
         }
         // Both joins are proven: the later one gives way and is purged, so
@@ -5623,7 +5646,7 @@ async function runSync ({
     for (const g of groupList) if (ownCommunities.has(g.group)) scanCatalogue(g.group, ownWriters.get(g.writer).core)
 
     qstore = await openQuarantine(dataDir, storeOptions)
-    if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], diskSlotOf: (key) => diskSlots.get(key) || null, swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, walkReadCount: () => walkReads, boxLiftCount: () => boxLiftRuns, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
+    if (inspectHook) inspectHook({ claimCount, topicHasPeer, failedSocketCount, lastClosedPeer: () => lastClosedPeer, recomputeCount: () => recomputes, groupTargetCount: () => groupTargets.size, groupCoreCount: () => groupCores.size, groupDiaryKeys: () => [...groupDiaries.keys()], diskSlotOf: (key) => diskSlots.get(key) || null, swarmTopicCount: () => swarm ? [...swarm.topics()].length : 0, walkReadCount: () => walkReads, boxLiftCount: () => boxLiftRuns, storedGateCount: (key) => storedGates.get(key) || 0, createMemo: (limit) => createMemo(() => limit), hardError, groupDiverged: groupDivergedError, divergeDiary: (key) => divergeDiary(key, groupDiaries.get(key) || { core: { close: async () => {} }, failed: false }) }) // test-only
 
     // One deadline (item 7): the completion timer and the gate fetches share
     // `deadline`, computed before the startup I/O.

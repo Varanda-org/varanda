@@ -56,8 +56,9 @@
 // page gets no new block ({ paused: true }).
 //
 // Single writer: every write (state file, diary or media append, a cleared
-// block, the noise key) asks guard() (the account service's lock) first, and
-// fail() refuses every later one; a refused write throws { code:
+// block, the noise key) asks guard() (the account service's lock) first, the
+// state file and the noise key again right before the rename
+// (./guarded-write.js), and fail() refuses every later one; a refused write throws { code:
 // 'indisponivel' }. Two holders appending to one core would fork it.
 //
 // Nothing logged ever names a key.
@@ -69,7 +70,8 @@ const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
@@ -84,7 +86,7 @@ const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { feira, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -112,8 +114,6 @@ const NONCE_ID_RE = /^(append|media|follow):[0-9a-f]{64}:[A-Za-z0-9_-]{1,64}$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 // A local copy of seeder-health.js SEEDER_HTTP_RE, with ws as well.
 const SEEDER_RE = /^(?:http|ws):\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/
-const PNG_MAGIC = b4a.from([0x89, 0x50, 0x4e, 0x47])
-const GIF_MAGIC = b4a.from([0x47, 0x49, 0x46, 0x38])
 
 function noop () {}
 
@@ -305,6 +305,18 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (!ok) throw fail('indisponivel')
   }
 
+  // A sidecar write with the lock asked again right before the rename
+  // (./guarded-write.js): a holder that lost it meanwhile leaves the file
+  // as the new holder wrote it, and the refusal is check()'s.
+  function writeChecked (file, obj) {
+    try {
+      writeGuarded(file, obj, 0o600, () => !failed && guard() === true)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
+      throw err
+    }
+  }
+
   // The lock is gone: nothing more is written, starting now.
   function failWriter () {
     failed = true
@@ -321,7 +333,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (p.stateLost) throw fail('pausada')
     check()
     refuseSymlinkDir(storeDir)
-    writeJsonAtomic(statePath(p.key), {
+    writeChecked(statePath(p.key), {
       v: STATE_VERSION,
       length: p.length,
       mediaLength: p.mediaLength,
@@ -332,7 +344,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       nonces: p.nonces,
       movedTo: p.movedTo,
       closed: p.closed === true
-    }, 0o600)
+    })
   }
 
   function readState (key) {
@@ -367,7 +379,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     } catch {}
     const kp = generateNoiseKeyPair()
     check()
-    writeJsonAtomic(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) }, 0o600)
+    writeChecked(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) })
     return kp
   }
 
@@ -619,11 +631,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   }
 
   // A committed write whose state could not be saved: memory already holds
-  // it, the file does not, so the page stops until an operator looks.
+  // it, the file does not, so the page stops until an operator looks. A
+  // lock refusal while this writer still holds it is not that: held()
+  // answers false for a moment when one heartbeat runs late, so the page
+  // stays writable and the next write saves the whole state. A lost lock
+  // goes through failWriter(), and a new holder's open finds the diary
+  // longer than the file and pauses it there.
   function saveOrPause (p) {
     try {
       saveState(p)
     } catch (err) {
+      if (!failed && err.code === 'indisponivel') throw err
       pause(p)
       throw err
     }
@@ -906,12 +924,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (video) {
       duration = videoMs(bytes, width, height, ms)
       if (duration === null) throw fail('midia-invalida')
-    } else if (mime === 'image/jpeg' || mime === 'image/webp') {
-      const size = stillImageSize(bytes, mime)
-      if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
     } else {
-      const magic = mime === 'image/png' ? PNG_MAGIC : GIF_MAGIC
-      if (bytes.byteLength < magic.byteLength || !b4a.equals(bytes.subarray(0, magic.byteLength), magic)) throw fail('midia-invalida')
+      // The same strict parser the app runs before showing a received photo:
+      // anything it would refuse is refused here, at the declared size. Only a
+      // GIF may carry several frames.
+      const bounds = mediaBounds(bytes, mime)
+      if (bounds === null || bounds.width !== width || bounds.height !== height) throw fail('midia-invalida')
+      if (mime !== 'image/gif' && bounds.frames !== 1) throw fail('midia-invalida')
+      if (mime === 'image/jpeg' || mime === 'image/webp') {
+        const size = stillImageSize(bytes, mime)
+        if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
+      }
     }
     const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
     const valid = video ? validVideoDescriptor : validDescriptor
