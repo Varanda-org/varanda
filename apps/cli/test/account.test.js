@@ -1008,6 +1008,47 @@ test('data-dir lock: the recovery store guarded by held() refuses a put while th
   t.is((await recovery.put(second)).changed, true, 'the next heartbeat makes writes land again')
 })
 
+test('data-dir lock: the terms store guarded by held() refuses an accept while the lock is stale', async (t) => {
+  const dir = path.join(tmpDir(t), 'account')
+  const lockFile = path.join(dir, LOCK_FILE)
+  const lock = takeLock(dir, { heartbeatMs: 60 * 60 * 1000 })
+  t.teardown(() => lock.release(), { force: true })
+  const terms = openTermsStore(dir, { guard: () => lock.held() })
+  const member = () => b4a.toString(crypto.randomBytes(32), 'hex')
+  const accept = (m) => terms.accept({ member: m, version: 1, nonce: 'n'.repeat(43), signature: 'ab'.repeat(64) })
+  t.is((await accept(member())).changed, true, 'held: the accept lands')
+  const file = path.join(dir, 'terms.json')
+  const before = fs.readFileSync(file)
+
+  const old = (Date.now() - 31 * 1000) / 1000
+  fs.utimesSync(lockFile, old, old)
+  t.is(lock.owned(), true, 'still ours by token')
+  const m = member()
+  try {
+    await accept(m)
+    t.fail('an accept under a stale lock resolved')
+  } catch (err) {
+    t.is(err.code, 'indisponivel', 'an accept under a stale lock is refused')
+  }
+  t.ok(b4a.equals(fs.readFileSync(file), before), 'the file is unchanged')
+  t.ok(terms.available(), 'the store is not failed')
+  t.is(terms.holds(m), false, 'memory is unchanged')
+
+  const now = new Date()
+  fs.utimesSync(lockFile, now, now)
+  t.is((await accept(m)).changed, true, 'the next heartbeat makes writes land again')
+})
+
+test('data-dir lock: every store the service opens is guarded by held()', (t) => {
+  // The serve path passes one guard, lock.held(), to every sidecar store; a
+  // store wired to lock.owned() would keep writing while its heartbeat fell
+  // behind.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'commands', 'account.js'), 'utf8')
+  const guards = src.match(/guard: (?:\(\) => [\w.]+\(\)|\w+)/g) || []
+  t.ok(guards.length >= 18, 'the store guards are found (' + guards.length + ')')
+  t.alike(guards.filter((g) => g !== 'guard: held' && g !== 'guard: () => lock.held()'), [], 'none asks lock.owned()')
+  t.ok(/const held = \(\) => lock\.held\(\)/.test(src), 'held is lock.held()')
+})
 test('data-dir lock: a lost lock marks the store unavailable before the service stops', async (t) => {
   const dir = path.join(tmpDir(t), 'account')
   const store = openAccountStore(dir)

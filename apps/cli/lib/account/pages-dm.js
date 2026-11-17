@@ -42,6 +42,7 @@ const { isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { isWeakBoxKey } = require('@varanda/core/lib/group')
 const { ENV } = require('./page-keys')
+const { held } = require('./guarded-write')
 
 const coreDir = path.dirname(require.resolve('@varanda/core/lib/seeder'))
 const sodium = require(require.resolve('sodium-universal', { paths: [coreDir] }))
@@ -166,7 +167,9 @@ function canonical (v) {
 
 // Writes `buf` to `file` through a temporary file: fsync, rename, then the
 // directory's fsync, so a crash leaves the old file or the whole new one.
-function writeDurable (file, buf) {
+// The lock is asked again right before the rename, so a holder that lost
+// it meanwhile leaves the file as the new holder wrote it.
+function writeDurable (file, buf, guard) {
   const tmp = file + '.tmp'
   const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600)
   try {
@@ -175,6 +178,10 @@ function writeDurable (file, buf) {
     fs.fsyncSync(fd)
   } finally {
     fs.closeSync(fd)
+  }
+  if (!held(guard)) {
+    try { fs.unlinkSync(tmp) } catch {}
+    throw fail('indisponivel')
   }
   fs.renameSync(tmp, file)
   syncDir(path.dirname(file))
@@ -295,11 +302,11 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
   }
 
   function check () {
-    let ok = false
-    try {
-      ok = !closed && guard() === true
-    } catch {}
-    if (!ok) throw fail('indisponivel')
+    if (!held(live)) throw fail('indisponivel')
+  }
+
+  function live () {
+    return !closed && guard() === true
   }
 
   function pageParam (page) {
@@ -778,6 +785,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
       refuseSymlinkDir(dir)
       fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 })
       refuseSymlinkDir(stateDir)
+      check()
       dropBundleFiles(page)
       fs.mkdirSync(bundleDir(page), { mode: 0o700 })
       refuseSymlinkDir(bundleDir(page))
@@ -791,12 +799,13 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
         const sealed = b4a.alloc(msg.byteLength + sodium.crypto_box_SEALBYTES)
         sodium.crypto_box_seal(sealed, msg, pk)
         msg.fill(0)
-        writeDurable(path.join(bundleDir(page), String(i)), sealed)
+        writeDurable(path.join(bundleDir(page), String(i)), sealed, live)
       }
       syncDir(stateDir)
       return { for: by, id: hex(id), count }
     } catch (err) {
-      try { dropBundleFiles(page) } catch {}
+      // Without the lock the directory may already be the new holder's.
+      if (held(live)) try { dropBundleFiles(page) } catch {}
       if (err && ['limite', 'indisponivel', 'pedido-invalido'].includes(err.code)) throw err
       note('legado-falhou')
       throw fail('indisponivel')
@@ -827,7 +836,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
       for (let i = 0; i < b.count; i++) {
         const buf = readNoFollow(path.join(bundleDir(from), String(i)))
         if (buf === null) throw fail('indisponivel')
-        writeDurable(path.join(bundleDir(to), String(i)), buf)
+        writeDurable(path.join(bundleDir(to), String(i)), buf, live)
       }
       syncDir(stateDir)
     } catch {

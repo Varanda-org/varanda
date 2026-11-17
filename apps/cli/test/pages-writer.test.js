@@ -648,27 +648,58 @@ test('pages-writer: a false guard or fail() refuses every write and writes nothi
   t.ok(keys.get(page.key) !== null, 'the key row is kept')
 })
 
+test('pages-writer: a guard lost right before the state file\'s rename leaves it as it was', async (t) => {
+  const ctx = setup()
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const storeDir = path.join(dir, 'pages-store')
+  let armed = false
+  // Refuses only while a temp file sits in the store directory, that is
+  // right before a sidecar rename: every earlier check passes.
+  const guard = () => !armed || !fs.readdirSync(storeDir).some((n) => n.endsWith('.tmp'))
+  const writer = createPagesWriter({ dir, keys, association: ctx.association, guard })
+  t.teardown(() => writer.close(), { force: true })
+  const page = newPage(ctx, keys, 'tarde')
+  await writer.createPage(page.args)
+  const state = stateBytes(dir, page.key)
+  armed = true
+  await t.exception(writer.setFollow(page.key, hex(crypto.keyPair().publicKey), true), /indisponivel/, 'setFollow refused')
+  t.alike(stateBytes(dir, page.key), state, 'state bytes unchanged')
+  t.absent(fs.readdirSync(storeDir).some((n) => n.endsWith('.tmp')), 'no temp file is left')
+  // The refusal was a late heartbeat, not a lost lock: the page stays
+  // writable and the next write saves the whole state.
+  armed = false
+  t.is(writer.info(page.key).paused, false, 'not paused')
+  await writer.setFollow(page.key, hex(crypto.keyPair().publicKey), true)
+  t.is(writer.info(page.key).paused, false, 'still not paused after the next write')
+  const saved = JSON.parse(stateBytes(dir, page.key))
+  t.is(saved.length, writer.info(page.key).length, 'the state file holds both follows')
+  t.is(saved.paused, false, 'the state file is not paused')
+})
+
 test('pages-writer: a committed append whose state save fails pauses the page', async (t) => {
   const ctx = setup()
   const dir = tmpDir(t, 'varanda-account-')
   const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
-  let owned = true
-  const writer = createPagesWriter({ dir, keys, association: ctx.association, guard: () => owned })
+  const writer = createPagesWriter({ dir, keys, association: ctx.association })
   t.teardown(() => writer.close(), { force: true })
   const page = newPage(ctx, keys, 'salva')
   await writer.createPage(page.args)
+  const file = path.join(dir, 'pages-store', page.key + '.json')
   const original = Hypercore.prototype.append
+  // A directory where the state file was: the rename fails, and it is no
+  // lock refusal.
   Hypercore.prototype.append = async function () {
     const res = await original.apply(this, arguments)
-    owned = false
+    fs.rmSync(file)
+    fs.mkdirSync(path.join(file, 'x'), { recursive: true })
     return res
   }
   try {
-    await t.exception(writer.append(page.key, [postRecord({ text: 'a' })]), /indisponivel/)
+    await t.exception(writer.append(page.key, [postRecord({ text: 'a' })]))
   } finally {
     Hypercore.prototype.append = original
   }
-  owned = true
   t.is(writer.info(page.key).paused, true, 'paused in memory')
   await t.exception(writer.append(page.key, [postRecord({ text: 'b' })]), /pausada/, 'nothing more is appended')
 })

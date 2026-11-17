@@ -25,22 +25,25 @@
 // shapes throw TypeError.
 //
 // Every write runs in one in-process queue against a copy of the state and
-// first re-reads the file: the service lock goes stale after 30 s and
-// writeJsonAtomic renames unconditionally, so another holder may have
-// replaced the file meanwhile. Rows are add-only and use is monotonic, so
+// first re-reads the file: the service lock goes stale after 30 s, so
+// another holder may have replaced the file meanwhile. Rows are add-only and use is monotonic, so
 // disk and memory are union-merged by slot (used beats unused, a dropped id
 // beats a kept one); two copies of one slot that disagree on inviter,
 // createdAt or a kept id mean a file this lineage did not write, and the
 // store becomes unavailable without writing. The merge also marks used every
 // row whose id the directory already reports used (isUsed): the directory is
-// the authority on use, so a failed consume heals on the next write. The
-// state is swapped only after the write returned, and guard() is asked again
-// afterwards: a holder that lost the lock meanwhile does not acknowledge, and
-// the store stays dirty so the next write or heal merge-writes first.
+// the authority on use, so a failed consume heals on the next write. guard()
+// is asked right before the rename too (./guarded-write.js, after the temp
+// file is written and fsynced): a false answer there leaves file and memory
+// as they were and refuses that request. The state is swapped only after the
+// write returned, and guard() is asked again afterwards: a holder that lost
+// the lock meanwhile does not acknowledge, and the store stays dirty so the
+// next write or heal merge-writes first.
 //
-// Remaining window, inherent without OS file locks: the guard and the rename
-// are separate syscalls, so a stalled writer's rename can still land after a
-// takeover and replace the new holder's file. That write is never
+// Remaining window, inherent without OS file locks: the check right before
+// the rename and the rename are separate steps, so a writer suspended
+// between them can still land its rename after a takeover and replace the
+// new holder's file. That write is never
 // acknowledged, and whatever it dropped is written back within one heal
 // interval by the current holder, which keeps everything it acknowledged in
 // memory. What remains is a crash of the holder inside that interval.
@@ -59,7 +62,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { dayStart, DAY_MS, DAY_OFFSET_MS } = require('@varanda/core/lib/activity')
 
@@ -336,11 +339,13 @@ function openInvitesStore (dataDir, {
   // After a failed write the file holds the previous state or `next`: merge
   // it back in (nothing acknowledged is ever dropped from memory); an
   // unreadable file marks the store unavailable. The store stays dirty, so
-  // the next write rewrites before it answers.
+  // the next write rewrites before it answers. A refusal right before the
+  // rename left the file untouched and changes nothing else.
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         setState(merge(state, readState(file), used))

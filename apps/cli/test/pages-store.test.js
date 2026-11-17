@@ -550,18 +550,30 @@ test('pages-store: a replaced file at the same path but another seq is refused',
   t.absent(fs.existsSync(file), 'nothing was written')
 })
 
-test('pages-store: a lost lock after the write is not acknowledged and stops later writes', async (t) => {
+test('pages-store: a lock refused after the write is not acknowledged; the store keeps working once it answers again', async (t) => {
   const { open } = setup(t)
   let calls = 0
-  let lostAt = 1
+  // Asked before the re-read (0), right before the rename (1), after it (2).
+  let lostAt = 2
   const store = open({ guard: () => calls++ !== lostAt })
   const page = key()
   await rejects(t, store.create({ page, owner: key() }), 'indisponivel', 'guard false after the write')
-  throwsCode(t, () => store.get(page), 'indisponivel', 'reads fail closed after a lost lock')
-  throwsCode(t, () => store.isPage(page), 'indisponivel', 'isPage fails closed after a lost lock')
-  lostAt = -1
-  await rejects(t, store.create({ page: key(), owner: key() }), 'indisponivel', 'dirty until reopened')
   t.ok(open().isPage(page), 'the write itself is on disk for the next holder')
+  t.ok(store.isPage(page), 'memory follows the file')
+  lostAt = -1
+  const other = key()
+  await store.create({ page: other, owner: key() })
+  t.ok(open().isPage(other), 'the next write lands: the store did not stop')
+})
+
+test('pages-store: after fail() every write and read is refused', async (t) => {
+  const { open } = setup(t)
+  const store = open()
+  const page = key()
+  await store.create({ page, owner: key() })
+  store.fail()
+  await rejects(t, store.create({ page: key(), owner: key() }), 'indisponivel', 'writes refused')
+  throwsCode(t, () => store.get(page), 'indisponivel', 'reads fail closed')
 })
 
 test('pages-store: a write that throws after the rename fails reads closed too', async (t) => {
