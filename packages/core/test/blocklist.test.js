@@ -163,9 +163,11 @@ test('verifySnapshot rejections', (t) => {
   t.ok(modCert)
 })
 
-test('size: 4096 blocked keys fit MAX_SNAPSHOT_BYTES, 4097 are malformed', (t) => {
-  t.is(bl.MAX_BLOCKED, 4096)
-  t.is(bl.MAX_SNAPSHOT_BYTES, 393216)
+test('size: 16384 blocked keys fit MAX_SNAPSHOT_BYTES, 16385 are malformed', (t) => {
+  t.is(bl.MAX_BLOCKED, 16384)
+  t.is(bl.MAX_SNAPSHOT_BYTES, 1179648)
+  // A seeder never serves more logs than one snapshot can block.
+  t.ok(bl.MAX_BLOCKED >= require('../lib/admission').MAX_INVENTORY, 'MAX_BLOCKED >= MAX_INVENTORY')
   // the longest canonical dates (expanded years)
   const longDate = '+275760-09-13T00:00:00.000Z'
   t.ok(cert.isCanonicalIso(longDate))
@@ -179,6 +181,7 @@ test('size: 4096 blocked keys fit MAX_SNAPSHOT_BYTES, 4097 are malformed', (t) =
   const over = { ...s, blocked: blocked.concat([hexKey(bl.MAX_BLOCKED)]) }
   over.signature = b4a.toString(crypto.sign(bl.snapshotPayload(over), modKp.secretKey), 'hex')
   t.alike(bl.verifySnapshot(over, assocHex), { ok: false, reason: 'malformed' })
+  t.exception.all(() => bl.createSnapshot({ seq: 1, date: longDate, blocked: over.blocked }, modKp, modCert), /blocked holds more than 16384 keys/)
 })
 
 test('acceptSnapshot and compareSnapshots', (t) => {

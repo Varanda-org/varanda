@@ -271,6 +271,7 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
 
   let listener = null
   let base = null
+  let server = null
   async function boot () {
     if (pages) {
       const real = createPagesWriter({ dir, keys, association, seederWs: 'http://127.0.0.1:' + wsPort, log: () => {} })
@@ -282,7 +283,7 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
       const { writer, acl } = faulty(real, ctx.pagesStore)
       opts.pages = { keys, writer, pagesStore: acl, dir, blocklist: { has: (k) => ctx.blocked.has(k) } }
     }
-    const server = createAccountServer(opts)
+    server = createAccountServer(opts)
     const l = await server.listen({ host: '127.0.0.1', port: 0 })
     t.teardown(() => l.close(), { force: true })
     listener = l
@@ -399,7 +400,9 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
     })
   }
 
-  return { ctx, store, terms, api, logs, newMember, start, sign, act, create, invite, accept, rosterAct, offer, upload, restart }
+  const deletionSweep = () => server.deletionSweep()
+
+  return { ctx, store, terms, api, logs, newMember, start, sign, act, create, invite, accept, rosterAct, offer, upload, restart, deletionSweep }
 }
 
 test('account pages: create, admins, transfer, follows, media, replay and the ACL mirror', async (t) => {
@@ -950,4 +953,42 @@ test('account pages: a post, reply or quote takes up to 10 photos, a listing 4, 
   t.alike(tail.map((r) => [r.type, r.seq, r.media.length]), [['delete', post.body.seq, 4], ['delete', post.body.seq, 4], ['delete', post.body.seq, 2]])
   t.is(new Set(tail.map((r) => r.at)).size, 1, 'one at')
   t.alike(tail.flatMap((r) => r.media), ten.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })), 'every range once')
+})
+
+test('account pages: an invite roster whose drop failed to save at accept is saved by the deletion sweep before it answers', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const file = path.join(ctx.dir, 'page-invite-rosters.json')
+  const rows = () => Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).rows)
+  // The roster file's rename fails while `failing` is set; every other
+  // write goes through.
+  let failing = false
+  const realRename = fs.renameSync
+  fs.renameSync = function (from, to) {
+    if (failing && path.basename(String(to)) === 'page-invite-rosters.json') throw Object.assign(new Error('EIO'), { code: 'EIO' })
+    return realRename.apply(this, arguments)
+  }
+  t.teardown(() => { fs.renameSync = realRename })
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const made = await s.create(ana, 'padaria')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+  t.is((await s.invite(ana, K, bia, ctx.pagesStore.get(K))).status, 200)
+  t.alike(rows(), [K + ':' + bia.hex])
+  failing = true
+  const inv = ctx.pagesStore.listFor(bia.hex).invites[0]
+  t.is((await s.accept(bia, K, inv.gen, inv.rosterSignature)).status, 200, 'the accept stands')
+  t.alike(rows(), [K + ':' + bia.hex], 'the file still holds the row memory dropped')
+  // holdsInvites only runs for a deleted key.
+  const gone = await s.newMember('dani')
+  await s.store.deleteMember(gone.hex)
+  const first = await s.deletionSweep()
+  t.ok(first.pending > 0, 'the retried save failed: pending')
+  t.ok(s.logs.some((e) => e.reason === 'arquivo-invalido' && e.file === 'page-invite-rosters.json'), 'the warning names the file')
+  t.alike(rows(), [K + ':' + bia.hex])
+  failing = false
+  t.alike(await s.deletionSweep(), { members: 1, pending: 0 }, 'the save works now')
+  t.alike(rows(), [], 'the row is gone from disk')
 })

@@ -25,6 +25,8 @@
 // (at, id) in the same write. A duplicate reportId returns the existing row
 // without a write. remove/removeTarget let a human cancel or unblock withdraw
 // a precedent; each writes once, and only when something was removed.
+// forgetTarget (Excluir conta) drops a deleted member's precedents even from
+// a file of another model.
 //
 // A missing file is created empty. A malformed one (one bad row is enough)
 // is never replaced: every method then throws { code: 'indisponivel' } until
@@ -244,6 +246,24 @@ function openExemplarStore (dataDir, { now = Date.now, model } = {}) {
     return count
   }
 
+  // Excluir conta: every precedent of a deleted member's diary, whatever its
+  // decision and whatever model wrote the file. Dropping rows mixes no
+  // vector spaces, and a file of another model must not keep their text.
+  function holdsTarget (target) {
+    usable()
+    if (!isLowerHex(target, 32)) throw fail('pedido-invalido')
+    return state.items.some((r) => r.target === target)
+  }
+
+  function forgetTarget (target) {
+    usable()
+    if (!isLowerHex(target, 32)) throw fail('pedido-invalido')
+    const items = state.items.filter((r) => r.target !== target)
+    const count = state.items.length - items.length
+    if (count > 0) persist({ v: VERSION, model: state.model, items })
+    return count
+  }
+
   function list ({ reason } = {}) {
     sameModel()
     if (reason !== undefined && !REASONS.includes(reason)) throw fail('pedido-invalido')
@@ -255,7 +275,7 @@ function openExemplarStore (dataDir, { now = Date.now, model } = {}) {
     return state.items.length
   }
 
-  return { add, remove, removeTarget, list, size }
+  return { add, remove, removeTarget, holdsTarget, forgetTarget, list, size }
 }
 
 module.exports = {

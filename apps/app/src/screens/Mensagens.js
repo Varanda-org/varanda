@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { useRowPeeks } from '../useRowPeeks'
 import { LABELS, sortConversations } from '../dm'
 import { requestsRow } from '../conversas'
 import { PAGE_DM_CUSTODY, pageDmClient, pageInboxTitle, previewLine } from '../dm-screen'
@@ -439,6 +440,11 @@ export function Mensagens ({ onOpenThread, onBack, oldPage }) {
     if (peers.length > 0) resolveMany(peers)
   }, [peers, resolveMany])
   const sorted = useMemo(() => sortConversations(rows), [rows])
+  // A sender the node does not hold (a request is from someone not followed)
+  // is named by a verified diary.peek, as in the Conversas list; the page's
+  // folder never keeps "Pessoa" for a person whose thread header has a name.
+  const sortedPeers = useMemo(() => sorted.map((r) => r.peer), [sorted])
+  useRowPeeks(sortedPeers, unlocked && loaded)
 
   const bar = <TopBar title={old !== null ? OLD_KEY_TITLE : requestsRow(null).title} onBack={onBack} />
   if (!hosted) return <View style={styles.root}>{bar}</View>

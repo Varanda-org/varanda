@@ -78,6 +78,15 @@ export function whoOf (profile) {
   }
 }
 
+// A person named for a question that must not leave two people alike: the
+// name and the @nome ("Caio Membro (@caio)"), or whichever one is known, else
+// 'sem nome'. Peer text: the caller renders it through displayText.
+export function whoLabel (profile) {
+  const w = whoOf(profile)
+  const name = typeof profile?.name === 'string' ? displayName(profile.name) : ''
+  return name && w.subtitle ? name + ' (' + w.subtitle + ')' : w.subtitle || w.title
+}
+
 // The name in a reply mark: '…' while the profile is not looked up yet, so
 // "respondendo a sem nome" never flashes before the answer.
 export const PENDING_NAME = '…'
