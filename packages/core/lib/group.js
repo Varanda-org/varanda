@@ -812,11 +812,30 @@ function slotEventOrder (a, b) {
 // The cut a diary marks on an own writer of a private group it replaces, so
 // the slot walk gives its slot back to the new writer. A boxless header is
 // header-invalid there, so nothing of the writer ever counts: 0, whatever it
-// holds. A writer boxed to another key: 0 for a header with no rejoin, 1
-// for a header with a rejoin (the generation reads its block 0), else past
-// its last record, so no record it holds stops counting. `entries` are the
-// writer's records as held ({ seq, record }). null when block 0 is not held.
+// holds. A writer boxed to another key is cut like any retired writer
+// (retiredWriterCut). null when block 0 is not held.
 function replacedWriterCut (entries) {
+  const held = heldWriterRecords(entries)
+  if (held === null) return null
+  if (held.head.box === null || held.head.box === undefined) return 0
+  return retiredWriterCut(entries)
+}
+
+// The cut a diary marks on its own writer when a join replaces it (retired
+// by a leave, or naming a CW the gate retired), so the slot walk frees its
+// live slot for the new writer while no record it holds stops counting: 0
+// for a header with no rejoin, 1 for a header with a rejoin (the generation
+// reads its block 0), else the length held (the device holds its own core
+// whole). `entries` are the writer's records as held ({ seq, record }).
+// null when block 0 is not held.
+function retiredWriterCut (entries) {
+  const held = heldWriterRecords(entries)
+  if (held === null) return null
+  if (held.last > 0) return held.last + 1
+  return held.head.rejoin ? 1 : 0
+}
+
+function heldWriterRecords (entries) {
   if (!Array.isArray(entries)) return null
   let head = null
   let last = -1
@@ -825,10 +844,7 @@ function replacedWriterCut (entries) {
     if (e.seq === 0) head = e.record
     if (e.seq > last) last = e.seq
   }
-  if (!isPlainObject(head)) return null
-  if (head.box === null || head.box === undefined) return 0
-  if (last > 0) return last + 1
-  return head.rejoin ? 1 : 0
+  return isPlainObject(head) ? { head, last } : null
 }
 
 // The walk of one diary for G (see slotWalkState): { live, frozen,
@@ -3905,6 +3921,7 @@ module.exports = {
   slotWalk,
   slotWalkState,
   replacedWriterCut,
+  retiredWriterCut,
   slotWalkStep,
   slotWalkResult,
   walkHasRoom,

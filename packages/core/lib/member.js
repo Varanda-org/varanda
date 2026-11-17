@@ -2116,8 +2116,27 @@ function unheldCountedWriters (loaded, diary) {
   return counted.filter((w) => !held.has(w) && !unbound.has(w))
 }
 
-function boundWriterCount (loaded, diary) {
-  return loaded.logs.filter((l) => l.diary === diary).length
+// The off join and the cut that retire this device's writer of the group
+// when a join replaces it (#350): retired by a leave, or naming a CW the
+// gate retired, it would keep its live slot in the diary's walk for good.
+// The cut sits at the length this device holds (retiredWriterCut), so every
+// record it wrote keeps counting, and goes before the new writer's join.
+// `own`: the own diary's entries.
+function retireLocalWriter (loaded, own) {
+  const local = loaded.local
+  const group = loaded.group
+  if (!local || local.writer === group) return []
+  const joins = groups.groupJoinHistory(own, group)
+  const marks = groups.groupCutHistory(own, group)
+  if (!groups.slotWalk(joins, marks, group).live.has(local.writer)) return []
+  const held = loaded.input.writers.find((l) => l.key === local.writer)
+  const cut = groups.retiredWriterCut(held ? held.entries : null)
+  if (cut === null) return []
+  const out = []
+  const last = joins.filter((j) => j.writer === local.writer).pop()
+  if (last && last.on) out.push({ kind: 'join', writer: local.writer, on: false })
+  if (!marks.some((m) => m.writer === local.writer && m.cut <= cut)) out.push({ kind: 'cut', writer: local.writer, cut })
+  return out
 }
 
 async function ownGroupWriter (loaded, identity, { root = false } = {}) {
@@ -2383,9 +2402,10 @@ async function joinLoaded (ctx, identity, loaded, cw) {
   if (!stale && !left && unboundLocal(loaded) && !(await localWriterHasLeave(store, loaded.local))) writerKey = loaded.local.writer
   if (writerKey === null) {
     if (groupWritersFull(loaded.view, group)) throw new UsageError(GROUP_FULL)
+    const own = await readAll(diary)
+    if (!stale) replace.push(...retireLocalWriter(loaded, own))
     // The diary's own slot walk, after the off join and the cut above: a
     // new writer it would not count live never counts.
-    const own = await readAll(diary)
     if (!groups.walkHasRoom(groups.groupJoinHistory(own, group), groups.groupCutHistory(own, group), group, replace)) throw new UsageError(GROUP_FULL)
   }
   for (const e of replace) {
@@ -3304,7 +3324,10 @@ async function communityJoin (ctx, { community }, { affected = null } = {}) {
       }
       if (writerKey === null) {
         if (groupWritersFull(c.view, C)) throw new UsageError(COMMUNITY_FULL)
-        if (boundWriterCount(c, ownHex) >= groups.MAX_GROUP_WRITERS_PER_DIARY) throw new UsageError(COMMUNITY_FULL)
+        // The own diary's slot walk, not the CWs held: a frozen or released
+        // CW frees its slot, and one never counted holds none (#350).
+        const own = await readAll(diary)
+        if (!groups.walkHasRoom(groups.groupJoinHistory(own, C), groups.groupCutHistory(own, C), C)) throw new UsageError(COMMUNITY_FULL)
         const general = c.view.general
         const need = 1 + (general !== null && !localGroups(ctx.dataDir).some((e) => e.group === general) ? 1 : 0)
         await makeGroupRoom(ctx, identity, null, need)
