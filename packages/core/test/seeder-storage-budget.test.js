@@ -42,6 +42,18 @@ function readFile (dataDir) {
   }
 }
 
+// A dropped root its creator bound keeps only that creator in goneRoots,
+// with no issuer, as for any drop of a bound root: not a moderation
+// outcome, so the entry refuses nothing while the creator is not blocked.
+function creatorOnly (t, seeder, file, root, creator) {
+  const gone = file.goneRoots || {}
+  t.alike(Object.keys(gone), [root], 'only the bound root is remembered')
+  t.is((gone[root] || {}).creator, creator)
+  t.absent('issuer' in (gone[root] || {}), 'not a moderation outcome: no issuer')
+  t.absent(file.revokedCreators)
+  t.is(seeder._goneRootReason(root), null, 'it refuses nothing while the creator is not blocked')
+}
+
 function readAdmitted (dataDir) {
   return readFile(dataDir).admitted
 }
@@ -559,7 +571,7 @@ test('storage budget: a group root past its member\'s fair share is dropped, nev
   t.absent(seeder._groupServed.has(R), 'the grown root fits no member\'s share, so it is not admitted again')
   t.is(seeder.stats().storage.dropped, 1)
   const file = readFile(dataDir)
-  t.absent(file.goneRoots, 'not a moderation outcome')
+  creatorOnly(t, seeder, file, R, A.key)
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
@@ -691,7 +703,7 @@ test('storage budget: roots filling a member\'s fair share never keep its own me
   t.is(seeder._storage.memberUse(A.key), cA1 + cM, 'A\'s share holds its own cores')
   t.is(seeder.stats().storage.dropped, 1)
   const file = readFile(dataDir)
-  t.absent(file.goneRoots, 'not a moderation outcome')
+  creatorOnly(t, seeder, file, R, A.key)
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 

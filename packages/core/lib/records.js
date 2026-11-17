@@ -165,11 +165,17 @@ const MAX_DEVICE_BOX = 8192
 // Varandinha (docs/protocol.md): `garden` is the public flag that a diary
 // shows its balcony, latest wins; `garden-state` is the whole balcony after
 // a play session (the pot rules are packages/rpc lib/garden.js), latest
-// wins; `garden-help` is one watering of another member's pot. No text:
-// nothing in them is ever shown as typed by a person.
+// wins; `garden-help` is one watering of another member's pot;
+// `garden-decor` is the set of enfeites, latest wins; `garden-gift` is one
+// ripe pot given as a mimo, and `garden-take` is its recipient's consent,
+// naming the gift block. No text: nothing in them is ever shown as typed by
+// a person.
 const GARDEN_KEYS = Object.freeze(['type', 'on', 'at'])
 const GARDEN_STATE_KEYS = Object.freeze(['type', 'pots', 'n', 'at'])
 const GARDEN_HELP_KEYS = Object.freeze(['type', 'to', 'pot', 'at'])
+const GARDEN_DECOR_KEYS = Object.freeze(['type', 'items', 'at'])
+const GARDEN_GIFT_KEYS = Object.freeze(['type', 'to', 'item', 'at'])
+const GARDEN_TAKE_KEYS = Object.freeze(['type', 'from', 'seq', 'at'])
 const { THEME_IDS, MAX_ABOUT, MAX_CITY, MAX_WORK, MAX_STUDIES, MAX_INTERESTS, MAX_MOOD_TEXT } = PX
 // Momentos (docs/protocol.md): one photo or short video in the anonymous
 // blob pool, its key and nonce public in the record, shown by readers for 24
@@ -608,7 +614,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -736,6 +742,18 @@ function check (record, seq) {
   }
   if (type === 'garden-help') {
     if (!hasExactKeys(record, GARDEN_HELP_KEYS) || !isHex64(record.to) || !garden.isPotIndex(record.pot)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden-decor') {
+    if (!hasExactKeys(record, GARDEN_DECOR_KEYS) || !garden.isDecor(record.items)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden-gift') {
+    if (!hasExactKeys(record, GARDEN_GIFT_KEYS) || !isHex64(record.to) || !garden.isGiftItem(record.item)) return 'malformed'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  if (type === 'garden-take') {
+    if (!hasExactKeys(record, GARDEN_TAKE_KEYS) || !isHex64(record.from) || !Number.isSafeInteger(record.seq) || record.seq < 1) return 'malformed'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   if (type === 'top-friends') {
@@ -1002,6 +1020,18 @@ function gardenStateRecord ({ pots, n, at = nowIso() } = {}) {
 
 function gardenHelpRecord ({ to, pot, at = nowIso() } = {}) {
   return build({ type: 'garden-help', to, pot, at }, 1)
+}
+
+function gardenDecorRecord ({ items, at = nowIso() } = {}) {
+  return build({ type: 'garden-decor', items: Array.isArray(items) ? items.slice() : items, at }, 1)
+}
+
+function gardenGiftRecord ({ to, item, at = nowIso() } = {}) {
+  return build({ type: 'garden-gift', to, item, at }, 1)
+}
+
+function gardenTakeRecord ({ from, seq, at = nowIso() } = {}) {
+  return build({ type: 'garden-take', from, seq, at }, 1)
 }
 
 function topFriendsRecord ({ keys, at = nowIso() } = {}) {
@@ -1281,6 +1311,9 @@ module.exports = {
   GARDEN_KEYS,
   GARDEN_STATE_KEYS,
   GARDEN_HELP_KEYS,
+  GARDEN_DECOR_KEYS,
+  GARDEN_GIFT_KEYS,
+  GARDEN_TAKE_KEYS,
   TOP_FRIENDS_KEYS,
   MAX_TOP_FRIENDS,
   POST_POLL_KEYS,
@@ -1358,6 +1391,9 @@ module.exports = {
   gardenRecord,
   gardenStateRecord,
   gardenHelpRecord,
+  gardenDecorRecord,
+  gardenGiftRecord,
+  gardenTakeRecord,
   topFriendsRecord,
   momentRecord,
   deleteRecord,

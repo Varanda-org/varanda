@@ -431,4 +431,4 @@ function postPreviewData (args) {
   }
 }
 
-module.exports = { renderPostPage, postPreviewData, postPhotos, MAX_PHOTOS }
+module.exports = { renderPostPage, postPreviewData, postPhotos, dateOf, MAX_PHOTOS }
