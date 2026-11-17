@@ -893,11 +893,68 @@ function walkHasRoom (joins, marks, G, extra = []) {
 // Never throws.
 function diaryWriterCut (entries, G, W) {
   try {
-    const w = slotWalk(groupJoinHistory(entries, G), groupCutHistory(entries, G), G)
-    if (w.released.has(W)) return 0
-    if ((w.live.has(W) || w.frozen.has(W)) && w.cut.has(W)) return w.cut.get(W)
+    return walkWriterCut(slotWalk(groupJoinHistory(entries, G), groupCutHistory(entries, G), G), W)
   } catch {}
   return null
+}
+
+function walkWriterCut (w, W) {
+  if (w.released.has(W)) return 0
+  if ((w.live.has(W) || w.frozen.has(W)) && w.cut.has(W)) return w.cut.get(W)
+  return null
+}
+
+// What diaryWriterCut reads of a diary's records: its group-join and
+// group-cut records. A node keeps these per diary length (walkRecordsCut)
+// instead of every record. Never throws.
+function diaryWalkRecords (entries) {
+  const kept = []
+  try {
+    eachEntry(entries, (seq, record) => {
+      if (validRecordCopyOfType(record, seq, 'group-join') !== null || validRecordCopyOfType(record, seq, 'group-cut') !== null) kept.push({ seq, record })
+    })
+  } catch {}
+  return { entries: kept, walks: new Map() }
+}
+
+// diaryWriterCut(entries, G, W) over diaryWalkRecords(entries): the same
+// cut, each group's walk stepped once. The seqs the kept records skip give
+// a gap mark, which changes no cut. Never throws.
+function walkRecordsCut (records, G, W) {
+  try {
+    let w = records.walks.get(G)
+    if (w === undefined) {
+      w = slotWalk(groupJoinHistory(records.entries, G), groupCutHistory(records.entries, G), G)
+      records.walks.set(G, w)
+    }
+    return walkWriterCut(w, W)
+  } catch {}
+  return null
+}
+
+// The header stubs a node hands buildGroup or buildCommunity (`heads`,
+// bindCores): block 0 of each held core some diary in `joins` (Map diary ->
+// groupJoinHistory) bound on, when that diary is not the one its header
+// names. `firsts`: Map key -> { entry, diary }, `entry` the core's block 0
+// as held and `diary` the one a writer header for this root names, else
+// null. Never throws.
+function headerStubs (joins, firsts) {
+  const out = []
+  try {
+    const binders = new Map()
+    for (const [d, list] of joins) {
+      for (const j of list) {
+        if (j.on !== true) continue
+        if (!binders.has(j.writer)) binders.set(j.writer, new Set())
+        binders.get(j.writer).add(d)
+      }
+    }
+    for (const [key, f] of firsts) {
+      const ds = binders.get(key)
+      if (ds !== undefined && (ds.size > 1 || !ds.has(f.diary))) out.push({ key, entries: [f.entry] })
+    }
+  } catch {}
+  return out
 }
 
 function slotWalkResult (s, gap = false, bound = false) {
@@ -1703,7 +1760,8 @@ function lenient (events) {
 
 // The pure fold of a group. Input: the root core, the writer cores
 // ({ key, entries, diary }), every diary's group-join history for this group
-// (Map diary -> [{ writer, on, seq }], groupJoinHistory) and `now`. The
+// (Map diary -> [{ writer, on, seq }], groupJoinHistory), `heads` (header
+// stubs: { key, entries } whose block 0 alone is read, bindCores) and `now`. The
 // result is the same for any delivery order of the same records, never
 // throws, and a missing writer only removes its records and sets
 // `incomplete`. Authority never depends on `at`: only the root appoints or
@@ -1796,6 +1854,20 @@ function bindCores (input, asCommunity) {
       pushTo(copies, key, { log, diary: w.diary, signed: Number.isSafeInteger(w.signed) && w.signed > 0 ? w.signed : 0 })
     }
   }
+  // Header stubs (#350): block 0 alone of a core a diary bound here whose
+  // header cannot count for that diary. Only block 0 is read, it merges with
+  // the core's other copies (a block 0 that differs is a fork), and it is no
+  // copy for any diary: it settles the pairs its header rules out (below),
+  // never counts a writer.
+  if (Array.isArray(input.heads)) {
+    for (let i = 0; i < input.heads.length; i++) {
+      const x = input.heads[i]
+      if (!isPlainObject(x) || !isHex64(x.key) || x.key === G) continue
+      const read = readLog(x.entries, false, null, priv, asCommunity)
+      if (!read.raw.has(0)) continue
+      pushTo(copies, x.key, { log: { header: read.header, records: [], raw: new Map([[0, read.raw.get(0)]]) }, diary: null, signed: 0 })
+    }
+  }
   // Every copy with a block 0 takes part in the merge, whatever its header
   // names and even when that block is invalid, so a copy with another block
   // 0 is seen as a fork; the header is validated only after the merge. A forked writer
@@ -1809,23 +1881,29 @@ function bindCores (input, asCommunity) {
   // Writers whose header names a diary whose walk neither counts nor
   // released them: never candidates, never awaited.
   const uncounted = new Set()
+  // Per writer whose copies agree, the header its block 0 holds, or null when
+  // that block is no valid writer header (undecodable, invalid or v1).
+  const heads = new Map()
   for (const [key, list] of copies) {
     const log = mergeCopies(list.map((x) => x.log))
-    if (log === null || log.header === null) continue
+    if (log === null) continue
+    heads.set(key, log.header)
+    if (log.header === null) continue
     const h = log.header
     if (h.group !== G || !bound.has(h.diary + ':' + key) || !list.some((x) => x.diary === h.diary)) continue
-    // header-invalid: a writer's recipient key must match the visibility, and
-    // a group writer names its device's community writer where a community
-    // writer names none.
+    // header-invalid: a group writer names its device's community writer
+    // where a community writer names none, and a writer's recipient key must
+    // match the visibility. A `member` mismatch rejects at any cut: no
+    // release or cut of its diary makes such a header count.
+    if ((h.member === null) !== asCommunity) {
+      invalid.add(key)
+      continue
+    }
     if ((h.box !== null) !== priv) {
       // A writer cut at 0 with such a header (a boxless writer its diary
       // replaced) holds nothing that counts: rejected, never awaited.
       const s0 = slot.get(h.diary + ':' + key)
       if (s0 !== undefined && s0.cut === 0) invalid.add(key)
-      continue
-    }
-    if ((h.member === null) !== asCommunity) {
-      invalid.add(key)
       continue
     }
     // The community gate binds a group writer strictly to a counted CW of
@@ -1886,10 +1964,19 @@ function bindCores (input, asCommunity) {
   // released ones included, whatever its diary's latest join says (a seeder
   // hiding one would hide the leave it holds); a writer no walk counts is
   // never awaited. A held writer whose header does not match the group's
-  // kind (a replaced boxless writer) is rejected above, never awaited.
+  // kind (a `member` mismatch, a replaced boxless writer) is rejected above,
+  // never awaited. Neither is a pair whose writer's held block 0 rules it
+  // out: no valid header, or one naming another group or another diary than
+  // the pair's. Block 0 is signed by the writer's key, so no copy can make a
+  // writer whose header counts for a pair read as ruled out there.
   for (const pair of slot.keys()) {
     const w = pair.slice(65)
-    if (!valid.has(w) && !rejected.has(w) && !invalid.has(w) && !uncounted.has(w)) incomplete = true
+    if (valid.has(w) || rejected.has(w) || invalid.has(w) || uncounted.has(w)) continue
+    if (heads.has(w)) {
+      const h = heads.get(w)
+      if (h === null || h.group !== G || h.diary !== pair.slice(0, 64)) continue
+    }
+    incomplete = true
   }
   const capped = [...valid.values()]
   // Over the group cap the creator's and the admins' writers go first, so
@@ -3961,6 +4048,9 @@ module.exports = {
   groupConfirmHistory,
   slotWalk,
   diaryWriterCut,
+  diaryWalkRecords,
+  walkRecordsCut,
+  headerStubs,
   slotWalkState,
   replacedWriterCut,
   retiredWriterCut,

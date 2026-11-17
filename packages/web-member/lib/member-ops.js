@@ -3186,7 +3186,10 @@ function sameFold (a, b) {
 // null. Block 0 is decoded first so the cores of other groups are never read
 // in full: every operation on one group would otherwise decode every group
 // core this device holds.
-async function readWriterCoreOf (ctx, key, group, rec = null) {
+// `firsts` (a Map, optional): every core read gets key -> { entry, diary },
+// its block 0 as held and the diary a writer header for `group` names, else
+// null (group.js headerStubs).
+async function readWriterCoreOf (ctx, key, group, rec = null, firsts = null) {
   return withNotedGroupCore(ctx, key, rec, async (core, never) => {
     if (core.contiguousLength === 0 || core.fork !== 0) return null
     let h = null
@@ -3195,7 +3198,9 @@ async function readWriterCoreOf (ctx, key, group, rec = null) {
       block = await core.get(0, { wait: false, raw: true })
       h = decodeBlock(block)
     } catch {}
-    if (validateWriterHeader(h) !== null || h.group !== group) {
+    const own = validateWriterHeader(h) === null && h.group === group
+    if (firsts !== null && block !== null) firsts.set(key, { entry: { seq: 0, record: h }, diary: own ? h.diary : null })
+    if (!own) {
       // Block 0 of fork 0 never changes, and a later fork never folds.
       if (block !== null) never()
       return null
@@ -3341,8 +3346,9 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
   keys.delete(group)
   const writers = []
   const cores = new Map([[group, { diary: rootHeader.diary, at: rootHeader.at, length: root.length, signed: root.signed, entries: root.entries }]])
+  const firsts = new Map()
   for (const key of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx, key, group, rec)
+    const core = await readWriterCoreOf(ctx, key, group, rec, firsts)
     if (core === null) continue
     const h = core.entries[0].record
     if (validateWriterHeader(h) !== null || h.group !== group) continue
@@ -3377,7 +3383,10 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
   // takes it (a blocked or unheld parent is null: the fold reads incomplete).
   const community = rootHeader.community
   const c = isHex64(community) ? await loadNotedCommunity(ctx, base, community, rec) : null
-  const input = { root: { key: group, entries: root.entries }, writers, joins, marks, confirms, community: c === null ? null : c.input }
+  // Header stubs (#350): a held block 0 settles a pair whose writer can never
+  // count for the diary read here that bound it.
+  const heads = grp.headerStubs(joins, firsts)
+  const input = { root: { key: group, entries: root.entries }, writers, joins, marks, confirms, heads, community: c === null ? null : c.input }
   const priv = rootHeader.visibility === 'private'
   const mine = priv ? mineOf(group, rootHeader, writers, ownHex, boxHexOf(ctx)) : new Set()
   const epochs = []
@@ -5387,8 +5396,9 @@ async function foldCommunity (ctx, base, key, kv, rec) {
   keys.delete(key)
   const writers = []
   const cores = new Map([[key, { diary: header.diary, at: header.at, length: root.length, signed: root.signed, entries: root.entries }]])
+  const firsts = new Map()
   for (const k of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx, k, key, rec)
+    const core = await readWriterCoreOf(ctx, k, key, rec, firsts)
     if (core === null) continue
     const h = core.entries[0].record
     writers.push({ key: k, entries: core.entries, diary: h.diary, signed: core.signed })
@@ -5410,7 +5420,7 @@ async function foldCommunity (ctx, base, key, kv, rec) {
       confirms.set(d, groupConfirmHistory(entries, key))
     }
   }
-  const input = { root: { key, entries: root.entries }, writers, joins, marks, confirms }
+  const input = { root: { key, entries: root.entries }, writers, joins, marks, confirms, heads: grp.headerStubs(joins, firsts) }
   const built = grp.buildCommunity({ ...input, now: Date.now() })
   return { key, group: key, header, own, built, cores, diaries, joins, input }
 }

@@ -115,7 +115,8 @@ const texts = async (ctx, group) => (await member.groupRead(ctx, { group })).ite
 // `snapshot()` is the blocklist snapshot it offers; announce() pushes a new
 // one to every connected peer.
 // `answer(query, n)` replaces the page for the n-th request (0-based).
-async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, answer = null } = {}) {
+// `onPeer(peer)` gets each admission peer it attaches.
+async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, answer = null, onPeer = null } = {}) {
   const noise = generateNoiseKeyPair()
   const cert = createSeederCert({ seeder: hex(noise.publicKey) }, kp)
   const cs = new Corestore(tmpDir(t, 'varanda-gfake-'))
@@ -145,7 +146,8 @@ async function fakeSeeder (t, bootstrap, kp, items, { snapshot = () => null, ans
     handles.add(h)
     socket.once('close', () => handles.delete(h))
     attachGroups(socket, { role: 'seeder', page })
-    attachAdmission(socket, { role: 'seeder', cert, have: [], onmessage: () => {} })
+    const peer = attachAdmission(socket, { role: 'seeder', cert, have: [], onmessage: () => {} })
+    if (onPeer) onPeer(peer)
   })
   await joinAndFlush(swarm, [topicFor(hex(kp.publicKey))])
   return { store: cs, swarm, requests, announce: () => { for (const h of handles) h.announce() } }

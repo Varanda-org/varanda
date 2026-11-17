@@ -18,7 +18,7 @@ const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, createIssuerCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { signRoster, signAccept, signMoved, signOrigin } = require('@varanda/core/lib/page')
-const { newPageSecrets, pairsOf, sealSecrets, signShare, verifyShare, openSecrets } = require('@varanda/core/lib/page-secrets')
+const { newPageSecrets, pairsOf, sealSecrets, signShare, verifyShare, openSecrets, signActorBox } = require('@varanda/core/lib/page-secrets')
 const { postRecord } = require('@varanda/core/lib/records')
 const { signPage, opHash } = require('@varanda/core/lib/page-proof')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
@@ -69,7 +69,7 @@ function nonce43 (c) {
   return (String(seqNo) + c.repeat(43)).slice(0, 43)
 }
 
-async function setup (t, { pagesGroups = null, hooks = {}, limits = {} } = {}) {
+async function setup (t, { pagesGroups = null, pagesDelegate = null, hooks = {}, limits = {} } = {}) {
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
   const association = hex(assocKp.publicKey)
@@ -114,7 +114,7 @@ async function setup (t, { pagesGroups = null, hooks = {}, limits = {} } = {}) {
     issuer: { keyPair: issuerKp, cert: issuerCert },
     terms,
     log,
-    pages: { keys, writer, pagesStore, dir, pagesDm, pagesGroups, blocklist: { has: () => false } }
+    pages: { keys, writer, pagesStore, dir, pagesDm, pagesGroups, pagesDelegate, blocklist: { has: () => false } }
   }
   // A fresh account service on the same data dir: the routes' in-memory
   // replay table starts empty, as after a restart.
@@ -139,6 +139,16 @@ async function setup (t, { pagesGroups = null, hooks = {}, limits = {} } = {}) {
     store.putGoogle(row.id, { sub: '40000000000000000' + String(subSeq++).padStart(5, '0'), email: 'p@example.test' })
     await store.finish(row.id, { signature: 'a'.repeat(128) }, issuerKp, issuerCert, association)
     await terms.accept({ member: m.hex, version: TERMS_VERSION, nonce: nonce43('T'), signature: 'a'.repeat(128) })
+    return m
+  }
+
+  // A core node's delegate actor (docs/protocol.md §12, "Nó core:
+  // delegado"): no directory link, a delegate row with the current terms;
+  // the replication check is the pagesDelegate the caller passes in.
+  async function newDelegate () {
+    const kp = crypto.keyPair()
+    const m = { kp, hex: hex(kp.publicKey) }
+    await pagesStore.setDelegate(m.hex, { diary: hex(crypto.randomBytes(32)), length: 1, termsVersion: TERMS_VERSION })
     return m
   }
 
@@ -271,7 +281,7 @@ async function setup (t, { pagesGroups = null, hooks = {}, limits = {} } = {}) {
     return { ...(await api('/account/pages/move', body)), to, sent: body }
   }
 
-  return { api, serve, association, assocKp, writer, pagesStore, pagesDm, keys, dir, env, seeder, logs, newMember, act, create, invite, accept, remove, move, browserMember, putDrop }
+  return { api, serve, association, assocKp, writer, pagesStore, pagesDm, keys, dir, env, seeder, logs, newMember, newDelegate, act, create, invite, accept, remove, move, browserMember, putDrop }
 }
 
 // ---- helpers: a device's keys, the rows file of a legacy page --------------
@@ -668,6 +678,72 @@ test('pages-dm: shares per member, the invite share, dm-sign, and a removed admi
   t.is((await s.act(bia, 'dm-sign', page, { digest })).body.error, 'sem-permissao', 'a removed admin cannot sign')
   t.is((await s.act(bia, 'dm-box-share', page, { ...extra, gen: 2 })).body.error, 'sem-permissao')
   t.is((await s.act(bia, 'dm-box-read', page, {})).body.error, 'sem-permissao')
+})
+
+// A delegate's own statement of its box, as its core node signs it.
+function actorBoxOp (m, { box = boxPair().hex, gen = 1, at = new Date().toISOString(), by = m } = {}) {
+  return { box, gen, at, sig: signActorBox({ actor: by.hex, box, gen, at }, by.kp) }
+}
+
+test('pages-dm: actor-box: a core delegate admin states its own box, dm-box-read hands it out, a removal forgets it', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const delegates = { verify: async () => ({ ok: true, length: 1 }) }
+  const s = await setup(t, { pagesDelegate: delegates })
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const dan = await s.newDelegate()
+  const eve = await s.newDelegate()
+  const page = (await s.create(ana, 'padaria')).page
+  const own = boxPair()
+  t.is((await s.act(ana, 'dm-box', page, boxOp({ expectedGen: 0, members: [ana.hex], ownBox: own.hex }))).status, 200)
+  for (const m of [bia, dan]) {
+    t.is((await s.invite(ana, page, m)).status, 200)
+    t.is((await s.accept(m, page)).status, 200)
+  }
+  t.alike((await s.act(ana, 'dm-box-read', page, {})).body.actorBoxes, [], 'none stated yet')
+
+  const first = actorBoxOp(dan, { at: new Date(Date.now() - 60000).toISOString() })
+  const sent = await s.act(dan, 'actor-box', page, first)
+  t.is(sent.status, 200, JSON.stringify(sent.body))
+  t.alike(sent.body, { ok: true })
+  const entry = { member: dan.hex, ...first }
+  for (const m of [ana, bia, dan]) {
+    const r = await s.act(m, 'dm-box-read', page, {})
+    t.is(r.status, 200)
+    t.alike(r.body.actorBoxes, [entry], 'the owner and every admin read it')
+  }
+  t.alike(s.pagesStore.get(page).actorBoxes, { [dan.hex]: first })
+
+  const api2 = await s.serve()
+  const replay = await api2('/account/pages/actor-box', sent.body2)
+  t.alike([replay.status, replay.body], [200, { ok: true, replay: true }], 'a resend after a restart answers its spent nonce')
+
+  t.is((await s.act(eve, 'actor-box', page, actorBoxOp(eve))).body.error, 'sem-permissao', 'a delegate outside the roster')
+  t.is((await s.act(bia, 'actor-box', page, actorBoxOp(bia))).body.error, 'pedido-invalido', 'a linked member has a diary box')
+  t.is((await s.act(dan, 'actor-box', page, actorBoxOp(dan, { by: eve }))).body.error, 'assinatura-invalida', 'a statement of another actor')
+  t.is((await s.act(dan, 'actor-box', page, { ...actorBoxOp(dan), sig: sigHex() })).body.error, 'assinatura-invalida', 'a bad signature')
+  const older = actorBoxOp(dan, { at: new Date(Date.parse(first.at) - 1000).toISOString() })
+  t.is((await s.act(dan, 'actor-box', page, older)).body.error, 'expirado', 'an older statement')
+  t.is((await s.act(dan, 'actor-box', page, actorBoxOp(dan, { at: first.at }))).body.error, 'expirado', 'another statement with the same at')
+  t.is((await s.act(dan, 'actor-box', page, actorBoxOp(dan, { at: new Date(Date.now() + 3600000).toISOString() }))).body.error, 'pedido-invalido', 'dated far ahead')
+  // The statement bytes signed by hand: signActorBox itself refuses a weak box.
+  const weak = { box: '0'.repeat(64), gen: 3, at: new Date().toISOString() }
+  const weakDigest = nodeCrypto.createHash('sha256').update(JSON.stringify({ actor: dan.hex, at: weak.at, box: weak.box, gen: weak.gen })).digest()
+  weak.sig = hex(crypto.sign(b4a.concat([b4a.from('varanda-page-actor-box-v1\n'), weakDigest]), dan.kp.secretKey))
+  t.is((await s.act(dan, 'actor-box', page, weak)).body.error, 'pedido-invalido', 'a weak box')
+  t.is((await s.act(dan, 'actor-box', page, { ...first, extra: 1 })).body.error, 'pedido-invalido', 'exact op keys')
+  t.alike(s.pagesStore.get(page).actorBoxes, { [dan.hex]: first }, 'nothing refused was written')
+  t.is((await s.act(dan, 'actor-box', page, first)).status, 200, 'the same statement again is idempotent')
+
+  const newer = actorBoxOp(dan, { gen: 2 })
+  t.is((await s.act(dan, 'actor-box', page, newer)).status, 200, 'a newer statement replaces it')
+  t.alike((await s.act(bia, 'dm-box-read', page, {})).body.actorBoxes, [{ member: dan.hex, ...newer }])
+
+  const removed = await s.remove(ana, page, dan.hex, boxOp({ expectedGen: 1, members: [ana.hex, bia.hex], ownBox: own.hex }))
+  t.is(removed.status, 200, JSON.stringify(removed.body))
+  t.absent('actorBoxes' in s.pagesStore.get(page), 'a removal forgets the actor box')
+  t.alike((await s.act(ana, 'dm-box-read', page, {})).body.actorBoxes, [])
+  t.is((await s.act(dan, 'actor-box', page, actorBoxOp(dan))).body.error, 'sem-permissao', 'and a removed admin cannot state one again')
 })
 
 test('pages-dm: dm-box-share: an admin only adds a missing share, the owner replaces any', async (t) => {

@@ -1,6 +1,6 @@
 # Varandinha fase 2, Enfeites e Barraquinha no nó do navegador (PR feat/varandinha-mimos-node)
 
-Este PR liga ao nó do navegador os cinco métodos da fase 2 (`docs/rpc.md` 5.161 a 5.165): o contrato em `packages/rpc/lib/methods.js` e em `docs/rpc.md`, as recusas no nó do core (`packages/core/lib/session.js`), as leituras e escritas em `packages/web-member/lib/member-ops.js` e os handlers em `packages/web-member/lib/session.js`.
+Este PR liga ao nó do navegador os cinco métodos da fase 2 (`docs/rpc.md` 5.162 a 5.166): o contrato em `packages/rpc/lib/methods.js` e em `docs/rpc.md`, as recusas no nó do core (`packages/core/lib/session.js`), as leituras e escritas em `packages/web-member/lib/member-ops.js` e os handlers em `packages/web-member/lib/session.js`.
 
 Nos handlers (`packages/web-member/lib/session.js`):
 
@@ -50,14 +50,14 @@ Ainda falta, para o orquestrador: `npm test -- --affected=origin/main`, `npm run
 
 ## O contrato e os handlers
 
-`docs/rpc.md` (5.157 e 5.161 a 5.165) e os handlers de `packages/web-member/lib/session.js` e de `member-ops.js` dizem agora a mesma coisa. Os pontos que foram acertados no documento, que antes divergia:
+`docs/rpc.md` (5.157 e 5.162 a 5.166) e os handlers de `packages/web-member/lib/session.js` e de `member-ops.js` dizem agora a mesma coisa. Os pontos que foram acertados no documento, que antes divergia:
 
-- 5.163 e 5.164: o portão de escrita (seção 11) roda só na volta à cadeia, antes da escrita, como em `garden.help` (5.160), e não na primeira passagem. Com o semeador parado, `garden.take` responde `'semeador indisponível'` e não escreve nada.
-- 5.163: a ordem é a própria chave, o bloqueio, a bandeira, `giveAllowed` (não segue, não é sábado, mesmo dia, limite do dia), `saveOrdinal`, `applyGive`; o resto que as regras recusam (relógio ou estado ilegível) é `'jogada inválida'`. O peek fora da cadeia lê os blocos 1, 2, a bandeira apontada e o estado apontado (`gardenTargetSeqs`); o estado é lido, mas só `gardenOpenVerdict` julga.
-- 5.164: a ordem é a própria chave, o doador bloqueado, a bandeira, um `diary.peek` do bloco do doador sem rota `/index`, e na volta `gardenTake`: bandeira, resposta idempotente (`changed: false`, o menor `seq` quando vários citam o mimo), `takeAllowed`. `taken` não é alcançável (a resposta idempotente vem antes) e saiu das razões. Qualquer outra recusa das regras é `'jogada inválida'`.
-- 5.165: `garden.drop` não confere a bandeira; o documento deixou de recusar com ela desligada. O handler faz identidade e portão de escrita, e `gardenDrop` confere só o diário próprio.
+- 5.164 e 5.165: o portão de escrita (seção 11) roda só na volta à cadeia, antes da escrita, como em `garden.help` (5.160), e não na primeira passagem. Com o semeador parado, `garden.take` responde `'semeador indisponível'` e não escreve nada.
+- 5.164: a ordem é a própria chave, o bloqueio, a bandeira, `giveAllowed` (não segue, não é sábado, mesmo dia, limite do dia), `saveOrdinal`, `applyGive`; o resto que as regras recusam (relógio ou estado ilegível) é `'jogada inválida'`. O peek fora da cadeia lê os blocos 1, 2, a bandeira apontada e o estado apontado (`gardenTargetSeqs`); o estado é lido, mas só `gardenOpenVerdict` julga.
+- 5.165: a ordem é a própria chave, o doador bloqueado, a bandeira, um `diary.peek` do bloco do doador sem rota `/index`, e na volta `gardenTake`: bandeira, resposta idempotente (`changed: false`, o menor `seq` quando vários citam o mimo), `takeAllowed`. `taken` não é alcançável (a resposta idempotente vem antes) e saiu das razões. Qualquer outra recusa das regras é `'jogada inválida'`.
+- 5.166: `garden.drop` não confere a bandeira; o documento deixou de recusar com ela desligada. O handler faz identidade e portão de escrita, e `gardenDrop` confere só o diário próprio.
 - 5.157: a saída (`on: false`) apaga os cinco tipos (`garden-state`, `garden-help`, `garden-decor`, `garden-gift`, `garden-take`) e não escreve nada só quando a bandeira já está desligada e nenhum deles está vivo. Também ficou dito que o recomeço zera `giftsToday` e `takesToday`.
-- 5.162: `gave` lista o que `offerListable` mantém mais todo mimo vivo que conta em `giftsToday`; `takes` só os datados nos últimos 691200000 ms (8 dias), sem limite superior; com a bandeira desligada ou um relógio ilegível as duas listas vêm vazias.
+- 5.163: `gave` lista o que `offerListable` mantém mais todo mimo vivo que conta em `giftsToday`; `takes` só os datados nos últimos 691200000 ms (8 dias), sem limite superior; com a bandeira desligada ou um relógio ilegível as duas listas vêm vazias.
 - 5.157, introdução: o aplicativo relê `garden.state` ou `garden.stall` antes de oferecer a ação de novo.
 
 ## Verificação da correção (documento, `gave` e testes de método)

@@ -214,8 +214,9 @@ async function heldCopy (ctx, key) {
 // arrived) with a post, replaced: B's diary cuts it at 0, so its walk
 // releases it (#350). R, fresh, holds A's cores and joined C and G; it never
 // held W0, and A never held anything of B. With `noMember`, W0's header also
-// names no member, which a writer of a group must.
-async function releasedBoxless (t, kp, { noMember = false } = {}) {
+// names no member, which a writer of a group must. With `live`, W0 has a box
+// and B's diary never cuts it.
+async function releasedBoxless (t, kp, { noMember = false, live = false } = {}) {
   const a = await person(t, kp, 'Ana')
   const b = await person(t, kp, 'Bia')
   const r = await person(t, kp, 'Rui')
@@ -235,12 +236,12 @@ async function releasedBoxless (t, kp, { noMember = false } = {}) {
   try {
     const core = await store.openGroupWriter(s, hex(crypto.randomBytes(16)))
     const validator = (rec, seq) => validateGroupRecord(rec, seq)
-    await store.appendRecord(core, writerHeader({ group, diary: b.key, member: noMember ? null : cw }), { validator })
+    await store.appendRecord(core, writerHeader({ group, diary: b.key, member: noMember ? null : cw, ...(live ? { box: box() } : {}) }), { validator })
     await store.appendRecord(core, groupPost({ text: 'sem caixa' }), { validator })
     w0 = hex(core.key)
     const diary = await store.openDiary(s)
     await store.appendRecord(diary, groupJoinRecord({ group, writer: w0, on: true }))
-    await store.appendRecord(diary, groupCutRecord({ group, writer: w0, cut: 0 }))
+    if (!live) await store.appendRecord(diary, groupCutRecord({ group, writer: w0, cut: 0 }))
     joins = (await store.readAll(diary)).filter((e) => e.record && e.record.type === 'group-join')
   } finally {
     await s.close()
@@ -305,14 +306,14 @@ test('a boxless writer refused before its diary is held is gated again as a stub
   t.is((await member.groupRead(f.r, { group: f.group })).incomplete, false, 'and the fold is complete')
 })
 
-test('a writer refused for its member is not gated again when its diary releases it (#350)', async (t) => {
+test('a writer refused for its member is held as a stub, block 0 alone, once its diary\'s join is proven (#350)', async (t) => {
   t.timeout(180000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
   let f = null
-  // As above, but W0's header names no member: the release of its box does
-  // not lift that refusal. A --once run never expires its memories, so one
-  // gate of W0 means one fetch of its block 0.
+  // As above, but W0's header names no member: the fold rejects it at any
+  // cut, so R holds it as a stub as soon as B's diary proves the join, read
+  // through the seeder before B's CW is listed.
   const fake = await fakeSeeder(t, bootstrap, kp, [], {
     answer: (q) => {
       if (q.group === f.group) return page([f.w0])
@@ -323,8 +324,82 @@ test('a writer refused for its member is not gated again when its diary releases
   f = await releasedBoxless(t, kp, { noMember: true })
   await copyToSeeder(f.b, fake, [f.b.key, f.cw.key, f.w0.key])
   await copyCores(f.b, f.r, [f.w1])
-  const { events } = await syncOnce(bootstrap, f.r, { timeoutMs: 15000 })
-  t.ok(await stored(f.r, f.b.key), 'B\'s diary, which releases W0, arrives through its CW')
-  t.alike(skipped(events, f.w0.key), ['header-invalid'], 'W0 is refused once: one gate, one fetch of its block 0')
-  t.absent(await stored(f.r, f.w0.key), 'and stays refused')
+  const { result, events } = await syncOnce(bootstrap, f.r, { timeoutMs: 15000 })
+  t.alike(skipped(events, f.w0.key), [], 'W0 is not refused')
+  t.ok(await stored(f.r, f.b.key), 'B\'s diary arrives')
+  t.alike(await heldCopy(f.r, f.w0.key), { contiguous: 1, held: [0] }, 'W0 is held, block 0 alone')
+  t.absent(result.errors.join(' ').includes(f.w0.key), 'and counted held')
+  t.is((await member.groupRead(f.r, { group: f.group })).incomplete, false, 'and the fold is complete')
+})
+
+test('a live writer whose header names no member is fetched to block 0 alone, and its posts never count (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  let f = null
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: (q) => page(q.group === f.group ? [f.w0] : q.group === f.community ? [f.cw] : [])
+  })
+  f = await releasedBoxless(t, kp, { noMember: true, live: true })
+  await copyToSeeder(f.b, fake, [f.b.key, f.cw.key, f.w0.key])
+  await copyCores(f.b, f.r, [f.b.key, f.cw.key, f.w1])
+  t.is((await member.groupRead(f.r, { group: f.group })).incomplete, true, 'control: without W0 the fold awaits it')
+  const { result, events } = await syncOnce(bootstrap, f.r, { timeoutMs: 12000 })
+  t.alike(skipped(events, f.w0.key), [], 'W0 is not refused')
+  t.alike(await heldCopy(f.r, f.w0.key), { contiguous: 1, held: [0] }, 'R fetches W0\'s block 0 alone, though the seeder holds its post')
+  t.absent(result.errors.join(' ').includes(f.w0.key), 'and counts it held')
+  const read = await member.groupRead(f.r, { group: f.group })
+  t.is(read.incomplete, false, 'the fold is complete')
+  t.absent(read.items.some((p) => p.text === 'sem caixa'), 'and W0\'s post never counts')
+})
+
+// A private root, and one diary D binding a boxed writer and `count` boxless
+// writers its walk keeps live (never released), in the fake seeder's store.
+async function oneDiary (fake, kp, count) {
+  const root = fake.store.get({ name: 'root' })
+  await root.ready()
+  const group = hex(root.key)
+  const r = await bound(fake.store, kp, group, 'root', { root })
+  await root.append(enc(groupHeader({ community: PARENT, member: PARENT, diary: r.dkey, visibility: 'private', join: 'approval', name: null, box: box() })))
+  const d = fake.store.get({ name: 'diary-shared' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(enc(memberCertRecord(createCert({ member: dkey }, kp))))
+  const writers = []
+  for (let i = 0; i <= count; i++) {
+    const w = fake.store.get({ name: 'writer-shared-' + i })
+    await w.ready()
+    await w.append(enc(writerHeader({ group, diary: dkey, member: PARENT, ...(i === 0 ? { box: box() } : {}) })))
+    await d.append(enc(groupJoinRecord({ group, writer: hex(w.key), on: true })))
+    writers.push({ key: hex(w.key), diary: dkey, length: 1, seq: d.length - 1 })
+  }
+  return { group, diary: dkey, root: { key: group, diary: r.dkey, length: 1, seq: 1 }, boxed: writers[0], bare: writers.slice(1) }
+}
+
+test('writers refused for their box read their held diary\'s walk once, and no lift follows while it stays current (#350)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  let f = null
+  let all = false
+  let armed = false
+  // The boxless writers are listed once the boxed one is held, and with it
+  // D, so each of their gates reads D as this node holds it.
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: (q) => page(q.group === f.group ? sorted(all ? [f.root, f.boxed, ...f.bare] : [f.root, f.boxed]) : [])
+  })
+  f = await oneDiary(fake, kp, 4)
+  const m = await groupMember(t, kp, f.group)
+  let inspect = null
+  const { events } = await runUntil(m, bootstrap, (evs) => {
+    if (!armed && evs.some((ev) => ev.event === 'group-downloaded' && ev.key === f.boxed.key)) {
+      armed = true
+      setTimeout(() => { all = true }, 1500)
+    }
+    return f.bare.every((w) => skipped(evs, w.key).length > 0)
+  }, { pageRefreshMs: 500, inspectHook: (h) => { inspect = h } })
+  for (const w of f.bare) t.alike(skipped(events, w.key), ['header-invalid'], 'a boxless writer is refused once')
+  t.ok(await stored(m, f.boxed.key), 'the boxed writer is held')
+  t.is(inspect.walkReadCount(), 1, 'four refusals read D\'s walk once')
+  t.is(inspect.boxLiftCount(), 0, 'and no lift reads it again')
 })

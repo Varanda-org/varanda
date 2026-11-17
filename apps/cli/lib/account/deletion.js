@@ -18,7 +18,8 @@
 // (invite-drops.json), the encrypted seen blob (seen/<member>, removed
 // with the compare-and-swap of ./seen-store.js: a conflict waits for the
 // next sweep) and the passkey public keys with any waiting deletion
-// (passkeys.json, leaving a 30-day tombstone). The verified phone number
+// (passkeys.json, leaving a 30-day tombstone), and a request filed by
+// Excluir conta sem a passkey (deletion-requests.json). The verified phone number
 // (phone.json) is not erased: its live row is ended ('excluida'), which frees
 // the number for someone else, but the sealed number stays for the store's
 // RETENTION_MS, because a court order about the deleted key may still follow
@@ -56,14 +57,14 @@ function usable (s) {
 }
 
 // createDeletionSweep({ accounts, terms, ages, pushStore, recovery, invites,
-// drops, seen, passkeys, phones, pages, pageInvites, triage, scheduled, tick,
-// retention, log }) -> { purge(member), sweep(), start() -> stop }. Every
+// drops, seen, passkeys, deletionRequests, phones, pages, pageInvites, triage,
+// scheduled, tick, retention, log }) -> { purge(member), sweep(), start() -> stop }. Every
 // store but `accounts` may be null (the feature is off: no file to purge).
 // `pages` is an openPagesStore, `pageInvites` { holds(m), forget(m) } and
 // `triage` { holdsMember(m), forgetMember(m) }. `scheduled` and `tick` are
 // async functions that never throw. `retention` (createModerationRetention)
 // runs after the per-member purge of every sweep.
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, retention = null, log = () => {} }) {
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, deletionRequests = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, retention = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
@@ -74,6 +75,7 @@ function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore =
     ['sorteio', drops, (m) => drops.holds(m), (m) => drops.forget(m)],
     ['vistos', seen, (m) => seen.get(m) !== null, forgetSeen],
     ['passkeys', passkeys, (m) => passkeys.holds(m), (m) => passkeys.forget(m)],
+    ['pedidos-exclusao', deletionRequests, (m) => deletionRequests.holds(m), (m) => deletionRequests.forget(m)],
     ['telefone', phones, (m) => phones.live(m) !== null, (m) => phones.end(m, 'excluida')],
     ['paginas', pages, (m) => pages.holdsMember(m), (m) => pages.forgetMember(m)],
     ['convites-pagina', pageInvites, (m) => pageInvites.holds(m), (m) => pageInvites.forget(m)],

@@ -13,6 +13,11 @@
 //     and each member's sealed share in the ACL row (./pages-store.js dm);
 //     'dm-box-share' adds one share, 'dm-box-read' hands a member its own.
 //     The service checks shapes only: the devices verify every signature.
+//   - actor boxes: 'actor-box' keeps a core delegate admin's own signed dm
+//     box (no diary has the actor's key, so dm.lookup finds none), stored
+//     only once the signature verifies under that member as the actor;
+//     'dm-box-read' hands every roster member's to the owner and admins, and
+//     the sharer's device checks the signature again before sealing.
 //   - legacy: a page that existed before keeps its gen 1 box secret
 //     (page-keys boxSecretKey, never created any more) and its sealed rows
 //     file until the owner's first 'dm-box'. That 'dm-box' first seals one
@@ -38,7 +43,7 @@ const b4a = require('b4a')
 const dm = require('@varanda/core/lib/dm')
 const dmFold = require('@varanda/core/lib/dm-fold')
 const { PAGE_SECRETS_SEALED_BYTES } = require('@varanda/core/lib/page-secrets')
-const { isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
+const { isPlainObject, isCanonicalIso, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { isWeakBoxKey } = require('@varanda/core/lib/group')
 const { ENV } = require('./page-keys')
@@ -274,6 +279,7 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
     moveDm,
     carryBundle,
     share: tracked(share),
+    actorBox: tracked(actorBox),
     read: tracked(read),
     gen: tracked(genOf),
     legacy: tracked(async (page) => hasRows(page)),
@@ -603,6 +609,28 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
     })
   }
 
+  // 'actor-box' from a roster member, under the caller's page lock: { box,
+  // gen, at, sig } signed by `member` itself (pagesStore.setActorBox checks
+  // the signature, the roster and the order). idem { member, nonce } is
+  // spent in the same write.
+  function actorBox (page, { member, box, gen, at, sig, idem = null } = {}) {
+    pageParam(page)
+    if (typeof member !== 'string' || !HEX64_RE.test(member) || !isBoxKey(box) || !isSig(sig)) throw fail('pedido-invalido')
+    if (!Number.isSafeInteger(gen) || gen < 1 || !isCanonicalIso(at)) throw fail('pedido-invalido')
+    return chained(page, async () => {
+      needStore()
+      await pagesStore.setActorBox(page, member, { box, gen, at, sig }, { spend: idem === null ? undefined : { member: idem.member, nonce: idem.nonce, seq: 0 } })
+      return { ok: true }
+    })
+  }
+
+  // The roster's actor boxes, by member.
+  function actorBoxesOf (row) {
+    const boxes = isPlainObject(row.actorBoxes) ? row.actorBoxes : {}
+    const roster = [row.owner, ...row.admins]
+    return Object.keys(boxes).filter((m) => roster.includes(m)).sort().map((m) => ({ member: m, ...boxes[m] }))
+  }
+
   // 'dm-box-read' for an owner or admin (the caller checked the role).
   function read (page, { member, owner = false, cert = null } = {}) {
     pageParam(page)
@@ -629,7 +657,8 @@ function createPagesDm ({ writer, pagesStore = null, keys, association, dir, env
         legacy: hasRows(page),
         rotatePending: rotating,
         // Only to the member it is sealed to: a later owner cannot open it.
-        legacyBundle: bundle !== null && bundle.for === member ? { id: bundle.id, count: bundle.count } : null
+        legacyBundle: bundle !== null && bundle.for === member ? { id: bundle.id, count: bundle.count } : null,
+        actorBoxes: actorBoxesOf(row)
       }
       if (owner) {
         out.shared = d !== null ? Object.keys(d.shares).sort() : []

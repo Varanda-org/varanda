@@ -1,6 +1,6 @@
 'use strict'
 
-// Varandinha end to end (docs/rpc.md 5.157 to 5.165): the real Seeder behind
+// Varandinha end to end (docs/rpc.md 5.157 to 5.166): the real Seeder behind
 // startSeedWs (the WebSocket entry and the /index/garden routes) and real
 // browser nodes (lib/node.js over in-memory storage) on the local DHT, tmp
 // dirs only. The helper's seeder index reads go through a fetchMedia seam
