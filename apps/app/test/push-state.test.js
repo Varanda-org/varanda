@@ -20,12 +20,12 @@ const subJson = (over = {}) => ({
 
 test('the fixed texts are the approved Portuguese', async (t) => {
   const m = await load()
-  t.alike(m.PUSH_KINDS, ['follow', 'reply', 'like', 'repost'])
+  t.alike(m.PUSH_KINDS, ['follow', 'reply', 'like', 'repost', 'quote', 'mention'])
   t.ok(Object.isFrozen(m.PUSH_KINDS))
   t.is(m.PUSH_LABEL, 'Avisos no aparelho')
   t.is(m.PUSH_ON, 'Ativar avisos neste aparelho')
   t.is(m.PUSH_OFF, 'Desligar avisos neste aparelho')
-  t.is(m.PUSH_HINT, 'Receba um aviso quando alguém seguir você, comentar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.')
+  t.is(m.PUSH_HINT, 'Receba um aviso quando alguém seguir ou mencionar você, comentar, citar, curtir ou republicar o que você publicou, e quando chegar um convite pra sua varanda. Mostra o nome de quem fez a ação. Só neste aparelho. Um aviso pode levar até cerca de um minuto para chegar, de propósito, para que o horário dele não revele o que você acabou de receber.')
   t.is(m.PUSH_DENIED, 'Os avisos do sistema estão desligados neste aparelho.')
   t.is(m.PUSH_UNAVAILABLE, 'Os avisos ainda não estão disponíveis nesta associação.')
   t.is(m.PUSH_UNSUPPORTED, 'No iPhone e no iPad, os avisos só funcionam com o Varanda na Tela de Início.')
@@ -157,12 +157,33 @@ test('parseLaunch refuses a planted or broken query', async (t) => {
   t.is(q('aviso=follow&actor=' + actor + '&recipient=' + recipient + '&ref='), null, 'follow with empty ref')
   t.is(q('aviso=follow&actor=' + actor + '&recipient=' + actor), null, 'actor is recipient')
   t.is(q('aviso=follow&actor=' + actor.toUpperCase() + '&recipient=' + recipient), null, 'upper-case hex')
-  t.is(q('aviso=mention&actor=' + actor + '&recipient=' + recipient), null, 'unknown kind')
+  t.is(q('aviso=boost&actor=' + actor + '&recipient=' + recipient + '&ref=' + ref), null, 'unknown kind')
   t.is(q('aviso=follow&aviso=follow&actor=' + actor + '&recipient=' + recipient), null, 'repeated field')
   t.is(q('aviso=follow&actor=%E0%A4%A&recipient=' + recipient), null, 'bad escape')
   t.is(q('conta=x'), null, 'no launch')
   t.is(parseLaunch(''), null)
   t.is(parseLaunch(null), null)
+})
+
+test('a quote or a mention takes only a ref authored by the actor', async (t) => {
+  const { parseLaunch, parseMessage } = await load()
+  const own = actor + ':5'
+  const other = 'c'.repeat(64)
+  const q = (kind, r) => parseLaunch('?aviso=' + kind + '&actor=' + actor + '&recipient=' + recipient + (r === null ? '' : '&ref=' + r))
+  const msg = (kind, r) => parseMessage({ source: 'varanda-push', kind, actor, recipient, ref: r })
+  for (const kind of ['quote', 'mention']) {
+    t.alike(q(kind, own), { kind, actor, recipient, ref: own }, kind + ' launch')
+    t.alike(msg(kind, own), { kind, actor, recipient, ref: own }, kind + ' message')
+    for (const [label, r] of [['ref author is the recipient', ref], ['ref author is a third key', other + ':5'], ['no ref', null], ['seq 0', actor + ':0']]) {
+      t.is(q(kind, r), null, kind + ' launch: ' + label)
+      t.is(msg(kind, r), null, kind + ' message: ' + label)
+    }
+  }
+  for (const kind of ['reply', 'like', 'repost']) {
+    t.is(q(kind, own), null, kind + ' launch with the actor\'s ref')
+    t.is(msg(kind, own), null, kind + ' message with the actor\'s ref')
+    t.alike(msg(kind, ref), { kind, actor, recipient, ref }, kind + ' message unchanged')
+  }
 })
 
 test('parseMessage reads only the worker message', async (t) => {

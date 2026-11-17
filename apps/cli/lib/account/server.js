@@ -281,15 +281,18 @@ function fixedWindow (limit, windowMs, now) {
 // oldest live one (insertion order: a window is re-inserted when it
 // restarts), so a flood of keys can at worst forget someone's count, never
 // lock a new key out.
+// `charge` false only asks whether the key would pass, changing nothing.
 function keyedWindow (limit, windowMs, now, max = 10000) {
   const windows = new Map()
-  return (key) => {
+  return (key, charge = true) => {
     const t = now()
     let w = windows.get(key)
     if (w !== undefined && t - w.start >= windowMs) {
+      if (!charge) return limit > 0
       windows.delete(key)
       w = undefined
     }
+    if (!charge) return w === undefined ? limit > 0 : w.count < limit
     if (w === undefined) {
       if (windows.size >= max) {
         for (const [k, v] of windows) if (t - v.start >= windowMs) windows.delete(k)

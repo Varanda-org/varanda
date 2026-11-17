@@ -13,7 +13,7 @@ const { WebSocket, createWebSocketStream } = require('ws')
 const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY } = require('@varanda/core/lib/net')
+const { attachAdmission, generateNoiseKeyPair, CAP_NO_INVENTORY, CAP_DISCOVERY, CAP_WRITER_CUTS } = require('@varanda/core/lib/net')
 const { attachDiscovery } = require('@varanda/core/lib/discovery-net')
 const { memberCertRecord, postRecord } = require('@varanda/core/lib/records')
 const { startSeedWs } = require('../lib/seed-ws')
@@ -155,12 +155,12 @@ test('seed-ws discovery: a lean member pages every diary once in recentAt order;
   t.alike(legacyHello.have.map((e) => e.key).sort(), [...k].sort())
 })
 
-test('seed-ws discovery: discovery false rejects the channel and offers no capability', async (t) => {
+test('seed-ws discovery: discovery false rejects the channel and offers no discovery', async (t) => {
   t.timeout(90000)
   const { server } = await startWsSeeder(t, { discovery: false })
   const member = await wsMember(t, server.port, { caps: CAP_NO_INVENTORY })
   await member.peer.hello
-  t.is(member.peer.remoteCaps, 0)
+  t.is(member.peer.remoteCaps, CAP_WRITER_CUTS, 'only the writer cuts bit (#350)')
   t.is(await member.disc.supported, false, 'the open is rejected')
   t.is(member.ws.readyState, WebSocket.OPEN, 'the WebSocket stays open')
 })

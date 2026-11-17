@@ -7,6 +7,7 @@ import { cloneElement, isValidElement, useCallback, useContext, useEffect, useRe
 import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
+import { INCOMPLETE_MESSAGE, INCOMPLETE_PLAIN, OFF_MESSAGE, OFF_REFUSED_PLAIN } from '../devices'
 import { PRESSED_OPACITY } from '../pressMotion'
 import { startDayWake } from '../dayClock'
 import { Icon } from './Icon'
@@ -59,7 +60,9 @@ const PLAIN = {
   'referência inválida': 'Não encontramos essa publicação.',
   'não é possível apagar este registro': 'Este registro não pode ser apagado.',
   'o registro não é uma publicação': 'Este registro não é uma publicação.',
-  'o registro não é um perfil': 'Este registro não é um perfil.'
+  'o registro não é um perfil': 'Este registro não é um perfil.',
+  [INCOMPLETE_MESSAGE]: INCOMPLETE_PLAIN,
+  [OFF_MESSAGE]: OFF_REFUSED_PLAIN
 }
 
 // The plain words for a message, or the message itself.

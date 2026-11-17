@@ -1026,6 +1026,8 @@ test('correct entries are served offline as fresh 200s with their content-type',
 const ACTOR = 'a'.repeat(64)
 const RECIPIENT = 'b'.repeat(64)
 const REF = RECIPIENT + ':7'
+const THIRD = 'c'.repeat(64)
+const ACTOR_REF = ACTOR + ':5'
 const FALLBACK = 'Você tem um aviso novo na Varanda'
 
 function renderedWorker (opts) {
@@ -1095,6 +1097,41 @@ test('push: a valid payload shows its body, tag and data', async (t) => {
   t.is(long.options.body, '😀'.repeat(120), '120 code points are allowed')
 })
 
+test('push: a quote or a mention points at the actor\'s own post', async (t) => {
+  const w = renderedWorker()
+  const quote = await push(w, pushData(valid({ kind: 'quote', body: 'Ana citou sua publicação', ref: ACTOR_REF })))
+  t.is(quote.options.body, 'Ana citou sua publicação')
+  t.is(quote.options.tag, 'varanda-quote-' + ACTOR_REF)
+  t.alike(plain(quote.options.data), { kind: 'quote', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR_REF })
+
+  const mention = await push(w, pushData(valid({ kind: 'mention', body: 'Ana mencionou você', ref: ACTOR_REF })))
+  t.is(mention.options.body, 'Ana mencionou você')
+  t.is(mention.options.tag, 'varanda-mention-' + ACTOR_REF)
+  t.alike(plain(mention.options.data), { kind: 'mention', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR_REF })
+
+  for (const kind of ['quote', 'mention']) {
+    const cases = {
+      'ref author is the recipient': REF,
+      'ref author is a third key': THIRD + ':5',
+      'no ref': null,
+      'seq 0': ACTOR + ':0',
+      'not a ref': ACTOR
+    }
+    for (const [label, ref] of Object.entries(cases)) {
+      const shown = await push(w, pushData(valid({ kind, body: 'Ana citou sua publicação', ref })))
+      t.is(shown.options.body, FALLBACK, kind + ': ' + label)
+      t.is(shown.options.tag, 'varanda-generic', kind + ': ' + label)
+      t.alike(plain(shown.options.data), {}, kind + ': ' + label)
+    }
+  }
+
+  // The actor-authored ref stays a quote and mention rule only.
+  for (const kind of ['reply', 'like', 'repost']) {
+    const shown = await push(w, pushData(valid({ kind, ref: ACTOR_REF })))
+    t.is(shown.options.body, FALLBACK, kind + ' with the actor\'s ref')
+  }
+})
+
 test('push: a blocked actor stays quiet, the shown notice is closed at once, others still show', async (t) => {
   const w = renderedWorker()
   const page = fakeWindow(ORIGIN + '/')
@@ -1150,7 +1187,7 @@ test('push: missing or invalid data shows only the fallback sentence', async (t)
     'url field': pushData(extra),
     'missing key': pushData((({ ref, ...rest }) => rest)(valid())),
     'wrong version': pushData(valid({ v: 2 })),
-    'unknown kind': pushData(valid({ kind: 'mention' })),
+    'unknown kind': pushData(valid({ kind: 'boost' })),
     'uppercase actor': pushData(valid({ actor: 'A'.repeat(64) })),
     'actor is recipient': pushData(valid({ actor: RECIPIENT })),
     'follow with ref': pushData(valid({ kind: 'follow' })),
@@ -1250,6 +1287,28 @@ test('notificationclick: no window opens the validated query path', async (t) =>
     '/?aviso=like&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + REF,
     '/?aviso=follow&actor=' + ACTOR + '&recipient=' + RECIPIENT
   ])
+})
+
+test('notificationclick: a quote or a mention opens the actor\'s post', async (t) => {
+  const w = renderedWorker()
+  w.windows = [fakeWindow('https://other.test/')]
+  await click(w, { kind: 'quote', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR_REF })
+  await click(w, { kind: 'mention', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR_REF })
+  await click(w, { kind: 'quote', actor: ACTOR, recipient: RECIPIENT, ref: REF })
+  await click(w, { kind: 'mention', actor: ACTOR, recipient: RECIPIENT, ref: THIRD + ':5' })
+  t.alike(w.opened, [
+    '/?aviso=quote&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + ACTOR_REF,
+    '/?aviso=mention&actor=' + ACTOR + '&recipient=' + RECIPIENT + '&ref=' + ACTOR_REF,
+    '/',
+    '/'
+  ])
+
+  const mine = fakeWindow(ORIGIN + '/')
+  w.windows = [mine]
+  await click(w, { kind: 'mention', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR_REF })
+  await click(w, { kind: 'quote', actor: ACTOR, recipient: RECIPIENT, ref: REF })
+  t.is(mine.focused, 2)
+  t.alike(plain(mine.messages), [{ source: 'varanda-push', kind: 'mention', actor: ACTOR, recipient: RECIPIENT, ref: ACTOR_REF }])
 })
 
 test('notificationclick: invalid data opens the root, never a profile link', async (t) => {

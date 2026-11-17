@@ -600,3 +600,85 @@ test('issuing at the allowed blob and DM rates never trips the inbound limit; a 
   await until(() => s.a.destroyed, { name: 'flood drop' })
   t.alike(logged2, [{ event: 'peer-dropped', reason: 'message-rate' }])
 })
+
+test('copy stamps: a blob stamp with its own weekly budget, the daily blob budget untouched', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const budget = counterBudget(5)
+  const blobBudget = counterBudget(5)
+  const copyBudget = counterBudget(5)
+  const logged = []
+  attachDmStamp(a, {
+    role: 'seeder',
+    postage: seederPostage(),
+    budget,
+    blobPostage: seederBlobPostage(),
+    blobBudget,
+    copyBudget,
+    log: (e) => logged.push(e),
+    now: () => Date.parse('2026-11-16T12:00:00.000Z')
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  t.alike(await hm.key('copy'), BLOB_PUB, 'the blob key signs a copy stamp')
+  const token = postage.newToken(BLOB_RSA.n, 'blob')
+  const { blinded, r } = postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n)
+  const stamp = await hm.issue(postage.toBase64(blinded), 'copy')
+  t.is(stamp.kid, BLOB_PUB.kid)
+  const sig = postage.unblind(postage.fromBase64(stamp.sig), r, BLOB_RSA.n)
+  t.ok(postage.verify(token, sig, BLOB_PUB, 'blob'), 'a copy stamp IS a blob stamp on the blob pool')
+  t.alike(copyBudget.calls, [{ diary: m.ownKey, day: '2026-W47' }], 'counted per Brasília ISO week')
+  t.is(blobBudget.calls.length, 0, 'the daily blob allowance is not spent')
+  t.is(budget.calls.length, 0)
+  t.alike(logged, [{ event: 'copy-stamp', reason: 'ok' }])
+  hm.close()
+})
+
+test('copy stamps: the week budget runs out as teto without touching the daily blob stamps', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const blobBudget = counterBudget(5)
+  attachDmStamp(a, {
+    role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: seederBlobPostage(), blobBudget, copyBudget: counterBudget(1)
+  })
+  const hm = attachDmStamp(b, { role: 'member', ownKey: m.ownKey, sign: m.sign })
+  const one = () => {
+    const token = postage.newToken(BLOB_RSA.n, 'blob')
+    return postage.toBase64(postage.blind(postage.representative(token, 'blob'), BLOB_RSA.n).blinded)
+  }
+  await hm.issue(one(), 'copy')
+  t.alike(await hm.issue(one(), 'copy'), { error: 'teto' })
+  const day = await hm.issue(one(), 'blob')
+  t.is(day.kid, BLOB_PUB.kid, 'a daily blob stamp is still served')
+  hm.close()
+})
+
+test('a seeder without a copy budget treats copy requests as bad, and no budget is spent', async (t) => {
+  const { a, b } = streams(t)
+  const m = member()
+  const blobBudget = counterBudget(5)
+  const hs = attachDmStamp(a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), blobPostage: seederBlobPostage(), blobBudget })
+  const raw = rawPeer(b)
+  await until(() => raw.received.length === 1, { name: 'challenge' })
+  raw.sendJson({ type: 'proof', key: m.ownKey, sig: hex(m.sign(encodeProof(raw.received[0].nonce, hex(b.publicKey), m.ownKey))) })
+  raw.sendJson({ type: 'key', kind: 'copy' })
+  await until(() => hs.badMessages === 1, { name: 'copy key' })
+  raw.sendJson({ type: 'issue', blinded: blindedToken().blinded, kind: 'copy' })
+  await until(() => hs.badMessages === 2, { name: 'copy issue' })
+  await delay(30)
+  t.is(raw.received.length, 1, 'nothing answered: an old seeder looks the same')
+  t.is(blobBudget.calls.length, 0)
+})
+
+test('copy message shapes', (t) => {
+  const bt = blindedToken()
+  t.ok(validateDmStampMessage({ type: 'key', kind: 'copy' }))
+  t.ok(validateDmStampMessage({ type: 'key', kind: 'copy', ...BLOB_PUB }))
+  t.ok(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'copy' }))
+  t.absent(validateDmStampMessage({ type: 'issue', blinded: bt.blinded, kind: 'copy', extra: 1 }))
+  t.absent(validateDmStampMessage({ type: 'issue', kind: 'copy' }))
+})
+
+test('a copy budget needs a blob key', (t) => {
+  const s = streams(t)
+  t.exception.all(() => attachDmStamp(s.a, { role: 'seeder', postage: seederPostage(), budget: counterBudget(5), copyBudget: counterBudget(5) }), /copyBudget without blobPostage/)
+})

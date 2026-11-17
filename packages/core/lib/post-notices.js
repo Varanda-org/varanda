@@ -199,7 +199,7 @@ function createPostNoticeIndex ({
   // Exact number of stored rows over all authors (private: never returned).
   let edges = 0
 
-  return { markPending, settle, removeAuthor, foldPost, foldUsername, removePost, pageV2, pageV3 }
+  return { markPending, settle, removeAuthor, foldPost, foldUsername, removePost, pageV2, pageV3, holders }
 
   function admit (authorHex) {
     if (tracked.has(authorHex)) return true
@@ -512,6 +512,23 @@ function createPostNoticeIndex ({
     dropCuts(authorHex)
     refused.delete(authorHex)
     tracked.delete(authorHex)
+  }
+
+  // The members that verifiably hold `token` now, under the same rule the
+  // page uses to give them its mention rows: the name derived from their
+  // window and an issuer that passes usable. A new sorted array; [] on bad
+  // input. Read only.
+  function holders (token, issuerUsable) {
+    if (typeof token !== 'string' || token.length === 0) return []
+    const who = owners.get(token)
+    if (!who) return []
+    const out = []
+    for (const member of who) {
+      const held = names.get(member)
+      const entry = held && held.get(token)
+      if (entry && usable(issuerUsable, entry.issuer)) out.push(member)
+    }
+    return out.sort()
   }
 
   // -> { items: [{ key, seq, at, kind }], next: null | { at, key, seq },

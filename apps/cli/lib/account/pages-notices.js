@@ -2,10 +2,10 @@
 
 // Notices of a hosted page (docs/rpc.md 5.28 shape, docs/protocol.md
 // 'Notices link'), read by the account service that holds the page key:
-// who followed the page and whom it does not follow yet, and who replied to,
-// quoted or mentioned it, and who liked or reposted one of its posts. The
-// rules are packages/web-member/lib/notices.js's (not imported: that package
-// is browser-only), on the CLI's Hypercore 11.
+// who followed the page, including an account it already follows, and who
+// replied to, quoted or mentioned it, and who liked or reposted one of its
+// posts. The rules are packages/web-member/lib/notices.js's (not imported:
+// that package is browser-only), on the CLI's Hypercore 11.
 //
 // One short-lived link per read: a WebSocket to the loopback seeder
 // (/seeder), a NoiseSecretStream with a FRESH key, the admission hello with
@@ -34,8 +34,8 @@
 // COST: at most MAX_SEEDER_PAGES pages, DEADLINE_MS and BUDGET_BYTES of
 // WebSocket payload per read; one read in flight per page; one cached
 // answer per page (at most 64 rows) for CACHE_TTL_MS, re-filtered by the
-// current blocklist and follows on every hit. The temporary store is
-// removed and the socket closed when the read ends.
+// current blocklist on every hit. The temporary store is removed and the
+// socket closed when the read ends.
 //
 // `seen` is docs/rpc.md 5.28's construction with a per-page seed derived
 // from VARANDA_PAGE_KEYS in place of the identity seed, so it is stable for
@@ -165,13 +165,13 @@ function zeroRow (row) {
   if (row.writers) for (const w of Object.keys(row.writers)) if (row.writers[w] instanceof Uint8Array) row.writers[w].fill(0)
 }
 
-// keys: page-keys.js table; writer: pages-writer.js (readEntries, follows);
+// keys: page-keys.js table; writer: pages-writer.js (readEntries);
 // seederWs: the loopback seeder URL; blocklist: { has(key) } or null;
 // revokedIssuers: () => Set | Array of revoked issuer keys; env: where
 // VARANDA_PAGE_KEYS is read for the `seen` seed; limits: test overrides.
 function createPagesNotices ({ keys, writer, seederWs, association, blocklist = null, revokedIssuers = null, env = process.env, tmpRoot = os.tmpdir(), log = noop, limits = {} } = {}) {
   if (!keys || typeof keys.get !== 'function') throw new TypeError('keys must be a page-keys table')
-  if (!writer || typeof writer.readEntries !== 'function' || typeof writer.follows !== 'function') throw new TypeError('writer must be a pages writer')
+  if (!writer || typeof writer.readEntries !== 'function') throw new TypeError('writer must be a pages writer')
   if (typeof association !== 'string' || !KEY_RE.test(association)) throw new TypeError('association must be 64 lowercase hex characters')
   const url = parseSeederWs(seederWs)
   if (url === null) throw new TypeError('seederWs must be a loopback http or ws URL with a port')
@@ -436,7 +436,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
   }
 
   function claimFollow (key, ctx) {
-    if (ctx.follows.has(key) || ctx.claimed.has(key)) return false
+    if (ctx.claimed.has(key)) return false
     ctx.claimed.add(key)
     return true
   }
@@ -449,7 +449,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     const ck = item.key + ':' + item.seq
     if (ctx.claimedSeqs.has(ck)) return DROPPED
     // Only a filter before any fetch: the kind is the one the block proves.
-    if (item.kind === 'follow' && (ctx.follows.has(item.key) || ctx.claimed.has(item.key))) return DROPPED
+    if (item.kind === 'follow' && ctx.claimed.has(item.key)) return DROPPED
     const r = await fetchEvidence(run, item, ctx)
     if (r.state !== 'ok') return r
     const evidence = r.evidence
@@ -501,7 +501,6 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     if (revoked === null) throw fail('indisponivel')
     if (isBlocked(page)) return empty()
     const entries = await writer.readEntries(page)
-    const follows = new Set(writer.follows(page).map((f) => f.key))
     const { posts, names } = ownContext(page, entries, revoked)
 
     const row = keys.enabled ? keys.get(page) : null
@@ -551,7 +550,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     }
 
     const cut = () => Date.now() >= deadline - MIN_FETCH_MS || run.cutoff || run.lost || run.link === null
-    const ctx = { v3, own: page, follows, revoked, deadline, cut, names, posts, claimed: new Set(), claimedSeqs: new Set() }
+    const ctx = { v3, own: page, revoked, deadline, cut, names, posts, claimed: new Set(), claimedSeqs: new Set() }
     const seen = []
     let accepted = 0
     let more = false
@@ -648,12 +647,10 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     for (const s of run.secrets) s.fill(0)
   }
 
-  // A cached answer, with rows of authors since blocked or followed removed.
-  function fromCache (page, result) {
-    let follows = new Set()
-    try { follows = new Set(writer.follows(page).map((f) => f.key)) } catch {}
+  // A cached answer, with rows of authors blocked since the read removed.
+  function fromCache (result) {
     const notices = result.notices
-      .filter((r) => !isBlocked(r.key) && !(r.kind === 'follow' && follows.has(r.key)))
+      .filter((r) => !isBlocked(r.key))
       .map((r) => ({ ...r, avatar: r.avatar === null ? null : { ...r.avatar } }))
     return { ...result, notices, next: result.next === null ? null : { ...result.next } }
   }
@@ -671,13 +668,13 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     const ck = JSON.stringify([cursor, limit])
     const hit = cache.get(page)
     if (hit !== undefined) {
-      if (hit.ck === ck && Date.now() - hit.at < L.cacheTtlMs) return fromCache(page, hit.result)
+      if (hit.ck === ck && Date.now() - hit.at < L.cacheTtlMs) return fromCache(hit.result)
       if (Date.now() - hit.at >= L.cacheTtlMs) cache.delete(page)
     }
     const inflight = running.get(page)
     if (inflight !== undefined) {
       if (inflight.ck !== ck) throw fail('ocupado')
-      return fromCache(page, await inflight.promise)
+      return fromCache(await inflight.promise)
     }
     const run = { link: null, store: null, tmp: null, cores: new Set(), keyLocks: new Map(), secrets: [], bytes: 0, cutoff: false, lost: false, ended: false, incomplete: false, deadlineTimer: null }
     const promise = (async () => {
@@ -695,7 +692,7 @@ function createPagesNotices ({ keys, writer, seederWs, association, blocklist = 
     try {
       const result = await promise
       if (!closed) cache.set(page, { at: Date.now(), ck, result })
-      return fromCache(page, result)
+      return fromCache(result)
     } finally {
       if (running.get(page) === entry) running.delete(page)
     }

@@ -28,6 +28,32 @@ function localDay (ms) {
   return new Date(ms + DAY_OFFSET_MS).toISOString().slice(0, 10)
 }
 
+// The ISO 8601 week ('YYYY-Www') of a calendar date given as the epoch ms of
+// its UTC midnight.
+function isoWeekOfDate (dateMs) {
+  const t = new Date(dateMs)
+  t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7) + 3)
+  const year = t.getUTCFullYear()
+  const jan4 = new Date(Date.UTC(year, 0, 4))
+  const week = 1 + Math.round(((t.getTime() - jan4.getTime()) / DAY_MS - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7)
+  return year + '-W' + String(week).padStart(2, '0')
+}
+
+// The Brasília ISO week of ms: Monday to Sunday, the week of the Thursday.
+function localWeek (ms) {
+  const d = new Date(ms + DAY_OFFSET_MS)
+  return isoWeekOfDate(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+}
+
+// The week n weeks before `week` ('YYYY-Www'), or null for a malformed one.
+function weekBefore (week, n) {
+  const m = /^([0-9]{4})-W([0-9]{2})$/.exec(week)
+  if (m === null) return null
+  const jan4 = Date.UTC(Number(m[1]), 0, 4)
+  const monday1 = jan4 - ((new Date(jan4).getUTCDay() + 6) % 7) * DAY_MS
+  return isoWeekOfDate(monday1 + (Number(m[2]) - 1 - n) * 7 * DAY_MS)
+}
+
 // Record that a served diary's signed length grew. Only a strictly larger
 // safe integer over an existing baseline counts: an equal length (the
 // synchronous first check of a serve, a restore, a re-gate) or a bad value
@@ -57,4 +83,4 @@ function countActive (entries, nowMs) {
   return { activeDay, activeWeek }
 }
 
-module.exports = { DAY_MS, WEEK_DAYS, DAY_OFFSET_MS, dayStart, localDay, noteGrowth, countActive }
+module.exports = { DAY_MS, WEEK_DAYS, DAY_OFFSET_MS, dayStart, localDay, localWeek, weekBefore, noteGrowth, countActive }
