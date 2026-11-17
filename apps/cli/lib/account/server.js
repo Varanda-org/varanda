@@ -771,6 +771,8 @@ function checkRawPost (req, origin) {
 // `passkeys` is an openPasskeyStore (./passkey-store.js) or null: Excluir
 // conta, the passkey enrolment and the removal of an extra passkey's
 // recovery entry then answer 503 'indisponivel'.
+// `deletionRequests` is an openDeletionRequests (./deletion-requests.js) or
+// null: Excluir conta sem a passkey then answers 503 'indisponivel'.
 // `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
 // Android app's origin to the ones a passkey assertion may report
 // (./webauthn.js passkeyOrigins).
@@ -813,6 +815,8 @@ function createAccountServer ({
   phoneClient = null,
   phones = null,
   phoneDailyLimit = 200,
+  // Tests only: the fixed answer time of the SMS deletion check.
+  deleteSmsFloorMs,
   pages = null,
   gif = null,
   gifTransport = {},
@@ -823,6 +827,7 @@ function createAccountServer ({
   recovery = null,
   drops = null,
   passkeys = null,
+  deletionRequests = null,
   listingReader = null,
   feiraInvites = null,
   androidCertSha256 = '',
@@ -976,6 +981,7 @@ function createAccountServer ({
     drops,
     seen,
     passkeys,
+    deletionRequests,
     phones,
     pages: pages !== null && pages.pagesStore ? pages.pagesStore : null,
     // Bound late, like `scheduled`: pagesRoutes is created below.
@@ -996,6 +1002,12 @@ function createAccountServer ({
     }
   }
   const deleteRoutes = createDeleteRoutes({
+    // Excluir conta sem a passkey: the deletion codes texted to the number
+    // the member verified. The per-address limits are Caddy's.
+    codes: phoneRoutes.deletionCodes,
+    requests: deletionRequests,
+    smsCheckLimit: keyedWindow(10, 600 * 1000, now),
+    smsCheckFloorMs: deleteSmsFloorMs,
     accounts: store,
     moderation,
     pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
@@ -1937,7 +1949,7 @@ function createAccountServer ({
     return 'sent'
   }
 
-  return { listen, notifyInvite, notifyScheduledDeletion, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
+  return { listen, notifyInvite, notifyScheduledDeletion, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), deletionCodeStats: () => phoneRoutes.deletionCodes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
 }
 
 module.exports = {

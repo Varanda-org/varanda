@@ -83,6 +83,28 @@ test('send: POST with the key, SMS only, a fresh vendor_data and nothing else', 
   t.not(fake.seen[1].body.vendor_data, req.body.vendor_data, 'vendor_data is fresh per send')
 })
 
+test('send: an optional sender name goes in options.sms_sender_name, nothing without it', async (t) => {
+  const fake = await fakeFor(t)
+  const p = client(fake)
+  t.alike(await p.send({ phone: PHONE, senderName: 'Varanda excluir conta' }), { ok: true, status: 'enviado' })
+  await p.send({ phone: PHONE })
+  t.is(fake.seen.length, 2)
+  t.alike(fake.seen[0].body.options, { preferred_channel: 'sms', locale: 'pt-BR', code_size: 6, sms_sender_name: 'Varanda excluir conta' })
+  t.alike(Object.keys(fake.seen[0].body).sort(), ['options', 'phone_number', 'vendor_data'])
+  t.alike(fake.seen[1].body.options, { preferred_channel: 'sms', locale: 'pt-BR', code_size: 6 }, 'no sender key without a name')
+  t.absent(allKeys(fake.seen[1].body).includes('sms_sender_name'))
+
+  // Names the provider would refuse never leave: empty, too long, only
+  // digits, a character outside its set, not a string.
+  const bad = { ok: false, reason: 'entrada', fields: [] }
+  for (const senderName of ['', 'x'.repeat(31), '12345', 'Varanda: excluir', 'Exclusão', 'a\nb', 42, null]) {
+    t.alike(await p.send({ phone: PHONE, senderName }), bad, 'sender ' + JSON.stringify(senderName))
+  }
+  t.is(fake.seen.length, 2, 'no refused name reached the provider')
+  t.alike(await p.send({ phone: PHONE, senderName: "A&B - ok! 'x' 9" }), { ok: true, status: 'enviado' }, 'every allowed kind')
+  t.ok(await p.send({ phone: PHONE, senderName: 'x'.repeat(30) }).then((r) => r.ok), '30 characters')
+})
+
 test('send: each provider status', async (t) => {
   const fake = await fakeFor(t)
   const p = client(fake)

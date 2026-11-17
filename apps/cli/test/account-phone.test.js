@@ -799,6 +799,95 @@ test('phone check: a wrong code three times, then codigo-expirado; a malformed c
   t.alike((await s.step(member(), 'check', { code: PHONE_CODE })).body, { error: 'codigo-expirado' }, 'no send at all')
 })
 
+// The provider's per-number state also moves with the deletion sends and
+// checks, so a Declined or Expired code answers and counts as a wrong one.
+test('phone check: a Declined or Expired code counts as a wrong code and keeps the entry until the attempts are used up', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await s.band(m)
+  t.alike((await s.step(m, 'send', { phone: PHONE_A })).body, { state: 'enviado' })
+  const statuses = ['Declined', 'Expired or Not Found', 'Declined']
+  let i = 0
+  s.fake.script({ phoneCheck: (req, res, ctx) => ctx.json(res, 200, { status: statuses[i++] }) })
+  for (const status of statuses) {
+    const r = await s.step(m, 'check', { code: WRONG_CODE })
+    t.is(r.status, 400, status)
+    t.alike(r.body, { error: 'codigo-invalido' }, status)
+    t.is(s.server.phoneStats().pending, i < 3 ? 1 : 0, 'kept until the third')
+  }
+  t.is(s.checks().length, 3, 'each check reached the provider')
+  const after = await s.step(m, 'check', { code: PHONE_CODE })
+  t.is(after.status, 410)
+  t.alike(after.body, { error: 'codigo-expirado' }, 'dropped after three, as with wrong codes')
+  t.is(s.checks().length, 3)
+  t.is(s.logs.filter((l) => l === JSON.stringify({ event: 'telefone', reason: 'didit-checagem-expirado' })).length, 3)
+
+  s.c.offset += 61 * 1000
+  t.alike((await s.step(m, 'send', { phone: PHONE_B })).body, { state: 'enviado' })
+  s.fake.script({ phoneCheck: (req, res, ctx) => ctx.json(res, 200, { status: 'Expired or Not Found' }) })
+  t.alike((await s.step(m, 'check', { code: PHONE_CODE })).body, { error: 'codigo-invalido' })
+  s.fake.script({})
+  t.is((await s.step(m, 'check', { code: PHONE_CODE })).body.state, 'verificado', 'the next check asked the provider again')
+  t.is(s.checks().length, 5)
+  noPersonalData(t, s, [m])
+})
+
+test('phone check: only the service\'s own 5-minute clock, from the send request, answers codigo-expirado', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await s.band(m)
+  // The provider answers the send 10 s after it was asked.
+  s.fake.script({ phoneSend: (req, res, ctx) => { s.c.offset += 10 * 1000; ctx.json(res, 200, { status: 'Success' }) } })
+  t.alike((await s.step(m, 'send', { phone: PHONE_A })).body, { state: 'enviado' })
+  s.fake.script({})
+  s.c.offset += 289 * 1000
+  t.alike((await s.step(m, 'check', { code: WRONG_CODE })).body, { error: 'codigo-invalido' })
+  t.is(s.checks().length, 1)
+  s.c.offset += 1000
+  const r = await s.step(m, 'check', { code: PHONE_CODE })
+  t.is(r.status, 410)
+  t.alike(r.body, { error: 'codigo-expirado' }, '5 minutes after the send was asked')
+  t.is(s.checks().length, 1, 'no provider call')
+  t.is(s.server.phoneStats().pending, 0)
+})
+
+test('phone send: a provider 429 answers and is remembered as a sent code, with a fixed log line', async (t) => {
+  const s = await setup(t)
+  const m = member()
+  await s.band(m)
+  s.fake.script({ phoneSend: (req, res, ctx) => ctx.json(res, 429, { phone_number: ['too many'] }) })
+  const { r, lines } = await logged(s, () => s.step(m, 'send', { phone: PHONE_A }))
+  t.is(r.status, 200)
+  t.alike(r.body, { state: 'enviado' })
+  t.alike(lines, [JSON.stringify({ event: 'telefone', reason: 'didit-envio-limite' })])
+  t.is(s.server.phoneStats().pending, 1)
+  const soon = await s.step(m, 'send', { phone: PHONE_A })
+  t.alike(soon.body, { error: 'limite-telefone' }, 'the resend wait runs as after a sent code')
+  t.is(s.sends().length, 1)
+  s.fake.script({})
+  const checked = await s.step(m, 'check', { code: PHONE_CODE })
+  t.is(s.checks().length, 1, 'the check asked the provider')
+  t.is(checked.body.state, 'verificado')
+  noPersonalData(t, s, [m])
+})
+
+test('phone send: two concurrent sends sharing a provider 429 both answer enviado', async (t) => {
+  const s = await setup(t)
+  s.fake.script({ phoneSend: (req, res, ctx) => setTimeout(() => ctx.json(res, 429, {}), 150) })
+  const m = member()
+  await s.band(m)
+  const a = (await s.start(m)).body.nonce
+  const b = (await s.start(m)).body.nonce
+  const body = (nonce) => ({ member: m.hex, nonce, signature: s.signFor(m, 'send', nonce), phone: PHONE_A })
+  const [ra, rb] = await Promise.all([s.post('/account/phone/send', body(a)), s.post('/account/phone/send', body(b))])
+  t.alike(ra.body, { state: 'enviado' })
+  t.alike(rb.body, { state: 'enviado' })
+  t.is(ra.status, 200)
+  t.is(rb.status, 200)
+  t.is(s.sends().length, 1)
+  t.is(s.server.phoneStats().pending, 1)
+})
+
 test('phone check: a virtual line is refused; an unknown outcome is 503', async (t) => {
   const s = await setup(t)
   const m = member()
@@ -835,7 +924,8 @@ test('phone send: provider refusals map to tokens and log field names, never val
   t.alike(s.server.phoneStats().pending, 0, 'nothing pending after a refusal')
 
   s.fake.script({ phoneSend: (req, res, ctx) => ctx.json(res, 429, {}) })
-  t.alike((await s.step(m, 'send', { phone: PHONE_A })).body, { error: 'limite-telefone' })
+  t.alike((await s.step(m, 'send', { phone: PHONE_A })).body, { state: 'enviado' }, 'a 429 answers as a sent code')
+  s.c.offset += 61 * 1000
   s.fake.script({ phoneSend: (req, res, ctx) => ctx.json(res, 200, { status: 'Blocked' }) })
   t.alike((await s.step(m, 'send', { phone: PHONE_A })).body, { error: 'limite-telefone' })
   s.fake.script({ phoneSend: (req, res, ctx) => ctx.json(res, 502, {}) })

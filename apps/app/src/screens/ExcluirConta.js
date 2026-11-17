@@ -64,7 +64,7 @@ function Bullets ({ texts, strong }) {
 // is ready; `member`: the unlocked key; onDone closes the sheet.
 // `scheduledDeletion`: the date the shell read from /account/status, so the
 // cancel stays reachable even when start refuses (a page owned meanwhile).
-export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsReset, scheduledDeletion = null, onDeletionChanged, onDone }) {
+export default function ExcluirConta ({ active, member, canChangePhone = false, onOpenPaginas, onTermsReset, scheduledDeletion = null, onDeletionChanged, onDone }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
   const outbox = useOutbox()
@@ -180,7 +180,7 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
   if (problem !== null && problem.code === 'paginas-ativas') {
     return (
       <Page>
-        {scheduledDeletion !== null ? <CancelarExclusao member={member} scheduled={scheduledDeletion} onCancelled={cancelled} /> : null}
+        {scheduledDeletion !== null ? <CancelarExclusao member={member} scheduled={scheduledDeletion} onCancelled={cancelled} canChangePhone={canChangePhone} /> : null}
         <Body>{PAGES_TEXT}</Body>
         {typeof onOpenPaginas === 'function' ? <Btn label='Abrir Páginas' onPress={onOpenPaginas} /> : <Body>{PAGES_LATER}</Body>}
       </Page>
@@ -194,7 +194,7 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
   if (waiting !== null && mode === 'agendada') {
     return (
       <Page>
-        <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} />
+        <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} canChangePhone={canChangePhone} />
       </Page>
     )
   }
@@ -207,7 +207,7 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
     <View style={styles.flex}>
       <KeyboardForm>
         <Page>
-          {waiting !== null ? <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} /> : null}
+          {waiting !== null ? <CancelarExclusao member={member} scheduled={waiting} onCancelled={cancelled} canChangePhone={canChangePhone} /> : null}
           <Bullets texts={[WHAT_GOES]} strong />
           <Bullets texts={[DIARY, GROUPS, KEPT, mode === 'agendada' ? WAIT_TEXT : DEVICE, PASSKEY_TEXT]} />
           {loading ? <Soft>carregando…</Soft> : null}
@@ -247,7 +247,8 @@ export default function ExcluirConta ({ active, member, onOpenPaginas, onTermsRe
 // service could verify): the date and the way to cancel it, on this screen
 // and on every signed-in device (Ajustes). Cancelling needs the diary key's
 // 'cancel' statement, nothing more: whoever holds the account may keep it.
-export function CancelarExclusao ({ member, scheduled, onCancelled }) {
+// canChangePhone: Ajustes shows Trocar o celular (the member has a number).
+export function CancelarExclusao ({ member, scheduled, onCancelled, canChangePhone = false }) {
   const node = useNode()
   const action = useAction()
   const cancel = () => action.run(async () => {
@@ -262,6 +263,7 @@ export function CancelarExclusao ({ member, scheduled, onCancelled }) {
     <View>
       <Body>{scheduledText(scheduled)}</Body>
       <Soft>Se não foi você que pediu, cancele agora.</Soft>
+      {canChangePhone ? <Soft>Se não foi você, troque o celular em Ajustes &gt; Trocar o celular.</Soft> : null}
       <Row>
         <Btn label='Cancelar exclusão' onPress={cancel} pending={action.pending} />
       </Row>
