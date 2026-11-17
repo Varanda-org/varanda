@@ -105,6 +105,7 @@ const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/enga
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { heldRuns } = require('@varanda/core/lib/sparse-held')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
@@ -2695,6 +2696,16 @@ async function groupCoreState (core) {
   return { entries: (await store.readBlocks(core)).slice(0, length), length, signed, fork }
 }
 
+// A writer as groupCoreState, and past its first hole the leaves and key
+// blocks held below the signed length reported (store.readHeldBlocks): a
+// seeder keeps a cut writer sparse (#350).
+async function writerCoreState (core) {
+  const length = core.contiguousLength
+  const signed = core.length
+  const fork = core.fork
+  return { entries: (await store.readHeldBlocks(core)).filter((e) => e.seq < signed), length, signed, fork }
+}
+
 // A stored group core's entries (store.readBlocks: no diary deletion fold),
 // read-only -> { entries, length, fork } or null.
 async function readGroupCore (ctx, key, rec = null) {
@@ -2711,8 +2722,8 @@ async function readGroupCore (ctx, key, rec = null) {
 
 const MEMO_MAX = 64
 const MEMO_TTL_MS = 30000
-// A replica with more missing blocks than this above its contiguous length
-// is not signed: its stamp would cost as much as the read.
+// A replica holding more runs of blocks than this past its contiguous
+// length is not signed: its stamp would cost as much as the read.
 const MEMO_MAX_HOLES = 4096
 // Tests only: VARANDA_MEMO_CHECK=1 turns the check mode on for every ctx
 // and gives a ctx without a memo one per storage.
@@ -2741,18 +2752,22 @@ function memoChecks (ctx) {
   return ctx.memoCheck === true || MEMO_ENV_CHECK
 }
 
+// A writer is read past its first hole too (groupCoreState), so a group
+// core's stamp is a replica's.
 function groupStamp (core) {
-  return core.contiguousLength + ',' + core.length + ',' + core.fork
+  return replicaStamp(core)
 }
 
 // readVisible also shows the stored blocks past a hole, so a replica's
-// stamp names each of them (null: too many to sign).
+// stamp names the runs of them (null: too many to sign). A long stub or a
+// writer cut early holds a few runs far past its prefix.
 async function replicaStamp (core) {
   const contiguous = core.contiguousLength
   const length = core.length
+  const runs = await heldRuns(core, contiguous, length, MEMO_MAX_HOLES)
+  if (runs === null) return null
   let out = contiguous + ',' + length + ',' + core.fork
-  if (length - contiguous > MEMO_MAX_HOLES) return null
-  for (let i = contiguous; i < length; i++) if (await core.has(i)) out += '.' + i
+  for (const [start, end] of runs) out += '.' + start + '-' + end
   return out
 }
 
@@ -2769,8 +2784,8 @@ async function withNotedGroupCore (ctx, key, rec, read) {
   if (rec === null) return withGroupCore(ctx, key, (core) => read(core, noop))
   let stamp = 'none'
   let skip = false
-  const value = await withGroupCore(ctx, key, (core) => {
-    stamp = groupStamp(core)
+  const value = await withGroupCore(ctx, key, async (core) => {
+    stamp = await groupStamp(core)
     return read(core, () => { skip = true })
   })
   if (!skip) noteDep(rec, 'k', key, stamp)
@@ -2964,7 +2979,7 @@ async function readWriterCoreOf (ctx, key, group, rec = null) {
       if (block !== null) never()
       return null
     }
-    return groupCoreState(core)
+    return writerCoreState(core)
   })
 }
 
@@ -3110,7 +3125,7 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
     if (core === null) continue
     const h = core.entries[0].record
     if (validateWriterHeader(h) !== null || h.group !== group) continue
-    writers.push({ key, entries: core.entries, diary: h.diary })
+    writers.push({ key, entries: core.entries, diary: h.diary, signed: core.signed })
     cores.set(key, { diary: h.diary, at: h.at, length: core.length, signed: core.signed, entries: core.entries })
   }
   const diaries = new Map()
@@ -5155,13 +5170,14 @@ async function foldCommunity (ctx, base, key, kv, rec) {
     const core = await readWriterCoreOf(ctx, k, key, rec)
     if (core === null) continue
     const h = core.entries[0].record
-    writers.push({ key: k, entries: core.entries, diary: h.diary })
+    writers.push({ key: k, entries: core.entries, diary: h.diary, signed: core.signed })
     cores.set(k, { diary: h.diary, at: h.at, length: core.length, signed: core.signed, entries: core.entries })
   }
   const diaries = new Map()
   const joins = new Map()
   // The diaries' group-cut marks for C, as the core node reads them: the
-  // slot walk frees a CW's slot and stops its records at its cut (#350).
+  // slot walk frees a CW's slot and stops its records at its cut, so a cut
+  // CW held sparse folds like the whole one (#350).
   const marks = new Map()
   const confirms = new Map()
   for (const d of new Set([ownHex, header.diary, ...writers.map((w) => w.diary)])) {
@@ -6960,5 +6976,6 @@ module.exports = {
   isNeedsExclusive,
   needsExclusive,
   lentCore,
-  entriesStamp
+  entriesStamp,
+  replicaStamp
 }

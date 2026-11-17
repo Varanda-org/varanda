@@ -73,7 +73,8 @@ const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-li
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupCutHistory, groupConfirmHistory, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { advertisedHeld, keptPastSeqs, askHeld, peerHolds } = require('./sparse-held')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
   presentState,
@@ -138,6 +139,12 @@ const MAX_WRITER_PAGES = Math.ceil(MAX_GROUP_WRITERS / GROUPS_LIMIT_MAX)
 // the socket dropped for 'message-rate' (that would cut diary replication).
 const GROUP_REQUEST_BURST = Math.floor(GROUPS_BURST / 8)
 const GROUP_REQUEST_RATE = GROUPS_RATE / 2
+// A foreign writer held past its prefix is checked again this often while
+// its goal waits on what its peers advertise (sparse-held.js).
+const SPARSE_CHECK_MS = 100
+// An own cut writer whose leaves or key blocks a seeder does not advertise
+// yet is checked again this often (its answer to the want raises no event).
+const KEPT_CHECK_MS = 250
 // Page items whose diary or join seq a gate disproved, per seeder, before
 // this run stops paging that seeder.
 const MAX_BAD_HINTS = 32
@@ -2164,7 +2171,15 @@ async function runSync ({
         continue
       }
       seen.add(g.group)
-      ownWriters.set(g.writer, { group: g.group, core })
+      // uploaded: replicator Peer -> the block indexes served to it.
+      const own = { group: g.group, core, cut: null, kept: null, keptReading: false, keptTimer: null, uploaded: new WeakMap() }
+      core.on('upload', (index, byteLength, from) => {
+        if (!from) return
+        let set = own.uploaded.get(from)
+        if (set === undefined) own.uploaded.set(from, (set = new Set()))
+        set.add(index)
+      })
+      ownWriters.set(g.writer, own)
       groupList.push({ group: g.group, writer: g.writer, nonce: g.nonce })
       groupSet.add(g.group)
       if (g.kind === 'community' || (g.writer === g.group && await ownRootKind(core) === 'community')) ownCommunities.add(g.group)
@@ -2183,6 +2198,17 @@ async function runSync ({
             noteParent(g.group, raw)
           }
         } catch {}
+      }
+    }
+    // A writer the own diary cut is pushed whole up to the cut, and past it
+    // only its leaves and key blocks, all a seeder keeps there
+    // (docs/protocol.md "Sparse copies").
+    if (ownWriters.size > 0) {
+      try {
+        const entries = await readAll(diary)
+        for (const [w, own] of ownWriters) if (w !== own.group) own.cut = diaryWriterCut(entries, own.group, w)
+      } catch {
+        log('aviso: falha ao ler os cortes do diário')
       }
     }
     // A joined group's root stored by an earlier run names its community
@@ -2647,7 +2673,15 @@ async function runSync ({
         if (it && it.length > pushed) pushed = it.length
       }
       const own = ownWriters.get(g.writer)
-      if (own.core.length > pushed) unmet.push(g.writer + ':' + own.core.length + '/' + pushed)
+      // A writer its diary cut is kept to the cut, block 0 always: past it
+      // a seeder holds only its leaves and key blocks, never the whole
+      // length, and those must be there too.
+      const goal = own.cut === null ? own.core.length : Math.min(own.core.length, Math.max(own.cut, 1))
+      if (goal > pushed) unmet.push(g.writer + ':' + goal + '/' + pushed)
+      else if (goal < own.core.length) {
+        const missing = ownKeptMissing(own, seeders, g, goal)
+        if (missing !== -1) unmet.push(g.writer + ':corte ' + missing)
+      }
     }
     for (const [key, advertised] of groupTargets) {
       if (ownWriters.has(key)) continue
@@ -2657,15 +2691,92 @@ async function runSync ({
       const active = e && e.state === 'active'
       const ours = active ? e.core.contiguousLength : 0
       const want = active ? Math.max(advertised, e.core.length) : advertised
+      // A copy past the advertised prefix with a hole (a writer a seeder keeps
+      // sparse) is met once its peers' advertised blocks are all held.
+      const short = !active || (ours < want && (ours < advertised || !sparseMet(e)))
       // Until the main store's block 0 is compared with the gated one, ending
       // the run would skip that comparison and the growth it reports.
-      if (!active || ours < want || e.expected !== null) unmet.push(key + ':' + ours + '/' + want)
+      if (short || e.expected !== null) unmet.push(key + ':' + ours + '/' + want)
       if (active) {
         const d = groupDiaries.get(e.diary)
         if (d && !d.failed && (d.present < d.want || d.expected !== null)) unmet.push(e.diary + ':' + d.present + '/' + d.want)
       }
     }
     return unmet
+  }
+
+  // The own leaves and key blocks of cut writer `own` past its cut, read
+  // once per length (null while that read runs).
+  function ownKept (own) {
+    const length = Math.min(own.core.length, maxLogBlocks)
+    const k = own.kept
+    if (k !== null && k.from === own.cut && k.to === length) return k.seqs
+    if (own.keptReading || ended) return null
+    own.keptReading = true
+    const from = own.cut
+    const start = k !== null && k.from === from && k.to < length ? k.to : from
+    const before = start === from ? [] : k.seqs
+    track(keptPastSeqs(own.core, start, length), (seqs) => {
+      own.keptReading = false
+      own.kept = { from, to: length, seqs: before.concat(seqs) }
+      evaluate()
+    }, () => {
+      own.keptReading = false
+    })
+    return null
+  }
+
+  // The first own leave or key block of cut writer `own` that no verified
+  // seeder listing it at `goal` holds (-1 when one holds them all): past
+  // the cut a seeder keeps those blocks only, so the writer is pushed once
+  // one holds them. Each such seeder is asked for its bitfield there (a
+  // full core sends no wants of its own) and checked again soon.
+  function ownKeptMissing (own, seeders, g, goal) {
+    const seqs = ownKept(own)
+    if (seqs === null) return own.cut
+    if (seqs.length === 0) return -1
+    let missing = seqs[0]
+    for (const p of seeders) {
+      const pass = p.groupPasses.get(g.group)
+      const it = pass && pass.items.get(g.writer)
+      if (!it || it.length < goal) continue
+      const peer = own.core.peers.find((x) => x.stream === p.socket)
+      if (!peer) continue
+      const served = own.uploaded.get(peer) || null
+      if (peerHolds(peer, seqs, served)) return -1
+      askHeld(peer, seqs)
+      missing = seqs.find((seq) => !peerHolds(peer, [seq], served))
+    }
+    if (own.keptTimer === null && !ended) {
+      own.keptTimer = later(() => {
+        own.keptTimer = null
+        evaluate()
+      }, KEPT_CHECK_MS)
+    }
+    return missing
+  }
+
+  // Whether foreign writer e, held up to a hole past what its seeders list,
+  // holds every block a connected peer advertises below its signed length,
+  // from the last check at its present length and prefix (sparse-held.js).
+  // A missing or stale check runs again shortly; evaluate() follows it.
+  function sparseMet (e) {
+    const s = e.sparse
+    if (s && s.length === e.core.length && s.contiguous === e.core.contiguousLength && s.done) return true
+    if (e.sparseTimer || ended) return false
+    e.sparseTimer = later(() => {
+      e.sparseTimer = null
+      const core = e.core
+      if (ended || core === null || e.state !== 'active') return
+      const length = core.length
+      const contiguous = core.contiguousLength
+      track(advertisedHeld(core, Math.min(length, maxLogBlocks)), (done) => {
+        if (e.core !== core) return
+        e.sparse = { length, contiguous, done }
+        evaluate()
+      }, noop)
+    }, SPARSE_CHECK_MS)
+    return false
   }
 
   function groupSockets (peer) {
@@ -3056,6 +3167,8 @@ async function runSync ({
       diaryRaw: null, // D's block 0, judged again when an issuer is revoked
       wasStored: false,
       purging: null,
+      sparse: null, // { length, contiguous, done }: the last advertisedHeld check
+      sparseTimer: null,
       accepted: false // gated as a writer of this group (now or in an earlier run)
     }
     groupCores.set(item.key, e)

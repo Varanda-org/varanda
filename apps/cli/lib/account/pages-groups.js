@@ -45,12 +45,13 @@ const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const Corestore = require('corestore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecord, readAll, readBlocks, openReplica, purgeReplica } = require('@varanda/core/lib/store')
+const { writeJsonAtomic, appendRecord, readAll, readBlocks, readHeldBlocks, openReplica, purgeReplica } = require('@varanda/core/lib/store')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const { groupJoinRecord, latestProfile, validateRecord, MAX_LOG_BLOCKS } = require('@varanda/core/lib/records')
+const { advertisedHeld } = require('@varanda/core/lib/sparse-held')
 const { latestUsername } = require('@varanda/core/lib/username')
 const groups = require('@varanda/core/lib/group')
 const { keyTag, keyCommit, wipe } = require('@varanda/core/lib/group-crypto')
@@ -67,6 +68,9 @@ const NOISE_FILE = 'noise-key.json'
 const MAX_REPLICAS = 1024
 const MAX_WRITER_PAGES = Math.ceil(groups.MAX_GROUP_WRITERS / GROUPS_LIMIT_MAX)
 const FETCH_TIMEOUT_MS = 10000
+// A listed writer held past the seeder's prefix is checked this often for
+// the blocks the seeder advertises (core sparse-held.js).
+const SPARSE_POLL_MS = 50
 const BACKOFF_MIN_MS = 1000
 const BACKOFF_MAX_MS = 60000
 const HANDSHAKE_TIMEOUT_MS = 10000
@@ -604,16 +608,34 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
 
   // The core at the length the seeder offers, held (release it), or null
   // when nothing arrived in time. `complete` is false while a block up to
-  // min(length, MAX_LOG_BLOCKS) is missing.
-  async function fetch (key, held) {
+  // min(length, MAX_LOG_BLOCKS) is missing, or for a `sparse` core (a listed
+  // writer, which a seeder keeps sparse once its diary cut it, #350) while
+  // a block the seeder advertises below that is missing.
+  async function fetch (key, held, sparse = false) {
     const core = await hold(key)
     held.push(key)
     await timeout(core.update({ wait: true }).catch(noop), fetchTimeoutMs)
     if (core.length === 0) return null
     const end = Math.min(core.length, MAX_LOG_BLOCKS)
-    await timeout(core.download({ start: 0, end }).done().catch(noop), fetchTimeoutMs)
+    const range = core.download({ start: 0, end }).done().catch(noop)
+    if (!sparse) {
+      await timeout(range, fetchTimeoutMs)
+      if (core.contiguousLength === 0) return null
+      return { core, complete: core.contiguousLength >= end }
+    }
+    // The range never completes past a seeder's hole: it ends once every
+    // block the seeder advertises is here.
+    const deadline = Date.now() + fetchTimeoutMs
+    let done = false
+    range.then(() => { done = true })
+    let complete = false
+    for (;;) {
+      complete = core.contiguousLength >= end || (core.contiguousLength > 0 && await advertisedHeld(core, end))
+      if (complete || done || closed || Date.now() >= deadline) break
+      await timeout(range, Math.min(SPARSE_POLL_MS, Math.max(0, deadline - Date.now())))
+    }
     if (core.contiguousLength === 0) return null
-    return { core, complete: core.contiguousLength >= end }
+    return { core, complete }
   }
 
   function localWriter (key) {
@@ -699,7 +721,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       // replica of the same key would never get a channel, so read it here.
       let got = localWriter(it.key)
       try {
-        if (got === null) got = await fetch(it.key, held)
+        if (got === null) got = await fetch(it.key, held, true)
       } catch {
         incomplete = true
         continue
@@ -711,7 +733,9 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       if (!got.complete) incomplete = true
       const core = got.core
       if (core.fork !== 0) continue
-      const entries = await readBlocks(core)
+      // A seeder keeps a cut writer sparse (#350): past its first hole, its
+      // leaves and key blocks.
+      const entries = await readHeldBlocks(core)
       const h = entries[0] && entries[0].record
       if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
       logs.push({ key: it.key, diary: h.diary, entries, length: core.contiguousLength, signed: core.length })

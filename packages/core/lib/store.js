@@ -9,6 +9,7 @@ const sodium = require('sodium-universal')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { presentState } = require('./deletion')
+const { nextHeld } = require('./sparse-held')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -520,6 +521,30 @@ async function readBlocks (core) {
   return out
 }
 
+// A group writer's blocks as readBlocks, then past the first hole only the
+// leaves and key blocks held: a seeder clears the rest of a cut writer
+// (#350), and the fold reads past a hole only what a cut keeps.
+async function readHeldBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  let hole = false
+  for (let i = 0; i < limit; i++) {
+    const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
+    if (block === null) {
+      hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
+      continue
+    }
+    const record = decodeBlock(block)
+    if (hole && (record === null || (record.type !== 'group-leave' && record.type !== 'group-key'))) continue
+    out.push({ seq: i, record })
+  }
+  return out
+}
+
 function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
@@ -935,6 +960,7 @@ module.exports = {
   readAll,
   readRaw,
   readBlocks,
+  readHeldBlocks,
   appendRecord,
   appendRecords,
   readConfig,
