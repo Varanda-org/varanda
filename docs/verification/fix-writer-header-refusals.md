@@ -514,3 +514,5 @@ Prova de regressão (cada remoção revertida, `shasum` dos dois `sync.js` igual
 - A política de cobrança de tocos listados por semeadores que anunciam o bit fica para o próximo PR.
 - Um registro pulado enquanto o portão da chave roda espera a próxima revisão ou a próxima partida (só o bloco 0 fica guardado).
 - O cache de entradas de cada passagem da revisão guarda, durante a passagem, toda entrada `on: true` dos diários que lê.
+- A marca de uma listagem recusada pelo limite (`cappedHints`) pode durar mais que o núcleo guardado a que se refere: se ele sai pelo limite do diário do próprio cabeçalho enquanto a marca vale, uma listagem sob o outro diário é recusada sem portão até esse limite liberar, a marca expirar ou a execução terminar.
+- Essa marca tem o mesmo teto de `provenLater` (`gateLimit`). Com mais listagens distintas recusadas do que o teto, as mais antigas saem e passam de novo pelo portão uma vez (só o bloco 0 local), o que exige centenas de núcleos guardados com marca. A varredura de novo (`rescanDue`) usa a mesma admissão e não tem teste próprio.
