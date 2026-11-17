@@ -248,11 +248,15 @@ test('destinations load as a page: Conversas only, no community read', async (t)
   t.is(r.partial, false)
 })
 
-test('page forward: text only, the items left out counted', async (t) => {
+test('page forward: the media goes with the text, nothing is left out', async (t) => {
   const { pageForwardSource } = await load()
-  t.alike(pageForwardSource({ kind: 'dm', text: 'oi', media: [dmItem, { unavailable: true }] }), { source: { kind: 'dm', text: 'oi', media: [] }, left: 1 })
-  t.alike(pageForwardSource({ kind: 'dm', text: 'oi', media: [] }), { source: { kind: 'dm', text: 'oi', media: [] }, left: 0 })
-  t.is(pageForwardSource({ kind: 'dm', text: '', media: [dmItem] }), null, 'a photo alone has nothing a page can forward')
+  const both = { kind: 'dm', text: 'oi', media: [dmItem, { unavailable: true }] }
+  t.alike(pageForwardSource(both), { source: both, left: 0 })
+  const bare = { kind: 'dm', text: 'oi', media: [] }
+  t.alike(pageForwardSource(bare), { source: bare, left: 0 })
+  const photo = { kind: 'dm', text: '', media: [dmItem] }
+  t.alike(pageForwardSource(photo), { source: photo, left: 0 }, 'a photo alone forwards as a page')
+  t.is(pageForwardSource({ kind: 'dm', text: '', media: [{ unavailable: true }] }), null, 'only an expired item has nothing to forward')
   t.is(pageForwardSource({ kind: 'group', visibility: 'public', text: 'oi', media: [] }), null)
   t.is(pageForwardSource(null), null)
 })
@@ -275,13 +279,13 @@ test('page forward: an uncertain send re-puts the same signed draft on a tap, ne
   let signs = 0
   const sign = async () => { signs++; return { signature: 'ef'.repeat(64), expiresAt: 1800000000000 } }
   const request = pageDmClient({ request: node, sign, page: PAGE })
-  const { source } = pageForwardSource({ kind: 'dm', text: 'oi', media: [dmItem] })
+  const { source } = pageForwardSource({ kind: 'dm', text: 'oi', media: [] })
   const target = { kind: 'dm', to: PEER_A }
   const plan = forwardPlan(source, target)
   t.is(plan.uploads.length, 0, 'nothing to upload')
   const r = await runForward({ plan, target, request, uncertain: (err) => err.uncertain === true })
   t.is(r.phase, 'uncertain')
-  t.alike(calls[0], ['dm.pageDraft', { page: PAGE, kind: 'msg', to: PEER_A, text: 'oi', fwd: 1 }], 'one page draft with fwd: 1 and no media')
+  t.alike(calls[0], ['dm.pageDraft', { page: PAGE, kind: 'msg', to: PEER_A, text: 'oi', fwd: 1 }], 'one page draft with fwd: 1')
   const entry = { state: 'uncertain', retry: r.error.retry }
   t.ok(canRetryPage(entry))
   t.absent(canRetryPage({ state: 'uncertain', op: r.op }), 'a kept dm.send op is no page retry')
@@ -298,17 +302,65 @@ test('page forward: an uncertain send re-puts the same signed draft on a tap, ne
   t.is(typeof unsure.retry, 'function', 'still uncertain: the same re-put stays')
 })
 
-test('ForwardSheet as a page: the page client, its re-put kept, the left-out note, Carregar mais', (t) => {
+test('the page client carries media and card to dm.pageDraft', async (t) => {
+  const { pageDmClient } = await import('../src/dm-screen.js')
+  const PAGE = '9'.repeat(64)
+  const calls = []
+  const node = async (method, params) => {
+    calls.push([method, params])
+    if (method === 'dm.pageDraft') return { id: 'ab'.repeat(16), digest: 'cd'.repeat(32), at: 1 }
+    return { id: params.id, at: 2 }
+  }
+  const sign = async () => ({ signature: 'ef'.repeat(64), expiresAt: 1800000000000 })
+  const dm = pageDmClient({ request: node, sign, page: PAGE })
+  await dm('dm.send', { to: PEER_A, text: 'oi', media: [dmItem], fwd: 1 })
+  t.alike(calls[0], ['dm.pageDraft', { page: PAGE, kind: 'msg', to: PEER_A, text: 'oi', fwd: 1, media: [dmItem] }])
+  const card = { url: 'https://example.com/x', title: 'x' }
+  await dm('dm.send', { to: PEER_A, text: 'veja', card })
+  t.alike(calls[2], ['dm.pageDraft', { page: PAGE, kind: 'msg', to: PEER_A, text: 'veja', card }])
+  await dm('dm.send', { to: PEER_A, text: 'so texto' })
+  t.absent('media' in calls[4][1] || 'card' in calls[4][1], 'text only stays text only')
+})
+
+test('ForwardSheet as a page: the page client, its re-put kept, Carregar mais', (t) => {
   const src = sheetSrc()
   t.ok(src.includes('const request = pageMode ? pageRequest : node.request'))
   t.ok(src.includes("{ retry: r.phase === 'uncertain' && r.error && typeof r.error.retry === 'function' ? r.error.retry : null }"), 'a page keeps only the re-put')
   t.ok(src.includes('const p = await retryPageForward({ retry: entry.retry, uncertain: unsure })'))
-  t.ok(src.includes('{!started && pageMode && mediaLeft > 0 ? <View style={styles.pad}><Soft>{PAGE_MEDIA_LEFT}</Soft></View> : null}'))
+  t.absent(src.includes('PAGE_MEDIA_LEFT'), 'no left-out note')
   t.ok(src.includes("<Pill label='Carregar mais' onPress={loadMore} pending={moreLoad.pending} />"))
   t.ok(src.includes('if (genRef.current !== gen || loadedRef.current !== loaded) return'), 'a late more answer is dropped')
   const mensagem = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   t.ok(mensagem.includes('const canForward = unlocked\n'), 'Encaminhar shows acting as a page')
-  t.ok(mensagem.includes('{...(pageKey !== null ? { request: dm, mediaLeft: pageForward !== null ? pageForward.left : 0 } : {})}'), 'the page client goes to the sheet')
-  t.ok(mensagem.includes('(pageKey === null || pageForwardSource(forwardSource) !== null)'), 'no page forward of a message without text')
+  t.ok(mensagem.includes('{...(pageKey !== null ? { request: dm, page: pageKey } : {})}'), 'the page client goes to the sheet')
+  t.ok(mensagem.includes('(pageKey === null || pageForwardSource(forwardSource) !== null)'), 'no page forward of a message with nothing to send')
   t.ok(mensagem.includes('useEffect(() => { setForwarding(null) }, [pageKey])'), 'a change of acting identity closes the sheet')
+})
+
+test('ForwardSheet: an expired page retry is not labelled as failed', (t) => {
+  const src = sheetSrc()
+  t.ok(src.includes("const PAGE_DRAFT_GONE = 'rascunho expirado'"))
+  t.ok(src.includes("maybe: 'Pode ter sido enviada. Confira na conversa.'"))
+  const retry = src.slice(src.indexOf('const retry = async (key) => {'), src.indexOf('const started = '))
+  const page = retry.slice(retry.indexOf('if (pageMode) {'), retry.indexOf('retryForward('))
+  t.ok(page.includes("if (p.phase === 'failed' && p.error && p.error.message === PAGE_DRAFT_GONE) {"))
+  t.ok(page.includes("setOne(key, { state: 'maybe', retry: null, error: '', dropped: entry.dropped })"), 'uncertain, no retry, no error text')
+  t.ok(page.indexOf("state: 'maybe'") < page.indexOf('stateOfPhase(p.phase)'), 'checked before the failed mapping')
+  t.absent(src.includes(String.fromCharCode(0x2014)))
+})
+
+test('ForwardSheet: a maybe row offers no retry and is not busy', async (t) => {
+  const { canRetryPage, forwardBusy } = await import('../src/forward.js')
+  const entry = { state: 'maybe', retry: null, error: '' }
+  t.absent(canRetryPage(entry))
+  t.absent(canRetryPage({ state: 'maybe', retry: () => {} }), 'not retryable even with a function')
+  t.absent(forwardBusy({ a: entry }))
+})
+
+test('the sheet as a page hands its page key to every forward upload', (t) => {
+  const src = sheetSrc()
+  t.ok(src.includes('request: pageRequest = null, page = null }) {'), 'the page prop')
+  t.ok(src.includes('runForward({ plan, target, readCache, readSource, media: node.media, request, ...(pageMode ? { page } : {}), live, uncertain: unsure })'))
+  const mensagem = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+  t.ok(mensagem.includes('{...(pageKey !== null ? { request: dm, page: pageKey } : {})}'), 'Mensagem passes the page key')
 })

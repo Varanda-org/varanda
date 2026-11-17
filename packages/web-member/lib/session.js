@@ -5646,6 +5646,9 @@ function createBrowserSession ({
       }
     },
     // The recipient's key is looked up off the chain first, as dm.send's.
+    // Its media and card are dm.send's: items put with dmPutMedia for `to`
+    // and this `page`, their blobs acked with this identity's stamps before
+    // the digest is answered.
     'dm.pageDraft': async (params) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
@@ -5660,7 +5663,7 @@ function createBrowserSession ({
       }
       return serialDm(async () => {
         await requireDm()
-        return dmEngine.pageDraft(params, box)
+        return dmEngine.pageDraft(params, box, keyPair)
       })({}, ident)
     },
     'dm.pageSend': serialDm(async (params) => {
@@ -6203,10 +6206,14 @@ function createBrowserSession ({
   // kind: 'voice' }, checked with audioBounds. `to`, the destination's diary
   // key, is required: it keeps the same photo for two conversations in two
   // blobs, and dm.send refuses the item for any other destination (5.97).
-  function dmPutMedia ({ bytes, mime, width, height, ms, kind, to } = {}) {
+  // `page`, optional: the Página the item is put for, whose secrets this
+  // node must hold (as dm.pageDraft's); its draft refuses an item put
+  // without it, and dm.send one put with it.
+  function dmPutMedia ({ bytes, mime, width, height, ms, kind, to, page } = {}) {
     if (typeof to !== 'string' || !/^[0-9a-f]{64}$/.test(to)) throw new TypeError(BAD_MEDIA_ARGS)
+    if (page !== undefined && (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page))) throw new TypeError(BAD_MEDIA_ARGS)
     const voice = kind !== undefined || mime === AUDIO_MIME
-    const dest = { to }
+    const dest = page === undefined ? { to } : { to, page }
     let copy
     if (voice) {
       ms = voiceArgsMs({ bytes, mime, width, height, ms, kind })

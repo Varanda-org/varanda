@@ -123,9 +123,9 @@ function createWebNode (args, { onInternalError } = {}) {
     return uploadMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, sealed, ms, kind })
   }
 
-  function putMedia ({ name, mime, width, height, ms, kind, to }) {
+  function putMedia ({ name, mime, width, height, ms, kind, to, page }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to })
+    return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to, page })
   }
 
   function putMoment ({ name, mime, width, height, ms, kind }) {
