@@ -282,7 +282,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -397,6 +397,18 @@ export async function actAs (node, args) {
 
 export function pagesFollow (node, { member, page, key, on }) {
   return actAs(node, { member, action: 'follow', page, op: { key, on: on === true } })
+}
+
+// The page's vote on a poll or RSVP to an event ('choice', docs/rpc.md 5.84):
+// `to` an 'author:seq' ref, `pick` an option index or null to withdraw (an
+// absent pick is null). Anything else is sent as given for the service to
+// refuse, never turned into a withdrawal.
+export function pageChoiceOp (to, pick) {
+  return { to, pick: pick === undefined ? null : pick }
+}
+
+export function pagesChoice (node, { member, page, to, pick }) {
+  return actAs(node, { member, action: 'choice', page, op: pageChoiceOp(to, pick) })
 }
 
 export async function pagesFollows (node, { member, page }) {
