@@ -514,8 +514,9 @@ test('recovery: a guard lost after the write is resultado-incerto, never a defin
   const s = await setup(t, { guard: () => answers.length === 0 || answers.shift() })
   const lookupId = hex(32)
   const blob = blobOf('passkey')
-  // reread() asks the guard before the write, persist() after it.
-  answers.push(true, false)
+  // reread() asks the guard before the write, persist() right before the
+  // rename and after it.
+  answers.push(true, true, false)
   const lost = await s.put(s.m, 'passkey', lookupId, blob)
   t.is(lost.status, 503, lost.text)
   t.alike(lost.body, { error: 'resultado-incerto' })
@@ -526,7 +527,7 @@ test('recovery: a guard lost after the write is resultado-incerto, never a defin
   t.is(retry.status, 200, retry.text)
   t.is((await s.fetchId(lookupId)).status, 200)
 
-  answers.push(true, false)
+  answers.push(true, true, false)
   const lostRemove = await s.remove(s.m, 'passkey', lookupId)
   t.is(lostRemove.status, 503, lostRemove.text)
   t.alike(lostRemove.body, { error: 'resultado-incerto' })
@@ -537,8 +538,9 @@ test('recovery: list and fetch after a guard lost past the rename show the file,
   const s = await setup(t, { guard: () => answers.length === 0 || answers.shift() })
   const lookupId = hex(32)
   const blob = blobOf('passkey')
-  // reread() asks the guard before the write, persist() after the rename.
-  answers.push(true, false)
+  // reread() asks the guard before the write, persist() right before the
+  // rename and after it.
+  answers.push(true, true, false)
   const lost = await s.put(s.m, 'passkey', lookupId, blob)
   t.is(lost.status, 503, lost.text)
   t.alike(lost.body, { error: 'resultado-incerto' })
@@ -549,7 +551,7 @@ test('recovery: list and fetch after a guard lost past the rename show the file,
   t.is(listed.status, 200, listed.text)
   t.alike(listed.body.entries.map((e) => e.lookupId), [lookupId], 'list shows it too')
 
-  answers.push(true, false)
+  answers.push(true, true, false)
   const lostRemove = await s.remove(s.m, 'passkey', lookupId)
   t.is(lostRemove.status, 503, lostRemove.text)
   t.alike(lostRemove.body, { error: 'resultado-incerto' })
@@ -561,7 +563,7 @@ test('recovery: list and fetch after an uncertain write answer indisponivel when
   const answers = []
   const s = await setup(t, { guard: () => answers.length === 0 || answers.shift() })
   const lookupId = hex(32)
-  answers.push(true, false)
+  answers.push(true, true, false)
   t.is((await s.put(s.m, 'passkey', lookupId, blobOf('passkey'))).status, 503)
   fs.writeFileSync(path.join(s.dir, FILE), 'not json')
   const fetched = await s.fetchId(lookupId)

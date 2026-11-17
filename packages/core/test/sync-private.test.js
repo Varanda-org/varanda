@@ -9,8 +9,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { testnet } = require('./helpers/net')
 const { createCert, generateAssociationKeyPair } = require('../lib/cert')
-const { writerHeader, groupHeader, groupPost } = require('../lib/group')
-const { memberCertRecord, groupJoinRecord } = require('../lib/records')
+const { writerHeader, groupHeader, groupPost, validateGroupRecord } = require('../lib/group')
+const { memberCertRecord, groupJoinRecord, groupCutRecord } = require('../lib/records')
 const store = require('../lib/store')
 const member = require('../lib/member')
 const { hex, PARENT, person, exchange, startSeeder, syncOnce, stored, ownWriter, fakeSeeder, groupMember, runUntil } = require('./helpers/sync-groups')
@@ -151,4 +151,180 @@ test('a private group syncs end to end through a seeder', async (t) => {
   t.is(lengths[1], lengths[0], 'B has every block of the root')
   const read = await member.groupRead(b, { group })
   t.alike(read.items.map((p) => p.text).sort(), ['antes', 'depois'], 'B reads the history after admission')
+})
+
+// Copies cores `keys` from Corestore `from` into Corestore `to`, block by
+// block, over an in-process replication stream.
+async function replicateKeys (from, to, keys) {
+  const left = from.replicate(true)
+  const right = to.replicate(false)
+  left.pipe(right).pipe(left)
+  try {
+    for (const key of keys) {
+      const source = from.get({ key: b4a.from(key, 'hex'), writable: false })
+      await source.ready()
+      const target = to.get({ key: b4a.from(key, 'hex'), writable: false })
+      await target.ready()
+      for (let seq = 0; seq < source.length; seq++) await target.get(seq, { raw: true, timeout: 10000 })
+    }
+  } finally {
+    left.destroy()
+    right.destroy()
+  }
+}
+
+async function copyCores (from, to, keys) {
+  const a = await store.openStore(from.dataDir)
+  const b = await store.openStore(to.dataDir)
+  try {
+    await replicateKeys(a, b, keys)
+  } finally {
+    await b.close()
+    await a.close()
+  }
+}
+
+async function copyToSeeder (from, fake, keys) {
+  const s = await store.openStore(from.dataDir)
+  try {
+    await replicateKeys(s, fake.store, keys)
+  } finally {
+    await s.close()
+  }
+}
+
+// The blocks ctx holds of core `key`.
+async function heldCopy (ctx, key) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = s.get({ key: b4a.from(key, 'hex'), writable: false })
+    await core.ready()
+    const held = []
+    for (let i = 0; i < core.length; i++) if (await core.has(i)) held.push(i)
+    const out = { contiguous: core.contiguousLength, held }
+    await core.close()
+    return out
+  } finally {
+    await s.close()
+  }
+}
+
+// A private group G of A's community, B a member through its boxed writer
+// W1, and W0: a boxless writer of B's diary (made before the private root
+// arrived) with a post, replaced: B's diary cuts it at 0, so its walk
+// releases it (#350). R, fresh, holds A's cores and joined C and G; it never
+// held W0, and A never held anything of B. With `noMember`, W0's header also
+// names no member, which a writer of a group must.
+async function releasedBoxless (t, kp, { noMember = false } = {}) {
+  const a = await person(t, kp, 'Ana')
+  const b = await person(t, kp, 'Bia')
+  const r = await person(t, kp, 'Rui')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Segredo', join: 'open', visibility: 'private', community })
+  await exchange(a, b)
+  await exchange(a, r)
+  for (const m of [b, r]) {
+    await member.communityJoin(m, { community })
+    await member.groupJoin(m, { group })
+  }
+  const cw = store.readGroups(b.dataDir).find((g) => g.kind === 'community' && g.group === community).writer
+  const w1 = ownWriter(b, group)
+  const s = await store.openStore(b.dataDir)
+  let w0
+  let joins
+  try {
+    const core = await store.openGroupWriter(s, hex(crypto.randomBytes(16)))
+    const validator = (rec, seq) => validateGroupRecord(rec, seq)
+    await store.appendRecord(core, writerHeader({ group, diary: b.key, member: noMember ? null : cw }), { validator })
+    await store.appendRecord(core, groupPost({ text: 'sem caixa' }), { validator })
+    w0 = hex(core.key)
+    const diary = await store.openDiary(s)
+    await store.appendRecord(diary, groupJoinRecord({ group, writer: w0, on: true }))
+    await store.appendRecord(diary, groupCutRecord({ group, writer: w0, cut: 0 }))
+    joins = (await store.readAll(diary)).filter((e) => e.record && e.record.type === 'group-join')
+  } finally {
+    await s.close()
+  }
+  const seqOf = (writer) => joins.find((e) => e.record.writer === writer && e.record.on).seq
+  return {
+    b,
+    r,
+    community,
+    group,
+    w0: { key: w0, diary: b.key, length: 2, seq: seqOf(w0) },
+    cw: { key: cw, diary: b.key, length: 1, seq: seqOf(cw) },
+    w1
+  }
+}
+
+const page = (items) => ({ items, next: null, incomplete: false })
+
+test('a fresh reader holding the diary that released a boxless writer keeps its block 0 alone and folds complete (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  let f = null
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: (q) => page(q.group === f.group ? [f.w0] : [])
+  })
+  f = await releasedBoxless(t, kp)
+  await copyToSeeder(f.b, fake, [f.w0.key])
+  await copyCores(f.b, f.r, [f.b.key, f.cw.key, f.w1])
+  t.is((await member.groupRead(f.r, { group: f.group })).incomplete, true, 'control: B\'s walk releases W0, so the fold awaits it')
+  // The fake seeder never holds R's diary, so the run ends at its deadline
+  // and names every goal still open.
+  const { result, events } = await syncOnce(bootstrap, f.r, { timeoutMs: 12000 })
+  t.alike(skipped(events, f.w0.key), [], 'W0 is not refused')
+  t.alike(await heldCopy(f.r, f.w0.key), { contiguous: 1, held: [0] }, 'R holds W0\'s block 0 alone')
+  t.absent(result.errors.join(' ').includes(f.w0.key), 'and counts it held: no goal on W0 is left open')
+  t.is((await member.groupRead(f.r, { group: f.group })).incomplete, false, 'and the fold is complete')
+})
+
+test('a boxless writer refused before its diary is held is gated again as a stub once the diary releases it (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  let f = null
+  // W0 is listed at once; B's diary is held only through B's CW, listed
+  // later, so W0's gate finds no diary to read.
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: (q) => {
+      if (q.group === f.group) return page([f.w0])
+      if (q.group === f.community) return new Promise((resolve) => setTimeout(() => resolve(page([f.cw])), 2000))
+      return page([])
+    }
+  })
+  f = await releasedBoxless(t, kp)
+  await copyToSeeder(f.b, fake, [f.b.key, f.cw.key, f.w0.key])
+  await copyCores(f.b, f.r, [f.w1])
+  const { result, events } = await syncOnce(bootstrap, f.r, { timeoutMs: 15000 })
+  t.alike(skipped(events, f.w0.key), ['header-invalid'], 'W0 is refused while B\'s diary is not held')
+  t.ok(await stored(f.r, f.b.key), 'B\'s diary arrives through its CW')
+  t.alike(await heldCopy(f.r, f.w0.key), { contiguous: 1, held: [0] }, 'then W0 is held, block 0 alone')
+  t.absent(result.errors.join(' ').includes(f.w0.key), 'and counted held')
+  t.is((await member.groupRead(f.r, { group: f.group })).incomplete, false, 'and the fold is complete')
+})
+
+test('a writer refused for its member is not gated again when its diary releases it (#350)', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  let f = null
+  // As above, but W0's header names no member: the release of its box does
+  // not lift that refusal. A --once run never expires its memories, so one
+  // gate of W0 means one fetch of its block 0.
+  const fake = await fakeSeeder(t, bootstrap, kp, [], {
+    answer: (q) => {
+      if (q.group === f.group) return page([f.w0])
+      if (q.group === f.community) return new Promise((resolve) => setTimeout(() => resolve(page([f.cw])), 2000))
+      return page([])
+    }
+  })
+  f = await releasedBoxless(t, kp, { noMember: true })
+  await copyToSeeder(f.b, fake, [f.b.key, f.cw.key, f.w0.key])
+  await copyCores(f.b, f.r, [f.w1])
+  const { events } = await syncOnce(bootstrap, f.r, { timeoutMs: 15000 })
+  t.ok(await stored(f.r, f.b.key), 'B\'s diary, which releases W0, arrives through its CW')
+  t.alike(skipped(events, f.w0.key), ['header-invalid'], 'W0 is refused once: one gate, one fetch of its block 0')
+  t.absent(await stored(f.r, f.w0.key), 'and stays refused')
 })

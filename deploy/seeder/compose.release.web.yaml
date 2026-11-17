@@ -5,6 +5,8 @@
 # fica, mas nunca é usado (o atualizador passa sempre --no-build), e as
 # variáveis de ambiente continuam só em compose.web.yaml. Os binds relativos
 # ./Caddyfile e ./www resolvem dentro do diretório da versão, que tem os dois.
+# Quando a versão traz a imagem do Caddy (caddy.json), o update.sh passa ela
+# em VARANDA_WEB_IMAGE e os binds fixos de compose.web.yaml.
 #   docker compose -p varanda-seeder -f compose.yaml -f compose.web.yaml \
 #     -f compose.release.yaml -f compose.release.web.yaml up -d --no-build
 services:

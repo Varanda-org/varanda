@@ -96,7 +96,7 @@ const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
 } = require('@varanda/core/lib/records')
@@ -320,6 +320,11 @@ function createPagesRoutes ({
   let creating = Promise.resolve()
   const audit = []
   const counts = { ok: 0, refused: 0, uncertain: 0 }
+  // `inviteUnreadable`: the file was there but could not be read, so memory
+  // may lack rows still on disk. `inviteStale`: a save failed, so disk may
+  // hold rows memory dropped. Either keeps the deletion sweep pending.
+  let inviteUnreadable = false
+  let inviteStale = false
   const invites = loadInvites()
   // K1 -> the communities its move left, for a resumed move's re-join on K2.
   const moveLeft = new Map()
@@ -778,26 +783,75 @@ function createPagesRoutes ({
     let data = null
     try {
       data = JSON.parse(fs.readFileSync(file, 'utf8'))
-    } catch {
+    } catch (err) {
+      if (err.code !== 'ENOENT') inviteUnreadable = true
       return map
     }
-    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) return map
+    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) {
+      inviteUnreadable = true
+      return map
+    }
     for (const [k, v] of Object.entries(data.rows)) {
       if (isPlainObject(v) && isPlainObject(v.record) && typeof v.expiresAt === 'string') map.set(k, v)
     }
     return map
   }
 
-  function saveInvites () {
+  // `drop`: keys that go with the expired ones. Memory follows only once the
+  // file is written, so a failed write leaves holdsInvites() true and the
+  // deletion sweep tries again.
+  function saveInvites (drop = null) {
     const file = invitePath()
-    if (file === null) return
     const t = now()
     const rows = {}
+    const gone = []
     for (const [k, v] of invites) {
-      if (Date.parse(v.expiresAt) > t) rows[k] = v
-      else invites.delete(k)
+      if (Date.parse(v.expiresAt) > t && (drop === null || !drop.has(k))) rows[k] = v
+      else gone.push(k)
     }
-    writeJsonAtomic(file, { v: 1, rows }, 0o600)
+    if (file === null) {
+      if (drop !== null) for (const k of drop) invites.delete(k)
+      return
+    }
+    try {
+      writeJsonAtomic(file, { v: 1, rows }, 0o600)
+    } catch (err) {
+      inviteStale = true
+      throw err
+    }
+    inviteUnreadable = false
+    inviteStale = false
+    for (const k of gone) invites.delete(k)
+  }
+
+  // Rows are keyed '<page>:<invitee>'. Only the invitee's own rows go: a
+  // roster another invitee holds may list the deleted member as an admin,
+  // and it is the owner's signed statement, settled at accept or expiry.
+  function invitesOf (member) {
+    const out = []
+    for (const k of invites.keys()) if (k.slice(65) === member) out.push(k)
+    return out
+  }
+
+  // Never answers from a memory that may disagree with the file: unreadable
+  // throws until a save rewrites it, and a failed save is retried first,
+  // since memory loaded fine and is the authority.
+  function holdsInvites (member) {
+    if (inviteUnreadable) throw refuse('indisponivel')
+    if (inviteStale) saveInvites()
+    return invitesOf(member).length > 0
+  }
+
+  // The file the sweep's warning names while holdsInvites cannot answer.
+  function inviteBrokenFiles () {
+    return inviteUnreadable || inviteStale ? [INVITE_FILE] : []
+  }
+
+  function forgetInvites (member) {
+    const keys = invitesOf(member)
+    if (keys.length === 0) return false
+    saveInvites(new Set(keys))
+    return true
   }
 
   // ---- start --------------------------------------------------------------
@@ -1913,6 +1967,69 @@ function createPagesRoutes ({
     return e.record
   }
 
+  // K1's profile as readers fold it, with the avatar's bytes, or null.
+  // Deletes are folded over the service's own blocks only: a paused K1's
+  // longer log holds blocks written with a leaked key, and its tombstone
+  // must not hide the real profile. Never throws.
+  async function profileToCarry (page) {
+    let profile
+    try {
+      profile = latestProfile(applyDeletes(await writer.readOwn(page)))
+    } catch {
+      note('move', 'perfil-pendente')
+      return null
+    }
+    if (profile === null) return null
+    let avatar = null
+    if (profile.avatar !== null) {
+      try {
+        avatar = { bytes: await writer.itemBytes(page, profile.avatar), mime: profile.avatar.mime }
+      } catch {
+        note('move', 'foto-pendente')
+      }
+    }
+    return { name: profile.name, bio: profile.bio, avatar }
+  }
+
+  // K1's profile appended to K2 once, best effort. It is part of the move:
+  // no media or avatar cap is spent and no statement is recorded. A photo
+  // that cannot be stored leaves name and bio. K2's lock keeps an admin's
+  // profile edit from landing between the check and the append; the caller
+  // holds K1's, and no route takes K2's and then K1's (each locks one page,
+  // and K2 is a new key). -> K2's length.
+  function carryProfile (to, carry, at, length) {
+    return withLock(to, async () => {
+      try {
+        if (latestProfile(await writer.readEntries(to)) !== null) return length
+        let avatar = null
+        if (carry.avatar !== null) {
+          try {
+            avatar = await writer.avatarItem(to, carry.avatar.bytes, carry.avatar.mime)
+          } catch {
+            note('move', 'foto-pendente')
+          }
+        }
+        await writer.append(to, profileRecords({ name: carry.name, bio: carry.bio, avatar, at }))
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      // A stored photo declares K2's media core even when the append failed.
+      let n = length
+      try {
+        n = writer.info(to).length
+        await pagesStore.expectLength(to, n)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      try {
+        await pagesStore.setMedia(to, writer.items(to).length)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      return n
+    })
+  }
+
   // `pending` null: a resumed move, whose writer step already ran.
   async function moveLocked ({ member, page, nonce, record, to, origin, roster, dmBox: rawBox, pending }) {
     const resume = pending === null
@@ -1962,6 +2079,9 @@ function createPagesRoutes ({
       }
       if (published === null || published.gen !== 1 || published.box !== dmBox.box) throw refuse('conflito')
     }
+    // Read before movePage. A resumed move's K1 is still readable: the wipe
+    // after a move takes its keys, never its diary or media core.
+    const carry = await profileToCarry(page)
     if (resume) {
       try {
         cert = writer.certOf(to)
@@ -2044,6 +2164,9 @@ function createPagesRoutes ({
         note('move', 'vinculo-pendente')
       }
     }
+    // The link above shows the owner's diary for the owner only; the page's
+    // own name, bio and photo come from its profile records.
+    if (carry !== null) length = await carryProfile(to, carry, date, length)
     rejoin(to, left)
     const result = { page: to, seq, length, pushed: res.pushed }
     if (res.paused) result.paused = true
@@ -2683,6 +2806,9 @@ function createPagesRoutes ({
     handle,
     stats: () => ({ available: on, ...counts, applied: applied.size, invites: invites.size }),
     reboxSweep,
+    holdsInvites,
+    forgetInvites,
+    inviteBrokenFiles,
     close: () => {
       routesClosed = true
       clearInterval(reboxTimer)

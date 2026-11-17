@@ -121,6 +121,20 @@ test('Caddyfile: /seeder retries the dial for 5 s, and no other handle does', (t
   }
 })
 
+// The seeder shares its connection slots by client address and reads it from
+// X-Forwarded-For only on a loopback connection. Caddy must set the header to
+// the address it saw, replacing whatever the client sent.
+test('Caddyfile: /seeder sets X-Forwarded-For to the client address inside its reverse_proxy', (t) => {
+  const seeder = block('handle /seeder {')
+  const open = seeder.findIndex((l) => l.trim() === 'reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {')
+  t.ok(open !== -1, 'reverse_proxy to VARANDA_WS_PORT')
+  const indent = seeder[open].match(/^\s*/)[0]
+  const close = seeder.findIndex((l, i) => i > open && l === indent + '}')
+  const proxy = seeder.slice(open, close + 1)
+  t.is(proxy.filter((l) => l.trim() === 'header_up X-Forwarded-For {remote_host}').length, 1, 'X-Forwarded-For set to {remote_host}')
+  t.is(seeder.filter((l) => /x-forwarded-for/i.test(l)).length, 1, 'no other X-Forwarded-For rule in handle /seeder')
+})
+
 // The AI triage route on the seeder is loopback-only (the account service
 // calls it directly on 127.0.0.1): Caddy never exposes it.
 test('Caddyfile: the triage route is not exposed', (t) => {

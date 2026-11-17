@@ -115,3 +115,12 @@ test('readsAs: invisibles, compatibility forms and case do not hide a look-alike
   t.absent(readsAs('Ana', 'Você'))
   t.absent(readsAs(null, 'Você'))
 })
+
+test('whoLabel names a person with the name and the @nome, whichever is known', async (t) => {
+  const { whoLabel } = await load()
+  t.is(whoLabel({ name: 'Caio Membro', username: 'caio' }), 'Caio Membro (@caio)')
+  t.is(whoLabel({ name: 'Caio Membro', username: null }), 'Caio Membro')
+  t.is(whoLabel({ name: null, username: 'caio' }), '@caio')
+  t.is(whoLabel(null), 'sem nome')
+  t.is(whoLabel(undefined), 'sem nome')
+})

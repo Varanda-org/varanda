@@ -30,8 +30,11 @@ const ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?$/
 // Loopback over plain HTTP, for the operator's local tests only.
 const LOOPBACK_ORIGIN_RE = /^http:\/\/127\.0\.0\.1(?::[0-9]{1,5})?$/
 const CHANGE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
-// Equal to MAX_BLOCKED (blocklist.js): one ack never names more changes than
-// one snapshot can hold.
+// At most MAX_BLOCKED (blocklist.js), so one ack never names more changes
+// than one snapshot can hold, and at least MAX_PENDING (apps/cli
+// account/moderation-store.js), the most changes one pull hands out. Not
+// raised with MAX_BLOCKED: it also sizes the ack body (account/mod-routes.js
+// ACK_BODY_MAX).
 const MAX_CHANGE_IDS = 4096
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX128 = /^[0-9a-f]{128}$/

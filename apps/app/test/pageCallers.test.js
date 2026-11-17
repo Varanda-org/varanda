@@ -25,6 +25,18 @@ test('@nome lookups for pages ask the node account origin', (t) => {
   t.absent(/lookupUsername\(username\)/.test(ajustes))
 })
 
+test('PaginaAjustes: the deleted-account flag stays informational', (t) => {
+  const ajustes = read('src/screens/PaginaAjustes.js')
+  const calls = ajustes.split('askAccounts(value)').length - 1
+  t.is(calls, 1, 'askAccounts is called from one place')
+  t.ok(ajustes.includes('if (value.isOwner === true || value.isAdmin === true) askAccounts(value)'), 'asked only for the owner or an admin')
+  t.ok(ajustes.indexOf("node.request('page.read', { key: page })") < ajustes.indexOf('askAccounts(value)'), 'asked after page.read')
+  const notes = ajustes.match(/ note=\{[^}]*\}/g) || []
+  t.alike(notes, [" note={deleted.has(r.key) ? ACCOUNT_DELETED : ''}"], 'note takes only ACCOUNT_DELETED or empty')
+  t.ok(ajustes.includes("const ACCOUNT_DELETED = 'Conta excluída'"))
+  t.ok(ajustes.includes("{isOwner && rosterKnown && r.role === 'admin'\n              ? <Pill label='Remover' danger"), 'Remover stays owner-only')
+})
+
 test('App.js: page screens are not gated on pagesOn, so never become Membro', (t) => {
   const src = read('App.js')
   t.ok(src.includes("if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'paginaajustes') {"))

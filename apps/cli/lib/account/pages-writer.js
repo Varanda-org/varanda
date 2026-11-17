@@ -272,9 +272,11 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     movePage,
     append,
     readEntries,
+    readOwn,
     mediaItem,
     avatarItem,
     items,
+    itemBytes,
     nonceRecord,
     nonceFirst,
     follows,
@@ -824,6 +826,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     return readAll(pageOf(key).core)
   }
 
+  // The blocks this writer wrote, tombstones not applied, so the caller
+  // folds only its own: a paused page's longer log holds blocks, deletes
+  // among them, written with a leaked key. A forked core or a lost state
+  // cannot tell which blocks are ours, so nothing comes back.
+  async function readOwn (key) {
+    await opening
+    const p = pageOf(key)
+    if (p.core.fork !== 0 || p.stateLost) return []
+    return (await readRaw(p.core)).filter((e) => e.seq < p.length)
+  }
+
   function info (key) {
     const p = pageOf(key)
     return { length: p.core.length, paused: p.paused, announced: p.announced, movedTo: p.movedTo }
@@ -990,6 +1003,24 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   function items (key) {
     return pageOf(key).items.map((it) => ({ ...it }))
+  }
+
+  // The bytes of one of the page's own items, so a move can copy the avatar
+  // to the new key. No secret is needed: a moved page keeps its media core
+  // open read only after its keys are wiped.
+  async function itemBytes (key, descriptor) {
+    await opening
+    const p = pageOf(key)
+    if (!isPlainObject(descriptor) || p.media === null || descriptor.core !== p.mediaKey || !p.items.some((it) => sameItem(it, descriptor))) throw fail('midia-invalida')
+    const chunks = []
+    for (let i = descriptor.start; i < descriptor.start + descriptor.blocks; i++) {
+      const block = await p.media.get(i, { wait: false })
+      if (block === null) throw fail('midia-invalida')
+      chunks.push(block)
+    }
+    const bytes = b4a.concat(chunks)
+    if (bytes.byteLength !== descriptor.bytes || sha256Hex(bytes) !== descriptor.sha256) throw fail('midia-invalida')
+    return bytes
   }
 
   // ---- follows, engagement, deletion ----------------------------------

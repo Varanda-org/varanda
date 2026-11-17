@@ -267,3 +267,60 @@ test('groupRows ignores null and primitive reaction entries', async (t) => {
   const reactions = [null, '👍', { emoji: '👍', count: 2, mine: false }]
   t.alike(groupRows([message(A, 1, 0, { reactions })], A)[0].reactions, [{ emoji: '👍', count: 2, mine: false }])
 })
+
+test('pageCommunityToEnter offers the community only for a definite fora-da-comunidade refusal', async (t) => {
+  const { pageCommunityToEnter } = await import('../src/groups.js')
+  const key = 'ab'.repeat(32)
+  const refused = Object.assign(new Error('x'), { code: 'fora-da-comunidade' })
+  t.is(pageCommunityToEnter({ error: refused, communityKey: key }), key)
+  t.is(pageCommunityToEnter({ error: refused, communityKey: null }), null, 'community not known yet')
+  t.is(pageCommunityToEnter({ error: Object.assign(new Error('x'), { code: 'fora-da-comunidade', uncertain: true }), communityKey: key }), null, 'uncertain')
+  t.is(pageCommunityToEnter({ error: Object.assign(new Error('x'), { code: 'indisponivel' }), communityKey: key }), null, 'other error')
+  t.is(pageCommunityToEnter({ error: null, communityKey: key }), null)
+})
+
+test('groupNameText: a page outside a public group does not call it private', async (t) => {
+  const { groupNameText, PRIVATE_LABEL } = await import('../src/groups.js')
+  t.is(groupNameText({ info: null, page: true, visibility: 'public' }), 'grupo')
+  t.is(groupNameText({ info: null, page: true, visibility: null }), 'grupo')
+  t.is(groupNameText({ info: null, page: true, visibility: 'private' }), PRIVATE_LABEL)
+  t.is(groupNameText({ info: null, page: false, visibility: null }), PRIVATE_LABEL, 'a person keeps the old rule')
+  t.is(groupNameText({ info: { name: 'Geral', visibility: 'private' }, page: true, visibility: null }), 'Geral')
+  t.is(groupNameText({ info: { name: '', visibility: 'private' }, page: false, visibility: null }), PRIVATE_LABEL)
+  t.is(groupNameText({ info: { name: '', visibility: 'public' }, page: false, visibility: null }), 'grupo')
+})
+
+test('Grupo wires the page community path and the neutral name', (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  t.ok(src.includes('pageCommunityToEnter({ error: pageJoinError, communityKey })'))
+  t.ok(src.includes('onOpenCommunity(pageEnterCommunity, { group })'), 'the page opens the community like a person')
+  t.ok(src.includes('groupNameText({ info, page: asPage.page, visibility: pageSeen })'))
+})
+
+test('a page outside a private group it holds no key for still sees it named private', async (t) => {
+  const { groupNameText, pagePostVisibility, PRIVATE_LABEL } = await import('../src/groups.js')
+  t.is(pagePostVisibility({ visibility: 'private', noKey: true }), null, 'posting stays unknown without the key')
+  t.is(groupNameText({ info: null, page: true, visibility: 'private' }), PRIVATE_LABEL)
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  t.ok(src.includes('visibility: pageSeen'), 'the title uses the raw verified read, not the posting visibility')
+  t.ok(src.includes('setPageSeen(seen)'))
+})
+
+test('a page that joined its community clears the stale refusal and the queued group opens from its join', (t) => {
+  const grupo = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Grupo.js'), 'utf8')
+  const comu = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidade.js'), 'utf8')
+  t.ok(/if \(pageRole !== 'member' && pageRole !== 'requested'\) return\s+setPageJoinError\(null\)/.test(grupo), 'member or requested clears the refusal')
+  t.ok(grupo.includes('if (asPage.page && was === false && isTop === true) loadRef.current()'), 'reload when the group is on top again')
+  t.ok(/setPageError\(''\)\n\s+setPageJoinError\(null\)\n\s+setPageRetry\(null\)\n\s+setSealAgain/.test(grupo), 'switching identity clears the join refusal')
+  t.ok(comu.includes("pageRoleOf(answer) === 'member' && typeof onJoined === 'function') onJoined()"))
+  t.ok(comu.includes('onJoined={openQueued}'))
+})
+
+test('a community read from the index offers a page its own join, never the person join', (t) => {
+  const comu = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Comunidade.js'), 'utf8')
+  const start = comu.indexOf('if (fromIndex) {')
+  const end = comu.indexOf('} else if', start)
+  t.ok(start > 0 && end > start, 'index branch found')
+  const branch = comu.slice(start, end)
+  t.ok(/\{asPage\.page\s+\? <PagePanel node=\{node\} community=\{community\} page=\{asPage\.key\} onJoined=\{openQueued\} \/>\s+: \(\s+<JoinCard/.test(branch), 'page mode shows PagePanel in place of JoinCard')
+})

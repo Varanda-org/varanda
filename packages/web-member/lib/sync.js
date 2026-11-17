@@ -34,7 +34,12 @@
 // core is replicated before the seeder's hello verified (role 'seeder' and
 // seederCertForKey on its Noise key, as lib/sync.js and ./seeder-link.js
 // do); an endpoint that fails that check is dropped. Nothing here logs or
-// returns the seeder URL.
+// returns the seeder URL. Whenever the own diary is announced on a link
+// whose verified seeder opened admission with CAP_PEER_PROOF, the link also
+// sends one `prove` (@varanda/core lib/peer-proof.js, issue #32): the diary
+// key's signature over this link's Noise public key, made by `signProof`
+// (the session's in-memory key pair). A locked identity sends none; the
+// next link proves. A `prove` received here is ignored.
 //
 // The own diary is opened read-only here (no key pair: ./node-store.js) and
 // DOWNLOADED from the verified seeder as a replica is, so a device that
@@ -342,7 +347,7 @@ const b4a = require('b4a')
 const { decodeBlock, validateRecord, validRecordCopy, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('@varanda/core/lib/records')
 const { warmBlock0 } = require('./warm-sigs')
 const { certForKey, seederCertForKey, verifyUsernameRecord } = require('@varanda/core/lib/cert')
-const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
+const { attachAdmission, MAX_INVENTORY, CAP_PEER_PROOF } = require('@varanda/core/lib/admission')
 const { createBlocklistState, compareSnapshots } = require('@varanda/core/lib/blocklist')
 const { attachBlocklist } = require('@varanda/core/lib/blocklist-net')
 const { attachGroups, GROUPS_LIMIT_MAX } = require('@varanda/core/lib/groups-net')
@@ -1526,6 +1531,10 @@ async function syncRun ({
   // async (key) => queues a signed follow of key (member-ops followAdd);
   // null while the session is locked, so a move is then left for later.
   followPage = null,
+  // (noiseHex, ownHex) => { key, signer, sig }: signs the own diary's
+  // `prove` (lib/peer-proof.js signPeerProof) synchronously; throws while
+  // the identity is locked. null: no link ever proves.
+  signProof = null,
   // The roots the pages this device holds the secrets of are in (docs/rpc.md
   // 5.114), kept paged like the roots the own diary binds: as replicas
   // only, never an own writer, nothing appended. At most MAX_PAGE_ROOTS.
@@ -1641,6 +1650,7 @@ async function syncRun ({
   const restingCores = new Map() // stored group core not synced this run -> { group, diary }
   const listedAtStart = new Set() // kv groupReplicas keys when the run started
   const joinCache = new Map() // binding diary -> { core, length, joins } (diaryJoins)
+  const boxLifts = new Map() // binding diary -> { again } while liftBoxRefused reads it
   const bindingCerts = new Map() // binding diary -> block 0 its accepted core was gated with (kv groupCerts)
   // Diaries the follow path refused or purged as 'revoked-issuer' this run:
   // their replica may be gone, their group cores still have to go.
@@ -1794,6 +1804,7 @@ async function syncRun ({
       peer: null,
       verified: false,
       hello: false, // the seeder's actual hello arrived (and verified)
+      proved: false, // this link sent its `prove` (at most one per link)
       inventoryTimedOut: false, // inventoryComplete came from the timeout
       quarantine: new Set(), // quarantine and peek cores replicating on this link
       peeks: new Map(), // key -> the shared peek core of this link ({ core, ready, refs })
@@ -1995,6 +2006,26 @@ async function syncRun ({
   function announceOwn () {
     if (cert === null || ownRefused()) return
     send({ type: 'announce', key: ownHex, cert })
+    proveOwn()
+  }
+
+  // Once per link, beside the announce, to a verified seeder that offered
+  // CAP_PEER_PROOF: the diary key signs this link's own Noise public key
+  // (what the seeder reads as remotePublicKey), so the proof holds on this
+  // connection only. A signer that throws (a locked identity) leaves the
+  // link unproven.
+  function proveOwn () {
+    const l = seederLink()
+    if (l === null || l.proved || signProof === null) return
+    if ((l.peer.remoteCaps & CAP_PEER_PROOF) === 0) return
+    let proof
+    try {
+      proof = signProof(hex(l.noise.publicKey), ownHex)
+    } catch {
+      return
+    }
+    l.proved = true
+    l.peer.send({ type: 'prove', key: proof.key, signer: proof.signer, sig: proof.sig })
   }
 
   // Keys whose advertisements matter: our own and the follows.
@@ -2074,6 +2105,8 @@ async function syncRun ({
           }
         }
         break
+      case 'prove':
+        return // only a seeder judges proofs
       default:
         break // members ignore announce
     }
@@ -2445,9 +2478,12 @@ async function syncRun ({
         }
         // An inventory sent or answered before the scan finished saw 0.
         if (entry.state === 'active') onScanned(entry, present)
+        liftBoxRefused(entry.key)
       },
       onGrow: (length) => {
-        if (entry.core === core) onGrow(entry, length)
+        if (entry.core !== core) return
+        liftBoxRefused(entry.key)
+        onGrow(entry, length)
       },
       onNewest: (length) => {
         if (entry.core === core) onNewest(entry, length)
@@ -3356,11 +3392,19 @@ async function syncRun ({
       }
       direct.push(key)
     }
+    // The block 0 kept for a blocked binding diary judges nothing any more
+    // (its cores are purged above) and would only name it. kv goes through
+    // the group kv chain, behind any putGroupCert queued before this sweep.
+    // Never the own diary, which groupCerts never holds.
+    for (const d of [...bindingCerts.keys()]) if (d !== ownHex && isBlockedKey(d)) bindingCerts.delete(d)
+    const certs = groupKv(() => store.dropGroupCerts(storage, (d) => d !== ownHex && isBlockedKey(d)))
+    certs.catch(noop) // awaited below, inside the sweep
     return track(serialSweep(async () => {
       for (const core of cores) await core.close()
       for (const key of direct) {
         if (await store.replicaExists(storage, key)) await store.purgeReplica(storage, key)
       }
+      await certs
     }), noop, () => {
       if (!ended) fail(['falha ao limpar diário bloqueado'])
       else log('aviso: falha ao limpar diário bloqueado')
@@ -3760,6 +3804,8 @@ async function syncRun ({
       attempts: 0, // gates started this run (MAX_GROUP_GATE_ATTEMPTS)
       lastAttempt: 0, // order of the last one (the fair queue)
       raw0: null, // the block 0 the gate accepted
+      stub: false, // released with a box that does not match: block 0 alone is held
+      boxRefused: false, // refused for its box alone until its diary releases it (liftBoxRefused)
       gating: false,
       waiting: false, // a retry of a gate that got no answer is scheduled
       range: null,
@@ -3933,10 +3979,13 @@ async function syncRun ({
         }
       } else if (rootOnly(s.group)) {
         s.rest = true
-      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null) || memberMismatch(s.raw, s.key, s.group)) {
-        // A writer whose box does not match its root's visibility, or whose
-        // member does not match its root's kind, as at the gate.
+      } else if (memberMismatch(s.raw, s.key, s.group)) {
+        // A writer whose member does not match its root's kind, as at the gate.
         s.invalid = true
+      } else if (boxMismatch(s.raw, s.key, s.group, rootVis.get(s.group) || null)) {
+        // One whose box does not match its root's visibility: judged below
+        // by the walk of its stored binding diary, as at the gate.
+        s.boxless = true
       }
     }
     const live = []
@@ -3953,6 +4002,12 @@ async function syncRun ({
       // block is not stored yet: a restart never frees it from its creator.
       s.rootBound = s.key === s.group && (boundRoots.has(s.key) || storedJoinProof(await bindingEntries(s.diary, bindings), s.group, s.group).proven)
       const unboundRoot = s.key === s.group && !s.rootBound
+      // Kept as a stub only while that diary, as stored, releases it (cut
+      // 0): the fold then never awaits it. Otherwise it goes, as before.
+      if (s.boxless === true) {
+        if (diaryWriterCut(await bindingEntries(s.diary, bindings), s.group, s.key) === 0) s.stub = true
+        else s.invalid = true
+      }
       if (s.invalid === true) {
         await s.core.close().catch(noop)
         if (!ending) purgeGroupKey(s.key, 'header-invalid')
@@ -3996,6 +4051,7 @@ async function syncRun ({
       }
       const ge = newGroupEntry(x.key, x.group, x.diary, x.seq)
       ge.raw0 = x.raw
+      ge.stub = x.stub === true
       ge.state = 'active'
       markGroupBound(ge.diary)
       // Stored before this run: a late box mismatch keeps its blocks (I4).
@@ -4125,12 +4181,14 @@ async function syncRun ({
       onReady: () => {
         if (gd.core !== core) return
         judge()
+        liftBoxRefused(gd.key)
         evaluate()
       },
       // Joins and names live there: the groups it binds read anew.
       onGrow: () => {
         if (gd.core !== core) return
         judge()
+        liftBoxRefused(gd.key)
         for (const ge of groupCores.values()) {
           if (ge.diary !== gd.key || ge.state !== 'active') continue
           markGroupChanged(ge.group)
@@ -4428,6 +4486,8 @@ async function syncRun ({
       ge.state = 'failed'
       markGroupChanged(ge.group)
       reconcileGroupDiaries()
+      // Gated again only once its purge is done.
+      if (ge.boxRefused) liftBoxRefused(ge.diary)
       evaluate()
     })
   }
@@ -4510,7 +4570,8 @@ async function syncRun ({
       if (ended || (ge.state !== 'active' && ge.state !== 'regate')) return
       failGroupEntry(ge, 'fork', { purge: true })
     })
-    ge.range = core.download({ start: 0, end: -1 })
+    // A stub's block 0 is all the fold reads of it: nothing past it is fetched.
+    ge.range = core.download(ge.stub ? { start: 0, end: 1 } : { start: 0, end: -1 })
     ge.stopGrow = watchContiguous(core, () => onGroupGrow(ge))
     if (checkGroupQuota(ge)) return
     const l = seederLink()
@@ -5272,9 +5333,17 @@ async function syncRun ({
     if (ge.state !== 'pending' || ending) return
     if (probe === null) return gateUnanswered(ge)
     const vis = rootVis.get(ge.group) || null
-    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group), vis, writerKind(ge.group))
+    const verdict = groupVerdict(probe.raw, ge.key, ge.group, ge.diary, expectFor(ge.group), null, writerKind(ge.group))
     if (verdict === 'not-community') return refuseNotCommunity(ge)
     if (verdict !== null) return failGroupEntry(ge, verdict, { purge: false })
+    // A box that does not match the root's visibility refuses the writer
+    // unless its binding diary released it (a replaced boxless writer): the
+    // fold then never awaits it, and it is held as a stub, block 0 alone, as
+    // seeders hold it. That release is read from the diary as this run
+    // holds it, below; a diary it does not hold refuses it now, as before,
+    // and the diary's arrival or growth tries it again (liftBoxRefused).
+    const stub = boxMismatch(probe.raw, ge.key, ge.group, vis)
+    if (stub && openBinding(ge.diary) === null) return refuseBox(ge, false)
     if (ge.key === ge.group) noteRootVisibility(ge.group, rootVisibilityOf(probe.raw, ge.key))
     const proof = await proveGroupJoin(l, ge, timeout)
     if (ge.state !== 'pending' || ending) return
@@ -5284,6 +5353,11 @@ async function syncRun ({
     if (isBlockedKey(ge.diary)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (isBlockedKey(ge.group)) return failGroupEntry(ge, 'blocked', { purge: false })
     if (overQuota(probe)) return failGroupEntry(ge, 'quota', { purge: false })
+    if (stub) {
+      const released = await heldRelease(ge.diary, ge.group, ge.key)
+      if (ge.state !== 'pending' || ending) return
+      if (!released) return refuseBox(ge, false)
+    }
     if (ge.key !== ge.group) {
       // The earliest join the held binding diaries show, for the candidate
       // and every held writer: a later duplicate join named by the seeder
@@ -5323,13 +5397,88 @@ async function syncRun ({
       return
     }
     ge.raw0 = probe.raw
+    ge.stub = stub
     ge.state = 'regate'
-    watchGroupEntry(ge, core)
     // The root's visibility may have been learned while this gate ran, and
     // recheckGroupBoxes skips a pending writer: its box is checked against
-    // the visibility known now.
+    // the visibility known now, before the core is replicated. A core closed
+    // while its channel is still opening leaves that channel open on the link
+    // (hypercore 10), and every later core of the key there gets no peer:
+    // liftBoxRefused could not fetch it as a stub on this link.
     const now = rootVis.get(ge.group) || null
-    if (now !== vis && boxMismatch(probe.raw, ge.key, ge.group, now)) failGroupEntry(ge, 'header-invalid', { purge: !ge.preStored })
+    if (!stub && now !== vis && boxMismatch(probe.raw, ge.key, ge.group, now)) {
+      ge.core = core
+      return refuseBox(ge, !ge.preStored)
+    }
+    watchGroupEntry(ge, core)
+  }
+
+  // A writer refused for a box that does not match, kept in groupCores
+  // (failed) for liftBoxRefused under the diary its block 0 names. Every
+  // such refusal is followed by one lift, once the entry is failed (here,
+  // or when its purge is done): the diary may have grown between the gate's
+  // read of its walk and this refusal, and that growth found nothing to lift.
+  function refuseBox (ge, purge) {
+    if (ge.state === 'failing' || ge.state === 'failed') return
+    ge.boxRefused = true
+    failGroupEntry(ge, 'header-invalid', { purge })
+    liftBoxRefused(ge.diary)
+  }
+
+  // Whether the slot walk of binding diary d, as this run holds it, gives
+  // writer `key` of `group` cut 0 (released, or kept at cut 0 past the
+  // release cap): the same records and rule as the fold's (group.js
+  // bindCores), which then never awaits a writer whose box does not match.
+  async function heldRelease (d, group, key) {
+    return diaryWriterCut(await heldEntries(d), group, key) === 0
+  }
+
+  // Binding diary d's entries as this run holds it open, else null.
+  async function heldEntries (d) {
+    const core = openBinding(d)
+    if (core === null || core.fork !== 0) return null
+    try {
+      return await store.readAll(core)
+    } catch {
+      return null
+    }
+  }
+
+  // The writers refused for their box whose diary d, as this run holds it,
+  // now releases them are gated again: refused while that diary was not
+  // held or did not show the release, they are a stub the fold never
+  // awaits. One read of d at a time; growth meanwhile reads it again.
+  function liftBoxRefused (d) {
+    if (ending) return
+    const refused = () => [...groupCores.values()].filter((ge) => ge.boxRefused && ge.diary === d && ge.state === 'failed')
+    if (refused().length === 0) return
+    const known = boxLifts.get(d)
+    if (known !== undefined) {
+      known.again = true
+      return
+    }
+    const run = { again: false }
+    boxLifts.set(d, run)
+    const done = () => {
+      boxLifts.delete(d)
+      pumpGroupGates()
+      evaluate()
+    }
+    track((async () => {
+      for (;;) {
+        run.again = false
+        const entries = await heldEntries(d)
+        for (const ge of refused()) {
+          if (diaryWriterCut(entries, ge.group, ge.key) !== 0) continue
+          if (ending || groupCores.get(ge.key) !== ge) continue
+          groupCores.delete(ge.key)
+          const g = groups.get(ge.group)
+          const it = g === undefined ? undefined : g.items.get(ge.key)
+          if (it !== undefined) noteGroupItem(g, it)
+        }
+        if (!run.again || ending) break
+      }
+    })(), done, done)
   }
 
   // Root G's verified visibility, first learned: a writer gated before it
@@ -5344,12 +5493,14 @@ async function syncRun ({
   // accepted writer of G whose gated block 0 does not match the visibility
   // goes with 'header-invalid' (a pending one is checked when its gate
   // lands); a core stored before this run keeps its blocks, as for any
-  // writer its own data refuses.
+  // writer its own data refuses. A stub was gated knowing the mismatch; any
+  // other writer is gated again as one once it is gone, if its diary
+  // released it (liftBoxRefused).
   function recheckGroupBoxes (group, visibility) {
     for (const ge of [...groupCores.values()]) {
-      if (ge.group !== group || ge.key === group || ge.raw0 === null) continue
+      if (ge.group !== group || ge.key === group || ge.raw0 === null || ge.stub) continue
       if (ge.state !== 'regate' && ge.state !== 'active') continue
-      if (boxMismatch(ge.raw0, ge.key, group, visibility)) failGroupEntry(ge, 'header-invalid', { purge: !ge.preStored })
+      if (boxMismatch(ge.raw0, ge.key, group, visibility)) refuseBox(ge, !ge.preStored)
     }
   }
 
@@ -5386,12 +5537,15 @@ async function syncRun ({
         unmet.push(ge.key + ':0/' + advertised)
         continue
       }
-      const want = Math.max(ge.core.length, advertised)
+      // A stub is held once its block 0 is.
+      const want = ge.stub ? 1 : Math.max(ge.core.length, advertised)
       const ours = ge.core.contiguousLength
       // A copy past the advertised prefix with a hole (a writer a seeder keeps
       // sparse) is met once its peers' advertised blocks are all held.
-      if (ours < want && (ours < advertised || !sparseMet(ge))) unmet.push(ge.key + ':' + ours + '/' + want)
+      if (ours < want && (ge.stub || ours < advertised || !sparseMet(ge))) unmet.push(ge.key + ':' + ours + '/' + want)
     }
+    // A writer refused for its box whose diary is being read for its release.
+    for (const d of boxLifts.keys()) unmet.push(d + ':liberação')
     // A community's catalogue scan in flight may still add roots to page.
     for (const [c, st] of catalogueScans) if (st.running || st.again) unmet.push(c + ':catalogue')
     // A binding diary is a goal from ensureGroupDiary on: still opening,
@@ -5777,6 +5931,7 @@ async function syncRun ({
         onGrow: (length) => {
           send({ type: 'have', key: ownHex, length })
           if (cert === null) recoverCert()
+          liftBoxRefused(ownHex)
           checkOwnSync()
           evaluate()
         },
