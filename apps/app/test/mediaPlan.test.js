@@ -14,10 +14,10 @@ test('media constants and MIME kinds match the record contract', async (t) => {
   t.is(plan.MAX_IMAGE_SIDE, 2048)
   t.is(plan.MAX_IMAGE_BYTES, 8 * 1024 * 1024)
   t.is(plan.MAX_GIF_BYTES, 8 * 1024 * 1024)
-  t.alike(plan.MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
-  for (const mime of ['image/jpeg', 'image/png', 'image/webp']) t.is(plan.kindOf(mime), 'image')
+  t.alike(plan.MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'image/avif']) t.is(plan.kindOf(mime), 'image')
   t.is(plan.kindOf('image/gif'), 'gif')
-  for (const mime of ['video/mp4', 'text/plain', 'image/svg+xml', 'image/avif', '', null, undefined]) {
+  for (const mime of ['video/mp4', 'text/plain', 'image/svg+xml', 'image/heic', 'image/AVIF', '', null, undefined]) {
     t.is(plan.kindOf(mime), null)
   }
 })
@@ -138,6 +138,7 @@ test('videoPair accepts only a JPEG poster followed by a video', async (t) => {
     [video],
     [poster, video, poster],
     [{ mime: 'image/png' }, video],
+    [{ mime: 'image/avif' }, video],
     [poster, { mime: 'image/jpeg' }],
     [poster, null],
     [null, video],

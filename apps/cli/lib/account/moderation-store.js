@@ -78,7 +78,7 @@ function fsyncDir (dir) {
 const FILE = 'moderation.json'
 const MEDIA_DIR = 'report-media'
 // An anexo: one image of at most 1 MiB, in the formats a DM carries minus
-// PNG (packages/rpc limits.js MEDIA_MIMES).
+// PNG and AVIF (packages/rpc limits.js MEDIA_MIMES).
 const ANEXO_MAX_BYTES = 1048576
 // A voice note report carries its audio (mod-routes.js decodeAnexo accepts it
 // only when audioBounds finds a sound-only MPEG-4 container).

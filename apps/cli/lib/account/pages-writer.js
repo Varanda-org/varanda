@@ -84,7 +84,7 @@ const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { feira, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -112,8 +112,6 @@ const NONCE_ID_RE = /^(append|media|follow):[0-9a-f]{64}:[A-Za-z0-9_-]{1,64}$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 // A local copy of seeder-health.js SEEDER_HTTP_RE, with ws as well.
 const SEEDER_RE = /^(?:http|ws):\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/
-const PNG_MAGIC = b4a.from([0x89, 0x50, 0x4e, 0x47])
-const GIF_MAGIC = b4a.from([0x47, 0x49, 0x46, 0x38])
 
 function noop () {}
 
@@ -893,12 +891,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (video) {
       duration = videoMs(bytes, width, height, ms)
       if (duration === null) throw fail('midia-invalida')
-    } else if (mime === 'image/jpeg' || mime === 'image/webp') {
-      const size = stillImageSize(bytes, mime)
-      if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
     } else {
-      const magic = mime === 'image/png' ? PNG_MAGIC : GIF_MAGIC
-      if (bytes.byteLength < magic.byteLength || !b4a.equals(bytes.subarray(0, magic.byteLength), magic)) throw fail('midia-invalida')
+      // The same strict parser the app runs before showing a received photo:
+      // anything it would refuse is refused here, at the declared size. Only a
+      // GIF may carry several frames.
+      const bounds = mediaBounds(bytes, mime)
+      if (bounds === null || bounds.width !== width || bounds.height !== height) throw fail('midia-invalida')
+      if (mime !== 'image/gif' && bounds.frames !== 1) throw fail('midia-invalida')
+      if (mime === 'image/jpeg' || mime === 'image/webp') {
+        const size = stillImageSize(bytes, mime)
+        if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
+      }
     }
     const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
     const valid = video ? validVideoDescriptor : validDescriptor

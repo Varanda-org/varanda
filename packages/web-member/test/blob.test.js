@@ -21,7 +21,9 @@ const coreBlob = require('@varanda/core/lib/blob')
 const postage = require('@varanda/core/lib/dm-postage')
 const gc = require('@varanda/core/lib/group-crypto')
 const sodium = require('../lib/sodium-browser')
-const { sealBlob, createBlobClient, fetchBlob, seederOrigin, BLOB_STAMP_WALLET, BLOB_STAMP_WALLET_LOW, FORCE_MARGIN } = require('../lib/blob')
+const { sealBlob, createBlobClient, fetchBlob, seederOrigin, looksLikeImage, BLOB_STAMP_WALLET, BLOB_STAMP_WALLET_LOW, FORCE_MARGIN } = require('../lib/blob')
+const { mediaBounds, mediaSize } = require('@varanda/rpc')
+const avif = require('../../rpc/test/helpers/avif-samples')
 const store = require('../lib/node-store')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { openBlobLink, openStampLink } = require('../lib/dm-link')
@@ -1092,6 +1094,116 @@ test('an image is checked by its bytes whatever the mime says, compared case-ins
   t.is(v.bounds, null, 'non-image bytes under an audio mime pass with no bounds')
   const err = await bad(fetchBlob(voice.descriptor, origin, { mime: 'Image/PNG', fetch: fakeRoute(voice).fetch }))
   t.is(err && err.message, 'mídia inválida', 'an image mime still requires an image')
+})
+
+// An ftyp box with these brands (minor version 0), then `tail` filler bytes.
+// size overrides the box size field.
+function ftyp (major, compatible = [], { size, tail = 64 } = {}) {
+  const box = 16 + 4 * compatible.length
+  const b = b4a.alloc(box + tail, 0x11)
+  b.writeUInt32BE(size === undefined ? box : size, 0)
+  b.write('ftyp', 4, 'latin1')
+  b.write(major, 8, 'latin1')
+  b.writeUInt32BE(0, 12)
+  compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+  return new Uint8Array(b)
+}
+
+// A real AVIF with its 32-byte ftyp rewritten to these brands (four
+// compatible ones, the size unchanged): the rest is still a valid AVIF, so
+// the brands alone decide what the rpc sniff says.
+function rebrand (sample, major, compatible) {
+  const b = b4a.from(sample)
+  b.write(major, 8, 'latin1')
+  compatible.forEach((brand, i) => b.write(brand, 16 + 4 * i, 'latin1'))
+  return new Uint8Array(b)
+}
+
+test('looksLikeImage takes an AVIF by the same ftyp rule as the rpc sniff', (t) => {
+  // The rpc sniff is internal to media-bounds.js: a still AVIF it parses in
+  // full stands in for it, rebranded so the brands alone decide.
+  for (const [base, real] of [['iOS', avif.ios.opaque], ['libavif', avif.libavif.opaque]]) {
+    for (const [label, bytes, image] of [
+      ['as written', real, true],
+      ['major mif1 with avif compatible', rebrand(real, 'mif1', ['MiPr', 'miaf', 'avif', 'mif1']), true],
+      ['major mif1 without avif (HEIC)', rebrand(real, 'mif1', ['MiPr', 'heic', 'miaf', 'mif1']), false],
+      ['major heic with avif compatible', rebrand(real, 'heic', ['MiPr', 'avif', 'miaf', 'mif1']), false],
+      ['major avis', rebrand(real, 'avis', ['MiPr', 'avif', 'miaf', 'mif1']), false],
+      ['major avif with avis compatible', rebrand(real, 'avif', ['MiPr', 'avis', 'miaf', 'mif1']), false],
+      ['major isom', rebrand(real, 'isom', ['iso2', 'avc1', 'mp41', 'mif1']), false],
+      ['major mp42', rebrand(real, 'mp42', ['isom', 'mp42', 'mp41', 'iso2']), false],
+      ['major M4A', rebrand(real, 'M4A ', ['M4A ', 'mp42', 'isom', 'iso2']), false]
+    ]) {
+      t.is(looksLikeImage(bytes), image, base + ' ' + label + ': looksLikeImage')
+      t.is(mediaSize(bytes) !== null, image, base + ' ' + label + ': rpc mediaSize')
+    }
+  }
+  // An alpha AVIF starts like an image whether or not the rpc parse takes
+  // it: the forced mediaBounds then decides.
+  t.ok(looksLikeImage(avif.ios.alpha), 'iOS alpha starts like an image')
+  t.ok(looksLikeImage(avif.libavif.alpha), 'libavif alpha starts like an image')
+  // ftyp-only boxes: with nothing after the box mediaSize is null either
+  // way, so these compare looksLikeImage against the rule itself.
+  for (const [label, bytes, image] of [
+    ['a bare ftyp word', new Uint8Array(b4a.from('\0\0\0\x10ftyp')), false],
+    ['an ftyp with no brands', ftyp('\0\0\0\0'), false],
+    ['major avif, no compatible brands', ftyp('avif'), true],
+    ['major avif cut inside its box', ftyp('avif', ['mif1', 'miaf']).subarray(0, 20), false],
+    ['major avif, box size 15', ftyp('avif', [], { size: 15 }), false],
+    ['major avif, box size 145', ftyp('avif', [], { size: 145, tail: 200 }), false],
+    ['major avif, box size 18', ftyp('avif', ['mif1'], { size: 18 }), false],
+    ['major avif, box size 144', ftyp('avif', new Array(32).fill('miaf')), true],
+    ['mif1 alone', ftyp('mif1', ['mif1', 'miaf']), false],
+    ['mif1 with avif', ftyp('mif1', ['avif']), true],
+    ['avif only past the box', (() => { const b = ftyp('mif1', ['mif1']); b.set(b4a.from('avif'), 20); return b })(), false],
+    ['isom', ftyp('isom', ['isom', 'avc1']), false],
+    ['mp42', ftyp('mp42', ['mp42', 'isom']), false],
+    ['M4A', ftyp('M4A ', ['M4A ', 'mp42']), false],
+    ['avis', ftyp('avis', ['avif', 'mif1']), false],
+    ['avif with avis', ftyp('avif', ['avis']), false]
+  ]) {
+    t.is(looksLikeImage(bytes), image, label)
+  }
+})
+
+test('an AVIF opens through the blob client; a truncated one is refused under any label', async (t) => {
+  const origin = 'http://127.0.0.1:1'
+  const bad = (p) => p.then(() => null, (e) => e)
+  for (const [name, sample] of [['iOS', avif.ios.opaque], ['libavif', avif.libavif.opaque], ['iOS alpha', avif.ios.alpha], ['libavif alpha', avif.libavif.alpha]]) {
+    const whole = sealBlob(sample)
+    // An alpha AVIF opens exactly when mediaBounds takes it, whatever the label.
+    const expected = name.endsWith('alpha') && mediaBounds(sample) === null ? null : [16, 16]
+    for (const mime of ['image/avif', 'IMAGE/AVIF', undefined, 'audio/ogg', 'application/octet-stream']) {
+      const got = await fetchBlob(whole.descriptor, origin, { mime, fetch: fakeRoute(whole).fetch }).then((r) => r.bounds, () => null)
+      t.alike(got && [got.width, got.height], expected, name + ' AVIF as ' + mime)
+    }
+    const cut = sealBlob(sample.subarray(0, sample.byteLength - 40))
+    for (const mime of ['image/avif', undefined, 'audio/ogg', 'audio/mp4', 'application/octet-stream']) {
+      const err = await bad(fetchBlob(cut.descriptor, origin, { mime, fetch: fakeRoute(cut).fetch }))
+      t.is(err && err.message, 'mídia inválida', name + ' truncated AVIF refused as ' + mime)
+    }
+  }
+})
+
+test('an audio MP4 or a HEIC body is not taken for an image, but an image label still needs one', async (t) => {
+  const origin = 'http://127.0.0.1:1'
+  const bad = (p) => p.then(() => null, (e) => e)
+  for (const [name, body] of [
+    ['audio/mp4', ftyp('M4A ', ['M4A ', 'mp42', 'isom'], { tail: 400 })],
+    ['HEIC', ftyp('heic', ['mif1', 'heic'], { tail: 400 })],
+    ['mif1 HEIC', rebrand(avif.ios.opaque, 'mif1', ['MiPr', 'heic', 'miaf', 'mif1'])],
+    ['AVIF sequence', rebrand(avif.ios.opaque, 'avis', ['avis', 'msf1', 'miaf', 'MA1B'])]
+  ]) {
+    const sealed = sealBlob(body)
+    for (const mime of ['audio/mp4', 'application/octet-stream']) {
+      const got = await fetchBlob(sealed.descriptor, origin, { mime, fetch: fakeRoute(sealed).fetch })
+      t.is(got.bounds, null, name + ' under ' + mime + ' passes with no bounds')
+    }
+    for (const mime of ['image/avif', 'image/heic', undefined]) {
+      const err = await bad(fetchBlob(sealed.descriptor, origin, { mime, fetch: fakeRoute(sealed).fetch }))
+      t.is(err && err.message, 'mídia inválida', name + ' under ' + mime + ' is refused')
+    }
+  }
 })
 
 test('a frame body is never buffered past the frame size', async (t) => {
