@@ -574,6 +574,22 @@ const MAX_CAP_CONTENDERS = 2
 // liveDiaryWriters: the slot walk reads the cuts with the joins (#350).
 const WALK_TYPES = new Set(['group-join', 'group-cut'])
 
+// The on:true writers the own diary binds now to the roots it binds, as
+// diaryGroupKeys counts them: the root's own key once bound, then the live
+// and frozen writers of the diary's slot walk (#350). `entries` the diary's
+// [{ seq, record }]. -> Map writer -> group.
+function liveDiaryWriters (entries, roots) {
+  const allowed = new Set()
+  for (const group of roots) {
+    const walk = slotWalk(groupJoinHistory(entries, group), groupCutHistory(entries, group), group)
+    if (walk.rootSlot) allowed.add(group + ':' + group)
+    for (const writer of [...walk.live, ...walk.frozen]) allowed.add(group + ':' + writer)
+  }
+  const out = new Map()
+  for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
+  return out
+}
+
 const NO_READER = { set: noop, clear: noop }
 // A startup that has not reached the seeder link ('ready') by then logs the
 // step it is on, and again at the same interval (local diagnostics only).
@@ -5205,22 +5221,6 @@ async function syncRun ({
     scheduleFold()
   }
 
-  // The on:true writers the own diary binds now to the roots it binds, as
-  // diaryGroupKeys counts them: the root's own key once bound, then the
-  // live and frozen writers of the diary's slot walk (#350). -> Map writer
-  // -> group.
-  function liveDiaryWriters (entries, roots) {
-    const allowed = new Set()
-    for (const group of roots) {
-      const walk = slotWalk(groupJoinHistory(entries, group), groupCutHistory(entries, group), group)
-      if (walk.rootSlot) allowed.add(group + ':' + group)
-      for (const writer of [...walk.live, ...walk.frozen]) allowed.add(group + ':' + writer)
-    }
-    const out = new Map()
-    for (const j of groupJoins(entries).values()) if (allowed.has(j.group + ':' + j.writer)) out.set(j.writer, j.group)
-    return out
-  }
-
   // Pages `group` for its new diary-bound writer, and again on a short
   // backoff (NEW_WRITER_PAGE_DELAYS, each wait after the previous page)
   // while the seeder, which may not have admitted it yet, does not list it;
@@ -5654,4 +5654,4 @@ async function syncRun ({
   }
 }
 
-module.exports = { runSync, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }
+module.exports = { runSync, groupVerdict, boxMismatch, addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY, WALK_TYPES, liveDiaryWriters, gateVerdict, trackPresent, linearExcept, MAX_RANGES, NEWEST_BLOCKS, TAIL_MAX, HEAD_LOW, HEAD_STALL_MS, GATE_TIMEOUT_MS, CONNECT_TIMEOUT_MS, MAX_PARALLEL_GATES, MAX_PARALLEL_OPENS, SEEDER_UNAVAILABLE, DIARY_UNAVAILABLE }

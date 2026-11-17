@@ -5,10 +5,10 @@ const test = require('brittle')
 const crypto = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
 const { createIssuerCert, createIssuedCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { groupJoinRecord } = require('@varanda/core/lib/records')
+const { groupJoinRecord, groupCutRecord } = require('@varanda/core/lib/records')
 const grp = require('@varanda/core/lib/group')
 const { MAX_GROUP_WRITERS, MAX_GROUP_WRITERS_PER_DIARY } = grp
-const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY: HELD } = require('../lib/sync')
+const { addJoins, earliestJoin, groupPushHeld, ownGroupVerdict, bindingRecheck, forgetListed, evictionPurges, capVictim, capExcess, storedJoinProof, refineJoinSeq, MAX_GROUP_HELD_PER_DIARY: HELD, WALK_TYPES, liveDiaryWriters } = require('../lib/sync')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const ops = require('../lib/member-ops')
@@ -663,4 +663,31 @@ test('the per-diary cap holds every writer the slot walk counts: 8 live, 8 froze
   const live = [{ key: g, group: g, diary: d, seq: 0, proven: false }]
   for (let i = 0; i < 2 * MAX_GROUP_WRITERS_PER_DIARY; i++) live.push({ key: randomKey(), group: g, diary: d, seq: 10 + i, proven: true })
   t.is(capExcess(live).size, 0, 'a root and 16 writers all stay live')
+})
+
+test('the own diary scan keeps the cuts: a writer joined after released slots binds its root and is live (#350)', (t) => {
+  // The scan keeps WALK_TYPES of the own diary for diaryGroupKeys and
+  // liveDiaryWriters, as readDiaryJoin and seedFold do.
+  const g = 'aa'.repeat(32)
+  const at = '2026-01-01T00:00:00.000Z'
+  const entries = []
+  let seq = 1
+  const scan = (record) => {
+    if (WALK_TYPES.has(record.type)) entries.push({ seq, record })
+    seq++
+  }
+  // Every live slot taken once, then left and released by a cut 0: the
+  // slots are free again, so a later writer takes one.
+  for (let i = 0; i < MAX_GROUP_WRITERS_PER_DIARY; i++) {
+    const w = randomKey()
+    scan(groupJoinRecord({ group: g, writer: w, on: true, at }))
+    scan(groupJoinRecord({ group: g, writer: w, on: false, at }))
+    scan(groupCutRecord({ group: g, writer: w, cut: 0, at }))
+  }
+  const late = randomKey()
+  scan(groupJoinRecord({ group: g, writer: late, on: true, at }))
+  t.alike(grp.diaryGroupKeys(entries), [g], 'the root is adopted for the later writer')
+  t.alike([...liveDiaryWriters(entries, new Set([g]))], [[late, g]], 'the later writer is live, so a new one is chased')
+  const joinsOnly = entries.filter((e) => e.record.type === 'group-join')
+  t.alike(grp.diaryGroupKeys(joinsOnly), [], 'control: without the cuts the walk has no slot for it')
 })
