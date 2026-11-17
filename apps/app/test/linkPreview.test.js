@@ -314,7 +314,7 @@ test('a DM card thumbnail is read by the node with index card', (t) => {
   const msg = withoutComments(read('screens', 'Mensagem.js'))
   // Acting as a Página, the thumb is read from the Página's store (docs/rpc.md
   // 5.89 `page`); the identity stays the person's, who holds that store here.
-  t.ok(/const pageOf = pageKey !== null \? \{ page: pageKey \} : \{\}/.test(msg))
+  t.ok(/const pageOf = mediaPage !== null \? \{ page: mediaPage \} : \{\}/.test(msg))
   t.ok(/cardThumb=\{item\.deleted \? undefined : \{ kind: 'dm', from: item\.from \|\| \(mine \? ownKey : null\), id: item\.id, identity: ownKey, \.\.\.pageOf \}\}/.test(msg), 'Mensagem passes the DM card thumb, in a Página thread too')
 })
 

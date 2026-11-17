@@ -11,6 +11,7 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const { REKEY_PERIOD_MS, REKEY_OTHER_WAIT_MS, REKEY_JITTER_MS, REKEY_CHECK_MS } = require('@varanda/core/lib/group-rekey')
+const devices = require('@varanda/core/lib/devices')
 const { createBrowserNode } = require('../lib/node')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
@@ -290,6 +291,32 @@ test('a plain member never rotates', async (t) => {
   t.alike(await ops.periodicRekey(ctx, { groups: [group], now }), { rotated: [], failed: [] })
   t.is(firstBlocks(await coreRecords(b, group)), 1)
   t.is(firstBlocks(await coreRecords(b, await writerOf(b, group))), 0)
+})
+
+// Another device of the account disconnected `m`: an off record for its id.
+async function disconnected (m, ctx) {
+  const { id } = await ops.deviceHello(ctx, { name: 'Celular' })
+  const diary = await store.openDiary(m.storage, m.keyPair)
+  const key = devices.deviceKey(m.keyPair.secretKey, b4a.from(m.key, 'hex'))
+  try {
+    await store.appendRecord(diary, devices.sealedRecord({ v: 1, id, name: null, on: false, writers: [] }, key))
+  } finally {
+    devices.wipeKey(key)
+    await diary.close()
+  }
+}
+
+test('a disconnected device plans no rotation, and an older plan rotates nothing', async (t) => {
+  const { a, group } = await admitted(t)
+  const ctx = await opsCtx(t, a)
+  const now = Date.now() + REKEY_PERIOD_MS + MINUTE
+  const due = await ops.periodicRekeyPlan(ctx, { now })
+  t.alike(due.rekey, [{ group, writer: group }], 'due while connected')
+  await disconnected(a, ctx)
+  t.is((await ops.deviceList(ctx)).off, true)
+  t.alike(await ops.periodicRekeyPlan(ctx, { now }), { rekey: [], checked: [], next: null })
+  t.alike(await ops.periodicRekey(ctx, { groups: due.rekey, now }), { rotated: [], failed: [] })
+  t.is(firstBlocks(await coreRecords(a, group)), 1, 'nothing written')
 })
 
 test('locked: nothing is planned', async (t) => {

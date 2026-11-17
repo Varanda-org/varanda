@@ -426,6 +426,8 @@ const INVITE_CARD_PAST = 24 * 60 * 60
 const INVITE_CARD_AHEAD = 8 * 24 * 60 * 60
 const GATE_LINE = 'sincronizando antes de publicar'
 const PUSH_LINE = 'enviando ao semeador'
+const DEVICE_LINE = 'atualizando os grupos antes de desconectar'
+const RECONNECT_PASSKEY = 'para conectar de novo, entre com a passkey'
 const LOCAL_LINE = 'diário próprio escrito neste aparelho'
 const DRAIN_WARNING = 'aviso: seguidos ainda não enviados'
 const UPKEEP_WARNING = 'aviso: participação automática neste aparelho não concluída'
@@ -974,6 +976,14 @@ function createBrowserSession ({
   // The identity key pair and this device's media key pair (session-owned
   // copies, zero-filled together when cleared).
   let keyPair = null
+  // Whether the host unlocked keyPair from a passkey ceremony in this open
+  // (setKeyPair's `fresh`), not from a kept session: device.reconnect needs
+  // it.
+  let keyFresh = false
+  // The last `off` sent in devices.changed for the current key pair, and
+  // the own length last checked for it.
+  let deviceOffSent = false
+  let deviceCheckLength = null
   let mediaKeyPair = null
   let groupPrf = null
   // The outbox key (passkey.js outboxKeyFromPrf), derived from groupPrf on
@@ -1401,6 +1411,7 @@ function createBrowserSession ({
                   // Kept while locked too: the link reports each length once,
                   // so the unlock arms from it (setKeyPair).
                   r.ownLength = ev.length
+                  scheduleDeviceCheck(ev.length)
                   if (ev.length !== upkeepLength) {
                     // The echo of a write made here may take the precheck,
                     // unless another trigger already queued a pass.
@@ -2612,6 +2623,8 @@ function createBrowserSession ({
     const stale = () => closed || epoch !== connection || generation !== groupEpoch || keyPair === null
     try {
       const { plan, planLength } = await withCores(async (c) => ({ plan: await member.deviceUpkeepPlan(c), planLength: await ownLength(c) }))
+      // Sent only on a change, so a pass of an off device never loops.
+      if (plan.off === true && !stale()) noteDeviceOff(true, epoch)
       shareChecked = true
       upkeepFullAt = Date.now()
       // Only what a later sync can bring keeps the arming: a root skipped
@@ -2767,6 +2780,104 @@ function createBrowserSession ({
     if (r.written !== null) wrote(r.written)
     await pushAfterWrite()
     return r
+  }
+
+  // ---- connected devices (docs/rpc.md 5.152 to 5.155) ----
+
+  // devices.changed (section 6): `off` for this device, sent when it differs
+  // from the last one sent under the current key pair (none sent: false).
+  function noteDeviceOff (off, epoch) {
+    if (typeof off !== 'boolean' || off === deviceOffSent || keyPair === null) return
+    deviceOffSent = off
+    send('devices.changed', { off }, epoch)
+  }
+
+  // A new own length on a user's continuous run may bring another device's
+  // off record or cut marks: a read on the run's cores, once per length.
+  // It stays off the request chain and only borrows: a run that has not
+  // lent its cores yet, cannot hold them or cannot serve the read skips
+  // it (never waits for the run's end and never preempts it); the next
+  // length, the upkeep or a device.* call reads again.
+  // `deviceCheckLength` is the length last read for good. The link reports
+  // each length once, so a skipped or failed read is not read again from
+  // here until a new length: the upkeep pass (see upkeep) reads the device
+  // state again and says off.
+  let deviceChecking = false
+  let deviceCheckNext = null
+  async function deviceCheck (length) {
+    if (deviceChecking) {
+      deviceCheckNext = length
+      return
+    }
+    deviceChecking = true
+    try {
+      for (let next = length; next !== null; next = deviceCheckNext) {
+        deviceCheckNext = null
+        const r = run
+        if (closed || keyPair === null || r === null || r.once) return
+        const epoch = connection
+        const kp = keyPair
+        const api = await readyWithin(r.ready, 0)
+        if (api === NOT_READY || api === null || !api.hold()) continue
+        let out = null
+        try {
+          out = await member.deviceOff({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group, opened: undefined, settled: undefined } })
+        } catch (err) {
+          if (!member.isNeedsExclusive(err)) throw err
+        } finally {
+          api.release()
+        }
+        if (out === null || run !== r || keyPair !== kp || epoch !== connection) continue
+        deviceCheckLength = next
+        noteDeviceOff(out.off, epoch)
+      }
+    } finally {
+      deviceChecking = false
+    }
+  }
+
+  function scheduleDeviceCheck (length) {
+    if (closed || keyPair === null || length === deviceCheckLength) return
+    deviceCheck(length).catch(noop)
+  }
+
+  // A device write: whatever reached the own diary (part of a disconnect
+  // that failed half way too) is counted and pushed. Never retried.
+  async function deviceWrite (write) {
+    const length = (c) => member.withIdentity(c, async ({ diary }) => diary.length)
+    let r
+    try {
+      r = await withStore(async (c) => {
+        const before = await length(c)
+        try {
+          return await write(c)
+        } finally {
+          const after = await length(c)
+          if (after > before) wrote(after - 1)
+        }
+      })
+    } catch (err) {
+      try { await pushAfterWrite() } catch {}
+      throw err
+    }
+    await pushAfterWrite()
+    return r
+  }
+
+  // device.disconnect: a once run of at most writeGateTimeoutMs brings the
+  // held group cores (the other devices' writers included) up to what the
+  // seeder serves, ending early once its goals are met; the cuts then mark
+  // the contiguous length held. The user's sync intent is restored.
+  async function refreshGroupCores (epoch) {
+    kickLease()
+    if (!writeGate) return
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    if (run !== null) await stopRun('preempted')
+    const intent = syncIntent
+    const r = startRun({ once: true, timeoutMs: writeGateTimeoutMs, internal: true, label: DEVICE_LINE })
+    await r.done
+    if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+    syncIntent = intent
   }
 
   // ---- direct messages (docs/rpc.md 5.73 to 5.81) ----
@@ -4787,6 +4898,62 @@ function createBrowserSession ({
       await dmEngine.visitClear({ queue: false })
       return { ok: true }
     }),
+
+    // Aparelhos conectados (docs/rpc.md 5.152 to 5.155, member-ops). The
+    // refusals and a hello with nothing to write are reads on the run's
+    // cores; a write runs the write gate first (device.disconnect a bounded
+    // group refresh before it). Never retried.
+    'device.hello': serial(async ({ name }, epoch) => {
+      await requireUnlocked()
+      const quick = await withCores((c) => member.deviceHello(c, { name }, { write: false }))
+      if (quick !== null) {
+        noteDeviceOff(quick.off, epoch)
+        return quick
+      }
+      await ensureCaughtUp(epoch)
+      const r = await deviceWrite((c) => member.deviceHello(c, { name }))
+      noteDeviceOff(r.off, epoch)
+      return r
+    }),
+    'device.list': serial(async (_, epoch) => {
+      await requireUnlocked()
+      const r = await withCores((c) => member.deviceList(c))
+      noteDeviceOff(r.off, epoch)
+      return r
+    }),
+    // The cuts need no group key; the rotation after them is best effort
+    // and skipped without one.
+    'device.disconnect': serial(async ({ id, previous }, epoch) => {
+      await requireUnlocked()
+      const params = { id: id === undefined ? null : id, previous: previous === true }
+      const { pairs } = await withCores((c) => member.deviceDisconnect(c, params, { write: false }))
+      groupWriting = true
+      try {
+        if (pairs > 0) await refreshGroupCores(epoch)
+        await ensureCaughtUp(epoch)
+        const r = await deviceWrite(async (c) => {
+          if (epoch !== connection) throw rpcError('USAGE', 'conexão encerrada')
+          const out = await member.deviceDisconnect(c, params)
+          await noteWrittenRoots(out.groups)
+          return out
+        })
+        for (const group of r.groups) send('groups.changed', { group }, epoch)
+        return { cut: r.cut, empty: r.empty }
+      } finally {
+        groupWriting = false
+        for (const pair of groupPairs) zeroPair(pair)
+        groupPairs.clear()
+      }
+    }),
+    'device.reconnect': serial(async ({ name }, epoch) => {
+      await requireUnlocked()
+      if (!keyFresh) throw new UsageError(RECONNECT_PASSKEY)
+      await withCores((c) => member.deviceReconnect(c, { name }, { write: false }))
+      await ensureCaughtUp(epoch)
+      const r = await deviceWrite((c) => member.deviceReconnect(c, { name }))
+      noteDeviceOff(false, epoch)
+      return r
+    }),
     // Queues a quiet ping to `key` only when the own switch is on, dms are
     // enabled, `key` is not self, a page or blocked, its own switch reads on
     // (visitTarget, off the chain) and the budgets allow; every check is
@@ -5488,6 +5655,9 @@ function createBrowserSession ({
     noticeCtxCache = null
     zeroPair(keyPair)
     keyPair = null
+    keyFresh = false
+    deviceOffSent = false
+    deviceCheckLength = null
     zeroPair(mediaKeyPair)
     mediaKeyPair = null
     if (groupPrf !== null) groupPrf.fill(0)
@@ -5530,13 +5700,15 @@ function createBrowserSession ({
   // Unlocks the identity with the pair derived from the passkey, and this
   // device's media key pair when the page derived one (`media`; without it
   // uploads are refused as locked). The optional PRF derives group keys.
+  // `fresh: true` says the host ran a passkey ceremony for this unlock (not
+  // a kept session); only then may device.reconnect register this device.
   // All are copied synchronously (the caller may zero its buffers right
   // away); any previous pair and PRF are
   // zero-filled. The cached identity is forgotten so a stored diary of
   // another key surfaces on the next operation as USAGE 'passkey não
   // corresponde ao diário guardado'. Nothing is written here; the follow
   // drain is scheduled right after.
-  function setKeyPair (pair, { media, prf } = {}) {
+  function setKeyPair (pair, { media, prf, fresh = false } = {}) {
     const copy = copyPair(pair)
     let mediaCopy = null
     let prfCopy = null
@@ -5588,6 +5760,7 @@ function createBrowserSession ({
       // before this one may start, so its own lock never meets this unlock.
       await dm.previous
       keyPair = copy
+      keyFresh = fresh === true
       mediaKeyPair = mediaCopy
       groupPrf = prfCopy
       synced = false
@@ -6180,6 +6353,7 @@ function createBrowserSession ({
     await store.clearFollowsMigrated(storage)
     await store.writeMemberBlocks(storage, [])
     await store.clearTestimonialDecisions(storage)
+    await store.clearDeviceId(storage)
     await store.clearMomentSeen(storage)
     testimonialDead.clear()
     zeroKeyPair()

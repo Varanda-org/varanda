@@ -66,7 +66,7 @@ test('response: success and error', (t) => {
 })
 
 test('event names and stop reasons (sync.started and preempted included)', (t) => {
-  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch'])
+  t.alike([...EVENTS], ['sync.started', 'sync.event', 'sync.stopped', 'warning', 'follows.changed', 'groups.changed', 'dm.changed', 'dm.sending', 'seen.changed', 'dm.pageKeyMismatch', 'devices.changed'])
   t.alike([...STOP_REASONS], ['done', 'stopped', 'preempted', 'timeout', 'error', 'idle'])
   t.is(STOP_REASONS.length, 6)
   t.ok(Object.isFrozen(EVENTS))
@@ -150,6 +150,15 @@ test('event: dm.pageKeyMismatch', (t) => {
   const page = 'cd'.repeat(32)
   t.ok(ev({ page }).ok)
   for (const data of [{}, { page: 'x' }, { page, added: 1 }, [], null]) {
+    t.absent(ev(data).ok, JSON.stringify(data))
+  }
+})
+
+test('event: devices.changed', (t) => {
+  const ev = (data) => validateEvent({ v: 1, event: 'devices.changed', seq: 1, data })
+  t.ok(ev({ off: true }).ok)
+  t.ok(ev({ off: false }).ok)
+  for (const data of [{}, { off: 1 }, { off: 'true' }, { off: true, id: 'x' }, [], null]) {
     t.absent(ev(data).ok, JSON.stringify(data))
   }
 })
