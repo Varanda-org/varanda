@@ -36,7 +36,7 @@ Arquivos do membro que não carregam o semeador, cada um sozinho, com a correç�
 | `sync-groups-4.test.js` | 14/14 | 73/73 |
 | `sync-groups-5.test.js` | 8/8 | 19/19 |
 | `sync-groups-6.test.js` | 1/1 | 5/5 |
-| `sync-groups-8.test.js` | 34/34 | 246/246 |
+| `sync-groups-8.test.js` | 40/40 | 271/271 |
 | `sync-slots.test.js` | 8/8 | 27/27 |
 
 Arquivos que usam o semeador real, cada um sozinho, com o lado do semeador pronto: todos passaram.
@@ -70,7 +70,7 @@ Mudanças em `packages/core/lib/seeder.js`:
 - A saída de uma linha lê a admissão em andamento de K na hora, como `_dropGroup`, e só a espera quando não há outra saída antes dela. Antes, duas saídas do mesmo núcleo e uma admissão nova dele podiam esperar uma pela outra para sempre, e `close()` não terminava.
 - Um bloco 0 diferente do buscado (`fork`) fica recusado para aquele seq da entrada, e uma admissão que falha (`admission-failed`) espera como um tempo esgotado. Antes, cada reconciliação buscava, gravava e apagava o mesmo núcleo de novo.
 - Uma entrada de D só conta como respondida pela linha do próprio D que não está saindo.
-- Um toco só se esconde atrás de um item de escritor do mesmo grupo que os membros já veem.
+- Um toco só se esconde atrás de um item de escritor do mesmo grupo que os membros já veem, e isso só vale no intervalo antes de `_takeFromStub`. Depois dele, o bloco 0 guardado (`_stubBlockHeld`) esconde o toco até a checagem do cabeçalho, e nesse intervalo K fica sem item (as páginas do grupo ficam incompletas).
 - A partida registra um toco bifurcado como `fork`, não `no-header`.
 - O comentário do cabeçalho diz que um diário ou núcleo de mídia já servido aqui e ligado como escritor vira linha só de lista, e um que não está aqui é recusado.
 
@@ -95,6 +95,50 @@ Remoção de cada correção (desfeita depois; `shasum` de `seeder.js` e de `syn
 
 No membro, tirar a cobrança de `wrong-group` no descarte da listagem faz o teste novo falhar (só ele, numa cópia temporária). A regra de esconder o toco atrás de um escritor visível e o registro `fork` na partida não têm teste próprio.
 
+## Rodada de revisão 2
+
+A branch recebeu a `main` com o orçamento de armazenamento (#33). Os núcleos dos tocos ficam fora do orçamento, limitados pela contagem (`maxHeaderStubs` vezes o bloco 0, cerca de 256 x 16,5 KiB no padrão); com o orçamento cheio, uma chave desconhecida é recusada com `storage-full` antes de ser julgada como toco. Uma saída pelo orçamento passa por `_drop` / `_dropGroup`: as linhas do diário saem, e um papel apagado leva as linhas que dependiam dele, com a entrada tentada de novo.
+
+Mudanças em `packages/core/lib/seeder.js`:
+
+- Uma entrada movida não perde o toco nos limites: `_stubRoom(diary, key, group)` não conta as linhas vivas de D para K sob outro grupo, nem nas 8 do diário nem no total. Antes, com D em 8 linhas ou o semeador em `maxHeaderStubs`, a nova entrada era `stub-full` e a linha antiga saía com o núcleo.
+- A linha antiga de uma entrada movida só fica enquanto a admissão da nova entrada de K está em andamento ou D espera uma vaga de admissão. A checagem roda depois do laço das entradas, para ver esse estado. Uma nova entrada recusada sem espera (grupo bloqueado, lista de bloqueio pendente, limites do diário) ou que espera por outro motivo tira a linha na mesma passagem, e K é buscado de novo quando a entrada for tentada outra vez. Enquanto fica, a linha não é listada (a entrada viva de D nomeia outro grupo), e o fim da admissão julga a linha de novo.
+- Uma raiz apagada pelo criador (bloqueado ou revogado, em `goneRoots`), qualquer raiz com a admissão de raízes fechada, ou uma raiz cujo criador sumiu não volta como toco de outro grupo: a entrada é recusada (`blocked`, `revoked-issuer`, `denials-full`) e espera como uma raiz sumida; um toco guardado dessa raiz sai na adoção da lista de bloqueio e na partida. A verificação `key === group` de `_admitGroup` ficou como estava, porque também se aplica a escritores comuns.
+- `_stubBlock` confere `core.fork` depois da leitura: um núcleo que bifurcou durante a leitura não dá bloco 0, e a admissão espera como um tempo esgotado.
+
+Testes novos em `seeder-groups-header-stubs.test.js`: entrada movida com os dois limites cheios e o autor fora do ar (também a linha antiga fora da lista enquanto a admissão está em andamento); linha antiga que sai quando a nova entrada termina sem bloco 0 e quando ela é recusada por grupo bloqueado; raiz apagada pelo criador que não volta como toco, e toco guardado de uma raiz cujo criador foi bloqueado; núcleo bifurcado durante a leitura (teste de unidade); saída pelo orçamento (`_dropOwner`, a mesma chamada de `_storagePass`) de um diário com toco guardado e de um papel em que uma linha só de lista se apoiava. A guarda `_stubsRestored` ficou sem teste próprio: exige uma linha só de lista cujo papel é apagado nos passos 3a a 3c da partida.
+
+Remoção de cada correção (desfeita depois; `shasum` de `seeder.js` igual antes e depois), rodando só `seeder-groups-header-stubs.test.js`:
+
+| Mutação | Resultado |
+|---|---|
+| total de `_stubRoom` conta a linha movida | falha (tempo esgotado em "K sob G2") |
+| limite do diário conta a linha movida | falha (tempo esgotado em "K sob G2") |
+| linha movida fica sempre (sem a checagem de admissão em andamento) | falha (tempo esgotado em "Kb fora") |
+| sem a checagem depois do laço das entradas | falha (tempo esgotado em "Kb fora") |
+| linha movida listada sob o grupo antigo | falha (teste 14) |
+| sem a reconciliação no fim da admissão | falha (tempo esgotado em "Kb fora") |
+| toco aceito para raiz apagada | falha (teste 16) |
+| sem a saída de tocos de raiz na adoção da lista | falha (tempo esgotado em "R2 removido") |
+| `_stubBlock` sem conferir `fork` | falha (teste 17) |
+| `_purge` sem `_stubRolePurged` | falha (teste 16, tempo esgotado antes do 18) |
+| leitura das linhas de volta em `_restoreHeaderStubs`, como antes da rodada 1 | falha só o teste 9 |
+
+A checagem de raiz em `_restoreHeaderStubs` não tem teste próprio.
+
+Depois da junção com a `main` e desta rodada, cada arquivo sozinho (`VARANDA_TEST_CONCURRENCY=1 node <arquivo>`), Node 24.22.1, todos passaram. A contagem de `sync-groups-8.test.js` na tabela do membro acima é desta execução (a `main` trouxe testes novos).
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `seeder-groups-header-stubs.test.js` | 18/18 | 126/126 |
+| `seeder-groups.test.js` | 44/44 | 271/271 |
+| `seeder-header-stubs-e2e.test.js` | 1/1 | 9/9 |
+| `seeder-storage-budget.test.js` | 14/14 | 160/160 |
+| `sync-groups-8.test.js` | 40/40 | 271/271 |
+| `seeder-groups-gone.test.js` | 25/25 | 153/153 |
+| `seeder-groups-waits.test.js` | 12/12 | 61/61 |
+| `seeder-groups-cuts.test.js` | 20/20 | 361/361 |
+
 ## Pontos em aberto (padrões do responsável)
 
 - Uma entrada desligada (`on: false`) mantém o toco: sair do grupo nunca apaga um núcleo, e os leitores ainda esperam um escritor que saiu.
@@ -110,5 +154,4 @@ Qualquer ordem funciona. O semeador lista tocos só para quem manda a capacidade
 ## Riscos residuais
 
 - Um semeador pode listar, a cada atualização, todo núcleo que o membro guarda sob cada grupo que ele pagina, sem nunca ser cortado: o membro abre cada um localmente e o pula, sem buscar nem guardar nada. O custo fica limitado a cada atualização (núcleos guardados vezes grupos paginados).
-- Quando a nova entrada de uma chave movida é recusada ou vira escritor comum, a linha antiga só sai na reconciliação seguinte do diário.
-- Na passagem em que a entrada se move, a linha antiga ainda conta nas 8 do diário.
+- Quando a nova entrada de uma chave movida é recusada sem espera, ou espera por outro motivo que não uma vaga de admissão, a linha antiga sai na mesma passagem e o núcleo é apagado; quando a entrada for tentada de novo, K é buscado outra vez (com o autor fora do ar, a entrada fica esperando).
