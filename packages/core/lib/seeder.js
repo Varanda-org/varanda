@@ -820,13 +820,12 @@ async function localGroupVerdict (core, key, binding, visibility = null) {
 }
 
 // Writer cores one diary may hold at a seeder in one group, left ones
-// included (leaving never frees a slot): its live and frozen slots, and a
-// stub per writer it released (#350).
+// included (leaving never frees a slot): its live and frozen slots, and
+// each released writer, held whole (#350).
 const MAX_GROUP_HELD_PER_DIARY = MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY + MAX_WRITER_RELEASES_PER_DIARY
-// And across all its groups: its share of the group cores, stubs included.
-// It stays at the live and frozen slots of every group (owner decision): a
-// stub is small, but it may hold as many leaves and key blocks as the quota
-// allows.
+// And across all its groups: its share of the group cores, each released
+// writer, held whole, included. It stays at the live and frozen slots of
+// every group (owner decision).
 const MAX_GROUP_CORES_PER_DIARY = MAX_GROUPS_PER_DIARY * (MAX_GROUP_WRITERS_PER_DIARY + MAX_FROZEN_WRITERS_PER_DIARY)
 // Waits before a group core that timed out or found no peer is tried again
 // for the same diary, so scans and connections do not restart fetches.
@@ -860,8 +859,9 @@ const ROOT_DENIALS_HARD = 2 * ROOT_CREATORS_MAX
 // MAX_WRITER_RELEASES_PER_DIARY, whatever its join), are kept too, `left`,
 // in those groups and in any group the diary has no live join in: the fold
 // still counts their records (below the cut, and block 0, leaves and key
-// blocks at any cut) and waits for them, but they never pick a group, fetch
-// a root or support one.
+// blocks at any cut) and waits for them, but their join never picks a
+// group, fetches a root or supports one (a root already held stays by the
+// retention rule, _groupSupported).
 // writer -> { group, seq, left }.
 function liveGroupJoins (decls, walks = new Map()) {
   const allowed = new Set()

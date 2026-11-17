@@ -2767,9 +2767,11 @@ async function rootUnfoldable (ctx, group) {
   return root.fork !== 0 || !foldableHeader(root.entries[0].record)
 }
 
-// The writers the fold counts for diary d from its join history alone: the
+// The writers an admit waits for, from diary d's join history alone: the
 // MAX_GROUP_WRITERS_PER_DIARY earliest bound by an on:true join (the bound
-// root is one of its creator's), as @varanda/core lib/group.js capPerDiary.
+// root is one of its creator's), the per-diary rule from before the slot
+// walk (@varanda/core lib/group.js slotWalk), which the fold now uses; the
+// switch to the walk comes with the client nodes (#350).
 function joinedCounted (history, d, rootDiary, group) {
   const first = new Map()
   for (const j of history || []) {
