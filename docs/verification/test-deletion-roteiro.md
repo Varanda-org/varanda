@@ -19,6 +19,7 @@ Depois, o teste planta os dados de Ana (e os de Bia) em todos os arquivos do ser
 | `invite-drops.json` | Apaga as marcas dela | Sem base depois da exclusão | `invite-drops.json: her marks are gone`, `Bia keeps hers (the week of the sweep)`. As linhas são por semana e saem quando a semana acaba, então cada uma das duas tem também uma marca na semana da varredura, que ainda vale nela: só a purga leva a de Ana |
 | `seen/<chave>` | Apaga o bloco cifrado | Sem base depois da exclusão | `seen/<member>: the blob is gone` |
 | `passkeys.json` | Apaga a chave da passkey e o agendamento. Retém a marca de 30 dias | Recusar a chave antiga reenviada | `passkeys.json: the key and the schedule are gone`, `no member row names her`, `the 30-day removal mark stays` (lido do arquivo) |
+| `deletion-requests.json` | Apaga o pedido de Excluir conta sem a passkey (chave da conta e data) | Nenhuma: o pedido serve só até a operação agendar a exclusão | `deletion-requests.json: her SMS request is gone`; o de Bia fica |
 | `phone.json` | Encerra a linha viva (`excluida`). Retém o número lacrado por 180 dias e então apaga | Impedir que uma conta bloqueada volte com o mesmo número (LGPD, "Número de celular selado"; Termos versão 36) | `phone.json: the live row is ended`, `the sealed number stays`; aos 179 dias, com a varredura do `phone.json` rodada (o teste a chama com as mesmas funções que `server.js` passa, porque a varredura de hora em hora não roda no teste e a passagem da moderação só a chama quando vencem os 180 dias), `nor the sealed number, with the phone sweep run`; aos 182 dias `the sealed number is gone` |
 | `pages.json` | Apaga o convite pendente dela. Retém a lista assinada de administradores de uma página de outra pessoa | A lista é a declaração assinada do dono, que só ele muda (Remover) | `pages.json: her pending invite is gone`, `the owner's signed admins list waits`, `Bia's invite stays` |
 | `page-invite-rosters.json` | Apaga as linhas dos convites dela | Sem base depois da exclusão | `page-invite-rosters.json: her roster is gone` |
@@ -64,11 +65,9 @@ Resíduos: (1) `account delete --yes` só agenda; até a varredura do serviço, 
 
 ## Entradas que este roteiro não percorre
 
-- A exclusão pelo SMS, sem passkey: em andamento.
+- Excluir conta sem a passkey (PR #770, já na `main`): o código certo só grava um pedido em `deletion-requests.json`, sem agendar nada, e é coberto por `apps/cli/test/account-delete-sms.test.js`. A operação agenda depois com `varanda account delete --yes --force`, a mesma espera do item abaixo. O roteiro grava um pedido para Ana e Bia e confere que a purga apaga o de Ana e mantém o de Bia.
 
 - `varanda account delete` (PR #762, já na `main`): grava a mesma espera (`passkeys.schedule`) que a rota e é coberto por `apps/cli/test/account-delete-cli.test.js`. O roteiro agenda pela rota, e a varredura depois de qualquer um dos dois caminhos é a mesma (`apps/cli/lib/account/deletion.js`).
-
-A exclusão pelo SMS chega à mesma purga. Quando entrar, o teste deve ganhar um caso para ela, com a mesma tabela.
 
 ## Passos manuais
 

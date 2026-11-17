@@ -53,6 +53,7 @@ const { weekStartMs } = require('../lib/account/invite-drop-time')
 const { openSeenStore } = require('../lib/account/seen-store')
 const { openPasskeyStore } = require('../lib/account/passkey-store')
 const { openPhoneStore } = require('../lib/account/phone-store')
+const { openDeletionRequests } = require('../lib/account/deletion-requests')
 const { openPagesStore } = require('../lib/account/pages-store')
 const { openLedger } = require('../lib/account/ai/ledger')
 const { openExemplarStore } = require('../lib/account/ai/exemplar-store')
@@ -278,6 +279,7 @@ test('roteiro: Excluir conta clears every component or keeps exactly what the do
   const passkeys = openPasskeyStore(accountDir, { now })
   const phoneKey = nodeCrypto.randomBytes(32)
   const phones = openPhoneStore(accountDir, { key: phoneKey, now })
+  const deletionRequests = openDeletionRequests(accountDir, { now })
   const pagesStore = openPagesStore(accountDir, { now })
   // The pages routes load the invite rosters once, at start, so the rows
   // for Ana's and Bia's pending invites are on disk before the server opens.
@@ -311,6 +313,7 @@ test('roteiro: Excluir conta clears every component or keeps exactly what the do
     drops,
     seen,
     passkeys,
+    deletionRequests,
     phones,
     phoneClient: createPhoneStub(),
     pages: { pagesStore, dir: accountDir },
@@ -380,6 +383,7 @@ test('roteiro: Excluir conta clears every component or keeps exactly what the do
     await seen.put({ member: m, blob: crypto.randomBytes(SEEN_BLOB_BYTES), expectedHash: HASH_NONE })
     const key = keyFromAttestation({ attestationObject: pk[name].attestationObject(), credentialId: pk[name].credentialId, rpId: RP })
     await passkeys.add({ member: m, credentialId: pk[name].credentialId, ...key })
+    await deletionRequests.record(m)
   }
   // Pages: Ana is an admin of another member's page (p1, kept on the
   // owner's signed roster) and has a pending invite to a second one (p2),
@@ -412,7 +416,7 @@ test('roteiro: Excluir conta clears every component or keeps exactly what the do
   }
   for (const dev of [ana, bia]) {
     t.ok(pagesStore.holdsMember(dev.key) || dev === bia, 'pages: the pending state is there before')
-    t.ok(drops.holds(dev.key) && seen.get(dev.key) !== null && passkeys.holds(dev.key) && invites.holds(dev.key), 'every store holds the member before')
+    t.ok(drops.holds(dev.key) && seen.get(dev.key) !== null && passkeys.holds(dev.key) && invites.holds(dev.key) && deletionRequests.holds(dev.key), 'every store holds the member before')
   }
 
   // ---- the deletion: asked without a passkey assertion, it waits 7 days ----
@@ -452,6 +456,7 @@ test('roteiro: Excluir conta clears every component or keeps exactly what the do
   t.absent(JSON.stringify(passkeyFile.members).includes(ana.key), 'passkeys.json: no member row names her')
   t.ok(passkeyFile.removed[ana.key] && typeof passkeyFile.removed[ana.key].removedAt === 'string', 'passkeys.json: the 30-day removal mark stays')
   t.is(phones.live(ana.key), null, 'phone.json: the live row is ended')
+  t.is(deletionRequests.holds(ana.key), false, 'deletion-requests.json: her SMS request is gone')
   const disclosed = () => openPhoneStore(accountDir, { key: phoneKey, now, disclose: true }).reveal(ana.key)
   t.alike(disclosed().map((r) => r.end), ['excluida'], 'phone.json: the sealed number stays for the 180-day retention')
   t.absent(pagesStore.holdsMember(ana.key), 'pages.json: her pending invite is gone')
@@ -465,7 +470,7 @@ test('roteiro: Excluir conta clears every component or keeps exactly what the do
   t.absent(precedents.some((e) => e.target === ana.key), 'AI triage: her precedents are gone')
   t.ok(precedents.some((e) => e.target === bia.key), 'AI triage: the precedent about Bia stays')
   t.ok(ledgerNow.read(byAnaOpen.body.id), 'AI triage: the copy about Bia stays')
-  for (const [label, held] of [['terms', terms.list(bia.key).length === 1], ['age', ages.get(bia.key) !== null], ['push', pushStore.devices(bia.key) === 1], ['recovery', recovery.list(bia.key).length === 1], ['invites', invites.holds(bia.key)], ['seen', seen.get(bia.key) !== null], ['passkeys', passkeys.holds(bia.key)], ['phone', phones.live(bia.key) !== null]]) {
+  for (const [label, held] of [['terms', terms.list(bia.key).length === 1], ['age', ages.get(bia.key) !== null], ['push', pushStore.devices(bia.key) === 1], ['recovery', recovery.list(bia.key).length === 1], ['invites', invites.holds(bia.key)], ['seen', seen.get(bia.key) !== null], ['passkeys', passkeys.holds(bia.key)], ['deletion-requests', deletionRequests.holds(bia.key)], ['phone', phones.live(bia.key) !== null]]) {
     t.ok(held, label + ': Bia keeps hers')
   }
   t.ok(moderation.get(aboutAna.body.id), 'moderation.json: the reports stay until the 180-day pass')
