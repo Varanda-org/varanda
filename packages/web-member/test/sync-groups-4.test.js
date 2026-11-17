@@ -400,7 +400,7 @@ function extraWriters (seeder, group) {
   return extra
 }
 
-test('a recorded stub live under another pair stays held when the diary its record names is blocked: only the record goes (#350)', async (t) => {
+test('a recorded stub live under another pair stays held when the diary its record names is blocked: the record moves to that pair (#350)', async (t) => {
   t.timeout(300000)
   const { seeder, url, b, c, r, group, stubs, assocKp } = await stubWorld(t, ['undecodable'])
   const x = stubs.undecodable
@@ -434,7 +434,7 @@ test('a recorded stub live under another pair stays held when the diary its reco
   try {
     await until(() => lent.held(x.key) !== null, { name: 'the stub live under (G, C)', timeoutMs: 60000 })
     await seeder._offerBlocklist(moderatorSnapshot(assocKp, { blocked: [b.ownHex] }), null)
-    await until(async () => !(x.key in await recorded(r)), { name: 'the record goes', timeoutMs: 60000 })
+    await until(async () => (await recorded(r))[x.key] === c.ownHex, { name: 'the record moves to (G, C)', timeoutMs: 60000 })
     // A later snapshot sweeps B's cores again: the stub is no longer B's.
     await seeder._offerBlocklist(moderatorSnapshot(assocKp, { seq: 2, blocked: [b.ownHex] }), null)
     await until(async () => (await store.readBlocklist(r.storage)).snapshot.seq === 2, { name: 'the second snapshot adopted', timeoutMs: 60000 })
@@ -445,7 +445,17 @@ test('a recorded stub live under another pair stays held when the diary its reco
   }
   t.alike(skips(ev, x.key), [], 'never refused')
   t.alike(await heldCopy(r, x.key), { length: 2, contiguous: 1, held: [0] }, 'kept, block 0 alone')
-  t.alike(await recorded(r), {}, 'and its record is gone')
+  t.alike(await recorded(r), { [x.key]: c.ownHex }, 'and its record names (G, C)')
+  // The next start reviews the stub against C's stored join: it stays a
+  // stub of (G, C), offline and then listed again by C.
+  await once(r, 'ws://127.0.0.1:9', [], { timeoutMs: 5000 })
+  t.alike(await heldCopy(r, x.key), { length: 2, contiguous: 1, held: [0] }, 'restart: kept, block 0 alone')
+  t.alike(await recorded(r), { [x.key]: c.ownHex }, 'restart: its record still names (G, C)')
+  const ev2 = []
+  t.ok((await once(r, url, ev2)).ok, 'R\'s next run ends ok')
+  t.alike(skips(ev2, x.key), [], 'next run: never refused')
+  t.alike(await heldCopy(r, x.key), { length: 2, contiguous: 1, held: [0] }, 'next run: a stub of (G, C), never fetched in full')
+  t.alike(await recorded(r), { [x.key]: c.ownHex }, 'next run: its record names (G, C)')
 })
 
 test('a recorded stub no entry of the run holds is purged in the run when the diary that proved it is blocked (#350)', async (t) => {
