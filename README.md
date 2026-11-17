@@ -930,7 +930,7 @@ Um servidor que atualiza por imagem não usa este caminho: veja a próxima seç�
 
 ### Atualização por imagem (pull)
 
-Em vez de o GitHub entrar no servidor por SSH, cada servidor baixa imagens assinadas do GHCR e se atualiza sozinho: ninguém guarda uma chave SSH por servidor. O fluxo `release` (`.github/workflows/release.yml`) publica `ghcr.io/varanda-org/varanda-seeder` e `ghcr.io/varanda-org/varanda-web` (só amd64) depois de cada `main` verde e as assina; o fluxo `promote` (`.github/workflows/promote.yml`) move o canal `stable` para uma versão já publicada. `update.sh` (`deploy/seeder/update.sh`), disparado por um timer do systemd, faz o resto no servidor. Só precisa de Docker com o plugin compose v2, `curl`, `flock` e `systemctl`: sem git, sem Node e sem `jq`.
+Em vez de o GitHub entrar no servidor por SSH, cada servidor baixa imagens assinadas do GHCR e se atualiza sozinho: ninguém guarda uma chave SSH por servidor. O fluxo `release` (`.github/workflows/release.yml`) publica `ghcr.io/varanda-org/varanda-seeder` e `ghcr.io/varanda-org/varanda-web` (só amd64) depois de cada `main` verde e as assina; o fluxo `promote` (`.github/workflows/promote.yml`) move o canal `stable` para uma versão já publicada (sem commit, a do canal `edge`). `update.sh` (`deploy/seeder/update.sh`), disparado por um timer do systemd, faz o resto no servidor. Só precisa de Docker com o plugin compose v2, `curl`, `flock` e `systemctl`: sem git, sem Node e sem `jq`.
 
 Canais: `stable` (padrão) só muda quando alguém aprova um `promote` no ambiente `release-stable`; `edge` segue cada `main` verde. Modos, escolha obrigatória e sem padrão: `VARANDA_UPDATE=auto` aplica sozinho cada versão nova assinada do canal; `VARANDA_UPDATE=manual` só avisa no registro e espera `update.sh apply`. Perfis: `seeder` (padrão) sobe só o semeador; `full` sobe também o Caddy com o app web e o serviço de conta (e exige `/etc/varanda/varanda.env`).
 
@@ -1020,7 +1020,7 @@ Passos de quem mantém o repositório:
 3. Confira, em cada pacote (Package settings > Manage Actions access), que o repositório tem acesso Write; sem ele o `promote` falha ao mover a tag. Pode não ser preciso quando o fluxo que publica está no mesmo repositório que o pacote: confira em vez de supor.
 4. Settings > Environments > New environment `release-stable`: revisores obrigatórios (quem mantém), sem autorrevisão e implantação só a partir de `main`. Faça isto ANTES de definir `VARANDA_PROMOTE`: o GitHub cria um ambiente que falta sem proteção nenhuma na primeira vez que um job o cita.
 5. Só então defina a variável `VARANDA_PROMOTE` com o valor `true` (liga só o `promote.yml`).
-6. Rode o `promote` (Actions > promote > Run workflow, em `main`, com o SHA de 40 dígitos de um commit já publicado pelo `release`) para a primeira versão `stable`.
+6. Rode o `promote` (Actions > promote > Run workflow, em `main`, com o SHA de 40 dígitos de um commit já publicado pelo `release`) para a primeira versão `stable`. Com o campo do commit vazio, ele promove a versão do canal `edge`, a mais nova que o `release` publicou na ponta de `main`, com as mesmas conferências. Essa versão só é lida depois da aprovação no `release-stable`: quem aprova vê o commit no resumo da execução, não no pedido.
 7. Rode a lista de `docs/verification/feat-seeder-pull-updater.md` num servidor de teste antes de migrar a produção.
 
 ### systemd

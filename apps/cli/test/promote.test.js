@@ -58,7 +58,8 @@ test('promote.yml: workflow_dispatch only, with the two inputs', (t) => {
   const inputs = (on.match(/^ {6}\S+:/gm) || []).map((s) => s.trim())
   t.alike(inputs, ['commit:', 'allow_older:'], 'inputs are commit and allow_older')
   const commit = block(/^ {6}commit:/, /^ {6}\S/)
-  t.ok(/^ {8}required:\s*true\s*$/m.test(commit), 'commit is required')
+  t.ok(/^ {8}required:\s*false\s*$/m.test(commit), 'commit is optional')
+  t.ok(/^ {8}default:\s*''\s*$/m.test(commit), 'commit defaults to empty, the edge release')
   t.ok(/^ {8}type:\s*string\s*$/m.test(commit), 'commit is a string')
   const older = block(/^ {6}allow_older:/, /^ {6}\S/)
   t.ok(/^ {8}type:\s*boolean\s*$/m.test(older), 'allow_older is a boolean')
@@ -154,6 +155,10 @@ test('promote.yml: commit check and the pinned cosign image', (t) => {
     const at = check.indexOf(cond)
     t.ok(at !== -1 && /^\n\s+echo "::error::[^"\n]*"\n\s+exit 1\n\s+fi/.test(check.slice(at + cond.length)), 'refused with exit 1: ' + cond)
   }
+  // Only an empty commit skips them: the edge release is checked against
+  // origin/main once its release.json is read.
+  t.ok(/\n\s+if \[ -z "\$COMMIT" \]; then\n\s+echo "[^"\n]*"\n\s+exit 0\n\s+fi\n\s+if ! \[\[ "\$COMMIT" =~ \^\[0-9a-f\]\{40\}\$ \]\]; then\n/.test(check), 'an empty commit ends the step before the three checks')
+  t.is((check.match(/exit 0/g) || []).length, 1, 'nothing else ends the step early')
 
   const cos = stepRun('Read the pinned cosign image')
   t.ok(/ref=\$\(grep -Ev '\^\[\[:space:\]\]\*\(#\|\$\)' deploy\/seeder\/cosign\.ref \|\| true\)/.test(cos), 'reads deploy/seeder/cosign.ref without comment lines')
@@ -188,13 +193,17 @@ test('promote.yml: login, pull and the release.json check', (t) => {
   t.is((code.match(/secrets\.GITHUB_TOKEN/g) || []).length, 1, 'the token reaches one step only')
 
   const pull = stepRun('Pull the seeder image of the commit')
-  t.ok(/if ! digest="\$\(digest_of "\$SEEDER:sha-\$COMMIT"\)"; then\n\s+exit 1\n/.test(pull), 'resolves the commit tag; a registry error fails')
-  t.ok(/if \[ -z "\$digest" \]; then\n\s+echo "::error::[^"\n]*esta versão não foi publicada pelo release; publique a ponta ou escolha um commit publicado"\n\s+exit 1\n/.test(pull), 'a commit with no image fails with a clear error')
+  t.ok(/if \[ -n "\$COMMIT" \]; then\n\s+ref="\$SEEDER:sha-\$COMMIT"\n\s+else\n\s+ref="\$SEEDER:edge"\n\s+fi\n/.test(pull), 'the commit tag, or edge when the commit is empty')
+  t.alike([...pull.matchAll(/\$SEEDER:([a-z]+)/g)].map((m) => m[1]), ['sha', 'edge'], 'no other tag is read')
+  t.ok(/if ! digest="\$\(digest_of "\$ref"\)"; then\n\s+exit 1\n/.test(pull), 'resolves the tag; a registry error fails')
+  t.ok(/if \[ -z "\$digest" \]; then\n\s+if \[ -n "\$COMMIT" \]; then\n\s+echo "::error::[^"\n]*esta versão não foi publicada pelo release; publique a ponta ou escolha um commit publicado"\n\s+else\n\s+echo "::error::[^"\n]*o release ainda não publicou nenhuma versão"\n\s+fi\n\s+exit 1\n/.test(pull), 'a commit with no image, or no edge yet, fails with a clear error')
   t.ok(pull.includes('docker pull "$SEEDER@$digest"'), 'pulls by digest')
 
   const rel = stepRun('Check release.json and the seq')
   t.ok(/docker run --rm --pull never --network none --entrypoint cat "\$1" \/app\/release\.json/.test(rel), 'reads release.json with no network')
-  t.ok(/if \[ "\$rel_commit" != "\$COMMIT" \]; then\n\s+echo "::error::[^"\n]*"\n\s+exit 1\n/.test(rel), 'release.json commit must equal the input, or fail')
+  t.ok(/\n\s+if \[ -z "\$COMMIT" \]; then\n\s+if ! git merge-base --is-ancestor "\$rel_commit" origin\/main; then\n\s+echo "::error::[^"\n]*"\n\s+exit 1\n\s+fi\n\s+elif \[ "\$rel_commit" != "\$COMMIT" \]; then\n\s+echo "::error::[^"\n]*"\n\s+exit 1\n\s+fi\n\s+echo "RELEASE_COMMIT=\$rel_commit" >> "\$GITHUB_ENV"\n/.test(rel), 'the edge release must be on main, a given commit must equal release.json, and only then is the commit recorded')
+  t.ok(rel.indexOf('read -r rel_commit seq web_digest') < rel.indexOf('echo "RELEASE_COMMIT='), 'the promoted commit comes from release.json')
+  t.absent(/echo "COMMIT=/.test(code), 'the COMMIT input is never rewritten through GITHUB_ENV')
   t.ok(/if ! out=\$\(read_release "\$SEEDER@\$SEEDER_DIGEST" new\); then\n\s+echo "::error::[^"\n]*"\n\s+exit 1\n/.test(rel), 'an unreadable release.json fails')
 
   const m = rel.match(/re='([^']+)'/)
@@ -304,7 +313,8 @@ test('promote.yml: verify, sign, verify, then move by digest with read-back', (t
 
 test('promote.yml: summary with commit, seq and digests', (t) => {
   const sum = stepRun('Summary')
-  for (const v of ['$COMMIT', '$SEQ', '$SEEDER_DIGEST', '$WEB_DIGEST']) t.ok(sum.includes(v), 'summary has ' + v)
+  for (const v of ['$RELEASE_COMMIT', '$SEQ', '$SEEDER_DIGEST', '$WEB_DIGEST']) t.ok(sum.includes(v), 'summary has ' + v)
+  t.absent(/\$COMMIT\b/.test(sum), 'the summary shows the promoted commit, not the input, which can be empty')
   t.ok(/>> "\$GITHUB_STEP_SUMMARY"/.test(sum), 'written to the step summary')
 })
 
@@ -324,4 +334,6 @@ test('promote.yml: the header orders the stable gate before VARANDA_PROMOTE', (t
   t.ok(/GitHub creates a missing\n?#?\s*environment without any protection/.test(header), 'says why the order matters')
   t.ok(/VARANDA_RELEASE enables only release\.yml/.test(header), 'VARANDA_RELEASE does not enable promote')
   t.ok(/Not every commit of main has an image/.test(header), 'documents commits with no image')
+  t.ok(/With the commit left empty it promotes the release on the edge channel/.test(header), 'documents the empty commit')
+  t.ok(/sees the commit in the summary, not in the request/.test(header), 'says the approver does not see the edge commit beforehand')
 })
