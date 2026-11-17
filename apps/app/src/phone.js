@@ -71,3 +71,50 @@ export function phoneErrorText (err) {
 
 export const PHONE_SENT_TEXT = 'Enviamos um código para o seu celular.'
 export const PHONE_UNCERTAIN_TEXT = 'Não deu para confirmar o envio. Se o código chegar, digite abaixo.'
+
+// A canonical ISO date (Date#toISOString), the shape of an attestation's
+// date and of node.info's phoneVerifiedDate.
+export function isIsoDate (s) {
+  if (typeof s !== 'string' || s.length !== 24) return false
+  const d = new Date(s)
+  return !Number.isNaN(d.getTime()) && d.toISOString() === s
+}
+
+// Whether Ajustes shows 'Trocar o celular': an unlocked passkey account on a
+// hosted node whose phone gate is open, for a known member (the shell's,
+// which markVerified accepts a proof under). The same rule on the web page
+// and on the app's in-app web node: both hold a passkey there.
+export function phoneChangeShown ({ hosted, hasPasskey, unlocked, gate, member } = {}) {
+  return hosted === true && hasPasskey === true && unlocked === true && gate === 'ok' && typeof member === 'string'
+}
+
+// Trocar o celular: the service never returns the number, only the date of
+// the live verification in a 'verificado' answer's proof (a recorded number
+// is a new row with a new date). `before` is the date known when the screen
+// opened, `after` the answer's. A doubtful date proves nothing.
+export function phoneChange (before, after) {
+  if (!isIsoDate(before) || !isIsoDate(after)) return 'unknown'
+  const a = Date.parse(after)
+  const b = Date.parse(before)
+  if (a > b) return 'changed'
+  if (a === b) return 'same'
+  return 'unknown'
+}
+
+export const PHONE_CHANGED_TEXT = 'Celular atualizado.'
+export const PHONE_SAME_TEXT = 'Esse já é o seu celular.'
+export const PHONE_NOT_CHANGED_TEXT = 'O número ainda não mudou. Confirme o código de novo ou peça outro.'
+export const PHONE_CHANGE_UNKNOWN_TEXT = 'Não deu para saber se o número mudou. Se precisar, troque de novo.'
+
+// via: 'send' (the service answered 'verificado' to a send: the number typed
+// is already the member's live one, so no code went, whatever the dates
+// say), 'check' (to a code) or 'recheck' (the status read after a check
+// whose outcome was unknown). stay: the Trocar screen keeps its code field,
+// since the service holds an approved code that a new check can still record.
+export function phoneChangeOutcome ({ via, before, after } = {}) {
+  if (via === 'send') return { stay: false, text: PHONE_SAME_TEXT }
+  const change = phoneChange(before, after)
+  if (change === 'changed') return { stay: false, text: PHONE_CHANGED_TEXT }
+  if (change === 'same' && via === 'recheck') return { stay: true, text: PHONE_NOT_CHANGED_TEXT }
+  return { stay: false, text: PHONE_CHANGE_UNKNOWN_TEXT }
+}
