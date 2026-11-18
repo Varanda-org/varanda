@@ -859,8 +859,15 @@ function createAccountServer ({
     invitesFinish: keyedWindow(10, 600 * 1000, now),
     invitesSummary: keyedWindow(30, 600 * 1000, now),
     termsHeld: keyedWindow(30, 600 * 1000, now),
-    seenRead: keyedWindow(30, 600 * 1000, now),
-    seenWrite: keyedWindow(10, 600 * 1000, now),
+    // One member key is shared by up to 4 active devices. The app caps each
+    // device at 13 write requests per 600 s, a 409 conflito included since it
+    // is charged too: 52 writes, and the rest covers unlock passes, which the
+    // app lets past its cap. Every pass reads once, and the app's pass spacing (4 passes 10 s apart per 300 s,
+    // else 60 s apart, plus one retry after a failure) keeps a device near
+    // 15 passes per 600 s whatever wakes it: about 60 reads for 4 devices, so
+    // 120 leaves room for unlock passes and restarts.
+    seenRead: keyedWindow(120, 600 * 1000, now),
+    seenWrite: keyedWindow(64, 600 * 1000, now),
     seenDelete: keyedWindow(5, 600 * 1000, now),
     lookup: fixedWindow(1200, 60 * 1000, now)
   }

@@ -3,8 +3,19 @@
 // are newer. Pure: the account calls (`http`), the node (`request`) and the
 // clock and timers are injected, so it runs in the tests without a network.
 
-export const SEEN_CHANGED_DEBOUNCE_MS = 30000
+export const SEEN_CHANGED_DEBOUNCE_MS = 3000
 export const SEEN_PASS_MIN_MS = 60000
+export const SEEN_BURST_GAP_MS = 10000
+export const SEEN_BURST_MAX = 4
+export const SEEN_BURST_WINDOW_MS = 300000
+export const SEEN_RETRY_MS = 15000
+export const SEEN_LIMIT_WAIT_MS = 120000
+// Write requests sent per 600 s, 409 and uncertain ones included. The spacing
+// above allows at most 13 passes in 600 s (4 at the burst gap, then one per
+// SEEN_PASS_MIN_MS), so steady marking keeps its 60 s cadence; conflicts,
+// unlocks and retries are what the cap stops.
+export const SEEN_WRITES_MAX = 13
+export const SEEN_WRITES_WINDOW_MS = 600000
 export const SEEN_OWN_MAX = 256
 export const SEEN_PAGE_TOKENS_MAX = 32
 export const SEEN_PAGES_MAX = 4
@@ -55,7 +66,7 @@ function badReply (code) {
 }
 
 export async function runSeenPass ({ member, request, http, avisos }) {
-  const out = { avisos: null, pushed: false, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [], error: null }
+  const out = { avisos: null, pushed: false, writes: 0, dmChanged: false, groupChanged: false, blocksChanged: false, testimonialsChanged: false, momentsChanged: false, caughtUp: [], error: null }
 
   const merge = async (params) => {
     const res = await request('seen.merge', params)
@@ -81,6 +92,9 @@ export async function runSeenPass ({ member, request, http, avisos }) {
     const { nonce } = await http.seenStart({ member, action: 'write' })
     const signed = await request('seen.sign', { nonce, action: 'write' })
     if (!signed || typeof signed.blob !== 'string') throw badReply('indisponivel')
+    // The service charges its write window for every finish it receives,
+    // refused or lost ones included, so the scheduler's cap counts these.
+    out.writes++
     await http.seenFinish({ member, nonce, action: 'write', signature: signed.signature, prevHash: signed.prevHash, blob: signed.blob })
     return signed.blob
   }
@@ -238,100 +252,145 @@ export function ackCaughtUp (cur, caughtUp, snap) {
   return map === cur.map ? cur : { epoch: cur.epoch, map }
 }
 
-// One pass in flight, at most one per SEEN_PASS_MIN_MS (an unlock skips the
-// wait), and 'changed' bursts coalesced. 'online' (the connection came back)
-// waits out the interval like 'changed'; an unlock during a pass runs right
-// after it. A failed pass waits for the next trigger: there is no retry
-// timer. 'once' (a one-time notice was just marked) skips the debounce: it
-// runs as soon as the interval allows, or right after a pass in flight
-// reaches it, so a closed tab rarely takes the mark with it.
+// A short debounce coalesces local marks, and a burst budget lets changes,
+// one-time notices and remote wakes sync sooner than routine reads. One
+// pending pass covers wakes during a gap or while a pass is in flight.
+// A transient failure gets one fresh pass, which reads before writing even
+// after an uncertain outcome. Wakes it covers stay available if it fails.
+// A 429 and the rolling write cap defer work to protect the server budget.
+// Unlock can bring a new connection or session keys, so it bypasses those
+// waits as soon as the current pass settles.
 export function createSeenScheduler ({ run, canRun, now, setTimer, clearTimer }) {
-  let last = null
+  const starts = []
+  const writes = []
+  let last = -Infinity
+  let limitUntil = -Infinity
   let inFlight = false
-  let changedTimer = null
+  let pending = null
+  let pendingRetry = null
+  let timer = null
+  let timerDue = 0
   let stopped = false
   let unlockQueued = false
-  let onceQueued = false
-  let changedDue = 0
 
-  const arm = (ms) => {
-    changedDue = now() + ms
-    changedTimer = setTimer(() => {
-      changedTimer = null
-      fire('changed')
-    }, ms)
+  function expire (times, cutoff) {
+    while (times.length > 0 && times[0] <= cutoff) times.shift()
   }
 
-  // Moves an armed timer earlier, never later.
-  const armBy = (ms) => {
-    if (changedTimer !== null) {
-      if (changedDue <= now() + ms) return
-      clearTimer(changedTimer)
-      changedTimer = null
-    }
-    arm(ms)
+  function gapDue (work) {
+    const burst = work.reason === 'changed' || work.reason === 'once' || work.reason === 'remote'
+    const gap = burst && starts.length < SEEN_BURST_MAX ? SEEN_BURST_GAP_MS : SEEN_PASS_MIN_MS
+    return Math.min(Math.max(work.readyAt, last + gap), work.dueBy ?? Infinity)
   }
 
-  function start (reason) {
+  function queue (work) {
+    const coversOnce = pending?.coversOnce || work.coversOnce
+    if (pending === null || gapDue(work) < gapDue(pending)) pending = work
+    if (coversOnce) pending.coversOnce = true
+  }
+
+  function cancelTimer () {
+    if (timer !== null) clearTimer(timer)
+    timer = null
+  }
+
+  async function start (reason, retry, held = null) {
     inFlight = true
-    onceQueued = false
     last = now()
-    let p
-    try { p = Promise.resolve(run(reason)) } catch { p = Promise.resolve() }
-    return p.catch(() => {}).then(() => {
-      inFlight = false
-      // The unlock may have brought what the pass lacked (a connection, the
-      // session keys).
-      if (unlockQueued) {
-        unlockQueued = false
-        fire('unlock')
-      } else if (onceQueued) {
-        onceQueued = false
-        fire('once')
-      }
-    })
+    starts.push(last)
+    let result
+    let rejected = false
+    try { result = await run(reason) } catch (error) {
+      result = { error }
+      rejected = true
+    }
+    inFlight = false
+    if (stopped) return
+
+    const time = now()
+    expire(starts, time - SEEN_BURST_WINDOW_MS)
+    expire(writes, time - SEEN_WRITES_WINDOW_MS)
+    const sent = Number.isSafeInteger(result?.writes) ? result.writes : (result?.pushed === true ? 1 : 0)
+    for (let i = 0; i < sent; i++) writes.push(time)
+    const failed = rejected || Boolean(result?.error)
+    if (!failed) {
+      pendingRetry = null
+    } else if (result.error?.status === 429) {
+      limitUntil = time + SEEN_LIMIT_WAIT_MS
+      // Also after a retry: its marks would otherwise wait for an unrelated wake.
+      queue({ reason: reason === 'unlock' ? 'poll' : reason, readyAt: limitUntil })
+    } else if (!retry) {
+      pendingRetry ??= { reason, readyAt: time + SEEN_RETRY_MS }
+    }
+    if (failed && held !== null) queue(held)
+    fire()
   }
 
-  function fire (reason) {
-    if (stopped) return false
-    if (typeof canRun === 'function' && !canRun()) return false
-    const owed = reason === 'changed' || reason === 'online'
-    if (inFlight) {
-      // The running pass may have signed before this change: keep it queued.
-      if (owed && changedTimer === null) arm(SEEN_CHANGED_DEBOUNCE_MS)
-      if (reason === 'unlock') unlockQueued = true
-      if (reason === 'once') onceQueued = true
+  function fire () {
+    if (stopped || inFlight) return false
+    if (unlockQueued) {
+      unlockQueued = false
+      if (typeof canRun !== 'function' || canRun()) {
+        cancelTimer()
+        if (pending !== null) delete pending.dueBy
+        start('unlock', false)
+        return true
+      }
+    }
+    if (pending === null && pendingRetry === null) return false
+    const time = now()
+    expire(starts, time - SEEN_BURST_WINDOW_MS)
+    expire(writes, time - SEEN_WRITES_WINDOW_MS)
+    const writeDue = writes.length < SEEN_WRITES_MAX ? -Infinity : writes[writes.length - SEEN_WRITES_MAX] + SEEN_WRITES_WINDOW_MS
+    const ordinaryDue = pending === null ? Infinity : gapDue(pending)
+    const retryDue = pendingRetry?.readyAt ?? Infinity
+    const retry = retryDue < ordinaryDue
+    const due = Math.max(Math.min(ordinaryDue, retryDue), limitUntil, writeDue)
+    if (due > time) {
+      if (timer === null || timerDue !== due) {
+        cancelTimer()
+        timerDue = due
+        timer = setTimer(() => {
+          timer = null
+          fire()
+        }, due - time)
+      }
       return false
     }
-    if (reason !== 'unlock' && last !== null) {
-      const wait = last + SEEN_PASS_MIN_MS - now()
-      if (wait > 0) {
-        if (reason === 'once') armBy(wait)
-        else if (owed && changedTimer === null) arm(wait)
-        return false
-      }
+
+    cancelTimer()
+    const { reason } = retry ? pendingRetry : pending
+    if (retry) pendingRetry = null
+    else pending = null
+    if (typeof canRun === 'function' && !canRun()) return fire()
+    const held = retry ? pending : null
+    if (held !== null) {
+      // A retry can cover a one-time notice without moving its deadline if it fails.
+      if (held.coversOnce) held.dueBy = ordinaryDue
+      pending = null
     }
-    start(reason)
+    start(reason, retry, held)
     return true
   }
 
   function wake (reason) {
     if (stopped) return false
-    if (reason === 'changed') {
-      // Not reset by later changes, so a steady stream of marks still gets a
-      // pass within the debounce.
-      if (changedTimer === null) arm(SEEN_CHANGED_DEBOUNCE_MS)
-      return false
+    if (reason === 'unlock') unlockQueued = true
+    else {
+      const time = now()
+      expire(starts, time - SEEN_BURST_WINDOW_MS)
+      const readyAt = time + (reason === 'changed' ? SEEN_CHANGED_DEBOUNCE_MS : 0)
+      queue({ reason, readyAt, coversOnce: reason === 'once' })
     }
-    return fire(reason)
+    return fire()
   }
 
   function stop () {
     stopped = true
     unlockQueued = false
-    onceQueued = false
-    if (changedTimer !== null) clearTimer(changedTimer)
-    changedTimer = null
+    pending = null
+    pendingRetry = null
+    cancelTimer()
   }
 
   return { wake, stop, get running () { return inFlight } }

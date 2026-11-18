@@ -1690,6 +1690,18 @@ test('seenStart: POST with member and action, nonce or a definite refusal', asyn
   try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
 })
 
+test('seen requests expose the HTTP status on a rate limit refusal', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(429, { error: 'pedido-invalido' }))
+  try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) {
+    t.is(e.status, 429)
+  }
+  try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+    t.is(e.status, 429)
+  }
+  t.alike(calls.map(({ url }) => url), ['/account/seen/start', '/account/seen/finish'])
+})
+
 test('seenFinish: read shapes, and the blob only goes in a write', async (t) => {
   const a = await load()
   let calls = stub(t, json(200, { hash: SEEN_HASH, blob: SEEN_BLOB }))
