@@ -14,7 +14,7 @@ Terceiro PR de uma pilha de quatro, sobre `feat/music-trending-playlists`. Os do
   - Uma faixa da lista de um gênero nunca é descartada pelo próprio texto de gênero, que o Audius pode dar composto ou diferente.
 - [x] App, cliente (`apps/app/src/music.js`, `apps/app/src/account.js`): `MUSIC_GENRE_ALL_TEXT` ("Todos"), `MUSIC_GENRE_LABELS` em pt-BR, `musicGenreChips(order)` e `trendingBody(kind, genre)`, que põe o gênero só no corpo do POST e recusa um gênero fora da lista ou junto de playlists sem abrir a sessão.
 - [x] App, seletor (`apps/app/src/ui/MusicPicker.js`): chips de gênero (`FilterChips`) acima da lista na aba Faixas do seletor de post e de momento, com o campo vazio. Cada troca de chip faz um pedido e descarta a resposta atrasada da seleção anterior; tocar no chip já selecionado não pede de novo. Digitar esconde os chips; limpar o campo traz de volta a seleção e a lista. Um `pedido-invalido` num pedido com gênero (um serviço do nível do PR 2) esconde os chips e pede a lista geral uma vez.
-- [x] Termos e Política na versão 95 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): o gênero tocado vai ao serviço com o nome em inglês e com a sessão; o serviço não grava qual gênero cada conta pediu; a lista de cada gênero fica só na memória e é igual para todos; o limite de 200 soma todas as listas; o gênero pode sair do Brasil como o texto da busca.
+- [x] Termos e Política na versão 96 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): o gênero tocado vai ao serviço com o nome em inglês e com a sessão; o serviço não grava qual gênero cada conta pediu; a lista de cada gênero fica só na memória e é igual para todos; o limite de 200 soma todas as listas; o gênero pode sair do Brasil como o texto da busca.
 - [x] `docs/protocol.md` (formas do corpo, a lista por referência, uma lista por gênero, o limite de 26, o custo, o que chega ao Audius) e `docs/app.md` (chips no seletor de post e de momento, serviço antigo).
 
 ## Conferência ao vivo (18/11/2026, 17:17 UTC)
@@ -32,7 +32,7 @@ Antes do plano, os 24 nomes da lista foram conferidos um a um (18/11/2026): todo
 
 ## Testes automáticos
 
-Rodados localmente no Node 24, sobre `feat/music-trending-playlists` (`000ed57e`): `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (91 arquivos, todos passando). Os principais:
+Rodados localmente no Node 24, sobre `feat/music-trending-playlists` (`000ed57e`) e de novo depois de juntar a pilha com `origin/main@5fcf3d30`: `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (91 arquivos, todos passando). Os principais:
 
 | Arquivo | Testes | Asserções |
 |---|---|---|
@@ -56,7 +56,7 @@ Novos casos: da lista (nomes exatos e na ordem, congelada, comparação exata, n
 A revisão apontou e esta branch corrigiu:
 
 - **Toque no chip já selecionado parava a prévia.** O seletor parava a prévia antes de olhar o chip, e o chip já selecionado (Todos, no começo) também chama a troca: a prévia que tocava parava e o tíquete guardado se perdia, então a próxima prévia pedia outro. Agora o toque no chip selecionado não faz nada. O teste `reselecting a track chip preserves playback and its ticket` falha sem a correção.
-- **Textos que prometiam mais do que o código.** Os Termos e a Política na versão 95 e `docs/design.md` diziam que todo pedido de lista conta no limite diário; um pedido que falha não conta, e o texto agora diz isso. `docs/design.md` dizia que a lista de cada gênero fica na memória por até 10 minutos; ela vale por até 10 minutos, mas só sai da memória quando é pedida de novo ou o serviço reinicia. `docs/protocol.md` apresentava 144 renovações por dia por lista como teto; é uma estimativa, e a lista de playlists pode renovar antes.
+- **Textos que prometiam mais do que o código.** Os Termos e a Política na versão 96 e `docs/design.md` diziam que todo pedido de lista conta no limite diário; um pedido que falha não conta, e o texto agora diz isso. `docs/design.md` dizia que a lista de cada gênero fica na memória por até 10 minutos; ela vale por até 10 minutos, mas só sai da memória quando é pedida de novo ou o serviço reinicia. `docs/protocol.md` apresentava 144 renovações por dia por lista como teto; é uma estimativa, e a lista de playlists pode renovar antes.
 
 Conferido sem mudança: um gênero só vira chave de lista depois de passar pela lista fixa, antes de qualquer contador; o tipo, e não a chave da lista, escolhe o pedido ao Audius e a leitura do cache; nenhum log nem `stats()` leva o gênero ou o membro. A auditoria de segurança não achou nada que bloqueie.
 
@@ -82,4 +82,4 @@ Não conferido em aparelho neste PR. Roteiro para a pessoa, primeiro no Android 
 ## Fora do alcance desta branch
 
 - Recentes no aparelho, ordem dos chips pelo uso e gênero mais usado pedido ao abrir (PR `feat/music-recents-genre`).
-- Termos 95 seguem a revisão jurídica pendente das versões anteriores.
+- Termos 96 seguem a revisão jurídica pendente das versões anteriores.

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 96)
+  t.is(LEGAL_VERSION, 97)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 96, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 97, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,6 +388,22 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 93 describes the Conversas notice sent to the recipient only', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 93)
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.absent(/pode haver uma mensagem nova/iu.test(all(doc)), doc.title + ': the old anonymous wake is gone')
+  }
+  t.ok(all(TERMS).includes('um aviso que diz apenas "Nova mensagem nas Conversas", ou, para quem administra uma Página, "Nova mensagem para uma página que você administra"'), 'terms: the two fixed sentences')
+  t.ok(all(TERMS).includes('o serviço de conta da associação fica sabendo que a pessoa recebeu uma mensagem e quando, mesmo que ela não tenha ligado os avisos, mas nunca quem enviou nem o conteúdo'), 'terms: what the service learns')
+  t.ok(all(PRIVACY).includes('A chave desse lacre vem do próprio serviço de conta, nunca de um semeador.'), 'privacy: wake key source')
+  t.ok(all(PRIVACY).includes('o serviço de conta fica sabendo que você recebeu uma mensagem e quando, mesmo que você não tenha ligado os avisos no aparelho, mas nunca quem enviou nem o conteúdo'), 'privacy: what the service learns, also without a subscription')
+  t.ok(all(PRIVACY).includes('no máximo um a cada 15 minutos por destinatário e 60 por pessoa por hora, só para quem aceitou a versão 93 destes documentos ou uma mais nova'), 'privacy: limits and terms gate')
+  t.ok(all(PRIVACY).includes('o serviço de push do navegador vê o momento de cada aviso'), 'privacy: push service sees timing')
+  t.ok(all(PRIVACY).includes('Avisos de mensagem nova: para avisar quem recebe uma mensagem, a base legal proposta é execução de contrato, Art. 7º, V'), 'privacy: proposed legal basis')
+})
+
 test('legal: version 92 describes reactions in a page\'s Conversas', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   t.ok(LEGAL_VERSION >= 92)
@@ -439,7 +455,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '9530fdc410e8c70c002b03429f3e0b2a3803f3e1cb0ecc65bf85577a2484b9c1', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '7b5e2386795e6bcff34ee211a22fd8265e4e11a4cd6dfd311e76b0b19c501bdb', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -467,9 +483,9 @@ test('legal: version 41 describes group and conversation reactions and chat form
   t.ok(text(PRIVACY).includes('as reações nos grupos e nas mensagens diretas'), 'legal basis of reactions')
 })
 
-test('legal: version 93 describes the weekly list', async (t) => {
+test('legal: version 94 describes the weekly list', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
-  t.ok(LEGAL_VERSION >= 93)
+  t.ok(LEGAL_VERSION >= 94)
   const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
   const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(audius(TERMS).includes('a escolha de música mostra as faixas em alta no Audius nesta semana. Cada lista em alta é igual para todo mundo. O que muda, a partir das músicas que você escolheu neste aparelho, é qual lista de faixas abre primeiro.'), 'terms: trending lists are the same; which track list opens first follows this device')
@@ -485,9 +501,9 @@ test('legal: version 93 describes the weekly list', async (t) => {
   t.ok(all(PRIVACY).includes('vale para mostrar, na escolha de música com o campo de busca vazio, a lista de faixas em alta'), 'privacy: legal basis covers the list')
 })
 
-test('legal: version 94 describes trending playlists', async (t) => {
+test('legal: version 95 describes trending playlists', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
-  t.ok(LEGAL_VERSION >= 94)
+  t.ok(LEGAL_VERSION >= 95)
   const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
   const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(audius(TERMS).includes('Na aba Playlists, com o campo de busca vazio, a escolha de música mostra também playlists em alta no Audius nesta semana. Como a lista de faixas, ela é igual para todo mundo, não é personalizada e pode mudar no provedor.'), 'terms: trending playlists')
@@ -502,10 +518,10 @@ test('legal: version 94 describes trending playlists', async (t) => {
   for (const doc of [TERMS, PRIVACY]) t.absent(all(doc).includes('\u2014'), doc.title + ': no em dash')
 })
 
-test('legal: version 95 describes genre lists', async (t) => {
+test('legal: version 96 describes genre lists', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   const { MUSIC_GENRES } = require('@varanda/rpc')
-  t.ok(LEGAL_VERSION >= 95)
+  t.ok(LEGAL_VERSION >= 96)
   t.ok(MUSIC_GENRES.includes('Electronic'), 'the English name the privacy text uses is in the allowlist')
   const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
   const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -528,10 +544,10 @@ test('legal: version 95 describes genre lists', async (t) => {
   for (const doc of [TERMS, PRIVACY]) t.absent(all(doc).includes('\u2014'), doc.title + ': no em dash')
 })
 
-test('legal: version 96 describes recents and the most used genre', async (t) => {
+test('legal: version 97 describes recents and the most used genre', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   const { MAX_RECENTS, MAX_OWNERS, MUSIC_RECENTS_SHOWN } = await import('../src/musicRecents.js')
-  t.ok(LEGAL_VERSION >= 96)
+  t.ok(LEGAL_VERSION >= 97)
   const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
   const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   const terms = audius(TERMS)
@@ -558,7 +574,7 @@ test('legal: version 96 describes recents and the most used genre', async (t) =>
   t.ok(all(PRIVACY).includes('O nome do gênero mais usado, que o app calculou no aparelho e pediu sem um toque, pode sair do Brasil como o gênero que você tocou'), 'privacy: the inferred name can leave Brazil as a tapped one does')
   t.ok(privacy.includes('Quando você toca num gênero, o app envia ao serviço de conta o nome desse gênero'), 'privacy: a tap still sends the genre')
   t.absent(all(TERMS).includes('escolhida a partir do que você faz'), 'terms: the track list is no longer said to ignore what the person does')
-  t.absent(all(TERMS).includes('não é personalizada nem escolhida'), 'terms: the version 93 sentence is gone')
+  t.absent(all(TERMS).includes('não é personalizada nem escolhida'), 'terms: the version 94 sentence is gone')
   t.absent(all(PRIVACY).includes('Nenhum gênero sai sem um toque'), 'privacy: a genre is not sent only on a tap')
   t.absent(all(PRIVACY).includes('nunca saem do aparelho'), 'privacy: a device backup may hold the list')
   t.absent(all(PRIVACY).includes('Limpar desliga o recurso de vez'), 'privacy: Limpar does not turn the feature off for good')

@@ -200,6 +200,8 @@ export function parseLaunch (search) {
     }
     if (!Object.prototype.hasOwnProperty.call(found, 'aviso')) return null
     if (found.aviso === 'convite') return Object.keys(found).length === 1 ? { kind: 'convite' } : null
+    // A Pagina DM notice names no Pagina: Paginas opens for whoever is unlocked.
+    if (found.aviso === 'dm-page') return Object.keys(found).length === 1 ? { kind: 'dm-page' } : null
     const ref = Object.prototype.hasOwnProperty.call(found, 'ref') ? found.ref : null
     return notice(found.aviso, found.actor, found.recipient, ref)
   } catch {
@@ -213,6 +215,7 @@ export function parseMessage (data) {
     if (!isPlainObject(data)) return null
     const own = Object.keys(data)
     if (own.length === 1 && own[0] === 'type' && data.type === 'varanda-invite-open') return { kind: 'convite' }
+    if (own.length === 1 && own[0] === 'type' && data.type === 'varanda-page-dm-open') return { kind: 'dm-page' }
     if (own.length !== MESSAGE_KEYS.length || !MESSAGE_KEYS.every((k) => own.includes(k))) return null
     if (data.source !== MESSAGE_SOURCE) return null
     return notice(data.kind, data.actor, data.recipient, data.ref)

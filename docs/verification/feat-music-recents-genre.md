@@ -10,12 +10,12 @@ Quarto e último PR de uma pilha de quatro, sobre `feat/music-trending-genres`. 
 - [x] Seletor (`apps/app/src/ui/MusicPicker.js`): com a busca vazia, **Recentes** aparece antes de "Em alta no Audius", com até cinco faixas ou cinco playlists da conta, conforme a aba. Os chips de gênero vêm depois de **Todos**, pela contagem. Ao abrir **Faixas**, o seletor seleciona o gênero mais escolhido e pede a lista dele; sem escolhas com gênero, pede a geral. Tocar num recente confere o item no serviço de conta antes de abrir o editor; mudar a busca, a aba ou o chip cancela essa consulta. **Limpar** apaga os recentes da conta no aparelho sem trocar o chip nem pedir outra lista.
 - [x] Sair e Recomeçar (`apps/app/src/node.js`) apagam os recentes de todas as contas do aparelho. Bloquear não apaga.
 - [x] Serviço de conta (`apps/cli/lib/account/audius-routes.js`, só comentário; `docs/protocol.md`): o gênero pedido sem toque chega como qualquer `{ "genre": ... }`, sem campo que diga como foi escolhido; uma chave a mais é 400. Um teste com quatro membros, quatro gêneros e três rodadas fixa uma lista por gênero, uma chamada ao Audius por lista e só `{ event: 'audius', reason: 'em-alta' }` no log.
-- [x] Termos e Política na versão 96 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): os recentes ficam só no aparelho (um backup do aparelho, como o do iCloud, pode levar o arquivo), o que Limpar, Sair e Recomeçar apagam, e o gênero mais escolhido que vai ao serviço sem toque, com a sessão, sem ser registrado nem guardado por conta.
+- [x] Termos e Política na versão 97 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): os recentes ficam só no aparelho (um backup do aparelho, como o do iCloud, pode levar o arquivo), o que Limpar, Sair e Recomeçar apagam, e o gênero mais escolhido que vai ao serviço sem toque, com a sessão, sem ser registrado nem guardado por conta.
 - [x] `docs/app.md`: Recentes, a ordem dos chips, Limpar, Sair e Recomeçar no seletor de post e de momento.
 
 ## Testes automáticos
 
-Rodados localmente no Node 24, sobre `feat/music-trending-genres` (`643046bb`): `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (115 arquivos, todos passando). Os principais:
+Rodados localmente no Node 24, sobre `feat/music-trending-genres` (`643046bb`) e de novo depois de juntar a pilha com `origin/main@5fcf3d30`: `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (115 arquivos, todos passando). Os principais:
 
 | Arquivo | Testes | Asserções |
 |---|---|---|
@@ -34,14 +34,14 @@ Rodados localmente no Node 24, sobre `feat/music-trending-genres` (`643046bb`): 
 
 A suíte inteira roda na CI do PR, nos Node 20 e 24.
 
-Novos casos: do arquivo de recentes (formato, limites de 24 e 4, mais novos primeiro, trecho como faixa, gênero só da lista fixa, arquivo corrompido, leitura que falha sem gravar, Limpar de uma conta, limpeza total, a ordem e o gênero mais escolhido, o armazenamento da web e o tamanho do arquivo cheio); do registro (post e momento só depois do aceite, a chave pessoal ao agir como Página, recusas, link colado, publicação e nova tentativa sem registro); do seletor (Recentes por aba, a ordem dos chips, o gênero pedido ao abrir, Limpar, a consulta de um recente, a resposta atrasada descartada e a consulta cancelada ao mudar a busca, a aba ou o chip); do serviço (muitos membros e gêneros sem nada por membro); dos textos (versão 96).
+Novos casos: do arquivo de recentes (formato, limites de 24 e 4, mais novos primeiro, trecho como faixa, gênero só da lista fixa, arquivo corrompido, leitura que falha sem gravar, Limpar de uma conta, limpeza total, a ordem e o gênero mais escolhido, o armazenamento da web e o tamanho do arquivo cheio); do registro (post e momento só depois do aceite, a chave pessoal ao agir como Página, recusas, link colado, publicação e nova tentativa sem registro); do seletor (Recentes por aba, a ordem dos chips, o gênero pedido ao abrir, Limpar, a consulta de um recente, a resposta atrasada descartada e a consulta cancelada ao mudar a busca, a aba ou o chip); do serviço (muitos membros e gêneros sem nada por membro); dos textos (versão 97).
 
 ## Revisão
 
 A revisão apontou e esta branch corrigiu:
 
 - **Consulta de um recente atropelava a tela seguinte.** Depois de tocar num recente, digitar, trocar de aba ou de chip não cancelava a consulta: quando ela voltava, abria o editor daquele item por cima do que a pessoa via; enquanto isso, os recentes da outra aba ficavam desativados, e uma falha atrasada mostrava o erro no lugar da lista. Agora essas mudanças cancelam a consulta. Quatro testes novos falham sem a correção.
-- **Textos da versão 96.** Os Termos e `docs/design.md` diziam que tocar num recente pede o item ao serviço como tocar num resultado de busca, mas um resultado de busca abre sem novo pedido; agora dizem só que o toque pede de novo os dados ao serviço. A lista do que os recentes guardam nos Termos não citava o identificador no Audius; agora cita.
+- **Textos da versão 97.** Os Termos e `docs/design.md` diziam que tocar num recente pede o item ao serviço como tocar num resultado de busca, mas um resultado de busca abre sem novo pedido; agora dizem só que o toque pede de novo os dados ao serviço. A lista do que os recentes guardam nos Termos não citava o identificador no Audius; agora cita.
 
 Conferido sem mudança: o gênero mais escolhido chega ao serviço como um gênero tocado e não deixa nada por membro; o registro só acontece depois do aceite. A auditoria de segurança não achou nada que bloqueie.
 
@@ -67,4 +67,4 @@ Não conferido em aparelho neste PR. Roteiro para a pessoa, primeiro no Android 
 
 ## Fora do alcance desta branch
 
-- Termos 96 seguem a revisão jurídica pendente das versões anteriores, incluindo a base legal do gênero enviado sem toque.
+- Termos 97 seguem a revisão jurídica pendente das versões anteriores, incluindo a base legal do gênero enviado sem toque.
