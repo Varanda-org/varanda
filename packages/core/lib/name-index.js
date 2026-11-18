@@ -42,6 +42,10 @@
 // of the first verified close or move (the lowest seq noted wins, as in
 // lib/page-lifecycle.js pageLifecycle): a pointer for page.feed, which
 // fetches and verifies that block itself (docs/protocol.md §12).
+// endUnverified(author) is true once the author's own log held a
+// shape-valid page-close or page-moved that did NOT verify (an issuer
+// revoked since, say): one more boolean in the entry, never cleared, so the
+// public post page fails closed on a page that may be closed.
 //
 // Pure and total: no I/O, no timers, and no method ever throws (hostile
 // records, verifiers and predicates included: a throw answers false / null
@@ -109,7 +113,8 @@ function newEntry () {
     page: false,
     closed: false,
     moved: false,
-    endSeq: null
+    endSeq: null,
+    endUnverified: false
   }
 }
 
@@ -151,7 +156,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
         } catch {
           ok = false
         }
-        if (!ok) return true
+        if (!ok) return PAGE_ENDS[type] === undefined ? true : markEndUnverified(author)
         return markPage(author, PAGE_ENDS[type] ?? null, seq)
       }
       if (type === 'profile') {
@@ -232,6 +237,18 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
     return true
   }
 
+  // false only for a NEW author at the cap, like note().
+  function markEndUnverified (author) {
+    let entry = entries.get(author)
+    if (entry === undefined) {
+      if (entries.size >= cap) return false
+      entry = newEntry()
+      entries.set(author, entry)
+    }
+    entry.endUnverified = true
+    return true
+  }
+
   // Only a page carries the keys: a person's row keeps its old shape.
   function pageFlags (entry) {
     return { page: true, closed: entry.closed, moved: entry.moved }
@@ -254,6 +271,15 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
       return entry !== undefined && Number.isSafeInteger(entry.endSeq) ? entry.endSeq : null
     } catch {
       return null
+    }
+  }
+
+  function endUnverified (author) {
+    try {
+      const entry = typeof author === 'string' ? entries.get(author) : undefined
+      return entry !== undefined && entry.endUnverified === true
+    } catch {
+      return false
     }
   }
 
@@ -369,7 +395,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
     return { authors: entries.size, maxAuthors: cap }
   }
 
-  return { note, settle, forget, remove, clear, search, stats, hint, endSeq }
+  return { note, settle, forget, remove, clear, search, stats, hint, endSeq, endUnverified }
 }
 
 module.exports = {

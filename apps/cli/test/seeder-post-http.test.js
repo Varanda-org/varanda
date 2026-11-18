@@ -13,10 +13,14 @@ const http = require('node:http')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const b4a = require('b4a')
+const crypto = require('hypercore-crypto')
 const Corestore = require('corestore')
 const { testnet, tmpDir, until, localSwarmOptions } = require('./helpers/net')
 const { Seeder } = require('@varanda/core/lib/seeder')
-const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
+const cert = require('@varanda/core/lib/cert')
+const { createCert, createSeederCert, generateAssociationKeyPair } = cert
+const { signRoster, issuerCountersign } = require('@varanda/core/lib/page')
+const { signClose } = require('@varanda/core/lib/page-lifecycle')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const {
   memberCertRecord, postRecord, profileRecord, deleteRecord, mediaCoreRecord, postShareRecord, listingRecord, MEDIA_BLOCK_BYTES
@@ -295,12 +299,14 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
       t.is(res.headers.location, '/publicacao/' + h + '/' + digits, name + ': Location from the path')
     }
   }
-  const hint = seeder._names.hint
-  seeder._names.hint = (k) => k === A.key ? { page: true, closed: false, moved: false } : hint(k)
-  const pageDiary = await get(on.port, base)
-  seeder._names.hint = hint
-  t.alike(shape(pageDiary), AWAY, 'a page diary')
-  t.is((await get(on.port, base)).status, 200, 'shown again once it is a person')
+  // A page diary is shown like a person's (packages/core/test/
+  // seeder-post-page.test.js); a closed or moved one is not.
+  const endSeq = seeder._names.endSeq
+  seeder._names.endSeq = (k) => k === A.key ? 1 : endSeq(k)
+  const closedPage = await get(on.port, base)
+  seeder._names.endSeq = endSeq
+  t.alike(shape(closedPage), AWAY, 'a closed or moved page')
+  t.is((await get(on.port, base)).status, 200, 'shown again once it is open')
 
   // The preview: what the page shows, as JSON, and the photos it counts are
   // the ones /foto/<n> serves.
@@ -351,10 +357,10 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
       t.alike(previaShape(res), noPreview(method), 'preview: ' + name + ' (' + method + ')')
     }
   }
-  seeder._names.hint = (k) => k === A.key ? { page: true, closed: false, moved: false } : hint(k)
-  const pagePreview = await get(on.port, base + '/previa')
-  seeder._names.hint = hint
-  t.alike(previaShape(pagePreview), noPreview('GET'), 'preview: a page diary')
+  seeder._names.endSeq = (k) => k === A.key ? 1 : endSeq(k)
+  const closedPreview = await get(on.port, base + '/previa')
+  seeder._names.endSeq = endSeq
+  t.alike(previaShape(closedPreview), noPreview('GET'), 'preview: a closed or moved page')
   for (const server of [on, off]) {
     for (const url of [base + '/previa?x=1', base + '/previa/x', base + '/previa/', '/p/' + A.key + '/previa']) {
       const res = await get(server.port, url)
@@ -584,4 +590,67 @@ test('preview budget: its own slot, deadline and bucket, every refusal the same 
   t.is((await get(flood.port, '/p/' + hex + '/3/previa')).body.toString().startsWith('{"post":{'), true)
   t.alike(previaShape(await get(flood.port, '/p/' + hex + '/3/previa')), noPreview('GET'), 'the preview bucket is empty')
   t.is((await get(flood.port, '/p/' + hex + '/3')).status, 200, 'an empty preview bucket leaves the page serving')
+})
+
+test('a page diary over a real Seeder: its shared post, preview and photo are served, then the uniform 302 once it is closed', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), log: (e) => events.push(e), associationKey: assoc.hex })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const on = await startSeedWs({ port: 0, seeder, postsOrigin: ORIGIN })
+  t.teardown(() => on.close(), { force: true })
+
+  // The page layout of docs/protocol.md section 12: the @nome at seq 1 and
+  // the genesis roster at seq 2, both from an issuer of the association.
+  const issuerKp = crypto.keyPair()
+  const issuerCert = cert.createIssuerCert({ issuer: hex(issuerKp.publicKey), date: at(0) }, assoc.kp)
+  const ownerKp = crypto.keyPair()
+  const owner = hex(ownerKp.publicKey)
+  const nonce = (c) => c.repeat(43)
+  const P = await member(t, bootstrap, assoc, (key, K) => {
+    const rosterFields = { type: 'page-roster', page: key, gen: 1, owner, admins: [], prev: null, at: at(1), nonce: nonce('r'), association: assoc.hex }
+    return [
+      cert.createUsernameRecord({ member: key, username: 'padaria', date: at(0) }, issuerKp, issuerCert), // 1
+      issuerCountersign({ ...rosterFields, signature: signRoster(rosterFields, ownerKp) }, issuerKp, issuerCert), // 2
+      mediaCoreRecord({ key: K, at: at(2) }), // 3
+      profileRecord({ name: 'Padaria', at: at(3) }), // 4
+      postRecord({ text: 'pão quente', at: at(4), media: [descriptor(K, 1, IMG[0])] }), // 5
+      share(5, 5) // 6
+    ]
+  })
+  const K = P.mediaKey
+  await admit(P, assoc)
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === P.mediaCore.length, { name: 'mídia baixada', timeoutMs: 60000 })
+  await settled(seeder, P)
+  t.is(seeder._names.hint(P.key).page, true, 'the seeder knows the diary as a page')
+
+  const base = '/p/' + P.key + '/5'
+  const page = await get(on.port, base)
+  t.is(page.status, 200, 'the page post is served')
+  t.ok(page.body.toString().includes('pão quente'))
+  t.ok(page.body.toString().includes('Padaria'))
+  const previa = JSON.parse((await get(on.port, base + '/previa')).body.toString()).post
+  t.ok(previa, 'its preview is served')
+  t.is(previa.name, 'Padaria')
+  t.is(previa.username, 'padaria', 'with the page @nome')
+  t.is(previa.photoCount, 1)
+  const foto = await get(on.port, base + '/foto/1')
+  t.is(foto.status, 200, 'its photo is served')
+  t.alike(foto.body, IMG[0])
+
+  const closeFields = { type: 'page-close', page: P.key, gen: 2, at: at(6), nonce: nonce('c'), actor: owner, association: assoc.hex }
+  await P.diary.append(issuerCountersign({ ...closeFields, signature: signClose(closeFields, ownerKp) }, issuerKp, issuerCert)) // 7
+  await P.message((x) => x.type === 'have' && x.key === P.key && x.length === P.diary.length, 'have ' + P.diary.length)
+  await settled(seeder, P)
+  t.is(seeder._names.hint(P.key).closed, true, 'the close was indexed')
+  const closed = await get(on.port, base)
+  t.alike(shape(closed), AWAY, 'a closed page: the uniform 302')
+  t.is(closed.headers.location, '/publicacao/' + P.key + '/5')
+  t.alike(previaShape(await get(on.port, base + '/previa')), noPreview('GET'), 'and no preview')
+  t.is((await get(on.port, base + '/foto/1')).status, 404, 'and no photo')
 })

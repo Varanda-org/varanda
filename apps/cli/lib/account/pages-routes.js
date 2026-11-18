@@ -95,7 +95,8 @@ const { isUsername } = require('@varanda/core/lib/account-link')
 const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
-const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
+const { applyDeletes, deletedSeqs, shownMedia } = require('@varanda/core/lib/deletion')
+const { foldShare, POST_SHARES_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
 const { feira, cardUrlHost, isMomentMusic } = require('@varanda/rpc')
@@ -104,7 +105,7 @@ const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
 } = require('@varanda/core/lib/records')
@@ -128,8 +129,9 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
 // record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
-// no earlier vote comes back.
-const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'profile', 'listing', 'listing-edit']
+// no earlier vote comes back. A share goes too, so no reader that missed a
+// post's tombstone keeps it on the public web page.
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -167,9 +169,12 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const GROUP_READ_LIMIT = 32
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
+// A page post on the installation's public web page (docs/protocol.md §2,
+// "Public share"), by a person's post.share and post.unshare rules.
+const SHARE_ACTIONS = ['post-share', 'post-unshare']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment']
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment', ...SHARE_ACTIONS]
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
@@ -188,7 +193,9 @@ const MAX_SUCCESSORS = 1000
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
 const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', 'rename', 'follow', 'media', 'avatar',
-  ...LISTING_ACTIONS]
+  ...LISTING_ACTIONS, ...SHARE_ACTIONS]
+// The tombstones one post-unshare appends: one writer append, one nonce.
+const MAX_UNSHARE = 8
 
 const WRITER_TOKENS = Object.freeze({
   pausada: 'pausada',
@@ -251,6 +258,45 @@ function momentsOf (folded) {
     out.push({ seq: e.seq, at, text })
   }
   return out
+}
+
+// Each valid post-share block as [post seq, share seq]. Over raw blocks it
+// sees tombstoned shares too; over a folded diary only the live ones.
+function shareBlocks (entries) {
+  const out = []
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'post-share') continue
+    const copy = validRecordCopy(e.record, e.seq)
+    if (copy !== null && copy.type === 'post-share') out.push([copy.seq, e.seq])
+  }
+  return out
+}
+
+// The seeder's fold of the raw diary (post-share.js foldShare, block order,
+// tombstoned shares included): post seq -> its highest share seq. A post is
+// on the public web page only while that highest share is live, so every
+// answer here follows that rule, not "any live share".
+function shareFold (raw) {
+  const fold = new Map()
+  for (const [p, seq] of shareBlocks(raw)) foldShare(fold, p, seq)
+  return fold
+}
+
+// The page's post seqs whose highest share is live and whose post is still a
+// live post, ascending, at most POST_SHARES_PER_DIARY: what 'status' answers
+// so an owner or admin sees which posts are on the public web page. raw is
+// the writer's own blocks, tombstones not applied.
+function sharedOf (raw) {
+  const deleted = deletedSeqs(raw)
+  const bySeq = new Map()
+  for (const e of raw) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+  const out = []
+  for (const [postSeq, shareSeq] of shareFold(raw)) {
+    const post = bySeq.get(postSeq)
+    if (deleted.has(shareSeq) || deleted.has(postSeq) || post === undefined || !isPlainObject(post.record) || post.record.type !== 'post') continue
+    out.push(postSeq)
+  }
+  return out.sort((a, b) => a - b)
 }
 
 function has (obj, k) {
@@ -604,6 +650,10 @@ function createPagesRoutes ({
           // A listing edit answers its edit block, the first of its append.
           const first = action === 'listing-edit' ? writer.nonceFirst(page, member, nonce) : null
           const seq = first === null ? a.seq : first
+          // Only a use that appended has a writer record: the share was
+          // created, or the tombstones were written.
+          if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+          if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
           const out = { seq, length: a.length, pushed: false, replay: true }
           if (action === 'create') out.page = page
           if (action === 'avatar') {
@@ -616,6 +666,10 @@ function createPagesRoutes ({
     }
     if (seq !== null) {
       if (action === 'dm-box-share' || action === 'actor-box') return { ok: true, replay: true }
+      // The ACL spends a share's nonce only after its append: the writer's
+      // record may be gone (evicted, or its state lost), the answer is not.
+      if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+      if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
         const r = pagesStore.get(page)
@@ -1412,6 +1466,72 @@ function createPagesRoutes ({
     }))
   }
 
+  // ---- public share -----------------------------------------------------------
+
+  // post-share and post-unshare ({ seq }), a person's post.share and
+  // post.unshare (web-member member-ops.js): only a live post of the page's
+  // own diary (a reply or quote included). A post whose highest share is
+  // live (the seeder's rule) answers { created: false } and an unshare with
+  // no live share { changed: false },
+  // nothing appended; a new post past the bounded fold every reader keeps
+  // (post-share.js) is 'limite', as the public page would never show it. An
+  // unshare tombstones the newest MAX_UNSHARE live shares of the post in one
+  // append (a page writer leaves one); a repeat finishes any left. The raw
+  // blocks are read, so tombstoned shares count toward the fold as they do
+  // for a reader.
+  async function share (action, body) {
+    const { member, page, nonce, op, hash } = await statement(body, action, false)
+    if (!exactKeys(op, ['seq']) || !Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+    const prior = claim(member, nonce, hash, false, page, action)
+    if (prior !== null) return prior
+    return once(member, nonce, () => withLock(page, async () => {
+      need(writableRow(page), member, 'admin')
+      // Charged before the read, the no-op answers included (unlike a
+      // delete's deletedAlready): every use reads the whole diary.
+      chargeOps(page)
+      let raw
+      try {
+        raw = await writer.readOwn(page)
+      } catch (err) {
+        throw tokenOf(err)
+      }
+      const deleted = deletedSeqs(raw)
+      const entry = raw.find((e) => e && e.seq === op.seq)
+      const post = entry === undefined || deleted.has(op.seq) ? null : validRecordCopy(entry.record, op.seq)
+      if (post === null || post.type !== 'post') throw refuse('nao-encontrado')
+      const live = shareBlocks(raw).filter(([p, seq]) => p === op.seq && !deleted.has(seq)).map(([, seq]) => seq)
+      const fold = shareFold(raw)
+      const highest = fold.get(op.seq)
+      let result = null
+      // Shared as the seeder sees it: the highest share is live. Otherwise a
+      // new share becomes the highest, even beside an older live one.
+      if (action === 'post-share' && highest !== undefined && !deleted.has(highest)) result = { shareSeq: highest, created: false }
+      if (action === 'post-unshare' && live.length === 0) result = { ok: true, changed: false }
+      if (result !== null) {
+        settle(member, nonce, result)
+        return result
+      }
+      let records
+      const at = iso(now())
+      if (action === 'post-share') {
+        if (highest === undefined && fold.size >= POST_SHARES_PER_DIARY) throw refuse('limite')
+        records = [postShareRecord({ seq: op.seq, at })]
+      } else {
+        records = live.slice(-MAX_UNSHARE).flatMap((seq) => deleteRecords({ seq, at }))
+      }
+      // The reads above awaited: the role is read again before the append.
+      need(writableRow(page), member, 'admin')
+      await refreshRoster(page)
+      need(writableRow(page), member, 'admin')
+      const res = await append(page, records, { member, nonce })
+      await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, res.seq) }))
+      result = action === 'post-share' ? { shareSeq: res.seq, created: true } : { ok: true, changed: true }
+      settle(member, nonce, result)
+      keep(page, action, member, res.seq)
+      return result
+    }))
+  }
+
   // ---- Feira consent ---------------------------------------------------------
 
   // The page's signature over one deal; appends nothing. The admin's signed
@@ -1469,6 +1589,9 @@ function createPagesRoutes ({
       const folded = applyDeletes(await writer.readEntries(page))
       const picked = pickedOf(folded)
       const moments = momentsOf(folded)
+      // Tombstoned shares count in the seeder's fold: only the raw blocks
+      // carry them.
+      const shared = sharedOf(await writer.readOwn(page))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1486,6 +1609,7 @@ function createPagesRoutes ({
         },
         picked,
         moments,
+        shared,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
@@ -1908,8 +2032,9 @@ function createPagesRoutes ({
     Promise.resolve().then(() => pagesDm.forget(page)).catch(() => note('conversas', 'parada-pendente'))
   }
 
-  // A tombstone, with the media ranges it releases, for every post, like,
-  // repost and profile version the page still shows.
+  // A tombstone, with the media ranges it releases, for every live record of
+  // a CLOSE_DELETES type the page still shows, its web shares included, so
+  // nothing of a closed page stays readable or on the public page.
   async function closeDeletes (page) {
     let entries
     try {
@@ -2838,6 +2963,7 @@ function createPagesRoutes ({
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
     if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (SHARE_ACTIONS.includes(action)) return share(action, body)
     if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)

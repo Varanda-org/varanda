@@ -376,6 +376,24 @@ test('choice: pageChoiceOp builds { to, pick } and pagesChoice posts it to the c
   t.is(node.signs[0].params.action, 'choice')
 })
 
+test('post-share and post-unshare: pagesPostShare and pagesPostUnshare post { seq } to their routes', async (t) => {
+  const { pagesPostShare, pagesPostUnshare } = await load()
+  const calls = stub(t, flow(() => json(200, { shareSeq: 3, created: true })))
+  const node = fakeNode()
+  const data = await pagesPostShare(node, { member: M, page: P, seq: 7 })
+  t.is(data.shareSeq, 3)
+  t.ok(calls[1].url.endsWith('/account/pages/post-share'))
+  t.alike(body(calls[1]).op, { seq: 7 })
+  t.is(node.signs[0].params.action, 'post-share')
+  const calls2 = stub(t, flow(() => json(200, { ok: true, changed: false })))
+  const node2 = fakeNode()
+  const data2 = await pagesPostUnshare(node2, { member: M, page: P, seq: 7 })
+  t.is(data2.changed, false)
+  t.ok(calls2[1].url.endsWith('/account/pages/post-unshare'))
+  t.alike(body(calls2[1]).op, { seq: 7 })
+  t.is(node2.signs[0].params.action, 'post-unshare')
+})
+
 test('moment: pageMomentOp builds the person\'s input and pagesMoment posts it to the moment route', async (t) => {
   const { pageMomentOp, pagesMoment } = await load()
   const media = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 2, bytes: 40000, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 }
