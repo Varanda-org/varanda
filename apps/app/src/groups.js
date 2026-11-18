@@ -641,8 +641,9 @@ export const PAGE_EMPTY_TEXT = 'A página ainda não está em nenhuma comunidade
 // The service answers these until its group routes exist; they are no error.
 const PAGE_SOON_CODES = ['pedido-invalido', 'nao-encontrado']
 
-// A page never creates, admits, bans, appoints, hides, rekeys or edits.
-const PAGE_ACTIONS = Object.freeze(['post', 'leave'])
+// A page never creates, admits, bans, appoints, rekeys or edits; it may hide
+// its own message, as any author may.
+const PAGE_ACTIONS = Object.freeze(['post', 'hide', 'leave'])
 
 // A stale page identity with the gate off acts as the member, so page mode
 // needs both the acting state and the pagesOn gate.
@@ -656,10 +657,38 @@ export function canAsPage (action) {
 }
 
 // What a page may do in a group, by its own standing and never a staff role.
-export function pageCan (action, role) {
+export function pageCan (action, role, opts = {}) {
   if (!canAsPage(action)) return false
   if (action === 'post') return role === 'member'
+  if (action === 'hide') return !!opts && opts.own === true && role === 'member'
   return role === 'member' || role === 'requested'
+}
+
+// The ops a page sends to the service's group actions (docs/rpc.md, the page
+// group-post, group-react, group-hide and group-choice). Absent optional keys
+// are dropped, never sent as null.
+export function pageGroupPostOp ({ group, text, replyTo, fwd, media, card, topic, poll, event } = {}) {
+  const op = { group, text }
+  if (replyTo) op.replyTo = replyTo
+  if (fwd === 1) op.fwd = 1
+  if (Array.isArray(media) && media.length > 0) op.media = media
+  if (card) op.card = card
+  if (topic === true) op.topic = true
+  if (Array.isArray(poll) && poll.length > 0) op.poll = poll
+  if (event) op.event = event
+  return op
+}
+
+export function pageGroupReactOp ({ group, target, emoji } = {}) {
+  return { group, target, emoji: typeof emoji === 'string' ? emoji : '' }
+}
+
+export function pageGroupHideOp ({ group, target, on } = {}) {
+  return { group, target, on: on === true }
+}
+
+export function pageGroupChoiceOp ({ group, target, pick } = {}) {
+  return { group, target, pick: Number.isInteger(pick) && pick >= 0 ? pick : null }
 }
 
 // The page's standing from a join, leave or read answer: 'member',

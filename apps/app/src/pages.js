@@ -46,7 +46,7 @@ const READ_MAX_BODY = 1024 * 1024
 // 'dm-sign', 'dm-box-read' and 'dm-legacy-read' are signed reads too: a lost
 // signature sent nothing, and the service keeps no answer for a same-nonce
 // resend.
-const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
+const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'group-topics', 'group-voters', 'group-events', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
 const DEFINITE = ['assinatura-invalida', 'pedido-invalido']
 const FEED_KEYS = 64
 
@@ -279,7 +279,7 @@ const PAGELESS = ['create', 'list', 'terms']
 const RECORD_ACTIONS = ['accept', 'remove', 'offer', 'transfer-accept', 'close']
 // A page's post in a private group is sealed on the device (node group.seal)
 // and sent as 'group-seal'; the service cannot read it (docs/rpc.md 5.114).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']
 // The page's own messages go through the node (5.114); dm-legacy-read and
 // dm-legacy-done serve only the sealed bundle of a legacy page's old ones.
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']

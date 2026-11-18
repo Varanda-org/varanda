@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 86)
+  t.is(LEGAL_VERSION, 87)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 86, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 87, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -371,12 +371,29 @@ test('legal: version 86 describes web share of a page post', async (t) => {
   t.ok(privacy.includes('As escolhas de publicar uma publicação da página na web também ficam no diário da página e são públicas como ele.'), 'privacy: the page diary holds the share')
 })
 
+test("legal: version 87 describes a page's parity in public groups", async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 87)
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
+  t.ok(terms.includes('Num grupo público, a página faz o mesmo que uma pessoa'), 'terms: a page acts as a person in a public group')
+  t.ok(terms.includes('uma mensagem de voz'), 'terms: the page sends voice notes')
+  t.ok(terms.includes('reage, vota, confirma presença e oculta as próprias publicações'), 'terms: reactions, votes, RSVPs and own hides')
+  t.ok(terms.includes('A página nunca oculta a publicação de outra pessoa.'), 'terms: never hides another person\'s post')
+  t.ok(terms.includes('o serviço de conta da associação a escreve com a chave de escrita da página e fica sabendo quem pediu e quando'), 'terms: what the service learns')
+  t.ok(privacy.includes('Num grupo público, as fotos, mensagens de voz, reações, votos e confirmações de presença da página são públicos como a página'), 'privacy: public as the page')
+  t.ok(privacy.includes('fica sabendo qual administrador pediu cada um e quando'), 'privacy: the service learns who asked')
+  const kept = 'As mensagens que a página já escreveu em comunidades e grupos, com as fotos e mensagens de voz delas, continuam nesses grupos.'
+  t.ok(terms.includes(kept), 'terms: closing a page leaves its group posts')
+  t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '9ab683029cb2dfe22fcca57216f6f4f85aae70dc86fa22456bbc731332eef757', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '7012cd824ba0243da94195aba61f52022f9567b2bb18f6013a5677901e5a7ec4', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

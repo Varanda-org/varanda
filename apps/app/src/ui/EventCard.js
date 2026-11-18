@@ -12,15 +12,23 @@
 // is never resent: a failure tells the person and they decide. Title, place
 // and names are peer text and go through displayText. No motion.
 //
-// Acting as a Page (diary events only), the answer is the page's: its own
+// Acting as a Page, the answer is the page's: on a diary event its own
 // answer comes from the page's status read and it answers with the page
-// action 'choice'; after an unknown outcome the same answer tapped again
-// resends the signed one.
+// action 'choice'; on a group event (public groups only) it comes from
+// the service ('group-voters' through pagesGroup, falling back to the `mine`
+// the caller read from the service for the page, never the node's) and it
+// answers with the page action 'group-choice'. A failed read keeps the last
+// pick and never disables the answer. The pick just answered stays until a
+// read shows it. After an unknown outcome the same option tapped again
+// resends the signed one; another option signs a new statement.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { pageGroupChoiceOp, pageGroupErrorText } from '../groups'
+import { pagePickOf } from '../pageVote'
+import { pagesGroup } from '../pages'
 import { useNames } from '../names'
 import { installationOrigin } from '../installation'
 import { validOrigin } from '../feiraLink'
@@ -31,7 +39,7 @@ import { calendarExportAvailable, exportCalendar } from '../calendarExport'
 import { hasReminder, removeReminder, setReminder } from '../eventRemindersStore'
 import { whoOf } from '../who'
 import { confirmedVoters, voterSeqs } from './pollVoters'
-import { learnPeeked, peekAll, readPagePick, setPagePick, useActing } from '../screens/Conversa'
+import { learnPeeked, memberKeyOf, peekAll, readPagePick, setPagePick, useActing } from '../screens/Conversa'
 import { PAGE_PICK_UNREAD, PAGE_RSVP_NOTICE, PAGE_RSVP_UNCERTAIN, choiceNotice, choicePage, pickRef, refusalText, tapAfterUncertain } from '../pageChoice'
 import { Icon } from './Icon'
 import { tap } from './haptics'
@@ -88,11 +96,14 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   const valid = HEX64.test(key) && Number.isSafeInteger(seq) && seq > 0
   const hosted = node.hosted === true && valid
   const page = choicePage(useActing())
-  const ref = pickRef(key, seq)
+  const ref = pickRef(grouped ? writer : key, seq)
   const online = node.online !== false
   const { request } = node
   const card = eventCard(event)
   const [own, setOwn] = useState(undefined)
+  // The page's pick in a group event: read from the service, and the one just answered until a read shows it.
+  const [gRead, setGRead] = useState(undefined)
+  const [sent, setSent] = useState(null)
   const [claim, setClaim] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -114,7 +125,7 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   pageRef.current = page
 
   // Another identity's answer is never shown: unread until this one's is.
-  useEffect(() => { setOwn(undefined); setError(''); setUnread(false); retryRef.current = null }, [page])
+  useEffect(() => { setOwn(undefined); setGRead(undefined); setSent(null); setError(''); setUnread(false); retryRef.current = null }, [page])
 
   const readClaim = useCallback(async () => {
     if (grouped || !hosted || !online) return
@@ -139,6 +150,32 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
     return () => { live = false }
   }, [grouped, hosted, online, request, key, seq, readClaim, page, ref])
 
+  // A group event's totals move with every answer: the page's own pick is
+  // read again with them. A failed read keeps what was last known.
+  const totalsKey = grouped && Array.isArray(totals) ? totals.join(',') : ''
+  useEffect(() => {
+    if (!grouped || page === null || !hosted || !online) return undefined
+    let live = true
+    ;(async () => {
+      const res = await pagesGroup(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page, action: 'group-voters', op: { group, target: { writer, seq } } })
+      if (!live || !alive.current || pageRef.current !== page) return
+      const pick = pagePickOf(res, page, 2)
+      if (pick !== undefined) setGRead(pick)
+    })().catch(() => {})
+    return () => { live = false }
+  }, [grouped, page, hosted, online, request, group, writer, seq, totalsKey])
+
+  const asPageGroup = grouped && page !== null
+  const serviceMine = Number.isSafeInteger(mine) ? mine : null
+  const readPick = gRead !== undefined ? gRead : serviceMine
+  // A read that shows the answered pick settles it, and the unsure notice goes.
+  useEffect(() => {
+    if (sent !== null && readPick === sent.pick) setSent(null)
+    // Only the notice of the tap that read confirms: a later tap's stays.
+    const pending = retryRef.current
+    if (asPageGroup && pending !== null && readPick === pending.value) { retryRef.current = null; setError('') }
+  }, [readPick, sent])
+
   useEffect(() => {
     if (!remindable) return undefined
     let live = true
@@ -149,7 +186,7 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   if (card === null) return null
   const at = typeof now === 'number' ? now : Date.now()
   const past = isPast(card, at)
-  const pick = grouped ? (Number.isSafeInteger(mine) ? mine : null) : own
+  const pick = grouped ? (asPageGroup ? (sent !== null ? sent.pick : readPick) : serviceMine) : (own === undefined ? null : own)
   const known = grouped || own !== undefined
   const shownTotals = grouped ? totals : claim && claim.totals.length === 2 ? claim.totals : null
   const start = new Date(card.startMs)
@@ -165,22 +202,29 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
     tap('light')
     const pending = retryRef.current
     retryRef.current = null
-    const asPage = !grouped && page !== null
+    const asPage = page !== null
+    // A resend carries the bytes already signed, so the value is the first one's.
+    const resend = asPage && tapAfterUncertain(pending, { page, ref, pick: index }) === 'resend'
+    const value = resend && pending.value !== undefined ? pending.value : next
     try {
-      if (grouped) await request('group.choose', { group, target: { writer, seq }, pick: next })
-      else if (asPage) await (tapAfterUncertain(pending, { page, ref, pick: next }) === 'resend' ? pending.retry() : setPagePick(nodeRef.current, page, ref, next))
+      if (asPageGroup) {
+        await (resend
+          ? pending.retry()
+          : pagesGroup(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page, action: 'group-choice', op: pageGroupChoiceOp({ group, target: { writer, seq }, pick: next }) }))
+      } else if (grouped) await request('group.choose', { group, target: { writer, seq }, pick: next })
+      else if (asPage) await (resend ? pending.retry() : setPagePick(nodeRef.current, page, ref, next))
       else await request('choice.set', { to: { author: key, seq }, pick: next })
       // The identity changed while it was in flight: the answer is not this one's.
-      if (!alive.current || (!grouped && pageRef.current !== page)) return
-      if (!grouped) { setOwn(next); readClaim() }
+      if (!alive.current || pageRef.current !== page) return
+      if (!grouped) { setOwn(value); readClaim() } else if (asPageGroup) setSent({ pick: value })
       if (typeof onChanged === 'function') onChanged()
     } catch (err) {
-      if (!alive.current || (!grouped && pageRef.current !== page)) return
+      if (!alive.current || pageRef.current !== page) return
       if (asPage && err && err.uncertain === true) {
-        if (typeof err.retry === 'function') retryRef.current = { page, ref, pick: next, retry: err.retry }
+        if (typeof err.retry === 'function') retryRef.current = { page, ref, pick: index, value, retry: err.retry }
         setError(PAGE_RSVP_UNCERTAIN)
       } else {
-        setError(asPage ? refusalText(err, FAILED) : FAILED)
+        setError(asPageGroup ? pageGroupErrorText(err) : asPage ? refusalText(err, FAILED) : FAILED)
       }
     } finally {
       if (alive.current) setBusy(false)
@@ -195,7 +239,9 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
     const fail = () => { if (mineGen === gen.current) setVoters({ phase: 'error', rows: [] }) }
     try {
       if (grouped) {
-        const res = await request('group.voters', { group, target: { writer, seq } })
+        const res = asPageGroup
+          ? await pagesGroup(nodeRef.current, { member: await memberKeyOf(request, nodeRef.current), page, action: 'group-voters', op: { group, target: { writer, seq } } })
+          : await request('group.voters', { group, target: { writer, seq } })
         if (mineGen !== gen.current) return
         const list = res && Array.isArray(res.voters) ? res.voters.find((v) => v && v.pick === index) : null
         const keys = list && Array.isArray(list.by) ? list.by.filter((k) => typeof k === 'string' && HEX64.test(k)) : []
@@ -241,7 +287,7 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   const chip = (index, label) => (
     <Pressable
       accessibilityRole='button'
-      accessibilityLabel={label + (pick === index ? (page !== null && !grouped ? ', resposta da Página, toque para tirar' : ', sua resposta, toque para tirar') : '')}
+      accessibilityLabel={label + (pick === index ? (page !== null ? ', resposta da Página, toque para tirar' : ', sua resposta, toque para tirar') : '')}
       accessibilityState={{ selected: pick === index, disabled: !canAnswer }}
       disabled={!canAnswer}
       onPress={() => answer(index)}
@@ -277,8 +323,8 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
           )
         : null}
       {!hosted ? <Text style={styles.note}>{NOT_HOSTED}</Text> : null}
-      {hosted && online && !past && pick === null && known ? <Text style={styles.note}>{!grouped && page !== null ? choiceNotice(page, NOTICE, PAGE_RSVP_NOTICE) : NOTICE}</Text> : null}
-      {!grouped && page !== null && unread && hosted && online ? <Text style={styles.note} accessibilityLiveRegion='polite'>{PAGE_PICK_UNREAD}</Text> : null}
+      {hosted && online && !past && pick === null && known ? <Text style={styles.note}>{page !== null ? choiceNotice(page, NOTICE, PAGE_RSVP_NOTICE) : NOTICE}</Text> : null}
+      {page !== null && unread && hosted && online ? <Text style={styles.note} accessibilityLiveRegion='polite'>{PAGE_PICK_UNREAD}</Text> : null}
       {hosted && online && total ? <Text style={styles.note}>{total + (grouped ? '' : '. ' + CLAIM)}</Text> : null}
       {hosted && online && shownTotals !== null
         ? (
