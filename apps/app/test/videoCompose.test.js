@@ -139,6 +139,7 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     pagesMoment: pagesMoment || (async () => { throw new Error('the person never publishes as a page') }),
     memberKeyOf: async () => 'a'.repeat(64),
     useMomentMusicAvailable: () => gate.open,
+    noteMusicRecent: () => {},
     useChatAttachments: () => photo,
     pickVideo,
     prepareVideo,

@@ -3769,6 +3769,42 @@ test('audius: genre requests leave no genre and no member in a log line or in st
   noKeyAnywhere(t, s)
 })
 
+test('audius: many members asking many genres leave one list per genre, one provider call each, and only the reason in the logs', async (t) => {
+  const s = await setup(t)
+  const members = [s.member, s.other, crypto.keyPair(), crypto.keyPair()]
+  const tokens = []
+  for (const kp of members) {
+    s.linked.add(b4a.toString(kp.publicKey, 'hex'))
+    tokens.push((await s.login(kp)).token)
+  }
+  const genres = ['Jazz', 'Rock', 'Metal', 'Drum & Bass']
+  let asked = 0
+  for (let round = 0; round < 3; round++) {
+    for (let m = 0; m < members.length; m++) {
+      for (let g = 0; g < genres.length; g++) {
+        const res = await s.post(tokens[m], 'trending', { genre: genres[(g + m + round) % genres.length] })
+        t.is(res.status, 200)
+        asked++
+      }
+    }
+    t.alike(s.routes.trendingSize(), { lists: genres.length, loads: 0 }, 'no list per member or per repeat')
+  }
+  t.is(asked, 48)
+  t.alike(s.state.trendingGenres.slice().sort(), genres.slice().sort(), 'one provider call per genre list while it is valid')
+  t.is(s.api.seen.length, genres.length)
+  for (const r of s.api.seen) {
+    t.alike(Object.keys(r.query).sort(), ['app_name', 'genre', 'limit', 'offset', 'time'])
+    t.absent(r.headers.authorization, 'no bearer')
+    t.ok(Object.keys(r.headers).every((h) => PROVIDER_HEADERS.includes(h)), 'nothing else of ours')
+    const text = JSON.stringify(r)
+    t.absent(members.some((kp) => text.includes(b4a.toString(kp.publicKey, 'hex'))) || tokens.some((k) => text.includes(k)), 'no member and no token')
+  }
+  const lines = s.logs.filter((e) => e.reason === 'em-alta')
+  t.is(lines.length, asked)
+  for (const e of lines) t.alike(e, { event: 'audius', reason: 'em-alta' })
+  noKeyAnywhere(t, s)
+})
+
 test('audius: one request per genre and per kind fills exactly MAX_TRENDING_LISTS lists, and asking again adds none', async (t) => {
   const s = await setup(t)
   const { token } = await s.login()

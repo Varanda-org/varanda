@@ -793,6 +793,11 @@ function createAudiusRoutes ({
     return unavailable()
   }
 
+  // The app may send a genre the person did not tap (their most used one, on
+  // opening). The request carries no sign of how it was chosen and the body
+  // takes no other key, so every genre request is treated alike: the genre
+  // only picks the list key and the provider's genre query, and nothing of
+  // it is kept per member apart from the day's trending count.
   async function trending (res, member, body, url) {
     exactKeys(body, [], ['kind', 'genre'])
     const kind = body.kind === undefined ? 'track' : kindParam(body.kind)
