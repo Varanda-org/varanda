@@ -90,3 +90,11 @@ test('a page thread offers Avaliar for its own offers, rated as the page', (t) =
   t.absent(/pageKey/.test(rate), 'the rate gate does not exclude a page')
   t.ok(rate.includes('buttons.rate && old === null'), 'the person\'s rules still hold')
 })
+
+test('the Mensagens novas line is fixed text inside the target row, not a data row', (t) => {
+  const row = src.slice(src.indexOf('const MessageRow = memo('), src.indexOf('}, sameMessageRow)'))
+  t.ok(row.includes("accessibilityLabel='Mensagens novas a partir daqui'"))
+  t.ok(row.includes("pointerEvents='none'"))
+  t.ok(src.includes('newMark={item.key === openKey}'))
+  t.ok(src.includes('data={rows}'), 'no extra row is added to the list data')
+})

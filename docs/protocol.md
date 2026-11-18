@@ -3001,6 +3001,8 @@ Momentos em vídeo usam os limites próprios da seção 2: MP4 de até 15 segund
 
 Só o nó do navegador grava e lê este bloco. Ele guarda o que cada aparelho da mesma passkey já viu em Avisos, nas Conversas (mensagens diretas e páginas) e nos grupos, para que a marca feita num aparelho valha nos outros, e quem o membro bloqueou (rpc.md 5.111), para que o bloqueio também valha. O serviço de conta guarda um bloco cifrado por membro, em `<dados>/seen/<membro hex64>`, criado na primeira vez que um aparelho grava as suas marcas. Nenhum semeador, nenhum par e nenhum outro membro recebe o bloco. Os textos do que a pessoa vê e a base legal estão na Política de Privacidade (`apps/app/src/legal.js`) e em `docs/design.md` (LGPD).
 
+A posição de leitura não muda o formato nem a versão do bloco. Uma leitura parcial sincroniza como menos tokens de visto das mesmas mensagens diretas e uma marca de grupo mais antiga, então o outro aparelho abre a conversa no mesmo ponto (`firstUnread`, rpc.md 5.78 e 5.40). Limite conhecido: o bloco guarda só as 128 marcas de mensagens diretas mais novas, em todas as conversas; uma conversa cuja marca mais nova saiu dessa janela abre no outro aparelho na posição mais antiga que esse aparelho ainda tem, o mesmo limite que o ponto de não lido já tem.
+
 ### Chave
 
 A chave do bloco sai do segredo de identidade, para que todo aparelho da passkey a derive sem trocar nada e sem nonce de aparelho:
