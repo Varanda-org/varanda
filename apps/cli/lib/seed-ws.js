@@ -117,11 +117,12 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
-//   /index/group-browse/members|recent -> indexGroupBrowse: `{ groups:
-//   [{ group, name, creator, community, communityName, writerCount,
-//   created, active }] (at most 20), more, indexing, complete }`, the
-//   public groups attached to a served community, by member count or by
-//   creation date. /index/public-groups/<D>[/<after>] -> indexPublicGroups:
+//   /index/group-browse/members|recent|trending -> indexGroupBrowse:
+//   `{ groups: [{ group, name, creator, community, communityName,
+//   writerCount, created, active }] (at most 20), more, indexing,
+//   complete }`, the public groups attached to a served community, by
+//   member count, by creation date or by recently active diaries (`active`
+//   is that count in trending, a hint from author-declared dates). /index/public-groups/<D>[/<after>] -> indexPublicGroups:
 //   `{ groups: [{ group, name, creator, community, communityName,
 //   writerCount }] (at most 32, key order), next, hidden, indexing,
 //   complete }`, the open public groups D takes part in (each community's
@@ -446,7 +447,7 @@ const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
 // Discovery lists: an order name, and a diary key with an optional
 // exclusive group-key cursor.
-const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent)$/
+const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent|trending)$/
 const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/

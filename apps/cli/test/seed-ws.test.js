@@ -2066,6 +2066,25 @@ test('startSeedWs /index/group*: routes answer the wire shapes; HEAD the headers
     t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', order])
   }
 
+  const browseStub = seeder.indexGroupBrowse
+  seeder.indexGroupBrowse = async (order) => {
+    seeder.calls.push(['indexGroupBrowse', order])
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 5, created: 1700000000000, active: 3 }], more: false, indexing: false, complete: false }
+  }
+  const trend = await mediaRequest(server.port, '/index/group-browse/trending')
+  t.is(trend.status, 200)
+  jsonHeaders(t, trend)
+  const trendBody = JSON.parse(trend.body.toString())
+  t.alike(trendBody, {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 5, created: 1700000000000, active: 3 }],
+    more: false,
+    indexing: false,
+    complete: false
+  })
+  t.alike(Object.keys(trendBody.groups[0]).sort(), ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount'], 'trending row keys are exact')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', 'trending'])
+  seeder.indexGroupBrowse = browseStub
+
   const pub = await mediaRequest(server.port, '/index/public-groups/' + A)
   t.is(pub.status, 200)
   jsonHeaders(t, pub)
@@ -2117,6 +2136,7 @@ test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 42
   t.ok(INDEX_GROUP_SEARCH_RE.test('/index/group-search/a-b'))
   t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/members'))
   t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/recent'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/trending'))
   t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A))
   t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A + '/' + G))
   const bad = [
@@ -2125,7 +2145,8 @@ test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 42
     '/index/group/' + G + '?x=1', '/index/groups', '/index/groups/' + A + '/x', '/index/groups/' + 'a'.repeat(65),
     '/index/group-search', '/index/group-search/', '/index/group-search/Ana', '/index/group-search/a-b-c-d-e',
     '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na',
-    '/index/group-browse', '/index/group-browse/', '/index/group-browse/trending', '/index/group-browse/Members',
+    '/index/group-browse', '/index/group-browse/', '/index/group-browse/active', '/index/group-browse/Trending',
+    '/index/group-browse/trending/x', '/index/group-browse/Members',
     '/index/group-browse/members/x', '/index/group-browse/members?x=1',
     '/index/public-groups', '/index/public-groups/', '/index/public-groups/' + 'a'.repeat(63), '/index/public-groups/' + 'A'.repeat(64),
     '/index/public-groups/' + A + '/', '/index/public-groups/' + A + '/abc', '/index/public-groups/' + A + '/' + 'a'.repeat(63),
@@ -2190,6 +2211,9 @@ test('startSeedWs /index/group*: the real Seeder\'s answers carry the public nam
   const browse = await mediaRequest(server.port, '/index/group-browse/members')
   t.is(browse.status, 200)
   t.ok(Array.isArray(JSON.parse(browse.body.toString()).groups), 'the real Seeder answers a browse page')
+  const trending = await mediaRequest(server.port, '/index/group-browse/trending')
+  t.is(trending.status, 200)
+  t.ok(Array.isArray(JSON.parse(trending.body.toString()).groups), 'the real Seeder answers a trending page')
   t.is((await mediaRequest(server.port, '/index/public-groups/' + '1'.repeat(64))).status, 404, 'a diary not served is the generic 404')
 })
 
