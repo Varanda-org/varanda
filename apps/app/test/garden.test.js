@@ -534,6 +534,52 @@ test('provenOff is true only for an off balcony read in full', async (t) => {
   t.is(provenOff({ ...off, isPage: true }, false), false)
 })
 
+test('reloadDelay: 5 s, 15 s, 30 s, 60 s, then stop', async (t) => {
+  const { reloadDelay, RELOAD_DELAYS_MS } = await import('../src/garden.js')
+  t.alike(Array.from(RELOAD_DELAYS_MS), [5000, 15000, 30000, 60000])
+  t.alike([0, 1, 2, 3].map((n) => reloadDelay(n)), [5000, 15000, 30000, 60000])
+  t.is(reloadDelay(4), null, 'stops after four')
+  t.is(reloadDelay(-1), null)
+  t.is(reloadDelay(1.5), null)
+  t.is(reloadDelay('0'), null)
+  t.ok(RELOAD_DELAYS_MS.reduce((a, b) => a + b, 0) >= 100000, 'the reloads outlast a seeder restart (about 70 s on the server)')
+})
+
+test('wantsReload: failures and an index still building reload, answers do not', async (t) => {
+  const { assembleBalcony, wantsReload } = await import('../src/garden.js')
+  const playing = { phase: 'ready', error: null, mine: { on: true }, following: null }
+  const on = assembleBalcony({ owner: OWNER, index: baseIndex(), ownerReads: ownerRead(), helperReads: new Map(), now: NOW })
+  const offReads = [peek(OWNER, [e(1, { type: 'profile' }), e(3, flag(false)), e(4, state(ownerPots()))])]
+  const off = assembleBalcony({ owner: OWNER, index: baseIndex(), ownerReads: offReads, helperReads: new Map(), now: NOW })
+  const building = assembleBalcony({ owner: OWNER, index: baseIndex({ indexing: true, complete: false }), ownerReads: offReads, helperReads: new Map(), now: NOW })
+  const ready = (result, forced = false) => ({ phase: 'ready', result, forced, error: null })
+
+  t.is(wantsReload({ view: { phase: 'error', error: 'x', mine: null }, bal: { phase: 'idle', result: null }, own: true }), true, 'the own state failed to load')
+  t.is(wantsReload({ view: playing, bal: { phase: 'error', result: null, error: 'x' }, own: false }), true, 'the balcony read failed')
+  t.is(wantsReload({ view: playing, bal: ready(building), own: false }), true, 'a neighbour while the seeder indexes')
+  t.is(wantsReload({ view: playing, bal: ready({ ...on, indexing: true }), own: true }), true, 'the own helpers while the seeder indexes')
+  t.is(wantsReload({ view: playing, bal: ready(off, true), own: false }), true, 'a neighbour not proven off')
+
+  t.is(wantsReload({ view: playing, bal: ready(on), own: false }), false, 'a neighbour who plays')
+  t.is(wantsReload({ view: playing, bal: ready(on), own: true }), false, 'the own balcony read in full')
+  t.is(wantsReload({ view: playing, bal: ready(off), own: false }), false, 'a neighbour proven not to play')
+  t.is(wantsReload({ view: playing, bal: ready({ ...off, isPage: true }), own: false }), false, 'a page')
+  t.is(wantsReload({ view: playing, bal: ready(off, true), own: true }), false, 'the own balcony reads its pots from garden.state')
+  t.is(wantsReload({ view: { phase: 'ready', error: null, mine: { on: false } }, bal: { phase: 'idle', result: null }, own: true }), false, 'a viewer who does not play')
+  t.is(wantsReload({ view: { phase: 'ready', error: null, mine: { on: false } }, bal: { phase: 'error', result: null }, own: false }), false, 'no balcony read for a viewer who does not play')
+  t.is(wantsReload({ view: { phase: 'loading', error: null, mine: null }, bal: { phase: 'idle', result: null }, own: true }), false, 'a load in flight')
+  t.is(wantsReload({ view: playing, bal: { phase: 'loading', result: null }, own: false }), false, 'a balcony read in flight')
+  t.is(wantsReload(null), false)
+  t.is(wantsReload({ view: null, bal: null }), false)
+})
+
+test('the Varandinha screen reloads on the ladder, never while a write is in flight', async (t) => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'screens', 'Varandinha.js'), 'utf8')
+  t.ok(src.includes('const reloadable = !act.pending && wantsReload({ view, bal, own })'), 'reloads only what a later read may fix, and no write is pending')
+  t.ok(src.includes('const delay = reloadDelay(reloads.current)'), 'on the bounded ladder')
+  t.is(src.match(/setTimeout\(/g).length, 1, 'one timer: the reload')
+})
+
 test('streetKeys offers only followed keys, once each, in the seeder order', async (t) => {
   const { streetKeys } = await import('../src/garden.js')
   const follows = new Set([BOB, CAROL])
