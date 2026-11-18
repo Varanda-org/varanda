@@ -179,6 +179,9 @@ function scanFixture (options = {}) {
     _groupServed: new Map(),
     _groupIndex: { removeDiary () {} },
     _groupRootStartup: null,
+    // _drop also leaves the header stubs the diary made (seeder.js).
+    _headerStubs: new Map(),
+    _stubCores: new Map(),
     // The scan also reconciles group joins (none in these records).
     _groups: new Map(),
     _groupBackoff: new Map(),
