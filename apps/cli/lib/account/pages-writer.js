@@ -176,7 +176,7 @@ function copyJson (value) {
   }
 }
 
-const DELETABLE = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first

@@ -47,6 +47,12 @@
 // de novo' drops the item, so the next press (the person's) puts the photo
 // again. An uncertain moment.create holds the draft until the person checks
 // in the Diário and discards it: never sent again.
+// A Page's momento (src/pageMoment.js): the composer opens as whoever is
+// acting, and as a Page the same photo or video put (media.putMoment, only the
+// item put in this session, for that publisher) is published with the page
+// action 'moment' (pagesMoment). An identity change drops the item. An unknown
+// outcome locks the draft and 'Tentar de novo' resends the same signed request
+// on the person's tap, or 'Descartar' drops it.
 // 'Publicar também na web' (../postShareCompose) is offered where the
 // installation has public post pages on and the node is hosted
 // (usePostPublic), for a plain own-diary post only: not a reply or quote (the
@@ -68,8 +74,9 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
-import { actAs, pagesList, pagesMedia, pagesOrigin, pagesStart } from '../pages'
+import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesStart } from '../pages'
 import { pagePostOp, prepPageVideo } from '../pagePost'
+import { MOMENT_PAGE_UNCERTAIN, MOMENT_PREPARING_NOTICE, createMomentItems, isMomentPreparing, momentComposerOn, momentFailure, momentPublishedAs, momentPutArgs } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
 import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
@@ -218,7 +225,7 @@ function useVideoDraft ({ active, moment = false }) {
 // The Momento draft: one staged item, the text, the put item kept for a new
 // press after a failure, and the uncertain hold. send() is one explicit
 // attempt; nothing here ever repeats a request.
-function useMomentDraft ({ node, member, open, active }) {
+function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 'você' }) {
   const photo = useChatAttachments({ limit: 1 })
   const video = useVideoDraft({ active, moment: true })
   const musicAllowed = useMomentMusicAvailable(node, member, active)
@@ -229,7 +236,13 @@ function useMomentDraft ({ node, member, open, active }) {
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [held, setHeld] = useState(false)
-  const itemRef = useRef(null)
+  // The item put in this session, for the publisher it was put for.
+  const itemsRef = useRef(null)
+  if (itemsRef.current === null) itemsRef.current = createMomentItems()
+  const kept = itemsRef.current
+  // A page's send that ended unknown: { retry } resends the same signed bytes
+  // on an explicit tap; the person's uncertain send has none.
+  const retryRef = useRef(null)
   const busyRef = useRef(false)
   const { items, remove, pick: pickPhoto, clear: clearPhoto } = photo
   // Exactly one photo. 'Trocar foto' keeps the staged one until a new one is
@@ -254,7 +267,7 @@ function useMomentDraft ({ node, member, open, active }) {
     const fresh = before === null ? items.slice(1) : items.filter((it) => !before.includes(it.id))
     if (before !== null && fresh.length > 0) {
       replacingRef.current = null
-      itemRef.current = null
+      kept.clear()
       for (const old of items.filter((it) => before.includes(it.id))) remove(old.id)
       for (const extra of fresh.slice(1)) remove(extra.id)
       if (fresh.length > 1) setNote(oneNote)
@@ -264,7 +277,7 @@ function useMomentDraft ({ node, member, open, active }) {
       for (const extra of items.slice(1)) remove(extra.id)
       setNote(oneNote)
     }
-  }, [items, remove, videoPhase, oneNote])
+  }, [items, remove, videoPhase, oneNote, kept])
   const pick = useCallback(async () => {
     if (busyRef.current || held) return
     if (video.draft.state.phase !== 'empty') { setNote(MOMENT_ONE_MEDIA); return }
@@ -286,17 +299,18 @@ function useMomentDraft ({ node, member, open, active }) {
   }
   const removePhoto = (id) => {
     if (busyRef.current || held) return
-    itemRef.current = null
+    kept.clear()
     remove(id)
   }
   const removeVideo = () => {
     if (busyRef.current || held) return
-    itemRef.current = null
+    kept.clear()
     video.draft.clear()
     setError('')
   }
   const reset = useCallback(() => {
-    itemRef.current = null
+    kept.clear()
+    retryRef.current = null
     clearPhoto()
     video.draft.clear()
     setText('')
@@ -305,7 +319,10 @@ function useMomentDraft ({ node, member, open, active }) {
     setError('')
     setNote('')
     setHeld(false)
-  }, [clearPhoto, video.draft])
+  }, [clearPhoto, video.draft, kept])
+  // An item put for one publisher is no use to another; a send waiting for
+  // its retry belongs to the page it was signed for and stays locked.
+  useEffect(() => { if (retryRef.current === null) kept.follow(asPage) }, [asPage, kept])
   useEffect(() => { if (!open) setError('') }, [open])
   useEffect(() => {
     if (!active || !musicAvailable) setMusicPickerOpen(false)
@@ -337,6 +354,23 @@ function useMomentDraft ({ node, member, open, active }) {
   useEffect(() => {
     if (!active) genRef.current++
   }, [active])
+  // A new publisher cancels a send in flight for the old one.
+  // switchRef counts identity changes alone: an item put across one is
+  // never recorded, even when the identity came back.
+  const publisherRef = useRef(asPage)
+  const switchRef = useRef(0)
+  useEffect(() => {
+    if (publisherRef.current !== asPage) {
+      genRef.current++
+      switchRef.current++
+    }
+    publisherRef.current = asPage
+  }, [asPage])
+  const publishedElsewhere = (label) => {
+    publishedRef.current = false
+    reset()
+    setNote(momentPublishedAs(label))
+  }
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
   const valid = !held && unlocked && node.online !== false &&
     (!video.state.file || canComposeVideo({ node, pickVideo, prepareVideo })) && momentValid({ files: photo.files, ready: photo.ready, text, video: video.state.file, preparing: video.state.phase === 'preparing' })
@@ -349,38 +383,55 @@ function useMomentDraft ({ node, member, open, active }) {
     if (clip && !canComposeVideo({ node, pickVideo, prepareVideo })) return false
     const file = clip || photo.files[0]
     const gen = genRef.current
+    const switches = switchRef.current
+    const publisher = asPage
+    const label = asLabel
     busyRef.current = true
     setPending(true)
     setError('')
     try {
-      if (itemRef.current === null) {
-        // putMoment wipes the buffer it gets: the staged bytes stay for a retry.
-        itemRef.current = clip
-          ? await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height, ms: file.ms, kind: 'video' })
-          : await node.media.putMoment({ bytes: file.bytes.slice(), mime: file.mime, width: file.width, height: file.height })
+      if (kept.take(publisher) === null) {
+        // putMoment wipes the buffer it gets: the staged bytes stay for a
+        // retry. An item that comes back after an identity change is not
+        // recorded (a close keeps it for the next press).
+        const put = await node.media.putMoment(momentPutArgs(file, { clip: !!clip, publisher }))
+        if (switchRef.current === switches) kept.put(put, publisher)
       }
       if (gen !== genRef.current) return false
+      // Only the item put in this session, for the publisher acting now.
+      const item = kept.take(publisher)
+      if (item === null) return false
       const chosen = !clip && musicAvailable && music !== null ? { music: { p: 'audius', id: music.ref.id, start: music.ref.start } } : {}
-      await node.request('moment.create', { text, media: itemRef.current, ...chosen })
-      itemRef.current = null
+      if (publisher === null) await node.request('moment.create', { text, media: item, ...chosen })
+      else await pagesMoment(node, { member: await memberKeyOf(node.request, node), page: publisher, text, media: item, music: chosen.music })
+      kept.clear()
       momentsChanged()
       publishedRef.current = true
-      // Published, but the person closed Momento meanwhile (maybe for another
-      // composer): no onPublished, which would close what is open now.
-      return gen === genRef.current
+      if (gen === genRef.current) return true
+      // Published for a publisher no longer acting: the draft goes, and the
+      // notice says for whom. A close alone keeps the old rule: no
+      // onPublished, which would close what is open now.
+      if (publisherRef.current !== publisher) publishedElsewhere(label)
+      return false
     } catch (err) {
-      if (isLocked(err)) setError(MOMENT_LOCKED)
-      else if (err && err.uncertain === true) {
+      const failure = momentFailure({ uncertain: err && err.uncertain === true, publisher, retry: err && err.retry, itemKept: kept.take(publisher) !== null })
+      if (failure === 'retry') {
+        // The page's request may have landed: only the person's tap resends
+        // the same signed request.
+        retryRef.current = { retry: err.retry, publisher, label }
+        setHeld(true)
+        setError(MOMENT_PAGE_UNCERTAIN)
+        momentsChanged()
+      } else if (failure === 'hold') {
         // The moment may be published: hold the draft, never resend.
-        if (itemRef.current !== null) {
-          setHeld(true)
-          setError(MOMENT_UNCERTAIN)
-          momentsChanged()
-        } else {
-          setError(errorText(err))
-        }
-      } else if (err && typeof err.message === 'string' && err.message.includes(MEDIA_STALE)) {
-        itemRef.current = null
+        setHeld(true)
+        setError(MOMENT_UNCERTAIN)
+        momentsChanged()
+      } else if (isLocked(err)) setError(MOMENT_LOCKED)
+      else if (isMomentPreparing(err)) setError(MOMENT_PREPARING_NOTICE)
+      else if (err && err.uncertain === true) setError(errorText(err))
+      else if (err && typeof err.message === 'string' && err.message.includes(MEDIA_STALE)) {
+        kept.clear()
         setError(clip ? 'O vídeo precisa ser preparado de novo. Toque em Publicar para enviar.' : MOMENT_STALE)
       } else {
         setError(errorText(err))
@@ -391,7 +442,46 @@ function useMomentDraft ({ node, member, open, active }) {
       setPending(false)
     }
   }
-  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, valid, unlocked, pick, send, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
+  // 'Tentar de novo' after a page's unknown outcome: the same signed request,
+  // once per tap. A refusal frees the draft; another unknown one keeps it.
+  const retry = async () => {
+    const pending = retryRef.current
+    if (busyRef.current || pending === null) return false
+    const gen = genRef.current
+    const label = pending.label
+    busyRef.current = true
+    setPending(true)
+    setError('')
+    try {
+      await pending.retry()
+      retryRef.current = null
+      kept.clear()
+      setHeld(false)
+      momentsChanged()
+      publishedRef.current = true
+      if (gen === genRef.current) return true
+      if (publisherRef.current !== pending.publisher) publishedElsewhere(label)
+      return false
+    } catch (err) {
+      if (momentFailure({ uncertain: err && err.uncertain === true, publisher: pending.publisher, retry: err && err.retry, itemKept: true }) === 'retry') {
+        retryRef.current = { retry: err.retry, publisher: pending.publisher, label }
+        setError(MOMENT_PAGE_UNCERTAIN)
+      } else {
+        retryRef.current = null
+        setHeld(false)
+        // The draft is free again: an item put for another publisher goes.
+        kept.follow(publisherRef.current)
+        setError(errorText(err))
+      }
+      momentsChanged()
+      return false
+    } finally {
+      busyRef.current = false
+      setPending(false)
+    }
+  }
+  const canRetry = held && retryRef.current !== null
+  return { photo, video, pickClip, removeVideo, removePhoto, text, setText, pending, error, note, held, canRetry, heldLabel: canRetry ? retryRef.current.label : null, valid, unlocked, pick, send, retry, reset, music, setMusic, removeMusic, musicAvailable, musicPickerOpen, setMusicPickerOpen, pickMusic }
 }
 
 // The Momento text box: about five lines before its text scrolls inside it,
@@ -805,10 +895,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const asPage = pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && acting.kind === 'page' ? acting.key : null
   // Momento mode: hosted, with media.putMoment, and a plain post (no reply,
   // quote or page). The post draft is untouched while it shows.
-  const momentOn = canPublishMoment(node) && !replyProp && !quote && asPage === null
+  const momentOn = momentComposerOn({ canPublish: canPublishMoment(node), reply: replyProp, quote })
   const [mode, setMode] = useState('post')
   const momentMode = momentOn && mode === 'moment'
-  const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode })
+  const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode, asPage, asLabel: asPage === null ? 'você' : actingStore.label() })
   const video = useVideoDraft({ active: open === true && !momentMode })
   const canVideo = canComposeVideo({ node, pickVideo, prepareVideo })
   // Only an increase is a request: the shell resets the counter to 0 when a
@@ -824,13 +914,14 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
   }, [momentRequest])
   // Each opening starts in Publicação (the publish button opens a post)
-  // unless a moment request came with it. Reset on the opening, not on the
+  // unless a moment request came with it, or a page momento is held for its
+  // retry (only Momento offers it). Reset on the opening, not on the
   // close: the sheet keeps its content while it slides away, so a reset there
   // flipped the closing sheet to the post composer.
   const wasOpenRef = useRef(open)
   useEffect(() => {
     if (open && !wasOpenRef.current) {
-      if (!momentAskedRef.current) setMode('post')
+      if (!momentAskedRef.current) setMode(moment.canRetry ? 'moment' : 'post')
       momentAskedRef.current = false
     }
     wasOpenRef.current = open
@@ -1945,6 +2036,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       onPublished('moment', null)
     }
   }
+  const retryMoment = async () => {
+    if (await moment.retry()) {
+      tap('success')
+      keepPostOnCloseRef.current = true
+      onPublished('moment', null)
+    }
+  }
   const handlePickMoment = moment.pick
   const handlePickMomentVideo = moment.pickClip
   const handleRemoveMomentVideo = moment.removeVideo
@@ -2064,7 +2162,10 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       }
     : undefined
   const handleMode = (id) => {
-    if (busy || moment.pending) return
+    // A page momento held for its retry stays with its Página, as a held post.
+    // Going back to Momento stays open: a share or a reopening lands on
+    // Publicação, and the retry and Descartar live only in Momento.
+    if (busy || moment.pending || (moment.canRetry && id !== 'moment')) return
     video.draft.cancelPreparation()
     moment.video.draft.cancelPreparation()
     setMode(id)
@@ -2168,7 +2269,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               >
                 {momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' : momentCount + '/' + MOMENT_TEXT_MAX}
               </Text>
-              <Soft>Fica 24 horas para quem segue você. Responder abre uma conversa privada.</Soft>
+              <Soft>{moment.heldLabel !== null ? 'Publicando como ' + moment.heldLabel + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : asPage !== null ? 'Publicando como ' + actingStore.label() + '. Fica 24 horas para quem segue a Página. Responder abre uma conversa privada.' : 'Fica 24 horas para quem segue você. Responder abre uma conversa privada.'}</Soft>
               {momentStatus === 'locked' ? <Soft>{!moment.unlocked ? MOMENT_LOCKED : 'Momentos precisam de internet'}</Soft> : null}
               {momentStatus === 'media' ? <Soft>{moment.note || moment.photo.note}</Soft> : null}
               {momentStatus === 'draft' ? <Soft>{DRAFT_KEPT}</Soft> : null}
@@ -2176,7 +2277,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               {moment.held
                 ? (
                   <View style={styles.retryRow}>
-                    <Btn label='Descartar' secondary onPress={handleDiscardMoment} />
+                    {moment.canRetry ? <Btn label='Tentar de novo' onPress={retryMoment} disabled={moment.pending} /> : null}
+                    <Btn label='Descartar' secondary onPress={handleDiscardMoment} disabled={moment.pending} />
                   </View>
                   )
                 : null}
@@ -2221,7 +2323,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             ? (
               <View style={styles.asRow} accessibilityRole='radiogroup' aria-labelledby={asLabelId}>
                 <Text style={styles.asLabel} nativeID={asLabelId}>Publicar como</Text>
-                <Chip label='Você' on={asPage === null} disabled={held} onPress={() => actingStore.me()} />
+                <Chip label='Você' on={asPage === null} disabled={held || moment.canRetry} onPress={() => actingStore.me()} />
                 {roster.map((key) => {
                   const p = names.profileOf(key)
                   return (
@@ -2229,7 +2331,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                       key={key}
                       label={pageLabel(p)}
                       on={asPage === key}
-                      disabled={held}
+                      disabled={held || moment.canRetry}
                       onPress={() => actingStore.asPage({ key, name: p && p.name, username: p && p.username })}
                     />
                   )

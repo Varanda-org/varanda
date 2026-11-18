@@ -25,8 +25,9 @@
 // No likes, no view counts: 'Responder' (hosted, canReply) opens the private
 // conversation with the author through the openMessage contract, with the
 // moment as its context. Own moments offer 'Apagar' (moment.delete, after a
-// confirmation; an uncertain answer says so and the action is not offered
-// again on that sheet) and 'Novo momento'. Each item shown is marked seen
+// confirmation; as the Page acted as, the Page's own momento goes through
+// the page 'delete' action; an uncertain answer says so and the action is not
+// offered again on that sheet) and 'Novo momento'. Each item shown is marked seen
 // (src/momentSeen.js: no record, nobody told; synced where the node is hosted).
 //
 // Also exported for A Rua and Diário: useMoments (moments.read on a hosted
@@ -40,6 +41,10 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { aheadMomentsOf, holdMsOf, momentMusicOf, momentRefOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, prevMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
 import { IMAGE_MIMES, momentPhotoKey, momentPhotosFor } from '../momentPhotos'
+import { actAs } from '../pages'
+import { choicePage } from '../pageChoice'
+import { momentDeleteAs } from '../pageMoment'
+import { memberKeyOf, useActing } from './Conversa'
 import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
 import { momentSwipe, swipeRelease, swipeTotal } from '../momentSwipe'
 import { QUICK, reactionName } from '../reactions'
@@ -166,11 +171,14 @@ export function useMomentSeen () {
   return { loaded: seen !== null, seen: seen || [], mark: markMomentSeen }
 }
 
-// Confirmation before moment.delete (ConfirmStack). An uncertain answer says
-// so and takes the confirm button away: the person checks before trying.
-export function ConfirmMomentDelete ({ open, target, onClose, onDeleted }) {
+// Confirmation before moment.delete (ConfirmStack), or before the page
+// 'delete' when `page` (the page acted as) owns the momento. An uncertain
+// answer says so and takes the confirm button away: the person checks before
+// trying.
+export function ConfirmMomentDelete ({ open, target, page = null, onClose, onDeleted }) {
   const styles = useStyles(makeStyles)
-  const { request } = useNode()
+  const node = useNode()
+  const { request } = node
   const [pending, setPending] = useState(false)
   const [error, setError] = useState(null)
   const [uncertain, setUncertain] = useState(false)
@@ -183,7 +191,9 @@ export function ConfirmMomentDelete ({ open, target, onClose, onDeleted }) {
     setError(null)
     let ok = false
     try {
-      await request('moment.delete', { to: target.ref })
+      const as = momentDeleteAs(target.ref, page)
+      if (as === null) await request('moment.delete', { to: target.ref })
+      else await actAs(node, { member: await memberKeyOf(request, node), action: 'delete', page: as, op: { to: target.ref } })
       ok = true
     } catch (err) {
       setError(failureText(err))
@@ -600,6 +610,9 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   // so the avatar below may persist.
   const author = ring ? ring.author : null
   const mine = author !== null && author === own
+  // The momento of the Page acted as: deleted through the page 'delete'.
+  const actingPage = choicePage(useActing())
+  const pageOwn = !mine && author !== null && actingPage === author
   const photo = useMomentPhoto(author, item)
   const handlePhotoError = photo.fail
   const itemKey = item ? item.ref : ''
@@ -612,8 +625,8 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
-  const reactionAvailable = !mine && canReact(node) && item !== null
-  const reactionVisible = !mine && item !== null
+  const reactionAvailable = !mine && !pageOwn && canReact(node) && item !== null
+  const reactionVisible = !mine && !pageOwn && item !== null
   const reaction = reactionStates[itemKey]
   const react = async (emoji) => {
     if (!mounted.current || reactionBusy.current || !reactionAvailable || reactionUncertain.current.has(item.ref)) return
@@ -1088,7 +1101,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const name = mine ? 'Você' : displayText(whoOf(profile || {}).title)
   const time = item ? relativeTime(item.at, now) : null
 
-  const reply = !mine && canReply(node) && typeof onMessage === 'function' && item !== null
+  const reply = !mine && !pageOwn && canReply(node) && typeof onMessage === 'function' && item !== null
     ? () => onMessage(author, { context: replyContext(item, author) })
     : null
   const openProfile = author !== null && typeof onOpenMember === 'function'
@@ -1157,7 +1170,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const segments = progressOf(pos.item, ring.items.length)
   const fill = progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] })
   const text = item.text !== '' ? displayText(item.text, { multiline: true }) : ''
-  const menuActions = mine
+  const menuActions = mine || pageOwn
     ? [{
         icon: 'lixeira',
         label: 'Apagar',
@@ -1280,7 +1293,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
             {video || musicOn === true
               ? <IconAction icon={silent ? 'mudo' : 'som'} label={silent ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL} color='#ffffff' onPress={toggleSound} />
               : null}
-            {mine
+            {mine || pageOwn
               ? (
                 <>
                   <IconAction icon='mais' label='mais ações' color='#ffffff' onPress={openMenu} />
@@ -1406,7 +1419,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
               : null}
         </View>
       </Animated.View>
-      <ConfirmMomentDelete open={deleting !== null} target={deleting} onClose={() => setDeleting(null)} onDeleted={removed} />
+      <ConfirmMomentDelete open={deleting !== null} target={deleting} page={pageOwn ? actingPage : null} onClose={() => setDeleting(null)} onDeleted={removed} />
     </View>
   )
 }

@@ -376,6 +376,24 @@ test('choice: pageChoiceOp builds { to, pick } and pagesChoice posts it to the c
   t.is(node.signs[0].params.action, 'choice')
 })
 
+test('moment: pageMomentOp builds the person\'s input and pagesMoment posts it to the moment route', async (t) => {
+  const { pageMomentOp, pagesMoment } = await load()
+  const media = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 2, bytes: 40000, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 }
+  const music = { p: 'audius', id: 'abc123', start: 30 }
+  t.alike(pageMomentOp({ text: 'Pão saindo', media }), { text: 'Pão saindo', media })
+  t.alike(pageMomentOp({ media }), { text: '', media }, 'an absent text is empty')
+  t.alike(pageMomentOp({ text: 'x', media, music }), { text: 'x', media, music })
+  t.alike(pageMomentOp({ text: 'x', media, music: null }), { text: 'x', media }, 'null music is none')
+  t.alike(pageMomentOp({ text: 3, media }), { text: 3, media }, 'a bad text is sent as given for the service to refuse')
+  const calls = stub(t, flow(() => json(200, { seq: 11 })))
+  const node = fakeNode()
+  const data = await pagesMoment(node, { member: M, page: P, text: 'oi', media, music })
+  t.is(data.seq, 11)
+  t.ok(calls[1].url.endsWith('/account/pages/moment'))
+  t.alike(body(calls[1]).op, { text: 'oi', media, music })
+  t.is(node.signs[0].params.action, 'moment')
+})
+
 test('offer-cancel is no action: the cancel is the signed offer record', async (t) => {
   const { actAs } = await load()
   const calls = stub(t, flow(() => json(200, {})))
@@ -1805,11 +1823,9 @@ test('pagesList: an answer never ends an identity chosen after its request began
   await early
   t.is(acting.get().kind, 'page', 'a list read before acting as the page leaves it')
 
-  acting.enterMoment()
   answers.push(list([{ page: X, closed: true }]))
   await pagesList(node, { member: MEM })
-  acting.leaveMoment()
-  t.is(acting.get().kind, 'me', 'the stopped page does not come back after the momento composer')
+  t.is(acting.get().kind, 'me', 'a stopped page acts as the person again')
 })
 
 test('pageError has plain words for a join refused because the page is outside the community', async (t) => {

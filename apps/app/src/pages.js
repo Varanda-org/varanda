@@ -285,7 +285,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', 'choice', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', 'moment', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -412,6 +412,20 @@ export function pageChoiceOp (to, pick) {
 
 export function pagesChoice (node, { member, page, to, pick }) {
   return actAs(node, { member, action: 'choice', page, op: pageChoiceOp(to, pick) })
+}
+
+// The page's momento ('moment', docs/rpc.md 5.84), the person's
+// moment.create input: `media` the item the node's moment.putMedia answered
+// (the device uploads the blob itself), `text` '' when absent, `music` sent
+// only when given (null or absent is none).
+export function pageMomentOp ({ text, media, music } = {}) {
+  const op = { text: text === undefined || text === null ? '' : text, media }
+  if (music !== undefined && music !== null) op.music = music
+  return op
+}
+
+export function pagesMoment (node, { member, page, text, media, music }) {
+  return actAs(node, { member, action: 'moment', page, op: pageMomentOp({ text, media, music }) })
 }
 
 export async function pagesFollows (node, { member, page }) {
