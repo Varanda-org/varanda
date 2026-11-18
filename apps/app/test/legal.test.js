@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 87)
+  t.is(LEGAL_VERSION, 89)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 87, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 89, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,12 +388,29 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test("legal: version 89 describes a page's media, reactions and hides in private groups", async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 89)
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
+  t.ok(terms.includes('Num grupo privado, a página também publica fotos, GIFs, uma mensagem de voz e um link com prévia, responde, encaminha, reage e oculta as próprias publicações'), 'terms: a page acts as a person in a private group')
+  t.ok(terms.includes('o serviço de conta guarda só a versão cifrada, sabe o tamanho dela e para qual grupo foi enviada'), 'terms: what the service stores and learns')
+  t.ok(terms.includes('só os aparelhos dos membros conseguem abri-las'), 'terms: only members open them')
+  t.ok(privacy.includes('as fotos e mensagens de voz da página são cifradas no aparelho de quem administra'), 'privacy: sealed on the admin device')
+  t.ok(privacy.includes('sabe o tamanho, o grupo e qual administrador a enviou e quando, e não consegue abri-la; nada público da página a mostra'), 'privacy: what the service learns, never shown in public')
+  t.ok(privacy.includes('As reações da página num grupo privado são cifradas como as publicações, e, quando ela oculta uma publicação, o que vai cifrado é o registro de ocultação.'), 'privacy: reactions and hide records sealed')
+  t.ok(terms.includes('Essa versão cifrada fica guardada pelo serviço de conta e é servida pelo semeador junto com as outras mídias da página em grupos.'), 'terms: the service keeps it, the seeder serves it')
+  t.ok(terms.includes('Ocultar a publicação ou sair do grupo não a apaga: ao ocultar, o que vai cifrado é o registro de ocultação'), 'terms: hiding or leaving deletes nothing, the hide record is sealed')
+  t.ok(privacy.includes('Essa versão cifrada fica guardada pelo serviço de conta e é servida pelo semeador, como as outras mídias da página em grupos, e ocultar a publicação ou sair do grupo não a apaga.'), 'privacy: kept and served, hiding or leaving deletes nothing')
+  t.ok(privacy.includes('Essas fotos e mensagens de voz, inclusive as cifradas dos grupos privados, continuam guardadas pelo serviço de conta e servidas pelo semeador.'), 'privacy: closing a page keeps its group media')
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '7012cd824ba0243da94195aba61f52022f9567b2bb18f6013a5677901e5a7ec4', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'eaaa30bd09b5496bb5f083a87e173c2176e2698507178fff0c7985001fcc35eb', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

@@ -89,8 +89,8 @@ export function preloadNode () {
 }
 
 // The node's media facade in the native handle's shape
-// (./webnode.native.js), so screens see one API: upload, putDm, putMoment and
-// read(ref) -> { bytes, mime, w, h }, plus ms for a voice note or a video
+// (./webnode.native.js), so screens see one API: upload, putDm, putMoment,
+// sealPage and read(ref) -> { bytes, mime, w, h }, plus ms for a voice note or a video
 // (the native handle answers a uri instead). Here the bytes never cross RPC:
 // they stay in the page. A method the facade lacks is a capability this node
 // does not have; `video` is true where upload is, since the node script ships
@@ -105,6 +105,7 @@ export function mediaOf (facade) {
   }
   if (has('putDm')) out.putDm = (args) => facade.putDm(args)
   if (has('putMoment')) out.putMoment = (args) => facade.putMoment(args)
+  if (has('sealPage')) out.sealPage = (args) => facade.sealPage(args)
   if (has('readDm') || has('readGroup') || has('readMoment')) {
     out.read = async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
