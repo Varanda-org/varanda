@@ -1,6 +1,6 @@
 // A pill-shaped button: filled (accent), tonal (soft ink on a quiet fill) or
 // outlined (ink or danger). `icon` sits left of the label; with no label it is
-// a round icon-only pill, 40 pt, or 32 pt when `small` (give it an
+// a round icon-only pill, 44 pt, or 36 pt when `small` (give it an
 // accessibilityLabel). `iconEnd` sits right of the label: the chevron of a
 // pill that opens a list of choices.
 // `maxFontSizeMultiplier` caps the label, for a pill in a Sheet header whose
@@ -68,24 +68,24 @@ export function Pill ({ label, icon, iconFilled, iconEnd, onPress, filled, dange
 }
 
 const makeStyles = (colors) => StyleSheet.create({
-  pill: { borderRadius: 999, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6, minHeight: 40 },
-  round: { width: 40, height: 40, paddingVertical: 0, paddingHorizontal: 0 },
+  pill: { borderRadius: 999, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6, minHeight: 44 },
+  round: { width: 44, height: 44, paddingVertical: 0, paddingHorizontal: 0 },
   // Same height as an outline pill: its 8 padding plus the 1.5 border.
   filled: { backgroundColor: colors.accent, paddingVertical: 9.5, paddingHorizontal: 17 },
   outline: { borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   tonal: { backgroundColor: colors.inputOff, paddingVertical: 9.5, paddingHorizontal: 17 },
   outlineDanger: { borderColor: colors.danger },
-  small: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 },
-  smallRound: { width: 32, height: 32, minHeight: 32, paddingVertical: 0, paddingHorizontal: 0 },
-  // The pressable is layout.hit because the web ignores hitSlop, so a 32 pt
+  small: { minHeight: 36, paddingVertical: 0, paddingHorizontal: 12 },
+  smallRound: { width: 36, height: 36, minHeight: 36, paddingVertical: 0, paddingHorizontal: 0 },
+  // The pressable is layout.hit because the web ignores hitSlop, so a 36 pt
   // face cannot grow to the 44 pt target that way.
   smallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   off: { opacity: 0.45 },
   pressed: { opacity: PRESSED_OPACITY },
   // 1 pt sides: Android rounds the exact-fit label inside the 1.5 pt outline and would
   // wrap its last word out of sight (seen on Btn's "Trocar passkey").
-  text: { ...type.pill, flexShrink: 1, textAlign: 'center', paddingHorizontal: 1 },
-  textSmall: { fontSize: 13, lineHeight: 16 },
+  text: { ...type.rowName, flexShrink: 1, textAlign: 'center', paddingHorizontal: 1 },
+  textSmall: { fontSize: 14, lineHeight: 20 },
   textFilled: { color: colors.accentInk },
   textTonal: { color: colors.soft },
   textInk: { color: colors.ink },

@@ -111,6 +111,7 @@ async function ui (stubs = {}, code = source, names = 'MusicContent, MusicPicker
     useTheme: () => ({ colors: {} }),
     useMusicCover: () => null,
     layout: { hit: 44 },
+    TEXT_CAP: 1.3,
     radius: {},
     space: {},
     webInputReset: {},
