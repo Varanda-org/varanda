@@ -17,7 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useBlocks } from '../blocksProvider'
 import { diaryPeekSlots } from '../engagement'
 import { readFollowKeys } from '../follow'
-import { assembleBalcony, closeConsent, discard, initialConsent, nextLoadStep, openConsent, pendingCount, pendingStart, planPeeks, provenOff, queue, revalidate, startConsent, toggleConsent } from '../garden'
+import { assembleBalcony, closeConsent, discard, initialConsent, nextLoadStep, openConsent, pendingCount, pendingStart, planPeeks, provenOff, queue, reloadDelay, revalidate, startConsent, toggleConsent, wantsReload } from '../garden'
 import { HELP } from '../help'
 import { gardenTime } from '../gardenClock'
 import { fetchGarden } from '../indexClient'
@@ -320,6 +320,28 @@ export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToa
     load()
     return () => { seq.current += 1 }
   }, [load])
+
+  // A read that failed, or a balcony the seeder is still indexing (an update
+  // restarts it), is read again by itself on the reload ladder while the
+  // screen is open; a clean answer starts the ladder over. Reads only, and
+  // never while a write is in flight (its own reread settles the screen).
+  const reloadable = !act.pending && wantsReload({ view, bal, own })
+  const reloads = useRef(0)
+  const [reloadTick, setReloadTick] = useState(0)
+  useEffect(() => {
+    if (!reloadable) {
+      if (view.phase === 'ready' && bal.phase !== 'loading') reloads.current = 0
+      return
+    }
+    const delay = reloadDelay(reloads.current)
+    if (delay === null) return
+    const timer = setTimeout(() => {
+      reloads.current += 1
+      setReloadTick((n) => n + 1)
+      load()
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [reloadable, reloadTick, load, view.phase, bal.phase])
 
   const mine = view.mine
   const counts = useMemo(

@@ -189,6 +189,36 @@ export function provenOff (result, forced) {
     result.incomplete !== true && result.stale !== true && forced !== true
 }
 
+// Automatic reloads of the screen while it is open. An update restarts the
+// seeder (about a minute, and its index is rebuilt after that), so a balcony
+// opened meanwhile fails or reads as still indexing; it is read again after
+// 5 s, 15 s, 30 s and 60 s, then waits for a tap. Reads only (garden.state,
+// the index, diary.peek): a write is never repeated.
+export const RELOAD_DELAYS_MS = Object.freeze([5000, 15000, 30000, 60000])
+
+// The wait before automatic reload number `done` + 1, or null to stop.
+export function reloadDelay (done, delays = RELOAD_DELAYS_MS) {
+  if (!Number.isInteger(done) || done < 0 || done >= delays.length) return null
+  return delays[done]
+}
+
+// Whether what the screen shows is one a later read may fix: the own state
+// failed to load, or, for a player, the balcony read failed, the seeder is
+// still indexing, or a neighbour's balcony could not be proven either way.
+// A balcony whose owner is proven not to play, a page, and a viewer who is
+// not playing are answers, not failures.
+export function wantsReload (args) {
+  const { view, bal, own } = isObject(args) ? args : {}
+  if (!isObject(view) || !isObject(bal)) return false
+  if (view.phase === 'error') return true
+  if (view.phase !== 'ready' || !isObject(view.mine) || view.mine.on !== true) return false
+  if (bal.phase === 'error') return true
+  const result = bal.result
+  if (!isObject(result) || result.isPage === true) return false
+  if (result.indexing === true) return true
+  return own !== true && result.on !== true && !provenOff(result, bal.forced)
+}
+
 // Varandas da rua: the seeder's street page is a claim, so only keys the
 // viewer's own follow list holds are offered, once each, in the seeder's
 // order. Without a follow set nothing is offered.

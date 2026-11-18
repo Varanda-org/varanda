@@ -3,9 +3,9 @@
 // The seeder's public share gate (packages/core/lib/seeder.js, the
 // post-share branch of _runScan and postPublic): a post is shown to people
 // without an account only while the highest share the scan recorded for it
-// is live, the post itself is a live post of a visible person's diary, and
-// nothing changed while the answer was being read (docs/protocol.md
-// section 2, "Public share").
+// is live, the post itself is a live post of a visible diary (a person's or
+// an open page's, seeder-post-page.test.js), and nothing changed while the
+// answer was being read (docs/protocol.md section 2, "Public share").
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -174,7 +174,7 @@ test('postPublic shows a shared post with its author, and null for every other b
 
   const hint = seeder._names.hint
   seeder._names.hint = (k) => k === A.key ? { page: true, closed: false, moved: false } : hint(k)
-  t.is(await seeder.postPublic(A.key, 3), null, 'a page diary')
+  t.is((await seeder.postPublic(A.key, 3)).shareSeq, 5, 'an open page diary is shown like a person')
   seeder._names.hint = hint
 
   const endSeq = seeder._names.endSeq
@@ -196,8 +196,8 @@ test('postPublic shows a shared post with its author, and null for every other b
   t.is(await seeder.postPublic(A.key, 3), null, 'a scan not caught up')
   entry.scanned = scanned
 
-  // The page flag lives in the name index: while it is behind, a page reads
-  // as a person, so a shared post of any diary waits.
+  // A page's close or move lives in the name index: while it is behind, a
+  // closed page reads as open, so a shared post of any diary waits.
   const indexed = entry.indexed
   const liveRecord = seeder._liveRecord
   let reads = 0
@@ -216,7 +216,7 @@ test('postPublic shows a shared post with its author, and null for every other b
 
   // The present length is raised asynchronously and can lag the signed
   // length after the scan reached it: an index at the present length has
-  // still not read the last block (a page roster, say).
+  // still not read the last block (a page close, say).
   const present = entry.present
   t.ok(entry.scanned >= entry.core.length, 'the scan is caught up')
   entry.present = entry.core.length - 1
@@ -384,10 +384,10 @@ test('postPublic answers null when the share, the post or the diary changed whil
   t.is(await seeder.postPublic(A.key, 3), null, 're-served meanwhile')
   seeder._served.set(A.key, entry)
 
-  const hint = seeder._names.hint
-  during(() => { seeder._names.hint = (k) => k === A.key ? { page: true, closed: false, moved: false } : hint(k) })
-  t.is(await seeder.postPublic(A.key, 3), null, 'known as a page meanwhile')
-  seeder._names.hint = hint
+  const endSeq = seeder._names.endSeq
+  during(() => { seeder._names.endSeq = (k) => k === A.key ? 1 : endSeq(k) })
+  t.is(await seeder.postPublic(A.key, 3), null, 'known as a closed or moved page meanwhile')
+  seeder._names.endSeq = endSeq
 
   seeder._liveRecord = live
   t.alike(await seeder.postPublic(A.key, 3), first, 'shown again with nothing changing')

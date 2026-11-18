@@ -25,8 +25,9 @@
 // No likes, no view counts: 'Responder' (hosted, canReply) opens the private
 // conversation with the author through the openMessage contract, with the
 // moment as its context. Own moments offer 'Apagar' (moment.delete, after a
-// confirmation; an uncertain answer says so and the action is not offered
-// again on that sheet) and 'Novo momento'. Each item shown is marked seen
+// confirmation; as the Page acted as, the Page's own momento goes through
+// the page 'delete' action; an uncertain answer says so and the action is not
+// offered again on that sheet) and 'Novo momento'. Each item shown is marked seen
 // (src/momentSeen.js: no record, nobody told; synced where the node is hosted).
 //
 // Also exported for A Rua and Diário: useMoments (moments.read on a hosted
@@ -40,6 +41,10 @@ import { useNode } from '../node'
 import { useNames } from '../names'
 import { aheadMomentsOf, holdMsOf, momentMusicOf, momentRefOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, prevMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
 import { IMAGE_MIMES, momentPhotoKey, momentPhotosFor } from '../momentPhotos'
+import { actAs } from '../pages'
+import { choicePage } from '../pageChoice'
+import { momentDeleteAs, momentPublisher, pageMomentsOf } from '../pageMoment'
+import { memberKeyOf, useActing } from './Conversa'
 import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
 import { momentSwipe, swipeRelease, swipeTotal } from '../momentSwipe'
 import { QUICK, reactionName } from '../reactions'
@@ -58,8 +63,10 @@ import { ConfirmStack, ErrorText, Soft, UNCERTAIN, errorText, useNow } from '../
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { MoreButton } from '../ui/MoreButton'
 import { HelpButton, useHelpOpen } from '../ui/Help'
 import { tap } from '../ui/haptics'
+import { excerptOf } from '../ui/MomentosStrip'
 import { Pill } from '../ui/Pill'
 import { Scrim, scrimColor } from '../ui/Scrim'
 import { Sheet } from '../ui/Sheet'
@@ -76,6 +83,8 @@ export const DELETE_TITLE = 'Apagar momento?'
 export const DELETE_BODY = 'O momento deixa de aparecer para quem segue você. Cópias que outras pessoas fizeram não voltam.'
 // A moment past its 24 hours is already shown to nobody.
 export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'
+export const DELETE_BODY_PAGE = 'O momento deixa de aparecer para quem segue a Página. Cópias que outras pessoas fizeram não voltam.'
+export const DELETE_BODY_PAST_PAGE = 'O momento sai do diário da Página. Já não aparece para ninguém.'
 export const NONE_TEXT = 'Nenhum momento agora.'
 const OFF_TEXT = 'Momentos disponíveis no app hospedado.'
 // Owner of the viewer's photo reads: another owner's want() must not end them.
@@ -166,11 +175,22 @@ export function useMomentSeen () {
   return { loaded: seen !== null, seen: seen || [], mark: markMomentSeen }
 }
 
-// Confirmation before moment.delete (ConfirmStack). An uncertain answer says
-// so and takes the confirm button away: the person checks before trying.
-export function ConfirmMomentDelete ({ open, target, onClose, onDeleted }) {
+// The delete sheet's text: past 24 hours it is already shown to nobody, and a
+// Page's momento sits in the Page's diary.
+export function deleteBody (target, page) {
+  const past = !!target && expiresIn(target.at) === 0
+  if (page !== null) return past ? DELETE_BODY_PAST_PAGE : DELETE_BODY_PAGE
+  return past ? DELETE_BODY_PAST : DELETE_BODY
+}
+
+// Confirmation before moment.delete (ConfirmStack), or before the page
+// 'delete' when `page` (the page acted as) owns the momento. An uncertain
+// answer says so and takes the confirm button away: the person checks before
+// trying.
+export function ConfirmMomentDelete ({ open, target, page = null, onClose, onDeleted }) {
   const styles = useStyles(makeStyles)
-  const { request } = useNode()
+  const node = useNode()
+  const { request } = node
   const [pending, setPending] = useState(false)
   const [error, setError] = useState(null)
   const [uncertain, setUncertain] = useState(false)
@@ -183,7 +203,9 @@ export function ConfirmMomentDelete ({ open, target, onClose, onDeleted }) {
     setError(null)
     let ok = false
     try {
-      await request('moment.delete', { to: target.ref })
+      const as = momentDeleteAs(target.ref, page)
+      if (as === null) await request('moment.delete', { to: target.ref })
+      else await actAs(node, { member: await memberKeyOf(request, node), action: 'delete', page: as, op: { to: target.ref } })
       ok = true
     } catch (err) {
       setError(failureText(err))
@@ -203,7 +225,7 @@ export function ConfirmMomentDelete ({ open, target, onClose, onDeleted }) {
     // onClose, which clears the viewer's `deleting`.
     <Sheet open={open} onClose={pending ? () => {} : onClose} dismissable={!pending} title={DELETE_TITLE}>
       <View style={styles.sheetBody}>
-        <Soft>{target && expiresIn(target.at) === 0 ? DELETE_BODY_PAST : DELETE_BODY}</Soft>
+        <Soft>{deleteBody(target, page)}</Soft>
         <Soft>{OWN_NOTE}</Soft>
         <ErrorText>{error}</ErrorText>
         {uncertain
@@ -216,6 +238,93 @@ export function ConfirmMomentDelete ({ open, target, onClose, onDeleted }) {
             )}
       </View>
     </Sheet>
+  )
+}
+
+export const PAGE_MOMENTS_TITLE = 'Momentos da Página'
+export const PAGE_MOMENTS_FAILED = 'Não foi possível ler os momentos da Página.'
+
+// The Page's own momentos, live and past, for whoever acts as that Page: the
+// node's rings cover only followed diaries for 24 h, so an admin who does not
+// follow the Page, or a momento past 24 hours, is reached only through the
+// service's signed page 'status'. Each row deletes through the page action.
+// A failed read says so and the list is read again on 'Tentar de novo'
+// (a read, never a repeat of a delete).
+export function PageMoments ({ page, now = Date.now(), tick = 0, active = true }) {
+  const styles = useStyles(makeStyles)
+  const node = useNode()
+  const key = momentPublisher(page)
+  const changed = useMomentsChanged()
+  // Rows and the open delete sheet belong to the Page and node epoch they were
+  // read for: a lock, sign-out or another identity drops them.
+  const epoch = node.epoch
+  const owner = key === null ? null : key + '|' + epoch
+  const [state, setState] = useState({ owner: null, phase: 'idle', status: null })
+  const [reads, setReads] = useState(0)
+  const [deleting, setDeleting] = useState(null)
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const hosted = node.hosted === true
+  useEffect(() => {
+    if (owner === null || !hosted || active === false) return undefined
+    let live = true
+    setState((s) => ({ owner, phase: 'loading', status: s.owner === owner ? s.status : null }))
+    ;(async () => {
+      try {
+        const member = await memberKeyOf(nodeRef.current.request, nodeRef.current)
+        const status = await actAs(nodeRef.current, { member, action: 'status', page: key })
+        if (live) setState({ owner, phase: 'ready', status })
+      } catch {
+        if (live) setState((s) => ({ owner, phase: 'error', status: s.owner === owner ? s.status : null }))
+      }
+    })()
+    return () => { live = false }
+  }, [owner, key, hosted, active, reads, changed, tick])
+  if (key === null || !hosted) return null
+  const phase = state.owner === owner ? state.phase : 'idle'
+  // Split at render, against the screen's clock, so a momento that passes 24 h
+  // while the list is open moves to the past ones.
+  const mine = { phase, ...pageMomentsOf(state.owner === owner ? state.status : null, key, now) }
+  const target = deleting !== null && deleting.page === owner ? deleting.target : null
+  const row = (m, past) => {
+    const text = excerptOf(m.text)
+    return (
+      <View key={m.ref} style={styles.pageRow}>
+        <View style={styles.pageText}>
+          <Text style={styles.pageMeta} numberOfLines={1}>{(past ? 'Anterior, ' : '24 h, ') + (relativeTime(m.at, now) || '')}</Text>
+          <Text style={styles.pageExcerpt} numberOfLines={2}>{text !== '' ? text : 'Momento com foto'}</Text>
+        </View>
+        <MoreButton
+          label='mais ações do momento'
+          actions={[{ icon: 'lixeira', label: 'Apagar', danger: true, onPress: () => setDeleting({ page: owner, target: { ref: m.ref, at: m.at } }) }]}
+        />
+      </View>
+    )
+  }
+  let body = null
+  if (mine.phase === 'error') {
+    body = (
+      <View style={styles.pageSection}>
+        <ErrorText>{PAGE_MOMENTS_FAILED}</ErrorText>
+        <Pill label='Tentar de novo' onPress={() => setReads((n) => n + 1)} />
+      </View>
+    )
+  } else if (mine.live.length > 0 || mine.past.length > 0) {
+    body = (
+      <View style={styles.pageSection}>
+        <Text style={styles.pageTitle} accessibilityRole='header'>{PAGE_MOMENTS_TITLE}</Text>
+        {mine.live.map((m) => row(m, false))}
+        {mine.past.map((m) => row(m, true))}
+      </View>
+    )
+  }
+  // Mounted in every branch and closed only by the sheet itself: a reload
+  // that fails or comes back empty must not hide the delete's outcome.
+  return (
+    <>
+      {body}
+      <ConfirmMomentDelete open={target !== null} target={target} page={key} onClose={() => setDeleting(null)} />
+    </>
   )
 }
 
@@ -600,6 +709,9 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   // so the avatar below may persist.
   const author = ring ? ring.author : null
   const mine = author !== null && author === own
+  // The momento of the Page acted as: deleted through the page 'delete'.
+  const actingPage = choicePage(useActing())
+  const pageOwn = !mine && author !== null && actingPage === author
   const photo = useMomentPhoto(author, item)
   const handlePhotoError = photo.fail
   const itemKey = item ? item.ref : ''
@@ -612,8 +724,8 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
-  const reactionAvailable = !mine && canReact(node) && item !== null
-  const reactionVisible = !mine && item !== null
+  const reactionAvailable = !mine && !pageOwn && canReact(node) && item !== null
+  const reactionVisible = !mine && !pageOwn && item !== null
   const reaction = reactionStates[itemKey]
   const react = async (emoji) => {
     if (!mounted.current || reactionBusy.current || !reactionAvailable || reactionUncertain.current.has(item.ref)) return
@@ -1088,7 +1200,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const name = mine ? 'Você' : displayText(whoOf(profile || {}).title)
   const time = item ? relativeTime(item.at, now) : null
 
-  const reply = !mine && canReply(node) && typeof onMessage === 'function' && item !== null
+  const reply = !mine && !pageOwn && canReply(node) && typeof onMessage === 'function' && item !== null
     ? () => onMessage(author, { context: replyContext(item, author) })
     : null
   const openProfile = author !== null && typeof onOpenMember === 'function'
@@ -1157,7 +1269,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const segments = progressOf(pos.item, ring.items.length)
   const fill = progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] })
   const text = item.text !== '' ? displayText(item.text, { multiline: true }) : ''
-  const menuActions = mine
+  const menuActions = mine || pageOwn
     ? [{
         icon: 'lixeira',
         label: 'Apagar',
@@ -1280,7 +1392,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
             {video || musicOn === true
               ? <IconAction icon={silent ? 'mudo' : 'som'} label={silent ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL} color='#ffffff' onPress={toggleSound} />
               : null}
-            {mine
+            {mine || pageOwn
               ? (
                 <>
                   <IconAction icon='mais' label='mais ações' color='#ffffff' onPress={openMenu} />
@@ -1406,7 +1518,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
               : null}
         </View>
       </Animated.View>
-      <ConfirmMomentDelete open={deleting !== null} target={deleting} onClose={() => setDeleting(null)} onDeleted={removed} />
+      <ConfirmMomentDelete open={deleting !== null} target={deleting} page={pageOwn ? actingPage : null} onClose={() => setDeleting(null)} onDeleted={removed} />
     </View>
   )
 }
@@ -1446,5 +1558,11 @@ const makeStyles = (colors) => StyleSheet.create({
   reactionHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   reactionEmoji: { fontSize: 24, color: '#ffffff' },
   reactionNote: { ...type.postMeta, color: '#ffffff', ...TEXT_SHADOW },
-  sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 }
+  sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 },
+  pageSection: { gap: 4, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  pageTitle: { ...type.postName, color: colors.ink, paddingHorizontal: 16, minHeight: 44, textAlignVertical: 'center' },
+  pageRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 16, paddingRight: 8, paddingVertical: 6 },
+  pageText: { flex: 1, minWidth: 0 },
+  pageMeta: { ...type.postMeta, color: colors.soft },
+  pageExcerpt: { ...type.postText, color: colors.ink }
 })

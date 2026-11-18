@@ -4496,7 +4496,12 @@ function groupInvitePolicy (ctx, { group, members }) {
 async function groupRead (ctx, { group, limit = GROUP_LIMIT_DEFAULT, before = null, marks = false, topic = null } = {}) {
   const thread = topic !== null && topic !== undefined
   return withGroup(ctx, group, false, async ({ base, g }) => {
-    if (!thread) return { ...readFold(base, g, { limit, before, marks: marks === true }), state: keyState(ctx, g) }
+    if (!thread) {
+      const page = { ...readFold(base, g, { limit, before, marks: marks === true }), state: keyState(ctx, g) }
+      // Newest page only: an older cursor and a topic read stay unchanged.
+      if (before === null || before === undefined) page.firstUnread = await firstUnreadOf(ctx, base, g)
+      return page
+    }
     const root = topicRoot(g, topic)
     return { ...readFold(base, g, { limit, before, marks: true, topic: root }), poll: pollSummary(root, base.ownHex), event: eventSummary(root, base.ownHex), state: keyState(ctx, g) }
   }, (p) => {
@@ -6224,6 +6229,19 @@ function previewOf (p) {
     return p.media.every((d) => (typeof d.plainMime === 'string' ? d.plainMime : d.mime) === 'image/gif') ? 'GIF' : 'Foto'
   }
   return Array.from(p.text).slice(0, PREVIEW_MAX).join('')
+}
+
+// The first post lastAndUnread would count after this device's stored mark.
+// No mark has no cursor to walk past, so the newest page reports null.
+async function firstUnreadOf (ctx, base, g) {
+  const marks = await store.readGroupSeen(ctx.storage)
+  const mark = marks.find((m) => m.group === g.group) || null
+  if (mark === null) return null
+  for (const p of postsAfter(readablePosts(g), mark)) {
+    if (p.diary === base.ownHex || p.hidden) continue
+    return { at: p.at, writer: p.writer, seq: p.seq }
+  }
+  return null
 }
 
 // rpc.md 5.59: a reader row's newest listed post and the others' posts after

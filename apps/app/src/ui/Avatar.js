@@ -7,8 +7,8 @@
 // MediaView does for post photos): the bytes come from the installation's
 // /media route, verified by ../media/avatar.js (SHA-256, still image, exact
 // 512x512), and only a blob: URL (web) or a cache file:// URI (native, from
-// ../media/display) is ever drawn. Retryable failures retry
-// after 2, 5 and 15 s while mounted; any final failure, or an image that
+// ../media/display) is ever drawn. Retryable failures retry on the
+// ladder of ../media/cache.js while mounted; any final failure, or an image that
 // does not render, leaves the initials. localUri (a blob: URL the editor
 // just made) is drawn as is. Without a hosted node nothing is fetched.
 // persist is false for authors the device does not follow (cache: 'no-store'

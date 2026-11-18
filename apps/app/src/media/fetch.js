@@ -248,8 +248,9 @@ function cancelBody (res) {
 }
 
 // A failure that may be "not there yet" (a 404 right after the post, before
-// the blocks reached the seeder, or a network error): err.retryable = true.
-// A length or SHA-256 mismatch, or any other status, is never retryable.
+// the blocks reached the seeder, a 502, 503 or 504 of our own origin while
+// the seeder restarts, or a network error): err.retryable = true. A length
+// or SHA-256 mismatch, or any other status, is never retryable.
 function retryable (message) {
   const err = fail(message)
   err.retryable = true
@@ -360,6 +361,9 @@ async function verifiedRequest (url, d, deps, transient, caller, onLink) {
     cancelBody(res)
     stop()
     if (res && res.status === 404 && !leftOrigin(res, url)) throw retryable('indisponível')
+    // While an update swaps the seeder container, Caddy answers 502 (no
+    // upstream) or 504 from our own origin: the seeder is coming back.
+    if (res && (res.status === 502 || res.status === 504) && !leftOrigin(res, url)) throw retryable('indisponível')
     // The seeder bounds /media globally (in flight and per second, never per
     // client), so a busy 503 from our own origin is "try again in a moment".
     if (res && res.status === 503 && !leftOrigin(res, url)) {

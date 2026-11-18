@@ -31,7 +31,9 @@ const LOADING = { phase: 'loading', note: '', error: '' }
 
 // phase: 'loading', 'off', 'on' or 'unknown' (no action is offered while the
 // state is not known: the person closes and opens the sheet again).
-export function PostShareSheet ({ open, target, link, notice = '', onClose }) {
+// `ops` (optional, pageShare.js pageShareOps) is a Page's: read from the page's
+// status, write through the page actions, instead of the person's post.* methods.
+export function PostShareSheet ({ open, target, link, notice = '', ops = null, onClose }) {
   const { request } = useNode()
   const [view, setView] = useState(LOADING)
   const [busy, setBusy] = useState(false)
@@ -49,12 +51,13 @@ export function PostShareSheet ({ open, target, link, notice = '', onClose }) {
     setView(LOADING)
     setLinkNote('')
     if (!open || typeof target !== 'string' || typeof request !== 'function') return
-    readShared(request, target).then((r) => {
+    const read = ops !== null ? ops.read : (t) => readShared(request, t)
+    read(target).then((r) => {
       if (turn.current !== mine) return
       setView(firstReadView(lead, r))
     })
     return () => { turn.current++ }
-  }, [open, target, request])
+  }, [open, target, request, ops])
 
   // One write at a time, never repeated: a failure only shows its words.
   const write = (action) => async () => {
@@ -66,7 +69,7 @@ export function PostShareSheet ({ open, target, link, notice = '', onClose }) {
     const mine = turn.current
     let r
     try {
-      r = await action(request, target)
+      r = await (ops !== null ? ops[action] : (t) => (action === 'publish' ? publish : unpublish)(request, t))(target)
     } finally {
       busyRef.current = false
       setBusy(false)
@@ -106,7 +109,7 @@ export function PostShareSheet ({ open, target, link, notice = '', onClose }) {
           ? (
             <>
               <Soft>{POST_SHARE_CONSENT}</Soft>
-              <Btn block large label='Publicar na web' pending={busy} disabled={busy} onPress={write(publish)} />
+              <Btn block large label='Publicar na web' pending={busy} disabled={busy} onPress={write('publish')} />
             </>
             )
           : null}
@@ -120,7 +123,7 @@ export function PostShareSheet ({ open, target, link, notice = '', onClose }) {
               {hasLink && canShare(nav) ? <Btn block large label='Compartilhar' disabled={busy} onPress={share} /> : null}
               {hasLink ? <Btn block large secondary label='Copiar link' disabled={busy} onPress={copy} /> : null}
               {linkNote ? <Soft>{linkNote}</Soft> : null}
-              <Btn block large secondary label='Tirar da web' pending={busy} disabled={busy} onPress={write(unpublish)} />
+              <Btn block large secondary label='Tirar da web' pending={busy} disabled={busy} onPress={write('unpublish')} />
             </>
             )
           : null}

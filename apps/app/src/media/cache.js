@@ -26,10 +26,12 @@ const noopRevoke = (url) => {
 }
 
 // Automatic retries of a failed load while its tile is shown: a post's
-// blocks can reach the seeder a moment after the post itself, so a 404 or a
-// network error is retried after 2 s, 5 s and 15 s, then the tile waits for
-// a tap. A mismatch (length, SHA-256) is never retried automatically.
-export const RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000])
+// blocks can reach the seeder a moment after the post itself, and an update
+// takes the seeder away for a while (502 from Caddy until the new container
+// listens), so a retryable failure is retried after 2 s, 5 s, 15 s, 30 s and
+// 60 s (about two minutes in all), then the tile waits for a tap. A
+// mismatch (length, SHA-256) is never retried automatically.
+export const RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000, 60000])
 
 // The delay before automatic retry number `done` + 1, or null to stop.
 // A busy seeder answer (err.retryAfterMs) is global to the installation, so
