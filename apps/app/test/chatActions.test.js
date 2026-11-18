@@ -43,6 +43,15 @@ test('pinToEnd keeps animated downward frames and resizes pinned', async (t) => 
   t.alike(pinToEnd(state, { kind: 'frame', y: 200, contentHeight: 600, layoutHeight: 400 }), { ...state, lastY: 200 }, 'reaching the end does not restore a released pin')
 })
 
+test('pinToEnd keeps the pin on opening frames and clamps at the end', async (t) => {
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const state = Object.freeze({ pinned: true, newest: 'a', lastY: 500 })
+  t.alike(pinToEnd(state, { kind: 'frame', y: 300, opening: true, contentHeight: 3000, layoutHeight: 400 }), { pinned: true, newest: 'a', lastY: 300 }, 'opening frame')
+  t.alike(pinToEnd(state, { kind: 'frame', y: 300, contentHeight: 700, layoutHeight: 400 }), { pinned: true, newest: 'a', lastY: 300 }, 'clamp still at the end')
+  t.alike(pinToEnd(state, { kind: 'frame', y: 300, contentHeight: 3000, layoutHeight: 400 }), { pinned: false, newest: 'a', lastY: 300 }, 'away from the end releases')
+  t.alike(pinToEnd(state, { kind: 'frame', y: 300 }), { pinned: false, newest: 'a', lastY: 300 }, 'missing heights behave as before')
+})
+
 test('conversations follow content batches and release the pin on user gestures', (t) => {
   for (const file of ['Mensagem.js', 'Grupo.js']) {
     const src = read(file)

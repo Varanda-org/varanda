@@ -5846,11 +5846,11 @@ function createBrowserSession ({
       if (page !== undefined) throw new UsageError(DM_USE_PAGE_DRAFT)
       return dmEngine.set(await requireDm(), keyPair, { peer, state })
     }),
-    'dm.seen': serialDm(async ({ peer, page }) => {
+    'dm.seen': serialDm(async ({ peer, page, upTo }) => {
       const own = await requireDm()
-      if (page !== undefined) return dmEngine.seen(own, peer, page)
+      if (page !== undefined) return dmEngine.seen(own, peer, page, upTo)
       const before = await store.readDmSeen(storage)
-      const r = await dmEngine.seen(own, peer)
+      const r = await dmEngine.seen(own, peer, undefined, upTo)
       if (!sameJson(before, await store.readDmSeen(storage))) seenChanged()
       return r
     }),
