@@ -450,7 +450,7 @@ test('a group with one new message shows the badge', (t) => {
 test('an older inbox page never lands after a fresher first page', (t) => {
   const conversas = readFileSync(join(__dirname, '../src/screens/Conversas.js'), 'utf8')
   t.ok(conversas.includes('if (s.next !== cursor) return s'), 'the append checks the cursor in the state it updates')
-  t.ok(conversas.includes("else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'no "nada novo" beside an unread Pedidos row')
+  t.ok(conversas.includes("else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'no "nada novo" beside an unread Pedidos row')
 })
 
 test('App.js hands the mention handler to the private chat', (t) => {
@@ -511,7 +511,7 @@ test('the Pedidos and Comunidades strip: two separate 44 pt targets, gone during
   t.ok(part.includes('onPress={onPress}') && part.includes("accessibilityRole='button'"), 'each part is its own button')
   t.ok(src.includes("stripPart: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.xs, minHeight: layout.hit, minWidth: layout.hit,"), 'each part is at least 44 pt')
   t.is((src.match(/<StripPart kind=/g) || []).length, 3, 'Pedidos, the old key and Comunidades')
-  t.ok(src.includes("const pinned = useMemo(() => (needle !== '' ? [] : applyFilter("), 'the strip is absent during a search')
+  t.ok(src.includes("needle !== '' ? [] : applyFilter(") && src.includes('if (!inbox.requests) return filtered'), 'the strip is absent during a search unless a request is pending')
   t.ok(src.includes('{pinned.length > 0') && src.indexOf('{pinned.length > 0') < src.indexOf('let footer = null'), 'the strip sits in the list header')
   t.ok(src.includes("{i > 0 ? <Text style={styles.stripSep} aria-hidden importantForAccessibility='no' accessibilityElementsHidden>·</Text> : null}"), 'the separator is not spoken')
   t.absent(src.includes('PinnedRow') || src.includes("item.kind === 'requests') {"), 'no pinned rows in the list')
