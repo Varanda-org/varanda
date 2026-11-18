@@ -3850,6 +3850,24 @@ function createBrowserSession ({
     if (deletedSeqs(entries).has(to.seq)) throw new UsageError(CHOICE_NOT_POLL)
   }
 
+  // Varandinha: whether block `seq` of `author` is a gift its giver withdrew,
+  // by the tombstones of a copy of that diary held here (a follow or any
+  // replica, read raw as refuseDeletedPoll does). A peek of a diary the run
+  // does not track reads the seeder's bytes, so a stale or hostile seeder
+  // can still serve a withdrawn gift; this local copy outranks it. A diary
+  // not held here is false (garden.take's RESIDUAL). Runs on the chain.
+  async function heldGiftDeleted (author, seq) {
+    let read
+    try {
+      read = await withCores((c) => member.logReadRaw(c, { author }))
+    } catch (err) {
+      if (messageOf(err) === NO_LOCAL_DATA) return false
+      throw err
+    }
+    const entries = read.entries.slice().sort((a, b) => a.seq - b.seq)
+    return deletedSeqs(entries).has(seq)
+  }
+
   // Enquetes: refuses a vote unless block `to.seq` of `to.author`, peeked,
   // is a poll post with an option `pick`, or an event post (Eventos: an RSVP,
   // pick 0 'vou' or 1 'talvez'). Fails closed: an unread block
@@ -5417,8 +5435,13 @@ function createBrowserSession ({
       })({})
     },
 
-    // The own diary alone, as garden.state.
-    'garden.stall': serial(() => withCores((c) => member.gardenStallOwn(c, Date.now()))),
+    // The own diary alone, caught up first as garden.state is: a copy behind
+    // another device of the same passkey shows a stale stall and fresh
+    // daily budgets that the next give or take would refuse.
+    'garden.stall': serial(async (_, epoch) => {
+      if (keyPair !== null && !ownHeld()) await ensureCaughtUp(epoch)
+      return withCores((c) => member.gardenStallOwn(c, Date.now()))
+    }),
 
     // Helps received are bounded as garden.play bounds them.
     'garden.give': async ({ to, pot }) => {
@@ -5456,7 +5479,13 @@ function createBrowserSession ({
     // As testimonial.show, with no seeder index read and no DM keys. Only an
     // answered peek proves a gift gone (a missing or deleted block is no
     // gift); a peek that fails says nothing about it, so it is unavailable
-    // and nothing is written.
+    // and nothing is written. A gift whose tombstone a copy of the giver's
+    // diary held here carries is no gift, whatever the peek read
+    // (heldGiftDeleted): the take goes on with none, so it is refused as gone
+    // and a take already held still answers. RESIDUAL: a withdrawn gift whose
+    // bytes the seeder still serves, of a giver not held here, passes; readers
+    // holding the giver's diary drop such a take, and it costs the taker one
+    // daily take.
     'garden.take': async ({ from, seq }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const key = from.toLowerCase()
@@ -5482,6 +5511,7 @@ function createBrowserSession ({
       return serial(async (_, epoch) => {
         await refuse(await requireUnlocked())
         await ensureCaughtUp(epoch)
+        if (record !== null && await heldGiftDeleted(key, seq)) record = null
         const r = await withStore((c) => member.gardenTake(c, { from: key, seq, record, now: Date.now() }))
         if (r.changed) {
           wrote(r.seq)
