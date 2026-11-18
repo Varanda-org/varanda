@@ -34,6 +34,71 @@ test('titles, actions and stages', async (t) => {
   t.is(v.CONSENT_SWITCH_LABEL, 'Entendi e quero participar')
 })
 
+test('decor and gift labels cover the contract ids', async (t) => {
+  const { DECOR_LABELS, DECOR_TITLE, GIFT_LABELS, decorLabel, decorLine, giftLabel } = await import('../src/varandinhaView.js')
+  t.is(DECOR_TITLE, 'Enfeites')
+  t.alike(Object.keys(DECOR_LABELS), [...rpc.garden.GARDEN_DECOR_IDS])
+  t.is(DECOR_LABELS.rede, 'Rede')
+  t.is(DECOR_LABELS.varal, 'Varal')
+  t.is(DECOR_LABELS.gato, 'Gato')
+  t.is(DECOR_LABELS.pisca, 'Pisca-pisca')
+  for (const id of rpc.garden.GARDEN_DECOR_IDS) t.ok(decorLabel(id).length > 0, id)
+  t.is(decorLabel('rosa'), '')
+  t.is(decorLabel('__proto__'), '')
+  t.is(decorLabel(undefined), '')
+  t.is(decorLine([]), '')
+  t.is(decorLine(null), '')
+  t.is(decorLine(undefined), '')
+  t.is(decorLine(['desconhecido']), '')
+  t.is(decorLine(['rede']), 'Enfeites: Rede')
+  t.is(decorLine(['rede', 'varal', 'gato', 'pisca']), 'Enfeites: Rede, Varal, Gato, Pisca-pisca')
+  t.alike(Object.keys(GIFT_LABELS).sort(), rpc.garden.GARDEN_PLANTS.map((p) => p.id).sort())
+  t.is(GIFT_LABELS.manjericao, 'Maço de manjericão')
+  t.is(GIFT_LABELS.tomate, 'Tomates-cereja')
+  t.is(GIFT_LABELS.pimenta, 'Pimentas')
+  t.is(GIFT_LABELS.alecrim, 'Ramo de alecrim')
+  t.is(GIFT_LABELS.samambaia, 'Muda de samambaia')
+  t.is(GIFT_LABELS.espada, 'Muda de espada-de-são-jorge')
+  for (const p of rpc.garden.GARDEN_PLANTS) t.ok(giftLabel(p.id).length > 0, p.id)
+  t.is(giftLabel('rosa'), '')
+  t.is(giftLabel('__proto__'), '')
+  t.is(giftLabel(undefined), '')
+})
+
+test('stall copy, plurals and shelf lines', async (t) => {
+  const v = await import('../src/varandinhaView.js')
+  t.is(v.STALL_TITLE, 'Barraquinha')
+  t.ok(Object.isFrozen(v.STALL_ACTIONS))
+  t.alike(Object.values(v.STALL_ACTIONS), ['Dar de presente', 'Aceitar', 'Tirar da prateleira', 'Desfazer'])
+  t.alike(Object.values(v.ACTIONS), ['Plantar', 'Regar', 'Arrancar', 'Guardar', 'Descartar'])
+  t.is(v.PENDING_TITLE, 'Mimos para aceitar')
+  t.is(v.SHELF_TITLE, 'Na prateleira')
+  t.is(v.GAVE_TITLE, 'Você deu')
+  t.is(v.PENDING_EMPTY, 'Nenhum mimo para aceitar.')
+  t.is(v.SHELF_EMPTY, 'A prateleira está vazia.')
+  t.is(v.GAVE_EMPTY, 'Você não deu mimos nesta semana.')
+  t.is(v.PICK_EMPTY, 'Ninguém que você segue está na Varandinha.')
+  t.is(v.stallLine(true), 'Hoje tem barraquinha.')
+  t.is(v.stallLine(false), 'A barraquinha abre aos sábados.')
+  t.is(v.pendingGiftsLabel(1), '1 mimo para aceitar')
+  t.is(v.pendingGiftsLabel(2), '2 mimos para aceitar')
+  t.is(v.pendingGiftsLabel(0), '0 mimos para aceitar')
+  t.is(v.shelfLine('tomate', 'Ana'), 'Tomates-cereja, presente de Ana')
+  t.is(v.shelfLine('manjericao', 'Lia'), 'Maço de manjericão, presente de Lia')
+  t.is(v.shelfLine('tomate', ''), 'Tomates-cereja')
+  t.is(v.shelfLine('tomate'), 'Tomates-cereja')
+  t.is(v.shelfLine('pimenta', null), 'Pimentas')
+  const bidi = String.fromCharCode(0x202e)
+  const bell = String.fromCharCode(7)
+  const hostile = v.shelfLine('tomate', 'A' + bidi + 'b' + bell + '\n<x>')
+  t.ok(hostile.startsWith('Tomates-cereja, presente de A'), 'a peer name still shows')
+  t.absent(hostile.includes(bidi) || hostile.includes(bell) || hostile.includes('\n'), 'a peer name is cleaned by displayText')
+  t.is(v.GIVE_PUBLIC, 'O mimo fica público no seu diário, com a pessoa, o item e a data. O vaso fica vazio.')
+  t.is(v.TAKE_PUBLIC, 'Aceitar grava no seu diário, em público, de quem veio o mimo.')
+  t.is(v.UNGIVE_NOTE, 'O mimo sai da prateleira da pessoa. O vaso não volta.')
+  t.is(v.LEAVE_STALL_LINE, 'Os mimos que vizinhos deram a você ficam no diário deles.')
+})
+
 test('harvest verbs', async (t) => {
   const { harvestVerb } = await import('../src/varandinhaView.js')
   for (const id of ['manjericao', 'tomate', 'pimenta', 'alecrim']) t.is(harvestVerb(id), 'Colher', id)
@@ -84,7 +149,9 @@ test('wateredDay labels a watering day like the visits list', async (t) => {
 test('the consent lines say what is public and what leaving does', async (t) => {
   const { CONSENT_LINES } = await import('../src/varandinhaView.js')
   const text = CONSENT_LINES.join(' ')
-  t.ok(CONSENT_LINES.length >= 4)
+  t.is(CONSENT_LINES.length, 6)
+  t.is(CONSENT_LINES[4], 'Sair da Varandinha marca os seus registros do jogo como apagados, mas cópias que outras pessoas já buscaram podem continuar. As regas que vizinhos fizeram na sua varanda ficam no diário deles.')
+  t.is(CONSENT_LINES[5], 'Os enfeites que você escolhe e os mimos que você dá ou aceita, com a pessoa, o item e a data, também ficam públicos no seu diário.')
   t.ok(/opcional/.test(text) && /desligada/.test(text))
   t.ok(/públic/.test(text))
   t.ok(/plant/.test(text) && /rega/.test(text) && /colheita/.test(text))
@@ -107,12 +174,21 @@ const REFUSALS = [
   'você já regou o máximo de varandas por hoje',
   'esta pessoa não está na Varandinha',
   'páginas não têm Varandinha',
-  'este vaso não tem planta para regar'
+  'este vaso não tem planta para regar',
+  'a barraquinha só abre aos sábados',
+  'não dá para dar um mimo para si',
+  'você só dá mimos para quem você segue',
+  'você já deu um mimo para esta pessoa hoje',
+  'você já deu o máximo de mimos por hoje',
+  'este vaso ainda não está pronto',
+  'este mimo não está mais disponível',
+  'você já aceitou o máximo de mimos por hoje',
+  'este registro não é um mimo seu'
 ]
 
-test('refusalNotice returns the twelve node refusals and null for anything else', async (t) => {
+test('refusalNotice returns the twenty-one node refusals and null for anything else', async (t) => {
   const { refusalNotice, NOTICES } = await import('../src/varandinhaView.js')
-  t.is(REFUSALS.length, 12)
+  t.is(REFUSALS.length, 21)
   for (const message of REFUSALS) {
     t.is(refusalNotice(message), message)
     t.ok(Object.values(NOTICES).includes(message), message + ' is a notice')
@@ -123,7 +199,7 @@ test('refusalNotice returns the twelve node refusals and null for anything else'
   t.absent(/Só na versão web/.test(NOTICES.notHosted))
 })
 
-test('no string of the module holds an em dash, an en dash or a web-only notice', async (t) => {
+test('no string of the module holds an em dash, an en dash, the classifieds name or a web-only notice', async (t) => {
   const view = await import('../src/varandinhaView.js')
   const strings = []
   const walk = (v) => {
@@ -132,11 +208,39 @@ test('no string of the module holds an em dash, an en dash or a web-only notice'
   }
   walk(view)
   t.ok(strings.length > 40)
-  for (const s of strings) {
+  const made = [
+    view.pendingLabel(1), view.pendingLabel(5),
+    view.visitorLine(0), view.visitorLine(1), view.visitorLine(2),
+    view.readyIn(NOW + H, NOW),
+    view.pendingGiftsLabel(1), view.pendingGiftsLabel(5),
+    view.stallLine(true), view.stallLine(false),
+    view.shelfLine('tomate', 'Ana'), view.shelfLine('tomate'),
+    view.decorLine(['rede', 'gato']), view.decorLine([])
+  ]
+  for (const s of strings.concat(made)) {
     t.absent(s.includes('—') || s.includes('–'), s)
+    t.absent(s.includes('Feira') || s.includes('feira'), s)
     t.absent(s.includes('Só na versão web'), s)
   }
-  for (const s of [view.pendingLabel(1), view.pendingLabel(5), view.visitorLine(0), view.visitorLine(1), view.visitorLine(2), view.readyIn(NOW + H, NOW)]) {
-    t.absent(s.includes('—') || s.includes('–'), s)
-  }
+})
+
+test('varandinha help tells the stall and the enfeites without naming the classifieds', async (t) => {
+  const { HELP } = await import('../src/help.js')
+  const paragraphs = HELP.varandinha.paragraphs
+  t.is(paragraphs.length, 7)
+  t.ok(paragraphs[0].startsWith('As plantas crescem'))
+  t.ok(paragraphs[4].includes('Não tem compra, ranking nem prêmio.'))
+  const added = paragraphs.slice(5).join(' ')
+  t.ok(added.includes('A barraquinha abre aos sábados.'))
+  t.ok(added.includes('vaso pronto'))
+  t.ok(added.includes('alguém que você segue'))
+  t.ok(added.includes('prateleira'))
+  t.ok(added.includes('aceita'))
+  t.ok(added.includes('sábado seguinte'))
+  t.ok(added.includes('enfeites são opcionais'))
+  t.ok(added.includes('lista fixa'))
+  t.ok(added.includes('públicos'))
+  t.ok(added.includes('aparência'))
+  t.ok(added.includes('não são um prêmio'))
+  t.absent(added.includes('Feira') || added.includes('feira') || added.includes('\u2014') || added.includes('–'))
 })
