@@ -27,6 +27,7 @@ const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf, groupKeyPairFromPrf } = require(
 const gc = require('@varanda/core/lib/group-crypto')
 const store = require('../lib/node-store')
 const { connectClient, errorOf } = require('./helpers/session')
+const { UsageError } = require('@varanda/core/lib/errors')
 const { dmSeeder, rsaKey } = require('./helpers/dm-seeder')
 const postage = require('@varanda/core/lib/dm-postage')
 const { testnet } = require('./helpers/net')
@@ -1587,6 +1588,43 @@ test('dm.react: two stamps and two puts as one dm.send; a no-op sends nothing; a
   t.is(puts(), 6)
   const sendErr = await errorOf(send())
   t.is(sendErr && sendErr.message, err.message, 'one daily allowance for both')
+})
+
+test('a throwing innerDiary reaches the client as itself; send, react and set spend, put and file nothing', async (t) => {
+  const OFF = 'Conversas ainda não ativadas neste aparelho'
+  let off = false
+  const { engine, storage, calls, own, kp, peer, recipientBox, send, set } = await sendingEngine(t, {
+    stamps: 4,
+    options: {
+      innerDiary: () => {
+        if (off) throw new UsageError(OFF)
+        return null
+      }
+    }
+  })
+  const puts = () => calls.filter((c) => c[0] === 'put').length
+  const sent = await send()
+  t.is(puts(), 2)
+  off = true
+  const before = await rawLocal(storage)
+
+  t.is((await errorOf(send())).message, OFF, 'not mensagem inválida')
+  t.is((await errorOf(engine.react(own, kp, { to: peer, target: { from: own, id: sent.id }, emoji: '\u{1f44d}' }, recipientBox))).message, OFF)
+  t.is((await errorOf(set())).message, OFF)
+  t.is((await errorOf(engine.set(own, kp, { peer, state: 'deleted' }))).message, OFF)
+
+  t.is(puts(), 2, 'nothing put')
+  t.is(await wallet(storage), 2, 'nothing spent')
+  t.alike(await store.readDmCtlQueue(storage), [], 'no ctl queued')
+  t.is(await rawLocal(storage), before, 'nothing filed')
+  const th = await engine.thread(own, { peer })
+  t.is(th.messages.length, 1, 'the conversation is still there')
+  t.absent('reactions' in th.messages[0])
+  t.is(th.folder, 'inbox', 'no accepted or deleted op filed')
+
+  off = false
+  t.alike(await set(), { ok: true }, 'the same set goes through once the diary is back')
+  t.is(puts(), 3)
 })
 
 test('dm.react: a row stored without a digest takes no reaction, spends nothing, and dm.thread marks it reactable: false', async (t) => {

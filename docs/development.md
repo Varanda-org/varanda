@@ -253,9 +253,9 @@ A identidade fica no navegador e no autenticador virtual do perfil do Chrome. Po
 4. Em outro perfil do Chrome, repita os passos 1 a 3 com o autenticador desse perfil e outro número de celular brasileiro: é um número por conta.
 5. Troque uma mensagem direta e uma publicação em grupo entre os dois perfis.
 
-### Por que o nó do aparelho não envia mensagens diretas
+### Quando o nó do aparelho envia mensagens diretas
 
-As Conversas selam cada mensagem para uma chave de caixa X25519 derivada da chave de identidade Ed25519 e falam com o semeador pela ligação do nó do navegador. Por isso só o nó do navegador envia mensagens pessoais. Sem o motor injetado (`dm` em `packages/core/lib/session.js`), o nó core responde a cada método `dm.*` com `mensagens diretas disponíveis só no navegador` e não abre nem lê nada; com ele (`varanda-serve --account-origin`, ou o worklet do app, que recebe como `accountOrigin` a instalação a que o app está ligado, quando a configuração é a manual de nó core), o nó core ativa as Conversas, recebe, lê e responde como Página só com texto, mas `dm.send`, `dm.react` e `dm.set` continuam recusados. A troca de mensagens do laboratório portanto acontece no Chrome, nunca no app instalado.
+As Conversas selam cada mensagem para uma chave de caixa X25519 derivada da chave de identidade Ed25519 e falam com o semeador por uma ligação que só o motor de Conversas abre. Sem esse motor injetado (`dm` em `packages/core/lib/session.js`), o nó core responde a cada método `dm.*` com `mensagens diretas disponíveis só no navegador` e não abre nem lê nada; com ele (`varanda-serve --account-origin`, ou o worklet do app, que recebe como `accountOrigin` a instalação a que o app está ligado, quando a configuração é a manual de nó core), o nó core ativa as Conversas, recebe, lê, responde como Página e também envia mensagens pessoais com `dm.send`, `dm.react` e `dm.set`, só com texto, assinadas pelo signatário do diário core. A troca de mensagens do laboratório continua no Chrome, nunca no app instalado: ela usa a passkey do navegador (ver "O que o laboratório não cobre").
 
 ### O que o laboratório não cobre
 

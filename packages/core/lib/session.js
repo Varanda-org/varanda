@@ -57,7 +57,7 @@ const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 const NO_PAGE_KEY = 'sem chave da página'
 // The dm.* methods a core node answers with the `dm` factory.
 const DM_CORE_METHODS = Object.freeze([
-  'dm.enable', 'dm.lookup', 'dm.pull', 'dm.list', 'dm.thread', 'dm.seen',
+  'dm.enable', 'dm.lookup', 'dm.send', 'dm.react', 'dm.pull', 'dm.list', 'dm.thread', 'dm.set', 'dm.seen',
   'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend',
   'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget', 'dm.actorBox'
 ])
@@ -1593,9 +1593,10 @@ function createSession ({
     })
   }
 
-  // With the factory, the methods in its scope route to it, and group.seal
-  // and group.read with a page fold as the page (pageGroupOp); personal
-  // dm.send, dm.react and dm.set and dm.reportSign keep their refusals.
+  // With the factory, the methods in its scope route to it (personal
+  // dm.send, dm.react and dm.set text only), and group.seal and
+  // group.read with a page fold as the page (pageGroupOp); dm.reportSign
+  // keeps its refusal.
   if (dmNode !== null) {
     for (const name of Object.keys(dmNode.handlers)) {
       if (DM_CORE_METHODS.includes(name)) handlers[name] = dmHandler(name)
