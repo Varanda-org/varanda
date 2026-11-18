@@ -227,8 +227,9 @@ test('account pages groups: the page joins and posts through the routes, a remov
   t.is(read.body.role, 'member')
   t.is((await act(bia, 'group-read', P, { group: G, limit: 33 })).body.error, 'pedido-invalido', 'at most 32 a read')
 
-  // The fold's forum keys stay out of the page's read: `topic` carries an
-  // uncapped voter list. The plain post after the poll proves the poll is in.
+  // The fold's forum keys stay out of the page's read (`topic` and `event`
+  // carry uncapped voter lists): each row has the node's compact `topic`
+  // mark instead. The plain post after the poll proves the poll is in.
   const root = await member.groupPost(a, { group: G, text: 'Vamos à feira?' })
   const target = { writer: G, seq: root.seq }
   await appendOwn(a, G, groupLib.groupTopic({ target }))
@@ -240,7 +241,10 @@ test('account pages groups: the page joins and posts through the routes, a remov
     return r.status === 200 && r.body.items.some((x) => x.text === 'depois da enquete') ? r.body : null
   }, { name: 'page reads past the poll', timeoutMs: 180000, intervalMs: 500 })
   t.ok(forum.items.some((x) => x.text === 'Vamos à feira?'), 'the topic root is listed')
-  t.alike(forum.items.filter((x) => 'topic' in x || 'thread' in x).map((x) => x.text), [], 'no topic or thread key on any item')
+  t.alike(forum.items.filter((x) => 'thread' in x || 'event' in x).map((x) => x.text), [], 'no thread or event key on any item')
+  t.alike(forum.items.find((x) => x.text === 'Vamos à feira?').topic, { writer: G, seq: root.seq, poll: true }, 'the root carries the compact topic mark')
+  t.is(forum.items.find((x) => x.text === 'depois da enquete').topic, null, 'a post outside a topic carries none')
+  t.absent(JSON.stringify(forum).includes('"by"'), 'never a voter list')
   t.is((await act(bia, 'group-post', P, { group: G, text: '' })).body.error, 'pedido-invalido', 'the group text bounds hold')
   // The app's word check, again on the service: a public group post with a
   // listed term is refused, as the app refuses it before sending.

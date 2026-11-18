@@ -2427,6 +2427,7 @@ test('page.* (Páginas)', (t) => {
   for (const action of ['list', 'status', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar', 'rename', 'invite',
     'dm-list', 'dm-thread', 'follow', 'follows', 'media', 'notices', 'terms',
     'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
+    'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events',
     'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
     ok(t, 'page.sign', { ...base, action })
   }

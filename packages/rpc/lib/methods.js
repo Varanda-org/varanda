@@ -758,7 +758,7 @@ const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
   'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
-  'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
+  'group-post', 'group-read', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'choice', 'moment', 'post-share', 'post-unshare', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']

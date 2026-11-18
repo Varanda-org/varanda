@@ -159,5 +159,5 @@ test('Conversa shares one status read per page and drops the pick after an unkno
     t.ok(src2.includes('refusalText(err,'), f + ' names a definite page refusal')
     t.ok(src2.includes('PAGE_PICK_UNREAD'), f + ' says when the page pick could not be read')
   }
-  t.ok(card('EventCard.js').includes('(!grouped && pageRef.current !== page)'), 'a person answer is dropped after a switch to a Page too')
+  t.ok(card('EventCard.js').includes('(!alive.current || pageRef.current !== page)'), 'an answer is dropped after the identity changed, a group one too')
 })

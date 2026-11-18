@@ -38,8 +38,15 @@
 //   - media and avatar take the raw bytes as the body and the statement in
 //     x-varanda-page-* headers. media is a still image or, with its `ms`, a
 //     short video/mp4 already free of metadata, for a post's [poster, video]
-//     pair; a post, reply or quote carries photos, that pair or a link card
-//     (its thumbnail one of the page's items), as a person's post does.
+//     pair, or a voice note (audio/mp4 with its `ms`, also free of metadata)
+//     for a group post; a post, reply or quote carries photos, that pair or
+//     a link card (its thumbnail one of the page's items), as a person's
+//     post does.
+//   - in a PUBLIC group the page does what a person does (./pages-groups.js):
+//     group-post with media, a voice note, a card, a reply, a forward, a
+//     topic, a poll or an event; group-react, group-hide (its own posts
+//     only) and group-choice (a vote or an RSVP). A private group answers
+//     'privado' to all of them: its posts are sealed on a device.
 //   - a root post may carry a poll or an event, and 'choice' writes the
 //     page's vote or RSVP, the same records a person writes (records.js
 //     postRecord, choiceRecord); 'status' answers the page's live choices.
@@ -99,7 +106,8 @@ const { applyDeletes, deletedSeqs, shownMedia } = require('@varanda/core/lib/del
 const { foldShare, POST_SHARES_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
-const { feira, cardUrlHost, isMomentMusic } = require('@varanda/rpc')
+const { feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
+const { MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
@@ -107,7 +115,8 @@ const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
   postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
-  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
+  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX,
+  AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, AUDIO_DESCRIPTOR_KEYS, validAudioDescriptor, charLength
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -165,8 +174,15 @@ function eventTexts (event) {
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box']
 const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']
 const GROUP_READ_LIMIT = 32
+// The signed group reads: checked under the lock, read outside it, never a
+// nonce spend.
+const GROUP_READS = ['group-read', 'group-topics', 'group-voters', 'group-events']
+// Writes whose resend changes nothing the fold shows (a reaction, a hide, a
+// vote or RSVP the fold already counts): their nonce is settled in memory
+// like the joins and leaves, never spent durably.
+const GROUP_IDEMPOTENT = ['group-react', 'group-hide', 'group-choice']
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
 // A page post on the installation's public web page (docs/protocol.md §2,
@@ -687,7 +703,9 @@ function createPagesRoutes ({
   // again only when neither the writer nor the ACL holds anything of it.
   function claim (member, nonce, hash, read, page = '', action = '') {
     const id = member + ':' + nonce
-    if (read && mintedBefore(nonce)) throw refuse('expirado')
+    // Reads and the in-memory group writes keep no durable mark, so a body
+    // minted before a restart could otherwise run again.
+    if ((read || GROUP_IDEMPOTENT.includes(action)) && mintedBefore(nonce)) throw refuse('expirado')
     const prior = applied.get(id)
     if (prior !== undefined) {
       if (prior.hash !== hash || read) throw refuse('expirado')
@@ -2491,16 +2509,20 @@ function createPagesRoutes ({
       ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
     if (!keysOk) throw refuse('pedido-invalido')
-    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME] : AVATAR_MIMES
+    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME, AUDIO_MIME] : AVATAR_MIMES
     const max = action === 'media' ? MAX_MEDIA_BODY : MAX_AVATAR_BYTES
     const { sha256, mime, bytes } = proof.op
     if (!mimes.includes(mime) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > max) throw refuse('midia-invalida')
-    // A short video (the second item of a post's [poster, video] pair) and
-    // only a video carries its duration; the writer checks the container.
+    // A short video (the second item of a post's [poster, video] pair) or a
+    // voice note (a group post's only item, with no picture size, as a
+    // person's audio descriptor), and only those, carry their duration; the
+    // writer checks the container.
     if (action === 'media') {
       const ms = proof.op.ms
       const video = mime === VIDEO_MIME
-      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : ms !== undefined) throw refuse('midia-invalida')
+      const voice = mime === AUDIO_MIME
+      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : voice ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_AUDIO_MS) : ms !== undefined) throw refuse('midia-invalida')
+      if (voice && (proof.op.width !== 0 || proof.op.height !== 0 || bytes > MAX_AUDIO_BYTES)) throw refuse('midia-invalida')
     }
     const row = writableRow(proof.page)
     need(row, proof.member, 'admin')
@@ -2829,6 +2851,93 @@ function createPagesRoutes ({
     }
   }
 
+  // A group post's { writer, seq } reference.
+  function groupRef (ref) {
+    if (!exactKeys(ref, ['writer', 'seq']) || !Number.isSafeInteger(ref.seq) || ref.seq < 1) throw refuse('pedido-invalido')
+    return { writer: keyParam(ref.writer), seq: ref.seq }
+  }
+
+  // A group post's media: the page's own items (the page `media` action),
+  // up to MAX_GROUP_MEDIA photos and GIFs, or one voice note alone, never a
+  // video. Every descriptor key must equal the stored row's, as mediaOf.
+  function groupMediaOf (page, media) {
+    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_GROUP_MEDIA) throw refuse('midia-invalida')
+    for (let i = 0; i < media.length; i++) {
+      const d = media[i]
+      if (!isPlainObject(d) || !(validDescriptor(d) || validAudioDescriptor(d))) throw refuse('midia-invalida')
+      if (d.mime === AUDIO_MIME && media.length !== 1) throw refuse('midia-invalida')
+    }
+    let table
+    try {
+      table = writer.items(page)
+    } catch (err) {
+      throw tokenOf(err)
+    }
+    return media.map((d) => {
+      const keys = d.mime === AUDIO_MIME ? AUDIO_DESCRIPTOR_KEYS : DESCRIPTOR_KEYS
+      const row = table.find((it) => it.core === d.core && it.start === d.start && it.blocks === d.blocks && it.sha256 === d.sha256)
+      if (row === undefined || Object.keys(row).length !== keys.length || !keys.every((k) => row[k] === d[k])) throw refuse('midia-invalida')
+      return row
+    })
+  }
+
+  // group-post as a person's group.post (methods.js group.post cross
+  // check): an event never with a poll, media, a card, a reply or a
+  // forward; a poll only on a topic, with no media and no card; a topic or
+  // an event is a root post with a visible title; media and a card never
+  // together. Texts go through the blocklist.
+  function groupPostParams (op) {
+    if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd', 'media', 'card', 'topic', 'poll', 'event'])) throw refuse('pedido-invalido')
+    const fwd = op.fwd === undefined ? 0 : op.fwd
+    if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
+    const replyTo = op.replyTo === undefined || op.replyTo === null ? null : groupRef(op.replyTo)
+    if (op.topic !== undefined && typeof op.topic !== 'boolean') throw refuse('pedido-invalido')
+    const topic = op.topic === true
+    const media = op.media === undefined || op.media === null ? null : op.media
+    const card = op.card === undefined || op.card === null ? null : op.card
+    const poll = op.poll === undefined || op.poll === null ? null : op.poll
+    let event = null
+    if (op.event !== undefined && op.event !== null) {
+      if (!exactKeys(op.event, ['title', 'start'], ['end', 'place'])) throw refuse('pedido-invalido')
+      event = { title: op.event.title, start: op.event.start, end: op.event.end === undefined ? null : op.event.end, place: op.event.place === undefined ? '' : op.event.place }
+    }
+    const titled = typeof op.text === 'string' && charLength(op.text) >= 1 && !profileExtra.isInvisibleOnly(op.text)
+    if (media !== null && card !== null) throw refuse('pedido-invalido')
+    if (topic && (replyTo !== null || fwd === 1 || !titled)) throw refuse('pedido-invalido')
+    if (poll !== null && (!topic || media !== null || card !== null)) throw refuse('pedido-invalido')
+    if (event !== null && (poll !== null || media !== null || card !== null || replyTo !== null || fwd === 1 || !titled)) throw refuse('pedido-invalido')
+    // The records' own bounds, checked before the page lock. The side
+    // records' target here is a stand-in: the real one is the post's seq.
+    const stand = { writer: keyParam(op.group), seq: 1 }
+    try {
+      // The text alone first, so a bad text is never 'midia-invalida'. With
+      // media an empty caption is allowed: a one-letter stand-in checks the
+      // rest of the text rules.
+      groupLib.groupPost({ text: media !== null && op.text === '' ? 'x' : op.text, replyTo, fwd })
+      if (poll !== null) groupLib.groupPoll({ target: stand, options: poll })
+      if (event !== null) groupLib.groupEvent({ target: stand, ...event })
+    } catch {
+      throw refuse('pedido-invalido')
+    }
+    termFree(op.text, ...(poll || []), ...eventTexts(event))
+    return { key: keyParam(op.group), text: op.text, replyTo, fwd, media, card, topic, poll: poll === null ? null : poll.slice(), event }
+  }
+
+  // The media and card of a group post resolved against the page's own
+  // items, then the whole record checked. Under the page lock, after the
+  // role check, as write() resolves a post's media: the item table is the
+  // page's, read only for an owner or admin.
+  function groupPostParts (page, params) {
+    const media = params.media === null ? null : groupMediaOf(page, params.media)
+    const card = params.card === null ? null : previewOf(page, params.card)
+    try {
+      groupLib.groupPost({ text: params.text, replyTo: params.replyTo, fwd: params.fwd, media, card })
+    } catch {
+      throw refuse(media !== null ? 'midia-invalida' : 'pedido-invalido')
+    }
+    return { ...params, media, card }
+  }
+
   function groupParams (action, op) {
     if (action === 'community-join' || action === 'community-leave') {
       if (!exactKeys(op, ['community'])) throw refuse('pedido-invalido')
@@ -2860,29 +2969,51 @@ function createPagesRoutes ({
       }
       return { key: keyParam(op.group), seal }
     }
-    if (action === 'group-post') {
-      if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
-      const fwd = op.fwd === undefined ? 0 : op.fwd
-      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
-      const replyTo = op.replyTo === undefined ? null : op.replyTo
-      // The group record's own bounds, checked before the page lock.
+    if (action === 'group-post') return groupPostParams(op)
+    if (action === 'group-react' || action === 'group-hide' || action === 'group-choice') {
+      const field = action === 'group-react' ? 'emoji' : action === 'group-hide' ? 'on' : 'pick'
+      if (!exactKeys(op, ['group', 'target', field])) throw refuse('pedido-invalido')
+      const target = groupRef(op.target)
+      const value = op[field]
+      // The record's own bounds (emoji, on, pick), checked before the page lock.
       try {
-        groupLib.groupPost({ text: op.text, replyTo, fwd })
+        if (action === 'group-react') groupLib.groupReact({ target, emoji: value })
+        else if (action === 'group-hide') groupLib.groupHide({ target, on: value })
+        else groupLib.groupChoice({ target, pick: value })
       } catch {
         throw refuse('pedido-invalido')
       }
-      return { key: keyParam(op.group), text: op.text, replyTo, fwd }
+      return { key: keyParam(op.group), target, [field]: value }
     }
-    if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
-    const limit = op.limit === undefined ? GROUP_READ_LIMIT : op.limit
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > GROUP_READ_LIMIT) throw refuse('pedido-invalido')
-    let before = null
-    if (op.before !== undefined && op.before !== null) {
-      const b = op.before
-      if (!exactKeys(b, ['at', 'writer', 'seq']) || !isCanonicalIso(b.at) || !Number.isSafeInteger(b.seq) || b.seq < 0) throw refuse('pedido-invalido')
-      before = { at: b.at, writer: keyParam(b.writer), seq: b.seq }
+    if (action === 'group-voters') {
+      if (!exactKeys(op, ['group', 'target'])) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), target: groupRef(op.target) }
     }
-    return { key: keyParam(op.group), before, limit }
+    if (action === 'group-events') {
+      if (!exactKeys(op, ['group'], ['cursor'])) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), cursor: groupCursor(op.cursor) }
+    }
+    if (action === 'group-topics') {
+      if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
+      const limit = op.limit === undefined ? GROUP_TOPICS_LIMIT : op.limit
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > GROUP_TOPICS_LIMIT) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), before: groupCursor(op.before), limit }
+    }
+    if (!exactKeys(op, ['group'], ['before', 'limit', 'topic'])) throw refuse('pedido-invalido')
+    // A topic thread is a marked page, at most GROUP_MARKED_LIMIT rows as
+    // the node's group.read with `topic`.
+    const topic = op.topic === undefined || op.topic === null ? null : groupRef(op.topic)
+    const max = topic === null ? GROUP_READ_LIMIT : GROUP_MARKED_LIMIT
+    const limit = op.limit === undefined ? max : op.limit
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > max) throw refuse('pedido-invalido')
+    return { key: keyParam(op.group), before: groupCursor(op.before), limit, topic }
+  }
+
+  // An exclusive group-order cursor { at, writer, seq }, or null.
+  function groupCursor (b) {
+    if (b === undefined || b === null) return null
+    if (!exactKeys(b, ['at', 'writer', 'seq']) || !isCanonicalIso(b.at) || !Number.isSafeInteger(b.seq) || b.seq < 0) throw refuse('pedido-invalido')
+    return { at: b.at, writer: keyParam(b.writer), seq: b.seq }
   }
 
   // Owner or admin, checked under the page lock before pages-groups.js runs:
@@ -2892,8 +3023,8 @@ function createPagesRoutes ({
   async function groupAction (action, body) {
     if (pagesGroups === null) throw refuse('indisponivel')
     const { member, page, nonce, op, hash } = await statement(body, action, false)
-    const params = groupParams(action, op)
-    const read = action === 'group-read'
+    let params = groupParams(action, op)
+    const read = GROUP_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
     const call = async () => {
@@ -2902,10 +3033,19 @@ function createPagesRoutes ({
         if (action === 'community-leave') return await pagesGroups.communityLeave(page, params.key)
         if (action === 'group-join') return await pagesGroups.groupJoin(page, params.key)
         if (action === 'group-leave') return await pagesGroups.groupLeave(page, params.key)
-        if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo, fwd: params.fwd })
+        if (action === 'group-post') {
+          const { text, replyTo, fwd, media, card, topic, poll, event } = params
+          return await pagesGroups.groupPost(page, params.key, { text, replyTo, fwd, media, card, topic, poll, event })
+        }
+        if (action === 'group-react') return await pagesGroups.groupReact(page, params.key, { target: params.target, emoji: params.emoji })
+        if (action === 'group-hide') return await pagesGroups.groupHide(page, params.key, { target: params.target, on: params.on })
+        if (action === 'group-choice') return await pagesGroups.groupChoice(page, params.key, { target: params.target, pick: params.pick })
         if (action === 'group-seal') return await pagesGroups.groupSeal(page, params.key, params.seal)
         if (action === 'group-rebox') return await pagesGroups.groupRebox(page)
-        return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit })
+        if (action === 'group-topics') return await pagesGroups.groupTopics(page, params.key, { before: params.before, limit: params.limit })
+        if (action === 'group-voters') return await pagesGroups.groupVoters(page, params.key, { target: params.target })
+        if (action === 'group-events') return await pagesGroups.groupEvents(page, params.key, { cursor: params.cursor })
+        return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit, topic: params.topic })
       } catch (err) {
         // A writer core or the diary may have taken a block before the
         // failure; a refusal from the fold appended nothing.
@@ -2929,6 +3069,7 @@ function createPagesRoutes ({
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, action === 'group-rebox' ? 'owner' : 'admin')
+      if (action === 'group-post') params = groupPostParts(page, params)
       chargeOps(page)
       const out = await call()
       // A post or seal is not idempotent in the group, so its nonce is
@@ -2945,6 +3086,7 @@ function createPagesRoutes ({
       let result
       if (action === 'group-post' || action === 'group-seal') result = { seq: out.seq }
       else if (action === 'group-rebox') result = { groups: out.groups, left: out.left }
+      else if (GROUP_IDEMPOTENT.includes(action)) result = { ok: true }
       else result = { state: out.state, role: out.state }
       if (action === 'community-join') result.group = out.group
       settle(member, nonce, result)

@@ -541,7 +541,7 @@ test('follow, follows, notices, terms and group ops', async (t) => {
   await pagesTerms(fakeNode(), { member: M })
   t.is(Object.hasOwn(body(calls[1]), 'page'), false)
 
-  for (const action of ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']) {
+  for (const action of ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']) {
     calls = stub(t, flow(() => json(200, {})))
     await pagesGroup(fakeNode(), { member: M, page: P, action, op: { group: K2 } })
     t.ok(calls[1].url.endsWith('/account/pages/' + action), action)
