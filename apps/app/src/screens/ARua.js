@@ -70,6 +70,7 @@ import { Icon } from '../ui/Icon'
 import { PostRow } from '../ui/PostRow'
 import { PostSheetProvider } from '../ui/PostSheetHost'
 import { KeptOnlyContext } from '../ui/MediaView'
+import { Toast } from '../ui/Toast'
 import { TopBar } from '../ui/TopBar'
 import { useChromeMotion } from '../ui/chromeMotion'
 import { RefreshableList } from '../ui/RefreshableList'
@@ -1710,20 +1711,10 @@ export function SocialToast ({ text }) {
   const styles = useStyles(makeStyles)
   const t = typeof text === 'string' ? { text } : text
   if (!t || !t.text) return null
+  const handleAction = t.onAction
   return (
     <View style={styles.toast} pointerEvents='box-none'>
-      <View style={styles.toastPill} pointerEvents='box-none'>
-        <View pointerEvents='none'>
-          <Text style={styles.toastText} accessibilityRole='alert'>{t.text}</Text>
-        </View>
-        {t.onAction
-          ? (
-            <Pressable onPress={() => t.onAction()} accessibilityRole='button' accessibilityLabel={t.actionLabel} hitSlop={8} style={styles.toastAction}>
-              <Text style={styles.toastActionText}>{t.actionLabel}</Text>
-            </Pressable>
-            )
-          : null}
-      </View>
+      <Toast text={t.text} actionLabel={t.actionLabel} onAction={handleAction} />
     </View>
   )
 }
@@ -2934,16 +2925,5 @@ const makeStyles = (colors) => StyleSheet.create({
     left: 16,
     right: 16,
     alignItems: 'center'
-  },
-  toastPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.toastBg,
-    borderRadius: 18,
-    paddingVertical: 8,
-    paddingHorizontal: 14
-  },
-  toastText: { ...type.counter, color: colors.toastInk },
-  toastAction: { marginLeft: 8 },
-  toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
+  }
 })
