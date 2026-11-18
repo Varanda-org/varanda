@@ -151,7 +151,7 @@ export function EmptyState ({ icon, title, body, actionLabel, onAction, secondar
       <Text style={styles.emptyTitle} accessibilityRole='header'>{title}</Text>
       {body ? <Soft style={styles.emptyBody}>{body}</Soft> : null}
       {actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}
-      {secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} /> : null}
+      {secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} tonal /> : null}
     </View>
   )
 }
