@@ -64,9 +64,10 @@ import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
+import { RadioMark } from '../ui/Radio'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useEscapeLayer } from '../ui/escapeLayer'
-import { space, type } from '../ui/theme'
+import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, useAction } from '../ui'
@@ -169,7 +170,9 @@ function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailin
       </View>
       {trailingText !== null
         ? <Text style={styles.trailing}>{trailingText}</Text>
-        : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
+        : radio
+          ? <RadioMark checked={checked} />
+          : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
     </Pressable>
   )
 }
@@ -834,7 +837,6 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   icon={m === 'dark' ? 'moon' : m === 'light' ? 'sun' : 'smartphone'}
                   label={MODE_LABELS[m]}
                   checked={mode === m}
-                  trailing={mode === m ? 'ok' : null}
                   onPress={() => setMode(m)}
                 />
               ))}
@@ -877,8 +879,8 @@ const makeStyles = (colors) => StyleSheet.create({
   back: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
   group: {
     backgroundColor: colors.card,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.bubble,
+    borderWidth: 1,
     borderColor: colors.line,
     overflow: 'hidden',
     marginBottom: 12
@@ -888,7 +890,7 @@ const makeStyles = (colors) => StyleSheet.create({
   confirm: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg },
   card: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 16 },
   cardName: { fontSize: 17, fontWeight: '600', color: colors.ink },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, paddingVertical: 14, paddingHorizontal: 16 },
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   rowPressed: { backgroundColor: colors.skeleton },
   copy: { flex: 1, minWidth: 0, gap: 2 },

@@ -57,6 +57,7 @@ import {
 } from '../forward'
 import { createChatMedia, pinChatMedia, sourceFor } from '../media/chatMedia'
 import { readReportAudio as readLocalBytes } from '../media/reportAudio'
+import { CheckboxMark } from './Checkbox'
 import { ErrorText, Soft, errorText } from './index'
 import { Icon } from './Icon'
 import { mediaHashDeps } from './MediaView'
@@ -354,7 +355,7 @@ export function ForwardSheet ({ open, onClose, source, refs, identity, request: 
               >
                 <Icon name={row.kind === 'group' ? 'gente' : 'pessoa'} size={20} color={colors.soft} />
                 <Text style={styles.title} numberOfLines={1}>{displayText(titleOf(row))}</Text>
-                {!started && chosen ? <Icon name='ok' size={20} color={colors.accent} /> : null}
+                <CheckboxMark checked={chosen} />
               </Pressable>
               {entry
                 ? (

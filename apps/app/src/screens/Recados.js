@@ -26,9 +26,9 @@ import {
 } from '../scraps'
 import { refusalOf } from '../wordCheck'
 import { ErrorText, Page, Soft, errorText, useBottomPad, useNow } from '../ui'
-import { Icon } from '../ui/Icon'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
+import { RadioMark } from '../ui/Radio'
 import { RefreshableList } from '../ui/RefreshableList'
 import { ScrapRow } from '../ui/ScrapRow'
 import { Sheet } from '../ui/Sheet'
@@ -347,7 +347,6 @@ export default function Recados ({ entry, ownKey, onBack, onOpenMember, onReport
 // offers no guess. A change is one scrap.wall, never repeated by itself.
 export function WallSetting ({ active }) {
   const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   const node = useNode()
   const requestRef = useRef(node.request)
   requestRef.current = node.request
@@ -405,7 +404,6 @@ export function WallSetting ({ active }) {
             pending={saving === o.id}
             disabled={saving !== null || state.loading}
             onPress={() => choose(o.id)}
-            color={colors.soft}
           />
         ))}
       </View>
@@ -418,7 +416,7 @@ export function WallSetting ({ active }) {
   )
 }
 
-function WallOption ({ label, checked, pending, disabled, onPress, first, color }) {
+function WallOption ({ label, checked, pending, disabled, onPress, first }) {
   const styles = useStyles(makeStyles)
   return (
     <Pressable
@@ -431,7 +429,7 @@ function WallOption ({ label, checked, pending, disabled, onPress, first, color 
       onPress={onPress}
     >
       <Text style={styles.optionLabel}>{pending ? label + '…' : label}</Text>
-      {checked ? <Icon name='ok' size={20} color={color} /> : null}
+      <RadioMark checked={checked} />
     </Pressable>
   )
 }
