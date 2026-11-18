@@ -1171,8 +1171,8 @@ const AUDIUS_TRENDING_MESSAGES = {
   'nao-encontrado': MUSIC_UNAVAILABLE_TEXT
 }
 
-export const audiusTrending = async ({ kind = 'track', origin, member, request, signal } = {}) => {
-  const body = trendingBody(kind)
+export const audiusTrending = async ({ kind = 'track', genre, origin, member, request, signal } = {}) => {
+  const body = trendingBody(kind, genre)
   if (body === null) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
     const json = await call('POST', '/account/audius/trending?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS, messages: AUDIUS_TRENDING_MESSAGES })

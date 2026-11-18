@@ -11,7 +11,7 @@
 
 import rpc from '@varanda/rpc'
 
-const { cardText, cardUrlHost, MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC } = rpc
+const { cardText, cardUrlHost, MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC, MUSIC_GENRES, isMusicGenre } = rpc
 
 export const SNIPPET_S = 15
 // The picker badge for that fixed window, not a length measured from the track.
@@ -176,9 +176,47 @@ export function searchBody (q, kind, cursor) {
   return { q: text, kind, cursor }
 }
 
-export function trendingBody (kind) {
-  if (kind === undefined || kind === 'track') return {}
-  if (kind === 'playlist') return { kind }
+export const MUSIC_GENRE_ALL_TEXT = 'Todos'
+export const MUSIC_GENRE_LABELS = Object.freeze({
+  Pop: 'Pop',
+  'Hip-Hop/Rap': 'Hip-hop e rap',
+  Rock: 'Rock',
+  Electronic: 'Eletrônica',
+  'R&B/Soul': 'R&B e soul',
+  Latin: 'Latina',
+  Funk: 'Funk',
+  Reggae: 'Reggae',
+  Jazz: 'Jazz',
+  Alternative: 'Alternativa',
+  Indie: 'Indie',
+  Metal: 'Metal',
+  Folk: 'Folk',
+  Acoustic: 'Acústica',
+  Classical: 'Clássica',
+  'Lo-Fi': 'Lo-fi',
+  House: 'House',
+  Techno: 'Techno',
+  Trance: 'Trance',
+  Dubstep: 'Dubstep',
+  'Drum & Bass': 'Drum & bass',
+  Trap: 'Trap',
+  'Deep House': 'Deep house',
+  'Tech House': 'Tech house'
+})
+
+export function musicGenreChips (order = MUSIC_GENRES) {
+  return [
+    { id: '', label: MUSIC_GENRE_ALL_TEXT },
+    ...order.filter(isMusicGenre).map((id) => ({ id, label: MUSIC_GENRE_LABELS[id] }))
+  ]
+}
+
+export function trendingBody (kind = 'track', genre = '') {
+  if (kind === 'track') {
+    if (genre === '') return {}
+    return isMusicGenre(genre) ? { genre } : null
+  }
+  if (kind === 'playlist' && genre === '') return { kind }
   return null
 }
 

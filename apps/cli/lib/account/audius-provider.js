@@ -1,7 +1,7 @@
 'use strict'
 
 const { isHostname } = require('./safe-fetch')
-const { cardText, cardUrlHost } = require('@varanda/rpc')
+const { cardText, cardUrlHost, isMusicGenre } = require('@varanda/rpc')
 
 // The one place that knows the Audius API shapes: the operator's config, the
 // request of each kind, and the mapping of an answer to the few fields a
@@ -110,13 +110,19 @@ function requestFor (config, kind, params = {}) {
     path = '/resolve'
     query = { url: params.url }
   } else if (kind === 'trendingTracks') {
-    // The week window is fixed: a caller cannot pick time, genre or a query.
+    // The week window is fixed: a caller picks only a genre from the shared
+    // list, never time, free text or a query. The provider filters by the exact
+    // string and accepts any text, so an unlisted value is refused here.
+    const { genre } = params
+    if (genre !== undefined && !isMusicGenre(genre)) return null
     const page = paging(params)
     if (page === null) return null
     path = '/tracks/trending'
-    query = { time: 'week', ...page }
+    query = genre === undefined ? { time: 'week', ...page } : { time: 'week', genre, ...page }
   } else if (kind === 'trendingPlaylists') {
     // The week window is fixed: a caller cannot pick time, genre, type or a query.
+    // Playlists take no genre, so one is refused rather than silently dropped.
+    if (params.genre !== undefined) return null
     const page = paging(params)
     if (page === null) return null
     path = '/playlists/trending'

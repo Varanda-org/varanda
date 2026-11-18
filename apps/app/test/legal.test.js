@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 95)
+  t.is(LEGAL_VERSION, 96)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 95, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 96, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -455,7 +455,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '62ad664a25156ac200a16c986189d8d559ee9c21b8ccc60d6f9a407edb743dc2', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '09b24305dd2b29e604b271c4c3d28608fd0a3abcc29dc88b017576d30e024b7c', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -509,12 +509,38 @@ test('legal: version 95 describes trending playlists', async (t) => {
   t.ok(audius(TERMS).includes('Na aba Playlists, com o campo de busca vazio, a escolha de música mostra também playlists em alta no Audius nesta semana. Como a lista de faixas, ela é igual para todo mundo, não é personalizada e pode mudar no provedor.'), 'terms: trending playlists')
   const privacy = audius(PRIVACY)
   t.ok(privacy.includes('Abrir a aba Playlists com o campo de busca vazio pede do mesmo modo a lista de playlists em alta, e o serviço fica sabendo que a sua conta abriu essa aba'), 'privacy: asked when the tab opens, the service knows')
-  t.ok(privacy.includes('Os dois pedidos contam num só limite diário próprio, de 200 aberturas por conta por dia, somadas as das duas listas'), 'privacy: one counter for both lists')
-  t.ok(privacy.includes('Cada lista, de faixas ou de playlists, segue a mesma regra: uma lista que voltou bem é reaproveitada para todos os membros por até 10 minutos'), 'privacy: each list is shared for 10 minutes')
+  t.ok(privacy.includes('Os pedidos de lista contam, salvo quando falham, num só limite diário próprio, de 200 aberturas por conta por dia, somados os da lista geral de faixas, os de cada gênero e os da lista de playlists'), 'privacy: one counter for every list')
+  t.ok(privacy.includes('Cada lista, de faixas, de cada gênero ou de playlists, segue a mesma regra: uma lista que voltou bem é reaproveitada para todos os membros por até 10 minutos'), 'privacy: each list is shared for 10 minutes')
   t.ok(privacy.includes('por 1 minuto e responde "indisponível"'), 'privacy: one minute after a failure')
   t.ok(all(PRIVACY).includes('As listas em alta, de faixas e de playlists, ficam só na memória do serviço, valem por até 10 minutos cada e somem ao reiniciar'), 'privacy: retention covers both lists')
   t.ok(all(PRIVACY).includes('e, na aba Playlists, a lista de playlists em alta'), 'privacy: legal basis covers the playlists')
   t.absent(all(PRIVACY).includes('no máximo uma vez a cada 10 minutos'), 'privacy: no fixed-interval promise')
+  for (const doc of [TERMS, PRIVACY]) t.absent(all(doc).includes('\u2014'), doc.title + ': no em dash')
+})
+
+test('legal: version 96 describes genre lists', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  const { MUSIC_GENRES } = require('@varanda/rpc')
+  t.ok(LEGAL_VERSION >= 96)
+  t.ok(MUSIC_GENRES.includes('Electronic'), 'the English name the privacy text uses is in the allowlist')
+  const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const terms = audius(TERMS)
+  t.ok(terms.includes('Na lista de faixas da escolha de música, com o campo vazio, você pode tocar num gênero para ver as faixas em alta daquele gênero nesta semana.'), 'terms: tap a genre')
+  t.ok(terms.includes('Os gêneros são uma lista fixa do app, e a lista de cada gênero é igual para todo mundo. Tocar em Todos volta à lista geral. A aba Playlists não tem gêneros.'), 'terms: fixed list, same for everyone, Todos, no genres for playlists')
+  const privacy = audius(PRIVACY)
+  t.ok(privacy.includes('Quando você toca num gênero, o app envia ao serviço de conta o nome desse gênero, sempre um dos nomes de uma lista fixa, nunca um texto livre.'), 'privacy: the genre name from a fixed list')
+  t.ok(privacy.includes('o gênero Eletrônica, por exemplo, vai como Electronic'), 'privacy: shown in pt-BR, sent in English')
+  t.ok(privacy.includes('naquele pedido o serviço vê qual conta pediu qual gênero'), 'privacy: the service sees the pairing in the request')
+  t.ok(privacy.includes('Quando precisa montar a lista desse gênero, ele envia ao Audius o nome do gênero'), 'privacy: what Audius gets for a genre list')
+  t.ok(privacy.includes('O serviço não grava em disco nem em registros qual gênero cada conta pediu'), 'privacy: the pairing is not recorded')
+  t.ok(privacy.includes('a contagem diária de pedidos da conta, que não leva o gênero'), 'privacy: the daily counter carries no genre')
+  t.ok(privacy.includes('Cada toque num gênero diferente é um pedido e conta no limite diário das listas, salvo quando falha'), 'privacy: each tap counts')
+  t.ok(privacy.includes('A lista fixa não tem gênero religioso, infantil nem categorias que não são música'), 'privacy: what the fixed list excludes')
+  t.ok(privacy.includes('Para montar a lista geral de faixas e a de playlists, o serviço envia ao Audius só o período fixo da semana'), 'privacy: the no-genre sentence is scoped to the general lists')
+  t.ok(all(PRIVACY).includes('o gênero que você tocou. O Audius'), 'privacy: sent abroad')
+  t.ok(all(PRIVACY).includes('ao tocar num gênero, a lista de faixas em alta daquele gênero'), 'privacy: legal basis covers genre lists')
+  t.absent(all(PRIVACY).includes('somadas as das duas listas'), 'privacy: the counter is no longer for two lists')
   for (const doc of [TERMS, PRIVACY]) t.absent(all(doc).includes('\u2014'), doc.title + ': no em dash')
 })
 

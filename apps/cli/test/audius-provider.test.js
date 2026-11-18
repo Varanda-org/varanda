@@ -21,6 +21,7 @@ const {
   listOf,
   nextCursor
 } = require('../lib/account/audius-provider')
+const { MUSIC_GENRES } = require('@varanda/rpc')
 
 const KEY = 'chave-sentinela-audius-42'
 
@@ -155,9 +156,9 @@ test('requestFor: every kind, the key never in the URL', (t) => {
     ['searchTracks', { query: 'samba' }, 'https://api.audius.co/v1/tracks/search?query=samba&limit=20&offset=0&app_name=varanda'],
     ['searchPlaylists', { query: 'roda', limit: 10, offset: 0 }, 'https://api.audius.co/v1/playlists/search?query=roda&limit=10&offset=0&app_name=varanda'],
     ['trendingTracks', { limit: 24 }, 'https://api.audius.co/v1/tracks/trending?time=week&limit=24&offset=0&app_name=varanda'],
-    ['trendingTracks', { query: 'secret', genre: 'Samba', time: 'allTime', id: 'abc' }, 'https://api.audius.co/v1/tracks/trending?time=week&limit=20&offset=0&app_name=varanda'],
+    ['trendingTracks', { query: 'secret', time: 'allTime', id: 'abc', url: 'https://audius.co/a/b' }, 'https://api.audius.co/v1/tracks/trending?time=week&limit=20&offset=0&app_name=varanda'],
     ['trendingPlaylists', { limit: 24 }, 'https://api.audius.co/v1/playlists/trending?time=week&limit=24&offset=0&app_name=varanda'],
-    ['trendingPlaylists', { query: 'secret', genre: 'Samba', time: 'allTime', id: 'abc', type: 'album', url: 'https://audius.co/a/b' }, 'https://api.audius.co/v1/playlists/trending?time=week&limit=20&offset=0&app_name=varanda'],
+    ['trendingPlaylists', { query: 'secret', time: 'allTime', id: 'abc', type: 'album', url: 'https://audius.co/a/b' }, 'https://api.audius.co/v1/playlists/trending?time=week&limit=20&offset=0&app_name=varanda'],
     ['track', { id: 'D7KyD' }, 'https://api.audius.co/v1/tracks/D7KyD?app_name=varanda'],
     ['playlist', { id: 'pL4yA' }, 'https://api.audius.co/v1/playlists/pL4yA?app_name=varanda'],
     ['playlistTracks', { id: 'pL4yA' }, 'https://api.audius.co/v1/playlists/pL4yA/tracks?app_name=varanda'],
@@ -173,6 +174,36 @@ test('requestFor: every kind, the key never in the URL', (t) => {
   }
   const own = requestFor(config({ apiUrl: 'https://audius.test:8443/v1' }), 'track', { id: 'abc' })
   t.is(own.href, 'https://audius.test:8443/v1/tracks/abc?app_name=varanda')
+})
+
+test('requestFor: trendingTracks forwards only a listed genre, encoded once', (t) => {
+  const c = config()
+  const base = 'https://api.audius.co/v1/tracks/trending?time=week&genre='
+  const tail = '&limit=20&offset=0&app_name=varanda'
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Pop' }).href, base + 'Pop' + tail)
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Hip-Hop/Rap' }).href, base + 'Hip-Hop%2FRap' + tail)
+  t.is(requestFor(c, 'trendingTracks', { genre: 'R&B/Soul' }).href, base + 'R%26B%2FSoul' + tail)
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Deep House' }).href, base + 'Deep+House' + tail)
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Drum & Bass' }).href, base + 'Drum+%26+Bass' + tail)
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Pop', limit: 24, offset: 24 }).href, base + 'Pop&limit=24&offset=24&app_name=varanda')
+  t.is(requestFor(c, 'trendingTracks', { genre: undefined, limit: 24 }).href, 'https://api.audius.co/v1/tracks/trending?time=week&limit=24&offset=0&app_name=varanda')
+  for (const genre of MUSIC_GENRES) {
+    const r = requestFor(c, 'trendingTracks', { genre })
+    t.is(new URL(r.href).searchParams.get('genre'), genre, genre + ' round-trips')
+  }
+  for (const genre of ['Samba', 'pop', ' Pop', 'Pop ', 'POP', 'Techno, Tech House', 'Devotional', '', 7, null, true, ['Pop'], { toString: () => 'Pop' }]) {
+    t.is(requestFor(c, 'trendingTracks', { genre }), null, 'refused: ' + JSON.stringify(genre))
+  }
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Pop', limit: 0 }), null)
+  t.is(requestFor(c, 'trendingTracks', { genre: 'Pop', time: 'allTime', query: 'x' }).href, base + 'Pop' + tail, 'time and query still never read')
+})
+
+test('requestFor: trendingPlaylists takes no genre', (t) => {
+  const c = config()
+  t.is(requestFor(c, 'trendingPlaylists', { genre: 'Pop' }), null)
+  t.is(requestFor(c, 'trendingPlaylists', { genre: '' }), null)
+  t.is(requestFor(c, 'trendingPlaylists', { genre: null }), null)
+  t.ok(requestFor(c, 'trendingPlaylists', { genre: undefined }))
 })
 
 test('requestFor: refuses unknown kinds and bad parameters', (t) => {

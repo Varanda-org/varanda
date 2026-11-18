@@ -7,6 +7,7 @@ const { publicAddress, httpsTarget } = require('./safe-fetch')
 const { refundableWindow, createMemberSession } = require('./member-session')
 const { createStreamFetch, parseRange, readCapped, pipeCapped } = require('./stream-fetch')
 const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, listOf, nextCursor, ID_RE } = require('./audius-provider')
+const { MUSIC_GENRES, isMusicGenre } = require('@varanda/rpc')
 
 // Music from Audius through the account service, off unless the operator
 // configures it (parseAudiusConfig in ./audius-provider.js):
@@ -27,19 +28,24 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     ignores the query, so a newer app can ask without breaking it. With
 //     `?info=1`, each track (never a playlist) also carries `genre` and `year`
 //     when the provider had them; without it the keys are today's exact ones.
-//   - POST /account/audius/trending {} or { kind } (bearer, kind 'track' or
-//     'playlist', 'track' when absent) answers { items, next: null }: at most
-//     PAGE_SIZE items of the week's trending tracks or playlists, with covers
-//     as on search and, for tracks only, info as on search. One daily counter,
-//     TRENDINGS_PER_DAY per member, serves both kinds. There is one list per
-//     kind for every member, kept in memory only: a list that came back fine
-//     is reused for up to CACHE_TTL_MS, concurrent misses of a kind share one
-//     provider call (the member that started it pays it), a failed attempt
-//     that reached the provider stops new requests for that list for
-//     TRENDING_RETRY_MS (answered 503, the use given back), and a restart
-//     erases both. A playlist's tracks are not asked. What reaches Audius on
-//     this route: the fixed time=week, the list's limit and offset, the app
-//     name, the key and this service's address, nothing of the member.
+//   - POST /account/audius/trending {}, { kind } or { genre } (bearer, kind
+//     'track' or 'playlist', 'track' when absent; genre one name of
+//     MUSIC_GENRES, exact, with no kind or kind 'track') answers { items,
+//     next: null }: at most PAGE_SIZE items of the week's trending tracks
+//     (of that genre) or playlists, with covers as on search and, for tracks
+//     only, info as on search. One daily counter, TRENDINGS_PER_DAY per
+//     member, serves both kinds and every genre. The lists, one per kind and
+//     one per genre, are shared by all members and kept in memory only: a
+//     list that came back fine is reused for up to CACHE_TTL_MS, concurrent
+//     misses of a list share one provider call (the member that started it
+//     pays it), a failed attempt that reached the provider stops new
+//     requests for that list for TRENDING_RETRY_MS (answered 503, the use
+//     given back), and a restart erases them all. A playlist's tracks are not
+//     asked. What reaches Audius on this route: the fixed time=week, the
+//     list's limit and offset, the allowlisted genre name of a genre list,
+//     the app name, the key and this service's address, nothing of the
+//     member. The genre names a list only: it is never logged and never kept
+//     with the member.
 //   - POST /account/audius/art { kind, id } (bearer, covers switch on)
 //     answers { mime, bytes } with the item's 150x150 cover: at most
 //     ART_MAX_BYTES, JPEG, PNG or WebP by magic bytes only, ARTS_PER_DAY per
@@ -116,10 +122,10 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     as any other.
 //
 // What reaches the provider: the query text, an id, a permalink or the
-// trending lists' fixed time=week, limit and offset, the operator's key (in
-// a header, first hop only, never to a kept storage URL) and app name, this
-// service's address and a fixed User-Agent. Never the member's address, key
-// or token.
+// trending lists' fixed time=week, limit and offset and an allowlisted genre
+// name (never logged), the operator's key (in a header, first hop only,
+// never to a kept storage URL) and app name, this service's address and a
+// fixed User-Agent. Never the member's address, key or token.
 // What reaches the art host: a GET from this service's address with
 // User-Agent and Accept only, never the key, a cookie or anything of the
 // member. Logs carry { event: 'audius', reason } only, never the key, the
@@ -175,6 +181,18 @@ const ART_PER_MEMBER = 3
 // shared budget again while the host is down.
 const ART_RETRY_MS = 60 * 1000
 const TRENDINGS_PER_DAY = 200
+// The trending list keys come only from the two kinds and one track list per
+// MUSIC_GENRES entry, so at most this many lists of at most PAGE_SIZE rows
+// (26 lists, 312 rows) exist, and no eviction is needed. Upstream cost, an
+// estimate with full TTLs and not a maximum: a list lives no longer than the
+// cached rows it lists, so a track list, whose answer caches every row anew,
+// is refreshed about once per CACHE_TTL_MS, about 144 calls a day per list
+// (1.2% of PROVIDER_PER_DAY, 12000) and 26 x 144 = 3744 for all (31%); the
+// playlist list can be refreshed sooner, because a playlist row cached
+// earlier keeps its own earlier expiry. A failing list is asked again at most
+// once per TRENDING_RETRY_MS, and every contact is still charged to the
+// asking member's PROVIDER_CALLS_PER_DAY and MEMBER_BUDGET_PER_DAY.
+const MAX_TRENDING_LISTS = 2 + MUSIC_GENRES.length
 // Asked for two pages: fromTrack drops gated and unlisted tracks, and the
 // answer should still fill one.
 const TRENDING_ASK = 2 * PAGE_SIZE
@@ -350,12 +368,14 @@ function createAudiusRoutes ({
   // member -> its art requests waiting on a host fetch, started or joined.
   const memberArts = new Map()
   // The week's trending lists, shared by every member and keyed only by the
-  // validated kind ('track' or 'playlist'), never by a member. A list key
-  // maps to { rows, expiresAt }, rows being cached track or playlist rows, or
-  // to { failedUntil }, the time before which a miss asks nothing after a
-  // failed call: a hold is only written on a miss, so it never replaces a
-  // valid list. `trendingLoads` holds the running provider call of a key,
-  // which every concurrent miss of that key awaits.
+  // validated list key ('track', 'playlist' or 'track:' + an allowlisted
+  // genre), never by a member, so each Map holds at most MAX_TRENDING_LISTS
+  // entries and needs no eviction. A list key maps to { rows, expiresAt },
+  // rows being cached track or playlist rows, or to { failedUntil }, the
+  // time before which a miss asks nothing after a failed call: a hold is
+  // only written on a miss, so it never replaces a valid list.
+  // `trendingLoads` holds the running provider call of a key, which every
+  // concurrent miss of that key awaits.
   const trendingLists = new Map()
   const trendingLoads = new Map()
   let streams = 0
@@ -721,12 +741,13 @@ function createAudiusRoutes ({
     return false
   }
 
-  // One provider call for the list `kind`, charged to `member`. Rejects like
-  // providerJson; a failure after the provider was contacted holds that list
-  // only.
-  async function loadTrending (kind, member) {
+  // One provider call for the list `key` of `kind` (of `genre` when one is
+  // given), charged to `member`. Rejects like providerJson; a failure after
+  // the provider was contacted holds that list only.
+  async function loadTrending (key, kind, genre, member) {
     try {
-      const spec = requestFor(config, kind === 'track' ? 'trendingTracks' : 'trendingPlaylists', { limit: TRENDING_ASK, offset: 0 })
+      const params = genre === undefined ? { limit: TRENDING_ASK, offset: 0 } : { limit: TRENDING_ASK, offset: 0, genre }
+      const spec = requestFor(config, kind === 'track' ? 'trendingTracks' : 'trendingPlaylists', params)
       const list = listOf(await providerJson(spec, member))
       if (list === null) throw new Error('forma')
       const rows = []
@@ -750,14 +771,14 @@ function createAudiusRoutes ({
         const entry = cache.get(kind + ':' + row.id)
         if (entry !== undefined && entry.expiresAt < expiresAt) expiresAt = entry.expiresAt
       }
-      trendingLists.set(kind, { rows, expiresAt })
+      trendingLists.set(key, { rows, expiresAt })
       return rows
     } catch (err) {
       const token = err && err.message
-      if (token !== 'pedido' && token !== 'lotado' && token !== 'limite' && token !== 'orcamento') trendingLists.set(kind, { failedUntil: now() + TRENDING_RETRY_MS })
+      if (token !== 'pedido' && token !== 'lotado' && token !== 'limite' && token !== 'orcamento') trendingLists.set(key, { failedUntil: now() + TRENDING_RETRY_MS })
       throw err
     } finally {
-      trendingLoads.delete(kind)
+      trendingLoads.delete(key)
     }
   }
 
@@ -773,11 +794,16 @@ function createAudiusRoutes ({
   }
 
   async function trending (res, member, body, url) {
-    exactKeys(body, [], ['kind'])
+    exactKeys(body, [], ['kind', 'genre'])
     const kind = body.kind === undefined ? 'track' : kindParam(body.kind)
+    const genre = body.genre
+    // Refused before any counter or Map entry: only an allowlisted genre ever
+    // becomes a list key, which keeps the lists bounded.
+    if (genre !== undefined && (!isMusicGenre(genre) || kind !== 'track')) throw refuse('pedido-invalido')
+    const key = genre === undefined ? kind : 'track:' + genre
     if (!limits.trending(member)) throw overLimit()
-    let rows = trendingRows(kind)
-    const running = trendingLoads.get(kind)
+    let rows = trendingRows(key)
+    const running = trendingLoads.get(key)
     if (rows === null && running !== undefined) {
       // The leader's refusal (its own 'limite' above all) says nothing about
       // this member, so a joiner only ever hears indisponivel.
@@ -788,12 +814,12 @@ function createAudiusRoutes ({
         throw unavailable()
       }
     } else if (rows === null) {
-      if (trendingHeld(kind)) {
+      if (trendingHeld(key)) {
         limits.trending.giveBack(member)
         throw unavailable()
       }
-      const load = loadTrending(kind, member)
-      trendingLoads.set(kind, load)
+      const load = loadTrending(key, kind, genre, member)
+      trendingLoads.set(key, load)
       try {
         rows = await load
       } catch (err) {
@@ -1494,7 +1520,12 @@ function createAudiusRoutes ({
     return { ...auth.stats(), cached: cache.size, covers: arts.size, inflight, artInflight, tickets: tickets.size, streams }
   }
 
-  return { owns, handle, stats, enabled: () => enabled }
+  // The trending Map sizes only, never their keys, for the bound's tests.
+  function trendingSize () {
+    return { lists: trendingLists.size, loads: trendingLoads.size }
+  }
+
+  return { owns, handle, stats, trendingSize, enabled: () => enabled }
 }
 
 module.exports = {
@@ -1520,6 +1551,7 @@ module.exports = {
   TRENDINGS_PER_DAY,
   TRENDING_ASK,
   TRENDING_RETRY_MS,
+  MAX_TRENDING_LISTS,
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,
   STREAMS_PER_MEMBER,
