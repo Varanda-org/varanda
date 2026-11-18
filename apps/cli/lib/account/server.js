@@ -719,7 +719,7 @@ function checkRawPost (req, origin) {
 // ('semanal' or 'sorteio') is only echoed by the signed invites summary: the
 // store's `opened` callback is what holds invites back. `push` is null
 // (the push routes and /push-event are not mounted at all) or the options of
-// ./push-routes.js { pushStore, vapid, send, relayTokenHash }. `seen` is an
+// ./push-routes.js { pushStore, vapid, wakeKey, send, relayTokenHash }. `seen` is an
 // openSeenStore (./seen-store.js) or null: the seen routes then answer 503
 // 'indisponivel'. `didit` (a
 // createDidit of ./didit.js) and `ages` (an openAgeStore of ./age-store.js)
@@ -898,6 +898,7 @@ function createAccountServer ({
       association,
       accounts: store,
       terms,
+      pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
       phoneChecked,
       log,
       now,

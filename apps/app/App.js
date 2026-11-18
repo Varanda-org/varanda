@@ -88,7 +88,7 @@ import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore, wipeLegacyPageNotices } from './src/pageNoticeStore'
 import { inviteDropOnceId, syncedPageNoticeStore, withOnceTokens } from './src/onceMarks'
 import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, onceKeyOf, onceMember, onceMemberFor, onceRegistry, setOnceMember } from './src/onceSync'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, pushWakeKey, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass } from './src/seenSync'
 import { badgeListParams, conversasDot, settleGroups } from './src/conversasDot'
@@ -373,6 +373,9 @@ let initialUrlTaken = false
 const NATIVE_APP = Platform.OS !== 'web'
 setCoreReach(CROSS_ORIGIN_PAGES)
 const DM_DOT_RETRY_MS = 15000
+// The DM notice key: tries after a failed read or handoff, doubling from 30 s.
+const NOTICE_KEY_TRIES = 5
+const NOTICE_KEY_RETRY_MS = 30000
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
 const INVITE_RETRIES = 10
@@ -2605,6 +2608,52 @@ function Member () {
   const feiraBadge = mode === 'hosted' && !locked && termsOk && !feiraOnScreen && feiraAlerts !== null &&
     feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
     alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
+  // --- Conversas: the push notice key (docs/rpc.md dm.noticeKey) ---
+  // The node seals a wake for the recipient after each DM send, so every
+  // member hands it the key, push on or not. The key comes only from this
+  // installation's account service, and lives only in the node's memory:
+  // asked once per node epoch, while online. No key or a failure leaves the
+  // node without it (it then sends no wake) and asks again after 30 s, 1, 2,
+  // 4 and 8 min: an HTTP failure neither ends the epoch nor takes the node
+  // offline, so without these tries a passing 503 would silence the notices
+  // until the next lock or reconnect. A later epoch, or the node coming back
+  // online, starts the tries over.
+  const noticeKeyEpochRef = useRef(null)
+  const noticeKeyRunRef = useRef(0)
+  const noticeKeyFailsRef = useRef({ epoch: null, n: 0 })
+  const [noticeKeyTry, setNoticeKeyTry] = useState(0)
+  const noticeKeyRequestRef = useRef(node.request)
+  noticeKeyRequestRef.current = node.request
+  const noticeKeyReady = dmReady && node.online === true
+  useEffect(() => {
+    if (!noticeKeyReady || noticeKeyEpochRef.current === nodeEpoch) return
+    const epoch = nodeEpoch
+    const request = noticeKeyRequestRef.current
+    const run = ++noticeKeyRunRef.current
+    const current = () => run === noticeKeyRunRef.current
+    let retryTimer = null
+    const retry = () => {
+      if (!current()) return
+      const fails = noticeKeyFailsRef.current
+      const n = fails.epoch === epoch ? fails.n + 1 : 1
+      noticeKeyFailsRef.current = { epoch, n }
+      if (n > NOTICE_KEY_TRIES) return
+      retryTimer = setTimeout(() => setNoticeKeyTry((x) => x + 1), NOTICE_KEY_RETRY_MS * 2 ** (n - 1))
+    }
+    pushWakeKey()
+      .then((key) => {
+        if (!current()) return
+        if (key === null) return retry()
+        return request('dm.noticeKey', { key }).then(() => {
+          if (current()) noticeKeyEpochRef.current = epoch
+        }, retry)
+      })
+      .catch(retry)
+    return () => {
+      noticeKeyRunRef.current++
+      if (retryTimer !== null) clearTimeout(retryTimer)
+    }
+  }, [noticeKeyReady, nodeEpoch, noticeKeyTry])
   // --- Visto em todos os aparelhos (src/seenSync.js) ---
   // The same passkey on another device marked notices, conversations or
   // groups as seen: a pass reads the encrypted seen document from the account
@@ -3197,6 +3246,13 @@ function Member () {
       requestDmOpen()
       return
     }
+    // A Pagina DM notice names no Pagina (privacy): the Paginas list is the
+    // landing, the same screen Ajustes opens. Without Paginas, Conversas.
+    if (intent.kind === 'dm-page') {
+      if (!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })) pushScreen({ screen: 'paginas' })
+      else requestDmOpen()
+      return
+    }
     // A convite names nobody: Convidar pessoas opens for whoever is unlocked.
     if (intent.kind === 'convite') {
       openInvites()
@@ -3215,7 +3271,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites, phoneClear, deleteFromAviso])
+  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites, phoneClear, deleteFromAviso, pushScreen, node.hosted, node.accountOrigin])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
