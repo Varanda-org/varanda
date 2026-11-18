@@ -6,6 +6,7 @@
 const test = require('brittle')
 const fs = require('fs')
 const path = require('path')
+const { createHash } = require('node:crypto')
 
 const loadShare = () => import('../src/postShare.js')
 const loadPolicy = () => import('../src/postPublicPolicy.js')
@@ -310,7 +311,7 @@ test('sheet source: consent, sent wording, share on its own tap, no em dash or P
     t.absent(imports.some((line) => /react|node:|'fs'|'path'/.test(line)), file + ' stays pure')
   }
   const own = read('postShare.js').split('\n').filter((line) => line.startsWith('import '))
-  t.alike(own, ["import { buildCover, coverSource, needsCover, validShareCover } from './media/shareCover.js'"], 'postShare.js takes its call and imports only the pure cover plan')
+  t.alike(own, ["import { sha256 } from '@noble/hashes/sha2.js'", "import { buildCover, coverSource, needsCover, validShareCover } from './media/shareCover.js'"], 'postShare.js takes its call and imports only hashing and the pure cover plan')
 })
 
 test('sheet source: the caller notice is read once per opening and only at the first read', (t) => {
@@ -334,7 +335,7 @@ test('context source: a failed probe is asked again when the app is back online 
   t.ok(src.includes('usePostPublicEnabled(hosted, where, online !== false && visible !== false)'), 'the provider passes online and visible')
 })
 
-const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: 'ef'.repeat(32), width: 1200, height: 900 }
+const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: createHash('sha256').update(new Uint8Array(40000)).digest('hex'), width: 1200, height: 900 }
 const AVIF_POST = { type: 'post', media: [{ ...COVER, mime: 'image/avif', bytes: 90000, width: 2000, height: 1500 }] }
 
 // A fake encoder and upload that count their calls.
@@ -417,6 +418,15 @@ test('sendCover writes nothing when the post needs no cover or a step fails', as
   throwing.setCover = async () => { throw new Error('x') }
   t.is((await sendCover({ post: AVIF_POST, ...throwing })).state, 'off', 'never rejects')
   t.is((await sendCover()).state, 'skipped')
+})
+
+test('sendCover rejects an upload hash of other bytes with the same size and sides', async (t) => {
+  const { sendCover, COVER_NOT_SENT } = await loadShare()
+  const sha256 = createHash('sha256').update(new Uint8Array(40000).fill(1)).digest('hex')
+  const rig = coverRig({ uploaded: { ...COVER, sha256 } })
+  t.alike(await sendCover({ post: AVIF_POST, ...rig }), { state: 'off', coverSeq: null, message: COVER_NOT_SENT })
+  t.is(rig.seen.uploads, 1, 'never retried')
+  t.alike(rig.seen.writes, [], 'no cover write for a different hash')
 })
 
 test('sheet source: the cover row is one tap, one attempt, no timer', (t) => {

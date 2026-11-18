@@ -5,6 +5,7 @@
 const test = require('brittle')
 const fs = require('fs')
 const path = require('path')
+const { createHash } = require('node:crypto')
 
 const load = () => import('../src/postShareCompose.js')
 
@@ -269,7 +270,7 @@ test('Publicar shares once after the post, never from the outbox, a poll, an eve
   t.absent(src.includes("'post.share'"), 'the screen never sends post.share itself')
 })
 
-const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: 'ef'.repeat(32), width: 1200, height: 900 }
+const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: createHash('sha256').update(new Uint8Array(40000)).digest('hex'), width: 1200, height: 900 }
 const AVIF = { ...COVER, mime: 'image/avif', bytes: 90000, width: 2000, height: 1500 }
 
 function coverInput ({ built = { bytes: new Uint8Array(40000), mime: 'image/jpeg', width: 1200, height: 900 }, uploadThrows = false } = {}) {

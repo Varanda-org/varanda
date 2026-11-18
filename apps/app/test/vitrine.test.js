@@ -1756,6 +1756,26 @@ test('post.cover needs a live share and keeps one live cover per post', async (t
   t.is((await call('post.shared', { to })).cover, false, 'no cover once the share is gone')
   await refused(t, request, 'post.cover', { to, image }, 'USAGE', 'a publicação não está na web')
   await refused(t, request, 'post.cover', { to: `${f.own}:1`, image }, 'USAGE', 'o registro não é uma publicação')
+  const again = await call('post.share', { to })
+  t.alike(await call('post.shared', { to }), { shareSeq: again.shareSeq, cover: false }, 'sharing again does not revive the withdrawn cover')
+})
+
+test('post.delete tombstones the live cover and refuses sharing the deleted post', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const { image } = samples(f)['post.cover']
+  const post = await call('post.create', { text: 'Uma publicação com capa.' })
+  await call('post.share', { to: post.ref })
+  const { coverSeq } = await call('post.cover', { to: post.ref, image })
+  t.is((await call('post.shared', { to: post.ref })).cover, true)
+  const result = await call('post.delete', { to: post.ref })
+  t.alike(result.deleted, [post.seq], 'the answer still names only the post')
+  const log = await call('log.read', { before: coverSeq + 1, limit: 1 })
+  t.alike(log.entries, [], 'the cover is no longer live')
+  t.alike(log.invalid, [{ seq: coverSeq, reason: 'deleted' }])
+  for (const method of ['post.share', 'post.shared']) {
+    await refused(t, request, method, { to: post.ref }, 'USAGE', 'referência inválida')
+  }
 })
 
 test('the demo feed shows the hashtag posts, so a tag can be tapped there', async (t) => {

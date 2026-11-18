@@ -11,6 +11,7 @@
 // One call sends one request. Nothing here retries.
 // post.shared also answers `cover` (5.121): true when the newest post-cover of
 // a shared post is live. An older node omits it, read as false.
+import { sha256 } from '@noble/hashes/sha2.js'
 import { buildCover, coverSource, needsCover, validShareCover } from './media/shareCover.js'
 
 export const UNCERTAIN_MESSAGE = 'Não deu para confirmar. Abra de novo para conferir.'
@@ -163,15 +164,15 @@ export async function sendCover ({ post, held = null, fetchStill = null, encodeT
     }
     const built = input === null ? null : await buildCover({ encodeThumbnail, bytes: input.bytes, mime: input.mime })
     if (built === null) return coverResult('off', null, COVER_NOT_BUILT)
+    const hash = Array.from(sha256(built.bytes), (b) => b.toString(16).padStart(2, '0')).join('')
     let image
     try {
       image = await upload(built)
     } catch {
       return coverResult('off', null, COVER_NOT_SENT)
     }
-    // The node refuses a descriptor that is not these bytes; this only keeps
-    // a wrong answer from becoming a write.
-    if (!validShareCover(image) || image.bytes !== built.bytes.byteLength || image.width !== built.width || image.height !== built.height) {
+    // Matching dimensions alone do not identify the uploaded photo.
+    if (!validShareCover(image) || image.bytes !== built.bytes.byteLength || image.width !== built.width || image.height !== built.height || image.sha256 !== hash) {
       return coverResult('off', null, COVER_NOT_SENT)
     }
     const r = await setCover(image)

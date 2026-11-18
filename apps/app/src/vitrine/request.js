@@ -836,6 +836,7 @@ export function createVitrineRequest (fixtures, options) {
       if (!entry || entry.record.type !== 'post') refuse('USAGE', 'referência inválida')
       const result = append({ type: 'delete', seq: target.seq, at: stamp() })
       deleted.set(to, result)
+      for (const e of liveCovers(target.seq)) deleted.set(`${data.own}:${e.seq}`, append({ type: 'delete', seq: e.seq, at: stamp() }))
       // As the real feed (packages/core/lib/feed.js), a repost whose target
       // is deleted leaves the feed with it.
       data.feed = data.feed.filter((p) => (p.author !== data.own || p.seq !== target.seq) &&
@@ -867,9 +868,10 @@ export function createVitrineRequest (fixtures, options) {
       return { shareSeq: append({ type: 'post-share', seq, at: stamp() }).seq, created: true }
     },
     'post.unshare': ({ to }) => {
-      const shares = liveShares(shareTarget(to))
-      for (const seq of shares) deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
-      return { ok: true, changed: shares.length > 0 }
+      const target = shareTarget(to)
+      const seqs = liveShares(target).concat(liveCovers(target).map((e) => e.seq))
+      for (const seq of seqs) deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
+      return { ok: true, changed: seqs.length > 0 }
     },
     'like.set': (params) => toggle('like', params),
     'repost.set': (params) => toggle('repost', params),

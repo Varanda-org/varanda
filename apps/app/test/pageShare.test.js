@@ -2,6 +2,7 @@
 'use strict'
 
 const test = require('brittle')
+const { createHash } = require('node:crypto')
 
 const load = () => import('../src/pageShare.js')
 const PAGE = 'ab'.repeat(32)
@@ -136,7 +137,7 @@ test('pageShareOps unpublish re-reads status after a change and never repeats th
   t.is(r2, 0, 'no read when nothing changed')
 })
 
-const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: 'ef'.repeat(32), width: 1200, height: 900 }
+const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: createHash('sha256').update(new Uint8Array(40000)).digest('hex'), width: 1200, height: 900 }
 
 test('coveredState and read: covered is known only from a current service', async (t) => {
   const { coveredState, pageShareOps } = await load()
