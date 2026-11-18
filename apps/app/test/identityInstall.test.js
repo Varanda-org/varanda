@@ -18,7 +18,7 @@ const { createIdentityHost, RECOVERY_PENDING_MS } = require('../worklet/identity
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile } = require('../worklet/web-node-parts')
+const { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile, createCoreMediaRead } = require('../worklet/web-node-parts')
 
 const hmac = (key, data) => new Uint8Array(crypto.createHmac('sha256', key).update(data).digest())
 const hkdf = (ikm, salt, info, length) => hkdfSha256(ikm, salt, info, length, { hmac })
@@ -1183,4 +1183,90 @@ test('a video file named with a path is refused before any read', async (t) => {
     t.is(mo.code, 'USAGE', 'momento ' + name)
   }
   t.is(sent.length, 0, 'nothing reached the session')
+})
+
+// worklet/main.js coreMediaRead: the core node's received DM media handle.
+function coreMedia (t, { dmReadMedia, gate = null }) {
+  const { root } = mediaDirs(t)
+  const dir = path.join(root, 'media-read')
+  fs.mkdirSync(dir)
+  const leftover = path.join(dir, 'ab'.repeat(16) + '.bin')
+  fs.writeFileSync(leftover, 'a killed worklet left this')
+  const opened = []
+  let entered = null
+  const writing = new Promise((resolve) => { entered = resolve })
+  const fsp = {
+    ...fs.promises,
+    open: async (...args) => {
+      opened.push(args[0])
+      entered()
+      if (gate !== null) await gate
+      return fs.promises.open(...args)
+    }
+  }
+  let n = 0
+  const media = createCoreMediaRead({
+    fs: fsp,
+    join: path.join,
+    dir,
+    newName: () => String(n++).padStart(32, '0') + '.bin',
+    flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    dmReadMedia
+  })
+  return { media, dir, leftover, opened, writing }
+}
+
+const PNG_3X2 = 'iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAAAAAC4HznGAAAAC0lEQVR4nGNggAAAAAgAAbdYc5UAAAAASUVORK5CYII='
+const DM_ITEM = { kind: 'dm', from: 'a'.repeat(64), id: 'b'.repeat(32), index: 0 }
+
+test('core media read: close waits for a write in flight, and no opened file is left once it resolves', async (t) => {
+  let release = null
+  const gate = new Promise((resolve) => { release = resolve })
+  const png = () => ({ bytes: new Uint8Array(Buffer.from(PNG_3X2, 'base64')), mime: 'image/png' })
+  const { media, dir, leftover, writing } = coreMedia(t, { dmReadMedia: async () => png(), gate })
+  const read = media.readFile(DM_ITEM)
+  read.catch(() => {})
+  await writing
+  t.absent(fs.existsSync(leftover), 'a file a killed worklet left is cleared at start, before any write')
+  let left = null
+  const closed = media.close().then(() => { left = fs.readdirSync(dir) })
+  t.is(media.close(), media.close(), 'close is idempotent')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(left, null, 'close waits while the write is held')
+  release()
+  await closed
+  t.alike(left, [], 'no opened file once close resolved')
+  const err = await read.catch((e) => e)
+  t.is(err.code, 'LOCKED', 'the read in flight is refused')
+  const later = await media.readFile(DM_ITEM).catch((e) => e)
+  t.is(later.code, 'LOCKED', 'a read after close is refused')
+  t.alike(fs.readdirSync(dir), [])
+})
+
+test('core media read: close does not wait for a read still opening its bytes, which then never writes', async (t) => {
+  let answer = null
+  const pending = new Promise((resolve) => { answer = resolve })
+  const { media, dir, opened } = coreMedia(t, { dmReadMedia: () => pending })
+  const read = media.readFile(DM_ITEM)
+  read.catch(() => {})
+  await media.close()
+  t.alike(fs.readdirSync(dir), [], 'cleared at close')
+  const bytes = new Uint8Array(Buffer.from(PNG_3X2, 'base64'))
+  answer({ bytes, mime: 'image/png' })
+  const err = await read.catch((e) => e)
+  t.is(err.code, 'LOCKED')
+  t.is(opened.length, 0, 'nothing is written after close')
+  t.ok(bytes.every((b) => b === 0), 'the plaintext is zeroed')
+  t.alike(fs.readdirSync(dir), [])
+})
+
+test('core media read: momento and group media stay refused', async (t) => {
+  const { media, opened } = coreMedia(t, { dmReadMedia: async () => { throw new Error('not reached') } })
+  for (const params of [{ kind: 'moment', author: 'k', seq: 1 }, { kind: 'group', diary: 'd', item: {} }]) {
+    const err = await media.readFile(params).catch((e) => e)
+    t.is(err.code, 'USAGE', params.kind)
+    t.is(err.message, 'mídia disponível só na versão web')
+  }
+  t.is(opened.length, 0)
+  await media.close()
 })

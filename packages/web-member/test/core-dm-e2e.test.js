@@ -274,6 +274,33 @@ test('core dm: a dm call queued while suspended refuses after close, never enter
   t.is(entered, 0, 'the engine never ran it')
 })
 
+test('core dm: suspend holds dm calls and the engine store ops until resume, and both run after it', async (t) => {
+  const kp = generateAssociationKeyPair()
+  let entered = 0
+  let ops = null
+  const fake = (hooks) => {
+    ops = hooks.ops
+    return { handlers: { 'dm.list': async () => { entered++; return {} } }, readMedia: async () => null, close: async () => {} }
+  }
+  const C = coreNode(t, { assoc: { kp, hex: hex(kp.publicKey) }, bootstrap: ['127.0.0.1:1'], dm: fake })
+  await C.session.suspend()
+  let listed = false
+  const queued = C.call('dm.list').then(() => { listed = true })
+  // An engine call already in flight asks for the store through an op: it
+  // waits too, so nothing is written while the store is suspended.
+  let opSettled = false
+  const op = ops.delegate().then(noop, noop).then(() => { opSettled = true })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(entered, 0, 'the engine is not entered while suspended')
+  t.absent(listed)
+  t.absent(opSettled, 'no store op while suspended')
+  C.session.resume()
+  await queued
+  await op
+  t.is(entered, 1, 'the queued call runs once after resume')
+  t.ok(opSettled, 'the op runs after resume')
+})
+
 test('core dm: a corrupt seed reaches the client as USAGE with no file content; the web-only methods stay refused', async (t) => {
   const kp = generateAssociationKeyPair()
   const C = coreNode(t, { assoc: { kp, hex: hex(kp.publicKey) }, bootstrap: ['127.0.0.1:1'], accountOrigin: 'http://127.0.0.1:1' })

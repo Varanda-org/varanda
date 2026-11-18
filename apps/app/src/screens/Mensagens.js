@@ -38,6 +38,8 @@ import { useStyles } from '../ui/ThemeProvider'
 import { atName } from '../who'
 import { shortKey } from '../format'
 import { memberKeyOf, useActing } from './Conversa'
+import { dmScreenGate } from '../coreDm'
+import { useCoreDm } from '../ui/useCoreDm'
 
 export const LOCKED_TEXT = 'Desbloqueie com a passkey para ler suas mensagens.'
 
@@ -388,7 +390,9 @@ export function Mensagens ({ onOpenThread, onBack, oldPage }) {
     else await list()
   }, [dm, list, bumpDm])
 
-  const ready = hosted && unlocked
+  // A core node reads its folder once its engine answers.
+  const core = useCoreDm(node)
+  const ready = dmScreenGate({ hosted, unlocked, core: core.state }).ready
 
   // Another acting identity is another folder: the old rows never stay.
   const seenPage = useRef(pageKey)
@@ -447,7 +451,7 @@ export function Mensagens ({ onOpenThread, onBack, oldPage }) {
   useRowPeeks(sortedPeers, unlocked && loaded)
 
   const bar = <TopBar title={old !== null ? OLD_KEY_TITLE : requestsRow(null).title} onBack={onBack} />
-  if (!hosted) return <View style={styles.root}>{bar}</View>
+  if (!hosted && !ready) return <View style={styles.root}>{bar}</View>
 
   const header = (
     <View>

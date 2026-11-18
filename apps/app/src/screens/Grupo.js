@@ -103,6 +103,8 @@ import { space } from '../ui/theme'
 import { fetchGroup } from '../indexClient'
 import { useNames } from '../names'
 import { pagesOn } from '../pageGate'
+import { groupScreenOpen } from '../coreDm'
+import { useCorePageGroups } from '../ui/useCoreDm'
 import { pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
@@ -157,6 +159,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const acting = useActing()
   const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
+  // A core node opens a group only as a Página, once it reads groups as one.
+  const coreGroups = useCorePageGroups(node, asPage.page ? asPage.key : null)
+  const open = groupScreenOpen({ hosted, asPage, core: coreGroups })
   const names = useNames()
   const namesRef = useRef(names)
   namesRef.current = names
@@ -454,7 +459,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }, [request, group])
 
   const load = useCallback(async (pull = false) => {
-    if (!hosted) return
+    if (!open) return
     const mine = ++seqRef.current
     if (pull) setRefreshing(true)
     else if (loadedAt === null) setLoading(true)
@@ -497,7 +502,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setLoadedAt(Date.now())
     setLoading(false)
     setRefreshing(false)
-  }, [hosted, loadInfo, readNewest, ownKey, loadedAt, asPage.page])
+  }, [open, loadInfo, readNewest, ownKey, loadedAt, asPage.page])
 
   const loadRef = useRef(load)
   loadRef.current = load
@@ -1721,7 +1726,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     }
   }
 
-  if (!hosted) {
+  if (!open) {
     return (
       <View style={styles.root}>
         <TopBar title='Grupo' onBack={onBack} />

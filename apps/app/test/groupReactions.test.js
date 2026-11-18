@@ -73,7 +73,7 @@ async function harness (request, { batchStore = false } = {}) {
   const readStart = source.indexOf('  const noteRead =')
   const readEnd = source.indexOf('  // The call carries', readStart)
   const start = source.indexOf('  function openReactionPicker (')
-  const end = source.indexOf('  if (!hosted) {', start)
+  const end = source.indexOf('  if (!open) {', start)
   const handlers = compileFunction(source.slice(readStart, readEnd) + source.slice(start, end) + '\nreturn { toggleReaction, showReactors, openReactionPicker, readGroup, commitRead, readNewest }', Object.keys(deps))(...Object.values(deps))
   const renderStart = source.indexOf('  const whoReactedRows =')
   const render = compileFunction(source.slice(renderStart, start) + '\nreturn whoReactedRows', ['whoReacted', 'names', 'rawItems', 'whoOf', 'UNNAMED', 'displayText'])

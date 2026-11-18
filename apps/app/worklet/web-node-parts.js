@@ -321,4 +321,48 @@ async function readMediaToFile ({ session, write, unlink, generation, isClosing 
   return ms === undefined ? { name, mime: got.mime, w, h } : { name, mime: got.mime, w, h, ms }
 }
 
-module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile, CLOSED_MESSAGE }
+// media.readFile on the core node (worklet/main.js): received DM media only,
+// through dmReadMedia(params) with the web kind's checks and read dir `dir`;
+// momento and group media stay refused. The dir is cleared at creation (a
+// file a killed worklet left goes on the next start) and at close. close()
+// waits for the writes in flight, not for whole reads: a read still opening
+// its bytes sees isClosing() before it would write and never writes, and the
+// core session cancels it only once closed, after this. close() is
+// idempotent and never rejects.
+function createCoreMediaRead ({ fs, join, dir, newName, flags, dmReadMedia }) {
+  const clear = () => clearReadDir({ fs, join, dir })
+  const clearing = clear()
+  const writes = new Set()
+  let closing = null
+  const textOnly = () => { throw new RpcError('USAGE', 'mídia disponível só na versão web') }
+  const session = { dmReadMedia, momentReadMedia: textOnly, groupReadMedia: textOnly }
+
+  function write (bytes) {
+    const p = clearing.then(() => writeReadFile({ fs, join, dir, name: newName(), bytes, flags }))
+    const settled = p.then(() => {}, () => {})
+    writes.add(settled)
+    settled.then(() => writes.delete(settled))
+    return p
+  }
+
+  return {
+    readFile: (params) => readMediaToFile({
+      session,
+      write,
+      unlink: (name) => fs.unlink(join(dir, name)),
+      generation: () => 0,
+      isClosing: () => closing !== null
+    }, params),
+    close () {
+      if (closing !== null) return closing
+      closing = (async () => {
+        while (writes.size > 0) await Promise.all([...writes])
+        await clearing
+        await clear()
+      })().catch(() => {})
+      return closing
+    }
+  }
+}
+
+module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile, createCoreMediaRead, CLOSED_MESSAGE }

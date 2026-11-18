@@ -255,7 +255,7 @@ A identidade fica no navegador e no autenticador virtual do perfil do Chrome. Po
 
 ### Por que o nó do aparelho não envia mensagens diretas
 
-As Conversas selam cada mensagem para uma chave de caixa X25519 derivada da chave de identidade Ed25519 e falam com o semeador pela ligação do nó do navegador. Por isso só o nó do navegador envia mensagens pessoais. Sem o motor injetado (`dm` em `packages/core/lib/session.js`), o nó core responde a cada método `dm.*` com `mensagens diretas disponíveis só no navegador` e não abre nem lê nada; com ele (`varanda-serve --account-origin`, ou o worklet quando recebe `accountOrigin`, o que o app ainda não passa), o nó core ativa as Conversas, recebe, lê e responde como Página só com texto, mas `dm.send`, `dm.react` e `dm.set` continuam recusados. A troca de mensagens do laboratório portanto acontece no Chrome, nunca no app instalado.
+As Conversas selam cada mensagem para uma chave de caixa X25519 derivada da chave de identidade Ed25519 e falam com o semeador pela ligação do nó do navegador. Por isso só o nó do navegador envia mensagens pessoais. Sem o motor injetado (`dm` em `packages/core/lib/session.js`), o nó core responde a cada método `dm.*` com `mensagens diretas disponíveis só no navegador` e não abre nem lê nada; com ele (`varanda-serve --account-origin`, ou o worklet do app, que recebe como `accountOrigin` a instalação a que o app está ligado, quando a configuração é a manual de nó core), o nó core ativa as Conversas, recebe, lê e responde como Página só com texto, mas `dm.send`, `dm.react` e `dm.set` continuam recusados. A troca de mensagens do laboratório portanto acontece no Chrome, nunca no app instalado.
 
 ### O que o laboratório não cobre
 

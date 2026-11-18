@@ -123,7 +123,7 @@ async function screenReactions (request, reactions = []) {
   }
   context.view = env.reactionViewRef.current
   const src = screen()
-  const handlers = src.slice(src.indexOf('  const reactionRowReady ='), src.indexOf('  const ready = hosted'))
+  const handlers = src.slice(src.indexOf('  const reactionRowReady ='), src.indexOf('  const ready = gate.ready'))
   const commit = src.slice(src.indexOf('  const commitRead ='), src.indexOf('  const readThread ='))
   const run = runInNewContext(handlers + commit + '\n;({ toggleReaction, canReact, commitRead })', env)
   return { ...run, context, clock, state, env, key, item }

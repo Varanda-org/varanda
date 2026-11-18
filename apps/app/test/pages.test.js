@@ -1585,25 +1585,83 @@ test('a fresh device adopts the current share before generating the next gen', a
   t.ok(moveFn.includes('if (dmStatus.share) await pagesDmAdopt(node, { page, status: dmStatus })'), 'a move keeps the old page\'s gen too')
 })
 
-test('a core node cannot rotate: remove and move refuse plainly with the app text, never a retry', async (t) => {
+test('a core node without Conversas cannot rotate: remove and move refuse plainly with the app text, never a retry', async (t) => {
   const { pagesDmPrepare, PAGE_DM_CORE_ONLY } = await load()
   t.is(PAGE_DM_CORE_ONLY, 'Para remover administradores ou mudar a chave desta página, use o app no celular ou na web.')
   const status = { gen: 2, groupBox: GBOX }
-  const core = { ...dmNode(), hosted: false }
+  const refused = Object.assign(new Error('mensagens diretas disponíveis só no navegador'), { code: 'USAGE' })
+  const core = { ...dmNode({ 'dm.list': refused }), hosted: false }
   const a = await caught(t, pagesDmPrepare(core, { member: M, page: '79'.repeat(32), status, roster: { owner: M, admins: [] } }))
   t.is(a.message, PAGE_DM_CORE_ONLY)
   t.absent(a.uncertain)
   t.absent(typeof a.retry === 'function', 'no retry loop')
-  t.is(core.calls.length, 0, 'nothing asked of the node')
+  t.alike(core.calls.map((c) => c.method), ['dm.list'], 'only the probe, which writes nothing')
+  const again = await caught(t, pagesDmPrepare(core, { member: M, page: '79'.repeat(32), status, roster: { owner: M, admins: [] } }))
+  t.is(again.message, PAGE_DM_CORE_ONLY)
+  t.is(core.calls.length, 1, 'the probe is kept for this node')
   const usage = dmNode({ 'dm.enable': new Error('mensagens diretas disponíveis só no navegador') })
   const b = await caught(t, pagesDmPrepare(usage, { member: M, page: '7a'.repeat(32), status, roster: { owner: M, admins: [] } }))
   t.is(b.message, PAGE_DM_CORE_ONLY, 'the node\'s USAGE refusal reads the same')
   t.absent(usage.calls.some((c) => c.method === 'dm.pageGenerate'))
   const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
   const removeFn = ajustes.slice(ajustes.indexOf('const remove = (key) =>'), ajustes.indexOf('const missingKeys'))
-  t.ok(removeFn.includes('if (pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)'), 'no remove without rotation')
+  t.ok(removeFn.includes('if (await pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)'), 'no remove without rotation')
   const moveFn = ajustes.slice(ajustes.indexOf('const movePage = () =>'), ajustes.indexOf('// ---- view'))
-  t.ok(moveFn.includes('if (hasDeviceKeys(dmStatus) && pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)'))
+  t.ok(moveFn.includes('if (hasDeviceKeys(dmStatus) && await pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)'))
+})
+
+test('a core node with Conversas rotates as the web does: the probe answers and the remove goes on (#352)', async (t) => {
+  const { pagesDmPrepare, pagesDmCoreOnly, PAGE_DM_CORE_ONLY } = await load()
+  rotatingService(t, { gen: 2 })
+  const node = { ...keysNode(), hosted: false, accountOrigin: 'https://conta.example.org' }
+  const status = { gen: 2, box: BOX, groupBox: GBOX, cert: CERT, rotatePending: false, share: { gen: 2, sealed: 's2', by: M, sig: SIG } }
+  const prep = await pagesDmPrepare(node, { member: M, page: '7c'.repeat(32), status, roster: { owner: M, admins: [] } })
+  t.ok(prep && prep.dmBox, 'a new dmBox for the remove, never PAGE_DM_CORE_ONLY')
+  t.ok(node.calls.some((c) => c.method === 'dm.pageGenerate'), 'the page key rotates')
+  t.is(node.calls[0].method, 'dm.list', 'after the probe')
+  const off = Object.assign(new Error('Conversas ainda não ativadas neste aparelho'), { code: 'USAGE' })
+  t.is(await pagesDmCoreOnly({ ...dmNode({ 'dm.list': off }), hosted: false }), false, 'an engine not enabled yet still holds page keys')
+  t.is(await pagesDmCoreOnly({ ...dmNode(), hosted: true }), false, 'a hosted node is never asked')
+  const flaky = { ...dmNode({ 'dm.list': Object.assign(new Error('fechado'), { code: 'CLOSED' }) }), hosted: false }
+  const err = await caught(t, pagesDmCoreOnly(flaky))
+  t.is(err.message, 'fechado', 'a failed probe is neither answer')
+  t.not(err.message, PAGE_DM_CORE_ONLY)
+})
+
+test('a core node whose Conversas are not activated refuses a rotation before dm.enable, and asks again once they are (#352)', async (t) => {
+  const { pagesDmPrepare, pagesDmCoreOnly, PAGE_DM_CORE_OFF } = await load()
+  t.is(PAGE_DM_CORE_OFF, 'Ative primeiro as Conversas deste aparelho; depois tente de novo.')
+  rotatingService(t, { gen: 2 })
+  const base = keysNode()
+  let activated = false
+  const offErr = Object.assign(new Error('Conversas ainda não ativadas neste aparelho'), { code: 'USAGE' })
+  const node = {
+    ...base,
+    hosted: false,
+    accountOrigin: 'https://ativar.example.org',
+    request: async (method, params) => {
+      if (method === 'dm.list' && !activated) {
+        base.calls.push({ method, params })
+        throw offErr
+      }
+      return base.request(method, params)
+    }
+  }
+  const status = { gen: 2, box: BOX, groupBox: GBOX, cert: CERT, rotatePending: false, share: { gen: 2, sealed: 's2', by: M, sig: SIG } }
+  const page = '7d'.repeat(32)
+  const err = await caught(t, pagesDmPrepare(node, { member: M, page, status, roster: { owner: M, admins: [] } }))
+  t.is(err.message, PAGE_DM_CORE_OFF)
+  t.absent(err.coreOnly, 'not the app-only text')
+  t.absent(err.uncertain)
+  t.alike(base.calls.map((c) => c.method), ['dm.list'], 'only the probe: no dm.enable, nothing written')
+  t.is(await pagesDmCoreOnly(node), false, 'an engine not activated yet is not core-only')
+  t.is(base.calls.length, 2, 'the not-activated answer is not kept')
+
+  activated = true
+  const prep = await pagesDmPrepare(node, { member: M, page, status, roster: { owner: M, admins: [] } })
+  t.ok(prep && prep.dmBox, 'once activated the rotation goes on')
+  t.is(base.calls[2].method, 'dm.list', 'after a new probe')
+  t.ok(base.calls.some((c) => c.method === 'dm.pageGenerate'))
 })
 
 test('a guard left by a publication that never reached the service goes with a fresh read of the gen before it', async (t) => {
@@ -1650,10 +1708,18 @@ test('pagesDmForget asks the node only for a page whose keys it holds, never on 
   t.is(await pagesDmForget({ request }, K2), false, 'a page whose keys the node does not hold')
   t.alike(calls, [['dm.pageLegacyBlocks', K2]], 'nothing is written for it')
   calls.length = 0
-  t.is(await pagesDmForget({ request, hosted: false }, P), false, 'a core node holds no page keys')
+  const coreRequest = async (method, params) => {
+    if (method === 'dm.list') throw Object.assign(new Error('mensagens diretas disponíveis só no navegador'), { code: 'USAGE' })
+    return request(method, params)
+  }
+  t.is(await pagesDmForget({ request: coreRequest, hosted: false }, P), false, 'a core node without Conversas holds no page keys')
   t.is(await pagesDmForget({ request }, 'x'), false)
   t.is(await pagesDmForget({}, P), false)
-  t.alike(calls, [])
+  t.alike(calls, [], 'nothing but the probe')
+  const engineRequest = async (method, params) => (method === 'dm.list' ? { items: [] } : request(method, params))
+  t.is(await pagesDmForget({ request: engineRequest, hosted: false }, P), true, 'a core node with Conversas forgets as the web does')
+  t.alike(calls, [['dm.pageLegacyBlocks', P], ['dm.pageForget', P]])
+  calls.length = 0
   const failing = async (method) => {
     if (method === 'dm.pageForget') throw new Error('erro interno')
     return { pending: [] }
@@ -1821,7 +1887,7 @@ test('pageError has plain words for a join refused because the page is outside t
 
 // A node for the move-chain walk: page.read answers from `movedFrom`, or
 // runs `read` first when given; every forget and read is recorded.
-function chainNode (movedFrom, { read = null, hosted } = {}) {
+function chainNode (movedFrom, { read = null, hosted, dmList } = {}) {
   const forgot = []
   const reads = []
   const node = {
@@ -1829,6 +1895,7 @@ function chainNode (movedFrom, { read = null, hosted } = {}) {
     reads,
     request: async (method, params) => {
       if (method === 'page.sign') return { signature: SIG }
+      if (method === 'dm.list' && dmList) return dmList()
       if (method === 'page.read') {
         reads.push(params.key)
         if (read !== null) await read(params.key)
@@ -1920,6 +1987,36 @@ test('pagesList: a failed read of the move chain marks nothing tried, and a late
   t.alike(node.forgot, [], 'each key is still tried once per session')
 })
 
+test('pagesList: an unanswered page-keys probe forgets and walks nothing, and the next list read walks the dropped page', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '4a'.repeat(32)
+  const K1 = '4b'.repeat(32)
+  const K2B = '4c'.repeat(32)
+  const answers = listAnswers(t)
+  // Only the first probe fails: a forget sent after it would probe again and go through.
+  let probes = 0
+  const node = chainNode({ [K2B]: K1 }, {
+    hosted: false,
+    dmList: () => {
+      if (++probes === 1) throw Object.assign(new Error('fechado'), { code: 'CLOSED' })
+      return { items: [] }
+    }
+  })
+  node.accountOrigin = 'https://sonda.example.org'
+
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(node.forgot, [], 'no dm.pageForget while the probe has no answer')
+  t.alike(node.reads, [], 'and no walk either')
+
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM })
+  await settle()
+  t.alike(node.reads, [K2B, K1], 'the next list read walks the page it dropped')
+  t.alike([...node.forgot].sort(), [K1, K2B].sort(), 'never marked tried: it goes with the key it moved from')
+})
+
 test('pagesList: a newer list that shows the keys again keeps them when an earlier walk lands', async (t) => {
   const { pagesList } = await load()
   const MEM = '6a'.repeat(32)
@@ -1946,7 +2043,7 @@ test('pagesList walks no move chain on a core node or a malformed answer', async
   const K2B = '5c'.repeat(32)
   const answers = listAnswers(t)
 
-  const core = chainNode({ [K2B]: K1 }, { hosted: false })
+  const core = chainNode({ [K2B]: K1 }, { hosted: false, dmList: () => { throw Object.assign(new Error('mensagens diretas disponíveis só no navegador'), { code: 'USAGE' }) } })
   answers.push(pageList([]))
   await pagesList(core, { member: MEM, also: [K2B] })
   await settle()

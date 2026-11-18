@@ -3,7 +3,7 @@
 // follows); any other config is the core kind, as before.
 
 import { startNode, terminateNode, currentClient } from './native'
-import { webNodeHandle } from './webnode'
+import { webNodeHandle, coreMediaHandle } from './webnode'
 
 const WATCH_MS = 1000
 
@@ -16,7 +16,7 @@ export async function connectNode (config, { onEvent, onClose } = {}) {
   // A previous node of this JS context (Fast Refresh, a restart): stop it
   // first; startNode refuses a second one.
   if (currentClient() !== null) await terminateNode()
-  const { client } = await startNode(config, { onEvent })
+  const { client, accountOrigin = null } = await startNode(config, { onEvent })
   let deliberate = false
   let notified = false
   let timer = null
@@ -43,5 +43,8 @@ export async function connectNode (config, { onEvent, onClose } = {}) {
   if (config !== null && typeof config === 'object' && config.kind === 'hosted') {
     return { ...conn, ...webNodeHandle(request) }
   }
+  // The worklet opens received DM media only once it built Conversas on an
+  // account origin (startNode's args).
+  if (typeof accountOrigin === 'string') return { ...conn, media: coreMediaHandle(request) }
   return conn
 }
