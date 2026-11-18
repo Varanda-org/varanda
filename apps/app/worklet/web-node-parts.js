@@ -201,6 +201,31 @@ function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, he
   return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height, ...videoOf({ ms, kind }), ...(ahead === true ? { ahead } : {}) }) })
 }
 
+// media.sealPageFile after the read (docs/rpc.md 5.114): a Página's photo,
+// GIF or voice note sealed for one of its private groups by the session
+// (pageSealMedia, which needs the page's secrets on this device). The
+// ciphertext is far above MAX_MESSAGE, so it goes back as a read-dir file
+// (write(bytes) -> name, as media.readFile); remove(name) takes it back
+// when a lock or close came in between. -> { name, item }: the item carries
+// its own key, which the app puts in group.seal; the page's and the group's
+// keys stay in the session.
+async function sealPageMedia ({ read, session, unlink, write, remove, generation, isClosing }, { page, mime, width, height, ms, kind }) {
+  const at = generation()
+  const { cipher, item } = await sendFile({ read, unlink, isClosing, put: (bytes) => session.pageSealMedia({ page, bytes, mime, width, height, ...voiceOf({ ms, kind }) }) })
+  let name
+  try {
+    if (isClosing() || generation() !== at) throw closedError()
+    name = await write(cipher)
+  } finally {
+    cipher.fill(0)
+  }
+  if (isClosing() || generation() !== at) {
+    await Promise.resolve().then(() => remove(name)).catch(() => {})
+    throw closedError()
+  }
+  return { name, item }
+}
+
 // Removes every read file (a media name) directly under `dir` and makes
 // sure the directory exists. Never throws: a file left here holds an opened
 // image, so the next clear tries again.
@@ -365,4 +390,4 @@ function createCoreMediaRead ({ fs, join, dir, newName, flags, dmReadMedia }) {
   }
 }
 
-module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, clearReadDir, writeReadFile, readMediaToFile, createCoreMediaRead, CLOSED_MESSAGE }
+module.exports = { readAll, readMediaFile, isMediaName, createLifecycle, uploadMedia, putDmMedia, putMomentMedia, sealPageMedia, clearReadDir, writeReadFile, readMediaToFile, createCoreMediaRead, CLOSED_MESSAGE }

@@ -1,6 +1,6 @@
 # feat/core-conversas-pagina
 
-Parte de #352 (PR 5): Conversas no nó core, só texto, com o motor de mensagens do nó do navegador injetado na sessão do core. Termos e Privacidade versão 88, sobre a 84 (a fila: #756 com a 85, page-web-share com a 86, page-groups-public com a 87; renumerada na entrada se elas mudarem).
+Parte de #352 (PR 5): Conversas no nó core, só texto, com o motor de mensagens do nó do navegador injetado na sessão do core. Termos e Privacidade versão 90, sobre a 89 (a fila: #756 com a 85, #781 com a 86, #782 com a 87, #785 com a 89).
 
 ## O que mudou
 
@@ -10,7 +10,7 @@ Parte de #352 (PR 5): Conversas no nó core, só texto, com o motor de mensagens
 - `packages/core/lib/session.js`: opção `dm` (a fábrica). Com ela: `dm.enable`, `dm.lookup`, `dm.pull`, `dm.list`, `dm.thread`, `dm.seen`, `dm.pageGenerate`, `dm.pageShare`, `dm.pageSecrets`, `dm.pageDraft`, `dm.pageSend`, `dm.pageLegacyChunk`, `dm.pageLegacyBlocks`, `dm.pageForget` e `dm.actorBox`. Continuam recusados no core: `dm.send`, `dm.react`, `dm.set`, `dm.reportSign`, `group.seal` e `group.read` com `page`. Sem a fábrica, toda recusa fica igual. Mídia recebida pelo `session.dmReadMedia` (para o `media.readFile` kind `'dm'` de um host; o worklet core ainda não o oferece).
 - `packages/web-member/lib/dm.js` e `blob.js`: opção `stampDiary`, para o motor do core assinar a prova de carimbo v2 (assinante do diário).
 - Hosts: `apps/cli/bin/varanda-serve.js` injeta a fábrica só com `--account-origin` (opção que já existia; aceita só https). `apps/app/worklet/main.js` só quando o argumento de início traz `accountOrigin` (o app ainda não passa: PR 8). `apps/cli/package.json` depende de `@varanda/web-member` 0.1.0, versão exata; depois de `npm install` ou `npm ci`, o build nativo precisa de `npm run prepare:native -w apps/app`.
-- Termos e Privacidade 88 (`apps/app/src/legal.js`, `packages/core/lib/terms.js`, páginas do site refeitas com `node apps/site/scripts/render-legal.js`): uma frase no parágrafo do nó core das Páginas, nos Termos, e a mesma no parágrafo das Páginas da Privacidade.
+- Termos e Privacidade 90 (`apps/app/src/legal.js`, `packages/core/lib/terms.js`, páginas do site refeitas com `node apps/site/scripts/render-legal.js`): uma frase no parágrafo do nó core das Páginas, nos Termos, e a mesma no parágrafo das Páginas da Privacidade.
 - Docs: `docs/rpc.md` (Conversas 5.73 a 5.80, 5.89, 5.114, 5.161, eventos `dm.changed`, `dm.sending` e `dm.pageKeyMismatch`), `docs/protocol.md` (seção 11 "Key" e "Local storage", seção 12 "Nó core: delegado" e "Actor box"), `README.md` (semente, cópia de segurança, `--account-origin`), `docs/development.md`.
 
 ## Ordem de implantação
@@ -27,7 +27,7 @@ Cada arquivo rodou sozinho (`node <arquivo>`, Node 24.22.1):
 - `packages/web-member/test/core-dm-e2e.test.js`, terceira rodada: 10/10, 72 asserções. Novo teste: com uma busca de dm-key em andamento que o semeador local não responde (limites padrão), `close()` fecha os núcleos da busca e ela termina 1 ms depois do fechamento; sem a correção, 18961 ms (falha).
 - `packages/core/test/dm-core-identity.test.js`: 12/12, 144 asserções (modos da semente, criação exclusiva, nunca recriada, links simbólicos, `dm-key` publicado e lido, `dmSigner`, `dmActorBox`; `dmLookup` responde null para réplica parcial com um `dm-key` antigo no começo, para emissor revogado e para réplica bifurcada).
 - `packages/core/test/dm-session-refuse.test.js`: 2/2, 54 asserções, sem mudança no arquivo.
-- Termos: `packages/core/test/terms.test.js` 8/8 (126), `apps/app/test/legal.test.js` 60/60 (1915, com o teste novo da versão 88 e o digest atualizado), `apps/site/test/legal.test.js` 7/7 (115), `apps/app/test/terms-version.test.js` 1/1 (2).
+- Termos: `packages/core/test/terms.test.js` 8/8, `apps/app/test/legal.test.js` 64/64 (1963, com o teste novo da versão 90 e o digest atualizado), `apps/site/test/legal.test.js` 7/7, `apps/app/test/terms-version.test.js` 1/1 (2).
 - `npx standard` nos arquivos tocados.
 
 ## Regressão

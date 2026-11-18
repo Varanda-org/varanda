@@ -86,6 +86,7 @@ function scanFixture ({ index = {}, search = {} } = {}) {
     _scanDiary: () => {},
     log: () => {},
     _ready: true,
+    _passesStarted: true,
     _closing: false,
     _isBlocked: () => false,
     association: null,

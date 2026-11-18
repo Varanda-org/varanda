@@ -71,7 +71,8 @@
 // queued when the handle reports media.sharesClient (mediaCall); the
 // caller shows its errors (errorText). When the handle has them, also the
 // chat media calls (client/webnode.native.js, client/browser.js mediaOf):
-// putDm(args), putMoment(args), read(ref), forgetReadFile(name),
+// putDm(args), putMoment(args), sealPage(args) (a Página's private group
+// item, docs/rpc.md 5.114), read(ref), forgetReadFile(name),
 // clearReadFiles(); a missing one means that capability is absent. `video`
 // is true only when the handle reports media.video === true (it uploads and
 // reads a short video); absent otherwise.
@@ -220,10 +221,10 @@ const NodeHandleContext = createContext(null)
 const MemberKeyContext = createContext(null)
 
 // The chat media calls a handle may offer besides upload (see the header).
-const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'read', 'forgetReadFile', 'clearReadFiles']
+const CHAT_MEDIA_CALLS = ['putDm', 'putMoment', 'sealPage', 'read', 'forgetReadFile', 'clearReadFiles']
 // The media calls that send a request to the node; the other two only
 // delete local files.
-const MEDIA_RPC_CALLS = new Set(['upload', 'putDm', 'putMoment', 'read'])
+const MEDIA_RPC_CALLS = new Set(['upload', 'putDm', 'putMoment', 'sealPage', 'read'])
 
 export function useNode () {
   return useContext(NodeContext)
@@ -1796,7 +1797,7 @@ function LiveNodeProvider ({ children }) {
   // A media call that sends one request on the connection's RPC client
   // (media.sharesClient, the native hosted handle) takes a queue slot, since
   // it shares that client's pending cap (requestQueue.js). A read waits in
-  // the visible lane. A write (upload, putDm, putMoment) goes in the control
+  // the visible lane. A write (upload, putDm, putMoment, sealPage) goes in the control
   // lane: hung reads never hold it back, and it is never refused for
   // capacity. A clear drops a waiting call unsent (queued: true), which the
   // screens show as a failed upload to try again. Elsewhere (the browser

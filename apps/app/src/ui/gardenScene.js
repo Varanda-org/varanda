@@ -57,8 +57,13 @@ const MAX_WIDTH = 420
 // A pot narrower than this cannot hold a 44 x 44 hit box (the slot is never
 // shorter than wide), so a frame too small for it draws nothing.
 const MIN_HIT = 44
+// Same ids and order as the rules. Where each one sits is this module's choice.
+export const DECOR_IDS = deepFreeze(['rede', 'varal', 'gato', 'pisca'])
+// Four ids is the whole set. Only this many entries are read, so a hostile
+// length spends no time; a hole or an accessor reads as no id.
+const DECOR_LIST_MAX = 8
 
-export function gardenLayout (width) {
+export function gardenLayout (width, opts) {
   const sceneW = Number.isFinite(width) && width > 0 ? Math.round(width) : 0
   const inner = Math.min(sceneW, MAX_WIDTH)
   const ox = Math.round((sceneW - inner) / 2)
@@ -77,9 +82,19 @@ export function gardenLayout (width) {
   const railGap = Math.max(10, Math.round(inner * 4 / 100))
   const bottom = Math.max(12, Math.round(inner * 4 / 100))
   const postW = Math.max(6, Math.round(inner * 18 / 1000))
-  const backY = top
+  // The phase 1 frame has no free rectangle, so an id that is on adds a band
+  // and the scene grows. With none on, every number matches that frame.
+  // A band above pushes the next one down: on or off is the only choice.
+  const chosen = decorChosen(opts)
+  const stripH = chosen.has('pisca') ? Math.max(12, Math.round(inner * 6 / 100)) : 0
+  const wallH = (chosen.has('rede') || chosen.has('varal')) ? Math.round(potW * 50 / 100) : 0
+  const floorH = chosen.has('gato') ? Math.round(potW * 45 / 100) : 0
+  const stripY = top
+  const wallY = stripY + (stripH > 0 ? stripH + rowGap : 0)
+  const backY = wallY + (wallH > 0 ? wallH + rowGap : 0)
   const frontY = backY + potH + rowGap
-  const railY1 = frontY + potH + 4
+  const bandY = frontY + potH + 4
+  const railY1 = bandY + (floorH > 0 ? floorH + 4 : 0)
   const railY2 = railY1 + railH + railGap
   const height = railY2 + railH + bottom
   // Local y 64 is the pot lip. The view fits the square drawing in the slot,
@@ -110,7 +125,21 @@ export function gardenLayout (width) {
       hit: { x, y, w: potW, h: potH }
     })
   }
-  return deepFreeze({ width: sceneW, height, wall, floor, railing, pots })
+  const scene = { width: sceneW, height, wall, floor, railing, pots }
+  if (chosen.size === 0) return deepFreeze(scene)
+  scene.decor = decorRects(chosen, {
+    ox,
+    pad,
+    potW,
+    gapX,
+    stripY,
+    stripH,
+    wallY,
+    wallH,
+    bandY,
+    floorH
+  })
+  return deepFreeze(scene)
 }
 
 function emptyLayout (sceneW) {
@@ -126,6 +155,68 @@ function emptyLayout (sceneW) {
     railing: [],
     pots
   })
+}
+
+// opts may be hostile. Only an own data array counts: a getter or a throw
+// is a balcony with no enfeites, and an id is only on or off.
+function decorChosen (opts) {
+  const chosen = new Set()
+  const list = decorItems(opts)
+  if (!list) return chosen
+  for (const id of list) {
+    if (typeof id === 'string' && DECOR_IDS.includes(id)) chosen.add(id)
+  }
+  return chosen
+}
+
+function decorItems (opts) {
+  try {
+    const value = ownValue(opts, 'decor')
+    if (!Array.isArray(value)) return null
+    const lenDesc = Object.getOwnPropertyDescriptor(value, 'length')
+    const len = lenDesc && lenDesc.value
+    if (!Number.isSafeInteger(len) || len < 0) return null
+    const out = []
+    const end = Math.min(len, DECOR_LIST_MAX)
+    for (let i = 0; i < end; i++) {
+      const desc = Object.getOwnPropertyDescriptor(value, String(i))
+      if (desc && 'value' in desc && desc.enumerable) out.push(desc.value)
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+// Canonical order, so the same set always freezes the same way. The rect comes
+// from the frame, never from a coordinate on opts.
+function decorRects (chosen, box) {
+  const rowW = box.potW * 3 + box.gapX * 2
+  const halfW = Math.floor((rowW - box.gapX) / 2)
+  const rects = {}
+  if (chosen.has('rede')) {
+    rects.rede = { x: box.ox + box.pad, y: box.wallY, w: halfW, h: box.wallH }
+  }
+  if (chosen.has('varal')) {
+    rects.varal = {
+      x: box.ox + box.pad + rowW - halfW,
+      y: box.wallY,
+      w: halfW,
+      h: box.wallH
+    }
+  }
+  if (chosen.has('gato')) {
+    rects.gato = {
+      x: box.ox + box.pad + 2 * (box.potW + box.gapX),
+      y: box.bandY,
+      w: box.potW,
+      h: box.floorH
+    }
+  }
+  if (chosen.has('pisca')) {
+    rects.pisca = { x: box.ox + box.pad, y: box.stripY, w: rowW, h: box.stripH }
+  }
+  return rects
 }
 
 export const POT_SHAPES = deepFreeze([

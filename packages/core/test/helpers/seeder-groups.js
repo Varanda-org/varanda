@@ -71,9 +71,10 @@ function prepareSeederDir (t, assoc) {
   return { dataDir, publicKey }
 }
 
+// `beforeStart(seeder, events)` runs once the seeder is built, before start().
 async function startSeeder (t, bootstrap, dataDir, opts = {}) {
   const events = []
-  const { onlog, ...rest } = opts
+  const { onlog, beforeStart, ...rest } = opts
   const seeder = new Seeder({
     dataDir,
     ...localSwarmOptions(bootstrap),
@@ -85,8 +86,19 @@ async function startSeeder (t, bootstrap, dataDir, opts = {}) {
     ...rest
   })
   t.teardown(() => seeder.close(), { force: true })
+  if (beforeStart) beforeStart(seeder, events)
   await seeder.start()
   return { seeder, events }
+}
+
+// Runs fn() right before the seeder's background passes start (the
+// accepting point of start()), to read what the passes find.
+function onPassesStart (seeder, fn) {
+  const start = seeder._startPasses.bind(seeder)
+  seeder._startPasses = () => {
+    fn()
+    start()
+  }
 }
 
 function encode (record) {
@@ -268,6 +280,7 @@ module.exports = {
   readGroups,
   prepareSeederDir,
   startSeeder,
+  onPassesStart,
   encode,
   member,
   admit,

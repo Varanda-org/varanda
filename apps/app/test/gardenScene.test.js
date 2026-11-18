@@ -265,3 +265,226 @@ test('GardenSceneView: native driver off the web, plant-only sway', (t) => {
   t.ok(src.includes('[movingKey, sway]'), 'the loop restarts when the moving set changes')
   t.absent(src.includes('anyRipe'))
 })
+
+const PHASE_KEYS = ['width', 'height', 'wall', 'floor', 'railing', 'pots']
+const DECOR_ORDER = ['rede', 'varal', 'gato', 'pisca']
+
+test('gardenScene: missing decor keeps the phase 1 balcony', async (t) => {
+  const m = await load()
+  for (const width of [360, 375, 1280]) {
+    const plain = m.gardenLayout(width)
+    t.alike(Object.keys(plain), PHASE_KEYS, width + ' six keys')
+    t.absent(plain.decor, width + ' no decor')
+    t.alike(m.gardenLayout(width, {}), plain, width + ' empty opts')
+    t.alike(m.gardenLayout(width, { decor: [] }), plain, width + ' empty list')
+    t.alike(m.gardenLayout(width, { decor: ['lamp', 'cadeira'] }), plain, width + ' unknown ids')
+    t.ok(plain.height > 0 && plain.height < width, width + ' phase 1 height')
+  }
+  const at360 = m.gardenLayout(360)
+  t.is(at360.height, 316)
+  t.alike(at360.wall, { x: 0, y: 0, w: 360, h: 96 })
+  t.alike(at360.pots[0], { index: 0, x: 15, y: 22, w: 103, h: 118, hit: { x: 15, y: 22, w: 103, h: 118 } })
+  t.alike(at360.pots[5], { index: 5, x: 243, y: 148, w: 103, h: 118, hit: { x: 243, y: 148, w: 103, h: 118 } })
+})
+
+test('gardenScene: DECOR_IDS matches the rules list', async (t) => {
+  const m = await load()
+  t.alike(m.DECOR_IDS, rpc.garden.GARDEN_DECOR_IDS)
+  t.alike(m.DECOR_IDS, DECOR_ORDER)
+  t.ok(Object.isFrozen(m.DECOR_IDS))
+})
+
+test('gardenScene: enfeite bands clear the pots and the railing', async (t) => {
+  const m = await load()
+  const sets = DECOR_ORDER.map((id) => [id]).concat([DECOR_ORDER])
+  for (const width of [172, 360, 375, 1280]) {
+    const plain = m.gardenLayout(width)
+    for (const decor of sets) {
+      const label = width + ' ' + decor.join(',')
+      const layout = m.gardenLayout(width, { decor })
+      const flipped = m.gardenLayout(width, { decor: decor.slice().reverse() })
+      t.alike(layout, flipped, label + ' order does not matter')
+      t.alike(layout, m.gardenLayout(width, { decor: decor.slice() }), label + ' deterministic')
+      t.ok(Object.isFrozen(layout) && Object.isFrozen(layout.decor), label + ' frozen')
+      t.ok(Object.isFrozen(layout.pots) && Object.isFrozen(layout.railing), label + ' scene frozen')
+      const bad = []
+      wholePixels(layout, bad, label)
+      t.alike(bad, [], label + ' whole pixels')
+      t.alike(Object.keys(layout), PHASE_KEYS.concat(['decor']), label + ' keys')
+      t.alike(Object.keys(layout.decor), DECOR_ORDER.filter((id) => decor.includes(id)), label + ' decor keys')
+      t.ok(layout.height > plain.height, label + ' adds height')
+      t.is(layout.width, width)
+      t.is(layout.pots.length, 6, label + ' six pots')
+      t.ok(inside(layout, layout.wall) && inside(layout, layout.floor), label + ' wall and floor')
+      const span = (box) => box.x >= layout.wall.x && box.x + box.w <= layout.wall.x + layout.wall.w
+      for (const bar of layout.railing) {
+        t.ok(inside(layout, bar), label + ' rail inside')
+        t.ok(span(bar), label + ' rail in the balcony')
+      }
+      for (let i = 0; i < layout.pots.length; i++) {
+        const pot = layout.pots[i]
+        t.ok(pot.hit.w >= 44 && pot.hit.h >= 44, label + ' hit ' + i)
+        t.ok(inside(layout, pot) && inside(layout, pot.hit), label + ' pot ' + i)
+        t.ok(span(pot), label + ' pot in the balcony')
+        for (let j = i + 1; j < layout.pots.length; j++) {
+          t.absent(overlaps(pot.hit, layout.pots[j].hit), label + ' pot overlap ' + i)
+        }
+      }
+      const ids = Object.keys(layout.decor)
+      for (let i = 0; i < ids.length; i++) {
+        const rect = layout.decor[ids[i]]
+        t.ok(Object.isFrozen(rect), label + ' rect frozen')
+        t.alike(Object.keys(rect).sort(), ['h', 'w', 'x', 'y'], label + ' rect keys')
+        t.ok(rect.w > 0 && rect.h > 0, label + ' rect has area')
+        t.ok(inside(layout, rect), label + ' ' + ids[i] + ' inside')
+        t.ok(span(rect), label + ' ' + ids[i] + ' in the balcony')
+        for (const pot of layout.pots) t.absent(overlaps(rect, pot), label + ' ' + ids[i] + ' pot')
+        for (const bar of layout.railing) t.absent(overlaps(rect, bar), label + ' ' + ids[i] + ' rail')
+        for (let j = i + 1; j < ids.length; j++) {
+          t.absent(overlaps(rect, layout.decor[ids[j]]), label + ' ' + ids[i] + ' ' + ids[j])
+        }
+      }
+    }
+  }
+  const full = m.gardenLayout(360, { decor: DECOR_ORDER })
+  t.ok(full.height > full.width, 'decorated height may pass the width')
+})
+
+test('gardenScene: enfeite rects are fixed for the frame', async (t) => {
+  const m = await load()
+  const all = m.gardenLayout(360, { decor: ['pisca', 'varal', 'rede', 'gato'] })
+  t.alike(all.decor, {
+    rede: { x: 15, y: 52, w: 160, h: 52 },
+    varal: { x: 186, y: 52, w: 160, h: 52 },
+    gato: { x: 243, y: 360, w: 103, h: 46 },
+    pisca: { x: 15, y: 22, w: 331, h: 22 }
+  })
+  t.is(all.height, 456)
+  t.alike(m.gardenLayout(360, { decor: ['pisca'] }).decor, {
+    pisca: { x: 15, y: 22, w: 331, h: 22 }
+  })
+  t.alike(m.gardenLayout(360, { decor: ['rede'] }).decor, {
+    rede: { x: 15, y: 22, w: 160, h: 52 }
+  })
+  t.alike(m.gardenLayout(360, { decor: ['varal'] }).decor, {
+    varal: { x: 186, y: 22, w: 160, h: 52 }
+  })
+  t.alike(m.gardenLayout(360, { decor: ['gato'] }).decor, {
+    gato: { x: 243, y: 270, w: 103, h: 46 }
+  })
+  const redeOnly = m.gardenLayout(360, { decor: ['rede'] })
+  const redeLit = m.gardenLayout(360, { decor: ['rede', 'pisca'] })
+  t.ok(redeLit.decor.rede.y > redeOnly.decor.rede.y, 'lights push the net down')
+  t.alike(redeLit.decor.pisca, all.decor.pisca, 'pisca stays on the top band')
+  const listed = ['gato', 'pisca']
+  const copy = listed.slice()
+  m.gardenLayout(360, { decor: listed, x: 3, y: 4, w: 9, h: 9 })
+  t.alike(listed, copy, 'opts are not mutated')
+  t.alike(
+    m.gardenLayout(360, { decor: ['gato'], x: 3, y: 4, w: 9, h: 9 }),
+    m.gardenLayout(360, { decor: ['gato'] }),
+    'coordinates in opts are ignored'
+  )
+  t.alike(
+    m.gardenLayout(360, { decor: ['gato', 'gato', 'lamp'] }).decor,
+    m.gardenLayout(360, { decor: ['gato'] }).decor,
+    'a repeat and an unknown id add no rect'
+  )
+  t.alike(
+    m.gardenLayout(360, { decor: ['nope', 'rede', 'varal', 'gato', 'pisca', 'x'] }).decor,
+    m.gardenLayout(360, { decor: DECOR_ORDER }).decor,
+    'unknown ids do not drop a known one'
+  )
+  t.alike(
+    m.gardenLayout(360, { decor: [1, 'rede', null, {}] }).decor,
+    m.gardenLayout(360, { decor: ['rede'] }).decor,
+    'a non string is skipped'
+  )
+})
+
+test('gardenScene: hostile decor opts draw no enfeites', async (t) => {
+  const m = await load()
+  const plain = m.gardenLayout(360)
+  const throwing = {}
+  Object.defineProperty(throwing, 'decor', {
+    enumerable: true,
+    get () { throw new Error('decor') }
+  })
+  const yielding = {}
+  Object.defineProperty(yielding, 'decor', {
+    enumerable: true,
+    get () { return ['pisca', 'gato', 'rede', 'varal'] }
+  })
+  const proxy = new Proxy({ decor: ['rede', 'varal', 'gato', 'pisca'] }, {
+    get () { throw new Error('get') },
+    getOwnPropertyDescriptor () { throw new Error('desc') }
+  })
+  const arrayProxy = new Proxy(['pisca', 'rede'], {
+    get () { throw new Error('get') },
+    getOwnPropertyDescriptor () { throw new Error('desc') }
+  })
+  const sneaky = ['rede']
+  Object.defineProperty(sneaky, '1', {
+    enumerable: true,
+    get () { throw new Error('item') }
+  })
+  const optsList = [
+    throwing,
+    yielding,
+    proxy,
+    { decor: arrayProxy },
+    { decor: 'pisca' },
+    { decor: null },
+    { decor: { 0: 'gato', length: 1 } },
+    null,
+    0
+  ]
+  for (const opts of optsList) {
+    let err = null
+    let layout = null
+    try {
+      layout = m.gardenLayout(360, opts)
+    } catch (e) {
+      err = e
+    }
+    t.is(err, null, 'does not throw')
+    t.alike(layout, plain, 'unchanged')
+  }
+  const beside = { decor: ['gato'] }
+  Object.defineProperty(beside, 'x', {
+    enumerable: true,
+    get () { throw new Error('x') }
+  })
+  let err = null
+  let layout = null
+  try {
+    layout = m.gardenLayout(360, beside)
+  } catch (e) {
+    err = e
+  }
+  t.is(err, null, 'a sibling getter is not read')
+  t.alike(layout.decor, m.gardenLayout(360, { decor: ['gato'] }).decor)
+  const onlyRede = m.gardenLayout(360, { decor: ['rede'] })
+  t.alike(m.gardenLayout(360, { decor: sneaky }), onlyRede, 'an accessor entry reads as no id and is never called')
+  t.alike(m.gardenLayout(360, { decor: [, 'rede'] }), onlyRede, 'a hole reads as no id') // eslint-disable-line no-sparse-arrays
+  t.alike(m.gardenLayout(360, { decor: new Array(9).fill('rede') }), onlyRede, 'a long list still draws its ids')
+  const past = ['x', 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'rede']
+  t.alike(m.gardenLayout(360, { decor: past }), plain, 'an id past the eighth entry is not read')
+})
+
+test('gardenScene: a frame too small ignores enfeites', async (t) => {
+  const m = await load()
+  const opts = { decor: ['rede', 'varal', 'gato', 'pisca'] }
+  for (const width of [0, 1, 40, 171, -5, NaN, Infinity]) {
+    const layout = m.gardenLayout(width, opts)
+    t.alike(layout, m.gardenLayout(width), width + ' unchanged')
+    t.is(layout.height, 0, width + ' empty')
+    t.absent(layout.decor, width + ' no decor')
+  }
+  const hostile = new Proxy(opts, {
+    get () { throw new Error('get') },
+    getOwnPropertyDescriptor () { throw new Error('desc') }
+  })
+  t.alike(m.gardenLayout(40, hostile), m.gardenLayout(40))
+  t.alike(m.gardenLayout(171, hostile), m.gardenLayout(171))
+})
