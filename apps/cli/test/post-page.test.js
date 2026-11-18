@@ -264,7 +264,10 @@ test('og:image sizes only when both are believable', (t) => {
   const big = sized(16384, 1)
   t.is(meta(big, 'og:image:width'), '16384')
   t.is(meta(big, 'og:image:height'), '1')
-  for (const [w, h] of [[0, 600], [800, 16385], [800.5, 600], ['800', 600], [800, null], [-1, 600], [Number.MAX_SAFE_INTEGER + 1, 600], [800, undefined]]) {
+  const square = sized(4096, 4096)
+  t.is(meta(square, 'og:image:width'), '4096', 'exactly the area cap keeps the size')
+  t.is(meta(square, 'og:image:height'), '4096')
+  for (const [w, h] of [[8192, 8192], [16384, 16384], [4097, 4096], [0, 600], [800, 16385], [800.5, 600], ['800', 600], [800, null], [-1, 600], [Number.MAX_SAFE_INTEGER + 1, 600], [800, undefined]]) {
     const html = sized(w, h)
     t.is(meta(html, 'og:image'), ORIGIN + BASE + '/foto/1', 'the photo stays for ' + w + 'x' + h)
     t.is(meta(html, 'og:image:width'), null, 'no width for ' + w + 'x' + h)

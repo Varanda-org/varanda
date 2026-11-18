@@ -35,6 +35,8 @@ const NO_OG_MIME = 'image/avif'
 const OG_FALLBACK = { path: '/og/convite.png', mime: 'image/png', width: 1200, height: 630, alt: 'Varanda' }
 // A peer-declared size past this is not believable, so the tags leave it out.
 const MAX_OG_SIDE = 16384
+// The same area cap mediaBounds holds a photo to.
+const MAX_OG_PIXELS = 16777216
 const VIDEO_MIME = 'video/mp4'
 const HEX64 = /^[0-9a-f]{64}$/
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
@@ -184,7 +186,7 @@ function ogImage (origin, base, photos) {
   const og = photos.items.findIndex((item) => mimeOf(item) !== NO_OG_MIME)
   if (og === -1) return { url: origin + OG_FALLBACK.path, mime: OG_FALLBACK.mime, width: OG_FALLBACK.width, height: OG_FALLBACK.height, alt: OG_FALLBACK.alt }
   const item = photos.items[og]
-  const sized = ogSide(item.width) !== 0 && ogSide(item.height) !== 0
+  const sized = ogSide(item.width) !== 0 && ogSide(item.height) !== 0 && item.width * item.height <= MAX_OG_PIXELS
   return {
     url: origin + base + '/foto/' + (og + 1),
     mime: mimeOf(item),
