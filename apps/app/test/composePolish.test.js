@@ -68,7 +68,7 @@ test('settings notes have titles and version details are separate accessible ite
     t.ok(notes.includes('<FlushSectionHeader>' + title + '</FlushSectionHeader>'), title + ' belongs to the appearance group')
   }
   t.ok(src.includes('caption={PREVIEW_PREF_NOTE}'), 'the switch note is the caption of its own row')
-  t.ok(/<\/View>\s*<\/View>\s*$/.test(notes) && src.includes('advanced: { marginTop: space.lg }'), 'notes close inside their group and advanced has normal spacing')
+  t.ok(/<\/View>\s*<\/ListGroup>\s*$/.test(notes) && src.includes('advanced: { marginTop: space.lg }'), 'notes close inside their group and advanced has normal spacing')
   const footer = src.slice(src.indexOf('<View style={styles.version}'), src.indexOf('</Page>'))
   t.is((footer.match(/aria-live=/g) || []).length, 1, 'one web live region for the footer')
   t.absent(footer.includes('accessibilityLiveRegion='), 'no per-line native live region')
@@ -87,6 +87,13 @@ test('settings notes have titles and version details are separate accessible ite
     }
   }
   t.ok(src.includes('[lines.appLine, lines.serverLine, versionNote].filter(Boolean).map(') && src.includes('accessibilityLabel={line}') && src.includes('onPress={copyVersion}'), 'each version line retains its copy action')
+})
+
+test('settings rows announce the value on their right', (t) => {
+  const src = read('screens/Ajustes.js')
+  const item = src.slice(src.indexOf('function Item ('), src.indexOf('function AccountCard'))
+  t.ok(item.includes('<ListRow') && item.includes('trailingText={trailingText}') && item.includes('caption={caption}'), 'the row gets the value and the caption')
+  t.absent(item.includes('accessibilityLabel='), 'ListRow builds the name from label, caption and value')
 })
 
 test('settings account card opens Editar perfil and falls back to the plain row', (t) => {

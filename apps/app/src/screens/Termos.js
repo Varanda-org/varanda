@@ -11,6 +11,7 @@ import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
 import { Accordion } from '../ui/Accordion'
+import { Divider } from '../ui/Divider'
 import { HelpNote } from '../ui/Help'
 import { Body, Btn, Label, Page, Soft } from '../ui'
 import { Icon } from '../ui/Icon'
@@ -70,7 +71,8 @@ function LegalDoc ({ doc, expanded, onToggle, grouped = false, first = false }) 
   ))
   if (grouped) {
     return (
-      <View style={first ? null : styles.groupedDivider}>
+      <View>
+        {first ? null : <Divider />}
         <Pressable
           accessibilityRole='button'
           accessibilityState={{ expanded }}
@@ -147,7 +149,6 @@ const makeStyles = (colors) => StyleSheet.create({
   cue: { fontSize: 14, color: colors.soft },
   paragraph: { fontSize: 16, lineHeight: 22, color: colors.ink },
   center: { textAlign: 'center' },
-  groupedDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   groupedHeader: { minHeight: 52, paddingHorizontal: space.lg },
   groupedBody: { paddingHorizontal: space.lg, paddingBottom: space.lg, gap: space.sm },
   // The Card this replaced spaced headings and paragraphs; the Accordion body has no gap.
