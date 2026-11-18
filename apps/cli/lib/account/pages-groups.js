@@ -42,7 +42,9 @@
 // The fold is buildCommunity / buildGroup over the root, the listed writers
 // whose header names the group, the page's own writers and every binding
 // diary that verifies under the association and the current revoked
-// issuers, blocked keys left out (the shape of member.js readCoreParts).
+// issuers, blocked keys left out, plus block 0 alone of a writer read here
+// whose header cannot count for a diary that bound it (`heads`, header
+// stubs; the shape of member.js readCoreParts).
 //
 // Nothing logged ever names a key or holds a secret.
 
@@ -869,9 +871,22 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     if (rootCore.fork !== 0 || groups.validateGroupHeader(header) !== null || header.kind !== kind) throw fail('nao-encontrada')
     const logs = [{ key, diary: header.diary, entries: rootEntries, length: rootCore.contiguousLength, signed: rootCore.length }]
     const seen = new Set([key])
+    // Block 0 of every writer core read here, with the diary its header names
+    // when it is a writer header for this root (group.js headerStubs): a
+    // listed writer whose diary the service refuses while the seeder still
+    // serves it is no copy, and another diary's join of it would otherwise
+    // hold the fold.
+    const firsts = new Map()
+    const noteFirst = (k, entries) => {
+      const e = entries[0]
+      if (e === undefined || e.seq !== 0) return
+      const own = groups.validateWriterHeader(e.record) === null && e.record.group === key
+      firsts.set(k, { entry: e, diary: own ? e.record.diary : null })
+    }
     for (const [w, core] of p.writers) {
       if (core.length === 0) continue
       const entries = await readBlocks(core)
+      noteFirst(w, entries)
       const h = entries[0] && entries[0].record
       if (groups.validateWriterHeader(h) !== null || h.group !== key || h.diary !== page) continue
       seen.add(w)
@@ -902,6 +917,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       // A seeder keeps a cut writer sparse (#350): past its first hole, its
       // leaves and key blocks.
       const entries = await readHeldBlocks(core)
+      noteFirst(it.key, entries)
       const h = entries[0] && entries[0].record
       if (groups.validateWriterHeader(h) !== null || h.group !== key) continue
       // The signed header, not the seeder's listing, names the diary whose
@@ -953,7 +969,8 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     const root = { key, entries: diaryEntries.has(header.diary) ? rootEntries : rootEntries.slice(0, 1) }
     const writers = accepted.filter((l) => l.key !== key)
     const bound = accepted.filter((l) => (joins.get(l.diary) || []).some((j) => j.writer === l.key && j.on))
-    return { header, input: { root, writers, joins, marks, confirms }, bound, profiles, diaryEntries, incomplete }
+    const heads = groups.headerStubs(joins, firsts)
+    return { header, input: { root, writers, joins, marks, confirms, heads }, bound, profiles, diaryEntries, incomplete }
   }
 
   // The page's live writer in the folded root: bound, no leave in its log,

@@ -152,11 +152,18 @@ test('listings of cores that are no writers never fill the table: an honest writ
   const group = hex(crypto.randomBytes(32))
   const junk = []
   const spam = await fakeSeeder(t, bootstrap, kp, junk)
+  // Listed under a diary the spammer serves, whose join seq names none of
+  // them: a header stub is never proven, so each is refused at once (#350).
+  const sd = spam.store.get({ name: 'junk-diary' })
+  await sd.ready()
+  const sdkey = hex(sd.key)
+  await sd.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: sdkey }, kp)))))
+  await sd.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(crypto.randomBytes(32)), on: true }))))
   for (let i = 0; i < 512; i++) {
     const c = spam.store.get({ name: 'junk' + i })
     await c.ready()
     await c.append(b4a.from(JSON.stringify({ type: 'nada', i })))
-    junk.push({ key: hex(c.key), diary: hex(crypto.randomBytes(32)), length: 1, seq: 1 })
+    junk.push({ key: hex(c.key), diary: sdkey, length: 1, seq: 1 })
   }
   junk.sort((x, y) => x.key < y.key ? -1 : 1)
   const items = []

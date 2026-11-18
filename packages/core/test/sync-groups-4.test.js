@@ -190,6 +190,16 @@ test('a stored writer takes its diary from its own block 0, not from the hint', 
   t.ok(await stored(m, wkey))
 })
 
+// A certified diary in `cs` whose block 1 joins some other writer to group.
+async function servedDiary (cs, kp, group) {
+  const d = cs.get({ name: 'served-diary' })
+  await d.ready()
+  const key = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: key }, kp)))))
+  await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(crypto.randomBytes(32)), on: true }))))
+  return key
+}
+
 test('a seeder listing too many wrong hints is no longer paged', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)
@@ -198,11 +208,15 @@ test('a seeder listing too many wrong hints is no longer paged', async (t) => {
   const items = []
   const fake = await fakeSeeder(t, bootstrap, kp, items)
   const real = hex(crypto.randomBytes(32))
+  // Each listed under a diary the fake seeder serves, whose join seq names
+  // no such writer: never proven a header stub's, so it stays a wrong hint
+  // (#350).
+  const other = await servedDiary(fake.store, kp, group)
   for (let i = 0; i < 40; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: real, member: PARENT }))))
-    items.push({ key: hex(w.key), diary: hex(crypto.randomBytes(32)), length: 1, seq: 1 })
+    items.push({ key: hex(w.key), diary: other, length: 1, seq: 1 })
   }
   // A real writer advertised past what is served keeps the --once run
   // paging for a few seconds.
@@ -211,9 +225,19 @@ test('a seeder listing too many wrong hints is no longer paged', async (t) => {
   items.sort((x, y) => x.key < y.key ? -1 : 1)
   setTimeout(() => { w.append(b4a.from(JSON.stringify(groupPost({ text: 'tarde' })))).catch(() => {}) }, 3500)
   const m = await groupMember(t, kp, group)
-  const { events } = await syncOnce(bootstrap, m, { pageRetryMs: 100 })
-  t.ok(events.filter((ev) => ev.event === 'group-skipped' && ev.reason === 'wrong-diary').length >= 32)
-  t.ok(fake.requests.length < 10, 'paging stopped: ' + fake.requests.length + ' requests')
+  // Each wrong hint now waits for its diary's blocks, so the count of pages
+  // before the cut-off depends on load: what counts is none after it.
+  const events = []
+  let cutAt = -1
+  await syncOnce(bootstrap, m, {
+    pageRetryMs: 100,
+    onEvent: (ev) => {
+      events.push(ev)
+      if (cutAt === -1 && events.filter((x) => x.event === 'group-skipped' && x.reason === 'wrong-diary').length >= 32) cutAt = fake.requests.length
+    }
+  })
+  t.ok(cutAt !== -1, '32 wrong hints refused')
+  t.ok(fake.requests.length <= cutAt + 2, 'paging stopped: ' + (fake.requests.length - cutAt) + ' requests after the cut-off')
 })
 
 test('long-running: a seeder cut off for wrong hints is paged again after the refresh interval', async (t) => {
@@ -224,11 +248,13 @@ test('long-running: a seeder cut off for wrong hints is paged again after the re
   const items = []
   const fake = await fakeSeeder(t, bootstrap, kp, items)
   const real = hex(crypto.randomBytes(32))
+  // A served diary disproves each hint, as in the test above (#350).
+  const other = await servedDiary(fake.store, kp, group)
   for (let i = 0; i < 40; i++) {
     const w = fake.store.get({ name: 'w' + i })
     await w.ready()
     await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: real, member: PARENT }))))
-    items.push({ key: hex(w.key), diary: hex(crypto.randomBytes(32)), length: 1, seq: 1 })
+    items.push({ key: hex(w.key), diary: other, length: 1, seq: 1 })
   }
   items.sort((x, y) => x.key < y.key ? -1 : 1)
   const m = await groupMember(t, kp, group)

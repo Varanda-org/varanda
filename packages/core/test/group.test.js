@@ -8,7 +8,8 @@ const {
   groupCreateRecord, communityAdmit, communityBan, communityHide, groupInvites,
   groupJoins, groupJoinHistory, diaryGroupKeys, orderKey, compareOrder, isFuture, buildGroup, buildCommunity,
   GROUP_POST_V2_KEYS, groupKey, groupSealed, sealedInner, groupReact, groupTopic, groupPoll, groupChoice,
-  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut
+  slotWalk, walkHasRoom, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, replacedWriterCut, retiredWriterCut,
+  diaryWriterCut, diaryWalkRecords, walkRecordsCut, headerStubs
 } = require('../lib/group')
 const { groupJoinRecord, groupCutRecord } = require('../lib/records')
 const { K, BASE, AT, NOW, community: communityOf, groupIn, diaryLog } = require('./helpers/groups')
@@ -1736,7 +1737,7 @@ test('a writer copy whose block 0 is invalid still forks the valid copy', (t) =>
   }
   const alone = buildGroup({ ...input, writers: [...others, odd] })
   t.absent(alone.writers.has(wX), 'an invalid header alone binds nothing')
-  t.is(alone.incomplete, true)
+  t.is(alone.incomplete, false, 'and, never able to count, it is not awaited (#350)')
 })
 
 test('at the writer cap the writers of community admins rank with the group admins', (t) => {
@@ -1902,7 +1903,7 @@ test('a CW copy whose block 0 is invalid still forks the valid copy', (t) => {
   t.is(a.incomplete, true)
   const alone = buildGroup(w.input({ community: { ...input, writers: [...others, odd] } }))
   t.is(alone.members.get(X), 'member')
-  t.is(alone.incomplete, true, 'a CW with only an invalid block 0 reads as missing')
+  t.is(alone.incomplete, false, 'a CW with only an invalid block 0 can never count: not awaited (#350)')
 })
 
 test('a CW copy without block 0 is no copy of it', (t) => {
@@ -3626,4 +3627,63 @@ test('slot walk: a diary that deletes its own group-cut or group-join keeps the 
   t.alike(walkView(after.wk), walkView(before.wk), 'the deletes change nothing in the walk')
   t.ok(after.wk.live.has(ws[2]), 'the writer whose join was deleted keeps its slot')
   t.is(after.room, before.room, 'walkHasRoom answers as before')
+})
+
+test('walkRecordsCut answers as diaryWriterCut from the group records alone (#350)', (t) => {
+  const rnd = mulberry32(0x350a)
+  const groups = [G, K(0x110)]
+  const W = (i) => K(0x9100 + i)
+  let checked = 0
+  let differ = 0
+  let cuts = 0
+  let kept = 0
+  let total = 0
+  for (let round = 0; round < 40; round++) {
+    const log = diaryLog()
+    for (let i = 0; i < 40; i++) {
+      const g = groups[Math.floor(rnd() * groups.length)]
+      const w = W(Math.floor(rnd() * 12))
+      const r = rnd()
+      if (r < 0.15 && log.entries.length > 1) log.delete(1 + Math.floor(rnd() * (log.entries.length - 1)))
+      else if (r < 0.6) log.join(g, w, rnd() < 0.85)
+      else log.mark(g, w, rnd() < 0.4 ? 0 : 1 + Math.floor(rnd() * 4))
+    }
+    const entries = log.entries.slice()
+    // Now and then the history as read skips a seq.
+    if (round % 3 === 0) entries.splice(1 + Math.floor(rnd() * (entries.length - 1)), 1)
+    const records = diaryWalkRecords(entries)
+    kept += records.entries.length
+    total += entries.length
+    for (const g of groups) {
+      for (let i = 0; i < 12; i++) {
+        checked++
+        const cut = diaryWriterCut(entries, g, W(i))
+        if (cut !== null) cuts++
+        if (walkRecordsCut(records, g, W(i)) !== cut) differ++
+      }
+    }
+  }
+  t.is(differ, 0, 'the same cut for each of ' + checked + ' writers')
+  t.ok(cuts > 100, cuts + ' of them cut or released')
+  t.ok(kept < total, 'kept ' + kept + ' of ' + total + ' records')
+  t.is(walkRecordsCut(diaryWalkRecords(null), G, W(0)), null, 'nothing read, no cut')
+})
+
+test('headerStubs: block 0 of a held core goes to the fold only for a diary its header does not name (#350)', (t) => {
+  const e = (n) => ({ seq: 0, record: { n } })
+  const joins = new Map([
+    [X, [{ writer: wX, on: true, seq: 1 }, { writer: wY, on: true, seq: 2 }, { writer: K(0xa1), on: false, seq: 3 }]],
+    [Y, [{ writer: wY, on: true, seq: 1 }]]
+  ])
+  const firsts = new Map([
+    [wX, { entry: e(1), diary: X }], // names its only binder: no stub
+    [wY, { entry: e(2), diary: Y }], // X bound it too: a stub for X's pair
+    [K(0xa1), { entry: e(3), diary: null }], // only ever bound off: none
+    [K(0xa2), { entry: e(4), diary: null }] // bound by no diary read: none
+  ])
+  t.alike(headerStubs(joins, firsts), [{ key: wY, entries: [e(2)] }])
+  firsts.set(K(0xa3), { entry: e(5), diary: null })
+  joins.get(Y).push({ writer: K(0xa3), on: true, seq: 2 })
+  t.alike(headerStubs(joins, firsts).map((x) => x.key), [wY, K(0xa3)], 'no header for this root: a stub for every binder')
+  t.alike(headerStubs(null, firsts), [], 'never throws')
 })
