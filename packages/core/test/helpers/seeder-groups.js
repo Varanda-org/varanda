@@ -149,8 +149,9 @@ async function admit (m, assoc) {
 }
 
 // A node holding nothing that dials the seeder only: what it reads came
-// from the seeder. `blocklist` hands the seeder a snapshot.
-async function reader (t, bootstrap, publicKey, { blocklist = null } = {}) {
+// from the seeder. `blocklist` hands the seeder a snapshot; `caps` are the
+// capability bits its admission channel announces (none by default).
+async function reader (t, bootstrap, publicKey, { blocklist = null, caps = 0 } = {}) {
   const store = new Corestore(tmpDir(t, 'varanda-reader-'))
   await store.ready()
   t.teardown(() => store.close(), { force: true })
@@ -168,7 +169,7 @@ async function reader (t, bootstrap, publicKey, { blocklist = null } = {}) {
       })
     }
     handles.push(attachGroups(socket, { role: 'member' }))
-    peers.push(attachAdmission(socket, { role: 'member', have: [] }))
+    peers.push(attachAdmission(socket, { role: 'member', have: [], caps }))
   })
   swarm.joinPeer(b4a.from(publicKey, 'hex'))
   await until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador (leitor)' })
@@ -181,6 +182,11 @@ function admitted (events, key) {
 
 function rejected (events, key, reason) {
   return until(() => events.find((e) => e.event === 'group-rejected' && e.key === key && (reason === undefined || e.reason === reason)), { name: 'group-rejected ' + key.slice(0, 8) + ' ' + reason, timeoutMs: 30000 })
+}
+
+// The log line of a join kept as a header stub (#350).
+function stubbed (events, key, reason) {
+  return until(() => events.find((e) => e.event === 'group-header-stub' && e.key === key && (reason === undefined || e.reason === reason)), { name: 'group-header-stub ' + key.slice(0, 8) + ' ' + reason, timeoutMs: 30000 })
 }
 
 async function stored (seeder, key) {
@@ -281,6 +287,7 @@ module.exports = {
   reader,
   admitted,
   rejected,
+  stubbed,
   stored,
   downloaded,
   moderator,
