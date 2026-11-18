@@ -128,13 +128,13 @@ const resultKeys = {
   'device.list': ['self', 'off', 'devices', 'previous'],
   'device.disconnect': ['cut', 'empty'],
   'listing.ratings': ['items', 'dropped', 'incomplete'],
-  'dm.thread': ['messages', 'next', 'folder', 'blocked'],
+  'dm.thread': ['messages', 'next', 'folder', 'blocked', 'firstUnread'],
   'dm.seen': ['ok'],
   'dm.send': ['id', 'at'],
   'dm.react': ['ok'],
   'dm.lookup': ['box', 'gen'],
   'group.list': ['groups', 'total'],
-  'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state'],
+  'group.read': ['items', 'next', 'hidden', 'incomplete', 'sealed', 'epoch', 'state', 'firstUnread'],
   'group.info': ['group', 'name', 'join', 'creator', 'role', 'members', 'state', 'community', 'orphan', 'visibility', 'memberInvite', 'writerHere', 'canWrite', 'writersBound', 'writersFrozen', 'frozenRoom'],
   'group.seen': ['ok'],
   'group.post': ['seq'],
@@ -193,6 +193,7 @@ async function answer (t, request, method, params) {
   t.ok(validateResponse({ v: 1, id: 1, ok: true, result }).ok, method + ' success envelope')
   let expected = resultKeys[method]
   if (method === 'username.add' && !result.changed) expected = ['changed', 'username']
+  if (method === 'group.read' && (params.topic || params.before)) expected = expected.filter((k) => k !== 'firstUnread')
   if (method === 'group.read' && params.topic) expected = [...expected, 'poll', 'event']
   if (method === 'sync.status' && result.state === 'running') expected = ['state', 'runId', 'once']
   if (method === 'page.sign') {
@@ -345,7 +346,7 @@ test('DM pagination is exclusive and lists preserve folder and global dots', asy
   const requests = await answer(t, request, 'dm.list', { folder: 'request' })
   t.is(requests.conversations.length, 3)
   t.ok(requests.conversations.every((c) => c.folder === 'request'))
-  t.alike(await answer(t, request, 'dm.thread', { peer: unknown }), { messages: [], next: null, folder: 'inbox', blocked: false })
+  t.alike(await answer(t, request, 'dm.thread', { peer: unknown }), { messages: [], next: null, folder: 'inbox', blocked: false, firstUnread: null })
   const tied = clone(f)
   tied.conversations[0].messages[2].id = tied.conversations[0].messages[1].id
   const tiedRequest = createVitrineRequest(tied)
@@ -359,6 +360,8 @@ test('group pages use full cursors, private epochs and an empty last line', asyn
   const first = await answer(t, request, 'group.read', { group, limit: 2 })
   keys(t, first.next, ['at', 'writer', 'seq'])
   const second = await answer(t, request, 'group.read', { group, limit: 2, before: first.next })
+  t.ok('firstUnread' in first, 'the newest page carries firstUnread')
+  t.absent('firstUnread' in second, 'a before page carries no firstUnread')
   t.alike([...first.items, ...second.items], [...f.groups[0].items].reverse())
   t.is(second.next, null)
   t.ok(first.items[0].replyTo)
