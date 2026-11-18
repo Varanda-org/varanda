@@ -8,6 +8,7 @@
 // keys, seq and pushed only: never a secret, a signature or a photo body.
 
 const fs = require('node:fs')
+const path = require('node:path')
 const nodeCrypto = require('node:crypto')
 const { jsonLine, safe } = require('@varanda/core/lib/safe')
 const member = require('@varanda/core/lib/member')
@@ -15,7 +16,7 @@ const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { MEDIA_MIMES, AVATAR_MIMES, AVATAR_SIDE, MAX_AVATAR_BYTES, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS } = require('@varanda/core/lib/records')
 const { validateParams, mediaBounds } = require('@varanda/rpc')
 
-const USAGE_TEXT = 'node bin/varanda.js page register|terms|create|list|post|reply|photo|follow|unfollow|notices|close|move|join|leave|group-post'
+const USAGE_TEXT = 'node bin/varanda.js page register|terms|create|list|post|reply|photo|follow|unfollow|notices|close|move|join|leave|group-post|dm-list|dm-read|dm-reply'
 const MAX_FILES = 10
 const MAX_MEDIA_BYTES = MEDIA_BLOCK_BYTES * MAX_MEDIA_ITEM_BLOCKS
 const TIMEOUT_MS = 30000
@@ -416,6 +417,271 @@ function groupStep (kind) {
   }
 }
 
+// ---- Conversas da página (dm-list, dm-read, dm-reply) ----
+// An in-process core session with the same `dm` factory varanda-serve
+// injects, called as the RPC client would, so both share one code path. The
+// engine's store lock refuses a second process on this data dir (DM_BUSY).
+
+const DM_OFF = 'Conversas ainda não ativadas neste aparelho'
+const DM_BUSY = 'Conversas abertas em outro processo deste aparelho'
+const NO_SEEDER = 'sem conexão com o semeador'
+const SEND_UNKNOWN = 'não deu para confirmar o envio'
+const DM_TEXTS = {
+  [DM_OFF]: DM_OFF + ': ative as Conversas deste diretório pelo varanda-serve com --account-origin e receba as chaves da página',
+  [DM_BUSY]: DM_BUSY + ': feche o varanda-serve deste diretório e tente de novo'
+}
+const DM_LIST_PAGES = 20
+// The draft dies with the session and the thread keeps no row of it.
+const REPLY_UNCERTAIN = ' (resultado incerto: a resposta pode ter chegado à pessoa, o dm-read não vai mostrá-la e repetir o dm-reply pode enviá-la duas vezes)'
+const DM_THREAD_PAGES = 25
+const MEDIA_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif', 'audio/mp4': 'm4a' }
+const HEX64 = /^[0-9a-f]{64}$/
+
+function dmKey (value, what) {
+  if (typeof value !== 'string' || !/^[0-9a-fA-F]{64}$/.test(value)) throw usage('informe ' + what + ' (chave de 64 hex)')
+  return value.toLowerCase()
+}
+
+// <página> positional, or --page as the other page commands take it.
+function dmPageOf (flags) {
+  if (flags.page !== null) return { page: flags.page, rest: flags.positionals.slice(1) }
+  return { page: dmKey(flags.positionals[1], '<página>'), rest: flags.positionals.slice(2) }
+}
+
+function dmError (err) {
+  if (err && Object.hasOwn(DM_TEXTS, err.message)) return usage(DM_TEXTS[err.message])
+  return err
+}
+
+async function withDm (flags, fn) {
+  const origin = accountOrigin(flags.accountOrigin)
+  const { createSession } = require('@varanda/core/lib/session')
+  const { readConfig } = require('@varanda/core/lib/store')
+  const { createCoreDm } = require('@varanda/web-member/lib/core-dm')
+  const { WebSocket } = require('ws')
+  let config = null
+  try {
+    config = readConfig(flags.dataDir)
+  } catch {}
+  const association = flags.association || (config !== null && typeof config === 'object' && typeof config.association === 'string' ? config.association : '')
+  const session = createSession({
+    dataDir: flags.dataDir,
+    association,
+    bootstrap: flags.bootstrap === undefined ? null : flags.bootstrap,
+    dhtHost: flags.dhtHost,
+    allowPublicDht: flags.bootstrap === undefined,
+    dm: (hooks) => createCoreDm({
+      ...hooks,
+      accountOrigin: origin,
+      createSocket: (url) => {
+        const ws = new WebSocket(url)
+        ws.on('error', () => {})
+        return ws
+      }
+    })
+  })
+  session.attach(() => {})
+  const call = async (method, params = {}) => {
+    const checked = validateParams(method, params)
+    if (!checked.ok) throw usage('parâmetro inválido')
+    return session.handlers[method](checked.value)
+  }
+  try {
+    return await fn(call, session)
+  } catch (err) {
+    throw dmError(err)
+  } finally {
+    await session.close()
+  }
+}
+
+// A pull that cannot reach the seeder still lets the local copy be read.
+async function dmPull (call) {
+  try {
+    const r = await call('dm.pull')
+    return r !== null && typeof r === 'object' && r.incomplete === true
+  } catch (err) {
+    if (!err || err.message !== NO_SEEDER) throw err
+    process.stderr.write('aviso: ' + NO_SEEDER + '; mostrando o que já chegou\n')
+    return true
+  }
+}
+
+// At most DM_LIST_PAGES pages per folder; a last page that still has a
+// next one marks the listing incomplete.
+async function dmListFolders (call, page) {
+  const conversations = []
+  let incomplete = false
+  for (const folder of ['inbox', 'request']) {
+    let before = null
+    for (let i = 0; ; i++) {
+      const params = { page, folder, limit: 50 }
+      if (before !== null) params.before = before
+      const r = await call('dm.list', params)
+      for (const c of r.conversations) {
+        conversations.push({ peer: c.peer, folder: c.folder, at: c.at, unread: c.unread === true, mine: c.mine === true, preview: String(c.preview) })
+      }
+      if (r.next === null || r.next === undefined) break
+      if (i === DM_LIST_PAGES - 1) {
+        incomplete = true
+        break
+      }
+      before = r.next
+    }
+  }
+  return { incomplete, conversations }
+}
+
+async function dmListRun (flags) {
+  const { page } = dmPageOf(flags)
+  const result = await withDm(flags, async (call) => {
+    const incomplete = await dmPull(call)
+    const listed = await dmListFolders(call, page)
+    return { incomplete: incomplete || listed.incomplete, conversations: listed.conversations }
+  })
+  const lines = result.conversations.map((c) =>
+    c.peer + ' ' + (c.folder === 'request' ? 'pedido' : 'entrada') + ' ' + safe(c.at) +
+    (c.unread ? ' (não lida)' : '') + ': ' + (c.mine ? 'você: ' : '') + safe(c.preview))
+  if (lines.length === 0) lines.push('nenhuma conversa')
+  if (result.incomplete) lines.push('(lista pode estar incompleta)')
+  print(flags, result, lines.join('\n'))
+}
+
+// The save directory: created 0700 when missing; a symlink or anything but
+// a directory is refused.
+function saveDir (dir) {
+  let st = null
+  try {
+    st = fs.lstatSync(dir)
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw usage('--save inválido')
+  }
+  if (st === null) {
+    fs.mkdirSync(dir, { mode: 0o700 })
+    return
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) throw usage('--save precisa ser um diretório (link simbólico recusado)')
+}
+
+function mediaOf (m) {
+  return Array.isArray(m.media) ? m.media.filter((x) => x !== null && typeof x === 'object' && Object.hasOwn(MEDIA_EXT, x.mime)) : []
+}
+
+// Each file goes to a temporary name, fully written and synced, then is
+// linked to its final name, which fails rather than replace an entry that
+// appeared meanwhile. A failure leaves no partial file, so a rerun completes.
+async function saveMedia (dir, plan, saved, read) {
+  for (const p of plan) {
+    const tmp = path.join(dir, '.' + p.name + '.' + nodeCrypto.randomBytes(6).toString('hex') + '.tmp')
+    let fd = null
+    try {
+      const got = await read(p)
+      fd = fs.openSync(tmp, 'wx', 0o600)
+      const bytes = got.bytes
+      let off = 0
+      while (off < bytes.length) off += fs.writeSync(fd, bytes, off, bytes.length - off)
+      fs.fsyncSync(fd)
+      fs.closeSync(fd)
+      fd = null
+      fs.linkSync(tmp, path.join(dir, p.name))
+    } catch (err) {
+      if (saved.length > 0) process.stderr.write('aviso: já salvos: ' + saved.join(', ') + '\n')
+      throw err
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd) } catch {}
+      }
+      try { fs.unlinkSync(tmp) } catch {}
+    }
+    saved.push(p.name)
+  }
+}
+
+async function dmReadRun (flags) {
+  const { page, rest } = dmPageOf(flags)
+  const peer = dmKey(rest[0], '<conversa>')
+  const result = await withDm(flags, async (call, session) => {
+    const incomplete = await dmPull(call)
+    let messages = []
+    let before = null
+    let folder = 'inbox'
+    for (let i = 0; i < DM_THREAD_PAGES; i++) {
+      const params = { page, peer }
+      if (before !== null) params.before = before
+      const r = await call('dm.thread', params)
+      folder = r.folder
+      messages = r.messages.concat(messages)
+      if (r.next === null || r.next === undefined) break
+      before = r.next
+    }
+    // The item's key and blob ids never leave this function.
+    const out = messages.map((m) => ({
+      id: m.id,
+      from: m.from,
+      mine: m.mine === true,
+      at: m.at,
+      text: String(m.text),
+      media: mediaOf(m).map((x, index) => ({ index, mime: x.mime, w: x.w, h: x.h, bytes: Math.max(0, x.bytes - 16) })),
+      unavailable: m.media !== null && typeof m.media === 'object' && !Array.isArray(m.media)
+    }))
+    const saved = []
+    if (flags.save !== null) {
+      const plan = []
+      for (const m of out) {
+        if (m.mine || !HEX64.test(m.from)) continue
+        for (const x of m.media) plan.push({ m, x, name: m.from.slice(0, 8) + '-' + m.id + '-' + x.index + '.' + MEDIA_EXT[x.mime] })
+      }
+      saveDir(flags.save)
+      // Checked before the first write, so a refusal leaves nothing half saved.
+      for (const p of plan) {
+        if (fs.existsSync(path.join(flags.save, p.name))) throw usage('--save: o arquivo ' + p.name + ' já existe')
+      }
+      await saveMedia(flags.save, plan, saved, (p) => session.dmReadMedia({ from: p.m.from, id: p.m.id, index: p.x.index, page }))
+    }
+    await call('dm.seen', { page, peer })
+    return { incomplete, folder, messages: out, saved }
+  })
+  const lines = []
+  for (const m of result.messages) {
+    lines.push(safe(m.at) + ' ' + (m.mine ? 'página' : m.from) + ': ' + safe(m.text))
+    for (const x of m.media) lines.push('  mídia ' + (x.index + 1) + ': ' + x.mime + ' ' + x.w + 'x' + x.h + ', ' + x.bytes + ' bytes')
+    if (m.unavailable) lines.push('  mídia indisponível')
+  }
+  if (lines.length === 0) lines.push('nenhuma mensagem')
+  for (const name of result.saved) lines.push('salvo: ' + name)
+  if (result.incomplete) lines.push('(conversa pode estar incompleta)')
+  print(flags, result, lines.join('\n'))
+}
+
+async function dmPageSend (call, params) {
+  try {
+    await call('dm.pageSend', params)
+  } catch (err) {
+    if (err && err.code === 'USAGE' && err.message !== SEND_UNKNOWN) throw err
+    const out = new Error(String(err && err.message) + REPLY_UNCERTAIN)
+    out.uncertain = true
+    throw out
+  }
+}
+
+// dm.pageDraft, the page's 'dm-sign' at the account service, dm.pageSend,
+// as the app does. Text only; the send is never repeated here.
+async function dmReplyRun (flags) {
+  const { page, rest } = dmPageOf(flags)
+  const peer = dmKey(rest[0], '<conversa>')
+  if (rest.length > 2) throw usage('o texto vai entre aspas')
+  const text = rest[1] !== undefined ? rest[1] : flags.text
+  if (typeof text !== 'string' || text === '') throw usage('informe <texto>')
+  const result = await withDm(flags, async (call) => {
+    const draft = await call('dm.pageDraft', { page, kind: 'msg', to: peer, text })
+    const { data } = await step(flags, { action: 'dm-sign', page, op: { digest: draft.digest }, signed: false })
+    if (typeof data.signature !== 'string' || !Number.isSafeInteger(data.expiresAt)) throw serviceError('indisponivel', false)
+    await dmPageSend(call, { page, id: draft.id, signature: data.signature, expiresAt: data.expiresAt })
+    return { id: draft.id, sent: true }
+  })
+  print(flags, result, 'resposta enviada como a página')
+}
+
 const subs = {
   register: registerRun,
   terms: termsRun,
@@ -431,7 +697,10 @@ const subs = {
   move: moveRun,
   join: groupStep('join'),
   leave: groupStep('leave'),
-  'group-post': groupStep('post')
+  'group-post': groupStep('post'),
+  'dm-list': dmListRun,
+  'dm-read': dmReadRun,
+  'dm-reply': dmReplyRun
 }
 
 // A mutating call is never resent; the uncertain text is already on the error.
@@ -442,6 +711,7 @@ async function pageRun (flags) {
 }
 
 module.exports = {
+  _test: { dmPageSend, SEND_UNKNOWN, dmListFolders, saveMedia, REPLY_UNCERTAIN },
   accountOrigin,
   groupStep,
   serviceError,

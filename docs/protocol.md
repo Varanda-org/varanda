@@ -1629,6 +1629,9 @@ Comandos:
   page close|move            encerra a página ou muda a sua chave (--page)
   page join|leave            a página entra ou sai (--page, --community ou --group)
   page group-post            a página publica num grupo (--page, --group, --text)
+  page dm-list <página>      conversas da página neste aparelho, depois de buscar as novas
+  page dm-read <página> <conversa>     lê a conversa; com --save <dir> grava as mídias recebidas (0600)
+  page dm-reply <página> <conversa> <texto>  responde como a página (só texto)
   secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
   secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
   secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
@@ -1641,13 +1644,13 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
-  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
+  page: VARANDA_ACCOUNT_ORIGIN ou --account-origin, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
-  --recipients --key-file --signing-key --signers --seq
+  --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).
 ```
