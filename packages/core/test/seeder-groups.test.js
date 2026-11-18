@@ -25,6 +25,7 @@ const {
   readGroups,
   prepareSeederDir,
   startSeeder,
+  onPassesStart,
   encode,
   member,
   admit,
@@ -525,14 +526,18 @@ test('restart keeps a root a member\'s live join keeps, with its creator absent 
   await A.swarm.destroy()
   await B.swarm.destroy()
 
-  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  let passesAt = -1
+  const second = await startSeeder(t, bootstrap, dataDir, {
+    associationKey: assoc.hex,
+    beforeStart: (seeder, events) => onPassesStart(seeder, () => { passesAt = events.length })
+  })
   await until(() => second.seeder._groupRootStartup === null && scansDone(second.seeder), { name: 'varreduras de início' })
   t.absent(second.events.some((e) => e.event === 'group-rejected' && e.key === R), 'R never dropped')
   t.ok(second.seeder._groupServed.has(R), 'R served')
   t.ok(R in readGroups(dataDir), 'R still listed')
   t.ok(await stored(second.seeder, R), 'R still stored')
   const gone = await rejected(second.events, R2, 'unbound')
-  t.ok(second.events.indexOf(gone) > second.events.findIndex((e) => e.event === 'ready'), 'R2 judged only after the start scans')
+  t.ok(passesAt >= 0 && second.events.indexOf(gone) >= passesAt, 'R2 judged only after the start scans')
   await until(async () => second.seeder._drops.size === 0 && !(R2 in readGroups(dataDir)) && !(await stored(second.seeder, R2)), { name: 'R2 purgado' })
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
 })

@@ -195,6 +195,7 @@ function scanFixture (options = {}) {
     _scanDiary: () => {},
     log: () => {},
     _ready: true,
+    _passesStarted: true,
     _closing: false,
     _isBlocked: () => false,
     association: null,
@@ -1647,7 +1648,7 @@ test('cap: the cursor pauses at the refused record (complete: false) and resumes
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('restart rebuilds the index from the stored diaries; indexing is true at ready; health metrics carry counts only', async (t) => {
+test('restart rebuilds the index from the stored diaries; indexing is true until the passes start; health metrics carry counts only', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -1686,22 +1687,28 @@ test('restart rebuilds the index from the stored diaries; indexing is true at re
   await first.seeder.close()
   t.is(first.seeder.indexPost(A.key, 1), null, 'nothing is served after close')
 
-  let atReady = null
+  let atStart = null
+  let startedAtReady = null
   const second = newSeeder(t, bootstrap, dataDir, {
     associationKey: assoc.hex,
     onlog: (e) => {
-      if (e.event !== 'ready') return
-      const s = second.seeder
-      atReady = {
-        indexing: s.indexCounts([ref(A.key, 1)]).indexing,
-        complete: s.indexCounts([ref(A.key, 1)]).complete,
-        records: s.stats().indexRecords,
-        cursors: [s._served.get(A.key).indexed, s._served.get(B.key).indexed]
-      }
+      if (e.event === 'ready') startedAtReady = second.seeder._passesStarted
     }
   })
+  const startPasses = second.seeder._startPasses.bind(second.seeder)
+  second.seeder._startPasses = () => {
+    const s = second.seeder
+    atStart = {
+      indexing: s.indexCounts([ref(A.key, 1)]).indexing,
+      complete: s.indexCounts([ref(A.key, 1)]).complete,
+      records: s.stats().indexRecords,
+      cursors: [s._served.get(A.key).indexed, s._served.get(B.key).indexed]
+    }
+    startPasses()
+  }
   await second.seeder.start()
-  t.alike(atReady, { indexing: true, complete: false, records: 0, cursors: [1, 1] }, 'at ready: empty index, indexing true, cursors at 1')
+  t.alike(atStart, { indexing: true, complete: false, records: 0, cursors: [1, 1] }, 'before the passes start: empty index, indexing true, cursors at 1')
+  t.is(startedAtReady, true, 'the passes start before ready')
   await until(() => second.seeder.indexCounts([ref(A.key, 1)]).indexing === false, { name: 'primeira passada' })
   await indexedTo(second.seeder, A)
   await indexedTo(second.seeder, B)

@@ -1539,9 +1539,11 @@ class Seeder {
   // local block-0 verdict is computed and before it is applied, _gate and
   // _gateGroup) and
   // storeHook() (awaited right after the main store, and
-  // its data-dir lock, is acquired) and flushHook() (awaited in start()
-  // once external streams are accepted, right before joinAndFlush; a throw
-  // fails the start) are test-only hooks (no CLI flag), as are the injectable limits
+  // its data-dir lock, is acquired), flushHook() (awaited in start()
+  // once external streams are accepted, right before the rendezvous
+  // joinAndFlush; a throw fails the start) and joinCoresHook() (awaited in
+  // the background after ready, right before the per-core joinAndFlush; a
+  // throw logs cores-join-failed) are test-only hooks (no CLI flag), as are the injectable limits
   // (maxLogBlocks, maxLogBytes, maxConnections, maxExternal, maxServed,
   // maxAnnounces, announceRate, announceBurst, maxBadAnnounces, maxMedia,
   // maxMediaBlocks, maxMediaBytes; defaults = the constants, maxExternal =
@@ -1620,6 +1622,7 @@ class Seeder {
     regateHook = null,
     storeHook = null,
     flushHook = null, // test-only (see above)
+    joinCoresHook = null, // test-only (see above)
     onPush = null,
     dm = null,
     noClear = null,
@@ -1713,6 +1716,7 @@ class Seeder {
     this.regateHook = regateHook
     this.storeHook = storeHook
     this.flushHook = flushHook
+    this.joinCoresHook = joinCoresHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
     this._dmOpts = dmOptions(dm)
@@ -1963,8 +1967,11 @@ class Seeder {
     this._started = false
     this._ready = false
     // External streams (acceptStream) are served from the end of step 5's
-    // swarm setup, before the DHT join and flush, like swarm peers.
+    // swarm setup, before the DHT join and flush, like swarm peers, and the
+    // background passes start there (_startPasses): until then every index
+    // answer says indexing.
     this._accepting = false
+    this._passesStarted = false
     this._closing = null
     this._stopRediscovery = null
     this.closed = new Promise((resolve) => { this._resolveClosed = resolve })
@@ -2447,8 +2454,9 @@ class Seeder {
       await this._restoreHeaderStubs(kept)
       marks.groups = Date.now()
       // Step 4: watchers and live downloads (no swarm yet). A persisted
-      // binding is served right away: the scan of its diary (after ready)
-      // only confirms or drops it, it never has to rediscover it. The
+      // binding is served right away: the scan of its diary (from the
+      // accepting point of step 5) only confirms or drops it, it never has
+      // to rediscover it. The
       // startup set of the engagement index exists BEFORE anything is
       // served: growth during step 5 may already queue an index pass, and
       // a pass that pauses at the cap must still count as covered.
@@ -2504,28 +2512,37 @@ class Seeder {
       // Every core is re-gated and prepared and the swarm exists: app
       // clients are served from here, as swarm peers already are during the
       // flush. A failure from here on goes through close(), which closes
-      // the external streams accepted meanwhile.
-      if (!this._closing) this._accepting = true
+      // the external streams accepted meanwhile. The background passes start
+      // here too, so the index answers fill while the DHT join runs.
+      if (!this._closing) {
+        this._accepting = true
+        this._startPasses()
+      }
       marks.accepting = Date.now()
-      const topics = [
-        this.topic,
-        ...survivors.filter(([key]) => this._served.has(key)).map(([, core]) => core.discoveryKey),
-        ...mediaSurvivors.filter(([key]) => this._mediaServed.has(key)).map(([, , core]) => core.discoveryKey),
-        ...groupSurvivors.filter(([key]) => this._groupServed.has(key)).map(([, , core]) => core.discoveryKey)
+      // Only the rendezvous topic is awaited: members find the seeder
+      // through it. The discovery key of every surviving core is joined
+      // after it, in the background (_joinCores), since that flush grows
+      // with the number of cores (over a minute for about 300).
+      const startupCores = [
+        ...survivors.map(([key, core]) => [this._served, key, core]),
+        ...mediaSurvivors.map(([key, , core]) => [this._mediaServed, key, core]),
+        ...groupSurvivors.map(([key, , core]) => [this._groupServed, key, core])
       ]
       const done = this.store.findingPeers()
       try {
         if (this.flushHook) await this.flushHook()
-        await joinAndFlush(this.swarm, topics)
-      } finally {
+        await joinAndFlush(this.swarm, [this.topic])
+        marks.flush = Date.now()
+        if (this._closing) throw new Error('semeador encerrado')
+      } catch (err) {
         done()
+        throw err
       }
-      marks.flush = Date.now()
-      if (this._closing) throw new Error('semeador encerrado')
       this._stopRediscovery = startRediscovery(this.swarm, [this.topic], {
         intervalMs: REDISCOVER_MS,
         hasPeer: () => this.swarm.connections.size > 0
       })
+      this._joinCores(startupCores, done)
     } catch (err) {
       await this.close()
       throw err
@@ -2546,17 +2563,48 @@ class Seeder {
       groups: { kept: groupsKept, dropped: groupsBefore - groupsKept }
     }
     this.log({ event: 'ready', topic, admitted, phases, cores, at: Date.now() })
-    // Background pass (never inside start()): scan every served diary for
-    // media-core records, one diary at a time (_scanQueue), and index it on
-    // the separate index queue (`indexing` stays true until every diary
-    // served at ready had its first index pass).
+    return { topic, admitted }
+  }
+
+  // Background passes, started (never awaited) at the accepting point of
+  // start(): scan every served diary for media-core records, one diary at a
+  // time (_scanQueue), and index it on the separate index queue (`indexing`
+  // stays true until every diary served at start had its first index pass).
+  _startPasses () {
+    this._passesStarted = true
     for (const [key, entry] of this._served) {
       this._scanDiary(key, entry)
       this._indexDiary(key, entry)
       this._topicDiary(key, entry)
       this._feiraDiary(key, entry)
     }
-    return { topic, admitted }
+  }
+
+  // After the rendezvous flush: the discovery key of every startup survivor
+  // ([served map, key, core]) still served, joined and flushed in the
+  // background; `done` (the startup findingPeers) is called when that flush
+  // settles. A core admitted at runtime joins its own topic once prepared
+  // (joinAndFlush skips a joined one) and a dropped one leaves it. A failed
+  // flush keeps the topics joined: hyperswarm announces them again on its
+  // own refresh.
+  _joinCores (startupCores, done) {
+    const t0 = Date.now()
+    const run = async () => {
+      if (this.joinCoresHook) await this.joinCoresHook()
+      if (this._closing) return null
+      const topics = []
+      for (const [served, key, core] of startupCores) {
+        const entry = served.get(key)
+        if (entry && !entry.dropped) topics.push(core.discoveryKey)
+      }
+      await joinAndFlush(this.swarm, topics)
+      return topics.length
+    }
+    run().then((topics) => {
+      if (topics !== null && !this._closing) this.log({ event: 'cores-joined', topics, ms: Date.now() - t0 })
+    }, () => {
+      if (!this._closing) this.log({ event: 'cores-join-failed', ms: Date.now() - t0 })
+    }).finally(done).catch(noop)
   }
 
   mediaKeys () {
@@ -7049,7 +7097,7 @@ class Seeder {
   // while no served diary's cursor is paused or behind its contiguous length,
   // its scan included (a tombstone not yet scanned may delete a listed post).
   _indexFlags () {
-    const indexing = !this._ready || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.size > 0
+    const indexing = !this._passesStarted || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.size > 0
     let complete = !indexing && !this._closing
     if (complete) {
       for (const entry of this._served.values()) {
@@ -7185,7 +7233,7 @@ class Seeder {
   // `next` is the { t, h } of the last item, null at the end of the view;
   // `total` is the view's size.
   discoveryPage ({ after = null, limit = MAX_DISCOVERY_LIMIT, view = null } = {}) {
-    if (!this.discovery || !this._ready || this._closing) return { stale: true }
+    if (!this.discovery || !this._passesStarted || this._closing) return { stale: true }
     const now = clock.now()
     this._pruneDiscoveryViews(now)
     const v = view === null ? this._discoveryNewest(now) : this._discoveryViews.find((x) => x.id === view)
@@ -7717,7 +7765,7 @@ class Seeder {
 
   // As _topicFlags, over the Feira cursor (it never pauses).
   _feiraFlags () {
-    const indexing = !this._ready || this._feiraStartup === null || this._feiraStartup.size > 0
+    const indexing = !this._passesStarted || this._feiraStartup === null || this._feiraStartup.size > 0
     let complete = !indexing && !this._closing
     if (complete) {
       for (const [key, entry] of this._served) {
@@ -8113,7 +8161,7 @@ class Seeder {
   // The search index's honesty flags, as _indexFlags over the search cursor
   // (no rebuild flag: the search index is never rebuilt wholesale).
   _topicFlags () {
-    const indexing = !this._ready || this._topicStartup === null || this._topicStartup.size > 0
+    const indexing = !this._passesStarted || this._topicStartup === null || this._topicStartup.size > 0
     let complete = !indexing && !this._closing
     if (complete) {
       for (const entry of this._served.values()) {
@@ -8628,10 +8676,10 @@ class Seeder {
   }
 
   // Whether the owner's diary is still being indexed or scanned: before
-  // ready, a rebuild queued or its first pass not over, a cursor paused or
+  // the passes start, a rebuild queued or its first pass not over, a cursor paused or
   // behind the present length, or a scan behind it (follows and tombstones).
   _ownerIndexPending (hex) {
-    if (!this._ready || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.has(hex)) return true
+    if (!this._passesStarted || this._indexRebuildQueued || this._indexStartup === null || this._indexStartup.has(hex)) return true
     const entry = this._served.get(hex)
     if (!entry) return true
     return entry.indexPaused === true || entry.indexed < entry.present || entry.scanned < entry.present
@@ -9047,7 +9095,7 @@ class Seeder {
   // group core is being admitted or waits for an admission slot, or a served
   // one awaits its header check.
   _groupsUnsettled () {
-    if (!this._ready || this._closing) return true
+    if (!this._passesStarted || this._closing) return true
     for (const k of this._groupReserved.keys()) if (this._groupReservedCounts(k)) return true
     if (this._groupDeferredFor(null) || this._groupFullFor(null)) return true
     for (const [k, e] of this._groupServed) {
@@ -9068,7 +9116,7 @@ class Seeder {
   // (_groupDeferredFor), or a served core of it still waits for
   // its local header check (pages hide it until then).
   _groupIncomplete (group) {
-    if (!this._ready || this._closing) return true
+    if (!this._passesStarted || this._closing) return true
     for (const [k, g] of this._groupReserved) if (g === group && this._groupReservedCounts(k)) return true
     if (this._groupDeferredFor(group) || this._groupFullFor(group)) return true
     for (const [k, e] of this._groupServed) {
@@ -9179,7 +9227,7 @@ class Seeder {
       // before the answer is.
       if (community !== null && this._communityPending(community)) incomplete = true
       const attached = rootServed && this._groupIndex.communityOf(group, (c) => this._communityVisible(c)) !== null
-      return { header, rootServed, community, attached, writers: page.items, next: page.next, indexing: !this._ready, complete: !incomplete }
+      return { header, rootServed, community, attached, writers: page.items, next: page.next, indexing: !this._passesStarted, complete: !incomplete }
     } catch {
       return null
     }
@@ -9245,7 +9293,7 @@ class Seeder {
     if (header !== null && header.kind !== 'community') return null
     if (header === null) {
       if (!this._groupIncomplete(C) && !this._groupHasCore(C)) return null
-      return { name: null, join: null, creator: null, members: 0, groups: [], next: null, indexing: !this._ready, complete: false }
+      return { name: null, join: null, creator: null, members: 0, groups: [], next: null, indexing: !this._passesStarted, complete: false }
     }
     const bound = this._communityVisible(C)
     const visible = (g) => bound && !this._isBlocked(g) && this._groupCoreVisible(g)
@@ -9266,7 +9314,7 @@ class Seeder {
       members: c.members,
       groups: c.groups,
       next: c.next,
-      indexing: !this._ready,
+      indexing: !this._passesStarted,
       complete: !incomplete
     }
   }
@@ -9300,7 +9348,7 @@ class Seeder {
       if (!this._indexVisible(diaryHex)) return null
       const groups = this._groupIndex.groupsOf(diaryHex, (group, writer) => !this._isBlocked(group) && this._groupCoreVisible(writer))
       const entry = this._served.get(diaryHex)
-      let complete = this._ready && !this._closing && !this._groupScanBehind(entry)
+      let complete = this._passesStarted && !this._closing && !this._groupScanBehind(entry)
       // A live join whose writer is in admission or awaits its header check
       // is left out of `groups` above: not complete yet.
       for (const writer of entry.groupLive.keys()) {
@@ -9308,7 +9356,7 @@ class Seeder {
       }
       if (this._groupDeferred.has(diaryHex) && this._groupDiaryWaiting(diaryHex, null)) complete = false
       if (this._groupFullFor(null, diaryHex)) complete = false
-      return { groups, indexing: !this._ready, complete }
+      return { groups, indexing: !this._passesStarted, complete }
     } catch {
       return null
     }
@@ -9325,7 +9373,7 @@ class Seeder {
       const visible = (group) => !this._isBlocked(group) && this._groupCoreVisible(group)
       const page = this._groupIndex.search(segment, visible)
       if (page === null) return null
-      return { groups: page.groups, more: page.more, indexing: !this._ready, complete: !this._groupsUnsettled() }
+      return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete: !this._groupsUnsettled() }
     } catch {
       return null
     }

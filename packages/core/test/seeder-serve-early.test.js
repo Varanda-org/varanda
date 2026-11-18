@@ -1,8 +1,10 @@
 // External streams (acceptStream) are served from the accepting point of
 // Seeder#start, once every core is re-gated and prepared and the swarm
-// exists, while the DHT join and flush still run. stats().status stays
-// 'starting' until start() completes. The flush is held with the test-only
-// flushHook option.
+// exists, while the DHT join and flush still run, and the index passes
+// start there too. stats().status stays 'starting' until start() completes,
+// which waits only for the rendezvous topic: the discovery key of every
+// served core is joined in the background. The flushes are held with the
+// test-only flushHook and joinCoresHook options.
 const test = require('brittle')
 const fs = require('node:fs')
 const net = require('node:net')
@@ -179,6 +181,12 @@ test('flush held: accepting, still starting, and an external stream reads an adm
   t.is(copy.contiguousLength, 3, 'the admitted diary replicated while the flush is held')
   t.is((await copy.get(2)).text, 'dois')
   t.is(seeder.stats().status, 'starting', 'still starting after serving')
+  const counts = await until(() => {
+    const c = seeder.indexFollowCounts(author.key)
+    return c !== null && c.indexing === false && c.complete === true ? c : null
+  }, { name: 'índice montado com o flush preso', timeoutMs: 30000 })
+  t.alike([counts.indexing, counts.complete], [false, true], 'the index pass ran while the flush is held')
+  t.is(seeder.stats().status, 'starting', 'still starting after the index pass')
 
   flush.release()
   await started
@@ -191,6 +199,49 @@ test('flush held: accepting, still starting, and an external stream reads an adm
   await seeder.close()
   t.absent(seeder.accepting(), 'accepting() is false after close()')
   t.is(seeder.stats().status, 'closing')
+})
+
+test('ready waits only for the rendezvous topic: the served cores join in the background', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const src = await clientStore(t)
+  const author = await diary(src, 'author', assoc)
+  await preloadAdmitted(dataDir, src, author.key, 3, createCert({ member: author.key }, assoc.kp))
+
+  const join = gate(t)
+  const { seeder, events } = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, joinCoresHook: join.hook })
+  await seeder.start()
+  t.is(seeder.stats().status, 'ok', 'ready before the per-core join')
+  t.ok(seeder.swarm.status(seeder.topic), 'the rendezvous topic is joined')
+  t.absent(seeder.swarm.status(author.core.discoveryKey), 'the diary topic is not joined yet')
+  await join.reached
+  t.absent(events.some((e) => e.event === 'cores-joined'), 'no cores-joined yet')
+
+  join.release()
+  const joined = await until(() => events.find((e) => e.event === 'cores-joined'), { name: 'cores-joined', timeoutMs: 60000 })
+  t.is(joined.topics, 1, 'the one served diary')
+  t.ok(Number.isInteger(joined.ms) && joined.ms >= 0, 'ms is an integer >= 0')
+  t.ok(seeder.swarm.status(author.core.discoveryKey), 'the diary topic is joined')
+  t.ok(events.findIndex((e) => e.event === 'ready') < events.indexOf(joined), 'ready is logged first')
+})
+
+test('a failed per-core join is logged and the seeder keeps serving', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const join = gate(t, { fail: true })
+  const { seeder, events } = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, joinCoresHook: join.hook })
+  await seeder.start()
+  await join.reached
+  join.release()
+  const failed = await until(() => events.find((e) => e.event === 'cores-join-failed'), { name: 'cores-join-failed', timeoutMs: 30000 })
+  t.ok(Number.isInteger(failed.ms) && failed.ms >= 0, 'ms is an integer >= 0')
+  t.absent(events.some((e) => e.event === 'cores-joined'), 'no cores-joined')
+  t.is(seeder.stats().status, 'ok', 'still serving')
+  t.ok(seeder.accepting())
 })
 
 test('before the accepting point a stream is refused as before', async (t) => {
