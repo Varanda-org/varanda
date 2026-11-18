@@ -4,11 +4,12 @@
 // domingo; 09:00, 12:00, 19:00, 20:00). The value is the plain fields object
 // { d, m, y, h, i } of strings, so a half-typed value is kept as typed;
 // fieldsToMs answers the instant or null when it is not a real date. Every
-// control is a 44 pt target and nothing here moves.
+// control has a target of at least 44 pt and nothing here moves.
 
+import { useEffect, useState } from 'react'
 import { StyleSheet, Text, TextInput, View } from 'react-native'
 import { Chip } from './Chip'
-import { layout, type } from './theme'
+import { type, webInputReset } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const pad = (n) => String(n).padStart(2, '0')
@@ -73,6 +74,8 @@ const FIELD_ROW = [
 export function DateTimeField ({ label, value, onChange, disabled = false, now }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const [focused, setFocused] = useState(null)
+  useEffect(() => { if (disabled) setFocused(null) }, [disabled])
   const change = typeof onChange === 'function' ? onChange : () => {}
   const f = value && typeof value === 'object' ? value : { d: '', m: '', y: '', h: '', i: '' }
   const chips = dayChips(now === undefined ? Date.now() : now)
@@ -105,7 +108,7 @@ export function DateTimeField ({ label, value, onChange, disabled = false, now }
           <View key={spec.key} style={styles.fieldGroup}>
             {index === 3 ? <Text style={styles.sep} importantForAccessibility='no'>às</Text> : null}
             <TextInput
-              style={[styles.input, { width: spec.width }, !real && styles.inputOff]}
+              style={[styles.input, { width: spec.width }, !disabled && focused === spec.key && styles.inputFocused, !real && styles.inputOff]}
               value={f[spec.key]}
               editable={!disabled}
               maxLength={spec.max}
@@ -115,6 +118,9 @@ export function DateTimeField ({ label, value, onChange, disabled = false, now }
               placeholderTextColor={colors.placeholder}
               accessibilityLabel={label + ', ' + spec.label}
               onChangeText={(text) => change({ ...f, [spec.key]: text.replace(/\D/g, '') })}
+              onFocus={() => setFocused(spec.key)}
+              onBlur={() => setFocused((current) => current === spec.key ? null : current)}
+              underlineColorAndroid='transparent'
             />
           </View>
         ))}
@@ -130,6 +136,7 @@ const makeStyles = (colors) => StyleSheet.create({
   fields: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   fieldGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   sep: { ...type.meta, color: colors.soft },
-  input: { ...type.postText, minHeight: layout.hit, color: colors.ink, textAlign: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, borderRadius: 12, paddingVertical: 8, paddingHorizontal: 6 },
-  inputOff: { borderColor: colors.danger }
+  input: { ...type.postText, minHeight: 56, color: colors.ink, textAlign: 'center', borderBottomWidth: 1, borderBottomColor: colors.controlOff, paddingVertical: 8, paddingHorizontal: 6 },
+  inputFocused: { ...webInputReset, borderBottomWidth: 2, borderBottomColor: colors.accent, paddingBottom: 7 },
+  inputOff: { borderBottomColor: colors.danger }
 })
