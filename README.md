@@ -142,6 +142,9 @@ Comandos:
   page close|move            encerra a página ou muda a sua chave (--page)
   page join|leave            a página entra ou sai (--page, --community ou --group)
   page group-post            a página publica num grupo (--page, --group, --text)
+  page dm-list <página>      conversas da página neste aparelho, depois de buscar as novas
+  page dm-read <página> <conversa>     lê a conversa; com --save <dir> grava as mídias recebidas (0600)
+  page dm-reply <página> <conversa> <texto>  responde como a página (só texto)
   secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
   secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
   secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
@@ -154,13 +157,13 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
-  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
+  page: VARANDA_ACCOUNT_ORIGIN ou --account-origin, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
-  --recipients --key-file --signing-key --signers --seq
+  --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).
 ```
@@ -832,6 +835,7 @@ Regras de operação:
 - Páginas em comunidades ficam ligadas sempre que as páginas estão ligadas. Não há interruptor separado. O serviço não guarda a chave das mensagens nem a caixa dos grupos privados da página: assina somente os digests das Conversas e acrescenta blocos de grupo já selados, sem ver o conteúdo. A caixa privada fica nos aparelhos administradores. É exceção a época antiga conhecida pelo serviço antes da renovação da caixa. O serviço ainda lê os avisos endereçados à página em nome de quem a administra. Termos e Política na versão 34.
 - Um nó core administra páginas com uma chave de delegado guardada no aparelho. A CLI usa `VARANDA_ACCOUNT_ORIGIN` (https) e o `varanda-serve --account-origin https://<host>` liga as Páginas no app servido por ele. O `VARANDA_NO_PAGE_MIGRATE=1` desliga o acompanhamento automático da chave nova de uma página nos aparelhos de quem segue.
 - Com `--account-origin`, o `varanda-serve` também liga as Conversas (só texto) do próprio nó e das Páginas que ele administra: ativar, buscar, receber, listar, ler, marcar como visto e responder em nome da Página. Enviar uma conversa pessoal, reagir, apagar e denunciar continuam só no navegador. Para ser convidado como administrador com Conversas, o semeador precisa da prova de carimbo v2 e o serviço de conta precisa da ação `actor-box`.
+- A CLI lê e responde as Conversas de uma Página pelo mesmo motor do `varanda-serve`, com a origem em `--account-origin` ou `VARANDA_ACCOUNT_ORIGIN`: `page dm-list <página>` busca as novas e lista as conversas (pessoa, última atividade, não lida), `page dm-read <página> <conversa>` mostra a conversa (texto de quem escreve escapado; mídias só por tipo e tamanho) e `page dm-reply <página> <conversa> <texto>` responde como a Página, só texto (o serviço de conta assina o digest com `dm-sign`, e o envio não se repete sozinho). Com `--save <dir>` explícito, o `dm-read` grava cada mídia recebida em modo `0600` (o diretório, se não existir, é criado `0700`); recusa diretório que seja link simbólico e arquivo que já exista, sem sobrescrever nada. Sem `--save`, nada é gravado. As Conversas precisam estar ativas nesse diretório de dados (`dm.enable` pelo `varanda-serve`, com as chaves da Página compartilhadas com o delegado); senão a CLI responde "Conversas ainda não ativadas neste aparelho". Com um `varanda-serve` aberto com Conversas no mesmo diretório, a CLI responde "Conversas abertas em outro processo deste aparelho": feche-o antes. Nenhum desses comandos imprime chave secreta, assinatura, semente ou carimbo.
 - Sem passkey, o nó core guarda a semente das Conversas em `<data>/private/dm-seed.json` (`{ "v": 1, "seed": "<64 hex>" }`, modo `0600`, diretório `0700`), criada uma vez na ativação e nunca recriada: um arquivo vazio ou corrompido é erro (`DM_SEED_INVALID`), e nenhum comando a imprime. As chaves e as mensagens ficam em `<data>/private/dm/`. Faça cópia de segurança do diretório de dados inteiro, num lugar protegido: quem tem esse diretório lê essas conversas, e perdê-lo perde as conversas e o compartilhamento das Páginas; nesse caso o dono compartilha de novo com o aparelho reativado.
 - O serviço confere com a lista curta da conferência de palavras do app o @nome novo de uma página (`nome-invalido`) e o que ela publica por ele, a publicação, a resposta, a citação, o perfil, o anúncio e a mensagem em grupo público (`termo-recusado`), sem gravar nada e sem registrar o texto. Um @nome que a página já tem não é conferido de novo, nem numa mudança de chave.
 - Criar a primeira página é uma migração de mão única do diretório de contas (ver o parágrafo sobre voltar a versões anteriores em "Vínculo de conta Google e @nome").

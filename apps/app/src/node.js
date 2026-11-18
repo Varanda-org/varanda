@@ -562,6 +562,9 @@ function LiveNodeProvider ({ children }) {
   const [mediaCaps, setMediaCaps] = useState('')
   // The handle's media.video flag; decided with hasMedia.
   const [mediaVideo, setMediaVideo] = useState(false)
+  // A core node with Conversas (no passkey, so no node.media): its handle
+  // only opens received DM media, for the rows (NodeHandleContext).
+  const [coreRead, setCoreRead] = useState(false)
   // The handle has follows.legacy / confirmLegacy (browser node).
   const [hasLegacy, setHasLegacy] = useState(false)
   // follows.changed (see the header): the version never goes back.
@@ -923,6 +926,7 @@ function LiveNodeProvider ({ children }) {
       setHasMedia(identity !== null && conn.media != null && typeof conn.media.upload === 'function')
       setMediaCaps(identity !== null && conn.media != null ? CHAT_MEDIA_CALLS.filter((k) => typeof conn.media[k] === 'function').join(',') : '')
       setMediaVideo(identity !== null && conn.media != null && conn.media.video === true)
+      setCoreRead(identity === null && conn.media != null && typeof conn.media.read === 'function')
       setHasLegacy(identity !== null && conn.follows != null && typeof conn.follows.legacy === 'function' && typeof conn.follows.confirmLegacy === 'function')
       noteOwner(pk)
       setPkStatus(pk)
@@ -1858,7 +1862,17 @@ function LiveNodeProvider ({ children }) {
     phase, config, error, hosted, accountOrigin, hostedSource, online, visible, sync: syncView, epoch, request, promote, restart, reconnect, connect, canConfigure, retryDiscovery, forgetConfig, passkey, media, legacyFollows, followsVersion: follows.version, followCount: follows.count, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, pageMismatch, clearPageMismatch, autoSync, signals: runFlags, ackFresh, setAutoSync, syncNow, whenIdle
   }), [phase, config, error, hosted, accountOrigin, hostedSource, online, visible, syncView, epoch, request, promote, restart, reconnect, connect, retryDiscovery, forgetConfig, passkey, media, legacyFollows, follows, groupVersions, getGroupVersion, dmVersion, bumpDm, seenVersion, pageMismatch, clearPageMismatch, autoSync, runFlags, ackFresh, setAutoSync, syncNow, whenIdle])
 
-  const handle = useHandle(hosted, request, media, accountOrigin, syncNow)
+  // Never node.media: no screen sees an upload a core node cannot make.
+  const rowMedia = useMemo(() => {
+    if (media !== null || !coreRead) return media
+    return {
+      read: (args) => mediaCall('read', args),
+      forgetReadFile: (args) => mediaCall('forgetReadFile', args),
+      clearReadFiles: (args) => mediaCall('clearReadFiles', args),
+      video: true
+    }
+  }, [media, coreRead, mediaCall])
+  const handle = useHandle(hosted, request, rowMedia, accountOrigin, syncNow)
   const memberKey = memberKeyOf(passkey)
 
   return (

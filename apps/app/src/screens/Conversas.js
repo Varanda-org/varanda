@@ -49,6 +49,8 @@ import { useActing } from './Conversa'
 import { NovaConversa } from './NovaConversa'
 import { heldOldKeys, oldPageKeys } from '../pageOldKeys'
 import { LOCKED_TEXT, PageInboxNote, useDmRequest } from './Mensagens'
+import { dmScreenGate } from '../coreDm'
+import { CoreDmActivate, useCoreDm } from '../ui/useCoreDm'
 
 export const PULL_EVERY_MS = 5 * 60 * 1000
 export const INFO_AT_ONCE = 4
@@ -436,7 +438,10 @@ export function Conversas ({
   const hosted = node.hosted === true
   const unlocked = !!(node.passkey && node.passkey.status && node.passkey.status.unlocked === true)
   const { dm, pageKey } = useDmRequest()
-  const ready = hosted && unlocked
+  // A core node reads and writes its Conversas once its engine answers.
+  const core = useCoreDm(node)
+  const gate = dmScreenGate({ hosted, unlocked, core: core.state })
+  const ready = gate.ready
   const bumpDm = node.bumpDm
   const [filter, setFilter] = useState('todas')
   const [query, setQuery] = useState('')
@@ -674,14 +679,16 @@ export function Conversas ({
     </>
   )
 
-  if (!hosted) return <View style={styles.root}><View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View></View>
+  if (gate.activate) return <View style={styles.root}><CoreDmActivate core={core} style={styles.pad} /></View>
+  if (!hosted && !ready) return <View style={styles.root}><View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View></View>
 
   const items = data.filter((row) => row.kind === 'dm' || row.kind === 'group')
   const dmLoaded = !ready || inbox.loaded
-  const loaded = dmLoaded && (pageKey !== null || groups.loaded)
+  // A core node lists no groups here.
+  const loaded = dmLoaded && (pageKey !== null || !hosted || groups.loaded)
   const dmFailed = ready && inbox.error !== ''
-  const groupsFailed = pageKey === null && groups.error !== ''
-  const partial = loaded && (dmFailed || groupsFailed || (pageKey === null && groups.partial))
+  const groupsFailed = hosted && pageKey === null && groups.error !== ''
+  const partial = loaded && (dmFailed || groupsFailed || (hosted && pageKey === null && groups.partial))
 
   const header = (
     <View>
@@ -697,7 +704,7 @@ export function Conversas ({
         />
       </View>
       <FilterChips options={FILTERS.map((id) => ({ id, label: FILTER_LABELS[id] }))} selected={filter} onSelect={setFilter} />
-      {!unlocked ? <View style={styles.pad}><Soft>{LOCKED_TEXT}</Soft></View> : null}
+      {gate.locked ? <View style={styles.pad}><Soft>{LOCKED_TEXT}</Soft></View> : null}
       {partial
         ? (
           <View style={styles.pad}>

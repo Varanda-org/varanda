@@ -100,6 +100,30 @@ function videoOf ({ ms, kind }) {
   return kind === 'video' ? { ms, kind } : {}
 }
 
+function readVia (request) {
+  return async (ref) => {
+    if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
+    let params
+    if (ref.kind === 'dm') params = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index, ...(ref.page != null ? { page: ref.page } : {}) }
+    else if (ref.kind === 'moment') params = { kind: 'moment', author: ref.author, seq: ref.seq }
+    else params = { kind: 'group', diary: ref.diary, item: ref.item }
+    const got = await request('media.readFile', params)
+    const name = got !== null && typeof got === 'object' ? got.name : null
+    if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')
+    readFiles.add(name)
+    return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h, ...(Number.isSafeInteger(got.ms) ? { ms: got.ms } : {}) }
+  }
+}
+
+// Native, core kind with Conversas (worklet/main.js coreDm): received DM
+// media open through the same media.readFile and read dir as the web kind
+// (the core data dir is the same <documents>/varanda). Nothing is sent from
+// here: a core node sends text only.
+export function coreMediaHandle (request) {
+  sweepReadDir()
+  return { read: readVia(request), forgetReadFile, clearReadFiles, video: true, sharesClient: true }
+}
+
 export function webNodeHandle (request) {
   sweepReadDir()
   sweepVoiceCache()
@@ -191,18 +215,7 @@ export function webNodeHandle (request) {
         deleteReadFile(name)
       }
     },
-    read: async (ref) => {
-      if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
-      let params
-      if (ref.kind === 'dm') params = { kind: 'dm', from: ref.from, id: ref.id, index: ref.index, ...(ref.page != null ? { page: ref.page } : {}) }
-      else if (ref.kind === 'moment') params = { kind: 'moment', author: ref.author, seq: ref.seq }
-      else params = { kind: 'group', diary: ref.diary, item: ref.item }
-      const got = await request('media.readFile', params)
-      const name = got !== null && typeof got === 'object' ? got.name : null
-      if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')
-      readFiles.add(name)
-      return { uri: readFileUri(name), mime: got.mime, w: got.w, h: got.h, ...(Number.isSafeInteger(got.ms) ? { ms: got.ms } : {}) }
-    },
+    read: readVia(request),
     forgetReadFile,
     clearReadFiles,
     // This worklet measures a video strictly before writing it (media.readFile).

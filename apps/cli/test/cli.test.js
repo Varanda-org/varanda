@@ -78,6 +78,9 @@ Comandos:
   page close|move            encerra a página ou muda a sua chave (--page)
   page join|leave            a página entra ou sai (--page, --community ou --group)
   page group-post            a página publica num grupo (--page, --group, --text)
+  page dm-list <página>      conversas da página neste aparelho, depois de buscar as novas
+  page dm-read <página> <conversa>     lê a conversa; com --save <dir> grava as mídias recebidas (0600)
+  page dm-reply <página> <conversa> <texto>  responde como a página (só texto)
   secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
   secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
   secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
@@ -90,13 +93,13 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
-  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
+  page: VARANDA_ACCOUNT_ORIGIN ou --account-origin, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
-  --recipients --key-file --signing-key --signers --seq
+  --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
 
@@ -208,6 +211,26 @@ test('CLI page flags: keys checked, --file repeatable, the account origin raw', 
   t.is(parse([], { VARANDA_ACCOUNT_ORIGIN: 'http://example.com' }).accountOrigin, 'http://example.com', 'checked by the page commands only')
 })
 
+test('CLI page dm commands: positionals, --save resolved, --account-origin over the environment', (t) => {
+  const k = 'ab'.repeat(32)
+  const p = 'cd'.repeat(32)
+  const l = parse(['page', 'dm-list', k])
+  t.is(l.command, 'page')
+  t.alike(l.positionals, ['dm-list', k])
+  t.is(l.save, null)
+  const r = parse(['page', 'dm-read', k, p, '--save', 'midia'])
+  t.alike(r.positionals, ['dm-read', k, p])
+  t.is(r.save, path.join(root, 'midia'))
+  t.is(parse(['page', 'dm-read', k, p, '--save', '/tmp/x']).save, '/tmp/x')
+  const y = parse(['page', 'dm-reply', k, p, 'olá, tudo bem?', '--json'])
+  t.alike(y.positionals, ['dm-reply', k, p, 'olá, tudo bem?'])
+  t.is(y.json, true)
+  usage(t, ['page', 'dm-read', k, p, '--save'], 'falta o valor de --save')
+  t.is(parse(['--account-origin', 'https://a.test'], { VARANDA_ACCOUNT_ORIGIN: 'https://b.test' }).accountOrigin, 'https://a.test', 'the flag wins')
+  t.is(parse(['--account-origin', 'http://example.com']).accountOrigin, 'http://example.com', 'checked by the page commands only')
+  usage(t, ['--account-origin'], 'falta o valor de --account-origin')
+})
+
 test('CLI parser, R5 help and command router', async (t) => {
   t.timeout(60000)
 
@@ -269,6 +292,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     keyFile: null,
     signingKey: null,
     signers: null,
+    save: null,
     seq: null,
     name: null,
     join: null,
@@ -332,6 +356,8 @@ test('CLI parser, R5 help and command router', async (t) => {
     'key-file': ['secrets-key.json', 'keyFile', path.join(root, 'secrets-key.json')],
     'signing-key': ['signing-key.json', 'signingKey', path.join(root, 'signing-key.json')],
     signers: ['secrets-signers.txt', 'signers', path.join(root, 'secrets-signers.txt')],
+    save: ['midia', 'save', path.join(root, 'midia')],
+    'account-origin': ['https://varanda.test', 'accountOrigin', 'https://varanda.test'],
     seq: ['7', 'seq', '7'],
     name: ['Ana', 'name', 'Ana'],
     bio: ['uma bio', 'bio', 'uma bio'],

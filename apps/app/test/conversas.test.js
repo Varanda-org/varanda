@@ -364,11 +364,11 @@ test('the private header shows the peer and replaces the perfil and mais pills',
 test('the private header learns an unfollowed peer from a verified peek', (t) => {
   const screen = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
   const start = screen.indexOf('const [peekTick, setPeekTick]')
-  const deps = '}, [ready, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])'
+  const deps = '}, [ready, hosted, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])'
   const end = screen.indexOf(deps, start)
   t.ok(start > 0 && end > start, 'the peek effect, with its deps')
   const effect = screen.slice(start, end + deps.length)
-  const shown = effect.indexOf('if (!ready || !isTop || !visible || node.online === false) {')
+  const shown = effect.indexOf('if (!ready || !hosted || !isTop || !visible || node.online === false) {')
   const wants = effect.indexOf('if (!(wantsPeek(peerProfile) || isPeeked(peer))) return')
   const markAt = effect.indexOf("const mark = peer + ':'")
   t.ok(shown > 0 && wants > shown && markAt > wants, 'not shown, then wants a read, then the mark')
