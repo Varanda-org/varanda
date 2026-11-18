@@ -281,7 +281,8 @@ test('compose-time resolution honors the preview preference and online gate', as
 })
 
 test('resolve runs once, carries the session and abort signal, and keeps a full track', async (t) => {
-  const r = await resolution()
+  const recents = []
+  const r = await resolution({ noteMusicRecent: (...args) => { recents.push(args) } })
   const work = r.timer.fn()
   t.is(r.calls.length, 1)
   t.is(r.calls[0].url, track.url)
@@ -292,6 +293,7 @@ test('resolve runs once, carries the session and abort signal, and keeps a full 
   r.finish({ kind: 'track', item: track })
   await work
   t.alike(r.ctx.musicDraftRef.current, draft)
+  t.alike(recents, [], 'pasting a link does not record a pick')
   r.cancel()
   r.ctx.setMusicDraft(null)
   r.run()
@@ -369,7 +371,7 @@ test('a failed resolve leaves the ordinary draft alone and does not retry', asyn
 
 // Run the actual send closure. Pure card builders and text checks stay real.
 async function sender (overrides = {}) {
-  const state = { errors: [], requests: [], queued: [], published: [], checked: [] }
+  const state = { errors: [], requests: [], queued: [], published: [], checked: [], recents: [] }
   const { refusalOf, previewRefusal } = await import('../src/wordCheck.js')
   const { sentMatcher } = await import('../src/replySend.js')
   const ctx = {
@@ -411,6 +413,7 @@ async function sender (overrides = {}) {
     parseRef: (await import('../src/thread.js')).parseRef,
     seqOf: (value) => value.seq,
     published: (...args) => { state.published.push(args) },
+    noteMusicRecent: (...args) => { state.recents.push(args) },
     GATE_MESSAGE: 'gate',
     setChecking: () => {},
     lastSeqRef: { current: null },
@@ -450,6 +453,7 @@ test('post, reply and quote send the music card with no image or provider text c
     t.alike(r.state.checked, [r.ctx.text], 'only the author text is checked')
     t.is(r.state.published.length, 1)
     t.is(r.state.queued.length, 0)
+    t.alike(r.state.recents, [], 'publishing does not record a pick')
   }
 })
 
@@ -533,24 +537,34 @@ test('switching identity drops page uploads and the kept video pair, never the m
   }
 })
 
-test('picking music refuses staged photos or a video and accepts a valid snippet', async (t) => {
+test('picking music records only accepted choices, under the person even when acting as a Page', async (t) => {
   const { musicSnapshot, MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT } = await rules()
+  const member = 'a'.repeat(64)
+  const recents = []
   const liveRef = { current: new Set(['photo']) }
   const video = { draft: { state: { phase: 'empty' } } }
+  let fail = false
   let note = ''
   let picked = null
-  const pick = composerFunction('  const pickMusic = (draft) => {', '\n  const cardRef', 'pickMusic', {
+  const handler = (overrides = {}) => composerFunction('  const pickMusic = (draft) => {', '\n  const cardRef', 'pickMusic', {
     busy: false,
     frozen: false,
-    asPage: null,
+    member,
+    asPage: 'b'.repeat(64),
     liveRef,
     video,
     musicSnapshot,
     MUSIC_PHOTOS_TEXT,
     MUSIC_VIDEO_TEXT,
     setNote: (value) => { note = value },
-    setMusicDraft: (value) => { picked = value }
+    setMusicDraft: (value) => { picked = value },
+    noteMusicRecent: (...args) => {
+      recents.push(args)
+      if (fail) throw new Error('recent write')
+    },
+    ...overrides
   })
+  const pick = handler()
   pick(draft)
   t.is(picked, null)
   t.is(note, MUSIC_PHOTOS_TEXT)
@@ -563,10 +577,28 @@ test('picking music refuses staged photos or a video and accepts a valid snippet
     t.is(note, MUSIC_VIDEO_TEXT, phase)
   }
   video.draft.state = { phase: 'empty' }
-  const snippet = { ...draft, ref: { ...draft.ref, kind: 'snippet', start: 75 } }
-  pick(snippet)
-  t.is(picked, snippet)
-  t.is(note, '')
+  handler({ busy: true })(draft)
+  handler({ frozen: true })(draft)
+  pick({ ...draft, item: null })
+  t.is(picked, null)
+  t.alike(recents, [])
+
+  const item = { ...track, genre: 'Rock' }
+  const snippet = { ref: { ...draft.ref, kind: 'snippet', start: 75 }, item }
+  const playlistItem = { id: 'def', title: 'Seleção', artist: 'Artista', count: 2, url: 'https://audius.co/artist/playlist/selection' }
+  const playlist = { ref: { kind: 'playlist', id: playlistItem.id, start: null }, item: playlistItem }
+  for (const [choice, kind] of [[snippet, 'track'], [{ ...draft, item }, 'track'], [playlist, 'playlist']]) {
+    recents.length = 0
+    pick(choice)
+    t.is(picked, choice)
+    t.is(note, '')
+    t.alike(recents, [[member, kind, choice.item]])
+    t.is(recents[0]?.[2], choice.item, 'the store gets the original item')
+  }
+
+  fail = true
+  t.exception(() => pick(snippet), /recent write/)
+  t.is(picked, snippet, 'the draft is attached before the store is called')
 })
 
 test('a video waits for the music card to go, like a link preview', async (t) => {
@@ -996,10 +1028,28 @@ test('page music sends the #varanda-musica card; one that does not fit sends not
   const r = await pageSender({ musicDraft: draft, text: 'Ouça esta música', len: 16 })
   await r.send()
   t.is(r.state.acts[0].op.preview.url, track.url + '#varanda-musica=t:abc')
+  t.alike(r.state.recents, [], 'publishing as a Page does not record a pick')
   const big = await pageSender({ musicDraft: draft, text: 'Ouça', len: 4, withPreview: () => { throw new Error('too long') } })
   await big.send()
   t.is(big.state.errors.at(-1), 'A música não coube: encurte o texto')
   t.is(big.state.acts.length, 0)
+})
+
+test('retrying a Page music post does not record a pick', async (t) => {
+  let retries = 0
+  const r = await pageSender({
+    musicDraft: draft,
+    actAs: async () => {
+      throw Object.assign(new Error('incerto'), { uncertain: true, retry: async () => { retries++ } })
+    }
+  })
+  await r.send()
+  t.ok(r.state.retry)
+  r.ctx.pageRetryRef.current = r.state.retry
+  await r.send()
+  t.is(retries, 1)
+  t.is(r.state.published.length, 1)
+  t.alike(r.state.recents, [])
 })
 
 test('a page music title with a listed term is refused before any upload or signature', async (t) => {

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import rpc from '@varanda/rpc'
-import { audiusPlay, audiusSearch, audiusTrending } from '../account'
-import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, MUSIC_SUGGEST_EMPTY_TEXT, MUSIC_SUGGEST_TEXT, SNIPPET_S, clampStart, musicErrorText, musicGenreChips, musicQuery, musicRowLine, snippetTick } from '../music'
+import { audiusItem, audiusPlay, audiusSearch, audiusTrending } from '../account'
+import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_RECENTS_CLEAR_FAIL_TEXT, MUSIC_RECENTS_CLEAR_LABEL, MUSIC_RECENTS_CLEAR_TEXT, MUSIC_RECENTS_TEXT, MUSIC_SEEK_TEXT, MUSIC_SUGGEST_EMPTY_TEXT, MUSIC_SUGGEST_TEXT, SNIPPET_S, clampStart, musicErrorText, musicGenreChips, musicQuery, musicRowLine, snippetTick } from '../music'
+import { MUSIC_RECENTS_SHOWN, musicGenreOrder, musicTopGenre } from '../musicRecents'
+import { listMusicRecents, clearMusicRecentsOf } from '../musicRecentsStore'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { Btn } from './index'
@@ -88,7 +90,7 @@ export function musicSuggestStep (state, action) {
       }
       return { ...state, phase: 'error', error: musicErrorText(action.error) }
     case 'reset':
-      return { ...state, phase: 'idle', key: '', genres: true, items: [], error: '', gen: state.gen + 1 }
+      return { ...state, phase: 'idle', key: action.key ?? '', genres: true, items: [], error: '', gen: state.gen + 1 }
     default:
       return state
   }
@@ -190,6 +192,9 @@ export function createSnippetPreview (session, notify) {
 export function MusicPicker ({ open, onClose, onPick, member, origin, request, modes = DEFAULT_MODES, initial = null }) {
   const stopRef = useRef(null)
   const editRef = useRef(null)
+  // The search stays mounted behind the editor, so a late item must also match the last navigation.
+  const turn = useRef(0)
+  useEffect(() => () => { turn.current++ }, [open])
   const [edit, setEdit] = useState(() => open ? initialEdit(initial, modes) : null)
   const [prevOpen, setPrevOpen] = useState(open)
   // Read on opening only: a later initial from the caller never moves an open editor.
@@ -198,7 +203,7 @@ export function MusicPicker ({ open, onClose, onPick, member, origin, request, m
     setEdit(open ? initialEdit(initial, modes) : null)
   }
   const close = () => { stopRef.current?.(); onClose() }
-  const back = () => { editRef.current?.(); setEdit(null) }
+  const back = () => { turn.current++; editRef.current?.(); setEdit(null) }
   const done = () => {
     if (!edit) return
     tap('select')
@@ -230,6 +235,7 @@ export function MusicPicker ({ open, onClose, onPick, member, origin, request, m
             modes={modes}
             stopRef={stopRef}
             editRef={editRef}
+            turn={turn}
           />
           )
         : null}
@@ -245,21 +251,22 @@ function initialEdit (initial, modes) {
   return { item, kind: ref.kind, start: ref.kind === 'snippet' ? clampStart(ref.start ?? 0, item.duration) : 0 }
 }
 
-function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request, modes, stopRef, editRef }) {
+function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request, modes, stopRef, editRef, turn }) {
   const styles = useStyles(makeStyles)
   const [status, setStatus] = useState({ phase: 'idle', error: '' })
   const [active, setActive] = useState(null)
   const session = useMemo(() => ({ member, origin, request }), [member, origin, request])
   const preview = useMemo(() => createSnippetPreview(session, setStatus), [session])
   useEffect(() => {
-    stopRef.current = () => { preview.release(); editRef.current?.() }
+    stopRef.current = () => { turn.current++; preview.release(); editRef.current?.() }
     setActive(null)
     setStatus({ phase: 'idle', error: '' })
     return () => { preview.release(); stopRef.current = null }
-  }, [preview, stopRef])
+  }, [preview, stopRef, turn])
 
   const stopPreview = () => { preview.release(); setActive(null); setStatus({ phase: 'idle', error: '' }) }
   const select = (item, kind) => {
+    turn.current++
     if (musicPickStep(kind, modes) === null) return
     stopPreview()
     onEdit({ item, kind: kind === 'playlist' ? 'playlist' : modes.includes('snippet') ? 'snippet' : 'track', start: 0 })
@@ -272,7 +279,7 @@ function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request,
   return (
     <View style={styles.root}>
       <View style={edit ? styles.hidden : styles.search}>
-        <MusicSearch member={member} origin={origin} request={request} modes={modes} onSelect={select} onStop={stopPreview} onToggle={toggle} active={status.phase === 'idle' ? null : active} phase={status.phase} previewError={status.error} visible={!edit} />
+        <MusicSearch member={member} origin={origin} request={request} modes={modes} turn={turn} onSelect={select} onStop={stopPreview} onToggle={toggle} active={status.phase === 'idle' ? null : active} phase={status.phase} previewError={status.error} visible={!edit} />
       </View>
       {edit ? <MusicEditor item={edit.item} kind={edit.kind} start={edit.start} modes={modes} session={session} onKind={onKind} onStart={onStart} stopRef={editRef} /> : null}
       <Text style={styles.footer}>Músicas do Audius</Text>
@@ -280,16 +287,8 @@ function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request,
   )
 }
 
-function useMusicSuggest ({ eligible, kind, member, origin, request }) {
-  const [suggest, dispatchSuggest] = useReducer(musicSuggestStep, musicSuggestIdle)
-  const session = useMemo(() => ({ member, origin, request }), [member, origin, request])
-  const previousSession = useRef(session)
-  const sessionChanged = previousSession.current !== session
-  useEffect(() => {
-    if (previousSession.current === session) return
-    previousSession.current = session
-    dispatchSuggest({ type: 'reset' })
-  }, [session])
+function useMusicSuggest ({ eligible, kind, initialKey = '', session, sessionChanged }) {
+  const [suggest, dispatchSuggest] = useReducer(musicSuggestStep, { ...musicSuggestIdle, key: initialKey })
   const canLoad = eligible && !sessionChanged
   useEffect(() => {
     if (canLoad && suggest.phase === 'idle') dispatchSuggest({ type: 'load' })
@@ -307,10 +306,10 @@ function useMusicSuggest ({ eligible, kind, member, origin, request }) {
     )
     return () => controller.abort()
   }, [suggest.gen, session])
-  return [suggest, dispatchSuggest, sessionChanged]
+  return [suggest, dispatchSuggest]
 }
 
-function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, visible }) {
+function MusicSearch ({ member, origin, request, modes, turn, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, visible }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const track = modes.includes('snippet') || modes.includes('track')
@@ -320,10 +319,31 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
   const shown = musicSuggestShown(state)
   const tracksEligible = visible && track && shown && kind === 'track'
   const playlistsEligible = visible && playlist && shown && kind === 'playlist'
-  const tracks = useMusicSuggest({ eligible: tracksEligible, kind: 'track', member, origin, request })
-  const playlists = useMusicSuggest({ eligible: playlistsEligible, kind: 'playlist', member, origin, request })
-  const [suggest, dispatchSuggest, sessionChanged] = kind === 'playlist' ? playlists : tracks
+  const [recents, setRecents] = useState(() => listMusicRecents(member))
+  const [opening, setOpening] = useState(null)
+  const [recentError, setRecentError] = useState('')
+  const pending = useRef(null)
+  const session = useMemo(() => ({ member, origin, request }), [member, origin, request])
+  const previousSession = useRef(session)
+  const sessionChanged = previousSession.current !== session
+  const initialKey = useMemo(() => musicTopGenre(recents) ?? '', [recents])
+  const tracks = useMusicSuggest({ eligible: tracksEligible, kind: 'track', initialKey, session, sessionChanged })
+  const playlists = useMusicSuggest({ eligible: playlistsEligible, kind: 'playlist', session, sessionChanged })
+  const [suggest, dispatchSuggest] = kind === 'playlist' ? playlists : tracks
   const eligible = tracksEligible || playlistsEligible
+  useEffect(() => {
+    if (previousSession.current === session) return
+    previousSession.current = session
+    const next = listMusicRecents(member)
+    setRecents(next)
+    tracks[1]({ type: 'reset', key: musicTopGenre(next) ?? '' })
+    playlists[1]({ type: 'reset' })
+  }, [session])
+  useEffect(() => {
+    setOpening(null)
+    setRecentError('')
+    return () => { pending.current?.abort(); pending.current = null }
+  }, [session, visible])
   useEffect(() => { dispatch({ type: 'retry' }) }, [member, origin, request])
   useEffect(() => {
     if (phase !== 'waiting' && phase !== 'more') return
@@ -340,14 +360,59 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
     return () => { live = false; clearTimeout(timer); controller.abort() }
     // A generation starts at the keystroke, before the debounce can finish.
   }, [gen, member, origin, request])
+  const cancelRecent = () => {
+    pending.current?.abort()
+    pending.current = null
+    setOpening(null)
+  }
   const search = (text, kind) => {
-    if (text !== state.text || kind !== state.kind) onStop()
+    if (text !== state.text || kind !== state.kind) {
+      cancelRecent()
+      onStop()
+      setRecentError('')
+    }
     dispatch({ type: 'query', text, kind })
   }
+  const openRecent = async (item) => {
+    if (pending.current) return
+    const controller = new AbortController()
+    pending.current = controller
+    const token = turn.current
+    setOpening(item)
+    setRecentError('')
+    try {
+      const answer = await audiusItem(item.kind, item.id, { ...session, signal: controller.signal })
+      if (controller.signal.aborted || token !== turn.current) return
+      const { tracks, ...fresh } = answer
+      onSelect(fresh, item.kind)
+    } catch (err) {
+      if (!controller.signal.aborted && token === turn.current) setRecentError(musicErrorText(err))
+    } finally {
+      if (pending.current === controller) {
+        pending.current = null
+        setOpening(null)
+      }
+    }
+  }
+  const clearRecents = () => {
+    if (!clearMusicRecentsOf(member)) return setRecentError(MUSIC_RECENTS_CLEAR_FAIL_TEXT)
+    cancelRecent()
+    setRecents([])
+    setRecentError('')
+  }
+  const recentItems = eligible && !sessionChanged && state.text === '' ? recents.filter((item) => item.kind === kind).slice(0, MUSIC_RECENTS_SHOWN) : []
   const results = eligible && !sessionChanged ? suggest : state
   const emptyText = eligible ? MUSIC_SUGGEST_EMPTY_TEXT : MUSIC_EMPTY_TEXT
   const notice = state.error || previewError || results.error || (results.phase === 'ready' && results.items.length === 0 ? emptyText : '')
   const showHeading = eligible && (results.phase === 'loading' || (results.phase === 'ready' && results.items.length > 0))
+  const listStatus = (
+    <>
+      {showHeading ? <Text accessibilityRole='header' style={styles.heading}>{MUSIC_SUGGEST_TEXT}</Text> : null}
+      {notice && !recentError ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{notice}</Text> : null}
+      {results.phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => (eligible ? dispatchSuggest : dispatch)({ type: 'retry' })} /> : null}
+      {results.phase === 'loading' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
+    </>
+  )
   return (
     <View style={styles.search}>
       <View style={styles.searchRow}>
@@ -366,25 +431,24 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
         />
       </View>
       {playlist ? <Segmented options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => search(state.text, kind)} /> : null}
-      {tracksEligible && tracks[0].phase !== 'off' && tracks[0].genres
+      {tracksEligible && !sessionChanged && suggest.phase !== 'off' && suggest.genres
         ? (
           <View style={styles.genreChips}>
             <FilterChips
-              options={musicGenreChips()}
-              selected={tracks[0].key}
+              options={musicGenreChips(musicGenreOrder(recents))}
+              selected={suggest.key}
               onSelect={(key) => {
-                if (key === tracks[0].key) return
+                if (key === suggest.key) return
+                cancelRecent()
                 onStop()
-                tracks[1]({ type: 'genre', key })
+                dispatchSuggest({ type: 'genre', key })
               }}
             />
           </View>
           )
         : null}
-      {showHeading ? <Text accessibilityRole='header' style={styles.heading}>{MUSIC_SUGGEST_TEXT}</Text> : null}
-      {notice ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{notice}</Text> : null}
-      {results.phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => (eligible ? dispatchSuggest : dispatch)({ type: 'retry' })} /> : null}
-      {results.phase === 'loading' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
+      {recentError ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{recentError}</Text> : null}
+      {recentItems.length === 0 ? listStatus : null}
       <FlatList
         data={results.items}
         keyExtractor={(item) => item.id}
@@ -392,11 +456,40 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
         keyboardShouldPersistTaps='handled'
         onEndReachedThreshold={0.6}
         onEndReached={() => dispatch({ type: 'more' })}
+        ListHeaderComponent={recentItems.length ? <MusicRecents items={recentItems} opening={opening} onOpen={openRecent} onClear={clearRecents} listStatus={listStatus} /> : null}
         ListFooterComponent={phase === 'more' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
         renderItem={({ item }) => (
           <MusicRow item={item} kind={kind} member={member} origin={origin} request={request} onOpen={onSelect} onToggle={onToggle} phase={active === item.id ? previewPhase : 'idle'} />
         )}
       />
+    </View>
+  )
+}
+
+function MusicRecents ({ items, opening, onOpen, onClear, listStatus }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  return (
+    <View>
+      <View style={styles.recentsHeading}>
+        <Text accessibilityRole='header' style={styles.heading}>{MUSIC_RECENTS_TEXT}</Text>
+        <Pressable accessibilityRole='button' accessibilityLabel={MUSIC_RECENTS_CLEAR_LABEL} onPress={onClear} style={styles.clear}>
+          <Text style={styles.artist}>{MUSIC_RECENTS_CLEAR_TEXT}</Text>
+        </Pressable>
+      </View>
+      {items.map((item) => (
+        <View key={item.id} style={styles.row}>
+          <Pressable accessibilityRole='button' disabled={opening !== null} onPress={() => onOpen(item)} style={({ pressed }) => [styles.main, pressed && styles.pressed]}>
+            <MusicCover size={48} uri={null} />
+            <View style={styles.words}>
+              <Text style={styles.title} numberOfLines={1}>{displayText(item.title)}</Text>
+              <Text style={styles.artist} numberOfLines={1}>{displayText(item.kind === 'track' ? item.artist : musicRowLine(item))}</Text>
+            </View>
+            {opening === item ? <ActivityIndicator color={colors.soft} /> : null}
+          </Pressable>
+        </View>
+      ))}
+      {listStatus}
     </View>
   )
 }
@@ -440,6 +533,8 @@ const makeStyles = (colors) => StyleSheet.create({
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: layout.hit, paddingHorizontal: space.md, borderRadius: radius.lg, backgroundColor: colors.bg },
   input: { flex: 1, minWidth: 0, fontSize: 16, paddingVertical: space.sm, color: colors.ink },
   list: { paddingVertical: space.sm },
+  recentsHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  clear: { minHeight: layout.hit, minWidth: layout.hit, justifyContent: 'center', alignItems: 'center' },
   row: { flexDirection: 'row', alignItems: 'center', gap: space.sm, borderBottomWidth: 1, borderBottomColor: colors.line },
   main: { flex: 1, minWidth: 0, minHeight: layout.hit, flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.md },
   play: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
