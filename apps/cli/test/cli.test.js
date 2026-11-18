@@ -40,6 +40,7 @@ Comandos:
   account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
   account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
+  account phone --waiting    lista as chaves com idade confirmada e ainda sem vínculo, para achar a conta de revisão
   account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
   account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
@@ -98,7 +99,7 @@ Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
-  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
+  --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release --waiting
   --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
@@ -250,6 +251,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     private: false,
     force: false,
     release: false,
+    waiting: false,
     dataDir: path.join(root, 'data'),
     association: null,
     bootstrap: undefined,

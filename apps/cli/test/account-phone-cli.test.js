@@ -16,6 +16,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { openPhoneStore, FILE } = require('../lib/account/phone-store')
+const { openAgeStore } = require('../lib/account/age-store')
+const { openAccountStore } = require('../lib/account/store')
 const { takeLock } = require('../lib/account/server')
 const { readEnv, releasePhone } = require('../lib/commands/account')
 const { UsageError } = require('../lib/cli')
@@ -46,9 +48,14 @@ function varanda (dir, args, env = {}) {
 }
 
 function association () {
+  return issuer().association
+}
+
+function issuer () {
   const assoc = crypto.keyPair()
   const kp = crypto.keyPair()
-  return createIssuerCert({ issuer: b4a.toString(kp.publicKey, 'hex') }, assoc).association
+  const cert = createIssuerCert({ issuer: b4a.toString(kp.publicKey, 'hex') }, assoc)
+  return { keyPair: kp, cert, association: cert.association }
 }
 
 function memberHex () {
@@ -154,11 +161,45 @@ test('readEnv: a malformed key, a key without the age pair and a bad limit are r
   t.absent((r.stdout + r.stderr).toLowerCase().includes(key), 'the key is never printed')
 })
 
+test('readEnv: VARANDA_PHONE_REVIEW lists up to four member keys, read only while the phone check is on', (t) => {
+  const key = hexKey()
+  const on = { ...ENV, ...DIDIT, VARANDA_PHONE_KEY: key }
+  const a = memberHex()
+  const b = memberHex()
+  t.alike(readEnv(on).phone.review, [], 'unset: none')
+  t.alike(readEnv({ ...on, VARANDA_PHONE_REVIEW: '' }).phone.review, [], 'empty: none')
+  t.alike(readEnv({ ...on, VARANDA_PHONE_REVIEW: '  ' }).phone.review, [], 'blank: none')
+  t.alike(readEnv({ ...on, VARANDA_PHONE_REVIEW: a }).phone.review, [a])
+  t.alike(readEnv({ ...on, VARANDA_PHONE_REVIEW: ' ' + a + ' , ' + b + ' ' }).phone.review, [a, b], 'spaces around the keys are trimmed')
+  const four = [a, b, memberHex(), memberHex()]
+  t.alike(readEnv({ ...on, VARANDA_PHONE_REVIEW: four.join(',') }).phone.review, four, 'four keys')
+  t.is(readEnv({ ...ENV, ...DIDIT, VARANDA_PHONE_REVIEW: 'not-a-key' }).phone, null, 'ignored while off')
+
+  for (const [bad, label] of [
+    [a.toUpperCase(), 'uppercase'],
+    [a.slice(1), 'short'],
+    [a + ',', 'trailing comma'],
+    [a + ';' + b, 'another separator'],
+    [a + ',' + a, 'repeated key'],
+    [[...four, memberHex()].join(','), 'five keys']
+  ]) {
+    try {
+      readEnv({ ...on, VARANDA_PHONE_REVIEW: bad })
+      t.fail(label + ': accepted')
+    } catch (err) {
+      t.ok(err instanceof UsageError, label + ': usage error')
+      t.is(err.message, 'VARANDA_PHONE_REVIEW inválida: use até 4 chaves de membro diferentes (64 caracteres hexadecimais minúsculos) separadas por vírgula', label)
+      t.absent(err.message.toLowerCase().includes(a.slice(0, 16)), label + ': no key in the message')
+    }
+  }
+})
+
 test('serve: without the key nothing about phones runs, and a leftover phone.json is logged once', async (t) => {
   t.timeout(60000)
   const { dir } = await accountDir(t, { phone: false })
-  const off = await serve(t, dir, {})
+  const off = await serve(t, dir, { VARANDA_PHONE_REVIEW: memberHex() })
   t.ok(off.has({ event: 'telefone', reason: 'desligada' }), 'off')
+  t.absent(off.has({ event: 'telefone', reason: 'contas-de-revisao' }), 'a review list is not read while off')
   t.absent(off.has({ event: 'telefone', reason: 'arquivo-sem-chave' }), 'no file, no warning')
   const policy = await fetch('http://127.0.0.1:' + off.port + '/account/phone/policy')
   t.alike(await policy.json(), { required: false })
@@ -188,11 +229,60 @@ test('serve: a key that does not open phone.json keeps the feature required', as
   t.is(await svc.stop(), 0)
 
   const right = await accountDir(t)
-  const on = await serve(t, right.dir, { ...DIDIT, VARANDA_PHONE_KEY: right.key })
+  const reviewer = memberHex()
+  const on = await serve(t, right.dir, { ...DIDIT, VARANDA_PHONE_KEY: right.key, VARANDA_PHONE_REVIEW: reviewer })
   t.ok(on.has({ event: 'telefone', reason: 'ligada' }))
+  t.ok(on.has({ event: 'telefone', reason: 'contas-de-revisao' }), 'the review list is logged as on')
   t.absent(on.has({ event: 'telefone', reason: 'indisponivel' }))
   t.absent((on.stdout() + on.stderr()).includes(DIGITS), 'no number in the log')
+  t.absent((on.stdout() + on.stderr()).includes(reviewer), 'never the review key')
   t.is(await on.stop(), 0)
+})
+
+test('account phone --waiting: unlinked keys with an age band, newest first, at most 10, with no key and under the lock', async (t) => {
+  const { dir } = await accountDir(t, { phone: false })
+  const ages = openAgeStore(dir)
+  const base = Date.parse('2026-11-18T10:00:00.000Z')
+  const waiting = []
+  for (let i = 0; i < 12; i++) {
+    const m = memberHex()
+    const checkedAt = new Date(base + i * 60000).toISOString()
+    await ages.record({ member: m, band: '18+', method: 'didit', checkedAt })
+    waiting.push({ member: m, checkedAt })
+  }
+  // The newest band belongs to a key that has linked since: never listed.
+  const linked = memberHex()
+  await ages.record({ member: linked, band: '18+', method: 'didit', checkedAt: new Date(base + 3600000).toISOString() })
+  const iss = issuer()
+  const store = openAccountStore(dir)
+  const row = store.start({ member: linked, username: 'ana' })
+  store.reserve(row.id)
+  store.putGoogle(row.id, { sub: '600000000000000000001', email: 'a@example.test' })
+  await store.finish(row.id, { signature: 'a'.repeat(128) }, iss.keyPair, iss.cert, iss.association)
+
+  const lock = takeLock(dir)
+  t.teardown(() => lock.release())
+  const before = fs.readFileSync(path.join(dir, 'age.json'))
+  const r = varanda(dir, ['account', 'phone', '--waiting'])
+  t.is(r.code, 0, r.stderr)
+  const lines = r.stdout.trim().split('\n').map((l) => JSON.parse(l))
+  t.alike(lines, waiting.slice(-10).reverse(), 'the 10 newest unlinked keys, newest first, { member, checkedAt } only')
+  t.absent(r.stdout.includes(linked), 'a linked key is never listed')
+  t.ok(lock.owned(), 'the lock is untouched')
+  t.alike(fs.readFileSync(path.join(dir, 'age.json')), before, 'age.json unchanged')
+
+  for (const extra of [['--member', memberHex()], ['--username', 'ana'], ['--release']]) {
+    const bad = varanda(dir, ['account', 'phone', '--waiting', ...extra])
+    t.is(bad.code, 2, extra[0])
+    t.ok(bad.stderr.startsWith('uso: use --waiting sozinho\n'), bad.stderr)
+  }
+})
+
+test('account phone --waiting: an empty store prints nothing', async (t) => {
+  const { dir } = await accountDir(t, { phone: false })
+  const r = varanda(dir, ['account', 'phone', '--waiting'])
+  t.is(r.code, 0, r.stderr)
+  t.is(r.stdout, '')
 })
 
 test('account phone: prints the number as one JSON line only with --member and the key', async (t) => {

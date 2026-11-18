@@ -743,7 +743,9 @@ function checkRawPost (req, origin) {
 // They are also the only way to link a new member: either null leaves
 // finish answering 'expirado' and the phone policy route answers
 // { required: false }. `phoneDailyLimit` caps the paid code sends per day,
-// for linked and for unlinked keys each.
+// for linked and for unlinked keys each. `phoneReview` lists the member keys
+// of the association's review accounts, which pass the phone gate with no
+// number (./phone-routes.js).
 // `pages` (null: every page POST answers 404 and the policy { available:
 // false }) is { keys, writer, pagesStore, dir, blocklist? } for
 // ./pages-routes.js; without a blocklist the moderation desk's is used.
@@ -815,6 +817,7 @@ function createAccountServer ({
   phoneClient = null,
   phones = null,
   phoneDailyLimit = 200,
+  phoneReview = [],
   // Tests only: the fixed answer time of the SMS deletion check.
   deleteSmsFloorMs,
   pages = null,
@@ -959,6 +962,7 @@ function createAccountServer ({
     },
     blocked: (m) => moderation !== null && moderation.blocked().some((x) => x.member === m),
     issuer,
+    review: phoneReview,
     log,
     now,
     dailyLimit: phoneDailyLimit,
