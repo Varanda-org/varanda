@@ -7,7 +7,7 @@
 - `apps/app/src/feiraReview.js`: `rateCall` escolhe `listing.rate` (pessoa) ou a ação `listing-rate` (Página), com a Página como quem avalia.
 - `apps/app/src/screens/Avaliar.js`: agindo como Página, lê a conversa da Página com quem anunciou e avalia pelo serviço; sem resposta, **Tentar de novo** manda os mesmos bytes assinados. `apps/app/src/screens/Mensagem.js`: a Página que fez a oferta vê **Avaliar** depois do aceite.
 - `docs/protocol.md`, `docs/rpc.md`, `docs/app.md`.
-- `apps/app/src/legal.js`, `packages/core/lib/terms.js`, `apps/site/public/termos/`, `apps/site/public/privacidade/`: Termos e Política versão 90, com novo aceite.
+- `apps/app/src/legal.js`, `packages/core/lib/terms.js`, `apps/site/public/termos/`, `apps/site/public/privacidade/`: Termos e Política versão 91, com novo aceite.
 
 ## Como verificar
 

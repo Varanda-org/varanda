@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 90)
+  t.is(LEGAL_VERSION, 91)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 90, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 91, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,9 +388,9 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
-test('legal: version 90 describes a page rating a Feira listing', async (t) => {
+test('legal: version 91 describes a page rating a Feira listing', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
-  t.ok(LEGAL_VERSION >= 90)
+  t.ok(LEGAL_VERSION >= 91)
   const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
   const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
   t.ok(terms.includes('Uma página também pode avaliar o anúncio de outra pessoa'), 'terms: a page rates')
@@ -424,7 +424,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '63976ba577f7e35c61cc4dd259c814b226db7b9eb579efaedbe64b5f57cb8f2d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'e19103bb2e80b507f4455c3e121fa2327eb32afddb3a2575319ae6a372846c10', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -1094,4 +1094,14 @@ test('legal: version 84 describes Excluir conta sem a passkey and the e-mail pat
   t.ok(text(PRIVACY).includes('para você pedir a exclusão da conta sem a passkey'))
   t.ok(text(PRIVACY).includes('Só o operador consegue ler o número, com um comando do servidor, para atender uma ordem judicial ou um pedido seu.'), 'the operator line is unchanged: the service never unseals the number')
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 90 says the Conversas keys of a core node sit in a file with no passkey', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const sentence = 'Num nó core, as chaves das Conversas, as do próprio nó e as das Páginas que ele administra, ficam guardadas num arquivo naquele aparelho, sem nenhuma passkey que as proteja: quem tiver a pasta de dados desse nó consegue ler essas conversas, e quem perder essa pasta perde essas conversas.'
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes(sentence), doc.title + ': the core seed file and what losing it means')
+    t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+  }
 })

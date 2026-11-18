@@ -25,7 +25,7 @@ const path = require('#path')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, FEED_INCOMPLETE_MAX, MAX_LINE, MAX_ID } = require('@varanda/rpc')
 const member = require('./member')
 const { runSync } = require('./sync')
-const { readConfig, readFollows, storeExists } = require('./store')
+const { readConfig, readFollows, readBlocklist, storeExists } = require('./store')
 const { validRecordCopy, validateRecord, parseRef, genesisCert, decodeBlock } = require('./records')
 const { certForKey } = require('./cert')
 const { formatEvent, key8 } = require('./sync-format')
@@ -45,6 +45,12 @@ const noop = () => {}
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
+// The dm.* methods a core node answers with the `dm` factory.
+const DM_CORE_METHODS = Object.freeze([
+  'dm.enable', 'dm.lookup', 'dm.pull', 'dm.list', 'dm.thread', 'dm.seen',
+  'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend',
+  'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget', 'dm.actorBox'
+])
 const SEEN_WEB_ONLY = 'estado de vistos sincronizado só no navegador'
 const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
 const POST_SHARE_WEB_ONLY = 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.'
@@ -254,8 +260,14 @@ function createSession ({
   // injectable for tests.
   rekeyClock = Date.now,
   rekeyRandom = Math.random,
-  rekeyDelayMs = REKEY_SESSION_DELAY_MS
+  rekeyDelayMs = REKEY_SESSION_DELAY_MS,
+  // Conversas (docs/rpc.md 5.73 to 5.80, 5.89, 5.114, 5.161): an optional
+  // factory, ({ dataDir, association, ops, emit, log }) -> { handlers,
+  // readMedia, close } (@varanda/web-member/lib/core-dm.js). Without it
+  // every dm.* method answers as before: USAGE DM_WEB_ONLY.
+  dm = null
 } = {}) {
+  if (dm !== null && typeof dm !== 'function') throw new TypeError('dm must be a function')
   const cfg = checkConfig({ dataDir, association, bootstrap, dhtHost, allowPublicDht })
   const baseStore = storeOptions !== null && typeof storeOptions === 'object' ? { ...storeOptions } : {}
   const reportInternal = (err) => {
@@ -679,6 +691,75 @@ function createSession ({
     return run === null || run.internal ? { state: 'idle' } : { state: 'running', runId: run.runId, once: run.once }
   }
 
+  // ---- Conversas (the injected engine, see the `dm` option) ----
+
+  // Each op opens the store on the chain, as a request does; the engine's
+  // handlers run off it, so one awaiting an op never holds the chain.
+  const onChain = (fn) => serial((params) => fn(params))
+  const dmOps = {
+    own: onChain(() => requireOwnKey()),
+    signer: onChain(() => withStore((c) => member.dmSigner(c))),
+    dmKeyEnsure: onChain(({ box, gen }) => withStore((c) => member.dmKeyEnsure(c, { box, gen }))),
+    dmLookup: (key) => onChain(() => withStore((c) => member.dmLookup(c, key)))({}),
+    moderation: async () => member.enforcedBlocklist(dataDir, cfg.association),
+    // The delegate file only: no store opened, no run preempted.
+    delegate: onChain(() => member.readDelegate(ctx())),
+    actorBox: onChain(({ box, gen }) => member.dmActorBox(ctx(), { box, gen })),
+    pageRead: (key) => onChain(() => withStore((c) => member.pageRead(c, { key })))({}),
+    readers: {
+      cert: onChain(() => withStore((c) => member.withIdentity(c, async ({ diary }) => {
+        if (diary.length === 0 || !(await diary.has(0))) return null
+        const block0 = decodeBlock(await diary.get(0, { wait: false, raw: true }))
+        return block0 !== null && typeof block0 === 'object' ? block0.cert : null
+      }))),
+      // No member blocks on a core node (block.set is the browser's).
+      memberBlocks: async () => [],
+      blocklist: async () => readBlocklist(dataDir),
+      follows: async () => readFollows(dataDir)
+    }
+  }
+  const dmNode = dm === null
+    ? null
+    : dm({
+      dataDir,
+      association: cfg.association,
+      ops: dmOps,
+      emit: (event, data) => send(event, data),
+      log: (text) => warning(safe(text))
+    })
+
+  // A dm.* handler of the engine, with the session's closed, gated and
+  // error checks and its error mapping.
+  function dmHandler (name) {
+    const fn = dmNode.handlers[name]
+    return async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      while (isGated()) await gate
+      // close() releases the gate: a call queued while suspended never
+      // enters the engine after it.
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (errorState) throw rpcError('LOCKED', LOCKED_MESSAGE)
+      try {
+        return await fn(params)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+    }
+  }
+
+  // The plaintext of a received DM item -> { bytes, mime, w, h, ms }, for
+  // the host's media.readFile only (never over RPC). Without the factory:
+  // USAGE DM_WEB_ONLY.
+  async function dmReadMedia (params) {
+    if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+    if (dmNode === null) throw rpcError('USAGE', DM_WEB_ONLY)
+    try {
+      return await dmNode.readMedia(params)
+    } catch (err) {
+      throw toRpcError(err, reportInternal)
+    }
+  }
+
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
 
   const handlers = {
@@ -868,7 +949,7 @@ function createSession ({
     'dm.pageLegacyChunk': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageLegacyBlocks': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageForget': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
-    // A later change signs the delegate's box here (docs/rpc.md 5.161).
+    // With the `dm` factory the delegate's box is signed (docs/rpc.md 5.161).
     'dm.actorBox': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'group.seal': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // Like report.sign (docs/rpc.md 5.20).
@@ -1440,6 +1521,15 @@ function createSession ({
     })
   }
 
+  // With the factory, the methods in its scope route to it; personal
+  // dm.send, dm.react and dm.set, dm.reportSign, group.seal and group.read
+  // with a page keep their refusals.
+  if (dmNode !== null) {
+    for (const name of Object.keys(dmNode.handlers)) {
+      if (DM_CORE_METHODS.includes(name)) handlers[name] = dmHandler(name)
+    }
+  }
+
   // ---- host controls ----
 
   // The transport passes dispatcher.emit; one emitter at a time.
@@ -1495,6 +1585,7 @@ function createSession ({
     closing = (async () => {
       await chain
       await stopRun('stopped')
+      if (dmNode !== null) await dmNode.close().catch(reportInternal)
     })()
     return closing
   }
@@ -1506,6 +1597,7 @@ function createSession ({
     suspend,
     resume,
     close,
+    dmReadMedia,
     // 'open' | 'suspended' | 'error' | 'closed'
     get state () {
       if (closed) return 'closed'
