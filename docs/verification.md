@@ -4308,12 +4308,13 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 5. **Administradora lê e envia.** B abre a mesma conversa, vê o histórico e responde como a página.
 6. **Remover.** A remove B. B deixa de ver a caixa da página e o envio como a página é recusado. Uma mensagem que B enviou antes continua na conversa de C.
 7. **Incerto.** Com a rede cortada no meio de um envio, o app mostra "incerto" e não envia de novo sozinho; conferir com C que chegou no máximo uma mensagem.
-8. **Só hospedado.** Numa configuração manual, as Conversas da página mostram "Só na versão web".
+8. **Só hospedado, ou nó core.** Numa configuração manual sem nó core com origem de conta, as Conversas da página mostram "Só na versão web". Num nó core com `accountOrigin` (`varanda-serve --account-origin` ou o app nativo com a instalação), elas funcionam só com texto: o app mostra "Ativar Conversas" (semente num arquivo, sem passkey), a página lê, responde e esquece como o delegado dela, e foto, voz e cartão não saem do nó core (`docs/verification/feat-core-conversas-pagina.md` e `docs/verification/feat-app-paginas-no-core.md`).
 
 ### Não verificado / limites conhecidos
 
 - Nada foi rodado num navegador nem num aparelho pelo agente.
 - O serviço lê as mensagens da página (decisão do dono, no Termos 15). As Conversas de uma página não acompanham uma troca de chave da página.
+- Num nó core, as Conversas da página são só texto e só como a página: Conversas pessoais e `dm.reportSign` seguem recusados no nó core (denunciar só no navegador; Conversas pessoais no core ficam na #790, que entra depois da versão hospedada que leva a #774). Nada disso foi rodado num aparelho (veja `docs/verification/feat-app-paginas-no-core.md`).
 
 ## 86. Páginas: seguir, fotos e A Rua (PR feat/pages-app)
 
@@ -4332,7 +4333,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 3. **Foto como a página.** Publique como a página com uma foto; ela aparece na publicação, em A Rua de uma terceira conta e é servida pela rota de mídia do semeador (a imagem carrega sem a conta A aberta).
 4. **GIF como a página.** Publique um GIF como a página; ele anima na publicação e em A Rua da terceira conta.
 5. **Deixar de seguir como a página.** A remoção tira a pessoa de A Rua da página sem mexer no que a própria conta A segue.
-6. **Só hospedado.** Numa configuração manual, essas ações não aparecem.
+6. **Só hospedado, ou nó core com origem de conta.** Numa configuração manual sem `accountOrigin`, essas ações não aparecem. Num nó core com `accountOrigin` (seção 89) as Páginas aparecem pelo mesmo serviço, e a CLI tem `page follow`, `page unfollow` e `page photo`; conferir o mesmo roteiro num nó core fica a fazer.
 
 ### Não verificado / limites conhecidos
 
@@ -4361,13 +4362,18 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 9. **Publicações antigas.** As publicações de antes da mudança continuam legíveis no perfil antigo e em A Rua.
 10. **Chave antiga vazada depois da mudança.** Um bloco acrescentado à chave antiga depois da mudança (fixture de teste) não aparece no perfil nem em A Rua.
 11. **Incerto.** Com a rede cortada logo depois de confirmar, a tela mostra "Tentar de novo"; o toque reenvia o mesmo pedido e não pede outra assinatura.
-12. **Limite.** Passado o limite diário, a resposta é "Limite de mudanças atingido, tente amanhã".
+12. **Limite.** Passado o limite diário, a resposta é "Limite de mudanças atingido, tente amanhã". O limite de 2 encerramentos ou mudanças de chave por dono em 24 horas fica gravado em `pages.json` e vale depois de o serviço reiniciar (#685).
+13. **Esquecer as chaves.** Depois de encerrar a página, ou quando a lista de Páginas mostra que a pessoa deixou de ser dona ou administradora, o aparelho esquece as chaves e as conversas dela (`dm.pageForget`, #690).
+14. **Chave que não confere.** Ao abrir as Conversas de uma página, logo depois que o nó avisa de uma chave diferente, o app mostra o aviso com um botão para ler a chave de novo, em vez de só ao tentar enviar (#690).
+15. **Administrador removido depois de uma mudança.** Remover um administrador da chave nova também tira a chave antiga da lista de Páginas dele (o serviço responde `sem-permissao` para ela), e o app apaga, quando consegue, as chaves e as conversas da chave antiga nesse aparelho (#765).
+16. **Perfil levado na mudança.** Depois de "Mudar a chave", o nome, a bio e a foto da página aparecem na chave nova sem o dono refazer nada; se a cópia falhar, a mudança vale e o dono edita o perfil na chave nova (#746).
 
 ### Não verificado / limites conhecidos
 
 - Nada foi rodado num navegador nem num aparelho pelo agente.
 - O app não confere assinaturas (o Metro não alcança `packages/core`): vale o que o nó verificou. A declaração do serviço é só uma dica.
 - Com a chave antiga pausada (sem `page-moved` no diário), o perfil da chave antiga esconde os blocos depois de `fromSeq`, mas A Rua não consulta a rota `successor` para cada página seguida: ali o corte depende só do nó.
+- Os itens 13 a 16 foram acrescentados depois (#690, #685, #765, #746); as conferências de cada PR estão nos arquivos `docs/verification/fix-paginas-*.md` (a fazer, como as daqui).
 
 ## 88. Avisos da página (PR feat/pages-app)
 
@@ -4396,7 +4402,9 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 - Nada foi rodado num navegador nem num aparelho pelo agente.
 - Se o canal v3 não responde e a leitura cai para o v2, a leitura sai com `incomplete` (a nota "alguns avisos ainda podem chegar"), sem teste automático (o semeador do teste sempre responde).
 - Um semeador que não abre `varanda/notices/3` leva a leitura para o v2, sem curtidas nem republicações; esse caminho não tem teste automático (o semeador do teste sempre abre os dois canais).
-- O limite de 8 por minuto por página fica na memória do serviço e recomeça quando ele reinicia.
+- O limite de 8 por minuto por página fica na memória do serviço e recomeça quando ele reinicia. Limite aceito pela manutenção (#685): os limites por minuto das ações de página ficam na memória; só o teto de encerrar e mudar (seção 87) é gravado.
+- O texto de Avisos vazios da página passou a citar curtidas e republicações (#690).
+- Os avatares das linhas de Avisos da página vêm das espiadas de linha do app (`useRowAvatars`, item da janela de #398), não do serviço.
 - O serviço lê os avisos da página em nome dos administradores (Termos 15).
 
 ## 89. Páginas no nó core (PR feat/pages-app)
@@ -4426,7 +4434,10 @@ Todas a fazer (nenhuma foi rodada). Primeiro o app no Android (build de debug ap
 - Nada foi rodado num navegador, num aparelho nem contra o serviço de produção pelo agente.
 - Um delegado não tem @nome e é convidado pela chave.
 - Perder `page-actor.json` perde o acesso do nó: registre de novo e peça o convite outra vez.
-- Limite aceito: a interface web do `varanda-serve` não tem Páginas (o serviço de conta não envia CORS e confere a origem). Avisos, Conversas e comunidades como a página seguem só no nó hospedado; no nó core, os avisos da página vêm pela CLI.
+- Limite aceito: a interface web do `varanda-serve` não tem Páginas (o serviço de conta não envia CORS e confere a origem).
+- Atualizado depois (#352, checagens a fazer): num nó core com `accountOrigin`, as Conversas como a página funcionam só com texto (#780, `docs/verification/feat-core-conversas-pagina.md`), a CLI tem `page dm-list`, `page dm-read` e `page dm-reply` (#791), o app mostra Conversas, Avisos como a página, grupo como a página, remover administrador e mudar a chave e abre a mídia recebida (#792), e a página lê e escreve nos grupos privados dela (#793). Continuam fora no nó core: a lista de Comunidades e a tela de ajustes do grupo (`Comunidade.js`, `GrupoAjustes.js`) ainda usam leituras só do nó hospedado, mídia enviada como a página nas Conversas e nos grupos privados (num grupo público, a foto e a voz da página sobem pelo serviço de conta), e denunciar (`dm.reportSign` recusado, só no navegador). Conversas pessoais no core estão na #790, pendente da versão hospedada que leva a #774.
+- Quem perde a pasta de dados de um nó core com Conversas perde a semente delas (`private/dm-seed.json`, sem passkey): o aviso está no README e não há cópia automática (limite aceito).
+- Um dono só de nó core (sem aparelho com passkey) é permitido, com Conversas só de texto (limite aceito).
 - A CLI nunca reenvia um pedido: um resultado incerto pede conferência antes de repetir.
 
 ## 90. Páginas em comunidades (PR feat/pages-app)
@@ -4458,6 +4469,7 @@ Todas a fazer (nenhuma foi rodada). Primeiro no Android (build de debug no emula
 
 - Nada foi rodado num navegador nem num aparelho pelo agente.
 - Um escritor vazado pode escrever com data anterior até a saída, o limite do aparelho que saiu da seção 10 do protocolo.
+- Atualizado depois (#352, #793, a fazer): num nó core com `accountOrigin`, a página lê e escreve nos grupos privados dela só com texto (`group.read` com `page`, `group.seal`; mídia e cartão recusados), conferido só por teste automático (`docs/verification/feat-core-pagina-grupos-privados.md`). A lista de Comunidades e a tela de ajustes do grupo continuam com leituras só do nó hospedado.
 - Uma página pausada que mudou de chave não sai dos grupos sozinha: vale `mod block`.
 - As Conversas da página não acompanham a mudança de chave.
 
