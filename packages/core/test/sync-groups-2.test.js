@@ -368,6 +368,70 @@ test('a writer stored in an earlier run gives its slot to an earlier proven join
   t.is(await storedCount(), CAP, 'the stored count stays at the cap')
 })
 
+test('a writer still opening on the last slot gives it to an earlier proven join, not the next latest holder', async (t) => {
+  t.timeout(180000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const group = hex(crypto.randomBytes(32))
+  const items = []
+  const fake = await fakeSeeder(t, bootstrap, kp, items)
+  const d = fake.store.get({ name: 'diary' })
+  await d.ready()
+  const dkey = hex(d.key)
+  await d.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: dkey }, kp)))))
+  const writers = []
+  const n = CAP + 1
+  for (let i = 0; i < n; i++) {
+    const w = fake.store.get({ name: 'w' + i })
+    await w.ready()
+    await d.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(w.key), on: true }))))
+    await w.append(b4a.from(JSON.stringify(writerHeader({ group, diary: dkey, member: PARENT }))))
+    writers.push(w)
+  }
+  const keys = writers.map((w) => hex(w.key)) // keys[i] joined at seq i + 1
+  const list = (i) => {
+    items.push({ key: keys[i], diary: dkey, length: 1, seq: i + 1 })
+    items.sort((x, y) => x.key < y.key ? -1 : 1)
+  }
+  const m = await groupMember(t, kp, group)
+  const downloaded = (evs, k) => evs.some((ev) => ev.event === 'group-downloaded' && ev.key === k)
+  const skipped = (evs, k) => evs.some((ev) => ev.event === 'group-skipped' && ev.key === k && ev.reason === 'quota')
+  const storedCount = async () => {
+    let count = 0
+    for (const k of keys) if (await stored(m, k)) count++
+    return count
+  }
+  const opts = { pageRetryMs: 100, pageRefreshMs: 300 }
+  // Run 1 stores every writer but the earliest and the latest joiner.
+  for (let i = 1; i < n - 1; i++) list(i)
+  await runUntil(m, bootstrap, (evs) => keys.slice(1, n - 1).every((k) => downloaded(evs, k)), opts)
+  t.is(await storedCount(), CAP - 1, 'run 1 leaves one slot')
+  // Run 2: the latest joiner takes the last slot and is held while its core
+  // opens; the earliest joiner is listed only then.
+  let opening = false
+  let release = null
+  const released = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release())
+  const openHook = async (key) => {
+    if (key !== keys[n - 1] || opening) return
+    opening = true
+    list(0)
+    await released
+  }
+  list(n - 1)
+  const r2 = await runUntil(m, bootstrap, (evs) => {
+    if (downloaded(evs, keys[0])) release()
+    return downloaded(evs, keys[n - 1]) || skipped(evs, keys[n - 1])
+  }, { ...opts, openHook })
+  t.ok(opening, 'the latest joiner was held while it opened')
+  t.ok(downloaded(r2.events, keys[0]), 'the earliest joiner is admitted')
+  t.ok(skipped(r2.events, keys[n - 1]), 'the latest joiner gives way once opened')
+  t.absent(downloaded(r2.events, keys[n - 1]), 'and never activates')
+  t.ok(await stored(m, keys[n - 2]), 'the next latest joiner keeps its slot')
+  t.absent(await stored(m, keys[n - 1]), 'the latest joiner holds nothing')
+  t.is(await storedCount(), CAP, 'the stored count stays at the cap')
+})
+
 test('a stored writer listed under the wrong group leaves the table so its own group admits it', async (t) => {
   t.timeout(120000)
   const { bootstrap } = await testnet(t)

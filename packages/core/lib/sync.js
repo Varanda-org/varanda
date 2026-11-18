@@ -3173,7 +3173,7 @@ async function runSync ({
     const out = []
     const keys = new Set()
     for (const e of groupCores.values()) {
-      if (e.group === group && e.diary === diary && (e.state === 'active' || (e.state === 'gating' && e.slot))) {
+      if (e.group === group && e.diary === diary && (e.state === 'active' || (e.state === 'gating' && e.slot && !e.yields))) {
         out.push(e)
         keys.add(e.key)
       }
@@ -4170,7 +4170,7 @@ async function runSync ({
     }
     earliest(e)
     for (const x of groupCores.values()) {
-      if (x !== e && x.group === e.group && x.diary === e.diary && x.state === 'active') earliest(x)
+      if (x !== e && x.group === e.group && x.diary === e.diary && (x.state === 'active' || (x.state === 'gating' && x.slot && !x.yields))) earliest(x)
     }
     return joins
   }
@@ -4358,12 +4358,13 @@ async function runSync ({
         // writer stored in an earlier run, active or only held on disk,
         // gives way to an earlier proven join as one stored in this run
         // does, so the node converges on the fold's earliest joins. A holder
-        // whose join this node has not proved never gives way.
+        // whose join this node has not proved never gives way. One past its
+        // gate and still opening proved its join before taking its slot.
         let top = null
         let topSeq = null
         for (const x of held) {
           if (x.key === x.group) continue
-          const seq = x.state === 'active' ? x.seq : x.state === 'held' ? heldJoinSeq(joins, x) : null
+          const seq = x.state === 'held' ? heldJoinSeq(joins, x) : x.seq
           if (seq !== null && (top === null || seq > topSeq)) {
             top = x
             topSeq = seq
@@ -4390,6 +4391,13 @@ async function runSync ({
           // (provenLater), never the pair its header names.
           failGroupCore(top, 'quota', { purge: true, own: true, memo: top.head === null })
           dropGroupCore(top.key)
+        } else if (top.state === 'gating') {
+          // Still opening: it gives way where its opens end (below), so its
+          // purge never races them. Its slot, and a stored one's slot on
+          // disk, go now.
+          provenLater.add(groupKey(top.group, top.key) + ':' + top.diary)
+          top.yields = true
+          dropSlotOf(top.key, top.group, top.diary)
         } else {
           diskSlots.delete(top.key)
           // A stub gated here under another pair or charged by a record that
@@ -4426,7 +4434,7 @@ async function runSync ({
       e.core = null
       track((async () => {
         await core.close()
-        if (!e.wasStored) await purgeKey(e.key)
+        if (!e.wasStored || (e.yields && !heldElsewhere(e.key))) await purgeKey(e.key)
       })(), noop, () => { if (!ended) purgeFailed(e.key) })
     }
     let openedNothing = false
@@ -4444,6 +4452,12 @@ async function runSync ({
     } catch (err) {
       if (core && core !== r.core) await core.close().catch(noop)
       if (!ended) log('aviso: falha ao abrir núcleo de grupo ' + key8(e.key) + ': ' + err.message)
+      // Giving way, it holds no slot: it goes as an evicted one does, its
+      // purge registered so a later gate of the key waits for it.
+      if (e.yields) {
+        e.core = core
+        failGroupCore(e, 'quota', { purge: true, own: true, memo: (r.head || null) === null })
+      }
       dropGroupCore(e.key)
       return
     }
@@ -4495,11 +4509,12 @@ async function runSync ({
         if (diaryLate && !followHolds(e.diary)) purgeStored(e.diary, closed)
         else track(closed, noop, noop)
       }
-      failGroupCore(e, late, { purge: true, own: late === 'fork' && forkedNow })
+      failGroupCore(e, late, { purge: true, own: (late === 'fork' && forkedNow) || e.yields === true })
       return
     }
     if (!retainDiary(e.diary, dcore, r.want, r.diaryExpected)) {
-      failGroupCore(e, 'timeout', { purge: false })
+      if (e.yields) failGroupCore(e, 'quota', { purge: true, own: true, memo: e.head === null })
+      else failGroupCore(e, 'timeout', { purge: false })
       return
     }
     if (e.diary !== ownHex) noteGroupCert(e.diary, e.diaryRaw)
@@ -4512,7 +4527,14 @@ async function runSync ({
     if (e.key !== e.group && !e.stub && (rootVis.get(e.group) || null) !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, rootVis.get(e.group) || null)) {
       refused.add(groupKey(e.group, e.key))
       noteBoxRefused(e)
-      failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
+      failGroupCore(e, 'header-invalid', { purge: !e.wasStored || e.yields === true })
+      return
+    }
+    // An earlier proven join took this slot while the opens above were
+    // awaited: the entry gives way as an active one does.
+    if (e.yields) {
+      failGroupCore(e, 'quota', { purge: true, own: true, memo: e.head === null })
+      dropGroupCore(e.key)
       return
     }
     activateGroupCore(e, core)
