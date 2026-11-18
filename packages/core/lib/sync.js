@@ -583,7 +583,8 @@ function followRange (core, deleted, { groupBound = false } = {}) {
 // protocol constants. releaseHook(key) is awaited by the release of a
 // binding diary before its session closes, and quarantineHook(key) by a
 // group quarantine read once its core is ready, before it replicates (both
-// test-only). addressOf(socket) (the remote host a connection slot is
+// test-only). joinsHook(key, seq) is awaited before each binding diary block
+// the gate of key reads for the per-diary cap (test-only). addressOf(socket) (the remote host a connection slot is
 // grouped by, default the UDX stream's remote host) and probationMs (the
 // slot probation, default PROBATION_MS) are test-only too.
 async function runSync ({
@@ -615,6 +616,7 @@ async function runSync ({
   messageBurst = MESSAGE_BURST,
   messageRate = MESSAGE_RATE,
   openHook = null,
+  joinsHook = null,
   pageRetryMs = once ? PAGE_RETRY_ONCE_MS : PAGE_RETRY_LONG_MS,
   pageRefreshMs = PAGE_REFRESH_LONG_MS,
   groupRequestTimeoutMs = GROUPS_REQUEST_TIMEOUT_MS,
@@ -752,7 +754,7 @@ async function runSync ({
   const capRefused = createMemo(gateLimit) // 'group:key' refused for the per-diary cap whose skip was emitted
   const provenLater = createMemo(gateLimit) // 'group:key:diary' whose cap the key's proven join lost
   const cappedHints = createMemo(gateLimit) // 'group:key:listed diary' -> the stored header's diary whose cap it lost
-  const joinCache = new Map() // binding diary -> { core, length, joins } read for the per-diary cap
+  const joinCache = new Map() // binding diary -> { core, length, joins, reading } read for the per-diary cap
   const failedWriters = createMemo(gateLimit) // 'group:key' accepted, then failed (fork, quota): not gated again
   // 'group:key' -> { group, key, diary, walk } refused for a box that does
   // not match its root's visibility (and for nothing else), gated again once
@@ -3173,7 +3175,7 @@ async function runSync ({
     const out = []
     const keys = new Set()
     for (const e of groupCores.values()) {
-      if (e.group === group && e.diary === diary && (e.state === 'active' || (e.state === 'gating' && e.slot))) {
+      if (e.group === group && e.diary === diary && (e.state === 'active' || (e.state === 'gating' && e.slot && !e.yields))) {
         out.push(e)
         keys.add(e.key)
       }
@@ -3776,7 +3778,7 @@ async function runSync ({
   // owns its replication channel and Hypercore refuses a second one from the
   // quarantine. Only a core absent from the main store goes through the
   // quarantine.
-  // -> { reason } or { reason: null, expected, diaryRaw, want, core, dcore }
+  // -> { reason } or { reason: null, expected, diaryRaw, want, core, dcore, until }
   // A verdict marked `own` comes from the writer's own data (its key, its
   // block 0, its group): it judges the writer. Every other verdict depends
   // on the page item's hinted diary and judges only the hint.
@@ -3977,7 +3979,7 @@ async function runSync ({
         if (!stubRoom()) return { ...(await fail('quota', false, true)), stubFull: true }
         stubSlots.add(e.key)
       }
-      return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis, stub, head: head === null ? null : headOf(raw0, e.key) }
+      return { reason: null, expected, gatedRaw: raw0, diaryRaw: diaryRaws[0], diaryExpected, want, core, dcore, vis, stub, head: head === null ? null : headOf(raw0, e.key), until }
     } catch (err) {
       await fail(null)
       throw err
@@ -4123,16 +4125,28 @@ async function runSync ({
   // far: each gate decodes only the blocks that arrived since. Only blocks
   // held locally count (each one verified by the replica), so a join seq is
   // only ever lowered to one this node proved.
-  async function diaryJoins (d, dcore) {
+  async function diaryJoins (d, dcore, key) {
     const core = heldBinding(d, dcore)
     if (core === null || core.fork !== 0) return null
     let st = joinCache.get(d)
     if (st === undefined || st.core !== core) {
       joinCache.delete(d)
       if (joinCache.size >= gateLimit()) joinCache.delete(joinCache.keys().next().value)
-      st = { core, length: 0, joins: [] }
+      st = { core, length: 0, joins: [], reading: null }
       joinCache.set(d, st)
     }
+    // Protecting the cap from a read cut short: a gate whose read another
+    // gate overtook returned only the joins read so far, and the cap took
+    // the holders past them as unproven. The reads of a diary take turns,
+    // each from where the last one ended.
+    const read = (st.reading || Promise.resolve()).then(() => readJoins(st, key))
+    st.reading = read.catch(noop)
+    await read
+    return st.joins
+  }
+
+  async function readJoins (st, key) {
+    const core = st.core
     const listed = new Set(groupList.map((g) => g.group))
     // The present length, not contiguousLength: a block its author deleted
     // and this node cleared never hides the joins after it. Every hole below
@@ -4140,8 +4154,8 @@ async function runSync ({
     const end = await presentLength(core, null, st.length)
     while (st.length < end) {
       const seq = st.length
+      if (joinsHook) await joinsHook(key, seq) // test-only
       const raw = await readLocal(core, seq)
-      if (st.length !== seq) break
       st.length = seq + 1
       if (raw === null) continue
       let record = null
@@ -4153,7 +4167,28 @@ async function runSync ({
         st.joins.push({ group: record.group, writer: record.writer, seq })
       }
     }
-    return st.joins
+  }
+
+  // Protecting the cap from a binding diary still arriving (a replica whose
+  // download an earlier run cut short): the joins read stop at its first
+  // missing block, and a holder whose join lies past it counts as unproven,
+  // so an earlier joiner would give way in its place. A gate about to evict
+  // waits, up to its deadline, for each block missing below the length as
+  // the replica brings it. -> whether any arrived.
+  async function awaitJoins (d, dcore, until) {
+    const core = heldBinding(d, dcore)
+    if (core === null || core.fork !== 0) return false
+    const st = joinCache.get(d)
+    let from = st !== undefined && st.core === core ? st.length : 0
+    let got = false
+    while (Date.now() < until) {
+      const end = await presentLength(core, null, from)
+      if (end >= core.length) break
+      if ((await readHeld(core, end, until)) === null) break
+      got = true
+      from = end + 1
+    }
+    return got
   }
 
   // The fold keeps each writer's EARLIEST on:true join (group.js readJoins):
@@ -4162,7 +4197,7 @@ async function runSync ({
   async function refineJoinSeqs (e, dcore) {
     let joins = null
     try {
-      joins = await diaryJoins(e.diary, dcore)
+      joins = await diaryJoins(e.diary, dcore, e.key)
     } catch {}
     if (joins === null) return null
     const earliest = (x) => {
@@ -4170,7 +4205,7 @@ async function runSync ({
     }
     earliest(e)
     for (const x of groupCores.values()) {
-      if (x !== e && x.group === e.group && x.diary === e.diary && x.state === 'active') earliest(x)
+      if (x !== e && x.group === e.group && x.diary === e.diary && (x.state === 'active' || (x.state === 'gating' && x.slot && !x.yields))) earliest(x)
     }
     return joins
   }
@@ -4347,6 +4382,13 @@ async function runSync ({
         await closeOpened()
         return
       }
+      if (joins !== null && othersHolding(e.group, e.diary, e.key).length >= MAX_GROUP_HELD_PER_DIARY && (await awaitJoins(e.diary, r.dcore, r.until))) {
+        joins = await refineJoinSeqs(e, r.dcore)
+        if (e.state !== 'gating' || ending) {
+          await closeOpened()
+          return
+        }
+      }
     }
     // The per-diary cap, against the diary block 0 named and the join seq
     // the binding diary proved (I1), for every entry before it activates.
@@ -4358,12 +4400,13 @@ async function runSync ({
         // writer stored in an earlier run, active or only held on disk,
         // gives way to an earlier proven join as one stored in this run
         // does, so the node converges on the fold's earliest joins. A holder
-        // whose join this node has not proved never gives way.
+        // whose join this node has not proved never gives way. One past its
+        // gate and still opening proved its join before taking its slot.
         let top = null
         let topSeq = null
         for (const x of held) {
           if (x.key === x.group) continue
-          const seq = x.state === 'active' ? x.seq : x.state === 'held' ? heldJoinSeq(joins, x) : null
+          const seq = x.state === 'held' ? heldJoinSeq(joins, x) : x.seq
           if (seq !== null && (top === null || seq > topSeq)) {
             top = x
             topSeq = seq
@@ -4386,10 +4429,21 @@ async function runSync ({
         // the stored writers of (group, diary) stay at the cap.
         if (top.state === 'active') {
           provenLater.add(groupKey(top.group, top.key) + ':' + top.diary)
+          // Its slot on disk goes now: until its purge settles it would
+          // count again as held, and the next earlier join would take a
+          // slot without evicting anyone.
+          dropSlotOf(top.key, top.group, top.diary)
           // A stub's eviction keeps out only the listings of this diary
           // (provenLater), never the pair its header names.
           failGroupCore(top, 'quota', { purge: true, own: true, memo: top.head === null })
           dropGroupCore(top.key)
+        } else if (top.state === 'gating') {
+          // Still opening: it gives way where its opens end (below), so its
+          // purge never races them. Its slot, and a stored one's slot on
+          // disk, go now.
+          provenLater.add(groupKey(top.group, top.key) + ':' + top.diary)
+          top.yields = true
+          dropSlotOf(top.key, top.group, top.diary)
         } else {
           diskSlots.delete(top.key)
           // A stub gated here under another pair or charged by a record that
@@ -4426,7 +4480,7 @@ async function runSync ({
       e.core = null
       track((async () => {
         await core.close()
-        if (!e.wasStored) await purgeKey(e.key)
+        if (!e.wasStored || (e.yields && !heldElsewhere(e.key))) await purgeKey(e.key)
       })(), noop, () => { if (!ended) purgeFailed(e.key) })
     }
     let openedNothing = false
@@ -4444,6 +4498,12 @@ async function runSync ({
     } catch (err) {
       if (core && core !== r.core) await core.close().catch(noop)
       if (!ended) log('aviso: falha ao abrir núcleo de grupo ' + key8(e.key) + ': ' + err.message)
+      // Giving way, it holds no slot: it goes as an evicted one does, its
+      // purge registered so a later gate of the key waits for it.
+      if (e.yields) {
+        e.core = core
+        failGroupCore(e, 'quota', { purge: true, own: true, memo: (r.head || null) === null })
+      }
       dropGroupCore(e.key)
       return
     }
@@ -4495,11 +4555,12 @@ async function runSync ({
         if (diaryLate && !followHolds(e.diary)) purgeStored(e.diary, closed)
         else track(closed, noop, noop)
       }
-      failGroupCore(e, late, { purge: true, own: late === 'fork' && forkedNow })
+      failGroupCore(e, late, { purge: true, own: (late === 'fork' && forkedNow) || e.yields === true })
       return
     }
     if (!retainDiary(e.diary, dcore, r.want, r.diaryExpected)) {
-      failGroupCore(e, 'timeout', { purge: false })
+      if (e.yields) failGroupCore(e, 'quota', { purge: true, own: true, memo: e.head === null })
+      else failGroupCore(e, 'timeout', { purge: false })
       return
     }
     if (e.diary !== ownHex) noteGroupCert(e.diary, e.diaryRaw)
@@ -4512,7 +4573,14 @@ async function runSync ({
     if (e.key !== e.group && !e.stub && (rootVis.get(e.group) || null) !== r.vis && boxMismatch(r.gatedRaw, e.key, e.group, rootVis.get(e.group) || null)) {
       refused.add(groupKey(e.group, e.key))
       noteBoxRefused(e)
-      failGroupCore(e, 'header-invalid', { purge: !e.wasStored })
+      failGroupCore(e, 'header-invalid', { purge: !e.wasStored || e.yields === true })
+      return
+    }
+    // An earlier proven join took this slot while the opens above were
+    // awaited: the entry gives way as an active one does.
+    if (e.yields) {
+      failGroupCore(e, 'quota', { purge: true, own: true, memo: e.head === null })
+      dropGroupCore(e.key)
       return
     }
     activateGroupCore(e, core)
