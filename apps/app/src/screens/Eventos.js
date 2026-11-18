@@ -4,7 +4,8 @@
 // post is read from its own diary, and one that is gone shows 'cancelado').
 // With params.groups (the public groups of a community, key = the community)
 // it is the Agenda: a local fold over group.events of each group, whose RSVPs
-// the member's own node counted. Upcoming events come first, soonest first,
+// the member's own node counted (acting as a Page, the service's 'group-events'
+// for the page, whose `mine` is the page's). Upcoming events come first, soonest first,
 // then the ones that passed. Events are immutable: to change or cancel one
 // the post is deleted. Hosted nodes only; no PostRow here, so no sheet host.
 
@@ -12,6 +13,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View } from 'react-native'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
+import { pageMode } from '../groups'
+import { pagesOn } from '../pageGate'
+import { pagesGroup } from '../pages'
 import { fetchEvents } from '../indexClient'
 import { eventRow, splitEvents } from '../events'
 import { planPeeks } from '../thread'
@@ -24,7 +28,7 @@ import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
-import { peekAll } from './Conversa'
+import { memberKeyOf, peekAll, useActing } from './Conversa'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const HOSTED_ONLY = 'Eventos disponíveis no site da associação ou no app ligado à instalação.'
@@ -41,6 +45,9 @@ export default function Eventos ({ entry, onBack, onOpenThread, onToast }) {
   const node = useNode()
   const { request } = node
   const hosted = node.hosted === true
+  const acting = useActing()
+  const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
+  const pageKey = asPage.page ? asPage.key : null
   const now = useNow(60 * 1000)
   const key = entry && typeof entry.key === 'string' && HEX64.test(entry.key) ? entry.key : null
   const groups = entry && entry.params && Array.isArray(entry.params.groups)
@@ -48,7 +55,10 @@ export default function Eventos ({ entry, onBack, onOpenThread, onToast }) {
     : null
   const agenda = groups !== null
   const capped = agenda && entry.params.truncated === true
-  const [rows, setRows] = useState(null)
+  // Rows are tagged with the identity they were read for: another one's `mine` is never shown.
+  const [rowsState, setRowsState] = useState(null)
+  const rows = rowsState !== null && rowsState.by === pageKey ? rowsState.rows : null
+  const setRows = (v) => setRowsState((prev) => ({ rows: typeof v === 'function' ? v(prev && prev.by === pageKey ? prev.rows : null) : v, by: pageKey }))
   const [next, setNext] = useState(null)
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -83,7 +93,9 @@ export default function Eventos ({ entry, onBack, onOpenThread, onToast }) {
     let missed = capped
     for (const group of groups) {
       try {
-        const res = await request('group.events', { group })
+        const res = pageKey === null
+          ? await request('group.events', { group })
+          : await pagesGroup(node, { member: await memberKeyOf(request, node), page: pageKey, action: 'group-events', op: { group } })
         if (res && (res.incomplete === true || (res.next !== null && res.next !== undefined))) missed = true
         for (const it of (res && Array.isArray(res.items) ? res.items : [])) {
           const ref = it.writer + ':' + it.seq
@@ -97,7 +109,7 @@ export default function Eventos ({ entry, onBack, onOpenThread, onToast }) {
       }
     }
     return { rows: out, next: null, partial: missed }
-  }, [request, capped, groups && groups.join(',')])
+  }, [request, node, pageKey, capped, groups && groups.join(',')])
 
   const load = useCallback(async (pull = false) => {
     if (!hosted || key === null) return
@@ -116,11 +128,11 @@ export default function Eventos ({ entry, onBack, onOpenThread, onToast }) {
     } finally {
       if (mine === gen.current && alive.current) { setLoading(false); setRefreshing(false) }
     }
-  }, [hosted, key, agenda, readAgenda, readDiary])
+  }, [hosted, key, agenda, pageKey, readAgenda, readDiary])
 
   const loadRef = useRef(load)
   loadRef.current = load
-  useEffect(() => { loadRef.current() }, [key, groups && groups.join(',')])
+  useEffect(() => { loadRef.current() }, [key, pageKey, groups && groups.join(',')])
 
   const older = async () => {
     if (next === null || moreBusy || agenda) return

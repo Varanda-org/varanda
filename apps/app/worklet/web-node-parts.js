@@ -196,9 +196,9 @@ function putDmMedia ({ read, session, unlink, isClosing }, { mime, width, height
 // moment.putMedia after the read (docs/rpc.md 5.113): a momento's photo, a
 // fresh blob sealed and put on the blob channel by the session. Never a
 // voice note: a photo sends its four image fields alone, a video adds its
-// duration and kind.
-function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind }) {
-  return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height, ...videoOf({ ms, kind }) }) })
+// duration and kind. `ahead` (a Página's momento) is passed only when true.
+function putMomentMedia ({ read, session, unlink, isClosing }, { mime, width, height, ms, kind, ahead }) {
+  return sendFile({ read, unlink, isClosing, put: (bytes) => session.momentPutMedia({ bytes, mime, width, height, ...videoOf({ ms, kind }), ...(ahead === true ? { ahead } : {}) }) })
 }
 
 // Removes every read file (a media name) directly under `dir` and makes

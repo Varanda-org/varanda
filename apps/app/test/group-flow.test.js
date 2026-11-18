@@ -329,7 +329,7 @@ test('an uncertain post stays as a faded own bubble, frees the composer and bloc
 
 test('Grupo: bubbles with Responder, Copiar, Esconder, Banir and Denunciar under can(), and a real reply', async (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes('groupRows(chatItems, ownKey, now)') && src.includes('[chatItems, ownKey, today]'), 'rows come from groupRows and follow the day')
+  t.ok(src.includes('groupRows(chatItems, selfKey, now)') && src.includes('[chatItems, selfKey, today]'), 'rows come from groupRows and follow the day')
   t.ok(src.includes('<Bubble') && !src.includes('GroupMessageRow'), 'messages are bubbles')
   t.ok(src.includes("label: 'Responder'") && src.includes('setReplyKey(row.key)'), 'Responder sets the reply target')
   t.ok(src.includes("label: 'Copiar'"))
@@ -338,7 +338,7 @@ test('Grupo: bubbles with Responder, Copiar, Esconder, Banir and Denunciar under
   t.ok(src.includes("label: 'Denunciar'") && src.includes("typeof onReport === 'function' && !!row.diary && !mine && !row.hidden"), 'Denunciar for others only, never a hidden message')
   t.ok(src.includes('replyTo: { writer: replyTo.writer, seq: replyTo.seq }'), 'group.post carries replyTo with exactly writer and seq')
   t.ok(src.includes("request('group.post', built.op)"))
-  t.ok(src.includes("pageStatement('group-post', { group, text })"), 'a page statement keeps its shape')
+  t.ok(src.includes("pageStatement('group-post', await build())"), 'a page statement keeps its shape')
   t.ok(src.includes('() => sendPost(text, replyTo, card)'), 'an uncertain retry resends the same reply and card, only when asked')
   t.ok(src.includes('replyPreview({ replyTo: key }, rawById)'), 'the quote reads only loaded raw items')
   t.ok(src.includes('quote={quote ?'), 'the quote reaches the bubble')
@@ -627,7 +627,7 @@ test('Grupo sends photos through the composer flow and renders them with ChatMed
   t.ok(src.includes("import { ChatMedia } from '../ui/ChatMedia'"))
   t.ok(src.includes("chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })"), 'refs from the raw group.read item')
   t.ok(src.includes('...(sealed ? { sealed: true } : {})'), 'a private group seals its uploads')
-  t.ok(src.includes('retryChatSend({ op: held.op, request, onPhase: setMediaSend })'), 'the retry resends the held op')
+  t.ok(src.includes('retryChatSend({ op: held.op, request: held.retry ? async () => held.retry() : sendRequest, onPhase: setMediaSend })'), 'the retry resends the held op')
   t.ok(src.includes('...(isPrivate && Array.isArray(raw.media) ? { media: raw.media } : {})'), 'report media only for a private group')
   t.absent(/https?:\/\//.test(ui('ChatMedia.js')), 'no http(s) source in ChatMedia')
   t.absent(/https?:\/\//.test(ui('AttachSheet.js')), 'no http(s) source in AttachSheet')
@@ -670,7 +670,7 @@ test('mediaPostLanded confirms an uncertain photo post only by text, reply and m
 
 test('Grupo reconciles an uncertain photo post and binds its retry to the acting identity', (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes('mediaPostLanded({ diary: ownKey, text: held.text, sentAt: held.sentAt, replyKey: held.replyKey, media: held.op.params.media }, read)'))
+  t.ok(src.includes('mediaPostLanded({ diary: selfKey, text: held.text, sentAt: held.sentAt, replyKey: held.replyKey, media: held.op.params.media }, read)'))
   t.ok(src.includes("if (await mediaLanded(held) === 'landed')"), 'the retry checks first')
   t.ok(src.includes('if (held.acting !== actingIdRef.current)'), 'a retry as another identity is refused')
   t.ok(/useEffect\(\(\) => \{\n {4}if \(sendTokenRef\.current\) sendTokenRef\.current\.live = false[\s\S]{0,200}setMediaHold\(null\)[\s\S]{0,200}\}, \[actingId\]\)/.test(src), 'switching identity drops the held post')
@@ -691,7 +691,7 @@ test('a stale pick is dropped and a long press on a photo opens the bubble actio
 
 test('Grupo sends a voice note through the composer flow and the bubble plays only local sources', (t) => {
   const src = screen('Grupo.js')
-  t.ok(src.includes("import { composePlan, stagedVoice, voiceUploadError } from '../attach-plan'"))
+  t.ok(src.includes("import { BAD_VOICE, VOICE_MIME, composePlan, stagedVoice, voiceUploadError } from '../attach-plan'"))
   t.ok(src.includes('attachments: [stagedVoice(recording)]'), 'one voice item through composePlan')
   t.ok(src.includes("width: 0, height: 0, ms: f.ms, kind: 'voice', ...(sealed ? { sealed: true } : {})"), 'the group media path, sealed when private')
   t.ok(src.includes('onVoice={isTop && mediaApi !== null && canPost'), 'the microphone only where media can be posted, and only on top')

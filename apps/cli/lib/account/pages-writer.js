@@ -77,6 +77,7 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const {
   MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS,
+  AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validAudioDescriptor,
   AVATAR_SIDE, AVATAR_MIMES, MAX_AVATAR_BLOCKS,
   memberCertRecord, mediaCoreRecord, followRecord, validDescriptor, validVideoDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
 } = require('@varanda/core/lib/records')
@@ -86,7 +87,7 @@ const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -176,7 +177,8 @@ function copyJson (value) {
   }
 }
 
-const DELETABLE = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
+// A post-share's tombstone is how a page post leaves the public web page.
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first
@@ -201,10 +203,25 @@ function closeBatches (records) {
   return batches
 }
 
-// A still image, or a short video (only ever the second item of a post's
-// [poster, video] pair): a page that stored a video must load it again.
+// A still image, a short video (only ever the second item of a post's
+// [poster, video] pair) or a voice note (only ever a group post's one
+// item): a page that stored one must load it again.
 function validItem (it) {
-  return isPlainObject(it) && (validDescriptor(it) || validVideoDescriptor(it))
+  return isPlainObject(it) && (validDescriptor(it) || validVideoDescriptor(it) || validAudioDescriptor(it))
+}
+
+// -> the container's duration of a voice note the page may store, or null:
+// the strict audioBounds a person's received voice note passes (audio only,
+// no metadata), the bytes already what stripAudioMetadata leaves (the
+// service never rewrites what a member signed), the given ms within
+// AUDIO_MS_TOLERANCE of the container's, which is what gets stored.
+function audioMs (bytes, ms) {
+  if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_AUDIO_MS || bytes.byteLength > MAX_AUDIO_BYTES) return null
+  const bounds = audioBounds(bytes)
+  if (bounds === null || Math.abs(ms - bounds.ms) > AUDIO_MS_TOLERANCE) return null
+  const stripped = stripAudioMetadata(bytes)
+  if (stripped === null || !b4a.equals(stripped, bytes)) return null
+  return bounds.ms
 }
 
 // -> the container's duration of a short video the page may store, or
@@ -911,18 +928,23 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   // ---- media ----------------------------------------------------------
 
-  // `ms` only for a video/mp4 (videoMs), never for a still image.
+  // `ms` only for a video/mp4 (videoMs) or a voice note (audioMs, width
+  // and height 0 as a person's audio descriptor), never for a still image.
   async function mediaItem (key, { bytes: input, mime, width, height, sha256, ms } = {}, opts) {
     const idem = idempotency(opts)
     if (!(input instanceof Uint8Array) || input.byteLength < 1 || input.byteLength > MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES) throw fail('midia-invalida')
     const bytes = b4a.from(input)
     if (typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || sha256Hex(bytes) !== sha256) throw fail('midia-invalida')
     const video = mime === VIDEO_MIME
-    if (typeof mime !== 'string' || (!video && !MEDIA_MIMES.includes(mime))) throw fail('midia-invalida')
-    if (!video && ms !== undefined) throw fail('midia-invalida')
+    const voice = mime === AUDIO_MIME
+    if (typeof mime !== 'string' || (!video && !voice && !MEDIA_MIMES.includes(mime))) throw fail('midia-invalida')
+    if (!video && !voice && ms !== undefined) throw fail('midia-invalida')
     let duration
     if (video) {
       duration = videoMs(bytes, width, height, ms)
+      if (duration === null) throw fail('midia-invalida')
+    } else if (voice) {
+      duration = width === 0 && height === 0 ? audioMs(bytes, ms) : null
       if (duration === null) throw fail('midia-invalida')
     } else {
       // The same strict parser the app runs before showing a received photo:
@@ -937,8 +959,8 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       }
     }
     const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
-    const valid = video ? validVideoDescriptor : validDescriptor
-    const withMs = (d) => video ? { ...d, ms: duration } : d
+    const valid = video ? validVideoDescriptor : voice ? validAudioDescriptor : validDescriptor
+    const withMs = (d) => video || voice ? { ...d, ms: duration } : d
     const shape = withMs({ core: '0'.repeat(64), mime, start: 1, blocks, bytes: bytes.byteLength, sha256, width, height })
     if (!valid(shape)) throw fail('midia-invalida')
 

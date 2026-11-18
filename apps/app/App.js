@@ -179,7 +179,9 @@ import { ComunidadeInfo as ComunidadeInfoScreen } from './src/screens/Comunidade
 import Ajustes from './src/screens/Ajustes'
 import ARua, { ARuaPreview, liveBinding, noteDeleted, previewBinding } from './src/screens/ARua'
 import Conexao from './src/screens/Conexao'
-import ConversaScreen, { useActing } from './src/screens/Conversa'
+import ConversaScreen, { memberKeyOf, useActing } from './src/screens/Conversa'
+import { actAs, pagesPostShare, pagesPostUnshare } from './src/pages'
+import { pageShareOps, sharePageOf } from './src/pageShare'
 import CurtidasScreen from './src/screens/Curtidas'
 import CitacoesScreen from './src/screens/Citacoes'
 import Denunciar from './src/screens/Denunciar'
@@ -2834,6 +2836,8 @@ function Member () {
   const intentsRef = useRef(new Map())
   // The page notice asked from a post's "Mensagem em particular" ({ key }).
   const [pageDmAsk, setPageDmAsk] = useState(null)
+  const actingRef = useRef(null)
+  actingRef.current = acting
   // The colon ref of the own post whose "Página pública na web" sheet is open.
   const [shareTarget, setShareTarget] = useState(null)
   // What the composer says on top of that sheet after its own post.share; a
@@ -2842,10 +2846,31 @@ function Member () {
   const [shareNotice, setShareNotice] = useState('')
   const openPostShare = useCallback((ref, notice = '') => {
     setShareNotice(typeof notice === 'string' ? notice : '')
-    setShareTarget(nav.isRef(ref) ? ref : null)
-  }, [])
+    // A ref that is neither the member's own nor the acting Page's is dropped.
+    const author = typeof ref === 'string' ? ref.slice(0, 64).toLowerCase() : ''
+    const mine = author === (typeof ownKey === 'string' ? ownKey.toLowerCase() : null) || sharePageOf(ref, actingRef.current) !== null
+    setShareTarget(nav.isRef(ref) && mine ? ref : null)
+  }, [ownKey])
   // A lock, an unlock or another identity closes it: the post is the old one's.
-  useEffect(() => setShareTarget(null), [ownKey, nodeEpoch])
+  useEffect(() => setShareTarget(null), [ownKey, nodeEpoch, acting.kind, acting.key])
+  // The acting Page's own post opens the sheet in page mode (pageShare.js):
+  // the page's status and actions, never the person's post.* methods.
+  const shareNodeRef = useRef(node)
+  shareNodeRef.current = node
+  const sharePage = sharePageOf(shareTarget, acting)
+  const shareOps = useMemo(() => {
+    if (sharePage === null) return null
+    const run = async (fn) => {
+      const n = shareNodeRef.current
+      return fn(n, await memberKeyOf(n.request, n))
+    }
+    return pageShareOps({
+      page: sharePage,
+      status: () => run((n, member) => actAs(n, { member, action: 'status', page: sharePage })),
+      share: (seq) => run((n, member) => pagesPostShare(n, { member, page: sharePage, seq })),
+      unshare: (seq) => run((n, member) => pagesPostUnshare(n, { member, page: sharePage, seq }))
+    })
+  }, [sharePage, nodeEpoch])
   // Hidden tabs and covered stack entries stay mounted, so playback follows
   // the visible screen and whatever covers or replaces it (a lock or reset,
   // the report sheet, help, the page notice), not component lifetimes. The
@@ -3333,15 +3358,11 @@ function Member () {
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   // The composer in Momento mode (the strip's own ring, 'Novo momento' in the
   // own viewer): `moment` is a counter, so every request switches it again.
-  // A momento is the person's own: a page chosen in Publicar como is set
-  // back to the person for this open, or Publicar would not offer Momento.
+  // The momento is published as whoever is acting, a Page included.
   const openMomentComposer = () => {
     clearStack()
-    actingAs.enterMoment()
     setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
   }
-  // The page is back once the composer closes, published or cancelled.
-  useEffect(() => { if (!composer.open) actingAs.leaveMoment() }, [composer.open])
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
   // Handlers for the memoized screens, updated on every render of the tabs
   // (see the module comment above).
@@ -4528,6 +4549,7 @@ function Member () {
           target={shareTarget}
           link={postLink(installationOrigin() || globalThis.location?.origin || null, shareTarget)}
           notice={shareNotice}
+          ops={shareOps}
           onClose={() => setShareTarget(null)}
         />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}

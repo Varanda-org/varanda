@@ -51,7 +51,8 @@ test('constants', (t) => {
     'avatar', 'rename', 'invite', 'dm-list', 'dm-thread',
     'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
     'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'listing',
-    'listing-edit', 'listing-status', 'listing-consent', 'choice'
+    'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment', 'post-share', 'post-unshare',
+    'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events'
   ])
   t.ok(Object.isFrozen(ACTIONS))
   t.is(NONCE_RE.source, accountLink.NONCE_RE.source, 'same nonce rule as account-link')

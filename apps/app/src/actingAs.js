@@ -29,9 +29,6 @@ export function createActingAs () {
     return state
   }
 
-  // The page a momento's composer set aside (see enterMoment).
-  let saved = null
-
   const get = () => state
   const toMe = () => commit(ME)
 
@@ -65,43 +62,21 @@ export function createActingAs () {
     return () => { listeners.delete(fn) }
   }
 
-  // Any choice made outside the momento's composer flow, 'Você' included,
-  // drops the page it set aside.
-  function me () {
-    saved = null
-    return toMe()
-  }
-  function asPage (page) {
-    saved = null
-    return toPage(page)
-  }
+  const me = toMe
+  const asPage = toPage
   const set = (next) => (next && next.kind === 'page' ? asPage(next) : me())
-
-  // A momento is the person's own, so opening its composer sets the identity
-  // back to the person; closing it puts the page back, unless an identity was
-  // chosen meanwhile. A new account (reset) forgets the saved one.
-  function enterMoment () {
-    if (saved === null && state.kind === 'page') saved = state
-    return toMe()
-  }
-  function leaveMoment () {
-    const back = saved
-    saved = null
-    return back !== null && state.kind === 'me' ? toPage(back) : state
-  }
   const reset = me
 
-  // The page the person acts as, or set aside for a momento's composer.
-  const pageKey = () => (state.kind === 'page' ? state.key : (saved !== null ? saved.key : null))
+  // The page the person acts as.
+  const pageKey = () => (state.kind === 'page' ? state.key : null)
 
-  // The person no longer runs this page: act as them, and never put it back.
+  // The person no longer runs this page: act as them.
   function dropPage (key) {
-    if (saved !== null && saved.key === key) saved = null
     return state.kind === 'page' && state.key === key ? toMe() : state
   }
 
-  return { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment, pageKey, dropPage }
+  return { get, set, me, asPage, isPage, label, subscribe, reset, pageKey, dropPage }
 }
 
 const shared = createActingAs()
-export const { get, set, me, asPage, isPage, label, subscribe, reset, enterMoment, leaveMoment, pageKey, dropPage } = shared
+export const { get, set, me, asPage, isPage, label, subscribe, reset, pageKey, dropPage } = shared

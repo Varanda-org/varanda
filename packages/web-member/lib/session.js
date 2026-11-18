@@ -6638,8 +6638,11 @@ function createBrowserSession ({
   // Nothing about the bytes is logged. A short video is { bytes, mime:
   // 'video/mp4', width, height, ms, kind: 'video' }, checked as mediaUpload
   // checks a post's (videoArgs) with a momento's bounds: what is sealed is
-  // the stripped copy.
-  function momentPutMedia ({ bytes, mime, width, height, ms, kind } = {}) {
+  // the stripped copy. `ahead: true` (a Página's momento) uploads only with
+  // stamps already in the wallet, else starts a fill and refuses 'envio em
+  // preparo' (dm.js putPublicMedia).
+  function momentPutMedia ({ bytes, mime, width, height, ms, kind, ahead } = {}) {
+    if (ahead !== undefined && ahead !== true) throw new TypeError(BAD_MEDIA_ARGS)
     let copy
     let video = null
     if (kind === 'video' || mime === VIDEO_MIME) {
@@ -6662,7 +6665,8 @@ function createBrowserSession ({
         return await withDmReady(ident, () => {
           const pair = keyPair
           if (pair === null) throw new UsageError(store.LOCKED)
-          return dmEngine.putPublicMedia(own, pair, video !== null ? { bytes: copy, mime, width, height, ms: video.ms } : { bytes: copy, mime, width, height })
+          const opt = ahead === true ? { ahead } : {}
+          return dmEngine.putPublicMedia(own, pair, video !== null ? { bytes: copy, mime, width, height, ms: video.ms, ...opt } : { bytes: copy, mime, width, height, ...opt })
         })
       } catch (err) {
         copy.fill(0)

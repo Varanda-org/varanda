@@ -86,7 +86,8 @@ import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
 import { DeletePrompt, useActing, useDelete } from './Conversa'
 import { TESTIMONIALS_TAB, useTestimonialTab, useTestimonials } from './Depoimentos'
-import { ConfirmMomentDelete, useMoments } from './Momentos'
+import { ConfirmMomentDelete, PageMoments, useMoments } from './Momentos'
+import { choicePage } from '../pageChoice'
 import { DiarioMoments } from '../ui/MomentosStrip'
 import { useBlocks } from '../blocksProvider'
 import { cacheGeneration } from '../localCaches'
@@ -774,13 +775,17 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
           onTabsLayout={(l) => setTabsBottom(l.y + l.height)}
           tabs={
             <View>
-              <DiarioMoments
-                hosted={node.hosted === true}
-                data={moments}
-                now={now}
-                onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
-                onDelete={setMomentDeleting}
-              />
+              {choicePage(acting) !== null
+                ? <PageMoments key={choicePage(acting)} page={choicePage(acting)} now={now} tick={String(refresh) + ':' + pulls} active={active !== false} />
+                : (
+                  <DiarioMoments
+                    hosted={node.hosted === true}
+                    data={moments}
+                    now={now}
+                    onOpenOwn={typeof onOpenMomentos === 'function' && ownPublicKey ? () => onOpenMomentos(ownPublicKey) : undefined}
+                    onDelete={setMomentDeleting}
+                  />
+                  )}
               {node.hosted === true ? <ReminderBanner now={now} onOpenThread={onOpenThread} /> : null}
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
               {node.hosted === true && savedList.available && typeof onOpenSalvos === 'function'

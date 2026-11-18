@@ -47,7 +47,7 @@ const READ_MAX_BODY = 1024 * 1024
 // 'dm-sign', 'dm-box-read' and 'dm-legacy-read' are signed reads too: a lost
 // signature sent nothing, and the service keeps no answer for a same-nonce
 // resend.
-const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
+const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'group-topics', 'group-voters', 'group-events', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
 const DEFINITE = ['assinatura-invalida', 'pedido-invalido']
 const FEED_KEYS = 64
 
@@ -280,13 +280,13 @@ const PAGELESS = ['create', 'list', 'terms']
 const RECORD_ACTIONS = ['accept', 'remove', 'offer', 'transfer-accept', 'close']
 // A page's post in a private group is sealed on the device (node group.seal)
 // and sent as 'group-seal'; the service cannot read it (docs/rpc.md 5.114).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']
 // The page's own messages go through the node (5.114); dm-legacy-read and
 // dm-legacy-done serve only the sealed bundle of a legacy page's old ones.
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', 'choice', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', 'moment', 'post-share', 'post-unshare', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -413,6 +413,31 @@ export function pageChoiceOp (to, pick) {
 
 export function pagesChoice (node, { member, page, to, pick }) {
   return actAs(node, { member, action: 'choice', page, op: pageChoiceOp(to, pick) })
+}
+
+// The page's momento ('moment', docs/rpc.md 5.84), the person's
+// moment.create input: `media` the item the node's moment.putMedia answered
+// (the device uploads the blob itself), `text` '' when absent, `music` sent
+// only when given (null or absent is none).
+export function pageMomentOp ({ text, media, music } = {}) {
+  const op = { text: text === undefined || text === null ? '' : text, media }
+  if (music !== undefined && music !== null) op.music = music
+  return op
+}
+
+// The page's web share of one of its posts ('post-share' / 'post-unshare',
+// docs/rpc.md 5.84): `seq` the page's own post. One request each, never
+// resent.
+export function pagesPostShare (node, { member, page, seq }) {
+  return actAs(node, { member, action: 'post-share', page, op: { seq } })
+}
+
+export function pagesPostUnshare (node, { member, page, seq }) {
+  return actAs(node, { member, action: 'post-unshare', page, op: { seq } })
+}
+
+export function pagesMoment (node, { member, page, text, media, music }) {
+  return actAs(node, { member, action: 'moment', page, op: pageMomentOp({ text, media, music }) })
 }
 
 export async function pagesFollows (node, { member, page }) {

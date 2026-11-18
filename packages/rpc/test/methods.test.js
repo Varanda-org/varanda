@@ -2427,6 +2427,7 @@ test('page.* (Páginas)', (t) => {
   for (const action of ['list', 'status', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar', 'rename', 'invite',
     'dm-list', 'dm-thread', 'follow', 'follows', 'media', 'notices', 'terms',
     'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
+    'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events',
     'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
     ok(t, 'page.sign', { ...base, action })
   }
@@ -2436,6 +2437,16 @@ test('page.* (Páginas)', (t) => {
   ok(t, 'page.sign', { ...base, action: 'choice', op: { to: KEY + ':3', pick: null } })
   ok(t, 'page.sign', { ...base, op: { text: 'Qual pão?', poll: ['Francês', 'Integral'] } })
   bad(t, 'page.sign', { ...base, action: 'choice', page: '', op: { to: KEY + ':3', pick: 0 } }, 'choice needs the page')
+  // A page's momento, the person's moment.create input (music optional).
+  const momentMedia = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 2, bytes: 40000, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 }
+  ok(t, 'page.sign', { ...base, action: 'moment', op: { text: 'Pão saindo', media: momentMedia } })
+  ok(t, 'page.sign', { ...base, action: 'moment', op: { text: '', media: momentMedia, music: { p: 'audius', id: 'abc123', start: 30 } } })
+  ok(t, 'page.sign', { ...base, action: 'delete', op: { to: KEY + ':7' } })
+  bad(t, 'page.sign', { ...base, action: 'moment', page: '', op: { text: '', media: momentMedia } }, 'moment needs the page')
+  // A page post put on the public web page and withdrawn.
+  ok(t, 'page.sign', { ...base, action: 'post-share', op: { seq: 4 } })
+  ok(t, 'page.sign', { ...base, action: 'post-unshare', op: { seq: 4 } })
+  bad(t, 'page.sign', { ...base, action: 'post-share', page: '', op: { seq: 4 } }, 'post-share needs the page')
   // A core delegate's terms acceptance (5.84): the op the node also signs a
   // terms signature for.
   ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })
@@ -2897,6 +2908,9 @@ test('moment.putMedia and moment.create take a short video', (t) => {
     bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ...patch }, 'an image takes no kind or ms: ' + JSON.stringify(patch))
   }
   ok(t, 'moment.putMedia', MOMENT_UPLOAD, MOMENT_UPLOAD)
+  ok(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ahead: true }, { ...MOMENT_UPLOAD, ahead: true })
+  ok(t, 'moment.putMedia', { ...upload, ahead: true })
+  for (const ahead of [false, 1, 'true', null]) bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ahead }, 'ahead is only true: ' + JSON.stringify(ahead))
   const video = { ...MOMENT_MEDIA, mime: 'video/mp4', w: 1080, h: 1920, ms: 15000, bytes: 4194304 + 16, chunks: 129 }
   ok(t, 'moment.create', { text: '', media: video })
   ok(t, 'moment.create', { text: '', media: { ...video, bytes: 17, chunks: 1, ms: 1 } })

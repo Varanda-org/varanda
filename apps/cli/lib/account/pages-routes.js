@@ -38,11 +38,24 @@
 //   - media and avatar take the raw bytes as the body and the statement in
 //     x-varanda-page-* headers. media is a still image or, with its `ms`, a
 //     short video/mp4 already free of metadata, for a post's [poster, video]
-//     pair; a post, reply or quote carries photos, that pair or a link card
-//     (its thumbnail one of the page's items), as a person's post does.
+//     pair, or a voice note (audio/mp4 with its `ms`, also free of metadata)
+//     for a group post; a post, reply or quote carries photos, that pair or
+//     a link card (its thumbnail one of the page's items), as a person's
+//     post does.
+//   - in a PUBLIC group the page does what a person does (./pages-groups.js):
+//     group-post with media, a voice note, a card, a reply, a forward, a
+//     topic, a poll or an event; group-react, group-hide (its own posts
+//     only) and group-choice (a vote or an RSVP). A private group answers
+//     'privado' to all of them: its posts are sealed on a device.
 //   - a root post may carry a poll or an event, and 'choice' writes the
 //     page's vote or RSVP, the same records a person writes (records.js
 //     postRecord, choiceRecord); 'status' answers the page's live choices.
+//   - moment writes a momento, the record a person's moment.create writes
+//     (records.js momentRecord): the admin's device seals and uploads the
+//     public blob itself, so the op carries only its descriptor and there is
+//     nothing here to resolve. delete takes a momento of the page that is not
+//     deleted, live or past its 24 hours, and close tombstones them with the
+//     rest.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -89,18 +102,21 @@ const { isUsername } = require('@varanda/core/lib/account-link')
 const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
-const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
+const { applyDeletes, deletedSeqs, shownMedia } = require('@varanda/core/lib/deletion')
+const { foldShare, POST_SHARES_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
-const { feira, cardUrlHost } = require('@varanda/rpc')
+const { feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
+const { MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
-  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
+  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX,
+  AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, AUDIO_DESCRIPTOR_KEYS, validAudioDescriptor, charLength
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -122,8 +138,9 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
 // record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
-// no earlier vote comes back.
-const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
+// no earlier vote comes back. A share goes too, so no reader that missed a
+// post's tombstone keeps it on the public web page.
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -157,13 +174,23 @@ function eventTexts (event) {
 const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box']
 const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']
 const GROUP_READ_LIMIT = 32
+// The signed group reads: checked under the lock, read outside it, never a
+// nonce spend.
+const GROUP_READS = ['group-read', 'group-topics', 'group-voters', 'group-events']
+// Writes whose resend changes nothing the fold shows (a reaction, a hide, a
+// vote or RSVP the fold already counts): their nonce is settled in memory
+// like the joins and leaves, never spent durably.
+const GROUP_IDEMPOTENT = ['group-react', 'group-hide', 'group-choice']
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
+// A page post on the installation's public web page (docs/protocol.md §2,
+// "Public share"), by a person's post.share and post.unshare rules.
+const SHARE_ACTIONS = ['post-share', 'post-unshare']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice']
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment', ...SHARE_ACTIONS]
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
@@ -173,12 +200,18 @@ const MAX_STATUS_REFS = 4096
 // The newest polls and events 'status' answers the page's live choice on
 // (about 75 bytes each), so the whole answer still fits that cap.
 const MAX_STATUS_PICKS = 1024
+// The newest momentos 'status' lists so an owner or admin can find one to
+// delete: a page posts a few a day, and the list stays a small part of the
+// answer.
+const MAX_STATUS_MOMENTS = 20
 const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
-const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', 'rename', 'follow', 'media', 'avatar',
-  ...LISTING_ACTIONS]
+const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', 'rename', 'follow', 'media', 'avatar',
+  ...LISTING_ACTIONS, ...SHARE_ACTIONS]
+// The tombstones one post-unshare appends: one writer append, one nonce.
+const MAX_UNSHARE = 8
 
 const WRITER_TOKENS = Object.freeze({
   pausada: 'pausada',
@@ -211,10 +244,10 @@ function noop () {}
 // withdrawal, newest first; the first one below the poll's count is the live
 // pick, as polls.js livePick (which skips a pick out of range). ->
 // { 'author:seq': [pick, ...] } for the MAX_STATUS_PICKS targets whose last
-// pick is newest.
-function pickedOf (entries) {
+// pick is newest. folded is the diary after applyDeletes.
+function pickedOf (folded) {
   const live = new Map()
-  for (const e of applyDeletes(entries)) {
+  for (const e of folded) {
     if (!e || e.deleted || !isPlainObject(e.record) || e.record.type !== 'choice') continue
     const { to, pick } = e.record
     if (!isPlainObject(to) || !HEX64_RE.test(to.author) || !Number.isSafeInteger(to.seq)) continue
@@ -225,6 +258,61 @@ function pickedOf (entries) {
     if (pick !== null) live.set(ref, [pick, ...prior.filter((p) => p !== pick)])
   }
   return Object.fromEntries([...live].slice(-MAX_STATUS_PICKS))
+}
+
+// The page's own momentos still in its diary, newest first: an expired one
+// is listed too, since its text stays until a tombstone removes it. Only
+// what finding and deleting one needs, never its media or music. ->
+// [{ seq, at, text }]. folded is the diary after applyDeletes.
+function momentsOf (folded) {
+  const out = []
+  for (let i = folded.length - 1; i >= 0 && out.length < MAX_STATUS_MOMENTS; i--) {
+    const e = folded[i]
+    if (!e || e.deleted || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'moment') continue
+    const { at, text } = e.record
+    if (typeof text !== 'string' || typeof at !== 'string' || Number.isNaN(Date.parse(at))) continue
+    out.push({ seq: e.seq, at, text })
+  }
+  return out
+}
+
+// Each valid post-share block as [post seq, share seq]. Over raw blocks it
+// sees tombstoned shares too; over a folded diary only the live ones.
+function shareBlocks (entries) {
+  const out = []
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'post-share') continue
+    const copy = validRecordCopy(e.record, e.seq)
+    if (copy !== null && copy.type === 'post-share') out.push([copy.seq, e.seq])
+  }
+  return out
+}
+
+// The seeder's fold of the raw diary (post-share.js foldShare, block order,
+// tombstoned shares included): post seq -> its highest share seq. A post is
+// on the public web page only while that highest share is live, so every
+// answer here follows that rule, not "any live share".
+function shareFold (raw) {
+  const fold = new Map()
+  for (const [p, seq] of shareBlocks(raw)) foldShare(fold, p, seq)
+  return fold
+}
+
+// The page's post seqs whose highest share is live and whose post is still a
+// live post, ascending, at most POST_SHARES_PER_DIARY: what 'status' answers
+// so an owner or admin sees which posts are on the public web page. raw is
+// the writer's own blocks, tombstones not applied.
+function sharedOf (raw) {
+  const deleted = deletedSeqs(raw)
+  const bySeq = new Map()
+  for (const e of raw) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+  const out = []
+  for (const [postSeq, shareSeq] of shareFold(raw)) {
+    const post = bySeq.get(postSeq)
+    if (deleted.has(shareSeq) || deleted.has(postSeq) || post === undefined || !isPlainObject(post.record) || post.record.type !== 'post') continue
+    out.push(postSeq)
+  }
+  return out.sort((a, b) => a - b)
 }
 
 function has (obj, k) {
@@ -578,6 +666,10 @@ function createPagesRoutes ({
           // A listing edit answers its edit block, the first of its append.
           const first = action === 'listing-edit' ? writer.nonceFirst(page, member, nonce) : null
           const seq = first === null ? a.seq : first
+          // Only a use that appended has a writer record: the share was
+          // created, or the tombstones were written.
+          if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+          if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
           const out = { seq, length: a.length, pushed: false, replay: true }
           if (action === 'create') out.page = page
           if (action === 'avatar') {
@@ -590,6 +682,10 @@ function createPagesRoutes ({
     }
     if (seq !== null) {
       if (action === 'dm-box-share' || action === 'actor-box') return { ok: true, replay: true }
+      // The ACL spends a share's nonce only after its append: the writer's
+      // record may be gone (evicted, or its state lost), the answer is not.
+      if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+      if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
         const r = pagesStore.get(page)
@@ -607,7 +703,9 @@ function createPagesRoutes ({
   // again only when neither the writer nor the ACL holds anything of it.
   function claim (member, nonce, hash, read, page = '', action = '') {
     const id = member + ':' + nonce
-    if (read && mintedBefore(nonce)) throw refuse('expirado')
+    // Reads and the in-memory group writes keep no durable mark, so a body
+    // minted before a restart could otherwise run again.
+    if ((read || GROUP_IDEMPOTENT.includes(action)) && mintedBefore(nonce)) throw refuse('expirado')
     const prior = applied.get(id)
     if (prior !== undefined) {
       if (prior.hash !== hash || read) throw refuse('expirado')
@@ -1185,6 +1283,16 @@ function createPagesRoutes ({
         }
         return [record]
       }
+      // A person's moment.create input: text and media required, music
+      // optional and never null. The descriptor is the public blob the
+      // admin's device uploaded; it names no page item.
+      if (action === 'moment') {
+        if (!exactKeys(op, ['text', 'media'], ['music'])) throw refuse('pedido-invalido')
+        if (!validMomentMedia(op.media)) throw refuse('midia-invalida')
+        if (has(op, 'music') && !isMomentMusic(op.music)) throw refuse('pedido-invalido')
+        termFree(op.text)
+        return [momentRecord({ text: op.text, media: op.media, music: has(op, 'music') ? op.music : null })]
+      }
       if (action === 'delete') {
         if (!exactKeys(op, ['to'])) throw refuse('pedido-invalido')
         const t = target(op.to)
@@ -1197,8 +1305,9 @@ function createPagesRoutes ({
           return deletePlan(entries, t.seq)
         }
         // Never a tombstone over a page record: a delete must not undo a
-        // roster, an accept or an offer.
-        if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
+        // roster, an accept or an offer. A momento names no media range (its
+        // blob expires on the seeder by itself), as a person's moment.delete.
+        if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost', 'moment'].includes(e.record.type)) throw refuse('pedido-invalido')
         return deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
       }
       if (action === 'listing') {
@@ -1245,6 +1354,28 @@ function createPagesRoutes ({
   }
 
   // A statement whose records the page appends: owner or admin.
+  // A delete whose target is already tombstoned answers that tombstone:
+  // nothing appended and no op charged, as a person's moment.delete
+  // (web-member member-ops.js recordDelete). A bad op goes on to recordsFor,
+  // which refuses it.
+  async function deletedAlready (page, op) {
+    let t
+    try {
+      if (!exactKeys(op, ['to'])) return null
+      t = target(op.to)
+    } catch {
+      return null
+    }
+    if (t.author !== page) return null
+    const folded = applyDeletes(await writer.readEntries(page))
+    if (!folded.some((e) => e && e.seq === t.seq && e.deleted === true)) return null
+    let seq = null
+    for (const e of folded) {
+      if (e && !e.deleted && isPlainObject(e.record) && e.record.type === 'delete' && e.record.seq === t.seq && (seq === null || e.seq > seq)) seq = e.seq
+    }
+    return seq === null ? null : { seq, length: writer.info(page).length, pushed: false }
+  }
+
   async function write (action, body) {
     const { member, page, nonce, op, hash } = await statement(body, action, false)
     const prior = claim(member, nonce, hash, false, page, action)
@@ -1252,6 +1383,13 @@ function createPagesRoutes ({
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
+      if (action === 'delete') {
+        const done = await deletedAlready(page, op)
+        if (done !== null) {
+          settle(member, nonce, done)
+          return done
+        }
+      }
       chargeOps(page)
       const records = await recordsFor(action, page, op)
       // A listing's checks read the diary: the role is read again after.
@@ -1346,6 +1484,72 @@ function createPagesRoutes ({
     }))
   }
 
+  // ---- public share -----------------------------------------------------------
+
+  // post-share and post-unshare ({ seq }), a person's post.share and
+  // post.unshare (web-member member-ops.js): only a live post of the page's
+  // own diary (a reply or quote included). A post whose highest share is
+  // live (the seeder's rule) answers { created: false } and an unshare with
+  // no live share { changed: false },
+  // nothing appended; a new post past the bounded fold every reader keeps
+  // (post-share.js) is 'limite', as the public page would never show it. An
+  // unshare tombstones the newest MAX_UNSHARE live shares of the post in one
+  // append (a page writer leaves one); a repeat finishes any left. The raw
+  // blocks are read, so tombstoned shares count toward the fold as they do
+  // for a reader.
+  async function share (action, body) {
+    const { member, page, nonce, op, hash } = await statement(body, action, false)
+    if (!exactKeys(op, ['seq']) || !Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+    const prior = claim(member, nonce, hash, false, page, action)
+    if (prior !== null) return prior
+    return once(member, nonce, () => withLock(page, async () => {
+      need(writableRow(page), member, 'admin')
+      // Charged before the read, the no-op answers included (unlike a
+      // delete's deletedAlready): every use reads the whole diary.
+      chargeOps(page)
+      let raw
+      try {
+        raw = await writer.readOwn(page)
+      } catch (err) {
+        throw tokenOf(err)
+      }
+      const deleted = deletedSeqs(raw)
+      const entry = raw.find((e) => e && e.seq === op.seq)
+      const post = entry === undefined || deleted.has(op.seq) ? null : validRecordCopy(entry.record, op.seq)
+      if (post === null || post.type !== 'post') throw refuse('nao-encontrado')
+      const live = shareBlocks(raw).filter(([p, seq]) => p === op.seq && !deleted.has(seq)).map(([, seq]) => seq)
+      const fold = shareFold(raw)
+      const highest = fold.get(op.seq)
+      let result = null
+      // Shared as the seeder sees it: the highest share is live. Otherwise a
+      // new share becomes the highest, even beside an older live one.
+      if (action === 'post-share' && highest !== undefined && !deleted.has(highest)) result = { shareSeq: highest, created: false }
+      if (action === 'post-unshare' && live.length === 0) result = { ok: true, changed: false }
+      if (result !== null) {
+        settle(member, nonce, result)
+        return result
+      }
+      let records
+      const at = iso(now())
+      if (action === 'post-share') {
+        if (highest === undefined && fold.size >= POST_SHARES_PER_DIARY) throw refuse('limite')
+        records = [postShareRecord({ seq: op.seq, at })]
+      } else {
+        records = live.slice(-MAX_UNSHARE).flatMap((seq) => deleteRecords({ seq, at }))
+      }
+      // The reads above awaited: the role is read again before the append.
+      need(writableRow(page), member, 'admin')
+      await refreshRoster(page)
+      need(writableRow(page), member, 'admin')
+      const res = await append(page, records, { member, nonce })
+      await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, res.seq) }))
+      result = action === 'post-share' ? { shareSeq: res.seq, created: true } : { ok: true, changed: true }
+      settle(member, nonce, result)
+      keep(page, action, member, res.seq)
+      return result
+    }))
+  }
+
   // ---- Feira consent ---------------------------------------------------------
 
   // The page's signature over one deal; appends nothing. The admin's signed
@@ -1400,7 +1604,12 @@ function createPagesRoutes ({
       needHeld(page, member)
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
-      const picked = pickedOf(await writer.readEntries(page))
+      const folded = applyDeletes(await writer.readEntries(page))
+      const picked = pickedOf(folded)
+      const moments = momentsOf(folded)
+      // Tombstoned shares count in the seeder's fold: only the raw blocks
+      // carry them.
+      const shared = sharedOf(await writer.readOwn(page))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1417,6 +1626,8 @@ function createPagesRoutes ({
           truncated: liked.length > MAX_STATUS_REFS || reposted.length > MAX_STATUS_REFS
         },
         picked,
+        moments,
+        shared,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
@@ -1839,8 +2050,9 @@ function createPagesRoutes ({
     Promise.resolve().then(() => pagesDm.forget(page)).catch(() => note('conversas', 'parada-pendente'))
   }
 
-  // A tombstone, with the media ranges it releases, for every post, like,
-  // repost and profile version the page still shows.
+  // A tombstone, with the media ranges it releases, for every live record of
+  // a CLOSE_DELETES type the page still shows, its web shares included, so
+  // nothing of a closed page stays readable or on the public page.
   async function closeDeletes (page) {
     let entries
     try {
@@ -2297,16 +2509,20 @@ function createPagesRoutes ({
       ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
     if (!keysOk) throw refuse('pedido-invalido')
-    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME] : AVATAR_MIMES
+    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME, AUDIO_MIME] : AVATAR_MIMES
     const max = action === 'media' ? MAX_MEDIA_BODY : MAX_AVATAR_BYTES
     const { sha256, mime, bytes } = proof.op
     if (!mimes.includes(mime) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > max) throw refuse('midia-invalida')
-    // A short video (the second item of a post's [poster, video] pair) and
-    // only a video carries its duration; the writer checks the container.
+    // A short video (the second item of a post's [poster, video] pair) or a
+    // voice note (a group post's only item, with no picture size, as a
+    // person's audio descriptor), and only those, carry their duration; the
+    // writer checks the container.
     if (action === 'media') {
       const ms = proof.op.ms
       const video = mime === VIDEO_MIME
-      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : ms !== undefined) throw refuse('midia-invalida')
+      const voice = mime === AUDIO_MIME
+      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : voice ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_AUDIO_MS) : ms !== undefined) throw refuse('midia-invalida')
+      if (voice && (proof.op.width !== 0 || proof.op.height !== 0 || bytes > MAX_AUDIO_BYTES)) throw refuse('midia-invalida')
     }
     const row = writableRow(proof.page)
     need(row, proof.member, 'admin')
@@ -2635,6 +2851,93 @@ function createPagesRoutes ({
     }
   }
 
+  // A group post's { writer, seq } reference.
+  function groupRef (ref) {
+    if (!exactKeys(ref, ['writer', 'seq']) || !Number.isSafeInteger(ref.seq) || ref.seq < 1) throw refuse('pedido-invalido')
+    return { writer: keyParam(ref.writer), seq: ref.seq }
+  }
+
+  // A group post's media: the page's own items (the page `media` action),
+  // up to MAX_GROUP_MEDIA photos and GIFs, or one voice note alone, never a
+  // video. Every descriptor key must equal the stored row's, as mediaOf.
+  function groupMediaOf (page, media) {
+    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_GROUP_MEDIA) throw refuse('midia-invalida')
+    for (let i = 0; i < media.length; i++) {
+      const d = media[i]
+      if (!isPlainObject(d) || !(validDescriptor(d) || validAudioDescriptor(d))) throw refuse('midia-invalida')
+      if (d.mime === AUDIO_MIME && media.length !== 1) throw refuse('midia-invalida')
+    }
+    let table
+    try {
+      table = writer.items(page)
+    } catch (err) {
+      throw tokenOf(err)
+    }
+    return media.map((d) => {
+      const keys = d.mime === AUDIO_MIME ? AUDIO_DESCRIPTOR_KEYS : DESCRIPTOR_KEYS
+      const row = table.find((it) => it.core === d.core && it.start === d.start && it.blocks === d.blocks && it.sha256 === d.sha256)
+      if (row === undefined || Object.keys(row).length !== keys.length || !keys.every((k) => row[k] === d[k])) throw refuse('midia-invalida')
+      return row
+    })
+  }
+
+  // group-post as a person's group.post (methods.js group.post cross
+  // check): an event never with a poll, media, a card, a reply or a
+  // forward; a poll only on a topic, with no media and no card; a topic or
+  // an event is a root post with a visible title; media and a card never
+  // together. Texts go through the blocklist.
+  function groupPostParams (op) {
+    if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd', 'media', 'card', 'topic', 'poll', 'event'])) throw refuse('pedido-invalido')
+    const fwd = op.fwd === undefined ? 0 : op.fwd
+    if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
+    const replyTo = op.replyTo === undefined || op.replyTo === null ? null : groupRef(op.replyTo)
+    if (op.topic !== undefined && typeof op.topic !== 'boolean') throw refuse('pedido-invalido')
+    const topic = op.topic === true
+    const media = op.media === undefined || op.media === null ? null : op.media
+    const card = op.card === undefined || op.card === null ? null : op.card
+    const poll = op.poll === undefined || op.poll === null ? null : op.poll
+    let event = null
+    if (op.event !== undefined && op.event !== null) {
+      if (!exactKeys(op.event, ['title', 'start'], ['end', 'place'])) throw refuse('pedido-invalido')
+      event = { title: op.event.title, start: op.event.start, end: op.event.end === undefined ? null : op.event.end, place: op.event.place === undefined ? '' : op.event.place }
+    }
+    const titled = typeof op.text === 'string' && charLength(op.text) >= 1 && !profileExtra.isInvisibleOnly(op.text)
+    if (media !== null && card !== null) throw refuse('pedido-invalido')
+    if (topic && (replyTo !== null || fwd === 1 || !titled)) throw refuse('pedido-invalido')
+    if (poll !== null && (!topic || media !== null || card !== null)) throw refuse('pedido-invalido')
+    if (event !== null && (poll !== null || media !== null || card !== null || replyTo !== null || fwd === 1 || !titled)) throw refuse('pedido-invalido')
+    // The records' own bounds, checked before the page lock. The side
+    // records' target here is a stand-in: the real one is the post's seq.
+    const stand = { writer: keyParam(op.group), seq: 1 }
+    try {
+      // The text alone first, so a bad text is never 'midia-invalida'. With
+      // media an empty caption is allowed: a one-letter stand-in checks the
+      // rest of the text rules.
+      groupLib.groupPost({ text: media !== null && op.text === '' ? 'x' : op.text, replyTo, fwd })
+      if (poll !== null) groupLib.groupPoll({ target: stand, options: poll })
+      if (event !== null) groupLib.groupEvent({ target: stand, ...event })
+    } catch {
+      throw refuse('pedido-invalido')
+    }
+    termFree(op.text, ...(poll || []), ...eventTexts(event))
+    return { key: keyParam(op.group), text: op.text, replyTo, fwd, media, card, topic, poll: poll === null ? null : poll.slice(), event }
+  }
+
+  // The media and card of a group post resolved against the page's own
+  // items, then the whole record checked. Under the page lock, after the
+  // role check, as write() resolves a post's media: the item table is the
+  // page's, read only for an owner or admin.
+  function groupPostParts (page, params) {
+    const media = params.media === null ? null : groupMediaOf(page, params.media)
+    const card = params.card === null ? null : previewOf(page, params.card)
+    try {
+      groupLib.groupPost({ text: params.text, replyTo: params.replyTo, fwd: params.fwd, media, card })
+    } catch {
+      throw refuse(media !== null ? 'midia-invalida' : 'pedido-invalido')
+    }
+    return { ...params, media, card }
+  }
+
   function groupParams (action, op) {
     if (action === 'community-join' || action === 'community-leave') {
       if (!exactKeys(op, ['community'])) throw refuse('pedido-invalido')
@@ -2666,29 +2969,51 @@ function createPagesRoutes ({
       }
       return { key: keyParam(op.group), seal }
     }
-    if (action === 'group-post') {
-      if (!exactKeys(op, ['group', 'text'], ['replyTo', 'fwd'])) throw refuse('pedido-invalido')
-      const fwd = op.fwd === undefined ? 0 : op.fwd
-      if (fwd !== 0 && fwd !== 1) throw refuse('pedido-invalido')
-      const replyTo = op.replyTo === undefined ? null : op.replyTo
-      // The group record's own bounds, checked before the page lock.
+    if (action === 'group-post') return groupPostParams(op)
+    if (action === 'group-react' || action === 'group-hide' || action === 'group-choice') {
+      const field = action === 'group-react' ? 'emoji' : action === 'group-hide' ? 'on' : 'pick'
+      if (!exactKeys(op, ['group', 'target', field])) throw refuse('pedido-invalido')
+      const target = groupRef(op.target)
+      const value = op[field]
+      // The record's own bounds (emoji, on, pick), checked before the page lock.
       try {
-        groupLib.groupPost({ text: op.text, replyTo, fwd })
+        if (action === 'group-react') groupLib.groupReact({ target, emoji: value })
+        else if (action === 'group-hide') groupLib.groupHide({ target, on: value })
+        else groupLib.groupChoice({ target, pick: value })
       } catch {
         throw refuse('pedido-invalido')
       }
-      return { key: keyParam(op.group), text: op.text, replyTo, fwd }
+      return { key: keyParam(op.group), target, [field]: value }
     }
-    if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
-    const limit = op.limit === undefined ? GROUP_READ_LIMIT : op.limit
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > GROUP_READ_LIMIT) throw refuse('pedido-invalido')
-    let before = null
-    if (op.before !== undefined && op.before !== null) {
-      const b = op.before
-      if (!exactKeys(b, ['at', 'writer', 'seq']) || !isCanonicalIso(b.at) || !Number.isSafeInteger(b.seq) || b.seq < 0) throw refuse('pedido-invalido')
-      before = { at: b.at, writer: keyParam(b.writer), seq: b.seq }
+    if (action === 'group-voters') {
+      if (!exactKeys(op, ['group', 'target'])) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), target: groupRef(op.target) }
     }
-    return { key: keyParam(op.group), before, limit }
+    if (action === 'group-events') {
+      if (!exactKeys(op, ['group'], ['cursor'])) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), cursor: groupCursor(op.cursor) }
+    }
+    if (action === 'group-topics') {
+      if (!exactKeys(op, ['group'], ['before', 'limit'])) throw refuse('pedido-invalido')
+      const limit = op.limit === undefined ? GROUP_TOPICS_LIMIT : op.limit
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > GROUP_TOPICS_LIMIT) throw refuse('pedido-invalido')
+      return { key: keyParam(op.group), before: groupCursor(op.before), limit }
+    }
+    if (!exactKeys(op, ['group'], ['before', 'limit', 'topic'])) throw refuse('pedido-invalido')
+    // A topic thread is a marked page, at most GROUP_MARKED_LIMIT rows as
+    // the node's group.read with `topic`.
+    const topic = op.topic === undefined || op.topic === null ? null : groupRef(op.topic)
+    const max = topic === null ? GROUP_READ_LIMIT : GROUP_MARKED_LIMIT
+    const limit = op.limit === undefined ? max : op.limit
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > max) throw refuse('pedido-invalido')
+    return { key: keyParam(op.group), before: groupCursor(op.before), limit, topic }
+  }
+
+  // An exclusive group-order cursor { at, writer, seq }, or null.
+  function groupCursor (b) {
+    if (b === undefined || b === null) return null
+    if (!exactKeys(b, ['at', 'writer', 'seq']) || !isCanonicalIso(b.at) || !Number.isSafeInteger(b.seq) || b.seq < 0) throw refuse('pedido-invalido')
+    return { at: b.at, writer: keyParam(b.writer), seq: b.seq }
   }
 
   // Owner or admin, checked under the page lock before pages-groups.js runs:
@@ -2698,8 +3023,8 @@ function createPagesRoutes ({
   async function groupAction (action, body) {
     if (pagesGroups === null) throw refuse('indisponivel')
     const { member, page, nonce, op, hash } = await statement(body, action, false)
-    const params = groupParams(action, op)
-    const read = action === 'group-read'
+    let params = groupParams(action, op)
+    const read = GROUP_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
     const call = async () => {
@@ -2708,10 +3033,19 @@ function createPagesRoutes ({
         if (action === 'community-leave') return await pagesGroups.communityLeave(page, params.key)
         if (action === 'group-join') return await pagesGroups.groupJoin(page, params.key)
         if (action === 'group-leave') return await pagesGroups.groupLeave(page, params.key)
-        if (action === 'group-post') return await pagesGroups.groupPost(page, params.key, { text: params.text, replyTo: params.replyTo, fwd: params.fwd })
+        if (action === 'group-post') {
+          const { text, replyTo, fwd, media, card, topic, poll, event } = params
+          return await pagesGroups.groupPost(page, params.key, { text, replyTo, fwd, media, card, topic, poll, event })
+        }
+        if (action === 'group-react') return await pagesGroups.groupReact(page, params.key, { target: params.target, emoji: params.emoji })
+        if (action === 'group-hide') return await pagesGroups.groupHide(page, params.key, { target: params.target, on: params.on })
+        if (action === 'group-choice') return await pagesGroups.groupChoice(page, params.key, { target: params.target, pick: params.pick })
         if (action === 'group-seal') return await pagesGroups.groupSeal(page, params.key, params.seal)
         if (action === 'group-rebox') return await pagesGroups.groupRebox(page)
-        return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit })
+        if (action === 'group-topics') return await pagesGroups.groupTopics(page, params.key, { before: params.before, limit: params.limit })
+        if (action === 'group-voters') return await pagesGroups.groupVoters(page, params.key, { target: params.target })
+        if (action === 'group-events') return await pagesGroups.groupEvents(page, params.key, { cursor: params.cursor })
+        return await pagesGroups.groupRead(page, params.key, { before: params.before, limit: params.limit, topic: params.topic })
       } catch (err) {
         // A writer core or the diary may have taken a block before the
         // failure; a refusal from the fold appended nothing.
@@ -2735,6 +3069,7 @@ function createPagesRoutes ({
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, action === 'group-rebox' ? 'owner' : 'admin')
+      if (action === 'group-post') params = groupPostParts(page, params)
       chargeOps(page)
       const out = await call()
       // A post or seal is not idempotent in the group, so its nonce is
@@ -2751,6 +3086,7 @@ function createPagesRoutes ({
       let result
       if (action === 'group-post' || action === 'group-seal') result = { seq: out.seq }
       else if (action === 'group-rebox') result = { groups: out.groups, left: out.left }
+      else if (GROUP_IDEMPOTENT.includes(action)) result = { ok: true }
       else result = { state: out.state, role: out.state }
       if (action === 'community-join') result.group = out.group
       settle(member, nonce, result)
@@ -2768,7 +3104,8 @@ function createPagesRoutes ({
     const body = await readJsonBody(req, MAX_BODY)
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
-    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (SHARE_ACTIONS.includes(action)) return share(action, body)
     if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)
