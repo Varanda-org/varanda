@@ -25,12 +25,14 @@ const {
   readGroups,
   prepareSeederDir,
   startSeeder,
+  onPassesStart,
   encode,
   member,
   admit,
   reader,
   admitted,
   rejected,
+  stubbed,
   stored,
   downloaded,
   moderator,
@@ -73,8 +75,10 @@ test('root and writer need both bindings, are listed before open, served over th
   t.is(evR.diary, A.key)
   t.is(evR.group, R)
   t.is(evW.diary, B.key)
-  await rejected(events, wrongDiary, 'wrong-diary')
-  await rejected(events, wrongGroup, 'wrong-group')
+  // Each can never count for (R, C): kept as a header stub (#350), block 0
+  // alone, listed only to peers that announce CAP_HEADER_STUBS.
+  await stubbed(events, wrongDiary, 'wrong-diary')
+  await stubbed(events, wrongGroup, 'wrong-group')
   t.is(listedAt[R], true, 'R listed before it is served')
   t.is(listedAt[W], true, 'W listed before it is served')
   const listed = readGroups(dataDir)
@@ -84,8 +88,8 @@ test('root and writer need both bindings, are listed before open, served over th
   t.is(listed[R].bound, true, 'A bound R with its own join')
   delete listed[R].bound
   t.alike(listed, { [R]: { diary: A.key, group: R, seq: 1, first: 1 }, [W]: { diary: B.key, group: R, seq: 1 } })
-  t.is(await stored(seeder, wrongDiary), false)
-  t.is(await stored(seeder, wrongGroup), false)
+  t.is(await stored(seeder, wrongDiary), true)
+  t.is(await stored(seeder, wrongGroup), true)
   t.is(seeder.stats().groupCores, 2)
   t.ok(!A.messages.some((x) => x.key === R) && !B.messages.some((x) => x.key === W), 'group keys never reach the admission channel')
   await downloaded(seeder, R, 2)
@@ -522,14 +526,18 @@ test('restart keeps a root a member\'s live join keeps, with its creator absent 
   await A.swarm.destroy()
   await B.swarm.destroy()
 
-  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  let passesAt = -1
+  const second = await startSeeder(t, bootstrap, dataDir, {
+    associationKey: assoc.hex,
+    beforeStart: (seeder, events) => onPassesStart(seeder, () => { passesAt = events.length })
+  })
   await until(() => second.seeder._groupRootStartup === null && scansDone(second.seeder), { name: 'varreduras de início' })
   t.absent(second.events.some((e) => e.event === 'group-rejected' && e.key === R), 'R never dropped')
   t.ok(second.seeder._groupServed.has(R), 'R served')
   t.ok(R in readGroups(dataDir), 'R still listed')
   t.ok(await stored(second.seeder, R), 'R still stored')
   const gone = await rejected(second.events, R2, 'unbound')
-  t.ok(second.events.indexOf(gone) > second.events.findIndex((e) => e.event === 'ready'), 'R2 judged only after the start scans')
+  t.ok(passesAt >= 0 && second.events.indexOf(gone) >= passesAt, 'R2 judged only after the start scans')
   await until(async () => second.seeder._drops.size === 0 && !(R2 in readGroups(dataDir)) && !(await stored(second.seeder, R2)), { name: 'R2 purgado' })
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)
 })

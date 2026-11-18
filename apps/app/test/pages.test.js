@@ -555,6 +555,23 @@ test('follow, follows, notices, terms and group ops', async (t) => {
   t.is(err.code, 'pedido-invalido')
 })
 
+test('a plain group-post carrying a private item key is refused before start and signing', async (t) => {
+  const { pagesGroup } = await load()
+  const item = { core: K2, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 65536, sha256: '12'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), plainMime: 'image/jpeg', plainSha256: '78'.repeat(32), w: 4, h: 4, ms: 0 }
+  for (const op of [
+    { group: K2, text: 'oi', media: [item] },
+    { group: K2, text: 'oi', card: { url: 'https://a.b', image: item } },
+    { group: K2, text: 'oi', media: [{ ...photoDescriptor(), nonce: item.nonce }] }
+  ]) {
+    const calls = stub(t, flow(() => json(200, { seq: 1 })))
+    const node = fakeNode()
+    const err = await caught(t, pagesGroup(node, { member: M, page: P, action: 'group-post', op }))
+    t.is(err.code, 'pedido-invalido')
+    t.is(calls.length, 0, 'no start')
+    t.is(node.signs.length, 0, 'nothing signed')
+  }
+})
+
 test('group-seal sends the sealed envelope as is; its refusals keep their codes', async (t) => {
   const { pagesGroup } = await load()
   const op = { group: K2, kid: { writer: K2, seq: 3 }, nonce: 'n'.repeat(32), box: 'b'.repeat(64), at: '2026-11-09T12:00:00.000Z', writer: K2, seq: 7 }

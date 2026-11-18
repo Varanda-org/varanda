@@ -68,7 +68,7 @@ import { shareNav } from '../shareNav'
 import {
   AS_PAGE_LABEL, DEVICE_APPROVAL_TEXT, DEVICE_JOIN_LABEL, DEVICE_JOIN_TEXT, DEVICE_WAIT_TEXT,
   EMPTY_PAGES, OWN_LABEL, PAGE_GROUP_LOADING_TEXT, PAGE_NO_KEY_TEXT, PAGE_JOIN_LABEL, PAGE_LEAVE_LABEL, PAGE_REKEYING_TEXT, PAGE_SEAL_AGAIN_LABEL, REKEY_PENDING_LABEL,
-  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealRaced, sealedLabel, visibilityLabel
+  applyPage, mergeNewest, reloadDone, reloadWalks, can, canWriteHere, communitySlots, groupSlots, reserveReachedAny, reserveText, slotRefusal, needsReserveConfirm, itemsOf, knownVisibility, membersLabel, needsDeviceJoin, pageCan, pageGroupHideOp, pageGroupPostOp, pageGroupReactOp, pagePostVisibility, postAsPage, readAsPage, pageCommunityToEnter, pageGroupErrorText, groupNameText, pageMode, pageRoleLabel, pageRoleOf, reconcile, roleLabel, roleOf, sealedLabel, visibilityLabel
 } from '../groups'
 import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNow } from '../ui'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -107,6 +107,7 @@ import { pagesDm, pagesGroup, pagesMedia, pagesOrigin, pagesStart } from '../pag
 import { sha256 } from '@noble/hashes/sha2.js'
 import { pageForwardSource } from '../forward'
 import { pageVoice } from '../pageVoice'
+import { carriesPrivateItems, heldPageSender, pageSealParams, privateItemOf, sealAgainAfter, sealedUploadOp, sendSealed } from '../pageGroupMedia'
 import { memberKeyOf, useActing } from './Conversa'
 import { shouldRedirectToCommunity } from '../groupRedirect'
 import { GrupoAjustes } from './GrupoAjustes'
@@ -242,8 +243,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // The node's verified header read as it came, kept for the title: pageVis is null for a private group whose key this device lacks.
   const [pageSeen, setPageSeen] = useState(null)
   const [pageVisNote, setPageVisNote] = useState('')
-  // The text of a sealed post the service refused as 'sequencia': sealed
-  // again only on the person's tap.
+  // A sealed post the service refused as 'sequencia' ({ text, replyTo,
+  // card }, the card already uploaded): sealed again only on the person's tap.
   const [sealAgain, setSealAgain] = useState(null)
   // The text of a post whose outcome is not known: no second send until the
   // person edits the draft or asks for it.
@@ -255,9 +256,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const act = useAction()
   const join = useAction()
   const attachments = useChatAttachments()
-  // The draft link card (as a page only in a public group, where its post is a
-  // signed 'group-post' that carries the card).
-  const linkDraft = useLinkDraft({ text: draft, enabled: !asPage.page || pageVis === 'public', photos: attachments.items.length > 0, member: ownKey })
+  // The draft link card. As a page, once the node read the group's
+  // visibility: a public post carries it in its signed 'group-post', a
+  // private one in the record the node seals, its thumbnail sealed too.
+  const linkDraft = useLinkDraft({ text: draft, enabled: !asPage.page || pageVis !== null, photos: attachments.items.length > 0, member: ownKey })
   // { phase, progress } of a photo post; mediaHold { op, text, replyKey }
   // after an uncertain one (the exact group.post it made); sendTokenRef is
   // the running post, which Cancelar marks dead before its request starts.
@@ -730,7 +732,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // never whatever the draft holds by then.
   // A page's statement is signed once. An unknown outcome keeps err.retry (the
   // same signed bytes) for settle's "tentar de novo"; nothing signs again.
-  const pageSend = async (fn, text, sentAt, retrying = false, replyKeyOf = null) => {
+  // `again` ({ replyTo, keep }) is what a seal-again sends with the text: the
+  // reply and the card the first try built (keep.card).
+  const pageSend = async (fn, text, sentAt, retrying = false, replyKeyOf = null, again = null) => {
     // Another identity on screen owns the composer now: this result is not its.
     const acting = 'page:' + asPage.key
     const dropReply = () => { if (replyKeyOf !== null) setReplyKey((k) => (k === replyKeyOf ? null : k)) }
@@ -756,19 +760,20 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         clearFollowed(inFlightRef.current, text)
         dropReply()
         setPostHold({ text, at: Date.now() })
-        settle({ action: 'post', diary: asPage.key, text, sentAt, replyKey: replyKeyOf }, () => pageSend(err.retry, text, sentAt, true, replyKeyOf))
-      } else if (sealRaced(err)) {
+        settle({ action: 'post', diary: asPage.key, text, sentAt, replyKey: replyKeyOf }, () => pageSend(err.retry, text, sentAt, true, replyKeyOf, again))
+      } else if (sealAgainAfter(err)) {
         // The page's key changed: the same envelope cannot land. The held
-        // text goes back to the composer and PAGE_SEAL_AGAIN_LABEL seals it anew.
+        // text goes back to the composer and PAGE_SEAL_AGAIN_LABEL seals it
+        // anew, with the card already uploaded (the media path's rule).
         if (retrying) {
           setPostHold(null)
           setDraft((d) => (d.trim() === '' ? text : d))
         }
-        setSealAgain(text)
+        setSealAgain({ text, replyTo: again ? again.replyTo : null, card: again && again.keep ? again.keep.card : undefined })
         setPageError(pageGroupErrorText(err))
         readNewest().catch(() => {})
       } else {
-        if (retrying) holdNotLanded({ action: 'post', diary: asPage.key, text, sentAt, replyKey: replyKeyOf }, () => pageSend(fn, text, sentAt, true, replyKeyOf))
+        if (retrying) holdNotLanded({ action: 'post', diary: asPage.key, text, sentAt, replyKey: replyKeyOf }, () => pageSend(fn, text, sentAt, true, replyKeyOf, again))
         setPageError(pageGroupErrorText(err))
       }
       inFlightRef.current = null
@@ -822,13 +827,14 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // A post in a private group: the node seals it with the page's key
   // (writing nothing) and the service appends the envelope it cannot read.
   // A retry of an unknown outcome resends that same envelope (err.retry).
-  // `build` makes the public post's op (a card is uploaded in it, once: the
-  // signed retry of an unknown outcome keeps the same bytes).
+  // `build` makes the post's op, the person's group.post params (a card is
+  // uploaded in it, once: the signed retry of an unknown outcome keeps the
+  // same bytes); in a private group the node seals that same post.
   const pagePost = (visibility, text, build = async () => ({ group, text })) => () => postAsPage({
     visibility,
     group,
     text,
-    seal: (t) => request('group.seal', { group, page: asPage.key, text: t }),
+    seal: async () => request('group.seal', pageSealParams(await build(), asPage.key)),
     send: async (action, op) => pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action, op }),
     plain: async () => pageStatement('group-post', await build())()
   })
@@ -850,12 +856,13 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
         return
       }
       let snapshot = null
-      if (vis === 'public' && heldCard === undefined) {
+      if (heldCard === undefined) {
         snapshot = linkDraft.take(text)
         if (snapshot && cardBesideSpoilers(hasRich(text) ? parseRich(text) : null, { url: snapshot.url }) === null) snapshot = null
       }
-      const sendReply = vis === 'public' ? replyTo : null
-      pageSend(pagePost(vis, text, pagePublicOp(text, sendReply, snapshot)), text, Date.now(), false, sendReply ? sendReply.writer + ':' + sendReply.seq : null)
+      const keep = { op: null, card: undefined }
+      const build = vis === 'public' ? pagePublicOp(text, replyTo, snapshot) : pagePrivateOp(text, replyTo, snapshot, heldCard, keep)
+      pageSend(pagePost(vis, text, build), text, Date.now(), false, replyTo ? replyTo.writer + ':' + replyTo.seq : null, { replyTo, keep })
       return
     }
     setCheck(null)
@@ -941,16 +948,76 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return pageGroupPostOp(withCardFallback((c) => composePlan({ text, target, card: c }).send().params, card).op)
   }
 
+  // A page's photo, GIF, voice note or card thumbnail in a private group:
+  // sealed on this device (the item key stays in the post), the ciphertext
+  // uploaded as the page with the `group` op, then the private item from the
+  // service's descriptor. One signed upload, never retried here. A photo,
+  // GIF or voice failure stops the post before anything is sealed; a card
+  // thumbnail failure only drops the image (cardForSend), as for a person.
+  const pagePrivateUpload = async ({ bytes: given, mime, width, height, ms: givenMs }) => {
+    const sealer = node.media && typeof node.media.sealPage === 'function' ? node.media : null
+    if (sealer === null) throw new Error('mídia indisponível')
+    // Stripped of its recording time and device tags before it is sealed.
+    const voice = mime === VOICE_MIME ? pageVoice({ bytes: given, ms: givenMs }) : null
+    if (mime === VOICE_MIME && voice === null) throw new TypeError(BAD_VOICE)
+    const page = asPage.key
+    const { cipher, item } = await sealer.sealPage(voice !== null
+      ? { page, bytes: voice.bytes, mime, width: 0, height: 0, kind: 'voice', ms: voice.ms }
+      : { page, bytes: given, mime, width, height })
+    const member = await memberKeyOf(request, node)
+    const origin = pagesOrigin(node)
+    const { nonce } = await pagesStart({ member, action: 'media', page, origin })
+    const op = sealedUploadOp({ group, item })
+    const signed = await request('page.sign', { action: 'media', nonce, page, op })
+    const answer = await pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: cipher, origin })
+    const full = privateItemOf(answer && answer.descriptor, item)
+    if (full === null) throw new Error('resposta inesperada')
+    return full
+  }
+
+  // The private post of a page: the person's reply, card and word budget
+  // (composePlan), built once (keep.op), so a resend after a failure never
+  // uploads the thumbnail again. heldCard: the card of a seal-again.
+  const pagePrivateOp = (text, replyTo, snapshot, heldCard, keep) => async () => {
+    if (keep.op !== null) return keep.op
+    const target = { kind: 'group', group, visibility: 'private', ...(replyTo ? { replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : {}) }
+    const card = heldCard !== undefined ? heldCard : (snapshot !== null ? await cardForSend(snapshot, { upload: pagePrivateUpload }) : null)
+    const built = withCardFallback((c) => composePlan({ text, target, card: c }).send().params, card)
+    keep.op = built.op
+    keep.card = built.card
+    return built.op
+  }
+
+  // One record sealed for the page (group.seal) and sent as its signed
+  // 'group-seal'. An unknown outcome throws { uncertain, retry }: the same
+  // envelope, resent only on a tap.
+  const pageSealSend = (params) => sendSealed({
+    group,
+    seal: () => request('group.seal', { ...params, group, page: asPage.key }),
+    send: async (action, op) => pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action, op })
+  })
+
+  // The runChatSend request of a page in a private group: the photo or voice
+  // post the person would send, sealed by the node.
+  const pageSealedRequest = async (method, params) => {
+    if (method !== 'group.post') throw new Error('pedido inesperado')
+    return pageSealSend(pageSealParams(params, asPage.key))
+  }
+
   // The reply target is read from its key, never from the loaded pages: a
   // refresh that drops the target from rawById must not turn the reply into a
   // plain message.
-  // A page uploads its own items (signed, never the person's); only in a public group.
+  // A page uploads its own items (signed, never the person's); in a private
+  // group only where this node can seal them.
+  const canSealPage = !!node.media && typeof node.media.sealPage === 'function'
   const mediaApi = asPage.page
-    ? (pageVis === 'public' ? { upload: pageUpload } : null)
+    ? (pageVis === 'public' ? { upload: pageUpload } : pageVis === 'private' && canSealPage ? { upload: pagePrivateUpload } : null)
     : (node.media && typeof node.media.upload === 'function' ? node.media : null)
   // The group's visibility is known: group.info for a person, the node's read for a page.
   const visKnown = asPage.page ? pageVis !== null : info !== null
-  const sendRequest = asPage.page ? pageGroupRequest : request
+  const sendRequest = asPage.page ? (pageVis === 'private' ? pageSealedRequest : pageGroupRequest) : request
+  // The visibility a photo or voice post goes under: a page's from the node's read.
+  const mediaVisibility = asPage.page ? pageVis : (isPrivate ? 'private' : 'public')
   const sendingMedia = mediaSend !== null && (mediaSend.phase === 'uploading' || mediaSend.phase === 'sending')
 
   // The identity a held photo post belongs to: a retry never goes out as
@@ -983,7 +1050,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     if (actingIdRef.current !== acting) return
     setMediaSend(null)
     if (r.phase === 'uncertain') {
-      const held = { op: r.op, text, replyKey: replyKeyOf, sentAt, acting, checking: true, retry: asPage.page && r.error && typeof r.error.retry === 'function' ? r.error.retry : null }
+      const held = { op: r.op, text, replyKey: replyKeyOf, sentAt, acting, checking: true, uncertain: true, sealed: carriesPrivateItems(r.op && r.op.params), retry: asPage.page && r.error && typeof r.error.retry === 'function' ? r.error.retry : null }
       setMediaHold(held)
       const verdict = await mediaLanded(held)
       if (actingIdRef.current !== acting) return
@@ -1001,8 +1068,16 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       attachments.clear()
       readNewest().then(() => scrollToEnd(), () => {})
     } else if (r.phase === 'failed') {
+      if (asPage.page && pageVis === 'private' && r.op && sealAgainAfter(r.error)) {
+        // The uploads stand: "Tentar de novo" seals the same post again
+        // (retry null: never the refused envelope), only on the person's tap.
+        setMediaHold({ op: r.op, text, replyKey: replyKeyOf, sentAt, acting, checking: false, uncertain: false, sealed: true, retry: null })
+        setMediaError(pageGroupErrorText(r.error))
+        readNewest().catch(() => {})
+        return
+      }
       setMediaHold(null)
-      setMediaError(errorText(r.error))
+      setMediaError(asPage.page ? pageGroupErrorText(r.error) : errorText(r.error))
     }
   }
 
@@ -1010,7 +1085,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     if (mediaApi === null || sendingMedia || !attachments.ready || !node.online || !visKnown) return
     setMediaError('')
     const files = attachments.files
-    const visibility = isPrivate ? 'private' : 'public'
+    const visibility = mediaVisibility
     let plan
     try {
       plan = composePlan({ text, attachments: stagedOf(files), target: { kind: 'group', group, visibility, ...(replyTo ? { replyTo: { writer: replyTo.writer, seq: replyTo.seq } } : {}) } })
@@ -1050,7 +1125,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setMediaError('')
     const k = replyKey !== null ? /^([0-9a-f]{64}):([1-9][0-9]*)$/.exec(replyKey) : null
     const replyTo = k ? { writer: k[1], seq: Number(k[2]) } : null
-    const visibility = isPrivate ? 'private' : 'public'
+    const visibility = mediaVisibility
     let plan
     try {
       plan = composePlan({ text: '', attachments: [stagedVoice(recording)], target: { kind: 'group', group, visibility, ...(replyTo ? { replyTo } : {}) } })
@@ -1097,8 +1172,19 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       mediaDone({ phase: 'done' }, held.text, held.replyKey, held.sentAt, held.acting, null)
       return
     }
-    // A page resends the same signed statement (err.retry), never a new one.
-    const r = await retryChatSend({ op: held.op, request: held.retry ? async () => held.retry() : sendRequest, onPhase: setMediaSend })
+    // A page resends the same signed statement (err.retry), never a new one;
+    // a sealed post is sealed again only while the node reads the group as
+    // private, never sent as a plain 'group-post'.
+    let send = request
+    if (asPage.page) {
+      const how = heldPageSender(held, pageVisNow())
+      if (how === null) {
+        setMediaError(pageVisNote || PAGE_GROUP_LOADING_TEXT)
+        return
+      }
+      send = how === 'retry' ? async () => held.retry() : how === 'sealed' ? pageSealedRequest : pageGroupRequest
+    }
+    const r = await retryChatSend({ op: held.op, request: send, onPhase: setMediaSend })
     mediaDone(r, held.text, held.replyKey, held.sentAt, held.acting, null)
   }
 
@@ -1220,15 +1306,22 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   }
 
   const hide = async (row, on) => {
+    const vis = asPage.page ? pageVisNow() : null
+    // A page whose group the node has not read now sends nothing: a private
+    // group's hide must not go out as the plain 'group-hide'.
+    if (asPage.page && vis === null) return
     setCheck(null)
     const target = { writer: row.writer, seq: row.seq }
-    // A page hides only its own message, through its signed 'group-hide'.
+    // A page hides only its own message, through its signed 'group-hide', or
+    // in a private group the hide record the node seals.
     const acting = actingId
+    const sealed = asPage.page && vis === 'private'
     // An unknown page outcome keeps err.retry: the same signed statement.
     let signedRetry = null
     const r = await act.run(async () => {
       if (!asPage.page) return request('group.hide', { group, target, on })
       try {
+        if (sealed) return await pageSealSend({ hide: { target, on } })
         return await pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action: 'group-hide', op: pageGroupHideOp({ group, target, on }) })
       } catch (err) {
         if (err && err.uncertain === true && typeof err.retry === 'function') signedRetry = err.retry
@@ -1750,10 +1843,10 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     }
   }
 
-  // A page reacts only in a public group it is a member of.
-  const pageActs = asPage.page && pageCan('post', pageRole) && pageVis === 'public'
-  // A sealed page post carries no reply yet: only a public group offers one.
-  const replyOk = !asPage.page || pageVis === 'public'
+  // A page reacts in a group it is a member of, once the node read the
+  // visibility: a private group's reaction is a record the node seals.
+  const pageActs = asPage.page && pageCan('post', pageRole) && pageVis !== null
+  const replyOk = !asPage.page || pageVis !== null
   const reactionsDisabled = !node.online || node.passkey?.status?.unlocked !== true || meta.state === 'locked' || meta.state === 'rekey-pending' || (asPage.page ? !pageActs : !canWriteHere(info)) || !reader || orphan
   const reactionViewRef = useRef(null)
   reactionViewRef.current = { disabled: reactionsDisabled, rawById, overrides: reactionOverrides, picker: reactionPicker, whoOpen: whoReacted !== null }
@@ -1787,6 +1880,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const view = reactionViewRef.current
     const item = view.rawById.get(key)
     if (!context.live || context !== reactionContextRef.current || view.disabled || !item || item.hidden || context.sending.has(key) || context.unsure.has(key)) return
+    const pageVisible = asPage.page ? pageVisNow() : null
+    // As in hide: a page's reaction in a group of unknown kind is not sent.
+    if (asPage.page && pageVisible === null) return
     const before = view.overrides.get(key)
     const reactions = before || item.reactions || []
     const emoji = toggleOf(reactions, picked)
@@ -1797,7 +1893,8 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setReactionOverrides((prev) => new Map(prev).set(key, applyOptimistic(reactions, emoji)))
     try {
       try {
-        if (asPage.page) await pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action: 'group-react', op: pageGroupReactOp({ group, target, emoji }) })
+        if (asPage.page && pageVisible === 'private') await pageSealSend({ react: { target, emoji } })
+        else if (asPage.page) await pagesGroup(node, { member: await memberKeyOf(request, node), page: asPage.key, action: 'group-react', op: pageGroupReactOp({ group, target, emoji }) })
         else await request('group.react', { group, target, emoji })
       } catch (err) {
         if (context.live && context === reactionContextRef.current) {
@@ -2116,7 +2213,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           {mediaHold
             ? (
               <View style={styles.mediaHold}>
-                <Soft>{CHECK_UNKNOWN}</Soft>
+                {mediaHold.uncertain ? <Soft>{CHECK_UNKNOWN}</Soft> : null}
                 {mediaHold.checking ? null : <Pill label='Tentar de novo' onPress={retryMedia} pending={sendingMedia} />}
                 <Pill label='Descartar' onPress={cancelMedia} />
               </View>
@@ -2180,7 +2277,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
                 : <Btn label={PAGE_JOIN_LABEL} onPress={enter} pending={pagePending} disabled={!node.online} />}
               {pageEnterCommunity !== null && typeof onOpenCommunity === 'function' ? <Btn label='Entrar na comunidade' onPress={() => onOpenCommunity(pageEnterCommunity, { group })} /> : null}
               {pageRetry ? <Pill label='Conferir de novo' onPress={pageRetry} pending={pagePending} /> : null}
-              {sealAgain !== null ? <Pill label={PAGE_SEAL_AGAIN_LABEL} onPress={() => sendPost(sealAgain)} pending={pagePending} /> : null}
+              {sealAgain !== null ? <Pill label={PAGE_SEAL_AGAIN_LABEL} onPress={() => sendPost(sealAgain.text, sealAgain.replyTo, sealAgain.card)} pending={pagePending} /> : null}
             </View>
             {pageVis === null && loadedAt !== null && pageVisNote !== '' && pageVisNote !== loadError ? <Soft>{pageVisNote}</Soft> : null}
             <ErrorText>{pageError}</ErrorText>

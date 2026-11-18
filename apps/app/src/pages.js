@@ -24,6 +24,7 @@ import { accountOriginOf, pagesCore } from './pageGate.js'
 import * as actingStore from './actingAs.js'
 import { actingPageStopped, actorBoxOf, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
 import { oldPageKeys } from './pageOldKeys.js'
+import { carriesPrivateItems } from './pageGroupMedia.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -330,6 +331,8 @@ function checkPreview (action, op) {
 }
 
 function checkMedia (action, op) {
+  // A private group's item keys never go out in a plain 'group-post'.
+  if (action === 'group-post' && carriesPrivateItems(op)) return false
   if (!MEDIA_ACTIONS.includes(action) || !isObject(op)) return true
   if (!checkPreview(action, op)) return false
   // A preview never travels with media (records.js POST_PREVIEW_KEYS).
