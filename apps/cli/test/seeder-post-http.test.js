@@ -268,6 +268,8 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
   t.ok(html.includes('Ana &lt;b&gt;'), 'the author name, escaped')
   t.ok(html.includes('<meta name="robots" content="noindex, nofollow, noarchive">'))
   t.ok(html.includes('<meta property="og:image" content="' + ORIGIN + base + '/foto/1">'), 'og:image on the posts origin')
+  t.ok(html.includes('<meta property="og:url" content="' + ORIGIN + base + '">'), 'og:url on the posts origin')
+  t.is((html.match(/<meta property="og:image" /g) || []).length, 1, 'exactly one og:image')
   t.ok(html.includes('Mais 1 foto na Varanda'), 'the fifth photo is only counted')
   t.ok(html.includes('href="/publicacao/' + A.key + '/3"'), 'the way into the app')
   const headPage = await get(on.port, base, { method: 'HEAD' })
@@ -424,7 +426,10 @@ test('post pages over a real Seeder: policy, page, the uniform 302, photos, the 
   t.is((await get(on.port, '/p/' + A.key + '/17/foto/2')).headers['content-type'], 'image/jpeg', 'the JPEG after it')
   t.is(JSON.parse((await get(on.port, '/p/' + A.key + '/17/previa')).body.toString()).post.photoCount, 2, 'the preview counts the AVIF')
   t.is((await get(on.port, '/p/' + A.key + '/19/foto/1')).status, 404, 'AVIF bytes that fail the parser')
-  t.absent((await get(on.port, '/p/' + A.key + '/19')).body.toString().includes('og:image'), 'no og:image when the only photo is AVIF')
+  const avifOnly = (await get(on.port, '/p/' + A.key + '/19')).body.toString()
+  t.ok(avifOnly.includes('<meta property="og:image" content="' + ORIGIN + '/og/convite.png">\n<meta property="og:image:type" content="image/png">\n' +
+    '<meta property="og:image:width" content="1200">\n<meta property="og:image:height" content="630">'), 'the brand card when the only photo is AVIF')
+  t.is((avifOnly.match(/<meta property="og:image" /g) || []).length, 1, 'exactly one og:image')
 
   // The share tombstoned while the photo bytes are read: the second
   // postPublic sees it and nothing is written.
