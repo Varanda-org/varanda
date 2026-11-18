@@ -34,6 +34,7 @@ test('Publicar: the acting-as radios are one named group and web reads their sta
     shared.includes('aria-checked={radio ? selected : undefined}'),
     'the wrapper selects a shared radio that exposes checked state on native and web'
   )
+  t.ok(chip.includes('<View style={styles.asChip}>') && src.includes('asChip: { maxWidth: 200 }') && shared.includes('numberOfLines={1}'), 'a long Page name ends in an ellipsis inside 200 pt')
 })
 
 test('EmojiPicker: the group tabs sit in a tablist, web reads the selected one and an empty search is announced', (t) => {

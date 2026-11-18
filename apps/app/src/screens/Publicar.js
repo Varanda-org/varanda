@@ -2672,8 +2672,11 @@ function pageLabel (profile) {
 }
 
 function Chip ({ label, on, disabled, onPress }) {
+  const styles = useStyles(makeStyles)
   return (
-    <SharedChip label={label} role='radio' selected={on} disabled={disabled} onPress={onPress} />
+    <View style={styles.asChip}>
+      <SharedChip label={label} role='radio' selected={on} disabled={disabled} onPress={onPress} />
+    </View>
   )
 }
 
@@ -2859,6 +2862,8 @@ const makeStyles = (colors) => StyleSheet.create({
   retryRow: { flexDirection: 'row', marginTop: 8 },
   asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
   asLabel: { ...type.replyMark, color: colors.soft },
+  // A Page name runs to 80 characters: the cap keeps the chip in the sheet and ends the name in an ellipsis.
+  asChip: { maxWidth: 200 },
   markRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
