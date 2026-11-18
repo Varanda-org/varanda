@@ -633,6 +633,7 @@ export function createVitrineRequest (fixtures, options) {
     'identity.forget': unavailable,
     // A Página's keys and sealed posts live only on a device holding them.
     'group.seal': unavailable,
+    'media.sealPageFile': unavailable,
     'dm.pageGenerate': unavailable,
     'dm.pageShare': unavailable,
     'dm.pageSecrets': unavailable,

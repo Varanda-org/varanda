@@ -46,7 +46,11 @@
 //     group-post with media, a voice note, a card, a reply, a forward, a
 //     topic, a poll or an event; group-react, group-hide (its own posts
 //     only) and group-choice (a vote or an RSVP). A private group answers
-//     'privado' to all of them: its posts are sealed on a device.
+//     'privado' to all of them: its posts, reactions and hides are sealed on
+//     a device and sent as 'group-seal'. media with `group` (a private group
+//     where the page has a live writer) takes the ciphertext of one sealed
+//     photo or voice note, whole blocks the service cannot open, filed apart
+//     from the page's items so nothing here ever resolves it.
 //   - a root post may carry a poll or an event, and 'choice' writes the
 //     page's vote or RSVP, the same records a person writes (records.js
 //     postRecord, choiceRecord); 'status' answers the page's live choices.
@@ -107,7 +111,7 @@ const { foldShare, POST_SHARES_PER_DIARY } = require('@varanda/core/lib/post-sha
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
 const { feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
-const { MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
+const { MAX_GROUP_MEDIA, SEALED_MEDIA_MIME } = require('@varanda/core/lib/group-media')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
@@ -2505,6 +2509,21 @@ function createPagesRoutes ({
     }
     const body = { member: header(req, 'member'), nonce: header(req, 'nonce'), page: header(req, 'page'), signature: header(req, 'signature'), op }
     const proof = await statement(body, action, false)
+    // A private group item: the ciphertext the device sealed for `group`,
+    // whole blocks, nothing about the picture or the sound it hides.
+    const sealed = action === 'media' && isPlainObject(proof.op) && has(proof.op, 'group')
+    if (sealed) {
+      if (!exactKeys(proof.op, ['group', 'sha256', 'mime', 'bytes'])) throw refuse('pedido-invalido')
+      keyParam(proof.op.group)
+      const { sha256, mime, bytes } = proof.op
+      if (mime !== SEALED_MEDIA_MIME || typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || !Number.isSafeInteger(bytes) ||
+          bytes < MEDIA_BLOCK_BYTES || bytes > MAX_MEDIA_BODY || bytes % MEDIA_BLOCK_BYTES !== 0) throw refuse('midia-invalida')
+      const row = writableRow(proof.page)
+      need(row, proof.member, 'admin')
+      const raw = await readRaw(req, MAX_MEDIA_BODY)
+      if (raw.length !== bytes || sha256Hex(raw) !== sha256) throw refuse('midia-invalida')
+      return { ...proof, raw, sealed: true }
+    }
     const keysOk = action === 'media'
       ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
@@ -2532,18 +2551,39 @@ function createPagesRoutes ({
   }
 
   async function media (req) {
-    const { member, page, nonce, op, hash, raw } = await upload(req, 'media')
+    const { member, page, nonce, op, hash, raw, sealed } = await upload(req, 'media')
+    if (sealed && pagesGroups === null) throw refuse('indisponivel')
     const prior = claim(member, nonce, hash, false, page, 'media')
-    if (prior !== null) return prior
+    if (prior !== null) {
+      // After a restart only the writer's record answers, and it keeps no
+      // body hash: other bytes, or a sealed item resent plain (or the
+      // reverse), on that nonce must not get its descriptor.
+      const d = prior.descriptor
+      if (isPlainObject(d) && (d.sha256 !== op.sha256 || (d.mime === SEALED_MEDIA_MIME) !== (sealed === true))) throw refuse('expirado')
+      return prior
+    }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
       if (!caps.media(page)) throw refuse('limite')
+      // Checked before any byte is stored: a page that is no member with a
+      // live writer in that private group stores nothing for it.
+      if (sealed) {
+        try {
+          await pagesGroups.sealedMediaOk(page, op.group)
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
       let descriptor
       try {
-        const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
-        if (op.ms !== undefined) item.ms = op.ms
-        descriptor = await writer.mediaItem(page, item, { member, nonce })
+        if (sealed) {
+          descriptor = await writer.sealedItem(page, { bytes: raw, sha256: op.sha256 }, { member, nonce })
+        } else {
+          const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
+          if (op.ms !== undefined) item.ms = op.ms
+          descriptor = await writer.mediaItem(page, item, { member, nonce })
+        }
       } catch (err) {
         if (err && typeof err.code === 'string' && has(WRITER_TOKENS, err.code)) throw tokenOf(err)
         throw new Uncertain()

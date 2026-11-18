@@ -243,6 +243,7 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
     groupHide,
     groupChoice,
     groupSeal,
+    sealedMediaOk,
     groupRebox,
     reboxNeeded,
     groupRead,
@@ -1549,6 +1550,27 @@ function createPagesGroups ({ dir, writer, pagesStore, keys, association, blockl
       if (core.length !== at0) throw fail('sequencia')
       const seq = await appendOn(page, core, G, record, { priv: true })
       return { seq }
+    })
+  }
+
+  // Whether the page may upload the ciphertext of a private item for G now:
+  // the checks of groupSeal that need no envelope (a private group, no
+  // rebox pending, a complete fold, a member with a live counted writer
+  // boxed to the page's group box). A later group-seal checks again.
+  async function sealedMediaOk (page, G) {
+    needKey(G)
+    return withPage(page, async (p) => {
+      const loaded = await loadGroup(page, p, G)
+      // 'privado' elsewhere means "this needs the sealed path"; a sealed
+      // upload for a public group is a malformed request instead.
+      if (!loaded.private) throw fail('pedido-invalido')
+      gate(page, loaded)
+      if (loaded.view.community === null || loaded.view.orphan || loaded.partial) throw fail('indisponivel')
+      const w = liveOwn(page, loaded)
+      if (w === null || loaded.view.members.get(page) !== 'member') throw fail('sem-permissao')
+      if (!loaded.view.writers.has(w)) throw fail('limite')
+      if (headerBox(loaded, w) !== groupBoxPublic(page)) throw fail('aguardando-chave')
+      return { ok: true }
     })
   }
 
