@@ -22,7 +22,7 @@ O espaçamento, a escala de texto e as formas dos componentes agora seguem um ki
 | verde | `#1d6b4f` | ação: botão de publicar, pílula Publicar, aba ativa, nome em "respondendo a", cursor |
 | verde claro | `rgba(29,107,79,0.10)` | fundos verdes suaves (reservado; não há mais chip de sincronia) |
 | morno | `#fff4e0` | destaques suaves (reservado) |
-| controle desligado | `#7f8882` | trilha do interruptor desligado, contorno da caixa de seleção e da opção |
+| controle desligado | `#7f8882` | trilha do interruptor desligado, contorno da caixa de seleção e da opção, linha do campo de texto |
 | listras | `#2576b0` `#e8805a` `#f2b705` `#c23528` `#1d6b4f` | avatares |
 | fim de tarde | `#f7b267 → #e8805a → #8a4e7a → #2b2a4a` | faixa do perfil (gradiente a 170°, como o herói da página) |
 
@@ -51,8 +51,8 @@ Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark
 | esqueleto | `rgba(245,245,245,0.10)` | blocos de carregamento |
 | pílula | `#5dcaa0` | fundo da pílula de estado (`pillBg`, Publicar) |
 | texto da pílula | `#10241c` | texto sobre a pílula (`pillInk`) |
-| campo desligado | `#2a2a2a` | fundo de campo desligado; o texto é o texto suave |
-| controle desligado | `#757575` | trilha do interruptor desligado, contorno da caixa de seleção e da opção |
+| campo desligado | `#2a2a2a` | fundo do campo de busca e das casas de código desligadas; o texto é o texto suave |
+| controle desligado | `#757575` | trilha do interruptor desligado, contorno da caixa de seleção e da opção, linha do campo de texto |
 | balão | `#f5f5f5` | fundo do aviso rápido (quase branco sobre escuro, o inverso do claro) |
 | texto do balão | `#101010` | texto do aviso rápido (`toastInk`) |
 
@@ -179,6 +179,8 @@ Cantos arredondados, botões em pílula, entrelinha generosa, nomes em negrito.
 - **Selo** (`Badge`): ponto redondo de 6 pt, sem número, em verde (`accent`) por padrão; quem o mostra pode passar outra cor. É decorativo e fica escondido do leitor de tela.
 - **Barra de progresso** (`ProgressBar`): trilha em pílula de 8 pt de altura por padrão, no fundo de campo desligado (`inputOff`), com o preenchimento verde na fração do valor, de 0 a 1; um valor ausente ou inválido conta como 0. Altura e cor da trilha podem mudar. O papel de progresso e o rótulo ficam com quem a usa.
 - **Acordeão** (`Accordion`): cartão com cantos de 24 pt e fio de 1 pt. Fechado: fundo de cartão e fio na cor do fio. Aberto: fundo e fio no campo desligado (`inputOff`), sem mudar de tamanho. O cabeçalho é um botão de no mínimo 56 pt, com 16 pt de preenchimento e 12 pt de vão: o título no nome de linha, a dica opcional ("Ler", "Fechar") em texto suave e a seta de 18 pt; o leitor de tela ouve se está aberto. O conteúdo aberto tem 16 pt nas laterais e embaixo. Quem só monta o conteúdo enquanto está aberto guarda o estado e o passa ao acordeão.
+- **Campo de texto** (`Field`): sem caixa, sem fundo e sem cantos; só uma linha de 1 pt embaixo do texto, em `controlOff`, sem recuo nas laterais. Com o foco, a linha vira 2 pt em verde (`accent`) e o preenchimento de baixo perde 1 pt, então o texto não se move. Na web, o contorno de foco do navegador some só enquanto a linha verde aparece, então um campo em foco sempre tem uma das duas marcas; num campo desligado o contorno do navegador continua. Desligado, a linha fica na cor do fio e o texto em texto suave. O campo de uma linha tem no mínimo 56 pt, com o texto em 16 pt; o rótulo, acima, tem 14/20, peso normal, em texto suave, e é também o nome que o leitor de tela ouve. O campo do celular em Telefone e os de @nome, celular e código em "Excluir conta sem a passkey" usam o mesmo campo, sem preenchimento automático nem sugestões do teclado; o código do passo Telefone continua nas seis casas de 52 pt.
+- **Campo de busca** (`SearchField`): pílula de no mínimo 44 pt no campo desligado (`inputOff`), com 16 pt nas laterais e 8 pt entre a lupa, o texto e o botão de limpar. Com o foco, fundo de cartão e contorno de 1,5 pt em verde.
 
 ### Feira
 
