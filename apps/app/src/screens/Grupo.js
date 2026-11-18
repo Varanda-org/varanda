@@ -61,6 +61,7 @@ import { countChars } from '../format'
 import { groupRows, replyPreview } from '../group-screen'
 import { chatView, seenCut, topicList } from '../forum'
 import { heldBubble, pageDmClient, pinToEnd } from '../dm-screen'
+import { GROWTH_PLACES, groupTarget, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
 import { UNNAMED, readsAs, whoOf } from '../who'
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
@@ -281,9 +282,15 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   storeRef.current = store
   const walksRef = useRef(null)
   if (walksRef.current === null) walksRef.current = reloadWalks()
+  // Counts the reload walks that ended: the open's older walk waits for one,
+  // and a walk that ends without a commit changes nothing else it watches.
+  const [walkEnds, setWalkEnds] = useState(0)
   const onSeenRef = useRef(onSeen)
   onSeenRef.current = onSeen
   const cutRef = useRef(null)
+  const openLatch = useRef(null)
+  const openScope = useRef('')
+  openScope.current = group + '|' + ownKey
   // The load whose newest read painted; equal to seqRef when none is in flight.
   const paintedRef = useRef(0)
   const listRef = useRef(null)
@@ -372,6 +379,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     if (!asPage.page) {
       const read = await request('group.read', op)
       context.readStarts.set(read, started)
+      // The first newest page decides where this open lands; a reread after
+      // group.seen does not move it.
+      if (!before) openLatch.current = latchOpen(openLatch.current, { scope: openScope.current, value: read.firstUnread })
       return read
     }
     const id = asPage.key + ':' + group
@@ -421,7 +431,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       olderReads.push(older)
     }
     const target = goal()
-    if (!walks.end(walk.token) || !reached || target === null) return
+    if (!walks.end(walk.token)) return
+    setWalkEnds((n) => n + 1)
+    if (!reached || target === null) return
     setStore(local)
     for (const older of olderReads) noteRead(older, false)
   }, [readGroup, noteRead])
@@ -437,7 +449,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     try {
       read = await readGroup()
     } catch (err) {
-      walks.end(walk.token)
+      if (walks.end(walk.token)) setWalkEnds((n) => n + 1)
       throw err
     }
     if (!walks.current(walk.token)) return read
@@ -647,6 +659,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
       }
     } catch (err) {
       setMoreError(errorText(err))
+      setOpenFailed(true)
     } finally {
       setLoadingMore(false)
     }
@@ -1247,27 +1260,49 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     const before = { away: away.current, pin: endPin.current }
     away.current = true
     endPin.current = pinToEnd(endPin.current, { kind: 'user' })
+    // A row not measured yet fails through onScrollToIndexFailed instead of
+    // throwing: the same way back.
+    let failed = false
+    const fail = () => {
+      failed = true
+      away.current = before.away
+      endPin.current = before.pin
+      missing()
+    }
+    indexJump.current = { kind: 'quote', fail }
     try {
       list.scrollToIndex({ index, animated: false, viewPosition: 0.5 })
     } catch {
-      away.current = before.away
-      endPin.current = before.pin
-      return missing()
+      indexJump.current = null
+      if (!failed) fail()
+      return
     }
+    indexJump.current = null
+    if (failed) return
     // The first offset can be an estimate even when scrollToIndex succeeds.
     jumpTimer.current = setTimeout(() => {
       if (listRef.current !== list) return
       // An older page can land in between and shift the index.
       const at = rowsRef.current.findIndex((row) => row.key === key)
       if (at < 0) return missing()
+      let lost = false
+      indexJump.current = { kind: 'quote', fail: () => { lost = true; missing() } }
       try {
         list.scrollToIndex({ index: at, animated: false, viewPosition: 0.5 })
-        setFlashKey(key)
-        quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
       } catch {
-        missing()
+        if (!lost) missing()
+        lost = true
       }
+      indexJump.current = null
+      if (lost) return
+      setFlashKey(key)
+      quoteTimer.current = setTimeout(() => setFlashKey(null), 900)
     }, 120)
+  }
+  const indexFailed = (info) => {
+    const jump = indexJump.current
+    indexJump.current = null
+    if (jump !== null) jump.fail(info)
   }
 
   const hide = async (row, on) => {
@@ -1372,6 +1407,36 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   const userScrolled = useRef(false)
   const olderState = useRef(olderInitial())
   const olderLive = useRef({ hasNext: false, loading: false, failed: false, loadOlder: null })
+  // One open of this group: whether its landing ran, finished (placed), how
+  // many older pages it asked for and how often it retried.
+  const openRun = useRef({ started: false, placed: false, older: 0, tries: 0, grown: 0 })
+  const openTimer = useRef(null)
+  const [placed, setPlaced] = useState(false)
+  // An older page failed during this open. It stays failed for the whole open:
+  // a later reload clears moreError, but the walk must not ask again, and no
+  // cut may pass the unread run that page held.
+  const [openFailed, setOpenFailed] = useState(false)
+  // The newest row the person had on screen since the landing: group.seen
+  // never marks past it.
+  const [cursor, setCursor] = useState(null)
+  const cursorRef = useRef(null)
+  const viewableRef = useRef([])
+  // Which scrollToIndex is in flight, so one onScrollToIndexFailed serves the
+  // quote jump and the opening placement.
+  const indexJump = useRef(null)
+  const rowKeys = useMemo(() => rows.map((row) => row.key), [rows])
+  const rowKeysRef = useRef(rowKeys)
+  rowKeysRef.current = rowKeys
+  // Reading as a page opens at the end: its own seen mark is not the person's.
+  const openFirst = !asPage.page && openLatch.current !== null && openLatch.current.scope === openScope.current ? openLatch.current.value : null
+  const openKey = openFirst === null ? null : groupTarget({ items: rawItems, rowKeys, firstUnread: openFirst, isOwn: (it) => typeof ownKey === 'string' && it.diary === ownKey })
+  const plan = loadedAt !== null ? openPlan({ targetKey: openKey, rowKeys, hasOlder: reader && !!store.next, olderPagesLoaded: openRun.current.older, loading: loadingMore, failed: openFailed }) : null
+  // The first unread sits on an older page that failed to load: a cut at a
+  // newer row would also mark that unread run, so only the end marks.
+  const openMissed = openKey !== null && !rowKeys.includes(openKey) && openFailed
+  // Read by the effects of this same render.
+  const planRef = useRef(plan)
+  planRef.current = plan
   useEffect(() => {
     away.current = false
     userScrolled.current = false
@@ -1380,7 +1445,14 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     setShowJump(false)
     setFlashKey(null)
     setQuoteToast(false)
+    openRun.current = { started: false, placed: false, older: 0, tries: 0, grown: 0 }
+    cursorRef.current = null
+    viewableRef.current = []
+    setPlaced(false)
+    setOpenFailed(false)
+    setCursor(null)
     return () => {
+      clearTimeout(openTimer.current)
       clearTimeout(quoteTimer.current)
       clearTimeout(jumpTimer.current)
     }
@@ -1420,19 +1492,147 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     endPin.current = { ...endPin.current, pinned: true }
     followEnd()
   }
+  // Moves the read cursor over the rows on screen, only after the landing:
+  // the rows the opening scroll passed over were not read.
+  const moveCursor = useCallback(() => {
+    if (!openRun.current.placed) return
+    const at = readCursor(cursorRef.current, { rowKeys: rowKeysRef.current, viewableKeys: viewableRef.current })
+    if (at === cursorRef.current) return
+    cursorRef.current = at
+    setCursor(at)
+  }, [])
+  // The landing is done: from here what the person sees moves the cursor.
+  const settleOpen = useCallback((atEnd) => {
+    const run = openRun.current
+    if (run.placed) return
+    run.placed = true
+    clearTimeout(openTimer.current)
+    if (indexJump.current !== null && indexJump.current.kind === 'open') indexJump.current = null
+    setPlaced(true)
+    // An open at the end shows the newest row: the cursor starts there.
+    if (atEnd === true && latestKeyRef.current !== null) {
+      cursorRef.current = latestKeyRef.current
+      setCursor(latestKeyRef.current)
+    }
+    moveCursor()
+  }, [moveCursor])
+  // Puts the first unread row at the top. Rows past the first batch are not
+  // measured yet, so a failed scrollToIndex jumps near it by estimate and
+  // tries again, a bounded number of times.
+  const placeOpenRow = useCallback((growth) => {
+    const run = openRun.current
+    const plan = planRef.current
+    if (!run.started || run.placed || plan === null || plan.kind !== 'row') return
+    const index = rowKeysRef.current.indexOf(plan.key)
+    const list = listRef.current
+    if (index < 0 || !list || typeof list.scrollToIndex !== 'function') return
+    // A content-size frame places the row again without spending a try: the
+    // first batches grow the list many times in a row.
+    let wait
+    if (growth === true) {
+      if (run.grown >= GROWTH_PLACES) return
+      run.grown++
+      wait = settleStep(run.tries).wait
+    } else {
+      const step = settleStep(run.tries)
+      run.tries = step.next
+      if (!step.again) return settleOpen()
+      wait = step.wait
+    }
+    const retry = () => {
+      clearTimeout(openTimer.current)
+      openTimer.current = setTimeout(placeOpenRow, wait)
+    }
+    const jump = {
+      kind: 'open',
+      fail: (info) => {
+        const average = info && Number.isFinite(info.averageItemLength) ? info.averageItemLength : 0
+        if (typeof list.scrollToOffset === 'function') list.scrollToOffset({ offset: Math.max(0, average * index), animated: false })
+        retry()
+      }
+    }
+    indexJump.current = jump
+    try {
+      list.scrollToIndex({ index, viewPosition: 0, animated: false })
+    } catch {
+      if (indexJump.current === jump) indexJump.current = null
+      return retry()
+    }
+    if (indexJump.current !== jump) return
+    indexJump.current = null
+    // Landed; growth before this timer places it again.
+    clearTimeout(openTimer.current)
+    openTimer.current = setTimeout(settleOpen, 250)
+  }, [settleOpen])
+  // Starts the landing once per open; false while it heads for a row.
+  const startOpen = () => {
+    openRun.current.started = true
+    const first = planRef.current
+    if (first !== null && first.kind !== 'end') {
+      // Unread messages: the open lands on the first one, not at the end.
+      away.current = true
+      releaseEnd()
+      return false
+    }
+    settleOpen(true)
+    return true
+  }
+  const startOpenRef = useRef(startOpen)
+  startOpenRef.current = startOpen
   const last = rows.length > 0 ? rows[rows.length - 1] : null
   const lastId = last === null ? null : last.id
+  const openKind = plan === null ? null : plan.kind
+  const openRowKey = plan !== null && plan.kind === 'row' ? plan.key : null
+  const openHeading = () => !openRun.current.placed && planRef.current !== null && planRef.current.kind !== 'end'
   // The seen mark follows the newest message the node holds, painted or not: a
   // reply inside a topic is hidden from the chat, and it must still clear the
-  // unread count without opening the topic.
+  // unread count without opening the topic. That holds once the end was on
+  // screen (the cursor reached the newest row); before, only up to the row
+  // behind the cursor, and nothing before the landing.
   const seenAt = seenCut(rawItems)
-  cutRef.current = seenAt
-  const seenKey = seenAt === null ? null : seenAt.writer + ':' + seenAt.seq
+  const endShown = placed && latestKey !== null && cursor === latestKey
+  const cursorItem = cursor === null ? null : rawById.get(cursor)
+  if (!placed) cutRef.current = null
+  else if (endShown) cutRef.current = seenAt
+  else cutRef.current = cursorItem && !openMissed ? { at: cursorItem.at, writer: cursorItem.writer, seq: cursorItem.seq } : null
+  const seenKey = cutRef.current === null ? null : cutRef.current.writer + ':' + cutRef.current.seq
   useEffect(() => {
     if (lastId === null) return
     endPin.current = pinToEnd(endPin.current, { kind: 'newest', newest: lastId })
+    if (!openRun.current.started) {
+      // Not loaded yet: the driver below starts the landing.
+      if (planRef.current === null) return followEnd()
+      if (!startOpenRef.current()) return
+    }
     followEnd()
   }, [lastId, followEnd])
+
+  useEffect(() => {
+    const run = openRun.current
+    if (openKind === null || run.placed) return
+    // The rows can paint before the read that decides the landing: the first
+    // newest run then had no plan, and the landing starts here.
+    if (!run.started && startOpenRef.current()) return followEnd()
+    if (openKind === 'older') {
+      // One older walk at a time: not during a reload's walk-back. Its end
+      // bumps walkEnds, so the open goes on even when it commits nothing.
+      const live = olderLive.current
+      if (live.loading || walksRef.current.target() !== null || typeof live.loadOlder !== 'function') return
+      run.older++
+      live.loadOlder()
+      return
+    }
+    if (openKind === 'end') {
+      // Nothing to land on after all: back to the end.
+      settleOpen(true)
+      away.current = false
+      setLastSeenKey(latestKeyRef.current)
+      endPin.current = { ...endPin.current, pinned: true }
+      followEnd()
+      return
+    }
+    placeOpenRow()
+  }, [openKind, openRowKey, loadingMore, rowKeys, walkEnds, settleOpen, placeOpenRow, followEnd])
 
   // The keyboard shrinks the list: when the person was reading the newest
   // line, keep it above the composer instead of behind it (as in Mensagem).
@@ -1441,17 +1641,25 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // the state, or the newest line stayed behind the composer afterwards.
   const atBottom = useRef(true)
   const lastY = useRef(null)
+  // Given to the list from its first render (it fixes the choice then). It
+  // only moves the cursor; marking waits for the effect below.
+  const viewable = useCallback(({ viewableItems }) => {
+    viewableRef.current = (Array.isArray(viewableItems) ? viewableItems : []).filter((v) => v && v.isViewable !== false && v.item).map((v) => v.item.key)
+    moveCursor()
+  }, [moveCursor])
   const userScroll = useCallback(() => {
     userScrolled.current = true
     releaseEnd()
-  }, [releaseEnd])
+    // The person took over: the landing stops where they are.
+    if (openRun.current.started) settleOpen()
+  }, [releaseEnd, settleOpen])
   const trackBottom = useCallback(({ y, contentHeight, layoutHeight }) => {
     scrollFrame.current = { y, contentHeight, layoutHeight }
     setShowJump(jumpVisible({ distanceFromEnd: contentHeight - y - layoutHeight, viewport: layoutHeight }))
     // A frame only updates the pin. Following the end happens on content
     // growth (onContentSizeChange): calling scrollToEnd from every frame of an
     // animated scroll restarts the animation on Android and turns it into a crawl.
-    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight })
+    endPin.current = pinToEnd(endPin.current, { kind: 'frame', y, contentHeight, layoutHeight, opening: userScrolled.current !== true })
     const live = olderLive.current
     const older = olderStep(olderState.current, { y, userScrolled: userScrolled.current, hasNext: live.hasNext, loading: live.loading, failed: live.failed })
     olderState.current = older.state
@@ -1490,13 +1698,32 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
   // marks it; uncovering the screen or bringing the app back marks what
   // already shows, without a reload that would drop the older pages.
   // Reading as a page never moves the person's own seen mark.
+  // Nothing is marked before the landing; after it the mark follows the read
+  // cursor with a short wait, so a scroll sends one mark.
   const visible = node.visible !== false
+  const seenTimer = useRef(null)
+  const seenPending = useRef(false)
+  const flushSeen = useRef(null)
+  flushSeen.current = () => {
+    clearTimeout(seenTimer.current)
+    if (!seenPending.current) return
+    seenPending.current = false
+    markSeen()
+  }
+  useEffect(() => () => { if (flushSeen.current) flushSeen.current() }, [])
   useEffect(() => {
     if (asPage.page) return
-    if (!visible || !isTop || !reader || seenKey === null || loadedAt === null || loadError !== '') return
+    if (!visible || !isTop || !reader || seenKey === null || loadedAt === null || loadError !== '' || !placed) {
+      clearTimeout(seenTimer.current)
+      seenPending.current = false
+      return
+    }
     if (paintedRef.current !== seqRef.current) return
-    markSeen()
-  }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, markSeen])
+    seenPending.current = true
+    if (endShown) return flushSeen.current()
+    clearTimeout(seenTimer.current)
+    seenTimer.current = setTimeout(() => flushSeen.current(), 400)
+  }, [asPage.page, visible, isTop, reader, seenKey, loadedAt, loadError, placed, endShown, markSeen])
   olderLive.current = { hasNext: reader && !!store.next, loading: loadingMore, failed: moreError !== '', loadOlder }
 
   const nameText = groupNameText({ info, page: asPage.page, visibility: pageSeen })
@@ -1916,6 +2143,15 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
     return (
       <SwipeReply disabled={!reply} onReply={reply?.onPress}>
         <View style={flashKey === row.key ? styles.quoteFlash : undefined}>
+          {row.key === openKey
+            ? (
+              <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
+                <View style={styles.newLine} />
+                <Text style={styles.newText}>Mensagens novas</Text>
+                <View style={styles.newLine} />
+              </View>
+              )
+            : null}
           <Bubble
             media={refs.length > 0 ? <ChatMedia refs={refs} identity={ownKey} mine={mine} /> : null}
             item={{ key: row.key, text: row.text, rawText: row.hidden ? undefined : row.rawText, at: row.at, hidden: row.hidden, dayMark: row.dayMark, card: !row.hidden && rawRow && rawRow.card ? rawRow.card : null }}
@@ -2078,7 +2314,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
               data={reader ? rows : []}
               keyExtractor={(row) => row.key}
               renderItem={renderItem}
-              extraData={{ role, rawById, names, canPost, replyKey, flashKey, reactionOverrides, reactionsDisabled }}
+              extraData={{ role, rawById, names, canPost, replyKey, flashKey, openKey, reactionOverrides, reactionsDisabled }}
               contentContainerStyle={styles.thread}
               ListHeaderComponent={stateNotes}
               ListEmptyComponent={
@@ -2098,9 +2334,14 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
                 const { y, layoutHeight } = scrollFrame.current
                 scrollFrame.current.contentHeight = height
                 setShowJump(jumpVisible({ distanceFromEnd: height - y - layoutHeight, viewport: layoutHeight }))
-                followEnd()
+                // While the open heads for an unread row, growth places that
+                // row and never follows the end.
+                if (openHeading()) placeOpenRow(true)
+                else followEnd()
               }}
               onUserScroll={userScroll}
+              onScrollToIndexFailed={indexFailed}
+              onViewableItemsChanged={viewable}
             />
           </EmbedBandBottom.Provider>
           )}
@@ -2139,6 +2380,9 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
 
 const makeStyles = (colors) => StyleSheet.create({
   quoteFlash: { backgroundColor: colors.line },
+  newMark: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
+  newLine: { flex: 1, height: 1, backgroundColor: colors.line },
+  newText: { color: colors.soft, fontSize: 13 },
   quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
   quoteToastText: { color: colors.bg, textAlign: 'center' },
   root: { flex: 1, backgroundColor: colors.bg },

@@ -21,20 +21,23 @@ function photo (core, start, blocks, sha) {
   return { core, start, blocks, sha256: hex(sha) }
 }
 
-test('retryDelay: 2 s, 5 s, 15 s for retryable failures, then stop', async (t) => {
+test('retryDelay: 2 s, 5 s, 15 s, 30 s, 60 s for retryable failures, then stop', async (t) => {
   const { retryDelay, RETRY_DELAYS_MS } = await load()
-  t.alike(Array.from(RETRY_DELAYS_MS), [2000, 5000, 15000])
+  t.alike(Array.from(RETRY_DELAYS_MS), [2000, 5000, 15000, 30000, 60000])
   const notYet = Object.assign(new Error('indisponível'), { retryable: true })
   t.is(retryDelay(notYet, 0), 2000)
   t.is(retryDelay(notYet, 1), 5000)
   t.is(retryDelay(notYet, 2), 15000)
-  t.is(retryDelay(notYet, 3), null, 'stops after three')
+  t.is(retryDelay(notYet, 3), 30000)
+  t.is(retryDelay(notYet, 4), 60000)
+  t.is(retryDelay(notYet, 5), null, 'stops after five')
+  t.ok(RETRY_DELAYS_MS.reduce((a, b) => a + b, 0) >= 100000, 'the ladder outlasts a seeder restart (about 70 s on the server)')
   t.is(retryDelay(notYet, -1), null)
   t.is(retryDelay(new Error('conteúdo não confere'), 0), null, 'mismatch never retried')
   t.is(retryDelay(null, 0), null)
 })
 
-test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladder, still three retries', async (t) => {
+test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladder, still five retries', async (t) => {
   const { retryDelay } = await load()
   const busy = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 1000 })
   t.is(retryDelay(busy, 0, undefined, () => 0), 1500, 'asked delay plus the smallest spread')
@@ -43,10 +46,11 @@ test('retryDelay: a busy answer honours retryAfterMs with jitter, then the ladde
   t.is(retryDelay(quick, 1, undefined, () => 0), 501, 'the spread is added, never compared')
   const slow = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 3000 })
   t.not(retryDelay(slow, 0, undefined, () => 0), retryDelay(slow, 0, undefined, () => 0.5), 'a long Retry-After keeps the spread')
-  t.is(retryDelay(busy, 2, undefined, () => 0), 15500, 'ladder for the last retry, plus the spread')
+  t.is(retryDelay(busy, 2, undefined, () => 0), 15500, 'the ladder once the busy retries are spent, plus the spread')
+  t.is(retryDelay(busy, 4, undefined, () => 0), 60500, 'ladder for the last retry, plus the spread')
   const late = Object.assign(new Error('indisponível'), { retryable: true, retryAfterMs: 30000 })
-  t.is(retryDelay(late, 2, undefined, () => 0), 30500, 'the last retry still honours a long Retry-After')
-  t.is(retryDelay(busy, 3, undefined, () => 0), null, 'stops after three')
+  t.is(retryDelay(late, 2, undefined, () => 0), 30500, 'a later retry still honours a long Retry-After')
+  t.is(retryDelay(busy, 5, undefined, () => 0), null, 'stops after five')
 })
 
 test('mediaKey joins core, start, blocks and sha256', async (t) => {

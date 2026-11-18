@@ -1105,9 +1105,9 @@ export function createVitrineRequest (fixtures, options) {
       }
       const start = Math.max(0, end - limit)
       const messages = all.slice(start, end)
-      return { messages, next: start > 0 ? messages[0].id : null, folder: c ? c.folder : 'inbox', blocked: c ? c.blocked : false }
+      return { messages, next: start > 0 ? messages[0].id : null, folder: c ? c.folder : 'inbox', blocked: c ? c.blocked : false, firstUnread: null }
     },
-    'dm.seen': ({ peer }) => {
+    'dm.seen': ({ peer }) => { // upTo is ignored
       const c = conversationOf(peer)
       if (c) c.unread = false
       return { ok: true }
@@ -1172,7 +1172,8 @@ export function createVitrineRequest (fixtures, options) {
         sealed: 0,
         epoch: g.visibility === 'private' ? { writer: g.group, seq: g.epoch || 1 } : null,
         ...(root ? { poll: pollSummary(g, root), event: eventSummary(g, root) } : {}),
-        state: 'ok'
+        state: 'ok',
+        ...(!before && !topic ? { firstUnread: null } : {})
       }
     },
     'group.choose': ({ group, target, pick }) => {
