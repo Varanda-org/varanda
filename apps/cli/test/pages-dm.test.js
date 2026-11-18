@@ -1464,5 +1464,5 @@ test('page group-post routes accept numeric forward flags and pass them to the w
     const out = await s.act(ana, 'group-post', page, op)
     t.is(out.status, 200, JSON.stringify(out.body))
   }
-  t.alike(posts, [0, 0, 1].map(fwd => ({ text: 'oi', replyTo: null, fwd })))
+  t.alike(posts, [0, 0, 1].map(fwd => ({ text: 'oi', replyTo: null, fwd, media: null, card: null, topic: false, poll: null, event: null })))
 })
