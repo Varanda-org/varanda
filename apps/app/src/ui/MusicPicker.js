@@ -12,7 +12,7 @@ import { MusicCover } from './MusicCover'
 import { useMusicCover } from './useMusicCover'
 import { MusicEditor } from './MusicEditor'
 import { Pill } from './Pill'
-import { Segmented } from './Segmented'
+import { SegmentedControl } from './SegmentedControl'
 import { Sheet, TEXT_CAP } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, webInputReset } from './theme'
@@ -287,7 +287,7 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
           returnKeyType='search'
         />
       </View>
-      {playlist ? <Segmented options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => search(state.text, kind)} /> : null}
+      {playlist ? <SegmentedControl options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => search(state.text, kind)} /> : null}
       {notice ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{notice}</Text> : null}
       {phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => dispatch({ type: 'retry' })} /> : null}
       {phase === 'loading' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
