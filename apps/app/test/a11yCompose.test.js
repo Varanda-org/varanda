@@ -23,8 +23,9 @@ test('Denunciar: the target choice is announced by the pill, not by a wrapper', 
 
 test('Publicar: the acting-as radios are one named group and web reads their state', (t) => {
   const src = read('screens/Publicar.js')
-  t.ok(src.includes("<View style={styles.asRow} accessibilityRole='radiogroup' accessibilityLabel='Publicar como'>"), 'the group has a name')
-  t.ok(src.includes("aria-hidden importantForAccessibility='no' accessibilityElementsHidden>Publicar como</Text>"), 'the visible label is not read twice')
+  t.ok(src.includes('const asLabelId = useId()'), 'one id per composer')
+  t.ok(src.includes("<View style={styles.asRow} accessibilityRole='radiogroup' aria-labelledby={asLabelId}>"), 'the group is named by its visible label')
+  t.ok(src.includes('<Text style={styles.asLabel} nativeID={asLabelId}>Publicar como</Text>'), 'the label stays readable: iOS reads no label on a plain View')
   const chip = src.slice(src.indexOf('function Chip ('), src.indexOf('// One attached item'))
   t.ok(chip.includes('accessibilityState={{ checked: on, disabled }}') && chip.includes('aria-checked={on}'), 'native and web checked state')
 })
