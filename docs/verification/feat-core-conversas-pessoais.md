@@ -62,4 +62,11 @@ No modo core o app não tem tela que abra uma conversa pessoal: a aba Conversas,
 - o app responde com `replyTo` (v9), reage com 👍 (v10) e grava `dm.set` `accepted` (`ctl` v9); as três chamadas dão certo, e o `dm.list` do app, depois de um `dm.pull`, mostra a conversa;
 - no membro, `dm.thread` traz a resposta ligada (`replyTo` com o id dele, `mine: false`) e a reação 👍 (`mine: false`).
 
-Não conferido: o Android (a DHT do laboratório anuncia 127.0.0.1 do Mac, que o emulador não alcança) e um toque na interface, porque no modo core nenhuma tela abre uma conversa pessoal.
+Emulador Android (AVD `varanda-api36`, API 36, arm64-v8a), build de debug desta branch (`./gradlew assembleDebug`), com o Metro e o laboratório hospedado por `adb reverse` (8081 e 8080). O emulador não alcança o loopback do Mac por UDP, então a DHT de teste e o semeador do laboratório ligaram no endereço de rede local do Mac, com a sondagem de firewall do hyperdht desligada, como faz o `gate-server.js --platform android` (`docs/ios-gate.md`, "Android emulator"). Como o `hosted-lab.js` só liga em loopback, isso rodou por um lançador fora do repositório que troca só esses dois endereços; o HTTP, o WebSocket e o serviço de conta ficaram em loopback. A configuração core (associação e bootstrap do laboratório) foi gravada pelo `saveConfig` do app, e o app foi reaberto. A identidade, o certificado do laboratório (`cert.add`), o perfil e o seguir saíram do cliente do app pelo inspetor do Metro; a tela dos Termos ficou aberta, sem aceite, porque as chamadas vão direto ao nó. Mesmo roteiro do iOS, mesmo resultado:
+
+- antes de ativar, `dm.list` responde `Conversas ainda não ativadas neste aparelho`; `dm.enable` publica a `dm-key` (`gen: 1`), e o primeiro `dm.send` do membro já a encontra pelo semeador;
+- a mensagem do membro chega ao app (`dm.pull`, `dm.thread`, pasta `inbox`);
+- o app responde com `replyTo` (v9), reage com 👍 (v10) e grava `dm.set` `accepted`; as três chamadas dão certo;
+- no membro, `dm.thread` traz a resposta ligada (`replyTo` com o id dele, `mine: false`) e a reação 👍 (`mine: false`), e `dm.list` mostra a conversa com a prévia da resposta.
+
+Não conferido: um toque na interface, porque no modo core nenhuma tela abre uma conversa pessoal, e um aparelho Android de verdade.
