@@ -3079,7 +3079,16 @@ function readFold (loaded, ownHex, { limit, before }) {
 }
 
 async function groupRead (ctx, { group, limit = 30, before = null }) {
-  return withGroupOrPending(ctx, group, async (loaded, { ownHex }) => readFold(loaded, ownHex, { limit, before }), (pending) => {
+  return withGroupOrPending(ctx, group, async (loaded, { ownHex }) => {
+    const page = readFold(loaded, ownHex, { limit, before })
+    // Newest page only, over the full readable list.
+    if (before === null || before === undefined) {
+      const posts = loaded.view.posts.filter((p) => loaded.profiles.has(p.diary))
+      const mark = readSeenMarks(ctx.dataDir).filter((m) => m.group === group.toLowerCase()).pop() || null
+      page.firstUnread = firstListedUnread(posts, mark, ownHex)
+    }
+    return page
+  }, (pending) => {
     requirePendingLocal(pending)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
   })
@@ -4221,6 +4230,17 @@ function unreadCount (posts, mark, ownHex) {
     if (++n === MAX_UNREAD) break
   }
   return n
+}
+
+// The first post unreadCount would count after a stored mark. No mark has
+// no cursor to walk past, so the newest page reports null.
+function firstListedUnread (posts, mark, ownHex) {
+  if (mark === null) return null
+  for (const p of postsAfter(posts, mark)) {
+    if (p.hidden || p.diary === ownHex) continue
+    return { at: p.at, writer: p.writer, seq: p.seq }
+  }
+  return null
 }
 
 // Whether marking posts[target] moves the stored mark forward (rpc.md 5.82).

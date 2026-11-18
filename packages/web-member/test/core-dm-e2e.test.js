@@ -261,6 +261,27 @@ test('core dm: close during an in-flight dm.enable waits for it, then zeroes the
   t.is(await messageOf(dm.handlers['dm.list']({})), NO_SEEDER, 'a call after close refuses')
 })
 
+test('core dm: close does not wait out an in-flight dm-key peek the seeder cannot answer', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const host = await seederHost(t, bootstrap, { kp, hex: hex(kp.publicKey) })
+  let sockets = 0
+  const dm = createCoreDm({ dataDir: tmpDir(t), association: hex(kp.publicKey), accountOrigin: 'http://' + new URL(host.url).host, createSocket: (url) => { sockets++; return socketTo(url) }, ops: lookupOps('ef'.repeat(32)) })
+  t.teardown(() => dm.close(), { force: true })
+  const looking = dm.handlers['dm.lookup']({ member: crypto.keyPair().publicKey.toString('hex') }).then(() => null, (err) => err)
+  await until(() => sockets > 0)
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  // The tracked peek after a pull (checkPageKeys) is what close drains; a
+  // lookup is the same peek, so its end after close is that drain's end.
+  const started = Date.now()
+  await dm.close()
+  const err = await looking
+  const took = Date.now() - started
+  t.ok(took < 5000, 'the peek ended ' + took + ' ms after close, well under closeDrainMs')
+  t.is(err && err.message, NO_SEEDER, 'the peek answers unknown')
+})
+
 test('core dm: a dm call queued while suspended refuses after close, never entering the engine', async (t) => {
   const kp = generateAssociationKeyPair()
   let entered = 0

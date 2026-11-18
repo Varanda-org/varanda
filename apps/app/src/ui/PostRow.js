@@ -62,8 +62,9 @@
 // - link: a public http(s) URL of the post (postActions.shareLink decides);
 //   without one there is no Compartilhar. onNotice(text) shows the toast of
 //   a copy to the clipboard.
-// - publishable: the member's own diary post, so 'Página pública na web' may
-//   open the publish sheet (only the own diary's writer accepts a post-share).
+// - publishable: the member's own diary post or the acting Page's own post, so
+//   'Página pública na web' may open the publish sheet (a person's post-share
+//   only works on the own diary; a Page's goes through the page action).
 // - onOpenMention(username): makes the @nome in the text and in the quote
 //   tappable (./MentionText). The post text with an http(s)/www link or a
 //   handled mention is rendered outside the body's single accessible element,

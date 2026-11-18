@@ -266,7 +266,11 @@ export function pinToEnd (state, event) {
   } else if (event.kind === 'user') {
     next.pinned = false
   } else if (event.kind === 'frame') {
-    if (state.lastY !== null && event.y < state.lastY - 48) next.pinned = false
+    // The opening frames and a clamp at the end move up without the person
+    // scrolling, so they keep the pin.
+    const measured = Number.isFinite(event.layoutHeight) && Number.isFinite(event.contentHeight)
+    const atEnd = measured && event.y + event.layoutHeight >= event.contentHeight - 48
+    if (state.lastY !== null && event.y < state.lastY - 48 && event.opening !== true && !atEnd) next.pinned = false
     next.lastY = event.y
   }
   return next

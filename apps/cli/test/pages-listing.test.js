@@ -435,7 +435,12 @@ test('page listings: create, edit, status, consent, delete, close, cap and repla
   t.ok(dels.some((r) => r.seq === L), 'the root is tombstoned')
   t.ok(dels.some((r) => r.seq === E3), 'the live edit is tombstoned')
   t.ok(dels.some((r) => (r.seq === L || r.seq === E3) && Array.isArray(r.media) && r.media.some((m) => m.core === d.core && m.start === d.start)), 'the photo range is freed')
-  t.is((await s.act(ana, 'delete', K, { to: K + ':' + E3 })).body.error, 'pedido-invalido', 'an edit is not deleted on its own')
+  // The edit went with its listing: naming it now answers its tombstone and
+  // appends nothing, as any delete of a target already tombstoned.
+  const tombs = dels.length
+  const editAgain = await s.act(ana, 'delete', K, { to: K + ':' + E3 })
+  t.is(editAgain.status, 200, JSON.stringify(editAgain.body))
+  t.is((await deletesOf(ctx, K)).length, tombs, 'nothing appended for an edit already tombstoned')
   t.is((await s.act(ana, 'listing-consent', K, consentOp)).body.error, 'pedido-invalido', 'no consent for a deleted listing')
   t.is((await s.act(ana, 'listing-consent', K, { ...consentOp, to: K + ':' + post.body.seq })).body.error, 'pedido-invalido', 'no consent for a post')
   t.is((await s.act(ana, 'listing-consent', K, { ...consentOp, to: caio.hex + ':' + L })).body.error, 'pedido-invalido', 'no consent for another diary')

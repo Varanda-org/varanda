@@ -20,7 +20,7 @@ test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
     'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
-    'garden.help', 'garden.play', 'garden.set', 'garden.state', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
+    'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
@@ -29,7 +29,7 @@ test('method list and mutating set', (t) => {
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
-    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.help', 'garden.play', 'garden.set', 'group.admin', 'group.admit', 'group.ban',
+    'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.take', 'group.admin', 'group.admit', 'group.ban',
     'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'identity.clear', 'identity.create', 'identity.forget',
     'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
@@ -2359,6 +2359,8 @@ test('dm.* (Conversas)', (t) => {
   ok(t, 'dm.seen', { peer: KEY }, { peer: KEY })
   bad(t, 'dm.seen', {})
   bad(t, 'dm.seen', { peer: KEY, id: ID }, 'no read receipt by id')
+  ok(t, 'dm.seen', { peer: KEY, upTo: ID }, { peer: KEY, upTo: ID })
+  for (const upTo of ['cd'.repeat(15), 'cd'.repeat(17), 'CD'.repeat(16), 'zz'.repeat(16), '', null, 1, true, [ID]]) bad(t, 'dm.seen', { peer: KEY, upTo }, 'upTo ' + JSON.stringify(upTo))
 
   const base = { nonce, target: KEY, reason: 'assedio', quote: 'mensagem' }
   t.absent(isMutating('dm.reportSign'))
@@ -2434,6 +2436,16 @@ test('page.* (Páginas)', (t) => {
   ok(t, 'page.sign', { ...base, action: 'choice', op: { to: KEY + ':3', pick: null } })
   ok(t, 'page.sign', { ...base, op: { text: 'Qual pão?', poll: ['Francês', 'Integral'] } })
   bad(t, 'page.sign', { ...base, action: 'choice', page: '', op: { to: KEY + ':3', pick: 0 } }, 'choice needs the page')
+  // A page's momento, the person's moment.create input (music optional).
+  const momentMedia = { id: 'a'.repeat(64), key: 'b'.repeat(64), nonce: 'c'.repeat(48), chunks: 2, bytes: 40000, sha256: 'd'.repeat(64), mime: 'image/jpeg', w: 1080, h: 1350, ms: 0 }
+  ok(t, 'page.sign', { ...base, action: 'moment', op: { text: 'Pão saindo', media: momentMedia } })
+  ok(t, 'page.sign', { ...base, action: 'moment', op: { text: '', media: momentMedia, music: { p: 'audius', id: 'abc123', start: 30 } } })
+  ok(t, 'page.sign', { ...base, action: 'delete', op: { to: KEY + ':7' } })
+  bad(t, 'page.sign', { ...base, action: 'moment', page: '', op: { text: '', media: momentMedia } }, 'moment needs the page')
+  // A page post put on the public web page and withdrawn.
+  ok(t, 'page.sign', { ...base, action: 'post-share', op: { seq: 4 } })
+  ok(t, 'page.sign', { ...base, action: 'post-unshare', op: { seq: 4 } })
+  bad(t, 'page.sign', { ...base, action: 'post-share', page: '', op: { seq: 4 } }, 'post-share needs the page')
   // A core delegate's terms acceptance (5.84): the op the node also signs a
   // terms signature for.
   ok(t, 'page.sign', { action: 'terms', nonce, page: '', op: { version: 13, diary: KEY } })
@@ -2895,6 +2907,9 @@ test('moment.putMedia and moment.create take a short video', (t) => {
     bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ...patch }, 'an image takes no kind or ms: ' + JSON.stringify(patch))
   }
   ok(t, 'moment.putMedia', MOMENT_UPLOAD, MOMENT_UPLOAD)
+  ok(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ahead: true }, { ...MOMENT_UPLOAD, ahead: true })
+  ok(t, 'moment.putMedia', { ...upload, ahead: true })
+  for (const ahead of [false, 1, 'true', null]) bad(t, 'moment.putMedia', { ...MOMENT_UPLOAD, ahead }, 'ahead is only true: ' + JSON.stringify(ahead))
   const video = { ...MOMENT_MEDIA, mime: 'video/mp4', w: 1080, h: 1920, ms: 15000, bytes: 4194304 + 16, chunks: 129 }
   ok(t, 'moment.create', { text: '', media: video })
   ok(t, 'moment.create', { text: '', media: { ...video, bytes: 17, chunks: 1, ms: 1 } })
@@ -3306,6 +3321,59 @@ test('garden: the four methods', (t) => {
   bad(t, 'garden.help', { to: KEY }, 'missing pot')
   bad(t, 'garden.help', { to: KEY, pot: 0, at: '2026-11-16T12:00:00.000Z' }, 'no at param on garden.help')
   bad(t, 'garden.help', { to: KEY, pot: 0, extra: 1 }, 'extra field')
+})
+
+test('garden phase 2: decor, stall, give, take and drop', (t) => {
+  for (const m of ['garden.decor', 'garden.give', 'garden.take', 'garden.drop']) t.ok(isMutating(m), m + ' mutates')
+  t.absent(isMutating('garden.stall'), 'garden.stall only reads')
+
+  ok(t, 'garden.decor', { items: [] }, { items: [] })
+  ok(t, 'garden.decor', { items: ['rede', 'varal', 'gato', 'pisca'] }, { items: ['rede', 'varal', 'gato', 'pisca'] })
+  ok(t, 'garden.decor', { items: ['varal', 'pisca'] })
+  bad(t, 'garden.decor', {}, 'missing items')
+  bad(t, 'garden.decor', { items: ['varal', 'rede'] }, 'unsorted')
+  bad(t, 'garden.decor', { items: ['gato', 'gato'] }, 'duplicate')
+  bad(t, 'garden.decor', { items: ['rede', 'vaso'] }, 'unknown decor id')
+  bad(t, 'garden.decor', { items: ['Rede'] }, 'unknown decor id case')
+  bad(t, 'garden.decor', { items: ['rede', 'varal', 'gato', 'pisca', 'rede'] }, 'over-long decor ids')
+  for (const items of [null, 'rede', 1, { 0: 'rede' }]) bad(t, 'garden.decor', { items }, 'items ' + JSON.stringify(items))
+  bad(t, 'garden.decor', { items: [], extra: 1 }, 'unknown key')
+  bad(t, 'garden.decor', { items: [], at: '2026-11-16T12:00:00.000Z' }, 'a date param refused')
+  t.is(validateParams('garden.decor', { items: [], at: '2026-11-16T12:00:00.000Z' }).message, 'parâmetro desconhecido')
+
+  ok(t, 'garden.stall', {}, {})
+  bad(t, 'garden.stall', { extra: 1 }, 'unknown key')
+  bad(t, 'garden.stall', { at: '2026-11-16T12:00:00.000Z' }, 'a date param refused')
+
+  ok(t, 'garden.give', { to: KEY, pot: 0 }, { to: KEY, pot: 0 })
+  ok(t, 'garden.give', { to: KEY, pot: 5 })
+  for (const pot of [6, -1, 1.5, '0', null, NaN, Infinity, true]) bad(t, 'garden.give', { to: KEY, pot }, 'bad pot ' + String(pot))
+  bad(t, 'garden.give', { to: 'zz', pot: 0 }, 'bad to')
+  bad(t, 'garden.give', { to: KEY.toUpperCase(), pot: 0 }, 'uppercase to')
+  bad(t, 'garden.give', { pot: 0 }, 'missing to')
+  bad(t, 'garden.give', { to: KEY }, 'missing pot')
+  bad(t, 'garden.give', { to: KEY, pot: 0, extra: 1 }, 'unknown key')
+  bad(t, 'garden.give', { to: KEY, pot: 0, at: '2026-11-16T12:00:00.000Z' }, 'a date param refused')
+  bad(t, 'garden.give', { to: KEY, pot: 0, text: 'oi' }, 'no free text')
+
+  ok(t, 'garden.take', { from: KEY, seq: 1 }, { from: KEY, seq: 1 })
+  ok(t, 'garden.take', { from: KEY, seq: Number.MAX_SAFE_INTEGER })
+  for (const seq of [0, -1, 1.5, '1', null]) bad(t, 'garden.take', { from: KEY, seq }, 'seq below 1 or bad ' + String(seq))
+  bad(t, 'garden.take', { from: KEY.toUpperCase(), seq: 1 }, 'bad from')
+  bad(t, 'garden.take', { from: 'zz', seq: 1 }, 'short from')
+  bad(t, 'garden.take', { from: KEY, seq: Number.MAX_SAFE_INTEGER + 1 }, 'seq too large')
+  bad(t, 'garden.take', { seq: 1 }, 'missing from')
+  bad(t, 'garden.take', { from: KEY, seq: 1, extra: 1 }, 'unknown key')
+  bad(t, 'garden.take', { from: KEY, seq: 1, at: '2026-11-16T12:00:00.000Z' }, 'a date param refused')
+
+  ok(t, 'garden.drop', { kind: 'gift', seq: 1 }, { kind: 'gift', seq: 1 })
+  ok(t, 'garden.drop', { kind: 'take', seq: 2 }, { kind: 'take', seq: 2 })
+  for (const kind of ['help', 'decor', 'GIFT', '', null, 1]) bad(t, 'garden.drop', { kind, seq: 1 }, 'kind outside gift and take ' + String(kind))
+  bad(t, 'garden.drop', { kind: 'gift', seq: 0 }, 'seq below 1')
+  bad(t, 'garden.drop', { kind: 'gift' }, 'missing seq')
+  bad(t, 'garden.drop', { seq: 1 }, 'missing kind')
+  bad(t, 'garden.drop', { kind: 'gift', seq: 1, extra: 1 }, 'unknown key')
+  bad(t, 'garden.drop', { kind: 'take', seq: 1, at: '2026-11-16T12:00:00.000Z' }, 'a date param refused')
 })
 
 test('choice.set and choice.mine', (t) => {

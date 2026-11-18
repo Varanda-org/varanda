@@ -33,13 +33,14 @@ test('webShareOffered is true only for a plain post with the box on', async (t) 
   t.is(webShareOffered({ enabled: true, author: AUTHOR }), true, 'online unknown is fine')
   t.is(webShareOffered({ ...base, author: AUTHOR.toUpperCase() }), true)
   t.is(webShareOffered(), false)
+  t.is(webShareOffered({ ...base, page: true }), true, 'a Page post is offered the box too')
   t.is(webShareOffered({ ...base, enabled: undefined }), false)
   t.is(webShareOffered({ ...base, enabled: 'yes' }), false)
   t.is(webShareOffered({ ...base, online: false }), false)
   for (const bad of [undefined, null, 'abc', 'zz'.repeat(32), AUTHOR + 'a', 7]) {
     t.is(webShareOffered({ ...base, author: bad }), false, 'author ' + String(bad))
   }
-  for (const key of ['page', 'moment', 'reply', 'quote', 'poll', 'event']) {
+  for (const key of ['locked', 'moment', 'reply', 'quote', 'poll', 'event']) {
     t.is(webShareOffered({ ...base, [key]: true }), false, key)
     t.is(webShareOffered({ ...base, [key]: { id: 1 } }), false, key + ' object')
   }
@@ -224,11 +225,12 @@ test('Publicar offers the box only for a plain own post', (t) => {
   const at = src.indexOf('webShareOffered({')
   t.ok(at > 0)
   const offer = src.slice(at, src.indexOf('})', at))
-  for (const part of ['reply: !!reply', 'quote: !!quote', 'poll: pollDraft !== null', 'event: eventDraft !== null', 'moment: momentMode', 'page: asPage !== null || locked', 'online: node.online', 'enabled: postPublic.enabled']) {
+  for (const part of ['reply: !!reply', 'quote: !!quote', 'poll: pollDraft !== null', 'event: eventDraft !== null', 'moment: momentMode', 'locked,', 'online: node.online', 'enabled: postPublic.enabled']) {
     t.ok(offer.includes(part), part)
   }
   t.ok(src.includes('const webOn = webShare && webShareOk'), 'a tick is void the moment the box stops being offered')
   t.ok(src.includes('const sentWeb = webOn && !sentReply && !sentQuote'), 'a reply or quote never shares')
+  t.ok(src.includes("const sentWeb = webOn && kind === 'post'") && src.includes('shareNewAsPage('), 'a Page post shares once through the page action')
 })
 
 test('Publicar unticks after every post and when shared content arrives', (t) => {
@@ -255,10 +257,14 @@ test('Publicar shares once after the post, never from the outbox, a poll, an eve
   const src = read('screens/Publicar.js')
   t.ok(src.includes('!sentWeb && canQueue'), 'a ticked post never falls back to the outbox')
   t.is(src.split('shareNew(').length - 1, 2, 'one share after post.create, one after an uncertain post is found')
-  for (const head of ['  const queue = async (', '  const sendPoll = async (', '  const sendEvent = async (', '  const sendAsPage = async (']) {
+  for (const head of ['  const queue = async (', '  const sendPoll = async (', '  const sendEvent = async (']) {
     const body = publicarBody(src, head)
     t.ok(body, head.trim() + ' found')
     t.absent(body && body.includes('shareNew'), head.trim() + ' never shares')
   }
+  const page = publicarBody(src, '  const sendAsPage = async (')
+  t.ok(page && !page.includes('shareNew(') && !page.includes("'post.share'"), 'a Page post never uses the person share, only shareNewAsPage')
+  const retry = page.slice(page.indexOf('await action.run(async () => {'), page.indexOf('if (pageRetryRef.current !== pending) return'))
+  t.ok(retry.includes('pending.retry()') && retry.includes('shareNewAsPage('), 'the retry branch shares inside the same action.run')
   t.absent(src.includes("'post.share'"), 'the screen never sends post.share itself')
 })

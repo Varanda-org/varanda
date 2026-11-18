@@ -7,9 +7,11 @@
 // never anything else). With varanda-serve or a manual configuration, a
 // neutral 'foto' tile is shown and nothing is fetched. While loading: a soft placeholder (the
 // parent gives the tile its aspect ratio). On failure: 'foto indisponível';
-// a tap retries. A 404 or a network error (blocks reach the seeder a moment
-// after the post) is first retried automatically after 2, 5 and 15 s while
-// the tile is mounted (retryDelay); a length or SHA-256 mismatch never is.
+// a tap retries. A 404 (blocks reach the seeder a moment after the post), a
+// 502, 503 or 504 of our own origin (an update restarts the seeder) or a
+// network error is first retried automatically on the ladder of
+// ../media/cache.js while the tile is mounted (retryDelay); a length or
+// SHA-256 mismatch never is.
 // URLs live in a shared LRU (../media/cache.js). Photos with persist also go
 // to the kept store (../media/keptLoad.js), read back on the next start with
 // no fetch. persist (default true) is

@@ -176,6 +176,9 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
   // them before it zeroes the signer and closes storage.
   const inflight = new Set()
   const links = new Set()
+  // A get on a peek core waits for a peer until its timeout even after the
+  // link dies; close() closes these so the drain does not wait it out.
+  const peekCores = new Set()
   let chain = Promise.resolve()
 
   function track (p) {
@@ -363,7 +366,9 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     const left = () => Math.max(1, deadline - Date.now())
     const link = await openLink(deadline)
     const q = new Hypercore(memoryStorage({ pageSize: PEEK_CORE_PAGE_SIZE }), b4a.from(key, 'hex'), { valueEncoding: 'binary' })
+    peekCores.add(q)
     try {
+      if (closed) throw new Error(NO_SEEDER)
       await q.ready()
       q.replicate(link.noise)
       let raw0
@@ -395,6 +400,7 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
       })
     } finally {
       links.delete(link)
+      peekCores.delete(q)
       link.noise.destroy()
       await q.close().catch(noop)
     }
@@ -640,6 +646,8 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     closed = true
     for (const link of links) link.noise.destroy()
     links.clear()
+    for (const q of peekCores) q.close().catch(noop)
+    peekCores.clear()
     closing = (async () => {
       const drained = (async () => {
         while (busy()) {
