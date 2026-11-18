@@ -2698,7 +2698,7 @@ function Member () {
         http: { seenStart, seenFinish },
         avisos: sent
       })
-      if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return
+      if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return undefined
       // Answered or failed, the invite monitor no longer waits for it.
       stepFirstPass({ type: 'pass', member })
       if (result.avisos) {
@@ -2716,6 +2716,7 @@ function Member () {
       if (result.testimonialsChanged) testimonialsChanged()
       if (result.momentsChanged) refreshMomentSeen().catch(() => {})
       if (result.groupChanged) bumpSeen()
+      return result
     }
     const scheduler = createSeenScheduler({
       run,

@@ -377,7 +377,7 @@ const isSeenHash = (v) => typeof v === 'string' && SEEN_HASH_RE.test(v)
 const isSeenBlob = (v) => typeof v === 'string' && v.length === SEEN_BLOB_B64 && SEEN_B64_RE.test(v)
 
 export const seenStart = async ({ member, action }) => {
-  const data = await call('POST', '/account/seen/start', { member, action })
+  const data = await call('POST', '/account/seen/start', { member, action }, { withStatus: true })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
   return { nonce: data.nonce }
 }
@@ -393,7 +393,7 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
   }
   let data
   try {
-    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS })
+    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS, withStatus: true })
   } catch (err) {
     const b = err.body || {}
     delete err.body
