@@ -283,6 +283,8 @@ test('DM loads older pages near the top only after the person scrolled, once per
     userScrolled: { current: false },
     olderLive: { current: { hasNext: true, loading: false, failed: false, loadOlder: () => { loads++ } } },
     releaseEnd: () => { releases++ },
+    openRun: { current: { started: false } },
+    settleOpen () {},
     scrollFrame: { current: {} },
     setShowJump () {},
     endPin: { current: { pinned: true, newest: 'b', lastY: null } },
@@ -355,6 +357,8 @@ test('group loads older pages near the top only after the person scrolled, once 
     userScrolled: { current: false },
     olderLive: { current: { hasNext: true, loading: false, failed: false, loadOlder: () => { loads++ } } },
     releaseEnd: () => { releases++ },
+    openRun: { current: { started: false } },
+    settleOpen () {},
     scrollFrame: { current: {} },
     setShowJump () {},
     endPin: { current: { pinned: true, newest: 'b', lastY: null } },
@@ -435,6 +439,7 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
       setFlashKey: (key) => { flash = key },
       setQuoteToast: (value) => { toast = value },
       AccessibilityInfo: { announceForAccessibility: (text) => announcements.push(text) },
+      indexJump: { current: null },
       useCallback: (fn) => fn
     }
     const fire = (id) => {
@@ -501,6 +506,13 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
       olderInitial,
       userScrolled: { current: true },
       olderState: { current: { fired: true } },
+      openRun: { current: { started: true, placed: true, older: 2, tries: 3 } },
+      openTimer: { current: null },
+      cursorRef: { current: 'one' },
+      viewableRef: { current: ['one'] },
+      setPlaced: (value) => { context.placed = value },
+      setOpenFailed: (value) => { context.failed = value },
+      setCursor: (value) => { context.cursor = value },
       setLastSeenKey: (value) => { context.seen = value },
       setShowJump: (value) => { context.shown = value },
       useEffect: (effect, next) => {
@@ -535,6 +547,11 @@ test('quote jumps settle once, preserve the pin on failure and cancel on navigat
     t.absent(env.away.current)
     t.absent(context.userScrolled.current, file + ' another thread waits for a new scroll before loading older pages')
     t.alike(context.olderState.current, olderInitial())
+    if (file === 'Mensagem') {
+      t.is(JSON.stringify(context.openRun.current), JSON.stringify({ started: false, placed: false, older: 0, tries: 0, grown: 0 }), 'another thread lands again')
+      t.is(context.cursorRef.current, null)
+      t.is(context.placed, false)
+    }
     t.is(context.seen, null)
     t.absent(context.shown)
     jump('one')
@@ -571,6 +588,10 @@ test('new own DM returns to the end while incoming messages preserve the reading
       setTimeout: () => 2,
       setLastSeenKey: (key) => { seen = key },
       setShowJump () {},
+      openRun: { current: { started: true } },
+      planRef: { current: { kind: 'row', key: 'x' } },
+      releaseEnd () {},
+      settleOpen () {},
       listRef: { current: { scrollToEnd: () => follows++ } }
     }
     runInNewContext(src.slice(followStart, followEnd) + src.slice(start, end), env)
@@ -579,6 +600,186 @@ test('new own DM returns to the end while incoming messages preserve the reading
     t.is(seen, mine ? 'new' : 'old')
     t.ok(env.endPin.current.pinned)
   }
+})
+
+test('DM open lands on the first unread: the first newest run skips followEnd on a row or older plan', async (t) => {
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const src = source('screens/Mensagem.js')
+  const start = src.indexOf('  useEffect(() => {\n    if (!loaded || newest')
+  const end = src.indexOf('\n\n', start)
+  const followStart = src.indexOf('  const followEnd =')
+  const followEnd = src.indexOf('  const releaseEnd =', followStart)
+  for (const kind of ['end', 'row', 'older', null]) {
+    let follows = 0
+    let releases = 0
+    let settles = 0
+    const env = {
+      loaded: true,
+      newest: 'new',
+      gestureRows: [{ key: 'new', mine: false }],
+      useEffect: (fn) => fn(),
+      useCallback: (fn) => fn,
+      opened: { current: false },
+      away: { current: false },
+      endPin: { current: { pinned: true, newest: '' } },
+      jumpTimer: { current: null },
+      settleTimer: { current: null },
+      latestKeyRef: { current: 'new' },
+      pinToEnd,
+      clearTimeout () {},
+      setTimeout: () => 2,
+      setLastSeenKey () {},
+      setShowJump () {},
+      openRun: { current: { started: false } },
+      planRef: { current: kind === null ? null : { kind, key: 'new' } },
+      releaseEnd: () => { releases++ },
+      settleOpen: () => { settles++ },
+      listRef: { current: { scrollToEnd: () => follows++ } }
+    }
+    runInNewContext(src.slice(followStart, followEnd) + src.slice(start, end), env)
+    const lands = kind === 'row' || kind === 'older'
+    t.ok(env.openRun.current.started)
+    t.is(follows, lands ? 0 : 1, kind + ' open follows the end only without unread')
+    t.is(env.away.current, lands)
+    t.is(releases, lands ? 1 : 0)
+    t.is(settles, lands ? 0 : 1, 'an end open is placed at once')
+  }
+})
+
+test('DM marks seen only after the landing, and the viewability handler stays off the scroll path', (t) => {
+  const src = source('screens/Mensagem.js')
+  const effect = src.slice(src.indexOf('  const endShown ='), src.indexOf('  const userScroll ='))
+  t.ok(effect.includes("newest === '' || !placed) {"), 'dm.seen waits for placed')
+  t.ok(effect.includes('seenAt.current = { peer, upTo }'))
+  t.ok(effect.includes('setTimeout(() => flushSeen.current(), 400)'))
+  t.absent(src.includes("dm('dm.seen', { peer, upTo: null"), 'never a null upTo')
+  const scroll = src.slice(src.indexOf('  const userScroll ='), src.indexOf('  useEffect(', src.indexOf('  const userScroll =')))
+  t.absent(scroll.includes('const viewable ='), 'the viewability handler is outside the scroll path')
+  t.ok(src.indexOf('  const viewable = useCallback(') > 0)
+  t.ok(src.includes('onViewableItemsChanged={viewable}'))
+  t.ok(src.includes('onScrollToIndexFailed={indexFailed}'))
+  const cursor = src.slice(src.indexOf('  const moveCursor ='), src.indexOf('  const settleOpen ='))
+  t.ok(cursor.includes('if (!openRun.current.placed) return'), 'the cursor ignores rows before the landing')
+})
+
+test('DM quote jump to an unmeasured row reports it through onScrollToIndexFailed and keeps the pin', async (t) => {
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const src = source('screens/Mensagem.js')
+  const start = src.indexOf('  const scrollToKey =')
+  const end = src.indexOf('  // The thread as offer input:', start)
+  const announcements = []
+  const env = {
+    rows: [{ key: 'one' }],
+    rowsRef: { current: [{ key: 'one' }] },
+    away: { current: false },
+    endPin: { current: { pinned: true } },
+    pinToEnd,
+    jumpTimer: { current: null },
+    quoteTimer: { current: null },
+    indexJump: { current: null },
+    setTimeout: () => 1,
+    clearTimeout () {},
+    setFlashKey () {},
+    setQuoteToast () {},
+    AccessibilityInfo: { announceForAccessibility: (text) => announcements.push(text) }
+  }
+  const { jump, failed } = runInNewContext(src.slice(start, end) + '\n;({ jump: scrollToKey, failed: indexFailed })', env)
+  env.listRef = { current: { scrollToIndex: ({ index }) => failed({ index, averageItemLength: 50 }) } }
+  jump('one')
+  t.is(announcements.at(-1), 'Mensagem fora do trecho carregado')
+  t.ok(env.endPin.current.pinned, 'a failed jump puts the pin back')
+  t.absent(env.away.current)
+  t.is(env.indexJump.current, null)
+})
+
+test('group open lands on the first unread: the first newest run skips followEnd on a row or older plan', async (t) => {
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const src = source('screens/Grupo.js')
+  const start = src.indexOf('  useEffect(() => {\n    if (lastId === null) return')
+  const end = src.indexOf('\n\n', start)
+  const followStart = src.indexOf('  const followEnd =')
+  const followEnd = src.indexOf('  const releaseEnd =', followStart)
+  const openStart = src.indexOf('  const startOpen = () => {')
+  const openEnd = src.indexOf('  const last = rows', openStart)
+  t.ok(start > 0 && openStart > 0 && openEnd > openStart)
+  for (const kind of ['end', 'row', 'older', null]) {
+    let follows = 0
+    let releases = 0
+    let settles = 0
+    const env = {
+      lastId: 'w:2',
+      useEffect: (fn) => fn(),
+      useCallback: (fn) => fn,
+      useRef: (current) => ({ current }),
+      away: { current: false },
+      endPin: { current: { pinned: true, newest: null } },
+      settleTimer: { current: null },
+      pinToEnd,
+      clearTimeout () {},
+      setTimeout: () => 2,
+      openRun: { current: { started: false } },
+      planRef: { current: kind === null ? null : { kind, key: 'w:2' } },
+      releaseEnd: () => { releases++ },
+      settleOpen: () => { settles++ },
+      listRef: { current: { scrollToEnd: () => follows++ } }
+    }
+    runInNewContext(src.slice(followStart, followEnd) + src.slice(openStart, openEnd) + src.slice(start, end), env)
+    const lands = kind === 'row' || kind === 'older'
+    t.is(env.openRun.current.started, kind !== null, 'not loaded yet: the driver starts it')
+    t.is(follows, lands ? 0 : 1, kind + ' open follows the end only without unread')
+    t.is(env.away.current, lands)
+    t.is(releases, lands ? 1 : 0)
+    t.is(settles, kind === 'end' ? 1 : 0, 'an end open is placed at once')
+  }
+})
+
+test('group marks seen only after the landing, and the viewability handler stays off the scroll path', (t) => {
+  const src = source('screens/Grupo.js')
+  const cut = src.slice(src.indexOf('  const seenAt = seenCut(rawItems)'), src.indexOf('  const seenKey ='))
+  t.ok(cut.includes('if (!placed) cutRef.current = null'), 'no cut-off before the landing')
+  const effect = src.slice(src.indexOf('  const visible = node.visible !== false'), src.indexOf('  olderLive.current = {'))
+  t.ok(effect.includes("loadError !== '' || !placed) {"), 'group.seen waits for placed')
+  t.ok(effect.includes('setTimeout(() => flushSeen.current(), 400)'))
+  t.is(src.split("request('group.seen'").length, 2, 'one group.seen call, in markSeen')
+  const scroll = src.slice(src.indexOf('  const userScroll ='), src.indexOf('  useEffect(', src.indexOf('  const userScroll =')))
+  t.absent(scroll.includes('const viewable ='), 'the viewability handler is outside the scroll path')
+  t.ok(src.indexOf('  const viewable = useCallback(') > 0)
+  t.ok(src.includes('onViewableItemsChanged={viewable}'))
+  t.ok(src.includes('onScrollToIndexFailed={indexFailed}'))
+  const cursor = src.slice(src.indexOf('  const moveCursor ='), src.indexOf('  const settleOpen ='))
+  t.ok(cursor.includes('if (!openRun.current.placed) return'), 'the cursor ignores rows before the landing')
+  const driver = src.slice(src.indexOf("    if (openKind === 'older') {"), src.indexOf("    if (openKind === 'end') {"))
+  t.ok(driver.includes('walksRef.current.target() !== null'), 'no older page during a reload walk-back')
+})
+
+test('group quote jump to an unmeasured row reports it through onScrollToIndexFailed and keeps the pin', async (t) => {
+  const { pinToEnd } = await import('../src/dm-screen.js')
+  const src = source('screens/Grupo.js')
+  const start = src.indexOf('  const scrollToKey =')
+  const end = src.indexOf('  const hide = async', start)
+  const announcements = []
+  const env = {
+    rows: [{ key: 'one' }],
+    rowsRef: { current: [{ key: 'one' }] },
+    away: { current: false },
+    endPin: { current: { pinned: true } },
+    pinToEnd,
+    jumpTimer: { current: null },
+    quoteTimer: { current: null },
+    indexJump: { current: null },
+    setTimeout: () => 1,
+    clearTimeout () {},
+    setFlashKey () {},
+    setQuoteToast () {},
+    AccessibilityInfo: { announceForAccessibility: (text) => announcements.push(text) }
+  }
+  const { jump, failed } = runInNewContext(src.slice(start, end) + '\n;({ jump: scrollToKey, failed: indexFailed })', env)
+  env.listRef = { current: { scrollToIndex: ({ index }) => failed({ index, averageItemLength: 50 }) } }
+  jump('one')
+  t.is(announcements.at(-1), 'Mensagem fora do trecho carregado')
+  t.ok(env.endPin.current.pinned, 'a failed jump puts the pin back')
+  t.absent(env.away.current)
+  t.is(env.indexJump.current, null)
 })
 
 test('JumpToEnd is a 36 pt button with a 44 pt target, a dot, the count as hint and a fade', (t) => {
@@ -683,4 +884,221 @@ test('SwipeReply provides RowShift with the value its transform uses', (t) => {
   const src = source('ui/SwipeReply.js')
   t.ok(src.includes('transform: [{ translateX: reduce ? 0 : x }]'))
   t.ok(src.includes('<RowShift.Provider value={reduce ? null : x}>{children}</RowShift.Provider>'))
+})
+
+test('group open whose rows painted before the read starts the older walk from the driver', (t) => {
+  const src = source('screens/Grupo.js')
+  const start = src.indexOf('  useEffect(() => {\n    const run = openRun.current\n    if (openKind === null')
+  const end = src.indexOf('\n\n', start)
+  t.ok(start > 0)
+  for (const kind of ['older', 'row', 'end']) {
+    let loads = 0
+    let places = 0
+    let follows = 0
+    const env = {
+      useEffect: (fn) => fn(),
+      openKind: kind,
+      openRowKey: null,
+      loadingMore: false,
+      rowKeys: [],
+      walkEnds: 0,
+      openRun: { current: { started: false, placed: false, older: 0 } },
+      startOpenRef: { current: () => { env.openRun.current.started = true; return kind === 'end' } },
+      olderLive: { current: { loading: false, loadOlder: () => { loads++ } } },
+      walksRef: { current: { target: () => null } },
+      settleOpen () {},
+      away: { current: true },
+      setLastSeenKey () {},
+      latestKeyRef: { current: null },
+      endPin: { current: { pinned: false } },
+      followEnd: () => { follows++ },
+      placeOpenRow: () => { places++ }
+    }
+    runInNewContext(src.slice(start, end), env)
+    t.is(loads, kind === 'older' ? 1 : 0, kind + ': the walk starts in the same run')
+    t.is(env.openRun.current.older, kind === 'older' ? 1 : 0)
+    t.is(places, kind === 'row' ? 1 : 0)
+    t.is(follows, kind === 'end' ? 1 : 0)
+  }
+})
+
+test('content-size frames place the open row without spending its tries, bounded', async (t) => {
+  const { GROWTH_PLACES, settleStep } = await import('../src/readPosition.js')
+  for (const file of ['Mensagem', 'Grupo']) {
+    const src = source('screens/' + file + '.js')
+    const start = src.indexOf('  const placeOpenRow = useCallback(')
+    const end = src.indexOf('  }, [settleOpen])', start) + '  }, [settleOpen])'.length
+    let scrolls = 0
+    let settles = 0
+    const env = {
+      useCallback: (fn) => fn,
+      openRun: { current: { started: true, placed: false, tries: 2, grown: 0 } },
+      planRef: { current: { kind: 'row', key: 'b' } },
+      rowKeysRef: { current: ['a', 'b'] },
+      listRef: { current: { scrollToIndex: () => { scrolls++ } } },
+      indexJump: { current: null },
+      openTimer: { current: null },
+      settleStep,
+      GROWTH_PLACES,
+      settleOpen: () => { settles++ },
+      clearTimeout () {},
+      setTimeout: () => 1
+    }
+    const place = runInNewContext(src.slice(start, end) + '\n;placeOpenRow', env)
+    for (let i = 0; i < GROWTH_PLACES + 5; i++) place(true)
+    t.is(env.openRun.current.tries, 2, file + ': growth spends no try')
+    t.is(env.openRun.current.grown, GROWTH_PLACES, file + ': growth is bounded')
+    t.is(scrolls, GROWTH_PLACES)
+    place()
+    t.is(env.openRun.current.tries, 3, file + ': a timed pass spends one')
+    t.is(settles, 0)
+    t.ok(src.includes('if (openHeading()) placeOpenRow(true)\n'), file + ': growth places the row while the open heads for it')
+    t.ok(src.includes('else followEnd()'), file + ': and follows the end otherwise')
+  }
+})
+
+test('the end counts as shown only when the cursor reached the newest row', (t) => {
+  for (const file of ['Mensagem', 'Grupo']) {
+    const src = source('screens/' + file + '.js')
+    t.ok(src.includes('  const endShown = placed && latestKey !== null && cursor === latestKey\n'), file + ': no sticky end open')
+    const start = src.indexOf('  const settleOpen = useCallback(')
+    const end = src.indexOf('  }, [moveCursor])', start) + '  }, [moveCursor])'.length
+    for (const atEnd of [true, undefined]) {
+      let cursor = null
+      const env = {
+        useCallback: (fn) => fn,
+        openRun: { current: { placed: false } },
+        openTimer: { current: null },
+        indexJump: { current: null },
+        latestKeyRef: { current: 'z' },
+        cursorRef: { current: null },
+        setPlaced () {},
+        setCursor: (key) => { cursor = key },
+        moveCursor () {},
+        clearTimeout () {}
+      }
+      runInNewContext(src.slice(start, end) + '\n;settleOpen', env)(atEnd)
+      t.is(cursor, atEnd ? 'z' : null, file + ': an end open starts the cursor at the newest row')
+      t.ok(env.openRun.current.placed)
+    }
+  }
+})
+
+test('a failed older page during the open leaves only the end to mark', (t) => {
+  const dm = source('screens/Mensagem.js')
+  t.ok(dm.includes('  const openMissed = openKey !== null && !rowKeys.includes(openKey) && openFailed\n'))
+  t.ok(dm.includes("  const upTo = !openMissed && cursorRow && typeof cursorRow.id === 'string' ? cursorRow.id : null\n"), 'DM: no upTo past a page that failed')
+  const group = source('screens/Grupo.js')
+  t.ok(group.includes('  const openMissed = openKey !== null && !rowKeys.includes(openKey) && openFailed\n'))
+  const cut = group.slice(group.indexOf('  const seenAt = seenCut(rawItems)'), group.indexOf('  const seenKey ='))
+  t.ok(cut.includes('else cutRef.current = cursorItem && !openMissed ?'), 'group: no cut past a page that failed')
+  t.ok(cut.includes('else if (endShown) cutRef.current = seenAt'), 'the end still marks')
+})
+
+test('an older page that fails stays failed for the whole open, through later refreshes', async (t) => {
+  for (const file of ['Mensagem', 'Grupo']) {
+    const src = source('screens/' + file + '.js')
+    t.ok(src.includes('loading: loadingMore, failed: openFailed })'), file + ': the plan reads the sticky flag, not the live error')
+    t.is(src.split('setOpenFailed(false)').length, 2, file + ': only the reset of the open clears it')
+    const reset = src.slice(src.indexOf('    openRun.current = { started: false'), src.indexOf('    return () => {', src.indexOf('    openRun.current = { started: false')))
+    t.ok(reset.includes('setOpenFailed(false)'), file + ': cleared when another chat opens')
+  }
+  const failing = async () => { throw new Error('falhou') }
+  const calls = []
+  const record = (name) => (v) => calls.push([name, v])
+  const dm = source('screens/Mensagem.js')
+  const dmLoad = dm.slice(dm.indexOf('  const loadOlder = async () => {'), dm.indexOf('  olderLive.current = {'))
+  const context = { live: true }
+  const dmEnv = {
+    peer: 'a'.repeat(64),
+    nextRef: { current: 'c1' },
+    loadingMore: false,
+    endPin: { current: {} },
+    pinToEnd: (state) => state,
+    setLoadingMore: record('loading'),
+    reactionContextRef: { current: context },
+    dm: failing,
+    olderErr: { current: false },
+    setLoadError: record('error'),
+    errorText: (err) => err.message,
+    setOpenFailed: record('failed')
+  }
+  await runInNewContext(dmLoad + '\nloadOlder', { ...dmEnv })()
+  t.alike(calls, [['loading', true], ['error', 'falhou'], ['failed', true], ['loading', false]], 'DM: failed before the spinner stops, in one batch')
+  calls.length = 0
+  const moved = { current: context }
+  // The person opened another conversation while the page was in flight.
+  await runInNewContext(dmLoad + '\nloadOlder', { ...dmEnv, reactionContextRef: moved, dm: async () => { moved.current = { live: true }; throw new Error('falhou') } })()
+  t.absent(calls.some(([name]) => name === 'failed'), 'DM: a page of another conversation does not fail this open')
+  calls.length = 0
+  const group = source('screens/Grupo.js')
+  const groupLoad = group.slice(group.indexOf('  const loadOlder = useCallback(async () => {'), group.indexOf('\n\n  const rawItems'))
+  const groupEnv = {
+    useCallback: (fn) => fn,
+    storeRef: { current: { next: { at: 'a', writer: 'w', seq: 1 } } },
+    loadingMore: false,
+    endPin: { current: {} },
+    pinToEnd: (state) => state,
+    setLoadingMore: record('loading'),
+    setMoreError: record('error'),
+    readGroup: failing,
+    readNewest () {},
+    commitRead () {},
+    errorText: (err) => err.message,
+    setOpenFailed: record('failed')
+  }
+  await runInNewContext(groupLoad + '\nloadOlder', groupEnv)()
+  t.alike(calls, [['loading', true], ['error', ''], ['error', 'falhou'], ['failed', true], ['loading', false]], 'group: failed before the spinner stops, in one batch')
+})
+
+test('a reload walk that ends without a commit wakes the group open it held back', async (t) => {
+  const src = source('screens/Grupo.js')
+  const walk = src.slice(src.indexOf('  const walkOlder = useCallback(async (walk, read) => {'), src.indexOf('  }, [readGroup, noteRead])') + '  }, [readGroup, noteRead])'.length)
+  t.ok(walk.length > 100)
+  for (const ended of [true, false]) {
+    let ends = 0
+    let stores = 0
+    const env = {
+      useCallback: (fn) => fn,
+      walksRef: { current: { current: () => true, target: () => ({ pages: 3 }), end: () => ended } },
+      applyPage: () => ({ next: { at: 'a', writer: 'w', seq: 1 } }),
+      EMPTY_PAGES: {},
+      reloadDone: () => false,
+      readGroup: async () => { throw new Error('falhou') },
+      setStore: () => { stores++ },
+      noteRead () {},
+      setWalkEnds: (fn) => { ends = fn(ends) }
+    }
+    await runInNewContext(walk + '\nwalkOlder', env)({ token: 1, target: { pages: 3 } }, {})
+    t.is(ends, ended ? 1 : 0, ended ? 'a failed walk that ends says so' : 'a superseded walk leaves it to the newer one')
+    t.is(stores, 0, 'nothing committed')
+  }
+  const newest = src.slice(src.indexOf('  const readNewest = useCallback('), src.indexOf('  }, [readGroup, noteRead, walkOlder, asPage.page])'))
+  t.ok(newest.includes('if (walks.end(walk.token)) setWalkEnds((n) => n + 1)'), 'a failed newest read ends its walk the same way')
+  t.ok(src.includes('  }, [openKind, openRowKey, loadingMore, rowKeys, walkEnds, settleOpen, placeOpenRow, followEnd])'), 'the open driver runs again on a walk end')
+  const start = src.indexOf('  useEffect(() => {\n    const run = openRun.current\n    if (openKind === null')
+  const driver = src.slice(start, src.indexOf('\n\n', start))
+  let loads = 0
+  let target = { pages: 3 }
+  const env = {
+    useEffect: (fn) => fn(),
+    openKind: 'older',
+    openRowKey: null,
+    loadingMore: false,
+    rowKeys: [],
+    walkEnds: 0,
+    openRun: { current: { started: true, placed: false, older: 1 } },
+    startOpenRef: { current: () => false },
+    olderLive: { current: { loading: false, loadOlder: () => { loads++ } } },
+    walksRef: { current: { target: () => target } },
+    settleOpen () {},
+    followEnd () {},
+    placeOpenRow () {}
+  }
+  runInNewContext(driver, { ...env })
+  t.is(loads, 0, 'held back during the walk')
+  target = null
+  runInNewContext(driver, { ...env, walkEnds: 1 })
+  t.is(loads, 1, 'goes on once the walk ended')
+  t.is(env.openRun.current.older, 2)
 })
