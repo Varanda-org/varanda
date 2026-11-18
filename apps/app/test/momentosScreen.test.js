@@ -90,7 +90,7 @@ test('the delete uncertain path never resends', (t) => {
 test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) => {
   const src = read('src/screens/Publicar.js')
   t.ok(src.includes("export const MODES = [{ id: 'post', label: 'Publicação' }, { id: 'moment', label: 'Momento' }]"), 'Publicação | Momento')
-  t.ok(src.includes('<Segmented options={MODES}'), 'Segmented switch')
+  t.ok(src.includes('<SegmentedControl options={MODES}'), 'Segmented switch')
   t.ok(src.includes('const momentOn = momentComposerOn({ canPublish: canPublishMoment(node), reply: replyProp, quote })'), 'gated on the capability, as the person or as a Page')
   t.ok(src.includes('files.length === 1'), 'exactly one photo')
   t.ok(src.includes('export const MOMENT_TEXT_MAX = 200'), '200 code points')
@@ -112,6 +112,11 @@ test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) =>
   t.ok(send.includes('isLocked(err)') && send.includes('MOMENT_LOCKED'), 'locked key asks for the passkey')
   t.ok(send.includes('MEDIA_STALE') && send.includes('kept.clear()'), 'stale item is put again on the next press')
   t.ok(src.includes('DRAFT_KEPT'), 'post draft kept')
+})
+
+test('Publicar uses the shared checkbox mark and upload progress bar', (t) => {
+  const src = read('src/screens/Publicar.js')
+  t.ok(src.includes('<CheckboxMark checked={webShare} disabled={held} />') && src.includes('<ProgressBar value={item.progress} height={4}'), 'shared checkbox and 4 pt progress bar')
 })
 
 test('every surface is gated on node.hosted, never Platform.OS', (t) => {
