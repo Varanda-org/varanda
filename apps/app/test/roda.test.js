@@ -22,6 +22,7 @@ const peek = (key, entries, extra = {}) => ({ key, length: 100, entries, invalid
 const peekedOf = (byAuthor) => new Map(Object.entries(byAuthor).map(([key, list]) => [key, peek(key, list.map(([seq, rec]) => ({ seq, record: rec })))]))
 const page = (...refs) => ({ items: refs.map((r) => ({ ref: r, to: 'ignored' })) })
 const item = (author, seq, replyTo, at = AT, extra = {}) => ({ kind: 'post', author, seq, at, text: 't' + seq, replyTo: replyTo ? to(replyTo) : null, quote: null, media: null, preview: null, name: null, username: null, avatar: null, ...extra })
+const pendingItem = (author, replyTo) => ({ kind: 'post', author, at: AT, text: 'oi', replyTo: to(replyTo) })
 const refs = (list) => list.map((i) => ref(i.author, i.seq))
 
 const TOP = ref(A, 1)
@@ -337,6 +338,128 @@ test('commentRows: the label uses the loaded total over the direct-count floor',
   t.is(own[1].label, 'Ver 1 resposta', 'an own reply not counted yet still shows')
   t.is(rodaLabel(1, false), 'Ver 1 resposta')
   t.is(rodaLabel(4, true), 'Ocultar respostas')
+})
+
+test('commentRows: a pending root reply goes first without a toggle', async (t) => {
+  const { commentRows } = await load()
+  const pending = { id: 'send-1', toRoot: true, holder: null, item: pendingItem(A, TOP) }
+  const base = { comments: [item(B, 1, TOP)], postAuthor: A }
+  const rows = commentRows({ ...base, pending })
+  t.alike(rows[0], { kind: 'comment', item: pending.item, depth: 0, isAuthor: true, pending: true, key: 'comment:pending:send-1' })
+  t.alike(rows.slice(1), commentRows(base))
+})
+
+test('commentRows: a closed roda shows its pending reply after the unchanged toggle', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const comment = item(B, 1, TOP)
+  const pending = { id: 'send-1', toRoot: false, holder, item: pendingItem(C, ref(D, 1)) }
+  const base = {
+    comments: [comment, comment],
+    rodas: { [holder]: [item(D, 1, holder)] },
+    counts: { [holder]: 1 },
+    more: { [holder]: true },
+    errors: { [holder]: 'falhou' },
+    postAuthor: A
+  }
+  const rows = commentRows({ ...base, pending })
+  t.alike(rows.slice(0, 2), commentRows(base), 'the toggle keeps its count and label')
+  t.alike(rows.slice(2), [{ kind: 'reply', item: pending.item, parent: comment, depth: 1, quote: null, isAuthor: false, pending: true, key: 'reply:pending:send-1' }])
+})
+
+test('commentRows: a pending reply under a closed comment without a toggle follows the comment', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const pending = { id: 'send-1', toRoot: false, holder, item: pendingItem(C, holder) }
+  const rows = commentRows({ comments: [item(B, 1, TOP)], pending })
+  t.alike(rows.map((r) => r.key), ['comment:' + holder, 'reply:pending:send-1'])
+})
+
+test('commentRows: an open roda shows its pending reply after the replies and before more and error', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const answered = ref(C, 1)
+  const pending = { id: 'send-1', toRoot: false, holder, item: pendingItem(A, answered) }
+  const base = {
+    comments: [item(B, 1, TOP)],
+    rodas: { [holder]: [item(C, 1, holder, AT, { name: 'Cris' }), item(D, 1, holder)] },
+    open: { [holder]: true },
+    totals: { [holder]: 2 },
+    more: { [holder]: true },
+    errors: { [holder]: 'falhou' },
+    postAuthor: A
+  }
+  const rows = commentRows({ ...base, pending })
+  const confirmed = commentRows(base)
+  t.alike(rows.slice(0, 4), confirmed.slice(0, 4))
+  t.alike(rows.slice(5), confirmed.slice(4))
+  t.is(rows[4]?.key, 'reply:pending:send-1')
+  t.is(rows[4]?.isAuthor, true)
+  t.alike(rows[4]?.quote, { ref: answered, author: C, name: 'Cris', username: null, text: 't1' })
+  const missing = { ...pending, item: pendingItem(A, ref(D, 9)) }
+  t.is(commentRows({ ...base, pending: missing })[4]?.quote, null, 'an unloaded target leaves no quote')
+})
+
+test('commentRows: an open roda with no confirmed replies shows its pending reply', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const pending = { id: 'send-1', toRoot: false, holder, item: pendingItem(C, holder) }
+  const rows = commentRows({ comments: [item(B, 1, TOP)], open: { [holder]: true }, counts: { [holder]: 0 }, pending })
+  t.alike(rows.map((r) => r.key), ['comment:' + holder, 'toggle:' + holder, 'reply:pending:send-1'])
+  t.is(rows[1].count, 0)
+})
+
+test('commentRows: malformed pending input or a missing holder leaves the existing rows alone', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const base = { comments: [item(B, 1, TOP)] }
+  const pending = { id: 'send-1', toRoot: false, holder, item: pendingItem(C, holder) }
+  const rows = commentRows(base)
+  const invalid = [
+    null,
+    [],
+    { ...pending, holder: null },
+    { ...pending, holder: ref(D, 1) },
+    { ...pending, id: undefined },
+    { ...pending, id: '' },
+    { ...pending, id: 1 },
+    { ...pending, item: null },
+    { ...pending, item: pendingItem('bad', holder) },
+    { ...pending, item: { ...pending.item, kind: 'like' } },
+    { ...pending, item: item(C, 1, holder) },
+    { ...pending, item: { ...pending.item, seq: null } }
+  ]
+  for (const value of invalid) t.alike(commentRows({ ...base, pending: value }), rows)
+})
+
+test('commentRows: pending flags in loaded comments and replies cannot show seq-less rows', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const comment = item(B, 1, TOP)
+  const reply = item(C, 1, holder)
+  const base = { comments: [comment], rodas: { [holder]: [reply] }, open: { [holder]: true }, totals: { [holder]: 2 } }
+  const rows = commentRows({
+    ...base,
+    comments: [{ ...pendingItem(A, TOP), pending: true }, comment],
+    rodas: { [holder]: [{ ...pendingItem(D, holder), pending: true }, reply] }
+  })
+  t.alike(rows, commentRows(base))
+})
+
+test('commentRows: pending ids give distinct keys without mutating inputs', async (t) => {
+  const { commentRows } = await load()
+  const holder = ref(B, 1)
+  const input = {
+    comments: [item(B, 1, TOP)],
+    rodas: { [holder]: [item(C, 1, holder)] },
+    open: { [holder]: true },
+    pending: { id: 'send-1', toRoot: false, holder, item: pendingItem(A, holder) }
+  }
+  const before = structuredClone(input)
+  const first = commentRows(input)
+  const second = commentRows({ ...input, pending: { ...input.pending, id: 'send-2' } })
+  t.alike(input, before)
+  t.alike([first.at(-1).key, second.at(-1).key], ['reply:pending:send-1', 'reply:pending:send-2'])
 })
 
 test('AUTHOR_TAG', async (t) => {

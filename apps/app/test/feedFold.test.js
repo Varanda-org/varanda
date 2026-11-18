@@ -311,6 +311,110 @@ test('an own reply adds a line when the root is shown and is dropped otherwise',
   t.is(foldFeed([mine], { originalOf: originals(root) }).rows[0].kind, 'comentarios', 'without ownKey it is anyone\'s comment')
 })
 
+test('a confirmed own reply adds a Você line and keeps the same rows', async (t) => {
+  const { foldFeed, withOwnReplies } = await load()
+  const root = post(S, 1, 'raiz')
+  const mine = post(ME, 4, 'eu comentei', root)
+  const items = [post(C, 1, 'antes'), root, post(D, 1, 'depois')]
+  const opts = { ownKey: ME }
+  const shown = foldFeed(withOwnReplies(items, [mine], ME), opts)
+  const line = { key: ref(ME, 4), name: 'Você', text: 'eu comentei' }
+  t.alike(shown.rows, foldFeed(items, opts).rows)
+  t.alike(shown.attached.get(ref(S, 1))?.lines, [line])
+
+  const synced = foldFeed(withOwnReplies([...items, { ...mine }], [mine], ME), opts)
+  t.alike(synced.rows, shown.rows)
+  t.alike(synced.attached.get(ref(S, 1)), shown.attached.get(ref(S, 1)), 'the same reply folds only once')
+})
+
+test('a confirmed own reply to an unseen root adds no row or card', async (t) => {
+  const { foldFeed, withOwnReplies } = await load()
+  const root = post(S, 1, 'raiz')
+  const mine = post(ME, 4, 'eu comentei', root)
+  const items = [post(C, 1, 'solto')]
+  const merged = withOwnReplies(items, [mine], ME)
+  t.alike(merged, [mine, ...items])
+  t.alike(foldFeed(merged, { ownKey: ME, pendingOf: () => true }), { rows: items, attached: new Map() })
+  t.alike(foldFeed(merged, { ownKey: ME, originalOf: originals(root) }), { rows: items, attached: new Map() })
+})
+
+test('only valid member replies merge, in the given order', async (t) => {
+  const { withOwnReplies } = await load()
+  const root = Object.freeze(post(S, 1, 'raiz'))
+  const mine = Object.freeze(post(ME, 4, 'eu', root))
+  const older = Object.freeze(post(ME.toUpperCase(), 3, 'eu antes', root))
+  const page = post(B, 4, 'da página', root)
+  const other = post(C, 4, 'de outra pessoa', root)
+  const invalid = [page, other, post(ME, 5, 'sem resposta'), post(ME, 0, 'sem ref', root), { ...mine, kind: 'repost' }, null]
+  const items = Object.freeze([root])
+  const own = Object.freeze([mine, ...invalid, older])
+  t.alike(withOwnReplies(items, own, ME.toUpperCase()), [mine, older, root])
+  t.is(withOwnReplies(items, invalid, ME), items)
+  t.is(withOwnReplies(items, own, null), items)
+  t.is(withOwnReplies(items, own, ''), items)
+  t.is(withOwnReplies(items, mine, ME), items)
+  t.alike(withOwnReplies(root, own, ME), [mine, older])
+})
+
+test('keeping an own reply replaces its ref, puts it first and caps the list', async (t) => {
+  const { keepOwnReply } = await load()
+  const root = post(S, 1, 'raiz')
+  const first = post(ME, 4, 'primeira', root)
+  const latest = Object.freeze(post(ME.toUpperCase(), 3, 'confirmada', root))
+  const last = post(ME, 2, 'antiga', root)
+  const list = Object.freeze([first, post(ME, 3, 'anterior', root), { ...latest }, last])
+  t.alike(keepOwnReply(list, latest), [latest, first, last])
+  t.alike(keepOwnReply(list, latest, 2), [latest, first])
+  t.is(keepOwnReply(list, post(ME, 0, 'sem ref', root)), list)
+
+  const many = Array.from({ length: 20 }, (_, i) => post(ME, 10 + i, 'outra', root))
+  t.alike(keepOwnReply(many, latest), [latest, ...many.slice(0, 19)])
+})
+
+test('dropping own replies removes matching refs and keeps identity if none match', async (t) => {
+  const { dropOwnReplies } = await load()
+  const root = post(S, 1, 'raiz')
+  const mine = Object.freeze(post(ME.toUpperCase(), 4, 'eu', root))
+  const older = post(ME, 3, 'eu antes', root)
+  const list = Object.freeze([mine, older, mine])
+  const refs = new Set([ref(ME, 4)])
+  t.alike(dropOwnReplies(list, refs), [older])
+  t.alike([...refs], [ref(ME, 4)])
+  t.is(dropOwnReplies(list, new Set([ref(B, 4)])), list)
+})
+
+test('a local reply goes once the feed carries it, and only then', async (t) => {
+  const { dropFedReplies } = await load()
+  const root = post(S, 1, 'raiz')
+  const fed = post(ME.toUpperCase(), 4, 'eu', root)
+  const waiting = post(ME, 5, 'ainda não', root)
+  const list = Object.freeze([waiting, post(ME, 4, 'eu', root)])
+  t.alike(dropFedReplies(list, [root, fed]), [waiting], 'the fed copy goes, case aside')
+  t.is(dropFedReplies(list, [root]), list, 'nothing fed keeps the same list')
+  t.is(dropFedReplies([], [fed]).length, 0)
+  t.is(dropFedReplies(list, null), list)
+  const { keepOwnReply } = await load()
+  t.is(dropFedReplies(keepOwnReply([], fed), [root, fed]).length, 0, 'an announcement the feed already carries is not kept')
+})
+
+test('known replies count distinct direct comments in a card or attachment', async (t) => {
+  const { foldFeed, knownReplies } = await load()
+  const root = post(S, 1, 'raiz')
+  const first = post(B, 1, 'primeiro', root)
+  const second = post(C, 1, 'segundo', root)
+  const deep = post(D, 1, 'resposta', first)
+  const deeper = post(E, 1, 'resposta à resposta', deep)
+  const replies = [deeper, deep, second, first]
+  t.is(knownReplies(foldFeed(replies, { originalOf: originals(root) }).rows[0]), 2)
+  t.is(knownReplies(foldFeed([root, ...replies]).attached.get(ref(S, 1))), 2)
+  t.is(knownReplies(null), 0)
+  t.is(knownReplies({ kind: 'comentarios', state: 'pending' }), 0)
+  t.is(knownReplies({ kind: 'post', comments: [{ top: ref(B, 1) }] }), 0)
+  t.is(knownReplies({ comments: {} }), 0)
+  const malformed = Object.freeze([null, 'top', {}, { top: 1 }, { top: '' }])
+  t.is(knownReplies({ comments: malformed }), 0)
+})
+
 test('blocked commenter and blocked root', async (t) => {
   const { foldFeed } = await load()
   const root = post(S, 1, 'raiz')

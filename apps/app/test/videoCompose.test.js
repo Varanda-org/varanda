@@ -232,6 +232,8 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
       }
     },
     confirm: () => {},
+    cacheGeneration: () => 0,
+    parseRef: (await import('../src/thread.js')).parseRef,
     seqOf: (value) => value.seq,
     published: (sent) => { published = true; draftText = sent; draft.clear() },
     canQueue: false,

@@ -2169,6 +2169,277 @@ test('the fast refusal: seederDownTtlMs 0 keeps the gate run', async (t) => {
   t.is(gate.stopped.reason, 'timeout', 'which waited out its deadline')
 })
 
+// ---- post.reply rides the live continuous run ----
+
+// A loopback relay in front of `url`: while `held` (true at first), a new
+// connection's answers are held, so its dial hangs in the handshake as on
+// hangingPort. release() lets every held answer through and stops holding;
+// drop() closes every connection, as a seeder that goes.
+async function heldRelay (t, url) {
+  const target = new URL(url)
+  const relay = { held: true, waiting: [], sockets: new Set() }
+  const server = net.createServer((socket) => {
+    const upstream = net.connect(Number(target.port), target.hostname)
+    for (const s of [socket, upstream]) {
+      relay.sockets.add(s)
+      s.on('error', () => {})
+      s.on('close', () => {
+        relay.sockets.delete(s)
+        socket.destroy()
+        upstream.destroy()
+      })
+    }
+    socket.pipe(upstream)
+    const answer = () => { if (!socket.destroyed) upstream.pipe(socket) }
+    if (relay.held) relay.waiting.push(answer)
+    else answer()
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const s of relay.sockets) s.destroy()
+    return new Promise((resolve) => server.close(() => resolve()))
+  }, { force: true })
+  relay.url = 'ws://127.0.0.1:' + server.address().port + target.pathname
+  relay.release = () => {
+    relay.held = false
+    for (const answer of relay.waiting.splice(0)) answer()
+  }
+  relay.drop = () => {
+    relay.waiting.length = 0
+    for (const s of [...relay.sockets]) s.destroy()
+  }
+  return relay
+}
+
+// gated() with one post (seq 1) for the replies to point at: length 2.
+async function gatedWithPost (t, { assoc = association(), ...options } = {}) {
+  const storage = memoryNodeStorage()
+  storage.close = async () => {}
+  const keyPair = crypto.keyPair()
+  const first = await certified(t, { storage, assoc, keyPair })
+  await first.web.request('post.create', { text: 'o post' })
+  await first.node.close()
+  const s = await setup(t, { storage, assoc, keyPair, writeGate: true, syncOptions: { retryMinMs: 100, retryMaxMs: 200 }, ...options })
+  return { ...s, key: first.key, to: first.key + ':1' }
+}
+
+// A request whose settling is observable without awaiting it.
+function watched (p) {
+  const w = { settled: false }
+  w.done = p.then((value) => { w.settled = true; return value }, (err) => { w.settled = true; throw err })
+  w.done.catch(() => {})
+  return w
+}
+
+function linesOf (web, runId) {
+  return web.events.filter((e) => e.name === 'sync.event' && e.data.runId === runId).map((e) => e.data.line)
+}
+
+// A device whose continuous run is live and dialling a seeder that holds
+// its answer (not own-synced), with a reply pending on it.
+async function ridingReply (t, options = {}) {
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const relay = await heldRelay(t, seeder.url)
+  // The ride gets the whole deadline, so a slow runner never hands over to a
+  // gate run in a test that asserts there is none.
+  const s = await gatedWithPost(t, { assoc, seederUrl: relay.url, writeGateTimeoutMs: 15000, writeGateRideMs: 15000, ...options })
+  const { runId } = await s.web.request('sync.start', {})
+  return { ...s, relay, runId, from: s.web.events.length }
+}
+
+test('post.reply waits on the live continuous run for own-synced instead of a gate run', async (t) => {
+  t.timeout(60000)
+  const { web, key, to, relay, runId, from } = await ridingReply(t)
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(500)
+  t.absent(reply.settled, 'the reply waits while the seeder holds its answer')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no run started or stopped while it waits')
+  relay.release()
+  t.alike(await reply.done, { seq: 2, ref: key + ':2' }, 'the reply appends at the next seq once the run reports the diary')
+  const after = web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no sincronizando antes de publicar line')
+  const synced = after.findIndex((e) => e.name === 'sync.event' && e.data.runId === runId && e.data.line === 'diário próprio sincronizado (2)')
+  t.ok(synced !== -1, 'the continuous run reported the own diary')
+  const stopped = after.findIndex((e) => e.name === 'sync.stopped' && e.data.runId === runId)
+  t.ok(stopped > synced, 'the continuous run was stopped only after it, for the append')
+  t.is(after[stopped].data.reason, 'preempted')
+  const started = after.filter((e) => e.name === 'sync.started')
+  t.is(started.length, 1, 'one run started: the restart')
+  t.is(started[0].data.once, false, 'no once run for the catch-up')
+  t.ok(started[0].data.runId > runId)
+  const status = await web.request('sync.status')
+  t.is(status.state, 'running', 'a continuous run is running again')
+  t.is(status.once, false)
+  await web.request('sync.stop')
+  t.is((await web.request('log.read', {})).entries.length, 3)
+})
+
+test('post.reply riding a run that never reports the own diary: the deadline refuses and writes nothing', async (t) => {
+  await testnet(t)
+  // A hanging dial: no own-synced and no link loss.
+  const port = await hangingPort(t)
+  const { web, to } = await gatedWithPost(t, { seederUrl: 'ws://127.0.0.1:' + port + '/seeder', writeGateTimeoutMs: 1500 })
+  const { runId } = await web.request('sync.start', {})
+  const from = web.events.length
+  const start = Date.now()
+  const refused = await errorOf(web.request('post.reply', { to, text: 'resposta' }))
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED])
+  t.ok(Date.now() - start >= 1400, 'at the deadline')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  t.is((await web.request('log.read', {})).entries.length, 2, 'nothing appended')
+  await web.request('sync.stop')
+})
+
+test('post.reply riding the run: a link loss refuses at once, writes nothing and leaves the run alone', async (t) => {
+  t.timeout(60000)
+  const { web, to, relay, runId, from } = await ridingReply(t)
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  t.absent(reply.settled)
+  const lost = retries(web)
+  const start = Date.now()
+  relay.drop()
+  const refused = await errorOf(reply.done)
+  t.alike([refused.code, refused.message], ['USAGE', NOT_SYNCED])
+  t.ok(Date.now() - start < 10000, 'at the link loss, not the deadline')
+  await until(() => retries(web) > lost, { name: 'the link loss', timeoutMs: 10000 })
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  t.alike(await web.request('sync.status'), { state: 'running', runId, once: false }, 'the same continuous run')
+  t.is((await web.request('log.read', {})).entries.length, 2, 'nothing appended')
+  // The next write meets the fast refusal.
+  const next = web.events.length
+  const again = await errorOf(web.request('post.reply', { to, text: 'resposta' }))
+  t.is(again.message, NOT_SYNCED)
+  t.absent(web.events.slice(next).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'refused at once')
+  t.is((await web.request('log.read', {})).entries.length, 2)
+  await web.request('sync.stop')
+})
+
+test('post.reply riding the run with seederDownTtlMs 0: a link loss does not refuse, the redial reports the diary', async (t) => {
+  t.timeout(60000)
+  const { web, key, to, relay, runId, from } = await ridingReply(t, { seederDownTtlMs: 0 })
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  const lost = retries(web)
+  relay.drop()
+  await until(() => retries(web) > lost, { name: 'the link loss', timeoutMs: 10000 })
+  await pause(300)
+  t.absent(reply.settled, 'still waiting after the link loss')
+  relay.release()
+  t.alike(await reply.done, { seq: 2, ref: key + ':2' })
+  const after = web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run')
+  t.ok(linesOf(web, runId).includes('diário próprio sincronizado (2)'), 'the same run redialled and reported the diary')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'stopped for the append only')
+  await web.request('sync.stop')
+})
+
+test('post.reply riding the run: a client that detaches meanwhile writes nothing', async (t) => {
+  t.timeout(60000)
+  const { web, node, to, relay } = await ridingReply(t)
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  web.port.close() // detach: the run stops and the intent is dropped
+  t.is((await errorOf(reply.done)).code, 'CLOSED', 'the client side is closed')
+  relay.release()
+  await pause(1000)
+  const second = await connectClient(node)
+  t.alike(await second.request('sync.status'), { state: 'idle' })
+  t.is((await second.request('log.read', {})).entries.length, 2, 'nothing appended')
+})
+
+test('post.reply riding a run stuck before own-synced hands over to the gate run after writeGateRideMs', async (t) => {
+  t.timeout(60000)
+  const { web, key, to, relay, runId, from } = await ridingReply(t, { writeGateRideMs: 300 })
+  await pause(200)
+  relay.held = false // later dials pass; the live run's stays stuck
+  const start = Date.now()
+  t.alike(await web.request('post.reply', { to, text: 'resposta' }), { seq: 2, ref: key + ':2' })
+  t.ok(Date.now() - start >= 250, 'after the ride')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted', 'the stuck run was stopped')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const gate = (await runsSince(web, from)).find((r) => r.lines[0] === GATE_LINE)
+  t.ok(gate, 'a gate run')
+  t.ok(gate.lines.includes('diário próprio sincronizado (2)'), 'which reported the own diary before the write')
+})
+
+test('post.reply riding a run that ends on its own falls through to the gate run and writes once', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  // The continuous run's startup is held before its first dial and then
+  // fails (as a storage error would): the run ends with an error, nobody
+  // stops it. Only that first startup fails; the gate run's goes through.
+  let first = true
+  let reached
+  const held = new Promise((resolve) => { reached = resolve })
+  let fail
+  const failed = new Promise((resolve, reject) => { fail = reject })
+  failed.catch(() => {})
+  const startupGate = async (point) => {
+    if (point !== 'sweeps' || !first) return
+    first = false
+    reached()
+    await failed
+  }
+  // The ride gets the whole deadline: without the wake at the run's end the
+  // ride outlasts it and the reply is refused.
+  const { web, key, to } = await gatedWithPost(t, { assoc, seederUrl: seeder.url, writeGateTimeoutMs: 15000, writeGateRideMs: 15000, syncOptions: { retryMinMs: 100, retryMaxMs: 200, startupGate } })
+  t.is((await web.request('log.read', {})).entries.length, 2)
+  const { runId } = await web.request('sync.start', {})
+  await held
+  const from = web.events.length
+  const reply = watched(web.request('post.reply', { to, text: 'resposta' }))
+  await pause(300)
+  t.absent(reply.settled, 'the reply rides the live run')
+  t.absent(web.events.slice(from).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  const start = Date.now()
+  fail(new Error('falha de teste'))
+  t.alike(await reply.done, { seq: 2, ref: key + ':2' })
+  t.ok(Date.now() - start < 10000, 'at the run end, not the ride bound')
+  t.is((await stoppedOf(web.events, runId)).reason, 'error', 'the riding run ended on its own')
+  await web.request('sync.stop') // runsSince waits for every run to stop
+  const gate = (await runsSince(web, from)).find((r) => r.lines[0] === GATE_LINE)
+  t.ok(gate, 'a gate run')
+  t.ok(gate.lines.includes('diário próprio sincronizado (2)'), 'which reported the own diary before the write')
+  const { entries } = await web.request('log.read', {})
+  t.is(entries.length, 3, 'one block appended')
+  t.is(entries.filter((e) => e.record.text === 'resposta').length, 1, 'the reply written once')
+})
+
+test('post.create while a continuous run is not own-synced still stops it for the gate run', async (t) => {
+  t.timeout(60000)
+  const { web, key, relay, runId, from } = await ridingReply(t)
+  const write = watched(web.request('post.create', { text: 'novo' }))
+  await until(() => web.events.some((e) => e.name === 'sync.stopped' && e.data.runId === runId), { name: 'the preemption', timeoutMs: 10000 })
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
+  await until(() => web.events.slice(from).some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), { name: 'the gate run', timeoutMs: 10000 })
+  relay.release()
+  t.alike(await write.done, { seq: 2, ref: key + ':2' })
+  await web.request('sync.stop')
+})
+
+test('post.reply under a run tracking the own diary takes the fast path, no gate run', async (t) => {
+  t.timeout(60000)
+  await testnet(t)
+  const assoc = association()
+  const seeder = await fakeSeeder(t, { signer: assoc.kp })
+  const { web, key, to } = await gatedWithPost(t, { assoc, seederUrl: seeder.url, writeGateTimeoutMs: 15000 })
+  const { runId } = await web.request('sync.start', {})
+  await until(() => linesOf(web, runId).includes('diário próprio sincronizado (2)'), { name: 'own-synced', timeoutMs: 20000 })
+  const from = web.events.length
+  t.alike(await web.request('post.reply', { to, text: 'resposta' }), { seq: 2, ref: key + ':2' })
+  const after = web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run')
+  t.absent(after.some((e) => e.name === 'sync.started' && e.data.once), 'no once run')
+  t.is((await stoppedOf(web.events, runId)).reason, 'preempted')
+  await web.request('sync.stop')
+})
+
 // ---- the device upkeep under the fast refusal ----
 // The sync boundary is replaced (as session-upkeep.test.js) so the runs'
 // events are driven by hand.
