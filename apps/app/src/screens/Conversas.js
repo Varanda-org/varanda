@@ -35,6 +35,7 @@ import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settle
 import { planRowPeeks, runRowPeeks } from '../rowPeek'
 import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Badge } from '../ui/Badge'
 import { ConversationRow, personTitle } from '../ui/ConversationRow'
 import { FilterChips } from '../ui/FilterChips'
 import { HistoryImportedNote } from '../ui/HistoryCopy'
@@ -821,7 +822,7 @@ function StripPart ({ kind, title, dot, onPress }) {
       style={({ pressed }) => [styles.stripPart, pressed && styles.pressed]}
     >
       <Text style={styles.stripLabel} numberOfLines={1}>{part.label}</Text>
-      {dot ? <View style={styles.dot} /> : null}
+      {dot ? <Badge /> : null}
     </Pressable>
   )
 }
@@ -836,6 +837,5 @@ const makeStyles = (colors) => StyleSheet.create({
   strip: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', paddingHorizontal: space.lg - space.sm },
   stripPart: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.xs, minHeight: layout.hit, minWidth: layout.hit, paddingHorizontal: space.sm, borderRadius: radius.sm },
   stripLabel: { ...type.more, color: colors.ink },
-  stripSep: { ...type.more, color: colors.soft },
-  dot: { width: 8, height: 8, borderRadius: radius.pill, backgroundColor: colors.accent }
+  stripSep: { ...type.more, color: colors.soft }
 })
