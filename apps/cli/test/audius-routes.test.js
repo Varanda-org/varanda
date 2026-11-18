@@ -14,6 +14,7 @@ const http = require('node:http')
 const crypto = require('hypercore-crypto')
 const b4a = require('b4a')
 const { signInvite } = require('@varanda/core/lib/invite')
+const { MUSIC_GENRES } = require('@varanda/rpc')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { RECHECK_MS } = require('../lib/account/member-session')
 const { parseAudiusConfig } = require('../lib/account/audius-provider')
@@ -34,6 +35,7 @@ const {
   TRENDINGS_PER_DAY,
   TRENDING_ASK,
   TRENDING_RETRY_MS,
+  MAX_TRENDING_LISTS,
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
@@ -183,7 +185,9 @@ function fakeApi (state) {
   // state.trendingHeld while state.trendingHold is set, and answers
   // state.trendingData when set; the trending playlists answer
   // state.plTrendingStatus, state.plTrendingHold, state.plTrendingHeld and
-  // state.plTrendingData the same way.
+  // state.plTrendingData the same way. Every trending track call records its
+  // genre query (null without one) in state.trendingGenres, and a call with a
+  // genre answers genreTrendingData unless state.trendingData is set.
   const withArt = (item) => {
     if (item === null || typeof item !== 'object') return item
     let out = item
@@ -219,10 +223,12 @@ function fakeApi (state) {
       return json(res, 200, { data: offset >= 492 ? data.slice(0, 3) : data })
     }
     if (p === '/v1/tracks/trending') {
+      const genre = url.searchParams.get('genre')
+      state.trendingGenres.push(genre)
       if (state.trendingHold) return state.trendingHeld.push(res)
       if (state.trendingStatus) return json(res, state.trendingStatus, { error: 'erro' })
       if (state.trendingData) return json(res, 200, { data: state.trendingData })
-      return json(res, 200, { data: trendingData() })
+      return json(res, 200, { data: genre === null ? trendingData() : genreTrendingData(genre) })
     }
     if (p === '/v1/playlists/trending') {
       if (state.plTrendingHold) return state.plTrendingHeld.push(res)
@@ -299,6 +305,16 @@ function trendingData () {
     track('Hot1', { title: 'Repetida' })
   ]
   while (data.length < 24) data.push(track('Hot' + data.length))
+  return data
+}
+
+// Two pages of one genre's week list. The provider's genre text can be
+// compound or another name than the one asked, and such a track still belongs
+// to the list the provider answered.
+function genreTrendingData (genre) {
+  const n = MUSIC_GENRES.indexOf(genre)
+  const data = []
+  for (let i = 0; i < 24; i++) data.push(track('Gen' + n + 'T' + i, { genre: i % 3 === 1 ? genre + ', Soul' : i % 3 === 2 ? 'Outro' : genre }))
   return data
 }
 
@@ -451,7 +467,7 @@ function fakeArt () {
 async function setup (t, { audius = true, moments = false, covers = false, streams = 16, caps = {}, accepted = true, timers = null } = {}) {
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
-  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false, storage: {}, signed: 0, trendingStatus: 0, trendingHold: false, trendingHeld: [], trendingData: null, plTrendingStatus: 0, plTrendingHold: false, plTrendingHeld: [], plTrendingData: null }
+  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false, storage: {}, signed: 0, trendingStatus: 0, trendingHold: false, trendingHeld: [], trendingData: null, trendingGenres: [], plTrendingStatus: 0, plTrendingHold: false, plTrendingHeld: [], plTrendingData: null }
   const dns = { moved: '127.0.0.1' }
   const api = fakeApi(state)
   const node = fakeNode()
@@ -3578,4 +3594,233 @@ test('audius: a playlist list lives no longer than a full playlist row it update
   t.is(miss.status, 404, 'the art route agrees')
   t.is((await s.post(token, 'trending', { kind: 'playlist' })).status, 200)
   t.is(playlistTrendingCalls(s), 2, 'the new list is a hit')
+})
+
+// --- the week's trending tracks of a genre -----------------------------------
+
+const JAZZ_IDS = Array.from({ length: 12 }, (_, i) => 'Gen' + MUSIC_GENRES.indexOf('Jazz') + 'T' + i)
+const genreIds = (genre) => Array.from({ length: 12 }, (_, i) => 'Gen' + MUSIC_GENRES.indexOf(genre) + 'T' + i)
+const nothingOfGenres = (text) => MUSIC_GENRES.every((g) => !text.includes(g))
+
+test('audius: the trending lists are bounded by the two kinds and the genre allowlist', async (t) => {
+  t.is(MAX_TRENDING_LISTS, 2 + MUSIC_GENRES.length)
+  t.is(MAX_TRENDING_LISTS, 26)
+  t.is(PROVIDER_CALLS_PER_DAY, 1760, 'the provider allowance is unchanged')
+})
+
+test('audius: a trending genre answers that genre\'s week list and asks the provider only the fixed list with that exact name', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const res = await s.post(token, 'trending?info=1', { genre: 'Jazz' })
+  t.is(res.status, 200)
+  t.alike(Object.keys(res.json).sort(), ['items', 'next'])
+  t.is(res.json.next, null)
+  t.alike(res.json.items.map((i) => i.id), JAZZ_IDS, 'the first PAGE_SIZE tracks, in order')
+  for (const it of res.json.items) t.alike(Object.keys(it).sort(), [...TRACK_KEYS, 'genre'].sort(), 'info as on search')
+  t.ok(res.json.items.some((i) => i.genre === 'Jazz, Soul'), 'a compound genre row is still returned')
+  t.ok(res.json.items.some((i) => i.genre === 'Outro'), 'and so is a row the provider tagged otherwise')
+
+  t.is(s.api.seen.length, 1)
+  const asked = s.api.seen[0]
+  t.is(asked.path, '/v1/tracks/trending')
+  t.alike(asked.query, { time: 'week', genre: 'Jazz', limit: '24', offset: '0', app_name: 'varanda' }, 'nothing else rides the URL')
+  t.is(asked.headers['x-api-key'], KEY, 'the key rides a header')
+  t.absent(asked.headers.authorization, 'no bearer')
+  t.ok(Object.keys(asked.headers).every((h) => PROVIDER_HEADERS.includes(h)), 'nothing else of ours')
+  t.absent(JSON.stringify(asked).includes(s.memberHex), 'never the member key')
+  t.absent(JSON.stringify(asked).includes(token), 'never the token')
+
+  const named = await s.post(token, 'trending?info=1', { kind: 'track', genre: 'Jazz' })
+  t.is(named.status, 200)
+  t.alike(named.json, res.json, '{ kind: track, genre } is { genre }')
+  t.alike(s.state.trendingGenres, ['Jazz'], 'one provider call')
+
+  for (const genre of ['Drum & Bass', 'Hip-Hop/Rap', 'R&B/Soul']) {
+    const r = await s.post(token, 'trending', { genre })
+    t.is(r.status, 200, genre)
+    t.alike(r.json.items.map((i) => i.id), genreIds(genre))
+    t.is(s.api.seen[s.api.seen.length - 1].query.genre, genre, genre + ' reaches the provider as that exact name')
+  }
+  t.alike(s.state.trendingGenres, ['Jazz', 'Drum & Bass', 'Hip-Hop/Rap', 'R&B/Soul'])
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: a trending genre off the allowlist, or with a playlist kind or an extra key, is refused before any counter, provider call or list', async (t) => {
+  const s = await setup(t, { caps: { trendings: 1 } })
+  const { token } = await s.login()
+  const bodies = [
+    { genre: 'Samba' },
+    { genre: 'jazz' },
+    { genre: 'JAZZ' },
+    { genre: ' Jazz' },
+    { genre: 'Techno, Tech House' },
+    { genre: 'Devotional' },
+    { genre: '' },
+    { genre: null },
+    { genre: 7 },
+    { genre: ['Jazz'] },
+    { genre: 'Jazz', kind: 'playlist' },
+    { kind: 'playlist', genre: 'Rock' },
+    { genre: 'Jazz', x: 1 },
+    { genre: 'Jazz', time: 'month' }
+  ]
+  for (const body of bodies) {
+    const res = await s.post(token, 'trending', body)
+    t.is(res.status, 400, JSON.stringify(body))
+    t.alike(res.json, { error: 'pedido-invalido' })
+  }
+  t.is(s.api.seen.length, 0, 'nothing reached the provider')
+  t.alike(s.routes.trendingSize(), { lists: 0, loads: 0 }, 'no list entry was made')
+  t.is((await s.post(token, 'trending', { genre: 'Jazz' })).status, 200, 'and no use was spent')
+})
+
+test('audius: one genre list serves every member, apart from other genres and the general list, and expires on its own', async (t) => {
+  const s = await setup(t)
+  const a = await s.login()
+  const b = await s.login(s.other)
+  for (let i = 0; i < 2; i++) {
+    for (const who of [a, b]) t.alike((await s.post(who.token, 'trending', { genre: 'Jazz' })).json.items.map((x) => x.id), JAZZ_IDS)
+  }
+  t.alike(s.state.trendingGenres, ['Jazz'], 'two members share one provider call')
+
+  s.clock.offset += CACHE_TTL_MS / 2
+  for (let i = 0; i < 2; i++) {
+    for (const who of [a, b]) {
+      t.alike((await s.post(who.token, 'trending', { genre: 'Rock' })).json.items.map((x) => x.id), genreIds('Rock'))
+      t.alike((await s.post(who.token, 'trending', {})).json.items.map((x) => x.id), HOT_IDS, 'a genre list never answers the general one')
+      t.alike((await s.post(who.token, 'trending', { genre: 'Jazz' })).json.items.map((x) => x.id), JAZZ_IDS, 'nor another genre')
+    }
+  }
+  t.alike(s.state.trendingGenres, ['Jazz', 'Rock', null], 'each list cached apart')
+
+  s.clock.offset += CACHE_TTL_MS / 2
+  for (const body of [{ genre: 'Jazz' }, { genre: 'Rock' }, {}]) t.is((await s.post(a.token, 'trending', body)).status, 200)
+  t.alike(s.state.trendingGenres, ['Jazz', 'Rock', null, 'Jazz'], 'past its TTL only the Jazz list was asked again')
+  t.alike(s.routes.trendingSize(), { lists: 3, loads: 0 }, 'one entry per list, none per member')
+})
+
+test('audius: a failed genre list holds only that list, and no other hold answers it', async (t) => {
+  const s = await setup(t, { caps: { trendings: 4 } })
+  const { token } = await s.login()
+  s.state.trendingStatus = 503
+  const failed = await s.post(token, 'trending', { genre: 'Jazz' })
+  t.is(failed.status, 503)
+  t.alike(failed.json, { error: 'indisponivel' })
+  s.state.trendingStatus = 0
+  const held = await s.post(token, 'trending', { genre: 'Jazz' })
+  t.is(held.status, 503, 'held')
+  t.alike(s.state.trendingGenres, ['Jazz'], 'a held call contacts nobody')
+  t.alike((await s.post(token, 'trending', { genre: 'Rock' })).json.items.map((x) => x.id), genreIds('Rock'), 'another genre answers')
+  t.alike((await s.post(token, 'trending', {})).json.items.map((x) => x.id), HOT_IDS, 'the general list answers')
+  t.is((await s.post(token, 'trending', { kind: 'playlist' })).status, 200, 'the playlists answer')
+  t.alike(s.state.trendingGenres, ['Jazz', 'Rock', null])
+  s.clock.offset += TRENDING_RETRY_MS
+  t.is((await s.post(token, 'trending', {})).status, 200, 'the uses of the failed and held calls were given back')
+  t.is((await s.post(token, 'trending', {})).status, 429, 'and only those')
+
+  const g = await setup(t)
+  const m = await g.login()
+  g.state.trendingStatus = 503
+  t.is((await g.post(m.token, 'trending', {})).status, 503)
+  g.state.trendingStatus = 0
+  t.is((await g.post(m.token, 'trending', {})).status, 503, 'the general list is held')
+  t.alike((await g.post(m.token, 'trending', { genre: 'Jazz' })).json.items.map((x) => x.id), JAZZ_IDS, 'a general hold never answers a genre call')
+  t.alike(g.state.trendingGenres, [null, 'Jazz'])
+})
+
+test('audius: genre requests leave no genre and no member in a log line or in stats, on a hit, a miss, a failure and a joined load', async (t) => {
+  const s = await setup(t)
+  const a = await s.login()
+  const b = await s.login(s.other)
+  t.is((await s.post(a.token, 'trending', { genre: 'Jazz' })).status, 200, 'a miss')
+  t.is((await s.post(b.token, 'trending', { genre: 'Jazz' })).status, 200, 'a hit')
+  s.state.trendingStatus = 503
+  t.is((await s.post(a.token, 'trending', { genre: 'Drum & Bass' })).status, 503, 'a failure')
+  s.state.trendingStatus = 0
+  t.is((await s.post(b.token, 'trending', { genre: 'Drum & Bass' })).status, 503, 'a held list')
+  s.state.trendingHold = true
+  const first = s.post(a.token, 'trending', { genre: 'Metal' })
+  t.ok(await s.until(() => s.state.trendingHeld.length === 1), 'the leader reached the provider')
+  const second = s.post(b.token, 'trending', { genre: 'Metal' })
+  await settle()
+  t.is(s.state.trendingHeld.length, 1, 'the second request joined it')
+  s.state.trendingHold = false
+  json(s.state.trendingHeld[0], 200, { data: genreTrendingData('Metal') })
+  const [ra, rb] = await Promise.all([first, second])
+  t.is(ra.status, 200)
+  t.alike(rb.json, ra.json, 'a joined load')
+  t.alike(s.state.trendingGenres, ['Jazz', 'Drum & Bass', 'Metal'])
+
+  t.ok(s.logs.length > 0)
+  for (const e of s.logs) {
+    const line = JSON.stringify(e)
+    t.ok(nothingOfGenres(line), 'no genre in ' + line)
+    t.absent(line.includes(s.memberHex) || line.includes(s.otherHex), 'no member in ' + line)
+    t.alike(Object.keys(e).sort(), ['event', 'reason'])
+  }
+  const lines = s.logs.filter((e) => e.reason === 'em-alta')
+  t.is(lines.length, 4)
+  for (const e of lines) t.alike(e, { event: 'audius', reason: 'em-alta' })
+  const stats = JSON.stringify(s.routes.stats())
+  t.ok(nothingOfGenres(stats), 'no genre in stats')
+  t.absent(stats.includes(s.memberHex) || stats.includes(s.otherHex), 'no member in stats')
+  t.alike(s.routes.trendingSize(), { lists: 3, loads: 0 })
+  noKeyAnywhere(t, s)
+})
+
+test('audius: one request per genre and per kind fills exactly MAX_TRENDING_LISTS lists, and asking again adds none', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const bodies = [{}, { kind: 'playlist' }, ...MUSIC_GENRES.map((genre) => ({ genre }))]
+  for (let i = 0; i < 2; i++) {
+    let wrong = 0
+    for (const body of bodies) if ((await s.post(token, 'trending', body)).status !== 200) wrong++
+    t.is(wrong, 0)
+    t.alike(s.routes.trendingSize(), { lists: 26, loads: 0 })
+  }
+  t.is(s.routes.trendingSize().lists, MAX_TRENDING_LISTS)
+  t.alike(s.state.trendingGenres, [null, ...MUSIC_GENRES], 'one provider call per track list')
+  t.is(playlistTrendingCalls(s), 1)
+})
+
+test('audius: the trendings cap is shared across genres and kinds, and the 201st call is 429 with no provider call', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const bodies = [{}, { kind: 'playlist' }, ...MUSIC_GENRES.map((genre) => ({ genre }))]
+  let wrong = 0
+  for (let i = 0; i < TRENDINGS_PER_DAY; i++) if ((await s.post(token, 'trending', bodies[i % bodies.length])).status !== 200) wrong++
+  t.is(wrong, 0)
+  const seen = s.api.seen.length
+  for (const body of [{ genre: 'Jazz' }, { genre: 'Tech House' }, {}, { kind: 'playlist' }]) {
+    const over = await s.post(token, 'trending', body)
+    t.is(over.status, 429, JSON.stringify(body))
+    t.alike(over.json, { error: 'limite-musica' })
+  }
+  t.is(s.api.seen.length, seen, 'no provider call over the cap')
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200, 'the provider allowance was not the limit')
+})
+
+test('audius: a track of a genre list shows its cover with no lookup, and a hit reads each flag from the track row', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  const listed = await s.post(token, 'trending?covers=1', { genre: 'Jazz' })
+  t.ok(listed.json.items.every((x) => x.cover === true))
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: JAZZ_IDS[3] }), 'image/jpeg', JPEG)
+  t.ok(await s.ticketFor(token, JAZZ_IDS[4]))
+  t.absent(s.api.seen.some((r) => r.path === '/v1/tracks/' + JAZZ_IDS[3] || r.path === '/v1/tracks/' + JAZZ_IDS[4]), 'no lookup by id')
+
+  const r = await setup(t, { covers: true })
+  const m = await r.login()
+  r.state.trendingData = [track('Pt0')]
+  r.state.artwork.Pt0 = undefined
+  const first = await r.post(m.token, 'trending?covers=1', { genre: 'Rock' })
+  t.alike(first.json.items.map((x) => [x.id, x.cover]), [['Pt0', false]])
+  delete r.state.artwork.Pt0
+  const found = await r.post(m.token, 'search?covers=1', { q: 'faixas', kind: 'track' })
+  t.alike(found.json.items.map((x) => [x.id, x.cover]), [['Pt0', true]])
+  const hit = await r.post(m.token, 'trending?covers=1', { genre: 'Rock' })
+  t.alike(hit.json.items.map((x) => [x.id, x.cover]), [['Pt0', true]], 'the newer track row wins, as the art route reads it')
+  t.alike(r.state.trendingGenres, ['Rock'], 'still a hit')
+  artOk(t, await r.post(m.token, 'art', { kind: 'track', id: 'Pt0' }), 'image/jpeg', JPEG)
 })

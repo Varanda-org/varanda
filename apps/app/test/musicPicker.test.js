@@ -115,7 +115,7 @@ async function ui (stubs = {}, code = source, names = 'MusicContent, MusicPicker
     radius: {},
     space: {},
     webInputReset: {},
-    ...Object.fromEntries(['ActivityIndicator', 'FlatList', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View', 'Btn', 'Icon', 'Segmented', 'Sheet', 'MusicCover', 'MusicEditor', 'MusicStrip', 'Pill'].map((name) => [name, name])),
+    ...Object.fromEntries(['ActivityIndicator', 'FlatList', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View', 'Btn', 'FilterChips', 'Icon', 'Segmented', 'Sheet', 'MusicCover', 'MusicEditor', 'MusicStrip', 'Pill'].map((name) => [name, name])),
     ...stubs
   }
   const input = code.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
@@ -275,6 +275,37 @@ test('suggestion transitions preserve extra state and accept only the current lo
     const reset = step(state, { type: 'reset' })
     t.alike(reset, { ...idle, gen: state.gen + 1 })
     t.is(step(reset, page), reset)
+  }
+})
+
+test('genre changes replace the current page and invalidate pending answers', async (t) => {
+  const { musicSuggestIdle: idle, musicSuggestStep: step } = await helpers()
+  const loading = step(idle, { type: 'load' })
+  const page = { type: 'page', gen: loading.gen, page: { items: [track()] } }
+  const fail = { type: 'fail', gen: loading.gen, error: { code: 'pedido-invalido' } }
+  const genre = { type: 'genre', key: 'Drum & Bass' }
+  for (const state of [idle, loading, step(loading, page), step(loading, fail)]) {
+    const selected = step(state, genre)
+    t.alike(selected, { ...state, key: genre.key, gen: state.gen + 1, phase: 'loading', items: [], error: '' })
+    t.is(step(selected, genre), selected)
+    t.is(step(selected, { ...page, gen: state.gen }), selected)
+    t.is(step(selected, { ...fail, extended: true, gen: state.gen }), selected)
+  }
+  const selected = step(idle, genre)
+  t.is(step(selected, page).key, genre.key)
+  const error = step(selected, fail)
+  t.is(error.phase, 'error')
+  t.is(error.key, genre.key)
+  t.alike(step(error, { type: 'retry' }), { ...selected, gen: selected.gen + 1 })
+  const fallback = step(selected, { ...fail, extended: true })
+  t.alike(fallback, { ...idle, key: '', genres: false, gen: selected.gen })
+  for (const state of [selected, fallback]) {
+    t.alike(step(state, { type: 'reset' }), { ...idle, key: '', genres: true, gen: state.gen + 1 })
+  }
+  for (const code of ['feature-off', 'nao-encontrado']) {
+    const off = step(selected, { ...fail, extended: true, error: { code } })
+    t.is(off.phase, 'off')
+    t.is(step(off, { type: 'genre', key: '' }), off)
   }
 })
 
@@ -646,9 +677,14 @@ async function suggestionFixture (t, props, stubs) {
     picker.render().find((n) => n.type === 'Segmented').props.onSelect(kind)
     return picker.render()
   }
-  return { ...picker, calls, selectTab, kinds: () => calls.map(({ session }) => session.kind) }
+  const selectGenre = (key) => {
+    chipsOf(picker.render()).props.onSelect(key)
+    return picker.render()
+  }
+  return { ...picker, calls, selectTab, selectGenre, kinds: () => calls.map(({ session }) => session.kind) }
 }
 
+const chipsOf = (nodes) => nodes.find((n) => n.type === 'FilterChips')
 const headingOf = (nodes) => nodes.find((n) => n.props.accessibilityRole === 'header')
 const noticeOf = (nodes) => nodes.find((n) => n.props.accessibilityLiveRegion === 'polite')
 const retryOf = (nodes) => nodes.find((n) => n.props.label === 'Tentar de novo')
@@ -692,12 +728,135 @@ test('typing while suggestions load preserves the page for the empty track tab',
   t.is(f.calls.length, 2)
 })
 
+test('track chips request one list per change and keep the selected list through search and tab changes', async (t) => {
+  const f = await suggestionFixture(t)
+  const key = 'Drum & Bass'
+  const chips = chipsOf(f.render()).props
+  t.is(chips.selected, '')
+  t.alike(chips.options[0], { id: '', label: 'Todos' })
+  t.alike(chips.options.find((option) => option.id === key), { id: key, label: 'Drum & bass' })
+  t.alike(f.kinds(), ['track'])
+  t.is(f.calls[0].session.genre, undefined)
+  let nodes = f.selectGenre(key)
+  t.is(chipsOf(nodes).props.selected, key)
+  t.alike(f.rows(nodes), [])
+  t.ok(f.calls[0].session.signal.aborted)
+  f.selectGenre(key)
+  t.alike(f.kinds(), ['track', 'track'])
+  t.is(f.calls[1].session.genre, key)
+  const item = track('drums')
+  f.calls[1].resolve({ items: [item] })
+  await f.flush()
+  f.calls[0].resolve({ items: [track('stale-general')] })
+  await f.flush()
+  t.alike(f.rows(f.render()).map((row) => row.props.item), [item])
+  nodes = await f.search('samba')
+  t.absent(chipsOf(nodes))
+  t.absent(headingOf(nodes))
+  t.alike(f.rows(nodes).map((row) => row.props.item.id), ['abc', 'def'])
+  nodes = await f.search('')
+  t.is(chipsOf(nodes).props.selected, key)
+  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
+  t.is(f.calls.length, 2)
+  t.absent(chipsOf(f.selectTab('playlist')))
+  t.absent(Object.hasOwn(f.calls[2].session, 'genre'))
+  nodes = f.selectTab('track')
+  t.is(chipsOf(nodes).props.selected, key)
+  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
+  nodes = f.selectGenre('')
+  t.is(chipsOf(nodes).props.selected, '')
+  t.alike(f.rows(nodes), [])
+  t.alike(f.kinds(), ['track', 'track', 'playlist', 'track'])
+  t.is(f.calls[3].session.genre, undefined)
+  t.alike(f.preview, [])
+})
+
+test('reselecting a track chip preserves playback and its ticket', async (t) => {
+  const f = await suggestionFixture(t)
+  const genre = 'Drum & Bass'
+  const item = track()
+  const rowPreview = () => previewOf(f.rows(f.render())[0]).props
+  f.render()
+
+  for (const [key, nextKey] of [['', genre], [genre, '']]) {
+    const lists = f.calls.length
+    f.calls.at(-1).resolve({ items: [item] })
+    await f.flush()
+    t.is(chipsOf(f.render()).props.selected, key)
+
+    rowPreview().onPress()
+    await f.flush()
+    rowPreview().onPress()
+    const stopped = f.preview.length
+    f.selectGenre(key)
+    rowPreview().onPress()
+    await f.flush()
+    t.alike(f.preview.slice(stopped), [['play']], 'replaying uses the cached ticket')
+
+    const playing = f.preview.length
+    f.selectGenre(key)
+    t.is(rowPreview().accessibilityLabel, 'Parar prévia')
+    t.alike(f.preview.slice(playing), [], 'reselecting leaves the player running')
+    t.is(f.calls.length, lists, 'reselecting asks for no list')
+
+    f.selectGenre(nextKey)
+    t.alike(f.preview.slice(playing), [['release']], 'changing the chip releases the player')
+    t.is(f.calls.length, lists + 1, 'changing the chip asks for one list')
+    t.is(f.calls.at(-1).session.genre, nextKey || undefined)
+  }
+})
+
+test('a service that refuses a genre hides the chips and loads the general list once', async (t) => {
+  const f = await suggestionFixture(t)
+  f.selectGenre('Rock')
+  f.calls[1].reject({ code: 'pedido-invalido' })
+  await f.flush()
+  let nodes = f.render()
+  t.absent(chipsOf(nodes))
+  t.absent(noticeOf(nodes))
+  t.alike(f.calls.map(({ session }) => session.genre), [undefined, 'Rock', undefined])
+  const item = track('weekly')
+  f.calls[2].resolve({ items: [item] })
+  await f.flush()
+  await f.search('samba')
+  nodes = await f.search('')
+  t.absent(chipsOf(nodes))
+  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
+  t.is(f.calls.length, 3)
+})
+
+test('rate limits and service errors retry the selected genre only on tap and a missing route ends suggestions', async (t) => {
+  const f = await suggestionFixture(t)
+  f.selectGenre('Rock')
+  for (const code of ['limite-musica', 'indisponivel']) {
+    const count = f.calls.length
+    f.calls.at(-1).reject({ code })
+    await f.flush()
+    const nodes = f.render()
+    t.is(chipsOf(nodes).props.selected, 'Rock')
+    t.is(f.calls.length, count)
+    retryOf(nodes).props.onPress()
+    f.render()
+    t.is(f.calls.length, count + 1)
+    t.is(f.calls.at(-1).session.genre, 'Rock')
+  }
+  f.calls.at(-1).reject({ code: 'nao-encontrado' })
+  await f.flush()
+  const nodes = f.render()
+  t.absent(chipsOf(nodes))
+  t.absent(retryOf(nodes))
+  t.absent(noticeOf(nodes))
+  t.is(f.calls.length, 4)
+})
+
 test('an editor-first opening waits for back and a suggested track opens the snippet editor', async (t) => {
   const item = track('weekly')
   const f = await suggestionFixture(t, { modes: ['snippet'], initial: { ref: { kind: 'snippet', id: 'abc', start: 2 }, item: track() } })
-  sheetOf(f.render()).props.onBack()
+  const editorFirst = f.render()
+  t.absent(chipsOf(editorFirst))
+  sheetOf(editorFirst).props.onBack()
   t.is(f.calls.length, 0)
-  f.render()
+  t.is(chipsOf(f.render()).props.selected, '')
   t.alike(f.kinds(), ['track'])
   f.calls[0].resolve({ items: [item], next: null })
   await f.flush()
@@ -762,6 +921,7 @@ test('a playlist-only picker waits for Voltar and retries only its playlist requ
   sheetOf(f.render()).props.onBack()
   t.alike(f.kinds(), [])
   const input = f.render().find((n) => n.type === 'TextInput')
+  t.absent(chipsOf(f.render()))
   t.is(input.props.autoFocus, false)
   t.alike(f.kinds(), ['playlist'])
   f.calls[0].reject({ code: 'indisponivel' })
@@ -773,6 +933,7 @@ test('a playlist-only picker waits for Voltar and retries only its playlist requ
   retryOf(nodes).props.onPress()
   f.render()
   t.alike(f.kinds(), ['playlist', 'playlist'])
+  t.ok(f.calls.every(({ session }) => !Object.hasOwn(session, 'genre')))
   f.calls[1].resolve({ items: [], next: null })
   await f.flush()
   t.alike(noticeOf(f.render()).children, ['Nenhuma sugestão agora'])

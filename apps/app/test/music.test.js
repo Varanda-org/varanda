@@ -3,6 +3,7 @@
 // Pure Audius music rules (src/music.js) and the decorative strip
 // (src/musicStrip.js). ES module loaded through import().
 const test = require('brittle')
+const { MUSIC_GENRES } = require('@varanda/rpc')
 
 const load = () => import('../src/music.js')
 const loadStrip = () => import('../src/musicStrip.js')
@@ -238,11 +239,41 @@ test('searchBody: { q, kind } or with a canonical cursor', async (t) => {
   ]) t.is(searchBody(q, kind, cursor), null, JSON.stringify([q, kind, cursor]))
 })
 
-test('trendingBody: an empty body for tracks, an explicit kind for playlists', async (t) => {
+test('musicGenreChips: the fixed genres have labels and Todos comes first', async (t) => {
+  const { MUSIC_GENRE_ALL_TEXT, MUSIC_GENRE_LABELS = {}, musicGenreChips } = await load()
+  t.is(MUSIC_GENRE_ALL_TEXT, 'Todos')
+  t.ok(Object.isFrozen(MUSIC_GENRE_LABELS))
+  t.alike(Object.keys(MUSIC_GENRE_LABELS).sort(), [...MUSIC_GENRES].sort())
+  t.is(MUSIC_GENRE_LABELS.Electronic, 'Eletrônica')
+  for (const label of Object.values(MUSIC_GENRE_LABELS)) {
+    t.ok(typeof label === 'string' && label.trim() !== '' && !label.includes('\u2014'), label)
+  }
+  t.alike(musicGenreChips?.(), [
+    { id: '', label: 'Todos' },
+    ...MUSIC_GENRES.map((id) => ({ id, label: MUSIC_GENRE_LABELS[id] }))
+  ])
+  t.alike(musicGenreChips?.(['Drum & Bass', 'Samba', 'Electronic', 'Pop, Rock']), [
+    { id: '', label: 'Todos' },
+    { id: 'Drum & Bass', label: 'Drum & bass' },
+    { id: 'Electronic', label: 'Eletrônica' }
+  ])
+})
+
+test('trendingBody: an optional track genre and an explicit kind for playlists', async (t) => {
   const { trendingBody } = await load()
   t.alike(trendingBody(undefined), {})
   t.alike(trendingBody('track'), {})
   t.alike(trendingBody('playlist'), { kind: 'playlist' })
+  t.alike(trendingBody(undefined, ''), {})
+  t.alike(trendingBody('track', ''), {})
+  t.alike(trendingBody('playlist', ''), { kind: 'playlist' })
+  t.alike(trendingBody(undefined, 'Drum & Bass'), { genre: 'Drum & Bass' })
+  t.alike(trendingBody('track', 'Hip-Hop/Rap'), { genre: 'Hip-Hop/Rap' })
+  t.is(trendingBody('playlist', 'Pop'), null)
+  t.is(trendingBody('album', 'Pop'), null)
+  for (const genre of ['Samba', 'Pop, Rock', 'rock', ' Rock ', null, 7]) {
+    t.is(trendingBody('track', genre), null, JSON.stringify(genre))
+  }
   t.is(trendingBody('album'), null)
   t.is(trendingBody(7), null)
 })

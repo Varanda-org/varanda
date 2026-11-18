@@ -2,10 +2,11 @@ import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { audiusPlay, audiusSearch, audiusTrending } from '../account'
-import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, MUSIC_SUGGEST_EMPTY_TEXT, MUSIC_SUGGEST_TEXT, SNIPPET_S, clampStart, musicErrorText, musicQuery, musicRowLine, snippetTick } from '../music'
+import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, MUSIC_SUGGEST_EMPTY_TEXT, MUSIC_SUGGEST_TEXT, SNIPPET_S, clampStart, musicErrorText, musicGenreChips, musicQuery, musicRowLine, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { Btn } from './index'
+import { FilterChips } from './FilterChips'
 import { tap } from './haptics'
 import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
@@ -54,10 +55,13 @@ export function musicSearchStep (state, action) {
   }
 }
 
-export const musicSuggestIdle = { phase: 'idle', gen: 0, items: [], error: '' }
+export const musicSuggestIdle = { phase: 'idle', gen: 0, key: '', genres: true, items: [], error: '' }
 
 export function musicSuggestStep (state, action) {
   switch (action.type) {
+    case 'genre':
+      if (state.phase === 'off' || action.key === state.key) return state
+      return { ...state, key: action.key, phase: 'loading', gen: state.gen + 1, items: [], error: '' }
     case 'load':
       return state.phase === 'idle' ? { ...state, phase: 'loading', gen: state.gen + 1 } : state
     case 'retry':
@@ -75,12 +79,16 @@ export function musicSuggestStep (state, action) {
     }
     case 'fail':
       if (state.phase !== 'loading' || action.gen !== state.gen) return state
-      if (action.error?.code === 'feature-off' || action.error?.code === 'nao-encontrado' || (action.extended === true && action.error?.code === 'pedido-invalido')) {
+      if (action.extended === true && action.error?.code === 'pedido-invalido') {
+        if (state.key !== '') return { ...state, key: '', genres: false, phase: 'idle', items: [], error: '' }
+        return { ...state, phase: 'off', items: [], error: '' }
+      }
+      if (action.error?.code === 'feature-off' || action.error?.code === 'nao-encontrado') {
         return { ...state, phase: 'off', items: [], error: '' }
       }
       return { ...state, phase: 'error', error: musicErrorText(action.error) }
     case 'reset':
-      return { ...state, phase: 'idle', items: [], error: '', gen: state.gen + 1 }
+      return { ...state, phase: 'idle', key: '', genres: true, items: [], error: '', gen: state.gen + 1 }
     default:
       return state
   }
@@ -292,9 +300,10 @@ function useMusicSuggest ({ eligible, kind, member, origin, request }) {
     const gen = suggest.gen
     const controller = new AbortController()
     const { signal } = controller
-    audiusTrending({ kind, ...session, signal }).then(
+    const filter = kind === 'track' ? { genre: suggest.key || undefined } : {}
+    audiusTrending({ kind, ...filter, ...session, signal }).then(
       (page) => { if (!signal.aborted) dispatchSuggest({ type: 'page', gen, page }) },
-      (error) => { if (!signal.aborted) dispatchSuggest({ type: 'fail', gen, error, extended: kind === 'playlist' }) }
+      (error) => { if (!signal.aborted) dispatchSuggest({ type: 'fail', gen, error, extended: kind === 'playlist' || suggest.key !== '' }) }
     )
     return () => controller.abort()
   }, [suggest.gen, session])
@@ -357,6 +366,21 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
         />
       </View>
       {playlist ? <Segmented options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => search(state.text, kind)} /> : null}
+      {tracksEligible && tracks[0].phase !== 'off' && tracks[0].genres
+        ? (
+          <View style={styles.genreChips}>
+            <FilterChips
+              options={musicGenreChips()}
+              selected={tracks[0].key}
+              onSelect={(key) => {
+                if (key === tracks[0].key) return
+                onStop()
+                tracks[1]({ type: 'genre', key })
+              }}
+            />
+          </View>
+          )
+        : null}
       {showHeading ? <Text accessibilityRole='header' style={styles.heading}>{MUSIC_SUGGEST_TEXT}</Text> : null}
       {notice ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{notice}</Text> : null}
       {results.phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => (eligible ? dispatchSuggest : dispatch)({ type: 'retry' })} /> : null}
@@ -410,6 +434,7 @@ function MusicRow ({ item, kind, member, origin, request, onOpen, onToggle, phas
 
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, paddingHorizontal: space.lg },
+  genreChips: { marginHorizontal: -space.lg },
   search: { flex: 1 },
   hidden: { display: 'none' },
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: layout.hit, paddingHorizontal: space.md, borderRadius: radius.lg, backgroundColor: colors.bg },

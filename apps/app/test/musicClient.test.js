@@ -243,6 +243,19 @@ test('audiusTrending: session, then the token in the header and an empty body', 
   t.is(calls.length, 4, 'the session is reused and the list is fetched again')
 })
 
+test('audiusTrending: the genre stays in the body on the same route', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const origin = 'https://mus-trending-genre.example.org'
+  const calls = stub(t, session({ '/account/audius/trending': json(200, { items: [track], next: null }) }))
+  const opts = { genre: 'Drum & Bass', origin, member: M, request: signer([]) }
+  t.alike(await a.audiusTrending(opts), { items: [track], next: null })
+  const trending = reads(calls, '/trending')
+  t.alike(trending.map(({ url, init }) => [init.method, url, init.body]), [
+    ['POST', origin + '/account/audius/trending?covers=1&info=1', '{"genre":"Drum & Bass"}']
+  ])
+})
+
 test('audiusTrending: an invalid member never fetches', async (t) => {
   const a = await load()
   a.forgetAudiusSession()
@@ -332,13 +345,13 @@ test('audiusTrending: playlists use an explicit kind and require playlist items 
   }
 })
 
-test('audiusTrending: an invalid kind never opens a session', async (t) => {
+test('audiusTrending: an invalid kind or genre never opens a session', async (t) => {
   const a = await load()
   a.forgetAudiusSession()
   const calls = stub(t, session())
   const signs = []
-  for (const kind of ['album', 7]) {
-    t.is(await code(t, a.audiusTrending({ kind, member: M, request: signer(signs) })), 'pedido-invalido')
+  for (const opts of [{ kind: 'album' }, { kind: 7 }, { genre: 'Samba' }, { genre: 'Pop, Rock' }, { kind: 'playlist', genre: 'Pop' }]) {
+    t.is(await code(t, a.audiusTrending({ ...opts, member: M, request: signer(signs) })), 'pedido-invalido', JSON.stringify(opts))
   }
   t.is(calls.length, 0)
   t.is(signs.length, 0)
@@ -351,6 +364,16 @@ test('audiusTrending: a 400 on a playlist request keeps its code after one read'
   const opts = { kind: 'playlist', member: M, request: signer([]) }
   t.is(await code(t, a.audiusTrending(opts)), 'pedido-invalido')
   t.is(reads(calls, '/trending').length, 1)
+  t.is(calls.length, 3, 'one session and one read')
+})
+
+test('audiusTrending: a 400 on a genre request from an older service keeps its code after one read', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/trending': json(400, { error: 'pedido-invalido' }) }))
+  const opts = { genre: 'Pop', member: M, request: signer([]) }
+  t.is(await code(t, a.audiusTrending(opts)), 'pedido-invalido')
+  t.alike(reads(calls, '/trending').map(({ init }) => init.body), ['{"genre":"Pop"}'])
   t.is(calls.length, 3, 'one session and one read')
 })
 
