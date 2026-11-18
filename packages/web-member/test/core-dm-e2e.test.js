@@ -312,8 +312,9 @@ test('core dm: a corrupt seed reaches the client as USAGE with no file content; 
     ['dm.react', { peer: P, id: 'x', emoji: 'x' }, DM_WEB_ONLY],
     ['dm.set', { peer: P, state: 'archived' }, DM_WEB_ONLY],
     ['dm.reportSign', { peer: P, id: 'x' }, SIGN_WEB_ONLY],
-    ['group.seal', { group: P }, DM_WEB_ONLY],
-    ['group.read', { group: P, page: P }, DM_WEB_ONLY]
+    // A page's private groups ask the engine for the page's group box.
+    ['group.seal', { group: P, page: P, text: 'x' }, DM_SEED_BAD],
+    ['group.read', { group: P, page: P }, DM_SEED_BAD]
   ]
   for (const [method, params, message] of refused) {
     const err = await rejection(C.call(method, params))
