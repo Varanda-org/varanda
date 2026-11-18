@@ -99,7 +99,7 @@ test('readCapped: exact length passes, more or fewer bytes fail', async (t) => {
   await t.exception(() => readCapped(plain, 3))
 })
 
-test('only a 404 or a network error is retryable; mismatches are not', async (t) => {
+test('a 404, a 502, 503 or 504 of our origin, or a network error is retryable; mismatches are not', async (t) => {
   const { fetchMedia } = await load()
   const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
@@ -115,6 +115,13 @@ test('only a 404 or a network error is retryable; mismatches are not', async (t)
   t.is((await reason(async () => response([bytes], 404))).retryable, true, '404')
   t.is((await reason(async () => { throw new TypeError('network') })).retryable, true, 'network error')
   t.absent((await reason(async () => response([bytes], 500))).retryable, '500')
+  for (const status of [502, 504]) {
+    const e = await reason(async () => response([bytes], status))
+    t.is(e.retryable, true, status + ' while the seeder restarts is retryable')
+    t.absent('retryAfterMs' in e, status + ' carries no Retry-After')
+    t.absent((await reason(async () => ({ ...response([bytes], status), url: 'https://evil.test/x' }))).retryable, status + ' after leaving the origin')
+  }
+  t.absent((await reason(async () => response([bytes], 501))).retryable, '501')
   const busy = (h) => Object.assign(response([bytes], 503), { headers: { get: (k) => (k === 'retry-after' ? h : null) } })
   const b1 = await reason(async () => busy('1'))
   t.is(b1.retryable, true, '503 is retryable')

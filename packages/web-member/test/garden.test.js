@@ -8,7 +8,7 @@ const test = require('brittle')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { validateRecord, gardenRecord, gardenStateRecord, gardenHelpRecord, followRecord } = require('@varanda/core/lib/records')
+const { validateRecord, gardenRecord, gardenStateRecord, gardenHelpRecord, gardenDecorRecord, gardenGiftRecord, gardenTakeRecord, followRecord } = require('@varanda/core/lib/records')
 const { deletedSeqs } = require('@varanda/core/lib/deletion')
 const { garden } = require('@varanda/rpc')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -344,6 +344,40 @@ test('gardenLeave: tombstones every state and help, the off flag last', async (t
   const before = raw.length
   t.is(await member.gardenLeave(ctx), null, 'a second leave writes nothing')
   t.is(await lengthOf(ctx), before)
+})
+
+test('gardenLeave: tombstones every decor, gift and take before the off flag', async (t) => {
+  const { ctx } = await prepared([onFlag()])
+  await appendRaw(ctx, [
+    gardenDecorRecord({ items: ['rede'], at: iso(NOW - 3 * HOUR) }),
+    gardenGiftRecord({ to: someKey(), item: 'tomate', at: iso(NOW - 2 * HOUR) }),
+    gardenTakeRecord({ from: someKey(), seq: 4, at: iso(NOW - HOUR) }),
+    gardenDecorRecord({ items: ['gato'], at: iso(NOW - HOUR) })
+  ])
+  const raw0 = await rawOf(ctx)
+  const targets = ['garden-decor', 'garden-gift', 'garden-take'].flatMap((type) => liveOf(raw0, type))
+  t.is(targets.length, 4)
+  const r = await member.gardenLeave(ctx)
+  const raw = await rawOf(ctx)
+  t.is(r.seq, raw.length - 1, 'the flag is the last block')
+  t.is(raw[r.seq].record.on, false)
+  for (const type of ['garden-decor', 'garden-gift', 'garden-take']) t.alike(liveOf(raw, type), [], type + ' gone')
+  const tombSeqs = raw.filter((e) => e.record !== null && e.record.type === 'delete' && targets.includes(e.record.seq)).map((e) => e.seq)
+  t.is(tombSeqs.length, 4, 'one tombstone each')
+  t.ok(tombSeqs.every((s) => s < r.seq), 'every tombstone before the off flag')
+})
+
+test('gardenLeave: a flag-off diary with a live decor still cleans up', async (t) => {
+  const { ctx } = await prepared([gardenDecorRecord({ items: ['pisca'], at: iso(NOW - HOUR) })])
+  const decor = liveOf(await rawOf(ctx), 'garden-decor')
+  t.is(decor.length, 1)
+  const r = await member.gardenLeave(ctx)
+  t.ok(r !== null, 'not nothing to do')
+  const raw = await rawOf(ctx)
+  t.alike(liveOf(raw, 'garden-decor'), [])
+  t.ok(deletedSeqs(raw).has(decor[0]))
+  t.is(raw[r.seq].record.on, false, 'the off flag last')
+  t.is(await member.gardenLeave(ctx), null, 'a repeat has nothing to do')
 })
 
 test('gardenLeave: never opted in answers null', async (t) => {

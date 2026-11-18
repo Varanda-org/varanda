@@ -864,7 +864,8 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const [self, ctx] = await contextOf(own, page)
     const c = await threadOf(self, peer, ctx)
     const state = threadState(self, peer, c, ctx)
-    if (c === null) return { messages: [], next: null, ...state }
+    if (c === null) return { messages: [], next: null, ...state, firstUnread: null }
+    const firstUnread = firstUnreadOf(c, new Set(await store.readDmSeen(storage, ctx.prefix)), ctx)
     // `before` is an id, unique within the thread (core dm-fold keeps one
     // row per id per conversation); an id no longer kept pages from the
     // newest.
@@ -883,8 +884,29 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return {
       messages: rows.map((m) => threadRow(m, mediaView(m, auto, ctx))),
       next: start > 0 && rows.length > 0 ? rows[0].id : null,
-      ...state
+      ...state,
+      firstUnread
     }
+  }
+
+  // The read position is the newest message that is mine or whose seen token
+  // is held; the first peer message after it is where reading stops. With no
+  // position at all -> null: a token that left the synced seen window never
+  // comes back, so "never read" cannot be told from "read on another device".
+  function firstUnreadOf (c, stored, ctx) {
+    let p = -1
+    for (let i = c.messages.length - 1; i >= 0; i--) {
+      const m = c.messages[i]
+      if (m.mine || stored.has(ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))) {
+        p = i
+        break
+      }
+    }
+    if (p === -1) return null
+    for (let i = p + 1; i < c.messages.length; i++) {
+      if (!c.messages[i].mine) return c.messages[i].id
+    }
+    return null
   }
 
   // `reactions` only when the fold gave the row one; `reactable: false` only
@@ -1307,12 +1329,20 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     return { bytes: r.bytes, mime: d.mime, w: d.w, h: d.h }
   }
 
-  async function seen (own, peer, page) {
+  // `upTo`: only the messages up to that id (what was on screen); an id no
+  // longer kept marks nothing, never the whole thread.
+  async function seen (own, peer, page, upTo) {
     requireUnlocked()
     const [self, ctx] = await contextOf(own, page)
     const c = await threadOf(self, peer, ctx)
     if (c === null) return { ok: true }
-    const ids = c.messages.filter((m) => !m.mine).map((m) => ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))
+    let shown = c.messages
+    if (upTo !== undefined && upTo !== null) {
+      const i = c.messages.findIndex((m) => m.id === upTo)
+      if (i === -1) return { ok: true }
+      shown = c.messages.slice(0, i + 1)
+    }
+    const ids = shown.filter((m) => !m.mine).map((m) => ctx.local.seenToken(dmFold.seenKey(m.from, m.id)))
     if (ids.length > 0) await store.writeDmSeen(storage, [...await store.readDmSeen(storage, ctx.prefix), ...ids], ctx.prefix)
     return { ok: true }
   }
