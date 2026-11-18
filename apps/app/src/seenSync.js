@@ -189,6 +189,8 @@ export function dropSent (pending, sent) {
   return { own, pages }
 }
 
+// Not used by the app since the Conversas dot follows community.info unread
+// counts instead of group versions; kept with its tests.
 // Takes snapshot() when a `method` answer carries caughtUp keys, and keeps
 // each key's version at the latest answer that listed it ({ epoch, versions }).
 // The node reads caughtUp as its last step before it answers, and a post that
