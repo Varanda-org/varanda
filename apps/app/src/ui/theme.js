@@ -108,7 +108,7 @@ export const layout = Object.freeze({
   fabRight: 20,
   fabAboveTabs: 17,
   sheetTop: 52,
-  sheetRadius: 24,
+  sheetRadius: 48,
   sheetTopRow: 56,
   band: 150,
   column: 640,

@@ -139,7 +139,7 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
     fabRight: 20,
     fabAboveTabs: 17,
     sheetTop: 52,
-    sheetRadius: 24,
+    sheetRadius: 48,
     sheetTopRow: 56,
     band: 150,
     column: 640,

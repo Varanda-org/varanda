@@ -13,7 +13,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { Backdrop } from './Backdrop'
 import { scrollerFocusProps } from './scrollerFocus'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, motion, type } from './theme'
+import { layout, motion, radius, space, type } from './theme'
 import { sideInset } from './sideInset'
 import { useEscapeLayer } from './escapeLayer'
 import { holdEmbeds } from '../embedLive'
@@ -360,8 +360,8 @@ const makeStyles = (colors) => StyleSheet.create({
   // page sheet has no system grabber (prefersGrabberVisible is never set).
   // A full-width row centres the pill on every platform (absolute + alignSelf
   // centres on the wrong axis on the web) and takes no touches.
-  grabberRow: { position: 'absolute', top: 6, left: 0, right: 0, alignItems: 'center', zIndex: 1 },
-  grabber: { width: 36, height: 4, borderRadius: 2, backgroundColor: colors.line },
+  grabberRow: { position: 'absolute', top: space.sm, left: 0, right: 0, alignItems: 'center', zIndex: 1 },
+  grabber: { width: 48, height: 5, borderRadius: radius.pill, backgroundColor: colors.line },
   topRow: {
     height: layout.sheetTopRow,
     paddingHorizontal: 16,
