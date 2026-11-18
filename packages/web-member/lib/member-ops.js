@@ -75,6 +75,9 @@ const {
   choiceRecord,
   momentRecord,
   postShareRecord,
+  postCoverRecord,
+  validShareCover,
+  hasPostStill,
   MAX_TESTIMONIAL,
   charLength,
   validTestimonialText,
@@ -103,7 +106,7 @@ const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { buildFeed } = require('@varanda/core/lib/feed')
 const { warmLogs } = require('./warm-sigs')
 const { foldMoments, ownPast, showingMoment } = require('@varanda/core/lib/moments')
-const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
+const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps, clearDeleted, presentLength } = require('@varanda/core/lib/deletion')
 const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/engagement')
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
@@ -117,7 +120,7 @@ const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } =
 const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, garden, mediaBounds, videoBounds } = require('@varanda/rpc')
 const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
-const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-share')
+const { POST_SHARES_PER_DIARY, POST_COVERS_PER_DIARY, foldShare, foldCover } = require('@varanda/core/lib/post-share')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const devices = require('@varanda/core/lib/devices')
 const store = require('./node-store')
@@ -998,6 +1001,15 @@ async function recordDelete (ctx, kind, { to }) {
       const gone = deletedSeqs(raw)
       if (gone.has(to.seq)) {
         const targets = clearedTargets(raw, gone, to.seq, kind)
+        // Covers an older writer left live when it deleted the post: a
+        // repeat tombstones them with their ranges.
+        const covers = kind === 'post' ? liveCoverSeqs(raw, gone, to.seq) : []
+        if (covers.length > 0) {
+          const tombs = coverTombstones({ entries: raw, ownHex }, covers, nowIso())
+          const seq = await appendChunked(ctx, diary, tombs)
+          await clearAfterDelete(ctx, diary, ownHex, covers, tombs)
+          return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
+        }
         const seq = existingTombstone(raw, gone, targets)
         return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: targets }
       }
@@ -1027,32 +1039,47 @@ async function recordDelete (ctx, kind, { to }) {
       else if (target.avatar !== undefined && compatPair(recordAt(raw, to.seq - 1), target)) targets = [to.seq - 1, to.seq]
     }
     const deleted = deletedSeqs(raw)
-    const pending = targets.filter((seq) => !deleted.has(seq))
+    // A post's live covers go with it, so their ranges are freed too;
+    // `deleted` still answers the named target only (docs/rpc.md 5.33).
+    const covers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : []
+    const pending = targets.filter((seq) => !deleted.has(seq)).concat(covers)
     if (pending.length === 0) {
       const seq = existingTombstone(raw, deleted, targets)
       return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: targets }
     }
     const declared = new Set(latestMediaCores(applyDeletes(raw), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
-    const live = liveMediaRefs(raw, targets)
+    const live = liveMediaRefs(raw, targets.concat(covers))
     // One `at` for the whole append marks the tombstones of a pair as one.
     const at = nowIso()
     // A reader from before the 10-photo cap rejects a delete with more than
     // MAX_DELETE_RANGES ranges, so a post's ranges go in several tombstones
     // of one target, all in one append.
-    const records = pending.flatMap((seq) => {
+    const order = kind === 'post' ? pending.slice().reverse() : pending
+    const tombs = order.map((seq) => {
       const media = descriptorsOf(recordAt(raw, seq))
         .filter((d) => declared.has(d.core) && !live.some((l) => overlaps(l, d)))
         .map((d) => ({ core: d.core, start: d.start, blocks: d.blocks }))
+      // Later targets stay live until their own append succeeds.
+      if (kind === 'post') live.push(...descriptorsOf(recordAt(raw, seq)))
       return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
     })
+    const records = (kind === 'post' ? tombs.reverse() : tombs).flat()
     let seq
     if (records.length <= APPEND_MAX) {
       seq = records.length === 1
         ? await appendOwn(ctx, diary, records[0])
         : await store.appendRecords(diary, records, ctx.limits)
+    } else if (kind === 'post') {
+      // A post is at most 3 tombstones, so they all go in the first append
+      // (docs/rpc.md 5.33): a repeat after a failed later chunk finds the
+      // post deleted and would never rebuild a missing range tombstone.
+      // Its covers follow oldest first (`pending` order), so a chunk that
+      // fails leaves only newer covers live, never the newest tombstoned
+      // while an older one is live; a repeat finishes them.
+      seq = await appendChunked(ctx, diary, records)
     } else {
       // Only a writer's many shows or many rich profile versions get here
-      // (a post is at most 3 tombstones, a profile pair 2). One append takes
+      // (a profile pair is 2 tombstones). One append takes
       // at most APPEND_MAX records, so the tombstones go in chunks: every
       // other version first, newest first, and the targeted one's in the
       // last chunk. A chunk that fails throws like any failed write and the
@@ -1075,6 +1102,11 @@ async function recordDelete (ctx, kind, { to }) {
     await clearAfterDelete(ctx, diary, ownHex, pending, records)
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: targets }
   })
+}
+
+// The seqs of the live `post-cover` blocks naming post `postSeq`, ascending.
+function liveCoverSeqs (entries, deleted, postSeq) {
+  return coverBlocks(entries).filter(([p, seq]) => p === postSeq && !deleted.has(seq)).map(([, seq]) => seq)
 }
 
 // A listing goes with its live edits in one append (core listing.js
@@ -1107,6 +1139,7 @@ function profileDelete (ctx, params) {
 
 const NOT_A_POST = 'o registro não é uma publicação'
 const SHARE_LIMIT = 'limite de publicações na web atingido'
+const NOT_SHARED = 'a publicação não está na web'
 
 // Every stored block of the own diary (holes skipped), not only the present
 // prefix: a tombstone or a share stored past a block not downloaded yet
@@ -1146,6 +1179,46 @@ function liveShares ({ entries, deleted }, postSeq) {
   return shareBlocks(entries).filter(([p, seq]) => p === postSeq && !deleted.has(seq)).map(([, seq]) => seq)
 }
 
+// Each valid post-cover block as [post seq, cover seq, image], tombstoned or
+// not.
+function coverBlocks (entries) {
+  const out = []
+  for (const { seq, record } of entries) {
+    if (record === null || typeof record !== 'object' || record.type !== 'post-cover') continue
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'post-cover') out.push([copy.seq, seq, copy.image])
+  }
+  return out
+}
+
+// The post's highest cover as the reader takes it (protocol section 2,
+// "Public share"): { seq, image } while that block is live, else null, even
+// when an older cover is still live.
+function newestLiveCover ({ entries, deleted }, postSeq) {
+  let newest = null
+  for (const [p, seq, image] of coverBlocks(entries)) {
+    if (p === postSeq && (newest === null || seq > newest.seq)) newest = { seq, image }
+  }
+  return newest === null || deleted.has(newest.seq) ? null : newest
+}
+
+// One tombstone per cover block in `seqs`, each carrying its image range
+// when the core is declared and no other live record shows it.
+function coverTombstones ({ entries, ownHex }, seqs, at) {
+  const declared = new Set(latestMediaCores(applyDeletes(entries), ownHex, Number.MAX_SAFE_INTEGER).map((c) => c.key))
+  const live = liveMediaRefs(entries, seqs)
+  const images = new Map(coverBlocks(entries).map(([, seq, image]) => [seq, image]))
+  return seqs.slice().reverse().map((seq) => {
+    const d = images.get(seq)
+    const media = d !== undefined && declared.has(d.core) && !live.some((l) => overlaps(l, d))
+      ? [{ core: d.core, start: d.start, blocks: d.blocks }]
+      : []
+    // Only the last tombstone sharing a range may release it.
+    if (d !== undefined) live.push(d)
+    return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
+  }).reverse().flat()
+}
+
 // Whether a new share of `postSeq`, appended after `entries`, is one the
 // reader's bounded fold (foldShare, block order) keeps: a post it already
 // holds always is, a new post only while the fold has room.
@@ -1161,7 +1234,8 @@ function postShared (ctx, { to }) {
   return withIdentity(ctx, ({ diary, ownHex }) => heldDiary(diary, ownHex)).then((held) => {
     shareTarget(held, to)
     const live = liveShares(held, to.seq)
-    return { shareSeq: live.length === 0 ? null : live[live.length - 1] }
+    if (live.length === 0) return { shareSeq: null, cover: false }
+    return { shareSeq: live[live.length - 1], cover: newestLiveCover(held, to.seq) !== null }
   })
 }
 
@@ -1179,21 +1253,24 @@ function postShare (ctx, { to }) {
   })
 }
 
-// One tombstone per live share (normally one), in appends of at most
-// APPEND_MAX. A chunk that fails is never retried: the error carries
-// `written`, the highest block already stored, so the caller still pushes
-// it. The shares not yet tombstoned stay live: a repeat finishes them while
-// the diary has room, and a diary that filled up can append nothing more.
-// The share blocks are not cleared here: they carry no media, and their
-// tombstones alone withdraw them.
+// One tombstone per live share (normally one), then one per live cover with
+// its image range, in appends of at most APPEND_MAX. A chunk that fails is
+// never retried: the error carries `written`, the highest block already
+// stored, so the caller still pushes it. What is not yet tombstoned stays
+// live: a repeat finishes it while the diary has room, and a diary that
+// filled up can append nothing more. The share blocks are not cleared here:
+// they carry no media, and their tombstones alone withdraw them; the cover
+// blocks and ranges are, as a post deletion clears them.
 function postUnshare (ctx, { to }) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     const held = await heldDiary(diary, ownHex)
     shareTarget(held, to)
     const live = liveShares(held, to.seq)
-    if (live.length === 0) return { ok: true, changed: false, written: null }
+    const covers = liveCoverSeqs(held.entries, held.deleted, to.seq)
+    if (live.length === 0 && covers.length === 0) return { ok: true, changed: false, written: null }
     const at = nowIso()
-    const records = live.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
+    const tombs = coverTombstones(held, covers, at)
+    const records = live.map((seq) => buildRecord(() => deleteRecord({ seq, at }))).concat(tombs)
     let seq = null
     try {
       for (let i = 0; i < records.length; i += APPEND_MAX) seq = await appendAll(ctx, diary, records.slice(i, i + APPEND_MAX))
@@ -1201,8 +1278,77 @@ function postUnshare (ctx, { to }) {
       if (seq !== null && err !== null && typeof err === 'object') err.written = seq
       throw err
     }
+    if (covers.length > 0) await clearAfterDelete(ctx, diary, ownHex, covers, tombs)
     return { ok: true, changed: true, written: seq }
   })
+}
+
+// A cover must show exactly its descriptor's sides: the reader checks only
+// the descriptor, so the bytes are checked here, as for an avatar.
+function stillCover (descriptor, bytes) {
+  const s = stillImageSize(bytes, 'image/jpeg')
+  return s !== null && s.width === descriptor.width && s.height === descriptor.height
+}
+
+// The cover rules on the held diary -> { same, old }: `same` the newest
+// live cover when it already is `image`, else null; `old` the older live
+// covers this call tombstones. The image must be its own upload: a range
+// another live record shows would be freed by the cover's own tombstone
+// otherwise, and a post's photos would go with its cover. Nor may it be a
+// range a tombstone already freed (an old cover sent again while this
+// device's clear failed or has not run): seeders cleared it for good.
+function coverPlan (held, to, image) {
+  shareTarget(held, to)
+  if (liveShares(held, to.seq).length === 0) throw new UsageError(NOT_SHARED)
+  // held.entries skips blocks not held here, so the post is found by seq,
+  // never by index.
+  const post = held.entries.find((e) => e.seq === to.seq)
+  if (!hasPostStill(post === undefined ? null : validRecordCopy(post.record, to.seq))) throw new UsageError('referência inválida')
+  const folded = new Map()
+  for (const [p, seq] of coverBlocks(held.entries)) foldCover(folded, p, seq)
+  if (!folded.has(to.seq) && folded.size >= POST_COVERS_PER_DIARY) throw new UsageError(SHARE_LIMIT)
+  const newest = newestLiveCover(held, to.seq)
+  const live = liveCoverSeqs(held.entries, held.deleted, to.seq)
+  // Only a diary another writer left has more than one live cover. One
+  // append takes APPEND_MAX records, so each call tombstones the oldest
+  // ones that fit beside its own record, and a repeat continues. Oldest
+  // first, as every cover tombstone here: a cover is never tombstoned while
+  // an older one stays live, so once cleared blocks read as nothing the
+  // highest cover left still is the one the reader takes.
+  if (newest !== null && deepEqual(newest.image, image)) return { same: newest, old: live.filter((seq) => seq !== newest.seq).slice(0, APPEND_MAX) }
+  if (liveMediaRefs(held.entries, []).concat(tombstonedRanges(held.entries)).some((l) => overlaps(l, image))) throw badMedia()
+  return { same: null, old: live.slice(0, APPEND_MAX - 1) }
+}
+
+// docs/rpc.md 5.167. A cover equal to the newest live one reads no bytes
+// (it may live in another device's media core) and only tombstones older
+// live covers, if any. Otherwise the bytes are checked, then the older live
+// covers are tombstoned with their ranges and the new cover appended, all in
+// one append, so only the newest cover is live. Nothing is retried.
+// written: the highest appended block's seq, or null when nothing was.
+function postCover (ctx, params) {
+  return coverWrite(ctx, params, false)
+}
+
+async function coverWrite (ctx, { to, image }, forceVerify) {
+  const first = forceVerify ? null : await withIdentity(ctx, async ({ diary, ownHex }) => coverPlan(await heldDiary(diary, ownHex), to, image))
+  if (first !== null && first.same !== null && first.old.length === 0) return { coverSeq: first.same.seq, created: false, written: null }
+  const verified = first === null || first.same === null
+  if (verified) await verifyMedia(ctx, [image], stillCover, validShareCover, 1)
+  const r = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    const held = await heldDiary(diary, ownHex)
+    const { same, old } = coverPlan(held, to, image)
+    // The newest cover changed under a sync since the first read: the
+    // bytes were never checked, so plan again with the check.
+    if (same === null && !verified) return null
+    if (same !== null && old.length === 0) return { coverSeq: same.seq, created: false, written: null }
+    const tombs = coverTombstones(held, old, nowIso())
+    const records = same !== null ? tombs : [...tombs, buildRecord(() => postCoverRecord({ seq: to.seq, image, at: nowIso() }))]
+    const seq = await appendAll(ctx, diary, records)
+    if (old.length > 0) await clearAfterDelete(ctx, diary, ownHex, old, tombs)
+    return same !== null ? { coverSeq: same.seq, created: false, written: seq } : { coverSeq: seq, created: true, written: seq }
+  })
+  return r === null ? coverWrite(ctx, { to, image }, true) : r
 }
 
 // ---- likes / reposts ----
@@ -7121,6 +7267,7 @@ module.exports = {
   postShared,
   postShare,
   postUnshare,
+  postCover,
   shareRoom,
   listingCreate,
   listingEdit,

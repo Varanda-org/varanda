@@ -201,7 +201,7 @@ test('the sent notice matches the publish sheet, and the module stays pure', asy
   t.absent(source.includes('Platform.OS'))
   t.absent(/\b(?:window|document|navigator|localStorage|sessionStorage)\./.test(source))
   const imports = source.split('\n').filter((line) => /^\s*import\b/.test(line))
-  t.alike(imports, ["import { UNCERTAIN_MESSAGE, publish } from './postShare.js'"])
+  t.alike(imports, ["import { UNCERTAIN_MESSAGE, addCover, claimCover, publish, releaseCover, sendCover } from './postShare.js'"])
 })
 
 // Publicar.js is JSX the tests cannot load: its wiring is checked as text.
@@ -267,4 +267,107 @@ test('Publicar shares once after the post, never from the outbox, a poll, an eve
   const retry = page.slice(page.indexOf('await action.run(async () => {'), page.indexOf('if (pageRetryRef.current !== pending) return'))
   t.ok(retry.includes('pending.retry()') && retry.includes('shareNewAsPage('), 'the retry branch shares inside the same action.run')
   t.absent(src.includes("'post.share'"), 'the screen never sends post.share itself')
+})
+
+const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: 'ef'.repeat(32), width: 1200, height: 900 }
+const AVIF = { ...COVER, mime: 'image/avif', bytes: 90000, width: 2000, height: 1500 }
+
+function coverInput ({ built = { bytes: new Uint8Array(40000), mime: 'image/jpeg', width: 1200, height: 900 }, uploadThrows = false } = {}) {
+  const seen = { uploads: 0 }
+  return {
+    seen,
+    cover: {
+      post: { media: [AVIF] },
+      held: { bytes: new Uint8Array(90000), mime: 'image/avif' },
+      encodeThumbnail: async () => built,
+      upload: async () => { seen.uploads++; if (uploadThrows) throw new Error('x'); return COVER }
+    }
+  }
+}
+
+// A call that answers post.share and post.cover as given.
+function routed (answers) {
+  const calls = []
+  const call = async (method, params) => {
+    calls.push([method, params])
+    const a = answers[method]
+    if (a instanceof Error) throw a
+    return a
+  }
+  return { calls, call }
+}
+
+test('shareNew adds one cover after the share answered on', async (t) => {
+  const { shareNew } = await load()
+  const c = routed({ 'post.share': { shareSeq: 9, created: true }, 'post.cover': { coverSeq: 10, created: true } })
+  const { cover, seen } = coverInput()
+  const out = await shareNew(c.call, AUTHOR, 5, cover)
+  t.alike(out, { ref: AUTHOR + ':5', result: { state: 'on', shareSeq: 9, message: '' } })
+  t.alike(c.calls.map(([m]) => m), ['post.share', 'post.cover'])
+  t.alike(c.calls[1][1], { to: AUTHOR + ':5', image: COVER })
+  t.is(seen.uploads, 1)
+})
+
+test('a cover failure still reports the share as sent, and nothing is retried', async (t) => {
+  const { shareNew, webShareAfter, WEB_SHARE_SENT } = await load()
+  const cases = [
+    ['refused by an older node', { 'post.share': { shareSeq: 9, created: true }, 'post.cover': rpcError('USAGE', 'método desconhecido') }, {}],
+    ['lost answer', { 'post.share': { shareSeq: 9, created: true }, 'post.cover': rpcError('USAGE', 'x', true) }, {}],
+    ['upload failed', { 'post.share': { shareSeq: 9, created: true } }, { uploadThrows: true }],
+    ['nothing built', { 'post.share': { shareSeq: 9, created: true } }, { built: null }]
+  ]
+  for (const [name, answers, opts] of cases) {
+    const c = routed(answers)
+    const { cover, seen } = coverInput(opts)
+    const out = await shareNew(c.call, AUTHOR, 5, cover)
+    t.is(out.result.state, 'on', name)
+    t.is(webShareAfter(out).notice, WEB_SHARE_SENT, name + ': the sent words, nothing alarming')
+    t.ok(c.calls.filter(([m]) => m === 'post.cover').length <= 1, name + ': at most one post.cover')
+    t.ok(seen.uploads <= 1, name + ': at most one upload')
+  }
+})
+
+test('shareNew sends no cover when the share is not on', async (t) => {
+  const { shareNew } = await load()
+  for (const share of [rpcError('USAGE', 'limite do diário atingido'), rpcError('USAGE', 'x', true), {}]) {
+    const c = routed({ 'post.share': share })
+    const { cover, seen } = coverInput()
+    await shareNew(c.call, AUTHOR, 5, cover)
+    t.alike(c.calls.map(([m]) => m), ['post.share'])
+    t.is(seen.uploads, 0)
+  }
+})
+
+test('the composer cover holds the post like the sheet, so no second cover starts meanwhile', async (t) => {
+  const { shareNew } = await load()
+  const { claimCover, coverInFlight, releaseCover } = await import('../src/postShare.js')
+  const ref = AUTHOR + ':5'
+  let during = null
+  const c = routed({ 'post.share': { shareSeq: 9, created: true }, 'post.cover': { coverSeq: 10, created: true } })
+  const { cover } = coverInput()
+  const upload = cover.upload
+  cover.upload = async (...a) => { during = coverInFlight(ref); return upload(...a) }
+  await shareNew(c.call, AUTHOR, 5, cover)
+  t.is(during, true, 'held while the cover is written')
+  t.is(coverInFlight(ref), false, 'released after')
+
+  t.ok(claimCover(ref), 'the sheet holds an attempt')
+  const held = routed({ 'post.share': { shareSeq: 9, created: true }, 'post.cover': { coverSeq: 10, created: true } })
+  const second = coverInput()
+  const out = await shareNew(held.call, AUTHOR, 5, second.cover)
+  releaseCover(ref)
+  t.is(out.result.state, 'on', 'the share still answers')
+  t.alike(held.calls.map(([m]) => m), ['post.share'], 'no second post.cover')
+  t.is(second.seen.uploads, 0, 'no second upload')
+})
+
+test('heldStill picks the held bytes of the first still', async (t) => {
+  const { heldStill } = await load()
+  const a = new Uint8Array(3)
+  const poster = { bytes: new Uint8Array(4), mime: 'image/jpeg' }
+  t.alike(heldStill([AVIF, COVER], [{ bytes: a, mime: 'image/avif' }, null]), { bytes: a, mime: 'image/avif' })
+  t.alike(heldStill([COVER, { mime: 'video/mp4' }], [poster, null]), poster, 'a video post: its poster')
+  t.is(heldStill([AVIF], [{ bytes: a, mime: 'image/webp' }]), null, 'other bytes')
+  t.is(heldStill([AVIF], [null]), null)
+  t.is(heldStill(null, []), null)
 })

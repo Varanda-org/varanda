@@ -62,8 +62,9 @@ const resultKeys = {
   'post.reply': ['seq', 'ref'],
   'post.quote': ['seq'],
   'post.delete': ['seq', 'ref', 'changed', 'deleted'],
-  'post.shared': ['shareSeq'],
+  'post.shared': ['shareSeq', 'cover'],
   'post.share': ['shareSeq', 'created'],
+  'post.cover': ['coverSeq', 'created'],
   'post.unshare': ['ok', 'changed'],
   'like.set': ['seq', 'on', 'changed'],
   'repost.set': ['seq', 'on', 'changed'],
@@ -634,6 +635,7 @@ function samples (f) {
     'post.delete': { to },
     'post.shared': { to },
     'post.share': { to },
+    'post.cover': { to, image: { core: 'e'.repeat(64), mime: 'image/jpeg', start: 7, blocks: 2, bytes: 40000, sha256: 'f'.repeat(64), width: 1200, height: 900 } },
     'post.unshare': { to },
     'like.set': { to, on: true },
     'repost.set': { to, on: true },
@@ -818,6 +820,8 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     const given = method === 'moment.create' ? { ...params[method], media: await request.media.putMoment({ bytes: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]), mime: 'image/jpeg', width: 640, height: 480 }) } : params[method]
     // profile.extra.delete needs a live record; the own fixture diary has none.
     if (method === 'profile.extra.delete') await request('profile.about', params['profile.about'])
+    // post.cover needs the post on the web first.
+    if (method === 'post.cover') await request('post.share', params['post.share'])
     if (method === 'device.reconnect') await refused(t, request, method, given, 'USAGE', 'este aparelho está conectado')
     // The demo clock is a Thursday, so a give is the documented refusal.
     else if (method === 'garden.give') await refused(t, request, method, given, 'USAGE', 'a barraquinha só abre aos sábados')
@@ -1710,20 +1714,20 @@ test('post.share, post.shared and post.unshare follow the newest live share', as
   const { fixtures: f, request } = await load()
   const call = (method, params) => answer(t, request, method, params)
   const to = samples(f)['post.shared'].to
-  t.alike(await call('post.shared', { to }), { shareSeq: null })
+  t.alike(await call('post.shared', { to }), { shareSeq: null, cover: false })
   t.alike(await call('post.unshare', { to }), { ok: true, changed: false }, 'nothing to withdraw')
   const first = await call('post.share', { to })
   t.is(first.created, true)
   t.ok(Number.isSafeInteger(first.shareSeq) && first.shareSeq > Number(to.split(':')[1]))
-  t.alike(await call('post.shared', { to }), { shareSeq: first.shareSeq })
+  t.alike(await call('post.shared', { to }), { shareSeq: first.shareSeq, cover: false })
   t.alike(await call('post.share', { to }), { shareSeq: first.shareSeq, created: false }, 'a live share is not written twice')
   t.alike(await call('post.unshare', { to }), { ok: true, changed: true })
-  t.alike(await call('post.shared', { to }), { shareSeq: null })
+  t.alike(await call('post.shared', { to }), { shareSeq: null, cover: false })
   t.alike(await call('post.unshare', { to }), { ok: true, changed: false })
   const again = await call('post.share', { to })
   t.is(again.created, true)
   t.ok(again.shareSeq > first.shareSeq, 'a new share after a withdrawal is a new block')
-  t.alike(await call('post.shared', { to }), { shareSeq: again.shareSeq })
+  t.alike(await call('post.shared', { to }), { shareSeq: again.shareSeq, cover: false })
   for (const method of ['post.shared', 'post.share', 'post.unshare']) {
     await refused(t, request, method, { to: `${f.members[1].author}:3` }, 'USAGE', 'referência inválida')
     await refused(t, request, method, { to: `${f.own}:1` }, 'USAGE', 'o registro não é uma publicação')
@@ -1732,6 +1736,26 @@ test('post.share, post.shared and post.unshare follow the newest live share', as
   const post = await call('post.create', { text: 'Some daqui a pouco.' })
   await call('post.delete', { to: post.ref })
   for (const method of ['post.shared', 'post.share', 'post.unshare']) await refused(t, request, method, { to: post.ref }, 'USAGE', 'referência inválida')
+})
+
+test('post.cover needs a live share and keeps one live cover per post', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const { to, image } = samples(f)['post.cover']
+  await refused(t, request, 'post.cover', { to, image }, 'USAGE', 'a publicação não está na web')
+  await call('post.share', { to })
+  const first = await call('post.cover', { to, image })
+  t.is(first.created, true)
+  t.alike(await call('post.shared', { to }), { shareSeq: (await call('post.share', { to })).shareSeq, cover: true })
+  t.alike(await call('post.cover', { to, image }), { coverSeq: first.coverSeq, created: false }, 'the same image is not written twice')
+  const next = await call('post.cover', { to, image: { ...image, start: 20 } })
+  t.is(next.created, true)
+  t.ok(next.coverSeq > first.coverSeq)
+  t.alike(await call('post.cover', { to, image }), { coverSeq: next.coverSeq + 2, created: true }, 'the older image is a new cover once replaced')
+  await call('post.unshare', { to })
+  t.is((await call('post.shared', { to })).cover, false, 'no cover once the share is gone')
+  await refused(t, request, 'post.cover', { to, image }, 'USAGE', 'a publicação não está na web')
+  await refused(t, request, 'post.cover', { to: `${f.own}:1`, image }, 'USAGE', 'o registro não é uma publicação')
 })
 
 test('the demo feed shows the hashtag posts, so a tag can be tapped there', async (t) => {

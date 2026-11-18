@@ -144,6 +144,20 @@ function deletedRanges (entries, cores) {
   return out
 }
 
+// Every media range an effective tombstone lists, live refs or not. A
+// seeder clears such a block when no live record shows it at that moment
+// and never fetches it again, so a writer must not point a new record at
+// it: the record would be live with bytes no seeder serves.
+function tombstonedRanges (entries) {
+  const out = []
+  if (!Array.isArray(entries)) return out
+  for (const { record } of fold(entries).effective) {
+    if (!Array.isArray(record.media)) continue
+    for (const r of record.media) out.push({ core: r.core, start: r.start, blocks: r.blocks })
+  }
+  return out
+}
+
 // Per core, the live refs as sorted disjoint [start, end) intervals.
 function coverage (refs) {
   const byCore = new Map()
@@ -183,8 +197,8 @@ function covered (index, r) {
 
 // The media descriptors a valid record copy shows: a post's photos or its
 // link preview thumbnail (`preview.image`, a block in a media core like a
-// photo), a profile's avatar, a listing's or listing edit's photos; []
-// otherwise.
+// photo), a profile's avatar, a shared post's cover, a listing's or listing
+// edit's photos; [] otherwise.
 function shownMedia (copy) {
   if (copy === null || typeof copy !== 'object') return []
   if (copy.type === 'post') {
@@ -193,6 +207,9 @@ function shownMedia (copy) {
     return image !== null && typeof image === 'object' ? [image] : []
   }
   if (copy.type === 'profile' && copy.avatar !== undefined) return [copy.avatar]
+  // Like an avatar: the cover's own block keeps its range, whether or not
+  // the post it names is still live, so the writer tombstones it with it.
+  if (copy.type === 'post-cover') return [copy.image]
   // Each listing and edit counts on its own, so a root's photos stay live
   // while the root does, even after an edit replaced them on screen: the
   // root is the fallback when the edit is deleted. A status or a rating
@@ -201,8 +218,8 @@ function shownMedia (copy) {
   return []
 }
 
-// Media still referenced by a surviving post, profile, listing or edit of a
-// surviving listing, other than the blocks in exceptSeqs.
+// Media still referenced by a surviving post, profile, post cover, listing
+// or edit of a surviving listing, other than the blocks in exceptSeqs.
 function liveMediaRefs (entries, exceptSeqs) {
   const except = toSet(exceptSeqs)
   const out = []
@@ -1013,6 +1030,7 @@ module.exports = {
   deletedSeqsOfCopies,
   applyDeletesOfCopies,
   deletedRanges,
+  tombstonedRanges,
   liveMediaRefs,
   shownMedia,
   overlaps,

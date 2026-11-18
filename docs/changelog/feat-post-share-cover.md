@@ -1,0 +1,6 @@
+### Adicionado
+
+- Ao marcar "Publicar também na web" numa publicação com foto em AVIF, GIF ou grande demais para o WhatsApp, o app prepara no aparelho uma capa JPEG menor e a envia com a publicação, para a prévia do link mostrar a foto. Se a capa não der certo, a publicação continua na web normalmente (PR `feat/post-share-cover`). Verificação em `docs/verification/feat-post-share-cover.md`.
+- Na folha "Página pública na web", uma publicação que já está na web sem capa ganha o botão "Adicionar uma capa à prévia", que prepara e envia a capa só com o toque. Funciona também para as publicações de uma Página.
+- Página pública de publicação: o semeador serve a capa em `/p/<diário>/<seq>/capa` (JPEG conferido pelo tamanho, pelo hash e pelo quadro), e o `og:image` da página passa a ser essa capa quando ela existe, antes da primeira foto e do cartão da marca. Atualize os semeadores antes dos serviços de conta e dos apps.
+- Registro `post-cover` (protocolo, seção 2), método `post.cover` (rpc 5.167), `cover` na resposta de `post.shared`, ação de Página `'post-cover'` e `covered` no `status` assinado da Página. Tirar da web, apagar a publicação e encerrar a Página apagam também as capas, com os intervalos de mídia delas.

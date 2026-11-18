@@ -179,8 +179,9 @@ function copyJson (value) {
   }
 }
 
-// A post-share's tombstone is how a page post leaves the public web page.
-const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'profile', 'listing', 'listing-edit']
+// A post-share's tombstone is how a page post leaves the public web page; a
+// post-cover's frees its image range.
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first
@@ -270,7 +271,8 @@ function validNonces (obj) {
     if (!NONCE_ID_RE.test(id) || !isPlainObject(v) || !Number.isSafeInteger(v.seq) || v.seq < 0 ||
         !Number.isSafeInteger(v.length) || v.length < 0 || !Number.isSafeInteger(v.expiresAt) ||
         !(v.descriptor === undefined || validItem(v.descriptor) || validSealed(v.descriptor)) ||
-        !(v.first === undefined || (Number.isSafeInteger(v.first) && v.first >= 0 && v.first <= v.seq))) return false
+        !(v.first === undefined || (Number.isSafeInteger(v.first) && v.first >= 0 && v.first <= v.seq)) ||
+        !(v.kept === undefined || (Number.isSafeInteger(v.kept) && v.kept >= 0 && v.kept < v.seq))) return false
   }
   return true
 }
@@ -712,11 +714,12 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (v === null) return null
     const out = { seq: v.seq, length: v.length }
     if (v.descriptor !== undefined) out.descriptor = { ...v.descriptor }
+    if (v.kept !== undefined) out.kept = v.kept
     return out
   }
 
-  // -> { append, media, follow }: each the stored { seq, length[, descriptor] }
-  // of a write with this member and nonce, or null.
+  // -> { append, media, follow }: each the stored { seq, length[, descriptor]
+  // [, kept] } of a write with this member and nonce, or null.
   // The first seq of the append a use made, or null: a listing edit
   // answers its edit block, not the tombstone after it.
   function nonceFirst (key, member, nonce) {
@@ -823,9 +826,14 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     return { key }
   }
 
+  // opts.kept, with a member and nonce: a block before this append that the
+  // use answers instead of its last seq (a post-cover that only tombstoned
+  // older covers answers the cover it kept), stored with the nonce record.
   async function append (key, input, opts) {
     if (!Array.isArray(input) || input.length < 1 || input.length > 8) throw fail('invalido')
     const idem = idempotency(opts)
+    const kept = idem === null || opts.kept === undefined ? undefined : opts.kept
+    if (kept !== undefined && !(Number.isSafeInteger(kept) && kept >= 0)) throw fail('invalido')
     const records = copyJson(input)
     for (const r of records) {
       if (!isPlainObject(r) || r.type === 'media-core' || r.type === 'follow') throw fail('invalido')
@@ -833,13 +841,15 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     const { seq, length, replay } = await withPage(key, async (p) => {
       const prior = recall(p, 'append', idem)
       if (prior !== null) return { seq: prior.seq, length: prior.length, replay: true }
+      if (kept !== undefined && kept >= p.length) throw fail('invalido')
       // A tombstone only removes what was published (closing a page needs
       // the profile's); the page's own structure (certs, roster, follows,
       // media cores) stays.
       for (const r of records) if (r.type === 'delete') await checkDeleteTarget(p, r)
       for (const r of records) {
-        if (!['post', 'profile', 'listing', 'listing-edit'].includes(r.type)) continue
+        if (!['post', 'profile', 'listing', 'listing-edit', 'post-cover'].includes(r.type)) continue
         const pointed = []
+        if (r.type === 'post-cover') pointed.push(r.image)
         if (r.media !== undefined) {
           if (!Array.isArray(r.media)) throw fail('midia-invalida')
           pointed.push(...r.media)
@@ -851,7 +861,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
         }
       }
       try {
-        const mark = (s, n) => remember(p, 'append', idem, { seq: s, length: n, first: s - records.length + 1 })
+        const mark = (s, n) => remember(p, 'append', idem, { seq: s, length: n, first: s - records.length + 1, ...(kept === undefined ? {} : { kept }) })
         return { seq: await appendBatch(p, records, mark), length: p.core.length, replay: false }
       } catch (err) {
         throw err.code === 'INVALID_RECORD' ? fail('invalido') : err
@@ -903,11 +913,15 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   // The blocks this writer wrote, tombstones not applied, so the caller
   // folds only its own: a paused page's longer log holds blocks, deletes
   // among them, written with a leaked key. A forked core or a lost state
-  // cannot tell which blocks are ours, so nothing comes back.
-  async function readOwn (key) {
+  // cannot tell which blocks are ours. Decisions about live covers require
+  // a reliable read; display-only callers may still ask for an empty view.
+  async function readOwn (key, { required = false } = {}) {
     await opening
     const p = pageOf(key)
-    if (p.core.fork !== 0 || p.stateLost) return []
+    if (p.core.fork !== 0 || p.stateLost) {
+      if (required) throw fail('fechado')
+      return []
+    }
     return (await readRaw(p.core)).filter((e) => e.seq < p.length)
   }
 

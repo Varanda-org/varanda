@@ -74,7 +74,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
-import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesPostShare, pagesStart } from '../pages'
+import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesPostCover, pagesPostShare, pagesStart } from '../pages'
 import { pagePostOp, prepPageVideo } from '../pagePost'
 import { MOMENT_PAGE_UNCERTAIN, MOMENT_PREPARING_NOTICE, createMomentItems, isMomentPreparing, momentComposerOn, momentFailure, momentPublishedAs, momentPutArgs } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
@@ -92,7 +92,7 @@ import { pickImages, pickVideo } from '../media/attach'
 import { prepareVideo } from '../media/videoPrep'
 import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { encodeFile } from '../media/encode'
+import { encodeFile, encodeThumbnail } from '../media/encode'
 import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
@@ -135,7 +135,7 @@ import { momentsChanged } from './Momentos'
 import { usePostPublic } from '../postPublicContext'
 import { POST_SHARE_CONSENT } from '../ui/PostShareSheet'
 import { shareNewAsPage } from '../pageShare'
-import { WEB_SHARE_LABEL, shareNew, webShareOffered } from '../postShareCompose'
+import { WEB_SHARE_LABEL, heldStill, shareNew, webShareOffered } from '../postShareCompose'
 
 export const MOMENT_TEXT_MAX = 200
 // maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
@@ -932,7 +932,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const keepPostOnCloseRef = useRef(false)
   const [roster, setRoster] = useState([])
   const [rosterFailed, setRosterFailed] = useState(false)
-  // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids }):
+  // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids,
+  // web, cover }):
   // retry() resends the same signed bytes. While it is set the draft is
   // locked and nothing new is signed.
   const pageRetryRef = useRef(null)
@@ -1628,7 +1629,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       const r = await action.run(async () => {
         const value = await pending.retry()
         if (pending.web) {
-          late = await shareNewAsPage(async (o) => pagesPostShare(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page: pending.page, seq: o.seq }), pending.page, seqOf(value)).catch(() => ({ ref: null, result: null }))
+          late = await shareNewAsPage(async (o) => pagesPostShare(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page: pending.page, seq: o.seq }), pending.page, seqOf(value), pending.cover || null).catch(() => ({ ref: null, result: null }))
         }
         return value
       })
@@ -1728,6 +1729,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const plain = structured.poll === undefined && structured.event === undefined
     const videoFile = hasVideo ? video.draft.state.file : null
     const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
+    const sentHeld = hasVideo ? [videoFile && videoFile.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
     if (hasMedia) {
       if (!mediaReady || !mediaOnline || (hasVideo && (!canVideo || video.draft.state.phase !== 'ready'))) return
@@ -1800,6 +1802,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // One post-share for the post just written, inside the same pending
     // action; shareNewAsPage never rejects and is never resent.
     const sentWeb = webOn && kind === 'post'
+    const sentCover = sentWeb ? coverFor(sentMedia, sentHeld, page) : null
     let web = null
     const r = await action.run(async () => {
       const member = await memberKeyOf(nodeRequest, nodeRef.current)
@@ -1810,7 +1813,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         raw = err
         throw err
       }
-      if (sentWeb) web = await shareNewAsPage((o) => pagesPostShare(nodeRef.current, { member, page, seq: o.seq }), page, seqOf(value))
+      if (sentWeb) web = await shareNewAsPage((o) => pagesPostShare(nodeRef.current, { member, page, seq: o.seq }), page, seqOf(value), sentCover)
       return value
     })
     if (r.ok) {
@@ -1818,7 +1821,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null)
     }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
-      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb })
+      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb, cover: sentCover })
     }
   }
 
@@ -1884,6 +1887,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sentWeb = webOn && !sentReply && !sentQuote
     if (sentQuote && (node.online === false || countChars(sent) < 1)) return
     const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
+    const sentHeld = hasVideo ? [video.draft.state.file && video.draft.state.file.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
     if (hasMedia) {
       if (!mediaReady || !mediaOnline || media === null || (hasVideo && !canVideo)) return
@@ -1948,12 +1952,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // action so a second Publicar cannot slip in; shareNew never rejects, and
     // neither request is ever resent.
     let web = null
+    const sentCover = sentWeb ? coverFor(sentMedia, sentHeld) : null
     const r = await action.run(async () => {
       const value = await call().catch((err) => {
         raw = err
         throw err
       })
-      if (sentWeb) web = await shareNew(node.request, self.publicKey, seqOf(value)).catch(() => ({ ref: null, result: null }))
+      if (sentWeb) web = await shareNew(node.request, self.publicKey, seqOf(value), sentCover).catch(() => ({ ref: null, result: null }))
       return value
     })
     if (r.ok) {
@@ -1992,7 +1997,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         const foundSeq = Number.isInteger(found.seq) ? found.seq : null
         confirm(foundSeq)
         action.clearError()
-        const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq).catch(() => ({ ref: null, result: null })) : null
+        const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq, sentCover).catch(() => ({ ref: null, result: null })) : null
         published(sent, sentReply, sentIds, sentQuote, late !== null && mountedRef.current ? late : null)
       }
     } catch (err) {
@@ -2000,6 +2005,26 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     } finally {
       setChecking(false)
     }
+  }
+
+  // The crawler's cover for a post sent with 'Publicar também na web'
+  // (postShare.js sendCover), built from the bytes this composer still holds:
+  // `held` the encoded { bytes, mime } in sentMedia's order. Only a node with
+  // an installation writes covers (post.cover is the browser node's, 5.167).
+  // -> sendCover's input, or null for none. node.hosted is read first, so
+  // nothing else is touched for a node without an installation.
+  const coverFor = (sentMedia, held, page = null) => {
+    if (node.hosted !== true || !Array.isArray(sentMedia)) return null
+    const base = { post: { media: sentMedia }, held: heldStill(sentMedia, held), encodeThumbnail }
+    if (page !== null) {
+      return {
+        ...base,
+        upload: async (b) => (await uploadBytesForPage(page, b)).descriptor,
+        write: async (op) => pagesPostCover(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page, op })
+      }
+    }
+    if (media === null) return null
+    return { ...base, upload: (b) => media.upload({ bytes: b.bytes, mime: b.mime, width: b.width, height: b.height }) }
   }
 
   const replyName = reply ? displayText(whoOf({ name: reply.name, username: reply.username }).title) : ''

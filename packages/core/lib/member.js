@@ -413,6 +413,24 @@ function targetedSeqs (raw, seq, copy) {
   return [seq]
 }
 
+// store.appendRecords takes at most this many records in one append.
+const APPEND_MAX = 8
+
+// The live `post-cover` blocks naming post `seq`, ascending: deleting the
+// post tombstones them too, so their media ranges are freed with it. They
+// go oldest first, so an append that has no room for all of them never
+// leaves an older cover live under a tombstoned newer one; a repeat
+// tombstones the rest.
+function liveCoverSeqs (raw, deleted, seq) {
+  const out = []
+  for (let i = seq + 1; i < raw.length; i++) {
+    if (deleted.has(i)) continue
+    const copy = recordAt(raw, i)
+    if (copy !== null && copy.type === 'post-cover' && copy.seq === seq) out.push(i)
+  }
+  return out
+}
+
 // The version of a cleared profile block, read from its tombstones: the pair
 // writer appends both tombstones in one append, in seq order and with one
 // `at`, so only consecutive tombstones of seq n then n + 1 carrying the same
@@ -471,6 +489,16 @@ async function recordDelete (ctx, { to, kind }) {
     // A cleared target can no longer be judged; its tombstone answers.
     if (to.seq < raw.length && deleted.has(to.seq) && !(await diary.has(to.seq))) {
       const seqs = kind === 'profile' ? clearedVersion(raw, deleted, to.seq) : [to.seq]
+      // Covers left live when the post was deleted (by an older writer, or
+      // by an append with no room for them all): a repeat tombstones them
+      // with their ranges, oldest first, one append's worth at a time.
+      const covers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq).slice(0, APPEND_MAX) : []
+      if (covers.length > 0) {
+        const records = tombstonesOf(raw, covers, declaredCores(raw, ownHex), liveMediaRefs(raw, covers), nowIso())
+        const seq = await appendRecords(diary, records)
+        await clearAfter(ctx, diary, covers)
+        return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
+      }
       const seq = tombstoneOf(raw, deleted, seqs)
       return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
     }
@@ -483,8 +511,11 @@ async function recordDelete (ctx, { to, kind }) {
       throw new UsageError(NOT_DELETABLE)
     }
     let seqs = targetedSeqs(raw, to.seq, copy)
-    const pending = seqs.filter((seq) => !deleted.has(seq))
-    if (pending.length === 0) {
+    // `deleted` still answers the named target only (docs/rpc.md 5.33).
+    const allCovers = kind === 'post' ? liveCoverSeqs(raw, deleted, to.seq) : []
+    let covers = []
+    const own = seqs.filter((seq) => !deleted.has(seq))
+    if (own.length === 0 && allCovers.length === 0) {
       const seq = tombstoneOf(raw, deleted, seqs)
       return { seq, ref: seq === null ? null : formatRef({ author: ownHex, seq }), changed: false, deleted: seqs }
     }
@@ -497,20 +528,30 @@ async function recordDelete (ctx, { to, kind }) {
       records = declaredOnly(buildRecord(() => deletePlan(raw, to.seq, at)), cores)
       seqs = records.map((r) => r.seq)
     } else {
-      const live = liveMediaRefs(raw, seqs)
       // A reader from before the 10-photo cap rejects a delete with more than
       // MAX_DELETE_RANGES ranges, so a post's ranges go in several tombstones
-      // of one target, all in this one append.
-      records = pending.flatMap((seq) => {
-        const media = freedRanges(recordAt(raw, seq), cores, live)
-        return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
-      })
+      // of one target, all in this one append. Its covers take only the room
+      // left: counted with every cover gone, when the post frees the most
+      // ranges, so the room is never overstated.
+      const room = APPEND_MAX - tombstonesOf(raw, own, cores, liveMediaRefs(raw, seqs.concat(allCovers)), at).length
+      covers = allCovers.slice(0, Math.max(0, room))
+      const live = liveMediaRefs(raw, seqs.concat(covers))
+      records = tombstonesOf(raw, own, cores, live, at).concat(tombstonesOf(raw, covers, cores, live, at))
     }
     const seq = await appendRecords(diary, records)
     // The tombstones are written, so the delete succeeded whatever the clear
     // does; a clear that is skipped or fails is finished by the next open.
-    await clearAfter(ctx, diary, seqs)
+    await clearAfter(ctx, diary, seqs.concat(covers))
     return { seq, ref: formatRef({ author: ownHex, seq }), changed: true, deleted: seqs }
+  })
+}
+
+// The tombstones of blocks `seqs`, each freeing its ranges that `live` does
+// not show, split per MAX_DELETE_RANGES.
+function tombstonesOf (raw, seqs, cores, live, at) {
+  return seqs.flatMap((seq) => {
+    const media = freedRanges(recordAt(raw, seq), cores, live)
+    return buildRecord(() => deleteRecords(media.length > 0 ? { seq, at, media } : { seq, at }))
   })
 }
 

@@ -17,6 +17,7 @@
 // read is a plain error whose retry runs a fresh start and page.sign.
 
 import rpc from '@varanda/rpc'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { buildRequest, readJson, formatNextChange } from './account.js'
 import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
 import { VIDEO_MIME } from './media/plan.js'
@@ -293,7 +294,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', 'choice', 'moment', 'post-share', 'post-unshare', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', 'moment', 'post-share', 'post-cover', 'post-unshare', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -443,6 +444,27 @@ export function pagesPostShare (node, { member, page, seq }) {
 
 export function pagesPostUnshare (node, { member, page, seq }) {
   return actAs(node, { member, action: 'post-unshare', page, op: { seq } })
+}
+
+// The crawler's cover of a shared page post ('post-cover', docs/rpc.md 5.84):
+// `op` exactly { seq, image }, `image` the page's own upload. One request.
+export function pagesPostCover (node, { member, page, op }) {
+  return actAs(node, { member, action: 'post-cover', page, op })
+}
+
+// One page media upload of bytes this device already encoded (a post cover):
+// start, page.sign, then the raw bytes. -> the service's descriptor. Never
+// resent here.
+export async function pagesUploadEncoded (node, { member, page, encoded }) {
+  const sign = signer(node)
+  if (sign === null || !isKey(member) || !isKey(page) || !encoded || !(encoded.bytes instanceof Uint8Array)) throw pageError('pedido-invalido')
+  const origin = pagesOrigin(node)
+  const { nonce } = await pagesStart({ member, action: 'media', page, origin })
+  const hash = Array.from(sha256(encoded.bytes), (b) => b.toString(16).padStart(2, '0')).join('')
+  const op = { sha256: hash, mime: encoded.mime, width: encoded.width, height: encoded.height, bytes: encoded.bytes.byteLength }
+  const signed = await sign('page.sign', { action: 'media', nonce, page, op })
+  const answer = await pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: encoded.bytes, origin })
+  return answer && typeof answer === 'object' ? answer.descriptor : null
 }
 
 export function pagesMoment (node, { member, page, text, media, music }) {

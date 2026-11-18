@@ -227,6 +227,7 @@ const { CANCEL_KINDS, pushCancel, pushCandidates, pushName, PUSH_MAX_AGE_MS } = 
 const {
   validateRecord,
   validRecordCopy,
+  hasPostStill,
   decodeBlock,
   MAX_BLOCK_BYTES,
   MAX_LOG_BLOCKS,
@@ -259,7 +260,7 @@ const { createFeiraIndex } = require('./feira-index')
 // test can count the checks a rescan repeats.
 const listingLib = require('./listing')
 const { foldListings } = listingLib
-const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
+const { foldShare, newestShare, foldCover, newestCover, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
 const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
 const { DEFAULT_STORAGE_BYTES, coreCharge, memberCapFor, createStorageBudget } = require('./storage-budget')
@@ -3095,9 +3096,12 @@ class Seeder {
       // scan read (lib/post-share.js), `sharesOverflow` that a share of a
       // post past POST_SHARES_PER_DIARY was refused. Tombstones never touch
       // it: postPublic checks the share is live when it reads, so a newer
-      // tombstoned share hides the post (fails closed).
+      // tombstoned share hides the post (fails closed). `covers` post seq ->
+      // the highest valid post-cover seq, the same way: a tombstoned newer
+      // cover leaves the post without one.
       shares: new Map(),
       sharesOverflow: false,
+      covers: new Map(),
       indexed: 1,
       indexQueued: false,
       indexPaused: false,
@@ -3705,6 +3709,15 @@ class Seeder {
         if (r !== null && !foldShare(entry.shares, r.seq, i, { maxPosts: POST_SHARES_PER_DIARY })) entry.sharesOverflow = true
         continue
       }
+      // A cover shows its image like an avatar (shownMedia): counted live
+      // so a tombstone never frees a range a live cover still shows. A
+      // cover past the cap is only left out: it is never consent.
+      if (block.type === 'post-cover') {
+        const r = validRecordCopy(block, i)
+        if (r !== null) foldCover(entry.covers, r.seq, i)
+        countShown(entry, entry.decls, i, r)
+        continue
+      }
       if (block.type === 'group-join' || block.type === 'group-cut') {
         const r = validRecordCopy(block, i)
         if (r !== null) foldGroupWalk(entry, i, r)
@@ -4005,7 +4018,7 @@ class Seeder {
           const target = targetRaw === null ? null : decodeBlock(targetRaw)
           if (target !== null && (target.type === 'follow' || target.type === 'media-core')) continue
           countTombstone(counts, i, r, target)
-        } else if (block.type === 'post' || block.type === 'profile' || block.type === 'listing' || block.type === 'listing-edit') {
+        } else if (block.type === 'post' || block.type === 'profile' || block.type === 'post-cover' || block.type === 'listing' || block.type === 'listing-edit') {
           countShown(counts, declared, i, validRecordCopy(block, i))
         } else if (block.type === 'media-core') {
           const record = validRecordCopy(block, i)
@@ -8919,14 +8932,18 @@ class Seeder {
 
   // Post `seq` of `hex` for the public page, to people without an account
   // (docs/protocol.md section 2, "Public share"): the post, the author's
-  // display name and verified @nome, and the share seq that allows it. Peer
-  // text, returned as stored: the caller renders it with displayText. null
+  // display name and verified @nome, the share seq that allows it, and the
+  // post's cover image (`cover`, from post-cover `coverSeq`; both null when
+  // there is none). Peer text, returned as stored: the caller renders it
+  // with displayText. null
   // unless the highest share the scan recorded for that post is a live,
   // valid post-share naming it and the post is a live post of a visible,
   // scanned diary, a person's or an open page's (the account service writes
   // a page's share, section 16). Every doubt answers null: a post with no
   // recorded share (past the cap included), a scan or a name index behind,
-  // a hold, a block, a closed or moved page, a date too far ahead.
+  // a hold, a block, a closed or moved page, a date too far ahead. A cover
+  // in doubt (hidden, naming another post, in a core not bound to this
+  // diary) only drops the image: a cover never withdraws the post.
   async postPublic (hex, seq) {
     try {
       if (typeof hex !== 'string' || !HEX64.test(hex) || !Number.isSafeInteger(seq) || seq < 1) return null
@@ -8950,6 +8967,12 @@ class Seeder {
       // As the feed: a post dated far ahead is held back until its time.
       const t = Date.parse(record.at)
       if (!Number.isFinite(t) || t - Date.now() > MAX_FUTURE_MS) return null
+      const coverSeq = newestCover(entry.covers, seq)
+      let cover = null
+      if (coverSeq !== null && hasPostStill(record)) {
+        const r = await this._liveRecord(hex, coverSeq)
+        if (r !== null && r.type === 'post-cover' && r.seq === seq) cover = r.image
+      }
       const hints = this._index.hints(hex)
       let name = null
       if (hints.profileSeq !== null) {
@@ -8977,7 +9000,13 @@ class Seeder {
       // does not withdraw the post.
       if (hints.profileSeq !== null && hidden.has(hints.profileSeq)) name = null
       if (hints.usernameSeq !== null && hidden.has(hints.usernameSeq)) username = null
-      return { record, name, username, shareSeq }
+      // The binding is read last: mediaRead serves the image only from a
+      // core bound to this diary, so a cover in any other core has no bytes.
+      if (cover !== null) {
+        const binding = this._media.get(cover.core)
+        if (newestCover(entry.covers, seq) !== coverSeq || hidden.has(coverSeq) || !binding || binding.diary !== hex) cover = null
+      }
+      return { record, name, username, shareSeq, cover, coverSeq: cover === null ? null : coverSeq }
     } catch {
       return null
     }

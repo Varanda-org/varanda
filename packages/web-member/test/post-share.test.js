@@ -1,5 +1,5 @@
-// post.shared, post.share and post.unshare on the browser node (docs/rpc.md
-// 5.121 to 5.123): lib/session.js through lib/node.js and an in-memory
+// post.shared, post.share, post.unshare and post.cover on the browser node
+// (docs/rpc.md 5.121 to 5.123, 5.167): lib/session.js through lib/node.js and an in-memory
 // client, member-ops' live-share walk, on memory storage. Any live share
 // counts, the target must be a live post of the own diary, a locked
 // identity reads but never writes, and a write pushes to the seeder. Most
@@ -15,18 +15,21 @@ const { WebSocketServer, WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, stoppedOf, errorOf } = require('./helpers/session')
 const { createCert, createSeederCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { postRecord, postShareRecord, deleteRecord, validateRecord } = require('@varanda/core/lib/records')
+const { postRecord, postShareRecord, postCoverRecord, deleteRecord, validateRecord } = require('@varanda/core/lib/records')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { wsStream } = require('../lib/ws-stream')
 const store = require('../lib/node-store')
 const member = require('../lib/member-ops')
 const { createBrowserNode } = require('../lib/node')
+const { jpegHead } = require('./helpers/photo')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const BAD_REF = 'referência inválida'
 const NOT_POST = 'o registro não é uma publicação'
 const FULL = 'limite do diário atingido'
+const NOT_SHARED = 'a publicação não está na web'
+const BAD_MEDIA = 'mídia inválida'
 const WRITERS = ['post.share', 'post.unshare']
 const ALL = ['post.shared', ...WRITERS]
 
@@ -47,7 +50,7 @@ async function deadPort () {
   return port
 }
 
-async function setup (t, { storage = memoryNodeStorage(), assoc = association(), keyPair = crypto.keyPair(), seederUrl = null, ...options } = {}) {
+async function setup (t, { storage = memoryNodeStorage(), assoc = association(), keyPair = crypto.keyPair(), mediaKeyPair = null, seederUrl = null, ...options } = {}) {
   const url = seederUrl === null ? 'ws://127.0.0.1:' + (await deadPort()) + '/seeder' : seederUrl
   const internal = []
   const node = createBrowserNode({
@@ -64,7 +67,7 @@ async function setup (t, { storage = memoryNodeStorage(), assoc = association(),
     ...options
   })
   t.teardown(() => node.close(), { force: true })
-  if (keyPair !== null) await node.setKeyPair(keyPair)
+  if (keyPair !== null) await node.setKeyPair(keyPair, mediaKeyPair === null ? undefined : { media: mediaKeyPair })
   const web = await connectClient(node, { timeoutMs: 30000 })
   return { node, web, assoc, storage, keyPair, internal }
 }
@@ -107,12 +110,12 @@ test('post.share: share, repeat, unshare, repeat, share again; a reply and a quo
   t.is((await web.request('post.create', { text: 'pública' })).seq, 1)
   const to = key + ':1'
 
-  t.alike(await web.request('post.shared', { to }), { shareSeq: null }, 'never shared')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: null, cover: false }, 'never shared')
   t.alike(await web.request('post.share', { to }), { shareSeq: 2, created: true })
   const block = (await web.request('log.read', {})).entries.find((e) => e.seq === 2).record
   t.alike([block.type, block.seq, Object.keys(block).sort()], ['post-share', 1, ['at', 'seq', 'type']], 'one post-share naming the post')
   t.is(validateRecord(block, 2), null, 'valid at its seq')
-  t.alike(await web.request('post.shared', { to }), { shareSeq: 2 })
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 2, cover: false })
 
   t.alike(await web.request('post.share', { to }), { shareSeq: 2, created: false }, 'the repeat writes nothing')
   t.is(await length(web), 3, 'nothing appended')
@@ -120,19 +123,19 @@ test('post.share: share, repeat, unshare, repeat, share again; a reply and a quo
   t.alike(await web.request('post.unshare', { to }), { ok: true, changed: true })
   const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === 3).record
   t.alike([tomb.type, tomb.seq, 'media' in tomb], ['delete', 2, false], 'one plain tombstone on the share')
-  t.alike(await web.request('post.shared', { to }), { shareSeq: null })
+  t.alike(await web.request('post.shared', { to }), { shareSeq: null, cover: false })
   t.alike(await web.request('post.unshare', { to }), { ok: true, changed: false }, 'the repeat writes nothing')
   t.is(await length(web), 4, 'nothing appended')
 
   t.alike(await web.request('post.share', { to }), { shareSeq: 4, created: true }, 'a new, higher share')
-  t.alike(await web.request('post.shared', { to }), { shareSeq: 4 })
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 4, cover: false })
   t.is((await web.request('log.read', {})).entries.find((e) => e.seq === 1).record.text, 'pública', 'the post itself is untouched')
 
   const reply = (await web.request('post.reply', { to, text: 'resposta' })).seq
   const quote = (await web.request('post.quote', { to, text: 'citação' })).seq
   t.alike(await web.request('post.share', { to: key + ':' + reply }), { shareSeq: quote + 1, created: true }, 'a reply is a post')
   t.alike(await web.request('post.share', { to: key + ':' + quote }), { shareSeq: quote + 2, created: true }, 'a quote is a post')
-  t.alike(await web.request('post.shared', { to }), { shareSeq: 4 }, 'each post has its own share')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 4, cover: false }, 'each post has its own share')
   t.alike(internal, [], 'no internal error')
 })
 
@@ -147,24 +150,24 @@ test('any live share counts; a tombstoned one never does; unshare tombstones eve
   ])
   const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair })
   const to = p.key + ':1'
-  t.alike(await web.request('post.shared', { to }), { shareSeq: 2 }, 'an older live share under a tombstoned newer one still counts')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 2, cover: false }, 'an older live share under a tombstoned newer one still counts')
   t.alike(await web.request('post.share', { to }), { shareSeq: 2, created: false }, 'already shared: nothing written')
   t.is(await length(web), 5, 'nothing appended')
   t.alike(await web.request('post.unshare', { to }), { ok: true, changed: true })
   const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === 5).record
   t.alike([tomb.type, tomb.seq], ['delete', 2], 'the live share got the tombstone')
   t.is(await length(web), 6, 'one tombstone')
-  t.alike(await web.request('post.shared', { to }), { shareSeq: null })
+  t.alike(await web.request('post.shared', { to }), { shareSeq: null, cover: false })
 
   // Two live shares: one unshare tombstones both in one append.
   const q = await prepared(() => [postRecord({ text: 'um' }), postShareRecord({ seq: 1 }), postShareRecord({ seq: 1 })])
   const two = await setup(t, { storage: q.storage, assoc: q.assoc, keyPair: q.keyPair })
   const toQ = q.key + ':1'
-  t.alike(await two.web.request('post.shared', { to: toQ }), { shareSeq: 3 }, 'the highest live share')
+  t.alike(await two.web.request('post.shared', { to: toQ }), { shareSeq: 3, cover: false }, 'the highest live share')
   t.alike(await two.web.request('post.unshare', { to: toQ }), { ok: true, changed: true })
   const tombs = (await two.web.request('log.read', {})).entries.filter((e) => e.seq >= 4).map((e) => [e.record.type, e.record.seq])
   t.alike(tombs, [['delete', 2], ['delete', 3]], 'both shares tombstoned')
-  t.alike(await two.web.request('post.shared', { to: toQ }), { shareSeq: null })
+  t.alike(await two.web.request('post.shared', { to: toQ }), { shareSeq: null, cover: false })
   t.alike(await two.web.request('post.unshare', { to: toQ }), { ok: true, changed: false }, 'the repeat writes nothing')
 
   // More live shares than one append takes: every one is tombstoned.
@@ -172,11 +175,11 @@ test('any live share counts; a tombstoned one never does; unshare tombstones eve
   await member.withIdentity({ storage: r.storage, association: r.assoc.hex, keyPair: r.keyPair }, ({ diary }) => store.appendRecords(diary, [postShareRecord({ seq: 1 }), postShareRecord({ seq: 1 })]))
   const many = await setup(t, { storage: r.storage, assoc: r.assoc, keyPair: r.keyPair })
   const toR = r.key + ':1'
-  t.alike(await many.web.request('post.shared', { to: toR }), { shareSeq: 10 })
+  t.alike(await many.web.request('post.shared', { to: toR }), { shareSeq: 10, cover: false })
   t.alike(await many.web.request('post.unshare', { to: toR }), { ok: true, changed: true })
   const targets = (await many.web.request('log.read', {})).entries.filter((e) => e.seq >= 11).map((e) => e.record.seq)
   t.alike(targets, [2, 3, 4, 5, 6, 7, 8, 9, 10], 'nine tombstones')
-  t.alike(await many.web.request('post.shared', { to: toR }), { shareSeq: null })
+  t.alike(await many.web.request('post.shared', { to: toR }), { shareSeq: null, cover: false })
 
   // A tombstone of the tombstone brings the share back.
   const u = await prepared(() => [
@@ -186,7 +189,7 @@ test('any live share counts; a tombstoned one never does; unshare tombstones eve
     deleteRecord({ seq: 3 })
   ])
   const back = await setup(t, { storage: u.storage, assoc: u.assoc, keyPair: u.keyPair })
-  t.alike(await back.web.request('post.shared', { to: u.key + ':1' }), { shareSeq: 2 }, 'the deletion fold decides liveness')
+  t.alike(await back.web.request('post.shared', { to: u.key + ':1' }), { shareSeq: 2, cover: false }, 'the deletion fold decides liveness')
 })
 
 test('post.shared, post.share, post.unshare: the target must be a live own post', async (t) => {
@@ -233,7 +236,7 @@ test('post.share: a full diary is refused and writes nothing', async (t) => {
   const q = await prepared(() => [postRecord({ text: 'um' }), postShareRecord({ seq: 1 })])
   const full = await setup(t, { storage: q.storage, assoc: q.assoc, keyPair: q.keyPair, limits: { maxLogBlocks: 3 } })
   t.alike(await errorPair(full.web.request('post.unshare', { to: q.key + ':1' })), ['USAGE', FULL])
-  t.alike(await full.web.request('post.shared', { to: q.key + ':1' }), { shareSeq: 2 }, 'still shared')
+  t.alike(await full.web.request('post.shared', { to: q.key + ':1' }), { shareSeq: 2, cover: false }, 'still shared')
 })
 
 test('post.share and post.unshare refuse a locked identity; post.shared works locked', async (t) => {
@@ -244,8 +247,8 @@ test('post.share and post.unshare refuse a locked identity; post.shared works lo
     t.alike(await errorPair(locked.web.request(method, { to: p.key + ':1' })), ['USAGE', LOCKED], method + ' locked')
     t.alike(await errorPair(locked.web.request(method, { to: p.key + ':3' })), ['USAGE', LOCKED], method + ' locked, unshared post')
   }
-  t.alike(await locked.web.request('post.shared', { to: p.key + ':1' }), { shareSeq: 2 }, 'read while locked')
-  t.alike(await locked.web.request('post.shared', { to: p.key + ':3' }), { shareSeq: null })
+  t.alike(await locked.web.request('post.shared', { to: p.key + ':1' }), { shareSeq: 2, cover: false }, 'read while locked')
+  t.alike(await locked.web.request('post.shared', { to: p.key + ':3' }), { shareSeq: null, cover: false })
   t.alike(await errorPair(locked.web.request('post.shared', { to: p.key + ':0' })), ['USAGE', 'parâmetro inválido: to'])
   t.is(await length(locked.web), 4, 'nothing appended')
   t.absent(locked.web.events.some((e) => e.name === 'sync.started'), 'no run for a locked identity')
@@ -263,7 +266,7 @@ test('blocks stored past a hole count: a tombstone, a share, and a target in the
   const p = await prepared(() => [postRecord({ text: 'um' }), postShareRecord({ seq: 1 }), postRecord({ text: 'buraco' }), deleteRecord({ seq: 2 })])
   await clearBlock(p, 3)
   const a = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair })
-  t.alike(await a.web.request('post.shared', { to: p.key + ':1' }), { shareSeq: null }, 'the tombstone past the hole withdraws the share')
+  t.alike(await a.web.request('post.shared', { to: p.key + ':1' }), { shareSeq: null, cover: false }, 'the tombstone past the hole withdraws the share')
   for (const method of ALL) {
     t.alike(await errorPair(a.web.request(method, { to: p.key + ':3' })), ['USAGE', BAD_REF], method + ': a target not held')
   }
@@ -273,10 +276,10 @@ test('blocks stored past a hole count: a tombstone, a share, and a target in the
   await clearBlock(q, 2)
   const b = await setup(t, { storage: q.storage, assoc: q.assoc, keyPair: q.keyPair })
   const to = q.key + ':1'
-  t.alike(await b.web.request('post.shared', { to }), { shareSeq: 3 }, 'the share past the hole is live')
+  t.alike(await b.web.request('post.shared', { to }), { shareSeq: 3, cover: false }, 'the share past the hole is live')
   t.alike(await b.web.request('post.share', { to }), { shareSeq: 3, created: false }, 'already shared')
   t.alike(await b.web.request('post.unshare', { to }), { ok: true, changed: true }, 'the share past the hole is withdrawn')
-  t.alike(await b.web.request('post.shared', { to }), { shareSeq: null })
+  t.alike(await b.web.request('post.shared', { to }), { shareSeq: null, cover: false })
   t.alike(await b.web.request('post.unshare', { to }), { ok: true, changed: false })
 })
 
@@ -361,7 +364,7 @@ test('post.share and post.unshare catch up, then push what they wrote', async (t
   }
 
   const from = web.events.length
-  t.alike(await web.request('post.shared', { to }), { shareSeq: 4 })
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 4, cover: false })
   t.absent(web.events.slice(from).some((e) => e.name === 'sync.started'), 'post.shared starts no run')
 })
 
@@ -383,5 +386,326 @@ test('post.unshare that fails across appends counts and pushes what landed', asy
   t.is(runs[1].stopped.result.seederConfirmed, true, 'the seeder confirmed the new length')
   const targets = (await web.request('log.read', {})).entries.filter((e) => e.seq >= 13).map((e) => e.record.seq)
   t.alike(targets, [2, 3, 4, 5, 6, 7, 8, 9], 'the first 8 tombstones are stored, nothing retried')
-  t.alike(await web.request('post.shared', { to: p.key + ':1' }), { shareSeq: 10 }, 'the last share is still live')
+  t.alike(await web.request('post.shared', { to: p.key + ':1' }), { shareSeq: 10, cover: false }, 'the last share is still live')
+})
+
+test('post.delete that fails across appends counts and pushes what landed', async (t) => {
+  t.timeout(90000)
+  await testnet(t)
+  const old = (start) => ({ core: 'ab'.repeat(32), mime: 'image/jpeg', start, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 })
+  // 1 the post, 2 its share, 3 to 10 eight live covers another writer left,
+  // 11 another post.
+  const p = await prepared(() => [postRecord({ text: 'um' }), postShareRecord({ seq: 1 }), ...[1, 2, 3, 4, 5, 6].map((i) => postCoverRecord({ seq: 1, image: old(i) }))])
+  await member.withIdentity({ storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }, ({ diary }) => store.appendRecords(diary, [postCoverRecord({ seq: 1, image: old(7) }), postCoverRecord({ seq: 1, image: old(8) }), postRecord({ text: 'dois' })]))
+  const seeder = await fakeSeeder(t, { signer: p.assoc.kp })
+  // 12 the share of 11, 13 to 20 the first chunk of tombstones; 21 is refused.
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, seederUrl: seeder.url, writeGate: true, limits: { maxLogBlocks: 21 }, syncOptions: { retryMinMs: 100, retryMaxMs: 200 } })
+  t.alike(await web.request('post.share', { to: p.key + ':11' }), { shareSeq: 12, created: true }, 'a confirmed push first')
+
+  const from = web.events.length
+  t.alike(await errorPair(web.request('post.delete', { to: p.key + ':1' })), ['USAGE', FULL], 'the second append fails')
+  const runs = await runsSince(web, from)
+  t.alike(runs.map((r) => r.lines[0]), ['sincronizando antes de publicar', 'enviando ao semeador'], 'what landed is pushed')
+  t.is(runs[1].stopped.result.seederConfirmed, true, 'the seeder confirmed the new length')
+  const targets = (await web.request('log.read', {})).entries.filter((e) => e.seq >= 13).map((e) => e.record.seq)
+  t.alike(targets, [1, 3, 4, 5, 6, 7, 8, 9], 'the post first, then the oldest covers; nothing retried')
+})
+
+// ---- the cover (docs/rpc.md 5.167) ----
+
+// A JPEG of `width` x `height` the node's photo check takes; `n` varies the
+// content so each upload is its own range.
+function jpegBytes (n, width = 1200, height = 630) {
+  const bytes = b4a.alloc(3000)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7 + n) & 0xff
+  return jpegHead(bytes, width, height)
+}
+
+function uploadCover (node, n, width = 1200, height = 630) {
+  return node.mediaUpload({ bytes: jpegBytes(n, width, height), mime: 'image/jpeg', width, height })
+}
+
+// A synthetic still WebP: one VP8L chunk with a 512x512 header, then filler.
+function webpBytes () {
+  const bytes = b4a.alloc(2000)
+  bytes.write('RIFF', 0, 'latin1')
+  bytes.writeUInt32LE(bytes.length - 8, 4)
+  bytes.write('WEBPVP8L', 8, 'latin1')
+  bytes.writeUInt32LE(bytes.length - 20, 16)
+  bytes[20] = 0x2f
+  bytes.writeUInt32LE((511 | (511 << 14)) >>> 0, 21)
+  for (let i = 25; i < bytes.length; i++) bytes[i] = (i * 13) & 0xff
+  return bytes
+}
+
+function range (d) {
+  return { core: d.core, start: d.start, blocks: d.blocks }
+}
+
+async function blocksOf (web, type) {
+  return (await web.request('log.read', {})).entries.filter((e) => e.record !== null && e.record.type === type)
+}
+
+// Whether this device still holds block `seq` of an own media core.
+async function mediaHeld (storage, core, seq) {
+  const c = await store.openMediaCoreReadOnly(storage, core)
+  try {
+    return await c.has(seq)
+  } finally {
+    await c.close()
+  }
+}
+
+test('post.cover: written after the bytes match; a repeat writes nothing; a new cover replaces the old one', async (t) => {
+  await testnet(t)
+  const { web, node, key, storage, internal } = await certified(t, { mediaKeyPair: crypto.keyPair() })
+  const first = await uploadCover(node, 1)
+  // 1: media-core declaration
+  t.is((await web.request('post.create', { text: 'pública', media: [await uploadCover(node, 3, 640, 480)] })).seq, 2)
+  const to = key + ':2'
+  t.alike(await errorPair(web.request('post.cover', { to, image: first })), ['USAGE', NOT_SHARED], 'an unshared post takes no cover')
+  t.is(await length(web), 3, 'nothing appended')
+
+  t.alike(await web.request('post.share', { to }), { shareSeq: 3, created: true })
+  t.alike(await web.request('post.cover', { to, image: first }), { coverSeq: 4, created: true })
+  const block = (await web.request('log.read', {})).entries.find((e) => e.seq === 4).record
+  t.alike([block.type, block.seq, block.image, Object.keys(block).sort()], ['post-cover', 2, first, ['at', 'image', 'seq', 'type']], 'one post-cover naming the post')
+  t.is(validateRecord(block, 4), null, 'valid at its seq')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 3, cover: true })
+
+  t.alike(await web.request('post.cover', { to, image: first }), { coverSeq: 4, created: false }, 'the same cover writes nothing')
+  t.is(await length(web), 5, 'nothing appended')
+
+  const second = await uploadCover(node, 2)
+  t.is(await mediaHeld(storage, first.core, first.start), true, 'the first cover\'s bytes are held')
+  t.alike(await web.request('post.cover', { to, image: second }), { coverSeq: 6, created: true })
+  const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === 5).record
+  t.alike([tomb.type, tomb.seq, tomb.media], ['delete', 4, [range(first)]], 'the old cover is tombstoned with its range in the same append')
+  t.alike((await blocksOf(web, 'post-cover')).map((e) => e.seq), [6], 'exactly one live cover')
+  t.is(await mediaHeld(storage, first.core, first.start), false, 'the first cover\'s range is freed')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 3, cover: true })
+
+  t.alike(await web.request('post.unshare', { to }), { ok: true, changed: true })
+  const tombs = (await web.request('log.read', {})).entries.filter((e) => e.seq >= 7).map((e) => [e.record.type, e.record.seq, e.record.media])
+  t.alike(tombs, [['delete', 3, undefined], ['delete', 6, [range(second)]]], 'unshare tombstones the share, then the cover with its range')
+  t.alike(await blocksOf(web, 'post-cover'), [], 'no live cover')
+  t.is(await mediaHeld(storage, second.core, second.start), false, 'the cover\'s range is freed')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: null, cover: false })
+  t.alike(await web.request('post.unshare', { to }), { ok: true, changed: false }, 'the repeat writes nothing')
+
+  t.alike(await web.request('post.share', { to }), { shareSeq: 9, created: true })
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 9, cover: false }, 'a new share starts without a cover')
+  t.alike(internal, [], 'no internal error')
+})
+
+test('post.cover: a repeat succeeds after an earlier post is deleted and its block cleared', async (t) => {
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [
+    postRecord({ text: 'anterior' }),
+    postRecord({ text: 'foto', media: [{ ...image, start: 2 }] }),
+    postShareRecord({ seq: 2 }),
+    postCoverRecord({ seq: 2, image })
+  ])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  const to = { author: p.key, seq: 2 }
+  const deleted = await member.postDelete(ctx, { to: { author: p.key, seq: 1 } })
+  t.alike([deleted.changed, deleted.deleted], [true, [1]])
+  await member.withIdentity(ctx, async ({ diary }) => {
+    t.is(await diary.has(1), false, 'the node cleared the deleted post block')
+    const { entries } = await store.readHeld(diary)
+    t.alike(entries.map((e) => e.seq), [0, 2, 3, 4, 5], 'held entries skip the cleared block')
+  })
+  t.alike(await member.postCover(ctx, { to, image }), { coverSeq: 4, created: false, written: null }, 'the same cover still succeeds')
+  t.alike(await member.postShared(ctx, { to }), { shareSeq: 3, cover: true })
+  t.is(await member.withIdentity(ctx, ({ diary }) => diary.length), 6, 'nothing appended by the repeat')
+})
+
+test('post.cover: an old cover sent again after its replacement writes nothing, even while its bytes are still held', async (t) => {
+  await testnet(t)
+  const { web, node, key, storage, internal } = await certified(t, { mediaKeyPair: crypto.keyPair() })
+  const first = await uploadCover(node, 1)
+  const second = await uploadCover(node, 2)
+  // 1: media-core declaration
+  t.is((await web.request('post.create', { text: 'pública', media: [await uploadCover(node, 3, 640, 480)] })).seq, 2)
+  const to = key + ':2'
+  t.alike(await web.request('post.share', { to }), { shareSeq: 3, created: true })
+  t.alike(await web.request('post.cover', { to, image: first }), { coverSeq: 4, created: true })
+  // This device's clear does not run, as when it fails or another device
+  // of the same passkey replaced the cover.
+  const clear = store.clearMediaRanges
+  store.clearMediaRanges = async () => {}
+  try {
+    t.alike(await web.request('post.cover', { to, image: second }), { coverSeq: 6, created: true })
+  } finally {
+    store.clearMediaRanges = clear
+  }
+  t.alike((await web.request('log.read', {})).entries.find((e) => e.seq === 5).record.media, [range(first)], 'the first cover\'s range was freed')
+  t.is(await mediaHeld(storage, first.core, first.start), true, 'its bytes are still held here')
+  const len = await length(web)
+  t.alike(await errorPair(web.request('post.cover', { to, image: first })), ['USAGE', BAD_MEDIA], 'seeders cleared that range for good')
+  t.is(await length(web), len, 'nothing appended')
+  t.alike((await blocksOf(web, 'post-cover')).map((e) => e.seq), [6], 'the second cover stays the live one')
+  t.alike(internal, [], 'no internal error')
+})
+
+test('post.cover: bad bytes, a foreign core, a webp and an alias of a photo write nothing', async (t) => {
+  await testnet(t)
+  const { web, node, key } = await certified(t, { mediaKeyPair: crypto.keyPair() })
+  const cover = await uploadCover(node, 1)
+  const photo = await uploadCover(node, 2, 640, 480)
+  const webp = await node.mediaUpload({ bytes: webpBytes(), mime: 'image/webp', width: 512, height: 512 })
+  // 1: media-core declaration
+  t.is((await web.request('post.create', { text: 'foto', media: [photo] })).seq, 2)
+  const to = key + ':2'
+  t.alike(await web.request('post.share', { to }), { shareSeq: 3, created: true })
+  const len = await length(web)
+
+  const cases = [
+    ['a foreign core', { ...cover, core: hex(crypto.keyPair().publicKey) }],
+    ['the diary key as the core', { ...cover, core: key }],
+    ['past the core end', { ...cover, start: cover.start + 100 }],
+    ['more bytes than stored', { ...cover, bytes: cover.bytes + 1 }],
+    ['a bad hash', { ...cover, sha256: 'ab'.repeat(32) }],
+    ['other sides than the bytes', { ...cover, width: 1199 }],
+    ['webp bytes declared as a JPEG', { ...webp, mime: 'image/jpeg' }],
+    ['an alias of the post\'s photo', photo]
+  ]
+  for (const [name, image] of cases) {
+    t.alike(await errorPair(web.request('post.cover', { to, image })), ['USAGE', BAD_MEDIA], name)
+  }
+  t.alike(await errorPair(web.request('post.cover', { to, image: webp })), ['USAGE', 'parâmetro inválido: image'], 'a webp descriptor')
+  t.is(await length(web), len, 'nothing appended')
+  t.alike(await web.request('post.shared', { to }), { shareSeq: 3, cover: false })
+})
+
+test('post.cover: the target rules of post.shared; a locked identity writes nothing', async (t) => {
+  await testnet(t)
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [
+    postRecord({ text: 'um', media: [image] }),
+    postShareRecord({ seq: 1 }),
+    postRecord({ text: 'apagada' }),
+    postShareRecord({ seq: 3 }),
+    deleteRecord({ seq: 3 }),
+    postCoverRecord({ seq: 1, image })
+  ])
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair })
+  const other = hex(crypto.keyPair().publicKey)
+  const cases = [
+    [other + ':1', BAD_REF, 'another author'],
+    [p.key + ':7', BAD_REF, 'at the length'],
+    [p.key + ':3', BAD_REF, 'a deleted post'],
+    [p.key + ':2', NOT_POST, 'a post-share'],
+    [p.key + ':6', NOT_POST, 'a post-cover']
+  ]
+  for (const [to, message, name] of cases) {
+    t.alike(await errorPair(web.request('post.cover', { to, image })), ['USAGE', message], name)
+  }
+  t.alike(await web.request('post.cover', { to: p.key + ':1', image }), { coverSeq: 6, created: false }, 'the live cover itself: nothing read, nothing written')
+  t.alike(await web.request('post.shared', { to: p.key + ':1' }), { shareSeq: 2, cover: true })
+  t.is(await length(web), 7, 'nothing appended')
+
+  const q = await prepared(() => [postRecord({ text: 'um', media: [image] }), postShareRecord({ seq: 1 })])
+  const locked = await setup(t, { storage: q.storage, assoc: q.assoc, keyPair: null })
+  t.alike(await errorPair(locked.web.request('post.cover', { to: q.key + ':1', image })), ['USAGE', LOCKED], 'locked')
+  t.is(await length(locked.web), 3, 'nothing appended while locked')
+})
+
+test('post.cover tombstones every older live cover in its one append; post.delete frees them all', async (t) => {
+  await testnet(t)
+  const old = (start) => ({ core: 'ab'.repeat(32), mime: 'image/jpeg', start, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 })
+  // A diary another writer left with two live covers of post 1.
+  const p = await prepared(() => [postRecord({ text: 'um', media: [old(99)] }), postShareRecord({ seq: 1 }), postCoverRecord({ seq: 1, image: old(1) }), postCoverRecord({ seq: 1, image: old(2) })])
+  const { web, node } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: crypto.keyPair() })
+  const to = p.key + ':1'
+  const cover = await uploadCover(node, 1)
+  // 5: media-core declaration
+  t.alike(await web.request('post.cover', { to, image: cover }), { coverSeq: 8, created: true })
+  const log = (await web.request('log.read', {})).entries
+  t.alike(log.filter((e) => e.seq >= 6 && e.seq <= 7).map((e) => [e.record.type, e.record.seq, 'media' in e.record]), [['delete', 3, false], ['delete', 4, false]], 'both old covers, no range in an undeclared core')
+  t.alike((await blocksOf(web, 'post-cover')).map((e) => e.seq), [8], 'exactly one live cover')
+
+  const r = await web.request('post.delete', { to })
+  t.alike([r.changed, r.deleted], [true, [1]], 'the answer names the post only')
+  const tombs = (await web.request('log.read', {})).entries.filter((e) => e.seq > 8).map((e) => [e.record.seq, e.record.media])
+  t.alike(tombs, [[1, undefined], [8, [range(cover)]]], 'the post and its cover, the cover with its range')
+})
+
+test('post.cover with more live covers than one append takes: each call tombstones what fits, a repeat continues', async (t) => {
+  await testnet(t)
+  const old = (start) => ({ core: 'ab'.repeat(32), mime: 'image/jpeg', start, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 })
+  // 1 the post, 2 its share, 3 to 11 nine live covers.
+  const p = await prepared(() => [postRecord({ text: 'um', media: [old(99)] }), postShareRecord({ seq: 1 }), ...[1, 2, 3, 4, 5, 6].map((i) => postCoverRecord({ seq: 1, image: old(i) }))])
+  await member.withIdentity({ storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }, ({ diary }) => store.appendRecords(diary, [7, 8, 9].map((i) => postCoverRecord({ seq: 1, image: old(i) }))))
+  const { web, node } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: crypto.keyPair() })
+  const to = p.key + ':1'
+  const cover = await uploadCover(node, 1)
+  // 12: media-core declaration
+  t.alike(await web.request('post.cover', { to, image: cover }), { coverSeq: 20, created: true })
+  const live = async () => (await blocksOf(web, 'post-cover')).map((e) => e.seq)
+  t.alike(await live(), [10, 11, 20], 'the seven oldest old covers went with the new one')
+  t.alike(await web.request('post.cover', { to, image: cover }), { coverSeq: 20, created: false }, 'the repeat keeps the cover')
+  t.alike(await live(), [20], 'and tombstones the rest')
+  const len = await length(web)
+  t.alike(await web.request('post.cover', { to, image: cover }), { coverSeq: 20, created: false })
+  t.is(await length(web), len, 'nothing left: nothing appended')
+
+  // The newest live cover already is the image: no bytes read, older ones go.
+  const q = await prepared(() => [postRecord({ text: 'um', media: [old(99)] }), postShareRecord({ seq: 1 }), ...[1, 2, 3, 4, 5, 6].map((i) => postCoverRecord({ seq: 1, image: old(i) }))])
+  await member.withIdentity({ storage: q.storage, association: q.assoc.hex, keyPair: q.keyPair }, ({ diary }) => store.appendRecords(diary, [7, 8, 9].map((i) => postCoverRecord({ seq: 1, image: old(i) }))))
+  const same = await setup(t, { storage: q.storage, assoc: q.assoc, keyPair: q.keyPair })
+  const toQ = q.key + ':1'
+  const liveQ = async () => (await blocksOf(same.web, 'post-cover')).map((e) => e.seq)
+  t.alike(await same.web.request('post.cover', { to: toQ, image: old(9) }), { coverSeq: 11, created: false })
+  t.alike(await liveQ(), [11], 'the eight older covers in one append')
+})
+
+test('D-FIX: unshare prefixes keep overlapping covers until the last tombstone', async (t) => {
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [
+    { type: 'media-core', key: image.core, at: new Date().toISOString() },
+    postRecord({ text: 'foto', media: [{ ...image, start: 2 }] }),
+    postShareRecord({ seq: 2 }),
+    ...Array.from({ length: 5 }, () => postCoverRecord({ seq: 2, image }))
+  ])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  await member.withIdentity(ctx, ({ diary }) => store.appendRecords(diary, Array.from({ length: 4 }, () => postCoverRecord({ seq: 2, image }))))
+  const to = { author: p.key, seq: 2 }
+  ctx.limits = { maxLogBlocks: 21 }
+  const err = await errorOf(member.postUnshare(ctx, { to }))
+  t.is(err && err.message, FULL, 'the second append fails')
+  const raw = () => member.withIdentity(ctx, async ({ diary }) => (await store.readHeld(diary)).entries)
+  const first = (await raw()).filter((e) => e.record && e.record.type === 'delete')
+  t.is(first.length, 8)
+  t.ok(first.every((e) => e.record.media === undefined), 'no prefix releases the shared range')
+  delete ctx.limits
+  await member.postUnshare(ctx, { to })
+  const tombs = (await raw()).filter((e) => e.record && e.record.type === 'delete')
+  t.alike(tombs.filter((e) => e.record.media).map((e) => [e.record.seq, e.record.media]), [[12, [range(image)]]], 'only the last cover releases it')
+})
+
+test('D-FIX: a text-only shared post cannot set even its existing cover', async (t) => {
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [postRecord({ text: 'texto' }), postShareRecord({ seq: 1 }), postCoverRecord({ seq: 1, image })])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  const err = await errorOf(member.postCover(ctx, { to: { author: p.key, seq: 1 }, image }))
+  t.is(err && err.message, BAD_REF)
+  t.is(await member.withIdentity(ctx, ({ diary }) => diary.length), 4, 'nothing appended')
+})
+
+test('D-FIX: cover fold capacity is independent of shares', async (t) => {
+  const { POST_COVERS_PER_DIARY } = require('@varanda/core/lib/post-share')
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [postRecord({ text: 'um' })])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  let seq
+  await member.withIdentity(ctx, async ({ diary }) => {
+    const records = Array.from({ length: POST_COVERS_PER_DIARY }, (_, i) => postCoverRecord({ seq: i + 1, image }))
+    for (let i = 0; i < records.length; i += 8) await store.appendRecords(diary, records.slice(i, i + 8))
+    seq = diary.length
+    await store.appendRecords(diary, [postRecord({ text: 'foto', media: [image] }), postShareRecord({ seq })])
+  })
+  const err = await errorOf(member.postCover(ctx, { to: { author: p.key, seq }, image }))
+  t.is(err && err.message, 'limite de publicações na web atingido')
+  t.is(await member.withIdentity(ctx, ({ diary }) => diary.length), seq + 2, 'no ignored cover appended')
 })

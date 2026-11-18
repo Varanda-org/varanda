@@ -5,7 +5,8 @@
 // page behind the operator switch, the one uniform 302 for every case that
 // shows nothing, the photos checked against their descriptors and the
 // re-check of the share after the bytes are read, the page's JSON twin
-// (/previa) with its one uniform {"post":null}, and the switch being
+// (/previa) with its one uniform {"post":null}, the share cover (/capa)
+// with its frame size and its own re-check, and the switch being
 // independent of the Feira's.
 const test = require('brittle')
 const fs = require('node:fs')
@@ -23,7 +24,7 @@ const { signRoster, issuerCountersign } = require('@varanda/core/lib/page')
 const { signClose } = require('@varanda/core/lib/page-lifecycle')
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('@varanda/core/lib/net')
 const {
-  memberCertRecord, postRecord, profileRecord, deleteRecord, mediaCoreRecord, postShareRecord, listingRecord, MEDIA_BLOCK_BYTES
+  memberCertRecord, postRecord, profileRecord, deleteRecord, mediaCoreRecord, postShareRecord, postCoverRecord, listingRecord, MEDIA_BLOCK_BYTES
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { startSeedWs } = require('../lib/seed-ws')
@@ -70,12 +71,25 @@ function jpeg (size, fill) {
   return b
 }
 
+// A JPEG whose baseline frame header (SOF0, three components) says
+// width x height, so stillImageSize reads that size.
+function jpegFrame (width, height) {
+  return b4a.from([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03,
+    0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+    0xff, 0xd9
+  ])
+}
+
 // Media core blocks 1..6 are JPEGs (IMG[0..5]), block 7 the video bytes,
-// block 8 a real AVIF and block 9 an AVIF cut short (its ftyp still there).
+// block 8 a real AVIF, block 9 an AVIF cut short (its ftyp still there) and
+// block 10 a share cover, a JPEG framed 120 x 80.
 const IMG = [0, 1, 2, 3, 4, 5].map((i) => jpeg(300 + i, i + 1))
 const VIDEO = b4a.concat([b4a.from([0, 0, 0, 0x18]), b4a.from('ftypmp42'), b4a.alloc(500, 9)])
 const AVIF = b4a.from(avifSamples.ios.opaque)
 const BAD_AVIF = b4a.from(AVIF.subarray(0, 100))
+const COVER = jpegFrame(120, 80)
 
 function descriptor (core, start, bytes, hash = sha(bytes)) {
   const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
@@ -90,7 +104,12 @@ function videoDescriptor (core, start, bytes) {
   return { core, mime: 'video/mp4', start, blocks: 1, bytes: bytes.byteLength, sha256: sha(bytes), width: 640, height: 360, ms: 5000 }
 }
 
+function coverDescriptor (core, start, bytes, over = {}) {
+  return { ...descriptor(core, start, bytes), width: 120, height: 80, ...over }
+}
+
 const share = (seq, i) => postShareRecord({ seq, at: at(i) })
+const coverOf = (seq, image, i) => postCoverRecord({ seq, image, at: at(i) })
 const del = (seq, i) => deleteRecord({ seq, at: at(i) })
 
 const HOSTILE = '<script>alert(1)</script> "oi" & \'tchau\''
@@ -109,6 +128,7 @@ async function member (t, bootstrap, assoc, records) {
   await mediaCore.append(VIDEO)
   await mediaCore.append(AVIF)
   await mediaCore.append(BAD_AVIF)
+  await mediaCore.append(COVER)
   const mediaKey = hex(mediaCore.key)
   await diary.append(memberCertRecord(validCert(assoc, key)))
   for (const r of records(key, mediaKey)) await diary.append(r)
@@ -658,4 +678,171 @@ test('a page diary over a real Seeder: its shared post, preview and photo are se
   t.is(closed.headers.location, '/publicacao/' + P.key + '/5')
   t.alike(previaShape(await get(on.port, base + '/previa')), noPreview('GET'), 'and no preview')
   t.is((await get(on.port, base + '/foto/1')).status, 404, 'and no photo')
+})
+
+test('the share cover over a real Seeder: /capa serves the checked JPEG, the page names it, and every miss is the same 404', async (t) => {
+  t.timeout(240000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), log: (e) => events.push(e), associationKey: assoc.hex })
+  t.teardown(() => seeder.close(), { force: true })
+  await seeder.start()
+  const on = await startSeedWs({ port: 0, seeder, postsOrigin: ORIGIN })
+  t.teardown(() => on.close(), { force: true })
+  const off = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => off.close(), { force: true })
+
+  const C = await member(t, bootstrap, assoc, (key, K) => [
+    mediaCoreRecord({ key: K, at: at(0) }), // 1
+    postRecord({ text: 'avif com capa', at: at(1), media: [avifDescriptor(K, 8, AVIF)] }), // 2
+    share(2, 2), // 3
+    coverOf(2, coverDescriptor(K, 10, COVER), 3), // 4
+    postRecord({ text: 'sem share', at: at(4), media: [avifDescriptor(K, 8, AVIF)] }), // 5
+    coverOf(5, coverDescriptor(K, 10, COVER), 5), // 6: a cover is not consent
+    postRecord({ text: 'capa apagada', at: at(6), media: [avifDescriptor(K, 8, AVIF)] }), // 7
+    share(7, 7), // 8
+    coverOf(7, coverDescriptor(K, 10, COVER), 8), // 9
+    del(9, 9), // 10: the cover tombstoned
+    postRecord({ text: 'hash errado', at: at(10), media: [descriptor(K, 1, IMG[0])] }), // 11
+    share(11, 11), // 12
+    coverOf(11, coverDescriptor(K, 10, COVER, { sha256: sha(IMG[0]) }), 12), // 13
+    postRecord({ text: 'quadro errado', at: at(13), media: [descriptor(K, 1, IMG[0])] }), // 14
+    share(14, 14), // 15
+    coverOf(14, coverDescriptor(K, 10, COVER, { width: 121 }), 15), // 16: the bytes say 120 x 80
+    postRecord({ text: 'sem capa', at: at(16), media: [descriptor(K, 1, IMG[0])] }), // 17
+    share(17, 17), // 18
+    postRecord({ text: 'texto sem foto', at: at(18) }), // 19
+    share(19, 19), // 20
+    coverOf(19, coverDescriptor(K, 10, COVER), 20) // 21
+  ])
+  const K = C.mediaKey
+  await admit(C, assoc)
+  await until(() => events.find((e) => e.event === 'media-admitted' && e.key === K), { name: 'mídia admitida', timeoutMs: 30000 })
+  await until(() => seeder._mediaServed.get(K)?.core.contiguousLength === C.mediaCore.length, { name: 'mídia baixada', timeoutMs: 60000 })
+  await settled(seeder, C)
+  await until(async () => (await seeder.postPublic(C.key, 2))?.cover != null, { name: 'capa da publicação 2 visível', timeoutMs: 30000 })
+  t.pass('the seeder shows post 2 with its cover')
+
+  const base = '/p/' + C.key + '/2'
+  const capa = await get(on.port, base + '/capa')
+  t.is(capa.status, 200, 'the cover')
+  t.is(capa.headers['content-type'], 'image/jpeg')
+  t.is(capa.headers['content-length'], String(COVER.byteLength), 'the exact length')
+  t.is(capa.headers['cache-control'], 'no-store')
+  t.is(capa.headers['x-content-type-options'], 'nosniff')
+  t.is(capa.headers['referrer-policy'], 'no-referrer')
+  t.is(capa.headers['x-robots-tag'], ROBOTS)
+  t.alike(capa.body, COVER, 'the exact bytes')
+  const headCapa = await get(on.port, base + '/capa', { method: 'HEAD' })
+  t.is(headCapa.status, 200)
+  t.is(headCapa.body.byteLength, 0, 'HEAD has no body')
+  t.is(headCapa.headers['content-length'], capa.headers['content-length'], 'HEAD has the same length')
+
+  // The page names the cover ahead of the brand card its AVIF photo would
+  // give, and its body is the same as without one.
+  const page = (await get(on.port, base)).body.toString()
+  t.ok(page.includes('<meta property="og:image" content="' + ORIGIN + base + '/capa">\n<meta property="og:image:type" content="image/jpeg">\n' +
+    '<meta property="og:image:width" content="120">\n<meta property="og:image:height" content="80">'), 'og:image is the cover with its sizes')
+  t.is((page.match(/<meta property="og:image" /g) || []).length, 1, 'exactly one og:image')
+  t.absent(page.includes('src="' + base + '/capa"'), 'the body never shows the cover')
+  const tombstoned = (await get(on.port, '/p/' + C.key + '/7')).body.toString()
+  t.ok(tombstoned.includes('<meta property="og:image" content="' + ORIGIN + '/og/convite.png">'), 'a tombstoned cover: the brand card')
+  const textOnly = (await get(on.port, '/p/' + C.key + '/19')).body.toString()
+  t.ok(textOnly.includes('<meta property="og:image" content="' + ORIGIN + '/og/convite.png">'), 'a text-only post ignores its cover and uses the brand card')
+  const noCover = (await get(on.port, '/p/' + C.key + '/17')).body.toString()
+  t.ok(noCover.includes('<meta property="og:image" content="' + ORIGIN + '/p/' + C.key + '/17/foto/1">'), 'no cover: the first photo, as before')
+
+  const misses = [
+    ['not shared', on, '/p/' + C.key + '/5/capa'],
+    ['the cover tombstoned', on, '/p/' + C.key + '/7/capa'],
+    ['a hash mismatch', on, '/p/' + C.key + '/11/capa'],
+    ['a frame size mismatch', on, '/p/' + C.key + '/14/capa'],
+    ['a post with no cover', on, '/p/' + C.key + '/17/capa'],
+    ['a text-only post with a cover', on, '/p/' + C.key + '/19/capa'],
+    ['a seq past the log', on, '/p/' + C.key + '/99/capa'],
+    ['an unknown diary', on, '/p/' + 'f'.repeat(64) + '/2/capa'],
+    ['posts origin unset', off, base + '/capa'],
+    ['a query string', on, base + '/capa?x=1'],
+    ['a path after it', on, base + '/capa/1'],
+    ['seq 0', on, '/p/' + C.key + '/0/capa'],
+    ['a leading zero', on, '/p/' + C.key + '/02/capa']
+  ]
+  for (const [name, server, url] of misses) {
+    const res = await get(server.port, url)
+    t.is(res.status, 404, name)
+    t.is(res.body.toString(), 'não encontrado\n', name + ': the generic 404')
+  }
+  const post = await get(on.port, base + '/capa', { method: 'POST' })
+  t.is(post.status, 405, 'POST /capa')
+  t.is(post.headers.allow, 'GET, HEAD')
+
+  // The share tombstoned while the cover bytes are read.
+  const entry = seeder._served.get(C.key)
+  const mediaRead = seeder.mediaRead
+  seeder.mediaRead = async function (...args) {
+    const read = await mediaRead.apply(this, args)
+    entry.tombstones.set(999, 3)
+    entry.effective = null
+    return read
+  }
+  const withdrawn = await get(on.port, base + '/capa')
+  seeder.mediaRead = mediaRead
+  entry.tombstones.delete(999)
+  entry.effective = null
+  t.is(withdrawn.status, 404, 'withdrawn during the read: 404')
+  t.is(withdrawn.body.toString(), 'não encontrado\n', 'the generic 404')
+  t.is((await get(on.port, base + '/capa')).status, 200, 'served again once the stub is gone')
+
+  // A second answer naming another share, or another cover, is not the
+  // same permission.
+  for (const [name, field] of [['another shareSeq', 'shareSeq'], ['another coverSeq', 'coverSeq']]) {
+    const postPublic = seeder.postPublic
+    let calls = 0
+    seeder.postPublic = async function (...args) {
+      const got = await postPublic.apply(this, args)
+      calls++
+      return calls === 2 && got ? { ...got, [field]: got[field] + 1 } : got
+    }
+    const res = await get(on.port, base + '/capa')
+    seeder.postPublic = postPublic
+    t.is(calls, 2, name + ': postPublic asked twice')
+    t.is(res.status, 404, name + ' after the read: 404')
+  }
+})
+
+test('the share cover from a stub seeder: an answer without a cover, or with one that is not a share cover, names no /capa and serves none', async (t) => {
+  await testnet(t)
+  const hex = 'ab'.repeat(32)
+  const core = 'cd'.repeat(32)
+  const good = { core, mime: 'image/jpeg', start: 1, blocks: 1, bytes: COVER.byteLength, sha256: sha(COVER), width: 120, height: 80 }
+  const covers = {
+    1: {}, // a seeder from before the cover: no cover, no coverSeq
+    2: { cover: { ...good, mime: 'image/png' }, coverSeq: 9 },
+    3: { cover: { ...good, width: 1201 }, coverSeq: 9 },
+    4: { cover: good, coverSeq: null },
+    5: { cover: good, coverSeq: 9 }
+  }
+  let reads = 0
+  const seeder = {
+    postPublic: async (h, seq) => ({ record: { type: 'post', text: 'oi', at: at(1), replyTo: null }, name: null, username: null, shareSeq: 20, ...covers[seq] }),
+    mediaRead: async () => {
+      reads++
+      return { bytes: COVER.byteLength, blocks: (async function * () { yield COVER })() }
+    }
+  }
+  const server = await startSeedWs({ port: 0, seeder, postsOrigin: ORIGIN })
+  t.teardown(() => server.close(), { force: true })
+  for (const seq of [1, 2, 3, 4]) {
+    const page = (await get(server.port, '/p/' + hex + '/' + seq)).body.toString()
+    t.ok(page.includes('<meta property="og:image" content="' + ORIGIN + '/og/convite.png">'), 'seq ' + seq + ': the brand card')
+    const res = await get(server.port, '/p/' + hex + '/' + seq + '/capa')
+    t.is(res.status, 404, 'seq ' + seq + ': no cover served')
+  }
+  t.is(reads, 0, 'nothing is read for a cover that is not a share cover')
+  const shown = await get(server.port, '/p/' + hex + '/5/capa')
+  t.is(shown.status, 200, 'a share cover is served')
+  t.alike(shown.body, COVER)
+  t.ok((await get(server.port, '/p/' + hex + '/5')).body.toString().includes('content="' + ORIGIN + '/p/' + hex + '/5/capa"'), 'and named')
 })

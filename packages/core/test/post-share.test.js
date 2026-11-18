@@ -1,8 +1,8 @@
 'use strict'
 
 const test = require('brittle')
-const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('../lib/post-share')
-const { postShareRecord, deleteRecord, validRecordCopy } = require('../lib/records')
+const { foldShare, newestShare, POST_SHARES_PER_DIARY, foldCover, newestCover, POST_COVERS_PER_DIARY } = require('../lib/post-share')
+const { postShareRecord, postCoverRecord, deleteRecord, validRecordCopy } = require('../lib/records')
 const { deletedSeqs } = require('../lib/deletion')
 
 const AT = '2026-01-01T00:00:00.000Z'
@@ -102,4 +102,75 @@ test('the highest-only reader fails closed under a tombstoned newer share', (t) 
   t.absent(r.deleted.has(3), 'share 3 is live')
   t.is(r.newest, 5)
   t.absent(r.shown, 'not shown')
+})
+
+const COVER = { core: 'b'.repeat(64), mime: 'image/jpeg', start: 3, blocks: 1, bytes: 1000, sha256: 'e'.repeat(64), width: 1200, height: 630 }
+
+test('foldCover keeps the highest cover seq per post, apart from shares', (t) => {
+  t.is(POST_COVERS_PER_DIARY, 4096)
+  for (const order of [[5, 9, 7], [9, 7, 5], [7, 5, 9]]) {
+    const covers = new Map()
+    for (const s of order) t.ok(foldCover(covers, 3, s))
+    t.ok(foldCover(covers, 4, 6))
+    t.is(newestCover(covers, 3), 9, 'order ' + order.join(','))
+    t.is(newestCover(covers, 4), 6)
+    t.is(newestCover(covers, 2), null)
+  }
+  t.is(newestCover(null, 3), null)
+  t.is(newestCover({ 3: 4 }, 3), null)
+  for (const v of [0, -1, 1.5, '3', null, undefined, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+    t.is(foldCover(new Map(), v, 6), false, 'post ' + String(v))
+    t.is(foldCover(new Map(), 3, v), false, 'cover ' + String(v))
+  }
+  t.is(foldCover({}, 3, 6), false)
+  t.is(foldCover(new Map(), 3, 6, { maxPosts: -1 }), false)
+})
+
+test('foldCover refuses a new post past the cap and still updates a known one', (t) => {
+  const map = new Map()
+  t.ok(foldCover(map, 1, 10, { maxPosts: 2 }))
+  t.ok(foldCover(map, 2, 11, { maxPosts: 2 }))
+  t.is(foldCover(map, 3, 12, { maxPosts: 2 }), false)
+  t.is(newestCover(map, 3), null, 'not inserted')
+  t.ok(foldCover(map, 1, 13, { maxPosts: 2 }))
+  t.is(newestCover(map, 1), 13)
+
+  const full = new Map()
+  for (let i = 1; i <= POST_COVERS_PER_DIARY; i++) foldCover(full, i, i + 1)
+  t.is(full.size, POST_COVERS_PER_DIARY)
+  t.is(foldCover(full, POST_COVERS_PER_DIARY + 1, POST_COVERS_PER_DIARY + 2), false, 'the default cap')
+})
+
+function newestLiveCover (entries) {
+  const deleted = deletedSeqs(entries)
+  const covers = new Map()
+  for (const { seq, record } of entries) {
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'post-cover') foldCover(covers, copy.seq, seq)
+  }
+  const newest = newestCover(covers, 1)
+  return newest !== null && !deleted.has(newest) ? newest : null
+}
+
+// docs/protocol.md section 2, "Cover reader rule": a removed cover never
+// comes back from an older live one.
+test('a tombstoned highest cover means no cover, even with an older live one', (t) => {
+  const cover3 = { seq: 3, record: postCoverRecord({ seq: 1, image: COVER, at: AT }) }
+  const cover5 = { seq: 5, record: postCoverRecord({ seq: 1, image: { ...COVER, start: 4 }, at: AT }) }
+  const drop5 = { seq: 6, record: deleteRecord({ seq: 5, at: AT }) }
+  t.is(newestLiveCover([cover3, cover5]), 5, 'the highest cover wins')
+  t.is(newestLiveCover([cover3, cover5, drop5]), null, 'tombstoned highest: no cover')
+  // The writers tombstone every live cover at once, so a replica that
+  // cleared the tombstoned blocks reaches the same answer.
+  const drop3 = { seq: 7, record: deleteRecord({ seq: 3, at: AT }) }
+  t.is(newestLiveCover([cover3, cover5, drop5, drop3]), null, 'all covers removed')
+  t.is(newestLiveCover([drop5, drop3]), null, 'both covers cleared: still no cover')
+  t.is(newestLiveCover([cover3]), 3)
+  // A cover never counts as a share.
+  const shares = new Map()
+  for (const { seq, record } of [cover3, cover5]) {
+    const copy = validRecordCopy(record, seq)
+    if (copy !== null && copy.type === 'post-share') foldShare(shares, copy.seq, seq)
+  }
+  t.is(newestShare(shares, 1), null)
 })

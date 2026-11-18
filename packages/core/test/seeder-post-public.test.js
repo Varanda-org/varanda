@@ -5,7 +5,9 @@
 // without an account only while the highest share the scan recorded for it
 // is live, the post itself is a live post of a visible diary (a person's or
 // an open page's, seeder-post-page.test.js), and nothing changed while the
-// answer was being read (docs/protocol.md section 2, "Public share").
+// answer was being read (docs/protocol.md section 2, "Public share"). The
+// post-cover branch adds the post's cover image, which never withdraws the
+// post, and keeps the cover's media range live in the seeder's counters.
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -18,7 +20,8 @@ const { Seeder } = require('../lib/seeder')
 const cert = require('../lib/cert')
 const { createCert, createSeederCert, generateAssociationKeyPair } = cert
 const { createSwarm, joinAndFlush, topicFor, attachAdmission } = require('../lib/net')
-const { memberCertRecord, postRecord, profileRecord, deleteRecord, postShareRecord } = require('../lib/records')
+const { memberCertRecord, postRecord, profileRecord, deleteRecord, postShareRecord, postCoverRecord, mediaCoreRecord, MEDIA_BLOCK_BYTES } = require('../lib/records')
+const { mediaHeader } = require('../lib/media')
 const { POST_SHARES_PER_DIARY } = require('../lib/post-share')
 
 function hex (buf) {
@@ -57,8 +60,16 @@ function share (seq, i) {
   return postShareRecord({ seq, at: at(i) })
 }
 
-function del (seq, i) {
-  return deleteRecord({ seq, at: at(i) })
+function del (seq, i, media) {
+  return deleteRecord({ seq, at: at(i), media })
+}
+
+function descriptor (core, start, blocks) {
+  return { core, mime: 'image/jpeg', start, blocks, bytes: blocks * MEDIA_BLOCK_BYTES, sha256: 'ab'.repeat(32), width: 100, height: 100 }
+}
+
+function cover (seq, image, i) {
+  return postCoverRecord({ seq, image, at: at(i) })
 }
 
 // A verified @nome for `key`, signed by an issuer the association delegated.
@@ -68,16 +79,26 @@ function usernameFor (assoc, key, username) {
   return cert.createUsernameRecord({ member: key, username, date: at(0) }, issuerKp, issuerCert)
 }
 
-// A member on the swarm with its diary. `records(key)` follow block 0.
-async function member (t, bootstrap, assoc, { records = () => [] } = {}) {
+// A member on the swarm with its diary. `records(key, mediaKey)` follow
+// block 0; with `media`, one media core of that many raw blocks after its
+// header (mediaKey, else null).
+async function member (t, bootstrap, assoc, { records = () => [], media = 0 } = {}) {
   const store = new Corestore(tmpDir(t, 'varanda-client-'))
   await store.ready()
   t.teardown(() => store.close(), { force: true })
   const diary = store.get({ name: 'diary', valueEncoding: 'json' })
   await diary.ready()
   const key = hex(diary.key)
+  let mediaKey = null
+  if (media > 0) {
+    const core = store.get({ name: 'media' })
+    await core.ready()
+    await core.append(b4a.from(JSON.stringify(mediaHeader({ diary: key }))))
+    for (let i = 0; i < media; i++) await core.append(b4a.alloc(MEDIA_BLOCK_BYTES, i + 1))
+    mediaKey = hex(core.key)
+  }
   await diary.append(memberCertRecord(validCert(assoc, key)))
-  for (const r of records(key)) await diary.append(r)
+  for (const r of records(key, mediaKey)) await diary.append(r)
 
   const swarm = createSwarm(localSwarmOptions(bootstrap))
   t.teardown(() => swarm.destroy(), { force: true })
@@ -91,7 +112,7 @@ async function member (t, bootstrap, assoc, { records = () => [] } = {}) {
   await joinAndFlush(swarm, [topicFor(assoc.hex)])
   const seederPeer = () => until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador' })
   const message = (pred, name, timeoutMs = 20000) => until(() => messages.find(pred), { name, timeoutMs })
-  return { store, diary, key, swarm, peers, messages, seederPeer, message }
+  return { store, diary, key, mediaKey, swarm, peers, messages, seederPeer, message }
 }
 
 async function admit (m, assoc) {
@@ -119,10 +140,36 @@ async function setup (t) {
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
   const { dataDir } = prepareSeederDir(t, assoc)
-  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), log: () => {}, associationKey: assoc.hex })
+  const events = []
+  const seeder = new Seeder({ dataDir, ...localSwarmOptions(bootstrap), log: (e) => events.push(e), associationKey: assoc.hex })
   t.teardown(() => seeder.close(), { force: true })
   await seeder.start()
-  return { bootstrap, assoc, seeder }
+  return { bootstrap, assoc, seeder, events }
+}
+
+// m's media core is bound to m's diary at the seeder.
+function bound (seeder, m) {
+  return until(() => seeder._media.get(m.mediaKey)?.diary === m.key, { name: 'mídia vinculada', timeoutMs: 30000 })
+}
+
+// m's media core is bound, holds block `last` and is re-gated (mediaRead
+// serves nothing before _gateMedia), and m's diary is settled.
+async function mediaReady (seeder, m, last) {
+  await bound(seeder, m)
+  await until(async () => (await seeder._mediaServed.get(m.mediaKey)?.core.has(last)) === true, { name: 'mídia baixada' })
+  await until(() => seeder._mediaServed.get(m.mediaKey)?.headerOk === true, { name: 'mídia conferida' })
+  await settled(seeder, m)
+}
+
+// Whether mediaRead comes to serve the range: its blocks may still be
+// downloading, and a range counted as deleted is never fetched at all.
+async function served (seeder, m, start, blocks) {
+  try {
+    await until(async () => (await seeder.mediaRead(m.key, m.mediaKey, start, blocks)) !== null, { name: 'mídia servida', timeoutMs: 10000 })
+    return true
+  } catch {
+    return false
+  }
 }
 
 test('postPublic shows a shared post with its author, and null for every other block, input or diary state', async (t) => {
@@ -152,7 +199,9 @@ test('postPublic shows a shared post with its author, and null for every other b
   t.is(got.name, 'Ana')
   t.is(got.username, 'ana_maria')
   t.is(got.shareSeq, 5)
-  t.alike(Object.keys(got).sort(), ['name', 'record', 'shareSeq', 'username'])
+  t.is(got.cover, null, 'no cover')
+  t.is(got.coverSeq, null)
+  t.alike(Object.keys(got).sort(), ['cover', 'coverSeq', 'name', 'record', 'shareSeq', 'username'])
 
   t.is(await seeder.postPublic(A.key, 4), null, 'a post with no share')
   t.is(await seeder.postPublic(A.key, 5), null, 'the share block itself')
@@ -391,4 +440,203 @@ test('postPublic answers null when the share, the post or the diary changed whil
 
   seeder._liveRecord = live
   t.alike(await seeder.postPublic(A.key, 3), first, 'shown again with nothing changing')
+})
+
+test('postPublic returns the live cover of a shared post, and a cover in doubt only drops the image', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t)
+  const A = await member(t, bootstrap, assoc, {
+    media: 2,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }), // 1
+      postRecord({ text: 'um', at: at(2), media: [descriptor(K, 1, 1)] }), // 2
+      share(2, 3), // 3
+      cover(2, descriptor(K, 1, 1), 4), // 4
+      postRecord({ text: 'dois', at: at(5), media: [descriptor(K, 1, 1)] }), // 5
+      share(5, 6), // 6
+      cover(5, descriptor(K, 1, 1), 7), // 7: older, still live
+      cover(5, descriptor(K, 2, 1), 8), // 8: newer, tombstoned below
+      del(8, 9), // 9
+      post('três', 10), // 10
+      share(10, 11), // 11
+      post('quatro', 12), // 12
+      share(12, 13), // 13
+      del(13, 14), // 14
+      cover(12, descriptor(K, 2, 1), 15) // 15: a cover with no live share
+    ]
+  })
+  const K = A.mediaKey
+  await admit(A, assoc)
+  await bound(seeder, A)
+  await settled(seeder, A)
+
+  const got = await seeder.postPublic(A.key, 2)
+  t.ok(got, 'a shared post with a cover')
+  t.is(got.record.text, 'um')
+  t.is(got.shareSeq, 3)
+  t.alike(got.cover, descriptor(K, 1, 1), 'the cover image')
+  t.is(got.coverSeq, 4)
+
+  const hidden = await seeder.postPublic(A.key, 5)
+  t.ok(hidden, 'a tombstoned cover never withdraws the post')
+  t.is(hidden.record.text, 'dois')
+  t.is(hidden.cover, null, 'the highest cover is tombstoned: no cover, the older live one included')
+  t.is(hidden.coverSeq, null)
+
+  const bare = await seeder.postPublic(A.key, 10)
+  t.is(bare.cover, null, 'a post with no cover')
+  t.is(bare.coverSeq, null)
+
+  t.is(await seeder.postPublic(A.key, 12), null, 'a cover with no live share is never public')
+  t.is(await seeder.postPublic(A.key, 4), null, 'the cover block itself')
+  t.is(await seeder.postPublic(A.key, 15), null)
+
+  const entry = seeder._served.get(A.key)
+  t.is(entry.covers.get(5), 8, 'tombstones never touch the cover hint')
+
+  // A hint naming a cover whose seq is another post's: the cover is read
+  // back and must name this very post.
+  entry.covers.set(10, 4)
+  const other = await seeder.postPublic(A.key, 10)
+  t.ok(other, 'a cover naming another post keeps the post')
+  t.is(other.cover, null, 'and gives no cover')
+  entry.covers.delete(10)
+
+  // mediaRead serves only a core bound to this diary.
+  const binding = seeder._media.get(K)
+  seeder._media.set(K, { ...binding, diary: 'f'.repeat(64) })
+  const foreign = await seeder.postPublic(A.key, 2)
+  t.ok(foreign, 'a cover in a core bound elsewhere keeps the post')
+  t.is(foreign.cover, null, 'and gives no cover')
+  t.is(foreign.coverSeq, null)
+  seeder._media.set(K, binding)
+
+  // A tombstone of the cover while the answer is read: the re-check after
+  // the awaits drops the image and keeps the post.
+  const live = seeder._liveRecord
+  seeder._liveRecord = async function (hex, seq) {
+    const r = await live.call(this, hex, seq)
+    if (seq === 4) {
+      entry.tombstones.set(999, 4)
+      entry.effective = null
+    }
+    return r
+  }
+  const meanwhile = await seeder.postPublic(A.key, 2)
+  t.ok(meanwhile, 'a cover tombstoned meanwhile keeps the post')
+  t.is(meanwhile.cover, null, 'and gives no cover')
+  seeder._liveRecord = live
+  entry.tombstones.delete(999)
+  entry.effective = null
+
+  seeder._liveRecord = async function (hex, seq) {
+    const r = await live.call(this, hex, seq)
+    if (seq === 4) entry.covers.set(2, 50)
+    return r
+  }
+  const newer = await seeder.postPublic(A.key, 2)
+  t.ok(newer, 'a newer cover recorded meanwhile keeps the post')
+  t.is(newer.cover, null, 'and gives no cover')
+  seeder._liveRecord = live
+  entry.covers.set(2, 4)
+
+  t.alike(await seeder.postPublic(A.key, 2), got, 'shown again with nothing changing')
+
+  // Another diary's cover in A's core: undeclared there, bound to A.
+  const B = await member(t, bootstrap, assoc, {
+    records: () => [postRecord({ text: 'b', at: at(1), media: [descriptor(K, 1, 1)] }), share(1, 2), cover(1, descriptor(K, 1, 1), 3)]
+  })
+  await admit(B, assoc)
+  await settled(seeder, B)
+  const fromB = await seeder.postPublic(B.key, 1)
+  t.ok(fromB, 'a cover in an undeclared core keeps the post')
+  t.is(fromB.cover, null, 'and gives no cover')
+  t.is(fromB.coverSeq, null)
+})
+
+test('a diary with a post-cover and no post-share shows nothing (fails closed)', async (t) => {
+  t.timeout(120000)
+  const { bootstrap, assoc, seeder } = await setup(t)
+  const A = await member(t, bootstrap, assoc, {
+    media: 1,
+    records: (key, K) => [mediaCoreRecord({ key: K, at: at(0) }), post('privado', 2), cover(2, descriptor(K, 1, 1), 3)]
+  })
+  await admit(A, assoc)
+  await bound(seeder, A)
+  await settled(seeder, A)
+  t.is(seeder._served.get(A.key).covers.get(2), 3, 'the cover was recorded')
+  t.is(await seeder.postPublic(A.key, 2), null, 'a cover is not consent')
+})
+
+// The post shares its photo with its cover: the post's tombstone lists the
+// range (hand-made, as an old client could write it), and the live cover
+// must keep it served until its own tombstone frees it.
+async function coverOverDeletedPost (t) {
+  const { bootstrap, assoc, seeder } = await setup(t)
+  const A = await member(t, bootstrap, assoc, {
+    media: 2,
+    records: (key, K) => [
+      mediaCoreRecord({ key: K, at: at(0) }), // 1
+      postRecord({ text: 'foto', media: [descriptor(K, 1, 1)], at: at(2) }), // 2
+      share(2, 3), // 3
+      cover(2, descriptor(K, 1, 1), 4), // 4
+      del(2, 5, [{ core: K, start: 1, blocks: 1 }]) // 5
+    ]
+  })
+  await admit(A, assoc)
+  await mediaReady(seeder, A, 2)
+  return { seeder, A, K: A.mediaKey }
+}
+
+async function coverTombstoneFrees (t, seeder, A, K) {
+  await append(A, [del(4, 6, [{ core: K, start: 1, blocks: 1 }])])
+  await settled(seeder, A)
+  t.is(await seeder.mediaRead(A.key, K, 1, 1), null, 'freed by the cover\'s own tombstone')
+  const mcore = seeder._mediaServed.get(K).core
+  await until(async () => !(await mcore.has(1)), { name: 'mídia apagada' })
+  t.ok(await mcore.has(2), 'a block nothing listed keeps its bytes')
+}
+
+test('a tombstone range over a live cover is not served as deleted until the cover\'s own tombstone', async (t) => {
+  t.timeout(120000)
+  const { seeder, A, K } = await coverOverDeletedPost(t)
+  t.ok(await served(seeder, A, 1, 1), 'the live cover keeps the range served')
+  t.is(await seeder.postPublic(A.key, 2), null, 'the deleted post is not public')
+  await coverTombstoneFrees(t, seeder, A, K)
+})
+
+test('a media recount still counts a live cover over a tombstoned range', async (t) => {
+  t.timeout(120000)
+  const { seeder, A, K } = await coverOverDeletedPost(t)
+  t.ok(await served(seeder, A, 1, 1), 'served before the recount')
+  const entry = seeder._served.get(A.key)
+  const recounts = entry.mediaRecounts
+  await seeder._recountMedia(A.key, entry)
+  t.is(entry.mediaRecounts, recounts + 1, 'the recount ran')
+  t.absent(entry.mediaIrregular, 'the diary stays regular')
+  t.ok(await seeder.mediaRead(A.key, K, 1, 1), 'the live cover keeps the range served after the recount')
+  await coverTombstoneFrees(t, seeder, A, K)
+})
+
+test('D-FIX: public covers require a still in the post itself', async (t) => {
+  const key = 'ab'.repeat(32)
+  const image = descriptor('cd'.repeat(32), 1, 1)
+  const entry = { core: { length: 4 }, scanned: 4, indexed: 4, shares: new Map([[1, 2]]), covers: new Map([[1, 3]]) }
+  const records = new Map([[1, post('texto', 1)], [2, share(1, 2)], [3, cover(1, image, 3)]])
+  const seeder = Object.assign(Object.create(Seeder.prototype), {
+    _served: new Map([[key, entry]]),
+    _media: new Map([[image.core, { diary: key }]]),
+    _feiraVisible: () => true,
+    _searchHeld: () => false,
+    _names: { endUnverified: () => false },
+    _index: { hints: () => ({ profileSeq: null, usernameSeq: null }) },
+    _effectiveDeleted: () => new Set(),
+    _liveRecord: async (_, seq) => records.get(seq) || null
+  })
+  const text = await seeder.postPublic(key, 1)
+  t.ok(text, 'the text post remains public')
+  t.is(text.cover, null, 'a live cover cannot decorate a text-only post')
+  t.is(text.coverSeq, null)
+  records.set(1, postRecord({ text: 'foto', media: [image], at: at(1) }))
+  t.alike((await seeder.postPublic(key, 1)).cover, image, 'a post with a still keeps its cover')
 })

@@ -135,3 +135,62 @@ test('pageShareOps unpublish re-reads status after a change and never repeats th
   t.is((await noop.unpublish(PAGE + ':3')).state, 'off')
   t.is(r2, 0, 'no read when nothing changed')
 })
+
+const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: 'ef'.repeat(32), width: 1200, height: 900 }
+
+test('coveredState and read: covered is known only from a current service', async (t) => {
+  const { coveredState, pageShareOps } = await load()
+  t.is(coveredState({ shared: [3], covered: [3] }, 3), true)
+  t.is(coveredState({ shared: [3], covered: [] }, 3), false)
+  t.is(coveredState({ shared: [3] }, 3), null, 'an older service: unknown')
+  t.is(coveredState(null, 3), null)
+  let status = { shared: [3, 4], covered: [4] }
+  const ops = pageShareOps({ page: PAGE, status: async () => status, share: async () => ({}), unshare: async () => ({}) })
+  t.is(ops.page, PAGE)
+  t.is((await ops.read(PAGE + ':3')).cover, false, 'shared, no cover: the repair may be offered')
+  t.is((await ops.read(PAGE + ':4')).cover, true)
+  t.is((await ops.read(PAGE + ':5')).cover, false, 'not shared')
+  status = { shared: [3] }
+  t.is((await ops.read(PAGE + ':3')).cover, null, 'no covered list: no button')
+})
+
+test('coverAsPage sends one post-cover and maps an older service to no cover', async (t) => {
+  const { coverAsPage } = await load()
+  const ops = []
+  const ok = await coverAsPage(async (op) => { ops.push(op); return { coverSeq: 8, created: true } }, 3, COVER)
+  t.is(ok.state, 'on')
+  t.alike(ops, [{ seq: 3, image: COVER }], 'the op is exactly { seq, image }')
+  for (const code of ['pedido-invalido', 'midia-invalida', 'nao-encontrado', 'limite', 'indisponivel']) {
+    let n = 0
+    const r = await coverAsPage(async () => { n++; throw Object.assign(new Error('x'), { code }) }, 3, COVER)
+    t.is(r.state, 'off', code)
+    t.is(n, 1, 'never retried')
+  }
+  t.is((await coverAsPage(async () => { throw Object.assign(new Error('x'), { uncertain: true }) }, 3, COVER)).state, 'uncertain')
+  t.is((await coverAsPage(async () => ({}), 3, COVER)).state, 'uncertain', 'wrong shape')
+  let none = 0
+  t.is((await coverAsPage(async () => { none++ }, 0, COVER)).state, 'off')
+  t.is(none, 0, 'a bad seq never reaches the service')
+})
+
+test('shareNewAsPage: a cover failure leaves the share on', async (t) => {
+  const { shareNewAsPage } = await load()
+  let writes = 0
+  let uploads = 0
+  const cover = {
+    post: { media: [{ ...COVER, mime: 'image/avif', bytes: 90000, width: 2000, height: 1500 }] },
+    held: { bytes: new Uint8Array(90000), mime: 'image/avif' },
+    encodeThumbnail: async () => ({ bytes: new Uint8Array(40000), mime: 'image/jpeg', width: 1200, height: 900 }),
+    upload: async () => { uploads++; return COVER },
+    write: async (op) => { writes++; t.alike(op, { seq: 6, image: COVER }); throw Object.assign(new Error('Pedido inválido'), { code: 'pedido-invalido' }) }
+  }
+  const out = await shareNewAsPage(async () => ({ shareSeq: 2, created: true }), PAGE, 6, cover)
+  t.is(out.result.state, 'on')
+  t.is(uploads, 1)
+  t.is(writes, 1)
+  writes = 0
+  uploads = 0
+  const off = await shareNewAsPage(async () => { throw new Error('não') }, PAGE, 6, cover)
+  t.is(off.result.state, 'error')
+  t.is(uploads + writes, 0, 'no cover without a share')
+})

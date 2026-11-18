@@ -33,9 +33,12 @@ function rpcError (code, message, uncertain = false) {
 test('readShared maps a share seq to on and null to off', async (t) => {
   const { readShared } = await loadShare()
   const on = caller({ shareSeq: 12 })
-  t.alike(await readShared(on.call, REF), { state: 'on', shareSeq: 12, message: '' })
+  t.alike(await readShared(on.call, REF), { state: 'on', shareSeq: 12, message: '', cover: false }, 'an older node omits cover: none')
   t.alike(on.calls, [['post.shared', { to: REF }]])
-  t.alike(await readShared(caller({ shareSeq: null }).call, REF), { state: 'off', shareSeq: null, message: '' })
+  t.alike(await readShared(caller({ shareSeq: null }).call, REF), { state: 'off', shareSeq: null, message: '', cover: false })
+  t.alike(await readShared(caller({ shareSeq: 12, cover: true }).call, REF), { state: 'on', shareSeq: 12, message: '', cover: true })
+  t.is((await readShared(caller({ shareSeq: null, cover: true }).call, REF)).cover, false, 'no share, no cover')
+  t.is((await readShared(caller({ shareSeq: 12, cover: 'yes' }).call, REF)).cover, false, 'only true is a cover')
 })
 
 test('publish and unpublish map their results without claiming more', async (t) => {
@@ -306,16 +309,17 @@ test('sheet source: consent, sent wording, share on its own tap, no em dash or P
     const imports = read(file).split('\n').filter((line) => line.startsWith('import '))
     t.absent(imports.some((line) => /react|node:|'fs'|'path'/.test(line)), file + ' stays pure')
   }
-  t.absent(read('postShare.js').includes('import '), 'postShare.js takes its call, imports nothing')
+  const own = read('postShare.js').split('\n').filter((line) => line.startsWith('import '))
+  t.alike(own, ["import { buildCover, coverSource, needsCover, validShareCover } from './media/shareCover.js'"], 'postShare.js takes its call and imports only the pure cover plan')
 })
 
 test('sheet source: the caller notice is read once per opening and only at the first read', (t) => {
   const sheet = read('ui/PostShareSheet.js')
   t.ok(sheet.includes("notice = ''"), 'the optional notice prop')
-  t.ok(sheet.includes('}, [open, target, request, ops])'), 'the notice never re-runs the read')
+  t.ok(sheet.includes('}, [open, target, request, ops, hosted])'), 'the notice never re-runs the read')
   t.ok(sheet.includes("import { firstReadView } from '../postShareCompose'"), 'the first-read words come from the tested pure module')
   t.ok(sheet.includes('setView(firstReadView(lead, r))'), 'the first read goes through firstReadView')
-  const effect = sheet.slice(sheet.indexOf('useEffect(() => {'), sheet.indexOf('}, [open, target, request, ops])'))
+  const effect = sheet.slice(sheet.indexOf('useEffect(() => {'), sheet.indexOf('}, [open, target, request, ops, hosted])'))
   const taken = effect.indexOf('const lead = noticeRef.current')
   t.ok(taken > 0 && taken < effect.indexOf('readShared('), 'the notice is taken at the opening, before the read')
   t.is(sheet.split('noticeRef.current').length - 1, 2, 'set on render, read once at the opening')
@@ -328,4 +332,170 @@ test('context source: a failed probe is asked again when the app is back online 
   t.ok(src.includes('}, [hosted, origin, awake])'), 'the probe effect re-runs when awake changes')
   t.ok(src.includes('if (hosted !== true || awake !== true) return'), 'nothing is asked while asleep')
   t.ok(src.includes('usePostPublicEnabled(hosted, where, online !== false && visible !== false)'), 'the provider passes online and visible')
+})
+
+const COVER = { core: 'cd'.repeat(32), mime: 'image/jpeg', start: 4, blocks: 2, bytes: 40000, sha256: 'ef'.repeat(32), width: 1200, height: 900 }
+const AVIF_POST = { type: 'post', media: [{ ...COVER, mime: 'image/avif', bytes: 90000, width: 2000, height: 1500 }] }
+
+// A fake encoder and upload that count their calls.
+function coverRig ({ built = { bytes: new Uint8Array(40000), mime: 'image/jpeg', width: 1200, height: 900 }, uploaded = COVER, uploadThrows = false } = {}) {
+  const seen = { encodes: [], uploads: 0, writes: [], fetches: 0 }
+  return {
+    seen,
+    encodeThumbnail: async (bytes, mime, opts) => { seen.encodes.push([bytes, mime, opts]); return built },
+    upload: async () => { seen.uploads++; if (uploadThrows) throw new Error('falhou'); return uploaded },
+    setCover: async (image) => { seen.writes.push(image); return { state: 'on', coverSeq: 9, message: 'ok' } },
+    fetchStill: async (d) => { seen.fetches++; return new Uint8Array(d.bytes) }
+  }
+}
+
+test('addCover sends one post.cover and maps its answer', async (t) => {
+  const { addCover, COVER_DONE, COVER_NOT_SENT } = await loadShare()
+  const made = caller({ coverSeq: 14, created: true })
+  t.alike(await addCover(made.call, REF, COVER), { state: 'on', coverSeq: 14, message: COVER_DONE })
+  t.alike(made.calls, [['post.cover', { to: REF, image: COVER }]])
+  t.is((await addCover(caller({ coverSeq: 14, created: false }).call, REF, COVER)).state, 'on', 'the same image again')
+  for (const bad of [null, {}, { coverSeq: 0, created: true }, { coverSeq: 3 }]) {
+    t.is((await addCover(caller(bad).call, REF, COVER)).state, 'uncertain', 'wrong shape ' + JSON.stringify(bad))
+  }
+  for (const [code, message] of [['USAGE', 'método desconhecido'], ['USAGE', 'a publicação não está na web'], ['USAGE', 'mídia inválida'], ['LOCKED', 'sessão encerrada']]) {
+    const c = caller(rpcError(code, message))
+    t.alike(await addCover(c.call, REF, COVER), { state: 'off', coverSeq: null, message: COVER_NOT_SENT }, 'refused: ' + message)
+    t.is(c.calls.length, 1, 'never retried')
+  }
+  const lost = caller(rpcError('USAGE', 'x', true))
+  t.is((await addCover(lost.call, REF, COVER)).state, 'uncertain')
+  t.is(lost.calls.length, 1)
+  const none = caller({ coverSeq: 1, created: true })
+  t.is((await addCover(none.call, REF, { ...COVER, mime: 'image/avif' })).state, 'off', 'not a cover descriptor')
+  t.is((await addCover(none.call, 'nope', COVER)).state, 'off')
+  t.is(none.calls.length, 0, 'never reaches the node')
+})
+
+test('sendCover builds from held bytes, uploads once and writes once', async (t) => {
+  const { sendCover } = await loadShare()
+  const rig = coverRig()
+  const held = { bytes: new Uint8Array(90000), mime: 'image/avif' }
+  const r = await sendCover({ post: AVIF_POST, held, ...rig })
+  t.is(r.state, 'on')
+  t.is(rig.seen.encodes.length, 1)
+  t.is(rig.seen.encodes[0][0], held.bytes, 'the held bytes, no fetch')
+  t.alike(rig.seen.encodes[0][2], { side: 1200, maxBytes: 204800 })
+  t.is(rig.seen.fetches, 0)
+  t.is(rig.seen.uploads, 1)
+  t.alike(rig.seen.writes, [COVER])
+})
+
+test('sendCover reads the stored still when nothing is held', async (t) => {
+  const { sendCover } = await loadShare()
+  const rig = coverRig()
+  t.is((await sendCover({ post: AVIF_POST, held: null, ...rig })).state, 'on')
+  t.is(rig.seen.fetches, 1)
+  t.is(rig.seen.encodes[0][1], 'image/avif')
+  const other = coverRig()
+  await sendCover({ post: AVIF_POST, held: { bytes: new Uint8Array(5), mime: 'image/webp' }, ...other })
+  t.is(other.seen.fetches, 1, 'held bytes of another still are not used')
+})
+
+test('sendCover writes nothing when the post needs no cover or a step fails', async (t) => {
+  const { sendCover, COVER_NOT_BUILT, COVER_NOT_SENT } = await loadShare()
+  const small = coverRig()
+  const ready = { type: 'post', media: [{ ...COVER, bytes: 100000 }] }
+  t.is((await sendCover({ post: ready, ...small })).state, 'skipped')
+  t.is(small.seen.encodes.length + small.seen.uploads + small.seen.writes.length + small.seen.fetches, 0)
+  const nullBuild = coverRig({ built: null })
+  t.alike(await sendCover({ post: AVIF_POST, ...nullBuild }), { state: 'off', coverSeq: null, message: COVER_NOT_BUILT }, 'an AVIF this device cannot decode')
+  t.is(nullBuild.seen.uploads + nullBuild.seen.writes.length, 0, 'a null build uploads and writes nothing')
+  const failed = coverRig({ uploadThrows: true })
+  t.alike(await sendCover({ post: AVIF_POST, ...failed }), { state: 'off', coverSeq: null, message: COVER_NOT_SENT })
+  t.is(failed.seen.uploads, 1, 'never retried')
+  t.is(failed.seen.writes.length, 0)
+  const wrong = coverRig({ uploaded: { ...COVER, bytes: 39999 } })
+  t.is((await sendCover({ post: AVIF_POST, ...wrong })).state, 'off', 'a descriptor of other bytes')
+  t.is(wrong.seen.writes.length, 0)
+  const throwing = coverRig()
+  throwing.setCover = async () => { throw new Error('x') }
+  t.is((await sendCover({ post: AVIF_POST, ...throwing })).state, 'off', 'never rejects')
+  t.is((await sendCover()).state, 'skipped')
+})
+
+test('sheet source: the cover row is one tap, one attempt, no timer', (t) => {
+  const sheet = read('ui/PostShareSheet.js')
+  t.ok(sheet.includes("POST_SHARE_ADD_COVER = 'Adicionar uma capa à prévia'"), 'the row label')
+  t.ok(sheet.includes('label={POST_SHARE_ADD_COVER}') && sheet.includes('onPress={addCoverTap}'), 'a button, written only on its tap')
+  t.absent(/ainda não mostra a foto/.test(sheet), 'no line claiming the preview lacks a photo')
+  t.absent(/setInterval/.test(sheet), 'no repeating timer')
+  t.is(sheet.split('setTimeout(').length - 1, 1, 'one timer only')
+  t.ok(sheet.includes("if (hosted !== true || r.state !== 'on' || r.cover !== false) return"), 'offered only on a node with an installation, for a shared post with no cover')
+  const tap = sheet.slice(sheet.indexOf('const addCoverTap = '), sheet.indexOf('const write = '))
+  t.is(tap.split('sendCover(').length - 1, 1, 'one attempt per tap')
+  t.ok(tap.includes('setCoverPost(null)'), 'the row goes after the attempt')
+  // A stalled download must not hold busyRef (and "Tirar da web") forever.
+  t.ok(tap.includes('setTimeout(() => ctrl.abort(), COVER_FETCH_MS)'), 'the one timer is the download deadline, and it only aborts')
+  t.ok(tap.includes('signal: ctrl !== null ? ctrl.signal : null'), 'the stored still is read with that signal')
+  t.ok(tap.includes('if (timer !== null) clearTimeout(timer)'), 'the deadline is cleared after the attempt')
+  t.ok(sheet.includes('if (coverAbort.current !== null) coverAbort.current.abort()'), 'closing the sheet or a new target aborts the download')
+})
+
+test('sendCover: a failed download is its own outcome and keeps the row', async (t) => {
+  const { sendCover, coverRowStays, COVER_NOT_FETCHED, COVER_NOT_BUILT, COVER_NOT_SENT, COVER_DONE } = await loadShare()
+  const fetched = { state: 'off', coverSeq: null, message: COVER_NOT_FETCHED }
+  const fails = [
+    async () => { throw new Error('rede') },
+    async () => { const e = new Error('abortado'); e.name = 'AbortError'; throw e },
+    async () => new Uint8Array(10),
+    async () => null
+  ]
+  for (const fetchStill of fails) {
+    const rig = coverRig()
+    rig.fetchStill = fetchStill
+    const r = await sendCover({ post: AVIF_POST, held: null, ...rig })
+    t.alike(r, fetched, 'not the device wording')
+    t.ok(coverRowStays(r), 'the row stays for another tap')
+    t.is(rig.seen.encodes.length + rig.seen.uploads + rig.seen.writes.length, 0, 'nothing encoded, uploaded or written')
+  }
+  const noFetch = coverRig()
+  noFetch.fetchStill = null
+  t.alike(await sendCover({ post: AVIF_POST, held: null, ...noFetch }), { state: 'off', coverSeq: null, message: COVER_NOT_BUILT }, 'no way to read the still: the device wording')
+  for (const r of [{ state: 'off', message: COVER_NOT_BUILT }, { state: 'off', message: COVER_NOT_SENT }, { state: 'on', message: COVER_DONE }, { state: 'uncertain', message: UNCERTAIN }, null]) {
+    t.absent(coverRowStays(r), 'the row goes: ' + JSON.stringify(r))
+  }
+})
+
+test('one cover attempt per post at a time, past the sheet closing', async (t) => {
+  const { claimCover, coverInFlight, releaseCover } = await loadShare()
+  t.absent(coverInFlight(REF))
+  t.ok(claimCover(REF))
+  t.ok(coverInFlight(REF.toUpperCase()), 'the same post in any case')
+  t.absent(claimCover(REF), 'a second attempt is refused while one runs')
+  releaseCover(REF)
+  t.absent(coverInFlight(REF))
+  t.ok(claimCover(REF), 'free again once settled')
+  releaseCover(REF)
+  t.absent(claimCover(null))
+  const sheet = read('ui/PostShareSheet.js')
+  t.ok(sheet.includes('needsCover(post) && !coverInFlight(target)) setCoverPost(post)'), 'no row while an attempt for the post runs')
+  const tap = sheet.slice(sheet.indexOf('const addCoverTap = '), sheet.indexOf('const write = '))
+  t.ok(tap.includes('if (!claimCover(target)) return'), 'the tap holds the post')
+  const done = tap.slice(tap.indexOf('} finally {'))
+  t.ok(done.includes('releaseCover(ref)'), 'and lets it go however the attempt ends')
+  t.ok(tap.includes('if (!coverRowStays(r)) setCoverPost(null)'), 'a failed download keeps the row')
+})
+
+test('the cover row survives a refused publish or unpublish', async (t) => {
+  const { coverRowAfterWrite } = await loadShare()
+  t.ok(coverRowAfterWrite({ state: 'error', shareSeq: null, message: 'x' }), 'refused: the post is still on the web')
+  for (const state of ['on', 'off', 'uncertain']) t.absent(coverRowAfterWrite({ state, shareSeq: null, message: '' }), state)
+  const sheet = read('ui/PostShareSheet.js')
+  const write = sheet.slice(sheet.indexOf('const write = '), sheet.indexOf('const nav = '))
+  t.is(write.split('setCoverPost(').length - 1, 1, 'one place clears the row')
+  t.ok(write.includes('if (!coverRowAfterWrite(r)) setCoverPost(null)'), 'only by the write result')
+})
+
+test('a cover attempt holds the sheet like a write', (t) => {
+  const sheet = read('ui/PostShareSheet.js')
+  t.ok(sheet.includes('const writing = busy || coverBusy'))
+  t.ok(sheet.includes('dismissable={!writing}'), 'not dismissable during the attempt')
+  t.ok(sheet.includes("label='Tirar da web' pending={busy} disabled={writing}"), 'Tirar da web waits, never a silent tap')
+  t.ok(sheet.includes("label='Publicar na web' pending={busy} disabled={writing}"))
 })
