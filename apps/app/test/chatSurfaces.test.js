@@ -33,7 +33,7 @@ test('inbox empty actions match the available paths and successful requests only
   const defaults = conversations.slice(conversations.indexOf('  const EmptyState ='), conversations.indexOf('  const sheets ='))
   t.ok(defaults.includes("actionLabel='Todas'\n      onAction={() => setFilter('todas')}"), 'unread empty clears its filter')
   t.ok(defaults.includes("secondaryLabel='Nova conversa'") && defaults.includes('onComposing(true)'), 'search and unread can start a conversation')
-  t.ok(conversations.includes("else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'a pending request is not presented as empty')
+  t.ok(conversations.includes("else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />"), 'a pending request is not presented as empty')
   t.ok(messages.includes("title={old !== null ? 'Nenhuma conversa da chave antiga.' : LABELS.emptyRequests} actionLabel='Voltar' onAction={onBack} />"), 'successful empty requests do not offer retry')
   t.ok(messages.includes("body={LOCKED_TEXT} actionLabel='Voltar' onAction={onBack}"))
 })
@@ -152,7 +152,8 @@ test('profile community chips preserve empty hiding, full labels and large text 
 
 test('chat presentation adds no receipt, presence, typing, platform gates or em dash', (t) => {
   for (const src of [row, conversations, messages, communities, community, box]) {
-    const text = src.replaceAll('Não lidas', '')
+    // The unread chip (its label, its id and its walk text) is not a read receipt.
+    const text = src.replace(/n[aã]o[ -]?lidas/gi, '')
     for (const word of ['lida', 'entregue', 'digitando']) t.absent(text.toLowerCase().includes(word), word)
     t.absent(/\b(?:typing|presence|delivered|readAt)\s*[:=]/i.test(text))
     t.absent(src.includes('Platform.OS'))

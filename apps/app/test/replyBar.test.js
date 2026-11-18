@@ -35,7 +35,7 @@ test('ReplyBar pins accessible copy, theme, capped text and keyboard handling', 
   t.ok(src.includes("accessibilityLabel='cancelar resposta'"))
   t.ok(src.includes("accessibilityLabel='abrir editor completo'"))
   t.ok(src.includes('accessibilityLabel={sendLabel}'))
-  t.ok(src.includes("sendLabel = 'Responder' }"), 'the send label defaults to Responder')
+  t.ok(src.includes("sendLabel = 'Responder'"), 'the send label defaults to Responder')
   const line = between(src, '<View style={styles.line}>', '\n      </View>\n      {/*')
   t.ok(line.includes('<TextInput') && line.includes('accessibilityLabel={sendLabel}'), 'the pill and the send share one line')
   t.ok(line.indexOf('<TextInput') < line.indexOf('accessibilityLabel={sendLabel}'))
@@ -438,6 +438,17 @@ test('locking during a handoff drops its stash without restoring account content
   t.is(await pending, false)
   t.is(h.state.composer.reply, null)
   t.is(h.context.replyDraftStash.current, null)
+})
+
+test('sendingShown masks the field and the send slice still clears only an unchanged draft', (t) => {
+  const sig = src.slice(src.indexOf('export function ReplyBar'), src.indexOf('\n', src.indexOf('export function ReplyBar')))
+  t.ok(sig.includes('sendingShown = false'))
+  t.ok(src.includes('const masked = busy && sendingShown === true'))
+  t.ok(src.includes("value={masked ? '' : text}"))
+  const sendSlice = between(src, '  const send = async () => {', '  const grow = (event) => {')
+  const send = between(sendSlice, '  const send = async () => {', '  const expand = async () => {')
+  t.is(send.split('setText').length - 1, 1, 'the send slice clears only through the unchanged draft compare')
+  t.ok(send.includes("setText((current) => current === sent ? '' : current)"))
 })
 
 test('the field text comes from the placeholder prop, defaulting to the old text', () => {

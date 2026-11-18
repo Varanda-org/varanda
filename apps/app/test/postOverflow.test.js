@@ -95,7 +95,7 @@ test('the post header dot has one space on each side', (t) => {
   const src = read('ui/PostRow.js')
   t.ok(src.includes("head: { flexDirection: 'row', alignItems: 'baseline' }"), 'no head gap')
   t.ok(src.includes('nameBox: { flexShrink: 1, marginRight: 6 }'))
-  t.ok(src.includes("(handle ? '\\u00a0· ' : stackHead ? '' : '· ') + time"), 'one space each side of the dot, with or without a handle; no dot when the date has its own line')
+  t.ok(src.includes("(handle ? '\\u00a0· ' : stackHead ? '' : '· ') + (sending ? SENDING_LABEL : time)"), 'one space each side of the dot, with or without a handle; no dot when the date has its own line')
 })
 
 test('round 8: the handle hides at Android 1.3 text and QuoteCard spaces the dot like PostRow', (t) => {
