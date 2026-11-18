@@ -249,6 +249,7 @@ const listingLib = require('./listing')
 const { foldListings } = listingLib
 const { foldShare, newestShare, POST_SHARES_PER_DIARY } = require('./post-share')
 const { MAX_FUTURE_MS } = require('./feed')
+const { MOMENT_TTL_MS, MOMENT_SKEW_MS } = require('./moments')
 const { DEFAULT_STORAGE_BYTES, coreCharge, memberCapFor, createStorageBudget } = require('./storage-budget')
 const { feira, mentionTokens, MENTION_MAX } = require('@varanda/rpc')
 const { UsageError } = require('./errors')
@@ -466,6 +467,33 @@ async function momentBlobIds (core) {
     if (r !== null) ids.add(r.media.id)
   }
   return ids
+}
+
+// How far back from a diary's end recentMomentIds looks: a momento lives
+// 24 h, and an honest diary writes far fewer blocks than this in a day.
+const MOMENT_SHARE_SCAN = 512
+
+// The ids among `wanted` that a valid momento of this diary dated between
+// `since` and `until` also names, reading the last MOMENT_SHARE_SCAN blocks.
+// Append order is not time order (a page roster refresh keeps its old `at`),
+// so the scan never stops early on an old date. A momento dated after
+// `until` is one readers hide (foldMoments), so it shields nothing. A block
+// in the window that is not stored yet may be the momento naming the id, so
+// it throws like a read error and the caller keeps every id.
+async function recentMomentIds (core, wanted, since, until) {
+  const found = new Set()
+  const stop = Math.max(1, core.length - MOMENT_SHARE_SCAN)
+  for (let i = core.length - 1; i >= stop && found.size < wanted.size; i--) {
+    const raw = await core.get(i, { wait: false, raw: true })
+    if (raw === null) throw new Error('moment scan: block not stored')
+    const block = decodeBlock(raw)
+    if (block === null || block.type !== 'moment') continue
+    const at = typeof block.at === 'string' ? Date.parse(block.at) : NaN
+    if (!(at >= since) || at > until) continue
+    const r = validRecordCopy(block, i)
+    if (r !== null && wanted.has(r.media.id)) found.add(r.media.id)
+  }
+  return found
 }
 
 // Media cores whose deletion counters one diary keeps (a diary entry's
@@ -8371,21 +8399,24 @@ class Seeder {
   // text, returned as stored: the caller renders it with displayText. null
   // unless the highest share the scan recorded for that post is a live,
   // valid post-share naming it and the post is a live post of a visible,
-  // scanned diary that is not a page. Every doubt answers null: a post with
-  // no recorded share (past the cap included), a scan or a name index
-  // behind, a hold, a block, a date too far ahead.
+  // scanned diary, a person's or an open page's (the account service writes
+  // a page's share, section 16). Every doubt answers null: a post with no
+  // recorded share (past the cap included), a scan or a name index behind,
+  // a hold, a block, a closed or moved page, a date too far ahead.
   async postPublic (hex, seq) {
     try {
       if (typeof hex !== 'string' || !HEX64.test(hex) || !Number.isSafeInteger(seq) || seq < 1) return null
       const entry = this._served.get(hex)
       if (!entry || !scanCaughtUp(entry)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
-      // The page flag comes from the name index, on its own cursor
-      // (entry.indexed): until it has read the whole diary a page reads as
-      // a person, so nothing is shown. The bound is the signed length, not
-      // the present length, which is raised asynchronously and can lag it.
+      // The page close or move comes from the name index, on its own cursor
+      // (entry.indexed): until it has read the whole diary a closed page
+      // reads as open, so nothing is shown. The bound is the signed length,
+      // not the present length, which is raised asynchronously and can lag it.
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
-      if (this._names.hint(hex).page === true) return null
+      // A close or move that no longer verifies (its issuer revoked since)
+      // leaves endSeq null: the page may be closed, so nothing is shown.
+      if (this._names.endUnverified(hex)) return null
       const shareSeq = newestShare(entry.shares, seq)
       if (shareSeq === null) return null
       const share = await this._liveRecord(hex, shareSeq)
@@ -8417,7 +8448,7 @@ class Seeder {
       if (hidden.has(seq) || hidden.has(shareSeq)) return null
       if (!this._feiraVisible(hex) || this._searchHeld(hex)) return null
       if (entry.indexPaused || entry.indexed < entry.core.length) return null
-      if (this._names.hint(hex).page === true) return null
+      if (this._names.endUnverified(hex)) return null
       // A profile or @nome deleted meanwhile drops only its own field: it
       // does not withdraw the post.
       if (hints.profileSeq !== null && hidden.has(hints.profileSeq)) name = null
@@ -8829,16 +8860,46 @@ class Seeder {
 
   // A blocked diary's momento blobs go before its log, which is what names
   // them: on a failure the diary stays listed and the next start scans it
-  // again (the caller's purge failure path).
+  // again (the caller's purge failure path). A blob that a recent momento of
+  // another listed, unblocked diary also names stays: any record can name
+  // any blob id, so a blocked diary naming someone else's media must not
+  // remove it early (it expires by itself).
   async _purgeMomentBlobs (key) {
     if (!this._blob) return
     const core = await openReplica(this.store, key)
+    let ids
     try {
-      const ids = await momentBlobIds(core)
-      if (ids.size > 0) this._blob.purge(ids)
+      ids = await momentBlobIds(core)
     } finally {
       await core.close().catch(noop)
     }
+    if (ids.size === 0) return
+    for (const id of await this._sharedMomentIds(key, ids)) ids.delete(id)
+    if (ids.size > 0) this._blob.purge(ids)
+  }
+
+  // The ids among `ids` that a momento of the last day in another listed
+  // diary, not blocked and not being dropped, also names. A diary that
+  // cannot be read keeps every id: the blobs expire by themselves.
+  async _sharedMomentIds (key, ids) {
+    const shared = new Set()
+    const since = Date.now() - MOMENT_TTL_MS - MOMENT_SKEW_MS
+    for (const other of [...this._admitted.keys()]) {
+      if (shared.size === ids.size) break
+      if (other === key || this._isBlocked(other) || this._dropping.has(other)) continue
+      if (this._purgingKeys.has(b4a.toString(crypto.discoveryKey(b4a.from(other, 'hex')), 'hex'))) continue
+      let core = null
+      try {
+        core = await openReplica(this.store, other)
+        const wanted = new Set([...ids].filter((id) => !shared.has(id)))
+        for (const id of await recentMomentIds(core, wanted, since, Date.now() + MOMENT_SKEW_MS)) shared.add(id)
+      } catch {
+        return ids
+      } finally {
+        if (core !== null) await core.close().catch(noop)
+      }
+    }
+    return shared
   }
 
   async _purge (key) {
@@ -10228,5 +10289,6 @@ module.exports = {
   // For tests.
   liveGroupJoins,
   groupWalkStep,
-  groupWalkCut
+  groupWalkCut,
+  recentMomentIds
 }

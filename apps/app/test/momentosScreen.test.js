@@ -91,22 +91,26 @@ test('Publicar: Momento mode is one photo, putMoment then moment.create', (t) =>
   const src = read('src/screens/Publicar.js')
   t.ok(src.includes("export const MODES = [{ id: 'post', label: 'Publicação' }, { id: 'moment', label: 'Momento' }]"), 'Publicação | Momento')
   t.ok(src.includes('<Segmented options={MODES}'), 'Segmented switch')
-  t.ok(src.includes('const momentOn = canPublishMoment(node) && !replyProp && !quote && asPage === null'), 'gated on the capability')
+  t.ok(src.includes('const momentOn = momentComposerOn({ canPublish: canPublishMoment(node), reply: replyProp, quote })'), 'gated on the capability, as the person or as a Page')
   t.ok(src.includes('files.length === 1'), 'exactly one photo')
   t.ok(src.includes('export const MOMENT_TEXT_MAX = 200'), '200 code points')
   t.ok(src.includes('maxLength={MOMENT_FIELD_MAX}') && src.includes('export const MOMENT_FIELD_MAX = 2 * MOMENT_TEXT_MAX'), 'UTF-16 worst case')
   const send = fnBody(src, 'const send = async () => {\n    if (busyRef.current || !valid)')
   t.ok(send !== null, 'moment send found')
   const put = send.indexOf('node.media.putMoment(')
-  const create = send.indexOf("node.request('moment.create', { text, media: itemRef.current, ...chosen })")
+  const create = send.indexOf("node.request('moment.create', { text, media: item, ...chosen })")
   t.ok(put > 0 && create > put, 'putMoment then moment.create')
+  const page = send.indexOf('pagesMoment(node, {')
+  t.ok(page > create && send.includes('publisher === null'), 'a Page publishes with pagesMoment instead of moment.create')
+  t.ok(send.includes('const item = kept.take(publisher)') && send.indexOf('const item = kept.take(publisher)') < create, 'only the item put in this session, for this publisher')
   t.ok(send.includes('refusalOf(text)') && send.indexOf('refusalOf(text)') < put, 'the word check runs before putMoment')
-  t.ok(send.includes('bytes: file.bytes.slice()'), 'putMoment gets a copy (it wipes its buffer)')
+  t.ok(send.includes('node.media.putMoment(momentPutArgs(file, { clip: !!clip, publisher }))'), 'putMoment gets a copy (it wipes its buffer), ahead for a Page (src/pageMoment.js)')
   t.is((send.match(/moment\.create/g) || []).length, 1, 'one create per press')
+  t.is((send.match(/pagesMoment\(/g) || []).length, 1, 'one page moment per press')
   t.ok(send.includes('setHeld(true)') && send.includes('MOMENT_UNCERTAIN'), 'uncertain holds the draft')
   t.ok(src.includes('const valid = !held &&'), 'a held draft cannot be sent again')
   t.ok(send.includes('isLocked(err)') && send.includes('MOMENT_LOCKED'), 'locked key asks for the passkey')
-  t.ok(send.includes('MEDIA_STALE') && send.includes('itemRef.current = null'), 'stale item is put again on the next press')
+  t.ok(send.includes('MEDIA_STALE') && send.includes('kept.clear()'), 'stale item is put again on the next press')
   t.ok(src.includes('DRAFT_KEPT'), 'post draft kept')
 })
 
@@ -439,7 +443,7 @@ test('review 6: only an increase of the request counter selects Momento', (t) =>
 
 test('round 3, 1: a close during the upload cancels moment.create', (t) => {
   const src = read('src/screens/Publicar.js')
-  t.ok(src.includes('const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode })'), 'the draft knows when it is shown')
+  t.ok(src.includes('const moment = useMomentDraft({ node, member: me?.publicKey, open, active: open === true && momentMode, asPage, asLabel: asPage === null ? \'você\' : actingStore.label() })'), 'the draft knows when it is shown, and who publishes')
   t.ok(src.includes('if (!active) genRef.current++'), 'a close or mode switch moves the generation')
   const send = fnBody(src, 'const send = async () => {\n    if (busyRef.current || !valid)')
   const check = send.indexOf('if (gen !== genRef.current) return false')
@@ -461,18 +465,19 @@ test('round 3, 2: pruneRings moves each ring start back by the items dropped bef
   t.is(later.rings[0].start, 1, 'a dropped start item hands over to the next one')
 })
 
-test('round 3, 3: a moment request opens the composer as the person', (t) => {
+test('round 3, 3: a moment request opens the composer as whoever is acting', (t) => {
   const app = read('App.js')
   const body = fnBody(app, 'const openMomentComposer = () =>')
-  t.ok(body.includes('actingAs.enterMoment()'), 'page identity cleared for the open (enterMoment switches to the person)')
-  t.ok(body.indexOf('actingAs.enterMoment()') < body.indexOf('setComposer('), 'before the composer opens')
+  t.ok(body.includes('setComposer('), 'the composer opens')
+  t.absent(body.includes('actingAs'), 'the acting identity is left alone, a Page included')
+  t.absent(app.includes('enterMoment') || app.includes('leaveMoment'), 'no identity switch around the composer')
 })
 
 test('round 4, 1: a create that finishes after a close never closes another composer', (t) => {
   const src = read('src/screens/Publicar.js')
   const send = fnBody(src, 'const send = async () => {\n    if (busyRef.current || !valid)')
   const create = send.indexOf("node.request('moment.create'")
-  const after = send.indexOf('return gen === genRef.current')
+  const after = send.indexOf('if (gen === genRef.current) return true')
   t.ok(after > create, 'generation checked again after moment.create')
   t.ok(send.indexOf('momentsChanged()', create) < after, 'moments still refresh')
   const wrap = fnBody(src, 'const sendMoment = async () =>')
@@ -502,7 +507,7 @@ test('round 4, 3: playback stays held until the menu action ran', (t) => {
 test('verifier: closing the composer returns it to Publicação', (t) => {
   const src = readFileSync(join(__dirname, '../src/screens/Publicar.js'), 'utf8')
   t.absent(src.includes("useEffect(() => { if (!open) setMode('post') }, [open])"), 'no reset on the close (the sliding sheet kept its mode)')
-  t.ok(src.includes("if (!momentAskedRef.current) setMode('post')") && src.indexOf('momentAskedRef.current = true') < src.indexOf("if (!momentAskedRef.current) setMode('post')"), 'each opening starts in Publicação unless a moment request came with it')
+  t.ok(src.includes("if (!momentAskedRef.current) setMode(moment.canRetry ? 'moment' : 'post')") && src.indexOf('momentAskedRef.current = true') < src.indexOf("if (!momentAskedRef.current) setMode(moment.canRetry ? 'moment' : 'post')"), 'each opening starts in Publicação unless a moment request came with it')
 })
 
 // The pure helpers of a screen file evaluated alone, as loadPrune does.
@@ -728,7 +733,8 @@ test('visual 1, 9 to 11: Momento box height, Diário rows, past delete body', (t
   t.ok(strip.includes('<Text style={styles.meta} maxFontSizeMultiplier={ROW_CAP}>{String(past.length)}</Text>'), 'the count apart, never cut')
   const src = read('src/screens/Momentos.js')
   t.ok(src.includes("export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'"), 'past body covers photos and videos')
-  t.ok(src.includes('{target && expiresIn(target.at) === 0 ? DELETE_BODY_PAST : DELETE_BODY}'), 'chosen by the 24-hour end')
+  t.ok(src.includes('<Soft>{deleteBody(target, page)}</Soft>'), 'chosen by the 24-hour end and by whose diary it is')
+  t.ok(src.includes('const past = !!target && expiresIn(target.at) === 0'), 'chosen by the 24-hour end')
 })
 
 test('visual 2, 1: solid scrims behind the text, a real gradient past it, a text shadow', (t) => {
@@ -1310,6 +1316,11 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
     audiusPolicy: async () => { env.policyCalls++; return typeof policy === 'function' ? policy() : { moments: policy } },
     audiusReady: async () => typeof ready === 'function' ? ready() : ready,
     useNode: () => node,
+    useActing: () => ({ kind: 'me' }),
+    choicePage: (acting) => (acting.kind === 'page' ? acting.key : null),
+    momentDeleteAs: () => null,
+    actAs: async () => { throw new Error('the person deletes with moment.delete') },
+    memberKeyOf: async () => A,
     useStyles: (make) => make({}),
     useTheme: () => ({ colors: {} }),
     useNames: () => null,
@@ -2520,6 +2531,9 @@ test('momento sends only a chosen music reference, checks author text and never 
     useChatAttachments: () => photo,
     useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
     ...(await import('../src/videoCompose.js')),
+    ...(await import('../src/pageMoment.js')),
+    pagesMoment: async () => { throw new Error('the person never publishes as a page') },
+    memberKeyOf: async () => A,
     pickVideo: null,
     prepareVideo: null,
     refusalOf: (text) => { checked.push(text); return '' },
@@ -2554,6 +2568,110 @@ test('momento sends only a chosen music reference, checks author text and never 
   t.is(calls.length, count, 'uncertain create is never repeated')
   h.render().reset()
   t.is(h.render().music, null, 'discard clears the music draft')
+})
+
+test('a Page publishes its momento with pagesMoment: one put, never resent, a tap retries the same request', async (t) => {
+  const source = read('src/screens/Publicar.js')
+  const calls = []
+  const photo = { files: [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }], ready: true, items: [], clear () {}, remove () {} }
+  const node = {
+    online: true,
+    passkey: { status: { unlocked: true } },
+    media: { putMoment: async () => { calls.push('put'); return { id: 'photo' } } },
+    request: async (method, body) => { calls.push({ method, body }) }
+  }
+  let outcome = null
+  let retries = 0
+  const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
+  const h = hookHost(input, 'useMomentDraft', {
+    momentMusicOf: () => null,
+    useMomentMusicAvailable: () => false,
+    useChatAttachments: () => photo,
+    useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
+    ...(await import('../src/videoCompose.js')),
+    ...(await import('../src/pageMoment.js')),
+    pagesMoment: async (n, args) => {
+      calls.push({ page: args })
+      if (outcome === 'unknown') throw Object.assign(new Error('?'), { uncertain: true, retry: async () => { retries++; if (outcome === 'unknown') throw Object.assign(new Error('?'), { uncertain: true, retry: async () => { retries++ } }) } })
+      if (outcome === 'refused') throw new Error('no')
+    },
+    memberKeyOf: async () => A,
+    pickVideo: null,
+    prepareVideo: null,
+    refusalOf: () => '',
+    momentsChanged () {},
+    LOCKED_MESSAGE: 'locked',
+    errorText: () => 'erro'
+  })
+  t.teardown(h.unmount)
+  const PAGE = 'ab'.repeat(32)
+  h.render({ node, member: A, open: true, active: true, asPage: PAGE })
+  h.render().setText('Pão saindo')
+  t.ok(await h.render().send())
+  t.alike(calls, ['put', { page: { member: A, page: PAGE, text: 'Pão saindo', media: { id: 'photo' }, music: undefined } }], 'the put item goes to the page action, never to moment.create')
+  calls.length = 0
+  outcome = 'refused'
+  t.absent(await h.render().send())
+  t.is(calls.filter((c) => c === 'put').length, 1, 'the item was put again after the publish')
+  calls.length = 0
+  t.absent(await h.render().send())
+  t.is(calls.filter((c) => c === 'put').length, 0, 'a refusal keeps the item for the next explicit press')
+  outcome = 'unknown'
+  t.absent(await h.render().send())
+  t.ok(h.render().held && h.render().canRetry, 'unknown: locked, with a retry on a tap')
+  const sent = calls.length
+  t.absent(await h.render().send(), 'Publicar does not resend a locked draft')
+  t.is(calls.length, sent, 'nothing is sent by itself')
+  t.absent(await h.render().retry())
+  t.is(retries, 1, 'one explicit tap resends the same request once')
+  t.ok(h.render().held && h.render().canRetry, 'unknown again: still locked')
+  t.is(retries, 1)
+  h.render().reset()
+  t.absent(h.render().held)
+  t.absent(h.render().canRetry)
+})
+
+test('an identity change drops the item put for the old publisher', async (t) => {
+  const source = read('src/screens/Publicar.js')
+  const puts = []
+  const photo = { files: [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }], ready: true, items: [], clear () {}, remove () {} }
+  const node = {
+    online: true,
+    passkey: { status: { unlocked: true } },
+    media: { putMoment: async () => { puts.push(1); return { id: 'photo' + puts.length } } },
+    request: async () => { throw Object.assign(new Error('refused'), { code: 'no' }) }
+  }
+  const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
+  const sent = []
+  const h = hookHost(input, 'useMomentDraft', {
+    momentMusicOf: () => null,
+    useMomentMusicAvailable: () => false,
+    useChatAttachments: () => photo,
+    useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
+    ...(await import('../src/videoCompose.js')),
+    ...(await import('../src/pageMoment.js')),
+    pagesMoment: async (n, args) => { sent.push(args); throw new Error('refused') },
+    memberKeyOf: async () => A,
+    pickVideo: null,
+    prepareVideo: null,
+    refusalOf: () => '',
+    momentsChanged () {},
+    LOCKED_MESSAGE: 'locked',
+    errorText: () => 'erro'
+  })
+  t.teardown(h.unmount)
+  const PAGE = 'ab'.repeat(32)
+  h.render({ node, member: A, open: true, active: true, asPage: PAGE })
+  t.absent(await h.render().send())
+  t.is(puts.length, 1)
+  t.absent(await h.render().send())
+  t.is(puts.length, 1, 'same publisher: the item is reused on the explicit press')
+  await h.flush()
+  h.render({ node, member: A, open: true, active: true, asPage: null })
+  await h.flush()
+  t.absent(await h.render().send())
+  t.is(puts.length, 2, 'the person puts again: the page item is not reused')
+  t.is(sent.length, 2, 'the page was never sent as the person')
 })
 
 test('T22 fix 1: a saved music chip and its remove button follow the send gate', async (t) => {
@@ -3711,4 +3829,132 @@ test('momento music button follows the draft availability gate', (t) => {
     const tree = h.render({ moment: { musicAvailable }, node: { online: true } })
     t.is(treeNodes(tree).some((n) => n.props.label === 'Música'), musicAvailable)
   }
+})
+
+test('Momentos: PageMoments reads the page status and deletes through the page action', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(/export function PageMoments \(/.test(src))
+  t.ok(/action: 'status', page: key/.test(src), 'the signed page status read')
+  t.ok(/pageMomentsOf\(state\.owner === owner \? state\.status : null, key, now\)/.test(src), 'live and past split at render, against now')
+  t.ok(/<ConfirmMomentDelete open=\{target !== null\} target=\{target\} page=\{key\}/.test(src), 'the page action, not moment.delete')
+  t.ok(/Tentar de novo/.test(src))
+})
+
+test('Diario: acting as a Page shows PageMoments in place of DiarioMoments', (t) => {
+  const src = read('src/screens/Diario.js')
+  t.ok(/choicePage\(acting\) !== null\s*\? <PageMoments key=\{choicePage\(acting\)\} page=\{choicePage\(acting\)\}/.test(src))
+  t.ok(src.includes("tick={String(refresh) + ':' + pulls} active={active !== false}"), 'the pull and a hidden Diário reach the read')
+  t.ok(/<DiarioMoments/.test(src), 'the person path stays')
+})
+
+const PM = 'cd'.repeat(32)
+const PM2 = 'ef'.repeat(32)
+
+async function pageMomentsHost ({ answers }) {
+  const env = { changed: 0, epoch: 1, asked: [], answers }
+  const { momentPublisher, pageMomentsOf } = await import('../src/pageMoment.js')
+  const source = read('src/screens/Momentos.js')
+  const deps = {
+    momentPublisher,
+    pageMomentsOf,
+    makeStyles: null,
+    useStyles: () => ({}),
+    useNode: () => ({ hosted: true, request: async () => ({}), epoch: env.epoch }),
+    useMomentsChanged: () => env.changed,
+    memberKeyOf: async () => A,
+    actAs: async (node, args) => {
+      env.asked.push(args.page)
+      const next = env.answers.shift()
+      if (next instanceof Error) throw next
+      return next
+    },
+    excerptOf: (text) => text,
+    relativeTime: () => '',
+    PAGE_MOMENTS_TITLE: 'Momentos da Página',
+    PAGE_MOMENTS_FAILED: 'falhou',
+    ...Object.fromEntries(['View', 'Text', 'ErrorText', 'Pill', 'MoreButton', 'ConfirmMomentDelete'].map((n) => [n, n]))
+  }
+  const host = hookHost(functionSource(source, 'PageMoments'), 'PageMoments', deps)
+  host.render({ page: PM })
+  await host.flush()
+  const nodes = () => treeNodes(host.render())
+  return {
+    host,
+    env,
+    nodes,
+    rows: () => nodes().filter((n) => n.type === 'MoreButton'),
+    sheet: () => nodes().find((n) => n.type === 'ConfirmMomentDelete'),
+    retry: () => nodes().find((n) => n.props.label === 'Tentar de novo')
+  }
+}
+
+const pmAnswer = (page, seq, text = 'oi') => ({ moments: [{ seq, at: new Date().toISOString(), text }] })
+
+test('PageMoments: a failed read says so and Tentar de novo reads again', async (t) => {
+  const h = await pageMomentsHost({ answers: [new Error('offline'), pmAnswer(PM, 4)] })
+  t.ok(h.retry(), 'the way to read again')
+  t.is(h.rows().length, 0)
+  h.retry().props.onPress()
+  await h.host.flush()
+  t.is(h.retry(), undefined)
+  t.is(h.rows().length, 1)
+  t.is(h.env.asked.length, 2, 'two reads, no delete')
+})
+
+test('PageMoments: another Page shows none of the first Page rows, and its delete goes to that Page', async (t) => {
+  const h = await pageMomentsHost({ answers: [pmAnswer(PM, 4)] })
+  t.is(h.rows().length, 1)
+  h.rows()[0].props.actions[0].onPress()
+  h.env.answers.push(new Promise(() => {}))
+  h.host.render({ page: PM2 })
+  t.is(h.rows().length, 0, 'no row of the previous Page')
+  t.is(h.sheet().props.open, false, 'no sheet of the previous Page')
+  t.is(h.sheet().props.page, PM2)
+})
+
+test('PageMoments: a momento that passes 24 h while the list is open moves to the past ones, with no new read', async (t) => {
+  const at = Date.now() - 23 * 3600 * 1000
+  const h = await pageMomentsHost({ answers: [{ moments: [{ seq: 4, at: new Date(at).toISOString(), text: 'oi' }] }] })
+  const metas = () => h.nodes().filter((n) => n.type === 'Text').map((n) => n.children.filter((c) => typeof c === 'string').join('')).filter((c) => /^(24 h|Anterior), /.test(c))
+  t.alike(metas(), ['24 h, '])
+  h.host.render({ page: PM, now: at + 25 * 3600 * 1000 })
+  t.alike(metas(), ['Anterior, '], 'the screen clock moves it')
+  t.is(h.env.asked.length, 1, 'no read for a tick of the clock')
+})
+
+test('PageMoments: a new node epoch drops the rows and the open sheet, and reads again', async (t) => {
+  const h = await pageMomentsHost({ answers: [pmAnswer(PM, 4)] })
+  h.rows()[0].props.actions[0].onPress()
+  t.is(h.sheet().props.open, true)
+  h.env.answers.push(pmAnswer(PM, 5))
+  h.env.epoch++
+  h.host.render()
+  t.is(h.rows().length, 0, 'no row read under the old epoch')
+  t.is(h.sheet().props.open, false, 'no sheet opened under the old epoch')
+  await h.host.flush()
+  t.is(h.env.asked.length, 2)
+  t.is(h.rows().length, 1)
+  h.rows()[0].props.actions[0].onPress()
+  t.is(h.sheet().props.target.ref, PM + ':5', 'the row read under the new epoch')
+})
+
+test('PageMoments: the delete sheet stays mounted when the reload fails or comes back empty', async (t) => {
+  const h = await pageMomentsHost({ answers: [pmAnswer(PM, 4)] })
+  h.rows()[0].props.actions[0].onPress()
+  t.is(h.sheet().props.open, true)
+  t.is(h.sheet().props.target.ref, PM + ':4')
+  h.env.answers.push(new Error('offline'))
+  h.env.changed++
+  h.host.render()
+  await h.host.flush()
+  t.ok(h.retry(), 'the list shows the failed read')
+  t.is(h.sheet()?.props.open, true, 'the sheet with the outcome is still there')
+  h.env.answers.push({ moments: [] })
+  h.env.changed++
+  h.host.render()
+  await h.host.flush()
+  t.is(h.rows().length, 0)
+  t.is(h.sheet()?.props.open, true, 'also with an empty list')
+  h.sheet().props.onClose()
+  t.is(h.sheet().props.open, false, 'only the sheet closes it')
 })

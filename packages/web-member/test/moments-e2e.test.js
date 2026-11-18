@@ -412,6 +412,31 @@ test('momento video: put, create, read with ms; bounds refused; a blob that is n
   t.alike([pic.mime, pic.w, pic.h], ['image/png', 64, 48])
 })
 
+// A Página's momento (ahead): no stamp is bought right before its upload,
+// whose blob the Página's record names (docs/protocol.md, "Riscos residuais
+// (Momentos como página)").
+test('momento ahead: a short wallet starts a fill and uploads nothing; the next press spends stamps bought before it', async (t) => {
+  t.timeout(170000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const assoc = { kp, hex: hex(kp.publicKey) }
+  const host = await seederHost(t, bootstrap, assoc)
+  const A = await memberNode(t, assoc, host)
+  const args = { mime: 'image/png', width: 64, height: 48, ahead: true }
+  const stamps = async () => (await store.readBlobStamps(A.storage)).items.length
+
+  t.exception.all(() => A.node.momentPutMedia({ ...args, bytes: png(10), ahead: false }), /mídia inválida/, 'ahead is only true')
+  await store.writeBlobStamps(A.storage, { items: [], kids: [] })
+  const photo = png(40000)
+  t.alike(await failure(A.node.momentPutMedia({ ...args, bytes: photo })), { code: 'USAGE', message: 'envio em preparo' }, 'refused, nothing uploaded')
+  t.ok(photo.every((b) => b === 0), 'the caller copy is wiped')
+  await until(async () => (await stamps()) >= 16, { name: 'the fill the refusal started', timeoutMs: 60000 })
+  const before = await stamps()
+  const item = await A.node.momentPutMedia({ ...args, bytes: png(40000) })
+  t.alike(Object.keys(item), ITEM_KEYS, 'the next press uploads')
+  t.is(await stamps(), before - item.chunks, 'with stamps already in the wallet, none bought around it')
+})
+
 test('moment.lookup: the showing momento a reaction names, a fifth one included, never once gone', async (t) => {
   t.timeout(170000)
   const { bootstrap } = await testnet(t)
