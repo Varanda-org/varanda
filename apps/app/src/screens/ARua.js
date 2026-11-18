@@ -1414,18 +1414,20 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const own = typeof ownKey === 'string' ? ownKey.toLowerCase() : null
   // The seeder's public page shows diary posts only. Chats, groups and
   // moments never come through here and are not kind 'post'; a page's diary
-  // is told apart by its profile.
-  const diaryPost = post.kind === 'post' && !(prof && prof.page === true)
+  // is told apart by its profile, and only the acting Page's own posts count.
+  const actingPage = actingPageKey()
+  const actingOwn = actingPage !== null && String(post.author).toLowerCase() === actingPage
+  const diaryPost = post.kind === 'post' && (!(prof && prof.page === true) || actingOwn)
   // A poll or an event shows for a page's post too; only the web link is off.
   const pollable = post.kind === 'post'
   const postRef = diaryPost ? refOf(post) : null
   const origin = installationOrigin() || globalThis.location?.origin || null
   const link = postRef !== null ? postLink(origin, postRef) : null
-  // The member's own diary only, never the page acted as: the writer refuses
-  // a post-share for any diary but the caller's own. The original under a
-  // repost is published from its own row.
+  // The member's own diary, or the acting Page's own posts (shared through the
+  // page action): the writer refuses a person's post-share for any other
+  // diary. The original under a repost is published from its own row.
   const authorKey = String(post.author).toLowerCase()
-  const publishable = postRef !== null && own !== null && authorKey === own && authorKey !== actingPageKey() &&
+  const publishable = postRef !== null && own !== null && ((authorKey === own && authorKey !== actingPage) || actingOwn) &&
     repostedBy === null && Number.isSafeInteger(post.seq)
   // While the index is still being built a count would be misleadingly small.
   const counts = s.flags.indexing ? null : (s.counts.get(ref) || null)

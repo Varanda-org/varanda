@@ -391,10 +391,13 @@ const WORST_EMOJI = 'e'.repeat(REACTION_MAX_BYTES)
 const WORST_REACTIONS = Array(GROUP_REACTIONS_MAX).fill({ emoji: WORST_EMOJI, count: SEQ, mine: false })
 
 // Every item carries the compact reaction summary, GROUP_REACTIONS_MAX of the
-// widest ones (`reactions` null leaves it out).
-function groupReadResult (n, ch, media, card = null, reactions = WORST_REACTIONS) {
+// widest ones (`reactions` null leaves it out). `newest` adds the widest
+// firstUnread, which only the newest page of a group carries.
+function groupReadResult (n, ch, media, card = null, reactions = WORST_REACTIONS, newest = false) {
   const item = { writer: HEX, diary: HEX, seq: SEQ, at: AT, text: ch.repeat(MAX_TEXT), replyTo: { writer: HEX, seq: SEQ }, fwd: 1, media, card, hidden: false, name: ch.repeat(MAX_NAME), username: 'u'.repeat(20), ...(reactions === null ? {} : { reactions }) }
-  return { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
+  const result = { items: Array(n).fill(item), next: { at: AT, writer: HEX, seq: SEQ }, hidden: SEQ, incomplete: true, sealed: SEQ, epoch: { writer: HEX, seq: SEQ }, state: 'rekey-pending' }
+  if (newest) result.firstUnread = { at: AT, writer: HEX, seq: SEQ }
+  return result
 }
 
 test('group.read: public media fits GROUP_LIMIT_MAX', (t) => {
@@ -490,7 +493,7 @@ function dmThreadResult (n, ch, card = true) {
   // A bound reply whose message is kept carries replyFrom, wider than
   // replyMissing: true, and a row never carries both.
   const message = { id: 'f'.repeat(32), from: HEX, text: ch.repeat(MAX_TEXT), replyTo: 'f'.repeat(32), replyFrom: HEX, fwd: 1, at: AT, mine: false, media: card ? null : widestDmMedia(MAX_DM_MEDIA), card: card ? DM_CARD : null, reactions }
-  return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false }
+  return { messages: Array(n).fill(message), next: 'f'.repeat(32), folder: 'request', blocked: false, firstUnread: 'f'.repeat(32) }
 }
 
 // n widest items with distinct blob ids (dm.send refuses repeated ids); every
@@ -515,8 +518,8 @@ test('dm.thread: DM_THREAD_LIMIT_MAX fits, one more does not', (t) => {
   const worst = size(dmThreadResult(DM_THREAD_LIMIT_MAX, '\u{1f600}'))
   t.comment('dm.thread worst case at ' + DM_THREAD_LIMIT_MAX + ' messages: ' + worst + ' bytes')
   const overflow = size(dmThreadResult(DM_THREAD_LIMIT_MAX + 1, '\u{1f600}'))
-  t.is(worst, 262042)
-  t.is(overflow, 268430)
+  t.is(worst, 262091)
+  t.is(overflow, 268479)
   t.comment('dm.thread worst case at ' + (DM_THREAD_LIMIT_MAX + 1) + ' messages: ' + overflow + ' bytes')
   t.ok(overflow > MAX_MESSAGE, 'largest that fits')
 })
@@ -560,7 +563,7 @@ test('dm.thread: a momento reaction row is never larger than the worst row', (t)
   const { replyFrom, ...rest } = page.messages[0]
   const reaction = { ...rest, text: DM_REACTION_BOUND, replyTo: null, fwd: 0, media: null, card: null, moment: Number.MAX_SAFE_INTEGER }
   t.ok(size({ ...page, messages: Array(DM_THREAD_LIMIT_MAX).fill(reaction) }) < size(page))
-  t.is(size(page), 262042, 'the pinned worst case is unchanged')
+  t.is(size(page), 262091, 'the pinned worst case is unchanged')
 })
 
 test('the dispatcher sends the worst-case feed page unchanged', async (t) => {
@@ -617,14 +620,14 @@ test('group.read: maximal private cards and reaction summaries fit, one more doe
   t.is(GROUP_LIMIT_MAX, 26)
   t.is(GROUP_REACTIONS_MAX, 12)
   for (const ch of WORST) {
-    const worst = groupReadResult(GROUP_LIMIT_MAX, ch, null, PRIVATE_CARD)
+    const worst = groupReadResult(GROUP_LIMIT_MAX, ch, null, PRIVATE_CARD, WORST_REACTIONS, true)
     t.ok(size(worst) <= MAX_MESSAGE)
-    t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, null, CARD)) < size(worst))
+    t.ok(size(groupReadResult(GROUP_LIMIT_MAX, ch, null, CARD, WORST_REACTIONS, true)) < size(worst))
   }
-  const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD))
-  const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', null, PRIVATE_CARD))
-  t.is(worst, 261882)
-  t.is(overflow, 271939)
+  const worst = size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD, WORST_REACTIONS, true))
+  const overflow = size(groupReadResult(GROUP_LIMIT_MAX + 1, '\ud800', null, PRIVATE_CARD, WORST_REACTIONS, true))
+  t.is(worst, 262032)
+  t.is(overflow, 272089)
   t.ok(overflow > MAX_MESSAGE)
   t.is(utf8ByteLength(JSON.stringify(WORST_REACTIONS)), 1093, 'twelve maximal summaries')
   // Without reactions the page would still hold 29 items, as before.
@@ -791,9 +794,10 @@ test('diary.peek: PEEK_SEQS_MAX poll posts fit with profile and username', (t) =
 const WORST_MARK = { writer: HEX, seq: SEQ, poll: false }
 
 // A marked page: every item carries `topic`, and a topic read also carries
-// the root's poll summary.
+// the root's poll summary. Only the newest page outside a topic carries
+// firstUnread; the bound has both.
 function markedGroupReadResult (n, ch, card = PRIVATE_CARD) {
-  const result = groupReadResult(n, ch, null, card)
+  const result = groupReadResult(n, ch, null, card, WORST_REACTIONS, true)
   result.items = result.items.map((item) => ({ ...item, topic: WORST_MARK }))
   result.poll = worstPollSummary()
   // A root carries a poll or an event, never both; the event summary is the smaller one.
@@ -807,7 +811,7 @@ test('group.read: unmarked pages are unchanged', (t) => {
   t.is(v.value.limit, GROUP_LIMIT_MAX, 'the unmarked default stays GROUP_LIMIT_MAX')
   t.absent('marks' in v.value)
   t.is(validateParams('group.read', { group: HEX, marks: false }).value.limit, GROUP_LIMIT_MAX)
-  t.is(size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD)), 261882, 'the same bytes as before marks')
+  t.is(size(groupReadResult(GROUP_LIMIT_MAX, '\ud800', null, PRIVATE_CARD, WORST_REACTIONS, true)), 262032, 'the same bytes as before marks, plus firstUnread on the newest page')
   t.absent('topic' in groupReadResult(1, '\ud800', null, PRIVATE_CARD).items[0])
 })
 

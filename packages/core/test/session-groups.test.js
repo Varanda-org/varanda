@@ -141,7 +141,7 @@ test('group create, idempotent join, list, info and members expose every field',
   })
   t.alike(await m.call('group.members', { group, offset: 1 }), { members: [], total: 1 })
   t.alike(await m.call('group.requests', { group }), { requests: [], total: 0 })
-  t.alike(await m.call('group.read', { group }), { items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok' })
+  t.alike(await m.call('group.read', { group }), { items: [], next: null, hidden: 0, incomplete: false, sealed: 0, epoch: null, state: 'ok', firstUnread: null })
   t.alike(m.events.map((e) => e.data.group), [group, community, group, group], 'group.create also announces its community')
   t.alike(m.session.internal, [])
 })
@@ -264,7 +264,8 @@ test('group requests, admission, administration, bans, metadata and leave throug
     incomplete: false,
     sealed: 0,
     epoch: null,
-    state: 'ok'
+    state: 'ok',
+    firstUnread: null
   })
   t.alike(await a.call('group.admin', { group, member: b.publicKey, on: true }), { ok: true })
   const admins = await a.call('group.members', { group })

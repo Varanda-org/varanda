@@ -233,6 +233,11 @@ test('the varandinha methods are refused on the node session, nothing written', 
   t.alike(await failure(m.call('garden.state', {})), NO)
   t.alike(await failure(m.call('garden.play', { acts: [{ op: 'plant', pot: 0, plant: 'manjericao' }] })), NO)
   t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 0 })), NO)
+  t.alike(await failure(m.call('garden.decor', { items: ['rede', 'gato'] })), NO)
+  t.alike(await failure(m.call('garden.stall', {})), NO)
+  t.alike(await failure(m.call('garden.give', { to: OTHER, pot: 0 })), NO)
+  t.alike(await failure(m.call('garden.take', { from: OTHER, seq: 1 })), NO)
+  t.alike(await failure(m.call('garden.drop', { kind: 'gift', seq: 1 })), NO)
   t.alike(await m.call('log.read'), before, 'nothing written')
   t.alike(m.session.internal, [])
   const UNKNOWN = { code: 'USAGE', message: 'parâmetro desconhecido' }
@@ -241,6 +246,11 @@ test('the varandinha methods are refused on the node session, nothing written', 
   t.alike(await failure(m.call('garden.set', { on: 'sim' })), { code: 'USAGE', message: 'parâmetro inválido: on' })
   t.alike(await failure(m.call('garden.help', { to: 'zz', pot: 0 })), { code: 'USAGE', message: 'parâmetro inválido: to' })
   t.alike(await failure(m.call('garden.help', { to: OTHER, pot: 6 })), { code: 'USAGE', message: 'parâmetro inválido: pot' })
+  t.alike(await failure(m.call('garden.decor', { items: ['vaso'] })), { code: 'USAGE', message: 'parâmetro inválido: items' })
+  t.alike(await failure(m.call('garden.give', { to: OTHER, pot: 6 })), { code: 'USAGE', message: 'parâmetro inválido: pot' })
+  t.alike(await failure(m.call('garden.take', { from: OTHER, seq: 0 })), { code: 'USAGE', message: 'parâmetro inválido: seq' })
+  t.alike(await failure(m.call('garden.drop', { kind: 'help', seq: 1 })), { code: 'USAGE', message: 'parâmetro inválido: kind' })
+  t.alike(await failure(m.call('garden.stall', { at: '2026-11-16T00:00:00.000Z' })), UNKNOWN)
 })
 
 test('the enquete methods are refused on the node session, nothing written', async (t) => {
