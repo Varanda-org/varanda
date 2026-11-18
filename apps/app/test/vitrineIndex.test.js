@@ -751,3 +751,57 @@ test('the profile route carries the newest garden flag seq, on or off, or null',
   const old = await request('diary.peek', { author: f.own, seqs: [51], profileSeq: 1, usernameSeq: 2 })
   t.alike(old.missing, [51], 'the off flag tombstones the previous flag, as the node does')
 })
+
+// The Barraquinha as the app reads it: the /mimos pointers, every block they
+// name peeked from the demo node, then assembleStall at the demo clock.
+async function stallOf (c, respond, request, f) {
+  const { planStallPeeks, assembleStall } = await import('../src/gardenStall.js')
+  const index = c.validGardenStall(respond(c.gardenStallUrl(f.own)), f.own)
+  const plan = planStallPeeks({ owner: f.own, index })
+  const peek = (b) => request('diary.peek', { author: b.author, seqs: b.seqs, profileSeq: 1, usernameSeq: 2 })
+  const ownerReads = await Promise.all(plan.owner.map(peek))
+  const giverReads = new Map()
+  for (const g of plan.givers) giverReads.set(g.author, await Promise.all(g.batches.map(peek)))
+  const since = c.validGarden(respond(c.gardenUrl(f.own)), f.own).on
+  return { index, stall: assembleStall({ owner: f.own, since, now: Date.parse(f.now), index, ownerReads, giverReads }) }
+}
+
+test('the mimos route passes validGardenStall and assembles to one shelf row and one pending row', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const [cecilia, andre] = [f.members[2].author, f.members[3].author]
+  const body = respond(c.gardenStallUrl(f.own))
+  t.alike(Object.keys(body).sort(), ['complete', 'decor', 'indexing', 'pending', 'shelf'])
+  for (const row of body.pending) t.alike(Object.keys(row).sort(), ['author', 'followSeq', 'seq'])
+  for (const row of body.shelf) t.alike(Object.keys(row).sort(), ['from', 'gseq', 'seq'])
+  const { index, stall } = await stallOf(c, respond, request, f)
+  t.alike(index, { decor: 54, pending: [{ author: andre, seq: 135, followSeq: 132 }], shelf: [{ seq: 55, from: cecilia, gseq: 135 }], indexing: false, complete: true })
+  t.is(stall.incomplete, false)
+  t.alike(stall.decor, ['rede', 'pisca'])
+  t.alike(stall.shelf.map((r) => [r.from, r.gseq, r.item]), [[cecilia, 135, 'manjericao']])
+  t.alike(stall.pending.map((r) => [r.author, r.seq, r.item]), [[andre, 135, 'tomate']])
+  t.alike(c.validGardenStall(respond(c.gardenStallUrl(andre)), andre), { decor: 134, pending: [], shelf: [], indexing: false, complete: true })
+  t.exception(() => respond(c.gardenStallUrl(f.own) + '/x'), /not-found/)
+})
+
+test('a take moves the mimo from pending to the shelf, and dropping it returns it to pending', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const [cecilia, andre] = [f.members[2].author, f.members[3].author]
+  const took = await request('garden.take', { from: andre, seq: 135 })
+  let { index, stall } = await stallOf(c, respond, request, f)
+  t.alike(index.pending, [], 'the taken mimo leaves pending')
+  t.alike(index.shelf, [{ seq: took.seq, from: andre, gseq: 135 }, { seq: 55, from: cecilia, gseq: 135 }])
+  t.alike(stall.shelf.map((r) => r.from).sort(), [cecilia, andre].sort())
+  t.alike(stall.pending, [])
+  await request('garden.drop', { kind: 'take', seq: took.seq })
+  ;({ index, stall } = await stallOf(c, respond, request, f))
+  t.alike(index.pending, [{ author: andre, seq: 135, followSeq: 132 }], 'a dropped take is pending again')
+  t.alike(stall.pending.map((r) => r.author), [andre])
+  t.alike(stall.shelf.map((r) => r.from), [cecilia])
+})
+
+test('a left balcony lists no mimo and no decor on the mimos route', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  await request('garden.set', { on: false })
+  t.alike(c.validGardenStall(respond(c.gardenStallUrl(f.own)), f.own), { decor: null, pending: [], shelf: [], indexing: false, complete: true })
+  t.is(c.validProfile(respond(c.profileUrl(f.own))).garden > 51, true, 'the profile answer still names the newest flag')
+})
