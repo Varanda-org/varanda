@@ -39,13 +39,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { displayText } from '@varanda/rpc'
 import { useNode } from '../node'
 import { useNames } from '../names'
+import { pageDmClient } from '../dm-screen'
 import { aheadMomentsOf, holdMsOf, momentMusicOf, momentRefOf, canReply, expiresIn, firstUnseenIndex, nextIndex, nextMomentOf, prevMomentOf, progressOf, replyContext, ringOrder, segmentMs, VIDEO_END_GRACE_MS } from '../moments'
 import { IMAGE_MIMES, momentPhotoKey, momentPhotosFor } from '../momentPhotos'
-import { actAs } from '../pages'
+import { actAs, pagesDm } from '../pages'
 import { choicePage } from '../pageChoice'
+import { pagesOn } from '../pageGate'
 import { momentDeleteAs, momentPublisher, pageMomentsOf } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
-import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
+import { canReact, reactionParams, reactionRetry, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
 import { momentSwipe, swipeRelease, swipeTotal } from '../momentSwipe'
 import { QUICK, reactionName } from '../reactions'
 import { audiusPolicy, audiusReady } from '../account'
@@ -727,19 +729,32 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   const reactionAvailable = !mine && !pageOwn && canReact(node) && item !== null
   const reactionVisible = !mine && !pageOwn && item !== null
   const reaction = reactionStates[itemKey]
-  const react = async (emoji) => {
-    if (!mounted.current || reactionBusy.current || !reactionAvailable || reactionUncertain.current.has(item.ref)) return
+  // Acting as a Página, the reaction to a person's momento is the page's
+  // signed one-emoji message with moment (inner v12): dm.pageDraft, the page
+  // statement, dm.pageSend, as the page's other Conversas sends. With Páginas
+  // off (pagesOn), as in Mensagem, it reacts as the person.
+  const reactPage = actingPage !== null && author !== actingPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? actingPage : null
+  const react = async (emoji, retry = null) => {
+    if (!mounted.current || reactionBusy.current || !reactionAvailable || (retry === null && reactionUncertain.current.has(item.ref))) return
     const ref = item.ref
     reactionBusy.current = true
     setReacting(true)
     setReactionStates((states) => ({ ...states, [ref]: null }))
     try {
-      await request('dm.send', reactionParams(item, author, emoji))
+      if (retry !== null) await retry()
+      else if (reactPage === null) await request('dm.send', reactionParams(item, author, emoji))
+      else {
+        const sign = async (digest) => pagesDm(node, { member: await memberKeyOf(request, node), page: reactPage, action: 'dm-sign', op: { digest } })
+        await pageDmClient({ request, sign, page: reactPage })('dm.send', reactionParams(item, author, emoji))
+      }
+      reactionUncertain.current.delete(ref)
       if (mounted.current) setReactionStates((states) => ({ ...states, [ref]: { text: REACTION_SENT } }))
     } catch (err) {
       const uncertain = unsure(err)
       if (uncertain) reactionUncertain.current.add(ref)
-      if (mounted.current) setReactionStates((states) => ({ ...states, [ref]: { uncertain, text: uncertain ? REACTION_UNSURE : errorText(err) } }))
+      else reactionUncertain.current.delete(ref)
+      const again = uncertain ? reactionRetry(err, reactPage !== null) || retry : null
+      if (mounted.current) setReactionStates((states) => ({ ...states, [ref]: { uncertain, retry: again, text: uncertain ? REACTION_UNSURE : errorText(err) } }))
     } finally {
       reactionBusy.current = false
       if (mounted.current) setReacting(false)
@@ -1497,6 +1512,20 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
                             </View>
                             )}
                         {reaction ? <Text style={styles.reactionNote} accessibilityLiveRegion='polite'>{reaction.text}</Text> : null}
+                        {reaction?.uncertain && typeof reaction.retry === 'function'
+                          ? (
+                            <Pressable
+                              accessibilityRole='button'
+                              accessibilityLabel='Tentar de novo'
+                              accessibilityState={{ disabled: reacting }}
+                              disabled={reacting}
+                              onPress={(e) => { e.stopPropagation(); if (!draggedRef.current) return react('', reaction.retry) }}
+                              style={({ pressed }) => [styles.reactionHit, pressed && styles.pressed]}
+                            >
+                              <Text style={styles.text}>Tentar de novo</Text>
+                            </Pressable>
+                            )
+                          : null}
                         {reaction?.uncertain && typeof onMessage === 'function'
                           ? (
                             <Pressable

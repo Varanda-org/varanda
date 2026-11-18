@@ -15,7 +15,7 @@ const dmCore = require('@varanda/core/lib/dm')
 const ps = require('@varanda/core/lib/page-secrets')
 const gc = require('@varanda/core/lib/group-crypto')
 const { memoryNodeStorage } = require('../lib/node-storage')
-const { dmBoxKeyPairFromPrf } = require('../lib/passkey')
+const { dmBoxKeyPairFromPrf, dmLocalKeyFromPrf } = require('../lib/passkey')
 const { createPageHolder } = require('../lib/page-dm')
 const store = require('../lib/node-store')
 const sodium = require('../lib/sodium-browser')
@@ -1231,15 +1231,95 @@ test('a carried legacy box opens drops to the old page key and files them for th
   await A.web.request('dm.pull')
   t.alike((await A.web.request('dm.thread', { page: K2, peer: C.key })).messages.map((m) => [m.text, m.mine]), [['para a chave antiga', false]], 'filed for the new page')
 
+  // C's thread holds it with K1: a reaction from K2 would never meet it, so
+  // the carried row takes none, refused before anything is signed.
+  await copyDiary(C, A)
+  const carriedRow = (await A.web.request('dm.thread', { page: K2, peer: C.key })).messages[0]
+  t.is(carriedRow.reactable, false, 'a carried row is not reactable')
+  const refused = await errorOf(A.web.request('dm.pageDraft', { page: K2, kind: 'react', to: C.key, target: { from: C.key, id: carriedRow.id }, emoji: '\u{1f44d}' }))
+  t.is(refused && refused.message, 'esta mensagem não aceita reações', 'the page reaction to it is refused')
+
   // Still the old key's box after a lock.
   await A.node.clearKeyPair()
   await A.node.setKeyPair(A.keyPair, { prf: A.prf })
   await C.web.request('dm.send', { to: K1, text: 'depois do bloqueio' })
   await A.web.request('dm.pull')
   t.alike((await A.web.request('dm.thread', { page: K2, peer: C.key })).messages.map((m) => m.text), ['para a chave antiga', 'depois do bloqueio'], 'after unlock too')
+
+  // C's reaction to a momento of K1 (inner v5) names K1's diary, not K2's:
+  // dropped, while the message after it is filed. Put by hand with C's stamp.
+  const key = await dmLocalKeyFromPrf(C.prf)
+  const w = await store.readDmStamps(C.storage)
+  const stampAt = (i) => ({ kid: w.items[i].kid, ...gc.openRecord({ nonce: w.items[i].nonce, box: w.items[i].box }, key) })
+  const put = (inner, stamp) => seeder.pool.submit(dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(inner, hex(legacyPub)) }))
+  await store.writeDmStamps(C.storage, { items: w.items.slice(2), kids: w.kids })
+  const onMoment = dmCore.buildInner({ kind: 'msg', to: K1, text: '\u{1f525}', moment: 3, cert: createCert({ member: C.key }, assoc) }, C.keyPair)
+  t.ok(put(onMoment, stampAt(0)), 'the pool takes the momento reaction')
+  // So does another page's reaction to a momento of K1 (inner v12).
+  const qKp = crypto.keyPair()
+  const Q = hex(qKp.publicKey)
+  const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
+  const v12 = dmCore.innerDigest({ from: Q, kind: 'msg', to: K1, text: '\u{1f525}', moment: 3, at: new Date().toISOString(), cert: createCert({ member: Q }, assoc) })
+  t.is(v12.body.v, dmCore.DM_PAGE_MOMENT_V)
+  t.ok(put(dmCore.assembleInner(v12.json, dmCore.signDigest(v12.digest, qKp.secretKey, expiresAt), expiresAt), stampAt(1)), 'the pool takes the page momento reaction')
+  await C.web.request('dm.send', { to: K1, text: 'depois do momento' })
+  await A.web.request('dm.pull')
+  const rows = (await A.web.request('dm.thread', { page: K2, peer: C.key })).messages
+  t.alike(rows.map((m) => m.text), ['para a chave antiga', 'depois do bloqueio', 'depois do momento'], 'the momento reaction is not filed')
+  t.absent(rows.some((m) => m.moment !== undefined), 'no momento row')
+  t.alike((await A.web.request('dm.thread', { page: K2, peer: Q })).messages, [], 'nor the page momento reaction')
 })
 
-test('dm.react tells a Página only from a diary held here: a held one is refused, an unheld peer never waits for a seeder peek', async (t) => {
+test('a page reaction draft: a no-op is refused, and the revs drafted here go with a lock', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc) }
+  const seeder = await dmSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: A.box }] })
+  const diary = await pageDiary(t, { assoc, issuer, pageKp, ownerKp: A.keyPair, box: made.box })
+  for (const n of [A, C]) await hold(diary, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+
+  // The page's own message, whose digest its draft answered, is the target.
+  const msg = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text: 'da página' })
+  await A.web.request('dm.pageSend', { page: P, id: msg.id, ...signed(msg.digest, pageKp) })
+  const target = { from: P, id: msg.id }
+  const heart = '\u2764\ufe0f'
+  const draft = (emoji) => A.web.request('dm.pageDraft', { page: P, kind: 'react', to: C.key, target, emoji })
+  // The rev a draft took, read back from its digest.
+  const revOf = (d, emoji) => {
+    for (let rev = 1; rev <= 8; rev++) {
+      const body = { kind: 'react', id: d.id, at: d.at, from: P, to: C.key, target: { ...target, digest: msg.digest }, emoji, rev, cert: pageCert }
+      if (dmCore.innerDigest(body).digest === d.digest) return rev
+    }
+    return null
+  }
+
+  const none = await errorOf(draft(''))
+  t.is(none && none.message, 'nada a alterar', 'no reaction to withdraw')
+  t.is(revOf(await draft(heart), heart), 1)
+  t.is(revOf(await draft(heart), heart), 2, 'a draft made here, maybe sent, lifts the no-op rule and is outrun')
+
+  await A.node.clearKeyPair()
+  await A.node.setKeyPair(A.keyPair, { prf: A.prf })
+  const fresh = await draft(heart)
+  t.is(revOf(fresh, heart), 1, 'after a lock the drafted revs are gone: one past the stored op')
+  await A.web.request('dm.pageSend', { page: P, id: fresh.id, ...signed(fresh.digest, pageKp) })
+  t.alike((await A.web.request('dm.thread', { page: P, peer: C.key })).messages[0].reactions, [{ emoji: heart, mine: true }])
+  const same = await errorOf(draft(heart))
+  t.is(same && same.message, 'nada a alterar', 'the same emoji again is refused')
+  t.is(revOf(await draft(''), ''), 2, 'a withdrawal goes on')
+})
+
+test('dm.react to a held Página reaches the engine, and an unheld peer never waits for a seeder peek', async (t) => {
   t.timeout(300000)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
@@ -1252,7 +1332,7 @@ test('dm.react tells a Página only from a diary held here: a held one is refuse
   const target = { from: P, id: dmCore.newMessageId() }
 
   const refused = await errorOf(C.web.request('dm.react', { to: P, target, emoji: '\u{1f44d}' }))
-  t.is(refused && refused.message, 'conversas com uma Página não têm reações', 'a held Página is refused')
+  t.is(refused && refused.message, 'mensagem não encontrada', 'a held Página is no refusal: the engine answers for the missing message')
 
   const X = hex(crypto.keyPair().publicKey)
   C.peeks.set(X, { box: hex(crypto.randomBytes(32)), gen: 1 })
@@ -1261,7 +1341,7 @@ test('dm.react tells a Página only from a diary held here: a held one is refuse
   const answer = await Promise.race([errorOf(C.web.request('dm.react', { to: X, target: { from: X, id: dmCore.newMessageId() }, emoji: '\u{1f44d}' })), waited])
   clearTimeout(timer)
   t.not(answer, 'waited', 'answered without waiting for a peek of the unheld diary')
-  t.is(answer && answer.message, 'mensagem não encontrada', 'past the Página check: the engine answers for the missing message')
+  t.is(answer && answer.message, 'mensagem não encontrada', 'the engine answers for the missing message')
 })
 
 // Which blocks of a Página's dm-local core still hold data.

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 87)
+  t.is(LEGAL_VERSION, 91)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 87, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 91, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -114,7 +114,7 @@ test('legal: version 46 sends a momento reaction as a private message', async (t
     'Nada da foto ou do vídeo é copiado.',
     'A conversa mostra uma prévia pequena só enquanto o app ainda mostra o momento.',
     'A reação gasta selos de envio como uma mensagem e não pode ser removida.',
-    'Um app que não foi atualizado não a mostra, e as conversas das páginas não a guardam.'
+    'Um app que não foi atualizado não a mostra.'
   ]) t.ok(privacy.includes(required), 'privacy: ' + required)
 })
 
@@ -388,12 +388,27 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 91 describes reactions in a page\'s Conversas', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 91)
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const pages = (doc) => doc.sections.filter(({ heading }) => heading === 'Páginas').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.absent(/n[ãa]o t[êe]m rea[çc][õo]es|n[ãa]o a guardam/iu.test(all(doc)), doc.title + ': no sentence says page conversations lack reactions')
+    t.ok(pages(doc).includes('O mesmo vale para as reações da página, que o serviço também assina sem vê-las.'), doc.title + ': prepared reactions after removal, signed blind')
+  }
+  t.ok(all(TERMS).includes('As conversas de uma página também têm reações: você reage às mensagens e aos momentos da página, e a página, pelo dono ou por um administrador, reage às suas mensagens e aos seus momentos.'), 'terms: both directions, messages and momentos')
+  t.ok(all(TERMS).includes('Um app anterior a esta versão não mostra as reações da página.'), 'terms: older apps do not show page reactions')
+  t.ok(all(PRIVACY).includes('Numa conversa com uma página, a reação da página é assinada pelo serviço de conta sem que ele a veja, como as mensagens da página, e o serviço fica sabendo qual administrador pediu a assinatura e quando.'), 'privacy: what the service learns from a page reaction')
+  t.ok(all(PRIVACY).includes('Numa conversa com uma página, a reação vale também para os momentos da página, e a página reage aos seus momentos do mesmo jeito.'), 'privacy: momento reactions with a page')
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '7012cd824ba0243da94195aba61f52022f9567b2bb18f6013a5677901e5a7ec4', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '3410f0756a42da74c01a95d4040766499d645154a8133b0c8e03925fa61caea5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -410,7 +425,7 @@ test('legal: version 41 describes group and conversation reactions and chat form
     t.ok(text(doc).includes('só as duas pessoas da conversa'), doc.title + ': a conversation reaction is seen by the two people')
     t.ok(text(doc).includes('no mesmo limite diário de envio'), doc.title + ': a reaction spends the daily sending allowance')
     t.ok(text(doc).includes('até ela chegar, a outra pessoa ainda pode ver a reação, e cópias que ela já recebeu podem continuar existindo'), doc.title + ': conversation removal leaves copies')
-    t.ok(/conversas das páginas não têm reações/iu.test(text(doc)), doc.title + ': no reactions in page conversations')
+    t.absent(/conversas das páginas não têm reações/iu.test(text(doc)), doc.title + ': page conversations have reactions since version 91')
     t.ok(text(doc).includes('sem indicação de leitura, de entrega ou de que alguém está digitando'), doc.title + ': no read, delivery or typing indicator')
     t.ok(text(doc).includes('é só apresentação'), doc.title + ': formatting is presentation only')
   }

@@ -40,10 +40,14 @@ export function olderPagesToReread (pages, pending, cap = REREAD_OLDER_PAGES) {
   return out
 }
 
-// An incomplete answer can identify a person; an index hint cannot hide chips.
+// A Página's Conversas take reactions both ways (inner v11/v12, docs/protocol.md
+// section 11), so nothing is hidden by kind any more; peerKind stays a
+// parameter for the callers. A person still waits for the peer's page.read
+// answer before reacting. Acting as a page, the app reads no peer (readPeer
+// skips it) and the node checks the peer when it drafts the reaction.
 export function dmReactionGate ({ read, peer, peerKind, pageKey = null, hosted, unlocked, online, isTop, blocked, folder }) {
-  const hidden = pageKey !== null || peerKind === 'page'
-  const disabled = hidden || read?.page !== peer || !hosted || !unlocked || !online || !isTop || blocked || folder !== 'inbox'
+  const hidden = false
+  const disabled = (pageKey === null && read?.page !== peer) || !hosted || !unlocked || !online || !isTop || blocked || folder !== 'inbox'
   return { hidden, disabled }
 }
 
@@ -53,6 +57,19 @@ export function dmReactionGate ({ read, peer, peerKind, pageKey = null, hosted, 
 export function peerReadDelay (failures) {
   const n = Number.isSafeInteger(failures) && failures > 0 ? Math.min(failures, 5) : 0
   return Math.min(60000, 2000 * 2 ** n)
+}
+
+// A tap on a message's reaction. `unsure`: the emoji of its unconfirmed
+// reaction (undefined: none), `removed`: the emoji an unconfirmed removal
+// took away. Tapping that emoji again is the retry. `held`: a page reaction
+// answered uncertain keeps its signed re-put (pageDmClient err.retry) until
+// the user resolves it, so any other tap on that message is locked: a second
+// rev is never signed before the first is settled.
+// -> { retry, emoji (the retry's), locked }
+export const PAGE_REACTION_HELD = 'Toque no mesmo emoji para tentar de novo.'
+export function reactionTap ({ unsure, removed, held = false }, picked) {
+  if (unsure !== undefined && (unsure === picked || (unsure === '' && picked !== '' && picked === removed))) return { retry: true, emoji: unsure, locked: false }
+  return { retry: false, emoji: null, locked: held === true }
 }
 
 // Keep the first choice across the whole burst: returning to it costs no stamps.
@@ -327,8 +344,10 @@ export function pageDmClient ({ request, sign, page }) {
     if (PAGE_READS.includes(method)) return request(method, { ...params, page })
     if (method === 'dm.pull') return request('dm.pull', {})
     if (method === 'dm.send') {
-      const { to, text, replyTo, fwd, media, card } = params
+      const { to, text, replyTo, fwd, media, card, moment } = params
       const op = { kind: 'msg', to, text }
+      // A one-emoji text with moment is the page's reaction to a momento of `to` (v12).
+      if (moment !== undefined) op.moment = moment
       if (replyTo !== undefined) op.replyTo = replyTo
       if (fwd !== undefined) op.fwd = fwd
       // As a person's dm.send: photos, GIFs and voice notes (media) or a
@@ -339,6 +358,12 @@ export function pageDmClient ({ request, sign, page }) {
     }
     if (method === 'dm.set') {
       await send({ kind: 'ctl', peer: params.peer, op: params.state })
+      return { ok: true }
+    }
+    // The page's reaction to a message (v11); emoji '' withdraws it. An
+    // uncertain put carries err.retry like a message, the same signed draft.
+    if (method === 'dm.react') {
+      await send({ kind: 'react', to: params.to, target: params.target, emoji: params.emoji })
       return { ok: true }
     }
     return {}

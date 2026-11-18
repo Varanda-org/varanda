@@ -1292,7 +1292,7 @@ test('inner v5: shape rules', (t) => {
   ]) {
     t.exception.all(() => momentReact(over), /mensagem inválida/, label)
   }
-  t.exception.all(() => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert }), /mensagem inválida/, 'a Página writes no moment')
+  t.is(dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert }).body.v, 12, 'a Página writes a v12, never a v5')
 })
 
 test('inner v5: a null or absent moment builds the exact bytes of today', (t) => {
@@ -1916,6 +1916,185 @@ test('inner v9: the text budget counts signer, and the largest text fits', (t) =
   t.exception.all(() => buildInner({ ...build, text: textOfBytes(budget) + 'x' }, who, who.opts), /mensagem longa demais/, 'one byte more throws before sealing')
   t.is(((inner[0] << 8) | inner[1]) + 66, DM_INNER_BYTES, 'the full budget fills the frame exactly')
   t.comment('v9 budgets with the largest certificate: text only ' + dmTextBudget(plain) + ', bound reply ' + budget + ' text bytes')
+})
+
+// A Página's reactions (v11: the v4 keys, v12: the v5 keys), digest-signed
+// with an expiry as v3 is.
+function pageReact (over = {}, signer = page, expiresAt = EXP) {
+  return pageInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: page.cert, ...over }, signer, expiresAt)
+}
+
+function pageMoment (over = {}, signer = page, expiresAt = EXP) {
+  return pageInner({ kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert, ...over }, signer, expiresAt)
+}
+
+// A digest-signed frame of any body (for shapes innerDigest refuses).
+function forgeDigest (body, signer = page, expiresAt = EXP) {
+  const json = b4a.from(JSON.stringify(body))
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  return dm.assembleInner(json, dm.signDigest(b4a.toString(d, 'hex'), signer.secretKey, expiresAt), expiresAt)
+}
+
+test('inner v11 and v12: constants and the rpc key lists', (t) => {
+  t.is(dm.DM_PAGE_REACT_V, 11)
+  t.is(dm.DM_PAGE_MOMENT_V, 12)
+  t.alike(dm.INNER_KEYS_V11, dm.INNER_KEYS_V4)
+  t.alike(dm.INNER_KEYS_V12, dm.INNER_KEYS_V5)
+  const rpc = require('@varanda/rpc')
+  t.alike(dm.INNER_KEYS_V11, rpc.DM_INNER_KEYS_V11)
+  t.alike(dm.INNER_KEYS_V12, rpc.DM_INNER_KEYS_V12)
+  t.alike(rpc.DM_INNER_DIGEST_VERSIONS, [3, 11, 12])
+})
+
+test('inner v11: a Página reacts, round trip and the digest signature', (t) => {
+  const { inner, json, digest, body } = pageReact()
+  t.is(body.v, 11)
+  t.alike(Object.keys(body), dm.INNER_KEYS_V4)
+  const d = b4a.alloc(32)
+  sodium.crypto_hash_sha256(d, json)
+  t.is(digest, b4a.toString(d, 'hex'))
+  const sig = inner.subarray(2 + json.byteLength, 2 + json.byteLength + 64)
+  t.ok(hcrypto.verify(b4a.concat([b4a.from('varanda-dm-v3\n'), d, u64(EXP)]), sig, page.publicKey), 'signed as v3 is: prefix || sha256(json) || expiry')
+  t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V4), json]), sig, page.publicKey), 'not under the v4 domain')
+  const theirs = openInner(b4a.from(inner), bia.hex, O)
+  t.is(theirs.v, 11)
+  t.is(theirs.kind, 'react')
+  t.is(theirs.emoji, HEART)
+  t.is(theirs.rev, 1)
+  t.is(theirs.expiresAt, EXP)
+  t.is(theirs.mine, false)
+  t.alike(theirs.target, { from: bia.hex, id: 'b'.repeat(32), digest: TD })
+  t.is(openInner(b4a.from(inner), page.hex, O).mine, true, 'the page copy')
+  t.is(openInner(b4a.from(inner), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(b4a.from(inner), bia.hex), null, 'it needs the association')
+  t.is(openInner(pageReact({ cert: null }).inner, bia.hex, O), null, 'and a certificate')
+  t.is(openInner(pageReact({ emoji: '' }).inner, bia.hex, O).emoji, '', 'the empty emoji withdraws')
+  t.is(openInner(pageReact({ target: { from: page.hex, id: 'c'.repeat(32), digest: TD } }).inner, bia.hex, O).target.from, page.hex, 'to its own message')
+  t.is(dm.pageInnerStale(theirs, EXP + dm.DM_V3_STALE_MS), false)
+  t.is(dm.pageInnerStale(theirs, EXP + dm.DM_V3_STALE_MS + 1), true, 'stale as v3 is')
+  t.is(dm.pageInnerStale({ v: 11 }, EXP), true, 'a v11 without expiresAt is refused')
+})
+
+test('inner v12: a Página reacts to a momento, round trip', (t) => {
+  const { inner, body } = pageMoment()
+  t.is(body.v, 12)
+  t.alike(Object.keys(body), dm.INNER_KEYS_V5)
+  const theirs = openInner(b4a.from(inner), bia.hex, O)
+  t.is(theirs.v, 12)
+  t.is(theirs.kind, 'msg')
+  t.is(theirs.moment, 7)
+  t.is(theirs.text, HEART)
+  t.is(theirs.expiresAt, EXP)
+  t.is(theirs.mine, false)
+  t.is(openInner(b4a.from(inner), page.hex, O).mine, true)
+  t.is(dm.pageInnerStale(theirs, EXP + dm.DM_V3_STALE_MS + 1), true)
+  t.is(dm.pageInnerStale({ v: 12, expiresAt: 0 }, EXP), true)
+})
+
+test('inner v11 and v12: strict bounds, refused before anything is signed', (t) => {
+  const tg = { from: bia.hex, id: 'b'.repeat(32), digest: TD }
+  const draft = (over) => dm.innerDigest({ from: page.hex, kind: 'react', to: bia.hex, target: tg, emoji: HEART, rev: 1, at: AT, cert: page.cert, ...over })
+  for (const [label, over] of [
+    ['emoji', { emoji: 'a' }], ['two emojis', { emoji: HEART + HEART }], ['rev 0', { rev: 0 }], ['rev past the max', { rev: dm.DM_REACT_REV_MAX + 1 }],
+    ['rev 1.5', { rev: 1.5 }], ['target of a third party', { target: { ...tg, from: caio.hex } }], ['no digest', { target: { from: bia.hex, id: 'b'.repeat(32) } }],
+    ['to itself', { to: page.hex }], ['a certificate of someone else', { cert: bia.cert }], ['bad id', { id: 'A'.repeat(32) }]
+  ]) {
+    t.exception.all(() => draft(over), /mensagem inválida/, 'v11 ' + label)
+  }
+  t.ok(draft({ rev: dm.DM_REACT_REV_MAX }), 'the largest rev')
+  const moment = (over) => dm.innerDigest({ from: page.hex, kind: 'msg', to: bia.hex, text: HEART, moment: 7, at: AT, cert: page.cert, ...over })
+  for (const [label, over] of [
+    ['text', { text: 'oi' }], ['empty text', { text: '' }], ['moment 0', { moment: 0 }], ['moment 1.5', { moment: 1.5 }], ['moment string', { moment: '7' }],
+    ['reply', { replyTo: 'b'.repeat(32) }], ['bound reply', { replyTo: boundTo() }], ['media', { media: [blobItem(1)] }], ['card', { card: dmCard() }],
+    ['fwd 1', { fwd: 1 }], ['ctl', { kind: 'ctl', op: 'blocked', peer: bia.hex }], ['op', { op: 'blocked' }], ['to itself', { to: page.hex }]
+  ]) {
+    t.exception.all(() => moment(over), /mensagem inválida/, 'v12 ' + label)
+  }
+  t.is(moment({ replyTo: null, media: null, card: null, fwd: 0 }).body.v, 12, 'the null defaults of a draft')
+
+  // Shapes innerDigest refuses never open either, signed or not.
+  const wire = (r) => JSON.parse(b4a.toString(r.json))
+  const v11 = wire(pageReact())
+  const v12 = wire(pageMoment())
+  t.ok(openInner(forgeDigest(v11), bia.hex, O), 'the forge helper builds an openable v11')
+  t.ok(openInner(forgeDigest(v12), bia.hex, O), 'and an openable v12')
+  for (const bad of [{ ...v11, text: 'oi' }, { ...v11, emoji: 'x' }, { ...v11, rev: 0 }, { ...v11, kind: 'msg' }, { ...v12, moment: 0 }, { ...v12, text: 'oi' }, { ...v12, media: null }, { ...v12, kind: 'react' }]) {
+    t.absent(dm.validBody(bad))
+    t.is(openInner(forgeDigest(bad), bia.hex, O), null)
+  }
+})
+
+test('inner v11 and v12: a forged, a cross-version or a replayed v3 signature is refused', (t) => {
+  const r = pageReact()
+  const m = pageMoment()
+  t.is(openInner(pageReact({}, caio).inner, bia.hex, O), null, 'v11 signed by another key')
+  t.is(openInner(pageMoment({}, caio).inner, bia.hex, O), null, 'v12 signed by another key')
+
+  // A v3 message signature, carried over to a v11 or v12 json: the version
+  // is inside the digested JSON, so it never verifies.
+  const v3 = pageInner({ kind: 'msg', to: bia.hex, text: HEART, at: AT, cert: page.cert })
+  const v3Sig = b4a.toString(frameParts(v3.inner).sig, 'hex')
+  t.ok(openInner(b4a.from(v3.inner), bia.hex, O), 'the v3 itself opens')
+  t.is(openInner(dm.assembleInner(r.json, v3Sig, EXP), bia.hex, O), null, 'a v3 signature replayed as a v11')
+  t.is(openInner(dm.assembleInner(m.json, v3Sig, EXP), bia.hex, O), null, 'a v3 signature replayed as a v12')
+  // The v3 json relabelled: the same bytes but "v":9 or "v":10 no longer
+  // match the signed digest, and its keys are no v11 or v12 key set.
+  const v3Body = JSON.parse(b4a.toString(v3.json))
+  for (const v of [9, 10]) {
+    const relabelled = b4a.from(JSON.stringify({ ...v3Body, v }))
+    t.is(openInner(dm.assembleInner(relabelled, v3Sig, EXP), bia.hex, O), null, 'a v3 json relabelled v' + v)
+  }
+
+  // Each version's signature on the other's json, and on its own relabelled.
+  const rSig = b4a.toString(frameParts(r.inner).sig, 'hex')
+  const mSig = b4a.toString(frameParts(m.inner).sig, 'hex')
+  t.is(openInner(dm.assembleInner(m.json, rSig, EXP), bia.hex, O), null, 'a v11 signature on a v12')
+  t.is(openInner(dm.assembleInner(r.json, mSig, EXP), bia.hex, O), null, 'a v12 signature on a v11')
+  const rWire = JSON.parse(b4a.toString(r.json))
+  const mWire = JSON.parse(b4a.toString(m.json))
+  t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...rWire, v: 4 })), rSig, EXP), bia.hex, O), null, 'a v11 relabelled v4')
+  t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...mWire, v: 5 })), mSig, EXP), bia.hex, O), null, 'a v12 relabelled v5')
+  t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...mWire, v: 3 })), mSig, EXP), bia.hex, O), null, 'a v12 relabelled v3')
+  // Nor as a manifest diary's v9 or v10, which carry `signer` and their own domains.
+  for (const v of [9, 10]) {
+    t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...rWire, v })), rSig, EXP), bia.hex, O), null, 'a v11 relabelled v' + v)
+    t.is(openInner(dm.assembleInner(b4a.from(JSON.stringify({ ...rWire, v, signer: page.hex })), rSig, EXP), bia.hex, O), null, 'a v11 relabelled v' + v + ' with a signer')
+  }
+
+  // A v11 or v12 body signed under a member's own domains (no digest, no
+  // expiry) never opens, nor does a v4 or v5 one under the digest scheme.
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5]]) {
+    t.is(openInner(forge(rWire, page, prefix), bia.hex, O), null, 'a v11 body under ' + name)
+    t.is(openInner(forge(mWire, page, prefix), bia.hex, O), null, 'a v12 body under ' + name)
+  }
+  t.is(openInner(forgeDigest(reactBody()), bia.hex, O), null, 'a v4 under the digest scheme')
+  t.is(openInner(forgeDigest(momentBody()), bia.hex, O), null, 'a v5 under the digest scheme')
+
+  // The frame expiry must match the signed one, as in v3.
+  const off = 2 + r.json.byteLength + 64
+  const other = b4a.from(r.inner)
+  other.set(u64(EXP + 1), off)
+  t.is(openInner(other, bia.hex, O), null, 'a different expiresAt than the signed one')
+  const tampered = b4a.from(r.inner)
+  const at = b4a.toString(r.json).indexOf('"rev":1') + 2 + 6
+  tampered[at] = '2'.charCodeAt(0)
+  t.is(openInner(tampered, bia.hex, O), null, 'a tampered rev')
+})
+
+test('inner v11 and v12: a reader that knows only v1 to v10 drops them', (t) => {
+  // The dispatch of a reader from before v11: anything else falls to its final else.
+  const v10Reader = (b) => b !== null && typeof b === 'object' && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(b.v) && dm.validBody(b)
+  for (const [name, r] of [['v11', pageReact()], ['v12', pageMoment()]]) {
+    const { mine, expiresAt, ...wire } = openInner(b4a.from(r.inner), bia.hex, O)
+    t.ok(dm.validBody(wire), name + ' is valid here')
+    t.absent(v10Reader(wire), name + ' falls to the final else of a v1 to v10 reader')
+  }
+  // Today's reader drops a version it does not know the same way.
+  const next = { ...JSON.parse(b4a.toString(pageReact().json)), v: 13 }
+  t.absent(dm.validBody(next))
+  t.is(openInner(forgeDigest(next), bia.hex, O), null, 'an unknown v13 opens for nobody')
+  t.is(openInner(buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: ana.cert, v: 11 }, ana), bia.hex, O).v, 4, 'buildInner never writes v11')
 })
 
 test('bucketPrefix: a fixed vector, bytes and hex alike, 0..63', (t) => {

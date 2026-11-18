@@ -11,7 +11,8 @@ const { utf8ByteLength } = require('./text')
 const DM_INNER_BYTES = 5120
 // Two length bytes and the 64-byte signature.
 const DM_INNER_FRAMING_BYTES = 66
-// A v3 frame also carries its uint64be expiry after the signature.
+// A v3 frame also carries its uint64be expiry after the signature, and so
+// do v11 and v12 (DM_INNER_DIGEST_VERSIONS).
 const DM_INNER_V3_EXPIRY_BYTES = 8
 // Insertion order is the wire order; packages/core/lib/dm.js signs the same.
 const DM_INNER_KEYS = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'op', 'peer', 'at', 'cert'])
@@ -47,6 +48,14 @@ const DM_INNER_KEYS_V8 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'copy',
 const DM_INNER_KEYS_V9 = Object.freeze(['v', 'kind', 'id', 'from', 'signer', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
 // v10 is a reaction from a manifest diary: the v4 keys plus `signer`.
 const DM_INNER_KEYS_V10 = Object.freeze(['v', 'kind', 'id', 'from', 'signer', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+// v11 and v12 are a Página's reactions: the v4 keys (to a message) and the v5
+// keys (to a momento of `to`), signed as v3 is, over the digest of the JSON
+// with an expiry. The version is inside that JSON, so no v3 signature
+// verifies as one of them.
+const DM_INNER_KEYS_V11 = DM_INNER_KEYS_V4
+const DM_INNER_KEYS_V12 = DM_INNER_KEYS_V5
+// The versions signed over a digest, whose frame carries the expiry.
+const DM_INNER_DIGEST_VERSIONS = Object.freeze([3, 11, 12])
 // The six keys of a blob descriptor (core lib/blob.js), in wire order.
 const DM_BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 // A reaction's target, and a bound reply's replyTo (v2 and v3): the
@@ -137,7 +146,9 @@ const INNER_KEYS_BY_V = new Map([
   [7, DM_INNER_KEYS_V7],
   [8, DM_INNER_KEYS_V8],
   [9, DM_INNER_KEYS_V9],
-  [10, DM_INNER_KEYS_V10]
+  [10, DM_INNER_KEYS_V10],
+  [11, DM_INNER_KEYS_V11],
+  [12, DM_INNER_KEYS_V12]
 ])
 
 function canonicalInnerJson (body) {
@@ -188,7 +199,7 @@ function dmTextBudget (fields = {}) {
   } else {
     body.v = f.v === 3 ? 3 : innerVersion(body)
   }
-  const framing = DM_INNER_FRAMING_BYTES + (body.v === 3 ? DM_INNER_V3_EXPIRY_BYTES : 0)
+  const framing = DM_INNER_FRAMING_BYTES + (DM_INNER_DIGEST_VERSIONS.includes(body.v) ? DM_INNER_V3_EXPIRY_BYTES : 0)
   return DM_INNER_BYTES - framing - utf8ByteLength(canonicalInnerJson(body))
 }
 
@@ -207,6 +218,9 @@ module.exports = {
   DM_INNER_KEYS_V8,
   DM_INNER_KEYS_V9,
   DM_INNER_KEYS_V10,
+  DM_INNER_KEYS_V11,
+  DM_INNER_KEYS_V12,
+  DM_INNER_DIGEST_VERSIONS,
   DM_BLOB_KEYS,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
