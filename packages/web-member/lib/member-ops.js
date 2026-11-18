@@ -4698,11 +4698,23 @@ async function pageGroupNoKey (ctx, { group }) {
   }
 }
 
-// group.seal: a group-post sealed under the epoch the fold holds eligible
-// for the page's live writer -> { kid, nonce, box, at, writer, seq } (seq:
-// that writer core's length here), for the owner or an admin to send as
-// 'group-seal'. Writes nothing. null when the root is not held here.
-async function pageGroupSeal (ctx, { group, page, text, replyTo = null, fwd = 0 }) {
+// group.seal: one record of the page's live writer sealed under the epoch
+// the fold holds eligible for it -> { kid, nonce, box, at, writer, seq }
+// (seq: that writer core's length here), for the owner or an admin to send
+// as 'group-seal'. The record is a person's, byte for byte: a group-post
+// (text, replyTo, fwd, sealed media or a card), a group-react ({ target,
+// emoji }, '' withdraws) or a group-hide of the page's own post ({ target,
+// on }). Writes nothing. { ok: true } for a reaction the fold already
+// counts (nothing to send); null when the root is not held here.
+async function pageGroupSeal (ctx, { group, page, text, replyTo = null, fwd = 0, media = null, card = null, react = null, hide = null }) {
+  // The items' shape only: their bytes sit in the page's media core on the
+  // service, which this device does not hold. A reader fetches them through
+  // the page diary, so an item outside that diary's media reads unavailable.
+  if (media !== null) {
+    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_GROUP_MEDIA || !media.every(validPrivateItem)) throw badMedia()
+    if (media.length !== 1 && media.some(isVoiceItem)) throw badMedia()
+  }
+  if (card !== null && card.image !== null && !validPrivateItem(card.image)) throw badMedia()
   return withPageGroup(ctx, group, page, ({ g, pageHex }) => {
     if (!g.private) throw new UsageError(GROUP_PUBLIC_NO_KEY)
     const writer = pageLiveWriter(g, pageHex)
@@ -4710,7 +4722,24 @@ async function pageGroupSeal (ctx, { group, page, text, replyTo = null, fwd = 0 
       if (g.built.rekeyPending) throw new UsageError(GROUP_REKEY_PENDING)
       throw new UsageError(GROUP_FORBIDDEN)
     }
-    const record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, seen: g.built.last, sealed: true }))
+    let record
+    if (react !== null) {
+      const post = visiblePost(g, react.target)
+      // The fold cuts the list at GROUP_REACTIONS_MAX emojis, so a full list
+      // may hide the page's reaction: only a list with room proves none.
+      const list = Array.isArray(post.reactions) ? post.reactions : []
+      const current = list.find((r) => r.by.includes(pageHex))
+      if (current !== undefined ? current.emoji === react.emoji : react.emoji === '' && list.length < GROUP_REACTIONS_MAX) return { ok: true }
+      record = buildRecord(() => grp.groupReact({ target: react.target, emoji: react.emoji, seen: g.built.last }))
+    } else if (hide !== null) {
+      // A page hides only its own posts: moderating others' is an admin's
+      // act, never the page's.
+      const c = g.cores.get(String(hide.target.writer).toLowerCase())
+      if (c === undefined || c.diary !== pageHex) throw new UsageError(GROUP_FORBIDDEN)
+      record = buildRecord(() => grp.groupHide({ target: hide.target, on: hide.on, seen: g.built.last }))
+    } else {
+      record = buildRecord(() => grp.groupPost({ text, replyTo, fwd, media, card, seen: g.built.last, sealed: true }))
+    }
     const sealed = sealForGroup(ctx, g, writer, record)
     return {
       kid: { writer: sealed.kid.writer, seq: sealed.kid.seq },

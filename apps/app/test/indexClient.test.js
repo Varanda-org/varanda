@@ -2238,3 +2238,98 @@ test('fetchGarden and fetchGardenStreet: request, contract and failures', async 
   t.alike(await fetchGardenStreet(A, 'abc', noFetch), { ok: false, reason: 'invalid-input' })
   t.is(called, false)
 })
+
+const stallGood = (over = {}) => ({ decor: 5, pending: [{ author: B, seq: 3, followSeq: 4 }], shelf: [{ seq: 7, from: C, gseq: 9 }], ...gflags, ...over })
+
+test('gardenStallUrl: lowercase hex64 only', async (t) => {
+  const { gardenStallUrl } = await load()
+  t.is(gardenStallUrl(A), '/index/garden/' + A + '/mimos')
+  for (const bad of [A.toUpperCase(), 'abc', A + 'a', 7, null, undefined]) t.is(gardenStallUrl(bad), null, 'owner ' + String(bad))
+})
+
+test('validGardenStall: exact shape, bounds and copies', async (t) => {
+  const { validGardenStall } = await load()
+  const worst = stallGood({
+    pending: Array.from({ length: 12 }, (_, i) => ({ author: hx(i + 1), seq: 1, followSeq: 1 })),
+    shelf: Array.from({ length: 8 }, (_, i) => ({ seq: i + 1, from: hx(i + 1), gseq: 2 }))
+  })
+  const out = validGardenStall(worst, A)
+  t.alike(out, worst)
+  t.not(out.pending, worst.pending)
+  t.not(out.shelf, worst.shelf)
+  t.not(out.pending[0], worst.pending[0])
+  t.not(out.shelf[0], worst.shelf[0])
+  t.alike(validGardenStall(stallGood({ decor: null, pending: [], shelf: [] }), A), stallGood({ decor: null, pending: [], shelf: [] }))
+  t.alike(validGardenStall(stallGood({ pending: [{ author: B, seq: 3, followSeq: 4 }, { author: B, seq: 4, followSeq: 4 }] }), A).pending.length, 2, 'one giver, two gifts')
+  const row = { author: B, seq: 3, followSeq: 4 }
+  const shelfRow = { seq: 7, from: C, gseq: 9 }
+  const getter = stallGood()
+  Object.defineProperty(getter, 'decor', { enumerable: true, get () { throw new Error('boom') } })
+  const hiddenKey = stallGood()
+  Object.defineProperty(hiddenKey, 'later', { enumerable: false, value: 1 })
+  const symbolKey = stallGood()
+  symbolKey[Symbol('x')] = 1
+  const proto = Object.assign(Object.create({ decor: 5 }), { pending: [], shelf: [], ...gflags })
+  const rowGetter = { author: B, seq: 3 }
+  Object.defineProperty(rowGetter, 'followSeq', { enumerable: true, get () { return 4 } })
+  const sparse = [row]
+  sparse.length = 2
+  const throwingProxy = new Proxy(stallGood(), { ownKeys () { throw new Error('boom') } })
+  const { proxy: revoked, revoke } = Proxy.revocable(stallGood(), {})
+  revoke()
+  const bads = [
+    { ...stallGood(), extra: 1 },
+    (() => { const b = stallGood(); delete b.shelf; return b })(),
+    { ...stallGood(), __proto__: null, constructor: 1 },
+    stallGood({ pending: Array.from({ length: 13 }, (_, i) => ({ author: hx(i + 1), seq: 1, followSeq: 1 })) }),
+    stallGood({ shelf: Array.from({ length: 9 }, (_, i) => ({ seq: i + 1, from: hx(i + 1), gseq: 1 })) }),
+    stallGood({ pending: [row, row] }),
+    stallGood({ pending: [{ ...row, extra: 1 }] }),
+    stallGood({ pending: [{ author: B, seq: 3 }] }),
+    stallGood({ pending: [{ ...row, author: A }] }),
+    stallGood({ pending: [{ ...row, author: B.toUpperCase() }] }),
+    stallGood({ pending: [{ ...row, seq: 0 }] }),
+    stallGood({ pending: [{ ...row, followSeq: null }] }),
+    stallGood({ pending: [{ ...row, seq: 1.5 }] }),
+    stallGood({ shelf: [shelfRow, { ...shelfRow, from: B }] }),
+    stallGood({ shelf: [{ ...shelfRow, from: A }] }),
+    stallGood({ shelf: [{ ...shelfRow, extra: 1 }] }),
+    stallGood({ shelf: [{ ...shelfRow, gseq: '9' }] }),
+    stallGood({ shelf: [{ seq: 7, from: C }] }),
+    stallGood({ decor: 0 }),
+    stallGood({ decor: '5' }),
+    stallGood({ pending: null }),
+    stallGood({ shelf: {} }),
+    stallGood({ indexing: 'no' }),
+    stallGood({ complete: 1 }),
+    stallGood({ pending: sparse }),
+    stallGood({ pending: [rowGetter] }),
+    getter,
+    hiddenKey,
+    symbolKey,
+    proto,
+    throwingProxy,
+    revoked,
+    null,
+    [],
+    'x'
+  ]
+  bads.forEach((b, i) => t.is(validGardenStall(b, A), null, 'bad ' + i))
+  t.is(validGardenStall(stallGood(), 'nope'), null, 'bad owner')
+})
+
+test('fetchGardenStall: request, contract and failures', async (t) => {
+  const { fetchGardenStall } = await load()
+  const calls = []
+  const g = await fetchGardenStall(A, { fetch: async (url, opts) => { calls.push({ url, opts }); return response(JSON.stringify(stallGood())) } })
+  t.is(g.ok, true)
+  t.alike(g.value, stallGood())
+  t.is(calls[0].url, '/index/garden/' + A + '/mimos')
+  t.is(calls[0].opts.method, 'GET')
+  t.alike(await fetchGardenStall(A, { fetch: async () => response(JSON.stringify({ ...stallGood(), on: 1 })) }), { ok: false, reason: 'malformed' })
+  t.alike(await fetchGardenStall(A, { fetch: async () => response('', { status: 404 }) }), { ok: false, reason: 'not-found' }, 'an older seeder')
+  t.is((await fetchGardenStall(A, { fetch: async () => response('', { status: 400 }) })).ok, false, 'a 400 is a failure')
+  let called = false
+  t.alike(await fetchGardenStall('nope', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
+  t.is(called, false)
+})

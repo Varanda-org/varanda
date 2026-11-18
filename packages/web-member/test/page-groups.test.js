@@ -11,6 +11,8 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
 const gc = require('@varanda/core/lib/group-crypto')
+const grp = require('@varanda/core/lib/group')
+const { sealMedia } = require('@varanda/core/lib/group-media')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const { groupKeyPairFromPrf } = require('../lib/passkey')
 const { createGroupKeys } = require('../lib/group-keys')
@@ -76,6 +78,19 @@ async function writerHeader (s, key) {
   const core = await store.openGroupCoreReadOnly(s.storage, key)
   try {
     return (await store.readAll(core))[0].record
+  } finally {
+    await core.close()
+  }
+}
+
+// Appends a group.seal result to the page's own writer, as the service does
+// with the 'group-seal' statement.
+async function appendSeal (p, group, s) {
+  const e = (await store.readGroupWriters(p.storage)).find((x) => x.group === group)
+  if (e.key !== s.writer) throw new Error('the seal names another writer')
+  const core = await store.openGroupWriter(p.storage, await p.ctx.groupKeyPair(new Uint8Array(b4a.from(e.nonce, 'hex'))))
+  try {
+    await store.appendGroupRecord(core, grp.groupSealed({ kid: s.kid, nonce: s.nonce, box: s.box, at: s.at }), { private: true })
   } finally {
     await core.close()
   }
@@ -258,4 +273,59 @@ test('a page fold reports the visibility of the root header it verified', async 
   const pub = await ops.pageGroupRead(asPage, { group: general, page: p.key })
   t.is(pub.visibility, 'public')
   t.is(pub.state, 'ok')
+})
+
+test('a page seals a post with media or a card, a reaction and a hide of its own post, and a member reads them', async (t) => {
+  const { a, p, group, pw, pageKeys, asPage, refresh } = await world(t)
+  const open = (s) => gc.openRecord({ nonce: s.nonce, box: s.box }, pageKeys.holderFor(p.key).get(s.kid))
+  const seal = async (params) => {
+    const s = await ops.pageGroupSeal(asPage, { group, page: p.key, ...params })
+    await appendSeal(p, group, s)
+    await share(p, a, [pw])
+    await refresh()
+    return s
+  }
+  const pageCore = 'ee'.repeat(32)
+  const { item: sealed } = sealMedia(b4a.from('foto do pão'), { plainMime: 'image/png', w: 2, h: 1 })
+  const item = { core: pageCore, start: 1, ...sealed }
+
+  // A photo post: the record is a person's sealed group-post, byte for byte.
+  const s1 = await seal({ text: '', media: [item] })
+  const inner1 = open(s1)
+  const person = grp.groupPost({ text: '', media: [item], seen: null, at: s1.at, sealed: true })
+  t.alike(Object.keys(inner1).filter((k) => !['writer', 'group', 'kid', 'seen'].includes(k)).sort(), Object.keys(person).filter((k) => k !== 'seen').sort(), 'a person\'s key set')
+  t.alike(inner1.media, [item], 'the private item, key included, only inside the envelope')
+  t.absent(JSON.stringify(s1).includes(item.key), 'and never outside it')
+  const read1 = await ops.groupRead(a.ctx, { group })
+  const got = read1.items.find((x) => x.diary === p.key && x.writer === pw && x.seq === s1.seq)
+  t.ok(got, 'the member folds the page\'s sealed photo post')
+  t.is(got.media.length, 1)
+  t.is(got.media[0].key, item.key, 'and reads the item key to open the photo')
+  t.is(got.media[0].core, pageCore)
+
+  // A card post.
+  const card = { url: 'https://example.com/', host: 'example.com', title: 'Padaria', desc: '', image: null }
+  const s2 = await seal({ text: 'veja', card })
+  t.alike(open(s2).card, card)
+  t.ok((await ops.groupRead(a.ctx, { group })).items.some((x) => x.writer === pw && x.seq === s2.seq && x.card && x.card.url === card.url), 'the member reads the card')
+
+  // A reaction to the member's post, then the same one again: nothing to send.
+  const target = { writer: read1.items.find((x) => x.text === 'bem-vinda, padaria').writer, seq: read1.items.find((x) => x.text === 'bem-vinda, padaria').seq }
+  const s3 = await seal({ react: { target, emoji: '❤️' } })
+  t.alike([open(s3).type, open(s3).emoji], ['group-react', '❤️'])
+  const reacted = (await ops.groupRead(a.ctx, { group })).items.find((x) => x.writer === target.writer && x.seq === target.seq)
+  t.alike(reacted.reactions.map((r) => [r.emoji, r.count]), [['❤️', 1]], 'the member counts the page\'s reaction')
+  t.alike(await ops.pageGroupSeal(asPage, { group, page: p.key, react: { target, emoji: '❤️' } }), { ok: true }, 'a reaction already counted seals nothing')
+
+  // A hide of its own post; another's is refused.
+  const s4 = await seal({ hide: { target: { writer: pw, seq: s1.seq }, on: true } })
+  t.alike([open(s4).type, open(s4).on], ['group-hide', true])
+  const hidden = (await ops.groupRead(a.ctx, { group })).items.find((x) => x.writer === pw && x.seq === s1.seq)
+  t.ok(hidden === undefined || hidden.hidden === true, 'the member folds the page\'s hide')
+  const other = await ops.pageGroupSeal(asPage, { group, page: p.key, hide: { target, on: true } }).catch((e) => e)
+  t.is(other.message, 'sem permissão no grupo', 'a page never hides another\'s post')
+
+  // Media the page could not have sealed: a plain descriptor.
+  const plain = await ops.pageGroupSeal(asPage, { group, page: p.key, text: 'x', media: [{ core: pageCore, mime: 'image/png', start: 1, blocks: 1, bytes: 1, sha256: 'ab'.repeat(32), width: 1, height: 1 }] }).catch((e) => e)
+  t.is(plain.message, 'mídia inválida', 'a plain descriptor in a private group')
 })

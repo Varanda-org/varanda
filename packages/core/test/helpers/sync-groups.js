@@ -11,7 +11,6 @@ const Corestore = require('corestore')
 const { until, localSwarmOptions } = require('./net')
 const { tmpDir } = require('./tmp')
 const { runSync } = require('../../lib/sync')
-const { Seeder } = require('../../lib/seeder')
 const { createCert, createSeederCert, createModeratorCert } = require('../../lib/cert')
 const { createSnapshot } = require('../../lib/blocklist')
 const { attachGroups } = require('../../lib/groups-net')
@@ -69,6 +68,8 @@ async function exchange (from, to) {
 }
 
 async function startSeeder (t, bootstrap, kp) {
+  // Required here: the tests that only use the fake seeder never load it.
+  const { Seeder } = require('../../lib/seeder')
   const dataDir = tmpDir(t, 'varanda-gseed-')
   Seeder.ensureConfig(dataDir, hex(kp.publicKey))
   const { publicKey } = Seeder.createKey(dataDir)
@@ -105,6 +106,32 @@ async function stored (ctx, key) {
 
 function ownWriter (ctx, group) {
   return store.readGroups(ctx.dataDir).find((g) => g.group === group).writer
+}
+
+// The blocks of `key` ctx holds: { contiguous, held }.
+async function heldCopy (ctx, key) {
+  const s = await store.openStore(ctx.dataDir)
+  try {
+    const core = s.get({ key: b4a.from(key, 'hex'), writable: false })
+    await core.ready()
+    const held = []
+    for (let i = 0; i < core.length; i++) if (await core.has(i)) held.push(i)
+    const out = { contiguous: core.contiguousLength, held }
+    await core.close()
+    return out
+  } finally {
+    await s.close()
+  }
+}
+
+// header-stubs.json as key -> the diary that proved the stub.
+function recorded (ctx) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(ctx.dataDir, 'header-stubs.json'), 'utf8'))
+    return Object.fromEntries(data.stubs.map((x) => [x.key, x.diary]))
+  } catch {
+    return {}
+  }
 }
 
 const texts = async (ctx, group) => (await member.groupRead(ctx, { group })).items.map((p) => p.text).sort()
@@ -284,6 +311,8 @@ module.exports = {
   startSeeder,
   syncOnce,
   stored,
+  heldCopy,
+  recorded,
   ownWriter,
   texts,
   fakeSeeder,
