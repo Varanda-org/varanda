@@ -499,6 +499,71 @@ test('core dm: the owner shares to the core delegate, which adopts, pulls, opens
   t.is(late && late.message, KEY_MISMATCH, 'no send while the key differs')
 })
 
+test('core dm: a core member writes to a Página and reacts to its reply; the Página files both (v9, v10)', async (t) => {
+  t.timeout(TEST_TIMEOUT_MS)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const assoc = { kp, hex: hex(kp.publicKey) }
+  const issuerKp = crypto.keyPair()
+  const issuer = { kp: issuerKp, cert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const host = await seederHost(t, bootstrap, assoc, { blob: true })
+  const blob = { wallet: 16, walletLow: 8, issuePaceMs: 0 }
+  const accountOrigin = 'http://' + new URL(host.url).host
+
+  // The Página's owner, a browser node, with Conversas on for P.
+  const O = await memberNode(t, assoc, host, { blob })
+  const boxO = hex((await dmBoxKeyPairFromPrf(O.prf, 1)).publicKey)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const made = await O.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: O.key, box: boxO }] })
+  const diary = await pageDiary(t, { assoc, issuer, pageKp, ownerKp: O.keyPair, box: made.box })
+  await holdWeb(diary, O.storage)
+  const [own] = made.shares
+  await O.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: own.sealed, by: O.key, sig: own.sig, box: made.box, groupBox: made.groupBox, cert: createCert({ member: P }, kp) })
+
+  // A core member, not a delegate: Conversas on, its dm-key on the seeder.
+  const C = coreNode(t, { assoc, bootstrap, accountOrigin })
+  const { publicKey: coreKey } = await C.call('identity.create')
+  await C.call('cert.add', { cert: createCert({ member: coreKey }, kp) })
+  const served = () => host.current._served.has(coreKey) || host.current._admitted.has(coreKey)
+  await stopped(C, (await C.call('sync.start', { once: true, timeoutMs: 30000 })).runId)
+  await until(served, { name: 'core served', timeoutMs: 30000 })
+  await C.call('dm.enable')
+  await stopped(C, (await C.call('sync.start', { once: true, timeoutMs: 30000 })).runId)
+  await until(async () => (await walletOf(C.dataDir)) > 0, { name: 'core stamps', timeoutMs: 60000 })
+  await holdCore(diary, C.dataDir)
+
+  const pageThread = async () => {
+    await O.web.request('dm.pull')
+    return (await O.web.request('dm.thread', { page: P, peer: coreKey })).messages
+  }
+
+  // Inner v9: the Página's store files the core member's message.
+  const sent = await C.call('dm.send', { to: P, text: 'oi, página' })
+  let rows = []
+  await until(async () => (rows = await pageThread()).some((m) => m.id === sent.id), { name: 'v9 filed by the Página', timeoutMs: 30000 })
+  t.is(rows.find((m) => m.id === sent.id).text, 'oi, página', 'the Página reads the core member\'s message')
+
+  // The Página replies; the core member reads it in its thread with P. The
+  // browser peeks the core dm-key through its running sync.
+  await O.web.request('sync.start', {})
+  const draft = await O.web.request('dm.pageDraft', { page: P, kind: 'msg', to: coreKey, text: 'resposta da página' })
+  await O.web.request('dm.pageSend', { page: P, id: draft.id, ...signed(draft.digest, pageKp) })
+  await until(async () => {
+    await C.call('dm.pull')
+    return (await C.call('dm.thread', { peer: P })).messages.some((m) => m.id === draft.id)
+  }, { name: 'page reply on core', timeoutMs: 30000 })
+
+  // Inner v10: the core member's reaction lands on the Página's message.
+  t.alike(await C.call('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1F44D}' }), { ok: true })
+  let reply = null
+  await until(async () => {
+    reply = (await pageThread()).find((m) => m.id === draft.id)
+    return reply !== undefined && Array.isArray(reply.reactions) && reply.reactions.length > 0
+  }, { name: 'v10 filed by the Página', timeoutMs: 30000 })
+  t.alike(reply.reactions, [{ emoji: '\u{1F44D}', mine: false }], 'the Página files the core member\'s reaction')
+})
+
 test('core dm: a session without the factory refuses dm.enable as before', async (t) => {
   const kp = generateAssociationKeyPair()
   const C = coreNode(t, { assoc: { kp, hex: hex(kp.publicKey) }, bootstrap: ['127.0.0.1:1'], dm: null })
