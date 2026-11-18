@@ -1,0 +1,2 @@
+### Adicionado
+- Conversas pessoais no nó core, só texto: com `varanda-serve --account-origin https://<host>`, o nó envia mensagens (também respostas), reage e muda a pasta de uma conversa (`dm.send`, `dm.react`, `dm.set`), assinando com o assinante do próprio diário. Mídia, cartão de link e reação a momento são recusados antes de qualquer assinatura ou selo. Denunciar e publicar como Página em grupo privado continuam só no navegador.

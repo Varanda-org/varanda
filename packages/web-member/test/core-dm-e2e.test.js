@@ -24,7 +24,7 @@ const { memoryStorage } = require('../lib/storage')
 const { fileNodeStorage } = require('../lib/file-storage')
 const { dmBoxKeyPairFromPrf } = require('../lib/passkey')
 const { createCoreDm, seederUrlOf, scanDmKey, BAD_ORIGIN, TEXT_ONLY, DM_OFF, DM_BUSY, DM_SEED_BAD, BLOCKLIST_UNREADABLE } = require('../lib/core-dm')
-const { KEY_MISMATCH } = require('../lib/dm')
+const { KEY_MISMATCH, USE_PAGE_DRAFT } = require('../lib/dm')
 const { hex, seederHost, memberNode, push, png, rejection } = require('./helpers/dm-e2e')
 const { signed } = require('./helpers/page-dm')
 
@@ -33,6 +33,7 @@ const RNONCE = 'r'.repeat(43)
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 const SIGN_WEB_ONLY = 'assinatura disponível só no navegador'
 const NO_SEEDER = 'sem conexão com o semeador'
+const PAGE_NO_REACTIONS = 'conversas com uma Página não têm reações'
 const TEST_TIMEOUT_MS = 170000
 
 function noop () {}
@@ -274,7 +275,7 @@ test('core dm: a dm call queued while suspended refuses after close, never enter
   t.is(entered, 0, 'the engine never ran it')
 })
 
-test('core dm: a corrupt seed reaches the client as USAGE with no file content; the web-only methods stay refused', async (t) => {
+test('core dm: a corrupt seed reaches the client as USAGE with no file content; personal sends reach the engine; the web-only methods stay refused', async (t) => {
   const kp = generateAssociationKeyPair()
   const C = coreNode(t, { assoc: { kp, hex: hex(kp.publicKey) }, bootstrap: ['127.0.0.1:1'], accountOrigin: 'http://127.0.0.1:1' })
   fs.mkdirSync(path.join(C.dataDir, 'private'), { recursive: true, mode: 0o700 })
@@ -287,9 +288,9 @@ test('core dm: a corrupt seed reaches the client as USAGE with no file content; 
   t.is(fs.readFileSync(path.join(C.dataDir, 'private', 'dm-seed.json'), 'utf8'), 'segredo-quebrado{', 'the file stays as is')
   const P = 'aa'.repeat(32)
   const refused = [
-    ['dm.send', { to: P, text: 'x' }, DM_WEB_ONLY],
-    ['dm.react', { peer: P, id: 'x', emoji: 'x' }, DM_WEB_ONLY],
-    ['dm.set', { peer: P, state: 'archived' }, DM_WEB_ONLY],
+    ['dm.send', { to: P, text: 'x' }, DM_SEED_BAD],
+    ['dm.react', { to: P, target: { from: P, id: 'c'.repeat(32) }, emoji: '\u{1f44d}' }, DM_SEED_BAD],
+    ['dm.set', { peer: P, state: 'accepted' }, DM_SEED_BAD],
     ['dm.reportSign', { peer: P, id: 'x' }, SIGN_WEB_ONLY],
     ['group.seal', { group: P }, DM_WEB_ONLY],
     ['group.read', { group: P, page: P }, DM_WEB_ONLY]
@@ -395,10 +396,13 @@ test('core dm: the owner shares to the core delegate, which adopts, pulls, opens
   }, { name: 'reply delivered', timeoutMs: 30000 })
   t.pass('the member reads the page\'s reply')
 
-  // Still refused on core with the factory (PR 6, PR 7).
-  for (const [method, params] of [['dm.send', { to: P, text: 'x' }], ['dm.set', { peer: P, state: 'archived' }]]) {
-    t.is((await rejection(C.call(method, params))).message, DM_WEB_ONLY, method)
-  }
+  // The core node as a member: a Página it holds is known from its diary
+  // (ops.pageRead), so a reaction to the page's message is refused.
+  const noReact = await rejection(C.call('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1F44D}' }))
+  t.alike([noReact && noReact.code, noReact && noReact.message], ['USAGE', PAGE_NO_REACTIONS], 'dm.react to a Página')
+
+  // A page's folder op is the page draft's, never a personal dm.set.
+  t.is((await rejection(C.call('dm.set', { page: P, peer: O.key, state: 'accepted' }))).message, USE_PAGE_DRAFT, 'dm.set with page')
 
   // The stranger lookup over the real seeder link, with its two gates.
   const probe = (association, revoked = []) => {

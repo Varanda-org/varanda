@@ -47,7 +47,7 @@ const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 // The dm.* methods a core node answers with the `dm` factory.
 const DM_CORE_METHODS = Object.freeze([
-  'dm.enable', 'dm.lookup', 'dm.pull', 'dm.list', 'dm.thread', 'dm.seen',
+  'dm.enable', 'dm.lookup', 'dm.send', 'dm.react', 'dm.pull', 'dm.list', 'dm.thread', 'dm.set', 'dm.seen',
   'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend',
   'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget', 'dm.actorBox'
 ])
@@ -1506,9 +1506,9 @@ function createSession ({
     })
   }
 
-  // With the factory, the methods in its scope route to it; personal
-  // dm.send, dm.react and dm.set, dm.reportSign, group.seal and group.read
-  // with a page keep their refusals.
+  // With the factory, the methods in its scope route to it (personal
+  // dm.send text only); dm.reportSign, group.seal and group.read with a page
+  // keep their refusals.
   if (dmNode !== null) {
     for (const name of Object.keys(dmNode.handlers)) {
       if (DM_CORE_METHODS.includes(name)) handlers[name] = dmHandler(name)

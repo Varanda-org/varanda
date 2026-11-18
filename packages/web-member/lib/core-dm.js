@@ -18,8 +18,12 @@
 //   inventory), gated on the block 0 certificate, newest blocks first, as
 //   the browser node's lookup is. A blocked author answers box null and is
 //   never asked for.
-// - Text only: media and card on dm.pageDraft are refused before any
-//   digest, upload or stamp. Received media opens through readMedia.
+// - Text only: media and card on dm.pageDraft and dm.send, and a momento
+//   reaction (dm.send moment), are refused before anything is signed,
+//   digested, uploaded or stamped. Received media opens through readMedia.
+// - Personal dm.send, dm.react and dm.set are written from the diary (inner
+//   v9, v10) and signed by the diary signer, as the stamps prove it. A core
+//   identity has one device: no visits and no history copy are sent.
 // Transport: wss://<account host>/seeder from an https account origin; ws
 // only for a loopback http origin (tests); any other origin is refused.
 // The handlers never run on the session's chain: the session's ops do, so
@@ -35,7 +39,7 @@ const { attachAdmission } = require('@varanda/core/lib/admission')
 const { UsageError } = require('@varanda/core/lib/errors')
 const { readDmSeed, ensureDmSeed } = require('@varanda/core/lib/store')
 const { newestDmKey } = require('@varanda/core/lib/member')
-const { createDmEngine, KEY_MISMATCH } = require('./dm')
+const { createDmEngine, KEY_MISMATCH, USE_PAGE_DRAFT } = require('./dm')
 const { fileNodeStorage } = require('./file-storage')
 const { memoryStorage } = require('./storage')
 const { guardedWsStream } = require('./ws-stream')
@@ -47,6 +51,7 @@ const BAD_ORIGIN = 'endereço da conta inválido: use https (http só neste comp
 const DM_OFF = 'Conversas ainda não ativadas neste aparelho'
 const NO_DELEGATE = 'chave de página não registrada'
 const TEXT_ONLY = 'mídia disponível só na versão web'
+const MOMENT_WEB_ONLY = 'reação a momento disponível só na versão web'
 const NO_SEEDER = 'sem conexão com o semeador'
 const BAD_KEY = 'chave inválida'
 const DM_BUSY = 'Conversas abertas em outro processo deste aparelho'
@@ -164,6 +169,11 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     hkdf,
     identity: ops.readers,
     stampDiary: () => (signer === null ? null : signer.diary),
+    // Never the browser versions here: a lock in between refuses instead.
+    innerDiary: () => {
+      if (signer === null) throw new UsageError(DM_OFF)
+      return signer.diary
+    },
     limits: L.engine
   })
   let closed = false
@@ -459,15 +469,34 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     } catch {}
   }
 
+  async function enable () {
+    await unlock(true)
+    const { box, gen } = engine.boxHex()
+    const r = await ops.dmKeyEnsure({ box, gen })
+    await store.writeDmKey(storage, gen)
+    topUp()
+    return r
+  }
+
+  const present = (v) => v !== undefined && v !== null
+
+  // Self and a peer this node cannot send to are refused before the
+  // lookup; checked again by the engine right before a new send.
+  async function checkPeer (to) {
+    const own = await requireDm()
+    engine.checkSend(own, to)
+  }
+
+  // As the browser node: an identity whose dm-key was never published
+  // publishes it first, so the peer can answer.
+  async function ownedKey () {
+    const own = await requireDm()
+    if ((await store.readDmKey(storage)) === null) await enable()
+    return own
+  }
+
   const handlers = {
-    'dm.enable': serial(async () => {
-      await unlock(true)
-      const { box, gen } = engine.boxHex()
-      const r = await ops.dmKeyEnsure({ box, gen })
-      await store.writeDmKey(storage, gen)
-      topUp()
-      return r
-    }),
+    'dm.enable': serial(enable),
     'dm.lookup': ({ member }) => lookup(member),
     'dm.pull': async () => {
       const own = await requireDm()
@@ -479,6 +508,44 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
         track(checkPageKeys().catch(noop))
       }
     },
+    // Text only (see the header): refused before the lookup, so nothing is
+    // signed, uploaded or stamped for it.
+    'dm.send': async ({ to, text, replyTo, fwd, media, card, moment }) => {
+      if (present(media) || present(card)) throw new UsageError(TEXT_ONLY)
+      if (moment !== undefined) throw new UsageError(MOMENT_WEB_ONLY)
+      await serial(() => checkPeer(to))()
+      const { box } = await lookup(to)
+      const fields = { to, text, fwd: fwd === undefined ? 0 : fwd, replyTo: replyTo === undefined ? null : replyTo }
+      return serial(async () => {
+        const own = await ownedKey()
+        const r = await engine.send(own, signerPair(), fields, box)
+        topUp()
+        return r
+      })()
+    },
+    // A Página is known only from its diary held here (as the browser
+    // node): the engine refuses a reaction to one before signing it, though
+    // ownedKey() may already have published the own dm-key.
+    'dm.react': async ({ to, target, emoji }) => {
+      await serial(() => checkPeer(to))()
+      let page = false
+      try {
+        const r = await ops.pageRead(to.toLowerCase())
+        page = r !== null && (r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined))
+      } catch {}
+      const { box } = await lookup(to)
+      return serial(async () => {
+        const own = await ownedKey()
+        const r = await engine.react(own, signerPair(), { to, target, emoji }, box, { page })
+        topUp()
+        return r
+      })()
+    },
+    // A page's ops are signed by the page delegate: dm.pageDraft.
+    'dm.set': serial(async ({ peer, state, page }) => {
+      if (page !== undefined) throw new UsageError(USE_PAGE_DRAFT)
+      return engine.set(await requireDm(), signerPair(), { peer, state })
+    }),
     'dm.list': serial(async (params) => engine.list(await requireDm(), params)),
     'dm.thread': serial(async (params) => engine.thread(await requireDm(), params)),
     'dm.seen': serial(async ({ peer, page }) => engine.seen(await requireDm(), peer, page)),
@@ -620,4 +687,4 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
   return { handlers, readMedia, close, seederUrl }
 }
 
-module.exports = { createCoreDm, seederUrlOf, scanDmKey, BAD_ORIGIN, DM_OFF, TEXT_ONLY, DM_BUSY, DM_SEED_BAD, BLOCKLIST_UNREADABLE }
+module.exports = { createCoreDm, seederUrlOf, scanDmKey, BAD_ORIGIN, DM_OFF, TEXT_ONLY, MOMENT_WEB_ONLY, DM_BUSY, DM_SEED_BAD, BLOCKLIST_UNREADABLE }

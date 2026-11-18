@@ -294,9 +294,17 @@ function identityReaders (given, storage) {
 // now (the clock the local compaction reads).
 // createStore, fetch and mediaOrigin: tests only. stampDiary() -> the
 // Hypercore 11 diary key the identity pair signs (a core node's), or null:
-// the stamp links then prove that diary with the v2 proof.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue, identity, stampDiary = () => null } = {}) {
+// the stamp links then prove that diary with the v2 proof. innerDiary() ->
+// the same diary key or null: msg, ctl and react inners are then written
+// from that diary (v9, v10), signed by the identity pair. Without it the
+// browser versions are written, byte for byte as before.
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue, identity, stampDiary = () => null, innerDiary = () => null } = {}) {
   const readers = identityReaders(identity, storage)
+  // undefined, never { diary: null }: buildInner refuses a null diary.
+  const innerOpts = () => {
+    const diary = innerDiary()
+    return diary === null || diary === undefined ? undefined : { diary }
+  }
   const L = {
     issueBurst: ISSUE_BURST,
     issuePaceMs: ISSUE_PACE_MS,
@@ -1700,9 +1708,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const gen = generation
     for (const b of sealedBlobs) await upload(b, keyPair)
     if (gen !== generation) throw new UsageError(LOCKED)
+    // Outside the try: a refusal of the diary (DM_OFF) reaches the client as itself.
+    const opts = innerOpts()
     let inner
     try {
-      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }), ...(moment === null ? {} : { moment }) }, keyPair)
+      inner = dm.buildInner({ kind: 'msg', id, at, to, text, replyTo, fwd, cert, card, ...(items === null ? {} : { media: items }), ...(moment === null ? {} : { moment }) }, keyPair, opts)
     } catch (err) {
       throw new UsageError(err && err.message === TOO_LONG ? TOO_LONG : BAD_TEXT)
     }
@@ -1884,9 +1894,10 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     const rev = Math.max(local.reactionRev(to, target, own), pendingRev) + 1
     if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
     const t = { from: target.from, id: target.id, digest: target.digest }
+    const opts = innerOpts()
     let inner
     try {
-      inner = dm.buildInner({ kind: 'react', id, at, to, target: t, emoji, rev, cert }, keyPair)
+      inner = dm.buildInner({ kind: 'react', id, at, to, target: t, emoji, rev, cert }, keyPair, opts)
     } catch {
       throw new UsageError(BAD_TEXT)
     }
@@ -1922,15 +1933,16 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (peer === own) throw new UsageError('nada a alterar')
     const id = dm.newMessageId()
     const at = nowIso()
-    await local.append([{ t: 'ctl', id, op: state, peer, at, filedAt: local.nextFiled() }])
-    if (state === 'deleted') housekeep(personal, generation)
-    const inner = dm.buildInner({ kind: 'ctl', id, at, op: state, peer }, keyPair)
+    // Built and sealed before the op is filed: a throw here changes nothing.
+    const inner = dm.buildInner({ kind: 'ctl', id, at, op: state, peer }, keyPair, innerOpts())
     let sealed
     try {
       sealed = dm.sealInner(inner, b4a.toString(box.publicKey, 'hex'))
     } finally {
       inner.fill(0)
     }
+    await local.append([{ t: 'ctl', id, op: state, peer, at, filedAt: local.nextFiled() }])
+    if (state === 'deleted') housekeep(personal, generation)
     // The op is filed here either way. The new ctl goes behind any older
     // queued one, so the other devices file them in order.
     const dropped = await withQueue(() => store.pushDmCtlQueue(storage, local.seal({ b: b4a.toString(sealed, 'base64') })))
