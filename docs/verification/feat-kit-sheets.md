@@ -1,11 +1,12 @@
 # Cantos e alças das folhas
 
-`Sheet` e `ActionsSheet` usam `layout.sheetRadius` para os cantos superiores. Em Publicar no iOS, a folha de página mantém o canto do sistema. O raio passa de 24 para 48 pt e vem da folha de ações do kit de referência. O raio da folha de altura total do kit não foi consultado. Só números de referência: nenhum arquivo, imagem ou ícone do kit entrou no repositório. A alça central de 48 × 5 pt usa a cor `colors.line` e tem pontas arredondadas. Na folha de Publicar, fica a 8 pt do topo.
+`Sheet` e `ActionsSheet` usam `layout.sheetRadius` para os cantos superiores. Em Publicar no iOS, a folha de página mantém o canto do sistema. O raio passa de 24 para 48 pt e vem da folha de ações do kit de referência. O raio da folha de altura total do kit não foi consultado. Só números de referência: nenhum arquivo, imagem ou ícone do kit entrou no repositório. A alça central de 48 × 5 pt usa a cor `colors.line` e tem pontas arredondadas. Na folha de Publicar, fica a 8 pt do topo, por baixo da linha do topo: um botão largo à direita (como "Tentar de novo" a 320 pt) cobre a alça em vez de a alça riscar o botão.
 
 ## Testes
 
 - [x] `npm run lint` passou.
 - [x] Os 38 arquivos de teste que a mudança alcança passaram, cada um com `node`, entre eles themeUsage, shellChrome, uiKit, sheetDrag e replyBar.
+- [x] Com o `Sheet.js` anterior (alça com `zIndex`), o pin novo de uiKit falha (285 de 286 asserções passam), como esperado.
 - [x] `npm run demo` terminou com "DEMO OK".
 - [ ] A suíte inteira roda na CI do GitHub, no Node 20 e no 24.
 

@@ -356,11 +356,13 @@ const makeStyles = (colors) => StyleSheet.create({
     borderTopRightRadius: layout.sheetRadius,
     overflow: 'hidden'
   },
-  // Floats over the top row so the row does not move. Drawn on iOS too: the
-  // page sheet has no system grabber (prefersGrabberVisible is never set).
+  // Floats over the top row so the row does not move. No zIndex: the row comes
+  // later, so a wide header button covers the grabber instead of the grabber
+  // drawing across it. Drawn on iOS too: the page sheet has no system grabber
+  // (prefersGrabberVisible is never set).
   // A full-width row centres the pill on every platform (absolute + alignSelf
   // centres on the wrong axis on the web) and takes no touches.
-  grabberRow: { position: 'absolute', top: space.sm, left: 0, right: 0, alignItems: 'center', zIndex: 1 },
+  grabberRow: { position: 'absolute', top: space.sm, left: 0, right: 0, alignItems: 'center' },
   grabber: { width: 48, height: 5, borderRadius: radius.pill, backgroundColor: colors.line },
   topRow: {
     height: layout.sheetTopRow,
