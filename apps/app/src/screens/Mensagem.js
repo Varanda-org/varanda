@@ -1563,8 +1563,8 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     const offer = offerStates.get(key)
     if (!offer || offer.id !== m.id || offer.from !== (m.mine ? me : m.from)) return null
     const buttons = buttonState(offer, me, listing)
-    // A page does not rate in v1.
-    const rate = buttons.rate && old === null && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
+    // As a page, `me` is the page key: its own offers, rated as the page.
+    const rate = buttons.rate && old === null && node.online !== false && typeof onAvaliar === 'function'
     return buttons.answer || rate ? { offer, listing, answer: buttons.answer, rate } : null
   }
   const offerBusy = offerAct.pending || offerHold !== null

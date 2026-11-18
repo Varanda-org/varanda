@@ -33,6 +33,7 @@ export class File {
   create () { if (box.files.has(this.uri)) throw new Error('exists'); box.files.set(this.uri, new Uint8Array(0)) }
   write (bytes) { box.files.set(this.uri, new Uint8Array(bytes)) }
   delete () { box.files.delete(this.uri); box.deleted.push(this.uri) }
+  async bytes () { if (!box.files.has(this.uri)) throw new Error('missing'); return new Uint8Array(box.files.get(this.uri)) }
 }
 `
 const identity = `
@@ -176,6 +177,46 @@ test('putMoment goes through moment.putMedia with only the image fields', async 
   t.is(calls.filter((c) => c.method === 'moment.putMedia').length, 2, 'no bytes never reaches the worklet')
 })
 
+test('sealPage goes through media.sealPageFile and reads the ciphertext back once', async (t) => {
+  const { webNodeHandle } = await load()
+  const page = '12'.repeat(32)
+  const cipher = new Uint8Array([9, 8, 7])
+  const item = { mime: 'application/octet-stream', blocks: 1, bytes: 65536, sha256: 'ab'.repeat(32), key: 'cd'.repeat(32), nonce: 'ef'.repeat(24), plainMime: 'image/jpeg', plainSha256: '34'.repeat(32), w: 3, h: 4, ms: 0 }
+  let n = 0
+  let answer = 'ok'
+  const { request, calls } = mockRequest((method) => {
+    if (method !== 'media.sealPageFile') return {}
+    if (answer === 'fail') throw Object.assign(new Error('sem chave da página'), { code: 'USAGE' })
+    const name = String(900 + n++).padStart(32, '0') + '.bin'
+    box().files.set(READS + name, cipher)
+    if (answer === 'no-item') return { name }
+    return { name, item }
+  })
+  const { media } = webNodeHandle(request)
+  const out = await media.sealPage({ bytes: new Uint8Array([5]), page, mime: 'image/jpeg', width: 3, height: 4, to: 'x', sealed: true })
+  t.alike(out, { cipher, item })
+  const call = calls.find((c) => c.method === 'media.sealPageFile')
+  t.ok(NAME_RE.test(call.params.name), 'only a generated name crosses the IPC')
+  t.alike(call.params, { name: call.params.name, page, mime: 'image/jpeg', width: 3, height: 4 }, 'an image keeps its exact keys')
+  t.alike(call.file, new Uint8Array([5]))
+  t.absent(box().files.has(READS + String(900).padStart(32, '0') + '.bin'), 'the ciphertext file is deleted once read')
+
+  await media.sealPage({ bytes: new Uint8Array([6]), page, mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' })
+  t.alike(calls.at(-1).params, { name: calls.at(-1).params.name, page, mime: 'audio/mp4', width: 0, height: 0, ms: 3000, kind: 'voice' }, 'a voice note keeps its duration and kind')
+
+  answer = 'no-item'
+  await t.exception(media.sealPage({ bytes: new Uint8Array([6]), page, mime: 'image/jpeg', width: 3, height: 4 }), /resposta inválida/)
+  t.absent(box().files.has(READS + String(902).padStart(32, '0') + '.bin'), 'a bad answer still deletes the file')
+  answer = 'fail'
+  await t.exception(media.sealPage({ bytes: new Uint8Array([6]), page, mime: 'image/jpeg', width: 3, height: 4 }), /sem chave da página/)
+  const failed = calls.filter((c) => c.method === 'media.sealPageFile').at(-1)
+  t.absent(box().files.has(UPLOAD + failed.params.name), 'a failed seal leaves no upload file')
+  const before = calls.length
+  await t.exception.all(media.sealPage({ bytes: new Uint8Array([6]), page: 'x', mime: 'image/jpeg', width: 3, height: 4 }), /mídia inválida/)
+  await t.exception.all(media.sealPage({ bytes: new Uint8Array(0), page, mime: 'image/jpeg', width: 3, height: 4 }), /mídia inválida/)
+  t.is(calls.length, before, 'a bad page or no bytes never reaches the worklet')
+})
+
 test('read names a read-dir file and the handle releases it', async (t) => {
   const mod = await load()
   const names = []
@@ -288,7 +329,8 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
     readDm: async (args) => { calls.push(['readDm', args]); return { bytes: gif, mime: 'image/gif' } },
     readGroup: async (args) => { calls.push(['readGroup', args]); return { bytes: new Uint8Array([1]), mime: 'image/png', w: 8, h: 9 } },
     putMoment: async (args) => { calls.push(['putMoment', args]); return { id: 'm' } },
-    readMoment: async (args) => { calls.push(['readMoment', args]); return { bytes: gif, mime: 'image/gif', w: 3, h: 5 } }
+    readMoment: async (args) => { calls.push(['readMoment', args]); return { bytes: gif, mime: 'image/gif', w: 3, h: 5 } },
+    sealPage: async (args) => { calls.push(['sealPage', args]); return { cipher: new Uint8Array([1]), item: { key: 'k' } } }
   }
   const media = mediaOf(facade)
   const bytes = new Uint8Array([1])
@@ -312,12 +354,17 @@ test('web: mediaOf gives the facade the same shape, bytes in the page', async (t
   t.alike(calls.at(-1), ['readMoment', { author: 'k', seq: 3 }], 'only the moment fields reach the node')
   t.alike(mo, { bytes: gif, mime: 'image/gif', w: 3, h: 5 }, 'the same { bytes, mime, w, h } answer')
 
+  const sealArgs = { page: 'p', bytes, mime: 'image/png', width: 1, height: 1 }
+  t.alike(await media.sealPage(sealArgs), { cipher: new Uint8Array([1]), item: { key: 'k' } })
+  t.is(calls.at(-1)[1], sealArgs, 'a Página\'s seal passes straight to the node, the bytes in the page')
+
   const uploadOnly = mediaOf({ upload: facade.upload })
   t.alike(Object.keys(uploadOnly), ['upload', 'video'], 'a missing facade method is an absent capability')
   const dmOnly = mediaOf({ readDm: facade.readDm })
   await t.exception.all(dmOnly.read({ kind: 'group', diary: 'd', item: {} }), /mídia inválida/)
   await t.exception.all(dmOnly.read({ kind: 'moment', author: 'k', seq: 1 }), /mídia inválida/, 'no readMoment, no moment read')
   t.absent('putMoment' in dmOnly)
+  t.absent('sealPage' in dmOnly, 'no sealPage, no Página private group media')
   const momentOnly = mediaOf({ readMoment: facade.readMoment })
   await t.exception.all(momentOnly.read(null), /mídia inválida/)
   await t.exception.all(momentOnly.read({ kind: 'dm', from: 'a', id: 'b', index: 0 }), /mídia inválida/)

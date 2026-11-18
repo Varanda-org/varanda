@@ -295,8 +295,10 @@ function identityReaders (given, storage) {
 // (dm-link limits), blob (./blob.js createBlobClient limits), fetch
 // (./blob.js fetchBlob limits), fold (the dm-fold fold, to count calls),
 // now (the clock the local compaction reads).
-// createStore, fetch and mediaOrigin: tests only.
-function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue, identity } = {}) {
+// createStore, fetch and mediaOrigin: tests only. stampDiary() -> the
+// Hypercore 11 diary key the identity pair signs (a core node's), or null:
+// the stamp links then prove that diary with the v2 proof.
+function createDmEngine ({ storage, association, seederUrl, createSocket, log = noop, emit = noop, limits = {}, createStore = createDmStore, fetch: fetchImpl, mediaOrigin, hkdf, visitsDue, identity, stampDiary = () => null } = {}) {
   const readers = identityReaders(identity, storage)
   const L = {
     issueBurst: ISSUE_BURST,
@@ -370,6 +372,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link }
   // Both throw while locked: the blob wallet is sealed under the local key.
   const blobs = createBlobClient({
+    stampDiary,
     seederUrl,
     createSocket,
     association,
@@ -1455,7 +1458,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   }
 
   async function issueStamps (keyPair) {
-    const link = await openStampLink({ ...linkOpts, keyPair })
+    const link = await openStampLink({ ...linkOpts, keyPair, diary: stampDiary() })
     const fresh = []
     let pub
     try {

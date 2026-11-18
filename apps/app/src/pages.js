@@ -24,6 +24,7 @@ import { accountOriginOf, pagesCore } from './pageGate.js'
 import * as actingStore from './actingAs.js'
 import { actingPageStopped, actorBoxOf, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
 import { oldPageKeys } from './pageOldKeys.js'
+import { carriesPrivateItems } from './pageGroupMedia.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -47,7 +48,9 @@ const READ_MAX_BODY = 1024 * 1024
 // signature sent nothing, and the service keeps no answer for a same-nonce
 // resend.
 const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'group-topics', 'group-voters', 'group-events', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
-const DEFINITE = ['assinatura-invalida', 'pedido-invalido']
+// A retry answered by one of these is the service's answer, not a lost one:
+// nothing to resend. A page's listing-rate refusals hold whatever the body.
+const DEFINITE = ['assinatura-invalida', 'pedido-invalido', 'consentimento-invalido', 'avaliacao-enviada', 'avaliacao-propria']
 const FEED_KEYS = 64
 
 let dmDropObserver = () => {}
@@ -80,6 +83,10 @@ export const TEXTS = Object.freeze({
   'aguardando-chave': 'aguardando nova chave',
   'fora-da-comunidade': 'A página ainda não está na comunidade deste grupo',
   privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho',
+  // A page's rating of a listing (listing-rate).
+  'consentimento-invalido': 'Esta oferta não pode ser avaliada pela página.',
+  'avaliacao-enviada': 'A página já avaliou esta oferta.',
+  'avaliacao-propria': 'Uma página não avalia anúncios de quem cuida dela.',
   // The account service's word check (apps/cli/lib/account/word-check.js):
   // the app checks the same list first, so this shows only when the service
   // has a term this build does not.
@@ -283,7 +290,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 // The page's own messages go through the node (5.114); dm-legacy-read and
 // dm-legacy-done serve only the sealed bundle of a legacy page's old ones.
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
-const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
+const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
   'follow', 'follows', 'notices', 'terms', 'choice', 'moment', 'post-share', 'post-unshare', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
@@ -324,6 +331,8 @@ function checkPreview (action, op) {
 }
 
 function checkMedia (action, op) {
+  // A private group's item keys never go out in a plain 'group-post'.
+  if (action === 'group-post' && carriesPrivateItems(op)) return false
   if (!MEDIA_ACTIONS.includes(action) || !isObject(op)) return true
   if (!checkPreview(action, op)) return false
   // A preview never travels with media (records.js POST_PREVIEW_KEYS).

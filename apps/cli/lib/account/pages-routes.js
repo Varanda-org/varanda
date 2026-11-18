@@ -25,7 +25,12 @@
 //     the page key signs the deal the admin states (docs/rpc.md 5.109); the
 //     service cannot read the page's Conversas, so it does not check that
 //     the offer exists, and the admin's app puts that signature in the
-//     aceite URL of its answer.
+//     aceite URL of its answer. listing-rate appends the page's rating of
+//     another member's listing (docs/rpc.md 5.108), by the node writer's
+//     rules: the listing author's consent names the page as the rater, one
+//     rating per offer (a tombstoned one counts), never a listing by the
+//     page's own people (owner, admins, their delegate diaries, a pending
+//     invitee or transfer target, a sibling page run by any of them).
 //   - dm-* (./pages-dm.js): the page's Conversas are sealed on the devices
 //     of its owner and admins. dm-sign signs a digest, dm-box, dm-box-share
 //     and dm-box-read keep the public boxes and the sealed shares;
@@ -46,7 +51,11 @@
 //     group-post with media, a voice note, a card, a reply, a forward, a
 //     topic, a poll or an event; group-react, group-hide (its own posts
 //     only) and group-choice (a vote or an RSVP). A private group answers
-//     'privado' to all of them: its posts are sealed on a device.
+//     'privado' to all of them: its posts, reactions and hides are sealed on
+//     a device and sent as 'group-seal'. media with `group` (a private group
+//     where the page has a live writer) takes the ciphertext of one sealed
+//     photo or voice note, whole blocks the service cannot open, filed apart
+//     from the page's items so nothing here ever resolves it.
 //   - a root post may carry a poll or an event, and 'choice' writes the
 //     page's vote or RSVP, the same records a person writes (records.js
 //     postRecord, choiceRecord); 'status' answers the page's live choices.
@@ -105,15 +114,15 @@ const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@va
 const { applyDeletes, deletedSeqs, shownMedia } = require('@varanda/core/lib/deletion')
 const { foldShare, POST_SHARES_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
-const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
+const { foldListings, countLive, liveEditOf, editPlan, deletePlan, verifyConsent } = require('@varanda/core/lib/listing')
 const { feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
-const { MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
+const { MAX_GROUP_MEDIA, SEALED_MEDIA_MIME } = require('@varanda/core/lib/group-media')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord, listingRateRecord,
   parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX,
   AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, AUDIO_DESCRIPTOR_KEYS, validAudioDescriptor, charLength
@@ -184,13 +193,13 @@ const GROUP_READS = ['group-read', 'group-topics', 'group-voters', 'group-events
 // like the joins and leaves, never spent durably.
 const GROUP_IDEMPOTENT = ['group-react', 'group-hide', 'group-choice']
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
-const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
+const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-rate']
 // A page post on the installation's public web page (docs/protocol.md §2,
 // "Public share"), by a person's post.share and post.unshare rules.
 const SHARE_ACTIONS = ['post-share', 'post-unshare']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment', ...SHARE_ACTIONS]
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate', 'choice', 'moment', ...SHARE_ACTIONS]
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
@@ -233,7 +242,8 @@ const TERMINAL = ['movida', 'encerrada']
 const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso', 'nome-invalido', 'expirado',
   'assinatura-invalida', 'pedido-invalido', 'pausada', 'encerrada', 'midia-invalida', 'indisponivel', 'termos-pendentes',
   'troca-bloqueada', 'nao-encontrado', 'para-si', 'bloqueou', 'sem-caixa', 'sem-selos', 'resposta-invalida', 'longa-demais',
-  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia', 'termo-recusado'])
+  'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia', 'termo-recusado',
+  'consentimento-invalido', 'avaliacao-enviada', 'avaliacao-propria'])
 
 function noop () {}
 
@@ -313,6 +323,16 @@ function sharedOf (raw) {
     out.push(postSeq)
   }
   return out.sort((a, b) => a - b)
+}
+
+// Whether a listing-rate for `offer` is in the raw blocks, deletes not
+// applied (a tombstoned rating still holds its offer), as the nodes check.
+function rateSent (raw, offer) {
+  return raw.some(({ seq, record }) => {
+    if (!isPlainObject(record) || record.type !== 'listing-rate') return false
+    const copy = validRecordCopy(record, seq)
+    return copy !== null && copy.offer === offer
+  })
 }
 
 function has (obj, k) {
@@ -1227,6 +1247,46 @@ function createPagesRoutes ({
     return t
   }
 
+  // The diaries of the page's owner and admins: each role key, and the
+  // diary its core delegate row names. A rating of their listing would be
+  // the page rating its own people.
+  function staffDiaries (row) {
+    const out = new Set()
+    for (const k of [row.owner, ...row.admins]) {
+      out.add(k)
+      let d
+      try {
+        d = pagesStore.delegate(k)
+      } catch {
+        throw refuse('indisponivel')
+      }
+      if (d !== null) out.add(d.diary)
+    }
+    return out
+  }
+
+  // Whether a listing by `author` is the page rating its own people: the
+  // staff above, a pending invitee or transfer target (who could take the
+  // role right after the rating), or a sibling page run by any of them. The
+  // sibling is the author's own row, one lookup: pages are never scanned.
+  function selfRating (row, page, author) {
+    const staff = staffDiaries(row)
+    for (const k of Object.keys(row.invites)) staff.add(k)
+    if (row.offer !== null) staff.add(row.offer.to)
+    if (staff.has(author)) return true
+    // The page's own listing fails its consent check instead.
+    if (author === page) return false
+    let sibling
+    try {
+      sibling = pagesStore.get(author)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    if (sibling === null) return false
+    for (const k of staffDiaries(sibling)) if (staff.has(k)) return true
+    return false
+  }
+
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
@@ -1339,6 +1399,19 @@ function createPagesRoutes ({
         if (item.record.kind === 'procura' && op.status === 'reservado') throw refuse('pedido-invalido')
         return [record]
       }
+      // A person's listing.rate, with the page as the rater.
+      if (action === 'listing-rate') {
+        if (!exactKeys(op, ['to', 'offer', 'consent', 'stars', 'text'])) throw refuse('pedido-invalido')
+        const t = target(op.to)
+        if (t.seq < 1 || typeof op.offer !== 'string' || !HEX32_RE.test(op.offer) || typeof op.consent !== 'string' || !HEX128_RE.test(op.consent)) throw refuse('pedido-invalido')
+        termFree(op.text)
+        const record = listingRateRecord({ to: t, offer: op.offer, consent: op.consent, stars: op.stars, text: op.text })
+        if (blocked(t.author)) throw refuse('sem-permissao')
+        if (selfRating(rowOf(page), page, t.author)) throw refuse('avaliacao-propria')
+        if (!verifyConsent({ listingAuthor: t.author, listingSeq: t.seq, rater: page, offerId: op.offer, consent: op.consent })) throw refuse('consentimento-invalido')
+        if (rateSent(await writer.readRawBlocks(page), op.offer)) throw refuse('avaliacao-enviada')
+        return [record]
+      }
       if (action === 'profile') {
         if (!exactKeys(op, ['name', 'bio'], ['avatar'])) throw refuse('pedido-invalido')
         termFree(op.name, op.bio)
@@ -1376,10 +1449,30 @@ function createPagesRoutes ({
     return seq === null ? null : { seq, length: writer.info(page).length, pushed: false }
   }
 
+  // A durable answer to a listing-rate keeps no body hash: after a restart
+  // the same nonce with other stars or text would answer the stored rating
+  // as its own. The block at the stored seq must say what this body says.
+  async function sameRate (page, seq, op) {
+    let raw
+    try {
+      raw = await writer.readRawBlocks(page)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    const block = raw.find((e) => e.seq === seq)
+    const r = block === undefined ? null : block.record
+    const t = exactKeys(op, ['to', 'offer', 'consent', 'stars', 'text']) ? parseRef(op.to) : null
+    if (t === null || !isPlainObject(r) || r.type !== 'listing-rate' || !isPlainObject(r.to) || r.to.author !== t.author || r.to.seq !== t.seq ||
+      r.offer !== op.offer || r.consent !== op.consent || r.stars !== op.stars || r.text !== op.text) throw refuse('expirado')
+  }
+
   async function write (action, body) {
     const { member, page, nonce, op, hash } = await statement(body, action, false)
     const prior = claim(member, nonce, hash, false, page, action)
-    if (prior !== null) return prior
+    if (prior !== null) {
+      if (action === 'listing-rate' && prior.replay === true) await sameRate(page, prior.seq, op)
+      return prior
+    }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
@@ -2505,6 +2598,21 @@ function createPagesRoutes ({
     }
     const body = { member: header(req, 'member'), nonce: header(req, 'nonce'), page: header(req, 'page'), signature: header(req, 'signature'), op }
     const proof = await statement(body, action, false)
+    // A private group item: the ciphertext the device sealed for `group`,
+    // whole blocks, nothing about the picture or the sound it hides.
+    const sealed = action === 'media' && isPlainObject(proof.op) && has(proof.op, 'group')
+    if (sealed) {
+      if (!exactKeys(proof.op, ['group', 'sha256', 'mime', 'bytes'])) throw refuse('pedido-invalido')
+      keyParam(proof.op.group)
+      const { sha256, mime, bytes } = proof.op
+      if (mime !== SEALED_MEDIA_MIME || typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || !Number.isSafeInteger(bytes) ||
+          bytes < MEDIA_BLOCK_BYTES || bytes > MAX_MEDIA_BODY || bytes % MEDIA_BLOCK_BYTES !== 0) throw refuse('midia-invalida')
+      const row = writableRow(proof.page)
+      need(row, proof.member, 'admin')
+      const raw = await readRaw(req, MAX_MEDIA_BODY)
+      if (raw.length !== bytes || sha256Hex(raw) !== sha256) throw refuse('midia-invalida')
+      return { ...proof, raw, sealed: true }
+    }
     const keysOk = action === 'media'
       ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
@@ -2532,18 +2640,39 @@ function createPagesRoutes ({
   }
 
   async function media (req) {
-    const { member, page, nonce, op, hash, raw } = await upload(req, 'media')
+    const { member, page, nonce, op, hash, raw, sealed } = await upload(req, 'media')
+    if (sealed && pagesGroups === null) throw refuse('indisponivel')
     const prior = claim(member, nonce, hash, false, page, 'media')
-    if (prior !== null) return prior
+    if (prior !== null) {
+      // After a restart only the writer's record answers, and it keeps no
+      // body hash: other bytes, or a sealed item resent plain (or the
+      // reverse), on that nonce must not get its descriptor.
+      const d = prior.descriptor
+      if (isPlainObject(d) && (d.sha256 !== op.sha256 || (d.mime === SEALED_MEDIA_MIME) !== (sealed === true))) throw refuse('expirado')
+      return prior
+    }
     return once(member, nonce, () => withLock(page, async () => {
       const row = writableRow(page)
       need(row, member, 'admin')
       if (!caps.media(page)) throw refuse('limite')
+      // Checked before any byte is stored: a page that is no member with a
+      // live writer in that private group stores nothing for it.
+      if (sealed) {
+        try {
+          await pagesGroups.sealedMediaOk(page, op.group)
+        } catch (err) {
+          throw tokenOf(err)
+        }
+      }
       let descriptor
       try {
-        const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
-        if (op.ms !== undefined) item.ms = op.ms
-        descriptor = await writer.mediaItem(page, item, { member, nonce })
+        if (sealed) {
+          descriptor = await writer.sealedItem(page, { bytes: raw, sha256: op.sha256 }, { member, nonce })
+        } else {
+          const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
+          if (op.ms !== undefined) item.ms = op.ms
+          descriptor = await writer.mediaItem(page, item, { member, nonce })
+        }
       } catch (err) {
         if (err && typeof err.code === 'string' && has(WRITER_TOKENS, err.code)) throw tokenOf(err)
         throw new Uncertain()

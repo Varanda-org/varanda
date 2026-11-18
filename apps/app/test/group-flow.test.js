@@ -627,7 +627,7 @@ test('Grupo sends photos through the composer flow and renders them with ChatMed
   t.ok(src.includes("import { ChatMedia } from '../ui/ChatMedia'"))
   t.ok(src.includes("chatMediaRefs('group', { diary: rawRow.diary, media: rawRow.media })"), 'refs from the raw group.read item')
   t.ok(src.includes('...(sealed ? { sealed: true } : {})'), 'a private group seals its uploads')
-  t.ok(src.includes('retryChatSend({ op: held.op, request: held.retry ? async () => held.retry() : sendRequest, onPhase: setMediaSend })'), 'the retry resends the held op')
+  t.ok(src.includes('retryChatSend({ op: held.op, request: send, onPhase: setMediaSend })') && src.includes("send = how === 'retry' ? async () => held.retry() : how === 'sealed' ? pageSealedRequest : pageGroupRequest"), 'the retry resends the held op')
   t.ok(src.includes('...(isPrivate && Array.isArray(raw.media) ? { media: raw.media } : {})'), 'report media only for a private group')
   t.absent(/https?:\/\//.test(ui('ChatMedia.js')), 'no http(s) source in ChatMedia')
   t.absent(/https?:\/\//.test(ui('AttachSheet.js')), 'no http(s) source in AttachSheet')

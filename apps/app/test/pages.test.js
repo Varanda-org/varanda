@@ -112,6 +112,9 @@ test('pageError maps tokens to pt-BR and everything else to unavailable', async 
   t.is(pageError('termos-pendentes').message, 'Aceite os Termos para continuar')
   t.is(pageError('termo-recusado').code, 'termo-recusado', 'the service word check')
   t.ok(pageError('termo-recusado').message.startsWith('Não dá para publicar: o texto tem um termo'))
+  t.is(pageError('consentimento-invalido').message, 'Esta oferta não pode ser avaliada pela página.')
+  t.is(pageError('avaliacao-enviada').message, 'A página já avaliou esta oferta.')
+  t.is(pageError('avaliacao-propria').message, 'Uma página não avalia anúncios de quem cuida dela.')
   t.is(pageError('<script>').code, 'indisponivel')
   t.is(pageError('__proto__').code, 'indisponivel')
   t.is(pageError('troca-bloqueada', '2026-01-02T12:00:00.000Z').code, 'troca-bloqueada')
@@ -291,7 +294,8 @@ test('listing actions reach the signer and post to their own route', async (t) =
     listing: { kind: 'produto', title: 'Bicicleta', text: '', price: 10000, unit: null, cat: 'esporte', place },
     'listing-edit': { to: P + ':3', expectedRevision: 0, title: 'Bicicleta', text: '', price: 9000, unit: null, cat: 'esporte', place, media: null },
     'listing-status': { to: P + ':3', status: 'reservado' },
-    'listing-consent': { to: P + ':3', rater: M, offer: 'f'.repeat(32) }
+    'listing-consent': { to: P + ':3', rater: M, offer: 'f'.repeat(32) },
+    'listing-rate': { to: M + ':3', offer: 'f'.repeat(32), consent: 'c'.repeat(128), stars: 5, text: 'Ótimo' }
   }
   for (const action of Object.keys(ops)) {
     const calls = stub(t, flow(() => json(200, action === 'listing-consent' ? { consent: 'c'.repeat(128) } : { seq: 4, length: 5, pushed: true })))
@@ -332,7 +336,7 @@ test('listing and listing-edit carry 1..4 media descriptors; listing-edit may cl
 
 test('a listing write with an unknown outcome is uncertain and never resent by itself', async (t) => {
   const { actAs } = await load()
-  for (const action of ['listing', 'listing-edit', 'listing-status', 'listing-consent']) {
+  for (const action of ['listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate']) {
     const calls = stub(t, flow(() => json(500, {})))
     const node = fakeNode()
     const err = await caught(t, actAs(node, { member: M, action, page: P, op: { to: P + ':3' } }))
@@ -549,6 +553,23 @@ test('follow, follows, notices, terms and group ops', async (t) => {
   }
   const err = await caught(t, pagesGroup(fakeNode(), { member: M, page: P, action: 'post', op: {} }))
   t.is(err.code, 'pedido-invalido')
+})
+
+test('a plain group-post carrying a private item key is refused before start and signing', async (t) => {
+  const { pagesGroup } = await load()
+  const item = { core: K2, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 65536, sha256: '12'.repeat(32), key: '34'.repeat(32), nonce: '56'.repeat(24), plainMime: 'image/jpeg', plainSha256: '78'.repeat(32), w: 4, h: 4, ms: 0 }
+  for (const op of [
+    { group: K2, text: 'oi', media: [item] },
+    { group: K2, text: 'oi', card: { url: 'https://a.b', image: item } },
+    { group: K2, text: 'oi', media: [{ ...photoDescriptor(), nonce: item.nonce }] }
+  ]) {
+    const calls = stub(t, flow(() => json(200, { seq: 1 })))
+    const node = fakeNode()
+    const err = await caught(t, pagesGroup(node, { member: M, page: P, action: 'group-post', op }))
+    t.is(err.code, 'pedido-invalido')
+    t.is(calls.length, 0, 'no start')
+    t.is(node.signs.length, 0, 'nothing signed')
+  }
 })
 
 test('group-seal sends the sealed envelope as is; its refusals keep their codes', async (t) => {
@@ -828,6 +849,19 @@ test('a retry refused for its bytes is definite', async (t) => {
     t.is(err.code, token)
     t.absent(err.uncertain, token)
     t.absent(err.retry, token)
+  }
+})
+
+test('a listing-rate retry refused by the rating rules is definite', async (t) => {
+  const { actAs } = await load()
+  for (const token of ['consentimento-invalido', 'avaliacao-enviada', 'avaliacao-propria']) {
+    stub(t, flow((n) => n === 2 ? json(500, {}) : json(400, { error: token })))
+    const first = await caught(t, actAs(fakeNode(), { member: M, action: 'listing-rate', page: P, op: { to: P + ':3' } }))
+    t.is(first.uncertain, true, 'the lost first answer is uncertain')
+    const err = await caught(t, first.retry())
+    t.is(err.code, token)
+    t.absent(err.uncertain, token + ' is the service\'s answer')
+    t.absent(err.retry, token + ' has nothing to resend')
   }
 })
 

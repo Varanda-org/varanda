@@ -66,6 +66,7 @@ const ACTIONS = Object.freeze([
   'listing-edit',
   'listing-status',
   'listing-consent',
+  'listing-rate',
   'choice',
   'moment',
   'post-share',

@@ -6584,6 +6584,51 @@ function createBrowserSession ({
     return item
   }
 
+  // A Página's photo or voice note for one of its private groups (docs/rpc.md
+  // 5.114): checked and copied synchronously as mediaUpload's sealed path
+  // (TypeError), then sealed under a fresh key -> { cipher, item }. cipher
+  // is the whole blocks the app sends with the page `media` action (op
+  // `group`); item is the private item without the core and start the
+  // service answers. Nothing is stored here and nothing about the bytes is
+  // logged. Needs the page's secrets held, as group.seal: only a device that
+  // can seal the post gets the item key, which leaves the node only in item.
+  // No video: private groups take none.
+  function pageSealMedia ({ page, bytes, mime, width, height, ms, kind } = {}) {
+    if (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page)) throw new TypeError(BAD_MEDIA_ARGS)
+    if (kind === 'video' || mime === VIDEO_MIME) throw new TypeError(BAD_MEDIA_ARGS)
+    let copy
+    if (kind !== undefined || mime === AUDIO_MIME) {
+      ms = voiceArgsMs({ bytes, mime, width, height, ms, kind })
+      // Sealed without its recording time or device tags.
+      copy = ms === null ? null : stripAudioMetadata(bytes)
+      if (copy === null) throw new TypeError(BAD_MEDIA_ARGS)
+      width = 0
+      height = 0
+    } else {
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_SEALED_MEDIA_PLAIN_BYTES) throw new TypeError(BAD_MEDIA_ARGS)
+      if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw new TypeError(BAD_MEDIA_ARGS)
+      if (!isIntIn(width, 1, MAX_MEDIA_DIMENSION) || !isIntIn(height, 1, MAX_MEDIA_DIMENSION)) throw new TypeError(BAD_MEDIA_ARGS)
+      // Nobody but a member can look inside a sealed photo: checked here.
+      if (mediaBounds(bytes, mime) === null) throw new TypeError(BAD_MEDIA_ARGS)
+      copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+      ms = 0
+    }
+    return (async () => {
+      try {
+        return await pageSealRun({ page: page.toLowerCase(), copy, mime, width, height, ms })
+      } finally {
+        copy.fill(0)
+      }
+    })()
+  }
+
+  const pageSealRun = serialDm(async ({ page, copy, mime, width, height, ms }) => {
+    await requireDm()
+    if (!pageGroupKeys.holds(page)) throw new UsageError(NO_PAGE_KEY)
+    return sealMedia(copy, { plainMime: mime, w: width, h: height, ms })
+  })
+
   // A chat photo for dm.send (docs/rpc.md 5.88): validated and copied
   // synchronously (TypeError), then off the chain, as dm.pull (it opens no
   // storage core): sealed and put on the anonymous blob channel by the dm
@@ -7030,6 +7075,7 @@ function createBrowserSession ({
     setKeyPair,
     clearKeyPair,
     mediaUpload,
+    pageSealMedia,
     dmPutMedia,
     dmReadMedia,
     groupReadMedia,

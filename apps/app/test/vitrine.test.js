@@ -168,6 +168,11 @@ const resultKeys = {
   'garden.state': ['on', 'state', 'savesToday', 'helpsToday', 'given'],
   'garden.play': ['seq', 'ref', 'state'],
   'garden.help': ['seq', 'ref'],
+  'garden.decor': ['seq', 'ref', 'items'],
+  'garden.stall': ['open', 'decor', 'giftsToday', 'takesToday', 'gave', 'takes'],
+  'garden.give': ['seq', 'ref', 'state'],
+  'garden.take': ['seq', 'ref', 'changed'],
+  'garden.drop': ['seq', 'deleted'],
   'profile.extra.delete': ['seq', 'deleted'],
   'moment.putMedia': ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'],
   'moment.create': ['seq', 'ref'],
@@ -595,7 +600,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
   }
 })
 
-const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget']
+const destructive = ['identity.create', 'identity.install', 'identity.clear', 'identity.reset', 'identity.forget', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap', 'identity.recoveryBind', 'profile.delete', 'group.seal', 'media.sealPageFile', 'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend', 'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget']
 
 function samples (f) {
   const group = f.groups[3].group
@@ -666,6 +671,11 @@ function samples (f) {
     'garden.state': {},
     'garden.play': { acts: [{ op: 'plant', pot: 4, plant: 'tomate' }] },
     'garden.help': { to: f.members[3].author, pot: 0 },
+    'garden.decor': { items: ['rede', 'gato'] },
+    'garden.stall': {},
+    'garden.give': { to: f.members[3].author, pot: 0 },
+    'garden.take': { from: f.members[3].author, seq: 135 },
+    'garden.drop': { kind: 'take', seq: 55 },
     'profile.mood': { emoji: '☕', text: 'Café na praça' },
     'profile.extra.delete': { kind: 'about' },
     'moment.putMedia': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
@@ -704,6 +714,7 @@ function samples (f) {
     'media.uploadFile': { name: '0'.repeat(32) + '.bin', mime: 'image/jpeg', width: 512, height: 512 },
     'dm.putMedia': { name: '0'.repeat(32) + '.bin', to: 'a'.repeat(64), mime: 'image/jpeg', width: 512, height: 512 },
     'media.readFile': { kind: 'dm', from: f.members[1].author, id: f.conversations[2].messages[4].id, index: 0 },
+    'media.sealPageFile': { name: '0'.repeat(32) + '.bin', page: 'a'.repeat(64), mime: 'image/jpeg', width: 512, height: 512 },
     'dm.enable': {},
     'dm.lookup': { member },
     'dm.pull': {},
@@ -808,6 +819,8 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     // profile.extra.delete needs a live record; the own fixture diary has none.
     if (method === 'profile.extra.delete') await request('profile.about', params['profile.about'])
     if (method === 'device.reconnect') await refused(t, request, method, given, 'USAGE', 'este aparelho está conectado')
+    // The demo clock is a Thursday, so a give is the documented refusal.
+    else if (method === 'garden.give') await refused(t, request, method, given, 'USAGE', 'a barraquinha só abre aos sábados')
     else if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
     else await answer(t, request, method, given)
   }
@@ -1989,4 +2002,103 @@ test('garden.help waters a neighbour pot once a day and refuses the other cases 
   t.alike(state.given.map((g) => g.seq), [helped.seq, 53])
   await call('block.set', { key: bia, on: true })
   await refused(t, request, 'garden.help', { to: bia, pot: 0 }, 'USAGE', 'você bloqueou esta pessoa')
+})
+
+test('the Barraquinha fixtures validate: decor, a pending mimo and an accepted pair, above the flags', async (t) => {
+  const { fixtures: f } = await load()
+  const { validateRecord } = require('@varanda/core/lib/records')
+  const { garden } = require('@varanda/rpc')
+  const [cecilia, andre] = [f.members[2].author, f.members[3].author]
+  const records = f.diaryRecords.filter((e) => ['garden-decor', 'garden-gift', 'garden-take'].includes(e.record.type))
+  t.is(records.length, 6)
+  for (const e of records) t.is(validateRecord(e.record, e.seq), null, e.record.type + ' ' + e.author.slice(0, 4) + ':' + e.seq + ' validates')
+  t.alike(records.filter((e) => e.record.type === 'garden-decor').map((e) => e.author).sort(), [f.own, cecilia, andre].sort())
+  for (const e of records) {
+    const flag = f.diaryRecords.filter((x) => x.author === e.author && x.record.type === 'garden').sort((a, b) => b.seq - a.seq)[0]
+    t.ok(flag.record.on === true && e.seq > flag.seq, 'above the live on flag')
+  }
+  const now = Date.parse(f.now)
+  t.is(garden.stallDay(now), false, 'the demo clock is not a Saturday')
+  const gifts = records.filter((e) => e.record.type === 'garden-gift')
+  t.alike(gifts.map((e) => e.author).sort(), [cecilia, andre].sort())
+  for (const e of gifts) {
+    t.is(e.record.to, f.own)
+    t.ok(garden.offerListable(Date.parse(e.record.at), now), 'the mimo is still inside its week')
+    t.ok(f.diaryRecords.some((x) => x.author === e.author && x.record.type === 'follow' && x.record.key === f.own && x.record.on === true), 'the giver follows Lia')
+  }
+  const take = records.find((e) => e.record.type === 'garden-take')
+  t.alike([take.author, take.record.from, take.record.seq], [f.own, cecilia, 135], 'Lia took the gift of Cecília')
+})
+
+test('garden.stall answers the seeded Barraquinha on the demo clock, and garden.decor replaces the enfeites', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const stall = await call('garden.stall', {})
+  t.alike(stall, { open: false, decor: { seq: 54, items: ['rede', 'pisca'] }, giftsToday: 0, takesToday: 0, gave: [], takes: [{ seq: 55, from: f.members[2].author, gseq: 135, at: '2026-11-04T21:00:00.000Z' }] })
+  const decor = await call('garden.decor', { items: ['varal', 'gato'] })
+  t.is(decor.ref, f.own + ':' + decor.seq)
+  t.alike(decor.items, ['varal', 'gato'])
+  t.alike((await call('garden.stall', {})).decor, { seq: decor.seq, items: ['varal', 'gato'] })
+  const prior = await call('diary.peek', { author: f.own, seqs: [54], profileSeq: 1, usernameSeq: 2 })
+  t.alike(prior.missing, [54], 'latest wins: the previous decor is tombstoned')
+  await call('garden.set', { on: false })
+  await refused(t, request, 'garden.decor', { items: [] }, 'USAGE', 'ligue a Varandinha para jogar')
+})
+
+test('garden.give refuses on the Thursday demo clock by the rule and writes nothing', async (t) => {
+  const { fixtures: f, request } = await load()
+  const before = await answer(t, request, 'diary.peek', { author: f.own, seqs: [51], profileSeq: 1, usernameSeq: 2 })
+  await refused(t, request, 'garden.give', { to: f.members[3].author, pot: 0 }, 'USAGE', 'a barraquinha só abre aos sábados')
+  const after = await answer(t, request, 'diary.peek', { author: f.own, seqs: [51], profileSeq: 1, usernameSeq: 2 })
+  t.is(after.length, before.length, 'no block is written')
+  await refused(t, request, 'garden.give', { to: f.own, pot: 0 }, 'USAGE', 'não dá para dar um mimo para si')
+  await refused(t, request, 'garden.give', { to: f.members[4].author, pot: 0 }, 'USAGE', 'você só dá mimos para quem você segue')
+})
+
+test('garden.give on a Saturday empties the ripe pot and lists the gift, and garden.drop takes it back', async (t) => {
+  const { fixtures, createVitrineRequest } = await load()
+  const f = { ...fixtures, now: '2026-11-07T15:00:00.000Z' }
+  const request = createVitrineRequest(f)
+  const call = (method, params) => answer(t, request, method, params)
+  const andre = f.members[3].author
+  await refused(t, request, 'garden.give', { to: andre, pot: 4 }, 'USAGE', 'este vaso ainda não está pronto')
+  const gave = await call('garden.give', { to: andre, pot: 0 })
+  t.is(gave.ref, f.own + ':' + gave.seq)
+  t.is(gave.state.pots[0], null, 'the given pot is emptied in the same append')
+  t.is(gave.state.seq, gave.seq - 1)
+  const stall = await call('garden.stall', {})
+  t.is(stall.open, true)
+  t.is(stall.giftsToday, 1)
+  t.alike(stall.gave, [{ seq: gave.seq, to: andre, item: 'manjericao', at: stall.gave[0].at }])
+  await refused(t, request, 'garden.give', { to: andre, pot: 2 }, 'USAGE', 'você já deu um mimo para esta pessoa hoje')
+  const dropped = await call('garden.drop', { kind: 'gift', seq: gave.seq })
+  t.alike(dropped.deleted, [gave.seq])
+  t.alike((await call('garden.stall', {})).gave, [], 'a dropped gift leaves gave')
+  await refused(t, request, 'garden.drop', { kind: 'gift', seq: gave.seq }, 'USAGE', 'este registro não é um mimo seu')
+  await refused(t, request, 'garden.drop', { kind: 'take', seq: 52 }, 'USAGE', 'este registro não é um mimo seu')
+})
+
+test('garden.take accepts a pending mimo once, and refuses one that is gone', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  const [cecilia, andre] = [f.members[2].author, f.members[3].author]
+  const took = await call('garden.take', { from: andre, seq: 135 })
+  t.is(took.changed, true)
+  t.is(took.ref, f.own + ':' + took.seq)
+  t.alike(await call('garden.take', { from: andre, seq: 135 }), { ...took, changed: false }, 'a second take is idempotent')
+  t.alike(await call('garden.take', { from: cecilia, seq: 135 }), { seq: 55, ref: f.own + ':55', changed: false }, 'the seeded take answers as held')
+  const stall = await call('garden.stall', {})
+  t.is(stall.takesToday, 1)
+  t.alike(stall.takes.map((r) => r.seq), [took.seq, 55])
+  await refused(t, request, 'garden.take', { from: andre, seq: 134 }, 'USAGE', 'este mimo não está mais disponível')
+  await refused(t, request, 'garden.take', { from: f.own, seq: 54 }, 'USAGE', 'este mimo não está mais disponível')
+})
+
+test('garden.set off tombstones the decor, gift and take blocks too', async (t) => {
+  const { fixtures: f, request } = await load()
+  const call = (method, params) => answer(t, request, method, params)
+  await call('garden.set', { on: false })
+  const peek = await call('diary.peek', { author: f.own, seqs: [54, 55], profileSeq: 1, usernameSeq: 2 })
+  t.alike(peek.missing, [54, 55], 'the decor and the take are tombstoned')
+  t.alike(await call('garden.stall', {}), { open: false, decor: null, giftsToday: 0, takesToday: 0, gave: [], takes: [] })
 })

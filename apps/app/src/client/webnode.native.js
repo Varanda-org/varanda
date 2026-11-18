@@ -173,6 +173,24 @@ export function webNodeHandle (request) {
     // (a Página's momento) buys no stamps right before the upload.
     putMoment: ({ bytes, mime, width, height, ms, kind, ahead } = {}) =>
       sendFile(bytes, 'moment.putMedia', { mime, width, height, ...videoOf({ ms, kind }), ...(ahead === true ? { ahead } : {}) }),
+    // A Página's photo, GIF or voice note sealed for one of its private
+    // groups (docs/rpc.md 5.114): the bytes go out as a cache file and the
+    // ciphertext comes back as a read-dir file, read here and deleted at
+    // once. -> { cipher, item }, item the private item without core and start.
+    sealPage: async ({ bytes, page, mime, width, height, ms, kind } = {}) => {
+      if (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page)) throw new TypeError('mídia inválida')
+      const got = await sendFile(bytes, 'media.sealPageFile', { page, mime, width, height, ...voiceOf({ ms, kind }) })
+      const name = got !== null && typeof got === 'object' ? got.name : null
+      if (typeof name !== 'string' || !READ_NAME_RE.test(name)) throw new Error('resposta inválida')
+      readFiles.add(name)
+      try {
+        if (got.item === null || typeof got.item !== 'object' || Array.isArray(got.item)) throw new Error('resposta inválida')
+        const cipher = await new File(readFileUri(name)).bytes()
+        return { cipher, item: got.item }
+      } finally {
+        deleteReadFile(name)
+      }
+    },
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
       let params
@@ -189,7 +207,7 @@ export function webNodeHandle (request) {
     clearReadFiles,
     // This worklet measures a video strictly before writing it (media.readFile).
     video: true,
-    // upload, putDm, putMoment and read each send one request on the same
+    // upload, putDm, putMoment, sealPage and read each send one request on the same
     // RPC client as the connection's own requests, so src/node.js counts them
     // against that client's pending cap (src/requestQueue.js).
     sharesClient: true

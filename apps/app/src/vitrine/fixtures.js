@@ -582,8 +582,12 @@ export const visitList = [
 // planted a moment ago, and two empty pots. Andre and Cecilia play too, follow
 // Lia and each watered one of her pots today; Lia watered Cecilia's balcony;
 // Bia left the game (an off flag still has a seq). Joao, the pending top
-// friend, stays out: he must not follow Lia back. Own seqs 51 to 53 are free
+// friend, stays out: he must not follow Lia back. Own seqs 51 to 55 are free
 // slots of Lia's log (the next block she writes stays after seq 61).
+// Barraquinha and Enfeites: Lia, Andre and Cecilia hang enfeites; Andre gave
+// Lia a tomate still pending, and Cecilia gave her a manjericao that Lia took
+// (seq 55). The demo clock is a Thursday, so both mimos are dated on the
+// Saturday before, still inside their week.
 export const gardenRecords = [
   { author: own, seq: 51, record: { type: 'garden', on: true, at: at(4, 19, 0) } },
   {
@@ -604,6 +608,8 @@ export const gardenRecords = [
     }
   },
   { author: own, seq: 53, record: { type: 'garden-help', to: members[2].author, pot: 3, at: at(5, 12, 0) } },
+  { author: own, seq: 54, record: { type: 'garden-decor', items: ['rede', 'pisca'], at: at(4, 19, 30) } },
+  { author: own, seq: 55, record: { type: 'garden-take', from: members[2].author, seq: 135, at: at(4, 21, 0) } },
   { author: members[3].author, seq: 130, record: { type: 'garden', on: true, at: at(4, 18, 0) } },
   {
     author: members[3].author,
@@ -624,6 +630,8 @@ export const gardenRecords = [
   },
   { author: members[3].author, seq: 132, record: { type: 'follow', key: own, on: true, at: at(4, 10, 0) } },
   { author: members[3].author, seq: 133, record: { type: 'garden-help', to: own, pot: 1, at: at(5, 9, 0) } },
+  { author: members[3].author, seq: 134, record: { type: 'garden-decor', items: ['varal', 'gato'], at: at(4, 18, 30) } },
+  { author: members[3].author, seq: 135, record: { type: 'garden-gift', to: own, item: 'tomate', at: '2026-10-31T15:00:00.000Z' } },
   { author: members[2].author, seq: 130, record: { type: 'garden', on: true, at: at(4, 18, 30) } },
   {
     author: members[2].author,
@@ -644,6 +652,8 @@ export const gardenRecords = [
   },
   { author: members[2].author, seq: 132, record: { type: 'follow', key: own, on: true, at: at(4, 11, 0) } },
   { author: members[2].author, seq: 133, record: { type: 'garden-help', to: own, pot: 2, at: at(5, 10, 0) } },
+  { author: members[2].author, seq: 134, record: { type: 'garden-decor', items: ['gato'], at: at(4, 19, 0) } },
+  { author: members[2].author, seq: 135, record: { type: 'garden-gift', to: own, item: 'manjericao', at: '2026-10-31T14:00:00.000Z' } },
   { author: members[4].author, seq: 130, record: { type: 'garden', on: false, at: at(4, 17, 0) } }
 ]
 

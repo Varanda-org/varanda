@@ -73,6 +73,9 @@ function scanFixture ({ index = {}, search = {} } = {}) {
     _groupServed: new Map(),
     _groupIndex: { removeDiary () {} },
     _groupRootStartup: null,
+    // _drop also leaves the header stubs the diary made (seeder.js).
+    _headerStubs: new Map(),
+    _stubCores: new Map(),
     _peers: new Set(),
     _inflight: new Map(),
     _drops: new Map(),
@@ -83,6 +86,7 @@ function scanFixture ({ index = {}, search = {} } = {}) {
     _scanDiary: () => {},
     log: () => {},
     _ready: true,
+    _passesStarted: true,
     _closing: false,
     _isBlocked: () => false,
     association: null,

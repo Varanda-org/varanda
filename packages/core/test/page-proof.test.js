@@ -51,7 +51,7 @@ test('constants', (t) => {
     'avatar', 'rename', 'invite', 'dm-list', 'dm-thread',
     'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow', 'follows', 'media', 'notices', 'terms', 'community-join',
     'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'listing',
-    'listing-edit', 'listing-status', 'listing-consent', 'choice', 'moment', 'post-share', 'post-unshare',
+    'listing-edit', 'listing-status', 'listing-consent', 'listing-rate', 'choice', 'moment', 'post-share', 'post-unshare',
     'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events'
   ])
   t.ok(Object.isFrozen(ACTIONS))
@@ -346,7 +346,7 @@ test('the module is pure: no fs, no network, no cert.js', (t) => {
 // membership of the Feira actions is pinned, read from each file's source.
 test('the Feira, legacy bundle and actor box actions are in ACTIONS, PAGE_ACTIONS and STATEMENTS', (t) => {
   const fs = require('node:fs')
-  const FEIRA = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
+  const FEIRA = ['listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate']
   const literal = (file, name) => {
     const src = fs.readFileSync(path.join(coreRoot, '..', '..', file), 'utf8')
     const start = src.indexOf('const ' + name + ' = [')

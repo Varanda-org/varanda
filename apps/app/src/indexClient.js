@@ -360,6 +360,11 @@ const GARDEN_KEYS = ['complete', 'given', 'helps', 'indexing', 'on', 'state']
 const GARDEN_ROW_KEYS = ['author', 'followSeq', 'seq']
 const GARDEN_STREET_KEYS = ['complete', 'indexing', 'items', 'next']
 const GARDEN_STREET_ITEM_KEYS = ['key', 'on', 'state']
+const GARDEN_GIFT_ROWS = rpc.garden.GARDEN_GIFT_ROWS
+const GARDEN_SHELF_ROWS = rpc.garden.GARDEN_SHELF_ROWS
+const GARDEN_STALL_KEYS = ['complete', 'decor', 'indexing', 'pending', 'shelf']
+const GARDEN_PENDING_KEYS = ['author', 'followSeq', 'seq']
+const GARDEN_SHELF_KEYS = ['from', 'gseq', 'seq']
 
 export function gardenUrl (owner) {
   return isHex64(owner) ? resolveUrl('/index/garden/' + owner) : null
@@ -369,6 +374,11 @@ export function gardenStreetUrl (owner, cursor = null) {
   if (!isHex64(owner)) return null
   if (cursor !== null && !isHex64(cursor)) return null
   return resolveUrl('/index/garden/' + owner + '/rua' + (cursor === null ? '' : '/' + cursor))
+}
+
+// Barraquinha and Enfeites pointers: GET /index/garden/<owner>/mimos.
+export function gardenStallUrl (owner) {
+  return isHex64(owner) ? resolveUrl('/index/garden/' + owner + '/mimos') : null
 }
 
 // Perfil rico: GET /index/profile/<author>. An open object of pointers; a
@@ -1154,6 +1164,77 @@ export function validGarden (body, owner) {
   return { on: body.on, state: body.state, helps, given: body.given.slice(), indexing: body.indexing, complete: body.complete }
 }
 
+// One plain copy of o with exactly `keys` (sorted), each value read once from
+// an own enumerable data property, or null: no accessor, symbol or inherited
+// key ever answers.
+function stallObject (o, keys) {
+  if (!isPlain(o) || Object.getOwnPropertySymbols(o).length > 0) return null
+  const names = Object.getOwnPropertyNames(o).sort()
+  if (names.length !== keys.length || !names.every((k, i) => k === keys[i])) return null
+  const out = {}
+  for (const k of keys) {
+    const d = Object.getOwnPropertyDescriptor(o, k)
+    if (!d || !('value' in d) || !d.enumerable) return null
+    out[k] = d.value
+  }
+  return out
+}
+
+// A dense plain array of at most `max` data items, copied, or null.
+function stallArray (v, max) {
+  if (!Array.isArray(v) || Object.getPrototypeOf(v) !== Array.prototype) return null
+  if (Object.getOwnPropertySymbols(v).length > 0) return null
+  const ld = Object.getOwnPropertyDescriptor(v, 'length')
+  const len = ld && ld.value
+  if (!Number.isSafeInteger(len) || len < 0 || len > max) return null
+  if (Object.getOwnPropertyNames(v).length !== len + 1) return null
+  const out = []
+  for (let i = 0; i < len; i++) {
+    const d = Object.getOwnPropertyDescriptor(v, String(i))
+    if (!d || !('value' in d) || !d.enumerable) return null
+    out.push(d.value)
+  }
+  return out
+}
+
+// The Barraquinha pointers of one balcony: `decor` the newest decor seq or
+// null, `pending` the open mimos to the owner (another giver's gift block and
+// that giver's follow of the owner), `shelf` the owner's takes (seq) and the
+// gift each names (from, gseq). The seeder's answer is untrusted: anything
+// off the exact contract is refused whole, never trimmed.
+export function validGardenStall (body, owner) {
+  try {
+    if (!isHex64(owner)) return null
+    const b = stallObject(body, GARDEN_STALL_KEYS)
+    if (b === null || typeof b.indexing !== 'boolean' || typeof b.complete !== 'boolean' || !isHint(b.decor)) return null
+    const pendingRows = stallArray(b.pending, GARDEN_GIFT_ROWS)
+    const shelfRows = stallArray(b.shelf, GARDEN_SHELF_ROWS)
+    if (pendingRows === null || shelfRows === null) return null
+    const seen = new Set()
+    const pending = []
+    for (const raw of pendingRows) {
+      const row = stallObject(raw, GARDEN_PENDING_KEYS)
+      if (row === null || !isHex64(row.author) || row.author === owner || !isSeq(row.seq) || !isSeq(row.followSeq)) return null
+      const ref = row.author + ':' + row.seq
+      if (seen.has(ref)) return null
+      seen.add(ref)
+      pending.push({ author: row.author, seq: row.seq, followSeq: row.followSeq })
+    }
+    const seqs = new Set()
+    const shelf = []
+    for (const raw of shelfRows) {
+      const row = stallObject(raw, GARDEN_SHELF_KEYS)
+      if (row === null || !isHex64(row.from) || row.from === owner || !isSeq(row.seq) || !isSeq(row.gseq)) return null
+      if (seqs.has(row.seq)) return null
+      seqs.add(row.seq)
+      shelf.push({ seq: row.seq, from: row.from, gseq: row.gseq })
+    }
+    return { decor: b.decor, pending, shelf, indexing: b.indexing, complete: b.complete }
+  } catch {
+    return null
+  }
+}
+
 // One page of the street, a walk of the followed keys in ascending order:
 // item keys strictly ascending after the cursor, and `next` (the last key
 // examined) at or after the last item, so following `next` always moves
@@ -1596,6 +1677,13 @@ export function fetchScraps (owner, cursor = null, deps = {}) {
 export function fetchGarden (owner, deps = {}) {
   const url = gardenUrl(owner)
   return run(url, (body) => validGarden(body, owner), deps)
+}
+
+// A 400 or 404 (a seeder from before the Barraquinha) is an ordinary
+// failure: the caller reads it as no stall.
+export function fetchGardenStall (owner, deps = {}) {
+  const url = gardenStallUrl(owner)
+  return run(url, (body) => validGardenStall(body, owner), deps)
 }
 
 export function fetchGardenStreet (owner, cursor = null, deps = {}) {

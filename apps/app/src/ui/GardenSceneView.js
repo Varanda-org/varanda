@@ -1,10 +1,12 @@
-// The Varandinha balcony. Boxes and drawings come from gardenScene.js.
+// The Varandinha balcony. Boxes and pot drawings come from gardenScene.js,
+// enfeites from gardenDecor.js.
 // A ripe pot sways until the person asks for less motion, then it stands still.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Easing, Platform, Pressable, StyleSheet, View } from 'react-native'
-import Svg, { Circle, Ellipse, Path, Rect } from 'react-native-svg'
-import { gardenLayout, gardenPalette, plantShapes, potBase } from './gardenScene'
+import Svg, { Circle, Ellipse, G, Path, Rect } from 'react-native-svg'
+import { decorDrawing, decorPalette } from './gardenDecor'
+import { DECOR_IDS, gardenLayout, gardenPalette, plantShapes, potBase } from './gardenScene'
 import { hiddenFromReaders } from './SplashSceneView'
 import { loopTiming } from './loopMotion'
 
@@ -133,11 +135,68 @@ function Art ({ pot, view, palette, tilt }) {
   )
 }
 
-export function GardenSceneView ({ width, pots, scheme, labels, onPressPot }) {
+// Only this many entries are read, as in the layout, so a hostile length
+// spends no time.
+const DECOR_LIST_MAX = 8
+
+// The memo key is the set of known ids, not the array object. A hole, a getter,
+// a throw or an unknown id adds nothing, the same read the layout makes.
+function joinedDecor (decor) {
+  try {
+    if (!Array.isArray(decor)) return ''
+    const lenDesc = Object.getOwnPropertyDescriptor(decor, 'length')
+    const len = lenDesc && lenDesc.value
+    if (!Number.isSafeInteger(len) || len < 0) return ''
+    const on = []
+    const end = Math.min(len, DECOR_LIST_MAX)
+    for (let i = 0; i < end; i++) {
+      const desc = Object.getOwnPropertyDescriptor(decor, String(i))
+      if (!desc || !('value' in desc) || !desc.enumerable) continue
+      const id = desc.value
+      if (typeof id === 'string' && DECOR_IDS.includes(id) && !on.includes(id)) on.push(id)
+    }
+    return DECOR_IDS.filter((id) => on.includes(id)).join(',')
+  } catch {
+    return ''
+  }
+}
+
+// One matrix scales about the drawing origin and then shifts it. A transform
+// list would depend on which end runs first. Spare room stays above the
+// drawing, so a short rect still rests on its floor.
+function DecorArt ({ id, rect, palette }) {
+  try {
+    const drawing = decorDrawing(id)
+    const w = drawing.w
+    const h = drawing.h
+    const shapes = drawing.shapes
+    if (!(w > 0) || !(h > 0) || !Array.isArray(shapes) || shapes.length === 0) return null
+    if (!rect || !(rect.w > 0) || !(rect.h > 0)) return null
+    const scale = Math.min(rect.w / w, rect.h / h)
+    if (!Number.isFinite(scale) || scale <= 0) return null
+    const x = rect.x + (rect.w - w * scale) / 2
+    const y = rect.y + rect.h - h * scale
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    const transform = 'matrix(' + scale + ' 0 0 ' + scale + ' ' + x + ' ' + y + ')'
+    return (
+      <G transform={transform}>
+        {shapes.map((shape, i) => <Shape key={i} shape={shape} fill={palette[shape.fill]} />)}
+      </G>
+    )
+  } catch {
+    return null
+  }
+}
+
+export function GardenSceneView ({ width, pots, scheme, labels, onPressPot, decor }) {
   const motion = useRef(null)
   if (motion.current === null) motion.current = createSway()
-  const layout = useMemo(() => gardenLayout(width), [width])
+  const decorIds = joinedDecor(decor)
+  const layout = useMemo(() => gardenLayout(width, {
+    decor: decorIds === '' ? [] : decorIds.split(',')
+  }), [width, decorIds])
   const palette = gardenPalette(scheme)
+  const decorFill = decorPalette(scheme)
   const reduce = useKnownReduceMotion()
   const canPress = typeof onPressPot === 'function'
   const sway = motion.current.sway
@@ -172,6 +231,11 @@ export function GardenSceneView ({ width, pots, scheme, labels, onPressPot }) {
         <Svg width={layout.width} height={layout.height}>
           <Rect x={layout.wall.x} y={layout.wall.y} width={layout.wall.w} height={layout.wall.h} fill={palette.wall} />
           <Rect x={layout.floor.x} y={layout.floor.y} width={layout.floor.w} height={layout.floor.h} fill={palette.floor} />
+          {layout.decor
+            ? Object.keys(layout.decor).map((id) => (
+              <DecorArt key={id} id={id} rect={layout.decor[id]} palette={decorFill} />
+            ))
+            : null}
           {layout.railing.map((bar, i) => (
             <Rect
               key={i}

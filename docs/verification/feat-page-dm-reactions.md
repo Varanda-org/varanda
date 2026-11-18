@@ -10,7 +10,7 @@
 - `apps/app/src/screens/Mensagem.js`: a reação usa o cliente da conversa (pessoa ou Página); uma reação da Página sem confirmação guarda o reenvio dos mesmos bytes assinados e só o usa com um toque no mesmo emoji.
 - `apps/app/src/screens/Momentos.js`, `apps/app/src/momentReaction.js`: agindo como Página, a reação ao momento de uma pessoa sai pela Página; sem confirmação, "Tentar de novo" reenvia os mesmos bytes assinados.
 - `docs/protocol.md` (seção 11), `docs/rpc.md`, `docs/app.md`.
-- `apps/app/src/legal.js`, `packages/core/lib/terms.js`: Termos e Política versão 91, com novo aceite.
+- `apps/app/src/legal.js`, `packages/core/lib/terms.js`: Termos e Política versão 92, com novo aceite.
 
 ## Como verificar
 
