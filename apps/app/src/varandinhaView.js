@@ -64,6 +64,9 @@ export function giftLabel (id) {
 
 export const STAGE_LABELS = Object.freeze(['semente', 'broto', 'crescendo', 'pronta'])
 export const SOIL_LABELS = Object.freeze({ dry: 'seca', wet: 'molhada' })
+// Said with a pot's label when it could take water now: the drop badge on
+// the balcony is hidden from readers.
+export const THIRSTY_LABEL = 'precisa de água'
 
 const MIN_MS = 60000
 const HOUR_MS = 3600000
