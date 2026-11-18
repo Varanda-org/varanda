@@ -293,7 +293,8 @@ test('version 1 headers: a root and a writer are header-invalid at admission and
   await admitted(first.events, G)
   await admitted(first.events, C)
   await rejected(first.events, R1, 'header-invalid')
-  await rejected(first.events, W1, 'header-invalid')
+  // A version 1 writer can never count for (G, B): a header stub (#350).
+  await until(() => first.events.find((e) => e.event === 'group-header-stub' && e.key === W1 && e.reason === 'header-invalid'), { name: 'stub W1' })
   t.absent(first.seeder._groupServed.has(R1))
   t.absent(first.seeder._groupServed.has(W1))
 
