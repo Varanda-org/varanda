@@ -25,6 +25,11 @@ function fakeClock () {
   }
 }
 
+// The read-position names the screen's reads use (readPosition.js).
+function openNames () {
+  return { openLatch: { current: null }, openScope: { current: '' }, latchOpen: (latch) => latch, setOpenFailed () {} }
+}
+
 test('DM reactions preserve both people and aggregate through the shared chips', async (t) => {
   const { dmReactions, threadRows } = await load()
   const { reactionChips, applyOptimistic, toggleOf } = await import('../src/reactions.js')
@@ -426,6 +431,7 @@ test('older reaction reads isolate a failed cursor and refresh the newest held p
     rawRef,
     olderRef: { current: true },
     olderErr: { current: false },
+    ...openNames(),
     genRef: { current: 0 },
     dm: async (method, params) => {
       reads.push(params.before || 'newest')
@@ -752,6 +758,7 @@ async function threadReader (h, rows, dm) {
     rawRef,
     olderRef: { current: true },
     olderErr: { current: false },
+    ...openNames(),
     genRef: { current: 0 },
     dm,
     setRaw: (rows) => { rawRef.current = rows },
@@ -896,6 +903,7 @@ test('an older-page reread carries reactable: false, so the reaction controls go
     rawRef,
     olderRef: { current: true },
     olderErr: { current: false },
+    ...openNames(),
     genRef: { current: 0 },
     dm: async (method, params) => {
       const row = params.before ? rows[0] : rows[1]
@@ -939,6 +947,7 @@ test('a successful older page clears only the error an older page set', async (t
     commitRead: h.commitRead,
     olderRef: { current: false },
     olderErr: { current: false },
+    ...openNames(),
     genRef: { current: 0 },
     nextRef: { current: 'cursor' },
     endPin: { current: { pinned: true } },
