@@ -29,6 +29,13 @@ export function reactionLabel (mine) {
   return mine ? 'Você reagiu a um momento' : 'Reagiu ao seu momento'
 }
 
+// The kept re-put of a page's unconfirmed reaction (pageDmClient err.retry):
+// the same signed draft, sent again only on a tap. A person keeps none and
+// goes to the conversation instead, as before.
+export function reactionRetry (err, page) {
+  return page === true && err && typeof err.retry === 'function' ? err.retry : null
+}
+
 export function unsure (err) {
   return err?.uncertain === true || err?.message === UNSURE_SEND
 }

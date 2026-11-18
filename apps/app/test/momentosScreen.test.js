@@ -3958,3 +3958,9 @@ test('PageMoments: the delete sheet stays mounted when the reload fails or comes
   h.sheet().props.onClose()
   t.is(h.sheet().props.open, false, 'only the sheet closes it')
 })
+
+test('the page reaction to a momento follows the Páginas switch, as Mensagem does', (t) => {
+  const src = read('src/screens/Momentos.js')
+  t.ok(src.includes("import { pagesOn } from '../pageGate'"), 'imports the gate')
+  t.ok(src.includes('const reactPage = actingPage !== null && author !== actingPage && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? actingPage : null'), 'no page reaction with Páginas off')
+})

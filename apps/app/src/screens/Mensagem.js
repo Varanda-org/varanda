@@ -74,7 +74,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
+import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, reactionTap, PAGE_REACTION_HELD, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { GROWTH_PLACES, dmTarget as openTargetOf, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
@@ -307,7 +307,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [reactionOverrides, setReactionOverrides] = useState(new Map())
   const [reactionError, setReactionError] = useState('')
   const [reactionPicker, setReactionPicker] = useState(null)
-  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), retries: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
   const reactionContextRef = useRef(reactionContext)
   reactionContextRef.current = reactionContext
   useEffect(() => {
@@ -441,7 +441,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (!context.live || context !== reactionContextRef.current) return
     for (const item of page) {
       const key = messageKey(item)
-      if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
+      if (context.retries.has(key) || context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
       context.unsure.delete(key)
       context.removed.delete(key)
       context.overrides.delete(key)
@@ -496,7 +496,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
         }
       }
       for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
-        if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
+        if (context.retries.has(key) || context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
         context.unsure.delete(key)
         context.removed.delete(key)
         context.overrides.delete(key)
@@ -557,6 +557,11 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       return
     }
     const target = { from: item.from, id: item.id }
+    // As a page, the retry of an unconfirmed reaction re-puts the same signed
+    // draft (err.retry from pageDmClient), never a new dm.pageDraft.
+    const put = context.retries.get(key)
+    const replay = typeof put === 'function' && context.unsure.has(key) && context.unsure.get(key) === emoji ? put : null
+    context.retries.delete(key)
     context.unsure.delete(key)
     // Any answer settles the last unconfirmed removal: confirmed, failed, or
     // unconfirmed again (then set anew below).
@@ -565,12 +570,14 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     context.sending.add(key)
     paintReactions(context)
     try {
-      await request('dm.react', { to: peer, target, emoji })
+      if (replay) await replay()
+      else await dm('dm.react', { to: peer, target, emoji })
       if (context.live && context === reactionContextRef.current) holdSent(key, emoji)
     } catch (err) {
       if (!context.live || context !== reactionContextRef.current) return
       if (unsureSend(err)) {
         context.unsure.set(key, emoji)
+        if (err && typeof err.retry === 'function') context.retries.set(key, err.retry)
         // The emoji an unconfirmed removal took away: tapping it again is the
         // retry of that removal (docs/rpc.md 5.119), not a new reaction.
         if (emoji === '') context.removed.set(key, context.bases.get(key)?.find((r) => r.mine)?.emoji || removed || '')
@@ -590,13 +597,19 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   function toggleReaction (key, picked) {
     const context = reactionContext
     if (!context.live || context !== reactionContextRef.current || !canReact(key)) return
+    // A page reaction kept uncertain (its signed re-put held) takes only its
+    // retry until it is settled (reactionTap).
+    const tap = reactionTap({ unsure: context.unsure.has(key) ? context.unsure.get(key) : undefined, removed: context.removed.get(key), held: context.retries.has(key) }, picked)
+    if (tap.locked) {
+      setReactionError(PAGE_REACTION_HELD)
+      return
+    }
     const item = reactionViewRef.current.rawById.get(key)
     const reactions = context.overrides.get(key) || dmReactions(item.reactions)
     if (!context.bases.has(key)) context.bases.set(key, reactions)
     const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
-    const unsure = context.unsure.get(key)
-    const retry = context.unsure.has(key) && (unsure === picked || (unsure === '' && picked !== '' && picked === context.removed.get(key)))
-    const emoji = retry ? unsure : toggleOf(reactions, picked)
+    const retry = tap.retry
+    const emoji = retry ? tap.emoji : toggleOf(reactions, picked)
     context.overrides.set(key, applyOptimistic(reactions, emoji))
     setReactionError('')
     paintReactions(context)

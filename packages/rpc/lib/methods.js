@@ -324,7 +324,28 @@ function postCross (given, value) {
 }
 
 // dm.pageDraft: media and card as dm.send's, never both, and only on a msg.
+// kind 'react' (a page's reaction, docs/rpc.md 5.114) is exactly to, target
+// and emoji; `moment` makes a msg the page's reaction to a momento of `to`:
+// one emoji as text, nothing else.
+const PAGE_REACT_KEYS = ['page', 'kind', 'to', 'target', 'emoji']
+
 function pageDraftCross (given, value) {
+  if (value.kind === 'react') {
+    for (const k of Object.keys(given)) if (!PAGE_REACT_KEYS.includes(k)) return 'parâmetro inválido: ' + k
+    if (!hasOwn(value, 'to')) return 'parâmetro inválido: to'
+    if (!hasOwn(value, 'target')) return 'parâmetro inválido: target'
+    if (!hasOwn(value, 'emoji')) return 'parâmetro inválido: emoji'
+    // The default fwd 0 is a msg's: a reaction carries none.
+    delete value.fwd
+    return null
+  }
+  if (hasOwn(value, 'target')) return 'parâmetro inválido: target'
+  if (hasOwn(value, 'emoji')) return 'parâmetro inválido: emoji'
+  if (hasOwn(value, 'moment')) {
+    if (value.kind !== 'msg') return 'parâmetro inválido: kind'
+    if (!isReaction(value.text)) return 'parâmetro inválido: text'
+    if (hasOwn(value, 'replyTo') || hasOwn(value, 'media') || hasOwn(value, 'card') || value.fwd !== 0) return 'parâmetro inválido: moment'
+  }
   if (value.kind === 'ctl' && (hasOwn(value, 'media') || hasOwn(value, 'card'))) return 'parâmetro inválido: kind'
   if (hasOwn(value, 'media') && hasOwn(value, 'card')) return 'parâmetro inválido: media'
   return null
@@ -674,7 +695,8 @@ const isPageRecipient = (r) => {
   return n === 2 || (n === 3 && hasOwn(r, 'proof') && isPageBoxProof(r.proof))
 }
 const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX && v.every(isPageRecipient)
-const isPageDraftKind = (v) => v === 'msg' || v === 'ctl'
+const isDmReactEmoji = (v) => v === '' || isReaction(v)
+const isPageDraftKind = (v) => v === 'msg' || v === 'ctl' || v === 'react'
 // dm.pageLegacyChunk (docs/rpc.md 5.114): one chunk of the legacy bundle the
 // service sealed to the owner's own dm-key box; the node opens and checks it.
 const PAGE_LEGACY_CHUNKS_MAX = 1024
@@ -1550,8 +1572,9 @@ const SPECS = {
     }
   },
   // A reaction to a message of the conversation (docs/rpc.md 5.119): one
-  // emoji, or '' to remove. Spends the stamps of one dm.send.
-  'dm.react': { fields: { to: req(isKey), target: req(isDmTarget), emoji: req((v) => v === '' || isReaction(v)) }, mutating: true },
+  // emoji, or '' to remove. Spends the stamps of one dm.send. It takes no
+  // `page`: a page reacts with dm.pageDraft kind 'react' and dm.pageSend.
+  'dm.react': { fields: { to: req(isKey), target: req(isDmTarget), emoji: req(isDmReactEmoji) }, mutating: true },
   'dm.pull': { fields: none },
   'dm.list': {
     fields: {
@@ -1596,7 +1619,10 @@ const SPECS = {
       media: opt(isDmMediaList),
       card: opt(isDmCard),
       op: opt(isDmState),
-      peer: opt(isKey)
+      peer: opt(isKey),
+      target: opt(isDmTarget),
+      emoji: opt(isDmReactEmoji),
+      moment: opt(int(1, Number.MAX_SAFE_INTEGER))
     },
     cross: pageDraftCross
   },

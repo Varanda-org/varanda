@@ -97,6 +97,14 @@ const DM_CLAIM_KIND = 'claim'
 // signed body.
 const DM_SIG_PREFIX_V9 = 'varanda-dm-v9\n'
 const DM_SIG_PREFIX_V10 = 'varanda-dm-v10\n'
+// A Página's reactions: v11 has the v4 keys (a reaction to a message) and v12
+// the v5 keys (a reaction to a momento of `to`), both signed as v3 is, over
+// the digest of the JSON. The version is inside that JSON, so a v3 signature
+// never verifies as a v11 or v12 one, nor either of those as another.
+const DM_PAGE_REACT_V = 11
+const DM_PAGE_MOMENT_V = 12
+// The versions whose signature covers the v3 prefix, the digest and an expiry.
+const DIGEST_SIGNED = rpc.DM_INNER_DIGEST_VERSIONS
 // The most own devices one claim names.
 const DM_CLAIM_FOR_MAX = 8
 // A reaction's revision: per (target, reactor) the op with the highest rev wins.
@@ -146,6 +154,8 @@ const INNER_KEYS_V7 = rpc.DM_INNER_KEYS_V7
 const INNER_KEYS_V8 = rpc.DM_INNER_KEYS_V8
 const INNER_KEYS_V9 = rpc.DM_INNER_KEYS_V9
 const INNER_KEYS_V10 = rpc.DM_INNER_KEYS_V10
+const INNER_KEYS_V11 = rpc.DM_INNER_KEYS_V11
+const INNER_KEYS_V12 = rpc.DM_INNER_KEYS_V12
 const DM_TARGET_KEYS = rpc.DM_TARGET_KEYS
 const DM_MEDIA_KEYS = rpc.DM_MEDIA_KEYS
 const BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
@@ -291,9 +301,10 @@ function validDmCard (card) {
 // v9 is a msg or ctl from a manifest diary: the v3 shape rules plus `signer`,
 // the key whose manifest hashes to `from`. v10 is a reaction from one: the v4
 // rules plus `signer`. Every other rule takes `from` as the identity.
+// v11 and v12 are a Página's v4 and v5, with the v3 signature.
 function validBody (b) {
   if (!isPlainObject(b)) return false
-  if (b.v === 4 || b.v === 10) return validReaction(b)
+  if (b.v === 4 || b.v === 10 || b.v === DM_PAGE_REACT_V) return validReaction(b)
   if (b.v === 6) return validVisit(b)
   if (b.v === 7) return validCopy(b)
   if (b.v === 8) return validClaim(b)
@@ -306,7 +317,7 @@ function validBody (b) {
     if (b.card !== null && (b.media !== null || !validDmCard(b.card))) return false
     // Null media is a card, the text forward or a bound reply. None of them is a v1 message.
     if (b.media === null ? b.fwd !== 1 && b.card === null && !isPlainObject(b.replyTo) : !validMedia(b.media)) return false
-  } else if (b.v === 5) {
+  } else if (b.v === 5 || b.v === DM_PAGE_MOMENT_V) {
     if (!hasExactKeys(b, INNER_KEYS_V5) || b.kind !== 'msg' || b.replyTo !== null) return false
     if (!Number.isSafeInteger(b.moment) || b.moment < 1 || !rpc.isReaction(b.text)) return false
   } else if (b.v === 3 || b.v === 9) {
@@ -576,9 +587,9 @@ function replyField (r) {
   return r === undefined ? null : targetField(r)
 }
 
-function reactionBody (fields, from) {
+function reactionBody (fields, from, v = 4) {
   return {
-    v: 4,
+    v,
     kind: 'react',
     id: fields.id === undefined ? newMessageId() : fields.id,
     from,
@@ -661,16 +672,51 @@ function signInner (body, signKeyPair) {
 }
 
 // A Página's inner, built on a device that does not hold the page key.
-// fields: as buildInner, with from (hex64) instead of a key pair. Always v3,
-// whatever the body needs. Returns { json, digest, body }: digest (hex64) is
-// what the key holder signs with signDigest, json goes to assembleInner.
+// fields: as buildInner, with from (hex64) instead of a key pair. A msg or a
+// ctl is always v3, whatever the body needs; a reaction ({ kind: 'react',
+// to, target, emoji, rev, id?, at?, cert? }) is v11, and a msg with a moment
+// is v12 (its text the emoji, nothing else). Returns { json, digest, body }:
+// digest (hex64) is what the key holder signs with signDigest, json goes to
+// assembleInner.
 function innerDigest (fields) {
   if (!isPlainObject(fields) || !isHex64(fields.from)) throw new TypeError('mensagem inválida')
-  // A Página writes v3 only, and v3 has no moment: refused, never dropped.
-  if (fields.moment !== undefined && fields.moment !== null) throw new TypeError('mensagem inválida')
+  const body = pageBody(fields)
+  if (!validBody(body)) throw new TypeError('mensagem inválida')
+  const json = b4a.from(canonicalJson(body), 'utf8')
+  if (json.byteLength + LEN_BYTES + SIG_BYTES + EXPIRES_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
+  return { json, digest: b4a.toString(digestBytes(json), 'hex'), body: JSON.parse(canonicalJson(body)) }
+}
+
+const PAGE_MOMENT_FIELDS = Object.freeze(['kind', 'from', 'to', 'text', 'moment', 'id', 'at', 'cert', 'replyTo', 'media', 'card', 'fwd'])
+
+function pageBody (fields) {
   const kind = fields.kind
   const from = fields.from
-  const body = {
+  if (kind === 'react') return reactionBody(fields, from, DM_PAGE_REACT_V)
+  if (fields.moment !== undefined && fields.moment !== null) {
+    // A v12 is never also a reply, a photo, a card, a forward or a ctl:
+    // refused here rather than dropped, as buildInner refuses for v5.
+    for (const k of Object.keys(fields)) {
+      if (!PAGE_MOMENT_FIELDS.includes(k) && fields[k] !== undefined) throw new TypeError('mensagem inválida')
+    }
+    if (kind !== 'msg' || (fields.replyTo !== undefined && fields.replyTo !== null) || (fields.media !== undefined && fields.media !== null) ||
+      (fields.card !== undefined && fields.card !== null) || (fields.fwd !== undefined && fields.fwd !== 0)) throw new TypeError('mensagem inválida')
+    return {
+      v: DM_PAGE_MOMENT_V,
+      kind,
+      id: fields.id === undefined ? newMessageId() : fields.id,
+      from,
+      to: fields.to,
+      replyTo: null,
+      text: fields.text,
+      moment: fields.moment,
+      op: null,
+      peer: null,
+      at: fields.at === undefined ? nowIso() : fields.at,
+      cert: fields.cert === undefined ? null : fields.cert
+    }
+  }
+  return {
     v: 3,
     kind,
     id: fields.id === undefined ? newMessageId() : fields.id,
@@ -686,15 +732,12 @@ function innerDigest (fields) {
     at: fields.at === undefined ? nowIso() : fields.at,
     cert: fields.cert === undefined ? null : fields.cert
   }
-  if (!validBody(body)) throw new TypeError('mensagem inválida')
-  const json = b4a.from(canonicalJson(body), 'utf8')
-  if (json.byteLength + LEN_BYTES + SIG_BYTES + EXPIRES_BYTES > DM_INNER_BYTES) throw new TypeError('mensagem longa demais')
-  return { json, digest: b4a.toString(digestBytes(json), 'hex'), body: JSON.parse(canonicalJson(body)) }
 }
 
 // The only bytes a key holder signs through this API: the v3 prefix, a
 // 32-byte digest and the expiry (uint64be ms), so it cannot be led to sign a
-// v1 or v2 inner or any other record of the protocol.
+// v1 or v2 inner or any other record of the protocol. A v3, v11 or v12 inner
+// alike: the version inside the digested JSON tells them apart.
 function signDigest (digestHex, secretKey, expiresAt) {
   if (typeof digestHex !== 'string' || !HEX64_DIGEST.test(digestHex)) throw new TypeError('resumo inválido')
   if (!isBytes(secretKey, 64)) throw new TypeError('chave de assinatura inválida')
@@ -711,10 +754,11 @@ function assembleInner (json, sigHex, expiresAt) {
   return frameInner(json, b4a.from(sigHex, 'hex'), expiresAt)
 }
 
-// True for a v3 body filed after its signature's expiry plus DM_V3_STALE_MS:
-// never file it. filedAtMs is the receiver's clock when it files the drop.
+// True for a v3, v11 or v12 body filed after its signature's expiry plus
+// DM_V3_STALE_MS: never file it. filedAtMs is the receiver's clock when it
+// files the drop.
 function pageInnerStale (body, filedAtMs) {
-  if (!isPlainObject(body) || body.v !== 3) return false
+  if (!isPlainObject(body) || !DIGEST_SIGNED.includes(body.v)) return false
   if (!isExpiresAt(body.expiresAt) || !Number.isFinite(filedAtMs)) return true
   return filedAtMs > body.expiresAt + DM_V3_STALE_MS
 }
@@ -723,8 +767,9 @@ function pageInnerStale (body, filedAtMs) {
 // body with `mine` (true when this identity wrote it) or null. opts:
 // { association (hex64, required for a msg), revokedIssuers? (a Set, as in
 // cert.js verifyCert) }. A msg must carry a certificate of that association
-// for `from`, so one member cannot write from throwaway keys. A v3 body also
-// carries `expiresAt` (ms) read from its frame; see pageInnerStale.
+// for `from`, so one member cannot write from throwaway keys. A v3, v11 or
+// v12 body also carries `expiresAt` (ms) read from its frame; see
+// pageInnerStale.
 // opts.visit: true on the quiet visit lane (VISIT_PROTOCOL). There only a
 // visit (v6) opens, and elsewhere a visit never does, so a ping put in the
 // DM pool is never filed as a message and a message never as a visit. A
@@ -748,7 +793,7 @@ function openInner (buf, ownKey, opts = {}) {
     let pad = LEN_BYTES + len + SIG_BYTES
     let signed
     const extra = {}
-    if (body.v === 3) {
+    if (DIGEST_SIGNED.includes(body.v)) {
       if (pad + EXPIRES_BYTES > DM_INNER_BYTES) return null
       const expiresAt = readUint64be(buf, pad)
       if (!isExpiresAt(expiresAt)) return null
@@ -919,6 +964,8 @@ module.exports = Object.freeze({
   DM_COPY_KIND,
   DM_CLAIM_KIND,
   DM_CLAIM_FOR_MAX,
+  DM_PAGE_REACT_V,
+  DM_PAGE_MOMENT_V,
   DM_REACT_REV_MAX,
   DM_V3_TTL_MS,
   DM_V3_STALE_MS,
@@ -939,6 +986,8 @@ module.exports = Object.freeze({
   INNER_KEYS_V8,
   INNER_KEYS_V9,
   INNER_KEYS_V10,
+  INNER_KEYS_V11,
+  INNER_KEYS_V12,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,
   DM_MEDIA_MAX,

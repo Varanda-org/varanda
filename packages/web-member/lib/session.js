@@ -5922,7 +5922,8 @@ function createBrowserSession ({
     },
 
     // A reaction travels as a message does (docs/rpc.md 5.119): the same
-    // refusals, lookup and stamps as dm.send.
+    // refusals, lookup and stamps as dm.send, to a person or a Página. A page
+    // reacts with the page key: dm.pageDraft kind 'react', dm.pageSend.
     'dm.react': async ({ to, target, emoji }) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
@@ -5930,15 +5931,6 @@ function createBrowserSession ({
         dmEngine.checkSend(await requireDm(), to)
         if ((await member.memberBlocks(storage)).has(to)) throw new UsageError(DM_BLOCKED)
       })({}, ident)
-      // A Página key is known only from its diary held here (the page.read
-      // answer the app's gate reads), never from the network: a reaction to a
-      // peer whose diary is not held does not wait for a seeder peek, goes
-      // through, and the Página drops it on pull.
-      let page = false
-      try {
-        const { result: r } = await pageReadHeld(to.toLowerCase())
-        page = r !== null && (r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined))
-      } catch {}
       let recipient
       try {
         recipient = await dmLookupOf(to)
@@ -5948,7 +5940,7 @@ function createBrowserSession ({
       return serialDm(async (_, epoch) => {
         const own = await requireDm()
         if ((await store.readDmKey(storage)) === null) await dmEnable(epoch)
-        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box, { page })
+        return dmEngine.react(own, keyPair, { to, target, emoji }, recipient.box)
       })({}, ident)
     },
 
@@ -6032,12 +6024,23 @@ function createBrowserSession ({
     // Its media and card are dm.send's: items put with dmPutMedia for `to`
     // and this `page`, their blobs acked with this identity's stamps before
     // the digest is answered.
+    // A page's reaction (kind 'react', or a msg with `moment`) is drafted the
+    // same way; a momento reaction needs that momento of `to` showing here.
     'dm.pageDraft': async (params) => {
       if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
       const ident = identityTarget
       await dmIdentity({}, ident)
+      if (params.moment !== undefined) {
+        let shown
+        try {
+          shown = await serial(() => withCores((c) => member.momentMedia(c, { author: params.to, seq: params.moment, now: Date.now() })))({})
+        } catch (err) {
+          throw toRpcError(err, reportInternal)
+        }
+        if (shown === null) throw rpcError('USAGE', MOMENT_NOT_FOUND)
+      }
       let box = null
-      if (params.kind === 'msg' && params.to !== undefined && params.to !== params.page) {
+      if (params.kind !== 'ctl' && params.to !== undefined && params.to !== params.page) {
         try {
           box = (await dmLookupOf(params.to)).box
         } catch (err) {

@@ -195,7 +195,7 @@ async function heldPage (t, assoc, owner) {
   return { page, box: made.box }
 }
 
-test('a moment reaction sealed to a Página box is never filed, and the pull goes on past it', async (t) => {
+test('a moment reaction sealed to a Página box is filed with its seq, and the pull goes on past it', async (t) => {
   t.timeout(170000)
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
@@ -214,6 +214,6 @@ test('a moment reaction sealed to a Página box is never filed, and the pull goe
   await put({ text: 'para a página' })
   await A.web.request('dm.pull')
   const th = await A.web.request('dm.thread', { page, peer: C.key })
-  t.alike(th.messages.map((m) => m.text), ['para a página'], 'only the message after it is filed')
-  t.absent(th.messages.some((m) => m.moment !== undefined), 'no moment row in the page conversation')
+  t.alike(th.messages.map((m) => m.text), ['❤️', 'para a página'], 'both are filed')
+  t.alike(th.messages.filter((m) => m.moment !== undefined).map((m) => [m.text, m.moment]), [['❤️', 1]], 'the moment row keeps its seq')
 })
