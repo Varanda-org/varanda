@@ -117,6 +117,16 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   root header's peer text, returned as data (clients render them through
 //   displayText). Like the topic words, the segment reaches the seeder and
 //   is never logged or echoed.
+//   /index/group-browse/members|recent -> indexGroupBrowse: `{ groups:
+//   [{ group, name, creator, community, communityName, writerCount,
+//   created, active }] (at most 20), more, indexing, complete }`, the
+//   public groups attached to a served community, by member count or by
+//   creation date. /index/public-groups/<D>[/<after>] -> indexPublicGroups:
+//   `{ groups: [{ group, name, creator, community, communityName,
+//   writerCount }] (at most 32, key order), next, hidden, indexing,
+//   complete }`, the open public groups D takes part in (each community's
+//   Geral left out); `next` is null or the last row's key. Both use the
+//   public budget, never the triage one.
 // - /index/community/<C> -> Seeder#indexCommunity: `{ name, join, creator,
 //   members, groups: [{ group, visibility, join, name, writerCount }]
 //   (attached groups, key order, at most 32; name and writerCount null for
@@ -434,6 +444,10 @@ const INDEX_TOPIC_RE = /^\/index\/topic\/([a-z0-9]{2,32}(?:\+[a-z0-9]{2,32}){0,7
 const INDEX_GROUP_RE = /^\/index\/group\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_GROUPS_RE = /^\/index\/groups\/([0-9a-f]{64})$/
 const INDEX_GROUP_SEARCH_RE = /^\/index\/group-search\/([a-z0-9]{1,20}(?:-[a-z0-9]{1,20}){0,3})$/
+// Discovery lists: an order name, and a diary key with an optional
+// exclusive group-key cursor.
+const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent)$/
+const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
@@ -947,6 +961,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexGroups', [m[1]]]
     m = INDEX_GROUP_SEARCH_RE.exec(url)
     if (m) return ['indexGroupSearch', [m[1]], searchBody]
+    m = INDEX_GROUP_BROWSE_RE.exec(url)
+    if (m) return ['indexGroupBrowse', [m[1]], browseBody]
+    m = INDEX_PUBLIC_GROUPS_RE.exec(url)
+    if (m) return ['indexPublicGroups', [m[1], m[2] === undefined ? null : m[2]], publicGroupsBody]
     m = INDEX_COMMUNITY_RE.exec(url)
     if (m) return ['indexCommunity', [m[1]], communityBody]
     m = INDEX_COMMUNITY_GROUPS_RE.exec(url)
@@ -1263,6 +1281,32 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return {
       groups: groups.map(({ group, name, members }) => ({ group, name: name ?? null, writerCount: members })),
       more,
+      indexing,
+      complete
+    }
+  }
+
+  // The discovery rows, rebuilt field by field: whatever else the seeder
+  // keeps on a row never reaches the wire.
+  function browseBody ({ groups, more, indexing, complete }) {
+    return {
+      groups: groups.map(({ group, name, creator, community, communityName, members, created, active }) =>
+        ({ group, name, creator, community, communityName, writerCount: members, created: created ?? null, active: active ?? null })),
+      more,
+      indexing,
+      complete
+    }
+  }
+
+  // `hidden` true means the diary opted out: no row and no cursor leave,
+  // whatever the seeder answered.
+  function publicGroupsBody ({ groups, next, hidden, indexing, complete }) {
+    if (hidden === true) return { groups: [], next: null, hidden: true, indexing, complete }
+    return {
+      groups: groups.map(({ group, name, creator, community, communityName, members }) =>
+        ({ group, name, creator, community, communityName, writerCount: members })),
+      next,
+      hidden: false,
       indexing,
       complete
     }
@@ -2263,6 +2307,8 @@ module.exports = {
   INDEX_GROUP_RE,
   INDEX_GROUPS_RE,
   INDEX_GROUP_SEARCH_RE,
+  INDEX_GROUP_BROWSE_RE,
+  INDEX_PUBLIC_GROUPS_RE,
   INDEX_COMMUNITY_RE,
   INDEX_COMMUNITY_GROUPS_RE,
   INDEX_ENGAGERS_RE,
