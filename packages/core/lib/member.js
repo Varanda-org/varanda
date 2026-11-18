@@ -80,7 +80,7 @@ const { signActorBox } = require('./page-secrets')
 const groupCrypto = require('./group-crypto')
 const devices = require('./devices')
 const rekeyPolicy = require('./group-rekey')
-const { recordBoundRoot } = require('./sync')
+const { recordBoundRoot, storedPageRoots } = require('./sync')
 const { COMMUNITY_LIST_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, feira } = require('@varanda/rpc')
 
 const HEX64 = /^[0-9a-fA-F]{64}$/
@@ -1475,6 +1475,9 @@ async function readCoreParts (identity, key, { blocked, revokedIssuers }, kind) 
   // included (an admission or grant cut must lie above them).
   const logs = [{ key, diary: header.diary, entries: rootEntries, length: rootCore.contiguousLength, signed: rootCore.length }]
   const localDiaries = new Set([ownHex])
+  // A fold as a page (loadGroup `as`): the page diary is read, and gated,
+  // like any other stored diary.
+  if (typeof identity.page === 'string') localDiaries.add(identity.page)
   // Block 0 of every other stored core, with the diary its header names when
   // it is a writer header for this root (group.js headerStubs).
   const firsts = new Map()
@@ -1550,8 +1553,13 @@ function liveCw (cview, logs, local) {
 // opens on the result (loaded.secrets) for an operation that seals or
 // distributes; the caller wipes them (wipeSecrets). Otherwise the box key
 // is only used for the fold and wiped before returning.
-async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
-  const { ownHex, association } = identity
+// `as` ({ page, box }): fold as page `page` (docs/rpc.md 5.114) with its
+// group box pair `box` (wiped as the device box would be): its writers
+// are the page diary's whose header box is that box, and this device has
+// no writer of its own there. The identity then carries `page` too.
+async function loadGroup (ctx, identity, group, { secrets = false, as = null } = {}) {
+  const { association } = identity
+  const ownHex = as === null ? identity.ownHex : as.page
   const block = enforcedBlocklist(ctx.dataDir, association)
   const { blocked } = block
   if (typeof group !== 'string' || !HEX64.test(group)) throw groupNotFound()
@@ -1581,7 +1589,7 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
   let opened = null
   try {
     if (priv) {
-      box = storeLib.ensureBoxKeyPair(ctx.dataDir)
+      box = as === null ? storeLib.ensureBoxKeyPair(ctx.dataDir) : as.box
       const mine = ownBoxWriters(header, group, writers, ownHex, box)
       const keys = { writers: mine, unseal: foldUnseal(box) }
       // The epochs the fold accepted (its read-side distributor rule), each
@@ -1615,7 +1623,7 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
       recordBoundRoot(ctx.dataDir, group)
     } catch {}
   }
-  const cw = view.community === null ? null : liveCw(view.community, parent.bound, communityEntry(ctx.dataDir, header.community))
+  const cw = view.community === null || as !== null ? null : liveCw(view.community, parent.bound, communityEntry(ctx.dataDir, header.community))
   return {
     group,
     input,
@@ -1626,7 +1634,7 @@ async function loadGroup (ctx, identity, group, { secrets = false } = {}) {
     private: priv,
     header,
     secrets: opened,
-    local: localGroups(ctx.dataDir).find((g) => g.group === group && g.kind !== 'community'),
+    local: as === null ? localGroups(ctx.dataDir).find((g) => g.group === group && g.kind !== 'community') : undefined,
     limits: logLimits(ctx),
     cw,
     // Key blocks written through community authority cite the CW length
@@ -3042,35 +3050,165 @@ function groupOlder (posts, before) {
   return posts.filter((p) => groups.compareOrder(groups.orderKey(p.at, p.writer, p.seq), k) < 0)
 }
 
+// One page of the fold's posts, newest first, as `ownHex` reads them.
+function readFold (loaded, ownHex, { limit, before }) {
+  const posts = groupOlder(loaded.view.posts.filter((p) => loaded.profiles.has(p.diary)), before)
+  const start = Math.max(0, posts.length - limit)
+  // A hidden post shows neither its text nor its media: a private item
+  // carries its key, which must not reach the reader of a hidden post.
+  // The fold's forum keys stay out (as the web node's page): `topic`
+  // carries an uncapped voter list and a hidden root's poll, and the
+  // unmarked page keeps its bytes. So does `event` (Eventos): its RSVP
+  // lists are uncapped too.
+  const items = posts.slice(start).reverse().map(({ media, reactions, topic, thread, event, ...p }) => ({
+    ...p,
+    ...reactionSummary({ reactions }, ownHex),
+    text: p.hidden ? '' : p.text,
+    media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
+    card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
+    ...loaded.profiles.get(p.diary)
+  }))
+  const last = items[items.length - 1]
+  return {
+    items,
+    next: start > 0 && last ? { at: last.at, writer: last.writer, seq: last.seq } : null,
+    hidden: items.filter((p) => p.hidden).length,
+    incomplete: loaded.view.incomplete,
+    ...readState(loaded.view)
+  }
+}
+
 async function groupRead (ctx, { group, limit = 30, before = null }) {
-  return withGroupOrPending(ctx, group, async (loaded, { ownHex }) => {
-    const posts = groupOlder(loaded.view.posts.filter((p) => loaded.profiles.has(p.diary)), before)
-    const start = Math.max(0, posts.length - limit)
-    // A hidden post shows neither its text nor its media: a private item
-    // carries its key, which must not reach the reader of a hidden post.
-    // The fold's forum keys stay out (as the web node's page): `topic`
-    // carries an uncapped voter list and a hidden root's poll, and the
-    // unmarked page keeps its bytes. So does `event` (Eventos): its RSVP
-    // lists are uncapped too.
-    const items = posts.slice(start).reverse().map(({ media, reactions, topic, thread, event, ...p }) => ({
-      ...p,
-      ...reactionSummary({ reactions }, ownHex),
-      text: p.hidden ? '' : p.text,
-      media: !p.hidden && Array.isArray(media) ? media.map((d) => ({ ...d })) : null,
-      card: p.hidden || !p.card ? null : copyLinkCard(p.card, (d) => ({ ...d })),
-      ...loaded.profiles.get(p.diary)
-    }))
-    const last = items[items.length - 1]
-    return {
-      items,
-      next: start > 0 && last ? { at: last.at, writer: last.writer, seq: last.seq } : null,
-      hidden: items.filter((p) => p.hidden).length,
-      incomplete: loaded.view.incomplete,
-      ...readState(loaded.view)
-    }
-  }, (pending) => {
+  return withGroupOrPending(ctx, group, async (loaded, { ownHex }) => readFold(loaded, ownHex, { limit, before }), (pending) => {
     requirePendingLocal(pending)
     return { items: [], next: null, hidden: 0, incomplete: true, sealed: 0, epoch: null, state: 'ok' }
+  })
+}
+
+// ---- a page's private groups (docs/rpc.md 5.114) ----
+
+// Folds `group` as page `page` with the page's group box pair `box` (a
+// copy the caller hands over, wiped here whatever happens): fn(loaded,
+// pageHex). The epoch keys the fold opens stay on `loaded` for fn only,
+// never in a file and never with this device's own groups.
+async function withPageGroup (ctx, { group, page, box }, fn) {
+  try {
+    return await withIdentity(ctx, async (identity) => {
+      const pageHex = page.toLowerCase()
+      const loaded = await loadGroup(ctx, { ...identity, page: pageHex }, group, { secrets: true, as: { page: pageHex, box } })
+      try {
+        return await fn(loaded, pageHex)
+      } finally {
+        wipeSecrets(loaded)
+      }
+    })
+  } finally {
+    groupCrypto.wipe(box.secretKey)
+  }
+}
+
+// The page's writer a sealed post goes in: counted live by the fold, of the
+// page's diary and under the page's group box.
+function pageLiveWriter (loaded, pageHex) {
+  const { view } = loaded
+  if (loaded.secrets === null || view.members.get(pageHex) !== 'member' || !(view.liveWriters instanceof Set)) return null
+  for (const key of [...loaded.secrets.mine].sort()) {
+    if (view.liveWriters.has(key) && view.writers.has(key)) return key
+  }
+  return null
+}
+
+// No epoch key opened here for the fold's epoch: a seal would fail.
+function pageEpochMissing (loaded) {
+  const { view } = loaded
+  return view.rekeyPending || view.epoch === null || loaded.secrets === null || !loaded.secrets.held.has(refId(view.epoch))
+}
+
+// 'rekey-pending' also when no epoch held covers the page's live writer.
+function pageKeyState (loaded, pageHex) {
+  if (!loaded.private) return 'ok'
+  if (loaded.view.rekeyPending) return 'rekey-pending'
+  return pageLiveWriter(loaded, pageHex) !== null && pageEpochMissing(loaded) ? 'rekey-pending' : 'ok'
+}
+
+// group.read with `page` -> group.read's shape plus `role`, the page's,
+// and `visibility`. A root not held here is NOT_FOUND (the next sync run
+// pages the roots of the held pages' diaries).
+async function pageGroupRead (ctx, { group, page, box, limit = 30, before = null }) {
+  return withPageGroup(ctx, { group, page, box }, (loaded, pageHex) => ({
+    ...readFold(loaded, pageHex, { limit, before }),
+    state: pageKeyState(loaded, pageHex),
+    role: groupRole(loaded.view, pageHex),
+    // From the root header this fold verified, never from the service.
+    visibility: loaded.private ? 'private' : 'public'
+  }))
+}
+
+// group.read with `page` while this device holds no secrets for the page:
+// the visibility of the stored root header (it needs no key), and nothing
+// else. NOT_FOUND when the root is blocked, not held or never folds.
+async function pageGroupNoKey (ctx, { group }) {
+  if (typeof group !== 'string' || !HEX64.test(group)) throw groupNotFound()
+  const key = group.toLowerCase()
+  return withIdentity(ctx, async ({ store, association }) => {
+    if (enforcedBlocklist(ctx.dataDir, association).blocked.has(key)) throw groupNotFound()
+    if (!(await replicaStored(store, key))) throw groupNotFound()
+    const root = store.get({ key: b4a.from(key, 'hex'), writable: false, active: false })
+    let header = null
+    try {
+      await root.ready()
+      if (root.fork === 0 && root.contiguousLength > 0) header = decodeBlock(await root.get(0, { wait: false, raw: true }))
+    } finally {
+      await root.close()
+    }
+    if (header === null || groups.validateGroupHeader(header) !== null || header.kind !== 'group') throw groupNotFound()
+    return {
+      items: [],
+      next: null,
+      hidden: 0,
+      incomplete: false,
+      sealed: 0,
+      epoch: null,
+      state: 'no-key',
+      role: null,
+      visibility: header.visibility === 'private' ? 'private' : 'public'
+    }
+  })
+}
+
+// group.seal: a group-post sealed under the epoch the fold holds eligible
+// for the page's live writer -> { kid, nonce, box, at, writer, seq } (seq:
+// that writer core's length here), for the owner or an admin to send as
+// 'group-seal'. Writes nothing.
+async function pageGroupSeal (ctx, { group, page, box, text, replyTo = null, fwd = 0 }) {
+  return withPageGroup(ctx, { group, page, box }, (loaded, pageHex) => {
+    if (!loaded.private) throw new UsageError('grupo público não usa chave')
+    const writer = pageLiveWriter(loaded, pageHex)
+    if (writer === null) {
+      if (loaded.view.rekeyPending) throw new UsageError(REKEY_PENDING)
+      throw groupPermission()
+    }
+    const record = buildRecord(() => groups.groupPost({ text, replyTo, fwd, seen: loaded.view.last, sealed: true }))
+    const sealed = sealGroupRecord(loaded, writer, record)
+    const log = loaded.logs.find((l) => l.key === writer) || loaded.input.writers.find((l) => l.key === writer)
+    return {
+      kid: { writer: sealed.kid.writer, seq: sealed.kid.seq },
+      nonce: sealed.nonce,
+      box: sealed.box,
+      at: sealed.at,
+      writer,
+      seq: log.signed
+    }
+  })
+}
+
+// The roots `pages` are in, from each stored page diary's live group-join
+// records: what a sync run pages for the pages held here. A page not stored
+// here, or not admitted, adds nothing.
+async function pageGroupRoots (ctx, pages) {
+  return withIdentity(ctx, async ({ store, association }) => {
+    const { blocked, revokedIssuers } = enforcedBlocklist(ctx.dataDir, association)
+    return storedPageRoots(store, pages, { association, blocked, revokedIssuers })
   })
 }
 
@@ -4481,6 +4619,10 @@ module.exports = {
   groupLeave,
   groupPost,
   groupRead,
+  pageGroupRead,
+  pageGroupNoKey,
+  pageGroupSeal,
+  pageGroupRoots,
   groupList,
   groupInfo,
   groupMembers,

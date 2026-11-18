@@ -73,7 +73,7 @@ const { pageLifecycle, originOf, verifyClose, verifyMoved } = require('./page-li
 const { certForKey, seederCertForKey } = require('./cert')
 const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./blocklist')
 const { attachBlocklist } = require('./blocklist-net')
-const { validateGroupHeader, validateWriterHeader, buildCommunity, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
+const { validateGroupHeader, validateWriterHeader, buildCommunity, diaryGroupKeys, groupJoinHistory, groupCutHistory, groupConfirmHistory, diaryWriterCut, diaryWalkRecords, walkRecordsCut, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS_PER_DIARY, MAX_FROZEN_WRITERS_PER_DIARY, MAX_WRITER_RELEASES_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = require('./group')
 const { advertisedHeld, keptPastSeqs, askHeld, peerHolds, nextHeld } = require('./sparse-held')
 const { attachGroups, GROUPS_LIMIT_MAX, GROUPS_REQUEST_TIMEOUT_MS, MESSAGE_BURST: GROUPS_BURST, MESSAGE_RATE: GROUPS_RATE } = require('./groups-net')
 const {
@@ -261,6 +261,41 @@ function recordBoundRoot (dataDir, root) {
   writeJsonAtomic(path.join(dataDir, 'bound-roots.json'), { v: 1, roots: roots.slice(-MAX_BOUND_ROOTS) }, 0o600)
 }
 
+// The roots the stored diaries of `pages` (the Páginas whose secrets the
+// node holds, docs/rpc.md 5.114) bind with live group-join records. Each
+// page diary is judged as a followed one (member.js skipReason: blocked,
+// fork, certificate, revoked issuer) before its records count; a page not
+// stored adds nothing, a blocked root is left out. Every replica opened
+// here is closed: an open one would be replicated in full to any peer.
+// `onError()` on a page diary that cannot be read.
+async function storedPageRoots (store, pages, { association, blocked, revokedIssuers = null, onError = noop }) {
+  const out = []
+  const seen = new Set()
+  for (const page of Array.isArray(pages) ? pages : []) {
+    if (typeof page !== 'string' || !HEX64.test(page.toLowerCase())) continue
+    const pageHex = page.toLowerCase()
+    if (seen.has(pageHex)) continue
+    seen.add(pageHex)
+    if (blocked.has(pageHex) || !(await replicaStored(store, pageHex))) continue
+    let core = null
+    let entries = null
+    try {
+      core = await openReplica(store, pageHex)
+      if (core.fork === 0) entries = await readAll(core)
+    } catch {
+      onError()
+      continue
+    } finally {
+      if (core !== null) await core.close().catch(noop)
+    }
+    if (entries === null || entries.length === 0 || entries[0].seq !== 0) continue
+    if (validateRecord(entries[0].record, 0) !== null) continue
+    if (!certForKey(entries[0].record.cert, pageHex, association, { revokedIssuers }).ok) continue
+    for (const key of diaryGroupKeys(entries)) if (!blocked.has(key) && !out.includes(key)) out.push(key)
+  }
+  return out
+}
+
 // Block 0 (the certificate) of each binding diary whose foreign writer or
 // root activated here, kept in group-certs.json, newest last, as kv
 // groupCerts in the browser. Protecting the revocation of an issuer from a
@@ -325,6 +360,8 @@ function gateVerdict (raw, keyHex, associationHex, revokedIssuers = null) {
 // community root; a group header there is this node's own verdict
 // 'not-community'), 'group' a group this node joined and 'catalogue' a
 // group root paged only so a community can name it (both a group header).
+// 'any' marks a held page's root whose kind is not known yet (either
+// kind; its verified header decides it, notePageKind).
 // A v1 header is 'header-invalid' (validateGroupHeader calls it legacy).
 function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
   try {
@@ -336,7 +373,7 @@ function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
       // group may be private.
       if (validateGroupHeader(header) !== null) return 'header-invalid'
       if (role === 'community' && header.kind === 'group') return 'not-community'
-      if (header.kind !== (role === 'community' ? 'community' : 'group')) return 'header-invalid'
+      if (role !== 'any' && header.kind !== (role === 'community' ? 'community' : 'group')) return 'header-invalid'
     } else {
       if (validateWriterHeader(header) !== null) return 'header-invalid'
       if (header.group !== group) return 'wrong-group'
@@ -352,7 +389,7 @@ function groupHeaderVerdict (raw, key, group, diary, role = 'group') {
 // which role it pages a key under, so a mismatch is its own verdict
 // 'header-invalid', never charged to the seeder (like a `box` mismatch).
 function memberMismatch (raw, key, group, role) {
-  if (key === group) return false
+  if (key === group || role === 'any') return false
   try {
     const header = decodeBlock(raw)
     if (header === null || validateWriterHeader(header) !== null) return false
@@ -572,6 +609,9 @@ async function runSync ({
   gateTimeoutMs = GATE_TIMEOUT_MS,
   maxGroupWriters = MAX_GROUP_WRITERS,
   maxHeaderStubs = MAX_HEADER_STUBS,
+  // The Páginas whose secrets the node holds (docs/rpc.md 5.114): the
+  // roots their stored diaries bind are paged like local groups.
+  pages = [],
   messageBurst = MESSAGE_BURST,
   messageRate = MESSAGE_RATE,
   openHook = null,
@@ -681,6 +721,10 @@ async function runSync ({
   // (local groups + communities) * MAX_GROUP_WRITERS cores plus the
   // catalogue roots (coreLimit).
   const ownCommunities = new Set() // groupList entries that are communities
+  // Held pages' roots (addPageRoots, writer null) -> their kind from the
+  // root header ('group' | 'community'), null until a header is known: a
+  // page's community is paged as a community, its groups as groups.
+  const pageKinds = new Map()
   const parents = new Map() // community key -> Set of local groups whose held root names it
   const parentOf = new Map() // local group -> the community its held root names
   const told = new Set() // communities a community-parent event already named
@@ -2261,6 +2305,65 @@ async function runSync ({
 
   // ---- groups (header comment) ----
 
+  // The roots the stored diaries of the held pages bind with live
+  // group-join records, each paged as a local group with no own writer
+  // (writer null, as a parent): a page's private groups then fold here with
+  // the page's group box. A blocked page or root adds nothing; the fold
+  // gates the page diary again. At most MAX_GROUPS_PER_DIARY per page.
+  async function addPageRoots () {
+    const held = (Array.isArray(pages) ? pages : []).filter((p) => typeof p !== 'string' || p.toLowerCase() !== ownHex)
+    if (held.length === 0) return
+    const roots = await storedPageRoots(store, held, {
+      association,
+      blocked: blocklist.blocked(),
+      revokedIssuers: revokedIssuers(),
+      onError: () => log('aviso: falha ao ler os grupos de uma página')
+    })
+    for (const key of roots) {
+      if (ending) return
+      if (groupSet.has(key)) continue
+      groupList.push({ group: key, writer: null, nonce: null })
+      groupSet.add(key)
+      pageKinds.set(key, null)
+      // As openOwnWriters does for a stored own root.
+      const raw = await storedRootHeader(key)
+      if (raw === null) continue
+      notePageKind(key, raw)
+      noteRootVisibility(key, rootVisibility(raw))
+      noteParent(key, raw)
+    }
+  }
+
+  // Block 0 of a stored root, read here only, else null.
+  async function storedRootHeader (group) {
+    if (!(await replicaStored(store, group))) return null
+    try {
+      const core = await openGroupReplica(store, group)
+      try {
+        return await readLocal(core, 0)
+      } finally {
+        await core.close().catch(noop)
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // A held page's root takes the kind its valid root header names, once.
+  // A community is then paged as one (its CWs, its catalogue), as a parent
+  // with no own writer; a group root names its parent.
+  function notePageKind (group, raw) {
+    if (raw === null || pageKinds.get(group) !== null) return
+    let header
+    try {
+      header = decodeBlock(raw)
+    } catch {
+      return
+    }
+    if (header === null || validateGroupHeader(header) !== null) return
+    pageKinds.set(group, header.kind === 'community' ? 'community' : 'group')
+  }
+
   // groups.json is our own file, but each entry's writer must be the core its
   // nonce opens; at most MAX_GROUPS_PER_DIARY groups, the earliest first.
   async function openOwnWriters () {
@@ -2396,6 +2499,7 @@ async function runSync ({
   // list first, then a parent a held group root names, else a catalogue
   // root.
   function roleOf (group) {
+    if (pageKinds.has(group)) return pageKinds.get(group) || 'any'
     if (groupSet.has(group)) return ownCommunities.has(group) ? 'community' : 'group'
     return parents.has(group) ? 'community' : 'catalogue'
   }
@@ -2429,7 +2533,7 @@ async function runSync ({
   // A held local group root names its community (the header is
   // immutable): that community is paged as a parent from now on.
   function noteParent (group, raw) {
-    if (ending || !groupSet.has(group) || ownCommunities.has(group) || parentOf.has(group)) return
+    if (ending || !groupSet.has(group) || ownCommunities.has(group) || pageKinds.get(group) === 'community' || parentOf.has(group)) return
     const community = raw === null ? null : rootCommunity(raw)
     if (community === null || community === group) return
     parentOf.set(group, community)
@@ -4226,7 +4330,10 @@ async function runSync ({
       failGroupCore(e, r.reason, { purge: e.accepted && condemning(r.reason) })
       return
     }
-    if (e.key === e.group) noteRootVisibility(e.group, rootVisibility(r.gatedRaw))
+    if (e.key === e.group) {
+      noteRootVisibility(e.group, rootVisibility(r.gatedRaw))
+      notePageKind(e.group, r.gatedRaw)
+    }
     if (ending) {
       await closeOpened()
       return
@@ -5648,6 +5755,7 @@ async function runSync ({
     if (!ending) await sweepRevoked()
     // And every stored diary that forked, with what it binds.
     if (!ending) await sweepForkedDiaries()
+    if (!ending) await addPageRoots()
     if (!ending) await reviewHeaderStubs()
     if (!ending) await loadDiskSlots()
     // Growth while a scan runs marks it to go again (scanCatalogue `again`).
@@ -5774,7 +5882,7 @@ async function runSync ({
       }
       for (const g of groupList) {
         topics.push(Hypercore.discoveryKey(b4a.from(g.group, 'hex')))
-        if (g.writer !== g.group) topics.push(ownWriters.get(g.writer).core.discoveryKey)
+        if (g.writer !== null && g.writer !== g.group) topics.push(ownWriters.get(g.writer).core.discoveryKey)
       }
       stopDiaryWatch = watchContiguous(diary, (length) => {
         broadcast({ type: 'have', key: ownHex, length })
@@ -5857,6 +5965,7 @@ module.exports = {
   sweepDeleted,
   readBoundRoots,
   recordBoundRoot,
+  storedPageRoots,
   runSync,
   heldCatalogue,
   createRequestPacer,
