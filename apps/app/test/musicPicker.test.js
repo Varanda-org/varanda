@@ -13,7 +13,7 @@ async function helpers (stubs = {}, code = source) {
   const deps = { ...music, ...playback, ...stubs }
   const body = code.slice(code.indexOf('export const musicSearchIdle'), code.indexOf('export function MusicPicker')).replace(/\bexport /g, '')
   // eslint-disable-next-line no-new-func
-  return new Function(...Object.keys(deps), body + '\nreturn { musicSearchIdle, musicSearchStep, musicPickStep, createSnippetPreview }')(...Object.values(deps))
+  return new Function(...Object.keys(deps), body + '\nreturn { musicSearchIdle, musicSearchStep, musicSuggestIdle, musicSuggestStep, musicSuggestShown, musicPickStep, createSnippetPreview }')(...Object.values(deps))
 }
 
 function deferred () {
@@ -104,6 +104,7 @@ async function ui (stubs = {}, code = source, names = 'MusicContent, MusicPicker
       effects.push(() => { old?.cleanup?.(); entry.cleanup = fn() })
     },
     tap: () => {},
+    audiusTrending: () => new Promise(() => {}),
     createSnippetLoop: () => ({ open () {}, setStart () {}, toggle () {}, stop () {}, release () {} }),
     loopIdle: { phase: 'idle', ms: 0, error: '' },
     StyleSheet: { create: (value) => value },
@@ -232,6 +233,44 @@ test('search errors use the shared texts and retry only on request', async (t) =
     t.is(s.error, code === 'limite-musica' ? m.MUSIC_LIMIT_TEXT : m.MUSIC_UNAVAILABLE_TEXT, code)
     t.is(step(s, { type: 'more' }), s, 'end reached never retries a failure')
     t.is(step(s, { type: 'retry' }).phase, 'waiting')
+  }
+})
+
+test('suggestions follow the normalized query and track tab', async (t) => {
+  const { musicSearchIdle, musicSearchStep, musicSuggestShown } = await helpers()
+  for (const [text, kind, shown] of [['', 'track', true], ['  ', 'track', true], ['samba', 'track', false], ['', 'playlist', false]]) {
+    t.is(musicSuggestShown(musicSearchStep(musicSearchIdle, { type: 'query', text, kind })), shown)
+  }
+})
+
+test('suggestion transitions preserve extra state and accept only the current loading generation', async (t) => {
+  const { musicSuggestIdle, musicSuggestStep: step } = await helpers()
+  const { MUSIC_LIMIT_TEXT, MUSIC_UNAVAILABLE_TEXT } = await import('../src/music.js')
+  const idle = { ...musicSuggestIdle, extra: 'kept' }
+  const loading = step(idle, { type: 'load' })
+  t.alike(loading, { ...idle, phase: 'loading', gen: 1 })
+  const page = { type: 'page', gen: loading.gen, page: { items: [track('b'), track('b', 45), track('a')], next: null } }
+  const ready = step(loading, page)
+  t.alike(ready, { ...loading, phase: 'ready', items: [track('b'), track('a')] })
+  const fail = { type: 'fail', gen: loading.gen }
+  const failed = (code) => step(loading, { ...fail, error: { code } })
+  const error = failed('indisponivel')
+  t.alike(error, { ...loading, phase: 'error', error: MUSIC_UNAVAILABLE_TEXT })
+  t.alike(failed('limite-musica'), { ...error, error: MUSIC_LIMIT_TEXT })
+  const off = failed('feature-off')
+  t.alike(off, { ...loading, phase: 'off' })
+  t.alike(failed('nao-encontrado'), off)
+  t.alike(step(error, { type: 'retry' }), { ...loading, gen: 2 })
+  for (const state of [idle, loading, ready, error, off]) {
+    if (state !== idle) t.is(step(state, { type: 'load' }), state)
+    if (state !== error) t.is(step(state, { type: 'retry' }), state)
+    for (const action of [page, fail]) {
+      if (state !== loading) t.is(step(state, { ...action, gen: state.gen }), state)
+      t.is(step(state, { ...action, gen: state.gen - 1 }), state)
+    }
+    const reset = step(state, { type: 'reset' })
+    t.alike(reset, { ...idle, gen: state.gen + 1 })
+    t.is(step(reset, page), reset)
   }
 })
 
@@ -560,7 +599,7 @@ test('rows and the editor ask a cover only through useMusicCover', async (t) => 
   t.is(flatten(fallback).find((n) => n.type === 'MusicCover').props.uri, null, 'the editor also keeps the generated tile')
 })
 
-async function pickerFixture (t, props = {}) {
+async function pickerFixture (t, props = {}, stubs = {}) {
   const searches = []
   const preview = []
   const timers = new Map()
@@ -570,7 +609,8 @@ async function pickerFixture (t, props = {}) {
     audiusPlay: async (id) => { preview.push(['ticket', id]); return answer },
     createStreamPlayer: () => ({ seek: async () => {}, play: async () => { preview.push(['play']) }, pause () {}, release: () => preview.push(['release']), onProgress: () => () => {}, onError: () => () => {} }),
     setTimeout: (fn) => { timers.set(++serial, fn); return serial },
-    clearTimeout: (id) => timers.delete(id)
+    clearTimeout: (id) => timers.delete(id),
+    ...stubs
   })
   t.teardown(h.unmount)
   const picks = []
@@ -587,6 +627,165 @@ async function pickerFixture (t, props = {}) {
   const rows = (nodes) => nodes.find((n) => n.type === 'FlatList').props.data.map((item) => nodes.find((n) => n.type === 'FlatList').props.renderItem({ item }))
   return { h, p, render, search, rows, flush, searches, preview, picks, get closed () { return closed } }
 }
+
+async function suggestionFixture (t, props, stubs) {
+  const calls = []
+  const picker = await pickerFixture(t, props, {
+    audiusTrending: (session) => {
+      const pending = deferred()
+      calls.push({ ...pending, session })
+      return pending.promise
+    },
+    ...stubs
+  })
+  return { ...picker, calls }
+}
+
+const headingOf = (nodes) => nodes.find((n) => n.props.accessibilityRole === 'header')
+const noticeOf = (nodes) => nodes.find((n) => n.props.accessibilityLiveRegion === 'polite')
+const retryOf = (nodes) => nodes.find((n) => n.props.label === 'Tentar de novo')
+
+test('typing while suggestions load preserves the page for the empty track tab', async (t) => {
+  const f = await suggestionFixture(t)
+  let nodes = f.render()
+  t.is(f.calls.length, 1)
+  t.alike(headingOf(nodes).children, ['Em alta no Audius'])
+  t.ok(nodes.some((n) => n.type === 'ActivityIndicator'))
+  nodes = await f.search('samba')
+  t.alike(f.searches, [['samba', 'track']])
+  t.absent(f.calls[0].session.signal.aborted)
+  const item = track('weekly')
+  f.calls[0].resolve({ items: [item], next: null })
+  await f.flush()
+  nodes = f.render()
+  t.absent(headingOf(nodes))
+  t.alike(f.rows(nodes).map((row) => row.props.item.id), ['abc', 'def'])
+  mainOf(f.rows(nodes)[0]).props.onPress()
+  sheetOf(f.render()).props.onBack()
+  nodes = await f.search('')
+  t.alike(headingOf(nodes).children, ['Em alta no Audius'])
+  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
+  nodes.find((n) => n.type === 'Segmented').props.onSelect('playlist')
+  nodes = f.render()
+  t.alike(f.rows(nodes), [])
+  t.absent(headingOf(nodes))
+  t.absent(noticeOf(nodes))
+  nodes.find((n) => n.type === 'Segmented').props.onSelect('track')
+  nodes = f.render()
+  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
+  t.is(f.calls.length, 1)
+  t.alike(f.searches, [['samba', 'track']])
+  t.alike(f.preview, [])
+  f.p.open = false
+  f.render()
+  f.p.open = true
+  f.render()
+  t.is(f.calls.length, 2, 'a new opening asks for a fresh page')
+  f.calls[1].resolve({ items: [track('new')], next: null })
+  await f.flush()
+  nodes = f.render()
+  t.alike(headingOf(nodes).children, ['Em alta no Audius'])
+  t.alike(f.rows(nodes).map((row) => row.props.item.id), ['new'])
+  nodes = await f.search('jazz')
+  t.absent(headingOf(nodes))
+  t.alike(f.rows(nodes).map((row) => row.props.item.id), ['abc', 'def'])
+  t.is(f.calls.length, 2)
+})
+
+test('an editor-first opening waits for back and a suggested track opens the snippet editor', async (t) => {
+  const item = track('weekly')
+  const f = await suggestionFixture(t, { modes: ['snippet'], initial: { ref: { kind: 'snippet', id: 'abc', start: 2 }, item: track() } })
+  sheetOf(f.render()).props.onBack()
+  t.is(f.calls.length, 0)
+  f.render()
+  t.is(f.calls.length, 1)
+  f.calls[0].resolve({ items: [item], next: null })
+  await f.flush()
+  const [row] = f.rows(f.render())
+  t.is(row.props.kind, 'track')
+  mainOf(row).props.onPress()
+  const editor = f.render().find((n) => n.type === 'MusicEditor')
+  t.is(editor.props.kind, 'snippet')
+  t.is(editor.props.item, item)
+  t.alike(f.preview, [])
+  const playlist = await suggestionFixture(t, { modes: ['playlist'] })
+  const nodes = playlist.render()
+  t.is(playlist.calls.length, 0)
+  t.absent(headingOf(nodes))
+  t.absent(noticeOf(nodes))
+  t.alike(playlist.rows(nodes), [])
+})
+
+test('only a tap retries suggestions and an empty search has its own notice', async (t) => {
+  const f = await suggestionFixture(t, {}, { audiusSearch: async () => ({ items: [], next: null }) })
+  f.render()
+  f.calls[0].reject({ code: 'indisponivel' })
+  await f.flush()
+  let nodes = f.render()
+  t.alike(noticeOf(nodes).children, ['Música indisponível agora'])
+  t.absent(headingOf(nodes))
+  t.ok(retryOf(nodes))
+  nodes = await f.search('samba')
+  t.alike(noticeOf(nodes).children, ['Nenhuma música encontrada'])
+  t.absent(retryOf(nodes))
+  nodes = await f.search('')
+  t.is(f.calls.length, 1)
+  retryOf(nodes).props.onPress()
+  nodes = f.render()
+  t.is(f.calls.length, 2)
+  t.absent(noticeOf(nodes))
+  t.absent(retryOf(nodes))
+  f.calls[1].resolve({ items: [], next: null })
+  await f.flush()
+  nodes = f.render()
+  t.absent(headingOf(nodes))
+  t.alike(noticeOf(nodes).children, ['Nenhuma sugestão agora'])
+})
+
+test('a service without suggestions leaves the empty picker quiet and search usable', async (t) => {
+  const f = await suggestionFixture(t)
+  f.render()
+  f.calls[0].reject({ code: 'nao-encontrado' })
+  await f.flush()
+  t.is(f.rows(await f.search('samba')).length, 2)
+  const nodes = await f.search('')
+  t.absent(headingOf(nodes))
+  t.absent(noticeOf(nodes))
+  t.absent(retryOf(nodes))
+  t.absent(nodes.some((n) => n.type === 'ActivityIndicator'))
+  t.alike(f.rows(nodes), [])
+  t.is(f.calls.length, 1)
+})
+
+test('session changes discard the previous suggestion page and abort pending answers', async (t) => {
+  const f = await suggestionFixture(t, { member: 'a', origin: 'first', request () {} })
+  f.render()
+  f.calls[0].resolve({ items: [track('first')], next: null })
+  await f.flush()
+  t.is(f.rows(f.render())[0].props.item.id, 'first')
+  f.p.member = 'b'
+  t.alike(f.rows(f.render()), [])
+  t.is(f.calls.length, 2)
+  t.is(f.calls[1].session.member, 'b')
+  f.p.origin = 'second'
+  f.render()
+  t.ok(f.calls[1].session.signal.aborted)
+  t.is(f.calls.length, 3)
+  t.is(f.calls[2].session.origin, 'second')
+  f.p.request = () => {}
+  f.render()
+  t.ok(f.calls[2].session.signal.aborted)
+  t.is(f.calls.length, 4)
+  t.is(f.calls[3].session.request, f.p.request)
+  f.calls[3].resolve({ items: [track('current')], next: null })
+  await f.flush()
+  f.calls[1].resolve({ items: [track('stale')], next: null })
+  f.calls[2].reject({ code: 'limite-musica' })
+  await f.flush()
+  const nodes = f.render()
+  t.alike(f.rows(nodes).map((row) => row.props.item.id), ['current'])
+  t.absent(noticeOf(nodes))
+})
 
 test('a row preview plays without opening the editor', async (t) => {
   const f = await pickerFixture(t)
@@ -781,7 +980,7 @@ test('initial reopens the editor at the chosen start', async (t) => {
   t.is(nodes.find((n) => n.type === 'MusicEditor').props.kind, 'track', 'initial is read on opening only')
 })
 
-test('reopening from the sticker never focuses the hidden search', async (t) => {
+test('the search field stays unfocused on opening, reopening and returning from the editor', async (t) => {
   const item = track('abc', 90)
   const choice = { ref: { kind: 'snippet', id: 'abc', start: 42 }, item }
   const focused = (nodes) => nodes.find((n) => n.type === 'TextInput' && n.props.accessibilityLabel === 'Buscar música')
@@ -801,8 +1000,12 @@ test('reopening from the sticker never focuses the hidden search', async (t) => 
   t.is(nodes.find((n) => n.type === 'MusicEditor').props.start, 42)
   const g = await pickerFixture(t, { modes: ['snippet', 'track'] })
   nodes = g.render()
-  t.is(focused(nodes).props.autoFocus, true)
+  t.is(focused(nodes).props.autoFocus, false)
   t.absent(nodes.some((n) => n.type === 'MusicEditor'))
+  g.p.open = false
+  g.render()
+  g.p.open = true
+  t.is(focused(g.render()).props.autoFocus, false)
 })
 
 test('closing without Concluído picks nothing', async (t) => {

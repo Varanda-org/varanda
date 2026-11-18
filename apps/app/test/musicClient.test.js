@@ -221,6 +221,103 @@ test('audiusSearch: a session refused with the daily limit says so', async (t) =
   t.is(calls.length, 2, 'no search, no retry')
 })
 
+test('audiusTrending: session, then the token in the header and an empty body', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const origin = 'https://mus-trending.example.org'
+  const signs = []
+  const routes = session({ '/account/audius/trending': json(200, { items: [track], next: null }) })
+  const calls = stub(t, routes)
+  const opts = { origin, member: M, request: signer(signs) }
+  t.alike(await a.audiusTrending(opts), { items: [track], next: null })
+  t.alike(signs, [{ method: 'invite.sign', args: { action: 'summary', nonce: NONCE } }])
+  t.alike(calls.map(({ url, init }) => init.method + ' ' + url), [
+    'POST ' + origin + '/account/audius/session/start',
+    'POST ' + origin + '/account/audius/session/finish',
+    'POST ' + origin + '/account/audius/trending?covers=1&info=1'
+  ])
+  t.is(calls[2].init.body, '{}')
+  t.is(calls[2].init.headers.authorization, 'Bearer ' + TOKEN)
+  routes['/account/audius/trending'] = json(200, { items: [], next: null })
+  t.alike(await a.audiusTrending(opts), { items: [], next: null })
+  t.is(calls.length, 4, 'the session is reused and the list is fetched again')
+})
+
+test('audiusTrending: an invalid member never fetches', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session())
+  t.is(await code(t, a.audiusTrending({ member: 'zz', request: signer([]) })), 'pedido-invalido')
+  t.is(calls.length, 0)
+})
+
+test('audiusTrending: only a track list with a null next is accepted', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const routes = session()
+  stub(t, routes)
+  const opts = { member: M, request: signer([]) }
+  for (const body of [
+    { items: [], next: null, x: 1 },
+    { items: [] },
+    { items: [playlist], next: null },
+    { items: [track], next: '12' }
+  ]) {
+    routes['/account/audius/trending'] = json(200, body)
+    t.is(await code(t, a.audiusTrending(opts)), 'indisponivel', JSON.stringify(body))
+  }
+})
+
+test('audiusTrending: one fresh session and one more try after a 401 only', async (t) => {
+  const a = await load()
+  const routes = session()
+  const calls = stub(t, routes)
+  const opts = { member: M, request: signer([]) }
+  const refusal = json(401, { error: 'nao-autorizado' })
+  const answer = { items: [], next: null }
+  const freshToken = 'u'.repeat(43)
+  for (const retryAnswer of [json(200, answer), refusal]) {
+    a.forgetAudiusSession()
+    calls.length = 0
+    let finishes = 0
+    let attempts = 0
+    routes['/account/audius/session/finish'] = () => json(200, { token: ++finishes === 1 ? TOKEN : freshToken, expiresAt: LATER })
+    routes['/account/audius/trending'] = () => (++attempts === 1 ? refusal : retryAnswer)
+    if (retryAnswer.ok) t.alike(await a.audiusTrending(opts), answer)
+    else t.is(await code(t, a.audiusTrending(opts)), 'nao-autorizado')
+    t.alike(calls.map(({ url }) => new URL(url, 'https://x.example').pathname), [
+      '/account/audius/session/start', '/account/audius/session/finish', '/account/audius/trending',
+      '/account/audius/session/start', '/account/audius/session/finish', '/account/audius/trending'
+    ])
+    t.alike(reads(calls, '/trending').map(({ init }) => init.headers.authorization), ['Bearer ' + TOKEN, 'Bearer ' + freshToken])
+  }
+})
+
+test('audiusTrending: other refusals keep their route-specific codes and never retry', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const routes = session({ '/account/audius/trending': json(200, { items: [], next: null }) })
+  const calls = stub(t, routes)
+  const opts = { member: M, request: signer([]) }
+  await a.audiusTrending(opts)
+  for (const [res, want, why, message] of [
+    [json(404, { error: 'feature-off' }), 'feature-off', 'the feature off', 'Música indisponível agora'],
+    [json(404, { error: 'nao-encontrado' }), 'nao-encontrado', 'an older service', 'Música indisponível agora'],
+    [json(429, { error: 'limite-musica' }), 'limite-musica', 'the daily limit'],
+    [json(500, { error: 'indisponivel' }), 'indisponivel', '500'],
+    [json(503, { error: 'indisponivel' }), 'indisponivel', '503'],
+    [() => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }) }, 'indisponivel', 'a timeout'],
+    [() => { throw new TypeError('network') }, 'indisponivel', 'a network error']
+  ]) {
+    routes['/account/audius/trending'] = res
+    const before = calls.length
+    const err = await a.audiusTrending(opts).catch((err) => err)
+    t.is(err?.code, want, why)
+    if (message) t.is(err?.message, message, why)
+    t.is(calls.length - before, 1, why + ': one fetch, no retry and no new session')
+  }
+})
+
 test('audiusItem: { kind, id } in the body, strict answer', async (t) => {
   const a = await load()
   a.forgetAudiusSession()

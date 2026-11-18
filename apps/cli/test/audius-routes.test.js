@@ -31,6 +31,9 @@ const {
   MEMBER_BUDGET_PER_DAY,
   PROVIDER_CALLS_PER_DAY,
   ARTS_PER_DAY,
+  TRENDINGS_PER_DAY,
+  TRENDING_ASK,
+  TRENDING_RETRY_MS,
   ART_MAX_BYTES,
   MAX_ART_CACHED,
   MAX_ART_INFLIGHT,
@@ -175,7 +178,10 @@ function fakeApi (state) {
   // adds its own fields to that item. state.storage[id] names the host the
   // stream of that track redirects to (NODE by default); Signed1's redirect
   // carries a new ?sig= on every walk, as a presigned URL would, and Long1's
-  // a query that makes the URL longer than the service keeps.
+  // a query that makes the URL longer than the service keeps. The trending
+  // list answers state.trendingStatus when set, holds the request in
+  // state.trendingHeld while state.trendingHold is set, and answers
+  // state.trendingData when set.
   const withArt = (item) => {
     if (item === null || typeof item !== 'object') return item
     let out = item
@@ -209,6 +215,12 @@ function fakeApi (state) {
       ]
       while (data.length < 12) data.push(track('Fill' + data.length))
       return json(res, 200, { data: offset >= 492 ? data.slice(0, 3) : data })
+    }
+    if (p === '/v1/tracks/trending') {
+      if (state.trendingHold) return state.trendingHeld.push(res)
+      if (state.trendingStatus) return json(res, state.trendingStatus, { error: 'erro' })
+      if (state.trendingData) return json(res, 200, { data: state.trendingData })
+      return json(res, 200, { data: trendingData() })
     }
     if (p === '/v1/playlists/search') {
       return json(res, 200, { data: [playlist('Pl1'), playlist('Pl2', { is_private: true }), playlist('Pl3', { track_count: 0 })] })
@@ -265,6 +277,21 @@ function fakeApi (state) {
     if (m) return json(res, 200, { data: [playlist(m[1] === 'SwapPl1' ? 'OtherPl1' : m[1])] })
     json(res, 404, {})
   })
+}
+
+// Two pages of the week's list: the dropped kinds and a duplicate of Hot1
+// among them, and more admitted tracks than one page holds.
+function trendingData () {
+  const data = [
+    track('Hot1'),
+    track('HotGated1', { is_stream_gated: true }),
+    track('HotUnlisted1', { is_unlisted: true }),
+    track('bad id'),
+    track('HotNoUser1', { user: null }),
+    track('Hot1', { title: 'Repetida' })
+  ]
+  while (data.length < 24) data.push(track('Hot' + data.length))
+  return data
 }
 
 // `answers` maps a path and query to the { status, headers, body } the node
@@ -402,7 +429,7 @@ function fakeArt () {
 async function setup (t, { audius = true, moments = false, covers = false, streams = 16, caps = {}, accepted = true, timers = null } = {}) {
   const clock = { offset: 0 }
   const now = () => Date.now() + clock.offset
-  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false, storage: {}, signed: 0 }
+  const state = { mode: 'ok', slow: [], artwork: {}, fields: {}, large: false, info: false, storage: {}, signed: 0, trendingStatus: 0, trendingHold: false, trendingHeld: [], trendingData: null }
   const dns = { moved: '127.0.0.1' }
   const api = fakeApi(state)
   const node = fakeNode()
@@ -2934,4 +2961,321 @@ test('audius: info=1 adds a track genre and year, never to a playlist, and combi
   const m = await off.login()
   const noCovers = await off.post(m.token, 'item?covers=1&info=1', { kind: 'track', id: 'Plain1' })
   t.alike(Object.keys(noCovers.json).sort(), INFO_KEYS)
+})
+
+// --- the week's trending list --------------------------------------------------
+
+const trendingCalls = (s) => s.api.seen.filter((r) => r.path === '/v1/tracks/trending').length
+const HOT_IDS = ['Hot1', 'Hot6', 'Hot7', 'Hot8', 'Hot9', 'Hot10', 'Hot11', 'Hot12', 'Hot13', 'Hot14', 'Hot15', 'Hot16']
+
+test('audius: trending constants, and the provider allowance formula is unchanged', async (t) => {
+  t.is(TRENDINGS_PER_DAY, 200)
+  t.is(TRENDING_ASK, 24)
+  t.is(TRENDING_RETRY_MS, 60 * 1000)
+  t.is(PROVIDER_CALLS_PER_DAY, 1760)
+})
+
+test('audius: trending is feature-off when off, and needs a session before any counter', async (t) => {
+  const off = await setup(t, { audius: false })
+  const res = await off.post(null, 'trending', {})
+  t.is(res.status, 404)
+  t.alike(res.json, { error: 'feature-off' })
+
+  const s = await setup(t, { caps: { trendings: 1 } })
+  for (let i = 0; i < 5; i++) {
+    t.is((await s.post(null, 'trending', {})).status, 401, 'without a token')
+    t.is((await s.post('A'.repeat(43), 'trending', {})).status, 401, 'with an unknown token')
+  }
+  t.is(s.api.seen.length, 0, 'the provider was never asked')
+  const { token } = await s.login()
+  t.is((await s.post(token, 'trending', {})).status, 200, 'the one use was untouched')
+})
+
+test('audius: a trending body with any key is refused before any counter or provider call', async (t) => {
+  const s = await setup(t, { caps: { trendings: 1 } })
+  const { token } = await s.login()
+  for (const body of [{ q: 'a' }, { cursor: '0' }, { kind: 'track' }, { time: 'month' }, { limit: 100 }, []]) {
+    const res = await s.post(token, 'trending', body)
+    t.is(res.status, 400, JSON.stringify(body))
+    t.alike(res.json, { error: 'pedido-invalido' })
+  }
+  t.is(s.api.seen.length, 0, 'nothing reached the provider')
+  t.is((await s.post(token, 'trending', {})).status, 200, 'and no use was spent')
+  t.is((await s.post(token, 'search', { q: '', kind: 'track' })).status, 400, 'search still refuses a blank query')
+})
+
+test('audius: trending answers one page of mapped tracks and asks the provider only the fixed week list', async (t) => {
+  const s = await setup(t)
+  const { token } = await s.login()
+  const res = await s.post(token, 'trending', {})
+  t.is(res.status, 200)
+  t.alike(Object.keys(res.json).sort(), ['items', 'next'])
+  t.is(res.json.next, null)
+  t.alike(res.json.items.map((i) => i.id), HOT_IDS, 'the first PAGE_SIZE admitted tracks, each once, in order')
+  for (const it of res.json.items) t.alike(Object.keys(it).sort(), TRACK_KEYS)
+  t.is(res.json.items[0].title, 'Musica Hot1', 'the first of a duplicate is kept')
+  const ids = res.json.items.map((i) => i.id)
+  for (const dropped of ['HotGated1', 'HotUnlisted1', 'bad id', 'HotNoUser1']) t.absent(ids.includes(dropped), dropped + ' dropped')
+
+  t.is(s.api.seen.length, 1)
+  const asked = s.api.seen[0]
+  t.is(asked.path, '/v1/tracks/trending')
+  t.alike(asked.query, { time: 'week', limit: '24', offset: '0', app_name: 'varanda' }, 'nothing else rides the URL')
+  t.is(asked.headers['x-api-key'], KEY, 'the key rides a header')
+  t.is(asked.headers['user-agent'], USER_AGENT)
+  t.ok(Object.keys(asked.headers).every((h) => PROVIDER_HEADERS.includes(h)), 'nothing else of ours')
+  t.absent(JSON.stringify(asked).includes(s.memberHex), 'never the member key')
+  t.absent(JSON.stringify(asked).includes(token), 'never the token')
+
+  t.ok(s.logs.some((e) => e.reason === 'em-alta'), 'logged as em-alta')
+  t.absent(JSON.stringify(s.logs).includes(s.memberHex), 'no member in a log line')
+  t.absent(JSON.stringify(s.logs).includes('Hot1'), 'no id in a log line')
+  noKeyAnywhere(t, s)
+  onlyLoopback(t, s)
+})
+
+test('audius: trending carries covers and song info only as search does', async (t) => {
+  const s = await setup(t, { covers: true })
+  s.state.info = true
+  const { token } = await s.login()
+  const plain = await s.post(token, 'trending', {})
+  for (const it of plain.json.items) t.alike(Object.keys(it).sort(), TRACK_KEYS, 'no query, no extra key')
+  const withCovers = await s.post(token, 'trending?covers=1', {})
+  for (const it of withCovers.json.items) {
+    t.alike(Object.keys(it).sort(), [...TRACK_KEYS, 'cover'].sort())
+    t.is(it.cover, true)
+  }
+  const withInfo = await s.post(token, 'trending?info=1', {})
+  for (const it of withInfo.json.items) t.alike(Object.keys(it).sort(), INFO_KEYS)
+  const both = await s.post(token, 'trending?covers=1&info=1', {})
+  for (const it of both.json.items) t.alike(Object.keys(it).sort(), [...INFO_KEYS, 'cover'].sort())
+  t.is(trendingCalls(s), 1, 'every variant came from the one list')
+  for (const r of s.responses) {
+    const text = r.raw.toString('latin1')
+    t.absent(text.includes(ART), 'no art host in a body')
+    t.absent(text.includes('artLarge') || text.includes('"art"'), 'no art key')
+  }
+
+  const off = await setup(t)
+  const m = await off.login()
+  const res = await off.post(m.token, 'trending?covers=1', {})
+  for (const it of res.json.items) t.alike(Object.keys(it).sort(), TRACK_KEYS, 'covers off adds no cover')
+})
+
+test('audius: one trending list serves every member for CACHE_TTL_MS, and a clock step back drops it', async (t) => {
+  const s = await setup(t)
+  const a = await s.login()
+  const b = await s.login(s.other)
+  for (let i = 0; i < 3; i++) {
+    t.is((await s.post(a.token, 'trending', {})).status, 200)
+    t.is((await s.post(b.token, 'trending', {})).status, 200)
+  }
+  t.is(trendingCalls(s), 1, 'one provider call for two members and six requests')
+  s.clock.offset += CACHE_TTL_MS - 1000
+  t.is((await s.post(b.token, 'trending', {})).status, 200)
+  t.is(trendingCalls(s), 1, 'still valid just before the TTL')
+  s.clock.offset += 1000
+  t.alike((await s.post(a.token, 'trending', {})).json.items.map((i) => i.id), HOT_IDS)
+  t.is(trendingCalls(s), 2, 'a new call once the TTL passed')
+  s.clock.offset -= CACHE_TTL_MS + 60 * 1000
+  t.is((await s.post(a.token, 'trending', {})).status, 200)
+  t.is(trendingCalls(s), 3, 'a list too far ahead after a step back is absent')
+})
+
+test('audius: an empty admitted trending list is kept and answered', async (t) => {
+  const s = await setup(t)
+  s.state.trendingData = [track('HotGated1', { is_stream_gated: true }), track('HotUnlisted1', { is_unlisted: true })]
+  const { token } = await s.login()
+  for (let i = 0; i < 3; i++) {
+    const res = await s.post(token, 'trending', {})
+    t.is(res.status, 200)
+    t.alike(res.json, { items: [], next: null })
+  }
+  t.is(trendingCalls(s), 1)
+})
+
+test('audius: concurrent cold trending requests share one provider call, charged to the member that started it', async (t) => {
+  const s = await setup(t, { caps: { calls: 1 } })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  s.state.trendingHold = true
+  const first = s.post(a.token, 'trending', {})
+  t.ok(await s.until(() => s.state.trendingHeld.length === 1), 'the first request reached the provider')
+  const second = s.post(b.token, 'trending', {})
+  await settle()
+  t.is(s.state.trendingHeld.length, 1, 'the second request joined it')
+  s.state.trendingHold = false
+  json(s.state.trendingHeld[0], 200, { data: trendingData() })
+  const [ra, rb] = await Promise.all([first, second])
+  t.is(ra.status, 200)
+  t.is(rb.status, 200)
+  t.alike(rb.json, ra.json, 'the same list')
+  t.is(trendingCalls(s), 1)
+  t.is((await s.post(a.token, 'search', { q: QUERY, kind: 'track' })).status, 429, 'the first member paid the call')
+  t.is((await s.post(b.token, 'search', { q: QUERY, kind: 'track' })).status, 200, 'the joiner did not')
+})
+
+test('audius: a joiner of a failed trending call gets 503, never 429, and its use back', async (t) => {
+  const s = await setup(t, { caps: { trendings: 1 } })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  s.state.trendingHold = true
+  const first = s.post(a.token, 'trending', {})
+  t.ok(await s.until(() => s.state.trendingHeld.length === 1))
+  const second = s.post(b.token, 'trending', {})
+  await settle()
+  s.state.trendingHold = false
+  json(s.state.trendingHeld[0], 500, { error: 'erro' })
+  const [ra, rb] = await Promise.all([first, second])
+  t.is(ra.status, 503)
+  t.alike(ra.json, { error: 'indisponivel' })
+  t.is(rb.status, 503)
+  t.alike(rb.json, { error: 'indisponivel' })
+  s.clock.offset += TRENDING_RETRY_MS + 1
+  t.is((await s.post(a.token, 'trending', {})).status, 200, 'the leader got its use back')
+  t.is((await s.post(b.token, 'trending', {})).status, 200, 'the joiner got its use back')
+  t.is(trendingCalls(s), 2, 'the failure cached nothing')
+})
+
+test('audius: a leader over its own provider calls gets 429 with its use back and starts no hold', async (t) => {
+  const s = await setup(t, { caps: { calls: 1, trendings: 1 } })
+  const a = await s.login()
+  const b = await s.login(s.other)
+  t.is((await s.post(a.token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  const over = await s.post(a.token, 'trending', {})
+  t.is(over.status, 429)
+  t.alike(over.json, { error: 'limite-musica' })
+  t.is(trendingCalls(s), 0, 'no provider call')
+  t.is((await s.post(b.token, 'trending', {})).status, 200, 'another member asks at once: no hold')
+  t.is(trendingCalls(s), 1)
+  t.is((await s.post(a.token, 'trending', {})).status, 200, 'the use was given back, and the list is a hit')
+})
+
+test('audius: the trendings cap answers 429 with no provider call, apart from the search cap', async (t) => {
+  const s = await setup(t, { caps: { trendings: 2 } })
+  const { token } = await s.login()
+  t.is((await s.post(token, 'trending', {})).status, 200)
+  t.is((await s.post(token, 'trending', {})).status, 200, 'a hit spends a use too')
+  const seen = s.api.seen.length
+  const over = await s.post(token, 'trending', {})
+  t.is(over.status, 429)
+  t.alike(over.json, { error: 'limite-musica' })
+  t.is(s.api.seen.length, seen, 'no provider call over the cap')
+  t.is((await s.post(token, 'search', { q: QUERY, kind: 'track' })).status, 200, 'a member at the trendings cap still searches')
+  const other = await s.login(s.other)
+  t.is((await s.post(other.token, 'trending', {})).status, 200, 'per member')
+
+  const q = await setup(t)
+  const m = await q.login()
+  let wrong = 0
+  for (let i = 0; i < SEARCHES_PER_DAY; i++) if ((await q.post(m.token, 'search', { q: QUERY, kind: 'track' })).status !== 200) wrong++
+  t.is(wrong, 0)
+  t.is((await q.post(m.token, 'search', { q: QUERY, kind: 'track' })).status, 429, 'at the search cap')
+  t.is((await q.post(m.token, 'trending', {})).status, 200, 'the list still answers')
+})
+
+test('audius: a trending outage or garbage answers 503, gives the use back, caches nothing and holds for TRENDING_RETRY_MS', async (t) => {
+  for (const fail of ['status', 'garbage']) {
+    const s = await setup(t, { caps: { trendings: 1 } })
+    const { token } = await s.login()
+    if (fail === 'status') s.state.trendingStatus = 503
+    else s.state.mode = 'garbage'
+    const res = await s.post(token, 'trending', {})
+    t.is(res.status, 503, fail)
+    t.alike(res.json, { error: 'indisponivel' })
+    t.is(s.api.seen.length, 1)
+    s.state.trendingStatus = 0
+    s.state.mode = 'ok'
+    const held = await s.post(token, 'trending', {})
+    t.is(held.status, 503, fail + ': held')
+    t.is(s.api.seen.length, 1, fail + ': no provider call during the hold')
+    s.clock.offset += TRENDING_RETRY_MS
+    t.is((await s.post(token, 'trending', {})).status, 200, fail + ': the uses were given back')
+    t.is(trendingCalls(s), 2, fail + ': nothing was cached')
+    noKeyAnywhere(t, s)
+  }
+})
+
+test('audius: a provider 4xx to the trending list is 503 with the use back, and the hold spares the provider', async (t) => {
+  for (const code of [400, 404, 403, 429]) {
+    const s = await setup(t, { caps: { trendings: 1 } })
+    const a = await s.login()
+    const b = await s.login(s.other)
+    s.state.trendingStatus = code
+    const res = await s.post(a.token, 'trending', {})
+    t.is(res.status, 503, code + ': never 400 or 404')
+    t.alike(res.json, { error: 'indisponivel' })
+    t.is(trendingCalls(s), 1)
+    s.state.trendingStatus = 0
+    const held = await s.post(b.token, 'trending', {})
+    t.is(held.status, 503, code + ': another member during the hold')
+    t.alike(held.json, { error: 'indisponivel' })
+    t.is(trendingCalls(s), 1, code + ': with no provider call')
+    s.clock.offset += TRENDING_RETRY_MS - 1000
+    t.is((await s.post(b.token, 'trending', {})).status, 503, code + ': still held')
+    t.is(trendingCalls(s), 1)
+    s.clock.offset += 1000
+    const ok = await s.post(b.token, 'trending', {})
+    t.is(ok.status, 200, code + ': the joiner of the hold had its use back')
+    t.is(trendingCalls(s), 2, code + ': the provider is asked again after the hold')
+    t.is((await s.post(a.token, 'trending', {})).status, 200, code + ': the leader had its use back, and the list is cached')
+    t.is(trendingCalls(s), 2)
+  }
+})
+
+test('audius: a trending miss refused before any provider contact starts no hold', async (t) => {
+  const s = await setup(t, { caps: { calls: 18, trendings: 1 } })
+  const { token } = await s.login()
+  const held = []
+  for (let i = 0; i < 16; i++) held.push(s.post(token, 'item', { kind: 'track', id: 'Slow' + i }))
+  t.ok(await s.until(() => s.routes.stats().inflight === 16 && s.state.slow.length === 16), 'sixteen calls in flight')
+  const busy = await s.post(token, 'trending', {})
+  t.is(busy.status, 503, 'lotado')
+  t.alike(busy.json, { error: 'indisponivel' })
+  for (const { id, res } of s.state.slow) json(res, 200, { data: track(id) })
+  await Promise.all(held)
+  t.is((await s.post(token, 'trending', {})).status, 200, 'no hold, and the use was given back')
+  t.is(trendingCalls(s), 1)
+
+  const b = await setup(t, { caps: { budget: 1 } })
+  const m = await b.login()
+  t.is((await b.post(m.token, 'search', { q: QUERY, kind: 'track' })).status, 200)
+  const spent = await b.post(m.token, 'trending', {})
+  t.is(spent.status, 503, 'a spent budget')
+  t.ok(b.logs.some((e) => e.reason === 'orcamento'), 'logged as orcamento')
+  t.is(trendingCalls(b), 0)
+})
+
+test('audius: a listed track plays and shows its cover with no new lookup, and a hit does not extend its row', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  t.is((await s.post(token, 'trending?covers=1', {})).status, 200)
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Hot7' }), 'image/jpeg', JPEG)
+  t.ok(await s.ticketFor(token, 'Hot8'))
+  t.absent(s.api.seen.some((r) => r.path === '/v1/tracks/Hot7' || r.path === '/v1/tracks/Hot8'), 'no lookup by id')
+
+  s.clock.offset += CACHE_TTL_MS / 2
+  t.is((await s.post(token, 'trending', {})).status, 200, 'a hit')
+  s.clock.offset += CACHE_TTL_MS / 2 - 5000
+  t.is((await s.post(token, 'trending', {})).status, 200, 'still a hit')
+  t.is(trendingCalls(s), 1)
+  s.clock.offset += 6000
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Hot9' }), 'image/jpeg', JPEG)
+  t.ok(s.api.seen.some((r) => r.path === '/v1/tracks/Hot9'), 'the row expired with the list: the hits did not refresh it')
+})
+
+test('audius: a trending hit reads each cover flag from the track row a later search replaced', async (t) => {
+  const s = await setup(t, { covers: true })
+  const { token } = await s.login()
+  s.state.trendingData = [track('Pt0')]
+  s.state.artwork.Pt0 = undefined
+  const first = await s.post(token, 'trending?covers=1', {})
+  t.alike(first.json.items.map((x) => [x.id, x.cover]), [['Pt0', false]])
+  delete s.state.artwork.Pt0
+  const found = await s.post(token, 'search?covers=1', { q: 'faixas', kind: 'track' })
+  t.alike(found.json.items.map((x) => [x.id, x.cover]), [['Pt0', true]])
+  const hit = await s.post(token, 'trending?covers=1', {})
+  t.alike(hit.json.items.map((x) => [x.id, x.cover]), [['Pt0', true]], 'the newer row wins, as the art route reads it')
+  t.is(trendingCalls(s), 1, 'still a hit')
+  artOk(t, await s.post(token, 'art', { kind: 'track', id: 'Pt0' }), 'image/jpeg', JPEG)
 })

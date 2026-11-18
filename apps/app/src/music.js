@@ -350,6 +350,8 @@ export function musicQuery (text) {
 export const MUSIC_DEBOUNCE_MS = 350
 export const MUSIC_SOURCE = 'Audius'
 export const MUSIC_EMPTY_TEXT = 'Nenhuma música encontrada'
+export const MUSIC_SUGGEST_TEXT = 'Em alta no Audius'
+export const MUSIC_SUGGEST_EMPTY_TEXT = 'Nenhuma sugestão agora'
 export const MUSIC_UNAVAILABLE_TEXT = 'Música indisponível agora'
 export const MUSIC_LIMIT_TEXT = 'Limite de músicas por hoje'
 export const MUSIC_NEEDS_TEXT = 'Escreva algo para publicar com a música'

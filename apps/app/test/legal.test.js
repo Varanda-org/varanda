@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 92)
+  t.is(LEGAL_VERSION, 93)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 92, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 93, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -439,7 +439,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'dcec87acfa998790130f2e88d05a11f068d1efab1c6311b0a999bc2036bc27e2', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '3c858f3a21564b213c1f6facae4c6eedeb8e69351a453f5ae13ee354861ab853', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -465,6 +465,24 @@ test('legal: version 41 describes group and conversation reactions and chat form
   t.ok(text(PRIVACY).includes('As reações nos grupos são guardadas e removidas como as mensagens do grupo em que foram publicadas'), 'retention of group reactions')
   t.ok(text(PRIVACY).includes('As reações nas mensagens diretas seguem os envelopes das mensagens diretas'), 'retention of conversation reactions')
   t.ok(text(PRIVACY).includes('as reações nos grupos e nas mensagens diretas'), 'legal basis of reactions')
+})
+
+test('legal: version 93 describes the weekly list', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 93)
+  const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(audius(TERMS).includes('a escolha de música mostra as faixas em alta no Audius nesta semana. A lista não é personalizada nem escolhida a partir do que você faz, e pode mudar no Audius.'), 'terms: trending, not personalised')
+  const privacy = audius(PRIVACY)
+  t.ok(privacy.includes('o app pede a lista de faixas em alta da semana ao serviço de conta antes de você digitar qualquer coisa'), 'privacy: asked before typing')
+  t.ok(privacy.includes('o serviço fica sabendo que a sua conta abriu a escolha'), 'privacy: the service knows the account opened it')
+  t.ok(privacy.includes('limite diário próprio, de 200 aberturas por conta por dia'), 'privacy: own daily limit')
+  t.ok(privacy.includes('sem texto de busca, gênero, conta, histórico de escuta nem endereço de internet do aparelho'), 'privacy: what Audius does not get')
+  t.ok(privacy.includes('reaproveitada para todos os membros por até 10 minutos'), 'privacy: shared for 10 minutes')
+  t.ok(privacy.includes('por 1 minuto e responde "indisponível"'), 'privacy: one minute after a failure')
+  t.ok(all(PRIVACY).includes('o serviço não registra em log qual membro a viu; ele só conta, na memória, quantas vezes cada conta abriu a lista no dia'), 'privacy: retention does not record who saw it')
+  t.ok(all(PRIVACY).includes('Para a lista de faixas em alta, saem do Brasil o período fixo da semana'), 'privacy: leaves Brazil')
+  t.ok(all(PRIVACY).includes('vale para mostrar, na escolha de música com o campo de busca vazio, a lista de faixas em alta'), 'privacy: legal basis covers the list')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {
