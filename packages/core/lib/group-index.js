@@ -31,6 +31,10 @@ const DEFAULT_MAX_GROUPS = 4096
 const BROWSE_MAX = RESULTS_MAX
 const RECENT_PER_CREATOR = 2
 const PUBLIC_GROUPS_PAGE = 32
+const TREND_WINDOW_MS = 604800000
+const TREND_MIN_ACTIVE = 2
+// Same clock tolerance as lib/group.js.
+const MAX_FUTURE_MS = 86400000
 // A header date is the creator's own claim, so a later date must not buy a
 // better place in 'recent'; 5 minutes covers ordinary device clock drift.
 const CREATED_SKEW_MS = 300000
@@ -487,6 +491,25 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return members.size
   }
 
+  function activeCount (g, now, f, activeMember, lastActivity) {
+    const oldest = now - TREND_WINDOW_MS
+    const newest = now + MAX_FUTURE_MS
+    const diaries = new Set()
+    for (const [key, w] of g.writers) {
+      // Also a member by the row's own filter, so active never exceeds the
+      // member count whatever filters the caller pairs.
+      if (w.left || !shown(f.members, w.diary, key) || !shown(activeMember, w.diary, key)) continue
+      let time
+      try {
+        time = lastActivity(key)
+      } catch {
+        continue
+      }
+      if (Number.isSafeInteger(time) && time >= oldest && time <= newest) diaries.add(w.diary)
+    }
+    return diaries.size
+  }
+
   function listed (key, g, f) {
     if (g.header === null || g.header.kind !== 'group' || g.header.visibility !== 'public') return null
     const name = groupName(g)
@@ -504,7 +527,10 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
 
   function browse (order, now, filters = {}) {
     try {
-      if ((order !== 'members' && order !== 'recent') || !Number.isSafeInteger(now)) return null
+      const trending = order === 'trending'
+      if ((order !== 'members' && order !== 'recent' && !trending) || !Number.isSafeInteger(now)) return null
+      const { activeMember, lastActivity } = trending ? filters : {}
+      if (trending && typeof lastActivity !== 'function') return { groups: [], more: false }
       const { visible, parent, members } = filters
       const f = { visible, parent, members }
       let rows = []
@@ -513,10 +539,18 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         if (row === null) continue
         if (row.created !== null && row.created > now + CREATED_SKEW_MS) row.created = null
         if (order === 'recent' && row.created === null) continue
+        if (trending) {
+          // A live writer may still be awaiting admission in an approval group.
+          if ((g.metaJoin || g.header.join) !== 'open') continue
+          row.active = activeCount(g, now, f, activeMember, lastActivity)
+          if (row.active < TREND_MIN_ACTIVE) continue
+        }
         rows.push(row)
       }
       if (order === 'members') {
         rows.sort((a, b) => b.members - a.members || cmp(a.group, b.group))
+      } else if (trending) {
+        rows.sort((a, b) => b.active - a.active || cmp(a.group, b.group))
       } else {
         rows.sort((a, b) => b.created - a.created || cmp(a.group, b.group))
         const perCreator = new Map()
@@ -639,5 +673,7 @@ module.exports = {
   RECENT_PER_CREATOR,
   PUBLIC_GROUPS_PAGE,
   CREATED_SKEW_MS,
+  TREND_WINDOW_MS,
+  TREND_MIN_ACTIVE,
   createGroupIndex
 }

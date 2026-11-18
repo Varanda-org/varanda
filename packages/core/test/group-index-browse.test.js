@@ -1,7 +1,7 @@
 'use strict'
 
 const test = require('brittle')
-const { BROWSE_MAX, RECENT_PER_CREATOR, PUBLIC_GROUPS_PAGE, CREATED_SKEW_MS, createGroupIndex } = require('../lib/group-index')
+const { BROWSE_MAX, RECENT_PER_CREATOR, PUBLIC_GROUPS_PAGE, CREATED_SKEW_MS, TREND_WINDOW_MS, TREND_MIN_ACTIVE, createGroupIndex } = require('../lib/group-index')
 const { groupHeader, groupCreateRecord, groupMeta } = require('../lib/group')
 
 const key = (n) => n.toString(16).padStart(64, '0')
@@ -41,15 +41,13 @@ function keysOf ({ groups }) {
   return groups.map((row) => row.group)
 }
 
-// The order a client checks on the wire: members by count descending, recent
-// by created descending (never null), each then by group key ascending.
+// Each order uses one descending field, then the group key ascending.
 function inOrder (t, order, { groups }) {
+  const field = { members: 'members', recent: 'created', trending: 'active' }[order]
   for (let i = 1; i < groups.length; i++) {
     const a = groups[i - 1]
     const b = groups[i]
-    const before = order === 'members'
-      ? a.members > b.members || (a.members === b.members && a.group < b.group)
-      : a.created > b.created || (a.created === b.created && a.group < b.group)
+    const before = a[field] > b[field] || (a[field] === b[field] && a.group < b.group)
     t.ok(before, order + ' row ' + i + ' in the stated order')
   }
   if (order === 'recent') t.ok(groups.every((row) => Number.isSafeInteger(row.created)), 'recent rows all dated')
@@ -215,6 +213,137 @@ test('browse: more counts rows after filters and creator caps', (t) => {
   t.is(idx.browse('members', NOW, filters).more, true)
 })
 
+test('browse: trending reads writer activity recorded before addWriter', (t) => {
+  const idx = createGroupIndex()
+  addCommunity(idx)
+  addGroup(idx, G)
+  const activity = new Map([[G, NOW], [W, NOW]])
+  const filters = { lastActivity: (writer) => activity.get(writer) ?? null }
+  const empty = { groups: [], more: false }
+  t.alike(idx.browse('trending', NOW, filters), empty, 'one active diary is below the threshold')
+  t.ok(idx.addWriter(G, W, D2, 2))
+  const row = { group: G, name: 'Cadeiras', creator: D1, community: C, communityName: 'Bairro', members: 2, created: NOW, active: null }
+  t.alike(idx.browse('trending', NOW, filters), { groups: [{ ...row, active: 2 }], more: false })
+  t.alike(idx.browse('members', NOW, filters), { groups: [row], more: false })
+  t.alike(idx.browse('recent', NOW, filters), { groups: [row], more: false })
+  activity.delete(W)
+  t.alike(idx.browse('trending', NOW, filters), empty, 'the lookup is repeated on each query')
+})
+
+test('browse: trending counts distinct live diaries using its own member filter', (t) => {
+  const idx = fixture()
+  const duplicate = key(3)
+  const left = key(4)
+  const filtered = key(5)
+  const departed = key(202)
+  idx.addWriter(G, duplicate, D1, 3)
+  idx.addWriter(G, left, key(203), 4)
+  idx.addWriter(G, filtered, departed, 5)
+  idx.setLeft(left, true)
+  const result = idx.browse('trending', NOW, {
+    lastActivity: () => NOW,
+    members: () => true,
+    activeMember: (diary, writer) => diary !== departed || writer !== filtered
+  })
+  t.alike(result.groups.map(({ group, members, active }) => [group, members, active]), [[G, 3, 2]])
+})
+
+test('browse: trending never counts a writer its members filter rejects, with no activeMember filter', (t) => {
+  const idx = fixture()
+  const other = key(6)
+  const hidden = key(3)
+  const hiddenDiary = key(202)
+  idx.addWriter(G, hidden, hiddenDiary, 3)
+  addGroup(idx, other)
+  idx.addWriter(other, key(7), D2, 2)
+  const result = idx.browse('trending', NOW, {
+    lastActivity: () => NOW,
+    members: (diary, writer) => diary !== hiddenDiary || writer !== hidden
+  })
+  t.alike(result.groups.map(({ group, members, active }) => [group, members, active]), [[G, 2, 2], [other, 2, 2]], 'the rejected writer posted lately but is not active')
+  for (const row of result.groups) t.ok(row.active <= row.members, 'active ' + row.active + ' <= members ' + row.members)
+  const unfiltered = idx.browse('trending', NOW, { lastActivity: () => NOW })
+  t.alike(unfiltered.groups.map(({ group, members, active }) => [group, members, active]), [[G, 3, 3], [other, 2, 2]], 'without the filter it counts')
+})
+
+test('browse: trending uses an inclusive activity window and skips invalid or throwing activity', (t) => {
+  const idx = fixture()
+  const third = key(3)
+  idx.addWriter(G, third, key(202), 3)
+  t.is(TREND_WINDOW_MS, 604800000)
+  t.is(TREND_MIN_ACTIVE, 2)
+  const oldest = NOW - TREND_WINDOW_MS
+  const newest = NOW + 86400000
+  for (const time of [oldest, newest]) {
+    const result = idx.browse('trending', NOW, {
+      lastActivity: (writer) => {
+        if (writer === third) throw new Error('lookup failed')
+        return writer === W ? time : NOW
+      },
+      activeMember: null
+    })
+    t.alike(result.groups.map(({ group, active }) => [group, active]), [[G, 2]], String(time))
+  }
+  for (const time of [oldest - 1, newest + 1, NOW + 0.5, String(NOW), null]) {
+    const result = idx.browse('trending', NOW, {
+      lastActivity: (writer) => writer === W ? time : NOW,
+      activeMember: (diary, writer) => {
+        if (writer === third) throw new Error('filter failed')
+        return true
+      }
+    })
+    t.alike(result, { groups: [], more: false }, String(time))
+  }
+})
+
+test('browse: trending requires effective join open and sorts by active then key', (t) => {
+  const idx = fixture()
+  const tied = key(3)
+  const busiest = key(4)
+  const approval = key(5)
+  const closedByMeta = key(6)
+  addGroup(idx, busiest, { at: NOW + CREATED_SKEW_MS + 1 })
+  addGroup(idx, tied, { join: 'approval', at: NOW + CREATED_SKEW_MS })
+  addGroup(idx, approval, { join: 'approval' })
+  addGroup(idx, closedByMeta)
+  idx.foldRoot(tied, groupMeta({ name: 'Cadeiras', join: 'open', at: iso(NOW) }))
+  idx.foldRoot(closedByMeta, groupMeta({ name: 'Cadeiras', join: 'approval', at: iso(NOW) }))
+  const activity = new Map([[G, NOW], [W, NOW]])
+  for (const [i, group] of [tied, busiest, approval, closedByMeta].entries()) {
+    const writer = key(300 + i)
+    idx.addWriter(group, writer, D2, 2)
+    activity.set(group, NOW)
+    activity.set(writer, NOW)
+    const extra = key(400 + i)
+    idx.addWriter(group, extra, key(202), 3)
+    if (group !== tied) activity.set(extra, NOW)
+  }
+  const result = idx.browse('trending', NOW, { lastActivity: (writer) => activity.get(writer) ?? null })
+  t.alike(result.groups.map(({ group, active, members, created }) => [group, active, members, created]), [
+    [busiest, 3, 3, null], [G, 2, 2, NOW], [tied, 2, 3, NOW + CREATED_SKEW_MS]
+  ])
+  inOrder(t, 'trending', result)
+  t.is(result.more, false)
+})
+
+test('browse: trending caps the result after the activity threshold and listing filters', (t) => {
+  const idx = createGroupIndex()
+  addCommunity(idx)
+  for (let i = BROWSE_MAX + 1; i >= 1; i--) {
+    const group = key(i)
+    addGroup(idx, group)
+    idx.addWriter(group, key(300 + i), D2, 2)
+  }
+  const lastActivity = () => NOW
+  const result = idx.browse('trending', NOW, { lastActivity })
+  const first = Array.from({ length: BROWSE_MAX }, (_, i) => key(i + 1))
+  t.alike(keysOf(result), first)
+  inOrder(t, 'trending', result)
+  t.is(result.more, true)
+  t.is(idx.browse('trending', NOW, { lastActivity, visible: (group) => group !== G }).more, false)
+  t.is(idx.browse('trending', NOW, { lastActivity: (writer) => writer === G ? null : NOW }).more, false)
+})
+
 test('generalOf: first create in fold order, rebuilt after resetRoot', (t) => {
   const idx = createGroupIndex()
   addCommunity(idx)
@@ -346,7 +475,7 @@ test('discovery: unsupported orders and hostile inputs answer without throwing',
   const idx = fixture()
   const fail = () => { throw new Error('x') }
   const hostile = { toString: fail, get visible () { return fail() } }
-  t.is(idx.browse('trending', NOW), null)
+  t.alike(idx.browse('trending', NOW), { groups: [], more: false })
   t.is(idx.browse('x', NOW), null)
   t.is(idx.browse(hostile, NOW), null)
   t.is(idx.browse('members', hostile), null)
