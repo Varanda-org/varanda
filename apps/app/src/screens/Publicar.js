@@ -98,6 +98,7 @@ import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
 import { Btn, ErrorText, Soft, errorText, useAction } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { Chip as SharedChip } from '../ui/Chip'
 import { EmojiPicker } from '../ui/EmojiPicker'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -2671,20 +2672,8 @@ function pageLabel (profile) {
 }
 
 function Chip ({ label, on, disabled, onPress }) {
-  const styles = useStyles(makeStyles)
   return (
-    <Pressable
-      accessibilityRole='radio'
-      accessibilityLabel={label}
-      accessibilityState={{ checked: on, disabled }}
-      aria-checked={on}
-      disabled={disabled}
-      onPress={onPress}
-      hitSlop={4}
-      style={[styles.chip, on && styles.chipOn]}
-    >
-      <Text style={[styles.chipText, on && styles.chipTextOn]} numberOfLines={1}>{label}</Text>
-    </Pressable>
+    <SharedChip label={label} role='radio' selected={on} disabled={disabled} onPress={onPress} />
   )
 }
 
@@ -2870,10 +2859,6 @@ const makeStyles = (colors) => StyleSheet.create({
   retryRow: { flexDirection: 'row', marginTop: 8 },
   asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
   asLabel: { ...type.replyMark, color: colors.soft },
-  chip: { minHeight: 36, maxWidth: 200, paddingHorizontal: 12, borderRadius: 18, borderWidth: 1, borderColor: colors.line, justifyContent: 'center' },
-  chipOn: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
-  chipText: { fontSize: 14, lineHeight: 18, fontWeight: '600', color: colors.soft },
-  chipTextOn: { color: colors.accent },
   markRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
