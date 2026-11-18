@@ -2093,6 +2093,7 @@ test('startSeedWs /index/group*: the real Seeder\'s answers carry the public nam
   t.timeout(20000)
   const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
   seeder._ready = true
+  seeder._passesStarted = true
   const B = 'b'.repeat(64)
   const P = 'a'.repeat(64)
   const core = { contiguousLength: 2, length: 2 }
@@ -2292,6 +2293,7 @@ test('startSeedWs /index/community: the real Seeder lists the creator\'s attache
   t.timeout(20000)
   const seeder = new Seeder({ dataDir: tmpDir(t, 'varanda-seed-') })
   seeder._ready = true
+  seeder._passesStarted = true
   const B = 'b'.repeat(64)
   const G2 = '8'.repeat(64)
   const core = { contiguousLength: 2, length: 2 }

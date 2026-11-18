@@ -31,6 +31,7 @@ const {
   makeAssociation,
   prepareSeederDir,
   startSeeder,
+  onPassesStart,
   member,
   admit,
   reader,
@@ -560,10 +561,17 @@ test('a persisted cut the diary does not give is dropped once the scan caught up
   await core.close()
   await store.close()
 
-  const second = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  let cutAtStart
+  const second = await startSeeder(t, bootstrap, dataDir, {
+    associationKey: assoc.hex,
+    beforeStart: (seeder) => onPassesStart(seeder, () => {
+      const served = seeder._groupServed.get(W)
+      cutAtStart = served ? served.cut : undefined
+    })
+  })
   const entry = second.seeder._groupServed.get(W)
   t.ok(entry, 'W served at ready')
-  t.is(entry.cut, 3, 'from its persisted cut')
+  t.is(cutAtStart, 3, 'from its persisted cut')
   await until(async () => entry.cut === null && (await blocksHeld(entry.core, 0, 6)).length === 6, { name: 'W buscado de novo' })
   t.alike(await blocksHeld(entry.core, 0, 6), [0, 1, 2, 3, 4, 5], 'every block fetched again')
   await until(() => !('cut' in readGroups(dataDir)[W]), { name: 'sem corte persistido' })
