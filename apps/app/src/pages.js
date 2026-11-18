@@ -285,7 +285,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', 'choice', 'moment', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', 'moment', 'post-share', 'post-unshare', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -422,6 +422,17 @@ export function pageMomentOp ({ text, media, music } = {}) {
   const op = { text: text === undefined || text === null ? '' : text, media }
   if (music !== undefined && music !== null) op.music = music
   return op
+}
+
+// The page's web share of one of its posts ('post-share' / 'post-unshare',
+// docs/rpc.md 5.84): `seq` the page's own post. One request each, never
+// resent.
+export function pagesPostShare (node, { member, page, seq }) {
+  return actAs(node, { member, action: 'post-share', page, op: { seq } })
+}
+
+export function pagesPostUnshare (node, { member, page, seq }) {
+  return actAs(node, { member, action: 'post-unshare', page, op: { seq } })
 }
 
 export function pagesMoment (node, { member, page, text, media, music }) {

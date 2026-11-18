@@ -43,7 +43,7 @@ import { aheadMomentsOf, holdMsOf, momentMusicOf, momentRefOf, canReply, expires
 import { IMAGE_MIMES, momentPhotoKey, momentPhotosFor } from '../momentPhotos'
 import { actAs } from '../pages'
 import { choicePage } from '../pageChoice'
-import { momentDeleteAs } from '../pageMoment'
+import { momentDeleteAs, momentPublisher, pageMomentsOf } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
 import { canReact, reactionParams, unsure, REACTION_SENT, REACTION_UNSURE } from '../momentReaction'
 import { momentSwipe, swipeRelease, swipeTotal } from '../momentSwipe'
@@ -63,8 +63,10 @@ import { ConfirmStack, ErrorText, Soft, UNCERTAIN, errorText, useNow } from '../
 import { ActionsSheet } from '../ui/ActionsSheet'
 import { Avatar } from '../ui/Avatar'
 import { Icon } from '../ui/Icon'
+import { MoreButton } from '../ui/MoreButton'
 import { HelpButton, useHelpOpen } from '../ui/Help'
 import { tap } from '../ui/haptics'
+import { excerptOf } from '../ui/MomentosStrip'
 import { Pill } from '../ui/Pill'
 import { Scrim, scrimColor } from '../ui/Scrim'
 import { Sheet } from '../ui/Sheet'
@@ -81,6 +83,8 @@ export const DELETE_TITLE = 'Apagar momento?'
 export const DELETE_BODY = 'O momento deixa de aparecer para quem segue você. Cópias que outras pessoas fizeram não voltam.'
 // A moment past its 24 hours is already shown to nobody.
 export const DELETE_BODY_PAST = 'O momento sai do seu diário. Já não aparece para ninguém.'
+export const DELETE_BODY_PAGE = 'O momento deixa de aparecer para quem segue a Página. Cópias que outras pessoas fizeram não voltam.'
+export const DELETE_BODY_PAST_PAGE = 'O momento sai do diário da Página. Já não aparece para ninguém.'
 export const NONE_TEXT = 'Nenhum momento agora.'
 const OFF_TEXT = 'Momentos disponíveis no app hospedado.'
 // Owner of the viewer's photo reads: another owner's want() must not end them.
@@ -171,6 +175,14 @@ export function useMomentSeen () {
   return { loaded: seen !== null, seen: seen || [], mark: markMomentSeen }
 }
 
+// The delete sheet's text: past 24 hours it is already shown to nobody, and a
+// Page's momento sits in the Page's diary.
+export function deleteBody (target, page) {
+  const past = !!target && expiresIn(target.at) === 0
+  if (page !== null) return past ? DELETE_BODY_PAST_PAGE : DELETE_BODY_PAGE
+  return past ? DELETE_BODY_PAST : DELETE_BODY
+}
+
 // Confirmation before moment.delete (ConfirmStack), or before the page
 // 'delete' when `page` (the page acted as) owns the momento. An uncertain
 // answer says so and takes the confirm button away: the person checks before
@@ -213,7 +225,7 @@ export function ConfirmMomentDelete ({ open, target, page = null, onClose, onDel
     // onClose, which clears the viewer's `deleting`.
     <Sheet open={open} onClose={pending ? () => {} : onClose} dismissable={!pending} title={DELETE_TITLE}>
       <View style={styles.sheetBody}>
-        <Soft>{target && expiresIn(target.at) === 0 ? DELETE_BODY_PAST : DELETE_BODY}</Soft>
+        <Soft>{deleteBody(target, page)}</Soft>
         <Soft>{OWN_NOTE}</Soft>
         <ErrorText>{error}</ErrorText>
         {uncertain
@@ -226,6 +238,93 @@ export function ConfirmMomentDelete ({ open, target, page = null, onClose, onDel
             )}
       </View>
     </Sheet>
+  )
+}
+
+export const PAGE_MOMENTS_TITLE = 'Momentos da Página'
+export const PAGE_MOMENTS_FAILED = 'Não foi possível ler os momentos da Página.'
+
+// The Page's own momentos, live and past, for whoever acts as that Page: the
+// node's rings cover only followed diaries for 24 h, so an admin who does not
+// follow the Page, or a momento past 24 hours, is reached only through the
+// service's signed page 'status'. Each row deletes through the page action.
+// A failed read says so and the list is read again on 'Tentar de novo'
+// (a read, never a repeat of a delete).
+export function PageMoments ({ page, now = Date.now(), tick = 0, active = true }) {
+  const styles = useStyles(makeStyles)
+  const node = useNode()
+  const key = momentPublisher(page)
+  const changed = useMomentsChanged()
+  // Rows and the open delete sheet belong to the Page and node epoch they were
+  // read for: a lock, sign-out or another identity drops them.
+  const epoch = node.epoch
+  const owner = key === null ? null : key + '|' + epoch
+  const [state, setState] = useState({ owner: null, phase: 'idle', status: null })
+  const [reads, setReads] = useState(0)
+  const [deleting, setDeleting] = useState(null)
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const hosted = node.hosted === true
+  useEffect(() => {
+    if (owner === null || !hosted || active === false) return undefined
+    let live = true
+    setState((s) => ({ owner, phase: 'loading', status: s.owner === owner ? s.status : null }))
+    ;(async () => {
+      try {
+        const member = await memberKeyOf(nodeRef.current.request, nodeRef.current)
+        const status = await actAs(nodeRef.current, { member, action: 'status', page: key })
+        if (live) setState({ owner, phase: 'ready', status })
+      } catch {
+        if (live) setState((s) => ({ owner, phase: 'error', status: s.owner === owner ? s.status : null }))
+      }
+    })()
+    return () => { live = false }
+  }, [owner, key, hosted, active, reads, changed, tick])
+  if (key === null || !hosted) return null
+  const phase = state.owner === owner ? state.phase : 'idle'
+  // Split at render, against the screen's clock, so a momento that passes 24 h
+  // while the list is open moves to the past ones.
+  const mine = { phase, ...pageMomentsOf(state.owner === owner ? state.status : null, key, now) }
+  const target = deleting !== null && deleting.page === owner ? deleting.target : null
+  const row = (m, past) => {
+    const text = excerptOf(m.text)
+    return (
+      <View key={m.ref} style={styles.pageRow}>
+        <View style={styles.pageText}>
+          <Text style={styles.pageMeta} numberOfLines={1}>{(past ? 'Anterior, ' : '24 h, ') + (relativeTime(m.at, now) || '')}</Text>
+          <Text style={styles.pageExcerpt} numberOfLines={2}>{text !== '' ? text : 'Momento com foto'}</Text>
+        </View>
+        <MoreButton
+          label='mais ações do momento'
+          actions={[{ icon: 'lixeira', label: 'Apagar', danger: true, onPress: () => setDeleting({ page: owner, target: { ref: m.ref, at: m.at } }) }]}
+        />
+      </View>
+    )
+  }
+  let body = null
+  if (mine.phase === 'error') {
+    body = (
+      <View style={styles.pageSection}>
+        <ErrorText>{PAGE_MOMENTS_FAILED}</ErrorText>
+        <Pill label='Tentar de novo' onPress={() => setReads((n) => n + 1)} />
+      </View>
+    )
+  } else if (mine.live.length > 0 || mine.past.length > 0) {
+    body = (
+      <View style={styles.pageSection}>
+        <Text style={styles.pageTitle} accessibilityRole='header'>{PAGE_MOMENTS_TITLE}</Text>
+        {mine.live.map((m) => row(m, false))}
+        {mine.past.map((m) => row(m, true))}
+      </View>
+    )
+  }
+  // Mounted in every branch and closed only by the sheet itself: a reload
+  // that fails or comes back empty must not hide the delete's outcome.
+  return (
+    <>
+      {body}
+      <ConfirmMomentDelete open={target !== null} target={target} page={key} onClose={() => setDeleting(null)} />
+    </>
   )
 }
 
@@ -1459,5 +1558,11 @@ const makeStyles = (colors) => StyleSheet.create({
   reactionHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
   reactionEmoji: { fontSize: 24, color: '#ffffff' },
   reactionNote: { ...type.postMeta, color: '#ffffff', ...TEXT_SHADOW },
-  sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 }
+  sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 },
+  pageSection: { gap: 4, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
+  pageTitle: { ...type.postName, color: colors.ink, paddingHorizontal: 16, minHeight: 44, textAlignVertical: 'center' },
+  pageRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 16, paddingRight: 8, paddingVertical: 6 },
+  pageText: { flex: 1, minWidth: 0 },
+  pageMeta: { ...type.postMeta, color: colors.soft },
+  pageExcerpt: { ...type.postText, color: colors.ink }
 })

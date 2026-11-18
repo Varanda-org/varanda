@@ -358,12 +358,25 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
   }
 })
 
+test('legal: version 86 describes web share of a page post', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 86)
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
+  t.ok(terms.includes('O dono ou um administrador de uma página pode fazer o mesmo com uma publicação da página. A escolha é um registro no diário da página'), 'terms: an owner or admin shares a page post, recorded in the page diary')
+  t.ok(terms.includes('encerrar a página retira todas'), 'terms: closing the page withdraws every share')
+  t.ok(terms.includes('a associação poderia publicar ou retirar uma publicação da página sem que ninguém da página pedisse'), 'terms: the residual risk of the service-held page key')
+  t.ok(terms.includes('A escolha de publicar uma publicação da página na web também é pública como a página.'), 'terms: the page lists the share as public')
+  t.ok(privacy.includes('Numa página, o dono ou um administrador faz a escolha, o serviço de conta a registra no diário da página com a chave da página e fica sabendo quem pediu e quando'), 'privacy: who chooses and what the service learns')
+  t.ok(privacy.includes('As escolhas de publicar uma publicação da página na web também ficam no diário da página e são públicas como ele.'), 'privacy: the page diary holds the share')
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '056bf620347c77d35075606c85061071af99de16a122d1a64d515891f1c376f5', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '5c0ca8be9b9345ef0e703a51889fdf1ade4a223d55cc26d99120c804ffde94fd', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
