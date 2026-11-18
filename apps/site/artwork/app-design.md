@@ -60,6 +60,33 @@ Os valores estão em `apps/app/src/appearance.js` (fonte única; `light` e `dark
 
 **Contraste medido.** O teste `apps/app/test/appearance.test.js` exige 4,5:1 nos pares de texto dos dois modos. No escuro, os valores medidos são: tinta 17,5:1 no fundo e 15,6:1 no cartão; texto suave 11,4:1 e 10,2:1; verde 9,4:1 e 8,5:1; perigo 8,6:1 e 7,7:1; aviso 11,2:1 e 10,1:1; dica 8,8:1 e 7,9:1; texto sobre verde e texto da pílula 8,1:1; texto do balão 17,5:1; texto suave sobre o campo desligado 8,6:1. O mesmo teste exige 3:1 para o controle desligado (`controlOff`) sobre o fundo, o cartão e o campo desligado, nos dois modos. No claro, os valores medidos são 3,4:1 no creme, 3,7:1 no branco e 3,1:1 no campo desligado. No escuro, 4,1:1 no fundo, 3,7:1 no cartão e 3,1:1 no campo desligado.
 
+### Sombras
+
+Os níveis do kit ficam em `elevation`, em `apps/app/src/ui/theme.js`. A string de cada nível já traz a cor (preto com alfa) e entra sozinha no `boxShadow`. São duas camadas, nesta ordem, salvo `edge`, que tem uma só. O uso é o do kit.
+
+| Nível | Camada 1 | Camada 2 | Uso no kit |
+|---|---|---|---|
+| `xs` | `0px 4px 4px 0px rgba(0,0,0,0.01)` | `0px 1px 2px 0px rgba(0,0,0,0.04)` | elevação leve, chips e controles pequenos |
+| `sm` | `0px 3px 5px -2px rgba(0,0,0,0.05)` | `0px 9px 10px -2px rgba(0,0,0,0.03)` | cartões em repouso |
+| `md` | `0px 4px 6px -4px rgba(0,0,0,0.08)` | `0px 10px 15px -3px rgba(0,0,0,0.05)` | cartões elevados e listas suspensas |
+| `lg` | `0px 5px 6px -5px rgba(0,0,0,0.05)` | `0px 12px 18px -3px rgba(0,0,0,0.08)` | painéis flutuantes e menus |
+| `xl` | `0px 6px 10px -5px rgba(0,0,0,0.10)` | `0px 14px 20px -5px rgba(0,0,0,0.08)` | modais e folhas |
+| `xxl` | `0px 8px 10px -6px rgba(0,0,0,0.12)` | `0px 25px 30px -6px rgba(0,0,0,0.12)` | coberturas de tela cheia (2xl no kit) |
+| `edge` | `6px 0px 12px -4px rgba(0,0,0,0.08)` | nenhuma | sombra lateral de uma coluna fixa ou de um painel por baixo do qual o conteúdo rola |
+
+`raised` permanece `0px 6px 16px`, sem cor na string: o app junta essa medida a `colors.shadow`, que acompanha o tema. Não é um nível do kit.
+
+### Papéis de mídia e de perigo suave
+
+Quatro papéis novos nas duas paletas de `apps/app/src/appearance.js`. `onMedia`, `mediaBg` e `mediaScrim` valem igual no claro e no escuro, porque ficam sobre a foto e não sobre a página. Em `dangerSoft`, o vermelho é o perigo do tema (`#a3201a` no claro, `#ff8f87` no escuro) e os alfas 0,10 e 0,16 são do app: o alfa vermelho do kit não foi lido.
+
+| Papel | Claro | Escuro |
+|---|---|---|
+| sobre a mídia (`onMedia`) | `#ffffff` | `#ffffff` |
+| fundo da mídia (`mediaBg`) | `#000000` | `#000000` |
+| véu da mídia (`mediaScrim`) | `rgba(0,0,0,0.55)` | `rgba(0,0,0,0.55)` |
+| perigo suave (`dangerSoft`) | `rgba(163,32,26,0.10)` | `rgba(255,143,135,0.16)` |
+
 ## Tipografia
 
 Fonte do sistema (SF no iOS, Roboto no Android, `system-ui` na web). Títulos na variante arredondada quando houver (`ui-rounded`). Tamanhos em pt para 402 pt de largura:
