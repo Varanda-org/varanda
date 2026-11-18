@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 90)
+  t.is(LEGAL_VERSION, 91)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 90, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 91, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,6 +388,20 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 91 describes a page rating a Feira listing', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 91)
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
+  t.ok(terms.includes('Uma página também pode avaliar o anúncio de outra pessoa'), 'terms: a page rates')
+  t.ok(terms.includes('a grava no diário da página, assinada com a chave da página, e fica sabendo quem pediu e quando'), 'terms: the association signs as the page')
+  t.ok(terms.includes('A página não avalia anúncios de quem cuida dela: o dono, os administradores, quem foi convidado ou vai receber a página, e outras páginas dessas pessoas.'), 'terms: no self-rating')
+  t.ok(terms.includes('não pode ser mudada, apagada nem refeita para a mesma oferta, e continua no diário público da página depois que a página é encerrada'), 'terms: a page rating is permanent')
+  t.ok(privacy.includes('A avaliação que uma página faz de um anúncio fica no diário da página'), 'privacy: where the rating lives')
+  t.ok(privacy.includes('fica sabendo qual administrador pediu e quando'), 'privacy: what the service learns')
+  t.ok(privacy.includes('Ela não pode ser mudada nem apagada e continua no diário público da página depois que a página é encerrada.'), 'privacy: a page rating outlives the page')
+})
+
 test("legal: version 89 describes a page's media, reactions and hides in private groups", async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   t.ok(LEGAL_VERSION >= 89)
@@ -410,7 +424,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '2e617a8e0e53ce5c4196f214656ee2a02b219f8ec7fd5d1fbd17f9eb0e0bcdbc', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'e19103bb2e80b507f4455c3e121fa2327eb32afddb3a2575319ae6a372846c10', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

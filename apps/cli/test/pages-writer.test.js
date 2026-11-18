@@ -576,6 +576,10 @@ test('pages-writer: an unexpected diary length, a foreign media append or a fork
   await writer.ready()
   await t.exception(writer.append(media.key, [postRecord({ text: 'c' })]), /pausada/, 'foreign media append')
   await t.exception(writer.append(forked.key, [postRecord({ text: 'd' })]), /pausada/, 'fork')
+  // A raw read of a forked core refuses: an empty answer would let a
+  // one-per-offer check pass. A paused page that did not fork still reads.
+  await t.exception(writer.readRawBlocks(forked.key), /fechado/, 'a forked core reads no raw blocks')
+  t.ok((await writer.readRawBlocks(extra.key)).length > 0, 'a paused page that did not fork reads its raw blocks')
 })
 
 test('pages-writer: concurrent creations are serialized', async (t) => {
@@ -682,6 +686,7 @@ test('pages-writer: state and noise files are never read through a link or a FIF
   t.teardown(() => writer.close(), { force: true })
   await writer.ready()
   t.is(writer.info(page.key).paused, true, 'a state that is not a regular file pauses the page')
+  await t.exception(writer.readRawBlocks(page.key), /fechado/, 'a lost state reads no raw blocks')
   t.ok(logs.some((e) => e.event === 'pages-link' && e.state === 'indisponivel'), 'a linked noise key is refused')
   t.ok(fs.lstatSync(path.join(storeDir, 'noise-key.json')).isSymbolicLink(), 'the link was not replaced')
   t.ok(fs.lstatSync(path.join(storeDir, page.key + '.json')).isFIFO(), 'the state FIFO was not replaced')

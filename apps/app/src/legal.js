@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 90
+export const LEGAL_VERSION = 91
 export const LEGAL_DATE = '17/11/2026'
-export const REVIEW_NOTE = 'Versão 90, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 91, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 export const TERMS = {
   title: 'Termos de Uso',
@@ -145,6 +145,7 @@ export const TERMS = {
         'Editar um anúncio mantém o mesmo endereço. A primeira versão, com texto e fotos, continua no diário até o anúncio ser apagado. Anúncios vendidos ou encontrados saem do índice dos buscadores (noindex), mas cópias, prévias e caches de buscadores fora da instalação podem continuar depois da remoção.',
         'Não há pagamento no app e o Varanda não é parte de nenhuma venda. A associação nunca cobra nem move dinheiro. Uma oferta enviada numa conversa é uma mensagem, não uma cobrança, não é contrato, e aceitá-la não reserva o anúncio. O status e a remoção do anúncio são de quem anuncia.',
         'Cada oferta pode receber uma avaliação, dada por quem fez a oferta, só depois de quem anuncia ter aceitado a oferta. Ao aceitar, quem anuncia assina um consentimento que não escolhe estrelas nem preço. A avaliação é a declaração de quem a escreveu, não prova de pagamento, e aparece só dentro do app. A avaliação de um membro novo fica oculta por 7 dias.',
+        'Uma página também pode avaliar o anúncio de outra pessoa, pela oferta que fez nas Conversas da página e que quem anuncia aceitou. O dono ou um administrador escreve a avaliação, e o serviço de conta da associação a grava no diário da página, assinada com a chave da página, e fica sabendo quem pediu e quando. A avaliação é pública como a página e não pode ser mudada, apagada nem refeita para a mesma oferta, e continua no diário público da página depois que a página é encerrada. A página não avalia anúncios de quem cuida dela: o dono, os administradores, quem foi convidado ou vai receber a página, e outras páginas dessas pessoas.',
         'Entrar pelo link de um anúncio segue as regras de convite e conta no limite semanal de convites da Feira de quem é responsável. A conversa com uma Página que ativou as Conversas privadas é cifrada entre você e quem administra a página, com os limites descritos em Páginas. Uma denúncia de anúncio chega sempre a uma pessoa, nunca só à automação. Anúncios e buscas salvos ficam no seu aparelho.'
       ]
     },
@@ -255,6 +256,7 @@ export const PRIVACY = {
       paragraphs: [
         'Os anúncios da Feira são públicos. O semeador entrega o texto, as fotos, o preço, a cidade, o bairro, a categoria, o status, o @nome e o nome de quem anunciou a qualquer pessoa que abra o endereço, inclusive a robôs de busca e de prévia de links. Há também um mapa do site (sitemap) que lista só endereços.',
         'O índice de busca do semeador guarda palavras do título para a busca e não guarda o texto do anúncio. Não há CEP nem GPS: o anúncio traz só a cidade e, se você quiser, o bairro. O semeador não registra nada por visualização nem por busca. Se o serviço falhar ao atender um pedido, o registro de erros do servidor web pode guardar o endereço pedido, que numa busca contém o texto buscado.',
+        'A avaliação que uma página faz de um anúncio fica no diário da página, com as estrelas, o texto, a oferta e o consentimento de quem anunciou, e é pública como a página. Ela não pode ser mudada nem apagada e continua no diário público da página depois que a página é encerrada. O serviço de conta grava a avaliação com a chave da página e fica sabendo qual administrador pediu e quando.',
         'O arquivo feira-invites.json guarda só a chave de quem é responsável pelo convite e o hash do código, nunca o código em si.',
         'Os anúncios salvos e as buscas salvas ficam só no seu aparelho, e a pesquisa repetida não é guardada. Os valores de uma oferta viajam apenas dentro da conversa selada. A conversa com uma Página que ativou as Conversas privadas é cifrada entre você e quem administra a página, com os limites descritos em Páginas.',
         'Cópias, prévias e caches de buscadores fora desta instalação podem continuar existindo depois que um anúncio é removido. A associação nunca cobra nem move dinheiro.'
