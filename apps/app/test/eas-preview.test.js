@@ -31,6 +31,17 @@ test('the preview profile pins a Node of at least 24.9', (t) => {
   t.ok(major > 24 || (major === 24 && minor >= 9), 'Node ' + node)
 })
 
+// The builder runs a plain `npm ci --include=dev` at the root. onnxruntime-node's
+// install script (apps/cli only) then fetches CUDA files that answer 404 on the
+// Linux builder, and sharp's can compile on macOS. The named post-install hook
+// still runs with the flag on.
+test('the preview profiles run no dependency install script', (t) => {
+  const { build } = JSON.parse(read('eas.json'))
+  t.alike(build.preview.env, { npm_config_ignore_scripts: 'true' })
+  t.is(build['preview-simulator'].extends, 'preview')
+  t.absent('env' in build['preview-simulator'], 'preview-simulator inherits the env of preview')
+})
+
 // Without it the module fails to compile (ActivityResultCallback is not on
 // its classpath), and that only shows on the EAS build.
 test('the auth-session module declares androidx.activity', (t) => {
