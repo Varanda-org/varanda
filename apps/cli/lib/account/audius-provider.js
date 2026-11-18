@@ -99,7 +99,6 @@ function searchQuery (params) {
 // with one) must not carry the key to another host.
 function requestFor (config, kind, params = {}) {
   if (config === null || typeof config !== 'object' || params === null || typeof params !== 'object') return null
-  const { id } = params
   let path
   let query = {}
   if (kind === 'searchTracks' || kind === 'searchPlaylists') {
@@ -110,7 +109,14 @@ function requestFor (config, kind, params = {}) {
     if (!isAudiusPermalink(params.url)) return null
     path = '/resolve'
     query = { url: params.url }
+  } else if (kind === 'trendingTracks') {
+    // The week window is fixed: a caller cannot pick time, genre or a query.
+    const page = paging(params)
+    if (page === null) return null
+    path = '/tracks/trending'
+    query = { time: 'week', ...page }
   } else {
+    const { id } = params
     if (typeof id !== 'string' || !ID_RE.test(id)) return null
     if (kind === 'track') path = '/tracks/' + id
     else if (kind === 'playlist') path = '/playlists/' + id

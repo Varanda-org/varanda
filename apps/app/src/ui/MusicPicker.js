@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import rpc from '@varanda/rpc'
-import { audiusPlay, audiusSearch } from '../account'
-import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, SNIPPET_S, clampStart, musicErrorText, musicQuery, musicRowLine, snippetTick } from '../music'
+import { audiusPlay, audiusSearch, audiusTrending } from '../account'
+import { MUSIC_DEBOUNCE_MS, MUSIC_EMPTY_TEXT, MUSIC_SEEK_TEXT, MUSIC_SUGGEST_EMPTY_TEXT, MUSIC_SUGGEST_TEXT, SNIPPET_S, clampStart, musicErrorText, musicQuery, musicRowLine, snippetTick } from '../music'
 import { claimPlayback, playbackEpoch } from '../media/chatMedia'
 import { createStreamPlayer } from '../media/stream'
 import { Btn } from './index'
@@ -52,6 +52,42 @@ export function musicSearchStep (state, action) {
     default:
       return state
   }
+}
+
+export const musicSuggestIdle = { phase: 'idle', gen: 0, items: [], error: '' }
+
+export function musicSuggestStep (state, action) {
+  switch (action.type) {
+    case 'load':
+      return state.phase === 'idle' ? { ...state, phase: 'loading', gen: state.gen + 1 } : state
+    case 'retry':
+      return state.phase === 'error' ? { ...state, phase: 'loading', gen: state.gen + 1, error: '' } : state
+    case 'page': {
+      if (state.phase !== 'loading' || action.gen !== state.gen) return state
+      const items = []
+      const ids = new Set()
+      for (const item of action.page.items) {
+        if (ids.has(item.id)) continue
+        ids.add(item.id)
+        items.push(item)
+      }
+      return { ...state, phase: 'ready', items }
+    }
+    case 'fail':
+      if (state.phase !== 'loading' || action.gen !== state.gen) return state
+      if (action.error?.code === 'feature-off' || action.error?.code === 'nao-encontrado') {
+        return { ...state, phase: 'off', items: [], error: '' }
+      }
+      return { ...state, phase: 'error', error: musicErrorText(action.error) }
+    case 'reset':
+      return { ...state, phase: 'idle', items: [], error: '', gen: state.gen + 1 }
+    default:
+      return state
+  }
+}
+
+export function musicSuggestShown (search) {
+  return search.query === '' && search.kind === 'track'
 }
 
 export function musicPickStep (kind, modes) {
@@ -148,15 +184,10 @@ export function MusicPicker ({ open, onClose, onPick, member, origin, request, m
   const editRef = useRef(null)
   const [edit, setEdit] = useState(() => open ? initialEdit(initial, modes) : null)
   const [prevOpen, setPrevOpen] = useState(open)
-  // Focus the search only when this opening shows it. A later back must not
-  // focus the field the editor is hiding.
-  const [searchFocus, setSearchFocus] = useState(() => open && initialEdit(initial, modes) === null)
   // Read on opening only: a later initial from the caller never moves an open editor.
   if (open !== prevOpen) {
-    const next = open ? initialEdit(initial, modes) : null
     setPrevOpen(open)
-    setEdit(next)
-    if (open) setSearchFocus(next === null)
+    setEdit(open ? initialEdit(initial, modes) : null)
   }
   const close = () => { stopRef.current?.(); onClose() }
   const back = () => { editRef.current?.(); setEdit(null) }
@@ -191,7 +222,6 @@ export function MusicPicker ({ open, onClose, onPick, member, origin, request, m
             modes={modes}
             stopRef={stopRef}
             editRef={editRef}
-            autoFocus={searchFocus}
           />
           )
         : null}
@@ -207,7 +237,7 @@ function initialEdit (initial, modes) {
   return { item, kind: ref.kind, start: ref.kind === 'snippet' ? clampStart(ref.start ?? 0, item.duration) : 0 }
 }
 
-function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request, modes, stopRef, editRef, autoFocus }) {
+function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request, modes, stopRef, editRef }) {
   const styles = useStyles(makeStyles)
   const [status, setStatus] = useState({ phase: 'idle', error: '' })
   const [active, setActive] = useState(null)
@@ -234,7 +264,7 @@ function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request,
   return (
     <View style={styles.root}>
       <View style={edit ? styles.hidden : styles.search}>
-        <MusicSearch member={member} origin={origin} request={request} modes={modes} onSelect={select} onStop={stopPreview} onToggle={toggle} active={status.phase === 'idle' ? null : active} phase={status.phase} previewError={status.error} autoFocus={autoFocus} />
+        <MusicSearch member={member} origin={origin} request={request} modes={modes} onSelect={select} onStop={stopPreview} onToggle={toggle} active={status.phase === 'idle' ? null : active} phase={status.phase} previewError={status.error} visible={!edit} />
       </View>
       {edit ? <MusicEditor item={edit.item} kind={edit.kind} start={edit.start} modes={modes} session={session} onKind={onKind} onStart={onStart} stopRef={editRef} /> : null}
       <Text style={styles.footer}>Músicas do Audius</Text>
@@ -242,13 +272,38 @@ function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request,
   )
 }
 
-function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, autoFocus }) {
+function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, visible }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const track = modes.includes('snippet') || modes.includes('track')
   const playlist = modes.includes('playlist')
   const [state, dispatch] = useReducer(musicSearchStep, { ...musicSearchIdle, kind: track ? 'track' : 'playlist' })
   const { gen, query, kind, phase, next } = state
+  const [suggest, dispatchSuggest] = useReducer(musicSuggestStep, musicSuggestIdle)
+  const eligible = visible && track && musicSuggestShown(state)
+  const session = useMemo(() => ({ member, origin, request }), [member, origin, request])
+  const previousSession = useRef(session)
+  const sessionChanged = previousSession.current !== session
+  useEffect(() => {
+    if (previousSession.current === session) return
+    previousSession.current = session
+    dispatchSuggest({ type: 'reset' })
+  }, [session])
+  useEffect(() => {
+    if (eligible && suggest.phase === 'idle') dispatchSuggest({ type: 'load' })
+  }, [suggest.phase, eligible])
+  useEffect(() => {
+    // A new session must finish its reset before starting its own request.
+    if (sessionChanged || suggest.phase !== 'loading') return
+    const gen = suggest.gen
+    const controller = new AbortController()
+    const { signal } = controller
+    audiusTrending({ ...session, signal }).then(
+      (page) => { if (!signal.aborted) dispatchSuggest({ type: 'page', gen, page }) },
+      (error) => { if (!signal.aborted) dispatchSuggest({ type: 'fail', gen, error }) }
+    )
+    return () => controller.abort()
+  }, [suggest.gen, session])
   useEffect(() => { dispatch({ type: 'retry' }) }, [member, origin, request])
   useEffect(() => {
     if (phase !== 'waiting' && phase !== 'more') return
@@ -269,7 +324,10 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
     if (text !== state.text || kind !== state.kind) onStop()
     dispatch({ type: 'query', text, kind })
   }
-  const notice = state.error || previewError || (phase === 'ready' && state.items.length === 0 ? MUSIC_EMPTY_TEXT : '')
+  const results = eligible && !sessionChanged ? suggest : state
+  const emptyText = eligible ? MUSIC_SUGGEST_EMPTY_TEXT : MUSIC_EMPTY_TEXT
+  const notice = state.error || previewError || results.error || (results.phase === 'ready' && results.items.length === 0 ? emptyText : '')
+  const showHeading = eligible && (results.phase === 'loading' || (results.phase === 'ready' && results.items.length > 0))
   return (
     <View style={styles.search}>
       <View style={styles.searchRow}>
@@ -283,16 +341,17 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
           accessibilityLabel='Buscar música'
           autoCapitalize='none'
           autoCorrect={false}
-          autoFocus={autoFocus}
+          autoFocus={false}
           returnKeyType='search'
         />
       </View>
       {playlist ? <Segmented options={track ? SEARCH_KINDS : SEARCH_KINDS.slice(1)} selected={kind} onSelect={(kind) => search(state.text, kind)} /> : null}
+      {showHeading ? <Text accessibilityRole='header' style={styles.heading}>{MUSIC_SUGGEST_TEXT}</Text> : null}
       {notice ? <Text style={styles.notice} accessibilityLiveRegion='polite'>{notice}</Text> : null}
-      {phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => dispatch({ type: 'retry' })} /> : null}
-      {phase === 'loading' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
+      {results.phase === 'error' ? <Btn label='Tentar de novo' secondary onPress={() => (eligible ? dispatchSuggest : dispatch)({ type: 'retry' })} /> : null}
+      {results.phase === 'loading' ? <ActivityIndicator style={styles.spinner} color={colors.soft} /> : null}
       <FlatList
-        data={state.items}
+        data={results.items}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         keyboardShouldPersistTaps='handled'
@@ -351,6 +410,7 @@ const makeStyles = (colors) => StyleSheet.create({
   words: { flex: 1, minWidth: 0 },
   title: { fontSize: 16, color: colors.ink, fontWeight: '600' },
   artist: { fontSize: 14, color: colors.soft },
+  heading: { fontSize: 14, fontWeight: '600', color: colors.ink, paddingTop: space.md },
   notice: { fontSize: 15, color: colors.soft, textAlign: 'center', paddingVertical: space.md },
   footer: { fontSize: 13, color: colors.soft, textAlign: 'center', paddingVertical: space.md },
   spinner: { paddingVertical: space.md },

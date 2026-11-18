@@ -27,6 +27,16 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     ignores the query, so a newer app can ask without breaking it. With
 //     `?info=1`, each track (never a playlist) also carries `genre` and `year`
 //     when the provider had them; without it the keys are today's exact ones.
+//   - POST /account/audius/trending {} (bearer) answers { items, next: null }:
+//     at most PAGE_SIZE tracks of the week's trending list, with covers and
+//     info as on search, TRENDINGS_PER_DAY per member. The list is one for
+//     every member, kept in memory only: a list that came back fine is reused
+//     for up to CACHE_TTL_MS, concurrent misses share one provider call (the
+//     member that started it pays it), a failed attempt that reached the
+//     provider stops new ones for TRENDING_RETRY_MS (answered 503, the use
+//     given back), and a restart erases the list. What reaches Audius on this
+//     route: the fixed time=week, the list's limit and offset, the app name,
+//     the key and this service's address, nothing of the member.
 //   - POST /account/audius/art { kind, id } (bearer, covers switch on)
 //     answers { mime, bytes } with the item's 150x150 cover: at most
 //     ART_MAX_BYTES, JPEG, PNG or WebP by magic bytes only, ARTS_PER_DAY per
@@ -102,10 +112,11 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     passes every check above replaces one, and it is counted and charged
 //     as any other.
 //
-// What reaches the provider: the query text, an id or a permalink, the
-// operator's key (in a header, first hop only, never to a kept storage URL)
-// and app name, this service's address and a fixed User-Agent. Never the
-// member's address, key or token.
+// What reaches the provider: the query text, an id, a permalink or the
+// trending list's fixed time=week, limit and offset, the operator's key (in
+// a header, first hop only, never to a kept storage URL) and app name, this
+// service's address and a fixed User-Agent. Never the member's address, key
+// or token.
 // What reaches the art host: a GET from this service's address with
 // User-Agent and Accept only, never the key, a cookie or anything of the
 // member. Logs carry { event: 'audius', reason } only, never the key, the
@@ -160,6 +171,14 @@ const ART_PER_MEMBER = 3
 // new contact: otherwise every appearance of the cover would spend the
 // shared budget again while the host is down.
 const ART_RETRY_MS = 60 * 1000
+const TRENDINGS_PER_DAY = 200
+// Asked for two pages: fromTrack drops gated and unlisted tracks, and the
+// answer should still fill one.
+const TRENDING_ASK = 2 * PAGE_SIZE
+// A trending list that failed after the provider was contacted is not asked
+// again for this long, so an outage cannot spend the shared budget once per
+// request.
+const TRENDING_RETRY_MS = 60 * 1000
 const ART_ACCEPT = 'image/jpeg, image/png, image/webp'
 // A size=480 request answers within this, under the app's 25 s art timeout
 // (AUDIUS_ART_TIMEOUT_MS): a lookup and the large fetch may already have
@@ -171,7 +190,8 @@ const ART_ANSWER_MS = 20 * 1000
 // search, a resolve and a play are one call each, a playlist item two), so
 // one member cannot spend the shared budget. The art route adds a lookup by
 // id when the item's row is no longer cached, counted here too, so a member
-// who loads covers of expired rows can reach it sooner.
+// who loads covers of expired rows can reach it sooner. A trending miss is
+// one more call counted here, charged to the member whose request started it.
 const PROVIDER_CALLS_PER_DAY = SEARCHES_PER_DAY + 2 * ITEMS_PER_DAY + RESOLVES_PER_DAY + PLAYS_PER_DAY
 const TICKET_BYTES = 256 * 1024 * 1024
 const DAILY_BYTES = 1024 * 1024 * 1024
@@ -291,7 +311,8 @@ function createAudiusRoutes ({
     resolve: refundableWindow(RESOLVES_PER_DAY, DAY_MS, now),
     play: refundableWindow(PLAYS_PER_DAY, DAY_MS, now),
     audio: refundableWindow(caps.opens ?? AUDIO_OPENS_PER_DAY, DAY_MS, now),
-    art: refundableWindow(caps.arts ?? ARTS_PER_DAY, DAY_MS, now)
+    art: refundableWindow(caps.arts ?? ARTS_PER_DAY, DAY_MS, now),
+    trending: refundableWindow(caps.trendings ?? TRENDINGS_PER_DAY, DAY_MS, now)
   }
   const budget = refundableWindow(budgetPerDay, DAY_MS, now, 1)
   const memberBudget = refundableWindow(caps.share ?? MEMBER_BUDGET_PER_DAY, DAY_MS, now)
@@ -325,6 +346,13 @@ function createAudiusRoutes ({
   const memberRelays = new Map()
   // member -> its art requests waiting on a host fetch, started or joined.
   const memberArts = new Map()
+  // The week's trending list, shared by every member and keyed by none:
+  // { rows, expiresAt }, rows being cached track rows. `trendingLoad` is the
+  // running provider call every concurrent miss awaits, and `trendingHold`
+  // the time before which a miss asks nothing after a failed call.
+  let trendingSlot = null
+  let trendingLoad = null
+  let trendingHold = 0
   let streams = 0
   let inflight = 0
   let artInflight = 0
@@ -665,6 +693,98 @@ function createAudiusRoutes ({
     }
     const row = rememberPlaylist(found.item)
     send(res, 200, { kind: 'playlist', item: shown(playlistItem(row), row, withCovers) })
+  }
+
+  // The trending rows while they are valid, by the rule of recalled().
+  function trendingRows () {
+    if (trendingSlot === null) return null
+    const t = now()
+    if (trendingSlot.expiresAt <= t || trendingSlot.expiresAt - t > CACHE_TTL_MS) {
+      trendingSlot = null
+      return null
+    }
+    return trendingSlot.rows
+  }
+
+  function trendingHeld () {
+    const t = now()
+    if (trendingHold > t && trendingHold - t <= TRENDING_RETRY_MS) return true
+    trendingHold = 0
+    return false
+  }
+
+  // One provider call for the list, charged to `member`. Rejects like
+  // providerJson; a failure after the provider was contacted starts the hold.
+  async function loadTrending (member) {
+    try {
+      const list = listOf(await providerJson(requestFor(config, 'trendingTracks', { limit: TRENDING_ASK, offset: 0 }), member))
+      if (list === null) throw new Error('forma')
+      const rows = []
+      const seen = new Set()
+      for (const it of list) {
+        if (rows.length >= PAGE_SIZE) break
+        // Checked before mappedTrack caches it: a duplicate must not replace
+        // the row whose cover flag this list answers.
+        const track = fromTrack(it)
+        if (track === null || seen.has(track.id)) continue
+        seen.add(track.id)
+        rows.push(mappedTrack(it))
+      }
+      trendingSlot = { rows, expiresAt: now() + CACHE_TTL_MS }
+      trendingHold = 0
+      return rows
+    } catch (err) {
+      const token = err && err.message
+      if (token !== 'pedido' && token !== 'lotado' && token !== 'limite' && token !== 'orcamento') trendingHold = now() + TRENDING_RETRY_MS
+      throw err
+    } finally {
+      trendingLoad = null
+    }
+  }
+
+  // The refusal of the leader's failed list. Unlike failed(), a provider 4xx
+  // also gives the use back: the request is the service's, not the member's,
+  // so the member must not pay for it. The provider call, once made, stays.
+  function trendingFailed (err, member) {
+    limits.trending.giveBack(member)
+    const token = err && err.message
+    if (token === 'limite') return overLimit()
+    log({ event: 'audius', reason: token === 'orcamento' ? 'orcamento' : 'indisponivel' })
+    return unavailable()
+  }
+
+  async function trending (res, member, body, url) {
+    exactKeys(body, [])
+    if (!limits.trending(member)) throw overLimit()
+    let rows = trendingRows()
+    if (rows === null && trendingLoad !== null) {
+      // The leader's refusal (its own 'limite' above all) says nothing about
+      // this member, so a joiner only ever hears indisponivel.
+      try {
+        rows = await trendingLoad
+      } catch {
+        limits.trending.giveBack(member)
+        throw unavailable()
+      }
+    } else if (rows === null) {
+      if (trendingHeld()) {
+        limits.trending.giveBack(member)
+        throw unavailable()
+      }
+      trendingLoad = loadTrending(member)
+      try {
+        rows = await trendingLoad
+      } catch (err) {
+        throw trendingFailed(err, member)
+      }
+    }
+    log({ event: 'audius', reason: 'em-alta' })
+    const withCovers = wantsCovers(url)
+    const withInfo = wantsInfo(url)
+    // As in a playlist answer, the flag comes from the track's own row, which
+    // a later search may have replaced: that row is what the art route reads.
+    const own = (row) => (withCovers ? recalled('track:' + row.id) ?? row : row)
+    send(res, 200, { items: rows.map((row) => shown(trackItem(row), own(row), withCovers, withInfo)), next: null })
   }
 
   // Each row expires by its own timer, so a cover nobody asks for again is
@@ -1317,7 +1437,8 @@ function createAudiusRoutes ({
     '/account/audius/item': item,
     '/account/audius/resolve': resolve,
     '/account/audius/play': play,
-    '/account/audius/art': art
+    '/account/audius/art': art,
+    '/account/audius/trending': trending
   }
 
   async function handle (req, res, url) {
@@ -1372,6 +1493,9 @@ module.exports = {
   ART_PER_MEMBER,
   ART_RETRY_MS,
   ART_ANSWER_MS,
+  TRENDINGS_PER_DAY,
+  TRENDING_ASK,
+  TRENDING_RETRY_MS,
   TICKET_TTL_MS,
   TICKETS_PER_MEMBER,
   STREAMS_PER_MEMBER,

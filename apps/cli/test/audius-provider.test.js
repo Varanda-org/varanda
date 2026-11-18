@@ -154,6 +154,8 @@ test('requestFor: every kind, the key never in the URL', (t) => {
     ['searchTracks', { query: 'samba & choro', limit: 24, offset: 48 }, 'https://api.audius.co/v1/tracks/search?query=samba+%26+choro&limit=24&offset=48&app_name=varanda'],
     ['searchTracks', { query: 'samba' }, 'https://api.audius.co/v1/tracks/search?query=samba&limit=20&offset=0&app_name=varanda'],
     ['searchPlaylists', { query: 'roda', limit: 10, offset: 0 }, 'https://api.audius.co/v1/playlists/search?query=roda&limit=10&offset=0&app_name=varanda'],
+    ['trendingTracks', { limit: 24 }, 'https://api.audius.co/v1/tracks/trending?time=week&limit=24&offset=0&app_name=varanda'],
+    ['trendingTracks', { query: 'secret', genre: 'Samba', time: 'allTime', id: 'abc' }, 'https://api.audius.co/v1/tracks/trending?time=week&limit=20&offset=0&app_name=varanda'],
     ['track', { id: 'D7KyD' }, 'https://api.audius.co/v1/tracks/D7KyD?app_name=varanda'],
     ['playlist', { id: 'pL4yA' }, 'https://api.audius.co/v1/playlists/pL4yA?app_name=varanda'],
     ['playlistTracks', { id: 'pL4yA' }, 'https://api.audius.co/v1/playlists/pL4yA/tracks?app_name=varanda'],
@@ -186,6 +188,10 @@ test('requestFor: refuses unknown kinds and bad parameters', (t) => {
   t.is(requestFor(c, 'searchTracks', { query: 'x', offset: -1 }), null)
   t.is(requestFor(c, 'searchTracks', { query: 'x', offset: MAX_OFFSET + 1 }), null)
   t.is(requestFor(c, 'searchTracks', { query: 'x', offset: '0' }), null)
+  t.is(requestFor(c, 'trendingTracks', { limit: 0 }), null)
+  t.is(requestFor(c, 'trendingTracks', { limit: 51 }), null)
+  t.is(requestFor(c, 'trendingTracks', { offset: -1 }), null)
+  t.is(requestFor(c, 'trendingTracks', { offset: '0' }), null)
   t.is(requestFor(c, 'resolve', { url: 'https://evil.test/a/b' }), null)
   t.is(requestFor(c, 'resolve', { url: 'https://audius.co/a/b?x=1' }), null)
   t.is(requestFor(null, 'track', { id: 'abc' }), null)

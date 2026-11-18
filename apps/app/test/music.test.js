@@ -28,6 +28,14 @@ test('constants', async (t) => {
   t.is(m.MUSIC_SEEK_TEXT, 'Não foi possível começar nesse ponto')
 })
 
+test('suggested list strings', async (t) => {
+  const m = await load()
+  t.is(m.MUSIC_SUGGEST_TEXT, 'Em alta no Audius')
+  t.is(m.MUSIC_SUGGEST_EMPTY_TEXT, 'Nenhuma sugestão agora')
+  t.absent(m.MUSIC_SUGGEST_TEXT.includes('\u2014'))
+  t.absent(m.MUSIC_SUGGEST_EMPTY_TEXT.includes('\u2014'))
+})
+
 test('musicRefOf: the three fragments, frozen', async (t) => {
   const { musicRefOf } = await load()
   t.alike(musicRefOf(PAGE + '#varanda-musica=t:T1abc'), { kind: 'track', id: 'T1abc', start: null })
