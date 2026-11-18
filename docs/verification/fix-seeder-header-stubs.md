@@ -209,6 +209,13 @@ Revisão da rodada 4: sem P1 nem P2. Três ajustes P3 entraram depois dela: a re
 
 A saída só de remoção no fim da admissão continua sem teste próprio: um teste como o 19 com a espera ignorada (`_groupBackingOff` sempre falso) passou também com a reconciliação da rodada 2 de volta (1 gravação), então não foi mantido. O teste 19 ainda passa com no máximo 2 gravações.
 
+## CI do GitHub
+
+- Primeira rodada (`5901fd19`): os jobs `cli` caíram com `this._headerStubs is not iterable`. `apps/cli/test/seeder-topic.test.js` e `apps/cli/test/seeder-index.test.js` montam o semeador à mão (`Object.create(Seeder.prototype)`) e chamam `_drop`, que agora passa por `_dropHeaderStubsOf`. Corrigido em `99b53032`: os dois montadores ganham `_headerStubs` e `_stubCores`. Sozinhos: `seeder-topic` 10/10 e `seeder-index` 55/55.
+- Segunda rodada (`c9c91f3e`): `sync-groups-8.test.js` passou do tempo por arquivo (180 s) no Node 24, com os 38 primeiros testes somando 179 s. Os testes 21 a 40 foram, com os mesmos nomes e os auxiliares que usam, para `packages/core/test/sync-groups-9.test.js`. Na CI, as duas metades somam cerca de 95 s e 90 s.
+- Contagem, cada arquivo sozinho: antes, `sync-groups-8` 40/40 testes e 271/271 asserções; depois, `sync-groups-8` 20/20 e 185/185, `sync-groups-9` 20/20 e 86/86. Na primeira rodada local depois da divisão, com a máquina sob carga (média 18), os testes 14 e 16 de `sync-groups-8` falharam uma vez e passaram na rodada seguinte.
+- Na mesma rodada da CI, `sync-groups-2` teste 8 ("a writer stored in an earlier run gives its slot to an earlier proven join listed later") falhou uma vez no Node 20. A mudança em `sync.js` só deixa de cobrar a recusa de cabeçalho de um núcleo guardado em outro papel e não muda qual escritor dá a vaga. Sozinho, o arquivo passou três vezes (27/27, 96/96).
+
 ## Pontos em aberto (padrões do responsável)
 
 - Uma entrada desligada (`on: false`) mantém o toco: sair do grupo nunca apaga um núcleo, e os leitores ainda esperam um escritor que saiu.
