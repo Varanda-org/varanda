@@ -6,6 +6,7 @@
 import rpc from '@varanda/rpc'
 import { shortKey } from './format.js'
 import { plainPreview } from './chatPreview.js'
+import { carriesPrivateItems } from './pageGroupMedia.js'
 
 const { displayText } = rpc
 
@@ -666,8 +667,12 @@ export function pageCan (action, role, opts = {}) {
 
 // The ops a page sends to the service's group actions (docs/rpc.md, the page
 // group-post, group-react, group-hide and group-choice). Absent optional keys
-// are dropped, never sent as null.
-export function pageGroupPostOp ({ group, text, replyTo, fwd, media, card, topic, poll, event } = {}) {
+// are dropped, never sent as null. A post of private items is refused before
+// anything is signed: it goes only sealed (pageGroupMedia.js).
+export const PAGE_PRIVATE_AS_PLAIN_TEXT = 'Esta mídia é de um grupo privado e não vai como publicação aberta'
+export function pageGroupPostOp (params = {}) {
+  if (carriesPrivateItems(params)) throw new TypeError(PAGE_PRIVATE_AS_PLAIN_TEXT)
+  const { group, text, replyTo, fwd, media, card, topic, poll, event } = params
   const op = { group, text }
   if (replyTo) op.replyTo = replyTo
   if (fwd === 1) op.fwd = 1

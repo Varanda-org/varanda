@@ -405,7 +405,7 @@ test('a fifth declaration drops the oldest bound core', async (t) => {
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('restart: a healthy binding is served at ready without a rescan; a binding whose diary is gone is purged', async (t) => {
+test('restart: a healthy binding is served before the scan starts, without a rescan; a binding whose diary is gone is purged', async (t) => {
   t.timeout(150000)
   const { bootstrap } = await testnet(t)
   const assoc = makeAssociation()
@@ -422,15 +422,15 @@ test('restart: a healthy binding is served at ready without a rescan; a binding 
   await m.swarm.destroy()
   await m.store.close()
 
-  let servedAtReady = null
-  const second = newSeeder(t, bootstrap, dataDir, {
-    associationKey: assoc.hex,
-    onlog: (e) => {
-      if (e.event === 'ready') servedAtReady = second.seeder._mediaServed.has(K) && second.seeder._served.get(m.key).scanned === 1
-    }
-  })
+  let servedAtStart = null
+  const second = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const startPasses = second.seeder._startPasses.bind(second.seeder)
+  second.seeder._startPasses = () => {
+    servedAtStart = second.seeder._mediaServed.has(K) && second.seeder._served.get(m.key).scanned === 1
+    startPasses()
+  }
   second.ready = await second.seeder.start()
-  t.is(servedAtReady, true, 'K served at ready, before any block of D was scanned')
+  t.is(servedAtStart, true, 'K served when the scan starts, before any block of D was scanned')
   t.alike(second.ready.admitted, [m.key])
   t.alike(second.seeder.mediaKeys(), [K])
   // The background scan confirms the binding (no drop, no re-admission).

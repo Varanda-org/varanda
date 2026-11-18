@@ -346,16 +346,16 @@ test('notices: incomplete until every served diary is committed; a restart rebui
   t.alike(before, { items: [{ key: A.key, seq, at: follow.at }], next: null, incomplete: false })
   await first.seeder.close()
 
-  // At ready every served diary is pending (the scan runs after ready).
-  let atReady = null
-  const second = newSeeder(t, bootstrap, dataDir, {
-    associationKey: assoc.hex,
-    onlog: (e) => {
-      if (e.event === 'ready') atReady = second.seeder._notices.page({ target: B.key, isBlocked: () => false })
-    }
-  })
+  // When the scan starts every served diary is pending.
+  let atStart = null
+  const second = newSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex })
+  const startPasses = second.seeder._startPasses.bind(second.seeder)
+  second.seeder._startPasses = () => {
+    atStart = second.seeder._notices.page({ target: B.key, isBlocked: () => false })
+    startPasses()
+  }
   await second.seeder.start()
-  t.alike(atReady, { items: [], next: null, incomplete: true }, 'nothing published before the scan, incomplete')
+  t.alike(atStart, { items: [], next: null, incomplete: true }, 'nothing published before the scan, incomplete')
   const after = await B.pageUntil((p) => p.items.length === 1 && !p.incomplete, 'B vê A após reinício')
   t.alike(after, before, 'same page after restart')
   t.is(second.events.filter((e) => e.event === 'fatal').length, 0)

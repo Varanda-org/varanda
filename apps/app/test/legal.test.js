@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 88)
+  t.is(LEGAL_VERSION, 90)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 88, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 90, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,12 +388,29 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test("legal: version 89 describes a page's media, reactions and hides in private groups", async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 89)
+  const terms = TERMS.sections.flatMap((s) => s.paragraphs).join('\n')
+  const privacy = PRIVACY.sections.flatMap((s) => s.paragraphs).join('\n')
+  t.ok(terms.includes('Num grupo privado, a página também publica fotos, GIFs, uma mensagem de voz e um link com prévia, responde, encaminha, reage e oculta as próprias publicações'), 'terms: a page acts as a person in a private group')
+  t.ok(terms.includes('o serviço de conta guarda só a versão cifrada, sabe o tamanho dela e para qual grupo foi enviada'), 'terms: what the service stores and learns')
+  t.ok(terms.includes('só os aparelhos dos membros conseguem abri-las'), 'terms: only members open them')
+  t.ok(privacy.includes('as fotos e mensagens de voz da página são cifradas no aparelho de quem administra'), 'privacy: sealed on the admin device')
+  t.ok(privacy.includes('sabe o tamanho, o grupo e qual administrador a enviou e quando, e não consegue abri-la; nada público da página a mostra'), 'privacy: what the service learns, never shown in public')
+  t.ok(privacy.includes('As reações da página num grupo privado são cifradas como as publicações, e, quando ela oculta uma publicação, o que vai cifrado é o registro de ocultação.'), 'privacy: reactions and hide records sealed')
+  t.ok(terms.includes('Essa versão cifrada fica guardada pelo serviço de conta e é servida pelo semeador junto com as outras mídias da página em grupos.'), 'terms: the service keeps it, the seeder serves it')
+  t.ok(terms.includes('Ocultar a publicação ou sair do grupo não a apaga: ao ocultar, o que vai cifrado é o registro de ocultação'), 'terms: hiding or leaving deletes nothing, the hide record is sealed')
+  t.ok(privacy.includes('Essa versão cifrada fica guardada pelo serviço de conta e é servida pelo semeador, como as outras mídias da página em grupos, e ocultar a publicação ou sair do grupo não a apaga.'), 'privacy: kept and served, hiding or leaving deletes nothing')
+  t.ok(privacy.includes('Essas fotos e mensagens de voz, inclusive as cifradas dos grupos privados, continuam guardadas pelo serviço de conta e servidas pelo semeador.'), 'privacy: closing a page keeps its group media')
+})
+
 // A copy change requires a new acceptance version, including the core's
 // independent constant. Pin the serialized contract, not a digest of itself.
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ff925bf67d772be0ecc2c37c4240b03d77fb5dfed12faca7c5f83d22d07e309b', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '2e617a8e0e53ce5c4196f214656ee2a02b219f8ec7fd5d1fbd17f9eb0e0bcdbc', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -1065,7 +1082,7 @@ test('legal: version 84 describes Excluir conta sem a passkey and the e-mail pat
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })
 
-test('legal: version 88 says the Conversas keys of a core node sit in a file with no passkey', async (t) => {
+test('legal: version 90 says the Conversas keys of a core node sit in a file with no passkey', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   const sentence = 'Num nó core, as chaves das Conversas, as do próprio nó e as das Páginas que ele administra, ficam guardadas num arquivo naquele aparelho, sem nenhuma passkey que as proteja: quem tiver a pasta de dados desse nó consegue ler essas conversas, e quem perder essa pasta perde essas conversas.'
