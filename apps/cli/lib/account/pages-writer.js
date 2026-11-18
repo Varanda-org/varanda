@@ -291,6 +291,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     movePage,
     append,
     readEntries,
+    readRawBlocks,
     readOwn,
     mediaItem,
     avatarItem,
@@ -861,6 +862,21 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   async function readEntries (key) {
     await opening
     return readAll(pageOf(key).core)
+  }
+
+  // Every block of the page's core, tombstones not applied, for a check a
+  // tombstoned block must still count in (one listing-rate per offer). It
+  // fails closed where readOwn answers nothing: a forked core or a lost
+  // state would read as "no such block" and let the check pass.
+  async function readRawBlocks (key) {
+    await opening
+    const p = pageOf(key)
+    if (p.core.fork !== 0 || p.stateLost) throw fail('fechado')
+    try {
+      return await readRaw(p.core)
+    } catch {
+      throw fail('fechado')
+    }
   }
 
   // The blocks this writer wrote, tombstones not applied, so the caller

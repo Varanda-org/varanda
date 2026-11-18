@@ -685,9 +685,9 @@ Numa conversa que tem o link de um anúncio da outra pessoa, aparece **Fazer ofe
 
 ### Avaliações
 
-Depois de um aceite com a assinatura, só quem fez a oferta vê **Avaliar** na conversa. A tela Avaliar pede de 1 a 5 estrelas e um "Comentário (opcional)", com a nota "A avaliação fica pública no anúncio. Ela não é prova de pagamento.". Sem resposta, nada é reenviado sozinho ("Não sabemos se a avaliação foi publicada. Confira o anúncio antes de avaliar de novo.", com **Tentar de novo** e **Descartar**).
+Depois de um aceite com a assinatura, só quem fez a oferta vê **Avaliar** na conversa (a pessoa, ou a Página que fez a oferta nas Conversas da Página). A tela Avaliar pede de 1 a 5 estrelas e um "Comentário (opcional)", com a nota "A avaliação fica pública no anúncio. Ela não é prova de pagamento.". Sem resposta, nada é reenviado sozinho ("Não sabemos se a avaliação foi publicada. Confira o anúncio antes de avaliar de novo.", com **Tentar de novo** e **Descartar**).
 
-- Uma Página não avalia por enquanto: "Uma página não avalia anúncios por enquanto. Para avaliar, use o seu perfil.".
+- Agindo como Página, o dono ou um administrador avalia pela Página: a tela lê a conversa da Página com quem anunciou, o consentimento tem a Página como quem avalia, e o rótulo vira "Nota da página". Um toque em **Avaliar** manda uma só declaração assinada (ação `listing-rate` do serviço de conta); sem resposta, **Tentar de novo** manda os mesmos bytes. A Página não avalia o próprio anúncio nem os de quem cuida dela (dono, administradores, convidados e quem recebe a transferência, e outras Páginas dessas pessoas), não apaga a avaliação e avalia cada oferta uma vez: "Esta oferta não pode ser avaliada pela página.", "Uma página não avalia anúncios de quem cuida dela.", "A página já avaliou esta oferta." e "Só o dono pode fazer isso" vêm do serviço.
 - Na tela Anúncio e no perfil (Membro), as avaliações vêm com "avaliações confirmadas pelo anunciante" e só aparecem as que o nó conferiu, uma por pessoa e anúncio (a mais nova vale). Uma avaliação sem o consentimento assinado não aparece, nem a de quem entrou na rede há menos de 7 dias (conta a data do certificado de quem avalia, no relógio de quem lê).
 
 ### Buscas salvas

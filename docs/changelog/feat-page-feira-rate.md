@@ -1,0 +1,3 @@
+### Adicionado
+
+- Página avalia um negócio da Feira como uma pessoa (PR `feat/page-feira-rate`): agindo como uma Página, o dono ou um administrador avalia o anúncio de outra pessoa pela oferta que a Página fez nas Conversas e que quem anuncia aceitou, com o consentimento que tem a Página como quem avalia. O serviço de conta ganha a ação de Página `listing-rate`, uma declaração assinada por toque, e o reenvio manda os mesmos bytes. A Página nunca avalia o próprio anúncio nem os de quem cuida dela (dono, administradores, convidados, quem recebe a transferência e outras Páginas dessas pessoas), avalia cada oferta uma vez e, como uma pessoa, não apaga a avaliação. Termos e Política versão 90, com novo aceite.

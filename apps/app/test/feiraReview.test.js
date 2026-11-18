@@ -49,6 +49,19 @@ test('rateParams passes the listing.rate validator', async (t) => {
   t.is(r.rateParams({ offer, listing: LISTING, me: SELLER, stars: 4 }), null)
 })
 
+test('rateCall: the person calls listing.rate, a page the listing-rate action', async (t) => {
+  const r = await load()
+  const offer = await accepted()
+  const fields = { to: SELLER + ':7', offer: id(1), consent: CONSENT, stars: 4, text: 'ok' }
+  t.alike(r.rateCall({ offer, listing: LISTING, me: BUYER, stars: 4, text: ' ok ' }), { method: 'listing.rate', params: fields })
+  // BUYER as a page key: the page's own thread, where the page made the offer.
+  t.alike(r.rateCall({ offer, listing: LISTING, me: BUYER, page: BUYER, stars: 4, text: 'ok' }), { action: 'listing-rate', page: BUYER, op: fields })
+  t.is(r.rateCall({ offer, listing: LISTING, me: OTHER, page: BUYER, stars: 4 }), null, 'the rater is the page')
+  t.is(r.rateCall({ offer, listing: LISTING, me: BUYER, page: OTHER, stars: 4 }), null, 'the consent names another rater')
+  t.is(r.rateCall({ offer, listing: LISTING, me: SELLER, page: SELLER, stars: 4 }), null, 'never the own listing')
+  t.is(r.rateCall({ offer, listing: LISTING, me: BUYER, page: BUYER, stars: 0 }), null)
+})
+
 test('summarize: dedupe by rater and listing, newest wins', async (t) => {
   const r = await load()
   t.alike(r.summarize([]), { count: 0, average: null })
