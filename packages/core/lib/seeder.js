@@ -264,6 +264,7 @@ const { verifyRoster } = require('./page')
 const { verifyClose, verifyMoved } = require('./page-lifecycle')
 const { parseQuery } = require('./search-text')
 const { createTopicIndex, QUERY_RE, tokensOf } = require('./topic-index')
+const { createTopicTrend } = require('./topic-trend')
 const { createFeiraIndex } = require('./feira-index')
 // verifyConsent is read off the module at each call (_feiraConsent), so a
 // test can count the checks a rescan repeats.
@@ -1571,6 +1572,8 @@ class Seeder {
   // search index; topicPerAuthorPostingsMax and topicPerAuthorTermsMax are
   // each diary's share of the posting and term budgets, so one diary cannot
   // fill them for everyone (defaults in topic-index.js; no CLI flags).
+  // trendMaxPosts and trendPerAuthorMax bound the posts kept for topic
+  // trends across all diaries and per diary (defaults in topic-trend.js).
   // feiraMaxEntries, feiraPerAuthorMax, feiraMaxTerms, feiraMaxPostings,
   // feiraMaxRatings and feiraMaxRatingsPerTarget bound the Feira index
   // (defaults in feira-index.js; no CLI flags). feiraRescanMs is the least
@@ -1683,6 +1686,8 @@ class Seeder {
     topicMaxPostings = undefined,
     topicPerAuthorPostingsMax = undefined,
     topicPerAuthorTermsMax = undefined,
+    trendMaxPosts = undefined,
+    trendPerAuthorMax = undefined,
     feiraMaxEntries = undefined,
     feiraPerAuthorMax = undefined,
     feiraMaxTerms = undefined,
@@ -1924,6 +1929,7 @@ class Seeder {
     // Topic search index (header comment): its own queue and startup set,
     // independent of the engagement index's.
     this._topics = createTopicIndex({ maxPosts: topicMaxPosts, perAuthorMax: topicPerAuthorMax, maxTerms: topicMaxTerms, maxPostings: topicMaxPostings, perAuthorPostingsMax: topicPerAuthorPostingsMax, perAuthorTermsMax: topicPerAuthorTermsMax, onFreed: () => this._scheduleTopicResume() })
+    this._trend = createTopicTrend({ maxPosts: trendMaxPosts, perAuthorMax: trendPerAuthorMax })
     this._topicQueue = Promise.resolve()
     this._topicStartup = null
     // Feira index (header comment): its own queue and startup set too.
@@ -2691,6 +2697,11 @@ class Seeder {
   feiraStats () {
     const s = this._feira.stats()
     return { feiraListings: s.stateListings, feiraIndexed: s.entries, feiraRatings: s.ratings }
+  }
+
+  trendStats () {
+    const { posts, saturated } = this._trend.stats()
+    return { trendPosts: posts, trendSaturated: saturated }
   }
 
   // (a) The announced certificate is checked synchronously BEFORE anything
@@ -3559,6 +3570,7 @@ class Seeder {
     // purge, on every drop path (blocked, fork, quota, revoked issuer, failed
     // gate, blocklist adoption). No timer.
     this._topics.removeDiary(key)
+    this._trend?.removeDiary(key)
     if (this._topicStartup !== null) this._topicStartup.delete(key)
     // Ratings this diary's listings received were verified when added and
     // their raters are never scanned again: they wait for a re-admission.
@@ -4107,6 +4119,7 @@ class Seeder {
     if (media) countTombstone(entry, seq, record, block)
     this._index.removeRecord(key, target)
     this._topics.removePost(key, target)
+    this._trend?.removePost(key, target)
     this._postNotices.removePost(key, target)
     this._pushForget((e) => e.actor === key && e.seq === target)
     // Removing a block a paused cursor never indexed (the refused one, or a
@@ -7419,8 +7432,8 @@ class Seeder {
   // to one must be applied to the other. Only post blocks are handed to the
   // search index; a refused add (cap reached) leaves the cursor AT that block
   // and pauses the diary's search cursor only (never entry.indexPaused).
-  // this._topics.add is idempotent, so re-reading the paused block after a resume
-  // never double counts.
+  // Observe trends before search can pause. Both indexes key the post by
+  // diary and seq, so resuming at that block counts it only once.
   async _runTopic (key, entry) {
     const core = entry.core
     try {
@@ -7441,9 +7454,12 @@ class Seeder {
         const block = raw === null || entry.deleted?.has(i) ? null : decodeBlock(raw)
         if (block !== null && block.type === 'post') {
           const record = validRecordCopy(block, i)
-          if (record !== null && !this._topics.add(key, i, record)) {
-            entry.topicPaused = true
-            return
+          if (record !== null) {
+            this._trend?.observe(key, i, record, Date.now())
+            if (!this._topics.add(key, i, record)) {
+              entry.topicPaused = true
+              return
+            }
           }
         }
         entry.topicIndexed = i + 1
@@ -8892,6 +8908,27 @@ class Seeder {
       }
       const flags = this._topicFlags()
       return { items: page.items, next: page.next, authors, indexing: flags.indexing, complete: flags.complete && !held }
+    } catch {
+      return null
+    }
+  }
+
+  indexTopicTrend () {
+    try {
+      const gate = this._followsVisible()
+      const visible = (hex) => {
+        if (!gate.visible(hex)) return false
+        const entry = this._served.get(hex)
+        // The unread part of a diary may contain its first verified page roster.
+        if (entry.indexPaused || entry.indexed < entry.present) {
+          gate.held = true
+          return false
+        }
+        return this._names.hint(hex).page !== true
+      }
+      const topics = this._trend.top(Date.now(), visible)
+      const flags = this._topicFlags()
+      return { topics, indexing: flags.indexing, complete: flags.complete && !gate.held && !this._trend.stats().saturated }
     } catch {
       return null
     }
@@ -11039,6 +11076,7 @@ class Seeder {
       if (this._stopRediscovery) this._stopRediscovery()
       for (const entry of this._served.values()) this._stopEntry(entry)
       this._served.clear()
+      this._trend?.clear()
       this._notices = createNoticeIndex() // nothing of the index outlives close
       this._postNotices = createPostNoticeIndex()
       this._pushPending.clear()
