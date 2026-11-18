@@ -6,13 +6,15 @@ const path = require('path')
 const { register } = require('node:module')
 
 // encode.native.js with expo-file-system, expo-image-manipulator and
-// ./display replaced by stubs (a module hook) that record what decodes.
-const thumbBox = globalThis.__thumb = { log: [] }
+// ./display replaced by stubs (a module hook) that record what decodes. The
+// AVIF module is a guard that records being loaded: a thumbnail never needs it.
+const thumbBox = globalThis.__thumb = { log: [], imagePrep: false }
 const thumbStubs = {
   'expo-file-system': 'export class File { constructor (uri) { this.uri = uri } get exists () { return false } async bytes () { return new Uint8Array(10) } delete () {} }',
   'expo-image-manipulator': 'export const SaveFormat = { JPEG: "jpeg" }\nexport async function manipulateAsync (uri, actions) { globalThis.__thumb.log.push(actions); const r = actions[0] && actions[0].resize; return { uri: "file:///t.jpg", width: r ? r.width : 9999, height: r ? r.height : 9999 } }',
   display: 'export function urlFromBytes () { return "blob:x" }\nexport function revokeUrl () {}',
-  'expo/fetch': 'export async function fetch () { throw new Error("no network in tests") }'
+  'expo/fetch': 'export async function fetch () { throw new Error("no network in tests") }',
+  '../../modules/image-prep': 'globalThis.__thumb.imagePrep = true\nexport async function canEncodeAvif () { throw new Error("native AVIF module loaded") }\nexport async function encodeAvif () { throw new Error("native AVIF module loaded") }'
 }
 const thumbHooks = `
 const stubs = ${JSON.stringify(Object.fromEntries(Object.entries(thumbStubs).map(([k, v]) => [k, 'data:text/javascript,' + encodeURIComponent(v)])))}
@@ -280,6 +282,7 @@ test('encodeThumbnail: a header past the photo bounds is dropped before any deco
   t.alike(thumbBox.log, [], 'native: never decoded')
   t.alike(await encNative.encodeThumbnail(PNG_1X1, 'image/png'), { bytes: new Uint8Array(10), mime: 'image/jpeg', width: 1, height: 1 }, 'native: a bounded header is encoded')
   t.alike(thumbBox.log, [[{ resize: { width: 1, height: 1 } }]], 'native: one resize from the header size, no full-size probe')
+  t.absent(thumbBox.imagePrep, 'native: the AVIF module is never loaded, neither on import nor for a thumbnail')
 })
 
 // A JPEG of 640 x 480 stored pixels with an EXIF orientation in its APP1.
@@ -633,8 +636,8 @@ test('Publicar holds the ordinary Audius build while availability is unknown or 
   const src = fs.readFileSync(path.join(SRC, 'screens/Publicar.js'), 'utf8')
   t.ok(src.includes('useMusicAvailable(node, member, open)'), 'opening the composer refreshes music availability')
   t.ok(src.includes('musicAvailable === true && node.online !== false && previewsEnabled(previewPrefStore())'), 'resolution requires confirmed music and online previews')
-  t.ok(src.includes('{musicAvailable === true && asPage === null'), 'the music button requires confirmed availability')
-  t.ok(src.includes('asPage === null && musicAvailable === true && musicPickerOpen'), 'the picker requires confirmed availability')
+  t.ok(src.includes('{musicAvailable === true && pollDraft === null'), 'the music button requires confirmed availability')
+  t.ok(src.includes('!momentMode && musicAvailable === true && musicPickerOpen'), 'the picker requires confirmed availability')
 
   const slots = []
   const effects = []

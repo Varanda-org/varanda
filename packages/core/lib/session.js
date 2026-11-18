@@ -868,6 +868,8 @@ function createSession ({
     'dm.pageLegacyChunk': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageLegacyBlocks': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageForget': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    // A later change signs the delegate's box here (docs/rpc.md 5.161).
+    'dm.actorBox': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'group.seal': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // Like report.sign (docs/rpc.md 5.20).
     'dm.reportSign': serial(async () => {
@@ -1105,6 +1107,22 @@ function createSession ({
       const r = await withStore((c) => member.deviceReconnect(c, params))
       noteDeviceOff(false, epoch)
       return r
+    }),
+
+    // Varandinha (docs/rpc.md garden.*): the help check needs peeks of the
+    // owner's diary and the seeder index the core node does not read; refused
+    // the same way, nothing written.
+    'garden.set': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.state': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.play': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.help': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
     }),
 
     // Foruns e enquetes (docs/rpc.md): a vote checks the poll post with a

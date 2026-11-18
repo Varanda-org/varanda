@@ -48,6 +48,7 @@ const ACTIONS = Object.freeze([
   'dm-box-read',
   'dm-legacy-read',
   'dm-legacy-done',
+  'actor-box',
   'group-seal',
   'group-rebox',
   'follow',
@@ -64,7 +65,8 @@ const ACTIONS = Object.freeze([
   'listing',
   'listing-edit',
   'listing-status',
-  'listing-consent'
+  'listing-consent',
+  'choice'
 ])
 // Actions that are not about one existing page sign page = ''.
 const PAGELESS = Object.freeze(['create', 'list', 'terms'])

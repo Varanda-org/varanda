@@ -24,7 +24,7 @@ function pictureOf (sha) {
 
 function checkFile ({ bytes, mime, width, height }) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw fail('foto inválida')
-  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mime)) throw fail('foto inválida')
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'].includes(mime)) throw fail('foto inválida')
   for (const side of [width, height]) if (!Number.isInteger(side) || side < 1 || side > 16384) throw fail('foto inválida')
 }
 

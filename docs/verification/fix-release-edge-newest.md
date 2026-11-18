@@ -1,0 +1,7 @@
+# `edge` só avança (PR fix/release-edge-newest)
+
+O teste `apps/cli/test/release.test.js` roda o passo "Move edge if this release is newer" com bash e jq de verdade contra um `docker` e um `git` de mentira: `edge` mais antigo (com `main` já à frente), nenhum `edge`, o mesmo commit, uma execução antiga terminando por último, `edge` fora do histórico, sem assinatura, assinado por outra identidade, `release.json` fora do formato, registro sem resposta, commit fora de `main` e falha ao mover o semeador. O que só uma execução de verdade mostra está abaixo. Este roteiro substitui o item 9 de `docs/verification/feat-seeder-pull-updater.md`, que descreve a regra antiga (só a ponta de `main`).
+
+- [ ] 1. A primeira execução do `release` depois do merge, com `edge` em uma versão mais antiga (hoje seq 522). Esperado: o resumo mostra `edge: movido` mesmo que outro merge tenha entrado em `main` durante a execução, e `docker buildx imagetools inspect ghcr.io/varanda-org/varanda-seeder:edge` (e o mesmo para `varanda-web`) mostra os digests do resumo.
+- [ ] 2. Rode de novo uma execução antiga do `release`, de um commit anterior ao de `edge`. Esperado: termina verde, o resumo mostra `edge: não movido (edge no seq <n>)`, e `edge` continua no digest de antes.
+- [ ] 3. Com `edge` em dia, rode o `promote` com o campo do commit vazio. Esperado: o resumo mostra o commit da versão mais nova que o `release` publicou, e não um commit antigo.

@@ -34,13 +34,15 @@
 // '<writer hex64>:<seq>' and requires params.group (the group's hex64 key).
 // 'eventos' (a member's events, keyed by the member's hex64; with params.groups,
 // a list of up to 12 group keys, the Agenda of a community keyed by its root).
+// 'varandinha' (one balcony of the pot game) is keyed by the owner's hex64;
+// 'varandinha-rua' (Varandas da rua) takes no key.
 // The stack is an immutable (frozen) array, oldest first. Invalid entries are
 // refused by returning the stack unchanged (never throws); pushing the
 // screen that is already on top is a no-op, whatever its params; past
 // MAX_DEPTH the oldest entry is dropped.
 
 export const MAX_DEPTH = 20
-export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos', 'visitas'])
+export const SCREENS = Object.freeze(['conversa', 'membro', 'curtidas', 'citacoes', 'grupo', 'comunidade', 'comunidade-info', 'mensagem', 'seguindo', 'seguidores', 'paginas', 'novapagina', 'paginaajustes', 'comunidades', 'pedidos', 'anuncio', 'anunciar', 'editar-anuncio', 'avaliar', 'anuncios', 'depoimentos', 'momentos', 'salvos', 'assunto', 'recados', 'fas', 'melhores-amigos', 'topico', 'eventos', 'visitas', 'varandinha', 'varandinha-rua'])
 
 const HEX32 = /^[0-9a-f]{32}$/
 const HEX64 = /^[0-9a-f]{64}$/
@@ -106,7 +108,7 @@ export function validEntry (entry) {
     return params.oldPage === undefined || isAuthorKey(params.oldPage)
   }
   if (entry.screen === 'membro' || entry.screen === 'grupo' || entry.screen === 'comunidade' || entry.screen === 'comunidade-info') return isAuthorKey(entry.key)
-  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas') return isAuthorKey(entry.key)
+  if (entry.screen === 'seguindo' || entry.screen === 'seguidores' || entry.screen === 'paginaajustes' || entry.screen === 'anuncios' || entry.screen === 'momentos' || entry.screen === 'recados' || entry.screen === 'fas' || entry.screen === 'varandinha') return isAuthorKey(entry.key)
   if (entry.screen === 'depoimentos') {
     const params = entry.params
     if (!isAuthorKey(entry.key)) return false
@@ -114,7 +116,7 @@ export function validEntry (entry) {
     if (typeof params !== 'object' || Array.isArray(params)) return false
     return params.section === undefined || params.section === 'sent'
   }
-  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos' || entry.screen === 'visitas') return entry.key === undefined || entry.key === null || entry.key === ''
+  if (entry.screen === 'paginas' || entry.screen === 'novapagina' || entry.screen === 'comunidades' || entry.screen === 'salvos' || entry.screen === 'melhores-amigos' || entry.screen === 'visitas' || entry.screen === 'varandinha-rua') return entry.key === undefined || entry.key === null || entry.key === ''
   if (entry.screen === 'citacoes') return isRef(entry.key)
   if (entry.screen === 'assunto') return typeof entry.key === 'string' && TAG.test(entry.key)
   if (entry.screen === 'curtidas') {

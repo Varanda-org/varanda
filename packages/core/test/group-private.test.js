@@ -570,6 +570,59 @@ test('a key block citing a cut community writer stays readable (#350)', (t) => {
   t.is(g.rekeyPending, true)
 })
 
+test('a key block citing a cut CW held sparse is judged by its signed length (#350)', (t) => {
+  const w = pworld({ cadmins: [B] })
+  w.add(B, wB)
+  w.comm.push(cwKey(B), communityBan({ member: K(0xabc), on: true, cuts: [], at: AT(5) }))
+  const ban = w.push(G, groupBan({ member: Y, on: true, cuts: [{ writer: wY, seq: 1 }], at: AT(6) }))
+  const E2 = w.rotate(wB, [G, wA, wB, wX], { basis: [ban], auth: w.cauth(B), at: 7 })
+  sealedPost(w, wX, E2, 8)
+  w.comm.mark(B, cwKey(B), 1)
+  const whole = w.input(w.reader(wX))
+  const cwB = whole.community.writers.find((l) => l.key === cwKey(B))
+  t.is(cwB.entries.length, 2, 'the auth cites the whole CW, past its cut')
+  const trimmed = (signed) => ({ ...whole, community: { ...whole.community, writers: whole.community.writers.map((l) => l === cwB ? { ...l, entries: l.entries.slice(0, 1), signed } : l) } })
+  t.alike(buildGroup(trimmed(undefined)).posts, [], 'control: held alone, the trimmed CW is too short for the auth')
+  const g = buildGroup(trimmed(2))
+  t.alike(g.posts.map((p) => p.text), ['p8'], 'the signed length keeps the history readable')
+  t.is(g.epoch, null, 'and still sends nothing')
+  t.is(normalize(g), normalize(buildGroup(whole)), 'the sparse CW folds like the whole one')
+})
+
+test('a cut writer held sparse folds like the whole copy; a copy with a hole folds as its prefix (#350)', (t) => {
+  const w = pworld()
+  const E2 = w.rotate(wA, [G, wA, wX, wY], { at: 6 })
+  sealedPost(w, wA, E2, 7)
+  const cut = w.len(wA)
+  sealedPost(w, wA, E2, 8)
+  const E3 = w.rotate(wA, [G, wA, wX, wY], { at: 9 })
+  sealedPost(w, wA, E3, 10)
+  w.push(wA, groupLeave({ cuts: [{ writer: wA, seq: w.len(wA) }], at: AT(11) }))
+  sealedPost(w, wX, E3, 12)
+  sealedPost(w, wX, E3, 13)
+  const signed = w.len(wA)
+  const marks = new Map([[A, [{ writer: wA, cut, seq: 2 }]]])
+  const base = w.input(w.reader(wX), { marks })
+  const kept = (e) => e.seq < cut || e.record.type === 'group-leave' || e.record.type === 'group-key'
+  const withCopy = (key, entries, extra = {}) => ({ ...base, writers: base.writers.map((l) => l.key === key ? { ...l, entries, ...extra } : l) })
+  const wAentries = base.writers.find((l) => l.key === wA).entries
+  const wXentries = base.writers.find((l) => l.key === wX).entries
+  const whole = buildGroup(base)
+  t.alike(whole.posts.map((p) => p.text), ['p7', 'p12', 'p13'], 'control: the whole copy drops the posts past the cut')
+  t.is(whole.members.get(A), 'left', 'control: the leave past the cut counts')
+  const sparse = wAentries.filter(kept)
+  t.alike(sparse.map((e) => e.seq), [0, 1, 2, 4, 6], 'the sparse copy: below the cut, the key block and the leave past it')
+  t.is(normalize(buildGroup(withCopy(wA, sparse, { signed }))), normalize(whole), 'the sparse copy folds like the whole one')
+  t.is(normalize(buildGroup({ ...base, writers: [...base.writers, { key: wA, diary: A, entries: sparse, signed }] })), normalize(whole), 'and so does a sparse copy next to the whole one')
+  // A copy that stops below the cut counts only up to its hole, even with
+  // the leave and key block held past it.
+  const short = wAentries.filter((e) => e.seq < 2 || e.seq === 4 || e.seq === 6)
+  t.is(normalize(buildGroup(withCopy(wA, short, { signed }))), normalize(buildGroup(withCopy(wA, wAentries.slice(0, 2)))), 'a hole below the cut: the prefix')
+  // An uncut writer never reads past a hole.
+  const holed = wXentries.filter((e) => e.seq !== 1)
+  t.is(normalize(buildGroup(withCopy(wX, holed))), normalize(buildGroup(withCopy(wX, wXentries.slice(0, 1)))), 'an uncut writer: the prefix')
+})
+
 test('a diary cut below its own leave keeps the diary left and the removal (#350)', (t) => {
   const unleave = (cut) => {
     const w = pworld()
@@ -2808,4 +2861,65 @@ test('replacedWriterCut: a boxless writer is released whatever it holds, a write
   t.is(replacedWriterCut([head({ box, rejoin: ref })]), 1, 'boxed with a rejoin: block 0 stays')
   t.is(replacedWriterCut([head({ box }), post(1), post(2)]), 3, 'boxed with records: past its last record')
   t.is(replacedWriterCut([head({ box }), post(1), post(4)]), 5, 'past the last seq held, not the count held')
+})
+
+test('a writer whose held block 0 cannot count for the diary that bound it is never awaited (#350)', (t) => {
+  const k2 = K(0x4a0)
+  const other = K(0x999)
+  // X binds wX and k2; k2's block 0, as held, is one of the five headers
+  // that can never count for X here.
+  const world = () => {
+    const w = pworld()
+    w.joins.get(X).push({ writer: k2, on: true, seq: w.joins.get(X).length + 1 })
+    return w
+  }
+  const box = () => hex(newBoxKeyPair().publicKey)
+  const v1 = { type: 'group-writer', v: 1, group: G, diary: X, box: null, rejoin: null, at: AT(1) }
+  const fold = (w, extra) => buildGroup(w.input(w.reader(wY), extra))
+  const none = world()
+  t.is(fold(none).incomplete, true, 'control: k2 not held, the fold waits for it')
+  // (a) A `member` that does not match the kind, held as a writer copy for
+  // X, posts past block 0 included: rejected at any cut.
+  for (const boxed of [true, false]) {
+    const w = world()
+    w.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: boxed ? box() : null, at: AT(1) }) }, { seq: 1, record: groupPost({ text: 'nada', at: AT(9) }) }] })
+    const g = fold(w)
+    t.is(g.incomplete, false, 'member mismatch, ' + (boxed ? 'box matches' : 'box does not match either') + ': never awaited')
+    t.absent(g.writers.has(k2))
+    t.absent(g.posts.some((p) => p.writer === k2), 'and nothing it wrote counts')
+  }
+  // (b) to (e): block 0 alone, as a header stub.
+  const stubs = {
+    undecodable: { seq: 0, record: null },
+    invalid: { seq: 0, record: { type: 'group-writer', v: 2, group: G } },
+    legacy: { seq: 0, record: v1 },
+    'another group': { seq: 0, record: writerHeader({ group: other, diary: X, member: cwKey(X), box: box(), at: AT(1) }) },
+    'another diary': { seq: 0, record: writerHeader({ group: G, diary: Y, member: cwKey(Y), box: box(), at: AT(1) }) }
+  }
+  for (const [name, e0] of Object.entries(stubs)) {
+    const g = fold(world(), { heads: [{ key: k2, entries: [e0] }] })
+    t.is(g.incomplete, false, name + ': settled, never awaited')
+    t.absent(g.writers.has(k2), name + ': and never counted')
+  }
+  // Only block 0 of a stub is read.
+  const extra = fold(world(), { heads: [{ key: k2, entries: [stubs.legacy, { seq: 1, record: groupPost({ text: 'nada', at: AT(9) }) }] }] })
+  t.is(extra.incomplete, false)
+  t.absent(extra.posts.some((p) => p.writer === k2))
+  // A stub whose header counts for X settles nothing: k2 is still awaited
+  // until a copy for X is held.
+  const own = writerHeader({ group: G, diary: X, member: cwKey(X), box: box(), at: AT(1) })
+  t.is(fold(world(), { heads: [{ key: k2, entries: [{ seq: 0, record: own }] }] }).incomplete, true, 'a header that counts for X: still awaited')
+  // A stub never settles the pair its header names: another diary that
+  // also bound Y's writer cannot make wY read as ruled out without wY.
+  const y = pworld()
+  y.joins.get(X).push({ writer: wY, on: true, seq: y.joins.get(X).length + 1 })
+  t.is(fold(y).incomplete, false, 'control: wY held, X\'s join of it changes nothing')
+  const yIn = y.input(y.reader(wY))
+  const head = { key: wY, entries: [y.logs.get(wY).entries[0]] }
+  const g = buildGroup({ ...yIn, writers: yIn.writers.filter((l) => l.key !== wY), heads: [head] })
+  t.is(g.incomplete, true, 'without wY\'s copy for Y the fold waits for it, whatever X bound')
+  // Copies that disagree on block 0 are a fork: awaited.
+  const f = world()
+  f.logs.set(k2, { key: k2, diary: X, entries: [{ seq: 0, record: writerHeader({ group: G, diary: X, member: null, box: box(), at: AT(1) }) }] })
+  t.is(fold(f, { heads: [{ key: k2, entries: [stubs.legacy] }] }).incomplete, true, 'a forked block 0 is awaited')
 })

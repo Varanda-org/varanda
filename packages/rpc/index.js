@@ -19,6 +19,7 @@ const music = require('./lib/music')
 const ogParse = require('./lib/og-parse')
 const musicCover = require('./lib/music-cover')
 const feira = require('./lib/feira')
+const garden = require('./lib/garden')
 const inviteCard = require('./lib/invite-card')
 const reaction = require('./lib/reaction')
 const profileExtra = require('./lib/profile-extra')
@@ -77,6 +78,9 @@ module.exports = {
   DM_INNER_KEYS_V5: dmBudget.DM_INNER_KEYS_V5,
   DM_INNER_KEYS_V6: dmBudget.DM_INNER_KEYS_V6,
   DM_INNER_KEYS_V7: dmBudget.DM_INNER_KEYS_V7,
+  DM_INNER_KEYS_V8: dmBudget.DM_INNER_KEYS_V8,
+  DM_INNER_KEYS_V9: dmBudget.DM_INNER_KEYS_V9,
+  DM_INNER_KEYS_V10: dmBudget.DM_INNER_KEYS_V10,
   DM_BLOB_KEYS: dmBudget.DM_BLOB_KEYS,
   DM_TARGET_KEYS: dmBudget.DM_TARGET_KEYS,
   DM_MEDIA_KEYS: dmBudget.DM_MEDIA_KEYS,
@@ -104,6 +108,7 @@ module.exports = {
   YOUTUBE_COVER_HOST: musicCover.YOUTUBE_COVER_HOST,
   youtubeCoverUrl: musicCover.youtubeCoverUrl,
   feira,
+  garden,
   profileExtra,
   THEME_IDS: profileExtra.THEME_IDS,
   isBirthday: profileExtra.isBirthday,

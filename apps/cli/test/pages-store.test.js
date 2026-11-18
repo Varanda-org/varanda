@@ -13,6 +13,7 @@ const {
   MAX_FOLLOWS, NONCE_TTL_MS, INVITE_TTL_MS, MAX_PAGE_MOVES
 } = require('../lib/account/pages-store')
 const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { signActorBox } = require('@varanda/core/lib/page-secrets')
 const { tmpDir } = require('./helpers/net')
 
 const T0 = Date.parse('2026-11-03T12:00:00.000Z')
@@ -550,18 +551,30 @@ test('pages-store: a replaced file at the same path but another seq is refused',
   t.absent(fs.existsSync(file), 'nothing was written')
 })
 
-test('pages-store: a lost lock after the write is not acknowledged and stops later writes', async (t) => {
+test('pages-store: a lock refused after the write is not acknowledged; the store keeps working once it answers again', async (t) => {
   const { open } = setup(t)
   let calls = 0
-  let lostAt = 1
+  // Asked before the re-read (0), right before the rename (1), after it (2).
+  let lostAt = 2
   const store = open({ guard: () => calls++ !== lostAt })
   const page = key()
   await rejects(t, store.create({ page, owner: key() }), 'indisponivel', 'guard false after the write')
-  throwsCode(t, () => store.get(page), 'indisponivel', 'reads fail closed after a lost lock')
-  throwsCode(t, () => store.isPage(page), 'indisponivel', 'isPage fails closed after a lost lock')
-  lostAt = -1
-  await rejects(t, store.create({ page: key(), owner: key() }), 'indisponivel', 'dirty until reopened')
   t.ok(open().isPage(page), 'the write itself is on disk for the next holder')
+  t.ok(store.isPage(page), 'memory follows the file')
+  lostAt = -1
+  const other = key()
+  await store.create({ page: other, owner: key() })
+  t.ok(open().isPage(other), 'the next write lands: the store did not stop')
+})
+
+test('pages-store: after fail() every write and read is refused', async (t) => {
+  const { open } = setup(t)
+  const store = open()
+  const page = key()
+  await store.create({ page, owner: key() })
+  store.fail()
+  await rejects(t, store.create({ page: key(), owner: key() }), 'indisponivel', 'writes refused')
+  throwsCode(t, () => store.get(page), 'indisponivel', 'reads fail closed')
 })
 
 test('pages-store: a write that throws after the rename fails reads closed too', async (t) => {
@@ -704,6 +717,97 @@ test('pages-store: at most MAX_PAGE_MOVES moves through movedFrom', async (t) =>
   t.is(store.stats().moved, MAX_PAGE_MOVES)
 })
 
+test('pages-store: an admin removed from the live key loses the old keys too', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const a = key()
+  const b = key()
+  const c = key()
+  const k1 = key()
+  const k2 = key()
+  const k3 = key()
+  const pages = (list) => [...list.owned, ...list.admin].map((p) => p.page)
+  const removeAdmin = async (page, member, seq) => {
+    const rm = store.remove(page, member)
+    await store.setRoster(page, { gen: rm.gen, seq, owner, admins: rm.admins })
+  }
+  await store.create({ page: k1, owner })
+  await addAdmin(store, k1, a, 3)
+  await addAdmin(store, k1, b, 4)
+  await addAdmin(store, k1, c, 5)
+  await removeAdmin(k1, c, 6)
+  await store.move(k1, k2)
+  t.is(store.role(k1, b), 'admin', 'before the remove, the old key still counts')
+  await removeAdmin(k2, b, 5)
+
+  t.alike(pages(store.listFor(b)), [], 'the removed admin is listed neither the old key nor the new one')
+  t.is(store.role(k1, b), null)
+  t.is(store.role(k2, b), null)
+  throwsCode(t, () => store.authorize(k1, b), 'sem-permissao', 'the old key refuses the removed admin')
+  t.alike(pages(store.listFor(c)), [], 'an admin removed before the move stays unlisted')
+  t.is(store.role(k1, c), null)
+  const ofA = store.listFor(a).admin
+  t.is(ofA.find((p) => p.page === k1).movedTo, k2, 'a remaining admin still sees the old key as moved')
+  t.ok(ofA.some((p) => p.page === k2))
+  t.is(store.role(k1, a), 'admin')
+  t.is(store.listFor(owner).owned.find((p) => p.page === k1).movedTo, k2, 'the owner still sees the old key')
+  t.is(store.authorize(k1, owner, 'owner'), 'owner')
+  t.is(open().role(k1, b), null, 'the same after a reopen')
+
+  // A second move: the end of the chain decides for every key behind it.
+  await store.move(k2, k3)
+  await removeAdmin(k3, a, 3)
+  t.alike(pages(store.listFor(a)), [], 'removed from K3, nothing of K1 or K2 is listed')
+  t.is(store.role(k1, a), null)
+  t.is(store.role(k2, a), null)
+  throwsCode(t, () => store.authorize(k2, a), 'sem-permissao', 'K2 refuses the admin removed from K3')
+  t.alike(pages(store.listFor(owner)).sort(), [k1, k2, k3].sort(), 'the owner keeps the whole chain')
+  t.alike(pages(store.listFor(b)), [], 'the admin removed from K2 stays unlisted')
+})
+
+test('pages-store: a closed end of the move chain keeps its roster for the old keys', async (t) => {
+  const { store } = setup(t)
+  const owner = key()
+  const a = key()
+  const k1 = key()
+  const k2 = key()
+  await store.create({ page: k1, owner })
+  await addAdmin(store, k1, a, 3)
+  await store.move(k1, k2)
+  await store.close(k2)
+  t.is(store.role(k1, a), 'admin')
+  const listed = store.listFor(a).admin
+  t.is(listed.find((p) => p.page === k1).movedTo, k2, 'the old key is still listed as moved')
+  t.ok(listed.find((p) => p.page === k2).closed)
+})
+
+test('pages-store: a move chain whose end row is missing, or that loops, counts no old roster', async (t) => {
+  const { store, open, file } = setup(t)
+  const owner = key()
+  const a = key()
+  const k1 = key()
+  const k2 = key()
+  await store.create({ page: k1, owner })
+  await addAdmin(store, k1, a, 3)
+  await store.move(k1, k2)
+  const obj = JSON.parse(fs.readFileSync(file, 'utf8'))
+  delete obj.pages[k2]
+  fs.writeFileSync(file, JSON.stringify(obj))
+  const gone = open()
+  t.ok(gone.available(), 'the file still loads')
+  t.is(gone.role(k1, owner), null, 'no end row: the owner role on K1 does not count')
+  t.is(gone.role(k1, a), null, 'nor the admin role')
+  t.alike(gone.listFor(a).admin, [], 'K1 is listed to no one')
+  t.alike(gone.listFor(owner).owned, [])
+
+  obj.pages[k2] = { ...obj.pages[k1], movedTo: k1, movedFrom: k1 }
+  fs.writeFileSync(file, JSON.stringify(obj))
+  const loop = open()
+  t.ok(loop.available(), 'a loop loads')
+  t.is(loop.role(k1, a), null, 'a loop never reaches an end')
+  t.is(loop.role(k2, owner), null)
+})
+
 test('pages-store: a file it would not write makes it unavailable, readOnly never writes', async (t) => {
   const { store, open, file } = setup(t)
   const page = key()
@@ -767,6 +871,53 @@ test('pages-store: dm keeps opaque shares, survives a reopen, leaves at close an
   t.absent('dm' in store.get(p2), 'a moved page keeps no shares')
   await store.setDm(k2, null)
   t.absent('dm' in store.get(k2))
+})
+
+test('pages-store: actor boxes: signed by the member, newer only, pruned by a removal, gone at close, carried by a move', async (t) => {
+  const { store, open, c } = setup(t)
+  const ownerKp = crypto.keyPair()
+  const owner = b4a.toString(ownerKp.publicKey, 'hex')
+  const danKp = crypto.keyPair()
+  const dan = b4a.toString(danKp.publicKey, 'hex')
+  const page = key()
+  const stated = (kp, at, box = key()) => {
+    const v = { box, gen: 1, at: iso(at) }
+    return { ...v, sig: signActorBox({ actor: b4a.toString(kp.publicKey, 'hex'), ...v }, kp) }
+  }
+  await store.create({ page, owner })
+  await store.invite(page, dan, { gen: 2, rosterSignature: sig() })
+  const n = store.accept(page, dan)
+  await store.setRoster(page, { gen: n.gen, seq: 3, owner: n.owner, admins: n.admins })
+  t.absent('actorBoxes' in store.get(page), 'no key while empty')
+
+  const first = stated(danKp, c.t - 1000)
+  await store.setActorBox(page, dan, first)
+  t.alike(open().get(page).actorBoxes, { [dan]: first }, 'persisted')
+  await rejects(t, store.setActorBox(page, owner, stated(danKp, c.t)), 'assinatura-invalida', 'signed by another actor')
+  await rejects(t, store.setActorBox(page, dan, { ...stated(danKp, c.t), sig: sig() }), 'assinatura-invalida', 'a bad signature')
+  await rejects(t, store.setActorBox(page, dan, stated(danKp, c.t - 2000)), 'expirado', 'older')
+  await rejects(t, store.setActorBox(page, dan, stated(danKp, c.t - 1000)), 'expirado', 'same at, another box')
+  await rejects(t, store.setActorBox(page, dan, stated(danKp, c.t + 11 * 60000)), 'pedido-invalido', 'too far ahead')
+  const outsiderKp = crypto.keyPair()
+  await rejects(t, store.setActorBox(page, b4a.toString(outsiderKp.publicKey, 'hex'), stated(outsiderKp, c.t)), 'sem-permissao', 'outside the roster')
+  t.exception.all(() => store.setActorBox(page, dan, { ...first, extra: 1 }), /value must be/)
+  await store.setActorBox(page, dan, first)
+  t.alike(store.get(page).actorBoxes, { [dan]: first }, 'the same statement again changes nothing')
+  const second = stated(danKp, c.t)
+  await store.setActorBox(page, dan, second)
+  await store.setActorBox(page, owner, stated(ownerKp, c.t))
+  t.alike(Object.keys(store.get(page).actorBoxes).sort(), [owner, dan].sort())
+  t.alike(store.get(page).actorBoxes[dan], second, 'a newer one replaces it')
+
+  const k2 = key()
+  await store.move(page, k2)
+  t.absent('actorBoxes' in store.get(page), 'the moved row keeps none')
+  t.alike(store.get(k2).actorBoxes[dan], second, 'carried to K2 with its roster')
+  const gone = store.remove(k2, dan)
+  await store.setRoster(k2, { gen: gone.gen, seq: 3, owner: gone.owner, admins: gone.admins })
+  t.alike(Object.keys(store.get(k2).actorBoxes), [owner], 'a removal forgets the removed member only')
+  await store.close(k2)
+  t.absent('actorBoxes' in store.get(k2), 'a close drops them')
 })
 
 test('pages-store: an invite share becomes a share at accept; a removed admin keeps none', async (t) => {
@@ -921,4 +1072,59 @@ test('pages-store: a malformed charges row makes the file refuse to open; a file
   fs.writeFileSync(file, JSON.stringify(old), { mode: 0o600 })
   const reopened = open()
   t.ok(await reopened.charge(m, nonce(), P), 'a file written before charges reads as empty')
+})
+
+test('pages-store: forgetMember drops a deleted member\'s pending state only; the signed roster and current shares stay', async (t) => {
+  const { store, open } = setup(t)
+  const owner = key()
+  const gone = key()
+  const other = key()
+  const p1 = key()
+  const p2 = key()
+  await store.create({ page: p1, owner })
+  await store.create({ page: p2, owner })
+  await addAdmin(store, p1, gone, 3)
+  const share = (gen, by) => ({ gen, sealed: sealedB64(), by, sig: sig(), at: iso(T0) })
+  const rotate = { kind: 'box', idem: owner + ':' + nonce(), gen: 2, box: key(), groupBox: key(), shares: { [owner]: share(2, owner), [gone]: share(2, owner) } }
+  await store.setDm(p1, { ...dmRow(1, [owner, gone], owner), rotatePending: rotate })
+  await store.offer(p1, gone, iso(T0 + DAY))
+  await store.setDm(p2, dmRow(1, [owner], owner))
+  await store.invite(p2, gone, { gen: 2, rosterSignature: sig(), share: { sealed: sealedB64(), sig: sig() } })
+  await store.invite(p2, other, { gen: 2, rosterSignature: sig(), share: { sealed: sealedB64(), sig: sig() } })
+  await store.setDelegate(gone, { diary: key(), length: 4, termsVersion: 12 })
+  const actor = key()
+  const diary = key()
+  await store.setDelegate(actor, { diary, length: 4, termsVersion: 12 })
+  const keepActor = key()
+  await store.setDelegate(keepActor, { diary: key(), length: 2, termsVersion: 12 })
+  const before1 = store.get(p1)
+
+  t.ok(store.holdsMember(gone))
+  t.ok(store.holdsMember(other), 'another invitee holds their own invite')
+  t.is(await store.forgetMember(gone), true)
+  const r1 = store.get(p1)
+  t.is(r1.owner, owner, 'owner unchanged')
+  t.alike(r1.admins, before1.admins, 'the admins list stays until the owner removes them')
+  t.is(r1.gen, before1.gen)
+  t.is(r1.rosterSeq, before1.rosterSeq)
+  t.alike(r1.dm.shares, before1.dm.shares, 'the current key shares stay')
+  t.is(r1.offer, null, 'the offer to them goes')
+  t.alike(Object.keys(r1.dm.rotatePending.shares), [owner], 'their share in a rotation not yet promoted goes')
+  t.is(r1.dm.rotatePending.idem, rotate.idem)
+  const r2 = store.get(p2)
+  t.alike(Object.keys(r2.invites), [other], 'their invite goes, another stays')
+  t.alike(Object.keys(r2.dm.pending), [other], 'the share sealed for them goes')
+  t.is(store.delegate(gone), null, 'their delegate row goes')
+  t.ok(store.delegate(actor), 'a delegate of another diary stays')
+  t.ok(store.delegate(keepActor))
+  t.alike(open().snapshot().pages, store.snapshot().pages, 'on disk too')
+  t.absent(store.holdsMember(gone))
+  t.is(await store.forgetMember(gone), false, 'a second forget writes nothing')
+
+  t.ok(store.holdsMember(diary), 'a delegate naming the diary of a deleted key')
+  t.is(await store.forgetMember(diary), true)
+  t.is(store.delegate(actor), null)
+  t.ok(store.delegate(keepActor))
+  t.absent(open().delegate(actor))
+  t.ok(store.holdsMember(other))
 })

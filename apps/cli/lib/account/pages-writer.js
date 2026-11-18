@@ -29,7 +29,8 @@
 // key, or a crash between the append and the state write): the page is
 // paused for good and nothing more is appended ('pausada'). Only
 // mediaItem() and setFollow() write `media-core` and `follow` records, and a
-// post, profile or listing may only point at items of the page's own item table.
+// post (photos, a [poster, video] pair or a link card thumbnail), profile or
+// listing may only point at items of the page's own item table.
 //
 // The link: one WebSocket to the loopback seeder (/seeder), wrapped as a
 // NoiseSecretStream initiator with the persistent pair, the admission
@@ -55,8 +56,9 @@
 // page gets no new block ({ paused: true }).
 //
 // Single writer: every write (state file, diary or media append, a cleared
-// block, the noise key) asks guard() (the account service's lock) first, and
-// fail() refuses every later one; a refused write throws { code:
+// block, the noise key) asks guard() (the account service's lock) first, the
+// state file and the noise key again right before the rename
+// (./guarded-write.js), and fail() refuses every later one; a refused write throws { code:
 // 'indisponivel' }. Two holders appending to one core would fork it.
 //
 // Nothing logged ever names a key.
@@ -68,14 +70,15 @@ const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
 const Hypercore = require('hypercore')
 const { WebSocket, createWebSocketStream } = require('ws')
-const { writeJsonAtomic, appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { appendRecords, readAll, readRaw } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { refuseSymlinkDir, certForKey, seederCertForKey, isPlainObject } = require('@varanda/core/lib/cert')
 const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const {
-  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES,
+  MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS,
   AVATAR_SIDE, AVATAR_MIMES, MAX_AVATAR_BLOCKS,
-  memberCertRecord, mediaCoreRecord, followRecord, validDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
+  memberCertRecord, mediaCoreRecord, followRecord, validDescriptor, validVideoDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
 } = require('@varanda/core/lib/records')
 const { mediaHeader, latestMediaCores } = require('@varanda/core/lib/media')
 const { deletedSeqs, deletedRanges, clearDeleted: clearDeletedSeqs, clearRanges, overlaps } = require('@varanda/core/lib/deletion')
@@ -83,7 +86,7 @@ const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { feira } = require('@varanda/rpc')
+const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -111,8 +114,6 @@ const NONCE_ID_RE = /^(append|media|follow):[0-9a-f]{64}:[A-Za-z0-9_-]{1,64}$/
 const HEX64_RE = /^[0-9a-f]{64}$/
 // A local copy of seeder-health.js SEEDER_HTTP_RE, with ws as well.
 const SEEDER_RE = /^(?:http|ws):\/\/(127\.0\.0\.1|localhost|\[::1\]):([0-9]{1,5})\/?$/
-const PNG_MAGIC = b4a.from([0x89, 0x50, 0x4e, 0x47])
-const GIF_MAGIC = b4a.from([0x47, 0x49, 0x46, 0x38])
 
 function noop () {}
 
@@ -159,9 +160,10 @@ function readFileNoFollow (file) {
   }
 }
 
+// A video item also has its duration (`ms`, absent on a still image).
 function sameItem (a, b) {
   return a.core === b.core && a.start === b.start && a.blocks === b.blocks && a.sha256 === b.sha256 &&
-    a.mime === b.mime && a.bytes === b.bytes && a.width === b.width && a.height === b.height
+    a.mime === b.mime && a.bytes === b.bytes && a.width === b.width && a.height === b.height && a.ms === b.ms
 }
 
 // A plain JSON copy taken before any await, so a caller changing its object
@@ -174,7 +176,7 @@ function copyJson (value) {
   }
 }
 
-const DELETABLE = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
+const DELETABLE = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
 
 // The close list in order, in batches of at most 8, never splitting the
 // tombstones of one target: a reader marks a target deleted from its first
@@ -199,8 +201,26 @@ function closeBatches (records) {
   return batches
 }
 
+// A still image, or a short video (only ever the second item of a post's
+// [poster, video] pair): a page that stored a video must load it again.
 function validItem (it) {
-  return isPlainObject(it) && validDescriptor(it)
+  return isPlainObject(it) && (validDescriptor(it) || validVideoDescriptor(it))
+}
+
+// -> the container's duration of a short video the page may store, or
+// null. The bytes must already be what every reader accepts (no udta, meta
+// or uuid) and must come back unchanged from stripVideoMetadata: the
+// service never rewrites what a member uploaded, so the stored copy is the
+// one whose sha256 the member signed. The sides must be the container's and
+// the given ms within VIDEO_MS_TOLERANCE of its samples' duration, which
+// is what gets stored. Synchronous, on a private copy.
+function videoMs (bytes, width, height, ms) {
+  if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_VIDEO_MS) return null
+  const bounds = videoBounds(bytes, { maxMs: MAX_VIDEO_MS })
+  if (bounds === null || bounds.width !== width || bounds.height !== height || Math.abs(ms - bounds.ms) > VIDEO_MS_TOLERANCE) return null
+  const stripped = stripVideoMetadata(bytes)
+  if (stripped === null || !b4a.equals(stripped, bytes)) return null
+  return bounds.ms
 }
 
 // -> { member, nonce } or null; a malformed one is a refusal.
@@ -254,9 +274,11 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     movePage,
     append,
     readEntries,
+    readOwn,
     mediaItem,
     avatarItem,
     items,
+    itemBytes,
     nonceRecord,
     nonceFirst,
     follows,
@@ -283,6 +305,18 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (!ok) throw fail('indisponivel')
   }
 
+  // A sidecar write with the lock asked again right before the rename
+  // (./guarded-write.js): a holder that lost it meanwhile leaves the file
+  // as the new holder wrote it, and the refusal is check()'s.
+  function writeChecked (file, obj) {
+    try {
+      writeGuarded(file, obj, 0o600, () => !failed && guard() === true)
+    } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
+      throw err
+    }
+  }
+
   // The lock is gone: nothing more is written, starting now.
   function failWriter () {
     failed = true
@@ -299,7 +333,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     if (p.stateLost) throw fail('pausada')
     check()
     refuseSymlinkDir(storeDir)
-    writeJsonAtomic(statePath(p.key), {
+    writeChecked(statePath(p.key), {
       v: STATE_VERSION,
       length: p.length,
       mediaLength: p.mediaLength,
@@ -310,7 +344,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       nonces: p.nonces,
       movedTo: p.movedTo,
       closed: p.closed === true
-    }, 0o600)
+    })
   }
 
   function readState (key) {
@@ -345,7 +379,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     } catch {}
     const kp = generateNoiseKeyPair()
     check()
-    writeJsonAtomic(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) }, 0o600)
+    writeChecked(file, { publicKey: hex(kp.publicKey), secretKey: hex(kp.secretKey) })
     return kp
   }
 
@@ -597,11 +631,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   }
 
   // A committed write whose state could not be saved: memory already holds
-  // it, the file does not, so the page stops until an operator looks.
+  // it, the file does not, so the page stops until an operator looks. A
+  // lock refusal while this writer still holds it is not that: held()
+  // answers false for a moment when one heartbeat runs late, so the page
+  // stays writable and the next write saves the whole state. A lost lock
+  // goes through failWriter(), and a new holder's open finds the diary
+  // longer than the file and pauses it there.
   function saveOrPause (p) {
     try {
       saveState(p)
     } catch (err) {
+      if (!failed && err.code === 'indisponivel') throw err
       pause(p)
       throw err
     }
@@ -766,6 +806,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
           pointed.push(...r.media)
         }
         if (r.avatar !== undefined && r.avatar !== null) pointed.push(r.avatar)
+        if (isPlainObject(r.preview) && r.preview.image !== undefined && r.preview.image !== null) pointed.push(r.preview.image)
         for (const d of pointed) {
           if (!isPlainObject(d) || !p.items.some((it) => sameItem(it, d))) throw fail('midia-invalida')
         }
@@ -803,6 +844,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
   async function readEntries (key) {
     await opening
     return readAll(pageOf(key).core)
+  }
+
+  // The blocks this writer wrote, tombstones not applied, so the caller
+  // folds only its own: a paused page's longer log holds blocks, deletes
+  // among them, written with a leaked key. A forked core or a lost state
+  // cannot tell which blocks are ours, so nothing comes back.
+  async function readOwn (key) {
+    await opening
+    const p = pageOf(key)
+    if (p.core.fork !== 0 || p.stateLost) return []
+    return (await readRaw(p.core)).filter((e) => e.seq < p.length)
   }
 
   function info (key) {
@@ -859,22 +911,36 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   // ---- media ----------------------------------------------------------
 
-  async function mediaItem (key, { bytes: input, mime, width, height, sha256 } = {}, opts) {
+  // `ms` only for a video/mp4 (videoMs), never for a still image.
+  async function mediaItem (key, { bytes: input, mime, width, height, sha256, ms } = {}, opts) {
     const idem = idempotency(opts)
     if (!(input instanceof Uint8Array) || input.byteLength < 1 || input.byteLength > MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES) throw fail('midia-invalida')
     const bytes = b4a.from(input)
     if (typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || sha256Hex(bytes) !== sha256) throw fail('midia-invalida')
-    if (typeof mime !== 'string' || !MEDIA_MIMES.includes(mime)) throw fail('midia-invalida')
-    if (mime === 'image/jpeg' || mime === 'image/webp') {
-      const size = stillImageSize(bytes, mime)
-      if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
+    const video = mime === VIDEO_MIME
+    if (typeof mime !== 'string' || (!video && !MEDIA_MIMES.includes(mime))) throw fail('midia-invalida')
+    if (!video && ms !== undefined) throw fail('midia-invalida')
+    let duration
+    if (video) {
+      duration = videoMs(bytes, width, height, ms)
+      if (duration === null) throw fail('midia-invalida')
     } else {
-      const magic = mime === 'image/png' ? PNG_MAGIC : GIF_MAGIC
-      if (bytes.byteLength < magic.byteLength || !b4a.equals(bytes.subarray(0, magic.byteLength), magic)) throw fail('midia-invalida')
+      // The same strict parser the app runs before showing a received photo:
+      // anything it would refuse is refused here, at the declared size. Only a
+      // GIF may carry several frames.
+      const bounds = mediaBounds(bytes, mime)
+      if (bounds === null || bounds.width !== width || bounds.height !== height) throw fail('midia-invalida')
+      if (mime !== 'image/gif' && bounds.frames !== 1) throw fail('midia-invalida')
+      if (mime === 'image/jpeg' || mime === 'image/webp') {
+        const size = stillImageSize(bytes, mime)
+        if (size === null || size.width !== width || size.height !== height) throw fail('midia-invalida')
+      }
     }
     const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
-    const shape = { core: '0'.repeat(64), mime, start: 1, blocks, bytes: bytes.byteLength, sha256, width, height }
-    if (!validDescriptor(shape)) throw fail('midia-invalida')
+    const valid = video ? validVideoDescriptor : validDescriptor
+    const withMs = (d) => video ? { ...d, ms: duration } : d
+    const shape = withMs({ core: '0'.repeat(64), mime, start: 1, blocks, bytes: bytes.byteLength, sha256, width, height })
+    if (!valid(shape)) throw fail('midia-invalida')
 
     return withPage(key, async (p, row) => {
       const prior = recall(p, 'media', idem)
@@ -886,8 +952,8 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       const chunks = []
       for (let i = 0; i < blocks; i++) chunks.push(b4a.from(bytes.subarray(i * MEDIA_BLOCK_BYTES, Math.min(bytes.byteLength, (i + 1) * MEDIA_BLOCK_BYTES))))
       const start = p.mediaLength
-      const descriptor = { core: p.mediaKey, mime, start, blocks, bytes: bytes.byteLength, sha256, width, height }
-      if (!validDescriptor(descriptor)) throw fail('midia-invalida')
+      const descriptor = withMs({ core: p.mediaKey, mime, start, blocks, bytes: bytes.byteLength, sha256, width, height })
+      if (!valid(descriptor)) throw fail('midia-invalida')
       check()
       stillKeyed(p)
       await media.append(chunks)
@@ -957,6 +1023,24 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   function items (key) {
     return pageOf(key).items.map((it) => ({ ...it }))
+  }
+
+  // The bytes of one of the page's own items, so a move can copy the avatar
+  // to the new key. No secret is needed: a moved page keeps its media core
+  // open read only after its keys are wiped.
+  async function itemBytes (key, descriptor) {
+    await opening
+    const p = pageOf(key)
+    if (!isPlainObject(descriptor) || p.media === null || descriptor.core !== p.mediaKey || !p.items.some((it) => sameItem(it, descriptor))) throw fail('midia-invalida')
+    const chunks = []
+    for (let i = descriptor.start; i < descriptor.start + descriptor.blocks; i++) {
+      const block = await p.media.get(i, { wait: false })
+      if (block === null) throw fail('midia-invalida')
+      chunks.push(block)
+    }
+    const bytes = b4a.concat(chunks)
+    if (bytes.byteLength !== descriptor.bytes || sha256Hex(bytes) !== descriptor.sha256) throw fail('midia-invalida')
+    return bytes
   }
 
   // ---- follows, engagement, deletion ----------------------------------

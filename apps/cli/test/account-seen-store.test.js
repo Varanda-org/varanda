@@ -195,8 +195,9 @@ test('guard false refuses that call only', async (t) => {
   allow = true
   t.is((await store.put({ member: m, blob: blob(1), expectedHash: HASH_NONE })).ok, true, 'next call works')
 
+  // Asked before the read (1), right before the rename (2), after it (3).
   let calls = 0
-  const after = setup(t, { guard: () => ++calls !== 2 })
+  const after = setup(t, { guard: () => ++calls !== 3 })
   await rejects(t, after.store.put({ member: m, blob: blob(2), expectedHash: HASH_NONE }), 'indisponivel', 'guard lost after the rename: not acknowledged')
   t.is(after.store.available(), true)
 })
@@ -312,4 +313,41 @@ test('the log carries no member, hash or bytes', async (t) => {
   t.absent(text.includes(m), 'no member')
   t.absent(text.includes(bad), 'no bad member')
   t.absent(text.includes(blobHash(b)), 'no hash')
+})
+
+test('a guard lost right before the rename or the unlink leaves the blob as it was', async (t) => {
+  let armed = false
+  let wiping = false
+  const { store, dir, logs } = setup(t, {
+    // Refuses only once the read is done: while a temp file sits next to
+    // the blob, or while forget holds the blob open to wipe it.
+    guard: () => !armed || (fs.existsSync(dir) && !fs.readdirSync(dir).some((n) => n.startsWith('.tmp.')) && !wiping)
+  })
+  const m = memberKey()
+  const first = blob(1)
+  t.is((await store.put({ member: m, blob: first, expectedHash: HASH_NONE })).ok, true)
+  const file = path.join(dir, m)
+  const before = fs.readFileSync(file)
+  armed = true
+  await rejects(t, store.put({ member: m, blob: blob(2), expectedHash: blobHash(first) }), 'indisponivel', 'put refused right before the rename')
+  t.ok(b4a.equals(fs.readFileSync(file), before), 'the blob is byte-identical')
+  t.alike(fs.readdirSync(dir), [m], 'no temp file is left')
+  t.ok(logs.some((e) => e.reason === 'guarda-recusou'), 'logged as a guard refusal')
+  t.is(store.available(), true)
+
+  // forget: the check before the unlink sees the blob opened for the wipe.
+  const { openSync } = fs
+  t.teardown(() => { fs.openSync = openSync }, { force: true })
+  fs.openSync = function (f, flags, ...rest) {
+    const fd = openSync.call(fs, f, flags, ...rest)
+    if (f === file && armed && (flags & fs.constants.O_WRONLY)) wiping = true
+    return fd
+  }
+  await rejects(t, store.forget(m, blobHash(first)), 'indisponivel', 'forget refused right before the unlink')
+  fs.openSync = openSync
+  t.ok(b4a.equals(fs.readFileSync(file), before), 'the blob is still there, byte-identical')
+  t.is(store.available(), true)
+  armed = false
+  wiping = false
+  t.alike(await store.forget(m, blobHash(first)), { ok: true, changed: true }, 'with the lock forget works')
 })

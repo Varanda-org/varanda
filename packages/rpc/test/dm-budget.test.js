@@ -278,3 +278,42 @@ test('dm-budget: v7 is a history copy pointer, canonical in wire order, and fits
   t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds it')
   t.is(budget.innerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1, 'innerVersion never picks v7')
 })
+
+test('dm-budget: v8 is a history copy claim, canonical in wire order, and fits one drop', (t) => {
+  t.alike(budget.DM_INNER_KEYS_V8, ['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+  t.ok(Object.isFrozen(budget.DM_INNER_KEYS_V8))
+  t.alike(budget.DM_INNER_KEYS_V8, dm.INNER_KEYS_V8, 'core signs the key list the rpc measures')
+  const devices = []
+  for (let i = 0; i < dm.DM_CLAIM_FOR_MAX; i++) devices.push(i.toString(16) + 'a'.repeat(63))
+  const body = { v: 8, kind: 'claim', id: 'e'.repeat(32), from: 'f'.repeat(64), to: 'f'.repeat(64), copy: 'd'.repeat(32), for: devices, by: 'b'.repeat(64), at: '2026-11-17T12:00:00.000Z' }
+  const shuffled = Object.fromEntries(Object.entries({ ...body, text: 'leak', cert: null }).reverse())
+  const parsed = JSON.parse(budget.canonicalInnerJson(shuffled))
+  t.alike(Object.keys(parsed), budget.DM_INNER_KEYS_V8, 'wire order whatever the caller built, nothing else')
+  t.is(parsed.copy, body.copy, 'the copy id is kept as is, not read as a descriptor')
+  t.alike(parsed.for, devices)
+  const bytes = b4a.byteLength(budget.canonicalInnerJson(body))
+  t.ok(bytes + budget.DM_INNER_FRAMING_BYTES < dm.DM_DROP_BYTES, 'one drop holds the largest claim')
+  t.is(budget.canonicalInnerJson({ v: 'constructor', id: 'x' }), budget.canonicalInnerJson({ v: 1, id: 'x' }).replace('"v":1', '"v":"constructor"'), 'an unknown version takes the v1 keys')
+})
+
+test('dm-budget: v9 and v10 add signer after from, and v9 measures it', (t) => {
+  const v9 = ['v', 'kind', 'id', 'from', 'signer', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert']
+  t.alike(budget.DM_INNER_KEYS_V9, v9)
+  t.alike(budget.DM_INNER_KEYS_V10, ['v', 'kind', 'id', 'from', 'signer', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  t.ok(Object.isFrozen(budget.DM_INNER_KEYS_V9))
+  t.ok(Object.isFrozen(budget.DM_INNER_KEYS_V10))
+  t.alike(budget.DM_INNER_KEYS_V9, dm.INNER_KEYS_V9, 'core signs the key list the rpc measures')
+  t.alike(budget.DM_INNER_KEYS_V10, dm.INNER_KEYS_V10)
+  t.alike(rpc.DM_INNER_KEYS_V9, v9, 'exported by @varanda/rpc')
+  t.alike(rpc.DM_INNER_KEYS_V10, budget.DM_INNER_KEYS_V10)
+  const body = Object.fromEntries([...v9.map((k) => [k, k === 'v' ? 9 : null]), ['extra', 1]].reverse())
+  t.alike(Object.keys(JSON.parse(budget.canonicalInnerJson(body))), v9, 'wire order, nothing else')
+  const cert = budget.MEMBER_CERT_STANDIN
+  const plain = budget.dmTextBudget({ v: 9, cert })
+  t.is(plain, 4006, 'v9 text only with the largest certificate')
+  t.is(budget.dmTextBudget({ cert }) - plain, 109, 'the v2 keys and signer cost against a v1 text-only body')
+  t.is(budget.dmTextBudget({ v: 3, cert }) - plain, 68, 'signer costs 68 against the same keys without it')
+  t.is(budget.dmTextBudget({ signer: 'a'.repeat(64), cert }), plain, 'a signer measures as v9')
+  t.ok(plain >= 4 * 1000, 'the longest text of four-byte characters fits')
+  t.is(budget.innerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1, 'innerVersion never picks v9')
+})

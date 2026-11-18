@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { StyleSheet, Text, TextInput, View } from 'react-native'
 import { useNode } from '../node'
-import { codeDigits, isCode } from '../phone'
+import { codeDigits, isCode, phoneChangeOutcome } from '../phone'
 import { cellsOf, shouldAutoSubmit } from '../phoneEntry'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { usePhoneVerify } from '../usePhoneVerify'
@@ -151,12 +151,28 @@ function CodeInput ({ label, value, onChangeText, editable, onSubmitEditing }) {
 // answered 'verificado'. After an uncertain check the screen holds Confirmar
 // until that read answers, and a 'verificado' then takes the onVerified path
 // (proofless, under the key the check started with).
-export default function Telefone ({ mode = 'setup', member, gateKey, onVerified, onUncertain, onDropped, offline = false, checking = false, checkError = '', onRecheck, statusBusy = false, statusVerified = false, index = 1, total = 3 }) {
+// Mode 'trocar' only: knownDate is the date of the member's verification
+// when the screen opened and statusDate the proof date of that read's
+// answer. onVerified gets a third argument, the text for Ajustes from
+// phoneChangeOutcome (src/phone.js), since the service never says which
+// number it holds. A recheck that shows the old date keeps the screen.
+export default function Telefone ({ mode = 'setup', member, gateKey, onVerified, onUncertain, onDropped, offline = false, checking = false, checkError = '', onRecheck, statusBusy = false, statusVerified = false, statusDate = null, knownDate = null, index = 1, total = 3 }) {
   const node = useNode()
   const verify = usePhoneVerify({ node, member, gateKey, onDropped })
   const styles = useStyles(makeStyles)
   const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
+  // Read once: a proof stored while the screen is open must not move it.
+  const [before] = useState(knownDate)
+  // The recheck showed the old date: the approved code can still be recorded.
+  const [notChanged, setNotChanged] = useState('')
+  const verified = (proof, key, via, after) => {
+    if (!onVerified) return
+    if (mode !== 'trocar') return onVerified(proof, key)
+    const outcome = phoneChangeOutcome({ via, before, after })
+    if (outcome.stay) setNotChanged(outcome.text)
+    else onVerified(proof, key, outcome.text)
+  }
   // The gate key an uncertain check started under, until the recheck answers.
   const [awaiting, setAwaiting] = useState(null)
   const sawBusy = useRef(false)
@@ -190,8 +206,8 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
     const answered = sawBusy.current
     sawBusy.current = false
     setAwaiting(null)
-    if (answered && statusVerified && onVerified) onVerified(undefined, awaiting)
-  }, [awaiting, gateKey, checkError, statusBusy, statusVerified])
+    if (answered && statusVerified) verified(undefined, awaiting, 'recheck', statusDate)
+  }, [awaiting, gateKey, checkError, statusBusy, statusVerified, statusDate])
   // A new gate drops every answer started before (usePhoneVerify), so no
   // request or code from the old one holds the new one.
   useEffect(() => {
@@ -199,10 +215,10 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
     lastChecked.current = null
   }, [gateKey])
 
-  const finish = (r) => {
+  const finish = (r, via) => {
     if (r === null) return
     if (r.state === 'verificado') {
-      if (onVerified) onVerified(r.proof, r.key)
+      verified(r.proof, r.key, via, r.proof && typeof r.proof === 'object' ? r.proof.date : undefined)
     } else if (r.uncertain === true && onUncertain) {
       onUncertain()
     }
@@ -210,10 +226,11 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
   const send = async () => {
     const mine = {}
     if (inFlight.current === null) inFlight.current = mine
+    setNotChanged('')
     try {
       const r = await verify.send(phone)
       if (r !== null && (r.state === 'enviado' || r.state === 'verificado')) setCode('')
-      finish(r)
+      finish(r, 'send')
     } finally {
       if (inFlight.current === mine) inFlight.current = null
     }
@@ -225,10 +242,11 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
     const mine = {}
     inFlight.current = mine
     lastChecked.current = candidate
+    setNotChanged('')
     try {
       const r = await verify.check(candidate)
       if (r !== null && r.uncertain === true) setAwaiting(r.key)
-      finish(r)
+      finish(r, 'check')
     } finally {
       if (inFlight.current === mine) inFlight.current = null
     }
@@ -247,6 +265,7 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
     lastChecked.current = null
     inFlight.current = null
     setAwaiting(null)
+    setNotChanged('')
     setCode('')
     verify.reset()
   }
@@ -278,7 +297,9 @@ export default function Telefone ({ mode = 'setup', member, gateKey, onVerified,
       {verify.sent
         ? <CodeInput label={CODE_LABEL} value={code} onChangeText={editCode} editable={!locked} onSubmitEditing={confirm} />
         : null}
-      <ErrorText>{verify.error}</ErrorText>
+      {/* It replaces the uncertain check's error, which it answers. */}
+      {notChanged ? <StepNotice><Notice>{notChanged}</Notice></StepNotice> : null}
+      <ErrorText>{notChanged ? '' : verify.error}</ErrorText>
       {offline ? <StepNotice><Soft>{OFFLINE_TEXT}</Soft></StepNotice> : null}
     </>
   )

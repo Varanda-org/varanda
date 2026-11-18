@@ -131,6 +131,9 @@ function fakeModeration (c) {
     exportRows () {
       return [...rows.values()].map((r) => ({ ...r }))
     },
+    reportIdsAbout (member) {
+      return [...rows.values()].filter((r) => r.target === member).map((r) => r.id)
+    },
     humanReversed (member) {
       return reversed.has(member) || changes.some((ch) => ch.member === member && ch.op === 'unblock')
     },
@@ -1309,4 +1312,86 @@ test('the worker exposes no reopen and never calls the store one; a store withou
   t.is(env.ledger.get(other.id).code, 'reaberto')
   t.is(env.moderation.decideCalls.length, 1, 'only the first report was decided')
   env.moderation.reopenedIds = reopenedIds
+})
+
+test('holdsMember: a store that cannot answer throws and brokenFiles names its file until it answers again', async (t) => {
+  const env = setup(t)
+  const gone = env.report().target
+  env.worker.forgetMember(gone)
+  await env.worker.idle()
+  t.absent(env.worker.holdsMember(gone))
+  t.alike(env.worker.brokenFiles(), [])
+  const fail = () => { throw Object.assign(new Error('indisponivel'), { code: 'indisponivel' }) }
+  for (const [store, file] of [[env.ledger, 'triage.json'], [env.exemplars, 'exemplars.json']]) {
+    const real = store.holdsTarget
+    store.holdsTarget = fail
+    t.exception(() => env.worker.holdsMember(gone))
+    t.alike(env.worker.brokenFiles(), [file], file + ' is named')
+    store.holdsTarget = real
+    t.absent(env.worker.holdsMember(gone))
+    t.alike(env.worker.brokenFiles(), [], 'and cleared once it answers')
+  }
+})
+
+test('forgetMember: a deleted member\'s reads, marks and precedents go after the running job, and their reports are never read again', async (t) => {
+  const env = setup(t)
+  const r = env.report()
+  const keep = env.report()
+  const gone = r.target
+  env.exemplars.add({ reportId: rid(), target: gone, seq: 2, reason: 'spam', decision: 'descartar', contentHash: hashOf(HAM), text: HAM, hasMedia: false, embedding: quantize(fakeEmbed(HAM)) })
+  t.ok(env.worker.holdsMember(gone), 'owed until forgetMember ran in this process')
+  env.worker.onReport(r)
+  env.worker.onReport(keep)
+  env.worker.forgetMember(gone)
+  await env.worker.idle()
+  t.is(env.ledger.read(r.id), null, 'the read the queued job cached is dropped')
+  t.is(env.ledger.get(r.id), null, 'and its mark')
+  t.absent(env.exemplars.list().some((e) => e.target === gone), 'their precedents are gone')
+  t.ok(env.ledger.read(keep.id), 'another member keeps theirs')
+  t.ok(env.ledger.get(keep.id))
+  t.absent(env.worker.holdsMember(gone))
+  const reads = env.readPost.calls.length
+  env.c.t += 2 * RETRY_ABSTAIN_MS
+  await env.worker.runOnce()
+  t.absent(env.readPost.calls.slice(reads).some((c) => c.diaryKey === gone), 'a scan never reads their post again')
+  t.is(env.ledger.get(r.id), null, 'nor marks it')
+  env.worker.onReport(r)
+  await env.worker.idle()
+  t.is(env.ledger.read(r.id), null)
+  t.is(env.ledger.get(r.id), null)
+})
+
+test('forgetMember: a failing ledger never keeps the precedents of a deleted member, and holdsMember says held while exemplars still hold them', async (t) => {
+  const env = setup(t)
+  const gone = env.report().target
+  const other = env.report().target
+  const precedent = (target) => ({ reportId: rid(), target, seq: 2, reason: 'spam', decision: 'descartar', contentHash: hashOf(HAM), text: HAM, hasMedia: false, embedding: quantize(fakeEmbed(HAM)) })
+  env.exemplars.add(precedent(gone))
+  env.exemplars.add(precedent(other))
+  const fail = () => { throw Object.assign(new Error('indisponivel'), { code: 'indisponivel' }) }
+  const realForget = env.ledger.forgetTarget
+  const realHolds = env.ledger.holdsTarget
+  const realExemplarForget = env.exemplars.forgetTarget
+  env.ledger.forgetTarget = fail
+  env.ledger.holdsTarget = fail
+  // The exemplar store fails once, so holdsMember must answer while it still
+  // holds the member and the ledger cannot answer.
+  env.exemplars.forgetTarget = () => { env.exemplars.forgetTarget = realExemplarForget; fail() }
+  env.worker.forgetMember(gone)
+  await env.worker.idle()
+  t.ok(env.exemplars.list().some((e) => e.target === gone), 'the exemplar store failed this time')
+  t.is(env.worker.holdsMember(gone), true, 'held: exemplars still hold them although the ledger throws')
+  t.alike(env.worker.brokenFiles(), ['triage.json'])
+  env.worker.forgetMember(gone)
+  env.worker.forgetMember(other)
+  await env.worker.idle()
+  t.absent(env.exemplars.list().some((e) => e.target === gone), 'their precedents are gone although the ledger failed')
+  t.absent(env.exemplars.list().some((e) => e.target === other), 'and a later member in the same job is forgotten too')
+  t.exception(() => env.worker.holdsMember(gone), 'no store holds them but the ledger cannot answer, so it throws')
+  env.ledger.forgetTarget = realForget
+  env.ledger.holdsTarget = realHolds
+  env.worker.forgetMember(gone)
+  await env.worker.idle()
+  t.absent(env.worker.holdsMember(gone))
+  t.alike(env.worker.brokenFiles(), [])
 })

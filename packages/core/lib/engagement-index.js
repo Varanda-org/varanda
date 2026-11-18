@@ -103,8 +103,60 @@
 // writer, then SCRAP_PER_PAGE per page, newest first (at desc, author asc,
 // seq desc). Each request examines at most SCRAP_SCAN pointers (writers
 // included); past it the answer says truncated.
+//
+// Varandinha (docs/protocol.md, the rules are @varanda/rpc lib/garden.js):
+// every live `garden`, `garden-state` and `garden-help` block holds a record
+// slot under its writer and is freed when deleted, so latest-wins flags and
+// states never pile up. Only seqs and the help's addressee, date and pot
+// index are kept, never the state's pots, plants or acts. The newest live `garden` block (on or
+// off) and `garden-state` block are pointers (garden(), profileExtra()); a
+// deletion falls back to the previous one. Helps are kept per (writer,
+// addressee): GARDEN_PAIR_MAX per pair, GARDEN_WRITER_MAX per writer (past
+// either, one row leaves and frees its slot, or the incoming row is skipped
+// without a slot when it is the one helpVictim names) and
+// GARDEN_WRITERS_PER_OWNER writers per addressee. A place at that last cap
+// is held only by rows garden() can still list: with the scan's clock
+// (add opts.now), a new writer past it takes the place of a writer none of
+// whose rows is listable, and its own row is skipped without a slot when
+// it is not listable either. When no place can be taken (or there is no
+// clock) the row is skipped, and garden() says hidden until it would have
+// left the reader window, since a skipped row is never replayed. A help
+// addressed to its own writer takes no slot and is never listed. Help rows
+// are kept across a drop of the addressee's diary (they belong to the
+// writers' diaries), like `incoming`.
+// Enfeites and the Barraquinha: every live `garden-decor`, `garden-gift` and
+// `garden-take` block holds a record slot under its writer and is freed when
+// deleted. Only seqs, a gift's addressee and parsed date and a take's
+// (giver, gift seq) are kept, never pots, plants or decor ids. The newest
+// live `garden-decor` block is a pointer, a deletion falls back. A gift to
+// its own writer, a take naming its own writer and a gift not dated on a
+// Saturday (lib/garden.js stallDay) take no slot. Gifts are kept per
+// (writer, addressee) in giftsByTo, apart from the helps so a flood of one
+// never evicts the other: GARDEN_GIFT_PAIR_MAX per pair and
+// GARDEN_GIFT_WRITER_MAX per writer (past either, the row giftVictim names
+// leaves and frees its slot, or the incoming gift is skipped without a slot
+// when it is that row: never a day's pick while another row can go). An
+// owner keeps GARDEN_TAKES_MAX live takes: past it a take whose gift can no
+// longer be pending leaves (takeVictim), else the incoming take is skipped.
+// One rule for every cap: a dropped row gardenStall() could still list (a
+// listable day pick, or a take that hides or may hide one) is never
+// replayed, so the addressee is marked full (markGiftFull) and
+// gardenStall() says hidden while that row would be listable. A place at
+// GARDEN_GIFT_WRITERS_PER_OWNER writers per addressee is held only by gifts
+// gardenStall() can still list, as for helps: with the scan's clock (add
+// opts.now), a new writer past it takes the place of a writer none of whose
+// gifts to that addressee is listable (offerListable), every gift of that
+// writer to it leaving and freeing its slot, and its own gift is skipped
+// without a slot when it is not listable either. Otherwise, with the
+// seeder's follow rank (add opts.giftRank, giftRankOf), it takes the place
+// of the lowest ranked writer when that rank is below its own; an evicted
+// writer's listable gifts mark the addressee full, whatever its rank read
+// (a rank is a snapshot). When no place can be taken (or there is no
+// clock) the gift is skipped, and gardenStall() says hidden exactly while
+// that gift would have been listable. Gift rows are kept across a drop of
+// the addressee's diary like the helps.
 const { formatRef, parseRef, MAX_TOP_FRIENDS, POLL_MIN, POLL_MAX } = require('./records')
-const { isEvent } = require('@varanda/rpc')
+const { isEvent, garden: gardenRules } = require('@varanda/rpc')
 const { commitment } = require('./testimonials')
 const { foldPicks } = require('./polls')
 
@@ -144,6 +196,25 @@ const EVENT_RSVP_OPTIONS = 2
 // Distinct polls one voter may hold operations on, and voters one poll lists.
 const CHOICE_POLLS_MAX = 4096
 const CHOICE_VOTERS_MAX = 20000
+// Varandinha help pointers: per (writer, addressee), per writer, writers per
+// addressee, and the keys one gardenStreet() call examines. They bound the
+// memory a flood of signed helps can take; the eviction rules (header) keep
+// a full cap from shutting out a listable help for good.
+const GARDEN_PAIR_MAX = 4
+const GARDEN_WRITER_MAX = 64
+const GARDEN_WRITERS_PER_OWNER = 512
+const GARDEN_STREET_SCAN = 2000
+// Barraquinha gift pointers: per (writer, addressee), per writer and writers
+// per addressee, and the live takes of one owner. GARDEN_TAKE_ROWS bounds an
+// honest diary's live takes in the take window, so the index never evicts a
+// take whose gift is still listable and pending never shows it again.
+const GARDEN_GIFT_PAIR_MAX = 4
+const GARDEN_GIFT_WRITER_MAX = 32
+const GARDEN_GIFT_WRITERS_PER_OWNER = 256
+const GARDEN_TAKES_MAX = gardenRules.GARDEN_TAKE_ROWS
+// Refused-gift days one addressee remembers (giftFull). With the scan clock
+// only days whose week has not ended stay, two or three at most.
+const GIFT_FULL_DAYS = 8
 // Same value as lib/feed.js MAX_FUTURE_MS (not imported: this module only
 // requires ./records and ./testimonials). An engager edge dated further ahead is hidden, never
 // removed, and appears once the clock catches up.
@@ -302,6 +373,10 @@ function noFollow () {
   return null
 }
 
+function noFollowed () {
+  return false
+}
+
 // Storage order of one (owner, writer) scrap list: ascending (atMs, seq),
 // so the newest pointer is at the end and notFutureTop applies.
 function compareScrapStored (a, b) {
@@ -453,6 +528,150 @@ function validChoice (record) {
     (record.pick === null || (Number.isSafeInteger(record.pick) && record.pick >= 0 && record.pick < POLL_MAX)) && typeof record.at === 'string'
 }
 
+// Stored garden-help rows: newest first (atMs desc), a tie by the lowest
+// seq, the order in which the reader fold picks a helper's newest row.
+function compareHelps (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  return a.seq - b.seq
+}
+
+// Whether garden(owner, now) may list a help dated atMs: inside the reader
+// window (lib/garden.js inWindow) on a day dayStart accepts. One test for
+// garden() and for the caps, so a cap never keeps a row garden() drops.
+function gardenListable (atMs, now) {
+  return atMs <= now + gardenRules.GARDEN_MAX_FUTURE_MS && atMs >= now - gardenRules.GARDEN_HELP_WINDOW_MS &&
+    !Number.isNaN(gardenRules.dayStart(atMs))
+}
+
+// The row a full help cap gives up among `rows` ([{ seq, atMs, to }], the
+// kept rows and the incoming one). Retention follows the writer's own seq
+// order, never the date it claims, so a far-future date cannot hold a slot
+// that garden() never lists while every later help is refused. A row the
+// reader fold would never count while the others stay goes first, the
+// highest seq of those: not the lowest seq of its (addressee, Brasilia day),
+// or a day dayStart refuses. Evicting the lowest seq of a day instead would
+// let a later duplicate of that day be listed in its place. Otherwise the
+// lowest seq leaves. With a clock (`now`, ms), a row garden(now) could not
+// list is dead first and the lowest seq of a day is taken among the others
+// only, as garden() and the reader fold filter the window before they pick
+// the day's row: a day the window edge cuts keeps its listed row.
+function helpVictim (rows, now = null) {
+  const days = rows.map((r) => gardenRules.dayStart(r.atMs))
+  const alive = rows.map((r, i) => !Number.isNaN(days[i]) && (now === null || gardenListable(r.atMs, now)))
+  const lowest = new Map()
+  rows.forEach((r, i) => {
+    if (!alive[i]) return
+    const key = r.to + '/' + days[i]
+    const prev = lowest.get(key)
+    if (prev === undefined || r.seq < prev) lowest.set(key, r.seq)
+  })
+  let dead = null
+  let oldest = null
+  rows.forEach((r, i) => {
+    if (!alive[i] || lowest.get(r.to + '/' + days[i]) !== r.seq) {
+      if (dead === null || r.seq > dead.seq) dead = r
+    } else if (oldest === null || r.seq < oldest.seq) {
+      oldest = r
+    }
+  })
+  return dead ?? oldest
+}
+
+// The follow rank the seeder gives (add opts.giftRank) to `writer` of a
+// gift to `to`: 2 when `to` follows the writer, 1 when the writer follows
+// `to`, else 0. A missing or throwing predicate, or any other answer, is 0.
+// The rank is a snapshot (a follow not committed yet, or a throw, reads 0),
+// so a held writer may be evicted while it does follow: every eviction at
+// the writers cap marks the addressee full for the gifts that leave.
+function giftRankOf (giftRank, writer, to) {
+  if (typeof giftRank !== 'function') return 0
+  try {
+    const r = giftRank(writer, to)
+    return r === 1 || r === 2 ? r : 0
+  } catch {
+    return 0
+  }
+}
+
+// The row a full gift pair or writer list gives up among `rows` ([{ seq,
+// atMs, to }], the kept rows and the incoming one). As in helpVictim, the
+// writer's seq order decides, never the claimed date, and the row
+// gardenStall() and lib/garden.js foldPending pick for a (addressee,
+// Brasilia day) never leaves while another row can: evicting a day's pick
+// would let a later gift of that day surface in pending although the pick
+// was taken. First a row dead at `now` (offerListable false; without a
+// clock, a day dayStart refuses), the highest seq; then a live row that is
+// not the lowest seq of its day among the live ones, the highest seq;
+// otherwise the lowest seq, then flagged `pick`: it is the row the fold
+// lists for its day.
+function giftVictim (rows, now = null) {
+  const days = rows.map((r) => gardenRules.dayStart(r.atMs))
+  const alive = rows.map((r, i) => !Number.isNaN(days[i]) && (now === null || gardenRules.offerListable(r.atMs, now)))
+  const lowest = new Map()
+  rows.forEach((r, i) => {
+    if (!alive[i]) return
+    const key = r.to + '/' + days[i]
+    const prev = lowest.get(key)
+    if (prev === undefined || r.seq < prev) lowest.set(key, r.seq)
+  })
+  let dead = null
+  let spare = null
+  let oldest = null
+  rows.forEach((r, i) => {
+    if (!alive[i]) {
+      if (dead === null || r.seq > dead.seq) dead = r
+    } else if (lowest.get(r.to + '/' + days[i]) !== r.seq) {
+      if (spare === null || r.seq > spare.seq) spare = r
+    } else if (oldest === null || r.seq < oldest.seq) {
+      oldest = r
+    }
+  })
+  return dead ?? spare ?? (oldest === null ? null : { ...oldest, pick: true })
+}
+
+// The latest instant at or before `ms` on a Brasilia Saturday (stallDay),
+// or NaN. A gift accepted by a take dated takeMs is offerListable at that
+// time (lib/garden.js takeAllowed), so it is dated at or before
+// takeMs + GARDEN_MAX_FUTURE_MS, and its week ends no later than the week
+// of this instant.
+function latestStallAt (ms) {
+  let at = ms
+  for (let i = 0; i < 8; i++) {
+    if (gardenRules.stallDay(at)) return at
+    const day = gardenRules.dayStart(at)
+    if (Number.isNaN(day)) return NaN
+    at = day - 1
+  }
+  return NaN
+}
+
+// Rows by date, newest first, then author asc, then seq asc. garden() wraps
+// it (gardenRowOrder) so a row dated after its clock never outranks one
+// that is not.
+function compareHelpRows (a, b) {
+  if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
+  if (a.author !== b.author) return a.author < b.author ? -1 : 1
+  return a.seq - b.seq
+}
+
+// garden(now)'s pick and answer order. A writer can date a help up to
+// GARDEN_MAX_FUTURE_MS ahead and still be listed, so ranking by the claimed
+// date alone would let a few writers dating ahead own every listed row.
+// Rows dated after now therefore come after every row at or before now,
+// nearest to now first, then author, then seq; the others keep
+// compareHelpRows.
+function gardenRowOrder (now) {
+  return (a, b) => {
+    const fa = a.atMs > now
+    const fb = b.atMs > now
+    if (fa !== fb) return fa ? 1 : -1
+    if (!fa) return compareHelpRows(a, b)
+    if (a.atMs !== b.atMs) return a.atMs < b.atMs ? -1 : 1
+    if (a.author !== b.author) return a.author < b.author ? -1 : 1
+    return a.seq - b.seq
+  }
+}
+
 // Fan rows: atMs desc, then key asc (lib/notices.js compareRows).
 function compareFanRows (a, b) {
   if (a.atMs !== b.atMs) return a.atMs > b.atMs ? -1 : 1
@@ -516,6 +735,28 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   // on that post (ops is the voter's own list, ascending seq, shared with its
   // author entry), kept across a drop of the poll's own diary like fanIn.
   const pollIn = new Map()
+  // Addressee -> Map<writer, [{ seq, atMs, pot }] by compareHelps>: the live
+  // `garden-help` blocks each writer addressed to that balcony (at most
+  // GARDEN_PAIR_MAX), the same rows as the writer's gardenHelps, kept across
+  // a drop of the addressee's diary like `incoming`.
+  const helpsByTo = new Map()
+  // Addressee -> fullUntil ms: the writers cap refused a help garden() might
+  // list, and a refused help is never replayed, so garden() says hidden
+  // until that help would have left the reader window. Kept across a drop
+  // of the addressee's diary like helpsByTo.
+  const gardenFull = new Map()
+  // Addressee -> Map<writer, [{ seq, atMs }] by seq asc>: the live
+  // `garden-gift` blocks each writer addressed to that owner (at most
+  // GARDEN_GIFT_PAIR_MAX), the same rows as the writer's gardenGifts, kept
+  // across a drop of the addressee's diary like helpsByTo.
+  const giftsByTo = new Map()
+  // Addressee -> Map<Brasilia day start, earliest atMs>: a cap refused or
+  // dropped a gift of that date the stall could list, or a take that hides
+  // or may hide one, and a dropped block is never replayed, so
+  // gardenStall(now) says hidden while a gift of that date would be
+  // listable (markGiftFull). Kept across a drop of the addressee's diary
+  // like giftsByTo.
+  const giftFull = new Map()
 
   function invalidateNotices (author) {
     noticeCache.delete(author)
@@ -523,7 +764,7 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
   function authorEntry (author) {
     let entry = authors.get(author)
     if (entry === undefined) {
-      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null, visitSeqs: null }
+      entry = { count: 0, timeline: [], posts: new Map(), reposts: new Map(), touched: new Map(), profileSeqs: [], usernameSeqs: [], copiedSeqs: [], aboutSeqs: [], moodSeqs: [], engagements: new Map(), testimonials: null, shows: null, scraps: null, scrapsByTo: null, scrapHides: null, hideSeqs: null, hiddenRefs: null, walls: null, wallSeqs: null, fanSeqs: null, fanOps: null, tops: null, topSeqs: null, choiceSeqs: null, choiceOps: null, eventSeqs: null, visitSeqs: null, gardenSeqs: null, gardenOn: null, gardenStateSeqs: null, gardenHelps: null, gardenDecorSeqs: null, gardenGifts: null, gardenTakes: null }
       authors.set(author, entry)
     }
     return entry
@@ -633,7 +874,9 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       const type = record.type
       if (type !== 'post' && type !== 'like' && type !== 'repost' && type !== 'profile' && type !== 'username' &&
           type !== 'testimonial' && type !== 'testimonial-show' && type !== 'scrap' && type !== 'scrap-hide' &&
-          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice' && type !== 'visits') return false
+          type !== 'scrap-wall' && type !== 'profile-about' && type !== 'mood' && type !== 'fan' && type !== 'top-friends' && type !== 'choice' && type !== 'visits' &&
+          type !== 'garden' && type !== 'garden-state' && type !== 'garden-help' &&
+          type !== 'garden-decor' && type !== 'garden-gift' && type !== 'garden-take') return false
       if (type === 'testimonial' && (!HEX64.test(record.to) || !HEX64.test(record.hash))) return false
       if (type === 'scrap' && (!HEX64.test(record.to) || (record.replyTo !== null &&
           (typeof record.replyTo !== 'object' || !HEX64.test(record.replyTo.author) || !isSeq(record.replyTo.seq))))) return false
@@ -643,8 +886,22 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       if (type === 'top-friends' && !validTopKeys(record.keys)) return false
       if (type === 'choice' && !validChoice(record)) return false
       if (type === 'visits' && typeof record.on !== 'boolean') return false
+      if (type === 'garden' && typeof record.on !== 'boolean') return false
+      if (type === 'garden-state' && !Array.isArray(record.pots)) return false
+      const helpAtMs = type === 'garden-help' && typeof record.at === 'string' ? Date.parse(record.at) : NaN
+      if (type === 'garden-help' && (typeof record.to !== 'string' || !HEX64.test(record.to) ||
+          !gardenRules.isPotIndex(record.pot) || !Number.isFinite(helpAtMs))) return false
+      if (type === 'garden-decor' && !Array.isArray(record.items)) return false
+      const giftAtMs = type === 'garden-gift' && typeof record.at === 'string' ? Date.parse(record.at) : NaN
+      if (type === 'garden-gift' && (typeof record.to !== 'string' || !HEX64.test(record.to) || !Number.isFinite(giftAtMs))) return false
+      if (type === 'garden-take' && (typeof record.from !== 'string' || !HEX64.test(record.from) || !isSeq(record.seq))) return false
       // Never self (lib/fans.js): as if never written, no slot.
       if (type === 'fan' && record.key === author) return true
+      if (type === 'garden-help' && record.to === author) return true
+      if (type === 'garden-gift' && record.to === author) return true
+      if (type === 'garden-take' && record.from === author) return true
+      // Never listable: a mimo exists only on a Saturday.
+      if (type === 'garden-gift' && !gardenRules.stallDay(giftAtMs)) return true
       if (type === 'top-friends' && record.keys.includes(author)) return true
       if (type === 'testimonial-show' && (!HEX64.test(record.from) || !isSeq(record.seq) ||
           typeof record.text !== 'string' || typeof record.nonce !== 'string')) return false
@@ -666,11 +923,115 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           indexOfSeq(existing.moodSeqs, seq) !== -1 || existing.testimonials?.has(seq) || existing.shows?.has(seq) ||
           existing.scraps?.has(seq) || existing.scrapHides?.has(seq) || existing.walls?.has(seq) ||
           existing.fanSeqs?.has(seq) || existing.tops?.has(seq) || existing.choiceSeqs?.has(seq) ||
-          (existing.visitSeqs !== null && indexOfSeq(existing.visitSeqs, seq) !== -1))) return true
+          (existing.visitSeqs !== null && indexOfSeq(existing.visitSeqs, seq) !== -1) ||
+          (existing.gardenSeqs !== null && indexOfSeq(existing.gardenSeqs, seq) !== -1) ||
+          (existing.gardenStateSeqs !== null && indexOfSeq(existing.gardenStateSeqs, seq) !== -1) ||
+          existing.gardenHelps?.has(seq) ||
+          (existing.gardenDecorSeqs !== null && indexOfSeq(existing.gardenDecorSeqs, seq) !== -1) ||
+          existing.gardenGifts?.has(seq) || existing.gardenTakes?.has(seq))) return true
       if (type === 'fan' && existing?.fanOps?.has(record.key) !== true && (existing?.fanOps?.size ?? 0) >= FAN_KEYS_MAX) return true
       if (type === 'choice' && existing?.choiceOps?.has(pollRef) !== true &&
           ((existing?.choiceOps?.size ?? 0) >= CHOICE_POLLS_MAX || (pollIn.get(pollRef)?.size ?? 0) >= CHOICE_VOTERS_MAX)) return true
-      if (records >= cap || (existing ? existing.count : 0) >= authorCap) return false
+      // The help cap skips (no slot) come before admission, like the fan
+      // cap; a kept help past a cap evicts the row helpEvict names (the same
+      // writer's) or every row of writer ownerEvict to this addressee.
+      // Everything is decided here and nothing changes until the checks
+      // below pass, so a refusal leaves no trace.
+      let helpEvict = null
+      let ownerEvict = null
+      if (type === 'garden-help') {
+        const now = typeof opts?.now === 'number' && Number.isFinite(opts.now) ? opts.now : null
+        const row = { seq, atMs: helpAtMs, to: record.to }
+        const writers = helpsByTo.get(record.to)
+        const list = writers?.get(author)
+        let victim = null
+        if (list !== undefined && list.length >= GARDEN_PAIR_MAX) {
+          victim = helpVictim([...list.map((r) => ({ seq: r.seq, atMs: r.atMs, to: record.to })), row], now)
+        } else if ((existing?.gardenHelps?.size ?? 0) >= GARDEN_WRITER_MAX) {
+          const kept = [...existing.gardenHelps].map(([s, info]) => ({ seq: s, atMs: info.atMs, to: info.to }))
+          victim = helpVictim([...kept, row], now)
+        }
+        if (victim !== null) {
+          if (victim.seq === seq) return true
+          helpEvict = victim.seq
+        }
+        if (list === undefined && (writers?.size ?? 0) >= GARDEN_WRITERS_PER_OWNER) {
+          // A row garden(now) cannot list costs no place. Otherwise the
+          // place of a writer none of whose rows garden(now) can list is
+          // taken, so stale or far-future rows never hold the cap forever.
+          if (now !== null && !gardenListable(helpAtMs, now)) return true
+          if (now !== null) ownerEvict = evictableWriter(writers, now)
+          if (ownerEvict === null) {
+            if (!Number.isNaN(gardenRules.dayStart(helpAtMs))) {
+              const until = helpAtMs + gardenRules.GARDEN_HELP_WINDOW_MS + 1
+              if (!(gardenFull.get(record.to) >= until)) gardenFull.set(record.to, until)
+            }
+            return true
+          }
+        }
+      }
+      // A full gift pair or writer list gives up the row giftVictim names
+      // and a full take list the take takeVictim names (giftEvict,
+      // takeEvict); the incoming block is skipped without a slot when it is
+      // that row. The writers cap follows the help one: a gift
+      // gardenStall(now) cannot list costs no place, and the place of a
+      // writer none of whose gifts it can list is taken, else the place of a
+      // lower ranked writer (giftOwnerEvict).
+      const clock = typeof opts?.now === 'number' && Number.isFinite(opts.now) ? opts.now : null
+      let giftEvict = null
+      let takeEvict = null
+      let giftOwnerEvict = null
+      let giftPickEvict = null
+      let takeEvictMark = NaN
+      if (type === 'garden-gift') {
+        const writers = giftsByTo.get(record.to)
+        const list = writers?.get(author)
+        const row = { seq, atMs: giftAtMs, to: record.to }
+        let victim = null
+        if (list !== undefined && list.length >= GARDEN_GIFT_PAIR_MAX) {
+          victim = giftVictim([...list.map((r) => ({ seq: r.seq, atMs: r.atMs, to: record.to })), row], clock)
+        } else if ((existing?.gardenGifts?.size ?? 0) >= GARDEN_GIFT_WRITER_MAX) {
+          const kept = [...existing.gardenGifts].map(([s, info]) => ({ seq: s, atMs: info.atMs, to: info.to }))
+          victim = giftVictim([...kept, row], clock)
+        }
+        if (victim !== null) {
+          if (victim.seq === seq) return true
+          giftEvict = victim.seq
+          if (victim.pick === true) giftPickEvict = victim
+        }
+        if (list === undefined && (writers?.size ?? 0) >= GARDEN_GIFT_WRITERS_PER_OWNER) {
+          if (clock !== null && !gardenRules.offerListable(giftAtMs, clock)) return true
+          if (clock !== null) giftOwnerEvict = evictableGiftWriter(writers, clock)
+          if (giftOwnerEvict === null && clock !== null) giftOwnerEvict = rankedGiftWriter(writers, author, record.to, opts.giftRank)
+          if (giftOwnerEvict === null) {
+            markGiftFull(record.to, giftAtMs, clock)
+            return true
+          }
+        }
+      } else if (type === 'garden-take' && (existing?.gardenTakes?.size ?? 0) >= GARDEN_TAKES_MAX) {
+        const rows = [...existing.gardenTakes].map(([s, take]) => ({ seq: s, from: take.from, gseq: take.gseq, atMs: take.atMs }))
+        const incoming = { seq, from: record.from, gseq: record.seq, atMs: Date.parse(record.at) }
+        rows.push(incoming)
+        const victim = takeVictim(author, rows, clock)
+        // Every take still hides a listable gift: evicting one would bring it
+        // back to pending. As in foldShelf, past GARDEN_TAKE_ROWS the answer
+        // is not trusted, so the take is skipped. A take that leaves or is
+        // skipped is never replayed, so the stall says hidden while the gift
+        // it names could be listed (takeMarkAt).
+        if (victim === null || victim === seq) {
+          const at = takeMarkAt(author, incoming, clock)
+          if (!Number.isNaN(at)) markGiftFull(author, at, clock)
+          return true
+        }
+        takeEvict = victim
+        takeEvictMark = takeMarkAt(author, rows.find((r) => r.seq === victim), clock)
+      }
+      // An eviction of the same writer's row makes the add net zero for the
+      // global and the author's counts; another writer's frees global slots
+      // only.
+      const ownEvict = helpEvict !== null || giftEvict !== null || takeEvict !== null
+      if ((records >= cap && !ownEvict && ownerEvict === null && giftOwnerEvict === null) ||
+          ((existing ? existing.count : 0) >= authorCap && !ownEvict)) return false
       // Off operations need no new target; they may free one at the cap.
       const needed = new Set([replyTo, quote, record.on === true ? to : null])
       needed.delete(null)
@@ -771,6 +1132,49 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       } else if (type === 'visits') {
         if (entry.visitSeqs === null) entry.visitSeqs = []
         entry.visitSeqs.splice(lowerBoundSeq(entry.visitSeqs, seq), 0, seq)
+      } else if (type === 'garden') {
+        if (entry.gardenSeqs === null) {
+          entry.gardenSeqs = []
+          entry.gardenOn = new Map()
+        }
+        entry.gardenSeqs.splice(lowerBoundSeq(entry.gardenSeqs, seq), 0, seq)
+        entry.gardenOn.set(seq, record.on)
+      } else if (type === 'garden-state') {
+        if (entry.gardenStateSeqs === null) entry.gardenStateSeqs = []
+        entry.gardenStateSeqs.splice(lowerBoundSeq(entry.gardenStateSeqs, seq), 0, seq)
+      } else if (type === 'garden-help') {
+        if (ownerEvict !== null) dropWriterHelps(ownerEvict, record.to)
+        if (helpEvict !== null) {
+          dropHelp(entry, author, helpEvict)
+          releaseRecord(entry)
+        }
+        addHelp(entry, author, seq, record.to, helpAtMs, record.pot)
+      } else if (type === 'garden-decor') {
+        if (entry.gardenDecorSeqs === null) entry.gardenDecorSeqs = []
+        entry.gardenDecorSeqs.splice(lowerBoundSeq(entry.gardenDecorSeqs, seq), 0, seq)
+      } else if (type === 'garden-gift') {
+        // A dropped gift the stall could still list is never replayed: the
+        // addressee says hidden while it would be listable.
+        if (giftOwnerEvict !== null) {
+          for (const r of giftsByTo.get(record.to).get(giftOwnerEvict)) {
+            if (gardenRules.offerListable(r.atMs, clock)) markGiftFull(record.to, r.atMs, clock)
+          }
+          dropWriterGifts(giftOwnerEvict, record.to)
+        }
+        if (giftPickEvict !== null) markGiftFull(giftPickEvict.to, giftPickEvict.atMs, clock)
+        if (giftEvict !== null) {
+          dropGift(entry, author, giftEvict)
+          releaseRecord(entry)
+        }
+        addGift(entry, author, seq, record.to, giftAtMs)
+      } else if (type === 'garden-take') {
+        if (takeEvict !== null) {
+          if (!Number.isNaN(takeEvictMark)) markGiftFull(author, takeEvictMark, clock)
+          entry.gardenTakes.delete(takeEvict)
+          releaseRecord(entry)
+        }
+        if (entry.gardenTakes === null) entry.gardenTakes = new Map()
+        entry.gardenTakes.set(seq, { from: record.from, gseq: record.seq, atMs: Date.parse(record.at) })
       } else if (type === 'fan') {
         if (entry.fanSeqs === null) {
           entry.fanSeqs = new Map()
@@ -816,11 +1220,231 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
       entry.count++
       if (entry.count === authorCap) fullAuthors++
       records++
-      if (targets.size < targetsBefore) freed()
+      // A writer evicted at the writers cap frees its slots: a paused diary
+      // may go on.
+      if (targets.size < targetsBefore || ownerEvict !== null || giftOwnerEvict !== null) freed()
       return true
     } catch {
       return false
     }
+  }
+
+  // A live garden-help of `author` at `seq` for pot index `pot`, under the
+  // writer and under the addressee.
+  function addHelp (entry, author, seq, to, atMs, pot) {
+    if (entry.gardenHelps === null) entry.gardenHelps = new Map()
+    entry.gardenHelps.set(seq, { to, atMs, pot })
+    let writers = helpsByTo.get(to)
+    if (writers === undefined) {
+      writers = new Map()
+      helpsByTo.set(to, writers)
+    }
+    let list = writers.get(author)
+    if (list === undefined) {
+      list = []
+      writers.set(author, list)
+    }
+    const row = { seq, atMs, pot }
+    let at = 0
+    while (at < list.length && compareHelps(list[at], row) < 0) at++
+    list.splice(at, 0, row)
+  }
+
+  // The writer of `writers` (helpsByTo of one addressee) whose place at
+  // GARDEN_WRITERS_PER_OWNER may be taken at now: none of its rows to that
+  // addressee is listable at now. Of those, the one whose newest row is the
+  // oldest, a tie by the lower key, or null. At most GARDEN_WRITERS_PER_OWNER
+  // writers of GARDEN_PAIR_MAX rows each.
+  function evictableWriter (writers, now) {
+    let best = null
+    let bestAt = 0
+    for (const [writer, list] of writers) {
+      if (list.some((r) => gardenListable(r.atMs, now))) continue
+      const newest = list[0].atMs
+      if (best === null || newest < bestAt || (newest === bestAt && writer < best)) {
+        best = writer
+        bestAt = newest
+      }
+    }
+    return best
+  }
+
+  // Every row of `writer` to `to` leaves both places and frees its slot.
+  function dropWriterHelps (writer, to) {
+    const entry = authors.get(writer)
+    for (const row of helpsByTo.get(to).get(writer).slice()) {
+      dropHelp(entry, writer, row.seq)
+      releaseRecord(entry)
+    }
+  }
+
+  // The help leaves both places; the caller releases its slot.
+  function dropHelp (entry, author, seq) {
+    const info = entry.gardenHelps.get(seq)
+    entry.gardenHelps.delete(seq)
+    if (entry.gardenHelps.size === 0) entry.gardenHelps = null
+    const writers = helpsByTo.get(info.to)
+    const list = writers?.get(author)
+    if (list === undefined) return
+    const at = list.findIndex((r) => r.seq === seq)
+    if (at !== -1) list.splice(at, 1)
+    if (list.length === 0) writers.delete(author)
+    if (writers.size === 0) helpsByTo.delete(info.to)
+  }
+
+  // A live garden-gift of `author` at `seq`, under the writer and under the
+  // addressee.
+  function addGift (entry, author, seq, to, atMs) {
+    if (entry.gardenGifts === null) entry.gardenGifts = new Map()
+    entry.gardenGifts.set(seq, { to, atMs })
+    let writers = giftsByTo.get(to)
+    if (writers === undefined) {
+      writers = new Map()
+      giftsByTo.set(to, writers)
+    }
+    let list = writers.get(author)
+    if (list === undefined) {
+      list = []
+      writers.set(author, list)
+    }
+    let at = 0
+    while (at < list.length && list[at].seq < seq) at++
+    list.splice(at, 0, { seq, atMs })
+  }
+
+  // The gift leaves both places; the caller releases its slot.
+  function dropGift (entry, author, seq) {
+    const info = entry.gardenGifts.get(seq)
+    entry.gardenGifts.delete(seq)
+    if (entry.gardenGifts.size === 0) entry.gardenGifts = null
+    const writers = giftsByTo.get(info.to)
+    const list = writers?.get(author)
+    if (list === undefined) return
+    const at = list.findIndex((r) => r.seq === seq)
+    if (at !== -1) list.splice(at, 1)
+    if (list.length === 0) writers.delete(author)
+    if (writers.size === 0) giftsByTo.delete(info.to)
+  }
+
+  // The writer of `writers` (giftsByTo of one addressee) whose place at
+  // GARDEN_GIFT_WRITERS_PER_OWNER may be taken at now: none of its gifts to
+  // that addressee is listable at now. Of those, the one whose newest gift
+  // is the oldest, a tie by the lower key, or null.
+  function evictableGiftWriter (writers, now) {
+    let best = null
+    let bestAt = 0
+    for (const [writer, list] of writers) {
+      if (list.some((r) => gardenRules.offerListable(r.atMs, now))) continue
+      const newest = Math.max(...list.map((r) => r.atMs))
+      if (best === null || newest < bestAt || (newest === bestAt && writer < best)) {
+        best = writer
+        bestAt = newest
+      }
+    }
+    return best
+  }
+
+  // The writer of `writers` (giftsByTo of `to`) whose place at
+  // GARDEN_GIFT_WRITERS_PER_OWNER `author`'s listable gift may take by
+  // follow rank (giftRankOf): the lowest ranked, only when its rank is below
+  // the author's, so a flood of accounts the owner does not know never
+  // shuts out a follower. A tie goes to the writer whose newest gift is the
+  // oldest, then the lower key. Each writer is ranked once: at most
+  // GARDEN_GIFT_WRITERS_PER_OWNER calls. The writer or null.
+  function rankedGiftWriter (writers, author, to, giftRank) {
+    const mine = giftRankOf(giftRank, author, to)
+    if (mine === 0) return null
+    let best = null
+    let bestRank = 0
+    let bestAt = 0
+    for (const [writer, list] of writers) {
+      const rank = giftRankOf(giftRank, writer, to)
+      if (rank >= mine) continue
+      const newest = Math.max(...list.map((r) => r.atMs))
+      if (best === null || rank < bestRank || (rank === bestRank && (newest < bestAt || (newest === bestAt && writer < best)))) {
+        best = writer
+        bestRank = rank
+        bestAt = newest
+      }
+    }
+    return best
+  }
+
+  // Every gift of `writer` to `to` leaves both places and frees its slot.
+  function dropWriterGifts (writer, to) {
+    const entry = authors.get(writer)
+    for (const row of giftsByTo.get(to).get(writer).slice()) {
+      dropGift(entry, writer, row.seq)
+      releaseRecord(entry)
+    }
+  }
+
+  // Whether `owner`'s take of gift (from, gseq) can still hide a pending
+  // gift: that gift is indexed, addressed to owner and, with a clock,
+  // listable at now.
+  function takeMatters (owner, from, gseq, now) {
+    const gift = authors.get(from)?.gardenGifts?.get(gseq)
+    return gift !== undefined && gift.to === owner && (now === null || gardenRules.offerListable(gift.atMs, now))
+  }
+
+  // The seq a full take list of `owner` gives up among `rows` ([{ seq, from,
+  // gseq }], the kept takes and the incoming one): a take that can no
+  // longer matter (takeMatters), one whose gift is indexed before one whose
+  // gift is not (that gift may still be indexed later), then the lowest seq.
+  // Null when every take still matters.
+  function takeVictim (owner, rows, now) {
+    let best = null
+    let bestIndexed = false
+    for (const r of rows) {
+      if (takeMatters(owner, r.from, r.gseq, now)) continue
+      const indexed = authors.get(r.from)?.gardenGifts?.has(r.gseq) === true
+      if (best === null || (indexed && !bestIndexed) || (indexed === bestIndexed && r.seq < best)) {
+        best = r.seq
+        bestIndexed = indexed
+      }
+    }
+    return best
+  }
+
+  // The gift date to mark full (markGiftFull) when `owner`'s take `take` ({
+  // from, gseq, atMs }) leaves the takes cap or is skipped there, or NaN for
+  // none. An indexed gift to another owner never counts here, and one to
+  // owner whose week ended at now never lists again: no mark. An indexed
+  // gift to owner marks its own date. A gift not indexed (yet) may still be,
+  // and then the take would have hidden it: the latest Saturday instant such
+  // a gift could carry (latestStallAt of the take's date plus
+  // GARDEN_MAX_FUTURE_MS). A take whose date does not parse gives no such
+  // instant, so it marks nothing.
+  function takeMarkAt (owner, take, now) {
+    const gift = authors.get(take.from)?.gardenGifts?.get(take.gseq)
+    if (gift !== undefined) {
+      if (gift.to !== owner) return NaN
+      if (now !== null && gardenRules.dayStart(gift.atMs) + gardenRules.GARDEN_STALL_WINDOW_MS <= now) return NaN
+      return gift.atMs
+    }
+    return latestStallAt(take.atMs + gardenRules.GARDEN_MAX_FUTURE_MS)
+  }
+
+  // Remembers a gift date the stall can no longer answer for (giftFull), as
+  // the earliest of its Brasilia day: gardenStall(now) is hidden exactly
+  // while a gift of that date would be listable (offerListable), a later one
+  // of the same day being listable inside that span. Days whose week ended
+  // before now are pruned; without a clock at most GIFT_FULL_DAYS days are
+  // kept, the latest.
+  function markGiftFull (to, atMs, now) {
+    const day = gardenRules.dayStart(atMs)
+    if (Number.isNaN(day)) return
+    let days = giftFull.get(to)
+    if (days === undefined) {
+      days = new Map()
+      giftFull.set(to, days)
+    }
+    if (!(days.get(day) <= atMs)) days.set(day, atMs)
+    for (const d of [...days.keys()]) {
+      if (now !== null && d + gardenRules.GARDEN_STALL_WINDOW_MS <= now) days.delete(d)
+    }
+    while (days.size > GIFT_FULL_DAYS) days.delete(Math.min(...days.keys()))
+    if (days.size === 0) giftFull.delete(to)
   }
 
   // The last live operation of `author` on `key` (the end of `ops`, sorted
@@ -1098,6 +1722,47 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
           found = true
         }
       }
+      if (entry.gardenSeqs !== null) {
+        const at = indexOfSeq(entry.gardenSeqs, seq)
+        if (at !== -1) {
+          entry.gardenSeqs.splice(at, 1)
+          entry.gardenOn.delete(seq)
+          if (entry.gardenSeqs.length === 0) {
+            entry.gardenSeqs = null
+            entry.gardenOn = null
+          }
+          found = true
+        }
+      }
+      if (entry.gardenStateSeqs !== null) {
+        const at = indexOfSeq(entry.gardenStateSeqs, seq)
+        if (at !== -1) {
+          entry.gardenStateSeqs.splice(at, 1)
+          if (entry.gardenStateSeqs.length === 0) entry.gardenStateSeqs = null
+          found = true
+        }
+      }
+      if (entry.gardenHelps?.has(seq)) {
+        dropHelp(entry, author, seq)
+        found = true
+      }
+      if (entry.gardenDecorSeqs !== null) {
+        const at = indexOfSeq(entry.gardenDecorSeqs, seq)
+        if (at !== -1) {
+          entry.gardenDecorSeqs.splice(at, 1)
+          if (entry.gardenDecorSeqs.length === 0) entry.gardenDecorSeqs = null
+          found = true
+        }
+      }
+      if (entry.gardenGifts?.has(seq)) {
+        dropGift(entry, author, seq)
+        found = true
+      }
+      if (entry.gardenTakes?.has(seq)) {
+        entry.gardenTakes.delete(seq)
+        if (entry.gardenTakes.size === 0) entry.gardenTakes = null
+        found = true
+      }
       for (const list of [entry.profileSeqs, entry.usernameSeqs, entry.copiedSeqs, entry.aboutSeqs, entry.moodSeqs]) {
         const at = indexOfSeq(list, seq)
         if (at === -1) continue
@@ -1242,6 +1907,18 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
         listed.delete(author)
         if (listed.size === 0) pollIn.delete(ref)
       }
+      for (const info of entry?.gardenHelps?.values() || EMPTY_LIST) {
+        const writers = helpsByTo.get(info.to)
+        if (writers === undefined) continue
+        writers.delete(author)
+        if (writers.size === 0) helpsByTo.delete(info.to)
+      }
+      for (const info of entry?.gardenGifts?.values() || EMPTY_LIST) {
+        const writers = giftsByTo.get(info.to)
+        if (writers === undefined) continue
+        writers.delete(author)
+        if (writers.size === 0) giftsByTo.delete(info.to)
+      }
       authors.delete(author)
       if (entry !== undefined) {
         if (entry.count === authorCap) fullAuthors--
@@ -1263,19 +1940,20 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     return { profileSeq: entry.profileSeqs.at(-1) ?? null, usernameSeq: entry.usernameSeqs.at(-1) ?? null }
   }
 
-  // Perfil rico pointers of `author`: { about, mood, top, visits }, the seq of
+  // Perfil rico pointers of `author`: { about, mood, top, visits, garden }, the seq of
   // its newest live `profile-about` and `mood` block, null when it has none,
   // top { seq, keys } its newest live `top-friends` block (keys a fresh copy)
   // or null, and visits the seq of its newest live `visits` block (Visitas:
   // the pointer says nothing about on or off, the node peeks the block and
-  // reads it) or null. The object is OPEN: later features add pointers to it and
-  // readers ignore keys they do not know. The node reads and verifies the
-  // blocks.
+  // reads it) or null, and garden the seq of its newest live `garden` block
+  // (Varandinha, on or off like visits) or null. The object is OPEN: later
+  // features add pointers to it and readers ignore keys they do not know. The
+  // node reads and verifies the blocks.
   function profileExtra (author) {
     const entry = typeof author === 'string' ? authors.get(author) : undefined
     const topSeq = entry?.topSeqs?.at(-1)
     const top = topSeq === undefined ? null : { seq: topSeq, keys: entry.tops.get(topSeq).slice() }
-    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null, top, visits: entry?.visitSeqs?.at(-1) ?? null }
+    return { about: entry?.aboutSeqs.at(-1) ?? null, mood: entry?.moodSeqs.at(-1) ?? null, top, visits: entry?.visitSeqs?.at(-1) ?? null, garden: entry?.gardenSeqs?.at(-1) ?? null }
   }
 
   // The writers whose last live `fan` operation on `author` is on, newest
@@ -2030,6 +2708,262 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     return out
   }
 
+  // The Varandinha pointers of `owner`'s balcony: { on: the seq of its
+  // newest live `garden` block (on or off, the node peeks it) or null, state:
+  // its newest live `garden-state` seq or null, helps: [{ author, seq,
+  // followSeq }], given: [seq], hidden }. A balcony whose newest live
+  // `garden` block is off, or that has none, answers no state, helps or
+  // given at once: a member who opted out is not one lookup away from the
+  // list of who watered them, and no reader shows that balcony anyway.
+  // helps are the rows of the writers `visible` keeps whose
+  // followSeq(writer) (the seq of that writer's live follow of the owner) is
+  // a seq, a throw or null omitting the writer. hidden says a writer with a
+  // listable row was omitted by `visible`, or the writers cap refused a help
+  // that may still be listable (gardenFull: a refused help is never
+  // replayed). A row is listable at now (gardenListable), one per writer
+  // per Brasilia day (dayStart, the lowest stored seq of that day). The
+  // reader counts a help only for a pot planted on or before it, so the
+  // surviving rows are picked per pot (the pot of the day's row): at most
+  // GARDEN_HELP_ROWS / GARDEN_POTS rows each, and helps naming one pot, or
+  // an empty one, never push out the helps of another. Inside a pot every
+  // writer's first row is taken first (the reader keeps one helper row per
+  // writer), then that pot's other rows, in gardenRowOrder(now) (rows dated
+  // after now last); the answer is the six picks in that order. given is the owner's own live help seqs inside the same window, newest
+  // first, at most GARDEN_HELP_ROWS. Null for a malformed owner or clock.
+  function garden (owner, now, opts = {}) {
+    try {
+      const { visible = allVisible, followSeq = noFollow } = opts
+      if (typeof owner !== 'string' || !HEX64.test(owner)) return null
+      if (typeof now !== 'number' || !Number.isFinite(now)) return null
+      const { GARDEN_HELP_ROWS, GARDEN_POTS, dayStart } = gardenRules
+      const perPot = Math.floor(GARDEN_HELP_ROWS / GARDEN_POTS)
+      const entry = authors.get(owner)
+      const on = entry?.gardenSeqs?.at(-1) ?? null
+      if (on === null || entry.gardenOn.get(on) !== true) return { on, state: null, helps: [], given: [], hidden: false }
+      const order = gardenRowOrder(now)
+      let hidden = now < (gardenFull.get(owner) ?? -Infinity)
+      const byPot = new Map()
+      for (const [writer, list] of helpsByTo.get(owner) || EMPTY_LIST) {
+        if (writer === owner) continue
+        const byDay = new Map()
+        for (const row of list) {
+          if (!gardenListable(row.atMs, now)) continue
+          const day = dayStart(row.atMs)
+          const prev = byDay.get(day)
+          if (prev === undefined || row.seq < prev.seq) byDay.set(day, row)
+        }
+        if (byDay.size === 0) continue
+        let shown = false
+        try { shown = visible(writer) === true } catch {}
+        if (!shown) {
+          hidden = true
+          continue
+        }
+        let fseq = null
+        try {
+          const n = followSeq(writer)
+          fseq = isSeq(n) ? n : null
+        } catch {}
+        if (fseq === null) continue
+        const rows = [...byDay.values()].map((r) => ({ atMs: r.atMs, author: writer, seq: r.seq, pot: r.pot, followSeq: fseq }))
+        rows.sort(order)
+        const firstIn = new Set()
+        for (const row of rows) {
+          let bucket = byPot.get(row.pot)
+          if (bucket === undefined) {
+            bucket = { firsts: [], rest: [] }
+            byPot.set(row.pot, bucket)
+          }
+          if (firstIn.has(row.pot)) {
+            bucket.rest.push(row)
+          } else {
+            firstIn.add(row.pot)
+            bucket.firsts.push(row)
+          }
+        }
+      }
+      const picked = []
+      for (const { firsts, rest } of byPot.values()) {
+        firsts.sort(order)
+        rest.sort(order)
+        const take = firsts.slice(0, perPot)
+        for (const row of rest) {
+          if (take.length >= perPot) break
+          take.push(row)
+        }
+        picked.push(...take)
+      }
+      picked.sort(order)
+      const own = []
+      for (const [seq, info] of entry.gardenHelps || EMPTY_LIST) {
+        if (info.to !== owner && gardenListable(info.atMs, now)) own.push({ seq, atMs: info.atMs })
+      }
+      own.sort(compareHelps)
+      return {
+        on,
+        state: entry.gardenStateSeqs?.at(-1) ?? null,
+        helps: picked.map((r) => ({ author: r.author, seq: r.seq, followSeq: r.followSeq })),
+        given: own.slice(0, GARDEN_HELP_ROWS).map((r) => r.seq),
+        hidden
+      }
+    } catch {
+      return null
+    }
+  }
+
+  // A Rua das varandinhas: { rows: [{ key, on, state }], next }. Walks the
+  // keys of `followed` ascending, strictly after `cursor`, and keeps those
+  // `visible` keeps (a throw hides one) whose newest live `garden` block is
+  // on: on is that block's seq, state the newest live `garden-state` seq or
+  // null. visible is asked first for every key examined, and a key it hides
+  // is skipped without counting: `next` is a public cursor, and a hidden key
+  // there would name a follow the public follows index omits. At most
+  // GARDEN_STREET_PAGE rows and GARDEN_STREET_SCAN visible keys per call;
+  // next is the last visible key examined while keys remain, else null, so
+  // a page of closed balconies is never a dead end. Null for a malformed
+  // owner, cursor or `followed`.
+  function gardenStreet (owner, followed, opts = {}) {
+    try {
+      const { visible = allVisible, cursor = null } = opts
+      if (typeof owner !== 'string' || !HEX64.test(owner)) return null
+      if (cursor !== null && (typeof cursor !== 'string' || !HEX64.test(cursor))) return null
+      const { GARDEN_STREET_PAGE } = gardenRules
+      const keys = new Set()
+      for (const key of followed) {
+        if (typeof key === 'string' && HEX64.test(key) && (cursor === null || key > cursor)) keys.add(key)
+      }
+      const sorted = [...keys].sort()
+      const rows = []
+      let next = null
+      let examined = 0
+      for (let i = 0; i < sorted.length; i++) {
+        const key = sorted[i]
+        let shown = false
+        try { shown = visible(key) === true } catch {}
+        if (!shown) continue
+        examined++
+        const entry = authors.get(key)
+        const on = entry?.gardenSeqs?.at(-1)
+        if (on !== undefined && entry.gardenOn.get(on) === true) {
+          rows.push({ key, on, state: entry.gardenStateSeqs?.at(-1) ?? null })
+        }
+        if ((rows.length >= GARDEN_STREET_PAGE || examined >= GARDEN_STREET_SCAN) && i + 1 < sorted.length) {
+          next = key
+          break
+        }
+      }
+      return { rows, next }
+    } catch {
+      return null
+    }
+  }
+
+  // The Barraquinha and Enfeites pointers of `owner`'s balcony: { decor,
+  // pending: [{ author, seq, followSeq }], shelf: [{ seq, from, gseq }],
+  // hidden }. Like garden(), a balcony whose newest live `garden` block is
+  // off, or that has none, answers decor null and no rows. Only blocks above
+  // that on block count (lib/garden.js liveSince): decor is the newest live
+  // `garden-decor` seq above it, else null. pending lists the gifts to owner
+  // still open (offerListable), one per writer per Brasilia day (the lowest
+  // seq), from writers `visible` keeps whose followSeq(writer) is a seq, as
+  // garden() does for helps, minus the gifts the owner's live takes above
+  // the on block name. The pick is made before the taken gifts drop, as
+  // lib/garden.js foldPending does, so taking a day's first gift never
+  // surfaces a second. The order is foldPending's: writers `followed`
+  // answers true for first (a follow is one-sided, so accounts the owner
+  // never followed cannot push them out of the cut), then gardenRowOrder(now)
+  // (rows dated after now last, nearest first); at most GARDEN_GIFT_ROWS.
+  // shelf is the owner's live takes above the on block whose gift is
+  // indexed, addressed to owner, still listable and from a visible giver,
+  // newest take seq first, at most GARDEN_SHELF_ROWS. hidden says a visible
+  // test omitted a writer with a listable row or a giver, a list was cut, or
+  // a cap dropped a gift or a take that would matter now (giftFull). Null
+  // for a malformed owner or clock.
+  function gardenStall (owner, now, opts = {}) {
+    try {
+      const { visible = allVisible, followSeq = noFollow, followed = noFollowed } = opts
+      if (typeof owner !== 'string' || !HEX64.test(owner)) return null
+      if (typeof now !== 'number' || !Number.isFinite(now)) return null
+      const { GARDEN_GIFT_ROWS, GARDEN_SHELF_ROWS, offerListable, dayStart } = gardenRules
+      const entry = authors.get(owner)
+      const on = entry?.gardenSeqs?.at(-1) ?? null
+      if (on === null || entry.gardenOn.get(on) !== true) return { decor: null, pending: [], shelf: [], hidden: false }
+      let hidden = false
+      for (const atMs of giftFull.get(owner)?.values() || EMPTY_LIST) {
+        if (offerListable(atMs, now)) hidden = true
+      }
+      const shownCache = new Map()
+      const shown = (key) => {
+        let ok = shownCache.get(key)
+        if (ok === undefined) {
+          ok = false
+          try { ok = visible(key) === true } catch {}
+          shownCache.set(key, ok)
+        }
+        return ok
+      }
+      const decorSeq = entry.gardenDecorSeqs?.at(-1)
+      const decor = decorSeq !== undefined && decorSeq > on ? decorSeq : null
+      const takes = []
+      const taken = new Set()
+      for (const [seq, take] of entry.gardenTakes || EMPTY_LIST) {
+        if (seq <= on) continue
+        takes.push({ seq, from: take.from, gseq: take.gseq })
+        taken.add(take.from + '/' + take.gseq)
+      }
+      const order = gardenRowOrder(now)
+      const rows = []
+      for (const [writer, list] of giftsByTo.get(owner) || EMPTY_LIST) {
+        if (writer === owner) continue
+        const byDay = new Map()
+        for (const row of list) {
+          if (!offerListable(row.atMs, now)) continue
+          const day = dayStart(row.atMs)
+          const prev = byDay.get(day)
+          if (prev === undefined || row.seq < prev.seq) byDay.set(day, row)
+        }
+        if (byDay.size === 0) continue
+        if (!shown(writer)) {
+          hidden = true
+          continue
+        }
+        let fseq = null
+        try {
+          const n = followSeq(writer)
+          fseq = isSeq(n) ? n : null
+        } catch {}
+        if (fseq === null) continue
+        let mine = false
+        try { mine = followed(writer) === true } catch {}
+        for (const r of byDay.values()) {
+          if (!taken.has(writer + '/' + r.seq)) rows.push({ atMs: r.atMs, author: writer, seq: r.seq, followSeq: fseq, mine })
+        }
+      }
+      rows.sort((a, b) => (a.mine === b.mine ? order(a, b) : a.mine ? -1 : 1))
+      if (rows.length > GARDEN_GIFT_ROWS) hidden = true
+      const shelf = []
+      for (const take of takes) {
+        const gift = authors.get(take.from)?.gardenGifts?.get(take.gseq)
+        if (gift === undefined || gift.to !== owner || !offerListable(gift.atMs, now)) continue
+        if (!shown(take.from)) {
+          hidden = true
+          continue
+        }
+        shelf.push(take)
+      }
+      shelf.sort((a, b) => b.seq - a.seq)
+      if (shelf.length > GARDEN_SHELF_ROWS) hidden = true
+      return {
+        decor,
+        pending: rows.slice(0, GARDEN_GIFT_ROWS).map((r) => ({ author: r.author, seq: r.seq, followSeq: r.followSeq })),
+        shelf: shelf.slice(0, GARDEN_SHELF_ROWS),
+        hidden
+      }
+    } catch {
+      return null
+    }
+  }
+
   function stats () {
     return { records, targets: targets.size, saturated: records >= cap || targets.size >= targetCap || authorCap === 0 || fullAuthors > 0, maxRecords: cap }
   }
@@ -2045,11 +2979,15 @@ function createEngagementIndex ({ maxRecords = DEFAULT_MAX_RECORDS, maxTargets =
     scrapIn.clear()
     fanIn.clear()
     pollIn.clear()
+    helpsByTo.clear()
+    gardenFull.clear()
+    giftsByTo.clear()
+    giftFull.clear()
     records = 0
     fullAuthors = 0
   }
 
-  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, events, stats, clear }
+  return { add, removePost, removeRecord, removeDiary, post, roda, counts, engagers, member, hints, noticeRows, noticePage, testimonials, scraps, profileExtra, fans, fanCount, pollTotals, pollVoters, events, stats, clear, garden, gardenStreet, gardenStall }
 }
 
 module.exports = {
@@ -2079,5 +3017,13 @@ module.exports = {
   CHOICE_POLLS_MAX,
   EVENT_PAGE,
   CHOICE_VOTERS_MAX,
+  GARDEN_PAIR_MAX,
+  GARDEN_WRITER_MAX,
+  GARDEN_WRITERS_PER_OWNER,
+  GARDEN_STREET_SCAN,
+  GARDEN_GIFT_PAIR_MAX,
+  GARDEN_GIFT_WRITER_MAX,
+  GARDEN_GIFT_WRITERS_PER_OWNER,
+  GARDEN_TAKES_MAX,
   CURSOR_RE
 }

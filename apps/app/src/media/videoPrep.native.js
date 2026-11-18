@@ -5,7 +5,7 @@
 // with the metadata allowance only the sender gets: rpc.videoBounds, then
 // rpc.stripVideoMetadata, then the strict videoBounds on the stripped bytes.
 // Width, height and length come from those bytes, never from the picker nor
-// from the module. The poster goes through the photo encoder like any photo.
+// from the module. The poster goes through the photo encoder, forced to JPEG.
 // Both files the module wrote are deleted on every path, and so is the
 // picker's own copy of the video (expo-image-picker copies the original,
 // location and device metadata included, into <cache>/ImagePicker/): only a
@@ -112,7 +112,7 @@ export async function prepareVideo (asset, { maxMs, maxBytes, signal } = {}) {
     if (video === null) throw refused()
     let poster
     try {
-      poster = await encodeFile({ uri: out.posterUri, mimeType: 'image/jpeg', width: video.width, height: video.height })
+      poster = await encodeFile({ uri: out.posterUri, mimeType: 'image/jpeg', width: video.width, height: video.height }, { format: 'jpeg' })
     } catch {
       if (aborted(signal)) return null
       throw refused()

@@ -48,6 +48,18 @@
 // { sha256, mime, size }. Rows without an anexo have no such key, so a file
 // written before it existed reads unchanged. The bytes are the reporter's
 // word, like the quote: nothing here fetches or checks them elsewhere.
+//
+// Six months (180 days) after an account's deletion, forgetDeleted(member)
+// removes the reports about it, its appeals, the events naming it and the
+// anexos of removed rows. Of the reports it filed, an open one is removed
+// (unless a pending change names it); a block whose key is still blocked
+// keeps its row, decision, quote and anexo but loses `reporter`, `text`,
+// `nonce` and `signature` (the row gains `stripped`, a month); any other
+// decided one becomes a record with no quote and no anexo, which stays
+// until its target is due too. A stripped block becomes a record once its
+// key is no longer blocked. A row about the member that blocked a group key
+// stays while that group is blocked. The published snapshot and the pending
+// changes are never touched; a row a pending change names waits for its ack.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -78,7 +90,7 @@ function fsyncDir (dir) {
 const FILE = 'moderation.json'
 const MEDIA_DIR = 'report-media'
 // An anexo: one image of at most 1 MiB, in the formats a DM carries minus
-// PNG (packages/rpc limits.js MEDIA_MIMES).
+// PNG and AVIF (packages/rpc limits.js MEDIA_MIMES).
 const ANEXO_MAX_BYTES = 1048576
 // A voice note report carries its audio (mod-routes.js decodeAnexo accepts it
 // only when audioBounds finds a sound-only MPEG-4 container).
@@ -92,11 +104,13 @@ const MAX_STORED_ANEXOS = 2000
 // v1 or v2 file is read with none and rewritten as v3 the same way.
 // A Feira listing report (kind 'listing') rides on the report rows unchanged,
 // so it adds no version: an older binary fails closed on the first file
-// holding one ('indisponivel' at load) and never rewrites it.
+// holding one ('indisponivel' at load) and never rewrites it. A stripped
+// row (forgetDeleted) works the same way.
 const VERSION = 3
-// Open reports waiting for a moderator. Decided ones are kept (retention is
-// issue #38) and do not count here, so deciding junk frees intake; they are
-// bounded by MAX_STORED_REPORTS instead.
+// Open reports waiting for a moderator. Decided ones stay (retention of a
+// live account is issue #38; a deleted account's rows go with forgetDeleted)
+// and do not count here, so deciding junk frees intake; they are bounded by
+// MAX_STORED_REPORTS instead.
 const MAX_REPORTS = 20000
 const MAX_STORED_REPORTS = 100000
 const MAX_PER_REPORTER_DAY = 20
@@ -291,9 +305,21 @@ function validReportRow (id, row) {
     if (r === row) r = { ...row }
     delete r.reopened
   }
+  // A row a deleted account filed (forgetDeleted): the reporter's key,
+  // comment, nonce and signature went, so it is never open evidence again.
+  // Only a block still standing keeps its quote and anexo; any other decided
+  // row is a record with neither.
+  let stripped = false
+  if (has(row, 'stripped')) {
+    if (!isCanonicalIso(row.stripped) || row.reporter !== null || row.text !== '' || row.nonce !== null || row.signature !== null) return false
+    if (row.status !== 'bloquear' && (row.status !== 'descartar' || row.quote !== '' || withAnexo)) return false
+    if (r === row) r = { ...row }
+    delete r.stripped
+    stripped = true
+  }
   if (r.kind === 'dm') {
     // A media-only message quotes nothing: the anexo is the evidence.
-    if (!exactKeys(r, REPORT_KEYS_DM) || (r.quote === '' && !withAnexo)) return false
+    if (!exactKeys(r, REPORT_KEYS_DM) || (r.quote === '' && !withAnexo && !stripped)) return false
   } else {
     if (!exactKeys(r, REPORT_KEYS)) return false
     if (r.writer === null) {
@@ -310,14 +336,15 @@ function validReportRow (id, row) {
     if (r.kind === 'listing' && (r.writer !== null || withAnexo)) return false
   }
   if (r.id !== id || !validId(id) || !isCanonicalIso(r.at)) return false
-  if (!isLowerHex(r.target, 32) || !isLowerHex(r.reporter, 32) || r.reporter === r.target) return false
+  if (!isLowerHex(r.target, 32)) return false
+  if (!stripped && (!isLowerHex(r.reporter, 32) || r.reporter === r.target)) return false
   if (r.blocked !== null) {
     if (r.status !== 'bloquear' || !BLOCK_TARGETS.includes(r.blocked)) return false
     if (r.blocked === 'grupo' && (r.kind === 'dm' || r.group === null)) return false
   }
   if (!REASONS.includes(r.reason)) return false
   if (!boundedText(r.text, TEXT_MAX, false) || !boundedText(r.quote, QUOTE_MAX, true)) return false
-  if (!isLowerHex(r.signature, 64) || typeof r.nonce !== 'string' || !NONCE_RE.test(r.nonce)) return false
+  if (!stripped && (!isLowerHex(r.signature, 64) || typeof r.nonce !== 'string' || !NONCE_RE.test(r.nonce))) return false
   if (!STATUSES.includes(r.status)) return false
   if (r.status === 'aberta') return r.decidedBy === null && r.decidedAt === null && r.note === ''
   return validBy(r.decidedBy) && isCanonicalIso(r.decidedAt) && boundedText(r.note, NOTE_MAX, true)
@@ -365,7 +392,9 @@ function validEvent (e) {
 function fromJson (obj, association) {
   const bad = () => new Error('moderação inválida')
   if (!isPlainObject(obj) || (obj.v !== 1 && obj.v !== 2 && obj.v !== VERSION)) throw bad()
-  if (!exactKeys(obj, obj.v === VERSION ? ['v', 'reports', 'appeals', 'pending', 'published', 'events'] : ['v', 'reports', 'pending', 'published', 'events'])) throw bad()
+  const keys = obj.v === VERSION ? ['v', 'reports', 'appeals', 'pending', 'published', 'events'] : ['v', 'reports', 'pending', 'published', 'events']
+  if (!exactKeys(obj, keys) && !(obj.v === VERSION && exactKeys(obj, [...keys, 'forgetMedia']))) throw bad()
+  if (has(obj, 'forgetMedia') && !validForgetMedia(obj.forgetMedia)) throw bad()
   if (!isPlainObject(obj.reports) || !Array.isArray(obj.pending) || !Array.isArray(obj.events)) throw bad()
   if (obj.v === VERSION && !isPlainObject(obj.appeals)) throw bad()
   if (obj.pending.length > MAX_PENDING || obj.events.length > MAX_EVENTS) throw bad()
@@ -404,7 +433,7 @@ function fromJson (obj, association) {
   for (const e of obj.events) {
     if (!validEvent(e)) throw bad()
   }
-  return {
+  const out = {
     v: VERSION,
     reports,
     appeals,
@@ -412,6 +441,13 @@ function fromJson (obj, association) {
     published: { snapshot: copySnapshot(p.snapshot), at: p.at, moderatorDate: p.moderatorDate },
     events: obj.events.map((e) => ({ ...e }))
   }
+  if (has(obj, 'forgetMedia')) out.forgetMedia = [...obj.forgetMedia]
+  return out
+}
+
+// The anexo files forgetDeleted still has to unlink: unique report ids.
+function validForgetMedia (list) {
+  return Array.isArray(list) && list.length <= MAX_REPORTS && list.every(validId) && new Set(list).size === list.length
 }
 
 function readState (file, association) {
@@ -423,7 +459,7 @@ function readState (file, association) {
 // Shallow copy for a mutation: rows and changes are replaced, never edited
 // in place, so the current state stays intact until the write returned.
 function cloneState (s) {
-  return {
+  const out = {
     v: VERSION,
     reports: dict(s.reports),
     appeals: dict(s.appeals),
@@ -431,6 +467,8 @@ function cloneState (s) {
     published: s.published,
     events: [...s.events]
   }
+  if (has(s, 'forgetMedia')) out.forgetMedia = [...s.forgetMedia]
+  return out
 }
 
 // Membership after applying `member`'s changes of `changes` in order.
@@ -467,6 +505,127 @@ function lastIndexFor (changes, member) {
   return -1
 }
 
+// What forgetDeleted(members) does to `s`, for every due member at once from
+// one scan, so holdsDeleted answers from the same rules. A row is about a
+// member through its `target` only: a group `writer` is a core key its
+// author holds and could link as a second account. A key counts as blocked
+// while the published list holds it or any pending change blocks it, so a
+// pending unblock (even behind a claimed block) never takes evidence a
+// cancel would need.
+//   - About a due member: removed (`remove`), unless it was decided
+//     'bloquear' and still backs a block of another key (a group): then it
+//     is `kept`, stripped too when its reporter is due.
+//   - Filed by a due member about a live target: an open row is removed; a
+//     'bloquear' row backing a blocked key is stripped (`strip`: quote and
+//     anexo stay); any other decided row becomes a `record` (stripped, with
+//     no quote and no anexo), so decidedBefore and humanReversed still see
+//     the decision. A decided row a pending change names that backs no
+//     block is stripped if it is a block, else left as it is (a stripped
+//     row keeps content only as a block). A stripped row whose key is no
+//     longer blocked becomes a record too, whoever filed it, unless a
+//     pending change names it. Records leave with their target.
+//   - A row filed less than DAY_MS ago waits: the per-reporter daily budget
+//     (checkBudget) counts stored rows. It waits alone, with the events that
+//     name it: anyone can file a report about any key every day, so a recent
+//     row holding the member would keep the older rows past the retention.
+// `deferred`: rows to remove that a pending change still names
+// (validChangeRow needs them until the ack); while one about a member
+// waits, the other rows and the events about that member stay too, as
+// humanReversed reads them in order. That hold ends at the operator's ack.
+// -> { remove, strip, records, appeals, dropsEvent, events, deferred, kept }.
+function deletedPlan (s, members, t) {
+  const due = new Set(members)
+  const named = new Set()
+  for (const c of s.pending) for (const id of c.reportIds) named.add(id)
+  const published = blockedSet(s.published.snapshot)
+  const pendingBlocks = new Set(s.pending.filter((c) => c.op === 'block').map((c) => c.member))
+  const isBlocked = (k) => published.has(k) || pendingBlocks.has(k)
+  const recent = t - DAY_MS
+  const remove = []
+  const strip = []
+  const records = []
+  const waiting = new Set()
+  const aboutOf = new Map()
+  const candidates = []
+  let deferred = 0
+  let kept = 0
+  for (const r of Object.values(s.reports)) {
+    const about = due.has(r.target) ? r.target : null
+    if (Date.parse(r.at) >= recent) continue
+    const key = r.status === 'bloquear' ? blockedKey(r) : null
+    const backs = key !== null && isBlocked(key)
+    const content = r.quote !== '' || has(r, 'anexo')
+    if (about !== null) {
+      if (backs && key !== about) {
+        kept++
+        if (due.has(r.reporter)) strip.push(r.id)
+        continue
+      }
+    } else if (due.has(r.reporter)) {
+      if (r.status !== 'aberta') {
+        if (backs || (named.has(r.id) && r.status === 'bloquear')) strip.push(r.id)
+        else if (named.has(r.id)) deferred++
+        else records.push(r.id)
+        continue
+      }
+    } else {
+      if (has(r, 'stripped') && !backs && content && !named.has(r.id)) records.push(r.id)
+      continue
+    }
+    if (named.has(r.id)) {
+      deferred++
+      if (about !== null) waiting.add(about)
+      continue
+    }
+    candidates.push([r.id, about])
+  }
+  // A member a named row waits for keeps every row about it this pass, so
+  // its events never outlive the rows they name.
+  for (const [id, about] of candidates) {
+    if (about !== null && waiting.has(about)) {
+      deferred++
+      continue
+    }
+    remove.push(id)
+    aboutOf.set(id, about)
+  }
+  const appealOf = new Map()
+  for (const a of Object.values(s.appeals)) if (due.has(a.member)) appealOf.set(a.id, a.member)
+  const dropsEvent = (e) => {
+    if (has(e, 'member') && due.has(e.member)) return !waiting.has(e.member)
+    if (has(e, 'reportId') && aboutOf.has(e.reportId)) return !waiting.has(aboutOf.get(e.reportId))
+    if (has(e, 'appealId') && appealOf.has(e.appealId)) return !waiting.has(appealOf.get(e.appealId))
+    return false
+  }
+  let events = 0
+  for (const e of s.events) if (dropsEvent(e)) events++
+  return { remove, strip, records, appeals: [...appealOf.keys()], dropsEvent, events, deferred, kept }
+}
+
+function planChanges (plan) {
+  return plan.remove.length + plan.strip.length + plan.records.length + plan.appeals.length + plan.events > 0
+}
+
+// The first instant of the UTC month of `ms`: a stripped row's date, coarse
+// so that with the directory's deletion date it does not point at the
+// reporter.
+function monthOf (ms) {
+  const d = new Date(ms)
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString()
+}
+
+// The fields a deleted reporter leaves on a row it filed (forgetDeleted).
+function strippedRow (row, at) {
+  return { ...row, reporter: null, text: '', nonce: null, signature: null, stripped: has(row, 'stripped') ? row.stripped : at }
+}
+
+// A decision record: what was decided about which target, with no content.
+function recordRow (row, at) {
+  const out = { ...strippedRow(row, at), quote: '' }
+  delete out.anexo
+  return out
+}
+
 function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   if (!isHex(association, 32)) throw new TypeError('association must be 64 hex characters')
   association = association.toLowerCase()
@@ -475,6 +634,8 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   fs.chmodSync(dataDir, 0o700)
   const file = path.join(dataDir, FILE)
   let state = null
+  // Bumped by every write attempt (forgetDeleted's stale check).
+  let revision = 0
   let failed = false
   let missing = false
   try {
@@ -507,6 +668,7 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   }
 
   function persist (next) {
+    revision++
     try {
       writeJsonAtomic(file, next, 0o600)
     } catch (err) {
@@ -700,8 +862,9 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     })
   }
 
-  // Evidence is never evicted: retention belongs to issue #38. One daily
-  // budget per reporter covers every kind of report. -> now
+  // Evidence is never evicted for room: retention belongs to issue #38 and,
+  // for a deleted account, to forgetDeleted. One daily budget per reporter
+  // covers every kind of report (a stripped row has no reporter). -> now
   function checkBudget (rows, reporter) {
     let open = 0
     for (const r of rows) if (r.status === 'aberta') open++
@@ -1008,6 +1171,9 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       // Already open: another moderator reopened it first.
       if (current.status === 'aberta') throw fail('ja-revertido')
       if (current.decidedBy !== AI_ACTOR) throw fail('sem-permissao')
+      // A stripped row lost the reporter's signature: it can never be open
+      // evidence again (validReportRow), so it stays decided.
+      if (has(current, 'stripped')) throw fail('sem-permissao')
       const next = cloneState(state)
       const reopened = { at: iso(now()), action: current.status, decidedAt: current.decidedAt }
       const report = { ...current, status: 'aberta', decidedBy: null, decidedAt: null, note: '', blocked: null, reopened }
@@ -1253,6 +1419,33 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     }))
   }
 
+  // Read-only, for the phone rule: is `member` in the published list, or
+  // does any change for it still wait for the operator? Excluir conta's own
+  // block (by OWNER_ACTOR) counts too: a 'bloquear' decided while it waits
+  // joins it. An unblock still waiting does not let go of a number, even
+  // next to the claimed block it lifts: it may be cancelled, and the burn
+  // itself is only lifted by the published list. An invalid member is false.
+  function held (member) {
+    usable()
+    if (!isLowerHex(member, 32)) return false
+    if (blockedSet(state.published.snapshot).has(member)) return true
+    return state.pending.some((c) => c.member === member)
+  }
+
+  // Read-only: how many 'bloquear' reports blocked `member` with a decision
+  // at or after `since` (canonical ISO, so strings compare in time order),
+  // or all of them when `since` is null. An invalid member is 0.
+  function blockReportsAfter (member, since) {
+    usable()
+    if (since !== null && !isCanonicalIso(since)) throw new TypeError('since must be null or a canonical ISO date')
+    if (!isLowerHex(member, 32)) return 0
+    let n = 0
+    for (const r of Object.values(state.reports)) {
+      if (r.status === 'bloquear' && blockedKey(r) === member && (since === null || r.decidedAt >= since)) n++
+    }
+    return n
+  }
+
   function stats () {
     usable()
     let open = 0
@@ -1267,6 +1460,37 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
       blocked: blockedSet(s).size,
       publishedSeq: s === null ? null : s.seq
     }
+  }
+
+  // Asked per key on every page fold and deletion pass, so each answer is
+  // built once per state: a mutation replaces `state.published` and
+  // `state.reports` (cloneState), never edits them, so their identity is the
+  // revision.
+  let blockedMemo = { snapshot: undefined, set: null }
+  let targetsMemo = { reports: null, ids: null }
+
+  // Same answer as blocked().some((b) => b.member === member).
+  function isBlocked (member) {
+    usable()
+    const snapshot = state.published.snapshot
+    if (blockedMemo.snapshot !== snapshot) blockedMemo = { snapshot, set: blockedSet(snapshot) }
+    return blockedMemo.set.has(member)
+  }
+
+  // The ids of the reports whose target is `member` (exportRows({ member })
+  // ids), for Excluir conta.
+  function reportIdsAbout (member) {
+    usable()
+    if (targetsMemo.reports !== state.reports) {
+      const ids = new Map()
+      for (const r of Object.values(state.reports)) {
+        if (!ids.has(r.target)) ids.set(r.target, [])
+        ids.get(r.target).push(r.id)
+      }
+      targetsMemo = { reports: state.reports, ids }
+    }
+    const got = targetsMemo.ids.get(member)
+    return got === undefined ? [] : got.slice()
   }
 
   // For the operator (LGPD access requests, legal orders): report rows with
@@ -1286,8 +1510,9 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
   //       never unblocks);
   //   (c) a report about the member was decided 'bloquear', yet the member
   //       is neither in the published list nor has a pending block: that
-  //       block was decided and later undone. Report rows are kept, so this
-  //       survives the truncation of `events` at MAX_EVENTS. A row a person
+  //       block was decided and later undone. Report rows outlive the
+  //       truncation of `events` at MAX_EVENTS, so this does too, until
+  //       forgetDeleted removes the rows of a deleted member. A row a person
   //       reopened from an AI 'bloquear' counts too, whatever it says now:
   //       the AI blocked its `target` (the AI never blocks a group key).
   //   (d) a retained event records a human unblock request: a 'pedido' that
@@ -1331,7 +1556,109 @@ function openModerationStore (dataDir, { now = Date.now, association } = {}) {
     return false
   }
 
-  return { add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, groupKeys, stats, exportRows, humanReversed }
+  // Read-only, for the deletion sweep: would forgetDeleted(member) change
+  // anything? A row left alone or waiting for an ack does not count, so the
+  // sweep does not call it every hour for nothing.
+  // `members`: one key or the list of keys a pass handles; an empty list or
+  // an invalid key is refused, as in forgetDeleted.
+  function holdsDeleted (members) {
+    usable()
+    const list = memberList(members)
+    return planChanges(deletedPlan(state, list, now())) || mediaToForget().length > 0
+  }
+
+  function memberList (members) {
+    const list = Array.isArray(members) ? members : [members]
+    if (list.length === 0 || !list.every((m) => isLowerHex(m, 32))) throw fail('pedido-invalido')
+    return list
+  }
+
+  function mediaToForget () {
+    return has(state, 'forgetMedia') ? state.forgetMedia : []
+  }
+
+  // Unlinks the files `forgetMedia` lists, skipping an id whose row holds an
+  // anexo again; a missing file counts as done (a crash after the unlink).
+  // The directory is synced before the write that shortens the list, so a
+  // power cut never brings back a file the list no longer names; a failed
+  // sync keeps the whole list. Then one write keeps only the ids whose
+  // unlink failed; a failed write leaves the list for the next call.
+  // -> the number of files removed.
+  function unlinkForgotten () {
+    const list = mediaToForget()
+    if (list.length === 0) return 0
+    let files = 0
+    let left = []
+    try {
+      refuseSymlinkDir(mediaDir)
+      for (const id of list) {
+        if (has(state.reports, id) && has(state.reports[id], 'anexo')) continue
+        try {
+          fs.unlinkSync(path.join(mediaDir, id))
+          files++
+        } catch (err) {
+          if (err.code !== 'ENOENT') left.push(id)
+        }
+      }
+      if (left.length < list.length) fsyncDir(mediaDir)
+    } catch {
+      left = [...list]
+    }
+    if (left.length === list.length) return files
+    const next = cloneState(state)
+    if (left.length > 0) next.forgetMedia = left
+    else delete next.forgetMedia
+    try {
+      persist(next)
+    } catch {}
+    return files
+  }
+
+  // Six months after each account of `members` (one key or a list) was
+  // deleted (./deletion.js decides when): one write applying deletedPlan
+  // that also lists, in `forgetMedia`, the anexo files of the rows it
+  // removed or made records; the files go after the write landed, and the
+  // list with them (a crash or a failed unlink in between leaves the list,
+  // which the next call finishes). Files are never inferred from absence: a
+  // missing or older moderation.json deletes nothing. A second call
+  // writes nothing. `revision`: revision() as the caller read it before its
+  // phone sweep; any write since (an ack, a decision) may have changed what
+  // a block rests on after the sweep looked, so the call then writes nothing
+  // and answers `stale`.
+  // -> { stale, reports, stripped, records, appeals, events, deferred, kept,
+  // files, filesLeft }: `filesLeft` counts the ids still listed after this
+  // call (an unlink that keeps failing), so the caller can log it.
+  function forgetDeleted (members, { revision: seen } = {}) {
+    return enqueue(() => {
+      usable()
+      const list = memberList(members)
+      if (seen !== undefined && seen !== revision) return { stale: true, reports: 0, stripped: 0, records: 0, appeals: 0, events: 0, deferred: 0, kept: 0, files: 0, filesLeft: mediaToForget().length }
+      const plan = deletedPlan(state, list, now())
+      if (planChanges(plan)) {
+        const next = cloneState(state)
+        const at = monthOf(now())
+        const media = [...mediaToForget()]
+        for (const id of [...plan.remove, ...plan.records]) {
+          if (has(state.reports[id], 'anexo') && !media.includes(id)) media.push(id)
+        }
+        if (media.length > 0) next.forgetMedia = media
+        for (const id of plan.remove) delete next.reports[id]
+        for (const id of plan.strip) next.reports[id] = strippedRow(state.reports[id], at)
+        for (const id of plan.records) next.reports[id] = recordRow(state.reports[id], at)
+        for (const id of plan.appeals) delete next.appeals[id]
+        next.events = state.events.filter((e) => !plan.dropsEvent(e))
+        persist(next)
+      }
+      const files = unlinkForgotten()
+      return { stale: false, reports: plan.remove.length, stripped: plan.strip.length, records: plan.records.length, appeals: plan.appeals.length, events: plan.events, deferred: plan.deferred, kept: plan.kept, files, filesLeft: mediaToForget().length }
+    })
+  }
+
+  function currentRevision () {
+    return revision
+  }
+
+  return { revision: currentRevision, add, addDm, anexoOf, list, get, addAppeal, listAppeals, getAppeal, blockedBy, decideAppeal, decide, reopen, reopenedIds, unblock, requestDeletion, cancel, pending, pull, ack, newestModeratorDate, blocked, isBlocked, held, blockReportsAfter, groupKeys, stats, exportRows, reportIdsAbout, humanReversed, holdsDeleted, forgetDeleted }
 }
 
 module.exports = {

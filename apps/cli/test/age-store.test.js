@@ -181,7 +181,8 @@ test('guard() false refuses and writes nothing', async (t) => {
 
 test('guard() true before and false after the write is not acknowledged', async (t) => {
   let calls = 0
-  const { store } = setup(t, { guard: () => ++calls < 2 })
+  // Asked before the re-read (1), right before the rename (2), after it (3).
+  const { store } = setup(t, { guard: () => ++calls < 3 })
   const m = memberKey()
   await rejects(t, store.record({ member: m, band: '18+', method: 'didit' }), 'indisponivel', 'refused after write')
   t.absent(store.verified(m), 'not readable as verified')

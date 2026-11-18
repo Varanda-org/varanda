@@ -40,6 +40,8 @@ Comandos:
   account phone              mostra o celular verificado de um membro, para pedido judicial (--member)
   account phone --release    libera o celular de um membro por ordem judicial, com o serviço parado (--member)
   account phone --username   acha a conta que teve o nome, atual ou passada, e mostra o celular (página: dona, sem número)
+  account delete             mostra a exclusão que seria agendada para um membro (--member ou --username)
+  account delete --yes       agenda a exclusão da conta em 7 dias, com o serviço parado (--undo cancela)
   mod init|show              chave da moderação e estado da lista de bloqueio
   mod cert add               grava o certificado da moderação (--cert-file <f>)
   mod block|unblock <chave>  bloqueia ou desbloqueia uma conta e publica a lista
@@ -118,7 +120,7 @@ function spawn (argv, extraEnv = {}) {
   const env = { ...process.env }
   delete env.VARANDA_PUSH_TOKEN
   delete env.VARANDA_ACCOUNT_HTTP
-  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
+  for (const name of ['VARANDA_PAGE_KEYS', 'VARANDA_SEEDER_WS', 'VARANDA_DATA', 'VARANDA_ASSOCIATION', 'VARANDA_BOOTSTRAP', 'VARANDA_DHT_HOST', 'VARANDA_HEALTH_PORT', 'VARANDA_HEALTH_HOST', 'VARANDA_WS_PORT', 'VARANDA_WS_HOST', 'VARANDA_WS_ORIGIN', 'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES', 'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST', 'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST']) delete env[name]
   return spawnSync(process.execPath, [bin, ...argv], {
     cwd: root,
     env: { ...env, ...extraEnv },
@@ -256,6 +258,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     maxExternal: null,
     maxSockets: null,
     frameMemory: null,
+    storageBytes: null,
     media: { maxInFlight: null, rate: null, burst: null },
     index: { maxInFlight: null, rate: null, burst: null },
     ageBand: null,
@@ -496,7 +499,9 @@ test('CLI parser, R5 help and command router', async (t) => {
     ['VARANDA_MAX_EXTERNAL', flags => flags.maxExternal, ['64', 64], ['abc', '0', '5000']],
     ['VARANDA_MEDIA_MAX_IN_FLIGHT', flags => flags.media.maxInFlight, ['64', 64], ['abc', '0', '1025']],
     ['VARANDA_INDEX_RATE', flags => flags.index.rate, ['64', 64], ['abc', '0', '100001']],
-    ['VARANDA_FRAME_MEMORY', flags => flags.frameMemory, ['67108864', 67108864], ['abc', '8454143', '1073741825']]
+    ['VARANDA_FRAME_MEMORY', flags => flags.frameMemory, ['67108864', 67108864], ['abc', '8454143', '1073741825']],
+    // 1 PiB has 16 digits: it must parse exactly, and 17 digits are refused.
+    ['VARANDA_STORAGE_BYTES', flags => flags.storageBytes, ['1125899906842624', 1125899906842624], ['abc', '1073741823', '1125899906842625', '11258999068426240']]
   ]) {
     t.is(read(parse([], { [name]: ok[0] })), ok[1], name + ' set')
     t.is(read(parse([], { [name]: ' ' + ok[0] + ' ' })), ok[1], name + ' trimmed')
@@ -508,6 +513,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     VARANDA_MAX_EXTERNAL: '512',
     VARANDA_MAX_SOCKETS: '8192',
     VARANDA_FRAME_MEMORY: '8454144',
+    VARANDA_STORAGE_BYTES: '1073741824',
     VARANDA_MEDIA_MAX_IN_FLIGHT: '1',
     VARANDA_MEDIA_RATE: '100000',
     VARANDA_MEDIA_BURST: '2',
@@ -519,6 +525,7 @@ test('CLI parser, R5 help and command router', async (t) => {
     maxExternal: 512,
     maxSockets: 8192,
     frameMemory: 8454144,
+    storageBytes: 1073741824,
     media: { maxInFlight: 1, rate: 100000, burst: 2 },
     index: { maxInFlight: 1024, rate: 3, burst: 4 }
   }, 'every web limit')

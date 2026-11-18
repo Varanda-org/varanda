@@ -49,9 +49,17 @@ const CAP_DISCOVERY = 2 // a seeder offers lean hellos and varanda/discovery/1
 // to MAX_FROZEN_WRITERS_PER_DIARY frozen writers per diary and group, each
 // below its cut, next to the live ones.
 const CAP_WRITER_CUTS = 4
+// A seeder accepts `prove` (lib/peer-proof.js): a member that proves it owns a
+// diary the seeder serves keeps its connection slot when the table is full.
+const CAP_PEER_PROOF = 8
+// A member holds a listed writer whose block 0 can never count for the
+// diary that joined it as a header stub, block 0 alone, once that diary
+// proves the join (docs/protocol.md section 10, "Header stubs").
+const CAP_HEADER_STUBS = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX64_ANY = /^[0-9a-fA-F]{64}$/
+const HEX128 = /^[0-9a-f]{128}$/
 // A rejected.reason is a token, never free text (S4).
 const REASON_RE = /^[a-z0-9-]{1,64}$/
 
@@ -115,6 +123,9 @@ function validateMessage (msg) {
         return hasExactKeys(msg, ['type', 'key', 'length']) && isHex64(msg.key) && isLength(msg.length)
       case 'announce':
         return hasExactKeys(msg, ['type', 'key', 'cert']) && isHex64(msg.key) && isPlainObject(msg.cert)
+      case 'prove':
+        return hasExactKeys(msg, ['type', 'key', 'signer', 'sig']) && isHex64(msg.key) && isHex64(msg.signer) &&
+          typeof msg.sig === 'string' && HEX128.test(msg.sig)
       case 'rejected':
         return hasExactKeys(msg, ['type', 'key', 'reason']) && isHex64(msg.key) &&
           typeof msg.reason === 'string' && REASON_RE.test(msg.reason)
@@ -257,6 +268,9 @@ function attachAdmission (socket, opts = {}) {
     hello: new Promise((resolve) => { resolveHello = resolve }),
     send,
     close,
+    // For a message the caller judges invalid after admission accepted its
+    // shape (e.g. a `prove` that does not verify): same count and limit.
+    badMessage,
     queued: () => backlogLive // our sends waiting (test inspection)
   }
 
@@ -595,6 +609,8 @@ module.exports = {
   CAP_NO_INVENTORY,
   CAP_DISCOVERY,
   CAP_WRITER_CUTS,
+  CAP_PEER_PROOF,
+  CAP_HEADER_STUBS,
   HEX64,
   HEX64_ANY,
   REASON_RE,

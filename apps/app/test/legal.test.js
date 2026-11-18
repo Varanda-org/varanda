@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 77)
+  t.is(LEGAL_VERSION, 84)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 77, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 84, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -345,7 +345,7 @@ test('legal: appeals are disclosed in the terms and in the privacy policy', asyn
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(text(TERMS).includes('o recurso'))
   t.ok(text(TERMS).includes('depois de 30 dias'))
-  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'o recurso não aparece para a própria pessoa nem para quem decidiu a denúncia que bloqueou a conta', 'pode ser revisto por qualquer moderador', 'Denúncias, recursos e decisões não são apagados automaticamente']) {
+  for (const required of ['o serviço de conta guarda o recurso', 'o texto opcional que a pessoa escreveu', 'a assinatura', 'a observação de quem julgou', 'o recurso não aparece para a própria pessoa nem para quem decidiu a denúncia que bloqueou a conta', 'pode ser revisto por qualquer moderador', 'Enquanto a conta existe, denúncias, recursos e decisões ligados a ela não são apagados automaticamente']) {
     t.ok(text(PRIVACY).includes(required), required)
   }
 })
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd81d40a05d10940ff41d82114a787d45b1f483c62933f1da9255106ec45e6851', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '58faae50b2411f0243a4fbe1ddc314c276534302265eba92a3b8dbd6b13c0b85', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -507,7 +507,7 @@ test('legal: version 18 describes voice notes in chats and the report audio', as
   t.ok(text(TERMS).includes('só pede acesso ao microfone quando você começa a gravar'))
   t.ok(text(TERMS).includes('o botão de gravar não aparece'))
   t.ok(text(TERMS).includes('só os aparelhos dos membros conseguem ouvi-la'))
-  t.ok(text(TERMS).includes('Conversas, grupos, Feira, Páginas e a foto do perfil não aceitam vídeo'))
+  t.ok(text(TERMS).includes('Conversas, grupos, Feira e a foto do perfil, de uma pessoa ou de uma página, não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('As conversas não aceitam vídeo'))
   t.ok(text(PRIVACY).includes('o áudio vai junto com a denúncia, aberto'))
   t.ok(text(PRIVACY).includes('se tiver até 700 KB'))
@@ -893,6 +893,30 @@ test('legal: version 76 describes connected devices and the periodic key change'
   t.ok(text(TERMS).includes('fica trancado até alguém entrar de novo com a passkey'), 'the disconnected device locks')
 })
 
+test('legal: version 78 describes Varandinha', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.ok(text(doc).includes('a Varandinha é opcional e começa desligada') || text(doc).includes('A Varandinha é um jogo opcional e começa desligada'), 'optional and off by default')
+    t.ok(text(doc).includes('a pessoa cuja planta você regou vê o seu nome') || text(doc).includes('A pessoa cuja planta você regou vê o seu nome'), 'the watered person sees the name')
+    t.ok(text(doc).includes('recompensa sorteada, ranking nem prêmio'), 'no random reward, ranking or prize')
+    t.ok(text(doc).includes('nenhuma notificação pede para alguém voltar'), 'nothing asks anyone to come back')
+    t.ok(text(doc).includes('cópias que outras pessoas já buscaram podem continuar'), 'fetched copies may remain')
+    t.ok(text(doc).includes('Sair apaga só os seus próprios registros: as regas que vizinhos fizeram na sua varanda ficam no diário deles, e só quem regou pode apagá-las.'), 'leaving deletes only the own records')
+    t.absent(text(doc).includes('\u2014'), 'no em dash')
+  }
+  t.ok(text(TERMS).includes('O estado de cada varanda é declarado por quem joga e não é conferido por ninguém.'), 'terms: declared, not verified')
+  t.ok(text(PRIVACY).includes('O estado do jogo é declarado por cada pessoa e não é conferido'), 'privacy: declared, not verified')
+  t.ok(text(PRIVACY).includes('e fica sabendo qual varanda o seu aparelho abre'), 'privacy: the seeder sees which balcony is opened')
+  t.ok(text(PRIVACY).includes('sem guardar planta nem nome'), 'privacy: pointers only')
+  t.ok(text(PRIVACY).includes('A cada nova rega, o app marca como apagadas até sete das suas regas com mais de cerca de três dias; as que sobrarem continuam públicas até as regas seguintes ou até você sair.'), 'privacy: each watering prunes at most seven helps older than about three days')
+  t.ok(text(TERMS).includes('deixa no seu diário um registro público de que o jogo foi desligado'), 'terms: leaving keeps a public off flag')
+  t.ok(text(PRIVACY).includes('deixa no diário o registro público de desligado'), 'privacy: leaving keeps a public off flag')
+  t.ok(text(PRIVACY).includes('inclusive as regas que você deu'), 'privacy: leaving deletes the given helps')
+  const visitas = text(PRIVACY).indexOf('No app instalado e na versão web hospedada, Visitas é opcional')
+  t.ok(visitas >= 0 && text(PRIVACY).indexOf('No app instalado e na versão web hospedada, a Varandinha') > visitas, 'privacy: after the Visitas paragraph')
+})
+
 test('legal: version 73 keeps the one-time notes from repeating on another device', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
@@ -903,5 +927,96 @@ test('legal: version 73 keeps the one-time notes from repeating on another devic
   const momentos = all.indexOf('Esse mesmo bloco guarda também os momentos de outras pessoas que você já viu')
   t.ok(all.indexOf(marks) < momentos, 'the marks come before the momentos sentence')
   t.ok(all.indexOf(closing) > momentos && all.indexOf(closing) > all.indexOf(marks), 'the closing sentence follows the momentos list, not the marks')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 79 describes video and link previews in page posts', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('As publicações de uma página também aceitam um vídeo curto, como as de uma pessoa.'))
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links'))
+  t.ok(text(PRIVACY).includes('fotos e vídeos das publicações, imagens das prévias de links'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links'))
+})
+
+test('legal: version 81 describes the keys of added passkeys, the recovery floor and the passkey lookup', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('e a de uma passkey adicionada em Ajustes com a confirmação de uma passkey cuja chave ele já tem'))
+  t.ok(text(TERMS).includes('uma passkey adicionada sem essa confirmação ou uma passkey criada com o código de recuperação), a exclusão fica agendada por 7 dias'))
+  t.ok(text(TERMS).includes('o código de recuperação e as chaves públicas das passkeys, e o app apaga a conta do aparelho'))
+  t.absent(text(TERMS).includes('e a chave pública da passkey, e o app'))
+  t.ok(text(PRIVACY).includes('ele guarda também a chave pública dela, ligada à entrada de recuperação dessa passkey e apagada quando essa entrada é removida'))
+  t.ok(text(PRIVACY).includes('fica, para cada conta, só a chave pública da conta e um número de controle, sem prazo, também depois de Excluir conta'))
+  t.ok(text(PRIVACY).includes('e as chaves públicas das passkeys com o pedido agendado'))
+  t.ok(text(PRIVACY).includes('um identificador que ele não consegue ligar a uma passkey, salvo quando guarda a chave pública dela, como descrito abaixo.'))
+  t.ok(text(PRIVACY).includes('Ao entrar com uma passkey que o app não reconhece, a versão hospedada pergunta ao serviço de conta, só pela chave pública, se ela tem conta.'))
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 80 describes polls, events, votes and RSVPs of a page', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela e quem ela segue, é público como a página'))
+  t.ok(text(TERMS).includes('Como os de uma pessoa, um voto ou uma resposta de presença da página é um registro no diário dela, e retirá-lo grava um novo registro que deixa os anteriores públicos.'))
+  t.ok(text(TERMS).includes('ao que uma página publica por ele (publicações, com as opções de uma enquete e o título e o lugar de um evento, respostas,'))
+  t.ok(text(PRIVACY).includes('imagens das prévias de links, enquetes, eventos, os votos e as respostas de presença da página e a lista de quem a página segue'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links, votos, respostas de presença e quem ela segue)'))
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 82 says the moderation data of a deleted account goes 6 months after the deletion', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('As denúncias sobre a conta, os seus recursos, as imagens e os áudios anexados a essas denúncias e o registro de decisões ligado à conta são apagados 6 meses (180 dias) depois da exclusão ou, se um bloqueio ainda espera a publicação da lista, logo depois dela. Uma denúncia sobre a conta que levou ao bloqueio de um grupo inteiro fica enquanto o grupo estiver bloqueado. Uma denúncia que você fez e que levou a um bloqueio que continua (de uma conta ou de um grupo) fica, sem a sua chave, o seu comentário e a sua assinatura, com o trecho e a imagem ou o áudio que você anexou, enquanto o bloqueio durar. As outras denúncias que você fez são apagadas no mesmo prazo, mas de uma denúncia já decidida sobre uma conta que ainda existe fica só um registro, sem nenhum dado seu, de que a denúncia foi analisada e do que foi decidido; é o que fica também quando aquele bloqueio é desfeito.'))
+  t.ok(text(PRIVACY).includes('Uma denúncia que ela fez e que levou a um bloqueio que continua (de uma conta ou de um grupo) fica, sem a chave pública, a observação e a assinatura de quem denunciou, enquanto o bloqueio durar. De uma denúncia que ela fez e que já foi decidida sobre uma conta que ainda existe fica só um registro, sem os dados de quem denunciou, de que a denúncia foi analisada e do que foi decidido.'))
+  t.ok(text(PRIVACY).includes('são apagados 6 meses (180 dias) depois da exclusão ou, se um bloqueio ainda espera a publicação da lista, logo depois dela (uma denúncia que ela fez e que levou a um bloqueio que continua fica'))
+  t.ok(text(PRIVACY).includes('uma denúncia sobre ela que levou ao bloqueio de um grupo inteiro fica enquanto o grupo estiver bloqueado), e as cópias'))
+  t.ok(text(PRIVACY).includes('as decisões dos moderadores, para moderação e pedidos legais, por 6 meses (180 dias), como descrito acima;'))
+  t.absent(text(PRIVACY).includes('sem prazo definido ainda (issue #38)'), 'the deletion paragraph follows the retention')
+  t.ok(text(TERMS).includes('As cópias da triagem automática com o texto das suas publicações, e os precedentes tirados delas, também são apagadas na exclusão (um arquivo corrompido que o serviço separou fica até a operação do servidor apagá-lo).'))
+  t.ok(text(PRIVACY).includes('com os precedentes, são apagadas na exclusão (um arquivo corrompido que o serviço separou fica até a operação do servidor apagá-lo).'), 'a set-aside triage file is named in Privacy too')
+  t.ok(text(PRIVACY).includes('Seis meses (180 dias) depois da exclusão de uma conta ou, se um bloqueio ainda espera a publicação da lista, logo depois dela, o serviço apaga as denúncias sobre ela e as que ela fez'))
+  t.ok(text(PRIVACY).includes('Seis meses (180 dias) depois da exclusão da conta, o recurso e o registro de decisões ligado a ela são apagados.'))
+  t.ok(text(PRIVACY).includes('A imagem é apagada com a denúncia, 6 meses (180 dias) depois da exclusão da conta denunciada ou de quem denunciou. Numa denúncia que fica enquanto um bloqueio durar (sem os dados de quem denunciou, ou porque levou ao bloqueio de um grupo inteiro), a imagem fica com ela; um registro sem conteúdo não guarda imagem.'))
+  t.ok(text(PRIVACY).includes('de uma que ela fez e que já foi decidida sobre uma conta que ainda existe fica só um registro sem conteúdo;'))
+  t.ok(text(PRIVACY).includes('O áudio é apagado com a denúncia, no mesmo prazo da imagem.'))
+  t.ok(text(PRIVACY).includes('Para contas ativas, a retenção está em aberto (issue #38).'))
+  t.absent(text(PRIVACY).includes('Denúncias, recursos e decisões não são apagados automaticamente.'), 'no longer true for a deleted account')
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 83 describes the automatic history copy to a new device', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    const all = text(doc)
+    t.absent(all.includes('Copiar conversas para outro aparelho'), doc.title + ': no option to tap any more')
+    t.ok(all.includes('um dos aparelhos da conta que já existiam'), doc.title + ': one existing device copies')
+    t.ok(all.includes('em segundo plano') && all.includes('uma vez para cada aparelho novo'), doc.title + ': in the background, once per new device')
+    t.ok(all.includes('das mais recentes para as mais antigas, dentro da cota semanal de cópia do semeador'), doc.title + ': photos newest first, within the weekly allowance')
+    t.ok(all.includes('Uma cópia interrompida continua na próxima vez que o app abrir.'), doc.title + ': it resumes')
+    t.ok(all.includes('Um aparelho desconectado em "Aparelhos conectados" não faz nem recebe cópia.'), doc.title + ': a disconnected device is left out')
+    t.ok(all.includes('Qualquer aparelho novo que entrar com a sua passkey recebe assim, dos seus outros aparelhos, o histórico das suas conversas privadas, com texto e fotos, sem nenhum aviso nesses outros aparelhos.'), doc.title + ': the passkey alone gets the history, with no notice')
+    t.ok(all.includes('guarde bem a sua passkey e desconecte em "Aparelhos conectados" todo aparelho que você não reconheça: isso também interrompe uma cópia em andamento'), doc.title + ': what to do about it')
+    t.ok(all.includes('14 dias'), doc.title + ': retention')
+  }
+  t.ok(text(PRIVACY).includes('um reserva a cópia, para que só um aparelho a faça'), 'the claim, plainly')
+  t.ok(text(TERMS).includes('As fotos das Páginas não vão.'))
+})
+
+test('legal: version 84 describes Excluir conta sem a passkey and the e-mail path', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('sem nenhuma passkey e sem o código, toque em Excluir conta sem a passkey na tela de entrada: digite o seu @nome, o número de celular que você confirmou e o código que enviamos por SMS para ele. Isso só registra um pedido: nada acontece antes de você escrever para contato@varanda.app com o seu @nome. Depois que a operação confirmar o pedido com você, a exclusão fica agendada por 7 dias, como acima, contados a partir daí.'))
+  t.absent(text(TERMS).includes('para ele, e a exclusão fica agendada'), 'the code alone schedules nothing')
+  t.ok(text(PRIVACY).includes('O pedido feito em Excluir conta sem a passkey (a chave pública da conta e a data do pedido) fica guardado por até 30 dias e é apagado quando a conta é excluída.'))
+  t.ok(text(TERMS).includes('Sem celular confirmado (contas que entraram com o Google), escreva para contato@varanda.app pelo e-mail da conta; a operação confere o pedido e agenda a mesma exclusão de 7 dias.'))
+  t.absent(text(TERMS).includes('ainda não há como pedir a exclusão pelo app'), 'the old sentence is gone')
+  t.ok(text(TERMS).includes('a seu pedido (em Ajustes, pela tela de entrada ou por e-mail) ou por decisão da moderação'))
+  t.ok(text(PRIVACY).includes('O parceiro de verificação recebe o número só para enviar o código de confirmação ou de exclusão por SMS'))
+  t.ok(text(PRIVACY).includes('ou, sem a passkey, em Excluir conta sem a passkey na tela de entrada'))
+  t.ok(text(PRIVACY).includes('para você pedir a exclusão da conta sem a passkey'))
+  t.ok(text(PRIVACY).includes('Só o operador consegue ler o número, com um comando do servidor, para atender uma ordem judicial ou um pedido seu.'), 'the operator line is unchanged: the service never unseals the number')
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })

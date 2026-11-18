@@ -11,6 +11,11 @@
 // (it sits in the diary), so the notice shows before the first one. An answer
 // is never resent: a failure tells the person and they decide. Title, place
 // and names are peer text and go through displayText. No motion.
+//
+// Acting as a Page (diary events only), the answer is the page's: its own
+// answer comes from the page's status read and it answers with the page
+// action 'choice'; after an unknown outcome the same answer tapped again
+// resends the signed one.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -26,7 +31,8 @@ import { calendarExportAvailable, exportCalendar } from '../calendarExport'
 import { hasReminder, removeReminder, setReminder } from '../eventRemindersStore'
 import { whoOf } from '../who'
 import { confirmedVoters, voterSeqs } from './pollVoters'
-import { learnPeeked, peekAll } from '../screens/Conversa'
+import { learnPeeked, peekAll, readPagePick, setPagePick, useActing } from '../screens/Conversa'
+import { PAGE_PICK_UNREAD, PAGE_RSVP_NOTICE, PAGE_RSVP_UNCERTAIN, choiceNotice, choicePage, pickRef, refusalText, tapAfterUncertain } from '../pageChoice'
 import { Icon } from './Icon'
 import { tap } from './haptics'
 import { layout, type } from './theme'
@@ -81,6 +87,8 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   const grouped = group !== null && HEX64.test(String(group)) && HEX64.test(String(writer))
   const valid = HEX64.test(key) && Number.isSafeInteger(seq) && seq > 0
   const hosted = node.hosted === true && valid
+  const page = choicePage(useActing())
+  const ref = pickRef(key, seq)
   const online = node.online !== false
   const { request } = node
   const card = eventCard(event)
@@ -88,6 +96,7 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   const [claim, setClaim] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [unread, setUnread] = useState(false)
   const [open, setOpen] = useState(null)
   const [voters, setVoters] = useState({ phase: 'idle', rows: [] })
   const [reminder, setReminderOn] = useState(false)
@@ -96,8 +105,16 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   // banner resolves reminders with diary.peek, so group events keep none.
   const remindable = scope !== null && valid && !grouped
   const gen = useRef(0)
+  const retryRef = useRef(null)
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const pageRef = useRef(page)
+  pageRef.current = page
+
+  // Another identity's answer is never shown: unread until this one's is.
+  useEffect(() => { setOwn(undefined); setError(''); setUnread(false); retryRef.current = null }, [page])
 
   const readClaim = useCallback(async () => {
     if (grouped || !hosted || !online) return
@@ -108,12 +125,19 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   useEffect(() => {
     if (grouped || !hosted || !online) return undefined
     let live = true
-    request('choice.mine', { to: { author: key, seq } }).then((r) => {
-      if (live && alive.current && isObject(r)) setOwn(Number.isSafeInteger(r.pick) ? r.pick : null)
-    }, () => {})
+    if (page !== null) {
+      // Two picks: 0 'vou', 1 'talvez'.
+      readPagePick(nodeRef.current, page, ref, 2).then((pick) => {
+        if (live && alive.current) { setUnread(false); setOwn(pick) }
+      }, () => { if (live && alive.current) setUnread(true) })
+    } else {
+      request('choice.mine', { to: { author: key, seq } }).then((r) => {
+        if (live && alive.current && isObject(r)) setOwn(Number.isSafeInteger(r.pick) ? r.pick : null)
+      }, () => {})
+    }
     readClaim()
     return () => { live = false }
-  }, [grouped, hosted, online, request, key, seq, readClaim])
+  }, [grouped, hosted, online, request, key, seq, readClaim, page, ref])
 
   useEffect(() => {
     if (!remindable) return undefined
@@ -139,14 +163,25 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
     setBusy(true)
     setError('')
     tap('light')
+    const pending = retryRef.current
+    retryRef.current = null
+    const asPage = !grouped && page !== null
     try {
       if (grouped) await request('group.choose', { group, target: { writer, seq }, pick: next })
+      else if (asPage) await (tapAfterUncertain(pending, { page, ref, pick: next }) === 'resend' ? pending.retry() : setPagePick(nodeRef.current, page, ref, next))
       else await request('choice.set', { to: { author: key, seq }, pick: next })
-      if (!alive.current) return
+      // The identity changed while it was in flight: the answer is not this one's.
+      if (!alive.current || (!grouped && pageRef.current !== page)) return
       if (!grouped) { setOwn(next); readClaim() }
       if (typeof onChanged === 'function') onChanged()
-    } catch {
-      if (alive.current) setError(FAILED)
+    } catch (err) {
+      if (!alive.current || (!grouped && pageRef.current !== page)) return
+      if (asPage && err && err.uncertain === true) {
+        if (typeof err.retry === 'function') retryRef.current = { page, ref, pick: next, retry: err.retry }
+        setError(PAGE_RSVP_UNCERTAIN)
+      } else {
+        setError(asPage ? refusalText(err, FAILED) : FAILED)
+      }
     } finally {
       if (alive.current) setBusy(false)
     }
@@ -206,7 +241,7 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
   const chip = (index, label) => (
     <Pressable
       accessibilityRole='button'
-      accessibilityLabel={label + (pick === index ? ', sua resposta, toque para tirar' : '')}
+      accessibilityLabel={label + (pick === index ? (page !== null && !grouped ? ', resposta da Página, toque para tirar' : ', sua resposta, toque para tirar') : '')}
       accessibilityState={{ selected: pick === index, disabled: !canAnswer }}
       disabled={!canAnswer}
       onPress={() => answer(index)}
@@ -242,7 +277,8 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
           )
         : null}
       {!hosted ? <Text style={styles.note}>{NOT_HOSTED}</Text> : null}
-      {hosted && online && !past && pick === null && known ? <Text style={styles.note}>{NOTICE}</Text> : null}
+      {hosted && online && !past && pick === null && known ? <Text style={styles.note}>{!grouped && page !== null ? choiceNotice(page, NOTICE, PAGE_RSVP_NOTICE) : NOTICE}</Text> : null}
+      {!grouped && page !== null && unread && hosted && online ? <Text style={styles.note} accessibilityLiveRegion='polite'>{PAGE_PICK_UNREAD}</Text> : null}
       {hosted && online && total ? <Text style={styles.note}>{total + (grouped ? '' : '. ' + CLAIM)}</Text> : null}
       {hosted && online && shownTotals !== null
         ? (

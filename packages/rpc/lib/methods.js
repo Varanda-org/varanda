@@ -12,6 +12,7 @@ const { isReaction } = require('./reaction')
 const PX = require('./profile-extra')
 const { isPoll, isPick } = require('./poll')
 const { isEvent, copyEvent } = require('./event')
+const garden = require('./garden')
 
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):(0|[1-9][0-9]*)$/
@@ -663,8 +664,16 @@ const PAGE_RECIPIENTS_MAX = 17
 // The page-secrets header carries gen as uint32be.
 const PAGE_GEN_MAX = 0xffffffff
 const PAGE_SEALED_MAX = 1024
-const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX &&
-  v.every((r) => isPlainObject(r) && Object.keys(r).length === 2 && isKey(r.member) && isKey(r.box))
+// A core delegate's own signed box (docs/rpc.md 5.161): exactly { gen, at,
+// sig }; the node checks the signature before it seals anything.
+const isPageBoxProof = (v) => isPlainObject(v) && Object.keys(v).length === 3 && Number.isSafeInteger(v.gen) && v.gen >= 1 &&
+  isCanonicalIso(v.at) && isSignature(v.sig)
+const isPageRecipient = (r) => {
+  if (!isPlainObject(r) || !isKey(r.member) || !isKey(r.box)) return false
+  const n = Object.keys(r).length
+  return n === 2 || (n === 3 && hasOwn(r, 'proof') && isPageBoxProof(r.proof))
+}
+const isPageRecipients = (v) => Array.isArray(v) && v.length <= PAGE_RECIPIENTS_MAX && v.every(isPageRecipient)
 const isPageDraftKind = (v) => v === 'msg' || v === 'ctl'
 // dm.pageLegacyChunk (docs/rpc.md 5.114): one chunk of the legacy bundle the
 // service sealed to the owner's own dm-key box; the node opens and checks it.
@@ -747,10 +756,10 @@ function isDmListCursor (v) {
 // diary through the signed cancel offer ({ to: null, exp: null }).
 const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
-  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'group-seal', 'group-rebox', 'follow',
+  'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
-  'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
+  'choice', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
 const PAGE_OP_MAX_BYTES = 16 * 1024
@@ -1540,7 +1549,7 @@ const SPECS = {
   // identity's blob stamps on any frame not yet acked; a repeat finds those
   // frames acked and spends nothing, so it is not marked mutating either.
   'dm.pageGenerate': { fields: { page: req(isKey), gen: req(int(1, PAGE_GEN_MAX)), recipients: req(isPageRecipients) } },
-  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey) } },
+  'dm.pageShare': { fields: { page: req(isKey), member: req(isKey), box: req(isKey), proof: opt(isPageBoxProof) } },
   'dm.pageSecrets': {
     fields: {
       page: req(isKey),
@@ -1583,11 +1592,9 @@ const SPECS = {
   },
   'dm.pageLegacyBlocks': { fields: { page: req(isKey) } },
   'dm.pageForget': { fields: { page: req(isKey) }, mutating: true },
-  // Copy the conversations (text and cached photos, the held Páginas' too) to
-  // the other devices of the same passkey (docs/rpc.md 5.156). Browser node
-  // only. It puts blobs and one pointer drop, so an uncertain failure is left
-  // to the user's retry; the node never repeats it by itself.
-  'dm.historyCopy': { fields: none, mutating: true },
+  // The core node's delegate actor signs its own dm box (docs/rpc.md 5.161).
+  // Signs, writes nothing, so it is not mutating.
+  'dm.actorBox': { fields: none },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
@@ -1617,6 +1624,15 @@ const SPECS = {
   'visits.list': { fields: none },
   'visits.clear': { fields: none, mutating: true },
   'visits.note': { fields: { key: req(isKey) }, mutating: true },
+  // Varandinha, browser node only (docs/rpc.md 5.157 to 5.160). garden.set
+  // turns the caller's own game on or off; garden.state reads it; garden.play
+  // applies one batch of acts as one save; garden.help waters pot `pot` of
+  // the balcony of `to`, a diary key. No date parameter: the node sets every
+  // `at` from its own clock.
+  'garden.set': { fields: { on: req(isBool) }, mutating: true },
+  'garden.state': { fields: none },
+  'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
+  'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
   // Páginas (docs/rpc.md 5.84 to 5.87). page.sign signs a page statement or
   // a page record and appends nothing; the node fills in member, actor and
   // association, so a caller never chooses the bytes. The exact op of each
@@ -1735,12 +1751,16 @@ const SPECS = {
     fields: {
       kind: req(isRecoveryKind),
       secret: opt(isPrf),
-      code: opt(str(1, RECOVERY_CODE_MAX))
+      code: opt(str(1, RECOVERY_CODE_MAX)),
+      // The hosted app's check of an unknown passkey without a user handle:
+      // the answer also names the diary key its PRF output would install.
+      withKey: opt(isBool)
     },
     cross (given, value) {
       const m = recoverySecretCross(given, value)
       if (m !== null) return m
       if (value.kind === 'code' && !hasOwn(given, 'code')) return 'parâmetro obrigatório: code'
+      if (value.kind === 'code' && hasOwn(given, 'withKey')) return 'withKey só com kind passkey'
       return null
     }
   },

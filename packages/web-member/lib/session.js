@@ -315,7 +315,7 @@
 // unlock with a dm-key). reset() removes the local store and the dm kv.
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
-const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
 const {
   validRecordCopy,
   validateRecord,
@@ -348,6 +348,7 @@ const { strictVerifyInviteCard } = require('./invite-card')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPhone } = require('@varanda/core/lib/phone')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { signPeerProof } = require('@varanda/core/lib/peer-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
 const { verifyPhoneVerified, verifyPhoneSince } = require('@varanda/core/lib/phone-proof')
@@ -403,6 +404,13 @@ const SCRAP_NOBODY = 'esta pessoa não está recebendo recados'
 const SCRAP_INDEX_MAX_CHARS = 64 * 1024
 const FOLLOW_INDEX_MAX_CHARS = 1024
 const VISIT_INDEX_MAX_CHARS = 16 * 1024
+// Varandinha (docs/rpc.md 5.160): the help target's refusals, read off the
+// chain from the owner's blocks. The index cap holds the seeder route's
+// largest body (apps/cli/lib/seed-ws.js INDEX_MAX_BODY).
+const GARDEN_PAGE = 'páginas não têm Varandinha'
+const GARDEN_NOT_IN = 'esta pessoa não está na Varandinha'
+const GARDEN_NO_PLANT = 'este vaso não tem planta para regar'
+const GARDEN_INDEX_MAX_CHARS = 64 * 1024
 // visits.set { on: true } without private messages enabled (no dm key): a
 // switch on could neither queue a ping nor be pinged. Same text as the
 // app's DMS_OFF_NOTICE (apps/app/src/visits.js).
@@ -503,6 +511,7 @@ const TESTIMONIAL_DEAD_REF_MAX = 256
 const BAD_PAGE = 'operação de página inválida'
 const PAGE_FEED_BUSY = 'feed de página já em andamento'
 const PAGE_REGISTER_CORE_ONLY = 'registro de página disponível só no nó core'
+const ACTOR_BOX_CORE_ONLY = 'caixa de delegado disponível só no nó core'
 const NO_LOCAL_DATA = 'sem dados locais para este diário'
 // page.read (docs/rpc.md 5.85): the bounded read of a page diary this node
 // does not hold peeks blocks 1..3 and this many windows of PEEK_WINDOW seqs,
@@ -530,6 +539,9 @@ const DM_PULL_EVERY_MS = 120000
 // The published dm-key checks after a pull (checkPageKeys), all pages at once.
 const PAGE_KEY_CHECK_MS = 8000
 const DM_TICK_MS = 60000
+// How long the automatic history copy reuses a device view while the own
+// diary keeps its length (copyKick).
+const COPY_VIEW_MS = 600000
 const DM_LOOKUP_WINDOWS = 8
 // An internal wire window of the node's own peeks, not an rpc page cap.
 const PEEK_WINDOW = 36
@@ -1044,6 +1056,11 @@ function createBrowserSession ({
   // The last `off` sent in devices.changed for the current key pair, and
   // the own length last checked for it.
   let deviceOffSent = false
+  // The key pair of the unlock a run (once or continuous) caught the own
+  // diary up for, or null: until then the history copy is not told this
+  // device is on (feedDevice). The continuous run clears it when its link
+  // drops or the own diary falls behind (holdCopyImports).
+  let ownCaught = null
   let deviceCheckLength = null
   let mediaKeyPair = null
   let groupPrf = null
@@ -1336,6 +1353,7 @@ function createBrowserSession ({
         checkPageKeys().catch(noop)
         visitPull(own, identityTarget)
       }
+      copyKick().catch(noop)
       if (keyPair !== null) await dmEngine.topUp(keyPair)
     } catch {}
   }
@@ -1438,6 +1456,13 @@ function createBrowserSession ({
           peeker: diaryPeeker,
           reader,
           followPage: syncOptions.followPage !== undefined ? syncOptions.followPage : followMovedPage,
+          // The own diary's `prove` on each link (./sync.js signProof), with
+          // the in-memory key, for the own key the run opened.
+          signProof: (noiseHex, own) => {
+            if (keyPair === null) throw new UsageError(store.LOCKED)
+            if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+            return signPeerProof({ noiseHex, keyHex: own, keyPair })
+          },
           log: (text) => {
             const [clean, redacted] = redactLogLine(text)
             if (redacted) reportInternal(new Error(String(text)))
@@ -1465,6 +1490,10 @@ function createBrowserSession ({
                   event(LOCAL_LINE + ' (' + safe(String(ev.length)) + ')')
                 }
                 event('diário próprio sincronizado (' + safe(String(ev.length)) + ')')
+                if (keyPair !== null && run === r) {
+                  ownCaught = keyPair
+                  dmEngine.holdImports(false)
+                }
                 if (!r.ownSynced) {
                   r.ownSynced = true
                   try { onOwnSynced(r) } catch {}
@@ -1579,6 +1608,7 @@ function createBrowserSession ({
                 synced = false
                 seederDownAt = null
                 r.ownSynced = false
+                holdCopyImports(r)
                 event('diário próprio atrasado (' + safe(String(ev.length)) + '/' + safe(String(ev.theirs)) + ')')
                 return
               case 'link-closed':
@@ -1586,6 +1616,7 @@ function createBrowserSession ({
                 r.groupBehind.clear()
                 synced = false
                 r.ownSynced = false
+                holdCopyImports(r)
                 // A 'peer' or verified link does not clear it: the own
                 // state is unknown until the inventory completes.
                 seederDownAt = Date.now()
@@ -1849,6 +1880,13 @@ function createBrowserSession ({
   // length (own-synced, and no own-behind or link loss since).
   function trackingOwn () {
     return run !== null && !run.once && run.ownSynced === true
+  }
+
+  // The live continuous run tracks the own diary, or a run of this unlock
+  // caught it up and no link loss or own-behind cleared that since
+  // (holdCopyImports).
+  function ownHeld () {
+    return trackingOwn() || (keyPair !== null && ownCaught === keyPair)
   }
 
   // A run lost its seeder link less than downTtl ago and no run reported the
@@ -2978,10 +3016,82 @@ function createBrowserSession ({
         if (out === null || run !== r || keyPair !== kp || epoch !== connection) continue
         deviceCheckLength = next
         noteDeviceOff(out.off, epoch)
+        // An off record only adds up, so off read on a diary still behind is
+        // already true: the copy stops now, not when the run catches up.
+        if (out.off === true) feedDevice({ self: null, off: true })
+        copyKick().catch(noop)
       }
     } finally {
       deviceChecking = false
     }
+  }
+
+  // The automatic history copy (./dm-copy.js): this device's id, state and
+  // copy targets read on the run's cores (borrowed as deviceCheck does: a run
+  // that cannot lend them skips it, never preempted), then the engine's job.
+  // Not awaited and not a dmCall: a same-key setKeyPair must not wait for a
+  // copy that takes minutes; the engine's lock stops it. Never throws.
+  // The last view read, reused while the own diary keeps its length: the
+  // tick kicks every minute, and the view reads the whole own diary.
+  // COPY_VIEW_MS bounds it so a target still leaves the window on time.
+  let copyKicking = false
+  let copyViewLast = null
+  async function copyKick () {
+    if (copyKicking) return
+    copyKicking = true
+    try {
+      const r = run
+      // Only on an own diary this run caught up: one that lags may still
+      // show a disconnected device as on.
+      if (closed || keyPair === null || ownKey === null || r === null || r.once || !r.ownSynced || !dmEngine.unlocked()) return
+      if ((await store.readDmKey(storage)) === null) return
+      const own = ownKey
+      const kp = keyPair
+      const api = await readyWithin(r.ready, 0)
+      if (api === NOT_READY || api === null || !api.hold()) return
+      let view = null
+      try {
+        const length = api.diary && Number.isSafeInteger(api.diary.length) ? api.diary.length : null
+        const last = copyViewLast
+        if (length !== null && last !== null && last.r === r && last.kp === kp && last.length === length && Date.now() - last.at < COPY_VIEW_MS) {
+          view = last.view
+        } else {
+          view = await member.deviceCopyView({ ...ctx(), cores: { diary: api.diary, replica: api.replica, group: api.group, opened: undefined, settled: undefined } })
+          copyViewLast = view === null || length === null ? null : { r, kp, length, at: Date.now(), view }
+        }
+      } catch (err) {
+        if (!member.isNeedsExclusive(err)) throw err
+      } finally {
+        api.release()
+      }
+      if (view === null || closed || run !== r || !r.ownSynced || keyPair !== kp || ownKey !== own || !dmEngine.unlocked()) return
+      dmEngine.setDevice(view)
+      dmEngine.autoCopy(own, kp, view).catch(noop)
+    } catch {
+    } finally {
+      copyKicking = false
+    }
+  }
+
+  // This device's state for the history copy, from device.hello,
+  // device.list or deviceCheck: off at once, on only once the own diary is
+  // caught up, by a run of this unlock or by the live continuous run (one
+  // read before that, as an app open after days offline reads it, may not
+  // hold the record that turned this device off), so until then an import
+  // waits. copyKick gives it with the targets later.
+  function feedDevice (v) {
+    if (v.off === true || ownHeld()) dmEngine.setDevice(v)
+  }
+
+  // The live continuous run lost its link or its own diary fell behind: a
+  // record that turns this device off may be on the way, so the device state
+  // the copy engine holds may be stale. Imports wait until the own diary is
+  // caught up again (own-synced releases them); a copy this device makes
+  // goes on, checked against its own targets.
+  function holdCopyImports (r) {
+    if (run !== r || r.once) return
+    ownCaught = null
+    dmEngine.holdImports(true)
   }
 
   function scheduleDeviceCheck (length) {
@@ -3621,6 +3731,55 @@ function createBrowserSession ({
     const p = await diaryPeekWithin({ author: owner, seqs: [f.seq] }, Math.min(peekTimeoutMs, left()))
     const e = p.entries.find((x) => x.seq === f.seq)
     if (e === undefined || e.record.type !== 'follow' || e.record.key !== writer || e.record.on !== true) throw new Error(SEEDER_UNAVAILABLE)
+  }
+
+  // garden.help's evidence deadline (docs/rpc.md 5.160): scrap.write's.
+  const gardenEvidenceMs = Math.min(12000, 2 * peekTimeoutMs)
+
+  // Whether pot `pot` of `owner`'s balcony takes a help now, with public
+  // evidence only, read off the chain under ONE deadline as scrapAdmits: the
+  // seeder names the owner's newest garden flag and garden-state, each a
+  // pointer, peeked and checked here with blocks 1 and 2 (a page-roster
+  // there is a page). Returns when the help may be written; throws a USAGE
+  // refusal when the verified evidence excludes it, and SEEDER_UNAVAILABLE
+  // (or the peek's own NOT_FOUND) when it cannot be read or does not verify.
+  // RESIDUAL: the seeder can point at an older live 'on' flag or an older
+  // state it still serves (it can withhold any newer block); readers apply
+  // foldHelps and drop a help that does not count, so a wrong write costs
+  // one of the helper's daily helps and nothing else.
+  async function gardenTarget (owner, pot) {
+    const deadline = Date.now() + gardenEvidenceMs
+    let timer = null
+    const late = new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(SEEDER_UNAVAILABLE)), gardenEvidenceMs)
+    })
+    const work = gardenEvidence(owner, pot, deadline)
+    try {
+      return await Promise.race([work, late])
+    } finally {
+      clearTimeout(timer)
+      work.catch(() => {})
+    }
+  }
+
+  async function gardenEvidence (owner, pot, deadline) {
+    const left = () => {
+      const ms = deadline - Date.now()
+      if (ms <= 0) throw new Error(SEEDER_UNAVAILABLE)
+      return ms
+    }
+    const index = await seederIndexJson('/index/garden/' + owner, GARDEN_INDEX_MAX_CHARS, left())
+    // A refusal never rests on an index still catching up.
+    const seqs = member.gardenTargetSeqs(index)
+    if (seqs === null) throw new Error(SEEDER_UNAVAILABLE)
+    const r = await peekBefore(owner, seqs, deadline)
+    // No boosts in the pot check: the generous reading is the reader's.
+    const verdict = member.gardenTargetVerdict(index, r, pot, Date.now())
+    if (verdict === null) return
+    if (verdict === 'page') throw new UsageError(GARDEN_PAGE)
+    if (verdict === 'off') throw new UsageError(GARDEN_NOT_IN)
+    if (verdict === 'no-plant') throw new UsageError(GARDEN_NO_PLANT)
+    throw new Error(SEEDER_UNAVAILABLE)
   }
 
   // Refuses (USAGE `message`) a key whose diary is a page: blocks 1 and 2
@@ -4425,6 +4584,10 @@ function createBrowserSession ({
     'page.register': serial(async () => {
       throw new UsageError(PAGE_REGISTER_CORE_ONLY)
     }),
+    // Nor a delegate's box: dm.lookup finds this identity's own (5.161).
+    'dm.actorBox': serial(async () => {
+      throw new UsageError(ACTOR_BOX_CORE_ONLY)
+    }),
 
     // Signs the push-subscription statement with the in-memory key
     // (docs/rpc.md 5.31), exactly like terms.sign. The session fills in
@@ -5056,17 +5219,20 @@ function createBrowserSession ({
       const quick = await withCores((c) => member.deviceHello(c, { name }, { write: false }))
       if (quick !== null) {
         noteDeviceOff(quick.off, epoch)
+        feedDevice({ self: quick.id, off: quick.off })
         return quick
       }
       await ensureCaughtUp(epoch)
       const r = await deviceWrite((c) => member.deviceHello(c, { name }))
       noteDeviceOff(r.off, epoch)
+      feedDevice({ self: r.id, off: r.off })
       return r
     }),
     'device.list': serial(async (_, epoch) => {
       await requireUnlocked()
       const r = await withCores((c) => member.deviceList(c))
       noteDeviceOff(r.off, epoch)
+      feedDevice({ self: r.self, off: r.off })
       return r
     }),
     // The cuts need no group key; the rotation after them is best effort
@@ -5134,6 +5300,97 @@ function createBrowserSession ({
         if (own === null) return { queued: false }
         return dmEngine.visitQueue(own, keyPair, { to: key, box, now: Date.now() })
       })({}, ident)
+    },
+
+    // Varandinha (docs/rpc.md 5.157 to 5.160). The game lives in public
+    // records of the own diary, written like profile.mood and never retried;
+    // a help is checked like scrap.write: the own checks on the chain, the
+    // owner's balcony off it (gardenTarget, fail closed), then the checks
+    // again and the write on the chain, so a help sent from another device
+    // of the same passkey meanwhile is refused there.
+    'garden.set': async ({ on }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        if (on === true) {
+          const cur = await withCores((c) => member.gardenOwn(c, Date.now()))
+          if (cur.on !== true) await profileExtraWrite((c) => member.gardenSet(c))
+          return { on: true }
+        }
+        // A leave that finds nothing to do (null) writes and pushes nothing;
+        // one cut short counts and pushes the blocks that landed (written).
+        let r
+        try {
+          r = await withStore((c) => member.gardenLeave(c))
+        } catch (err) {
+          if (err !== null && typeof err === 'object' && Number.isSafeInteger(err.written)) {
+            wrote(err.written)
+            try { await pushAfterWrite() } catch {}
+          }
+          throw err
+        }
+        if (r !== null) {
+          wrote(r.seq)
+          await pushAfterWrite()
+        }
+        return { on: false }
+      })({})
+    },
+
+    // The own diary alone, as choice.mine: no key needed to read it. Unlocked,
+    // a device that does not hold what the seeder holds for it (ownHeld)
+    // first catches up as a write does: a copy behind another device of the
+    // same passkey reads an empty or older balcony and invites a replant.
+    'garden.state': serial(async (_, epoch) => {
+      if (keyPair !== null && !ownHeld()) await ensureCaughtUp(epoch)
+      return withCores((c) => member.gardenOwn(c, Date.now()))
+    }),
+
+    // Caught up first, so a second device of the same passkey plays on the
+    // freshest state. Helps received are bounded generously (they live in
+    // other diaries; readers fold them).
+    'garden.play': async ({ acts }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      return serial(async (_, epoch) => {
+        await requireUnlocked()
+        await ensureCaughtUp(epoch)
+        let state = null
+        const r = await profileExtraWrite(async (c) => {
+          const out = await member.gardenPlay(c, { acts, now: Date.now(), received: Array(garden.GARDEN_POTS).fill(garden.GARDEN_HELP_PER_POT) })
+          state = out.state
+          return out
+        })
+        return { seq: r.seq, ref: r.ref, state }
+      })({})
+    },
+
+    'garden.help': async ({ to, pot }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      const key = to.toLowerCase()
+      const refuse = async (own) => {
+        if (key === own) throw new UsageError(member.GARDEN_HELP_SELF)
+        if ((await member.memberBlocks(storage)).has(key)) throw new UsageError(DM_BLOCKED)
+      }
+      const writer = await serial(async () => {
+        const own = await requireUnlocked()
+        await refuse(own)
+        await withCores((c) => member.gardenHelpCheck(c, { to: key, writer: own, now: Date.now() }))
+        return own
+      })({})
+      try {
+        await gardenTarget(key, pot)
+      } catch (err) {
+        throw toRpcError(err, reportInternal)
+      }
+      return serial(async (_, epoch) => {
+        await refuse(await requireUnlocked())
+        await ensureCaughtUp(epoch)
+        const r = await withStore((c) => member.gardenHelp(c, { to: key, pot, writer, now: Date.now() }))
+        wrote(r.seq)
+        await pushAfterWrite()
+        return { seq: r.seq, ref: r.ref }
+      })({})
     },
 
     // Momentos (docs/rpc.md 5.113): the item must be one this node's
@@ -5573,21 +5830,6 @@ function createBrowserSession ({
       }
     },
 
-    // Copies the conversation history for the other devices of this identity
-    // (docs/rpc.md 5.156). Not on the chain: a copy takes minutes (paced
-    // stamps and puts) and must not hold up sends. One at a time, in the
-    // engine; it runs only on this call and repeats nothing by itself.
-    'dm.historyCopy': async () => {
-      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
-      const ident = identityTarget
-      const own = await dmIdentity({}, ident)
-      try {
-        return await withDmReady(ident, () => dmEngine.historyCopy(own, keyPair))
-      } catch (err) {
-        throw toRpcError(err, reportInternal)
-      }
-    },
-
     // With `page` (5.114) the page's conversations, held under its secrets;
     // the member's own blocks do not apply to them.
     'dm.list': serialDmList(async (params) => {
@@ -5823,6 +6065,7 @@ function createBrowserSession ({
     noticeCtxCache = null
     zeroPair(keyPair)
     keyPair = null
+    ownCaught = null
     keyFresh = false
     deviceOffSent = false
     deviceCheckLength = null

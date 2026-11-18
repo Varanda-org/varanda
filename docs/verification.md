@@ -5416,13 +5416,11 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 - A flag BE é autodeclarada pelo autenticador quando a atestação é `none`; o app não consegue provar que o gerenciador sincroniza.
 - Dados de autenticação ilegíveis são aceitos, então um autenticador que não informa a flag passa na criação.
 - As dicas (`client-device`, `hybrid`) são só orientação: não forçam a tela do QR code.
-- No Android, a limpeza de passkeys é só exclusão, e só com androidx.credentials 1.5.0.
+- No Android, a limpeza de passkeys é só exclusão, e depende de androidx.credentials 1.5.0 ou mais novo, fixado em versão exata no `build.gradle` do módulo; `apps/app/test/passkeyPrfAndroid.test.js` falha se a versão cair ou deixar de ser exata (#444).
 - No iOS nativo, o domínio associado já está no projeto (`Varanda.entitlements`); entrar com passkey numa instalação de produção depende da conta Apple Developer.
 - O build de debug do Android (`app.varanda.debug`) não usa passkeys de produção.
-- Entrar com uma passkey do Varanda antiga, num aparelho sem diário, ainda abre um diário vazio.
 - Depois de recarregar a página, o cartão não lembra mais quais passkeys criadas aqui não serviram: a pessoa não recebe o nome para apagar. É de propósito, para nunca mandar apagar uma passkey que virou a conta em outro aparelho.
 - Uma passkey recusada no "concluir" nunca recebe pedido de remoção, mesmo quando foi criada nesta carga da página: ela fica no gerenciador até a pessoa apagá-la.
-- Há uma janela entre o autenticador criar a passkey e o registro local ser gravado: se a página cair nessa janela, a passkey existe no gerenciador sem registro local.
 - A recusa de uma passkey presa a um aparelho (chave de segurança, Windows Hello) vale só no navegador ou na instalação que a recusou: ela sobrevive ao "recomeçar" e ao limite de 32 registros, mas em outro navegador, depois de limpar os dados do site ou depois de reinstalar o app, a mesma passkey pode entrar e abrir uma conta nova presa àquele aparelho. A entrada não lê a flag BE, por decisão do dono: passkeys que já existem continuam entrando. Por isso o cartão de passkey recusada nunca manda abrir o Varanda em outro navegador. Decisão registrada na auditoria de segurança deste PR.
 - Pela mesma regra, uma chave de segurança que este navegador recusou na criação nunca entra neste navegador, mesmo que a pessoa tenha criado a conta com ela em outro computador; a conta continua acessível nos outros aparelhos.
 
@@ -5475,16 +5473,14 @@ Nenhuma verificação foi feita ainda. Marcar só o que for de fato executado, c
 
 ### Limites que sobram
 
-- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta.
-- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca.
+- A passkey original não pode ser invalidada: enquanto existir em algum gerenciador, ela abre a conta. Decidido na #444: limite do desenho, porque a chave da conta vem dela.
+- Uma passkey extra numa versão antiga do app cria outra identidade, porque a versão antiga não conhece a marca. Decidido na #444: sem versão mínima; a tela de adicionar passkey avisa para usar o app atualizado.
 - A passkey original abre a conta sem internet em qualquer aparelho (nunca há busca no serviço para ela). Uma passkey extra ou o código precisa do serviço de conta a cada entrada nova com a passkey ou com o código; só uma sessão guardada no aparelho evita isso.
-- Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, o aparelho não vê a marca e essa passkey abre ali uma conta separada e vazia em vez da conta do membro. Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam. Um autenticador que segue o padrão devolve o identificador numa entrada sem registro no aparelho.
+- Se um gerenciador de senhas fora do padrão não devolve o identificador do usuário de uma passkey extra (marcada) num aparelho onde ela não está ligada, e o aparelho está sem internet ou o serviço de conta está fora do ar, essa passkey ainda abre ali uma conta separada e vazia, sem o cartão. Com o status da conta legível, o app procura a entrada dela no serviço e abre a conta do membro, ou mostra o cartão "Esta passkey não abriu nenhuma conta". Nada da conta real é afetado, e o código ou a passkey original ainda a recuperam.
 - Remover ou trocar uma entrada não troca a raiz: quem buscou aquele blob enquanto a entrada valia e tem o segredo dela ainda abre a conta. Isso vem do desenho da raiz embrulhada. Remover a entrada ou criar um código novo só impede novas entradas num aparelho que ainda não a usou; quem já entrou com ela, ou um aparelho ainda aberto com ela, continua com acesso, porque a chave da conta não pode ser trocada. Se uma passkey adicionada ou o código vazar, o único caminho seguro é criar uma conta nova. O cartão do código, a confirmação de código novo e as duas confirmações de remover dizem isso, e os Termos e a Política também (a versão continua 17).
 - Cancelar a recuperação não desfaz o que já terminou: uma instalação que concluiu antes do cancelamento continua (a conta fica aberta e presa à passkey nova), uma passkey criada durante a cerimônia continua no gerenciador (o Varanda não consegue apagá-la; no navegador ela fica recusada como `SUPERSEDED` e fora das próximas criações) e um put já enviado ao serviço pode ter sido gravado (a lista confirma).
 - Remover uma entrada não desconecta um aparelho que já desembrulhou a raiz com ela.
-- Se o disco do serviço se perder, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo.
-- Uma cópia de `recovery.json` mais antiga que uma lápide já podada pode trazer de volta aquela linha.
-- Só membros com vínculo Google cadastram entradas.
+- Se o disco do serviço se perder sem cópia, as entradas somem: o membro entra com a passkey original ou num aparelho ainda conectado e cadastra de novo. Uma cópia restaurada não tem as entradas cadastradas depois dela e volta a ter as removidas depois dela; o README descreve a restauração e o aviso aos membros (#444).
 
 ## 111. Busca de GIFs pelo serviço de conta (PR feat/gif-search)
 
@@ -5771,7 +5767,7 @@ Limites:
 
 - A chave é confiada no primeiro uso, no cadastro: quem controlar o aparelho da pessoa na hora seguinte ao vínculo pode registrar um autenticador forjado no lugar.
 - Uma sessão aberta guarda a chave do diário e pode agendar uma exclusão; a pessoa vê o pedido em todos os aparelhos e pode cancelar por 7 dias, mas quem não abrir nenhum aparelho nesse prazo perde a conta.
-- As passkeys extras e a troca de passkey não registram chave; quem só tem uma delas espera os 7 dias.
+- Uma passkey criada com o código de recuperação, ou adicionada sem a confirmação de uma passkey registrada, não registra chave; quem só tem uma delas espera os 7 dias.
 - A origem do iOS e o objeto de atestado no iOS dependem do aparelho (passo acima).
 - Nenhuma caixa acima foi executada nesta documentação.
 
@@ -8143,7 +8139,7 @@ Cobertura automatizada:
 - `packages/core/test/group-media.test.js`: recusa de descritor de vídeo e do par de publicação em grupos.
 - `apps/cli/test/commands.test.js`: marcador `[vídeo]` em `feed` e `log`, com o par preservado em JSON.
 - `apps/cli/test/panel.test.js`: aviso de fotos ou vídeo no painel de moderação.
-- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: recusa de vídeo em Páginas, inclusive de MP4 válido e de imagem com MIME de vídeo, sem gravar registro nem item de mídia.
+- `apps/cli/test/pages-writer.test.js` e `apps/cli/test/account-pages.test.js`: uma Página recusa vídeo sem `ms` (`midia-invalida`) e imagem com MIME de vídeo, sem gravar registro nem item; um `video/mp4` com `ms` válido é guardado. Publicação, resposta e citação da Página agora levam o vídeo curto e a prévia de link.
 - `apps/cli/test/ai-triage.test.js`: mídia, inclusive vídeo, fica para decisão humana.
 - `apps/cli/test/ai-read-post.test.js`: par de vídeo reconhecido como mídia, com ou sem legenda, e denúncia mantida aberta para uma pessoa.
 
@@ -8174,7 +8170,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local.
 - [ ] Em aparelhos Android e iOS, publicar um MP4 real de câmera H.264 com AAC e outro sem som, em retrato e paisagem, como post, resposta, citação e momento. Registrar aparelho, sistema e resultado; conferir capa, rotação, duração e reprodução. Um arquivo HEVC, fragmentado ou com faixa de metadados temporizados deve ser recusado; não afrouxar o validador para fazê-lo passar.
 - [ ] Com um arquivo real de câmera de celular contendo uma tag de localização, passar os bytes por `stripVideoMetadata` e conferir que a tag foi removida e que a saída passa em `videoBounds` estrito, sem `metadata: true`; conferir também a reprodução.
 - [ ] Na web e no PWA, repetir a publicação, resposta, citação e momento com os arquivos de câmera, conferindo capa, rotação, duração e reprodução.
-- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia e que não oferece vídeo em publicações de Páginas, conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
+- [ ] Conferir os limites de 30 s/8 MiB e 15 s/4 MiB e suas recusas acima do teto, lados e área; conferir que o app não mistura vídeo com fotos nem prévia, que oferece o vídeo curto nas publicações de Páginas, como nas de uma pessoa, e que não oferece vídeo em conversas, grupos, Feira, avatar ou prévia. Conferir a limpeza dos arquivos temporários ao trancar, sair e mandar o app para o fundo, sem nomes ou bytes em logs.
 - [ ] Simular perda de conexão depois do envio e confirmar a indicação de resultado incerto, sem repetição automática; reler o diário antes de publicar de novo. Conferir que o custo de até 129 selos por momento e as esperas de ritmo da seção 13 não são apresentados como uma falha antes de o envio terminar. Com a carteira vazia, `putPublicMedia` força o abastecimento até 300 selos, dentro da cota diária de 1024; uma compra completa em um único link soma `(300 - 28) × 270 ms = 73,44 s` de esperas deliberadas. O envio dos 129 pedaços soma `(129 - 28) × 135 ms = 13,635 s`, além da rede e das gravações.
 - [ ] Denunciar uma publicação com vídeo e outra com foto ou GIF: ambas ficam para uma pessoa, sem inferência sobre a mídia. No ambiente local, aplicar um bloqueio de teste e conferir a indisponibilidade dos núcleos de mídia do diário. Conferir separadamente que o blob do momento deixa de abrir com um descritor guardado depois do bloqueio e que a interface esconde o momento após 24 horas.
 - [ ] Ler o mesmo diário com um leitor e semeador anteriores: o post ou momento em vídeo inteiro é omitido; os blocos continuam servidos pelo semeador antigo, mas o post não entra nos índices nem nas contagens de posts vivos. Atualizar semeadores e serviço de conta antes do app publicador, como manda o CHANGELOG.
@@ -8243,7 +8239,7 @@ Ordem: Android, iOS, depois web e PWA, num ambiente de teste local. Registrar ap
 
 ## 183. Preparar e publicar um vídeo curto
 
-Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação, nem vídeo em Página, conversa, grupo, Feira, avatar ou prévia de link. A comparação com listas de hashes continua ausente (seção 181).
+Uma publicação, resposta ou citação leva exatamente o par `[capa JPEG, vídeo MP4]`: até 30 segundos e 8 MiB (`MAX_VIDEO_MS`, `MAX_VIDEO_BYTES` em `apps/app/src/media/plan.js`). Um momento leva uma foto, um GIF ou um vídeo de até 15 segundos e 4 MiB, sem par de capa, visível por 24 horas. Os dois formatos limitam cada lado a 1920 e a área a 2073600 pixels. Não há segunda mídia na mesma publicação. A Página agora leva o vídeo curto e a prévia de link, como a publicação de uma pessoa. Conversa, grupo, Feira, avatar e prévia de link continuam sem vídeo. A comparação com listas de hashes continua ausente (seção 181).
 
 `pickVideo()` (`apps/app/src/media/attach`) devolve um arquivo, ou `null` se a pessoa cancelar. O app não usa o tamanho nem a duração que o seletor informa. `prepareVideo(picked, { maxMs, maxBytes, signal })` (`videoPrep.native.js` e `videoPrep.web.js`, o mesmo contrato) devolve `{ bytes, mime: 'video/mp4', width, height, ms, poster }` ou `null` se o `signal` foi abortado (troca de modo, remoção ou desmonte: nada é mostrado). O texto de erro já está em pt-BR. Largura, altura e duração saem dos bytes depois de `stripVideoMetadata`. Uma preparação por vez: a ação Vídeo e o envio ficam indisponíveis enquanto ela corre. `node.media.video === true` só num handle real conectado (`apps/app/src/node.js`); a fachada da Vitrine não tem essa capacidade.
 
@@ -8297,7 +8293,7 @@ Nenhuma caixa foi marcada. Ordem: build de debug do Android, simulador ou aparel
 | Apagar a publicação tira capa e vídeo; apagar o momento tira o item | [ ] | [ ] | [ ] | [ ] |
 | Núcleo cheio: "Este aparelho não tem mais espaço para fotos e vídeos.", sem núcleo novo | [ ] | [ ] | [ ] | [ ] |
 | Um app ou uma página anterior pula a publicação com vídeo inteira | [ ] | [ ] | [ ] | [ ] |
-| Página e conversa sem vídeo (também grupo, Feira, avatar e prévia) | [ ] | [ ] | [ ] | [ ] |
+| Página com vídeo curto; conversa, grupo, Feira, avatar e prévia sem vídeo | [ ] | [ ] | [ ] | [ ] |
 | Portão dos Termos e da Política na versão 37, com novo aceite | [ ] | [ ] | [ ] | [ ] |
 
 ### Conferido em 2026-11-12: simulador iOS e emulador Android, sem conta

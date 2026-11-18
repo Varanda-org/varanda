@@ -39,7 +39,7 @@ const MEDIA_BLOCK_BYTES = 32768
 const MAX_MEDIA_BLOCKS = 8192
 const MAX_MEDIA_PER_POST = 10
 const MAX_MEDIA_ITEM_BLOCKS = 256
-const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+const MEDIA_MIMES = Object.freeze(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
 const MAX_MEDIA_DIMENSION = 16384
 // Profile avatar, same values as records.js.
 const AVATAR_SIDE = 512

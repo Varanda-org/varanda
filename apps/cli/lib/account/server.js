@@ -9,16 +9,17 @@ const { isUsername, verifyAccountLink } = require('@varanda/core/lib/account-lin
 const { TERMS_VERSION, verifyTerms } = require('@varanda/core/lib/terms')
 const { verifyInvite } = require('@varanda/core/lib/invite')
 const { loadKeyPairFile, verifyIssuerCert, refuseSymlinkDir } = require('@varanda/core/lib/cert')
-const { createModRoutes, ANEXO_READ_MAX_MS } = require('./mod-routes')
+const { createModRoutes, LARGE_BODY_READ_MAX_MS } = require('./mod-routes')
 const { inviteId, CODE_RE } = require('./invites-store')
 const { createPushRoutes } = require('./push-routes')
 const { createSeenRoutes } = require('./seen-routes')
 const { createAgeRoutes } = require('./age-routes')
 const { createPhoneRoutes } = require('./phone-routes')
+const { spentCapacity } = require('./start-nonces')
 const { phoneSub } = require('./store')
 const { createRecoveryRoutes } = require('./recovery-routes')
 const { createDeleteRoutes } = require('./delete-routes')
-const { createDeletionSweep } = require('./deletion')
+const { createDeletionSweep, createModerationRetention } = require('./deletion')
 const { createPasskeyRoutes } = require('./passkey-routes')
 const { passkeyOrigins } = require('./webauthn')
 const { LINK_HEADER, APP_RETURN_PATH, isAppRequest, isAppProof, proofOf, safeEqual, header } = require('./app-return')
@@ -62,7 +63,9 @@ const { createOgRoutes } = require('./og-routes')
 // verified (finish, rename/finish) and keyed on the member it
 // proved; the public reads share one wide
 // window; the routes that need no proof (start, rename/start) are bounded
-// by their tables (oldest evicted) and by the one global token bucket.
+// by their tables (oldest evicted) and by the one global token bucket;
+// phone/start and age/start hold no table at all (stateless nonces,
+// ./start-nonces.js), only the bucket bounds them.
 // Residual: a flood can still drain the global bucket (by default 20/s,
 // burst 100; `ratePerSecond` and `burst` configure it, and `maxConnections`
 // the socket ceiling, by default 64) for everyone. A per-source limit needs client addresses, which the
@@ -76,12 +79,13 @@ const MAX_SOCKETS = 64
 const DEFAULT_RATE = 20
 const DEFAULT_BURST = 100
 const HEADERS_TIMEOUT_MS = 4000
-// Long enough for the largest report anexo at the slowest rate its own
-// deadline allows (mod-routes.js). Every other body is at most a few dozen
-// KB and gets BODY_READ_MS from when its route starts reading it, the
-// earlier request timeout, so only the anexo route holds a slow sender's
-// socket past HEADERS_TIMEOUT_MS + BODY_READ_MS.
-const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + ANEXO_READ_MAX_MS
+// Long enough for the largest report anexo or operator ack at the slowest
+// rate their own deadline allows (mod-routes.js LARGE_BODY_READ_MAX_MS, the
+// larger of the two maxima). Every other body is at most a few dozen KB and
+// gets BODY_READ_MS from when its route starts reading it, the earlier
+// request timeout, so only those two routes hold a slow sender's socket
+// past HEADERS_TIMEOUT_MS + BODY_READ_MS.
+const REQUEST_TIMEOUT_MS = HEADERS_TIMEOUT_MS + LARGE_BODY_READ_MAX_MS
 const BODY_READ_MS = 10000
 const CHECK_INTERVAL_MS = 1000
 const MAX_BODY = 4096
@@ -398,7 +402,7 @@ function checkIssuerCert (cert, keyPair, association) {
 const LOCK_HEARTBEAT_MS = 10000
 const LOCK_STALE_MS = 30000
 
-// -> { file, owned(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
+// -> { file, owned(), held(), release() }. `heartbeatMs`, `staleMs` and `onLost` are for
 // tests and the serve path; the heartbeat timer is unref'd so it never
 // keeps a process alive on its own.
 function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_STALE_MS, onLost = () => {} } = {}) {
@@ -408,7 +412,7 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
   const token = nodeCrypto.randomBytes(16).toString('hex')
   const body = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token }) + '\n'
   for (let attempt = 0; attempt < 2; attempt++) {
-    if (publishLock(file, body)) return heartbeat(file, token, { heartbeatMs, onLost })
+    if (publishLock(file, body)) return heartbeat(file, token, { heartbeatMs, staleMs, onLost })
     if (attempt > 0) break
     const current = readLock(file)
     if (current === null) continue // gone between link and read: retry once
@@ -428,9 +432,22 @@ function takeLock (dataDir, { heartbeatMs = LOCK_HEARTBEAT_MS, staleMs = LOCK_ST
 }
 
 // Refreshes the lock's mtime every `heartbeatMs` while it is still ours;
-// -> { file, owned(), release() }. owned() reads the lock file now, for a
-// check that cannot wait for the next tick (the shutdown close).
-function heartbeat (file, token, { heartbeatMs, onLost }) {
+// -> { file, owned(), held(), release() }. owned() reads the lock file now,
+// for a check that cannot wait for the next tick (the shutdown close).
+// held() is stricter: ours AND an mtime younger than `staleMs` minus one
+// heartbeat. A holder whose own heartbeat fell behind may be in the middle
+// of a takeover (the taker saw the lock stale and is about to unlink it),
+// and the margin makes held() refuse a late heartbeat before anyone can
+// call the lock stale. It does not cover a holder that stalled past the
+// whole window: its next tick refreshes the mtime while its token is still
+// in the file, possibly just before a taker that already read the lock
+// stale unlinks it (recovery-store.js, Residual). A store guarded by held() refuses
+// to write until the next tick refreshes the mtime while the token is still
+// ours: the request is refused (the client sees an uncertain result) and
+// nothing is lost from the file. A heartbeat as long as the stale window
+// (tests only) leaves no margin, so the window alone applies.
+function heartbeat (file, token, { heartbeatMs, staleMs, onLost }) {
+  const heldMs = heartbeatMs < staleMs ? staleMs - heartbeatMs : staleMs
   let timer = null
   const stop = () => {
     if (timer !== null) clearInterval(timer)
@@ -452,6 +469,7 @@ function heartbeat (file, token, { heartbeatMs, onLost }) {
   return {
     file,
     owned: () => ownLock(file, token),
+    held: () => holdLock(file, token, heldMs),
     release: () => {
       stop()
       releaseLock(file, token)
@@ -504,6 +522,25 @@ function ownLock (file, token) {
     return isPlainObject(data) && data.token === token
   } catch {
     return false
+  }
+}
+
+// True while the lock carries `token` and its mtime is within `windowMs` of
+// now, both from one open of the file, so the token and the mtime belong to
+// the same lock.
+function holdLock (file, token, windowMs) {
+  let fd
+  try {
+    fd = fs.openSync(file, 'r')
+    const { mtimeMs } = fs.fstatSync(fd)
+    const data = JSON.parse(fs.readFileSync(fd, 'utf8'))
+    return isPlainObject(data) && data.token === token && lockLive({ mtimeMs }, windowMs)
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch {}
+    }
   }
 }
 
@@ -726,12 +763,16 @@ function checkRawPost (req, origin) {
 // loopback fixtures. Every audio request, a seek included, also spends one
 // token of the global bucket like any other request.
 // `recovery` is an openRecoveryStore (./recovery-store.js), or null: the
-// recovery routes (./recovery-routes.js) then answer 503 'indisponivel' and
+// recovery routes (./recovery-routes.js) and the enrolment of an extra
+// passkey (./passkey-routes.js) then answer 503 'indisponivel' and
 // everything else stays up.
 // `drops` is the surprise-invite ledger (./invite-drops.js) or null, only so
 // Excluir conta (./delete-routes.js, ./deletion.js) can purge its marks.
 // `passkeys` is an openPasskeyStore (./passkey-store.js) or null: Excluir
-// conta and the passkey enrolment then answer 503 'indisponivel'.
+// conta, the passkey enrolment and the removal of an extra passkey's
+// recovery entry then answer 503 'indisponivel'.
+// `deletionRequests` is an openDeletionRequests (./deletion-requests.js) or
+// null: Excluir conta sem a passkey then answers 503 'indisponivel'.
 // `androidCertSha256` (VARANDA_ANDROID_CERT_SHA256, '' for none) adds the
 // Android app's origin to the ones a passkey assertion may report
 // (./webauthn.js passkeyOrigins).
@@ -741,6 +782,9 @@ function checkRawPost (req, origin) {
 // off) turns the /account/feira/* routes of ./feira-routes.js on together
 // with `listingReader`; `invites` is then the ./invites-pair.js facade over
 // both stores, so sign-up and Excluir conta see the Feira codes too.
+// `triageForget` (a createTriageForget of ./ai/forget.js, or null) is what
+// Excluir conta purges the AI triage's copies with while `triage` is null:
+// it has no other use and is never handed to the moderation routes.
 function createAccountServer ({
   association,
   origin,
@@ -752,6 +796,7 @@ function createAccountServer ({
   googleMod = null,
   modEmails = [],
   triage = null,
+  triageForget = null,
   statsEmails = [],
   usage = null,
   groupCheck = null,
@@ -770,6 +815,8 @@ function createAccountServer ({
   phoneClient = null,
   phones = null,
   phoneDailyLimit = 200,
+  // Tests only: the fixed answer time of the SMS deletion check.
+  deleteSmsFloorMs,
   pages = null,
   gif = null,
   gifTransport = {},
@@ -780,6 +827,7 @@ function createAccountServer ({
   recovery = null,
   drops = null,
   passkeys = null,
+  deletionRequests = null,
   listingReader = null,
   feiraInvites = null,
   androidCertSha256 = '',
@@ -872,6 +920,7 @@ function createAccountServer ({
     log,
     now,
     dailyLimit: ageDailyLimit,
+    maxSpent: spentCapacity(ratePerSecond, burst),
     since: ageSince,
     ageCheck,
     directoryFloor: ageDirectoryFloor,
@@ -881,9 +930,14 @@ function createAccountServer ({
   })
 
   // Always mounted, so /account/phone/policy answers even when the feature
-  // is off. Excluir conta also queues a block with no report id
-  // (moderation-store.js requestDeletion): only a block that is not that one
-  // alone burns the number.
+  // is off. Any listing burns a live member's number. Excluir conta also
+  // queues a block with no report id (moderation-store.js requestDeletion),
+  // so a deleted member's number burns only through a 'bloquear' report
+  // decided at or after `since`: the last time the sweep saw the member
+  // under no block (`cleared`), so the reports of a block lifted before the
+  // deletion never hold it again (issue #534). held() counts that pending
+  // block, so no member is cleared while it waits, and a 'bloquear' decided
+  // after the deletion keeps the member from being cleared.
   // Members with a phone finish in flight -> count. A number another member
   // records meanwhile must not end the row this finish is about to link.
   const linking = new Map()
@@ -896,21 +950,27 @@ function createAccountServer ({
     forgetAge: forgetRefusedAge,
     linked: (m) => store.status(m).linked || linking.has(m),
     deleted: (m) => store.deletedAt(m) !== null,
-    burnable: (m) => {
-      if (moderation === null) return false
-      const b = moderation.blocked().find((x) => x.member === m)
-      return b !== undefined && (b.reportIds.length > 0 || store.deletedAt(m) === null)
+    burnable: (m, since) => moderation !== null && moderation.blocked().some((x) => x.member === m) &&
+      (store.deletedAt(m) === null || moderation.blockReportsAfter(m, since) > 0),
+    cleared: (m, since) => {
+      if (moderation === null || moderation.held(m) || moderation.blockReportsAfter(m, since) === 0) return false
+      const at = store.deletedAt(m)
+      return at === null || moderation.blockReportsAfter(m, at) === 0
     },
     blocked: (m) => moderation !== null && moderation.blocked().some((x) => x.member === m),
     issuer,
     log,
     now,
     dailyLimit: phoneDailyLimit,
+    maxSpent: spentCapacity(ratePerSecond, burst),
     http: { send, sendError, redirect, readJsonBody, checkPost: (req, opts) => checkPost(req, origin, opts), RouteError, refuse, fromStore, keyedWindow, fixedWindow }
   })
 
   // Excluir conta: always mounted. The sweep purges the other stores for
   // every deleted key; serve() runs it at start and then periodically.
+  // Six months after a deletion it also purges the key's moderation data,
+  // after a phone sweep, so a late block still burns the number first.
+  const moderationRetention = createModerationRetention({ accounts: store, moderation, beforeForget: () => phoneRoutes.sweepNow(), now, log })
   const deletion = createDeletionSweep({
     accounts: store,
     terms,
@@ -921,9 +981,16 @@ function createAccountServer ({
     drops,
     seen,
     passkeys,
+    deletionRequests,
     phones,
+    pages: pages !== null && pages.pagesStore ? pages.pagesStore : null,
+    // Bound late, like `scheduled`: pagesRoutes is created below.
+    pageInvites: { holds: (m) => pagesRoutes.holdsInvites(m), forget: (m) => pagesRoutes.forgetInvites(m), brokenFiles: () => pagesRoutes.inviteBrokenFiles() },
+    triage: triage !== null && typeof triage.forgetMember === 'function' ? triage : triageForget,
     // Bound late: deleteRoutes is created below with this sweep's purge.
     scheduled: () => deleteRoutes.runScheduled(),
+    tick: pages !== null && pages.pagesGroups && typeof pages.pagesGroups.purgeBlocked === 'function' ? () => pages.pagesGroups.purgeBlocked() : null,
+    retention: moderationRetention,
     log
   })
   const publishedList = moderationBlocklist(moderation)
@@ -935,10 +1002,17 @@ function createAccountServer ({
     }
   }
   const deleteRoutes = createDeleteRoutes({
+    // Excluir conta sem a passkey: the deletion codes texted to the number
+    // the member verified. The per-address limits are Caddy's.
+    codes: phoneRoutes.deletionCodes,
+    requests: deletionRequests,
+    smsCheckLimit: keyedWindow(10, 600 * 1000, now),
+    smsCheckFloorMs: deleteSmsFloorMs,
     accounts: store,
     moderation,
     pagesStore: pages !== null && pages.pagesStore ? pages.pagesStore : null,
     passkeys,
+    recovery,
     purge: deletion.purge,
     isBlocked: inPublishedList,
     notify: (member) => { if (pushRoutes !== null) pushRoutes.notifyDeletion({ member }) },
@@ -949,11 +1023,12 @@ function createAccountServer ({
       } catch {
         log({ event: 'telefone', reason: 'varredura-exclusao-falhou' })
         // Once deleted, a block with no report id no longer burns: a blocked
-        // member's deletion waits until the burn is written. Nobody else is
-        // held by a failing phone store.
+        // member's deletion waits until the burn is written. So does one
+        // with 'bloquear' reports, whose lifted block the sweep may not have
+        // cleared yet. Nobody else is held by a failing phone store.
         let held = true
         try {
-          held = moderation !== null && moderation.blocked().some((x) => x.member === member)
+          held = moderation !== null && (moderation.blocked().some((x) => x.member === member) || moderation.blockReportsAfter(member, null) > 0)
         } catch {}
         if (held) throw refuse('indisponivel')
       }
@@ -976,8 +1051,10 @@ function createAccountServer ({
   // routes and Excluir conta. add is charged per member after the proof.
   const passkeyRoutes = createPasskeyRoutes({
     store: passkeys,
+    recovery,
     accounts: store,
     rpId: webauthn.rpId,
+    origins: webauthn.origins,
     association,
     now,
     log,
@@ -995,6 +1072,7 @@ function createAccountServer ({
   // charged per member after the proof.
   const recoveryRoutes = createRecoveryRoutes({
     store: recovery,
+    passkeys,
     accounts: store,
     association,
     now,
@@ -1852,7 +1930,26 @@ function createAccountServer ({
     return pushRoutes === null ? 0 : pushRoutes.room()
   }
 
-  return { listen, notifyInvite, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
+  // A notice `account delete --yes` queued while the service was stopped
+  // (./deletion-notices.js): pushed as the app's wait path pushes it, only
+  // while the hold is still there. -> 'sent', 'skip' (deleted or no hold),
+  // or 'keep' when the stores cannot tell, so the notice waits for the next
+  // start instead of being dropped.
+  function notifyScheduledDeletion (member) {
+    let hold
+    try {
+      if (store.deletedAt(member) !== null) return 'skip'
+      if (passkeys === null || !passkeys.available()) return 'keep'
+      hold = passkeys.hold(member)
+    } catch {
+      return 'keep'
+    }
+    if (hold === null) return 'skip'
+    if (pushRoutes !== null) pushRoutes.notifyDeletion({ member })
+    return 'sent'
+  }
+
+  return { listen, notifyInvite, notifyScheduledDeletion, inviteRoom, inviteConsent, modStats: () => mod.stats(), pushStats: () => (pushRoutes === null ? null : pushRoutes.stats()), ageStats: () => ageRoutes.stats(), phoneStats: () => phoneRoutes.stats(), recoveryStats: () => recoveryRoutes.stats(), deleteStats: () => deleteRoutes.stats(), deletionCodeStats: () => phoneRoutes.deletionCodes.stats(), passkeyStats: () => passkeyRoutes.stats(), deletionSweep: () => deletion.sweep(), startDeletionSweep: (ms) => deletion.start(ms), pagesStats: () => pagesRoutes.stats(), pagesReboxSweep: () => pagesRoutes.reboxSweep(), gifStats: () => gifRoutes.stats(), previewStats: () => previewRoutes.stats(), audiusStats: () => audiusRoutes.stats(), appStats: () => ({ rows: apps.size }) }
 }
 
 module.exports = {
@@ -1861,6 +1958,7 @@ module.exports = {
   MAX_SOCKETS,
   DEFAULT_RATE,
   DEFAULT_BURST,
+  HEADERS_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   BODY_READ_MS,
   KEY_FILE,

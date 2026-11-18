@@ -9,6 +9,7 @@ const hcrypto = require('hypercore-crypto')
 const dm = require('../lib/dm')
 const { generateAssociationKeyPair, createCert, createIssuerCert, createIssuedCert } = require('../lib/cert')
 const { MAX_TEXT, dmTextBudget } = require('@varanda/rpc')
+const { diaryKeyOfSigner } = require('../lib/diary-signer')
 
 const {
   DM_MAX_TEXT, DM_INNER_BYTES, DM_SEAL_BYTES, DM_SEALED_BYTES, DM_DROP_BYTES, DM_PAGE_MAX, DM_MAX_MESSAGE,
@@ -399,7 +400,9 @@ test('inner v2: constants and layout', (t) => {
   t.alike(dm.INNER_KEYS_V2, ['v', 'kind', 'id', 'from', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
   t.alike(dm.DM_MEDIA_KEYS, ['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256', 'mime', 'w', 'h', 'ms'])
   t.is(dm.DM_MEDIA_MAX, 4)
-  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+  t.alike(dm.DM_MEDIA_MIMES, ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'])
+  t.absent(dm.DM_MEDIA_MIMES.includes('audio/mp4'), 'audio stays out of the image list')
+  t.absent(dm.DM_MEDIA_MIMES.includes('video/mp4'), 'video stays out of the image list')
 
   // Items built in any key order are written in the canonical one.
   const shuffled = Object.fromEntries(Object.entries(blobItem(1)).reverse())
@@ -515,6 +518,8 @@ test('inner v2: descriptors are validated strictly', (t) => {
     t.is(openInner(forge(v2Body({ media }), ana, DM_SIG_PREFIX_V2), bia.hex, O), null, name + ' refused on open')
   }
   t.ok(msg({ media: [1, 2, 3, 4].map(n => blobItem(n, { mime: dm.DM_MEDIA_MIMES[n - 1] })) }), 'every mime, four items')
+  const avif = blobItem(1, { mime: 'image/avif' })
+  t.alike(openInner(msg({ media: [avif] }), bia.hex, O).media, [avif], 'an avif item')
   t.ok(msg({ media: [blobItem(1, { chunks: 1, bytes: 17 })] }), 'the smallest blob')
 })
 
@@ -1632,6 +1637,285 @@ test('inner v7: its own signature domain', (t) => {
     const p = frameParts(inner)
     t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V7), p.json]), p.sig, ana.publicKey), name + ' under the v7 domain')
   }
+})
+
+// A history copy claim (v8): the account's own, to itself.
+const DEV_A = '1'.repeat(64)
+const DEV_B = '2'.repeat(64)
+const DEV_C = '3'.repeat(64)
+const CLAIM_ID = 'f'.repeat(32)
+function claim (over = {}, from = ana) {
+  return buildInner({ kind: 'claim', id: CLAIM_ID, copy: CID, for: [DEV_B], by: DEV_A, at: AT, ...over }, from)
+}
+function claimBodyOf (over = {}) {
+  return { v: 8, kind: 'claim', id: CLAIM_ID, from: ana.hex, to: ana.hex, copy: CID, for: [DEV_B], by: DEV_A, at: AT, ...over }
+}
+
+test('inner v8: constants, the rpc key list and round trip', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V8, 'varanda-dm-v8\n')
+  t.is(dm.DM_CLAIM_KIND, 'claim')
+  t.is(dm.DM_CLAIM_FOR_MAX, 8)
+  t.alike(dm.INNER_KEYS_V8, ['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+  t.alike(dm.INNER_KEYS_V8, require('@varanda/rpc').DM_INNER_KEYS_V8)
+  const inner = claim()
+  t.is(inner.byteLength, DM_INNER_BYTES)
+  t.alike(Object.keys(wireOf(inner)), dm.INNER_KEYS_V8)
+  const got = openInner(claim(), ana.hex, O)
+  t.is(got.kind, 'claim')
+  t.is(got.mine, true)
+  t.is(got.id, CLAIM_ID)
+  t.is(got.copy, CID)
+  t.alike(got.for, [DEV_B])
+  t.is(got.by, DEV_A)
+  t.alike(openInner(claim({ for: [DEV_C, DEV_B] }), ana.hex, O).for, [DEV_B, DEV_C], 'for is written sorted')
+  const many = []
+  for (let i = 0; i < dm.DM_CLAIM_FOR_MAX; i++) many.push(i.toString(16) + 'a'.repeat(63))
+  const full = claim({ for: many })
+  t.is(openInner(full, ana.hex, O).for.length, dm.DM_CLAIM_FOR_MAX, 'the most devices fit')
+})
+
+test('inner v8: only the owner opens it, never a stranger or the visit lane', (t) => {
+  t.is(openInner(claim(), bia.hex, O), null, 'a recipient that is not the sender')
+  t.is(openInner(claim(), ana.hex, { ...O, visit: true }), null, 'never on the visit lane')
+  t.is(openInner(forge(claimBodyOf({ from: bia.hex, to: ana.hex }), bia, dm.DM_SIG_PREFIX_V8), ana.hex, O), null, 'from must be the opener')
+  t.is(openInner(forge(claimBodyOf(), bia, dm.DM_SIG_PREFIX_V8), ana.hex, O), null, 'signed by another key')
+  t.ok(openInner(forge(claimBodyOf(), ana, dm.DM_SIG_PREFIX_V8), ana.hex, O), 'the owner signature opens')
+})
+
+test('inner v8: shape rules', (t) => {
+  const ok = (over) => openInner(forge(claimBodyOf(over), ana, dm.DM_SIG_PREFIX_V8), ana.hex, O)
+  t.ok(ok({}))
+  t.ok(ok({ for: [DEV_B, DEV_C] }))
+  t.is(ok({ kind: 'copy' }), null)
+  t.is(ok({ v: 7 }), null)
+  t.is(ok({ id: 'x' }), null)
+  t.is(ok({ copy: COPY_DESC }), null, 'copy is an id, not a descriptor')
+  t.is(ok({ copy: 'e'.repeat(64) }), null)
+  t.is(ok({ at: 'yesterday' }), null)
+  t.is(ok({ by: 'x' }), null)
+  t.is(ok({ for: [] }), null, 'at least one device')
+  t.is(ok({ for: DEV_B }), null, 'a list')
+  t.is(ok({ for: [DEV_C, DEV_B] }), null, 'strictly ascending')
+  t.is(ok({ for: [DEV_B, DEV_B] }), null, 'no repeats')
+  t.is(ok({ for: [DEV_A] }), null, 'never the claimant itself')
+  t.is(ok({ for: ['B'.repeat(64)] }), null, 'lowercase hex')
+  const nine = []
+  for (let i = 0; i < 9; i++) nine.push(i.toString(16) + 'a'.repeat(63))
+  t.is(ok({ for: nine }), null, 'at most DM_CLAIM_FOR_MAX')
+  t.is(ok({ extra: 1 }), null, 'exact keys')
+  t.is(ok({ to: bia.hex }), null, 'to is the sender')
+  t.exception.all(() => claim({ text: 'x' }), /./, 'no other field')
+  t.exception.all(() => claim({ for: [DEV_A] }))
+  t.exception.all(() => claim({ for: [] }))
+})
+
+test('inner v8: its own signature domain', (t) => {
+  const { json, sig } = frameParts(claim())
+  t.ok(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V8), json]), sig, ana.publicKey))
+  for (const [name, prefix] of [['v1', DM_SIG_PREFIX], ['v2', DM_SIG_PREFIX_V2], ['v4', dm.DM_SIG_PREFIX_V4], ['v5', dm.DM_SIG_PREFIX_V5], ['v6', dm.DM_SIG_PREFIX_V6], ['v7', dm.DM_SIG_PREFIX_V7]]) {
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(prefix), json]), sig, ana.publicKey), 'not under ' + name)
+    t.is(openInner(forge(claimBodyOf(), ana, prefix), ana.hex, O), null, 'a v8 body signed under ' + name)
+  }
+  for (const [name, inner] of [['v1', msg()], ['v7', copyPtr()]]) {
+    const p = frameParts(inner)
+    t.absent(hcrypto.verify(b4a.concat([b4a.from(dm.DM_SIG_PREFIX_V8), p.json]), p.sig, ana.publicKey), name + ' under the v8 domain')
+  }
+})
+
+// A core node: its diary key is the manifest hash of the key that signs.
+function corePair (cert = (diary) => createCert({ member: diary, date: AT }, assoc)) {
+  const p = signPair()
+  p.diary = b4a.toString(diaryKeyOfSigner(p.publicKey), 'hex')
+  p.cert = cert(p.diary)
+  p.opts = { diary: p.diary }
+  return p
+}
+
+const dora = corePair()
+const erin = corePair()
+
+function coreMsg (over = {}, who = dora) {
+  return buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: who.cert, ...over }, who, who.opts)
+}
+
+function coreReact (over = {}, who = dora) {
+  return buildInner({ kind: 'react', to: bia.hex, target: { from: bia.hex, id: 'b'.repeat(32), digest: TD }, emoji: HEART, rev: 1, at: AT, cert: who.cert, ...over }, who, who.opts)
+}
+
+function v9BodyOf (over = {}) {
+  return { ...wireOf(coreMsg()), ...over }
+}
+
+test('inner v9 and v10: constants and the rpc key lists', (t) => {
+  t.is(dm.DM_SIG_PREFIX_V9, 'varanda-dm-v9\n')
+  t.is(dm.DM_SIG_PREFIX_V10, 'varanda-dm-v10\n')
+  t.alike(dm.INNER_KEYS_V9, ['v', 'kind', 'id', 'from', 'signer', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
+  t.alike(dm.INNER_KEYS_V10, ['v', 'kind', 'id', 'from', 'signer', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
+  t.alike(Object.keys(wireOf(coreMsg())), dm.INNER_KEYS_V9)
+  t.alike(Object.keys(wireOf(coreReact())), dm.INNER_KEYS_V10)
+  t.not(dora.diary, dora.hex, 'the diary key is not the signer')
+})
+
+test('inner v9: a msg and a ctl from a manifest diary open with from = the diary', (t) => {
+  const got = openInner(coreMsg(), bia.hex, O)
+  t.is(got.v, 9)
+  t.is(got.from, dora.diary, 'from is the diary key')
+  t.is(got.signer, dora.hex)
+  t.is(got.text, 'oi')
+  t.is(got.mine, false)
+  t.is(openInner(coreMsg(), dora.diary, O).mine, true, 'the self copy, under the diary key')
+  t.is(openInner(coreMsg(), dora.hex, O), null, 'the signer key is not the identity')
+  t.is(openInner(coreMsg(), caio.hex, O), null, 'a third party opens nothing')
+  t.is(openInner(coreMsg({ cert: null }), bia.hex, O), null, 'a msg needs a certificate')
+  t.is(openInner(coreMsg({ cert: createCert({ member: dora.diary, date: AT }, generateAssociationKeyPair()) }), bia.hex, O), null, 'of this association')
+  t.exception.all(() => coreMsg({ cert: createCert({ member: dora.hex, date: AT }, assoc) }), /mensagem inválida/, 'the certificate names the diary, not the signer')
+  t.is(openInner(coreMsg({ media: [blobItem(1)], text: '' }), bia.hex, O).media.length, 1, 'a photo')
+  t.is(openInner(coreMsg({ fwd: 1 }), bia.hex, O).fwd, 1, 'a forward')
+  t.is(openInner(coreMsg({ replyTo: 'a'.repeat(32) }), bia.hex, O).replyTo, 'a'.repeat(32), 'a bare reply')
+  const ctl = buildInner({ kind: 'ctl', op: 'blocked', peer: bia.hex, at: AT }, dora, dora.opts)
+  const c = openInner(b4a.from(ctl), dora.diary)
+  t.is(c.v, 9)
+  t.is(c.from, dora.diary)
+  t.is(c.to, dora.diary)
+  t.is(c.mine, true)
+  t.is(openInner(b4a.from(ctl), dora.hex), null, 'a ctl opens for the own diary only')
+  t.is(openInner(b4a.from(ctl), bia.hex), null)
+})
+
+test('inner v10: a reaction from a manifest diary opens with from = the diary', (t) => {
+  const got = openInner(coreReact(), bia.hex, O)
+  t.is(got.v, 10)
+  t.is(got.kind, 'react')
+  t.is(got.from, dora.diary)
+  t.is(got.signer, dora.hex)
+  t.is(got.mine, false)
+  t.is(openInner(coreReact(), dora.diary, O).mine, true)
+  t.is(openInner(coreReact({ cert: null }), bia.hex, O), null)
+  t.exception.all(() => coreReact({ target: { from: caio.hex, id: 'b'.repeat(32), digest: TD } }), /mensagem inválida/, 'the v4 rules hold')
+})
+
+test('inner v9 and v10: every forgery is refused', (t) => {
+  const P9 = dm.DM_SIG_PREFIX_V9
+  const P10 = dm.DM_SIG_PREFIX_V10
+  t.ok(openInner(forge(v9BodyOf(), dora, P9), bia.hex, O), 'the forge helper builds an openable v9')
+  t.is(openInner(forge(v9BodyOf({ signer: caio.hex }), caio, P9), bia.hex, O), null, 'a signer whose manifest does not hash to from')
+  t.is(openInner(forge(v9BodyOf(), caio, P9), bia.hex, O), null, 'the named signer did not sign')
+  t.is(openInner(forge(v9BodyOf({ signer: erin.hex }), erin, P9), bia.hex, O), null, 'another diary signer swapped in')
+  t.is(openInner(forge(v9BodyOf(), dora, DM_SIG_PREFIX_V2), bia.hex, O), null, 'a v9 body under the v2 domain')
+  t.is(openInner(forge(v9BodyOf(), dora, P10), bia.hex, O), null, 'a v9 body under the v10 domain')
+  const { signer, ...v2 } = v9BodyOf({ v: 2, fwd: 1 })
+  t.is(openInner(forge(v2, dora, DM_SIG_PREFIX_V2), bia.hex, O), null, 'relabelled v2 with from the diary: the diary key verifies nothing')
+  const anaV2 = wireOf(msg({ fwd: 1 }))
+  t.is(openInner(forge({ ...anaV2, v: 9, signer: ana.hex }, ana, DM_SIG_PREFIX_V2), bia.hex, O), null, 'a v2 relabelled v9 keeps its v2 signature')
+  t.is(openInner(forge({ ...anaV2, v: 9, signer: ana.hex }, ana, P9), bia.hex, O), null, 'a browser key claiming v9 with signer == from')
+  t.absent(dm.validBody({ ...anaV2, v: 9, signer: ana.hex }), 'a key is never its own manifest diary')
+  const r = wireOf(coreReact())
+  t.ok(openInner(forge(r, dora, P10), bia.hex, O), 'the forge helper builds an openable v10')
+  t.is(openInner(forge({ ...r, signer: caio.hex }, caio, P10), bia.hex, O), null, 'a v10 signer that does not hash to from')
+  t.is(openInner(forge(r, dora, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'a v10 body under the v4 domain')
+  t.is(openInner(forge(r, dora, P9), bia.hex, O), null, 'a v10 body under the v9 domain')
+  const anaR = wireOf(react())
+  t.is(openInner(forge({ ...anaR, v: 10, signer: ana.hex }, ana, P10), bia.hex, O), null, 'a browser key claiming v10')
+  const { signer: s10, ...v4 } = { ...r, v: 4 }
+  t.is(openInner(forge(v4, dora, dm.DM_SIG_PREFIX_V4), bia.hex, O), null, 'relabelled v4 with from the diary')
+})
+
+test('inner v9 and v10: shape rules and the writer refuses what has no version', (t) => {
+  t.ok(dm.validBody(v9BodyOf()))
+  const { signer, ...noSigner } = v9BodyOf()
+  t.absent(dm.validBody(noSigner), 'a missing signer')
+  t.absent(dm.validBody(v9BodyOf({ signer: dora.hex.toUpperCase() })), 'lowercase hex')
+  t.absent(dm.validBody(v9BodyOf({ signer: null })))
+  t.absent(dm.validBody(v9BodyOf({ moment: 1 })), 'an extra key')
+  t.absent(dm.validBody(v9BodyOf({ kind: 'react' })))
+  t.absent(dm.validBody(v9BodyOf({ fwd: true })))
+  t.absent(dm.validBody({ ...v9BodyOf(), kind: 'ctl', text: '', op: 'blocked', peer: bia.hex, to: dora.diary, media: [blobItem(1)] }), 'a ctl carries no media')
+  t.exception.all(() => buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: dora.cert }, dora, { diary: erin.diary }), /chave de assinatura inválida/, 'a diary of another signer')
+  t.exception.all(() => buildInner({ kind: 'msg', to: bia.hex, text: 'oi', at: AT, cert: ana.cert }, ana, { diary: ana.hex }), /chave de assinatura inválida/, 'a key as its own diary')
+  t.exception.all(() => coreMsg({ from: dora.hex }), /mensagem inválida/, 'from is the diary')
+  t.exception.all(() => coreMsg({ moment: 1, text: HEART }), /mensagem inválida/, 'no v5 from a diary yet')
+  t.exception.all(() => buildInner({ kind: 'visit', to: bia.hex, cert: dora.cert }, dora, dora.opts), /mensagem inválida/, 'no v6')
+  t.exception.all(() => buildInner({ kind: 'copy', copy: blobItem(1) }, dora, dora.opts), /mensagem inválida/, 'no v7')
+  t.exception.all(() => buildInner({ kind: 'claim', copy: 'a'.repeat(32), for: ['b'.repeat(64)], by: 'c'.repeat(64) }, dora, dora.opts), /mensagem inválida/, 'no v8')
+})
+
+test('inner v9 and v10: a reader that knows only v1 to v8 drops them', (t) => {
+  const oldDispatch = (b) => b !== null && typeof b === 'object' && b.v >= 1 && b.v <= 8 && dm.validBody(b)
+  for (const inner of [coreMsg(), coreReact()]) {
+    const { mine, ...wire } = openInner(inner, bia.hex, O)
+    t.ok(dm.validBody(wire))
+    t.absent(oldDispatch(wire), 'v ' + wire.v + ' falls to the final else')
+  }
+})
+
+test('inner v9: bound replies and v10 reactions name it by a digest that covers signer', (t) => {
+  const inner = coreMsg({ text: 'de um nó' })
+  const sent = dm.frameDigest(inner)
+  const opened = openInner(b4a.from(inner), bia.hex, O)
+  t.is(dm.bodyDigest(opened), sent, 'sender and receiver agree')
+  const { signer, ...noSigner } = { ...opened, v: 2 }
+  t.not(dm.bodyDigest(noSigner), sent, 'a digest over the body without signer does not match')
+  const target = { from: dora.diary, id: opened.id, digest: sent }
+  const reply = buildInner({ kind: 'msg', to: dora.diary, text: 'resposta', at: AT, replyTo: target, cert: bia.cert }, bia)
+  const r = openInner(reply, dora.diary, O)
+  t.is(r.v, 2)
+  t.alike(r.replyTo, target, 'a bound reply from a browser names the v9 message')
+  t.is(r.replyTo.digest, dm.bodyDigest(openInner(b4a.from(inner), dora.diary, O)), 'and the digest matches the own copy')
+  const self = coreMsg({ replyTo: target, text: 'eu de novo' })
+  t.alike(openInner(self, bia.hex, O).replyTo, target, 'a v9 bound reply to a v9 message')
+  const rx = openInner(coreReact({ target }), bia.hex, O)
+  t.is(rx.v, 10)
+  t.is(rx.target.digest, dm.bodyDigest(opened), 'a v10 reaction to a v9 message')
+})
+
+test('inner v9: buildInner without a diary is byte for byte what it was', (t) => {
+  // sha256 of the frames built by origin/main 5128101c from the same inputs.
+  const s = hcrypto.keyPair(b4a.alloc(32, 7))
+  const r = b4a.toString(hcrypto.keyPair(b4a.alloc(32, 8)).publicKey, 'hex')
+  const ID = '0123456789abcdef0123456789abcdef'
+  const tg = { from: r, id: 'b'.repeat(32), digest: TD }
+  const pins = [
+    [{ kind: 'msg', to: r, text: 'oi', id: ID, at: AT }, '3fdd45ecd69406368703995ddb9f296493ea75b3c8bfda4df856a4e62ab283e8'],
+    [{ kind: 'msg', to: r, text: 'oi', id: ID, at: AT, fwd: 1 }, 'fe64afbec3b052e42a43cb6e36df44a3d0443764f29b2cc01ae91de0976cb4c3'],
+    [{ kind: 'msg', to: r, text: 'oi', id: ID, at: AT, replyTo: tg }, 'd3a2457716dbf412560115249b0c74e990408cf7e32c2a1d7226ba1b643c3839'],
+    [{ kind: 'ctl', op: 'blocked', peer: r, id: ID, at: AT }, '94fa9449a2fab98d69eecfc5303818c9e2b67f684c1ba5f3e0c778188f096424'],
+    [{ kind: 'react', to: r, target: tg, emoji: HEART, rev: 1, id: ID, at: AT }, '3f9fdb5ef6740555ed6c09b7aca3e9c52618bbd3da0e8f817f09cad8b37b10a3']
+  ]
+  const sha = (b) => {
+    const d = b4a.alloc(32)
+    sodium.crypto_hash_sha256(d, b)
+    return b4a.toString(d, 'hex')
+  }
+  for (const [fields, pin] of pins) {
+    t.is(sha(buildInner(fields, s)), pin, fields.kind + ' pinned')
+    t.is(sha(buildInner(fields, s, {})), pin, 'empty opts')
+    t.is(sha(buildInner(fields, s, { diary: undefined })), pin, 'diary undefined')
+    for (const opts of [{ diary: null }, { diary: '' }, 'x', 5, [], null]) {
+      t.exception.all(() => buildInner(fields, s, opts), /inválida/, fields.kind + ' refuses opts ' + JSON.stringify(opts))
+    }
+  }
+})
+
+test('inner v9: the text budget counts signer, and the largest text fits', (t) => {
+  const who = corePair((diary) => {
+    const issuer = hcrypto.keyPair()
+    const issuerCert = createIssuerCert({ issuer: b4a.toString(issuer.publicKey, 'hex'), date: AT }, assoc)
+    return createIssuedCert({ member: diary, date: AT }, issuer, issuerCert)
+  })
+  const plain = { v: 9, kind: 'msg', from: who.diary, to: bia.hex, at: AT, cert: who.cert }
+  const full = buildInner({ kind: 'msg', to: bia.hex, text: '\u{1F600}'.repeat(DM_MAX_TEXT), at: AT, cert: who.cert }, who, who.opts)
+  t.is(openInner(full, bia.hex, O).text, '\u{1F600}'.repeat(DM_MAX_TEXT), 'the longest text fits next to the largest certificate')
+  t.ok(dmTextBudget(plain) >= 4 * DM_MAX_TEXT, 'budget ' + dmTextBudget(plain))
+  t.is(dmTextBudget({ ...plain, v: undefined, signer: who.hex }), dmTextBudget(plain), 'a signer measures as v9')
+  const fields = { ...plain, replyTo: { from: bia.hex, id: 'b'.repeat(32), digest: TD } }
+  const budget = textBudget(fields)
+  t.is(budget, dmTextBudget(fields), 'rpc and core agree')
+  const { v, from, ...build } = fields
+  const inner = buildInner({ ...build, text: textOfBytes(budget) }, who, who.opts)
+  t.is(openInner(b4a.from(inner), bia.hex, O).v, 9)
+  t.exception.all(() => buildInner({ ...build, text: textOfBytes(budget) + 'x' }, who, who.opts), /mensagem longa demais/, 'one byte more throws before sealing')
+  t.is(((inner[0] << 8) | inner[1]) + 66, DM_INNER_BYTES, 'the full budget fills the frame exactly')
+  t.comment('v9 budgets with the largest certificate: text only ' + dmTextBudget(plain) + ', bound reply ' + budget + ' text bytes')
 })
 
 test('bucketPrefix: a fixed vector, bytes and hex alike, 0..63', (t) => {

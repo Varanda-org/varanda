@@ -15,9 +15,11 @@
 // anything, a readOnly store never writes, validation is total (a file this
 // module would not have written makes every method throw
 // { code: 'indisponivel' } until an operator repairs it), every write runs in
-// one queue, re-reads the file first and asks guard() before and after, and
-// memory changes only once the write landed. Reads after an uncertain write
-// adopt the merge of file and memory first, or throw.
+// one queue, re-reads the file first and asks guard() before the re-read,
+// right before the rename (./guarded-write.js; a false answer there leaves
+// file and memory as they were) and after the rename, and memory changes
+// only once the write landed. Reads after an uncertain write adopt the merge
+// of file and memory first, or throw.
 //
 // A cancelled hold must never come back from a stale copy (that would delete
 // an account its owner kept), so a plain union is not enough. Each member's
@@ -29,22 +31,35 @@
 // older than a pruned tombstone may bring keys back for a deleted key, which
 // is harmless (the directory never links that key again) and the deletion
 // sweep forgets them again.
+//
+// Each key carries `lookupId`: null for the passkey enrolled at sign-up, the
+// lookupId of its recovery entry (./recovery-store.js) for an extra passkey
+// whose key an already stored passkey vouched for (./passkey-routes.js), so
+// removing that entry drops its key too (./recovery-routes.js), and
+// `entryAt`: null for the sign-up passkey, that entry's createdAt for an
+// extra one, so the key belongs to that entry and not to a later entry put
+// at the same lookupId (countedKeys). Version 1 files (no lookupId) still
+// open, their keys read as lookupId and entryAt null; a write is version 2
+// only while some key has a lookupId.
 
 const fs = require('node:fs')
 const path = require('node:path')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { fromB64url, MAX_CREDENTIAL_ID, ES256, RS256 } = require('./webauthn')
+const { MAX_PASSKEYS } = require('./recovery-store')
 
 const FILE = 'passkeys.json'
-const VERSION = 1
-const MAX_KEYS = 4
+const VERSION = 2
+// The sign-up passkey plus one per extra passkey recovery entry.
+const MAX_KEYS = 1 + MAX_PASSKEYS
 const MAX_SPKI_HEX = 1200
 const MAX_COUNTER = 0xffffffff
 const TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000
 const FILE_KEYS = ['v', 'seq', 'members', 'removed']
 const RECORD_KEYS = ['keys', 'hold', 'gen']
-const KEY_KEYS = ['credentialId', 'alg', 'spki', 'signCount', 'addedAt']
+const KEY_KEYS_V1 = ['credentialId', 'alg', 'spki', 'signCount', 'addedAt']
+const KEY_KEYS = [...KEY_KEYS_V1, 'lookupId', 'entryAt']
 const HOLD_KEYS = ['at', 'runAt']
 const TOMB_KEYS = ['removedAt', 'gen']
 
@@ -82,9 +97,13 @@ function validCounter (n) {
   return Number.isSafeInteger(n) && n >= 0 && n <= MAX_COUNTER
 }
 
-function validKey (k) {
+function validLink (k) {
+  return k.lookupId === null ? k.entryAt === null : isLowerHex(k.lookupId, 32) && isCanonicalIso(k.entryAt)
+}
+
+function validKey (k, v) {
   return isPlainObject(k) &&
-    exactKeys(k, KEY_KEYS) &&
+    (v === 1 ? exactKeys(k, KEY_KEYS_V1) : exactKeys(k, KEY_KEYS) && validLink(k)) &&
     validCredentialId(k.credentialId) &&
     (k.alg === ES256 || k.alg === RS256) &&
     validSpki(k.spki) &&
@@ -96,9 +115,11 @@ function validHold (h) {
   return h === null || (isPlainObject(h) && exactKeys(h, HOLD_KEYS) && isCanonicalIso(h.at) && isCanonicalIso(h.runAt))
 }
 
-function validRecord (r) {
+function validRecord (r, v) {
   if (!isPlainObject(r) || !exactKeys(r, RECORD_KEYS) || !Array.isArray(r.keys) || r.keys.length > MAX_KEYS) return false
-  if (!r.keys.every(validKey) || new Set(r.keys.map((k) => k.credentialId)).size !== r.keys.length) return false
+  if (!r.keys.every((k) => validKey(k, v)) || new Set(r.keys.map((k) => k.credentialId)).size !== r.keys.length) return false
+  const linked = r.keys.map((k) => k.lookupId).filter((id) => typeof id === 'string')
+  if (new Set(linked).size !== linked.length) return false
   return validHold(r.hold) && validGen(r.gen)
 }
 
@@ -107,7 +128,7 @@ function validTomb (t) {
 }
 
 function copyKey (k) {
-  return { credentialId: k.credentialId, alg: k.alg, spki: k.spki, signCount: k.signCount, addedAt: k.addedAt }
+  return { credentialId: k.credentialId, alg: k.alg, spki: k.spki, signCount: k.signCount, addedAt: k.addedAt, lookupId: k.lookupId === undefined ? null : k.lookupId, entryAt: k.entryAt === undefined ? null : k.entryAt }
 }
 
 function copyRecord (r) {
@@ -127,13 +148,13 @@ function emptyState () {
 }
 
 function fromJson (obj) {
-  if (!isPlainObject(obj) || !exactKeys(obj, FILE_KEYS) || obj.v !== VERSION) throw invalidFile()
+  if (!isPlainObject(obj) || !exactKeys(obj, FILE_KEYS) || (obj.v !== 1 && obj.v !== VERSION)) throw invalidFile()
   if (!Number.isSafeInteger(obj.seq) || obj.seq < 0) throw invalidFile()
   if (!isPlainObject(obj.members) || !isPlainObject(obj.removed)) throw invalidFile()
   const state = emptyState()
   state.seq = obj.seq
   for (const [m, r] of Object.entries(obj.members)) {
-    if (!validMember(m) || !validRecord(r) || r.gen > obj.seq) throw invalidFile()
+    if (!validMember(m) || !validRecord(r, obj.v) || r.gen > obj.seq) throw invalidFile()
     state.members[m] = copyRecord(r)
   }
   for (const [m, t] of Object.entries(obj.removed)) {
@@ -172,12 +193,19 @@ function fingerprint (file) {
   }
 }
 
+// Version 1 while no key is linked to a recovery entry, so a file holding
+// only sign-up keys stays readable by the previous build; version 2 once an
+// extra passkey's key is stored.
 function toJson (state) {
   const members = {}
   for (const m of Object.keys(state.members).sort()) members[m] = copyRecord(state.members[m])
   const removed = {}
   for (const m of Object.keys(state.removed).sort()) removed[m] = copyTomb(state.removed[m])
-  return { v: VERSION, seq: state.seq, members, removed }
+  const linked = Object.values(members).some((r) => r.keys.some((k) => k.lookupId !== null))
+  if (!linked) {
+    for (const r of Object.values(members)) r.keys = r.keys.map(({ lookupId, entryAt, ...k }) => k)
+  }
+  return { v: linked ? VERSION : 1, seq: state.seq, members, removed }
 }
 
 function canonical (state) {
@@ -247,8 +275,9 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
 
   function persist (next) {
     try {
-      writeJsonAtomic(file, toJson(next), 0o600)
+      writeGuarded(file, toJson(next), 0o600, guard)
     } catch (err) {
+      if (isRefused(err)) throw fail('indisponivel')
       dirty = true
       try {
         readState(file)
@@ -302,12 +331,20 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
 
   // Records a passkey's public key. `first` (enrolment at link time,
   // ./passkey-routes.js) refuses with 'passkey-registrada' when the member
-  // already has another key. The same credential again is a no-op.
+  // already has another key. An extra passkey (first false) names its
+  // recovery entry's lookupId and createdAt (`entryAt`) and, as `voucher`,
+  // the credential id of the stored key whose assertion vouched for it: that
+  // key must still be here when the write runs ('passkey-invalida'), so a
+  // deletion that forgot the record meanwhile is not undone by a lone extra
+  // key. A key already linked
+  // to that entry refuses with 'pedido-invalido', and MAX_KEYS with
+  // 'limite-recuperacao'. The same credential again is a no-op.
   // -> { changed }
-  function add ({ member, credentialId, alg, spki, signCount, first = true } = {}) {
+  function add ({ member, credentialId, alg, spki, signCount, first = true, lookupId = null, entryAt = null, voucher = null } = {}) {
     return enqueue(() => {
       checkMember(member)
       if (!validCredentialId(credentialId) || (alg !== ES256 && alg !== RS256) || !validSpki(spki) || !validCounter(signCount)) throw new TypeError('invalid passkey')
+      if (first ? lookupId !== null || entryAt !== null || voucher !== null : !isLowerHex(lookupId, 32) || !isCanonicalIso(entryAt) || !validCredentialId(voucher)) throw new TypeError('invalid lookupId')
       const { next, stale } = reread()
       const record = copyRecord(recordIn(next, member))
       const same = record.keys.find((k) => k.credentialId === credentialId)
@@ -320,11 +357,38 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
         settle(next, stale)
         throw fail('passkey-registrada')
       }
+      if (!first && !record.keys.some((k) => k.credentialId === voucher)) {
+        settle(next, stale)
+        throw fail('passkey-invalida')
+      }
+      if (lookupId !== null && record.keys.some((k) => k.lookupId === lookupId)) {
+        settle(next, stale)
+        throw fail('pedido-invalido')
+      }
       if (record.keys.length >= MAX_KEYS) {
         settle(next, stale)
-        throw fail('passkey-registrada')
+        throw fail('limite-recuperacao')
       }
-      record.keys.push({ credentialId, alg, spki, signCount, addedAt: new Date(now()).toISOString() })
+      record.keys.push({ credentialId, alg, spki, signCount, addedAt: new Date(now()).toISOString(), lookupId, entryAt })
+      commit(next, member, record)
+      return { changed: true }
+    })
+  }
+
+  // The recovery entry lookupId was removed: the key linked to it goes too,
+  // so that passkey no longer confirms a deletion at once. -> { changed }
+  function removeByLookup ({ member, lookupId } = {}) {
+    return enqueue(() => {
+      checkMember(member)
+      if (!isLowerHex(lookupId, 32)) throw new TypeError('invalid lookupId')
+      const { next, stale } = reread()
+      const record = copyRecord(recordIn(next, member))
+      const kept = record.keys.filter((k) => k.lookupId !== lookupId)
+      if (kept.length === record.keys.length) {
+        settle(next, stale)
+        return { changed: false }
+      }
+      record.keys = kept
       commit(next, member, record)
       return { changed: true }
     })
@@ -439,7 +503,8 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
     state = merge(state, disk, now())
   }
 
-  // -> [{ credentialId, alg, spki, signCount, addedAt }], oldest first.
+  // -> [{ credentialId, alg, spki, signCount, addedAt, lookupId, entryAt }], oldest
+  // first.
   function keys (member) {
     checkMember(member)
     fresh()
@@ -473,6 +538,7 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
 
   return {
     add,
+    removeByLookup,
     touch,
     schedule,
     cancel,
@@ -487,7 +553,32 @@ function openPasskeyStore (dataDir, { now = Date.now, readOnly = false, guard = 
   }
 }
 
+// The keys of `keys` (a member's, from keys()) that count to confirm a
+// deletion or vouch for a new passkey: the sign-up key always, an extra key
+// only while the entry it was stored with is live: a 'passkey' entry of the
+// same member in `recovery` (an openRecoveryStore) with its lookupId and,
+// as createdAt, its entryAt. Without a recovery store that answers, no extra
+// key counts. So a key whose entry is gone (removed while this file could
+// not be written, or by a remove racing the add) is inert, also after an
+// entry is put again at the same lookupId.
+function countedKeys (keys, recovery, member) {
+  if (!keys.some((k) => k.lookupId !== null)) return keys
+  let rows = null
+  try {
+    if (recovery !== null && recovery.available()) rows = recovery.list(member)
+  } catch {}
+  return keys.filter((k) => k.lookupId === null || (rows !== null && entryOf(k, rows)))
+}
+
+// Whether `rows` (recovery list(member)) holds the entry an extra key was
+// stored with.
+function entryOf (k, rows) {
+  return rows.some((r) => r.kind === 'passkey' && r.lookupId === k.lookupId && r.createdAt === k.entryAt)
+}
+
 module.exports = {
+  countedKeys,
+  entryOf,
   openPasskeyStore,
   FILE,
   MAX_KEYS,

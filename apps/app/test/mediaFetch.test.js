@@ -9,6 +9,13 @@ const load = () => import('../src/media/fetch.js')
 const AUTHOR = 'ab'.repeat(32)
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
+// Stamps a minimal JPEG frame header (SOF0, 1x1, one component) on the start
+// of `bytes`, so rpc.mediaBounds accepts the photo fetchMedia now checks.
+function photo (bytes) {
+  bytes.set([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00])
+  return bytes
+}
+
 function descriptor (bytes, over = {}) {
   return {
     core: 'cd'.repeat(32),
@@ -43,7 +50,7 @@ function response (chunks, status = 200) {
 
 test('mediaUrl builds the same-origin path and refuses bad fields', async (t) => {
   const { mediaUrl, validDescriptor } = await load()
-  const bytes = new Uint8Array(40000).fill(7)
+  const bytes = photo(new Uint8Array(40000).fill(7))
   const d = descriptor(bytes)
   t.ok(validDescriptor(d))
   t.is(mediaUrl(AUTHOR, d), '/media/' + AUTHOR + '/' + d.core + '/1/2')
@@ -94,7 +101,7 @@ test('readCapped: exact length passes, more or fewer bytes fail', async (t) => {
 
 test('only a 404 or a network error is retryable; mismatches are not', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(100).fill(3)
+  const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
   const subtle = webcrypto.subtle
   const reason = async (fetch, extra = {}) => {
@@ -129,7 +136,7 @@ test('only a 404 or a network error is retryable; mismatches are not', async (t)
 
 test('fetchMedia: persist false is no-store on the first attempt and on retries', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(100).fill(3)
+  const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
   const seen = []
   const fetch = async (url, opts) => { seen.push(opts.cache); return response([bytes]) }
@@ -146,7 +153,7 @@ test('fetchMedia: the app client sends no cache option and the URL unchanged', a
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => setAppClient(false))
   setAppClient(true)
-  const bytes = new Uint8Array(100).fill(3)
+  const bytes = photo(new Uint8Array(100).fill(3))
   const d = descriptor(bytes)
   const seen = []
   const fetch = async (url, opts) => { seen.push({ url, opts }); return response([bytes]) }
@@ -174,7 +181,7 @@ test('fetchMedia: the app client streams with an abortable request and a no-stor
   const { setAppClient } = await import('../src/appClient.js')
   t.teardown(() => setAppClient(false))
   setAppClient(true)
-  const bytes = new Uint8Array(100).fill(8)
+  const bytes = photo(new Uint8Array(100).fill(8))
   const d = descriptor(bytes)
   const seen = []
   let reads = 0
@@ -223,6 +230,8 @@ test('fetchMedia: request options, status and sha checks', async (t) => {
   const { fetchMedia, loadMediaUrl } = await load()
   const bytes = new Uint8Array(70000)
   for (let i = 0; i < bytes.length; i++) bytes[i] = i & 255
+  // A PNG signature, a 1x1 IHDR (CRC not read) and an empty IDAT header.
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x49, 0x44, 0x41, 0x54])
   const d = descriptor(bytes, { mime: 'image/png' })
   const calls = []
   const chunks = [bytes.subarray(0, 50000), bytes.subarray(50000)]
@@ -255,9 +264,70 @@ test('fetchMedia: request options, status and sha checks', async (t) => {
   await t.exception(() => loadMediaUrl(AUTHOR, d, deps), /sem exibição/)
 })
 
+// A post photo shown by MediaView (loadKept with fetchMedia), the Feira
+// (fetchMedia then urlFromBytes) or loadMediaUrl: every path asks for a URL
+// only after fetchMedia returned, so a refusal there means no URL at all.
+async function showPaths (bytes, d) {
+  const { fetchMedia, loadMediaUrl } = await load()
+  const { loadKept } = await import('../src/media/keptLoad.js')
+  const made = []
+  const urlFromBytes = (b, mime) => { made.push(mime); return 'blob:' + made.length }
+  const deps = { fetch: async () => response([bytes]), subtle: webcrypto.subtle, persist: false }
+  const outcomes = []
+  const run = async (fn) => { try { outcomes.push(await fn()) } catch (err) { outcomes.push(err) } }
+  await run(() => loadMediaUrl(AUTHOR, d, { ...deps, urlFromBytes }))
+  await run(() => loadKept({
+    kind: 'posts',
+    author: AUTHOR,
+    d,
+    persist: false,
+    keptUrl: () => null,
+    keep: () => null,
+    fetchBytes: (desc) => fetchMedia(AUTHOR, desc, deps),
+    urlFromBytes,
+    generation: () => 0
+  }))
+  await run(async () => urlFromBytes(await fetchMedia(AUTHOR, d, deps), d.mime))
+  return { outcomes, made }
+}
+
+test('fetchMedia: a malformed post photo is refused before any display URL is made', async (t) => {
+  const avif = require('../../../packages/rpc/test/helpers/avif-samples.js')
+  const jpeg = photo(new Uint8Array(100).fill(3))
+  const scanFirst = photo(new Uint8Array(100).fill(3))
+  scanFirst[3] = 0xda
+  const cases = [
+    ['JPEG with no header at all', new Uint8Array(100).fill(3), 'image/jpeg'],
+    ['JPEG with scan data before the frame header', scanFirst, 'image/jpeg'],
+    ['a valid JPEG declared PNG', jpeg, 'image/png'],
+    ['a valid JPEG declared AVIF', jpeg, 'image/avif'],
+    ['a truncated AVIF', avif.ios.opaque.slice(0, 120), 'image/avif'],
+    ['an AVIF with its ftyp brand broken', (() => { const b = avif.ios.opaque.slice(); b[8] = 0x78; return b })(), 'image/avif'],
+    ['an AVIF declared JPEG', avif.ios.opaque, 'image/jpeg']
+  ]
+  for (const [name, bytes, mime] of cases) {
+    const { outcomes, made } = await showPaths(bytes, descriptor(bytes, { mime }))
+    t.is(outcomes.length, 3, name)
+    for (const o of outcomes) t.ok(o instanceof Error && /não confere/.test(o.message), name + ': refused')
+    t.is(made.length, 0, name + ': no URL made')
+  }
+  const { outcomes, made } = await showPaths(jpeg, descriptor(jpeg))
+  t.alike(outcomes, ['blob:1', 'blob:2', 'blob:3'], 'a valid JPEG passes every path')
+  t.alike(made, ['image/jpeg', 'image/jpeg', 'image/jpeg'])
+})
+
+test('fetchMedia: a valid AVIF post photo passes and is typed image/avif', async (t) => {
+  const avif = require('../../../packages/rpc/test/helpers/avif-samples.js')
+  for (const [name, bytes] of [['ios', avif.ios.opaque], ['libavif', avif.libavif.opaque]]) {
+    const { outcomes, made } = await showPaths(bytes, descriptor(bytes, { mime: 'image/avif', width: 16, height: 16 }))
+    t.alike(outcomes, ['blob:1', 'blob:2', 'blob:3'], name)
+    t.alike(made, ['image/avif', 'image/avif', 'image/avif'], name)
+  }
+})
+
 test('fetchMedia: without WebCrypto the injected sha256 checks the bytes', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(100).fill(9)
+  const bytes = photo(new Uint8Array(100).fill(9))
   const d = descriptor(bytes)
   const hashed = []
   const sha256 = (b) => { hashed.push(b.byteLength); return new Uint8Array(createHash('sha256').update(b).digest()) }
@@ -274,7 +344,7 @@ test('fetchMedia: without WebCrypto the injected sha256 checks the bytes', async
 
 test('fetchMedia: without WebCrypto the bundled sha256 is the default', async (t) => {
   const { fetchMedia } = await load()
-  const bytes = new Uint8Array(300).fill(4)
+  const bytes = photo(new Uint8Array(300).fill(4))
   t.is((await fetchMedia(AUTHOR, descriptor(bytes), { fetch: async () => response([bytes]), subtle: null })).byteLength, 300)
   await t.exception(() => fetchMedia(AUTHOR, descriptor(bytes, { sha256: 'ee'.repeat(32) }), { fetch: async () => response([bytes]), subtle: null }), /não confere/)
 })
@@ -283,7 +353,7 @@ test('fetchMedia: short body, oversized Content-Length and another origin are re
   const { fetchMedia } = await load()
   const { setInstallation } = await import('../src/installation.js')
   t.teardown(() => setInstallation(null))
-  const bytes = new Uint8Array(100).fill(5)
+  const bytes = photo(new Uint8Array(100).fill(5))
   const d = descriptor(bytes)
   const deps = (res) => ({ fetch: async () => res, subtle: null })
   const withHeaders = (res, h) => Object.assign(res, { headers: { get: (k) => (k === 'content-length' ? h : null) } })
@@ -309,7 +379,7 @@ test('fetchMedia: short body, oversized Content-Length and another origin are re
 
 test('fetchMedia: a relative url with a same-origin res.url passes on the web', async (t) => {
   const { fetchMedia, mediaUrl } = await load()
-  const bytes = new Uint8Array(100).fill(6)
+  const bytes = photo(new Uint8Array(100).fill(6))
   const d = descriptor(bytes)
   const had = Object.getOwnPropertyDescriptor(globalThis, 'location')
   Object.defineProperty(globalThis, 'location', { value: { origin: 'https://page.test' }, configurable: true, writable: true })
@@ -394,7 +464,7 @@ test('fetchMedia: a voice note only for chat items, checked by its bytes', async
   t.alike(got, bytes)
   const video = m4a({ handlers: ['soun', 'vide'], pad: 100 })
   await t.exception(() => fetchMedia(AUTHOR, audioDescriptor(video), { chat: true, fetch: async () => response([video]), subtle: webcrypto.subtle }), /não confere/, 'a video track is refused even when the hash matches')
-  const img = new Uint8Array(200).fill(3)
+  const img = photo(new Uint8Array(200).fill(3))
   t.is((await fetchMedia(AUTHOR, descriptor(img), { chat: true, fetch: async () => response([img]), subtle: webcrypto.subtle })).byteLength, 200, 'chat photos still pass')
 })
 

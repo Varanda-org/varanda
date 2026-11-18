@@ -29,7 +29,7 @@ const shLines = sh.split('\n')
 const shCode = shLines.filter((l) => !/^\s*#/.test(l)).join('\n')
 
 const SEEDER_LIMITS = [
-  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY',
+  'VARANDA_MAX_EXTERNAL', 'VARANDA_MAX_SOCKETS', 'VARANDA_FRAME_MEMORY', 'VARANDA_STORAGE_BYTES',
   'VARANDA_MEDIA_MAX_IN_FLIGHT', 'VARANDA_MEDIA_RATE', 'VARANDA_MEDIA_BURST',
   'VARANDA_INDEX_MAX_IN_FLIGHT', 'VARANDA_INDEX_RATE', 'VARANDA_INDEX_BURST'
 ]
@@ -86,6 +86,45 @@ mount_source() {
 }
 # The last non-empty-or-empty assignment of $1 in env file $2, quotes dropped.
 env_valor() { sed -n "s/^$1=//p" "$2" | tail -n 1 | tr -d "'\""; }
+# Models when Compose recreates a container: on up, each named service (all
+# of the profile when none is named) whose resolved config differs from the
+# last one in $FIX/cfg_<service>, or every one with --force-recreate, is
+# logged to $FIX/recreated. The web config is its image and the two bind
+# sources, resolved like Compose does from the variables of compose.web.yaml.
+compose_up() {
+  local a depois=0 forcar=0 web=0 svc cfg ci ws wd
+  local -a alvo=()
+  for a in "$@"; do
+    case $a in
+      up) depois=1 ;;
+      --force-recreate) forcar=1 ;;
+      compose.web.yaml) web=1 ;;
+      -*) ;;
+      *) if [ "$depois" = 1 ]; then alvo+=("$a"); fi ;;
+    esac
+  done
+  if [ "$` + '{#alvo[@]}' + String.raw`" = 0 ]; then
+    alvo=(seeder)
+    if [ "$web" = 1 ]; then alvo+=(account web); fi
+  fi
+  for svc in "$` + '{alvo[@]}' + String.raw`"; do
+    if [ "$svc" = web ]; then
+      ci=$(printenv VARANDA_CADDYFILE_SRC || printf './Caddyfile')
+      ws=$(printenv VARANDA_WWW_SRC || printf './www')
+      wd=$(printenv VARANDA_WWW_DST || printf '/srv/web')
+      case $ci in ./*) ci="$PWD/$` + '{ci#./}' + String.raw`" ;; esac
+      case $ws in ./*) ws="$PWD/$` + '{ws#./}' + String.raw`" ;; esac
+      cfg="img=$(printenv VARANDA_WEB_IMAGE || true) caddyfile=$ci www=$ws:$wd"
+    else
+      cfg="img=$(printenv VARANDA_SEEDER_IMAGE || true)"
+    fi
+    if [ "$forcar" = 1 ] || [ "$cfg" != "$(cat "$FIX/cfg_$svc" 2>/dev/null || true)" ]; then
+      printf 'recreate %s %s
+' "$svc" "$cfg" >>"$FIX/recreated"
+      printf '%s' "$cfg" >"$FIX/cfg_$svc"
+    fi
+  done
+}
 docker() {
   local a ultimo='' svc='' si wi prev='' ef=''
   for a in "$@"; do ultimo=$a; done
@@ -110,6 +149,7 @@ docker() {
             fi ;;
         esac
       fi
+      case " $* " in *" up "*) compose_up "$@" ;; esac
       return 0 ;;
   esac
   printf 'docker %s\n' "$*" >>"$CALLS"
@@ -174,6 +214,13 @@ docker() {
         *" verify "*)
           printf '%s\n' "$*" >>"$FIX/cosign_calls"
           if [ -f "$FIX/cosign_fail" ]; then return 1; fi ;;
+        *" --entrypoint test "*" -e /app/caddy.json "*)
+          if [ -f "$FIX/caddy_err" ]; then return 125; fi
+          if [ -f "$FIX/caddy.json" ]; then return 0; fi
+          return 1 ;;
+        *" /app/caddy.json "*)
+          [ -f "$FIX/caddy.json" ] || return 1
+          cat "$FIX/caddy.json" ;;
         *" --entrypoint cat "*) cat "$FIX/release.json" ;;
       esac
       ;;
@@ -264,6 +311,7 @@ dono_modo() {
   cat "$FIX/dono_modo" 2>/dev/null || printf '0 600\n'
 }
 trocar_atual() { rm -f "$releases/current"; ln -s "$1" "$releases/current"; }
+trocar_link() { rm -f "$2"; ln -s "$1" "$2"; printf 'link %s -> %s\n' "$2" "$1" >>"$CALLS"; }
 # The gate is replaced unless $FIX/real_gate exists. $FIX/term_at_gate_<n>
 # sends SIGTERM to the script during the n-th gate.
 if [ ! -f "$FIX/real_gate" ]; then
@@ -676,6 +724,147 @@ test('update.sh: apply prepares, swaps and records a full-profile release', (t) 
   t.ok(r.calls.includes('docker image prune -f'), 'prunes dangling images')
 })
 
+// Caddy (the web service) stays up across app-only releases: with
+// /app/caddy.json the web runs the pinned Caddy image and mounts stable paths
+// in $releases (the Caddyfile by its sha256, the www through the web link), so
+// Compose recreates it only when that image or the Caddyfile changes.
+const CADDY_1 = 'ghcr.io/varanda-org/varanda-caddy@sha256:' + H('3', 64)
+const CADDY_2 = 'ghcr.io/varanda-org/varanda-caddy@sha256:' + H('4', 64)
+const COMMIT_B = H('2', 40)
+const DIGEST_B = 'sha256:' + H('6', 64)
+const SEEDER_B = 'ghcr.io/varanda-org/varanda-seeder@' + DIGEST_B
+const caddyJson = (ref) => '{"v":1,"caddy":"' + ref + '"}\n'
+
+// A full server on an old-mode release that applies release A (COMMIT, seq 5,
+// Caddy CADDY_1). The fixtures are then reset for the second apply.
+function caddyServer (t) {
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV)
+  s.write('state/atual', record(OLD_COMMIT, 1, OLD_SEEDER, OLD_WEB))
+  installRelease(s, OLD_COMMIT)
+  s.write('fix/bundle/Caddyfile', 'caddyfile one\n')
+  s.write('fix/caddy.json', caddyJson(CADDY_1))
+  const first = s.run(MAIN + 'cmd_apply')
+  t.is(first.status, 0, 'release A applied: ' + first.out)
+  // Release B: another seeder image and commit, the same web image.
+  s.write('fix/digest', DIGEST_B + '\n')
+  s.write('fix/release.json', '{"v":1,"commit":"' + COMMIT_B + '","seq":6,"web":"' + WEB_REF + '"}\n')
+  fs.rmSync(s.p('calls'))
+  fs.rmSync(s.p('fix/recreated'))
+  return s
+}
+
+const recreated = (s) => s.read('fix/recreated').split('\n').filter(Boolean)
+const webCfg = (s, caddy, caddyfile) => 'recreate web img=' + caddy + ' caddyfile=' + s.p('releases', 'Caddyfile-' + sha256(caddyfile)) +
+  ' www=' + s.p('releases') + ':/srv'
+
+test('update.sh: a commit-only release does not recreate Caddy', (t) => {
+  if (!hasBash(t)) return
+  const s = caddyServer(t)
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF) + 'caddy=' + CADDY_1 + '\n', 'the record keeps the Caddy image')
+  t.is(linkOf(s.p('releases/web')), COMMIT + '/www', 'the web link serves release A')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'release B applied: ' + r.out)
+  t.alike(recreated(s), ['recreate seeder img=' + SEEDER_B, 'recreate account img=' + SEEDER_B], 'seeder and account recreated, web left running')
+  t.is(linkOf(s.p('releases/web')), COMMIT_B + '/www', 'the web link now serves release B')
+  t.is(s.read('releases/Caddyfile-' + sha256('caddyfile one\n')), 'caddyfile one\n', 'the Caddyfile copy is the stable bind source')
+  const upApp = r.calls.indexOf(' up -d --no-build seeder account\n')
+  const link = r.calls.indexOf('link ' + s.p('releases/web') + ' -> ' + COMMIT_B + '/www\n')
+  const upWeb = r.calls.indexOf(' up -d --no-build web\n')
+  t.ok(upApp !== -1 && link > upApp && upWeb > link, 'seeder and account first, then the www swap, then web')
+  t.ok(r.calls.includes('compose pwd=' + s.p('releases', COMMIT_B) + ' seeder=' + SEEDER_B + ' web=' + CADDY_1 + ' compose '), 'compose runs with the pinned Caddy image')
+  t.is(s.read('state/atual'), record(COMMIT_B, 6, SEEDER_B, WEB_REF) + 'caddy=' + CADDY_1 + '\n', 'atual is release B')
+})
+
+test('update.sh: a Caddyfile change recreates Caddy with the new file', (t) => {
+  if (!hasBash(t)) return
+  const s = caddyServer(t)
+  s.write('fix/bundle/Caddyfile', 'caddyfile two\n')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'release B applied: ' + r.out)
+  t.ok(recreated(s).includes(webCfg(s, CADDY_1, 'caddyfile two\n')), 'web recreated on the same Caddy image with the new Caddyfile')
+  t.is(s.read('releases/Caddyfile-' + sha256('caddyfile two\n')), 'caddyfile two\n', 'the new Caddyfile is in place under its hash')
+  t.is(s.read('releases/Caddyfile-' + sha256('caddyfile one\n')), 'caddyfile one\n', 'the previous one stays for the rollback')
+})
+
+test('update.sh: a Caddy digest change recreates Caddy', (t) => {
+  if (!hasBash(t)) return
+  const s = caddyServer(t)
+  s.write('fix/caddy.json', caddyJson(CADDY_2))
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'release B applied: ' + r.out)
+  t.ok(recreated(s).includes(webCfg(s, CADDY_2, 'caddyfile one\n')), 'web recreated on the new Caddy image')
+  t.ok(r.calls.includes('docker pull ' + CADDY_2) || s.read('fix/tags').includes('varanda-caddy:atual sha256:id-' + CADDY_2), 'the new Caddy image is used')
+  t.is(s.read('state/atual'), record(COMMIT_B, 6, SEEDER_B, WEB_REF) + 'caddy=' + CADDY_2 + '\n', 'the record names the new Caddy image')
+})
+
+test('update.sh: a failed release with a new Caddy rolls back to the previous Caddy, Caddyfile and www', (t) => {
+  if (!hasBash(t)) return
+  const s = caddyServer(t)
+  s.write('fix/caddy.json', caddyJson(CADDY_2))
+  s.write('fix/bundle/Caddyfile', 'caddyfile two\n')
+  // The first gate was release A's; the second is release B's.
+  s.write('fix/gate_fail_2', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'release B fails its gate')
+  t.ok(r.log.includes('voltou para a versão anterior'), 'rolled back: ' + r.log)
+  const all = recreated(s)
+  const failed = all.indexOf(webCfg(s, CADDY_2, 'caddyfile two\n'))
+  const back = all.lastIndexOf(webCfg(s, CADDY_1, 'caddyfile one\n'))
+  t.ok(failed !== -1 && back > failed, 'web went to the new Caddy, then back to the previous Caddy and Caddyfile')
+  t.is(linkOf(s.p('releases/web')), COMMIT + '/www', 'the web link serves release A again')
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF) + 'caddy=' + CADDY_1 + '\n', 'atual is still release A')
+  t.ok(fs.existsSync(s.p('releases', COMMIT, 'www/index.html')), 'release A www kept')
+})
+
+test('update.sh: a docker error reading caddy.json postpones the release, never falls back to the old mode', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV)
+  s.write('fix/caddy.json', caddyJson(CADDY_1))
+  s.write('fix/caddy_err', '')
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 1, 'refused')
+  t.ok(r.log.includes('não foi possível ler /app/caddy.json de ' + SEEDER_REF + ' (saída 125)'), 'says why: ' + r.log)
+  t.absent(r.log.includes('sem /app/caddy.json'), 'not read as absent')
+  t.absent(composeRan(r.calls), 'nothing ran')
+})
+
+test('update.sh: a Caddyfile that cannot be hashed keeps every Caddyfile copy', (t) => {
+  if (!hasBash(t)) return
+  if (process.getuid && process.getuid() === 0) { t.comment('root reads any file'); return }
+  const s = caddyServer(t)
+  s.write('fix/bundle/Caddyfile', 'caddyfile two\n')
+  fs.chmodSync(s.p('releases', COMMIT, 'Caddyfile'), 0o000)
+  const r = s.run(MAIN + 'cmd_apply')
+  fs.chmodSync(s.p('releases', COMMIT, 'Caddyfile'), 0o644)
+  t.is(r.status, 0, 'release B applied: ' + r.out)
+  t.ok(r.log.includes('não foi possível calcular o sha256 de ' + s.p('releases', COMMIT, 'Caddyfile')), 'the hash failure reaches the log: ' + r.log)
+  t.ok(fs.existsSync(s.p('releases', 'Caddyfile-' + sha256('caddyfile one\n'))), 'release A copy kept')
+  t.ok(fs.existsSync(s.p('releases', 'Caddyfile-' + sha256('caddyfile two\n'))), 'release B copy kept')
+})
+
+test('update.sh: a release without caddy.json keeps the old mode', (t) => {
+  if (!hasBash(t)) return
+  const s = server(t)
+  s.write('etc/update.conf', 'VARANDA_UPDATE=manual\nVARANDA_PROFILE=full\n')
+  s.write('etc/varanda.env', FULL_ENV)
+  s.write('fix/caddy.json', '{"v":1,"caddy":"ghcr.io/varanda-org/varanda-web@sha256:' + H('3', 64) + '"}\n')
+  const bad = s.run(MAIN + 'cmd_apply')
+  t.is(bad.status, 1, 'a malformed caddy.json is refused')
+  t.ok(bad.log.includes('caddy.json de ' + SEEDER_REF + ' fora do formato esperado'), 'says why')
+  t.absent(composeRan(bad.calls), 'nothing ran')
+  fs.rmSync(s.p('fix/caddy.json'))
+  const r = s.run(MAIN + 'cmd_apply')
+  t.is(r.status, 0, 'applied: ' + r.out)
+  t.ok(r.log.includes('sem /app/caddy.json'), 'logs the old mode')
+  t.is(s.read('state/atual'), record(COMMIT, 5, SEEDER_REF, WEB_REF), 'no caddy line in the record')
+  t.ok(recreated(s).includes('recreate web img=' + WEB_REF + ' caddyfile=' + s.p('releases', COMMIT, 'Caddyfile') + ' www=' + s.p('releases', COMMIT, 'www') + ':/srv/web'), 'web runs the web image with the version binds')
+  t.is(linkOf(s.p('releases/web')), null, 'no web link')
+})
+
 test('update.sh: extracted trees are normalised and links refused', (t) => {
   if (!hasBash(t)) return
   const s = server(t)
@@ -744,6 +933,12 @@ test('update.sh: the env pre-flight refuses a bad limit before anything runs', (
   t.is(check(FULL_ENV + 'VARANDA_INVITE_DROPS=1\n', 'full'), 1, 'invite drops without the weekly number are refused')
   t.is(check('VARANDA_DOMAIN=Exemplo.org\n', 'full'), 1, 'a bad domain is refused for profile full')
   t.is(check('VARANDA_MEDIA_RATE=0\n', 'seeder'), 1, 'profile seeder still checks the seeder limits')
+  t.is(check('VARANDA_STORAGE_BYTES=1073741823\n', 'seeder'), 1, 'VARANDA_STORAGE_BYTES below 1 GiB is refused')
+  t.is(check('VARANDA_STORAGE_BYTES=1073741824\n', 'seeder'), 0, 'VARANDA_STORAGE_BYTES=1073741824 passes')
+  t.is(check('VARANDA_STORAGE_BYTES=1125899906842624\n', 'seeder'), 0, 'VARANDA_STORAGE_BYTES at 1 PiB (16 digits) passes')
+  t.is(check('VARANDA_STORAGE_BYTES=1125899906842625\n', 'seeder'), 1, 'VARANDA_STORAGE_BYTES above 1 PiB is refused')
+  t.is(check('VARANDA_STORAGE_BYTES=11258999068426240\n', 'seeder'), 1, '17 digits are refused')
+  t.is(check('VARANDA_STORAGE_BYTES=01073741824\n', 'seeder'), 1, 'a leading zero is refused')
   t.is(check('VARANDA_DOMAIN=\n', 'seeder'), 0, 'profile seeder does not need the web variables')
 })
 

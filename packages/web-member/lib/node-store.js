@@ -50,6 +50,7 @@ const {
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { validateGroupRecord, validateGroupHeader, validateWriterHeader, MAX_GROUPS_PER_DIARY, MAX_GROUP_WRITERS } = require('@varanda/core/lib/group')
 const { presentState, clearRanges } = require('@varanda/core/lib/deletion')
+const { nextHeld } = require('@varanda/core/lib/sparse-held')
 const { MAX_INVENTORY } = require('@varanda/core/lib/admission')
 const { SEEN_BLOB_BYTES, SEEN_BLOB_B64 } = require('@varanda/core/lib/seen-blob')
 const { normalizeBlocks } = require('@varanda/core/lib/member-block')
@@ -611,6 +612,30 @@ async function readBlocks (core) {
   return out
 }
 
+// A group writer's blocks as readBlocks, then past the first hole only the
+// leaves and key blocks held: a seeder clears the rest of a cut writer
+// (#350), and the fold reads past a hole only what a cut keeps.
+async function readHeldBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  let hole = false
+  for (let i = 0; i < limit; i++) {
+    const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
+    if (block === null) {
+      hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
+      continue
+    }
+    const record = decodeBlock(block)
+    if (hole && (record === null || (record.type !== 'group-leave' && record.type !== 'group-key'))) continue
+    out.push({ seq: i, record })
+  }
+  return out
+}
+
 function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
@@ -1121,6 +1146,7 @@ async function purgeGroupCore (storage, hex) {
   await storage.deleteCore(groupName(hex))
   await unregisterGroupCore(storage, hex)
   await removeBoundRoot(storage, hex)
+  await removeHeaderStub(storage, hex)
 }
 
 // kv boundRoots = { v: 1, keys: [rootHex...] }: the group roots whose gate
@@ -1151,6 +1177,48 @@ function removeBoundRoot (storage, hex) {
     const keys = await readBoundRoots(storage)
     if (!keys.includes(key)) return
     await storage.writeJson('boundRoots', { v: 1, keys: keys.filter((k) => k !== key) })
+  })
+}
+
+// kv headerStubs = { v: 1, stubs: [{ key, group, diary }] }: the header
+// stubs this device fetched (#350), each a core held for block 0 alone
+// under (group, diary), the hinted diary whose join of it was proven,
+// because its block 0 can never count for that diary. Newest last, at most
+// MAX_HEADER_STUBS: a restart keeps one only while the stored binding diary
+// still holds that join, and its cap slot stays under that pair, never
+// under the one its header names. Removed with the core. An unreadable
+// entry, or a malformed stub, reads as none.
+const MAX_HEADER_STUBS = 256
+
+async function readHeaderStubs (storage) {
+  const data = await readKv(storage, 'headerStubs')
+  if (!isVersioned(data) || !Array.isArray(data.stubs)) return []
+  const out = new Map()
+  for (const x of data.stubs) {
+    if (x === null || typeof x !== 'object' || ![x.key, x.group, x.diary].every(isHex64)) continue
+    const key = x.key.toLowerCase()
+    out.delete(key)
+    out.set(key, { key, group: x.group.toLowerCase(), diary: x.diary.toLowerCase() })
+  }
+  return [...out.values()].slice(-MAX_HEADER_STUBS)
+}
+
+function addHeaderStub (storage, stub) {
+  if (stub === null || typeof stub !== 'object' || ![stub.key, stub.group, stub.diary].every(isHex64)) throw new TypeError('chave inválida')
+  const x = { key: stub.key.toLowerCase(), group: stub.group.toLowerCase(), diary: stub.diary.toLowerCase() }
+  return withGroupCoreLock(storage, async () => {
+    const stubs = (await readHeaderStubs(storage)).filter((y) => y.key !== x.key)
+    stubs.push(x)
+    await storage.writeJson('headerStubs', { v: 1, stubs: stubs.slice(-MAX_HEADER_STUBS) })
+  })
+}
+
+function removeHeaderStub (storage, hex) {
+  const key = String(hex).toLowerCase()
+  return withGroupCoreLock(storage, async () => {
+    const stubs = await readHeaderStubs(storage)
+    if (!stubs.some((x) => x.key === key)) return
+    await storage.writeJson('headerStubs', { v: 1, stubs: stubs.filter((x) => x.key !== key) })
   })
 }
 
@@ -1301,13 +1369,18 @@ function writeLeaveNotes (storage, notes) {
 // v: 1) among those kv groupWriters, groupReplicas and groupCores name:
 // each is purged and dropped from the lists, a created entry included, since
 // no seeder or fold of protocol v2 takes it -> [{ event: 'group-skipped',
-// key, reason: 'legacy' }], one per purged core.
+// key, reason: 'legacy' }], one per purged core. A header stub (kv
+// headerStubs) whose block 0 is v1 stays: the startup judges it by its
+// binding diary's join, and the fold never counts it.
 async function purgeLegacyGroupCores (storage) {
   const writers = await readGroupWriters(storage)
   const keys = new Set([...await readGroupReplicas(storage), ...await readGroupCoreKeys(storage)])
   for (const e of writers) {
     keys.add(e.key)
     if (e.rootNonce !== null) keys.add(e.group)
+  }
+  for (const x of await readHeaderStubs(storage)) {
+    if (!writers.some((e) => e.key === x.key || e.group === x.key)) keys.delete(x.key)
   }
   const legacy = new Set()
   for (const key of [...keys].sort()) {
@@ -1396,6 +1469,20 @@ function putGroupCert (storage, diaryHex, raw0) {
   })
 }
 
+// Removes the groupCerts entries whose diary drop(diaryHex) names (a blocked
+// diary: its cores are purged and its certificate would only name it);
+// rewrites the list only when one went. Resolves the removed diaries.
+function dropGroupCerts (storage, drop) {
+  return withGroupCoreLock(storage, async () => {
+    const map = await readGroupCerts(storage)
+    const removed = [...map.keys()].filter((d) => drop(d))
+    if (removed.length === 0) return removed
+    for (const d of removed) map.delete(d)
+    await storage.writeJson('groupCerts', { v: 1, entries: [...map].map(([d, r]) => [d, b4a.toString(r, 'hex')]) })
+    return removed
+  })
+}
+
 // Every group core and binding replica this device holds, and the three
 // group kv lists (reset; the cores must be closed first): the next person on
 // a shared device must neither read nor push the previous person's groups.
@@ -1426,6 +1513,7 @@ async function deleteGroupData (storage) {
   await withGroupCoreLock(storage, () => storage.writeJson('groupCores', null))
   await withGroupCoreLock(storage, () => storage.writeJson('groupCerts', null))
   await withGroupCoreLock(storage, () => storage.writeJson('boundRoots', null))
+  await withGroupCoreLock(storage, () => storage.writeJson('headerStubs', null))
 }
 
 // ---- follows, local-first ----
@@ -2152,6 +2240,20 @@ function writeDmCopy (storage, sealed) {
   return storage.writeJson('dmCopy', { nonce: sealed.nonce, box: sealed.box })
 }
 
+// Automatic history copy (./dm-copy.js): kv dmAutoCopy = { nonce, box },
+// the sealed record { v, job, lastClaim, claimed, done, claims } under the
+// local store key.
+async function readDmAutoCopy (storage) {
+  const data = await readKv(storage, 'dmAutoCopy')
+  return validLegacySealed(data) ? { nonce: data.nonce, box: data.box } : null
+}
+
+function writeDmAutoCopy (storage, sealed) {
+  if (sealed === null) return storage.writeJson('dmAutoCopy', null)
+  if (!validLegacySealed(sealed)) throw new TypeError('registro inválido')
+  return storage.writeJson('dmAutoCopy', { nonce: sealed.nonce, box: sealed.box })
+}
+
 async function readCopyPend (storage) {
   const data = await readKv(storage, 'dmCopyPend')
   if (!isVersioned(data) || !Array.isArray(data.items)) return []
@@ -2239,7 +2341,7 @@ async function deleteDmData (storage) {
   // seenSync before seenRemote and seenLocal: an interrupted reset must
   // never leave the compare-and-swap cursor without the documents it was
   // taken from.
-  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'dmCopy', 'seenLocal']) await storage.writeJson(key, null)
+  for (const key of ['seenSync', 'seenRemote', 'seenHeld', 'dmKey', 'dmCursor', 'dmSeen', 'dmStamps', 'blobStamps', 'dmCtlQueue', 'dmReactPending', 'dmCopy', 'dmAutoCopy', 'seenLocal']) await storage.writeJson(key, null)
 }
 
 // kv ageVerified / ageSince = { v: 1, proof }: the account service's signed
@@ -2347,6 +2449,8 @@ module.exports = {
   readPageCursor,
   readDmCopy,
   writeDmCopy,
+  readDmAutoCopy,
+  writeDmAutoCopy,
   readCopyPend,
   writeCopyPend,
   readCopyPiece,
@@ -2435,6 +2539,7 @@ module.exports = {
   readRaw,
   readHeld,
   readBlocks,
+  readHeldBlocks,
   readBlock0,
   appendRecord,
   appendRecords,
@@ -2485,8 +2590,13 @@ module.exports = {
   readGroupCoreKeys,
   readGroupCerts,
   putGroupCert,
+  dropGroupCerts,
   readBoundRoots,
   addBoundRoot,
+  MAX_HEADER_STUBS,
+  readHeaderStubs,
+  addHeaderStub,
+  removeHeaderStub,
   withFollowsLock,
   readFollowsPending,
   writeFollowsPending,

@@ -107,7 +107,7 @@ test('pageError maps tokens to pt-BR and everything else to unavailable', async 
   t.is(pageError('expirado').message, 'Convite ou oferta expirada')
   t.is(pageError('pausada').message, 'Página pausada; fale com a associação')
   t.is(pageError('encerrada').message, 'Esta página foi encerrada')
-  t.is(pageError('midia-invalida').message, 'Foto não aceita')
+  t.is(pageError('midia-invalida').message, 'Foto ou vídeo não aceito')
   t.is(pageError('limite').message, 'Limite atingido')
   t.is(pageError('termos-pendentes').message, 'Aceite os Termos para continuar')
   t.is(pageError('termo-recusado').code, 'termo-recusado', 'the service word check')
@@ -178,6 +178,110 @@ test('post, reply and quote carry 1..10 media descriptors, never more', async (t
     t.is(err.code, 'pedido-invalido')
     t.is(calls.length, before, 'nothing is sent')
   }
+})
+
+function photoDescriptor (over = {}) {
+  return {
+    blocks: 1,
+    bytes: 10,
+    core: 'ab'.repeat(32),
+    height: 1,
+    mime: 'image/jpeg',
+    sha256: 'cd'.repeat(32),
+    start: 1,
+    width: 1,
+    ...over
+  }
+}
+
+function videoDescriptor (over = {}) {
+  return {
+    blocks: 1,
+    bytes: 10,
+    core: 'ef'.repeat(32),
+    height: 360,
+    mime: 'video/mp4',
+    ms: 1000,
+    sha256: '12'.repeat(32),
+    start: 2,
+    width: 640,
+    ...over
+  }
+}
+
+test('post, reply and quote accept a poster and video pair, and a link preview', async (t) => {
+  const { actAs } = await load()
+  const { validDescriptor, validVideoDescriptor } = await import('../src/media/fetch.js')
+  const poster = photoDescriptor()
+  const video = videoDescriptor()
+  t.ok(validDescriptor(poster))
+  t.ok(validVideoDescriptor(video))
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { seq: 1, length: 2, pushed: true }))
+  const preview = { url: 'https://exemplo.com/a', title: 'Padaria', desc: 'Abre cedo', image: poster }
+  for (const action of ['post', 'reply', 'quote']) {
+    const before = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { text: 'x', media: [poster, video] } })
+    t.alike(body(calls[before + 1]).op.media, [poster, video], action + ' sends the pair')
+    const at = calls.length
+    await actAs(fakeNode(), { member: M, action, page: P, op: { text: 'x', preview } })
+    t.alike(body(calls[at + 1]).op.preview, preview, action + ' sends the preview')
+  }
+  const loose = { sha256: 'a'.repeat(64), mime: 'image/png', width: 1, height: 1, bytes: 10 }
+  const bp = { url: 'https://exemplo.com/b', extra: 1 }
+  for (const media of [[loose, loose], [poster, video]]) {
+    const before = calls.length
+    const err = await caught(t, actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', media, preview: bp } }))
+    t.is(err.code, 'pedido-invalido', 'media with a preview is refused')
+    t.is(calls.length, before, 'nothing is sent')
+  }
+  await actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', preview: bp } })
+  t.is(body(calls[calls.length - 1]).op.preview.url, 'https://exemplo.com/b')
+})
+
+test('a video list that is not the poster-then-video pair is refused before send', async (t) => {
+  const { actAs } = await load()
+  const poster = photoDescriptor()
+  const video = videoDescriptor()
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { seq: 1 }))
+  const bad = [
+    [video, poster],
+    [poster, video, poster],
+    [video, video, video],
+    [photoDescriptor({ mime: 'image/png' }), video],
+    [{ mime: 'video/mp4' }, { mime: 'video/mp4' }, { mime: 'video/mp4' }]
+  ]
+  for (const media of bad) {
+    const before = calls.length
+    const err = await caught(t, actAs(fakeNode(), { member: M, action: 'post', page: P, op: { text: 'x', media } }))
+    t.is(err.code, 'pedido-invalido')
+    t.is(calls.length, before, 'nothing is sent')
+  }
+  for (const preview of [null, 'https://exemplo.com', { title: 'sem url' }, { url: 1 }, []]) {
+    const before = calls.length
+    const err = await caught(t, actAs(fakeNode(), { member: M, action: 'reply', page: P, op: { text: 'x', preview } }))
+    t.is(err.code, 'pedido-invalido')
+    t.is(calls.length, before, 'a bad preview sends nothing')
+  }
+})
+
+test('a video/mp4 upload sends the signed op whole', async (t) => {
+  const { pagesMedia, MAX_MEDIA_BYTES: cap } = await load()
+  const calls = stub(t, json(200, { descriptor: { mime: 'video/mp4' } }))
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  const op = { sha256: 'ab'.repeat(32), mime: 'video/mp4', width: 640, height: 360, bytes: 4, ms: 1500 }
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op, signature: SIG, bytes })
+  t.alike(JSON.parse(calls[0].init.headers['x-varanda-page-op']), op, 'ms is inside the op')
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op: { ...op, ms: undefined }, signature: SIG, bytes, ms: 99 })
+  t.absent(JSON.parse(calls[1].init.headers['x-varanda-page-op']).ms, 'a top-level ms is not copied into the op')
+  const image = { sha256: 'cd'.repeat(32), mime: 'image/jpeg', width: 1, height: 1, bytes: 4 }
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op: image, signature: SIG, bytes })
+  const exact = new Uint8Array(cap)
+  await pagesMedia({ member: M, nonce: NONCE, page: P, op: { ...op, bytes: exact.byteLength }, signature: SIG, bytes: exact })
+  t.is(calls.length, 4)
+  const over = new Uint8Array(cap + 1)
+  const err = await caught(t, pagesMedia({ member: M, nonce: NONCE, page: P, op: { ...op, bytes: over.byteLength }, signature: SIG, bytes: over }))
+  t.is(err.code, 'midia-invalida')
+  t.is(calls.length, 4, 'over the cap sends nothing')
 })
 
 test('listing actions reach the signer and post to their own route', async (t) => {
@@ -255,6 +359,21 @@ test('op shapes of like, delete, profile, rename, follow and the reads are sent 
     t.ok(calls[1].url.endsWith('/account/pages/' + action), action)
     t.alike(body(calls[1]).op, JSON.parse(JSON.stringify(op)), action)
   }
+})
+
+test('choice: pageChoiceOp builds { to, pick } and pagesChoice posts it to the choice route', async (t) => {
+  const { pageChoiceOp, pagesChoice } = await load()
+  t.alike(pageChoiceOp(M + ':4', 2), { to: M + ':4', pick: 2 })
+  t.alike(pageChoiceOp(M + ':4', null), { to: M + ':4', pick: null })
+  t.alike(pageChoiceOp(M + ':4'), { to: M + ':4', pick: null }, 'an absent pick withdraws')
+  t.alike(pageChoiceOp(M + ':4', -1), { to: M + ':4', pick: -1 }, 'a bad pick is not turned into a withdrawal')
+  const calls = stub(t, flow(() => json(200, { seq: 9 })))
+  const node = fakeNode()
+  const data = await pagesChoice(node, { member: M, page: P, to: M + ':4', pick: 1 })
+  t.is(data.seq, 9)
+  t.ok(calls[1].url.endsWith('/account/pages/choice'))
+  t.alike(body(calls[1]).op, { to: M + ':4', pick: 1 })
+  t.is(node.signs[0].params.action, 'choice')
 })
 
 test('offer-cancel is no action: the cancel is the signed offer record', async (t) => {
@@ -479,7 +598,7 @@ test('a refusal token maps to its pt-BR text and is never uncertain', async (t) 
     [409, 'nome-em-uso', 'Esse @nome já está em uso'],
     [403, 'pausada', 'Página pausada; fale com a associação'],
     [403, 'encerrada', 'Esta página foi encerrada'],
-    [400, 'midia-invalida', 'Foto não aceita'],
+    [400, 'midia-invalida', 'Foto ou vídeo não aceito'],
     [403, 'termos-pendentes', 'Aceite os Termos para continuar'],
     [503, 'indisponivel', 'Serviço indisponível']
   ]) {
@@ -858,7 +977,8 @@ test('page keys: refreshes re-read, a held activation keeps its resend, Enviar c
   const inbox = fs.readFileSync(path.join(__dirname, '../src/screens/Mensagens.js'), 'utf8')
   t.ok(inbox.includes('}, [dmVersion, pageKey, unlocked, read])'), 'the dmVersion bump reads the keys again')
   t.ok(inbox.includes('adopted.get(pageKey) !== held'), 'an adopted share is not stored again')
-  t.absent(/setInterval|setTimeout/.test(inbox), 'no timer of its own')
+  t.absent(/setInterval/.test(inbox), 'no polling timer of its own')
+  t.is((inbox.match(/setTimeout/g) || []).length, 1, 'one timed re-read, only after a busy answer')
   t.ok(inbox.includes("{keys.hold\n          ? <Btn label='Tentar de novo' onPress={retry}") || /keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}[\s\S]*PAGE_DM_ROTATING|PAGE_DM_ROTATING[\s\S]*keys\.hold\s*\?\s*<Btn label='Tentar de novo' onPress=\{retry\}/.test(inbox), 'mid-rotation the held request can be resent')
   const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
   t.ok(/if \(dmStatus && dmStatus\.share\) await pagesDmAdopt\(node, \{ page, status: dmStatus \}\)\s*return pagesDmShareTo/.test(ajustes), 'the own share is adopted before sharing')
@@ -894,15 +1014,96 @@ test('move builds dmBox for K2 after start', async (t) => {
 
 test('Enviar chave seals for the member\'s dm-key and files the share', async (t) => {
   const { pagesDmShareTo, pagesDmInviteShare, PAGE_DM_NO_BOX } = await load()
-  const calls = stub(t, flow(() => json(200, { ok: true })))
+  // A nonce, then the signed action; 'dm-box-read' names no actor box.
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { ok: true }))
   const node = dmNode({ 'dm.lookup': ({ member }) => ({ box: member === ADMIN ? BOX : null, gen: 1 }), 'dm.pageShare': () => ({ gen: 4, sealed: 'S', sig: SIG }) })
   await pagesDmShareTo(node, { member: M, page: P, to: ADMIN })
   t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: ADMIN, box: BOX })
   t.alike(body(calls[1]).op, { member: ADMIN, gen: 4, sealed: 'S', sig: SIG })
+  t.is(calls.length, 2, 'a member with a dm-key needs no box read')
   const err = await caught(t, pagesDmShareTo(node, { member: M, page: P, to: K2 }))
   t.is(err.message, PAGE_DM_NO_BOX)
+  t.is(node.calls.filter((c) => c.method === 'dm.pageShare').length, 1, 'nothing sealed without a box')
   t.alike(await pagesDmInviteShare(node, { page: P, to: ADMIN, status: { gen: 4 } }), { sealed: 'S', sig: SIG })
   t.is(await pagesDmInviteShare(node, { page: P, to: K2, status: { gen: 4 } }), null, 'no dm-key, no share')
+})
+
+const DELEGATE = '22'.repeat(32)
+const ACTOR_BOX = 'b3'.repeat(32)
+const AT = '2026-11-17T12:00:00.000Z'
+const actorBoxes = [{ member: DELEGATE, box: ACTOR_BOX, gen: 2, at: AT, sig: SIG }, { member: ADMIN, box: 'b4'.repeat(32), gen: 1, at: AT, sig: SIG }]
+const generate = ({ recipients }) => ({ box: BOX, groupBox: GBOX, shares: recipients.map((r) => ({ member: r.member, sealed: 's', sig: SIG })) })
+const keyedLookup = ({ member }) => ({ box: member === M ? OWN_BOX : member === ADMIN ? BOX : null, gen: 1 })
+const sealedFor = (node) => node.calls.find((c) => c.method === 'dm.pageGenerate').params.recipients
+const boxReads = (calls) => calls.filter((c) => String(c.url).endsWith('/dm-box-read'))
+
+test('a move seals K2 for a core delegate with the box it stated on the old page', async (t) => {
+  const { pagesDmPrepare } = await load()
+  const NEW = '5e'.repeat(32)
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { gen: 3, actorBoxes }))
+  const node = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate })
+  const prep = await pagesDmPrepare(node, { member: M, page: NEW, status: { gen: 0 }, roster: { owner: M, admins: [ADMIN, DELEGATE] }, gen: 1, boxesFrom: P })
+  t.alike(sealedFor(node), [{ member: M, box: OWN_BOX }, { member: ADMIN, box: BOX }, { member: DELEGATE, box: ACTOR_BOX, proof: { gen: 2, at: AT, sig: SIG } }])
+  t.alike(prep.missing, [], 'the delegate is not left out of K2')
+  t.is(boxReads(calls).length, 1)
+  t.is(body(boxReads(calls)[0]).page, P, 'the statements come from the old page, K2 has none yet')
+  const ajustes = fs.readFileSync(path.join(__dirname, '../src/screens/PaginaAjustes.js'), 'utf8')
+  t.ok(ajustes.includes('gen: 1, boxesFrom: page })'), 'the move reads the statements of the old page')
+})
+
+test('a remove seals for the newest stated box, not the one in the screen\'s older read', async (t) => {
+  const { pagesDmPrepare } = await load()
+  const PAGE = '5f'.repeat(32)
+  const cached = { gen: 3, actorBoxes: [{ member: DELEGATE, box: 'c0'.repeat(32), gen: 1, at: AT, sig: SIG }] }
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, { gen: 3, actorBoxes }))
+  const node = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate })
+  const prep = await pagesDmPrepare(node, { member: M, page: PAGE, status: cached, roster: { owner: M, admins: [DELEGATE] } })
+  t.is(prep.gen, 4, 'the gen still comes from the given status')
+  t.alike(sealedFor(node), [{ member: M, box: OWN_BOX }, { member: DELEGATE, box: ACTOR_BOX, proof: { gen: 2, at: AT, sig: SIG } }])
+  t.is(body(boxReads(calls)[0]).page, PAGE)
+
+  calls.length = 0
+  const keyed = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate })
+  await pagesDmPrepare(keyed, { member: M, page: PAGE, status: cached, roster: { owner: M, admins: [ADMIN] } })
+  t.is(calls.length, 0, 'every member has a dm-key: no extra read')
+})
+
+test('a failed fresh read keeps the given statements, and Enviar chave answers no box', async (t) => {
+  const { pagesDmPrepare, pagesDmShareTo, PAGE_DM_NO_BOX } = await load()
+  const cached = { gen: 3, actorBoxes }
+  const calls = stub(t, () => new Error('offline'))
+  const node = dmNode({ 'dm.lookup': keyedLookup, 'dm.pageGenerate': generate, 'dm.pageShare': () => ({ gen: 3, sealed: 'S', sig: SIG }) })
+  await pagesDmPrepare(node, { member: M, page: '6e'.repeat(32), status: cached, roster: { owner: M, admins: [DELEGATE] } })
+  t.ok(calls.length >= 1, 'the fresh read was tried')
+  t.alike(sealedFor(node), [{ member: M, box: OWN_BOX }, { member: DELEGATE, box: ACTOR_BOX, proof: { gen: 2, at: AT, sig: SIG } }])
+
+  const err = await caught(t, pagesDmShareTo(node, { member: M, page: P, to: DELEGATE }))
+  t.is(err.message, PAGE_DM_NO_BOX, 'a failed read is no statement, not its own error')
+  t.absent(node.calls.some((c) => c.method === 'dm.pageShare'), 'nothing sealed')
+})
+
+test('a core delegate without a dm-key gets its signed box with the proof, never one that has a dm-key', async (t) => {
+  const { pagesDmShareTo, pagesDmPrepare } = await load()
+  const proof = { gen: 2, at: AT, sig: SIG }
+  const calls = stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : json(200, url.endsWith('/dm-box-read') ? { gen: 4, actorBoxes } : { ok: true }))
+  const lookup = ({ member }) => ({ box: member === ADMIN || member === M ? (member === M ? OWN_BOX : BOX) : null, gen: 1 })
+  const node = dmNode({ 'dm.lookup': lookup, 'dm.pageShare': () => ({ gen: 4, sealed: 'S', sig: SIG }) })
+  await pagesDmShareTo(node, { member: M, page: P, to: DELEGATE })
+  t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: DELEGATE, box: ACTOR_BOX, proof })
+  t.ok(calls[1].url.endsWith('/dm-box-read'), 'the box comes from a fresh read')
+  t.alike(body(calls[3]).op, { member: DELEGATE, gen: 4, sealed: 'S', sig: SIG })
+  node.calls.length = 0
+  await pagesDmShareTo(node, { member: M, page: P, to: ADMIN })
+  t.alike(node.calls.find((c) => c.method === 'dm.pageShare').params, { page: P, member: ADMIN, box: BOX }, 'the dm-key wins over a stated box')
+
+  const prepNode = dmNode({ 'dm.enable': { box: OWN_BOX, gen: 1, seq: null }, 'dm.lookup': lookup, 'dm.pageGenerate': generate })
+  const prep = await pagesDmPrepare(prepNode, { member: M, page: P, status: { gen: 0, actorBoxes }, roster: { owner: M, admins: [ADMIN, DELEGATE, K2] } })
+  t.alike(prepNode.calls.find((c) => c.method === 'dm.pageGenerate').params.recipients, [
+    { member: M, box: OWN_BOX },
+    { member: ADMIN, box: BOX },
+    { member: DELEGATE, box: ACTOR_BOX, proof }
+  ])
+  t.alike(prep.missing, [K2], 'no box and no statement: left for Enviar chave')
 })
 
 test('a core node with an https account origin sends every page request there', async (t) => {
@@ -1473,6 +1674,7 @@ test('pagesList forgets, once, the keys of a page the newest list no longer show
   const node = {
     request: async (method, params) => {
       if (method === 'page.sign') return { signature: SIG }
+      if (method === 'page.read') return {}
       if (method === 'dm.pageLegacyBlocks') return { pending: [] }
       if (method === 'dm.pageForget') {
         forgot.push(params.page)
@@ -1520,4 +1722,243 @@ test('pagesList forgets, once, the keys of a page the newest list no longer show
   await pagesList({ ...node, accountOrigin: 'https://outra.example' }, { member: MEM })
   await flush()
   t.absent(forgot.includes(Z), 'another account origin\'s list forgets none of this one\'s pages')
+})
+
+test('pagesList sets the acting identity back to the person when the page acted as is closed, moved or no longer run; a failed or older answer changes nothing', async (t) => {
+  const { pagesList } = await load()
+  const acting = await import('../src/actingAs.js')
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const Z = '78'.repeat(32)
+  const list = (owned, admin = []) => json(200, { owned, admin, invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const node = {
+    request: async (method) => {
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'dm.pageLegacyBlocks') return { pending: [] }
+      if (method === 'dm.pageForget') return { ok: true }
+      throw new Error('unexpected ' + method)
+    }
+  }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+  t.teardown(() => acting.reset())
+
+  acting.asPage({ key: X, name: 'Casa' })
+  answers.push(list([{ page: X }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'page', 'a page still run stays')
+
+  answers.push(new Error('offline'))
+  await caught(t, pagesList(node, { member: MEM }))
+  t.is(acting.get().kind, 'page', 'a failed read changes nothing')
+
+  answers.push(list([{ page: X, closed: true }]))
+  await pagesList(node, { member: MEM })
+  await flush()
+  t.is(acting.get().kind, 'me', 'a closed page: back to the person')
+
+  acting.asPage({ key: X })
+  answers.push(list([{ page: X, closed: true, movedTo: Z }, { page: Z }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'me', 'the old key of a moved page: back to the person')
+  acting.asPage({ key: Z })
+  answers.push(list([{ page: X, closed: true, movedTo: Z }, { page: Z }]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().key, Z, 'the new key stays')
+
+  answers.push(list([]))
+  await pagesList(node, { member: MEM })
+  t.is(acting.get().kind, 'me', 'removed as admin: back to the person')
+
+  acting.asPage({ key: Z })
+  let releaseOld
+  answers.push(new Promise((resolve) => { releaseOld = resolve }))
+  answers.push(list([{ page: Z }]))
+  const older = pagesList(node, { member: MEM })
+  await flush()
+  await pagesList(node, { member: MEM })
+  releaseOld(list([]))
+  await older
+  t.is(acting.get().kind, 'page', 'an older answer that lands later changes nothing')
+})
+
+test('pagesList: an answer never ends an identity chosen after its request began, and drops the page a momento composer set aside', async (t) => {
+  const { pagesList } = await load()
+  const acting = await import('../src/actingAs.js')
+  const MEM = '12'.repeat(32)
+  const X = '34'.repeat(32)
+  const list = (owned) => json(200, { owned, admin: [], invites: [], offers: [] })
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  const node = { request: async (method) => (method === 'page.sign' ? { signature: SIG } : { pending: [], ok: true }) }
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 20))
+  t.teardown(() => acting.reset())
+
+  acting.reset()
+  let release
+  answers.push(new Promise((resolve) => { release = resolve }))
+  const early = pagesList(node, { member: MEM })
+  await flush()
+  acting.asPage({ key: X })
+  release(list([]))
+  await early
+  t.is(acting.get().kind, 'page', 'a list read before acting as the page leaves it')
+
+  acting.enterMoment()
+  answers.push(list([{ page: X, closed: true }]))
+  await pagesList(node, { member: MEM })
+  acting.leaveMoment()
+  t.is(acting.get().kind, 'me', 'the stopped page does not come back after the momento composer')
+})
+
+test('pageError has plain words for a join refused because the page is outside the community', async (t) => {
+  const { pageError } = await load()
+  const err = pageError('fora-da-comunidade')
+  t.is(err.code, 'fora-da-comunidade')
+  t.is(err.message, 'A página ainda não está na comunidade deste grupo')
+})
+
+// A node for the move-chain walk: page.read answers from `movedFrom`, or
+// runs `read` first when given; every forget and read is recorded.
+function chainNode (movedFrom, { read = null, hosted } = {}) {
+  const forgot = []
+  const reads = []
+  const node = {
+    forgot,
+    reads,
+    request: async (method, params) => {
+      if (method === 'page.sign') return { signature: SIG }
+      if (method === 'page.read') {
+        reads.push(params.key)
+        if (read !== null) await read(params.key)
+        return movedFrom[params.key] ? { movedFrom: { from: movedFrom[params.key] } } : {}
+      }
+      if (method === 'dm.pageLegacyBlocks') return { pending: [] }
+      if (method === 'dm.pageForget') {
+        forgot.push(params.page)
+        return { ok: true }
+      }
+      throw new Error('unexpected ' + method)
+    }
+  }
+  if (hosted !== undefined) node.hosted = hosted
+  return node
+}
+const pageList = (owned, admin = []) => json(200, { owned, admin, invites: [], offers: [] })
+const listAnswers = (t) => {
+  const answers = []
+  stub(t, (n, url) => url.endsWith('/start') ? json(200, { nonce: NONCE }) : answers.shift())
+  return answers
+}
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+test('pagesList also forgets the keys a dropped page moved from, unless the list still shows them', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '9a'.repeat(32)
+  const K0 = '9b'.repeat(32)
+  const K1 = '9c'.repeat(32)
+  const K2B = '9d'.repeat(32)
+  const L1 = '9e'.repeat(32)
+  const L2 = '9f'.repeat(32)
+  const C1 = '8a'.repeat(32)
+  const C2 = '8b'.repeat(32)
+  const answers = listAnswers(t)
+  const node = chainNode({ [K2B]: K1, [K1]: K0, [L2]: L1, [C2]: C1 })
+
+  // After a restart no earlier answer names K1 or K0; only the node's flag names K2.
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike([...node.forgot].sort(), [K0, K1, K2B].sort(), 'the dropped key and every key it moved from')
+
+  node.forgot.length = 0
+  answers.push(pageList([{ page: L1, closed: true, movedTo: L2 }]))
+  await pagesList(node, { member: MEM, also: [L2] })
+  await settle()
+  t.alike(node.forgot, [L2], 'an old key the list still shows as moved stays')
+
+  node.forgot.length = 0
+  node.reads.length = 0
+  answers.push(pageList([{ page: C2, closed: true }]))
+  await pagesList(node, { member: '8c'.repeat(32) })
+  await settle()
+  t.alike(node.forgot, [C2], 'a closed page goes')
+  t.alike(node.reads, [], 'and its move chain is not read')
+})
+
+test('pagesList: a failed read of the move chain marks nothing tried, and a later list read forgets the old keys', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '7a'.repeat(32)
+  const K0 = '7b'.repeat(32)
+  const K1 = '7c'.repeat(32)
+  const K2B = '7d'.repeat(32)
+  const answers = listAnswers(t)
+  let fail = true
+  const node = chainNode({ [K2B]: K1, [K1]: K0 }, {
+    read: async (key) => { if (key === K1 && fail) throw new Error('LOCKED') }
+  })
+
+  answers.push(pageList([], [{ page: K2B }]))
+  await pagesList(node, { member: MEM })
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM })
+  await settle()
+  t.alike(node.reads, [K2B, K1], 'the walk stopped at the read that failed')
+  t.alike(node.forgot, [], 'nothing in the chain is forgotten or marked tried')
+
+  fail = false
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM })
+  await settle()
+  t.alike([...node.forgot].sort(), [K0, K1, K2B].sort(), 'the next list read walks again and forgets the whole chain')
+
+  node.forgot.length = 0
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(node.forgot, [], 'each key is still tried once per session')
+})
+
+test('pagesList: a newer list that shows the keys again keeps them when an earlier walk lands', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '6a'.repeat(32)
+  const K1 = '6b'.repeat(32)
+  const K2B = '6c'.repeat(32)
+  const answers = listAnswers(t)
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const node = chainNode({ [K2B]: K1 }, { read: () => gate })
+
+  answers.push(pageList([]))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  answers.push(pageList([], [{ page: K1, closed: true, movedTo: K2B }, { page: K2B }]))
+  await pagesList(node, { member: MEM })
+  release()
+  await settle()
+  t.alike(node.forgot, [], 'an admin added back keeps the old and the new key')
+})
+
+test('pagesList walks no move chain on a core node or a malformed answer', async (t) => {
+  const { pagesList } = await load()
+  const MEM = '5a'.repeat(32)
+  const K1 = '5b'.repeat(32)
+  const K2B = '5c'.repeat(32)
+  const answers = listAnswers(t)
+
+  const core = chainNode({ [K2B]: K1 }, { hosted: false })
+  answers.push(pageList([]))
+  await pagesList(core, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(core.reads, [], 'a core node reads no move chain')
+  t.alike(core.forgot, [], 'and holds no page keys to forget')
+
+  const node = chainNode({ [K2B]: K1 })
+  answers.push(json(200, { owned: [{ page: 'nope' }], admin: [] }))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  answers.push(json(200, { owned: null }))
+  await pagesList(node, { member: MEM, also: [K2B] })
+  await settle()
+  t.alike(node.reads, [], 'a malformed answer reads no move chain')
+  t.alike(node.forgot, [], 'and forgets nothing')
 })

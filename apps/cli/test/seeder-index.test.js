@@ -24,6 +24,7 @@ const { createSwarm, joinAndFlush, topicFor, attachAdmission, MAX_INVENTORY } = 
 const { memberCertRecord, postRecord, profileRecord, likeRecord, repostRecord, deleteRecord } = require('@varanda/core/lib/records')
 const { metricsText } = require('../lib/health')
 const { createEngagementIndex } = require('@varanda/core/lib/engagement-index')
+const { createStorageBudget } = require('@varanda/core/lib/storage-budget')
 const { createNoticeIndex } = require('@varanda/core/lib/notices')
 const { createPostNoticeIndex } = require('@varanda/core/lib/post-notices')
 const { signRoster, signClose, issuerCountersign } = require('@varanda/core/lib/page')
@@ -184,6 +185,8 @@ function scanFixture (options = {}) {
     _peers: new Set(),
     _inflight: new Map(),
     _drops: new Map(),
+    // _drop also leaves the storage budget (storage-budget.js).
+    _storage: createStorageBudget({ budget: 1024 * 1024 * 1024 }),
     _purge: async () => {},
     _persist: async () => {},
     _scanDiary: () => {},
@@ -2240,8 +2243,8 @@ test('indexProfile: newest about and mood pointers, deletes, fail closed while i
     await pass()
   }
   await pass()
-  t.alike(seeder.indexProfile(O), { about: 1, mood: 2, fans: { count: 0, indexing: false }, top: null, visits: null, indexing: false, complete: true })
-  t.alike(seeder.indexProfile(V), { about: null, mood: 1, fans: { count: 0, indexing: false }, top: null, visits: null, indexing: false, complete: true }, 'each author has its own pointers')
+  t.alike(seeder.indexProfile(O), { about: 1, mood: 2, fans: { count: 0, indexing: false }, top: null, visits: null, garden: null, indexing: false, complete: true })
+  t.alike(seeder.indexProfile(V), { about: null, mood: 1, fans: { count: 0, indexing: false }, top: null, visits: null, garden: null, indexing: false, complete: true }, 'each author has its own pointers')
   t.is(seeder.indexProfile('f'.repeat(64)), null, 'an author not served is unknown')
   t.is(seeder.indexProfile('nope'), null)
 
@@ -2250,19 +2253,19 @@ test('indexProfile: newest about and mood pointers, deletes, fail closed while i
   await grow(O, ofO, [deleteRecord({ seq: 3, at: at(4) })]) // 4
   t.is(seeder.indexProfile(O).about, 1, 'a deleted block falls back to the previous one')
   await grow(O, ofO, [deleteRecord({ seq: 2, at: at(5) })]) // 5
-  t.alike(seeder.indexProfile(O), { about: 1, mood: null, fans: { count: 0, indexing: false }, top: null, visits: null, indexing: false, complete: true })
+  t.alike(seeder.indexProfile(O), { about: 1, mood: null, fans: { count: 0, indexing: false }, top: null, visits: null, garden: null, indexing: false, complete: true })
 
   seeder._rebuildIndex()
-  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, visits: null, indexing: true, complete: false }, 'between a rebuild and the re-index: fail closed')
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, visits: null, garden: null, indexing: true, complete: false }, 'between a rebuild and the re-index: fail closed')
   await settleIndex(seeder)
-  t.alike(seeder.indexProfile(O), { about: 1, mood: null, fans: { count: 0, indexing: false }, top: null, visits: null, indexing: false, complete: true }, 'the same after a rebuild')
+  t.alike(seeder.indexProfile(O), { about: 1, mood: null, fans: { count: 0, indexing: false }, top: null, visits: null, garden: null, indexing: false, complete: true }, 'the same after a rebuild')
 
   const owner = seeder._served.get(O)
   owner.indexPaused = true
-  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, visits: null, indexing: true, complete: false }, 'a paused diary: no pointer')
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, visits: null, garden: null, indexing: true, complete: false }, 'a paused diary: no pointer')
   owner.indexPaused = false
   owner.core.contiguousLength++
-  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, visits: null, indexing: true, complete: false }, 'a diary behind its present length: no pointer')
+  t.alike(seeder.indexProfile(O), { about: null, mood: null, fans: { count: 0, indexing: true }, top: null, visits: null, garden: null, indexing: true, complete: false }, 'a diary behind its present length: no pointer')
   owner.core.contiguousLength--
   t.is(seeder.indexProfile(O).about, 1, 'caught up: the pointer again')
 
@@ -2362,6 +2365,7 @@ test('indexProfile and indexFans: fan count and pages, top-friends with follow-b
     fans: { count: 2, indexing: false },
     top: { seq: 1, back: { [F]: 2, [G]: null, [H]: null } },
     visits: null,
+    garden: null,
     indexing: false,
     complete: true
   }, 'two fas (H took it back), F follows back, G unfollowed, H never followed')
@@ -2638,6 +2642,369 @@ test('indexEvents: event post pointers, cursor, fail closed, held, blocked, dele
 
   seeder._drop(O, 'blocked')
   t.is(seeder.indexEvents(O), null, 'a purged author is unknown')
+})
+
+// Garden helps are listed only inside the reader window of Date.now(), so
+// these records are dated relative to the real clock, not BASE_MS.
+function gardenFixture (all) {
+  const { seeder, diary } = scanFixture()
+  const entries = new Map(all.map(([key, records]) => [key, scannable(seeder, diary(key, records.length, (seq) => records[seq - 1]))]))
+  const pass = async () => {
+    for (const [key] of all) {
+      const entry = entries.get(key)
+      if (!entry || entry.dropped) continue
+      await seeder._runScan(key, entry)
+      seeder._onGrow(key, entry, entry.core.contiguousLength)
+    }
+    await settleIndex(seeder)
+  }
+  const grow = async (key, records, more) => {
+    records.push(...more)
+    entries.get(key).core.contiguousLength = records.length + 1
+    await pass()
+  }
+  return { seeder, pass, grow }
+}
+
+const ISO_DATE = /\d{4}-\d{2}-\d{2}T/
+
+test('indexGarden: on, state, helps from followers with their follow pointer, given, deletes, fail closed, held, blocked and purged', async (t) => {
+  const { gardenRecord, gardenStateRecord, gardenHelpRecord, followRecord } = require('@varanda/core/lib/records')
+  const A = authorKey(1)
+  const B = authorKey(2)
+  const C = authorKey(3)
+  const D = authorKey(4)
+  const ago = (h) => new Date(Date.now() - h * 3600000).toISOString()
+  const pot = { plant: 'manjericao', at: ago(5), water: ago(5), w: 0 }
+  // A shows a balcony with one pot and watered B's; B and D follow A and
+  // water it; C waters it without following A.
+  const ofA = [gardenRecord({ on: true, at: ago(5) }), gardenStateRecord({ pots: [pot, null, null, null, null, null], n: 1, at: ago(5) }), gardenHelpRecord({ to: B, pot: 0, at: ago(4) })]
+  const ofB = [followRecord({ key: A, on: true, at: at(0) }), gardenHelpRecord({ to: A, pot: 0, at: ago(3) })]
+  const ofC = [gardenHelpRecord({ to: A, pot: 0, at: ago(2) })]
+  const ofD = [followRecord({ key: A, on: true, at: at(1) }), gardenHelpRecord({ to: A, pot: 0, at: ago(1) })]
+  const { seeder, pass, grow } = gardenFixture([[A, ofA], [B, ofB], [C, ofC], [D, ofD]])
+  await pass()
+  const full = {
+    on: 1,
+    state: 2,
+    helps: [{ author: D, seq: 2, followSeq: 1 }, { author: B, seq: 2, followSeq: 1 }],
+    given: [3],
+    indexing: false,
+    complete: true
+  }
+  t.alike(seeder.indexGarden(A), full, 'followers\' helps newest first, each with the helper\'s follow of A; C does not follow A and is left out')
+  const text = JSON.stringify(seeder.indexGarden(A))
+  t.absent(text.includes('manjericao') || text.includes('pot') || ISO_DATE.test(text), 'pointers only: no pot, plant or date')
+  t.alike(seeder.indexGarden(B), { on: null, state: null, helps: [], given: [], indexing: false, complete: true }, 'a member without a balcony: null pointers, nothing listed')
+  t.is(seeder.indexGarden('f'.repeat(64)), null, 'an owner not served is unknown, never an empty balcony')
+  t.is(seeder.indexGarden('nope'), null)
+
+  await grow(C, ofC, [followRecord({ key: A, on: true, at: at(2) })]) // C:2
+  t.alike(seeder.indexGarden(A).helps, [{ author: D, seq: 2, followSeq: 1 }, { author: C, seq: 1, followSeq: 2 }, { author: B, seq: 2, followSeq: 1 }], 'once C follows A its help appears')
+  await grow(C, ofC, [followRecord({ key: A, on: false, at: at(3) })]) // C:3
+  t.alike(seeder.indexGarden(A), full, 'an unfollow takes it out again')
+
+  await grow(D, ofD, [deleteRecord({ seq: 2, at: at(4) })]) // D:3
+  t.alike(seeder.indexGarden(A).helps, [{ author: B, seq: 2, followSeq: 1 }], 'a deleted help is gone')
+  await grow(A, ofA, [gardenRecord({ on: false, at: ago(0.5) })]) // A:4
+  t.alike(seeder.indexGarden(A), { on: 4, state: null, helps: [], given: [], indexing: false, complete: true }, 'an off flag is still the pointer, with no state, helps or given')
+  await grow(A, ofA, [deleteRecord({ seq: 4, at: at(5) })]) // A:5
+  const kept = { ...full, helps: [{ author: B, seq: 2, followSeq: 1 }] }
+  t.alike(seeder.indexGarden(A), kept, 'a deleted flag falls back to the previous one')
+
+  const pending = { on: null, state: null, helps: [], given: [], indexing: true, complete: false }
+  seeder._rebuildIndex()
+  t.alike(seeder.indexGarden(A), pending, 'between a rebuild and the re-index: fail closed')
+  await settleIndex(seeder)
+  t.alike(seeder.indexGarden(A), kept, 'the same after a rebuild')
+
+  const owner = seeder._served.get(A)
+  owner.indexPaused = true
+  t.alike(seeder.indexGarden(A), pending, 'a paused owner: nothing listed')
+  owner.indexPaused = false
+  owner.scanned = 0
+  t.alike(seeder.indexGarden(A), pending, 'a tombstone scan behind: nothing listed')
+  owner.scanned = owner.present
+  t.alike(seeder.indexGarden(A), kept, 'caught up')
+
+  seeder._served.get(B).searchHold = 1
+  t.alike(seeder.indexGarden(A), { ...kept, helps: [], complete: false }, 'a held helper is left out and the answer is not complete')
+  seeder._served.get(B).searchHold = 0
+  seeder._isBlocked = (hex) => hex === B
+  t.alike(seeder.indexGarden(A), { ...kept, helps: [], complete: false }, 'a blocked helper is left out and the answer is not complete')
+  seeder._isBlocked = (hex) => hex === A
+  t.is(seeder.indexGarden(A), null, 'a blocked owner is unknown')
+  seeder._isBlocked = () => false
+  owner.searchHold = 1
+  t.is(seeder.indexGarden(A), null, 'a held owner is unknown')
+  owner.searchHold = 0
+
+  seeder._drop(B, 'blocked')
+  t.alike(seeder.indexGarden(A), { ...kept, helps: [] }, 'a purged helper leaves at once')
+  seeder._drop(A, 'blocked')
+  t.is(seeder.indexGarden(A), null, 'a purged owner is unknown')
+})
+
+test('indexGardenStreet: only followed balconies that are on, cursor, unfollow, fail closed, held, blocked and purged', async (t) => {
+  const { gardenRecord, gardenStateRecord, followRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const A = authorKey(2)
+  const B = authorKey(3)
+  const C = authorKey(4)
+  const D = authorKey(5)
+  const ago = (h) => new Date(Date.now() - h * 3600000).toISOString()
+  // O follows A, B and C; A and B show their balcony, C turned it off; D
+  // shows one but O does not follow D.
+  const ofO = [followRecord({ key: A, on: true, at: at(0) }), followRecord({ key: B, on: true, at: at(1) }), followRecord({ key: C, on: true, at: at(2) })]
+  const ofA = [gardenRecord({ on: true, at: ago(3) }), gardenStateRecord({ pots: [null, null, null, null, null, null], n: 1, at: ago(3) })]
+  const ofB = [gardenRecord({ on: true, at: ago(2) })]
+  const ofC = [gardenRecord({ on: true, at: ago(2) }), gardenRecord({ on: false, at: ago(1) })]
+  const ofD = [gardenRecord({ on: true, at: ago(1) })]
+  const { seeder, pass, grow } = gardenFixture([[O, ofO], [A, ofA], [B, ofB], [C, ofC], [D, ofD]])
+  await pass()
+  const full = { items: [{ key: A, on: 1, state: 2 }, { key: B, on: 1, state: null }], next: null, indexing: false, complete: true }
+  t.alike(seeder.indexGardenStreet(O), full, 'followed keys that are on, keys ascending; C is off and D is not followed')
+  t.absent(ISO_DATE.test(JSON.stringify(seeder.indexGardenStreet(O))), 'keys and seqs only')
+  t.alike(seeder.indexGardenStreet(O, A), { ...full, items: [{ key: B, on: 1, state: null }] }, 'an exclusive cursor')
+  t.alike(seeder.indexGardenStreet(D), { items: [], next: null, indexing: false, complete: true }, 'an owner who follows nobody')
+  t.is(seeder.indexGardenStreet(O, 'x'), null, 'a malformed cursor')
+  t.is(seeder.indexGardenStreet('f'.repeat(64)), null, 'an owner not served is unknown')
+  t.is(seeder.indexGardenStreet('nope'), null)
+
+  await grow(B, ofB, [gardenRecord({ on: false, at: ago(0.5) })]) // B:2
+  t.alike(seeder.indexGardenStreet(O).items, [{ key: A, on: 1, state: 2 }], 'a balcony turned off leaves the street')
+  await grow(B, ofB, [deleteRecord({ seq: 2, at: at(3) })]) // B:3
+  t.alike(seeder.indexGardenStreet(O), full, 'a deleted off flag falls back to on')
+
+  seeder._rebuildIndex()
+  t.alike(seeder.indexGardenStreet(O), { items: [], next: null, indexing: true, complete: false }, 'between a rebuild and the re-index: fail closed')
+  await settleIndex(seeder)
+  t.alike(seeder.indexGardenStreet(O), full, 'the same after a rebuild')
+
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  t.alike(seeder.indexGardenStreet(O), { items: [], next: null, indexing: false, complete: false }, 'a paused owner: no items')
+  owner.indexPaused = false
+
+  seeder._served.get(A).searchHold = 1
+  t.alike(seeder.indexGardenStreet(O), { ...full, items: [{ key: B, on: 1, state: null }], complete: false }, 'a held balcony is left out and the page is not complete')
+  seeder._served.get(A).searchHold = 0
+  seeder._isBlocked = (hex) => hex === A
+  t.alike(seeder.indexGardenStreet(O), { ...full, items: [{ key: B, on: 1, state: null }], complete: true }, 'a blocked balcony is filtered, complete unchanged')
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexGardenStreet(O), null, 'a blocked owner is unknown')
+  seeder._isBlocked = () => false
+  owner.searchHold = 1
+  t.is(seeder.indexGardenStreet(O), null, 'a held owner is unknown')
+  owner.searchHold = 0
+
+  await grow(O, ofO, [followRecord({ key: A, on: false, at: at(4) })]) // O:4
+  t.alike(seeder.indexGardenStreet(O).items, [{ key: B, on: 1, state: null }], 'an unfollow takes A out')
+  seeder._drop(B, 'blocked')
+  t.alike(seeder.indexGardenStreet(O).items, [], 'a purged balcony leaves at once')
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexGardenStreet(O), null, 'a purged owner is unknown')
+})
+
+test('indexGardenStreet: a followed key the follows index hides is never an item or next where the key budget ends', async (t) => {
+  const { gardenRecord, followRecord } = require('@varanda/core/lib/records')
+  const { GARDEN_STREET_SCAN } = require('@varanda/core/lib/engagement-index')
+  const O = authorKey(1)
+  const ago = (h) => new Date(Date.now() - h * 3600000).toISOString()
+  const followed = []
+  for (let i = 0; i < GARDEN_STREET_SCAN + 5; i++) followed.push(authorKey(100 + i))
+  // H sits where the budget ended when every examined key counted. Its
+  // balcony is on, but O's follow of it is not shown once H is blocked.
+  const H = followed[GARDEN_STREET_SCAN - 1]
+  const ofO = followed.map((key, i) => followRecord({ key, on: true, at: at(i) }))
+  const { seeder, pass } = gardenFixture([[O, ofO], ...followed.map((key) => [key, key === H ? [gardenRecord({ on: true, at: ago(1) })] : []])])
+  await pass()
+  t.alike(seeder.indexGardenStreet(O).items, [{ key: H, on: 1, state: null }], 'shown while H is not blocked')
+  seeder._isBlocked = (hex) => hex === H
+  const page = seeder.indexGardenStreet(O)
+  t.alike(page.items, [], 'H is not an item')
+  t.not(page.next, H, 'H is not next')
+  t.is(page.next, followed[GARDEN_STREET_SCAN], 'next is the last shown key the budget reached')
+  t.is(page.complete, true)
+  t.alike(seeder.indexGardenStreet(O, page.next).items, [])
+  t.is(seeder.indexGardenStreet(O, page.next).next, null, 'the walk ends')
+})
+
+test('indexGarden and indexGardenStreet: complete false while the follow index is incomplete for the owner', async (t) => {
+  const { gardenRecord, gardenHelpRecord, followRecord } = require('@varanda/core/lib/records')
+  const A = authorKey(1)
+  const B = authorKey(2)
+  const ago = (h) => new Date(Date.now() - h * 3600000).toISOString()
+  const ofA = [gardenRecord({ on: true, at: ago(5) }), followRecord({ key: B, on: true, at: at(0) })]
+  const ofB = [followRecord({ key: A, on: true, at: at(1) }), gardenHelpRecord({ to: A, pot: 0, at: ago(1) }), gardenRecord({ on: true, at: ago(2) })]
+  const { seeder, pass } = gardenFixture([[A, ofA], [B, ofB]])
+  await pass()
+  t.alike(seeder.indexGarden(A), { on: 1, state: null, helps: [{ author: B, seq: 2, followSeq: 1 }], given: [], indexing: false, complete: true })
+  t.alike(seeder.indexGardenStreet(A), { items: [{ key: B, on: 3, state: null }], next: null, indexing: false, complete: true })
+  const real = seeder._notices.followersIncomplete
+  seeder._notices.followersIncomplete = () => { throw new Error('x') }
+  t.is(seeder.indexGarden(A).complete, false, 'a throwing followersIncomplete reads incomplete')
+  seeder._notices.followersIncomplete = real
+  const realFollowing = seeder._notices.followingIncomplete
+  seeder._notices.followingIncomplete = () => { throw new Error('x') }
+  t.is(seeder.indexGardenStreet(A).complete, false, 'a throwing followingIncomplete reads incomplete')
+  seeder._notices.followingIncomplete = realFollowing
+  seeder._notices.markPending(B)
+  t.alike(seeder.indexGarden(A), { on: 1, state: null, helps: [], given: [], indexing: false, complete: false }, 'a pending helper follow omits its help and says so')
+  seeder._notices.markPending(A)
+  t.alike(seeder.indexGardenStreet(A), { items: [], next: null, indexing: false, complete: false }, 'pending own follows: a short street says so')
+})
+
+// A Barraquinha mimo is listable only while the week of its Saturday lasts,
+// so the gifts are dated on the latest Brasília Saturday of the real clock.
+function lastStallDay () {
+  const { garden } = require('@varanda/rpc')
+  const now = Date.now()
+  let start = garden.dayStart(now)
+  while (!garden.stallDay(start)) start -= 86400000
+  return { first: start, later: Math.max(start + 1, Math.min(start + 3600000, now)) }
+}
+
+test('indexGardenStall: decor, pending mimos from followers ranked by the owner\'s follows, shelf, deletes, fail closed, held, blocked and purged', async (t) => {
+  const { gardenRecord, gardenDecorRecord, gardenGiftRecord, gardenTakeRecord, followRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const G = authorKey(2)
+  const H = authorKey(3)
+  const K = authorKey(4)
+  const N = authorKey(5)
+  const { first, later } = lastStallDay()
+  const iso = (ms) => new Date(ms).toISOString()
+  // O shows a balcony with enfeites. G, H and K follow O and each give O a
+  // mimo; H's is dated later than G's. N gives one without following O.
+  const ofO = [gardenRecord({ on: true, at: iso(first - 86400000) }), gardenDecorRecord({ items: ['rede', 'gato'], at: iso(first) })]
+  const ofG = [followRecord({ key: O, on: true, at: at(0) }), gardenGiftRecord({ to: O, item: 'manjericao', at: iso(first) })]
+  const ofH = [followRecord({ key: O, on: true, at: at(1) }), gardenGiftRecord({ to: O, item: 'manjericao', at: iso(later) })]
+  const ofK = [followRecord({ key: O, on: true, at: at(2) }), gardenGiftRecord({ to: O, item: 'manjericao', at: iso(first) })]
+  const ofN = [gardenGiftRecord({ to: O, item: 'manjericao', at: iso(later) })]
+  const { seeder, pass, grow } = gardenFixture([[O, ofO], [G, ofG], [H, ofH], [K, ofK], [N, ofN]])
+  await pass()
+  const byDate = seeder.indexGardenStall(O)
+  t.is(byDate.decor, 2, 'the newest live garden-decor block')
+  t.is(byDate.pending[0].author, H, 'O follows none of them: the later mimo first')
+  t.alike(new Set(byDate.pending.map((r) => r.author)), new Set([G, H, K]), 'N does not follow O and is left out')
+  t.alike(byDate.pending.find((r) => r.author === G), { author: G, seq: 2, followSeq: 1 }, 'each row carries the giver\'s follow of O')
+  t.alike(byDate.shelf, [])
+  t.is(byDate.indexing, false)
+  t.is(byDate.complete, true)
+  t.alike(Object.keys(byDate).sort(), ['complete', 'decor', 'indexing', 'pending', 'shelf'], 'no gave list')
+  const text = JSON.stringify(byDate)
+  t.absent(text.includes('manjericao') || text.includes('rede') || ISO_DATE.test(text), 'keys and seqs only: no plant, decor id or date')
+
+  await grow(O, ofO, [followRecord({ key: G, on: true, at: at(3) })]) // O:3
+  const ranked = seeder.indexGardenStall(O)
+  t.alike(ranked.pending[0], { author: G, seq: 2, followSeq: 1 }, 'a giver O follows comes first (O\'s follow of G, not G\'s of O)')
+  t.is(ranked.pending.length, 3)
+
+  await grow(O, ofO, [gardenTakeRecord({ from: K, seq: 2, at: iso(later) })]) // O:4
+  const full = seeder.indexGardenStall(O)
+  t.alike(full.shelf, [{ seq: 4, from: K, gseq: 2 }], 'a taken mimo is on the shelf')
+  t.absent(full.pending.some((r) => r.author === K), 'and no longer pending')
+  t.is(full.pending.length, 2)
+
+  await grow(H, ofH, [deleteRecord({ seq: 2, at: at(4) })]) // H:3
+  const kept = seeder.indexGardenStall(O)
+  t.alike(kept, { decor: 2, pending: [{ author: G, seq: 2, followSeq: 1 }], shelf: [{ seq: 4, from: K, gseq: 2 }], indexing: false, complete: true }, 'a deleted mimo is gone')
+  t.alike(seeder.indexGardenStall(G), { decor: null, pending: [], shelf: [], indexing: false, complete: true }, 'a member without a balcony: nothing listed')
+  t.is(seeder.indexGardenStall('f'.repeat(64)), null, 'an owner not served is unknown, never an empty stall')
+  t.is(seeder.indexGardenStall('nope'), null)
+
+  const pending = { decor: null, pending: [], shelf: [], indexing: true, complete: false }
+  seeder._rebuildIndex()
+  t.alike(seeder.indexGardenStall(O), pending, 'between a rebuild and the re-index: fail closed')
+  await settleIndex(seeder)
+  t.alike(seeder.indexGardenStall(O), kept, 'the same after a rebuild')
+  const owner = seeder._served.get(O)
+  owner.indexPaused = true
+  t.alike(seeder.indexGardenStall(O), pending, 'a paused owner: nothing listed')
+  owner.indexPaused = false
+  owner.scanned = 0
+  t.alike(seeder.indexGardenStall(O), pending, 'a tombstone scan behind: nothing listed')
+  owner.scanned = owner.present
+  t.alike(seeder.indexGardenStall(O), kept, 'caught up')
+
+  seeder._served.get(G).searchHold = 1
+  t.alike(seeder.indexGardenStall(O), { ...kept, pending: [], complete: false }, 'a held giver is left out and the answer is not complete')
+  seeder._served.get(G).searchHold = 0
+  seeder._isBlocked = (hex) => hex === K
+  t.alike(seeder.indexGardenStall(O), { ...kept, shelf: [], complete: false }, 'a blocked giver leaves the shelf and the answer is not complete')
+  seeder._isBlocked = (hex) => hex === O
+  t.is(seeder.indexGardenStall(O), null, 'a blocked owner is unknown')
+  seeder._isBlocked = () => false
+  owner.searchHold = 1
+  t.is(seeder.indexGardenStall(O), null, 'a held owner is unknown')
+  owner.searchHold = 0
+
+  const real = seeder._notices.followersIncomplete
+  seeder._notices.followersIncomplete = () => { throw new Error('x') }
+  t.is(seeder.indexGardenStall(O).complete, false, 'a throwing followersIncomplete reads incomplete')
+  seeder._notices.followersIncomplete = real
+  t.alike(seeder.indexGarden(O), { on: 1, state: null, helps: [], given: [], indexing: false, complete: true }, 'the balcony route keeps its own closed answer')
+
+  await grow(O, ofO, [gardenRecord({ on: false, at: iso(later) })]) // O:5
+  t.alike(seeder.indexGardenStall(O), { decor: null, pending: [], shelf: [], indexing: false, complete: true }, 'an off balcony lists nothing')
+  await grow(O, ofO, [gardenRecord({ on: true, at: iso(later) })]) // O:6
+  t.alike(seeder.indexGardenStall(O).decor, null, 'decor and takes below the newest on block do not count')
+  t.alike(seeder.indexGardenStall(O).shelf, [])
+
+  seeder._drop(O, 'blocked')
+  t.is(seeder.indexGardenStall(O), null, 'a purged owner is unknown')
+})
+
+test('indexGardenStall: the scan hands the index each giver\'s follow rank for the writers cap', async (t) => {
+  const { gardenRecord, gardenGiftRecord, followRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const F = authorKey(2)
+  const M = authorKey(3)
+  const N = authorKey(4)
+  const { first } = lastStallDay()
+  const iso = (ms) => new Date(ms).toISOString()
+  // F follows O; O follows M, who follows O too; N follows no one.
+  const ofO = [gardenRecord({ on: true, at: iso(first - 86400000) }), followRecord({ key: M, on: true, at: at(0) })]
+  const ofF = [followRecord({ key: O, on: true, at: at(1) }), gardenGiftRecord({ to: O, item: 'manjericao', at: iso(first) })]
+  const ofM = [followRecord({ key: O, on: true, at: at(2) }), gardenGiftRecord({ to: O, item: 'manjericao', at: iso(first) })]
+  const ofN = [gardenGiftRecord({ to: O, item: 'manjericao', at: iso(first) })]
+  const { seeder, pass } = gardenFixture([[O, ofO], [F, ofF], [M, ofM], [N, ofN]])
+  const ranks = []
+  const real = seeder._index.add
+  seeder._index.add = (key, seq, record, opts) => {
+    if (record.type === 'garden-gift') ranks.push(opts.giftRank)
+    return real(key, seq, record, opts)
+  }
+  await pass()
+  t.is(ranks.length, 3, 'every gift add carries a rank')
+  const giftRank = ranks[0]
+  t.ok(ranks.every((r) => typeof r === 'function'))
+  t.is(giftRank(M, O), 2, 'the owner follows M')
+  t.is(giftRank(F, O), 1, 'F follows the owner')
+  t.is(giftRank(N, O), 0, 'N follows no one')
+  t.is(giftRank(O, F), 2, 'the addressee given is read: F follows O, so O ranks 2 at F')
+  const realFollowSeq = seeder._notices.followSeq
+  seeder._notices.followSeq = () => { throw new Error('x') }
+  t.is(giftRank(M, O), 0, 'a throwing follow index ranks 0')
+  seeder._notices.followSeq = realFollowSeq
+})
+
+test('indexProfile: garden pointer is the newest live garden block, on or off, deletes fall back, fail closed', async (t) => {
+  const { gardenRecord } = require('@varanda/core/lib/records')
+  const O = authorKey(1)
+  const ago = (h) => new Date(Date.now() - h * 3600000).toISOString()
+  const ofO = [gardenRecord({ on: true, at: ago(2) })]
+  const { seeder, pass, grow } = gardenFixture([[O, ofO]])
+  await pass()
+  t.is(seeder.indexProfile(O).garden, 1, 'a garden block gives its seq')
+  await grow(O, ofO, [gardenRecord({ on: false, at: ago(1) })]) // 2
+  t.is(seeder.indexProfile(O).garden, 2, 'an off block is still the pointer')
+  await grow(O, ofO, [deleteRecord({ seq: 2, at: at(0) })]) // 3
+  t.is(seeder.indexProfile(O).garden, 1, 'a deleted block falls back')
+  seeder._rebuildIndex()
+  t.is(seeder.indexProfile(O).garden, null, 'between a rebuild and the re-index: fail closed')
+  await settleIndex(seeder)
+  t.is(seeder.indexProfile(O).garden, 1, 'the same after a rebuild')
 })
 
 test('indexScraps: the caps count admitted writers only and pages carry exclusive cursors', async (t) => {

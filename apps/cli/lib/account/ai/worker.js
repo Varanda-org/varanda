@@ -12,7 +12,7 @@
 // Everything is injected (moderation store, exemplar store, ledger, reader,
 // embedder, clock, logger), so tests run with fakes and no model. One serial
 // in-process queue with a short gap between jobs: onReport, onHumanDecision,
-// onCancel, onUnblock and start only enqueue and never throw, and nothing is
+// onCancel, onUnblock, forgetMember and start only enqueue and never throw, and nothing is
 // decided in the caller's stack (the HTTP handler that received the report
 // has long answered). stop() resolves when the running job ends, or after a
 // bounded wait when a read hangs.
@@ -72,6 +72,8 @@
 const { blockedSet } = require('@varanda/core/lib/blocklist')
 const { MAX_TEXT } = require('@varanda/core/lib/records')
 const { MAX_REPORTS } = require('../moderation-store')
+const { FILE: LEDGER_FILE } = require('./ledger')
+const { FILE: EXEMPLARS_FILE } = require('./exemplar-store')
 const {
   judge,
   quantize,
@@ -176,7 +178,7 @@ function createWorker ({
 } = {}) {
   if (!MODES.includes(mode)) throw new TypeError('mode must be sombra or auto')
   if (!moderation || !isFn(moderation.list) || !isFn(moderation.get) || !isFn(moderation.decide) ||
-    !isFn(moderation.pending) || !isFn(moderation.exportRows)) {
+    !isFn(moderation.pending) || !isFn(moderation.exportRows) || !isFn(moderation.reportIdsAbout)) {
     throw new TypeError('moderation store required')
   }
   if (!exemplars || !isFn(exemplars.add) || !isFn(exemplars.list) || !isFn(exemplars.size)) throw new TypeError('exemplar store required')
@@ -205,6 +207,12 @@ function createWorker ({
   // learning stay off for the rest of the process (reads still happen, so
   // the panel keeps its verified text).
   let disabled = false
+  // Excluir conta: deleted members whose triage copies were purged (no
+  // report of theirs is read, marked or learned from again in this
+  // process), and those whose purge job is still queued.
+  const forgotten = new Set()
+  const forgetting = new Set()
+  let forgetQueued = false
 
   function emit (reason) {
     try {
@@ -441,6 +449,7 @@ function createWorker ({
 
   async function processReport (id) {
     const row = moderation.get(id)
+    if (row !== null && forgotten.has(row.target)) return
     if (row === null || row.status !== 'aberta') {
       ledger.mark(id, { code: 'ja-decidida', retryAt: null, suggestion: null, nearest: null })
       return
@@ -593,7 +602,7 @@ function createWorker ({
   // Adds one exemplar from the cached read of a report a human decided.
   // Returns true when an exemplar was written.
   function learn (row) {
-    if (disabled || row === null || typeof row !== 'object') return false
+    if (disabled || row === null || typeof row !== 'object' || forgotten.has(row.target)) return false
     if (row.kind !== 'post' || isGroupRow(row) || row.status === 'aberta' || row.decidedBy === AI_ACTOR) return false
     if (!ACTIONABLE_REASONS.includes(row.reason)) return false
     const read = ledger.read(row.id)
@@ -741,7 +750,7 @@ function createWorker ({
     let last = null
     for (let k = 0; k < open.length && picked < SCAN_LIMIT; k++) {
       const r = open[(start + k) % open.length]
-      if (isGroupRow(r) || (r.kind === 'dm' && ledger.get(r.id) !== null) || !due(r.id, size, nowIso)) continue
+      if (isGroupRow(r) || forgotten.has(r.target) || (r.kind === 'dm' && ledger.get(r.id) !== null) || !due(r.id, size, nowIso)) continue
       enqueueReport(r.id)
       picked++
       last = { at: r.at, id: r.id }
@@ -769,6 +778,37 @@ function createWorker ({
       if (r.kind === 'post' && r.seq !== null && !isGroupRow(r)) decidedPosts.add(postKey(r))
       if (dayOf(r.decidedAt) === day && (r.status === 'bloquear' || r.status === 'descartar')) counts[r.status]++
     }
+  }
+
+  // ---- Excluir conta -------------------------------------------------
+
+  function reportIdsOf (member) {
+    return moderation.reportIdsAbout(member)
+  }
+
+  // Every member queued since the last run, in one job: a sweep at start
+  // over many deleted keys costs one gap, not one per key.
+  function forgetJob () {
+    forgetQueued = false
+    const members = [...forgetting]
+    forgetting.clear()
+    // Each store on its own: one failing must not leave the other, or a later
+    // member, holding what the sweep was told is gone. The first error still
+    // reaches the queue.
+    let first = null
+    for (const member of members) {
+      try {
+        ledger.forgetTarget(member, reportIdsOf(member))
+      } catch (err) {
+        if (first === null) first = err
+      }
+      try {
+        exemplars.forgetTarget(member)
+      } catch (err) {
+        if (first === null) first = err
+      }
+    }
+    if (first !== null) throw first
   }
 
   // ---- public surface -------------------------------------------------
@@ -814,6 +854,60 @@ function createWorker ({
       // is pending, and pruneReversed removes them once it is applied.
       enqueue(() => pruneReversed())
     } catch {}
+  }
+
+  // Excluir conta (../deletion.js): drops the cached reads and the marks of
+  // the reports about `member` (their diary, any post of it) and every
+  // precedent of theirs. It runs in the queue, so a job reading one of
+  // those reports finishes first and its read is dropped too. Never throws.
+  function forgetMember (member) {
+    try {
+      if (typeof member !== 'string') return
+      forgotten.add(member)
+      forgetting.add(member)
+      if (forgetQueued) return
+      forgetQueued = true
+      enqueue(forgetJob)
+    } catch {}
+  }
+
+  // Owed until forgetMember ran in this process, so the sweep at every start
+  // marks each deleted member forgotten again before the first scan.
+  function holdsMember (member) {
+    if (!forgotten.has(member) || forgetting.has(member)) return true
+    const ids = reportIdsOf(member)
+    // Both stores answer on their own, so a failing one never hides the other
+    // still holding the member: a store that holds them wins over an error.
+    let first = null
+    let holds = false
+    for (const [file, fn] of [[LEDGER_FILE, () => ledger.holdsTarget(member, ids)], [EXEMPLARS_FILE, () => exemplars.holdsTarget(member)]]) {
+      try {
+        if (noting(file, fn)) holds = true
+      } catch (err) {
+        if (first === null) first = err
+      }
+    }
+    if (holds) return true
+    if (first !== null) throw first
+    return false
+  }
+
+  // The store files whose last answer to holdsMember failed, so the sweep's
+  // warning names them.
+  const broken = new Set()
+  function noting (file, fn) {
+    try {
+      const out = fn()
+      broken.delete(file)
+      return out
+    } catch (err) {
+      broken.add(file)
+      throw err
+    }
+  }
+
+  function brokenFiles () {
+    return [...broken]
   }
 
   function start () {
@@ -888,7 +982,7 @@ function createWorker ({
     return { texto: r.text, midia: r.hasMedia, citacao: r.hasQuote, enquete: r.hasPoll }
   }
 
-  return { onReport, onHumanDecision, onCancel, onUnblock, suggestionOf, verifiedOf, start, runOnce, idle, stop }
+  return { onReport, onHumanDecision, onCancel, onUnblock, forgetMember, holdsMember, brokenFiles, suggestionOf, verifiedOf, start, runOnce, idle, stop }
 }
 
 module.exports = {

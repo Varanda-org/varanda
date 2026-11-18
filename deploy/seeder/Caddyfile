@@ -132,6 +132,12 @@
 	handle /seeder {
 		reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {
 			header_up Host {upstream_hostport}
+			# O semeador divide as vagas de conexão por endereço: ele lê o
+			# endereço do cliente só deste cabeçalho, e só quando a conexão
+			# vem de 127.0.0.1. O valor substitui qualquer X-Forwarded-For
+			# enviado pelo cliente. O endereço fica só na memória do
+			# semeador, nunca em log.
+			header_up X-Forwarded-For {remote_host}
 			# Num deploy a porta do semeador fica fechada enquanto o contêiner
 			# dele reinicia. O Caddy repete a discagem por até 5 s, em vez de
 			# falhar na hora. 5 s mais a espera de 8 s da partida do próprio
@@ -276,6 +282,80 @@
 					header_up -X-Real-Ip
 				}
 			}
+		}
+	}
+
+	# Excluir conta sem a passkey (POST /account/delete/sms/send e
+	# /account/delete/sms/check, sem conta aberta: o @nome, o celular
+	# confirmado e o código do SMS). Cada envio que bate com o celular da
+	# conta é um SMS pago, e o serviço de contas não lê endereço nenhum,
+	# então o limite por origem fica aqui, como na idade da Feira: o envio
+	# tem 3 por hora por endereço e um teto global de 30 por hora (cada teto
+	# num rate_limit separado, em ordem, pelo mesmo motivo da Feira); a
+	# conferência do código tem 20 por hora por endereço. Só um POST com
+	# Content-Type application/json entra nas zonas (uma página de outro site
+	# não gastaria o limite de quem a visita); qualquer outro pedido recebe
+	# 405 aqui mesmo. O endereço fica só na memória do Caddy, durante a
+	# janela, e nunca vai ao serviço.
+	handle /account/delete/sms/* {
+		@exclusaoSmsEnvio {
+			path /account/delete/sms/send
+			method POST
+			header Content-Type application/json*
+		}
+		@exclusaoSmsCodigo {
+			path /account/delete/sms/check
+			method POST
+			header Content-Type application/json*
+		}
+		@exclusaoSmsOutro {
+			not {
+				path /account/delete/sms/send /account/delete/sms/check
+				method POST
+				header Content-Type application/json*
+			}
+		}
+		handle @exclusaoSmsEnvio {
+			route {
+				rate_limit {
+					zone exclusao-sms {
+						key {remote_host}
+						events 3
+						window 1h
+					}
+				}
+				rate_limit {
+					zone exclusao-sms-total {
+						key static
+						events 30
+						window 1h
+					}
+				}
+				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					header_up Host {upstream_hostport}
+					header_up -X-Forwarded-For
+					header_up -X-Real-Ip
+				}
+			}
+		}
+		handle @exclusaoSmsCodigo {
+			route {
+				rate_limit {
+					zone exclusao-codigo {
+						key {remote_host}
+						events 20
+						window 1h
+					}
+				}
+				reverse_proxy 127.0.0.1:{$VARANDA_ACCOUNT_PORT} {
+					header_up Host {upstream_hostport}
+					header_up -X-Forwarded-For
+					header_up -X-Real-Ip
+				}
+			}
+		}
+		handle @exclusaoSmsOutro {
+			respond 405
 		}
 	}
 

@@ -10,11 +10,12 @@
 //   identity.status()   -> Promise<{ exists, publicKey, legacy, unlocked, synced,
 //                          webauthn, prf, hybrid, platform, signal (each
 //                          'yes'|'no'|'unknown'), rpId, rpIdError?,
-//                          passkeyKnown, resumed, pending,
+//                          passkeyKnown, credentialId, resumed, pending,
 //                          refused: [{ userId, code, cleaned, created }] }>
-//   identity.unlock({ register = false, any = false, phone = false } = {})
+//   identity.unlock({ register = false, any = false, phone = false, check = false } = {})
 //                       -> Promise<{ publicKey, created, sessionSaved? } | { pending: true }>
-//                          | { wrapped: true, lookupId }
+//                          | { wrapped: true, lookupId } | { check: true, publicKey, lookupId }
+//   identity.unlockDirect() -> Promise<{ publicKey, created, sessionSaved? }>
 //   identity.complete() -> Promise<{ publicKey, created, sessionSaved? }>
 //                          (or the addPasskey/finishRecovery result when the
 //                          pending creation was one of those)
@@ -24,6 +25,9 @@
 //   identity.cancelRecovery() -> Promise
 //   identity.finishRecovery({ phone }) / identity.addPasskey({ phone })
 //                       -> Promise<{ credentialId, userId, lookupId, blob, sessionSaved? } | { pending: true }>
+//                          (addPasskey's also carries the creation's
+//                          attestationObject when the browser gave one, for
+//                          the new passkey's key at the account service)
 //   identity.bindPasskey({ credentialId, userId }) -> Promise<{ sessionSaved? }>
 //   identity.makeRecoveryCode() -> Promise<{ code, lookupId, blob }>
 //   identity.confirm({ challenge })
@@ -114,6 +118,14 @@
 // creation replaces a pending one only once it is bound; if its install
 // fails, the old pending stays and the new id is refused INSTALL_FAILED.
 // reset() drops it; signOut() keeps it.
+// A sign-up creation also leaves `intent` ({ userId, phone }, no credential
+// id), queued before create() so a page that dies before the pending write
+// still knows the user handle of the passkey it asked for. status() reports
+// it as pending; 'concluir' then offers every passkey and only the one with
+// that handle is the creation (OTHER_PASSKEY otherwise, the trace kept),
+// and a sign-in with that handle takes the creation checks (BE flag, PRF)
+// before any other route. A separate field: a build without it reads the
+// entry as before, and no null id reaches an exclude or allow list.
 //
 // confirm() is the gate before a step the stored session alone must not
 // authorize (deleting the account): someone holding an unlocked device must
@@ -155,6 +167,20 @@
 // any other passkey installs directly, as before recovery: a lookup id is
 // never derived from a PRF output not known to be a wrapping passkey's (it
 // would send a value derived from a member root to the account service).
+// The one exception is unlock({ check: true }), which the hosted app passes:
+// such an unknown passkey without a handle is held instead, and the call
+// resolves { check: true, publicKey, lookupId }, the diary key its PRF output
+// would install and the lookup id it would have as an added passkey. The app
+// reads the account status of publicKey and sends lookupId to the account
+// service only when that key has no account (docs/protocol.md "Web member
+// storage (B2)"); then unlockWrapped opens the member's blob as for a marked
+// passkey (bound with record.wrapped), and unlockDirect() installs the held
+// PRF output as before (RECOVERY_BAD when nothing is held). Both the PRF copy
+// and the wrap key are zeroed by cancelRecovery, a sign-in that installs, the
+// next held passkey or code, lock, signOut, reset, close and after 120 s.
+// unlockWrapped consumes and zeroes the wrap key whenever it runs; after a
+// blob that does not open only the PRF copy stays held, for unlockDirect. A
+// ceremony that fails leaves both held.
 // unlockWithCode() does the same for a code; unlockWrapped then holds the root for 120 s ({ needsPasskey: true })
 // and finishRecovery(), in a click, creates a recovery passkey, wraps the
 // root under it and only then installs the root bound to it (a failed
@@ -214,6 +240,8 @@ const PASSKEY_KEY = 'passkey'
 const PASSKEY_ATTEMPTS_KEY = 'passkeyAttempts'
 const PASSKEY_ENROL_KEY = 'passkeyEnrol'
 const ATTESTATION_RE = /^[A-Za-z0-9_-]{1,2731}$/
+const USER_ID_RE = /^[0-9a-f]{64}$/
+const USER_ID_BYTES = 32
 const REFUSED_MAX = 32
 const PHONE_HINTS = ['hybrid']
 const NONCE_BYTES = 32
@@ -306,10 +334,10 @@ function capRefused (refused) {
   })
 }
 
-// The stored attempts record for this rp.id -> { pending, refused }; a record
-// for another rp.id, or anything malformed, reads as empty.
+// The stored attempts record for this rp.id -> { pending, refused, intent };
+// a record for another rp.id, or anything malformed, reads as empty.
 function attemptsRecord (value, rpId) {
-  const empty = { pending: null, refused: [] }
+  const empty = { pending: null, refused: [], intent: null }
   if (value === null || typeof value !== 'object' || value.v !== 1 || value.rpId !== rpId) return empty
   let pending = null
   const p = value.pending
@@ -324,7 +352,23 @@ function attemptsRecord (value, rpId) {
       refused.push({ credentialId: e.credentialId, userId: typeof e.userId === 'string' ? e.userId : null, code: e.code, cleaned: e.cleaned === true, created: e.created === true })
     }
   }
-  return { pending, refused: capRefused(refused) }
+  return { pending, refused: capRefused(refused), intent: intentOf(value.intent) }
+}
+
+// The creation intent: the user id (hex, 32 bytes) and the phone choice of a
+// sign-up creation, written before create() so a passkey made by a page that
+// died before its result was recorded can still be recognized by its user
+// handle. Its own field, not a pending without an id: a build from before it
+// ignores the field and still reads the pending creation as before.
+function intentOf (value) {
+  if (value === null || typeof value !== 'object' || typeof value.userId !== 'string' || !USER_ID_RE.test(value.userId)) return null
+  return { userId: value.userId, phone: value.phone === true }
+}
+
+// The 'concluir' of a creation intent met another passkey: never that
+// creation, so nothing is installed and the trace stays.
+function otherPasskey (target) {
+  return codedError('OTHER_PASSKEY', 'essa não é a passkey criada agora; escolha a passkey "Varanda ' + target.userId.slice(0, 6) + '"')
 }
 
 function attestationOk (value) {
@@ -394,6 +438,11 @@ function createIdentity (node, storage, sessionStore, idb) {
   // mirrored in kv 'passkeyAttempts' so a reload still excludes them.
   let pending = null
   let refused = []
+  // The creation intent ({ userId, phone }) of a sign-up creation whose
+  // result is not recorded yet, mirrored in kv 'passkeyAttempts' too: a
+  // later 'concluir' or sign-in with that user handle finishes it as a
+  // creation (finishIntent).
+  let intent = null
   // The passkey the person chose when the stored diary turned out to be
   // another identity's (MISMATCH): after "recomeçar" (reset) the next
   // "entrar" asks for that passkey only, not any Varanda passkey.
@@ -417,6 +466,10 @@ function createIdentity (node, storage, sessionStore, idb) {
   // A code recovery whose blob opened, waiting for the new passkey:
   // { root, member, timer }.
   let held = null
+  // The PRF output of an unknown passkey without a handle held by
+  // unlock({ check: true }) beside its wrap key (awaiting), until the app
+  // picks unlockDirect or unlockWrapped: { prf, credentialId, timer }.
+  let direct = null
   // A recovery passkey creation without PRF yet ({ credentialId, userId,
   // phone, mode: 'add' | 'recover', epoch }): memory only, complete() ends it.
   let addPending = null
@@ -437,10 +490,18 @@ function createIdentity (node, storage, sessionStore, idb) {
   }
 
   function dropAwaiting () {
+    dropDirect()
     if (awaiting === null) return
     clearTimeout(awaiting.timer)
     zero(awaiting.wrapKey)
     awaiting = null
+  }
+
+  function dropDirect () {
+    if (direct === null) return
+    clearTimeout(direct.timer)
+    zero(direct.prf)
+    direct = null
   }
 
   function dropHeld () {
@@ -500,9 +561,11 @@ function createIdentity (node, storage, sessionStore, idb) {
   // already queued. Never rejects: a failed write keeps the memory copy.
   function persist () {
     persisting = persisting.then(() => {
-      const value = pending === null && refused.length === 0
-        ? null
-        : { v: 1, rpId, pending, refused }
+      let value = null
+      if (pending !== null || refused.length > 0 || intent !== null) {
+        value = { v: 1, rpId, pending, refused }
+        if (intent !== null) value.intent = intent
+      }
       return storage.writeJson(PASSKEY_ATTEMPTS_KEY, value)
     }).catch(noop)
     return persisting
@@ -530,9 +593,13 @@ function createIdentity (node, storage, sessionStore, idb) {
   async function bind (gen, record, rec) {
     const prevKnown = known
     const prevPending = pending
+    const prevIntent = intent
     const prevStored = stored
     known = record
     pending = null
+    // Any bound passkey ends the creation intent: its own (finishIntent), or
+    // another identity that leaves that creation unknown, with no id to refuse.
+    intent = null
     try {
       await storage.writeJson(PASSKEY_KEY, record)
       if (stale(gen, rec)) throw cancelled()
@@ -549,6 +616,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       if (known === record) {
         known = prevKnown
         if (pending === null) pending = prevPending
+        if (intent === null) intent = prevIntent
         await storage.writeJson(PASSKEY_KEY, prevStored).catch(() => {})
       }
       throw err
@@ -561,6 +629,7 @@ function createIdentity (node, storage, sessionStore, idb) {
         pending = prevPending
         refused = refused.filter((e) => !(e.credentialId === prevPending.credentialId && e.code === 'SUPERSEDED'))
       }
+      if (intent === null) intent = prevIntent
       await storage.writeJson(PASSKEY_KEY, prevStored).catch(() => {})
       await persist()
     }
@@ -813,11 +882,55 @@ function createIdentity (node, storage, sessionStore, idb) {
     return err
   }
 
-  function unlock ({ register = false, any = false, phone = false } = {}) {
+  // A get answered by the passkey of the creation intent `target` (its user
+  // handle): the checks of a creation apply, as in passkey.register. Bound
+  // to one device -> NOT_SYNCED (refused by the caller's onFail through
+  // refuseIntent); otherwise it installs as a creation, and the bind ends
+  // the intent. It has no attestation object (none was ever stored), so no
+  // passkey enrolment follows. Zeroes result.prf.
+  function finishIntent (gen, result, target) {
+    const known = refused.find((e) => e.credentialId === result.credentialId && isDeviceBound(e))
+    if (result.sync === 'bound' || known !== undefined) {
+      result.prf.fill(0)
+      const err = codedError('NOT_SYNCED', passkey.MESSAGES.NOT_SYNCED)
+      err.credentialId = result.credentialId
+      err.userId = target.userId
+      err.cleaned = false
+      throw err
+    }
+    return finish(gen, result.prf, { credentialId: result.credentialId, userId: target.userId, created: true })
+  }
+
+  // A NO_PRF or NOT_SYNCED that names the passkey of the creation intent
+  // `target`: that creation is refused here (created true, never asked to be
+  // dropped: it may already be the account on another device) and its trace
+  // goes. A NO_PRF from a passkey whose data says it is bound to one device
+  // is NOT_SYNCED, as register() orders them: a NO_PRF entry would let it
+  // sign in once its manager returns PRF. -> the error to throw, or null
+  // when `err` is not that passkey's.
+  async function refuseIntent (err, target, epoch) {
+    if (!err || typeof err.credentialId !== 'string' || err.userId !== target.userId) return null
+    if (err.code !== 'NO_PRF' && err.code !== 'NOT_SYNCED') return null
+    let out = err
+    if (err.code === 'NO_PRF' && err.sync === 'bound') {
+      out = codedError('NOT_SYNCED', passkey.MESSAGES.NOT_SYNCED)
+      out.cleaned = false
+    }
+    if (epoch === resets && intent === target) intent = null
+    return noteUnusable(out, err.credentialId, target.userId, false, true, epoch)
+  }
+
+  function unlock ({ register = false, any = false, phone = false, check = false } = {}) {
     const hints = phone === true ? PHONE_HINTS : undefined
     const epoch = resets
     if (register) {
       let deviceBound = null
+      // The intent this creation writes and the one it replaces: a create()
+      // that ends with no passkey (or one refused at once) puts the old one
+      // back, so the record is as it was before the attempt.
+      const prevIntent = intent
+      let mine = null
+      let made = false
       // Ids this request asks the manager to leave alone (the stored, the
       // pending and every refused passkey, any of which may be an account
       // somewhere): if an authenticator ignores the list and hands one back,
@@ -825,7 +938,20 @@ function createIdentity (node, storage, sessionStore, idb) {
       const excludedNow = excluded()
       const wasExcluded = new Set(excludedNow)
       return run(
-        (credentials) => passkey.register(credentials, { rpId, excludeCredentialIds: excludedNow, hints }),
+        (credentials) => {
+          const userId = new Uint8Array(USER_ID_BYTES)
+          globalThis.crypto.getRandomValues(userId)
+          mine = { userId: b4a.toString(userId, 'hex'), phone: phone === true }
+          intent = mine
+          // Queued, not awaited: create() below still runs inside the click.
+          // The write lands long before the person finishes the passkey
+          // sheet, so a page that dies once create() resolved has the trace.
+          persist()
+          return passkey.register(credentials, { rpId, userId, excludeCredentialIds: excludedNow, hints }).then((r) => {
+            made = true
+            return r
+          })
+        },
         async (gen, result) => {
           const bound = refused.find((e) => e.credentialId === result.credentialId && isDeviceBound(e))
           if (bound !== undefined) {
@@ -849,6 +975,8 @@ function createIdentity (node, storage, sessionStore, idb) {
           if (result.pending === true) {
             if (old !== null) supersede()
             pending = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, attestationObject: attestationOk(result.attestationObject) ? result.attestationObject : null }
+            // The pending creation, with its id, takes the place of the trace.
+            if (intent === mine) intent = null
             await persist()
             // A lock/signOut/reset during the write: the caller must not be
             // told to 'concluir' (reset already dropped this pending).
@@ -878,6 +1006,13 @@ function createIdentity (node, storage, sessionStore, idb) {
           }
         },
         async (err) => {
+          // A passkey made, then a lock, sign-out or close before its result
+          // was recorded: the trace stays, as after a crash, so 'concluir'
+          // can still reach it. Any other end of this attempt drops it.
+          if (epoch === resets && intent === mine && mine !== null && !(made && err && err.code === 'CANCELLED')) {
+            intent = prevIntent
+            await persist()
+          }
           if (err === deviceBound) return err
           const id = err && err.credentialId
           // A handed-back excluded id was not made by this request: it may be
@@ -890,6 +1025,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     }
     const allow = any === true ? [] : (known ? [known.credentialId] : (chosen ? [chosen] : []))
     const rec = recoveryEpoch
+    const target = intent
     let deviceBound = null
     return run(
       (credentials) => passkey.signIn(credentials, { rpId, allowCredentialIds: allow, hints }),
@@ -906,6 +1042,10 @@ function createIdentity (node, storage, sessionStore, idb) {
           deviceBound.cleaned = false
           throw deviceBound
         }
+        // The passkey of the creation intent: the person's own new creation,
+        // so it takes the creation checks before any recovery or account
+        // check (a check: true sign-in included).
+        if (target !== null && result.userHandle === target.userId) return finishIntent(gen, result, target)
         const isBound = known !== null && known.credentialId === result.credentialId
         const credentialId = result.credentialId
         // No handle and not the bound passkey: an abandoned recovery or added
@@ -923,10 +1063,18 @@ function createIdentity (node, storage, sessionStore, idb) {
         if (recovery.isWrapUserId(userId) || (isBound && known.wrapped === true)) {
           return hold(gen, result.prf, { kind: 'passkey', credentialId, userId, rec })
         }
+        // Unknown and without a handle, on a hosted app: it may be an added
+        // passkey whose manager dropped the handle. Held for the app's
+        // status-gated lookup, never installed yet.
+        if (check === true && userId === null && !isBound) return holdCheck(gen, result.prf, { credentialId, rec })
         return finish(gen, result.prf, { credentialId, userId, created: false })
       },
       async (err) => {
         if (err === deviceBound) return err
+        if (target !== null) {
+          const refusal = await refuseIntent(err, target, epoch)
+          if (refusal !== null) return refusal
+        }
         // A chosen passkey without PRF: name it like a fresh one (userId from
         // its userHandle, or the stored record when it is that passkey). It is
         // refused for creation only, and never dropped from the manager.
@@ -938,6 +1086,7 @@ function createIdentity (node, storage, sessionStore, idb) {
 
   function complete () {
     if (addPending !== null) return completeWrapped()
+    if (pending === null && intent !== null) return completeIntent()
     if (pending === null) return Promise.reject(codedError('CANCELLED', 'nenhuma criação de passkey pendente'))
     const target = pending
     const epoch = resets
@@ -951,6 +1100,32 @@ function createIdentity (node, storage, sessionStore, idb) {
       // Never dropped from the manager: between creation and 'concluir' the
       // synced passkey may already have become the account on another device.
       (err) => noteUnusable(err, target.credentialId, target.userId, false, true, epoch))
+  }
+
+  // 'concluir' of a creation intent: its credential id was never recorded, so
+  // the get offers every Varanda passkey and only the one whose user handle
+  // is the intent's finishes it (finishIntent). Any other passkey is zeroed
+  // and refused OTHER_PASSKEY, the trace kept; a cancel keeps it too.
+  function completeIntent () {
+    const target = intent
+    const epoch = resets
+    const hints = target.phone === true ? PHONE_HINTS : undefined
+    return run(
+      (credentials) => passkey.signIn(credentials, { rpId, allowCredentialIds: [], hints }),
+      (gen, result) => {
+        if (result.userHandle !== target.userId) {
+          result.prf.fill(0)
+          throw otherPasskey(target)
+        }
+        return finishIntent(gen, result, target)
+      },
+      async (err) => {
+        const refusal = await refuseIntent(err, target, epoch)
+        if (refusal !== null) return refusal
+        // Another passkey without PRF: not this creation, nothing recorded.
+        if (err && typeof err.credentialId === 'string' && (err.code === 'NO_PRF' || err.code === 'NOT_SYNCED')) return otherPasskey(target)
+        return err
+      })
   }
 
   // A recovery secret (a passkey's PRF output or a code secret) -> its
@@ -976,6 +1151,46 @@ function createIdentity (node, storage, sessionStore, idb) {
       zero(secret)
       if (keys !== null) zero(keys.wrapKey)
     }
+  }
+
+  // unlock({ check: true }) of an unknown passkey without a handle: its PRF
+  // output -> { check: true, publicKey, lookupId }, holding a copy for
+  // unlockDirect and the wrap key for unlockWrapped. Zeroes prf.
+  async function holdCheck (gen, prf, { credentialId, rec }) {
+    let copy = new Uint8Array(prf)
+    let kp = null
+    try {
+      if (stale(gen, rec)) throw cancelled()
+      kp = await passkey.keyPairFromPrf(copy)
+      const publicKey = b4a.toString(kp.publicKey, 'hex')
+      zeroPair(kp)
+      kp = null
+      const out = await hold(gen, prf, { kind: 'passkey', credentialId, userId: null, rec })
+      // A cancelRecovery, lock or newer ceremony while hold() settled has
+      // dropped the wrap key: the copy is not armed either.
+      if (stale(gen, rec) || awaiting === null) throw cancelled()
+      const entry = { prf: copy, credentialId, timer: null }
+      entry.timer = unrefTimer(() => { if (direct === entry) dropDirect() }, RECOVERY_TTL_MS)
+      direct = entry
+      copy = null
+      return { check: true, publicKey, lookupId: out.lookupId }
+    } finally {
+      zero(prf)
+      zero(copy)
+      zeroPair(kp)
+    }
+  }
+
+  // After { check: true }: the held PRF output installs as the identity, as
+  // a plain passkey's does (the account check found nothing to open).
+  function unlockDirect () {
+    if (busy) return Promise.reject(busyError())
+    const entry = direct
+    if (entry === null) return Promise.reject(recoveryBad('nenhuma entrada em andamento'))
+    direct = null
+    clearTimeout(entry.timer)
+    dropAwaiting()
+    return local((gen) => finish(gen, entry.prf, { credentialId: entry.credentialId, userId: null, created: false }))
   }
 
   // A non-ceremony step that must not overlap a ceremony (LOCKED otherwise);
@@ -1088,7 +1303,7 @@ function createIdentity (node, storage, sessionStore, idb) {
   // install drops the held root (that recovery is over) and refuses the new
   // passkey INSTALL_FAILED unless it ended up bound. `resetEpoch`: the
   // resets count when the creation began (a reset since then records nothing).
-  async function wrappedCreated (gen, mode, prf, { credentialId, userId, epoch, resetEpoch }) {
+  async function wrappedCreated (gen, mode, prf, { credentialId, userId, epoch, resetEpoch, attestationObject = null }) {
     let keys = null
     let rootCopy = null
     try {
@@ -1138,7 +1353,9 @@ function createIdentity (node, storage, sessionStore, idb) {
       keys = await recovery.deriveRecoveryKeys(prf, 'passkey')
       if (gen !== generation || root === null) throw cancelled()
       const blob = recovery.wrapRoot({ root, member: rootMember, kind: 'passkey', wrapKey: keys.wrapKey })
-      return { credentialId, userId, lookupId: keys.lookupId, blob }
+      const out = { credentialId, userId, lookupId: keys.lookupId, blob }
+      if (attestationOk(attestationObject)) out.attestationObject = attestationObject
+      return out
     } finally {
       zero(prf)
       zero(rootCopy)
@@ -1177,7 +1394,7 @@ function createIdentity (node, storage, sessionStore, idb) {
         }
         if (result.pending === true) {
           if (addPending !== null && addPending.credentialId !== result.credentialId) dropAddPending(addPending)
-          const next = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, mode, epoch: rec }
+          const next = { credentialId: result.credentialId, userId: result.userId, phone: phone === true, mode, epoch: rec, attestationObject: result.attestationObject }
           addPending = next
           // addPending is memory only: the refused entry keeps the passkey
           // out of later creations after a reload, which never offers it
@@ -1187,7 +1404,7 @@ function createIdentity (node, storage, sessionStore, idb) {
           if (gen !== generation || addPending !== next) throw cancelled()
           return { pending: true }
         }
-        return wrappedCreated(gen, mode, result.prf, { credentialId: result.credentialId, userId: result.userId, epoch: rec, resetEpoch: epoch })
+        return wrappedCreated(gen, mode, result.prf, { credentialId: result.credentialId, userId: result.userId, epoch: rec, resetEpoch: epoch, attestationObject: result.attestationObject })
       },
       (err) => {
         if (err === deviceBound) return err
@@ -1214,7 +1431,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     return run(
       (credentials) => passkey.completeRegistration(credentials, { rpId, credentialId: target.credentialId, hints }),
       async (gen, result) => {
-        const out = await wrappedCreated(gen, target.mode, result.prf, { credentialId: result.credentialId, userId: target.userId, epoch: target.epoch, resetEpoch: epoch })
+        const out = await wrappedCreated(gen, target.mode, result.prf, { credentialId: result.credentialId, userId: target.userId, epoch: target.epoch, resetEpoch: epoch, attestationObject: target.attestationObject })
         if (addPending === target) addPending = null
         // It is an entry now (and, for a recovery, the bound passkey).
         const before = refused.length
@@ -1377,8 +1594,9 @@ function createIdentity (node, storage, sessionStore, idb) {
       platform: support.platform,
       signal: support.signal,
       passkeyKnown: known !== null,
+      credentialId: known !== null ? known.credentialId : null,
       resumed: resumed && stored.unlocked === true,
-      pending: pending !== null || addPending !== null,
+      pending: pending !== null || addPending !== null || intent !== null,
       refused: refused.map(({ userId, code, cleaned, created }) => ({ userId, code, cleaned, created }))
     }
     if (rpIdError !== null) out.rpIdError = rpIdError.message
@@ -1447,6 +1665,7 @@ function createIdentity (node, storage, sessionStore, idb) {
     resumed = false
     known = null
     pending = null
+    intent = null
     refused = kept
     stored = null
     await finishing
@@ -1469,6 +1688,8 @@ function createIdentity (node, storage, sessionStore, idb) {
       const attempts = attemptsRecord(await storage.readJson(PASSKEY_ATTEMPTS_KEY), rpId)
       pending = attempts.pending
       refused = attempts.refused
+      // Bound before the write that ends the intent landed: it is done.
+      intent = attempts.intent !== null && known !== null && known.userId === attempts.intent.userId ? null : attempts.intent
     },
     resume,
     invalidate,
@@ -1484,6 +1705,7 @@ function createIdentity (node, storage, sessionStore, idb) {
       signOut,
       reset,
       unlockWrapped,
+      unlockDirect,
       unlockWithCode,
       cancelRecovery,
       finishRecovery,

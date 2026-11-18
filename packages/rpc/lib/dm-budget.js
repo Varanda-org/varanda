@@ -34,6 +34,19 @@ const DM_INNER_KEYS_V6 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'day', 
 // own box and signed by the own key under its own domain. `from` and `to` are
 // both the own key and there is no certificate, as a ctl has none.
 const DM_INNER_KEYS_V7 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'copy', 'at'])
+// v8 is a history copy claim (kind 'claim', docs/protocol.md section 11): the
+// own device `by` announces that it will make copy `copy` for the own devices
+// `for`, so another own device seeing an earlier claim leaves the copy to it.
+// Sealed to the own box and signed by the own key under its own domain, with
+// no certificate, as the v7 pointer.
+const DM_INNER_KEYS_V8 = Object.freeze(['v', 'kind', 'id', 'from', 'to', 'copy', 'for', 'by', 'at'])
+// v9 is a msg or ctl from a manifest diary (a Hypercore 11 core node): `from`
+// is the diary key, which is the hash of its signer's manifest and so cannot
+// verify a signature, and `signer` is the key that signs. The v2 keys plus
+// `signer`, signed under its own domain.
+const DM_INNER_KEYS_V9 = Object.freeze(['v', 'kind', 'id', 'from', 'signer', 'to', 'replyTo', 'text', 'media', 'card', 'fwd', 'op', 'peer', 'at', 'cert'])
+// v10 is a reaction from a manifest diary: the v4 keys plus `signer`.
+const DM_INNER_KEYS_V10 = Object.freeze(['v', 'kind', 'id', 'from', 'signer', 'to', 'target', 'emoji', 'rev', 'at', 'cert'])
 // The six keys of a blob descriptor (core lib/blob.js), in wire order.
 const DM_BLOB_KEYS = Object.freeze(['id', 'key', 'nonce', 'chunks', 'bytes', 'sha256'])
 // A reaction's target, and a bound reply's replyTo (v2 and v3): the
@@ -114,23 +127,28 @@ function canonicalBlobDescriptor (d) {
   return o
 }
 
+// v1 and anything unknown use the v1 list; v3 signs the v2 keys.
+const INNER_KEYS_BY_V = new Map([
+  [2, DM_INNER_KEYS_V2],
+  [3, DM_INNER_KEYS_V2],
+  [4, DM_INNER_KEYS_V4],
+  [5, DM_INNER_KEYS_V5],
+  [6, DM_INNER_KEYS_V6],
+  [7, DM_INNER_KEYS_V7],
+  [8, DM_INNER_KEYS_V8],
+  [9, DM_INNER_KEYS_V9],
+  [10, DM_INNER_KEYS_V10]
+])
+
 function canonicalInnerJson (body) {
-  const keys = body.v === 7
-    ? DM_INNER_KEYS_V7
-    : body.v === 4
-      ? DM_INNER_KEYS_V4
-      : body.v === 5
-        ? DM_INNER_KEYS_V5
-        : body.v === 6
-          ? DM_INNER_KEYS_V6
-          : body.v === 2 || body.v === 3 ? DM_INNER_KEYS_V2 : DM_INNER_KEYS
+  const keys = INNER_KEYS_BY_V.get(body.v) || DM_INNER_KEYS
   const o = {}
   for (const k of keys) {
     o[k] = k === 'media' && Array.isArray(body.media)
       ? body.media.map(canonicalMediaItem)
       : k === 'card'
         ? canonicalCard(body.card)
-        : k === 'copy' ? canonicalBlobDescriptor(body.copy) : k === 'target' || k === 'replyTo' ? canonicalTarget(body[k]) : body[k]
+        : k === 'copy' && body.v === 7 ? canonicalBlobDescriptor(body.copy) : k === 'target' || k === 'replyTo' ? canonicalTarget(body[k]) : body[k]
   }
   return JSON.stringify(o)
 }
@@ -142,9 +160,10 @@ function dmTextBytes (text) {
 }
 
 // fields: { v?, kind?, id?, from?, to?, replyTo?, media?, card?, fwd?, op?,
-// peer?, at?, cert? }; text is ignored. replyTo is measured as given: a
-// bare id, or a bound { from, id, digest }. v 3 measures a Página's inner,
-// which always carries the v2 keys. Returns the dmTextBytes still free
+// peer?, at?, cert?, signer? }; text is ignored. replyTo is measured as
+// given: a bare id, or a bound { from, id, digest }. v 3 measures a Página's
+// inner, which always carries the v2 keys; v 9 (or a signer) the inner of a
+// manifest diary, the v2 keys plus `signer`. Returns the dmTextBytes still free
 // under DM_INNER_BYTES; below zero nothing fits, not even empty text.
 function dmTextBudget (fields = {}) {
   const f = fields !== null && typeof fields === 'object' ? fields : {}
@@ -163,7 +182,12 @@ function dmTextBudget (fields = {}) {
     at: f.at === undefined ? AT_STANDIN : f.at,
     cert: orNull(f.cert)
   }
-  body.v = f.v === 3 ? 3 : innerVersion(body)
+  if (f.v === 9 || f.signer !== undefined) {
+    body.v = 9
+    body.signer = f.signer === undefined ? KEY_STANDIN : f.signer
+  } else {
+    body.v = f.v === 3 ? 3 : innerVersion(body)
+  }
   const framing = DM_INNER_FRAMING_BYTES + (body.v === 3 ? DM_INNER_V3_EXPIRY_BYTES : 0)
   return DM_INNER_BYTES - framing - utf8ByteLength(canonicalInnerJson(body))
 }
@@ -180,6 +204,9 @@ module.exports = {
   DM_INNER_KEYS_V5,
   DM_INNER_KEYS_V6,
   DM_INNER_KEYS_V7,
+  DM_INNER_KEYS_V8,
+  DM_INNER_KEYS_V9,
+  DM_INNER_KEYS_V10,
   DM_BLOB_KEYS,
   DM_TARGET_KEYS,
   DM_MEDIA_KEYS,

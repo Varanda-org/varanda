@@ -156,6 +156,33 @@ test('selfOff: an id the fold turned off', (t) => {
   t.alike(devices.disconnectPlan({ fold, self: id, id: hex32(), linked: [], own: [] }), { error: devices.OFF_REFUSED })
 })
 
+test('copyView: on devices registered after this one, inside the window', (t) => {
+  const { key, seal } = setup()
+  const [old, self, mid, gone, late] = [hex32(), hex32(), hex32(), hex32(), hex32()]
+  const fold = devices.foldDevices(diary([
+    seal({ v: 1, id: old, name: 'Antigo', on: true, writers: [] }, 1),
+    seal({ v: 1, id: self, name: 'Este', on: true, writers: [] }, 2),
+    seal({ v: 1, id: mid, name: 'Tablet', on: true, writers: [] }, 3),
+    seal({ v: 1, id: gone, name: 'Perdido', on: true, writers: [] }, 4),
+    seal({ v: 1, id: gone, name: null, on: false, writers: [] }, 5),
+    seal({ v: 1, id: late, name: 'Novo', on: true, writers: [] }, 6),
+    seal({ v: 1, id: old, name: null, on: true, writers: [] }, 7)
+  ]), key)
+  const now = Date.parse(at(9))
+  const cuts = new Map()
+  const view = (over = {}) => devices.copyView({ fold, self, own: [], cuts, now, windowMs: 60000, ...over })
+  t.alike(view(), { self, off: false, targets: [mid, late] }, 'never an older device, this one or an off one')
+  t.alike(view({ windowMs: 4000 }).targets, [late], 'registered before the window: left out')
+  const lateAt = Date.parse(at(6))
+  t.alike(view({ now: lateAt - devices.COPY_SINCE_SKEW_MS - 1, windowMs: 3600000 + 60000 }).targets, [mid], 'a first record dated more than the skew ahead: left out')
+  t.alike(view({ now: lateAt - devices.COPY_SINCE_SKEW_MS, windowMs: 3600000 + 60000 }).targets, [mid, late], 'within the skew: still a target')
+  t.alike(view({ self: old }).targets, [self, mid, late], 'a later record of an id keeps its first place')
+  t.alike(view({ self: late }).targets, [], 'the newest device copies to nobody')
+  t.alike(view({ self: null }), { self: null, off: false, targets: [] }, 'no id yet')
+  t.alike(view({ self: hex32() }).targets, [], 'an id the diary does not hold yet')
+  t.alike(view({ self: gone }), { self: gone, off: true, targets: [] }, 'a disconnected device copies to nobody')
+})
+
 test('reconnectPlan: only on a disconnected device, a new id with the uncut writers', (t) => {
   const { key, seal } = setup()
   const old = hex32()

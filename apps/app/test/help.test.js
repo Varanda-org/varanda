@@ -9,7 +9,7 @@ test('help keys match the supported tabs and setup steps', async (t) => {
   t.alike(Object.keys(HELP).sort(), [
     'rua', 'espiadinha', 'seguindo', 'avisos', 'diario', 'conversas', 'entrar', 'vinculo',
     'idade', 'telefone', 'identidade', 'certificado', 'perfil', 'busca', 'ausentes', 'bloqueio',
-    'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira'
+    'instalar', 'denuncia', 'termosAparelho', 'convites', 'feira', 'varandinha'
   ].sort())
 })
 
@@ -203,7 +203,7 @@ test('conversas help states the private-message rules', async (t) => {
     'Não há confirmação de leitura.',
     'Bloquear interrompe as mensagens nos seus aparelhos.',
     'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
-    'Copiar conversas leva o texto e as fotos guardadas neste aparelho para os seus outros aparelhos que entram com a mesma passkey, e só você consegue abrir.',
+    'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
     'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
     'A linha Comunidades serve para achar e criar comunidades.'
   ])

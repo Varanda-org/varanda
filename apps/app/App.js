@@ -91,7 +91,7 @@ import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, once
 import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
-import { deletedOf, newReceipt, scheduledOf } from './src/accountDeletion'
+import { STATUS_RETRY_MS, ajustesTarget, newReceipt, statusReadDue, statusUpdate } from './src/accountDeletion'
 import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
 import { ageBlocking, ageErrorText, ageGate, ageReadAllowed, parseReturnAge } from './src/age'
@@ -130,6 +130,8 @@ import { InstallCard } from './src/ui/InstallCard'
 import { PushNote } from './src/ui/PushNote'
 import { DeletionNote } from './src/ui/DeletionNote'
 import { DeviceOffNote } from './src/ui/DeviceOffNote'
+import { StorageFullNote } from './src/ui/StorageFullNote'
+import { storageFullShown } from './src/syncSignals'
 import { deviceMemberOf, deviceStep, deviceStore, notePasskeyUnlock, readDevices, reconnectDevice, sendHello, shouldForceLock, visibleDevices } from './src/devices'
 import { currentDeviceName, useDeviceState } from './src/useDevices'
 import { InviteDropNote } from './src/ui/InviteDropNote'
@@ -200,6 +202,8 @@ import { refreshMomentSeen } from './src/momentSeenStore'
 import SalvosScreen from './src/screens/Salvos'
 import EventosScreen from './src/screens/Eventos'
 import VisitasScreen from './src/screens/Visitas'
+import VarandinhaScreen from './src/screens/Varandinha'
+import VarandinhaRuaScreen from './src/screens/VarandinhaRua'
 import MomentosScreen from './src/screens/Momentos'
 import FeiraScreen from './src/screens/Feira'
 import AnuncioScreen from './src/screens/Anuncio'
@@ -256,6 +260,8 @@ const Assunto = memo(AssuntoScreen)
 const Recados = memo(RecadosScreen)
 const Eventos = memo(EventosScreen)
 const Visitas = memo(VisitasScreen)
+const Varandinha = memo(VarandinhaScreen)
+const VarandinhaRua = memo(VarandinhaRuaScreen)
 const Mensagens = memo(MensagensScreen)
 const Mensagem = memo(MensagemScreen)
 const Anuncio = memo(AnuncioScreen)
@@ -851,22 +857,87 @@ function Member () {
   const [scheduledDeletion, setScheduledDeletion] = useState(null)
   const [accountTick, setAccountTick] = useState(0)
   const refreshAccount = useCallback(() => setAccountTick((n) => n + 1), [])
+  // A deletion can be scheduled from elsewhere (Excluir conta sem a passkey,
+  // another device), so the status is read again on the foreground, when the
+  // node comes back online and on a timer while in the foreground: at most
+  // every STATUS_EVERY_MS after a good read, every STATUS_RETRY_MS after a
+  // failed one (statusReadDue), so a read that failed offline or on a 429
+  // does not hide the date for long. One read at a time per member: a
+  // refresh asked during a read (`again`) runs after it. The record is
+  // replaced for another member or node, which drops a late answer.
+  const freshStatusRead = () => ({ goodAt: null, triedAt: null, failed: false, busy: false, queued: false, again: false })
+  const statusRead = useRef(freshStatusRead())
+  const pokeStatus = useCallback(() => {
+    const rec = statusRead.current
+    if (rec.busy || rec.queued || !statusReadDue(rec, Date.now())) return
+    rec.queued = true
+    refreshAccount()
+  }, [refreshAccount])
+  useEffect(() => {
+    if (node.hosted !== true || member === null) return
+    let timer = null
+    const stop = () => { if (timer !== null) clearInterval(timer); timer = null }
+    const run = () => { if (timer === null) timer = setInterval(pokeStatus, STATUS_RETRY_MS) }
+    if (AppState.currentState === 'active') run()
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return stop()
+      run()
+      pokeStatus()
+    })
+    return () => { stop(); sub.remove() }
+  }, [node.hosted, member, pokeStatus])
+  const statusOnlineRef = useRef(node.online)
+  useEffect(() => {
+    const was = statusOnlineRef.current
+    statusOnlineRef.current = node.online
+    if (was !== false || node.online !== true) return
+    pokeStatus()
+  }, [node.online, pokeStatus])
   const enrolling = useRef(false)
   const [enrolDue, setEnrolDue] = useState(null)
+  // Cleared only for another member or node; a refresh (a schedule, a
+  // cancel, the foreground) keeps what is shown until an answer replaces it.
+  // The first answer for this member is the one that leaves the enrolment due.
+  const statusStart = useRef(true)
+  const deletionShown = useRef({ deletedState: null, scheduledDeletion: null })
   useEffect(() => {
+    statusStart.current = true
+    statusRead.current = freshStatusRead()
+    deletionShown.current = { deletedState: null, scheduledDeletion: null }
     setDeletedState(null)
     setScheduledDeletion(null)
     setEnrolDue(null)
+  }, [node.hosted, member])
+  useEffect(() => {
     if (node.hosted !== true || member === null) return
-    let alive = true
-    accountStatus(member).then((st) => {
-      if (!alive) return
-      setDeletedState(deletedOf(st))
-      setScheduledDeletion(scheduledOf(st))
-      if (st && st.linked === true && typeof st.username === 'string') setEnrolDue({ member, username: st.username })
-    }, () => {})
-    return () => { alive = false }
-  }, [node.hosted, member, accountTick])
+    const rec = statusRead.current
+    rec.queued = false
+    if (rec.busy) {
+      rec.again = true
+      return
+    }
+    rec.busy = true
+    const start = statusStart.current
+    const settle = (st) => {
+      rec.busy = false
+      if (rec !== statusRead.current) return
+      const at = Date.now()
+      rec.triedAt = at
+      rec.failed = st === null
+      if (st !== null) rec.goodAt = at
+      const next = statusUpdate(deletionShown.current, st, { start, member })
+      if (st !== null) statusStart.current = false
+      deletionShown.current = { deletedState: next.deletedState, scheduledDeletion: next.scheduledDeletion }
+      setDeletedState(next.deletedState)
+      setScheduledDeletion(next.scheduledDeletion)
+      if (next.enrolDue !== null) setEnrolDue(next.enrolDue)
+      if (rec.again) {
+        rec.again = false
+        refreshAccount()
+      }
+    }
+    accountStatus(member).then((st) => settle(st && typeof st === 'object' ? st : null), () => settle(null))
+  }, [node.hosted, member, accountTick, refreshAccount])
   const decision = terms.status === 'loading'
     ? 'loading'
     : termsDecision({
@@ -930,12 +1001,15 @@ function Member () {
   if (held.offline) termsHeld.current.set(heldEntryKey, { state: 'none' })
   // After Entrar with no diary here, until the key is known (src/termsCreate.js
   // recoverView). Render-time ref writes: the window's start, cleared with it.
+  // An empty card up for this identity (src/emptyAccount.js) is rendered
+  // instead, and closes the window until it is taken down.
   const recoverAt = useRef(null)
-  const recoverProbe = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision })
+  const emptyCard = passkey !== null ? passkey.emptyCard : null
+  const recoverProbe = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, card: emptyCard, status: pkStatus })
   if (!recoverProbe.window) recoverAt.current = null
   else if (recoverAt.current === null) recoverAt.current = Date.now()
   const recoverElapsed = recoverAt.current === null ? NaN : Date.now() - recoverAt.current
-  const recoverWait = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait
+  const recoverWait = recoverView({ hosted: mode === 'hosted', locked, member, claim: terms.claim, decision, card: emptyCard, status: pkStatus, recovering: passkey !== null && passkey.recovering === true, elapsedMs: recoverElapsed }).wait
   useEffect(() => {
     if (!recoverWait) return
     const t = setTimeout(() => setHeldTick((n) => n + 1), Math.max(0, RECOVER_WAIT_MS - recoverElapsed) + 50)
@@ -945,7 +1019,7 @@ function Member () {
   // if the terms passed (src/termsCreate.js modeUnknownPass): the splash,
   // then Conexão, never the gate ahead of Entrar.
   const modePass = modeUnknownPass({ hostedMode: mode === 'hosted', hostedPage, installation: installationOrigin(), config: node.config, phase: node.phase, decision })
-  const gateDecision = held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision)
+  const gateDecision = recoverProbe.card ? 'accepted' : (held.wait || recoverWait ? 'loading' : (modePass ? 'accepted' : decision))
   useEffect(() => {
     if (!held.ask || member === null) return
     const who = member
@@ -1434,14 +1508,25 @@ function Member () {
   // Excluir conta opened from the explainer: every way out of it (back,
   // Escape, close) returns to the explainer, never to the Ajustes list.
   const [deleteFromAviso, setDeleteFromAviso] = useState(false)
-  useEffect(() => { if (ajustes === null) setDeleteFromAviso(false) }, [ajustes])
+  // Excluir conta sem a passkey opened from Entrar: the same, closing the
+  // sheet, since no account is open there.
+  const [smsFromEntrar, setSmsFromEntrar] = useState(false)
+  useEffect(() => {
+    if (ajustes !== null) return
+    setDeleteFromAviso(false)
+    setSmsFromEntrar(false)
+  }, [ajustes])
+  const openSmsDelete = useCallback(() => {
+    setSmsFromEntrar(true)
+    setAjustes('excluirSms')
+  }, [])
   const openAvisoDelete = useCallback(() => {
     setDeleteFromAviso(true)
     setAjustes('excluir')
   }, [])
   const navigateAjustes = useCallback((screen) => {
-    setAjustes(deleteFromAviso && screen !== 'excluir' ? null : screen)
-  }, [deleteFromAviso])
+    setAjustes(ajustesTarget(screen, { aviso: deleteFromAviso, entrar: smsFromEntrar }))
+  }, [deleteFromAviso, smsFromEntrar])
 
   // The gates: `confirmed` can latch setupDone for a member already linked,
   // so setupDone alone never opens the tabs, autosync, the outbox, the terms
@@ -2253,6 +2338,11 @@ function Member () {
     pushScreen({ screen: 'recados', key: key.toLowerCase(), params: {} })
   }, [pushScreen])
   const openVisitas = useCallback(() => pushScreen({ screen: 'visitas' }), [pushScreen])
+  const openVarandinha = useCallback((key) => {
+    if (typeof key !== 'string') return
+    pushScreen({ screen: 'varandinha', key: key.toLowerCase(), params: {} })
+  }, [pushScreen])
+  const openVarandinhaRua = useCallback(() => pushScreen({ screen: 'varandinha-rua' }), [pushScreen])
   const openEventos = useCallback((key) => {
     if (typeof key !== 'string') return
     pushScreen({ screen: 'eventos', key: key.toLowerCase(), params: {} })
@@ -2318,11 +2408,13 @@ function Member () {
   const helpOpen = useHelpOpen()
   const helpOpenRef = useRef(helpOpen)
   helpOpenRef.current = helpOpen
-  const backGuardRef = useRef(null)
+  // Every registered guard checks at call time that its own screen is on top,
+  // so at most one of them answers a back press.
+  const backGuardsRef = useRef(new Set())
   const registerBackGuard = useCallback((fn) => {
-    backGuardRef.current = fn
+    backGuardsRef.current.add(fn)
     return () => {
-      if (backGuardRef.current === fn) backGuardRef.current = null
+      backGuardsRef.current.delete(fn)
     }
   }, [])
   // Help opened inside Ajustes or Denunciar keeps sheetOpen true, so it stays.
@@ -3206,10 +3298,14 @@ function Member () {
     })
   }, [action, node.online, inviteTick])
   useEffect(() => {
+    const guarded = () => {
+      for (const fn of backGuardsRef.current) if (fn() === true) return true
+      return false
+    }
     if (Platform.OS === 'android') {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
         if (helpOpenRef.current || sheetOpenRef.current) return false
-        if (backGuardRef.current?.() === true) return true
+        if (guarded()) return true
         if (nav.depth(stackRef.current) === 0) {
           if (tabRef.current !== 'avisos') return false
           closeAvisos()
@@ -3224,7 +3320,7 @@ function Member () {
     if (Platform.OS !== 'web' || typeof globalThis.addEventListener !== 'function') return
     const onKey = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented || helpOpenRef.current || sheetOpenRef.current) return
-      if (backGuardRef.current?.() === true) {
+      if (guarded()) {
         event.preventDefault()
         return
       }
@@ -3743,7 +3839,7 @@ function Member () {
             onDismiss: () => { clearPostLink(); setPendingPost(null) }
           }
         : null
-      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} termsBeforeCreate={termsBeforeCreate} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
+      body = <Identidade active={ready} embedded setup step={step} index={index} total={total} initialInfo={passkey === null ? info : null} onInfo={takeInfo} onInfoError={takeInfoError} onAccountRead={setAccountReadKey} onLinked={takeLinked} onInviteChanged={reloadCard} onPhoneRecheck={recheckPhone} onStepHeld={holdPostStep} termsBeforeCreate={termsBeforeCreate} onDeleteWithoutPasskey={openSmsDelete} invite={inviteProp || entryProp || postProp} feira={{ holder: FEIRA_ENTRY, origin: feiraOrigin, hold: holdFeiraCode }} />
     } else if (infoError) {
       body = (
         <Page flush grow padBottom={16}>
@@ -3830,6 +3926,7 @@ function Member () {
     // The invite note sits above the other notes, so it takes the top inset on
     // Diário and the note under it does not.
     const inviteNoteShown = !!(inviteDrop.note && atTabs && ajustes !== 'convites' && !stacked)
+    const storageNoteShown = storageFullShown({ online: node.online, signals: node.signals })
     const h = screenHandlers.current.update({
       handleStartReply: startReply,
       handleStartQuote: startQuote,
@@ -3853,6 +3950,7 @@ function Member () {
       handleOpenRecados: node.hosted === true ? openRecados : undefined,
       handleOpenEventos: node.hosted === true ? openEventos : undefined,
       handleOpenVisitas: node.hosted === true ? openVisitas : undefined,
+      handleOpenVarandinha: node.hosted === true ? openVarandinha : undefined,
       handleOpenAgenda: node.hosted === true ? openAgenda : undefined,
       handleOpenTop: node.hosted === true ? openTop : undefined,
       handleComposeSeen: () => setComposeSignal(null),
@@ -3880,6 +3978,7 @@ function Member () {
       onOpenPeople: openPeople,
       onOpenTestimonials: openTestimonials,
       onOpenRecados: h.handleOpenRecados,
+      onOpenVarandinha: h.handleOpenVarandinha,
       onOpenEventos: h.handleOpenEventos,
       onOpenListings: h.handleOpenListings
     }
@@ -3932,6 +4031,23 @@ function Member () {
         return (
           <StackLayer key={i + ':visitas:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
             <Visitas active={ready} onBack={goBack} onOpenMember={openMember} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'varandinha') {
+        // Queued acts make Android Back and Escape ask first, as the top bar
+        // arrow does; the guard answers only while this entry is on top.
+        const guardRegistrar = entryHandlers.current.for(i + ':varandinha', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === 'varandinha' && fn()) }).handleRegisterBackGuard
+        return (
+          <StackLayer key={i + ':varandinha:' + entry.key + ':' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <Varandinha entry={entry} ownKey={ownKey} onBack={goBack} onOpenStreet={openVarandinhaRua} onToast={h.handleShowToast} registerBackGuard={guardRegistrar} />
+          </StackLayer>
+        )
+      }
+      if (entry.screen === 'varandinha-rua') {
+        return (
+          <StackLayer key={i + ':varandinha-rua:' + nodeEpoch} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
+            <VarandinhaRua ownKey={ownKey} onBack={goBack} onOpenBalcony={openVarandinha} />
           </StackLayer>
         )
       }
@@ -4051,8 +4167,7 @@ function Member () {
       }
       if (entry.screen === 'anunciar') {
         // Anunciar registers once per mount, so the guard checks the stack at
-        // call time. backGuardRef holds one guard and Anunciar is its only
-        // registrant: a second one would need Anunciar to register again.
+        // call time and answers only while this entry is on top.
         const guardRegistrar = entryHandlers.current.for(i + ':anunciar', { handleRegisterBackGuard: (fn) => registerBackGuard(() => stackRef.current.length - 1 === i && stackRef.current[i].screen === 'anunciar' && fn()) }).handleRegisterBackGuard
         return (
           <StackLayer key={i + ':anunciar:' + actingIdentity} motion={stackMotion} index={i} entry={entry} onPop={goBack}>
@@ -4161,16 +4276,19 @@ function Member () {
           {deviceOffShown
             ? <DeviceOffNote onReconnect={reconnectThisDevice} inset={tab === 'diario' && node.online !== false && scheduledDeletion === null} />
             : null}
+          {storageNoteShown
+            ? <StorageFullNote inset={tab === 'diario' && !deviceOffShown && scheduledDeletion === null} />
+            : null}
           {inviteNoteShown
-            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null} />
+            ? <InviteDropNote record={inviteDrop.note} onShown={handleInviteShown} onOpen={() => { inviteDrop.dismiss(); openInvites() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null} />
             : null}
           {updateReady && !updateDismissed
-            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
+            ? <UpdateNote onUpdate={() => { try { if (Platform.OS === 'web') window.location.reload() } catch {} }} onClose={() => setUpdateDismissed(true)} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} />
             : installCardOpen && install.card !== 'none'
-              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
+              ? <InstallCard kind={install.card} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} onInstall={() => { install.promptInstall(); setInstallCardOpen(false) }} onClose={() => { setInstallCardOpen(false); install.dismissInstall() }} />
               : install.note !== 'none'
-                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} />
-                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
+                ? <InstallNote kind={install.note} onInstall={() => { install.promptInstall() }} onClose={() => { install.dismissInstall() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} />
+                : push.note === 'offer' && pushMember !== null && push.member === pushMember ? <PushNote text={push.error || undefined} pending={push.pending} onEnable={() => { push.activatePush({ node, member: pushMember }) }} onClose={() => { push.dismissPush() }} inset={tab === 'diario' && node.online !== false && !deviceOffShown && !storageNoteShown && scheduledDeletion === null && !inviteNoteShown} /> : null}
         </Animated.View>
         <TabBarShown.Provider value={!barsHidden}>
           <ScreenCovered.Provider value={covered}>
@@ -4348,6 +4466,7 @@ function Member () {
                       onOpenRecados={h.handleOpenRecados}
                       onOpenEventos={h.handleOpenEventos}
                       onOpenVisitas={h.handleOpenVisitas}
+                      onOpenVarandinha={h.handleOpenVarandinha}
                       onOpenTop={h.handleOpenTop}
                     />
                   )}
@@ -4487,7 +4606,7 @@ function Member () {
             showToast(text)
           }}
         />
-        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} markVerified={markPhoneVerified} recheckPhone={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
+        <Ajustes key={locked ? 'locked' : 'open'} screen={ajustes} onNavigate={navigateAjustes} onClose={() => setAjustes(null)} onInfo={ajustesInfo} termsInfo={termsInfo} onTermsReset={dropTermsAndSync} scheduledDeletion={scheduledDeletion} onDeletionChanged={refreshAccount} inviteNudge={inviteNudge} onOpenVarandinha={!deleteFromAviso && node.hosted === true && ownKey ? () => openVarandinha(ownKey) : undefined} onOpenPaginas={!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) ? () => pushScreen({ screen: 'paginas' }) : undefined} node={node} member={member} phoneGate={phone.gate} phoneKey={phone.key} phoneChecking={phone.pending} phoneVerified={phone.state === 'verificado' && !phone.error} phoneProofDate={phone.proofDate} phoneKnownDate={phone.knownDate} markVerified={markPhoneVerified} recheckPhone={recheckPhone} termsBeforeCreate={termsBeforeCreate} />
         {/* Mounted after the splash, so it wins: while the boot cover shows it
             follows the splash, which stays cream on native (Splash.js). */}
         <StatusBar style={coveringBoot ? statusBarStyle(Platform.OS === 'web' || previewOn ? scheme : 'light') : statusBarStyle(scheme, { overBand: light || viewerOnTop })} />

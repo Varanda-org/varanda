@@ -25,7 +25,7 @@ export function isAvailable () { return true }
 export async function prepare (uri, opts) { return globalThis.__vpModule(uri, opts) }
 `
 const encode = `
-export async function encodeFile (asset) { return globalThis.__vpEncode(asset) }
+export async function encodeFile (asset, options) { return globalThis.__vpEncode(asset, options) }
 `
 const picker = `
 export async function launchImageLibraryAsync (opts) { return globalThis.__vpPicker(opts) }
@@ -116,7 +116,7 @@ function nativeEnv ({ output = mp4(), claim = {}, fail = null, encodeFails = fal
   globalThis.__vpFiles.clear()
   globalThis.__vpFiles.set(PICKED, new Uint8Array([9, 9, 9]))
   globalThis.__vpReads = []
-  const env = { calls: [], encoded: [] }
+  const env = { calls: [], encoded: [], options: [] }
   globalThis.__vpModule = async (uri, opts) => {
     env.calls.push({ uri, opts })
     if (env.during) await env.during()
@@ -129,11 +129,14 @@ function nativeEnv ({ output = mp4(), claim = {}, fail = null, encodeFails = fal
     globalThis.__vpFiles.set(POSTER, POSTER_BYTES)
     return { uri: OUT, posterUri: POSTER, width: 1234, height: 4321, ms: 1, bytes: 1, ...claim }
   }
-  globalThis.__vpEncode = async (asset) => {
+  globalThis.__vpEncode = async (asset, options) => {
     env.encoded.push(asset)
+    env.options.push(options)
     if (!globalThis.__vpFiles.has(asset.uri)) throw new Error('poster already gone')
     if (encodeFails) throw new Error('não foi possível preparar a foto')
-    return { bytes: new Uint8Array([0xff, 0xd8, 7, 0xff, 0xd9]), mime: 'image/jpeg', width: asset.width, height: asset.height }
+    // Only a forced JPEG comes back as one: the default would be AVIF or WebP.
+    const mime = options && options.format === 'jpeg' ? 'image/jpeg' : 'image/avif'
+    return { bytes: new Uint8Array([0xff, 0xd8, 7, 0xff, 0xd9]), mime, width: asset.width, height: asset.height }
   }
   return env
 }
@@ -159,6 +162,7 @@ test('native: stripped bytes, sizes from the bytes, poster through the photo enc
   t.ok(rpc.videoBounds(res.bytes, { maxMs: 30000 }), 'and passes the strict check')
   t.is(env.encoded.length, 1)
   t.alike(env.encoded[0], { uri: POSTER, mimeType: 'image/jpeg', width: 640, height: 360 }, 'poster sized from the bytes')
+  t.alike(env.options[0], { format: 'jpeg' }, 'the poster is forced to JPEG')
   t.alike(res.poster, { bytes: new Uint8Array([0xff, 0xd8, 7, 0xff, 0xd9]), mime: 'image/jpeg', width: 640, height: 360 })
   t.alike(leftovers(), [], 'output and poster deleted')
   t.absent(globalThis.__vpFiles.has(PICKED), 'the picker\'s copy deleted')

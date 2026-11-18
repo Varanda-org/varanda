@@ -334,7 +334,7 @@ test('guard() false after the write does not acknowledge and heal rewrites', asy
   const { store, file, open } = setup(t, { guard: () => ++calls !== refuseAt })
   const m = hex32()
   const r = req(m)
-  refuseAt = 2 // before = 1, after = 2
+  refuseAt = 3 // before = 1, right before the rename = 2, after = 3
   await rejects(t, store.put(r), 'indisponivel', 'refused after the write')
   t.ok(store.available())
   t.ok(fs.existsSync(file), 'the file may hold the unacknowledged write')
@@ -408,13 +408,13 @@ test('reads after a write refused past the rename show the file, never stale mem
   const kept = req(m)
   await store.put(kept)
   const r = req(m)
-  refuseAt = calls + 2 // before = +1, after the rename = +2
+  refuseAt = calls + 3 // before = +1, right before the rename = +2, after it = +3
   await rejects(t, store.put(r), 'indisponivel', 'put refused after the rename')
   t.ok(readFile(file).entries[r.lookupId], 'the file holds the row')
   t.alike(store.fetch(r.lookupId), { member: m, kind: 'passkey', blob: r.blob }, 'fetch shows the file')
   t.alike(store.list(m).map((x) => x.lookupId).sort(), [kept.lookupId, r.lookupId].sort(), 'list shows the file')
 
-  refuseAt = calls + 2
+  refuseAt = calls + 3
   await rejects(t, store.remove({ member: m, lookupId: kept.lookupId }), 'indisponivel', 'remove refused after the rename')
   t.ok(readFile(file).removed[kept.lookupId], 'the file holds the tombstone')
   t.is(store.fetch(kept.lookupId), null, 'fetch shows the removal')
@@ -482,7 +482,7 @@ test('a read after an uncertain write refuses when the file cannot be read', asy
   const { store, file } = setup(t, { guard: () => ++calls !== refuseAt })
   const m = hex32()
   const r = req(m)
-  refuseAt = 2
+  refuseAt = 3
   await rejects(t, store.put(r), 'indisponivel', 'put refused after the rename')
   fs.writeFileSync(file, 'not json')
   t.exception(() => store.fetch(r.lookupId), /indisponivel/)
@@ -625,11 +625,12 @@ test('code rows tied on gen after a stale rename both stay: the acknowledged cod
   const ack = req(m, 'code', ackId)
   t.is((await fresh.put(ack)).changed, true)
   // The holder that lost its lock had read the file before that write; its
-  // rename lands afterwards with its own code at the same gen.
+  // rename lands afterwards with its own code at the same gen (it passed the
+  // check right before the rename and was suspended before the rename).
   const afterAck = fs.readFileSync(file, 'utf8')
   fs.writeFileSync(file, before)
   let calls = 0
-  const stale = open({ guard: () => ++calls < 2 })
+  const stale = open({ guard: () => ++calls < 3 })
   await rejects(t, stale.put(req(m, 'code', staleId)), 'indisponivel', 'the stale holder does not acknowledge')
   const disk = readFile(file)
   t.is(disk.entries[staleId].gen, JSON.parse(afterAck).entries[ackId].gen, 'the two writes tie on gen')
@@ -663,4 +664,388 @@ test('put over another member\'s tombstone is refused; the same member may re-pu
   t.alike(store.list(b), [])
   t.is((await store.put(r)).changed, true, 'the same member re-puts')
   t.is(store.fetch(r.lookupId).member, a)
+})
+
+function fileRow (member, gen, kind = 'passkey') {
+  return { member, kind, nonce: '0'.repeat(48), ciphertext: '1'.repeat(164), createdAt: new Date(T0).toISOString(), gen }
+}
+
+test('a tombstone pruned by the TTL leaves a floor: an older copy never brings its row back', async (t) => {
+  const { store, file, c } = setup(t)
+  const m = hex32()
+  const r = req(m)
+  await store.put(r)
+  const old = fs.readFileSync(file, 'utf8')
+  c.t += 1000
+  await store.remove({ member: m, lookupId: r.lookupId })
+  c.t += TOMBSTONE_TTL_MS + DAY
+  await store.put(req(m))
+  let disk = readFile(file)
+  t.absent(disk.removed[r.lookupId], 'tombstone pruned')
+  t.is(disk.v, 2)
+  t.alike(disk.floors, { [m]: 2 }, 'the floor is the pruned tombstone\'s gen')
+
+  // heal(): a stalled writer renames the copy that still holds the row.
+  fs.writeFileSync(file, old)
+  t.is(await store.heal(), true, 'heal rewrites')
+  t.is(store.fetch(r.lookupId), null, 'not back in memory')
+  disk = readFile(file)
+  t.absent(disk.entries[r.lookupId], 'not back on disk')
+  t.alike(disk.floors, { [m]: 2 }, 'the floor survives the merge')
+
+  // The merge before a write.
+  fs.writeFileSync(file, old)
+  t.is((await store.put(req(m))).changed, true)
+  t.absent(readFile(file).entries[r.lookupId], 'not back after a put over the old copy')
+  t.is(store.fetch(r.lookupId), null)
+})
+
+test('the file\'s floor never drops a row memory holds: a copy from another history is merged', async (t) => {
+  const { store, file, c } = setup(t)
+  const m = hex32()
+  const kept = hex32()
+  // The service started with no file, and the member registered again.
+  const r = req(m)
+  await store.put(r)
+  t.is(readFile(file).entries[r.lookupId].gen, 1)
+  // A copy of the earlier file, whose floor for m passes that row, is put back.
+  fs.writeFileSync(file, JSON.stringify({ v: 2, seq: 8, entries: { [kept]: fileRow(m, 8) }, removed: {}, floors: { [m]: 7 } }))
+  c.t += 1000
+  t.is(await store.heal(), true, 'heal rewrites')
+  t.ok(store.fetch(r.lookupId), 'the row memory holds stays')
+  t.ok(store.fetch(kept), 'the copy\'s row comes in')
+  const disk = readFile(file)
+  t.alike(Object.keys(disk.entries).sort(), [r.lookupId, kept].sort())
+  t.is(disk.seq, 8)
+  t.alike(disk.floors, { [m]: 7 })
+  const next = req(m)
+  await store.put(next)
+  t.ok(readFile(file).entries[next.lookupId].gen > 8, 'a later put takes a gen above the floor')
+})
+
+test('removeMember, then the TTL: an older copy never brings the member\'s rows back', async (t) => {
+  const { store, file, c } = setup(t)
+  const m = hex32()
+  const other = hex32()
+  const rows = [req(m), req(m, 'code')]
+  for (const r of rows) await store.put(r)
+  const old = fs.readFileSync(file, 'utf8')
+  c.t += 1000
+  t.is((await store.removeMember(m)).changed, true)
+  c.t += TOMBSTONE_TTL_MS + DAY
+  await store.put(req(other))
+  let disk = readFile(file)
+  for (const r of rows) t.absent(disk.removed[r.lookupId], 'tombstone pruned')
+  t.ok(disk.floors[m] >= 3, 'the member keeps a floor')
+
+  fs.writeFileSync(file, old)
+  t.is(await store.heal(), true, 'heal rewrites')
+  for (const r of rows) t.is(store.fetch(r.lookupId), null, 'not back in memory')
+  disk = readFile(file)
+  for (const r of rows) t.absent(disk.entries[r.lookupId], 'not back on disk')
+  t.alike(store.list(m), [])
+})
+
+test('a read after an uncertain write never brings back a row under the floor', async (t) => {
+  let calls = 0
+  let refuseAt = -1
+  const { store, file, c } = setup(t, { guard: () => ++calls !== refuseAt })
+  const m = hex32()
+  const r = req(m)
+  await store.put(r)
+  const old = fs.readFileSync(file, 'utf8')
+  c.t += 1000
+  await store.remove({ member: m, lookupId: r.lookupId })
+  c.t += TOMBSTONE_TTL_MS + DAY
+  await store.put(req(m))
+  t.ok(readFile(file).floors[m], 'the floor is on disk')
+  refuseAt = calls + 3 // before = +1, right before the rename = +2, after it = +3
+  await rejects(t, store.put(req(m)), 'indisponivel', 'put refused after the rename')
+  fs.writeFileSync(file, old)
+  t.is(store.fetch(r.lookupId), null, 'fetch merges the old copy and keeps the row gone')
+  t.absent(store.list(m).some((x) => x.lookupId === r.lookupId), 'list too')
+})
+
+test('a tombstone pruned by the per-member cap leaves a floor: an older copy never brings its row back', async (t) => {
+  const { store, file, c } = setup(t)
+  const m = hex32()
+  const r = req(m)
+  await store.put(r)
+  const old = fs.readFileSync(file, 'utf8')
+  c.t += 1000
+  await store.remove({ member: m, lookupId: r.lookupId })
+  // Each new code buries the previous one, well inside the TTL.
+  for (let i = 0; i < TOMBSTONE_MAX_PER_MEMBER + 2; i++) {
+    c.t += STALE_WINDOW_MS + 1000
+    await store.put(req(m, 'code'))
+  }
+  t.ok(c.t - T0 < TOMBSTONE_TTL_MS, 'no tombstone reached the TTL')
+  let disk = readFile(file)
+  t.absent(disk.removed[r.lookupId], 'the cap pruned the oldest tombstone')
+  t.ok(disk.floors[m] >= 2, 'and left a floor at or above its gen')
+
+  fs.writeFileSync(file, old)
+  t.is(await store.heal(), true, 'heal rewrites')
+  t.is(store.fetch(r.lookupId), null, 'not back in memory')
+  disk = readFile(file)
+  t.absent(disk.entries[r.lookupId], 'not back on disk')
+  t.is(store.list(m).filter((x) => x.kind === 'passkey').length, 0)
+})
+
+test('a version 1 file is read, and the next write that changes it is version 2', async (t) => {
+  const { file, open, c } = setup(t)
+  const m = hex32()
+  const id = hex32()
+  const v1 = JSON.stringify({ v: 1, seq: 1, entries: { [id]: fileRow(m, 1) }, removed: {} })
+  fs.writeFileSync(file, v1)
+  const store = open()
+  t.ok(store.available())
+  t.is(store.fetch(id).member, m)
+  c.t += 1000
+  t.is(await store.heal(), false, 'nothing rewritten only for the version')
+  t.is(fs.readFileSync(file, 'utf8'), v1)
+  const r = req(m)
+  await store.put(r)
+  const disk = readFile(file)
+  t.alike(Object.keys(disk), ['v', 'seq', 'entries', 'removed', 'floors'])
+  t.is(disk.v, 2)
+  t.alike(disk.floors, {})
+  t.alike(disk.entries[id], fileRow(m, 1), 'the version 1 row is kept')
+  t.ok(disk.entries[r.lookupId])
+  t.ok(open().available(), 'the version 2 file opens')
+})
+
+test('a version 1 file whose tombstone expired is rewritten as version 2 with the floor', async (t) => {
+  const { file, open, c } = setup(t)
+  const m = hex32()
+  const id = hex32()
+  fs.writeFileSync(file, JSON.stringify({ v: 1, seq: 4, entries: {}, removed: { [id]: { member: m, removedAt: new Date(T0).toISOString(), gen: 4 } } }))
+  const store = open()
+  c.t += TOMBSTONE_TTL_MS + DAY
+  t.is(await store.heal(), true, 'the prune is written')
+  const disk = readFile(file)
+  t.is(disk.v, 2)
+  t.alike(disk.removed, {})
+  t.alike(disk.floors, { [m]: 4 })
+})
+
+test('a malformed floor makes the file malformed', async (t) => {
+  const m = hex32()
+  const cases = [
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {} }),
+    JSON.stringify({ v: 1, seq: 9, entries: {}, removed: {}, floors: {} }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: {}, extra: 1 }),
+    JSON.stringify({ v: 3, seq: 9, entries: {}, removed: {}, floors: {} }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: null }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: [] }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m.toUpperCase()]: 1 } }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m.slice(2)]: 1 } }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m]: 0 } }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m]: -1 } }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m]: 1.5 } }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m]: '3' } }),
+    JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m]: 10 } })
+  ]
+  for (const bytes of cases) {
+    const { file, open } = setup(t)
+    fs.writeFileSync(file, bytes)
+    const store = open()
+    t.absent(store.available(), 'unavailable: ' + bytes.slice(0, 60))
+    await rejects(t, store.put(req(m)), 'indisponivel', 'put refused')
+    t.is(await store.heal(), false)
+    t.is(fs.readFileSync(file, 'utf8'), bytes, 'bytes untouched')
+  }
+  const { file, open } = setup(t)
+  fs.writeFileSync(file, JSON.stringify({ v: 2, seq: 9, entries: {}, removed: {}, floors: { [m]: 9 } }))
+  t.ok(open().available(), 'a floor equal to seq is fine')
+})
+
+test('floors merge as the max per member', async (t) => {
+  const { file, open, c } = setup(t)
+  const [a, b, d] = [hex32(), hex32(), hex32()]
+  fs.writeFileSync(file, JSON.stringify({ v: 2, seq: 10, entries: {}, removed: {}, floors: { [a]: 5, [b]: 9 } }))
+  const store = open()
+  fs.writeFileSync(file, JSON.stringify({ v: 2, seq: 12, entries: {}, removed: {}, floors: { [a]: 8, [d]: 4 } }))
+  c.t += 1000
+  t.is(await store.heal(), true, 'the copy lacks a floor memory has')
+  const disk = readFile(file)
+  t.is(disk.seq, 12)
+  t.alike(disk.floors, { [a]: 8, [b]: 9, [d]: 4 })
+  fs.writeFileSync(file, JSON.stringify({ v: 2, seq: 12, entries: {}, removed: {}, floors: { [a]: 3 } }))
+  await store.heal()
+  t.alike(readFile(file).floors, { [a]: 8, [b]: 9, [d]: 4 }, 'a lower floor never wins')
+})
+
+test('the floor drops only rows at or under it, of its member, that its own copy lacks', async (t) => {
+  const { file, open, c } = setup(t)
+  const m = hex32()
+  const m2 = hex32()
+  const [own, low, high, otherMember] = [hex32(), hex32(), hex32(), hex32()]
+  // Memory: a floor of 5 for m, and an older row of m it never removed.
+  fs.writeFileSync(file, JSON.stringify({ v: 2, seq: 10, entries: { [own]: fileRow(m, 3) }, removed: {}, floors: { [m]: 5 } }))
+  const store = open()
+  fs.writeFileSync(file, JSON.stringify({
+    v: 2,
+    seq: 10,
+    entries: { [low]: fileRow(m, 5), [high]: fileRow(m, 6), [otherMember]: fileRow(m2, 4) },
+    removed: {},
+    floors: {}
+  }))
+  c.t += 1000
+  t.is(await store.heal(), true)
+  t.ok(store.fetch(own), 'a row under its own copy\'s floor stays')
+  t.is(store.fetch(low), null, 'a row at the other copy\'s floor goes')
+  t.ok(store.fetch(high), 'a row above the floor stays')
+  t.ok(store.fetch(otherMember), 'another member\'s row stays')
+  const disk = readFile(file)
+  t.alike(Object.keys(disk.entries).sort(), [own, high, otherMember].sort())
+  t.alike(disk.floors, { [m]: 5 })
+})
+
+test('heal() keeps the 30-day removal on an idle store: the tombstone goes and the floor rises', async (t) => {
+  const { store, file, c, open } = setup(t)
+  const m = hex32()
+  const r = req(m)
+  await store.put(r)
+  const withRow = fs.readFileSync(file, 'utf8')
+  c.t += 1000
+  await store.remove({ member: m, lookupId: r.lookupId })
+  t.is(await store.heal(), false, 'the file equals memory')
+  const tombGen = readFile(file).removed[r.lookupId].gen
+  // Only heal() runs from here on: nobody writes.
+  c.t += TOMBSTONE_TTL_MS + DAY
+  t.is(await store.heal(), true, 'heal prunes and writes')
+  const disk = readFile(file)
+  t.absent(disk.removed[r.lookupId], 'the tombstone is gone from the file')
+  t.is(disk.floors[m], tombGen, 'the member\'s floor is raised to its gen')
+  t.is(await store.heal(), false, 'nothing more to heal')
+
+  const reopened = open()
+  t.is(reopened.fetch(r.lookupId), null, 'a reopened store does not bring the row back')
+  t.alike(readFile(file).removed, {}, 'and holds no tombstone')
+  fs.writeFileSync(file, withRow)
+  c.t += 1000
+  t.is(await reopened.heal(), true, 'an older copy holding the row is rewritten')
+  t.is(reopened.fetch(r.lookupId), null, 'the floor keeps the row gone')
+  t.absent(readFile(file).entries[r.lookupId])
+})
+
+test('heal() on a clean store with no expired tombstone writes nothing', async (t) => {
+  const { store, file, c } = setup(t)
+  const m = hex32()
+  const kept = req(m)
+  const gone = req(m)
+  await store.put(kept)
+  await store.put(gone)
+  c.t += 1000
+  await store.remove({ member: m, lookupId: gone.lookupId })
+  t.is(await store.heal(), false)
+  const bytes = fs.readFileSync(file)
+  const { mtimeMs, ino } = fs.statSync(file)
+  c.t += TOMBSTONE_TTL_MS - DAY
+  t.is(await store.heal(), false, 'a tombstone younger than the TTL stays')
+  t.ok(b4a.equals(fs.readFileSync(file), bytes), 'the file is byte-identical')
+  const st = fs.statSync(file)
+  t.is(st.mtimeMs, mtimeMs, 'and was not rewritten')
+  t.is(st.ino, ino)
+  t.ok(readFile(file).removed[gone.lookupId], 'the tombstone is still there')
+})
+
+test('a writer that lost the lock before the rename leaves the new holder\'s acknowledged write in place', async (t) => {
+  for (const op of ['put', 'remove']) {
+    const { file, c, dir } = setup(t)
+    let held = true
+    let inject = null
+    const now = () => {
+      if (inject) {
+        const f = inject
+        inject = null
+        f()
+      }
+      return c.t
+    }
+    const a = openRecoveryStore(dir, { now, guard: () => held })
+    const m = hex32()
+    const first = req(m)
+    await a.put(first)
+    // The new holder B starts from the same file (a copy of the directory)
+    // and acknowledges its own write there.
+    const copy = path.join(tmpDir(t), 'account')
+    fs.mkdirSync(copy, { mode: 0o700 })
+    fs.copyFileSync(file, path.join(copy, FILE))
+    const b = openRecoveryStore(copy, { now: c.now })
+    const theirs = req(m)
+    c.t += 1000
+    if (op === 'put') t.is((await b.put(theirs)).changed, true, op + ': B acknowledges')
+    else t.alike(await b.remove({ member: m, lookupId: first.lookupId }), { changed: true }, op + ': B acknowledges')
+    const bFile = fs.readFileSync(path.join(copy, FILE))
+    // A stalls after its first guard check and read: meanwhile B takes the
+    // lock and its file lands in place.
+    inject = () => {
+      fs.copyFileSync(path.join(copy, FILE), file)
+      held = false
+    }
+    const mine = req(m)
+    await rejects(t, a.put(mine), 'indisponivel', op + ': A does not acknowledge')
+    t.ok(b4a.equals(fs.readFileSync(file), bFile), op + ': the file is B\'s')
+    const reopened = openRecoveryStore(dir, { now: c.now })
+    if (op === 'put') t.ok(reopened.fetch(theirs.lookupId), op + ': B\'s row is there after a reopen')
+    else t.is(reopened.fetch(first.lookupId), null, op + ': B\'s removal is there after a reopen')
+    t.is(reopened.fetch(mine.lookupId), null, op + ': A\'s refused row is not')
+    t.ok(a.available(), op + ': A is not failed')
+  }
+})
+
+test('a replaced code refused before the rename leaves the acknowledged code live', async (t) => {
+  const { file, c, dir, open } = setup(t)
+  let held = true
+  let inject = null
+  const now = () => {
+    if (inject) {
+      const f = inject
+      inject = null
+      f()
+    }
+    return c.t
+  }
+  const store = openRecoveryStore(dir, { now, guard: () => held })
+  const m = hex32()
+  const acked = req(m, 'code')
+  await store.put(acked)
+  const before = fs.readFileSync(file)
+  // The guard answers false from the merge inside reread() on.
+  inject = () => { held = false }
+  c.t += 1000
+  const replacement = req(m, 'code')
+  await rejects(t, store.put(replacement), 'indisponivel', 'the replacement is not acknowledged')
+  t.ok(b4a.equals(fs.readFileSync(file), before), 'the file is byte-identical')
+  t.alike(fs.readdirSync(dir), [FILE], 'no temp file is left')
+  t.ok(store.available(), 'the store is not failed')
+  t.is(store.fetch(replacement.lookupId), null, 'the new code does not fetch')
+  t.ok(store.fetch(acked.lookupId), 'the acknowledged code still does')
+  const reopened = open()
+  t.ok(reopened.fetch(acked.lookupId), 'the acknowledged code is live after a reopen')
+  t.is(reopened.fetch(replacement.lookupId), null, 'the new code does not fetch after a reopen')
+  held = true
+  c.t += 1000
+  t.is((await store.put(replacement)).changed, true, 'a later put with the lock held works')
+  t.is(open().fetch(acked.lookupId), null, 'and then replaces the code')
+})
+
+test('a guard that throws right before the rename refuses the request only', async (t) => {
+  let calls = 0
+  const { store, file, dir } = setup(t, {
+    guard: () => {
+      if (++calls === 2) throw new Error('lock read failed')
+      return true
+    }
+  })
+  const m = hex32()
+  const r = req(m)
+  await rejects(t, store.put(r), 'indisponivel', 'refused')
+  t.absent(fs.existsSync(file), 'nothing was renamed into place')
+  t.alike(fs.readdirSync(dir), [], 'no temp file is left')
+  t.ok(store.available())
+  t.is((await store.put(r)).changed, true, 'the next put lands')
+  t.ok(readFile(file).entries[r.lookupId])
 })

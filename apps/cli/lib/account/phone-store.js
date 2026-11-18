@@ -17,9 +17,12 @@
 // argument shapes throw TypeError, and no message ever carries a number.
 //
 // No union merge: every mutation runs in one in-process queue, re-reads the
-// file (the service lock can go stale and writeJsonAtomic renames
-// unconditionally), applies its one change to the disk state and only
-// replaces memory after the write. A write that throws or a guard that
+// file (the service lock can go stale, so another holder may have replaced
+// it), applies its one change to the disk state and only replaces memory
+// after the write. guard() is asked before the re-read, before the write and
+// right before the rename (./guarded-write.js, after the temp file is
+// written and fsynced), so a holder that lost the lock meanwhile leaves the
+// file as the new holder wrote it. A write that throws or a guard that
 // refuses marks the store dirty and adopts the file as it then reads (the
 // rename may have landed before the error); when that re-read fails too,
 // every call answers 'indisponivel' until heal() reads the file again.
@@ -30,12 +33,12 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const nodeCrypto = require('node:crypto')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { isLowerHex, isCanonicalIso, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { isBrMobile } = require('@varanda/core/lib/phone')
 
 const FILE = 'phone.json'
-const VERSION = 1
+const VERSION = 2
 const DAY = 24 * 3600 * 1000
 // Both periods: sujeita a revisão jurídica (LGPD section of docs/design.md).
 // RETENTION_MS is how long a number stays sealed after it stops being a
@@ -46,7 +49,10 @@ const UNLINKED_TTL_MS = 7 * DAY
 
 const ENDS = Object.freeze(['trocado', 'excluida', 'substituido', 'liberado'])
 const END_REASONS = Object.freeze(['excluida', 'trocado', 'substituido'])
-const FILE_KEYS = ['v', 'check', 'since', 'rows', 'released']
+// Version 2 added `cleared`; a version 1 file still reads (nothing
+// cleared) and the next write makes it version 2.
+const FILE_KEYS = ['v', 'check', 'since', 'rows', 'released', 'cleared']
+const FILE_KEYS_V1 = ['v', 'check', 'since', 'rows', 'released']
 const ROW_KEYS = ['member', 'index', 'sealed', 'verifiedAt', 'endedAt', 'end', 'burnedAt']
 const SEALED_KEYS = ['iv', 'tag', 'data']
 const SEAL_LABEL = 'varanda-phone-seal-v1'
@@ -89,6 +95,7 @@ function checkCallbacks (cbs) {
     if (typeof cbs[name] !== 'function') throw new TypeError('linked, burnable and deleted must be functions')
   }
   if (cbs.blocked !== undefined && typeof cbs.blocked !== 'function') throw new TypeError('blocked must be a function')
+  if (cbs.cleared !== undefined && typeof cbs.cleared !== 'function') throw new TypeError('cleared must be a function')
 }
 
 function hmac (key, data) {
@@ -136,12 +143,27 @@ function copyRow (r) {
 }
 
 function emptyState () {
-  return { since: null, rows: [], released: Object.create(null) }
+  return { since: null, rows: [], released: Object.create(null), cleared: Object.create(null) }
 }
 
 function copyState (s) {
-  const out = { since: s.since, rows: s.rows.map(copyRow), released: Object.create(null) }
+  const out = { since: s.since, rows: s.rows.map(copyRow), released: Object.create(null), cleared: Object.create(null) }
   for (const m of Object.keys(s.released)) out.released[m] = s.released[m]
+  for (const m of Object.keys(s.cleared)) out.cleared[m] = s.cleared[m]
+  return out
+}
+
+function memberTimes (from, into) {
+  if (!isPlainObject(from)) throw invalid()
+  for (const [m, at] of Object.entries(from)) {
+    if (!validMember(m) || !isCanonicalIso(at)) throw invalid()
+    into[m] = at
+  }
+}
+
+function sortedTimes (map) {
+  const out = {}
+  for (const m of Object.keys(map).sort()) out[m] = map[m]
   return out
 }
 
@@ -150,9 +172,11 @@ function invalid () {
 }
 
 function fromJson (obj, check) {
-  if (!isPlainObject(obj) || !exactKeys(obj, FILE_KEYS) || obj.v !== VERSION) throw invalid()
+  if (!isPlainObject(obj)) throw invalid()
+  const v1 = obj.v === 1 && exactKeys(obj, FILE_KEYS_V1)
+  if (!v1 && !(obj.v === VERSION && exactKeys(obj, FILE_KEYS))) throw invalid()
   if (!isLowerHex(obj.check, 32) || !nodeCrypto.timingSafeEqual(Buffer.from(obj.check, 'hex'), check)) throw invalid()
-  if (!isCanonicalIso(obj.since) || !Array.isArray(obj.rows) || !isPlainObject(obj.released)) throw invalid()
+  if (!isCanonicalIso(obj.since) || !Array.isArray(obj.rows)) throw invalid()
   const state = emptyState()
   state.since = obj.since
   const liveMembers = new Set()
@@ -166,17 +190,13 @@ function fromJson (obj, check) {
     }
     state.rows.push(copyRow(r))
   }
-  for (const [m, at] of Object.entries(obj.released)) {
-    if (!validMember(m) || !isCanonicalIso(at)) throw invalid()
-    state.released[m] = at
-  }
+  memberTimes(obj.released, state.released)
+  if (!v1) memberTimes(obj.cleared, state.cleared)
   return state
 }
 
 function toJson (state, check) {
-  const released = {}
-  for (const m of Object.keys(state.released).sort()) released[m] = state.released[m]
-  return { v: VERSION, check, since: state.since, rows: state.rows.map(copyRow), released }
+  return { v: VERSION, check, since: state.since, rows: state.rows.map(copyRow), released: sortedTimes(state.released), cleared: sortedTimes(state.cleared) }
 }
 
 // The file's state, or null when it does not exist. O_NOFOLLOW so a symlink
@@ -307,7 +327,8 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
   }
 
   // Runs one mutation: guard, re-read, apply to the disk state, guard again,
-  // write, and only then replace memory. `apply` returns [changed, result].
+  // write (guard once more right before the rename), and only then replace
+  // memory. `apply` returns [changed, result].
   function mutate (apply) {
     usable()
     if (readOnly) throw fail('indisponivel')
@@ -326,7 +347,7 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
     try {
       guarded()
       refuseSymlinkDir(dataDir)
-      writeJsonAtomic(file, toJson(next, checkHex), 0o600)
+      writeGuarded(file, toJson(next, checkHex), 0o600, guard)
     } catch {
       dirty = true
       try {
@@ -342,13 +363,18 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
     return result
   }
 
+  function clearedOf (s, m) {
+    return has(s.cleared, m) ? s.cleared[m] : null
+  }
+
   function ownerTest (cbs, s) {
     const cache = new Map()
     return (name, owner) => {
       const k = name + ':' + owner
       if (!cache.has(k)) {
-        let v = cbs[name](owner) === true
-        if (name === 'burnable') v = v && !has(s.released, owner)
+        let v
+        if (name === 'burnable') v = cbs.burnable(owner, clearedOf(s, owner)) === true && !has(s.released, owner)
+        else v = cbs[name](owner) === true
         cache.set(k, v)
       }
       return cache.get(k)
@@ -464,12 +490,23 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
     return enqueue(() => {
       checkCallbacks(cbs)
       return mutate((s) => {
-        const counts = { ended: 0, burned: 0, unburned: 0, unsealed: 0, removed: 0, released: 0 }
+        const counts = { ended: 0, burned: 0, unburned: 0, unsealed: 0, removed: 0, released: 0, cleared: 0 }
         const t = now()
         const stamp = new Date(t).toISOString()
+        // First, so the burns below already see it: a member seen under no
+        // block after its 'bloquear' reports keeps those reports from
+        // burning its number once it deletes its account (issue #534).
+        if (typeof cbs.cleared === 'function') {
+          for (const m of new Set(s.rows.map((r) => r.member))) {
+            if (cbs.cleared(m, clearedOf(s, m)) === true) {
+              s.cleared[m] = stamp
+              counts.cleared++
+            }
+          }
+        }
         const lifted = typeof cbs.blocked === 'function'
           ? (m) => cbs.blocked(m) === false
-          : (m) => cbs.burnable(m) !== true
+          : (m) => cbs.burnable(m, clearedOf(s, m)) !== true
         const liftedOf = new Map()
         const isLifted = (m) => {
           if (!liftedOf.has(m)) liftedOf.set(m, lifted(m))
@@ -523,6 +560,14 @@ function openPhoneStore (dataDir, { key, now = Date.now, guard = () => true, rea
           kept.push(r)
         }
         s.rows = kept
+        // Bounded by the rows: an entry only matters while its member has one.
+        const withRows = new Set(kept.map((r) => r.member))
+        for (const m of Object.keys(s.cleared)) {
+          if (!withRows.has(m)) {
+            delete s.cleared[m]
+            counts.cleared++
+          }
+        }
         const changed = Object.values(counts).some((n) => n > 0)
         return [changed, counts]
       })

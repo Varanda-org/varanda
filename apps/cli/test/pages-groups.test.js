@@ -20,7 +20,7 @@ const groupLib = require('@varanda/core/lib/group')
 const groupCrypto = require('@varanda/core/lib/group-crypto')
 const { sealMedia } = require('@varanda/core/lib/group-media')
 const { groupJoinRecord } = require('@varanda/core/lib/records')
-const { person, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
+const { person, exchange, ownWriter, startSeeder, syncOnce } = require('../../../packages/core/test/helpers/sync-groups')
 const { startSeedWs } = require('../lib/seed-ws')
 const { openPageKeys } = require('../lib/account/page-keys')
 const { createPagesWriter } = require('../lib/account/pages-writer')
@@ -240,7 +240,7 @@ test('pages-groups: cached v1 and v2 posts paginate without a seeder connection'
   const page = newPage(ctx, keys, 'fotos')
   await writer.createPage(page.args)
   await pagesStore.create({ page: page.key, owner: page.owner })
-  const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
   // 500 reactors on the visible post, the page among them: the read sends
@@ -313,7 +313,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   const writer = createPagesWriter({ dir, keys, association, seederWs, log: (e) => logs.push(e) })
   t.teardown(() => writer.close(), { force: true })
   await writer.ready()
-  let pg = createPagesGroups({ dir, writer, pagesStore, keys, association, seederWs, log: (e) => logs.push(e) })
+  let pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, log: (e) => logs.push(e) })
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
   await until(() => writer.connected() && pg.connected(), { name: 'links up', timeoutMs: 20000 })
@@ -519,7 +519,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
     readEntries: (k) => writer.readEntries(k),
     pageKeys: () => writer.pageKeys()
   }
-  pg = createPagesGroups({ dir, writer: flaky, pagesStore, keys, association, seederWs, log: (e) => logs.push(e) })
+  pg = createPagesGroups({ clearReplicas: false, dir, writer: flaky, pagesStore, keys, association, seederWs, log: (e) => logs.push(e) })
   await pg.ready()
   await until(() => pg.connected(), { name: 'link up (flaky)', timeoutMs: 20000 })
   t.is(await pg.reboxNeeded(page.key), 4, 'four private memberships wait for the rebox')
@@ -583,7 +583,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   // Groups that no longer fold (here: blocked) never hold the rotation:
   // one is left while reboxPending, the other is left by the rebox.
   await pg.close()
-  pg = createPagesGroups({ dir, writer, pagesStore, keys, association, seederWs, log: (e) => logs.push(e), blocklist: { has: (k) => k === GP2 || k === GP3 } })
+  pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, log: (e) => logs.push(e), blocklist: { has: (k) => k === GP2 || k === GP3 } })
   await pg.ready()
   await until(() => pg.connected(), { name: 'link up (blocked)', timeoutMs: 20000 })
   await pagesStore.setDm(page.key, dmRow(boxPair(), { reboxPending: true }))
@@ -626,7 +626,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   }
   async function restartPg (w) {
     await pg.close()
-    pg = createPagesGroups({ dir, writer: w, pagesStore, keys, association, seederWs, log: (e) => logs.push(e) })
+    pg = createPagesGroups({ clearReplicas: false, dir, writer: w, pagesStore, keys, association, seederWs, log: (e) => logs.push(e) })
     await pg.ready()
     await until(() => pg.connected(), { name: 'link up (restart)', timeoutMs: 20000 })
   }
@@ -668,7 +668,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   // A partial fold (no seeder listing): the rebox still leaves the old
   // writer and files the step; the new writer waits for a complete fold.
   await pg.close()
-  pg = createPagesGroups({ dir, writer, pagesStore, keys, association, seederWs: null, fetchTimeoutMs: 500, log: (e) => logs.push(e) })
+  pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs: null, fetchTimeoutMs: 500, log: (e) => logs.push(e) })
   await pg.ready()
   const beforePartial = gpWriter()
   await pagesStore.setDm(page.key, dmRow(boxPair(), { reboxPending: true }))
@@ -693,7 +693,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   // A writer cap that leaves no room for a new writer: the page leaves the
   // group and lists it, never keeping the old box.
   await pg.close()
-  pg = createPagesGroups({ dir, writer, pagesStore, keys, association, seederWs, log: (e) => logs.push(e), maxWritersPerGroup: 6 })
+  pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, log: (e) => logs.push(e), maxWritersPerGroup: 6 })
   await pg.ready()
   await until(() => pg.connected(), { name: 'link up again', timeoutMs: 20000 })
   const boxC = boxPair()
@@ -713,7 +713,7 @@ test('pages-groups: a page joins, posts, waits for approval, leaves and reads a 
   const rejoined = gpWriter()
   await pagesStore.setDm(page.key, dmRow(boxPair(), { reboxPending: true }))
   await pg.close()
-  pg = createPagesGroups({ dir, writer, pagesStore, keys, association, seederWs: null, fetchTimeoutMs: 500, log: (e) => logs.push(e) })
+  pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs: null, fetchTimeoutMs: 500, log: (e) => logs.push(e) })
   await pg.ready()
   t.alike(await pg.groupLeave(page.key, GP), { state: 'left' }, 'the leave runs while reboxPending, on a partial fold')
   t.alike(lastJoins(await writer.readEntries(page.key), GP).get(rejoined), false, 'and turns the join off')
@@ -811,7 +811,7 @@ test('pages-groups: restart, rollback, pruning, caps, partial folds and zeroed s
   let pg = null
   async function start (opts = {}) {
     if (pg !== null) await pg.close()
-    pg = createPagesGroups({ dir, writer, pagesStore, keys, association, seederWs, ...opts })
+    pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, ...opts })
     await pg.ready()
     if (opts.seederWs !== null) await until(() => pg.connected(), { name: 'link up', timeoutMs: 20000 })
   }
@@ -935,7 +935,7 @@ test('pages-groups: a group read reads no gap in the cut history of a member dia
   const page = newPage(ctx, keys, 'fotos')
   await writer.createPage(page.args)
   await pagesStore.create({ page: page.key, owner: page.owner })
-  const pg = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
   t.teardown(() => pg.close(), { force: true })
   await pg.ready()
   const real = groupLib.groupCutHistory
@@ -952,4 +952,264 @@ test('pages-groups: a group read reads no gap in the cut history of a member dia
   }
   t.ok(seen.length > 0, 'the read folded Ana\'s diary')
   t.ok(seen.every((out) => !out.some((m) => m.gap === true)), 'Ana\'s cut history has no gap')
+})
+
+// Ana's diary and group copied into a pages-replicas cache in a fresh data
+// dir, and `held(key)`: the length a core has there on disk (0 once purged).
+async function cachedReplicas (t) {
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const a = await person(t, kp, 'Ana')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Fotos', join: 'open', community })
+  await member.groupPost(a, { group, text: 'texto' })
+  const dir = tmpDir(t, 'varanda-account-')
+  const replicasDir = path.join(dir, 'pages-replicas')
+  const source = await coreStore.openStore(a.dataDir)
+  const target = new Corestore(replicasDir)
+  let left
+  let right
+  try {
+    await target.ready()
+    const copies = []
+    for await (const discoveryKey of source.list()) {
+      const from = source.get({ discoveryKey, writable: false })
+      await from.ready()
+      const to = target.get({ key: from.key, writable: false })
+      await to.ready()
+      copies.push({ from, to })
+    }
+    left = source.replicate(true)
+    right = target.replicate(false)
+    left.pipe(right).pipe(left)
+    for (const { from, to } of copies) {
+      for (let seq = 0; seq < from.contiguousLength; seq++) await to.get(seq, { raw: true, timeout: 10000 })
+    }
+  } finally {
+    if (left) left.destroy()
+    if (right) right.destroy()
+    await target.close()
+    await source.close()
+  }
+  async function held (key) {
+    const store = new Corestore(replicasDir)
+    try {
+      const core = store.get({ key: b4a.from(key, 'hex'), writable: false })
+      await core.ready()
+      return core.contiguousLength
+    } finally {
+      await store.close()
+    }
+  }
+  return { ctx, association, a, group, dir, held }
+}
+
+test('pages-groups: the replica cache of an earlier run is cleared at open; a blocked key\'s replica is purged and never reopened', async (t) => {
+  const { ctx, association, a, group, dir, held } = await cachedReplicas(t)
+  t.ok(await held(a.key) > 0, 'the diary is in the cache')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'fotos')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const blocked = new Set()
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10, blocklist: { has: (k) => blocked.has(k) } })
+  await pg.ready()
+  const first = await pg.groupRead(page.key, group, { limit: 2 })
+  t.is(first.items.length, 1, 'read from the replicas, the diary among them')
+  t.is(await pg.purgeBlocked(), 0, 'nothing blocked, nothing purged')
+  blocked.add(a.key)
+  t.is(await pg.purgeBlocked(), 1, 'the blocked diary\'s idle replica goes')
+  await pg.groupRead(page.key, group, { limit: 2 })
+  t.is(await pg.purgeBlocked(), 0, 'the read did not open the blocked diary again')
+  await pg.close()
+  t.is(await held(a.key), 0, 'purged on disk and not reopened by a later read')
+  t.ok(await held(group) > 0, 'another key stays cached while the process runs')
+
+  const again = createPagesGroups({ dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10 })
+  await again.ready()
+  await again.close()
+  t.is(await held(group), 0, 'the next open starts with an empty cache')
+})
+
+test('pages-groups: a blocked key\'s purge that failed is not counted and the next pass purges it', async (t) => {
+  const { ctx, association, a, group, dir, held } = await cachedReplicas(t)
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'fotos')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const blocked = new Set()
+  const logs = []
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, fetchTimeoutMs: 10, blocklist: { has: (k) => blocked.has(k) }, log: (e) => logs.push(e) })
+  await pg.ready()
+  t.is((await pg.groupRead(page.key, group, { limit: 2 })).items.length, 1)
+  const real = coreStore.purgeReplica
+  let failures = 0
+  coreStore.purgeReplica = async (...args) => {
+    if (args[1] === a.key && failures++ === 0) throw new Error('EIO')
+    return real(...args)
+  }
+  try {
+    blocked.add(a.key)
+    t.is(await pg.purgeBlocked(), 0, 'the failed purge is not counted')
+    t.is(failures, 1)
+    const warn = logs.find((e) => e.step === 'purge-failed')
+    t.alike(warn, { event: 'page-groups', count: 1, step: 'purge-failed' }, 'a count, never a key')
+    t.is(await pg.purgeBlocked(), 1, 'the next pass purges it with no open entry')
+    t.is(failures, 2)
+    t.is(await pg.purgeBlocked(), 0, 'and does not try again')
+    t.is(failures, 2)
+  } finally {
+    coreStore.purgeReplica = real
+  }
+  await pg.close()
+  t.is(await held(a.key), 0, 'purged on disk')
+  t.ok(await held(group) > 0, 'another key stays cached')
+})
+
+test('pages-groups: a listed writer of a member whose diary is blocked is purged with the diary', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer: hex(issuerKp.publicKey) }, kp) }
+  const seeder = await startSeeder(t, bootstrap, kp)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const seederWs = 'http://127.0.0.1:' + server.port
+  const a = await person(t, kp, 'Ana')
+  const b = await person(t, kp, 'Bia')
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await member.groupPost(a, { group, text: 'primeiro' })
+  await exchange(a, b)
+  await member.communityJoin(b, { community })
+  await member.groupJoin(b, { group })
+  await member.groupPost(b, { group, text: 'oi' })
+  const wb = ownWriter(b, group)
+  await syncOnce(bootstrap, a)
+  await syncOnce(bootstrap, b)
+
+  const dir = tmpDir(t, 'varanda-account-')
+  const replicasDir = path.join(dir, 'pages-replicas')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'horta')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const blocked = new Set()
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, blocklist: { has: (k) => blocked.has(k) } })
+  t.teardown(() => pg.close(), { force: true })
+  await pg.ready()
+  await until(() => pg.connected(), { name: 'link up', timeoutMs: 20000 })
+  await settled(async () => {
+    const r = await pg.groupRead(page.key, group)
+    return r.items.find((p) => p.text === 'oi') || null
+  }, 'the page reads Bia\'s post through her listed writer')
+
+  blocked.add(b.key)
+  t.ok(await pg.purgeBlocked() >= 2, 'the blocked diary and the writer listed for it go')
+  await pg.groupRead(page.key, group).catch(() => {})
+  t.is(await pg.purgeBlocked(), 0, 'a later read opens neither again')
+  await pg.close()
+  // The length a core has in the replica store on disk (0 once purged).
+  async function held (key) {
+    const store = new Corestore(replicasDir)
+    try {
+      const core = store.get({ key: b4a.from(key, 'hex'), writable: false })
+      await core.ready()
+      return core.contiguousLength
+    } finally {
+      await store.close()
+    }
+  }
+  t.is(await held(wb), 0, 'Bia\'s writer core is purged on disk')
+  t.is(await held(b.key), 0, 'and her diary')
+  t.ok(await held(group) > 0, 'the group root stays cached')
+})
+
+test('pages-groups: another diary\'s join of a listed writer whose diary the service refuses is settled by its block 0, so the group reads whole and a page joins it (#350)', async (t) => {
+  t.timeout(300000)
+  const { bootstrap } = await testnet(t)
+  const kp = generateAssociationKeyPair()
+  const association = hex(kp.publicKey)
+  const issuerKp = crypto.keyPair()
+  const issuer = hex(issuerKp.publicKey)
+  const ctx = { association, issuerKp, issuerCert: createIssuerCert({ issuer }, kp) }
+  const seeder = await startSeeder(t, bootstrap, kp)
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const seederWs = 'http://127.0.0.1:' + server.port
+  const a = await person(t, kp, 'Ana')
+  // Bia's certificate comes from an issuer the service already revokes and
+  // the seeder does not yet (its blocklist snapshot lags the service's).
+  const b = { dataDir: tmpDir(t, 'varanda-gsync-'), association }
+  b.key = (await member.idCreate(b)).publicKey
+  await member.certAdd(b, createIssuedCert({ member: b.key }, issuerKp, ctx.issuerCert))
+  await member.profileSet(b, { name: 'Bia' })
+  const { community } = await member.communityCreate(a, { name: 'Bairro', join: 'open' })
+  const { group } = await member.groupCreate(a, { name: 'Horta', join: 'open', community })
+  await member.groupPost(a, { group, text: 'primeiro' })
+  await exchange(a, b)
+  await member.communityJoin(b, { community })
+  await member.groupJoin(b, { group })
+  await member.groupPost(b, { group, text: 'oi' })
+  const wb = ownWriter(b, group)
+  // Ana's diary binds Bia's writer too. Its header names Bia, so it can never
+  // count for Ana.
+  const s = await coreStore.openStore(a.dataDir)
+  try {
+    await coreStore.appendRecord(await coreStore.openDiary(s), groupJoinRecord({ group, writer: wb, on: true }))
+  } finally {
+    await s.close()
+  }
+  await syncOnce(bootstrap, b)
+  await syncOnce(bootstrap, a)
+  await until(() => {
+    const l = seederListing(seeder, group)
+    return l.complete && l.rows.has(group) && l.rows.has(wb) && l.rows.get(wb).diary === b.key
+  }, { name: 'the seeder lists Bia\'s writer under her diary', timeoutMs: 60000, intervalMs: 250 })
+
+  const dir = tmpDir(t, 'varanda-account-')
+  const keys = openPageKeys({ dir, env: { VARANDA_PAGE_KEYS: PAGE_KEYS } })
+  const pagesStore = openPagesStore(dir)
+  const writer = createPagesWriter({ dir, keys, association })
+  t.teardown(() => writer.close(), { force: true })
+  await writer.ready()
+  const page = newPage(ctx, keys, 'horta')
+  await writer.createPage(page.args)
+  await pagesStore.create({ page: page.key, owner: page.owner })
+  const pg = createPagesGroups({ clearReplicas: false, dir, writer, pagesStore, keys, association, seederWs, revokedIssuers: () => new Set([issuer]) })
+  t.teardown(() => pg.close(), { force: true })
+  await pg.ready()
+  await until(() => pg.connected(), { name: 'link up', timeoutMs: 20000 })
+
+  const read = await until(async () => {
+    let r
+    try {
+      r = await pg.groupRead(page.key, group)
+    } catch (err) {
+      if (err.code === 'indisponivel') return null
+      throw err
+    }
+    return !r.incomplete && r.items.some((x) => x.text === 'primeiro') ? r : null
+  }, { name: 'a whole read', timeoutMs: 60000, intervalMs: 500 }).catch(() => null)
+  t.ok(read, 'the group reads whole: Ana\'s join of Bia\'s writer does not hold the fold')
+  t.absent(read !== null && read.items.some((x) => x.text === 'oi'), 'Bia\'s post stays out: the service refuses her diary')
+  t.is((await settled(() => pg.communityJoin(page.key, community), 'community join')).state, 'member', 'the page joins the community')
+  const joined = await settled(() => pg.groupJoin(page.key, group), 'group join', 60000).catch(() => null)
+  t.is(joined && joined.state, 'member', 'and the group: no join answers indisponivel')
 })

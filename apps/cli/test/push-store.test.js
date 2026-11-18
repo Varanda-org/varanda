@@ -332,7 +332,8 @@ test('guard() true before and false after the write does not acknowledge', async
   const { store, file } = setup(t, { guard: () => ++calls !== failAt })
   const m = memberKey()
   await store.put(sub(m, 1))
-  failAt = calls + 2
+  // Asked before (n+1), right before the rename (n+2) and after it (n+3).
+  failAt = calls + 3
   await rejects(t, store.put(sub(m, 2)), 'indisponivel', 'not acknowledged after the guard failed')
   t.is(readFile(file).members[m].length, 2, 'the write itself landed')
   t.alike(await store.put(sub(m, 2)), { changed: false }, 'the repeat answers')

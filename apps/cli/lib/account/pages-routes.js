@@ -31,10 +31,18 @@
 //     and dm-box-read keep the public boxes and the sealed shares;
 //     dm-legacy-read and dm-legacy-done hand the owner's device the sealed
 //     bundle of a legacy page's old Conversas and drop it once imported.
+//     actor-box keeps a core delegate admin's own signed dm box, which
+//     dm-box-read then hands the owner and admins (actorBoxes).
 //     dm-list and dm-thread serve the old rows only while the service still
 //     holds them.
-//   - media and avatar take the raw image as the body and the statement in
-//     x-varanda-page-* headers.
+//   - media and avatar take the raw bytes as the body and the statement in
+//     x-varanda-page-* headers. media is a still image or, with its `ms`, a
+//     short video/mp4 already free of metadata, for a post's [poster, video]
+//     pair; a post, reply or quote carries photos, that pair or a link card
+//     (its thumbnail one of the page's items), as a person's post does.
+//   - a root post may carry a poll or an event, and 'choice' writes the
+//     page's vote or RSVP, the same records a person writes (records.js
+//     postRecord, choiceRecord); 'status' answers the page's live choices.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -78,19 +86,21 @@ const { canonicalOp, opHash, verifyPage } = require('@varanda/core/lib/page-proo
 const pageLib = require('@varanda/core/lib/page')
 const { createIssuedCert, createUsernameRecord, isPlainObject } = require('@varanda/core/lib/cert')
 const { isUsername } = require('@varanda/core/lib/account-link')
-const { writeJsonAtomic } = require('@varanda/core/lib/store')
+const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
-const { applyDeletes } = require('@varanda/core/lib/deletion')
+const { applyDeletes, shownMedia } = require('@varanda/core/lib/deletion')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan } = require('@varanda/core/lib/listing')
-const { feira } = require('@varanda/rpc')
+const { feira, cardUrlHost } = require('@varanda/rpc')
+const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, deleteRecords, profileRecords, followRecord, listingRecord, listingStatusRecord,
-  parseRef, validDescriptor, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST
+  postRecord, likeRecord, repostRecord, choiceRecord, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord,
+  parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
+  MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX
 } = require('@varanda/core/lib/records')
 
 const PREFIX = '/account/pages/'
@@ -111,8 +121,9 @@ const HEX32_RE = /^[0-9a-f]{32}$/
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
 const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
-// record (pages-writer.js DELETABLE).
-const CLOSE_DELETES = ['post', 'like', 'repost', 'profile', 'listing', 'listing-edit']
+// record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
+// no earlier vote comes back.
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -137,8 +148,13 @@ function placeTexts (place) {
   return isPlainObject(place) ? [place.city, place.bairro] : []
 }
 
+// The texts an event post shows besides its text: the title and the place.
+function eventTexts (event) {
+  return isPlainObject(event) ? [event.title, event.place] : []
+}
+
 // Conversas as the page (./pages-dm.js, docs/rpc.md 5.84).
-const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
+const DM_ACTIONS = ['dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box']
 const DM_READS = ['dm-list', 'dm-thread', 'dm-box-read', 'dm-sign', 'dm-legacy-read']
 // Communities and groups as the page (./pages-groups.js).
 const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
@@ -147,18 +163,21 @@ const GROUP_READ_LIMIT = 32
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
-  'listing', 'listing-edit', 'listing-status', 'listing-consent']
+  'listing', 'listing-edit', 'listing-status', 'listing-consent', 'choice']
 const RECORDS = ['accept', 'remove', 'offer', 'transfer-accept', 'close', 'move']
 const START_ACTIONS = [...STATEMENTS, ...RECORDS]
 const READS = ['list', 'status', 'follows']
 // The newest refs 'status' answers per engagement list, so the answer stays
 // inside the app's 1 MiB read cap (about 80 bytes a ref).
 const MAX_STATUS_REFS = 4096
+// The newest polls and events 'status' answers the page's live choice on
+// (about 75 bytes each), so the whole answer still fits that cap.
+const MAX_STATUS_PICKS = 1024
 const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
 // record without a spent nonce is only known to be partial.
-const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename', 'follow', 'media', 'avatar',
+const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', 'rename', 'follow', 'media', 'avatar',
   ...LISTING_ACTIONS]
 
 const WRITER_TOKENS = Object.freeze({
@@ -184,6 +203,29 @@ const TOKENS = new Set(['nao-vinculado', 'sem-permissao', 'limite', 'nome-em-uso
   'fora-da-comunidade', 'aguardando-chave', 'conflito', 'rotacao-necessaria', 'privado', 'sequencia', 'termo-recusado'])
 
 function noop () {}
+
+// The page's choices per poll or event, from its own diary, in the form
+// readers fold them: a null pick (a withdrawal) clears the target's history
+// and a deleted choice never counted. The service cannot know a foreign
+// poll's option count, so it hands back every distinct pick since the last
+// withdrawal, newest first; the first one below the poll's count is the live
+// pick, as polls.js livePick (which skips a pick out of range). ->
+// { 'author:seq': [pick, ...] } for the MAX_STATUS_PICKS targets whose last
+// pick is newest.
+function pickedOf (entries) {
+  const live = new Map()
+  for (const e of applyDeletes(entries)) {
+    if (!e || e.deleted || !isPlainObject(e.record) || e.record.type !== 'choice') continue
+    const { to, pick } = e.record
+    if (!isPlainObject(to) || !HEX64_RE.test(to.author) || !Number.isSafeInteger(to.seq)) continue
+    if (pick !== null && !(Number.isSafeInteger(pick) && pick >= 0 && pick < POLL_MAX)) continue
+    const ref = to.author + ':' + to.seq
+    const prior = live.get(ref) || []
+    live.delete(ref)
+    if (pick !== null) live.set(ref, [pick, ...prior.filter((p) => p !== pick)])
+  }
+  return Object.fromEntries([...live].slice(-MAX_STATUS_PICKS))
+}
 
 function has (obj, k) {
   return Object.prototype.hasOwnProperty.call(obj, k)
@@ -228,6 +270,9 @@ function createPagesRoutes ({
   pagesNotices = null,
   pagesGroups = null,
   pagesDelegate = null,
+  // The service lock, asked right before the rename of the nonce key and
+  // the invites file (./guarded-write.js).
+  guard = () => true,
   // member -> void, throws 'telefone-pendente' (server.js phoneChecked).
   phoneChecked = () => {},
   http
@@ -280,6 +325,11 @@ function createPagesRoutes ({
   let creating = Promise.resolve()
   const audit = []
   const counts = { ok: 0, refused: 0, uncertain: 0 }
+  // `inviteUnreadable`: the file was there but could not be read, so memory
+  // may lack rows still on disk. `inviteStale`: a save failed, so disk may
+  // hold rows memory dropped. Either keeps the deletion sweep pending.
+  let inviteUnreadable = false
+  let inviteStale = false
   const invites = loadInvites()
   // K1 -> the communities its move left, for a resumed move's re-join on K2.
   const moveLeft = new Map()
@@ -319,7 +369,7 @@ function createPagesRoutes ({
         throw new Error('invalid')
       }
       const key = nodeCrypto.randomBytes(32)
-      writeJsonAtomic(file, { v: 1, key: key.toString('hex') }, 0o600)
+      writeGuarded(file, { v: 1, key: key.toString('hex') }, 0o600, guard)
       return key
     } catch {
       log({ event: 'pagina', action: 'nonce-key', reason: 'indisponivel' })
@@ -539,7 +589,7 @@ function createPagesRoutes ({
       }
     }
     if (seq !== null) {
-      if (action === 'dm-box-share') return { ok: true, replay: true }
+      if (action === 'dm-box-share' || action === 'actor-box') return { ok: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
         const r = pagesStore.get(page)
@@ -620,6 +670,18 @@ function createPagesRoutes ({
   function need (row, member, role) {
     const got = roleOf(row, member)
     if (got === null || (role === 'owner' && got !== 'owner')) throw refuse('sem-permissao')
+  }
+
+  // For a row that may have moved: the store counts its frozen roster only
+  // for whoever still holds a role at the end of the move chain.
+  function needHeld (page, member) {
+    let got
+    try {
+      got = pagesStore.role(page, member)
+    } catch {
+      throw refuse('indisponivel')
+    }
+    if (got === null) throw refuse('sem-permissao')
   }
 
   // At most 2 closes or moves per owner per 24 h, kept in pages.json so a
@@ -738,26 +800,75 @@ function createPagesRoutes ({
     let data = null
     try {
       data = JSON.parse(fs.readFileSync(file, 'utf8'))
-    } catch {
+    } catch (err) {
+      if (err.code !== 'ENOENT') inviteUnreadable = true
       return map
     }
-    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) return map
+    if (!isPlainObject(data) || data.v !== 1 || !isPlainObject(data.rows)) {
+      inviteUnreadable = true
+      return map
+    }
     for (const [k, v] of Object.entries(data.rows)) {
       if (isPlainObject(v) && isPlainObject(v.record) && typeof v.expiresAt === 'string') map.set(k, v)
     }
     return map
   }
 
-  function saveInvites () {
+  // `drop`: keys that go with the expired ones. Memory follows only once the
+  // file is written, so a failed write leaves holdsInvites() true and the
+  // deletion sweep tries again.
+  function saveInvites (drop = null) {
     const file = invitePath()
-    if (file === null) return
     const t = now()
     const rows = {}
+    const gone = []
     for (const [k, v] of invites) {
-      if (Date.parse(v.expiresAt) > t) rows[k] = v
-      else invites.delete(k)
+      if (Date.parse(v.expiresAt) > t && (drop === null || !drop.has(k))) rows[k] = v
+      else gone.push(k)
     }
-    writeJsonAtomic(file, { v: 1, rows }, 0o600)
+    if (file === null) {
+      if (drop !== null) for (const k of drop) invites.delete(k)
+      return
+    }
+    try {
+      writeGuarded(file, { v: 1, rows }, 0o600, guard)
+    } catch (err) {
+      inviteStale = true
+      throw err
+    }
+    inviteUnreadable = false
+    inviteStale = false
+    for (const k of gone) invites.delete(k)
+  }
+
+  // Rows are keyed '<page>:<invitee>'. Only the invitee's own rows go: a
+  // roster another invitee holds may list the deleted member as an admin,
+  // and it is the owner's signed statement, settled at accept or expiry.
+  function invitesOf (member) {
+    const out = []
+    for (const k of invites.keys()) if (k.slice(65) === member) out.push(k)
+    return out
+  }
+
+  // Never answers from a memory that may disagree with the file: unreadable
+  // throws until a save rewrites it, and a failed save is retried first,
+  // since memory loaded fine and is the authority.
+  function holdsInvites (member) {
+    if (inviteUnreadable) throw refuse('indisponivel')
+    if (inviteStale) saveInvites()
+    return invitesOf(member).length > 0
+  }
+
+  // The file the sweep's warning names while holdsInvites cannot answer.
+  function inviteBrokenFiles () {
+    return inviteUnreadable || inviteStale ? [INVITE_FILE] : []
+  }
+
+  function forgetInvites (member) {
+    const keys = invitesOf(member)
+    if (keys.length === 0) return false
+    saveInvites(new Set(keys))
+    return true
   }
 
   // ---- start --------------------------------------------------------------
@@ -943,22 +1054,67 @@ function createPagesRoutes ({
 
   // ---- posts and engagement ------------------------------------------------
 
-  function mediaOf (page, media, max = MAX_MEDIA_PER_POST) {
+  // The page's own stored items for these descriptors, or 'midia-invalida'.
+  // Photos, or, for a post (`video`), exactly the pair [JPEG poster, video]
+  // as a person's post carries it (records.js validPostMedia). Every key
+  // must equal the stored row's, a video's `ms` included, and a row only
+  // answers a descriptor of its own kind (a still row has no `ms`).
+  function mediaOf (page, media, max = MAX_MEDIA_PER_POST, { video = false } = {}) {
     if (media === undefined) return undefined
     if (!Array.isArray(media) || media.length < 1 || media.length > max) throw refuse('midia-invalida')
+    const withVideo = video && media.some((d) => isPlainObject(d) && d.mime === VIDEO_MIME)
+    if (withVideo ? !validPostMedia(media) : !media.every((d) => isPlainObject(d) && validDescriptor(d))) throw refuse('midia-invalida')
     let table
     try {
       table = writer.items(page)
     } catch (err) {
       throw tokenOf(err)
     }
-    const same = (a, b) => ['core', 'start', 'blocks', 'sha256', 'mime', 'bytes', 'width', 'height'].every((k) => a[k] === b[k])
     return media.map((d) => {
-      if (!isPlainObject(d) || !validDescriptor(d)) throw refuse('midia-invalida')
+      const keys = d.mime === VIDEO_MIME ? VIDEO_DESCRIPTOR_KEYS : DESCRIPTOR_KEYS
       const row = table.find((it) => it.core === d.core && it.start === d.start && it.blocks === d.blocks && it.sha256 === d.sha256)
-      if (row === undefined || !same(row, d)) throw refuse('midia-invalida')
+      if (row === undefined || Object.keys(row).length !== keys.length || !keys.every((k) => row[k] === d[k])) throw refuse('midia-invalida')
       return row
     })
+  }
+
+  // A post's link card (docs/protocol.md, "Link cards"), the music card
+  // included (a link card whose URL ends in #varanda-musica). The app sends
+  // { url, title?, desc?, image? }; a `host` given must be the URL's. The
+  // thumbnail must be one of the page's own items and pass the check a
+  // person's post preview passes (a JPEG of at most MAX_CARD_IMAGE_BYTES).
+  // The URL and texts go through the blocklist like the post text. -> the card, or
+  // undefined for none.
+  function previewOf (page, preview) {
+    if (preview === undefined || preview === null) return undefined
+    if (!exactKeys(preview, ['url'], ['host', 'title', 'desc', 'image'])) throw refuse('pedido-invalido')
+    const host = cardUrlHost(preview.url)
+    if (host === null || (preview.host !== undefined && preview.host !== host)) throw refuse('pedido-invalido')
+    const text = (v) => v === undefined || v === null ? '' : v
+    let image = null
+    if (preview.image !== undefined && preview.image !== null) {
+      if (!validPreviewImage(preview.image)) throw refuse('midia-invalida')
+      image = mediaOf(page, [preview.image], 1)[0]
+    }
+    const card = { url: preview.url, host, title: text(preview.title), desc: text(preview.desc), image }
+    if (!validPreview(card)) throw refuse('pedido-invalido')
+    termFree(card.url, card.title, card.desc)
+    return card
+  }
+
+  // A post, reply or quote op's media and preview: never both, as a
+  // person's post (records.js postRecord matches no key set with the two).
+  function postParts (page, op) {
+    const hasPreview = op.preview !== undefined && op.preview !== null
+    if (op.media !== undefined && hasPreview) throw refuse('pedido-invalido')
+    return { media: mediaOf(page, op.media, MAX_MEDIA_PER_POST, { video: true }), preview: previewOf(page, op.preview) }
+  }
+
+  // The media ranges a tombstone of this record frees: everything it shows
+  // (deletion.js shownMedia), a post's link card thumbnail included.
+  function rangesOf (record) {
+    const items = shownMedia(record).filter(isPlainObject)
+    return items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
   }
 
   function target (ref) {
@@ -976,24 +1132,58 @@ function createPagesRoutes ({
   async function recordsFor (action, page, op) {
     try {
       if (action === 'post') {
-        if (!exactKeys(op, ['text'], ['media'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['text'], ['media', 'preview', 'poll', 'event'])) throw refuse('pedido-invalido')
+        // A root post with a poll or an event, as a person's post.create
+        // (methods.js postPollCross): never beside media, a link card or
+        // each other, and never null.
+        if (has(op, 'poll') || has(op, 'event')) {
+          if (has(op, 'media') || has(op, 'preview') || (has(op, 'poll') && has(op, 'event'))) throw refuse('pedido-invalido')
+          if (has(op, 'event')) {
+            if (!isPlainObject(op.event)) throw refuse('pedido-invalido')
+            termFree(op.text, ...eventTexts(op.event))
+            return [postRecord({ text: op.text, event: op.event })]
+          }
+          if (!Array.isArray(op.poll)) throw refuse('pedido-invalido')
+          termFree(op.text, ...op.poll)
+          return [postRecord({ text: op.text, poll: op.poll })]
+        }
         termFree(op.text)
-        return [postRecord({ text: op.text, media: mediaOf(page, op.media) })]
+        return [postRecord({ text: op.text, ...postParts(page, op) })]
       }
       if (action === 'reply') {
-        if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
         termFree(op.text)
-        return [postRecord({ text: op.text, replyTo: target(op.to), media: mediaOf(page, op.media) })]
+        return [postRecord({ text: op.text, replyTo: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'quote') {
-        if (!exactKeys(op, ['to', 'text'], ['media'])) throw refuse('pedido-invalido')
+        if (!exactKeys(op, ['to', 'text'], ['media', 'preview'])) throw refuse('pedido-invalido')
         termFree(op.text)
-        return [postRecord({ text: op.text, quote: target(op.to), media: mediaOf(page, op.media) })]
+        return [postRecord({ text: op.text, quote: target(op.to), ...postParts(page, op) })]
       }
       if (action === 'like' || action === 'repost') {
         if (!exactKeys(op, ['to', 'on']) || typeof op.on !== 'boolean') throw refuse('pedido-invalido')
         const build = action === 'like' ? likeRecord : repostRecord
         return [build({ to: target(op.to), on: op.on })]
+      }
+      if (action === 'choice') {
+        if (!exactKeys(op, ['to', 'pick'])) throw refuse('pedido-invalido')
+        const t = target(op.to)
+        if (t.seq < 1) throw refuse('pedido-invalido')
+        const record = choiceRecord({ to: t, pick: op.pick })
+        // A withdrawal needs no read, as a person's choice.set. A pick on a
+        // blocked author is refused, as a follow is. Only the page's own
+        // diary is readable here: on it the target must be a live poll with
+        // that option or an event; elsewhere a pick no poll has counts for
+        // no reader (polls.js).
+        if (op.pick !== null) {
+          if (blocked(t.author)) throw refuse('sem-permissao')
+          if (t.author === page) {
+            const live = applyDeletes(await writer.readEntries(page)).find((e) => e && e.seq === t.seq && !e.deleted)
+            const count = live === undefined ? null : pickCount(live.record, t.seq)
+            if (count === null || !(op.pick < count)) throw refuse('pedido-invalido')
+          }
+        }
+        return [record]
       }
       if (action === 'delete') {
         if (!exactKeys(op, ['to'])) throw refuse('pedido-invalido')
@@ -1009,8 +1199,7 @@ function createPagesRoutes ({
         // Never a tombstone over a page record: a delete must not undo a
         // roster, an accept or an offer.
         if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost'].includes(e.record.type)) throw refuse('pedido-invalido')
-        const media = Array.isArray(e.record.media) ? e.record.media.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-        return deleteRecords({ seq: t.seq, media })
+        return deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
@@ -1208,9 +1397,10 @@ function createPagesRoutes ({
     try {
       if (action === 'list') return pagesStore.listFor(member)
       const row = rowOf(page)
-      need(row, member, 'admin')
+      needHeld(page, member)
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
+      const picked = pickedOf(await writer.readEntries(page))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1226,6 +1416,7 @@ function createPagesRoutes ({
           reposted: reposted.slice(-MAX_STATUS_REFS),
           truncated: liked.length > MAX_STATUS_REFS || reposted.length > MAX_STATUS_REFS
         },
+        picked,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
@@ -1662,9 +1853,7 @@ function createPagesRoutes ({
       if (!e || e.deleted || !Number.isSafeInteger(e.seq) || e.seq < 1) continue
       const r = e.record
       if (!isPlainObject(r) || !CLOSE_DELETES.includes(r.type)) continue
-      const items = Array.isArray(r.media) ? r.media : isPlainObject(r.avatar) ? [r.avatar] : []
-      const media = items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
-      out.push(...deleteRecords({ seq: e.seq, media }))
+      out.push(...deleteRecords({ seq: e.seq, media: rangesOf(r) }))
     }
     return out
   }
@@ -1795,6 +1984,69 @@ function createPagesRoutes ({
     return e.record
   }
 
+  // K1's profile as readers fold it, with the avatar's bytes, or null.
+  // Deletes are folded over the service's own blocks only: a paused K1's
+  // longer log holds blocks written with a leaked key, and its tombstone
+  // must not hide the real profile. Never throws.
+  async function profileToCarry (page) {
+    let profile
+    try {
+      profile = latestProfile(applyDeletes(await writer.readOwn(page)))
+    } catch {
+      note('move', 'perfil-pendente')
+      return null
+    }
+    if (profile === null) return null
+    let avatar = null
+    if (profile.avatar !== null) {
+      try {
+        avatar = { bytes: await writer.itemBytes(page, profile.avatar), mime: profile.avatar.mime }
+      } catch {
+        note('move', 'foto-pendente')
+      }
+    }
+    return { name: profile.name, bio: profile.bio, avatar }
+  }
+
+  // K1's profile appended to K2 once, best effort. It is part of the move:
+  // no media or avatar cap is spent and no statement is recorded. A photo
+  // that cannot be stored leaves name and bio. K2's lock keeps an admin's
+  // profile edit from landing between the check and the append; the caller
+  // holds K1's, and no route takes K2's and then K1's (each locks one page,
+  // and K2 is a new key). -> K2's length.
+  function carryProfile (to, carry, at, length) {
+    return withLock(to, async () => {
+      try {
+        if (latestProfile(await writer.readEntries(to)) !== null) return length
+        let avatar = null
+        if (carry.avatar !== null) {
+          try {
+            avatar = await writer.avatarItem(to, carry.avatar.bytes, carry.avatar.mime)
+          } catch {
+            note('move', 'foto-pendente')
+          }
+        }
+        await writer.append(to, profileRecords({ name: carry.name, bio: carry.bio, avatar, at }))
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      // A stored photo declares K2's media core even when the append failed.
+      let n = length
+      try {
+        n = writer.info(to).length
+        await pagesStore.expectLength(to, n)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      try {
+        await pagesStore.setMedia(to, writer.items(to).length)
+      } catch {
+        note('move', 'perfil-pendente')
+      }
+      return n
+    })
+  }
+
   // `pending` null: a resumed move, whose writer step already ran.
   async function moveLocked ({ member, page, nonce, record, to, origin, roster, dmBox: rawBox, pending }) {
     const resume = pending === null
@@ -1844,6 +2096,9 @@ function createPagesRoutes ({
       }
       if (published === null || published.gen !== 1 || published.box !== dmBox.box) throw refuse('conflito')
     }
+    // Read before movePage. A resumed move's K1 is still readable: the wipe
+    // after a move takes its keys, never its diary or media core.
+    const carry = await profileToCarry(page)
     if (resume) {
       try {
         cert = writer.certOf(to)
@@ -1926,6 +2181,9 @@ function createPagesRoutes ({
         note('move', 'vinculo-pendente')
       }
     }
+    // The link above shows the owner's diary for the owner only; the page's
+    // own name, bio and photo come from its profile records.
+    if (carry !== null) length = await carryProfile(to, carry, date, length)
     rejoin(to, left)
     const result = { page: to, seq, length, pushed: res.pushed }
     if (res.paused) result.paused = true
@@ -2036,13 +2294,20 @@ function createPagesRoutes ({
     const body = { member: header(req, 'member'), nonce: header(req, 'nonce'), page: header(req, 'page'), signature: header(req, 'signature'), op }
     const proof = await statement(body, action, false)
     const keysOk = action === 'media'
-      ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'])
+      ? exactKeys(proof.op, ['sha256', 'mime', 'width', 'height', 'bytes'], ['ms'])
       : exactKeys(proof.op, ['sha256', 'mime', 'bytes', 'name', 'bio'])
     if (!keysOk) throw refuse('pedido-invalido')
-    const mimes = action === 'media' ? MEDIA_MIMES : AVATAR_MIMES
+    const mimes = action === 'media' ? [...MEDIA_MIMES, VIDEO_MIME] : AVATAR_MIMES
     const max = action === 'media' ? MAX_MEDIA_BODY : MAX_AVATAR_BYTES
     const { sha256, mime, bytes } = proof.op
     if (!mimes.includes(mime) || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > max) throw refuse('midia-invalida')
+    // A short video (the second item of a post's [poster, video] pair) and
+    // only a video carries its duration; the writer checks the container.
+    if (action === 'media') {
+      const ms = proof.op.ms
+      const video = mime === VIDEO_MIME
+      if (video ? !(Number.isSafeInteger(ms) && ms >= 1 && ms <= MAX_VIDEO_MS) : ms !== undefined) throw refuse('midia-invalida')
+    }
     const row = writableRow(proof.page)
     need(row, proof.member, 'admin')
     const raw = await readRaw(req, max)
@@ -2060,7 +2325,9 @@ function createPagesRoutes ({
       if (!caps.media(page)) throw refuse('limite')
       let descriptor
       try {
-        descriptor = await writer.mediaItem(page, { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }, { member, nonce })
+        const item = { bytes: raw, mime: op.mime, width: op.width, height: op.height, sha256: op.sha256 }
+        if (op.ms !== undefined) item.ms = op.ms
+        descriptor = await writer.mediaItem(page, item, { member, nonce })
       } catch (err) {
         if (err && typeof err.code === 'string' && has(WRITER_TOKENS, err.code)) throw tokenOf(err)
         throw new Uncertain()
@@ -2157,6 +2424,11 @@ function createPagesRoutes ({
       if (!exactKeys(op, ['id']) || typeof op.id !== 'string' || !HEX64_RE.test(op.id)) throw refuse('pedido-invalido')
       return { id: op.id }
     }
+    if (action === 'actor-box') {
+      if (!exactKeys(op, ['box', 'gen', 'at', 'sig'])) throw refuse('pedido-invalido')
+      if (!Number.isSafeInteger(op.gen) || op.gen < 1 || !isCanonicalIso(op.at) || typeof op.box !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
+      return { box: op.box, gen: op.gen, at: op.at, sig: op.sig }
+    }
     if (action === 'dm-box-share') {
       if (!exactKeys(op, ['member', 'gen', 'sealed', 'sig'])) throw refuse('pedido-invalido')
       if (!Number.isSafeInteger(op.gen) || op.gen < 1 || typeof op.sealed !== 'string' || typeof op.sig !== 'string') throw refuse('pedido-invalido')
@@ -2187,8 +2459,11 @@ function createPagesRoutes ({
   // on, and nothing is signed, read or stored for them.
   async function dm (action, body) {
     if (pagesDm === null) throw refuse('nao-encontrado')
-    const { member, page, nonce, op, hash } = await statement(body, action, false)
+    const { member, page, nonce, op, hash, delegate } = await statement(body, action, false)
     const params = dmParams(action, op)
+    // A linked member's box is its diary's dm-key: only a core delegate
+    // actor, which has no diary of its own key, states one.
+    if (action === 'actor-box' && delegate === null) throw refuse('pedido-invalido')
     const read = DM_READS.includes(action)
     const prior = claim(member, nonce, hash, read, page, action)
     if (prior !== null) return prior
@@ -2245,6 +2520,12 @@ function createPagesRoutes ({
           result = await pagesDm.legacyDone(page, { member, id: params.id })
         } catch (err) {
           throw dmFailure(err)
+        }
+      } else if (action === 'actor-box') {
+        try {
+          result = await pagesDm.actorBox(page, { member, ...params, idem: { member, nonce } })
+        } catch (err) {
+          throw tokenOf(err)
         }
       } else {
         try {
@@ -2487,7 +2768,7 @@ function createPagesRoutes ({
     const body = await readJsonBody(req, MAX_BODY)
     if (action === 'start') return start(body)
     if (action === 'create') return create(body)
-    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
+    if (['post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'profile', ...LISTING_ACTIONS].includes(action)) return write(action, body)
     if (action === 'listing-consent') return consent(body)
     if (READS.includes(action)) return read(action, body)
     if (DM_ACTIONS.includes(action)) return dm(action, body)
@@ -2556,6 +2837,9 @@ function createPagesRoutes ({
     handle,
     stats: () => ({ available: on, ...counts, applied: applied.size, invites: invites.size }),
     reboxSweep,
+    holdsInvites,
+    forgetInvites,
+    inviteBrokenFiles,
     close: () => {
       routesClosed = true
       clearInterval(reboxTimer)

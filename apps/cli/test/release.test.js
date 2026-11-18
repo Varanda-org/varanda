@@ -3,6 +3,8 @@
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
+const os = require('node:os')
+const { spawnSync } = require('node:child_process')
 
 const repoRoot = path.resolve(__dirname, '../../..')
 const WORKFLOW = path.join(repoRoot, '.github/workflows/release.yml')
@@ -227,7 +229,7 @@ test('release.yml: a rerun reuses sha-<commit> only when both images verify', (t
   const seq = reuse.indexOf('[ "$' + '{BASH_REMATCH[2]}" = "$SEQ" ] || return 1')
   const web = reuse.indexOf('web="$' + '{BASH_REMATCH[3]}"')
   const verifyWeb = reuse.indexOf('cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$WEB_REPO@$web" > /dev/null || return 1')
-  const print = reuse.indexOf('printf \'%s %s\\n\' "$seeder" "$web"')
+  const print = reuse.indexOf('printf \'%s %s %s\\n\' "$seeder" "$web" "$caddy"')
   t.ok(verifySeeder !== -1 && run !== -1 && commit !== -1 && seq !== -1 && web !== -1 && verifyWeb !== -1 && print !== -1, 'seeder verify, release.json, commit, seq, web verify and result present')
   t.ok(verifySeeder < run, 'the seeder is verified before it is ever run')
   t.ok(run < commit && commit < seq && seq < web && web < verifyWeb && verifyWeb < print, 'a release counts only after every check')
@@ -237,9 +239,9 @@ test('release.yml: a rerun reuses sha-<commit> only when both images verify', (t
   const match = reuse.indexOf('[[ "$release" =~ $re ]] || return 1')
   t.ok(matchRe !== -1 && matchRe < run, 'the reuse step holds the same anchored release.json regex')
   t.ok(match !== -1 && run < match && match < commit, 'release.json is matched whole before its fields are compared')
-  t.ok(/^ {10}rc=0\n {10}found="\$\(signed_release\)" \|\| rc=\$\?\n {10}if \[ "\$rc" -eq 2 \]; then\n {12}echo "::error::[^"\n]*"\n {12}exit 1\n {10}elif \[ "\$rc" -eq 0 \]; then\n {12}read -r seeder web <<< "\$found"\n/m.test(reuse), 'a registry error fails the step; reused only when signed_release succeeds')
+  t.ok(/^ {10}rc=0\n {10}found="\$\(signed_release\)" \|\| rc=\$\?\n {10}if \[ "\$rc" -eq 2 \]; then\n {12}echo "::error::[^"\n]*"\n {12}exit 1\n {10}elif \[ "\$rc" -eq 0 \]; then\n {12}read -r seeder web caddy <<< "\$found"\n/m.test(reuse), 'a registry error fails the step; reused only when signed_release succeeds')
   t.ok(/\n {14}echo "RELEASE_SOURCE=reused"\n {14}echo "VERIFIED_SEEDER_DIGEST=\$seeder"\n {14}echo "VERIFIED_WEB_DIGEST=\$web"\n/.test(reuse), 'the reused digests are the verified ones')
-  t.ok(/\n {10}else\n[^\n]*\n {12}echo "RELEASE_SOURCE=build" >> "\$GITHUB_ENV"\n {10}fi/.test(reuse), 'anything else builds')
+  t.ok(/\n {10}else\n[^\n]*\n {12}echo "RELEASE_SOURCE=build" >> "\$GITHUB_ENV"\n/.test(reuse), 'anything else builds')
   t.is((code.match(/RELEASE_SOURCE=reused/g) || []).length, 1, 'only the reuse step marks a release reused')
 
   // The build and sign steps stop on a reused release and refuse an unknown state.
@@ -261,11 +263,14 @@ test('release.yml: image names, build flags and the digests from the push', (t) 
   t.ok(validate.includes("re='^ghcr\\.io/sigstore/cosign/cosign:v[0-9]+\\.[0-9]+\\.[0-9]+@sha256:[0-9a-f]{64}$'"), 'cosign.ref must be the pinned cosign image')
 
   const builds = lines.filter((l) => /docker (buildx )?build\b/.test(l))
-  t.is(builds.length, 2, 'two image builds')
+  t.is(builds.length, 3, 'three image builds: web, seeder and, when needed, Caddy')
   const build = stepNamed('Build and push both images')
   t.ok(build, 'build step found')
-  const cmds = build.split(/(?=docker build )/).slice(1).map((c) => c.split(/ \.\n/)[0])
-  t.is(cmds.length, 2, 'two build commands')
+  const all = build.split(/(?=docker build )/).slice(1)
+  t.is(all.length, 3, 'three build commands')
+  // The release images carry the commit; the Caddy image is shared by many.
+  const cmds = all.filter((c) => !c.includes('Dockerfile.caddy')).map((c) => c.split(/ \.\n/)[0])
+  t.is(cmds.length, 2, 'two release build commands')
   for (const c of cmds) {
     for (const f of ['--platform linux/amd64', '--provenance=false', '--sbom=false', '--build-arg VARANDA_COMMIT="$GITHUB_SHA"', '--label org.opencontainers.image.revision="$GITHUB_SHA"']) {
       t.ok(c.includes(f), 'build has ' + f)
@@ -293,7 +298,7 @@ test('release.yml: image names, build flags and the digests from the push', (t) 
   t.ok(build.includes("re='^\\{\"v\":1,\"commit\":\"([0-9a-f]{40})\",\"seq\":([1-9][0-9]{0,9}),\"web\":\"ghcr\\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})\"\\}$'"), 'release.json matched whole by one anchored regex')
   t.ok(/\[ "\$\{BASH_REMATCH\[1\]\}" != "\$GITHUB_SHA" \]/.test(build) && /\[ "\$\{BASH_REMATCH\[2\]\}" != "\$SEQ" \]/.test(build), 'release.json names this commit and seq')
   t.ok(/\|\| \[ "\$\{BASH_REMATCH\[3\]\}" != "\$web" \]; then\n[^\n]*\n\s+exit 1/.test(build), 'release.json names the pushed web digest')
-  t.ok(/\n {10}\{\n {12}echo "WEB_DIGEST=\$web"\n {12}echo "SEEDER_DIGEST=\$seeder"\n {10}\} >> "\$GITHUB_ENV"/.test(build), 'the pushed digests are handed to signing')
+  t.ok(/\n {10}\{\n {12}echo "WEB_DIGEST=\$web"\n {12}echo "SEEDER_DIGEST=\$seeder"\n {12}echo "CADDY_DIGEST=\$caddy"\n {10}\} >> "\$GITHUB_ENV"/.test(build), 'the pushed digests are handed to signing')
   t.is((code.match(/echo "(WEB|SEEDER)_DIGEST=/g) || []).length, 2, 'only the build step sets the digests to sign')
 })
 
@@ -306,8 +311,11 @@ test('release.yml: cosign keyless, only as the pinned container, verified', (t) 
   const cosignLines = lines.filter((l) => /\bcosign\b/.test(l) && !/^\s+- name:|sigstore\/cosign|cosign\.ref|COSIGN_|cosign\(\)|cosign_ref/.test(l))
   for (const l of cosignLines) t.ok(/^\s+cosign (sign|verify) /.test(l), 'cosign only through the container function: ' + l.trim())
   t.ok(/-e ACTIONS_ID_TOKEN_REQUEST_URL -e ACTIONS_ID_TOKEN_REQUEST_TOKEN /.test(sign), 'OIDC request variables passed by name only, to the signing container')
-  t.absent(/ACTIONS_ID_TOKEN_REQUEST/.test(stepNamed('Reuse a release already signed for this commit')), 'the verify-only container gets no OIDC token')
-  for (const s of [sign, stepNamed('Reuse a release already signed for this commit')]) {
+  for (const name of ['Reuse a release already signed for this commit', 'Move edge if this release is newer']) {
+    t.ok(stepNamed(name), 'step found: ' + name)
+    t.absent(/ACTIONS_ID_TOKEN_REQUEST/.test(stepNamed(name)), 'the verify-only container gets no OIDC token: ' + name)
+  }
+  for (const s of [sign, stepNamed('Reuse a release already signed for this commit'), stepNamed('Move edge if this release is newer')]) {
     t.ok(/docker run --rm --user "\$\(id -u\):\$\(id -g\)"/.test(s), 'cosign runs as a container')
     t.ok(/^\s+"\$COSIGN_IMAGE" "\$@"\s*$/m.test(s), 'the container is the image named in cosign.ref')
     t.ok(/-e COSIGN_YES=true/.test(s), 'COSIGN_YES=true')
@@ -317,7 +325,7 @@ test('release.yml: cosign keyless, only as the pinned container, verified', (t) 
   t.ok(/^ {12}cosign sign "\$ref"\n {12}cosign verify --certificate-identity "\$COSIGN_IDENTITY" --certificate-oidc-issuer "\$COSIGN_ISSUER" "\$ref" > \/dev\/null\n {10}done$/m.test(sign), 'each is verified right after signing, with the exact identity and issuer')
   // A verify that cannot fail the job would let an unsigned digest through.
   const verifies = lines.filter((l) => /cosign verify/.test(l))
-  t.is(verifies.length, 3, 'three verifies: the two reuse checks and the post-sign check')
+  t.is(verifies.length, 7, 'seven verifies: seeder, web and Caddy of a reused release, a reused Caddy tag, a built Caddy, the post-sign loop and the current edge')
   for (const l of verifies) {
     t.ok(/--certificate-identity "\$COSIGN_IDENTITY" --certificate-oidc-issuer "\$COSIGN_ISSUER" "[^"]+" > \/dev\/null( \|\| return 1)?$/.test(l), 'verify pins identity and issuer and can fail: ' + l.trim())
     t.absent(/\|\|\s*(true|:)\b|;\s*true\b/.test(l), 'verify failure is never ignored: ' + l.trim())
@@ -328,7 +336,68 @@ test('release.yml: cosign keyless, only as the pinned container, verified', (t) 
   t.is((code.match(/echo "VERIFIED_(WEB|SEEDER)_DIGEST=/g) || []).length, 4, 'only the reuse and sign steps record verified digests')
 })
 
-test('release.yml: edge moves only from the tip of main, by digest, read back', (t) => {
+test('release.yml: the Caddy image is built only for a new Dockerfile.caddy and pinned in caddy.json', (t) => {
+  t.ok(/^ {6}CADDY_REPO:\s*ghcr\.io\/varanda-org\/varanda-caddy\s*$/m.test(publish), 'Caddy image name')
+  const validate = publishSteps.find((s) => /deploy\/seeder\/cosign\.ref/.test(s)) || ''
+  t.ok(validate.includes('caddy_hash="$(sha256sum deploy/seeder/Dockerfile.caddy)"') && validate.includes('echo "CADDY_TAG=caddy-$caddy_hash"'), 'the Caddy tag is the Dockerfile.caddy hash')
+  const reuse = stepNamed('Reuse a release already signed for this commit')
+  const readCaddy = reuse.indexOf('caddy_json="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$seeder" /app/caddy.json)" || return 1')
+  const verifyCaddy = reuse.indexOf('cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$CADDY_REPO@$caddy" > /dev/null || return 1')
+  const print = reuse.indexOf('printf \'%s %s %s\\n\' "$seeder" "$web" "$caddy"')
+  t.ok(readCaddy !== -1 && verifyCaddy > readCaddy && print > verifyCaddy, 'a reused release reuses only a verified caddy.json digest')
+  t.ok(reuse.includes('found_caddy="$(digest_of "$CADDY_REPO@$caddy")" || return 2\n            [ "$found_caddy" = "$caddy" ] || return 1'), 'the caddy.json digest must exist')
+  const tagged = reuse.indexOf('caddy="$(digest_of "$CADDY_REPO:$CADDY_TAG")" || return 2')
+  const labelCheck = reuse.indexOf('[ "caddy-$label" = "$CADDY_TAG" ] || return 1')
+  t.ok(tagged !== -1 && labelCheck > reuse.indexOf('"$CADDY_REPO@$caddy" > /dev/null || return 1', tagged), 'a Caddy tag is reused only after verify and a matching Dockerfile hash label')
+  t.ok(/\n {16}echo "CADDY_SOURCE=reused"\n {16}echo "VERIFIED_CADDY_DIGEST=\$caddy"\n/.test(reuse) && /\n {14}echo "CADDY_SOURCE=build" >> "\$GITHUB_ENV"\n/.test(reuse), 'reused when verified, built otherwise')
+
+  const build = stepNamed('Build and push both images')
+  t.ok(/^ {14}docker build --platform linux\/amd64 --provenance=false --sbom=false \\\n {16}--label org\.varanda\.dockerfile-caddy="\$\{CADDY_TAG#caddy-\}" \\\n {16}-f deploy\/seeder\/Dockerfile\.caddy -t "\$CADDY_REPO:\$CADDY_TAG" deploy\/seeder\n {14}caddy="\$\(tag="\$CADDY_TAG" push_digest "\$CADDY_REPO"\)"\n/m.test(build), 'Caddy built only in the build branch, labelled, pushed as caddy-<hash>, digest from its push')
+  t.ok(build.includes('reused) caddy="$VERIFIED_CADDY_DIGEST" ;;'), 'a reused Caddy keeps its verified digest')
+  t.ok(build.includes('--build-arg VARANDA_CADDY_IMAGE="$CADDY_REPO@$caddy"'), 'the seeder pins the Caddy image by digest')
+  t.ok(build.indexOf('--build-arg VARANDA_CADDY_IMAGE') > build.indexOf('caddy="$(tag='), 'Caddy pushed before the seeder build')
+  t.ok(build.includes('if [ "$caddy_json" != "{\\"v\\":1,\\"caddy\\":\\"$CADDY_REPO@$caddy\\"}" ]; then'), 'caddy.json read back and compared')
+
+  const sign = stepNamed('Sign and verify the pushed digests')
+  t.ok(/^ {10}if \[ "\$CADDY_SOURCE" = build \]; then\n {12}cosign sign "\$CADDY_REPO@\$CADDY_DIGEST"\n {12}cosign verify [^\n]*"\$CADDY_REPO@\$CADDY_DIGEST" > \/dev\/null\n {12}echo "VERIFIED_CADDY_DIGEST=\$CADDY_DIGEST" >> "\$GITHUB_ENV"\n {10}fi\n/m.test(sign), 'only a Caddy image this run pushed is signed, then verified')
+  t.absent(/CADDY_REPO:edge|CADDY_REPO" "\$VERIFIED_CADDY/.test(code), 'no channel tag for the Caddy image')
+  const summary = publishSteps.find((s) => /GITHUB_STEP_SUMMARY/.test(s)) || ''
+  t.ok(summary.includes('$CADDY_REPO@$VERIFIED_CADDY_DIGEST'), 'summary names the Caddy digest')
+})
+
+test('Dockerfile: caddy.json is written only with a Caddy image, in its own RUN', { skip: process.platform === 'win32' }, (t) => {
+  const df = fs.readFileSync(path.join(repoRoot, 'deploy/seeder/Dockerfile'), 'utf8').split('\n').filter((l) => !/^\s*#/.test(l))
+  let i = df.indexOf('ARG VARANDA_CADDY_IMAGE=""')
+  t.ok(i !== -1, 'ARG VARANDA_CADDY_IMAGE with an empty default')
+  while (i !== -1 && i < df.length && !/^RUN\s/.test(df[i])) i++
+  const out = []
+  for (; i !== -1 && i < df.length; i++) {
+    out.push(df[i].replace(/\\$/, ''))
+    if (!/\\$/.test(df[i])) break
+  }
+  t.ok(i < df.findIndex((l) => /^USER\s+node/.test(l)), 'before USER node')
+  const script = out.join('\n').replace(/^RUN\s+/, '')
+  const run = (env) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-caddy-'))
+    const file = path.join(dir, 'caddy.json')
+    const r = spawnSync('sh', ['-c', script.split('/app/caddy.json').join(file)], {
+      env: { PATH: process.env.PATH, VARANDA_COMMIT: '', VARANDA_CADDY_IMAGE: '', ...env }, encoding: 'utf8'
+    })
+    const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null
+    fs.rmSync(dir, { recursive: true, force: true })
+    return { status: r.status, content }
+  }
+  const ref = 'ghcr.io/varanda-org/varanda-caddy@sha256:' + 'c'.repeat(64)
+  const commit = 'a'.repeat(40)
+  t.alike(run({}), { status: 0, content: null }, 'no argument, no file')
+  t.alike(run({ VARANDA_COMMIT: commit, VARANDA_CADDY_IMAGE: ref }), { status: 0, content: '{"v":1,"caddy":"' + ref + '"}\n' }, 'the exact line update.sh accepts')
+  t.is(run({ VARANDA_CADDY_IMAGE: ref }).status, 1, 'a Caddy image without a commit is refused')
+  for (const bad of ['ghcr.io/varanda-org/varanda-web@sha256:' + 'c'.repeat(64), ref + 'c', ref.slice(0, -1), ref.toUpperCase(), 'varanda-caddy:local']) {
+    t.alike(run({ VARANDA_COMMIT: commit, VARANDA_CADDY_IMAGE: bad }), { status: 1, content: null }, 'refused: ' + bad)
+  }
+})
+
+test('release.yml: edge moves only forward, by digest, read back', (t) => {
   const creates = lines.filter((l) => /imagetools create/.test(l))
   t.ok(creates.length > 0, 'edge is moved with imagetools create')
   for (const l of creates) {
@@ -340,13 +409,25 @@ test('release.yml: edge moves only from the tip of main, by digest, read back', 
   t.absent(/:stable/.test(code), 'release.yml never touches stable')
 
   const fetch = edge.indexOf('git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main')
-  const tip = edge.indexOf('if [ "$tip" != "$GITHUB_SHA" ]; then')
+  const onMain = edge.indexOf('if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then')
   const first = edge.indexOf('imagetools create')
-  t.ok(fetch !== -1 && tip !== -1, 'fresh fetch and tip comparison present')
-  t.ok(fetch < tip && tip < first, 'the tip check comes before any move')
-  t.ok(/if \[ "\$tip" != "\$GITHUB_SHA" \]; then\n(\s+echo[^\n]*\n){2}\s+exit 0\n/.test(edge), 'not the tip: a notice and a green exit, nothing moved')
+  t.ok(fetch !== -1 && onMain !== -1, 'fresh fetch and the check that this commit is on main present')
+  t.ok(fetch < onMain && onMain < first, 'the main check comes before any move')
+  t.ok(/if ! git merge-base --is-ancestor "\$GITHUB_SHA" refs\/remotes\/origin\/main; then\n(\s+echo[^\n]*\n){2}\s+exit 0\n/.test(edge), 'not on main: a notice and a green exit, nothing moved')
+  t.absent(/\$tip\b|rev-parse/.test(edge), 'no tip comparison: a run that ends after the next push still moves edge')
 
-  t.ok(/for d in "\$\{VERIFIED_WEB_DIGEST:-\}" "\$\{VERIFIED_SEEDER_DIGEST:-\}"; do\n\s+if ! \[\[ "\$d" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]; then\n[^\n]*\n\s+exit 1/.test(edge), 'both verified digests must be present')
+  // The current edge counts only verified, and only its release.json says how new it is.
+  const verifyEdge = edge.indexOf('cosign verify --certificate-identity "$COSIGN_IDENTITY" --certificate-oidc-issuer "$COSIGN_ISSUER" "$SEEDER_REPO@$1" > /dev/null || return 1')
+  const runEdge = edge.indexOf('release="$(docker run --rm --network none --entrypoint cat "$SEEDER_REPO@$1" /app/release.json)" || return 1')
+  t.ok(verifyEdge !== -1 && runEdge !== -1 && verifyEdge < runEdge, 'the current edge is verified before it is ever run')
+  t.ok(edge.includes("re='^\\{\"v\":1,\"commit\":\"([0-9a-f]{40})\",\"seq\":([1-9][0-9]{0,9}),\"web\":\"ghcr\\.io/varanda-org/varanda-web@(sha256:[0-9a-f]{64})\"\\}$'"), 'the same release.json format as the reuse step')
+  t.ok(edge.includes('[[ "$release" =~ $re ]] || return 1'), 'a release.json out of format does not count')
+  const readEdge = edge.indexOf('if ! found="$(edge_release "$seeder_prev")"; then')
+  t.ok(readEdge !== -1 && edge.indexOf('seeder_prev="$(digest_of "$SEEDER_REPO:edge")"') < readEdge && readEdge < edge.indexOf('if ! move'), 'the current edge is read before any move')
+  t.ok(/if ! found="\$\(edge_release "\$seeder_prev"\)"; then\n\s+echo "::error::[^\n]*\n\s+exit 1\n/.test(edge), 'an edge that does not verify or read fails the step, nothing moved')
+  t.ok(/if \[ "\$edge_seq" -ge "\$SEQ" \] \|\| ! git merge-base --is-ancestor "\$edge_commit" "\$GITHUB_SHA"; then\n(\s+echo[^\n]*\n){2}\s+exit 0\n/.test(edge), 'an edge as new or newer, or off this history: a notice and a green exit, nothing moved')
+
+  t.ok(/for d in "\$\{VERIFIED_WEB_DIGEST:-\}" "\$\{VERIFIED_SEEDER_DIGEST:-\}" "\$\{VERIFIED_CADDY_DIGEST:-\}"; do\n\s+if ! \[\[ "\$d" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]; then\n[^\n]*\n\s+exit 1/.test(edge), 'every verified digest must be present, the Caddy one too')
   t.ok(/^ {10}if ! move "\$WEB_REPO" "\$VERIFIED_WEB_DIGEST"; then\n {12}restore "\$WEB_REPO" "\$web_prev"\n {12}exit 1\n/m.test(edge), 'web moves to its verified digest; a failure restores it and fails')
   t.ok(/^ {10}if ! move "\$SEEDER_REPO" "\$VERIFIED_SEEDER_DIGEST"; then\n {12}restore "\$SEEDER_REPO" "\$seeder_prev"\n {12}restore "\$WEB_REPO" "\$web_prev"\n {12}exit 1\n/m.test(edge), 'seeder moves last; a failure restores both and fails')
   t.ok(edge.indexOf('web_prev="$(digest_of "$WEB_REPO:edge")"') < edge.indexOf('if ! move') && edge.indexOf('seeder_prev="$(digest_of "$SEEDER_REPO:edge")"') < edge.indexOf('if ! move'), 'the previous edge digests are read first')
@@ -357,6 +438,212 @@ test('release.yml: edge moves only from the tip of main, by digest, read back', 
   t.ok(/retag "\$1" "\$2" \|\| echo "::error::[^"\n]*"/.test(edge), 'a failed restore is reported')
   t.ok(/if \[ -n "\$2" \]; then\n[^\n]*\n\s+else\n\s+echo "::error::[^"\n]*"\n\s+fi/.test(edge), 'a missing previous digest is reported')
   t.ok(edge.indexOf('echo "EDGE_STATUS=movido"') > edge.lastIndexOf('if ! move'), 'moved is recorded only after both moves')
+})
+
+// The edge step itself, run with real bash and jq against a fake docker (the
+// registry, cosign and release.json) and a fake git (main's first-parent line).
+const FAKE_DOCKER = `#!/usr/bin/env node
+const fs = require('node:fs')
+const file = process.env.FAKE_STATE
+const state = JSON.parse(fs.readFileSync(file, 'utf8'))
+const args = process.argv.slice(2)
+fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify(args) + '\\n')
+const save = () => fs.writeFileSync(file, JSON.stringify(state))
+const resolve = (ref) => ref.includes('@') ? (state.digests.includes(ref) ? ref.slice(ref.indexOf('@') + 1) : null) : (state.tags[ref] || null)
+if (args[0] === 'buildx' && args[2] === 'inspect') {
+  const ref = args[args.length - 1]
+  if (state.inspectFail.includes(ref)) { process.stderr.write('ERROR: registry unavailable\\n'); process.exit(1) }
+  const d = resolve(ref)
+  if (!d) { process.stderr.write('ERROR: ' + ref + ': not found\\n'); process.exit(1) }
+  process.stdout.write(JSON.stringify({ mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: d, size: 1 }) + '\\n')
+} else if (args[0] === 'buildx' && args[2] === 'create') {
+  const tag = args[args.indexOf('-t') + 1]
+  if (state.createFailOnce.includes(tag)) {
+    state.createFailOnce = state.createFailOnce.filter((x) => x !== tag)
+    save()
+    process.exit(1)
+  }
+  const src = args[args.length - 1]
+  state.tags[tag] = src.slice(src.indexOf('@') + 1)
+  save()
+} else if (args[0] === 'run' && args.includes('verify')) {
+  const identity = args[args.indexOf('--certificate-identity') + 1]
+  process.exit(state.signed[args[args.length - 1]] === identity ? 0 : 1)
+} else if (args[0] === 'run' && args.includes('--entrypoint')) {
+  const body = state.releases[args[args.length - 2]]
+  if (body === undefined) process.exit(1)
+  process.stdout.write(body + '\\n')
+} else {
+  process.stderr.write('fake docker: unexpected ' + args.join(' ') + '\\n')
+  process.exit(2)
+}
+`
+
+const FAKE_GIT = `#!/usr/bin/env node
+const fs = require('node:fs')
+const state = JSON.parse(fs.readFileSync(process.env.FAKE_STATE, 'utf8'))
+const args = process.argv.slice(2)
+if (args[0] === 'fetch') process.exit(0)
+if (args[0] === 'rev-parse' && args[args.length - 1] === 'refs/remotes/origin/main^{commit}') {
+  process.stdout.write(state.main[state.main.length - 1] + '\\n')
+  process.exit(0)
+}
+if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
+  const at = (r) => r === 'refs/remotes/origin/main' ? state.main.length - 1 : state.main.indexOf(r)
+  const a = at(args[2])
+  const b = at(args[3])
+  if (a === -1 || b === -1) { process.stderr.write('fatal: Not a valid commit name\\n'); process.exit(128) }
+  process.exit(a <= b ? 0 : 1)
+}
+process.stderr.write('fake git: unexpected ' + args.join(' ') + '\\n')
+process.exit(2)
+`
+
+function edgeScript () {
+  const step = stepNamed('Move edge if this release is newer').split('\n')
+  const start = step.findIndex((l) => /^ {8}run: \|\s*$/.test(l))
+  if (start === -1) return ''
+  return step.slice(start + 1).map((l) => l.slice(10)).join('\n') + '\n'
+}
+
+test('release.yml: the edge step moves edge forward only, also when main moved on', (t) => {
+  for (const bin of ['bash', 'jq']) {
+    const probe = spawnSync(bin, ['--version'], { encoding: 'utf8' })
+    if (probe.error || probe.status !== 0) {
+      t.comment(bin + ' not found: skipping the behavioural check')
+      return
+    }
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-release-edge-'))
+  t.teardown(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  fs.writeFileSync(path.join(bin, 'docker'), FAKE_DOCKER, { mode: 0o755 })
+  fs.writeFileSync(path.join(bin, 'git'), FAKE_GIT, { mode: 0o755 })
+  const file = path.join(dir, 'edge.sh')
+  const body = edgeScript()
+  t.ok(body.includes('edge_release'), 'step script extracted')
+  fs.writeFileSync(file, body)
+
+  const IDENTITY = 'https://github.com/Varanda-org/varanda/.github/workflows/release.yml@refs/heads/main'
+  const commit = (n) => n.toString(16).padStart(40, 'c')
+  const digest = (kind, n) => 'sha256:' + (kind === 'web' ? 'e' : 'd') + n.toString(16).padStart(63, '0')
+  const main = [1, 2, 3, 4, 5, 6, 7, 8].map(commit)
+  // A published release n: both images signed by release.yml, release.json naming commit n and seq n.
+  const published = (n) => ({
+    digests: [SEEDER + '@' + digest('seeder', n), WEB + '@' + digest('web', n)],
+    signed: { [SEEDER + '@' + digest('seeder', n)]: IDENTITY, [WEB + '@' + digest('web', n)]: IDENTITY },
+    releases: { [SEEDER + '@' + digest('seeder', n)]: '{"v":1,"commit":"' + commit(n) + '","seq":' + n + ',"web":"' + WEB + '@' + digest('web', n) + '"}' }
+  })
+  const registry = (ns, edge, extra = {}) => {
+    const s = { main, tags: {}, digests: [], signed: {}, releases: {}, inspectFail: [], createFailOnce: [] }
+    for (const n of ns) {
+      const p = published(n)
+      s.digests.push(...p.digests)
+      Object.assign(s.signed, p.signed)
+      Object.assign(s.releases, p.releases)
+    }
+    if (edge) {
+      s.tags[SEEDER + ':edge'] = digest('seeder', edge)
+      s.tags[WEB + ':edge'] = digest('web', edge)
+    }
+    return Object.assign(s, extra)
+  }
+
+  const run = (n, state) => {
+    const paths = { state: path.join(dir, 'state.json'), log: path.join(dir, 'docker.log'), env: path.join(dir, 'github.env') }
+    fs.writeFileSync(paths.state, JSON.stringify(state))
+    for (const p of [paths.log, paths.env]) fs.writeFileSync(p, '')
+    const res = spawnSync('bash', [file], {
+      encoding: 'utf8',
+      env: {
+        PATH: bin + path.delimiter + process.env.PATH,
+        FAKE_STATE: paths.state,
+        FAKE_LOG: paths.log,
+        GITHUB_SHA: commit(n),
+        SEQ: String(n),
+        GITHUB_ENV: paths.env,
+        RUNNER_TEMP: dir,
+        DOCKER_CONFIG: path.join(dir, 'docker-config'),
+        SEEDER_REPO: SEEDER,
+        WEB_REPO: WEB,
+        CADDY_REPO: 'ghcr.io/varanda-org/varanda-caddy',
+        COSIGN_ISSUER: 'https://token.actions.githubusercontent.com',
+        COSIGN_IDENTITY: IDENTITY,
+        COSIGN_IMAGE: 'ghcr.io/sigstore/cosign/cosign:v2.0.0@sha256:' + 'f'.repeat(64),
+        VERIFIED_WEB_DIGEST: digest('web', n),
+        VERIFIED_SEEDER_DIGEST: digest('seeder', n),
+        VERIFIED_CADDY_DIGEST: 'sha256:' + 'a'.repeat(64)
+      }
+    })
+    const after = JSON.parse(fs.readFileSync(paths.state, 'utf8'))
+    const calls = fs.readFileSync(paths.log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    const status = (fs.readFileSync(paths.env, 'utf8').match(/^EDGE_STATUS=(.*)$/m) || [])[1]
+    const edgeOf = (repo) => after.tags[repo + ':edge'] || null
+    return { res, status, calls, seeder: edgeOf(SEEDER), web: edgeOf(WEB) }
+  }
+  const at = (r, n) => r.seeder === digest('seeder', n) && r.web === digest('web', n)
+
+  // The case that left edge behind: main is at 8, this run is 6, edge is at 4.
+  const busy = run(6, registry([4, 6], 4))
+  t.is(busy.res.status, 0, 'a run that ends after the next push succeeds ' + busy.res.stderr)
+  t.ok(at(busy, 6), 'and moves both edge tags to its release')
+  t.is(busy.status, 'movido', 'and records it')
+
+  const first = run(6, registry([6], null))
+  t.is(first.res.status, 0, 'no edge yet ' + first.res.stderr)
+  t.ok(at(first, 6), 'the first release becomes edge')
+
+  const same = run(6, registry([6], 6))
+  t.is(same.res.status, 0, 'a rerun of the edge commit ' + same.res.stderr)
+  t.ok(at(same, 6), 'keeps edge on that release')
+
+  const late = run(4, registry([4, 6], 6))
+  t.is(late.res.status, 0, 'a late older run is green ' + late.res.stderr)
+  t.ok(at(late, 6), 'but never moves edge back')
+  t.is(late.status, 'não movido (edge no seq 6)', 'and says where edge stays')
+  t.absent(late.calls.some((a) => a[2] === 'create'), 'nothing is retagged')
+
+  const foreign = registry([3, 6], null)
+  foreign.tags[SEEDER + ':edge'] = digest('seeder', 3)
+  foreign.tags[WEB + ':edge'] = digest('web', 3)
+  foreign.releases[SEEDER + '@' + digest('seeder', 3)] = '{"v":1,"commit":"' + 'b'.repeat(40) + '","seq":3,"web":"' + WEB + '@' + digest('web', 3) + '"}'
+  const off = run(6, foreign)
+  t.is(off.res.status, 0, 'an edge whose commit is not in this history ' + off.res.stderr)
+  t.ok(off.seeder === digest('seeder', 3), 'stays where it is, for a person to look at')
+
+  const unsigned = registry([4, 6], 4)
+  delete unsigned.signed[SEEDER + '@' + digest('seeder', 4)]
+  const bad = run(6, unsigned)
+  t.is(bad.res.status, 1, 'an edge that does not verify fails the step')
+  t.ok(/::error::/.test(bad.res.stdout), 'with an error')
+  t.ok(at(bad, 4), 'and nothing moves')
+  t.absent(bad.calls.some((a) => a[0] === 'run' && a.includes('--entrypoint')), 'an unverified edge is never run')
+
+  const otherSigner = registry([4, 6], 4)
+  otherSigner.signed[SEEDER + '@' + digest('seeder', 4)] = 'https://github.com/Varanda-org/varanda/.github/workflows/promote.yml@refs/heads/main'
+  t.is(run(6, otherSigner).res.status, 1, 'an edge signed by another identity fails the step')
+
+  const garbled = registry([4, 6], 4)
+  garbled.releases[SEEDER + '@' + digest('seeder', 4)] = '{"v":1,"commit":"' + commit(4) + '","seq":"4"}'
+  const unreadable = run(6, garbled)
+  t.is(unreadable.res.status, 1, 'an edge with a release.json out of format fails the step')
+  t.ok(at(unreadable, 4), 'and nothing moves')
+
+  const outage = run(6, registry([4, 6], 4, { inspectFail: [SEEDER + ':edge'] }))
+  t.not(outage.res.status, 0, 'a registry that does not answer about edge fails the step')
+  t.ok(at(outage, 4), 'and nothing moves')
+
+  const gone = registry([4, 6], 4)
+  gone.main = main.filter((c) => c !== commit(6))
+  const rewritten = run(6, gone)
+  t.is(rewritten.res.status, 0, 'a commit no longer on main is green ' + rewritten.res.stderr)
+  t.ok(at(rewritten, 4), 'and moves nothing')
+  t.is(rewritten.calls.length, 0, 'without asking the registry anything')
+
+  const flaky = run(6, registry([4, 6], 4, { createFailOnce: [SEEDER + ':edge'] }))
+  t.is(flaky.res.status, 1, 'a seeder retag that fails fails the step')
+  t.ok(at(flaky, 4), 'and both edge tags go back to the previous release')
 })
 
 test('release.yml: summary and credential cleanup', (t) => {

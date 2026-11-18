@@ -1414,6 +1414,7 @@ function groupFixture (held, blocks = GROUP_BLOCKS) {
     groupWalks: new Map(),
     groupEvents: new Map(),
     groupLive: new Map(),
+    groupRefused: new Map(),
     recent: [],
     core: {
       fork: 0,
@@ -1478,6 +1479,45 @@ test('a deleted group-cut that arrives after the scan steps the slot walk at its
   await seeder._pageArrived(GROUP_DIARY, entry, 9)
   t.alike(entry.groupLive.get(CUT_WRITERS[0]), { group: GROUP_KEY, seq: 1, left: true }, 'the deleted cut released the first writer')
   t.alike(entry.groupLive.get(CUT_WRITERS[8]), { group: GROUP_KEY, seq: 10, left: false }, 'the ninth takes the slot it freed')
+})
+
+test('a deleted cut that arrives after the scan tries again the join it lowers the cut of (#350)', async (t) => {
+  const held = new Set(CUT_BLOCKS.keys())
+  const { seeder, entry } = groupFixture(held, CUT_BLOCKS)
+  for (const seq of [1, 2, 3, 4, 5, 6, 7, 8, 10]) await seeder._pageArrived(GROUP_DIARY, entry, seq)
+  // Refused at their joins (a boxless writer of a private group, a core
+  // past its quota): only a lower cut on the writer lifts that.
+  entry.groupRefused.set(CUT_WRITERS[0], 1)
+  entry.groupRefused.set(CUT_WRITERS[1], 2)
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 9)
+  t.absent(entry.groupRefused.has(CUT_WRITERS[0]), 'the writer the late cut released is tried again')
+  t.is(entry.groupRefused.get(CUT_WRITERS[1]), 2, 'a writer it does not cut stays refused')
+})
+
+// A writer's first on join (seq 1) is deleted (seq 4), a cut freezes it
+// (seq 2) and a repeated on join (seq 3) makes the scan count it, with no
+// cut: the join was a hole when the scan passed it, so the cut found the
+// writer uncounted and was ignored.
+const LATE_JOIN_BLOCKS = [
+  { type: 'member-cert', cert: { member: GROUP_DIARY } },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: true, at: GROUP_AT },
+  { type: 'group-cut', group: GROUP_KEY, writer: GROUP_WRITER, cut: 3, at: GROUP_AT },
+  { type: 'group-join', group: GROUP_KEY, writer: GROUP_WRITER, on: true, at: GROUP_AT },
+  { type: 'delete', seq: 1, at: GROUP_AT }
+]
+
+test('a deleted join that arrives after the scan tries again the join whose cut it brings back (#350)', async (t) => {
+  const held = new Set(LATE_JOIN_BLOCKS.keys())
+  const { seeder, entry } = groupFixture(held, LATE_JOIN_BLOCKS)
+  for (const seq of [2, 3]) await seeder._pageArrived(GROUP_DIARY, entry, seq)
+  t.is(entry.groupWalks.get(GROUP_KEY).cut.has(GROUP_WRITER), false, 'the scan ignored the cut')
+  // Refused at the repeated join (past its quota with no cut).
+  entry.groupRefused.set(GROUP_WRITER, 3)
+
+  await seeder._pageArrived(GROUP_DIARY, entry, 1)
+  t.is(entry.groupWalks.get(GROUP_KEY).cut.get(GROUP_WRITER), 3, 'the late join brings the cut back')
+  t.absent(entry.groupRefused.has(GROUP_WRITER), 'and the writer is tried again')
 })
 
 // A member joined a writer (seq 1), left (seq 2, the join off) and deleted

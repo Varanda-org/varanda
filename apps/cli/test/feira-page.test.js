@@ -29,6 +29,7 @@ function view (over) {
     username: 'ana',
     name: 'Ana Souza',
     photoUrls: [photo(0)],
+    photoMimes: ['image/jpeg'],
     pageUrl: PAGE,
     enterUrl: '/entrar?volta=%2Ff%2F' + HEX + '%2F7',
     ...over
@@ -115,6 +116,23 @@ test('og:image only for a same-origin /f/ photo', (t) => {
   t.ok(first.includes('<img src="' + photo(1) + '"'))
   const ok = renderListingPage(view())
   t.ok(ok.includes('<meta property="og:image" content="https://bora.varanda.app' + photo(0) + '">'))
+  t.ok(ok.includes('<meta property="og:image" content="https://bora.varanda.app' + photo(0) + '">\n<meta property="og:image:type" content="image/jpeg">'), 'og:image:type right after og:image')
+})
+
+test('og:image skips an AVIF photo and needs a known mime', (t) => {
+  const urls = [photo(1), photo(2), photo(3)]
+  const skip = renderListingPage(view({ photoUrls: urls, photoMimes: ['image/avif', 'image/png', 'image/jpeg'] }))
+  t.ok(skip.includes('<meta property="og:image" content="https://bora.varanda.app' + photo(2) + '">'), 'the first photo that is not AVIF')
+  t.ok(skip.includes('<meta property="og:image:type" content="image/png">'))
+  t.ok(skip.includes('<img src="' + photo(1) + '"'), 'the AVIF photo is still shown')
+  const all = renderListingPage(view({ photoUrls: [photo(1), photo(2)], photoMimes: ['image/avif', 'image/avif'] }))
+  t.absent(all.includes('og:image'), 'no og:image when every photo is AVIF')
+  t.absent(renderListingPage(view({ photoMimes: undefined })).includes('og:image'), 'no mime, no og:image')
+  t.absent(renderListingPage(view({ photoMimes: ['text/html"><script>'] })).includes('og:image'), 'an unknown mime is never echoed')
+  const past = renderListingPage(view({ photoUrls: [photo(1), 'https://evil.example/a.jpg', photo(3)], photoMimes: ['image/avif', 'image/jpeg', 'image/jpeg'] }))
+  t.absent(past.includes('og:image'), 'never promotes a photo past an off-origin one')
+  const fifth = renderListingPage(view({ photoUrls: [photo(0), photo(1), photo(2), photo(3), photo(4)], photoMimes: ['image/avif', 'image/avif', 'image/avif', 'image/avif', 'image/jpeg'] }))
+  t.absent(fifth.includes('og:image'), 'never a fifth photo')
 })
 
 test('four photos rendered, never a fifth', (t) => {

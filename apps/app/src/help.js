@@ -32,6 +32,16 @@ export const HELP = Object.freeze({
       'Nas conversas com uma Página, só quem administra a página lê as mensagens.'
     ])
   }),
+  varandinha: Object.freeze({
+    title: 'Como funciona a Varandinha',
+    paragraphs: Object.freeze([
+      'As plantas crescem em horas de verdade, no relógio de quem olha. Nada acontece enquanto ninguém joga, mas o tempo passa igual.',
+      'Regar a própria planta e receber a rega de um vizinho adiantam a colheita.',
+      'Cada pessoa rega a varanda de quem segue, uma vez por dia por varanda.',
+      'Tudo no jogo fica público no diário e é declarado por cada pessoa: participar, o que está plantado, as datas de plantio, rega e colheita, e de quem você regou. Quem recebe a rega vê o nome de quem regou.',
+      'Não tem compra, ranking nem prêmio. Sair da Varandinha marca os seus registros do jogo como apagados, mas cópias que outras pessoas já buscaram podem continuar. As regas que vizinhos fizeram na sua varanda ficam no diário deles.'
+    ])
+  }),
   seguindo: Object.freeze({
     title: 'Como funciona Seguindo',
     paragraphs: Object.freeze([
@@ -70,7 +80,7 @@ export const HELP = Object.freeze({
       'Não há confirmação de leitura.',
       'Bloquear interrompe as mensagens nos seus aparelhos.',
       'Apagar tira a conversa dos seus aparelhos. As fotos saem da memória deles na hora e o texto 15 dias depois, na próxima vez que o app abrir.',
-      'Copiar conversas leva o texto e as fotos guardadas neste aparelho para os seus outros aparelhos que entram com a mesma passkey, e só você consegue abrir.',
+      'Num aparelho novo com a mesma passkey, as conversas chegam sozinhas, copiadas de outro aparelho seu: primeiro o texto, depois as fotos. Só você consegue abrir a cópia.',
       'Uma denúncia envia só a mensagem que você escolheu e a conta de quem enviou, nunca o resto da conversa.',
       'A linha Comunidades serve para achar e criar comunidades.'
     ])
@@ -83,7 +93,8 @@ export const HELP = Object.freeze({
       'Num computador, use o celular: para criar a conta, toque em Outras formas de entrar e em criar com o celular; para entrar, toque em Entrar ou Já tenho conta e escolha usar outro aparelho na janela do sistema. Nos dois casos, leia com a câmera do celular o QR code que aparece na tela do computador.',
       'Em Ajustes → Passkeys e recuperação, cadastre outra passkey ou um código de recuperação: eles abrem a mesma conta. Uma passkey criada fora desse lugar abre outra conta.',
       LOSS_TEXT,
-      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.'
+      'Em Outras formas de entrar ficam os outros jeitos de entrar, para quem já tem conta em outro aparelho ou guardou um código de recuperação: entrar com outra passkey, usar o celular pelo QR code (no navegador) e entrar com o código de recuperação.',
+      'Sem passkey e sem código, Excluir conta sem a passkey, abaixo dos botões, registra um pedido de exclusão com o seu @nome, o celular que você confirmou e um código por SMS. Depois, ainda falta escrever para contato@varanda.app: nada acontece antes disso.'
     ])
   }),
   vinculo: Object.freeze({

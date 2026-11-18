@@ -127,7 +127,7 @@ async function member (t, bootstrap, assoc, fill, { certOf = (key) => validCert(
   })
   await joinAndFlush(swarm, [topicFor(assoc.hex)])
   const seederPeer = () => until(() => peers.find((p) => p.remoteRole === 'seeder'), { name: 'hello do semeador' })
-  return { store, diary, key, cores, swarm, messages, seederPeer, certOf }
+  return { store, diary, key, cores, swarm, messages, peers, seederPeer, certOf }
 }
 
 async function admit (m, assoc) {

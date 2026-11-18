@@ -35,6 +35,10 @@ const NOT_FOUND = 'aparelho não encontrado'
 const OFF_REFUSED = 'este aparelho foi desconectado da conta'
 const NOT_OFF = 'este aparelho está conectado'
 const PARTIAL = 'a desconexão ficou incompleta: tente de novo'
+// How far past `now` a device's first record may say it was written and still
+// count as inside a copy window: a later time would keep it a target past the
+// window, after the claims that cover it are forgotten.
+const COPY_SINCE_SKEW_MS = 60 * 60 * 1000
 
 function isBytes (v) {
   return b4a.isBuffer(v) || v instanceof Uint8Array
@@ -356,6 +360,31 @@ function listView ({ fold, self, linked, cuts, own }) {
   }
 }
 
+// The own devices a history copy made by this device is for (docs/protocol.md
+// section 11): on, not this device, first registered after it (the fold keeps
+// ids in the seq order of their first record, so an older device copies to a
+// newer one and never the reverse) and registered at most `windowMs` before
+// `now`, and at most COPY_SINCE_SKEW_MS after it (the time is the one the
+// registering device wrote). -> { self, off, targets }, targets in
+// registration order; none while this device has no registered id or is
+// disconnected.
+function copyView ({ fold, self, own, cuts, now, windowMs }) {
+  const off = selfOff({ fold, self, own, cuts })
+  const targets = []
+  if (self === null || off || !fold.byId.has(self)) return { self, off, targets }
+  let after = false
+  for (const [id, d] of fold.byId) {
+    if (id === self) {
+      after = true
+      continue
+    }
+    if (!after || !d.on) continue
+    const since = Date.parse(d.since)
+    if (Number.isFinite(since) && since >= now - windowMs && since <= now + COPY_SINCE_SKEW_MS) targets.push(id)
+  }
+  return { self, off, targets }
+}
+
 // The pairs device.disconnect cuts, before the held-length check:
 // { error: OFF_REFUSED | SELF_REFUSED | NOT_FOUND } or { pairs, off }
 // (`off` the id to turn off afterwards, null for `previous`). Never this
@@ -424,6 +453,8 @@ module.exports = {
   joinRecord,
   reconnectPlan,
   listView,
+  copyView,
+  COPY_SINCE_SKEW_MS,
   disconnectPlan,
   deviceView,
   alreadyCut,

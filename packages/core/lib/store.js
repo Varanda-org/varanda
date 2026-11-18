@@ -9,6 +9,7 @@ const sodium = require('sodium-universal')
 const Corestore = require('corestore')
 const { validateRecord, decodeBlock, MAX_BLOCK_BYTES, MAX_LOG_BLOCKS, MAX_LOG_BYTES } = require('./records')
 const { presentState } = require('./deletion')
+const { nextHeld } = require('./sparse-held')
 
 // Private directory: created 0o700 and tightened to 0o700 when it exists.
 // Follows symlinks: the data dir itself may be a symlink the user chose.
@@ -520,6 +521,30 @@ async function readBlocks (core) {
   return out
 }
 
+// A group writer's blocks as readBlocks, then past the first hole only the
+// leaves and key blocks held: a seeder clears the rest of a cut writer
+// (#350), and the fold reads past a hole only what a cut keeps.
+async function readHeldBlocks (core) {
+  assertOpen(core)
+  const limit = Math.min(core.length, MAX_LOG_BLOCKS)
+  const out = []
+  let hole = false
+  for (let i = 0; i < limit; i++) {
+    const block = (await core.has(i)) ? await core.get(i, { wait: false, raw: true }) : null
+    if (block === null) {
+      hole = true
+      const next = await nextHeld(core, i + 1, limit)
+      if (next === -1) break
+      i = next - 1
+      continue
+    }
+    const record = decodeBlock(block)
+    if (hole && (record === null || (record.type !== 'group-leave' && record.type !== 'group-key'))) continue
+    out.push({ seq: i, record })
+  }
+  return out
+}
+
 function assertOpen (core) {
   if (core.closing) {
     const err = new Error('SESSION_CLOSED: cannot read from a closed session')
@@ -632,7 +657,10 @@ function readJson (file, fallback) {
 // the parent directory is fsynced so the rename survives a crash. Two
 // concurrent writers (even across processes) each use their own temp file,
 // so both succeed and the last rename wins; a failure unlinks the temp file.
-function writeJsonAtomic (file, obj, mode) {
+// `beforeRename`, when given, runs after the temp file is fsynced and closed
+// and right before the rename: a throw from it leaves the target untouched,
+// so a caller can re-check a lock as late as the write allows.
+function writeJsonAtomic (file, obj, mode, { beforeRename } = {}) {
   const dir = path.dirname(file)
   fs.mkdirSync(dir, { recursive: true })
   const tmp = path.join(dir, '.' + path.basename(file) + '.' + process.pid + '.' + b4a.toString(randomBytes(6), 'hex') + '.tmp')
@@ -647,6 +675,7 @@ function writeJsonAtomic (file, obj, mode) {
     } finally {
       fs.closeSync(fd)
     }
+    if (beforeRename) beforeRename()
     fs.renameSync(tmp, file)
     published = true
   } finally {
@@ -732,13 +761,16 @@ async function blockZero (core) {
 // root is such a core goes, created entries included (their roots are never
 // folded again). `emit` receives { event: 'group-skipped', key, reason:
 // 'legacy' } once per purged core or dropped group. Returns the purged keys.
-async function sweepLegacyGroups (dataDir, store, emit = () => {}) {
+// `keep` (a Set of keys, optional): header stubs, whose v1 block 0 is held
+// only so a fold never waits for them (#350), stay.
+async function sweepLegacyGroups (dataDir, store, emit = () => {}, keep = null) {
   const legacy = new Set()
   for await (const dk of store.list()) {
     const core = store.get({ discoveryKey: dk, writable: false, active: false })
     try {
       await core.ready()
-      if (legacyGroupBlock(await blockZero(core))) legacy.add(b4a.toString(core.key, 'hex'))
+      const key = b4a.toString(core.key, 'hex')
+      if ((keep === null || !keep.has(key)) && legacyGroupBlock(await blockZero(core))) legacy.add(key)
     } finally {
       await core.close()
     }
@@ -935,6 +967,7 @@ module.exports = {
   readAll,
   readRaw,
   readBlocks,
+  readHeldBlocks,
   appendRecord,
   appendRecords,
   readConfig,

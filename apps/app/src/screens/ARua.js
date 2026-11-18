@@ -1416,6 +1416,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   // moments never come through here and are not kind 'post'; a page's diary
   // is told apart by its profile.
   const diaryPost = post.kind === 'post' && !(prof && prof.page === true)
+  // A poll or an event shows for a page's post too; only the web link is off.
+  const pollable = post.kind === 'post'
   const postRef = diaryPost ? refOf(post) : null
   const origin = installationOrigin() || globalThis.location?.origin || null
   const link = postRef !== null ? postLink(origin, postRef) : null
@@ -1496,8 +1498,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
       text: post.text,
       media: post.media || null,
       preview: post.preview || null,
-      ...(diaryPost && Array.isArray(post.poll) ? { poll: post.poll } : {}),
-      ...(diaryPost && post.event && typeof post.event === 'object' ? { event: post.event } : {}),
+      ...(pollable && Array.isArray(post.poll) ? { poll: post.poll } : {}),
+      ...(pollable && post.event && typeof post.event === 'object' ? { event: post.event } : {}),
       replyToName,
       level: post.replyTo ? 'comment' : 'post',
       // Feed posts pass persist: true (own or followed by construction).
@@ -1567,8 +1569,8 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
     commenter,
     focusRef,
     focusTop,
-    poll: diaryPost && Array.isArray(post.poll) ? post.poll : null,
-    event: diaryPost && post.event && typeof post.event === 'object' ? post.event : null,
+    poll: pollable && Array.isArray(post.poll) ? post.poll : null,
+    event: pollable && post.event && typeof post.event === 'object' ? post.event : null,
     // By value: a refetch answers with new objects for the same numbers.
     counts: counts !== null && typeof counts === 'object',
     replies: counts ? counts.replies : null,

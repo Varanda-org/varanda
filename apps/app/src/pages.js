@@ -18,8 +18,12 @@
 
 import rpc from '@varanda/rpc'
 import { buildRequest, readJson, formatNextChange } from './account.js'
+import { validDescriptor, validVideoDescriptor } from './media/fetch.js'
+import { VIDEO_MIME } from './media/plan.js'
 import { accountOriginOf, pagesCore } from './pageGate.js'
-import { isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, planShares, secretsParams } from './pageSecrets.js'
+import * as actingStore from './actingAs.js'
+import { actingPageStopped, actorBoxOf, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
+import { oldPageKeys } from './pageOldKeys.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -33,6 +37,8 @@ export { MAX_AVATAR_BYTES }
 const KEY_RE = /^[0-9a-f]{64}$/
 const TIMEOUT_MS = 8000
 const UPLOAD_TIMEOUT_MS = 30000
+// A video is up to MAX_MEDIA_BYTES on a slow uplink.
+const VIDEO_UPLOAD_TIMEOUT_MS = 120000
 const MAX_BODY = 65536
 // The signed reads: 'follows' answers up to 4095 keys, 'status' up to 4096
 // liked and 4096 reposted refs, 'list' every invite and offer.
@@ -62,7 +68,7 @@ export const TEXTS = Object.freeze({
   pausada: 'Página pausada; fale com a associação',
   encerrada: 'Esta página foi encerrada',
   movida: 'Esta página mudou para uma nova chave',
-  'midia-invalida': 'Foto não aceita',
+  'midia-invalida': 'Foto ou vídeo não aceito',
   indisponivel: 'Serviço indisponível',
   'termos-pendentes': 'Aceite os Termos para continuar',
   'troca-bloqueada': 'Você ainda não pode trocar o @nome',
@@ -72,6 +78,7 @@ export const TEXTS = Object.freeze({
   'rotacao-necessaria': 'A chave da página está sendo trocada; tente de novo em instantes',
   sequencia: 'Alguém publicou antes; toque para enviar de novo',
   'aguardando-chave': 'aguardando nova chave',
+  'fora-da-comunidade': 'A página ainda não está na comunidade deste grupo',
   privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho',
   // The account service's word check (apps/cli/lib/account/word-check.js):
   // the app checks the same list first, so this shows only when the service
@@ -94,6 +101,11 @@ export function pageError (code, nextChangeAt) {
 
 const isKey = (v) => typeof v === 'string' && KEY_RE.test(v)
 const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+const plainObject = (v) => {
+  if (!isObject(v)) return false
+  const proto = Object.getPrototypeOf(v)
+  return proto === Object.prototype || proto === null
+}
 
 // A header value is latin-1 on the wire: JSON with every non-ASCII character
 // escaped parses to the same op, and the service canonicalizes it anyway.
@@ -249,12 +261,15 @@ function upload (action, { member, nonce, page, op, signature, bytes, origin }, 
       'x-varanda-page-signature': signature,
       'x-varanda-page-op': headerJson(op)
     },
-    timeoutMs: UPLOAD_TIMEOUT_MS,
+    timeoutMs: op && op.mime === VIDEO_MIME ? VIDEO_UPLOAD_TIMEOUT_MS : UPLOAD_TIMEOUT_MS,
     signed: true,
     origin
   })
 }
 
+// A video's duration `ms` travels inside the signed op; upload() sends the
+// op whole. video/mp4 shares the still-image byte cap (MAX_VIDEO_BYTES equals
+// MAX_MEDIA_BYTES).
 export const pagesMedia = (args) => upload('media', args, MAX_MEDIA_BYTES)
 export const pagesAvatar = (args) => upload('avatar', args, MAX_AVATAR_BYTES)
 
@@ -270,7 +285,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
-  'follow', 'follows', 'notices', 'terms', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
+  'follow', 'follows', 'notices', 'terms', 'choice', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
 
 const signer = (node) => {
@@ -279,10 +294,45 @@ const signer = (node) => {
   return null
 }
 
+const MEDIA_ACTIONS = ['post', 'reply', 'quote', 'listing', 'listing-edit']
+const POST_ACTIONS = ['post', 'reply', 'quote']
+
+// A diary video is exactly [JPEG poster, video], the same pair postRecord
+// accepts. Anything else that carries a video is not that pair.
+function isVideoPair (media) {
+  if (!Array.isArray(media) || media.length !== 2) return false
+  const poster = media[0]
+  const video = media[1]
+  return validDescriptor(poster) && poster.mime === 'image/jpeg' && validVideoDescriptor(video)
+}
+
+function hasVideo (media) {
+  if (!Array.isArray(media)) return false
+  for (let i = 0; i < media.length; i++) {
+    const item = media[i]
+    if (validVideoDescriptor(item)) return true
+    if (item && typeof item === 'object' && item.mime === VIDEO_MIME) return true
+  }
+  return false
+}
+
+// preview, when present on a post, reply or quote: a plain object with a
+// url string. The service checks the card; this is only the shape.
+function checkPreview (action, op) {
+  if (!POST_ACTIONS.includes(action) || op.preview === undefined) return true
+  return plainObject(op.preview) && typeof op.preview.url === 'string'
+}
+
 function checkMedia (action, op) {
-  if (!['post', 'reply', 'quote', 'listing', 'listing-edit'].includes(action) || !isObject(op) || op.media === undefined) return true
+  if (!MEDIA_ACTIONS.includes(action) || !isObject(op)) return true
+  if (!checkPreview(action, op)) return false
+  // A preview never travels with media (records.js POST_PREVIEW_KEYS).
+  if (op.preview !== undefined && op.media !== undefined && op.media !== null && !(Array.isArray(op.media) && op.media.length === 0)) return false
+  if (op.media === undefined) return true
   // listing.edit takes media null to drop every photo (docs/rpc.md 5.107).
   if (action === 'listing-edit' && op.media === null) return true
+  if (POST_ACTIONS.includes(action) && isVideoPair(op.media)) return true
+  if (POST_ACTIONS.includes(action) && hasVideo(op.media)) return false
   // A listing is not a diary post: Feira stays at its own cap.
   const cap = action === 'listing' || action === 'listing-edit' ? rpc.feira.MAX_LISTING_MEDIA : MAX_MEDIA_PER_POST
   return Array.isArray(op.media) && op.media.length >= 1 && op.media.length <= cap
@@ -350,6 +400,18 @@ export async function actAs (node, args) {
 
 export function pagesFollow (node, { member, page, key, on }) {
   return actAs(node, { member, action: 'follow', page, op: { key, on: on === true } })
+}
+
+// The page's vote on a poll or RSVP to an event ('choice', docs/rpc.md 5.84):
+// `to` an 'author:seq' ref, `pick` an option index or null to withdraw (an
+// absent pick is null). Anything else is sent as given for the service to
+// refuse, never turned into a withdrawal.
+export function pageChoiceOp (to, pick) {
+  return { to, pick: pick === undefined ? null : pick }
+}
+
+export function pagesChoice (node, { member, page, to, pick }) {
+  return actAs(node, { member, action: 'choice', page, op: pageChoiceOp(to, pick) })
 }
 
 export async function pagesFollows (node, { member, page }) {
@@ -514,7 +576,21 @@ export async function pagesDmPrepare (node, args) {
   }
 }
 
-async function prepare (node, { member, page, status, roster, gen }) {
+// The boxes core delegates signed for themselves, for planShares: read fresh
+// from `page` only when some roster member has no dm-key, because the given
+// status may be the screen's older read (a delegate restated since) or a
+// move's K2 placeholder, while the statements live on the old page. A failed
+// read keeps the given status's statements.
+async function statedBoxes (node, { member, page, owner, admins, boxes, status }) {
+  if ([owner, ...admins].filter(isKey).every((m) => isKey(boxes[m]))) return status
+  try {
+    const fresh = await pagesDmBoxRead(node, { member, page })
+    if (isObject(fresh)) return { actorBoxes: fresh.actorBoxes }
+  } catch {}
+  return status
+}
+
+async function prepare (node, { member, page, status, roster, gen, boxesFrom = page }) {
   const owner = roster && roster.owner
   const admins = roster && Array.isArray(roster.admins) ? roster.admins : []
   // A device that never opened the page's inbox holds no gen yet: the
@@ -528,10 +604,11 @@ async function prepare (node, { member, page, status, roster, gen }) {
   if (unadopted.has(page)) throw pageError('rotacao-necessaria')
   const ownBox = await ownDmBox(node)
   const boxes = await pagesDmBoxes(node, [owner, ...admins, member])
-  const { recipients, missing } = planShares({ owner, admins, boxes })
   // The legacy bundle is sealed to ownBox: only a box this node derives will
   // open it, so a published dm-key that is not this node's is refused here.
   if (boxes[member] !== ownBox) throw new Error(PAGE_DM_OWN_BOX_PENDING)
+  const stated = await statedBoxes(node, { member, page: boxesFrom, owner, admins, boxes, status })
+  const { recipients, missing } = planShares({ owner, admins, boxes, status: stated })
   if (!recipients.some((r) => r.member === owner)) throw new Error(PAGE_DM_NO_OWN_BOX)
   const g = Number.isInteger(gen) ? gen : nextGen(status)
   const made = await nodeCall(node)('dm.pageGenerate', { page, gen: g, recipients })
@@ -718,11 +795,21 @@ export async function pagesDmActivate (node, { member, page, status, roster }) {
 }
 
 // 'Enviar chave' to one member of the roster: seal the held secrets for the
-// member's dm-key and file the share. A write: { uncertain, retry }.
+// member's dm-key, or for the box a core delegate signed for itself (a fresh
+// 'dm-box-read', only when it has no dm-key; a failed read counts as no
+// statement), and file the share. A write: { uncertain, retry }.
 export async function pagesDmShareTo (node, { member, page, to }) {
   const boxes = await pagesDmBoxes(node, [to])
-  if (!isKey(boxes[to])) throw new Error(PAGE_DM_NO_BOX)
-  const s = await nodeCall(node)('dm.pageShare', { page, member: to, box: boxes[to] })
+  let params = isKey(boxes[to]) ? { page, member: to, box: boxes[to] } : null
+  if (params === null) {
+    let stated = null
+    try {
+      stated = actorBoxOf(await pagesDmBoxRead(node, { member, page }), to)
+    } catch {}
+    if (stated !== null) params = { page, member: to, box: stated.box, proof: stated.proof }
+  }
+  if (params === null) throw new Error(PAGE_DM_NO_BOX)
+  const s = await nodeCall(node)('dm.pageShare', params)
   if (!isObject(s) || !Number.isInteger(s.gen)) throw pageError('indisponivel')
   return pagesDm(node, { member, page, action: 'dm-box-share', op: { member: to, gen: s.gen, sealed: s.sealed, sig: s.sig } })
 }
@@ -793,30 +880,67 @@ export async function pagesDmForget (node, page) {
 }
 
 // The newest 'list' answer applied per account origin and member this
-// session (another origin's list never names this one's pages), and the
-// pages a forget was tried for (each once).
+// session (another origin's list never names this one's pages), the pages a
+// forget was tried for (each once), the pages whose move chain could not be
+// read (the next list read for that origin and member walks it again) and the
+// walks in flight.
 const listRuns = new Map()
 const forgetTried = new Set()
+const walkAgain = new Map()
+const walking = new Set()
 let listCalls = 0
 
 // The signed 'list' read. An answer newer than the last one applied for the
 // member also forgets, on this device, the keys of the pages it shows the
-// member no longer runs (pageSecrets.js pagesNoLongerRun); `also` names the
-// acting page and the pages the node flagged. A failed read forgets nothing.
+// member no longer runs (pageSecrets.js pagesNoLongerRun) and of the keys
+// those pages moved from (pageOldKeys.js); `also` names the acting page and
+// the pages the node flagged. A failed read forgets nothing.
 export async function pagesList (node, { member, also = [] } = {}) {
   const seq = ++listCalls
+  // Who the app acted as when this read started: an answer never ends an identity chosen after it.
+  const actedAs = actingStore.pageKey()
   const runKey = String(pagesOrigin(node)) + ' ' + member
   const data = await actAs(node, { member, action: 'list', page: '', op: {} })
   const last = listRuns.get(runKey)
   if (last !== undefined && last.seq > seq) return data
-  const out = pagesNoLongerRun(data, { before: last ? last.run : [], also, tried: forgetTried })
+  const before = [...(last ? last.run : []), ...(walkAgain.get(runKey) || [])]
+  const out = pagesNoLongerRun(data, { before, also, tried: forgetTried })
   if (out === null) return data
   listRuns.set(runKey, { seq, run: out.run })
-  for (const page of out.gone) {
+  // The device keeps acting as a page the member stopped running (closed, moved
+  // or removed as admin elsewhere) until this answer says otherwise.
+  if (actedAs !== null && actingPageStopped(data, actedAs)) actingStore.dropPage(actedAs)
+  walkAgain.delete(runKey)
+  const forget = (page) => {
     forgetTried.add(page)
     pagesDmForget(node, page).then((forgot) => {
       if (forgot && typeof node.clearPageMismatch === 'function') node.clearPageMismatch(page)
     }).catch(() => {})
+  }
+  const call = signer(node)
+  const closed = pagesRun(data).closed
+  for (const page of out.gone) {
+    // A closed page is not walked: the keys it moved from are still listed to
+    // its roster. A core node holds no page keys.
+    if (call === null || pagesDmCoreOnly(node) || closed.includes(page)) {
+      forget(page)
+      continue
+    }
+    if (walking.has(page)) continue
+    // The keys it moved from go with it unless still run: after a restart no
+    // earlier answer names them, and the service lists them to no one who
+    // lost the newest key. The chain is read before the page goes, so a
+    // failed read keeps the page (and the node's flag on it) for a retry.
+    walking.add(page)
+    oldPageKeys(call, page, { strict: true }).then((keys) => {
+      walking.delete(page)
+      const { run } = listRuns.get(runKey)
+      for (const k of [page, ...keys]) if (!run.includes(k) && !forgetTried.has(k)) forget(k)
+    }, () => {
+      walking.delete(page)
+      const later = walkAgain.get(runKey) || []
+      if (!later.includes(page)) walkAgain.set(runKey, [...later, page])
+    })
   }
   return data
 }

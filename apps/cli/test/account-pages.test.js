@@ -186,7 +186,7 @@ async function thirdMember (t, bootstrap, association) {
   }
 }
 
-async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } = {}) {
+async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {}, pagesGuard } = {}) {
   const { bootstrap } = await testnet(t)
   const assocKp = generateAssociationKeyPair()
   const association = hex(assocKp.publicKey)
@@ -271,6 +271,7 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
 
   let listener = null
   let base = null
+  let server = null
   async function boot () {
     if (pages) {
       const real = createPagesWriter({ dir, keys, association, seederWs: 'http://127.0.0.1:' + wsPort, log: () => {} })
@@ -281,8 +282,9 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
       ctx.pagesStore = openPagesStore(dir)
       const { writer, acl } = faulty(real, ctx.pagesStore)
       opts.pages = { keys, writer, pagesStore: acl, dir, blocklist: { has: (k) => ctx.blocked.has(k) } }
+      if (pagesGuard) opts.pages.guard = () => pagesGuard(dir)
     }
-    const server = createAccountServer(opts)
+    server = createAccountServer(opts)
     const l = await server.listen({ host: '127.0.0.1', port: 0 })
     t.teardown(() => l.close(), { force: true })
     listener = l
@@ -399,7 +401,9 @@ async function setup (t, { pages = true, storeNow = Date.now, serverOpts = {} } 
     })
   }
 
-  return { ctx, store, terms, api, logs, newMember, start, sign, act, create, invite, accept, rosterAct, offer, upload, restart }
+  const deletionSweep = () => server.deletionSweep()
+
+  return { ctx, store, terms, api, logs, newMember, start, sign, act, create, invite, accept, rosterAct, offer, upload, restart, deletionSweep }
 }
 
 test('account pages: create, admins, transfer, follows, media, replay and the ACL mirror', async (t) => {
@@ -538,13 +542,19 @@ test('account pages: create, admins, transfer, follows, media, replay and the AC
   t.alike(videoBounds(video), { width: 640, height: 480, ms: 3000, audio: false }, 'a valid short video container')
   const beforeVideo = ctx.writer.info(K).length
   const beforeItems = ctx.writer.items(K)
-  for (const bytes of [video, img]) {
-    const refused = await s.upload(bia, K, bytes, { ...op, mime: 'video/mp4', bytes: bytes.length, sha256: sha(bytes) })
-    t.is(refused.status, 400, 'an authenticated admin cannot upload video')
-    t.is(refused.body.error, 'midia-invalida')
-  }
+  const missingMs = await s.upload(bia, K, video, { ...op, mime: 'video/mp4', bytes: video.length, sha256: sha(video) })
+  t.is(missingMs.status, 400, 'a video without ms is refused')
+  t.is(missingMs.body.error, 'midia-invalida', 'the refusal is midia-invalida because ms is missing')
+  const labeled = await s.upload(bia, K, img, { ...op, mime: 'video/mp4', bytes: img.length, sha256: sha(img), ms: 3000 })
+  t.is(labeled.status, 400, 'image bytes labeled video/mp4 are refused')
+  t.is(labeled.body.error, 'midia-invalida')
   t.is(ctx.writer.info(K).length, beforeVideo, 'a refused video appends no record')
   t.alike(ctx.writer.items(K), beforeItems, 'a refused video stores no media item')
+  const withMs = await s.upload(bia, K, video, { ...op, mime: 'video/mp4', bytes: video.length, sha256: sha(video), ms: 3000 })
+  t.is(withMs.status, 200, JSON.stringify(withMs.body))
+  t.is(withMs.body.descriptor.mime, 'video/mp4')
+  t.is(withMs.body.descriptor.ms, 3000, 'a video with a valid ms is stored')
+  t.ok(ctx.writer.items(K).some((it) => it.sha256 === sha(video) && it.ms === 3000))
   t.is((await s.upload(bia, K, img, { ...op, sha256: 'ab'.repeat(32) })).body.error, 'midia-invalida', 'the body must hash to the op')
   t.is((await s.upload(dani, K, img, op)).body.error, 'nao-vinculado')
   const foreign = { ...d, core: F }
@@ -801,6 +811,17 @@ test('account pages: a resend after a lost answer or a restart appends once', as
   t.absent(JSON.stringify(s.logs).includes(saved.key), 'the nonce key is never logged')
 })
 
+test('account pages: a nonce key refused right before its rename is not written', async (t) => {
+  t.timeout(300000)
+  // Refuses only while the nonce key's temp file sits in the data dir.
+  const pagesGuard = (d) => !fs.readdirSync(d).some((n) => n.startsWith('.page-nonce-key.json.') && n.endsWith('.tmp'))
+  const s = await setup(t, { pagesGuard })
+  const dir = s.ctx.dir
+  t.ok(s.logs.some((e) => e.event === 'pagina' && e.action === 'nonce-key' && e.reason === 'indisponivel'), 'the refusal is logged')
+  t.absent(fs.existsSync(path.join(dir, 'page-nonce-key.json')), 'no nonce key file')
+  t.absent(fs.readdirSync(dir).some((n) => n.endsWith('.tmp')), 'no temp file is left')
+})
+
 test('account pages: a resend while the first post is in flight is em-andamento and the page gets one post', async (t) => {
   t.timeout(300000)
   const s = await setup(t)
@@ -944,4 +965,42 @@ test('account pages: a post, reply or quote takes up to 10 photos, a listing 4, 
   t.alike(tail.map((r) => [r.type, r.seq, r.media.length]), [['delete', post.body.seq, 4], ['delete', post.body.seq, 4], ['delete', post.body.seq, 2]])
   t.is(new Set(tail.map((r) => r.at)).size, 1, 'one at')
   t.alike(tail.flatMap((r) => r.media), ten.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })), 'every range once')
+})
+
+test('account pages: an invite roster whose drop failed to save at accept is saved by the deletion sweep before it answers', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const file = path.join(ctx.dir, 'page-invite-rosters.json')
+  const rows = () => Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).rows)
+  // The roster file's rename fails while `failing` is set; every other
+  // write goes through.
+  let failing = false
+  const realRename = fs.renameSync
+  fs.renameSync = function (from, to) {
+    if (failing && path.basename(String(to)) === 'page-invite-rosters.json') throw Object.assign(new Error('EIO'), { code: 'EIO' })
+    return realRename.apply(this, arguments)
+  }
+  t.teardown(() => { fs.renameSync = realRename })
+  const ana = await s.newMember('ana')
+  const bia = await s.newMember('bia')
+  const made = await s.create(ana, 'padaria')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+  t.is((await s.invite(ana, K, bia, ctx.pagesStore.get(K))).status, 200)
+  t.alike(rows(), [K + ':' + bia.hex])
+  failing = true
+  const inv = ctx.pagesStore.listFor(bia.hex).invites[0]
+  t.is((await s.accept(bia, K, inv.gen, inv.rosterSignature)).status, 200, 'the accept stands')
+  t.alike(rows(), [K + ':' + bia.hex], 'the file still holds the row memory dropped')
+  // holdsInvites only runs for a deleted key.
+  const gone = await s.newMember('dani')
+  await s.store.deleteMember(gone.hex)
+  const first = await s.deletionSweep()
+  t.ok(first.pending > 0, 'the retried save failed: pending')
+  t.ok(s.logs.some((e) => e.reason === 'arquivo-invalido' && e.file === 'page-invite-rosters.json'), 'the warning names the file')
+  t.alike(rows(), [K + ':' + bia.hex])
+  failing = false
+  t.alike(await s.deletionSweep(), { members: 1, pending: 0 }, 'the save works now')
+  t.alike(rows(), [], 'the row is gone from disk')
 })

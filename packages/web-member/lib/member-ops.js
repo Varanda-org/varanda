@@ -66,6 +66,9 @@ const {
   fanRecord,
   topFriendsRecord,
   visitsRecord,
+  gardenRecord,
+  gardenStateRecord,
+  gardenHelpRecord,
   choiceRecord,
   momentRecord,
   postShareRecord,
@@ -102,18 +105,20 @@ const { engagementState, isLiked, isReposted } = require('@varanda/core/lib/enga
 const { verifySnapshot, blockedSet, revokedIssuerSet } = require('@varanda/core/lib/blocklist')
 const { blockedKeys } = require('@varanda/core/lib/member-block')
 const { UsageError } = require('@varanda/core/lib/errors')
+const { heldRuns } = require('@varanda/core/lib/sparse-held')
 const { copyLinkCard } = require('@varanda/core/lib/link-card')
 const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, garden, mediaBounds, videoBounds } = require('@varanda/rpc')
 const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
 const { POST_SHARES_PER_DIARY, foldShare } = require('@varanda/core/lib/post-share')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const devices = require('@varanda/core/lib/devices')
 const store = require('./node-store')
+const { COPY_WINDOW_MS } = require('./dm-copy')
 
 const {
   buildGroup, groupJoinHistory, diaryGroupKeys, groupCutHistory, groupConfirmHistory, validateGroupHeader, validateWriterHeader, replacedWriterCut, retiredWriterCut, walkHasRoom, slotWalk,
@@ -1628,6 +1633,215 @@ async function visitsSet (ctx, { on }) {
   return publishLatest(ctx, buildRecord(() => visitsRecord({ on: on === true })))
 }
 
+// ---- varandinha (docs/rpc.md garden.*) ----
+
+const GARDEN_OFF_PLAY = 'ligue a Varandinha para jogar'
+const GARDEN_SAVES_FULL = 'você já cuidou da varanda o máximo de vezes por hoje'
+const GARDEN_BAD_PLAY = 'jogada inválida'
+const GARDEN_HELP_SELF = 'não dá para regar a própria varanda'
+const GARDEN_OFF_HELP = 'ligue a Varandinha para regar'
+const GARDEN_NOT_FOLLOWING = 'você só rega a varanda de quem você segue'
+const GARDEN_SAME_DAY = 'você já regou esta varanda hoje'
+const GARDEN_HELPS_FULL = 'você já regou o máximo de varandas por hoje'
+
+// The own game blocks of the raw entries, read once: the newest live
+// `garden` flag copy (null for none), and every live `garden-state` and
+// `garden-help` copy as { seq, record }, ascending. A copy that fails
+// validRecordCopy is skipped.
+function gardenBlocks (raw) {
+  const deleted = deletedSeqs(raw)
+  let flag = null
+  const states = []
+  const helps = []
+  for (const { seq, record } of raw) {
+    if (deleted.has(seq)) continue
+    const copy = validRecordCopy(record, seq)
+    if (copy === null) continue
+    if (copy.type === 'garden') flag = copy
+    else if (copy.type === 'garden-state') states.push({ seq, record: copy })
+    else if (copy.type === 'garden-help') helps.push({ seq, record: copy })
+  }
+  return { on: flag !== null && flag.on === true, states, helps }
+}
+
+async function readGarden (diary) {
+  return gardenBlocks(diary.length === 0 ? [] : await store.readRaw(diary))
+}
+
+// The own balcony -> { on, state, savesToday, helpsToday, given } (docs/rpc.md
+// 5.158). A state dated after today counts as today's (its n); one
+// saveOrdinal cannot read, or an unreadable clock, reads as every save
+// spent, never as a fresh budget, and an unreadable clock reads every help
+// spent.
+async function gardenOwn (ctx, now) {
+  const g = await withIdentity(ctx, ({ diary }) => readGarden(diary))
+  const last = g.states.length === 0 ? null : g.states[g.states.length - 1]
+  const state = last === null ? null : { seq: last.seq, pots: last.record.pots, n: last.record.n, at: last.record.at }
+  const n = garden.saveOrdinal(last === null ? null : last.record, now)
+  const today = garden.dayStart(now)
+  const helps = g.helps.map((h) => ({ seq: h.seq, to: h.record.to, pot: h.record.pot, at: h.record.at, ms: Date.parse(h.record.at) }))
+  const helpsToday = Number.isNaN(today) ? garden.GARDEN_HELPS_DAILY_MAX : helps.filter((h) => h.ms >= today).length
+  const given = helps
+    .filter((h) => h.ms >= now - garden.GARDEN_HELP_WINDOW_MS && h.ms <= now + garden.GARDEN_MAX_FUTURE_MS)
+    .sort((a, b) => b.seq - a.seq)
+    .slice(0, garden.GARDEN_HELP_ROWS)
+    .map(({ seq, to, pot, at }) => ({ seq, to, pot, at }))
+  return {
+    on: g.on,
+    state,
+    savesToday: n === null ? garden.GARDEN_SAVES_DAILY_MAX : n - 1,
+    helpsToday,
+    given
+  }
+}
+
+// Opts in (publishLatest). The session compares with gardenOwn first and
+// calls it only when the flag is not already on. -> { seq, ref }.
+async function gardenSet (ctx) {
+  return publishLatest(ctx, buildRecord(() => gardenRecord({ on: true })))
+}
+
+// Leaves the game: tombstones every live garden-state and garden-help, oldest
+// first, then writes the off flag LAST, so a leave cut short still reads on
+// and a repeat re-reads the live blocks and converges. -> { seq, ref } of the
+// flag, or null when there was nothing to do (flag not on, nothing live).
+async function gardenLeave (ctx) {
+  const done = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    const g = await readGarden(diary)
+    if (!g.on && g.states.length === 0 && g.helps.length === 0) return null
+    const seqs = [...g.states, ...g.helps].map((e) => e.seq).sort((a, b) => a - b)
+    if (seqs.length === 0) return { last: null }
+    const at = nowIso()
+    const tombs = seqs.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
+    const last = await appendChunked(ctx, diary, tombs)
+    await clearAfterDelete(ctx, diary, ownHex, seqs, tombs)
+    return { last }
+  })
+  if (done === null) return null
+  try {
+    return await publishLatest(ctx, buildRecord(() => gardenRecord({ on: false })))
+  } catch (err) {
+    if (done.last !== null && err !== null && typeof err === 'object' && !Number.isSafeInteger(err.written)) err.written = done.last
+    throw err
+  }
+}
+
+// One play session saved as one garden-state (publishLatest: the previous
+// state's tombstone and the new state in one append). received is the
+// caller's bound on the neighbours' helps; this op never peeks.
+// -> { seq, ref, state: { seq, pots, n, at } }.
+async function gardenPlay (ctx, { acts, now, received }) {
+  const { n, pots } = await withIdentity(ctx, async ({ diary, ownHex }) => {
+    const g = await readGarden(diary)
+    if (!g.on) throw new UsageError(GARDEN_OFF_PLAY)
+    const prev = g.states.length === 0 ? null : g.states[g.states.length - 1].record
+    const n = garden.saveOrdinal(prev, now)
+    if (n === null) throw new UsageError(GARDEN_SAVES_FULL)
+    const given = garden.foldGiven({ self: ownHex, pots: prev === null ? null : prev.pots, given: g.helps, now }).perPot
+    const r = garden.applyActs(prev, acts, now, { received, given })
+    if (r === null || typeof r !== 'object' || r.ok !== true) throw new UsageError(GARDEN_BAD_PLAY)
+    return { n, pots: r.state.pots }
+  })
+  const at = new Date(now).toISOString()
+  const { seq, ref } = await publishLatest(ctx, buildRecord(() => gardenStateRecord({ pots, n, at })))
+  return { seq, ref, state: { seq, pots, n, at } }
+}
+
+function helpRefusal (reason) {
+  if (reason === 'self') return GARDEN_HELP_SELF
+  if (reason === 'not-following') return GARDEN_NOT_FOLLOWING
+  if (reason === 'same-day') return GARDEN_SAME_DAY
+  if (reason === 'daily') return GARDEN_HELPS_FULL
+  return GARDEN_BAD_PLAY
+}
+
+// The help checks over one open own diary -> the own game blocks, or a
+// UsageError. Follows come from the diary's live `follow` records, not kv
+// follows: a reader counts a help only with the helper's follow block, and a
+// queued follow op is not in the diary yet.
+async function checkHelp (diary, ownHex, { to, writer, now }) {
+  if (ownHex !== writer) throw new UsageError(store.LOCKED)
+  if (to === ownHex) throw new UsageError(GARDEN_HELP_SELF)
+  const g = await readGarden(diary)
+  if (!g.on) throw new UsageError(GARDEN_OFF_HELP)
+  const follows = new Set(diary.length === 0 ? [] : followSet(await store.readAll(diary), ownHex))
+  const own = g.helps.map((h) => ({ to: h.record.to, at: h.record.at }))
+  const verdict = garden.helpAllowed({ self: ownHex, to, follows, own, now })
+  if (verdict.ok !== true) throw new UsageError(helpRefusal(verdict.reason))
+  return g
+}
+
+// gardenHelp's checks alone, writing nothing (the session runs them before
+// its peek of the owner). -> undefined, or gardenHelp's UsageError.
+async function gardenHelpCheck (ctx, { to, writer, now }) {
+  await withIdentity(ctx, ({ diary, ownHex }) => checkHelp(diary, ownHex, { to, writer, now }))
+}
+
+const isGardenSeq = (v) => Number.isSafeInteger(v) && v >= 1
+
+// The owner blocks a help target check peeks, from the seeder's
+// /index/garden/<owner> answer: blocks 1 and 2 (a page roster) and the two
+// pointers, ascending. -> seqs, or null when the answer is indexing or
+// malformed (the session fails closed).
+function gardenTargetSeqs (index) {
+  if (index === null || typeof index !== 'object' || index.indexing === true) return null
+  const { on, state } = index
+  if ((on !== null && !isGardenSeq(on)) || (state !== null && !isGardenSeq(state))) return null
+  const wanted = new Set([1, 2])
+  if (on !== null) wanted.add(on)
+  if (state !== null) wanted.add(state)
+  return [...wanted].sort((a, b) => a - b)
+}
+
+// Judges a help target from the index answer and the verified peek of the
+// gardenTargetSeqs blocks (`{ entries: [{ seq, record }], missing, length }`).
+// -> null (a planted, growing pot of an opted-in member), 'page', 'off',
+// 'no-plant' or 'unavailable' (anything the peek did not prove).
+function gardenTargetVerdict (index, peek, pot, now) {
+  const { on, state } = index
+  const at = (seq) => peek.entries.find((e) => e.seq === seq)
+  if (peek.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster')) return 'page'
+  if ([1, 2].some((q) => q < peek.length && peek.missing.includes(q))) return 'unavailable'
+  if (on === null) return 'off'
+  const flag = at(on)
+  if (flag === undefined || flag.record.type !== 'garden') return 'unavailable'
+  const ahead = now + garden.GARDEN_MAX_FUTURE_MS
+  // Readers drop a flag or state dated past MAX_FUTURE (foldBalcony).
+  if (flag.record.on !== true || !(Date.parse(flag.record.at) <= ahead)) return 'off'
+  if (state === null) return 'no-plant'
+  // An honest diary's live state follows its live on flag: a leave
+  // tombstones every state before the off flag, a rejoin writes a new flag.
+  if (state < on) return 'unavailable'
+  const s = at(state)
+  if (s === undefined || s.record.type !== 'garden-state' || !Array.isArray(s.record.pots)) return 'unavailable'
+  if (!(Date.parse(s.record.at) <= ahead)) return 'no-plant'
+  const p = s.record.pots[pot]
+  if (p === null || p === undefined || !(Date.parse(p.at) <= now)) return 'no-plant'
+  const view = garden.potView(p, now)
+  if (view === null || view.ripe) return 'no-plant'
+  return null
+}
+
+// Waters pot `pot` of `to`'s balcony: one append of the tombstones of the own
+// helps older than the window (oldest first, at most APPEND_MAX - 1) and the
+// new garden-help last. The pot check against the owner's balcony is the
+// session's. -> { seq, ref }.
+async function gardenHelp (ctx, { to, pot, writer, now }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const g = await checkHelp(diary, ownHex, { to, writer, now })
+    const cutoff = now - garden.GARDEN_HELP_WINDOW_MS
+    const old = g.helps.filter((h) => {
+      const ms = Date.parse(h.record.at)
+      return !Number.isFinite(ms) || ms < cutoff
+    }).slice(0, APPEND_MAX - 1)
+    const at = new Date(now).toISOString()
+    const tombs = old.map((h) => buildRecord(() => deleteRecord({ seq: h.seq, at })))
+    const seq = await appendChunked(ctx, diary, [...tombs, buildRecord(() => gardenHelpRecord({ to, pot, at }))])
+    if (old.length > 0) await clearAfterDelete(ctx, diary, ownHex, old.map((h) => h.seq), tombs)
+    return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
 const NOTHING_TO_DELETE = 'nada para apagar'
 
 // The seqs of the live (not tombstoned) blocks of `type` in the own diary's
@@ -2483,6 +2697,16 @@ async function groupCoreState (core) {
   return { entries: (await store.readBlocks(core)).slice(0, length), length, signed, fork }
 }
 
+// A writer as groupCoreState, and past its first hole the leaves and key
+// blocks held below the signed length reported (store.readHeldBlocks): a
+// seeder keeps a cut writer sparse (#350).
+async function writerCoreState (core) {
+  const length = core.contiguousLength
+  const signed = core.length
+  const fork = core.fork
+  return { entries: (await store.readHeldBlocks(core)).filter((e) => e.seq < signed), length, signed, fork }
+}
+
 // A stored group core's entries (store.readBlocks: no diary deletion fold),
 // read-only -> { entries, length, fork } or null.
 async function readGroupCore (ctx, key, rec = null) {
@@ -2499,8 +2723,8 @@ async function readGroupCore (ctx, key, rec = null) {
 
 const MEMO_MAX = 64
 const MEMO_TTL_MS = 30000
-// A replica with more missing blocks than this above its contiguous length
-// is not signed: its stamp would cost as much as the read.
+// A replica holding more runs of blocks than this past its contiguous
+// length is not signed: its stamp would cost as much as the read.
 const MEMO_MAX_HOLES = 4096
 // Tests only: VARANDA_MEMO_CHECK=1 turns the check mode on for every ctx
 // and gives a ctx without a memo one per storage.
@@ -2529,18 +2753,22 @@ function memoChecks (ctx) {
   return ctx.memoCheck === true || MEMO_ENV_CHECK
 }
 
+// A writer is read past its first hole too (groupCoreState), so a group
+// core's stamp is a replica's.
 function groupStamp (core) {
-  return core.contiguousLength + ',' + core.length + ',' + core.fork
+  return replicaStamp(core)
 }
 
 // readVisible also shows the stored blocks past a hole, so a replica's
-// stamp names each of them (null: too many to sign).
+// stamp names the runs of them (null: too many to sign). A long stub or a
+// writer cut early holds a few runs far past its prefix.
 async function replicaStamp (core) {
   const contiguous = core.contiguousLength
   const length = core.length
+  const runs = await heldRuns(core, contiguous, length, MEMO_MAX_HOLES)
+  if (runs === null) return null
   let out = contiguous + ',' + length + ',' + core.fork
-  if (length - contiguous > MEMO_MAX_HOLES) return null
-  for (let i = contiguous; i < length; i++) if (await core.has(i)) out += '.' + i
+  for (const [start, end] of runs) out += '.' + start + '-' + end
   return out
 }
 
@@ -2557,8 +2785,8 @@ async function withNotedGroupCore (ctx, key, rec, read) {
   if (rec === null) return withGroupCore(ctx, key, (core) => read(core, noop))
   let stamp = 'none'
   let skip = false
-  const value = await withGroupCore(ctx, key, (core) => {
-    stamp = groupStamp(core)
+  const value = await withGroupCore(ctx, key, async (core) => {
+    stamp = await groupStamp(core)
     return read(core, () => { skip = true })
   })
   if (!skip) noteDep(rec, 'k', key, stamp)
@@ -2738,7 +2966,10 @@ function sameFold (a, b) {
 // null. Block 0 is decoded first so the cores of other groups are never read
 // in full: every operation on one group would otherwise decode every group
 // core this device holds.
-async function readWriterCoreOf (ctx, key, group, rec = null) {
+// `firsts` (a Map, optional): every core read gets key -> { entry, diary },
+// its block 0 as held and the diary a writer header for `group` names, else
+// null (group.js headerStubs).
+async function readWriterCoreOf (ctx, key, group, rec = null, firsts = null) {
   return withNotedGroupCore(ctx, key, rec, async (core, never) => {
     if (core.contiguousLength === 0 || core.fork !== 0) return null
     let h = null
@@ -2747,12 +2978,14 @@ async function readWriterCoreOf (ctx, key, group, rec = null) {
       block = await core.get(0, { wait: false, raw: true })
       h = decodeBlock(block)
     } catch {}
-    if (validateWriterHeader(h) !== null || h.group !== group) {
+    const own = validateWriterHeader(h) === null && h.group === group
+    if (firsts !== null && block !== null) firsts.set(key, { entry: { seq: 0, record: h }, diary: own ? h.diary : null })
+    if (!own) {
       // Block 0 of fork 0 never changes, and a later fork never folds.
       if (block !== null) never()
       return null
     }
-    return groupCoreState(core)
+    return writerCoreState(core)
   })
 }
 
@@ -2893,12 +3126,13 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
   keys.delete(group)
   const writers = []
   const cores = new Map([[group, { diary: rootHeader.diary, at: rootHeader.at, length: root.length, signed: root.signed, entries: root.entries }]])
+  const firsts = new Map()
   for (const key of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx, key, group, rec)
+    const core = await readWriterCoreOf(ctx, key, group, rec, firsts)
     if (core === null) continue
     const h = core.entries[0].record
     if (validateWriterHeader(h) !== null || h.group !== group) continue
-    writers.push({ key, entries: core.entries, diary: h.diary })
+    writers.push({ key, entries: core.entries, diary: h.diary, signed: core.signed })
     cores.set(key, { diary: h.diary, at: h.at, length: core.length, signed: core.signed, entries: core.entries })
   }
   const diaries = new Map()
@@ -2929,7 +3163,10 @@ async function foldGroup (ctx, base, group, asPage, kv, rec) {
   // takes it (a blocked or unheld parent is null: the fold reads incomplete).
   const community = rootHeader.community
   const c = isHex64(community) ? await loadNotedCommunity(ctx, base, community, rec) : null
-  const input = { root: { key: group, entries: root.entries }, writers, joins, marks, confirms, community: c === null ? null : c.input }
+  // Header stubs (#350): a held block 0 settles a pair whose writer can never
+  // count for the diary read here that bound it.
+  const heads = grp.headerStubs(joins, firsts)
+  const input = { root: { key: group, entries: root.entries }, writers, joins, marks, confirms, heads, community: c === null ? null : c.input }
   const priv = rootHeader.visibility === 'private'
   const mine = priv ? mineOf(group, rootHeader, writers, ownHex, boxHexOf(ctx)) : new Set()
   const epochs = []
@@ -4939,17 +5176,19 @@ async function foldCommunity (ctx, base, key, kv, rec) {
   keys.delete(key)
   const writers = []
   const cores = new Map([[key, { diary: header.diary, at: header.at, length: root.length, signed: root.signed, entries: root.entries }]])
+  const firsts = new Map()
   for (const k of [...keys].sort()) {
-    const core = await readWriterCoreOf(ctx, k, key, rec)
+    const core = await readWriterCoreOf(ctx, k, key, rec, firsts)
     if (core === null) continue
     const h = core.entries[0].record
-    writers.push({ key: k, entries: core.entries, diary: h.diary })
+    writers.push({ key: k, entries: core.entries, diary: h.diary, signed: core.signed })
     cores.set(k, { diary: h.diary, at: h.at, length: core.length, signed: core.signed, entries: core.entries })
   }
   const diaries = new Map()
   const joins = new Map()
   // The diaries' group-cut marks for C, as the core node reads them: the
-  // slot walk frees a CW's slot and stops its records at its cut (#350).
+  // slot walk frees a CW's slot and stops its records at its cut, so a cut
+  // CW held sparse folds like the whole one (#350).
   const marks = new Map()
   const confirms = new Map()
   for (const d of new Set([ownHex, header.diary, ...writers.map((w) => w.diary)])) {
@@ -4961,7 +5200,7 @@ async function foldCommunity (ctx, base, key, kv, rec) {
       confirms.set(d, groupConfirmHistory(entries, key))
     }
   }
-  const input = { root: { key, entries: root.entries }, writers, joins, marks, confirms }
+  const input = { root: { key, entries: root.entries }, writers, joins, marks, confirms, heads: grp.headerStubs(joins, firsts) }
   const built = grp.buildCommunity({ ...input, now: Date.now() })
   return { key, group: key, header, own, built, cores, diaries, joins, input }
 }
@@ -6340,6 +6579,14 @@ async function deviceOff (ctx) {
   return withIdentity(ctx, async ({ diary, ownHex }) => ({ off: (await deviceStateIn(ctx, await store.readAll(diary), ownHex)).off }))
 }
 
+// -> { self, off, targets } for the automatic history copy
+// (devices.copyView over COPY_WINDOW_MS), or null while locked. Only the own
+// diary and kv are read, so the run's cores may be borrowed.
+async function deviceCopyView (ctx) {
+  if (keyPairOf(ctx) === null) return null
+  return withDevices(ctx, async ({ self, own, view }) => devices.copyView({ fold: view.fold, self, own, cuts: view.cuts, now: Date.now(), windowMs: COPY_WINDOW_MS }))
+}
+
 // A disconnected device binds no new writer by hand either (group.join,
 // community.join, group.create, community.create): only device.reconnect,
 // after the passkey, brings it back (rpc.md 5.154). Checked before anything
@@ -6641,6 +6888,22 @@ module.exports = {
   ownTopKeys,
   visitsState,
   visitsSet,
+  gardenOwn,
+  gardenSet,
+  gardenLeave,
+  gardenPlay,
+  gardenHelpCheck,
+  gardenHelp,
+  gardenTargetSeqs,
+  gardenTargetVerdict,
+  GARDEN_OFF_PLAY,
+  GARDEN_SAVES_FULL,
+  GARDEN_BAD_PLAY,
+  GARDEN_HELP_SELF,
+  GARDEN_OFF_HELP,
+  GARDEN_NOT_FOLLOWING,
+  GARDEN_SAME_DAY,
+  GARDEN_HELPS_FULL,
   profileExtraDelete,
   momentCreate,
   momentDelete,
@@ -6727,10 +6990,12 @@ module.exports = {
   deviceDisconnect,
   deviceReconnect,
   deviceOff,
+  deviceCopyView,
   DEVICE_PARTIAL,
   AUTO_ENROL_RESERVE,
   isNeedsExclusive,
   needsExclusive,
   lentCore,
-  entriesStamp
+  entriesStamp,
+  replicaStamp
 }
