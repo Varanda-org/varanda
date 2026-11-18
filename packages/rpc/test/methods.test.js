@@ -2428,6 +2428,7 @@ test('page.* (Páginas)', (t) => {
     'dm-list', 'dm-thread', 'follow', 'follows', 'media', 'notices', 'terms',
     'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
     'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events',
+    'listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate',
     'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
     ok(t, 'page.sign', { ...base, action })
   }
@@ -2786,6 +2787,39 @@ test('page end-to-end node methods', (t) => {
   t.is(validateParams('dm.pageDraft', { ...msg, text: 'oi', media: [item], card: LINK_CARD }).message, 'parâmetro inválido: media', 'media and card, never both')
   t.is(validateParams('dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted', media: [item] }).message, 'parâmetro inválido: kind', 'a ctl carries no media')
   t.is(validateParams('dm.pageDraft', { page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted', card: LINK_CARD }).message, 'parâmetro inválido: kind', 'nor a card')
+
+  // A page's reaction: kind 'react' is exactly to, target and emoji ('' withdraws).
+  const rTarget = { from: KEY, id: 'cd'.repeat(16) }
+  const react = { page: PAGE, kind: 'react', to: KEY, target: rTarget, emoji: '\u{1f44d}' }
+  // A msg's default fwd 0 is not added: the node gets exactly these keys.
+  ok(t, 'dm.pageDraft', react, react)
+  ok(t, 'dm.pageDraft', { ...react, emoji: '' }, { ...react, emoji: '' })
+  t.absent('fwd' in validateParams('dm.pageDraft', react).value, 'no fwd on a reaction')
+  const why = (params) => { const r = validateParams('dm.pageDraft', params); return r.ok ? 'ok' : r.message }
+  t.is(why({ ...react, target: undefined }), 'parâmetro inválido: target', 'react needs a target')
+  t.is(why({ page: PAGE, kind: 'react', to: KEY, target: rTarget }), 'parâmetro inválido: emoji', 'react needs an emoji')
+  t.is(why({ page: PAGE, kind: 'react', target: rTarget, emoji: '' }), 'parâmetro inválido: to', 'react needs a to')
+  for (const extra of ['text', 'replyTo', 'fwd', 'media', 'card', 'op', 'peer', 'moment']) {
+    const value = { text: '\u{1f44d}', replyTo: 'cd'.repeat(16), fwd: 1, media: [item], card: LINK_CARD, op: 'accepted', peer: KEY, moment: 1 }[extra]
+    t.is(validateParams('dm.pageDraft', { ...react, [extra]: value }).ok, false, 'react refuses ' + extra)
+  }
+  t.is(validateParams('dm.pageDraft', { ...react, extra: 1 }).ok, false, 'react refuses an unknown key')
+  t.is(why({ ...msg, text: 'oi', target: rTarget }), 'parâmetro inválido: target', 'target only with react')
+  t.is(why({ ...msg, text: '\u{1f44d}', emoji: '\u{1f44d}' }), 'parâmetro inválido: emoji', 'emoji only with react')
+  t.is(why({ page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted', target: rTarget }), 'parâmetro inválido: target', 'nor on a ctl')
+  bad(t, 'dm.pageDraft', { ...react, target: { from: KEY } }, 'a target without an id')
+  bad(t, 'dm.pageDraft', { ...react, emoji: 'oi' }, 'not an emoji')
+
+  // The page's reaction to a momento of `to`: a msg with one emoji and moment.
+  ok(t, 'dm.pageDraft', { ...msg, text: '\u{1f44d}', moment: 3 }, { ...msg, text: '\u{1f44d}', moment: 3, fwd: 0 })
+  t.is(why({ ...msg, text: 'oi', moment: 3 }), 'parâmetro inválido: text', 'moment needs one emoji as text')
+  t.is(why({ ...msg, text: '\u{1f44d}\u{1f44d}', moment: 3 }), 'parâmetro inválido: text', 'not two emoji')
+  t.is(why({ ...msg, text: '\u{1f44d}', moment: 3, replyTo: 'cd'.repeat(16) }), 'parâmetro inválido: moment', 'moment with replyTo')
+  t.is(why({ ...msg, text: '\u{1f44d}', moment: 3, media: [item] }), 'parâmetro inválido: moment', 'moment with media')
+  t.is(why({ ...msg, text: '\u{1f44d}', moment: 3, card: LINK_CARD }), 'parâmetro inválido: moment', 'moment with a card')
+  t.is(why({ ...msg, text: '\u{1f44d}', moment: 3, fwd: 1 }), 'parâmetro inválido: moment', 'moment on a forward')
+  t.is(why({ page: PAGE, kind: 'ctl', peer: KEY, op: 'accepted', moment: 3 }), 'parâmetro inválido: kind', 'moment only on a msg')
+  bad(t, 'dm.pageDraft', { ...msg, text: '\u{1f44d}', moment: 0 }, 'moment 0')
   const expiresAt = Date.parse('2026-01-01T00:10:00.000Z')
   ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt })
   ok(t, 'dm.pageSend', { page: PAGE, id, signature: sig, expiresAt: 1 })

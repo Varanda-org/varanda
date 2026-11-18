@@ -42,9 +42,19 @@ const INTERNAL_MESSAGE = 'erro interno'
 
 const noop = () => {}
 
+// Media or a card on a call that is text only on this node.
+function hasMediaParam (params) {
+  if (params === null || typeof params !== 'object') return false
+  const media = params.media
+  const hasMedia = media !== undefined && media !== null && !(Array.isArray(media) && media.length === 0)
+  return hasMedia || (params.card !== undefined && params.card !== null)
+}
+
 const MEDIA_WEB_ONLY = 'mídia disponível só na versão web'
 const PEEK_WEB_ONLY = 'leitura sob demanda só na versão web'
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
+// Of packages/web-member/lib/page-dm.js: no secrets of that page here.
+const NO_PAGE_KEY = 'sem chave da página'
 // The dm.* methods a core node answers with the `dm` factory.
 const DM_CORE_METHODS = Object.freeze([
   'dm.enable', 'dm.lookup', 'dm.send', 'dm.react', 'dm.pull', 'dm.list', 'dm.thread', 'dm.set', 'dm.seen',
@@ -357,7 +367,9 @@ function createSession ({
     const runId = lastRunId
     const epoch = connection
     const { signal, abort } = createAbort()
-    const r = { runId, once, internal, abort, reason: null, done: null }
+    // The roots of the Páginas held here (docs/rpc.md 5.114).
+    const pages = dmNode === null ? [] : dmNode.heldPages()
+    const r = { runId, once, internal, abort, reason: null, done: null, pages }
     const syncEvent = (event, data) => {
       if (!internal) send(event, data, epoch)
     }
@@ -417,6 +429,7 @@ function createSession ({
             if (text !== null) syncEvent('sync.event', { runId, line: line(text) })
           },
           signal,
+          pages,
           storeOptions: currentStoreOptions()
         })
       } catch (err) {
@@ -706,6 +719,7 @@ function createSession ({
     delegate: onChain(() => member.readDelegate(ctx())),
     actorBox: onChain(({ box, gen }) => member.dmActorBox(ctx(), { box, gen })),
     pageRead: (key) => onChain(() => withStore((c) => member.pageRead(c, { key })))({}),
+    pagesChanged: () => pagesChanged(),
     readers: {
       cert: onChain(() => withStore((c) => member.withIdentity(c, async ({ diary }) => {
         if (diary.length === 0 || !(await diary.has(0))) return null
@@ -758,6 +772,63 @@ function createSession ({
     } catch (err) {
       throw toRpcError(err, reportInternal)
     }
+  }
+
+  // group.read and group.seal with `page` (docs/rpc.md 5.114) with the
+  // factory: the page's group box comes from the engine off the chain (the
+  // engine's ops queue on it), then the fold runs on the chain. Text only:
+  // media or a card is refused before any key use. Without the page's
+  // secrets a read answers the root header's visibility (state 'no-key')
+  // and a seal NO_PAGE_KEY.
+  // The fold runs inside the factory's withPageGroupBox, so a dm.pageForget
+  // is ordered with it, and takes its box copy only once its turn on the
+  // chain came and the run stopped: a suspend before that holds no copy.
+  function pageGroupOp (operation) {
+    const fold = serial(({ params, take }) => withStore(async (c) => {
+      const box = take()
+      if (box === null) {
+        if (operation !== member.pageGroupRead) throw rpcError('USAGE', NO_PAGE_KEY)
+        return member.pageGroupNoKey(c, params)
+      }
+      try {
+        return await operation(c, { ...params, box })
+      } finally {
+        box.secretKey.fill(0)
+      }
+    }))
+    return async (params) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (hasMediaParam(params)) throw rpcError('USAGE', MEDIA_WEB_ONLY)
+      if (typeof params.page !== 'string') throw rpcError('USAGE', 'parâmetro inválido: page')
+      while (isGated()) await gate
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      if (errorState) throw rpcError('LOCKED', LOCKED_MESSAGE)
+      // Errors of the fold keep the chain's mapping; the factory's are
+      // mapped here.
+      let folding = false
+      try {
+        return await dmNode.withPageGroupBox(params.page.toLowerCase(), (take) => {
+          folding = true
+          return fold({ params, take })
+        })
+      } catch (err) {
+        if (folding) throw err
+        throw toRpcError(err, reportInternal)
+      }
+    }
+  }
+
+  // The held pages changed (Conversas unlocked, a page adopted or
+  // forgotten): a continuous run started with another list restarts, so
+  // the roots it pages follow them. Also with requests queued: one that
+  // never opens the store does not stop the run, and the last of them
+  // restarts it (serial's restartWhenIdle).
+  function pagesChanged () {
+    const r = run
+    if (r === null || r.once || closed || suspended || errorState) return
+    const now = dmNode.heldPages()
+    if (now.length === r.pages.length && now.every((p) => r.pages.includes(p))) return
+    stopRun('preempted').then(() => restartWhenIdle(0), reportInternal)
   }
 
   // ---- handlers (docs/rpc.md section 5; params arrive validated) ----
@@ -1338,7 +1409,8 @@ function createSession ({
     }),
 
     // A page reads its private groups only on a node that holds its secrets
-    // (browser node), never as this member.
+    // (browser node, or with the `dm` factory: pageGroupOp), never as this
+    // member.
     'group.read': serial((params) => {
       if (params.page !== undefined) throw new UsageError(DM_WEB_ONLY)
       // Topic marks never go unanswered as a plain page: refused.
@@ -1522,12 +1594,22 @@ function createSession ({
   }
 
   // With the factory, the methods in its scope route to it (personal
-  // dm.send text only); dm.reportSign, group.seal and group.read with a page
-  // keep their refusals.
+  // dm.send, dm.react and dm.set text only), and group.seal and
+  // group.read with a page fold as the page (pageGroupOp); dm.reportSign
+  // keeps its refusal.
   if (dmNode !== null) {
     for (const name of Object.keys(dmNode.handlers)) {
       if (DM_CORE_METHODS.includes(name)) handlers[name] = dmHandler(name)
     }
+    const plainRead = handlers['group.read']
+    const pageRead = pageGroupOp(member.pageGroupRead)
+    handlers['group.read'] = (params, ...rest) => {
+      if (params.page === undefined) return plainRead(params, ...rest)
+      // A page's groups are private: no topics there.
+      if (params.marks !== undefined || params.topic !== undefined) return Promise.reject(rpcError('USAGE', PEEK_WEB_ONLY))
+      return pageRead(params)
+    }
+    handlers['group.seal'] = pageGroupOp(member.pageGroupSeal)
   }
 
   // ---- host controls ----

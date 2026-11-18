@@ -33,7 +33,7 @@ const RNONCE = 'r'.repeat(43)
 const DM_WEB_ONLY = 'mensagens diretas disponíveis só no navegador'
 const SIGN_WEB_ONLY = 'assinatura disponível só no navegador'
 const NO_SEEDER = 'sem conexão com o semeador'
-const PAGE_NO_REACTIONS = 'conversas com uma Página não têm reações'
+const NO_TARGET = 'mensagem não encontrada'
 const TEST_TIMEOUT_MS = 170000
 
 function noop () {}
@@ -296,6 +296,33 @@ test('core dm: a dm call queued while suspended refuses after close, never enter
   t.is(entered, 0, 'the engine never ran it')
 })
 
+test('core dm: suspend holds dm calls and the engine store ops until resume, and both run after it', async (t) => {
+  const kp = generateAssociationKeyPair()
+  let entered = 0
+  let ops = null
+  const fake = (hooks) => {
+    ops = hooks.ops
+    return { handlers: { 'dm.list': async () => { entered++; return {} } }, readMedia: async () => null, close: async () => {} }
+  }
+  const C = coreNode(t, { assoc: { kp, hex: hex(kp.publicKey) }, bootstrap: ['127.0.0.1:1'], dm: fake })
+  await C.session.suspend()
+  let listed = false
+  const queued = C.call('dm.list').then(() => { listed = true })
+  // An engine call already in flight asks for the store through an op: it
+  // waits too, so nothing is written while the store is suspended.
+  let opSettled = false
+  const op = ops.delegate().then(noop, noop).then(() => { opSettled = true })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(entered, 0, 'the engine is not entered while suspended')
+  t.absent(listed)
+  t.absent(opSettled, 'no store op while suspended')
+  C.session.resume()
+  await queued
+  await op
+  t.is(entered, 1, 'the queued call runs once after resume')
+  t.ok(opSettled, 'the op runs after resume')
+})
+
 test('core dm: a corrupt seed reaches the client as USAGE with no file content; personal sends reach the engine; the web-only methods stay refused', async (t) => {
   const kp = generateAssociationKeyPair()
   const C = coreNode(t, { assoc: { kp, hex: hex(kp.publicKey) }, bootstrap: ['127.0.0.1:1'], accountOrigin: 'http://127.0.0.1:1' })
@@ -313,8 +340,9 @@ test('core dm: a corrupt seed reaches the client as USAGE with no file content; 
     ['dm.react', { to: P, target: { from: P, id: 'c'.repeat(32) }, emoji: '\u{1f44d}' }, DM_SEED_BAD],
     ['dm.set', { peer: P, state: 'accepted' }, DM_SEED_BAD],
     ['dm.reportSign', { peer: P, id: 'x' }, SIGN_WEB_ONLY],
-    ['group.seal', { group: P }, DM_WEB_ONLY],
-    ['group.read', { group: P, page: P }, DM_WEB_ONLY]
+    // A page's private groups ask the engine for the page's group box.
+    ['group.seal', { group: P, page: P, text: 'x' }, DM_SEED_BAD],
+    ['group.read', { group: P, page: P }, DM_SEED_BAD]
   ]
   for (const [method, params, message] of refused) {
     const err = await rejection(C.call(method, params))
@@ -417,10 +445,11 @@ test('core dm: the owner shares to the core delegate, which adopts, pulls, opens
   }, { name: 'reply delivered', timeoutMs: 30000 })
   t.pass('the member reads the page\'s reply')
 
-  // The core node as a member: a Página it holds is known from its diary
-  // (ops.pageRead), so a reaction to the page's message is refused.
+  // The core node as a member: a reaction to a Página takes the personal
+  // path (#786), and this reply went to O's thread, never to the core
+  // node's own thread with the page.
   const noReact = await rejection(C.call('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1F44D}' }))
-  t.alike([noReact && noReact.code, noReact && noReact.message], ['USAGE', PAGE_NO_REACTIONS], 'dm.react to a Página')
+  t.alike([noReact && noReact.code, noReact && noReact.message], ['USAGE', NO_TARGET], 'dm.react to a Página message of another thread')
 
   // A page's folder op is the page draft's, never a personal dm.set.
   t.is((await rejection(C.call('dm.set', { page: P, peer: O.key, state: 'accepted' }))).message, USE_PAGE_DRAFT, 'dm.set with page')

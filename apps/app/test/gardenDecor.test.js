@@ -9,7 +9,7 @@ const rpc = require('@varanda/rpc')
 const load = () => import('../src/ui/gardenDecor.js')
 const SRC = path.join(__dirname, '../src/ui/gardenDecor.js')
 const HEX = /^#[0-9a-f]{6}$/
-const PALETTE_KEYS = ['cloth', 'clothAlt', 'fur', 'furDark', 'lamp', 'rope']
+const PALETTE_KEYS = ['bulb1', 'bulb2', 'bulb3', 'bulb4', 'cloth', 'clothAlt', 'fur', 'furDark', 'furLight', 'ink', 'rope', 'wire', 'wood']
 const BOX = {
   rede: { w: 150, h: 50 },
   varal: { w: 150, h: 50 },
@@ -47,7 +47,12 @@ function assertShape (t, shape, label, lightKeys, darkKeys, box) {
   }
   t.ok(Object.isFrozen(shape), label + ' frozen')
   const fill = shape.fill
-  t.ok(lightKeys.includes(fill) && darkKeys.includes(fill), label + ' fill ' + fill)
+  t.ok(fill === 'none' || (lightKeys.includes(fill) && darkKeys.includes(fill)), label + ' fill ' + fill)
+  if (shape.stroke !== undefined) {
+    t.ok(lightKeys.includes(shape.stroke) && darkKeys.includes(shape.stroke) && shape.sw > 0, label + ' stroke ' + shape.stroke)
+  }
+  t.ok(fill !== 'none' || shape.stroke !== undefined, label + ' paints something')
+  t.absent('transform' in shape, label + ' has no transform')
   if (shape.kind === 'rect') {
     t.ok(inside(shape.x, shape.y, shape.x + shape.w, shape.y + shape.h, box), label + ' rect')
   } else if (shape.kind === 'circle') {
@@ -101,16 +106,23 @@ test('gardenDecor: keys match the rules and every shape sits in its box', async 
   const pisca = m.DECOR_DRAWINGS.pisca && m.DECOR_DRAWINGS.pisca.shapes
   t.ok(rede && varal && gato && pisca, 'four drawings')
   if (!rede || !varal || !gato || !pisca) return
-  t.ok(rede.some((shape) => shape.fill === 'rope'), 'hammock rope')
+  const rope = (shape) => shape.fill === 'rope' || shape.stroke === 'rope'
+  t.ok(rede.some(rope), 'hammock rope')
   t.ok(rede.some((shape) => shape.fill === 'cloth' || shape.fill === 'clothAlt'), 'hammock cloth')
   const cloths = varal.filter((shape) => shape.fill === 'cloth' || shape.fill === 'clothAlt')
   t.is(cloths.length, 3, 'three cloths')
-  t.ok(varal.some((shape) => shape.fill === 'rope'), 'clothesline')
+  t.ok(varal.some(rope), 'clothesline')
   t.ok(gato.some((shape) => shape.fill === 'fur') && gato.some((shape) => shape.fill === 'furDark'), 'sitting cat')
   t.ok(gato.some((shape) => shape.kind === 'circle' || shape.kind === 'ellipse'), 'cat has a round body')
-  const lamps = pisca.filter((shape) => shape.kind === 'circle' && shape.fill === 'lamp')
+  const lamps = pisca.filter((shape) => (shape.kind === 'circle' || shape.kind === 'ellipse') && /^bulb[1-4]$/.test(shape.fill))
   t.ok(lamps.length >= 5, 'string of lamps')
-  t.ok(pisca.some((shape) => shape.fill === 'rope'), 'lamp string')
+  t.ok(lamps.every((shape) => shape.glow === true), 'every bulb glows at night')
+  t.is(new Set(lamps.map((shape) => shape.fill)).size, 4, 'four bulb colours')
+  t.ok(pisca.some((shape) => shape.stroke === 'wire'), 'lamp string')
+  for (const id of ['rede', 'varal', 'gato']) {
+    t.ok(m.DECOR_DRAWINGS[id].shapes.some((shape) => shape.stroke === 'ink'), id + ' is outlined')
+    t.absent(m.DECOR_DRAWINGS[id].shapes.some((shape) => shape.glow === true), id + ' does not glow')
+  }
 })
 
 test('gardenDecor: palettes share keys and hex colours', async (t) => {

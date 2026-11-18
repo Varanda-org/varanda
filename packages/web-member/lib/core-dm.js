@@ -24,6 +24,9 @@
 // - Personal dm.send, dm.react and dm.set are written from the diary (inner
 //   v9, v10) and signed by the diary signer, as the stamps prove it. A core
 //   identity has one device: no visits and no history copy are sent.
+// - A Página's private groups: the session folds them with the page's group
+//   box (withPageGroupBox, a copy) and pages their roots (heldPages,
+//   ops.pagesChanged when they change).
 // Transport: wss://<account host>/seeder from an https account origin; ws
 // only for a loopback http origin (tests); any other origin is refused.
 // The handlers never run on the session's chain: the session's ops do, so
@@ -263,6 +266,7 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
           prf.fill(0)
           if (s !== null) zero(s.keyPair)
         }
+        pagesChanged()
       })()
       unlocking.then(() => { unlocking = null }, () => { unlocking = null })
     }
@@ -529,20 +533,13 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
         return r
       })()
     },
-    // A Página is known only from its diary held here (as the browser
-    // node): the engine refuses a reaction to one before signing it, though
-    // ownedKey() may already have published the own dm-key.
+    // To a person or a Página, as the browser node (#786).
     'dm.react': async ({ to, target, emoji }) => {
       await serial(() => checkPeer(to))()
-      let page = false
-      try {
-        const r = await ops.pageRead(to.toLowerCase())
-        page = r !== null && (r.gen !== null || r.owner !== null || r.closed === true || (r.movedTo !== null && r.movedTo !== undefined))
-      } catch {}
       const { box } = await lookup(to)
       return serial(async () => {
         const own = await ownedKey()
-        const r = await engine.react(own, signerPair(), { to, target, emoji }, box, { page })
+        const r = await engine.react(own, signerPair(), { to, target, emoji }, box)
         topUp()
         return r
       })()
@@ -577,7 +574,9 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
       if (pair === null) throw new UsageError(NO_DELEGATE)
       const actor = b4a.toString(pair.publicKey, 'hex')
       zero(pair)
-      return serial(() => engine.pageSecrets(actor, roster, params))()
+      const r = await serial(() => engine.pageSecrets(actor, roster, params))()
+      pagesChanged()
+      return r
     },
     'dm.pageDraft': async (params) => {
       const hasMedia = params.media !== undefined && params.media !== null && !(Array.isArray(params.media) && params.media.length === 0)
@@ -624,7 +623,11 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     }),
     'dm.pageForget': serial(async (params) => {
       await requireDm()
-      return engine.pageForget(params)
+      try {
+        return await engine.pageForget(params)
+      } finally {
+        pagesChanged()
+      }
     }),
     // The node's own DM box and gen, the ones its dm-key names (docs/rpc.md
     // 5.161), signed by the page delegate.
@@ -656,6 +659,43 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
       if (page !== undefined) p.page = page
       return engine.readMedia(own, p)
     })())
+  }
+
+  // The group box pair of a page whose secrets are held here (docs/rpc.md
+  // 5.114), for the session's group.read and group.seal with `page`; never
+  // over RPC. fn(take) runs on this chain, so a dm.pageForget lands wholly
+  // before or after it. take() -> a copy (the caller wipes it), or null when
+  // none is held: called as the fold starts, no copy waits in a queue.
+  function withPageGroupBox (page, fn) {
+    return track(serial(async () => {
+      await requireDm()
+      return fn(() => {
+        if (closed || !engine.unlocked()) return null
+        const pair = engine.groupBoxOf(page)
+        if (pair === null || pair === undefined) return null
+        return { publicKey: b4a.from(pair.publicKey), secretKey: b4a.from(pair.secretKey) }
+      })
+    })())
+  }
+
+  // The held pages may have changed (an unlock, an adoption, a forget):
+  // the session's run pages their roots again (ops.pagesChanged).
+  function pagesChanged () {
+    if (typeof ops.pagesChanged !== 'function') return
+    try { ops.pagesChanged() } catch {}
+  }
+
+  // The pages whose secrets are held here, for the roots a sync run pages.
+  // Synchronous and never on the session's chain (a run starts from it):
+  // none while the engine is locked or closed. A change calls
+  // ops.pagesChanged, after the engine holds it.
+  function heldPages () {
+    if (closed) return []
+    try {
+      return engine.heldPageBoxes().map((p) => p.page)
+    } catch {
+      return []
+    }
   }
 
   // Later calls refuse (NO_SEEDER). The work in flight ends first, bounded
@@ -692,7 +732,7 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     return closing
   }
 
-  return { handlers, readMedia, close, seederUrl }
+  return { handlers, readMedia, withPageGroupBox, heldPages, close, seederUrl }
 }
 
 module.exports = { createCoreDm, seederUrlOf, scanDmKey, BAD_ORIGIN, DM_OFF, TEXT_ONLY, MOMENT_WEB_ONLY, DM_BUSY, DM_SEED_BAD, BLOCKLIST_UNREADABLE }

@@ -98,7 +98,7 @@ test('both providers supply the handle and the member key', (t) => {
   t.ok(vitrine.includes('<RowContexts handle={handle} memberKey={memberKeyOf(value.passkey)}>'))
 
   const live = node.slice(node.indexOf('function LiveNodeProvider'))
-  t.ok(live.includes('const handle = useHandle(hosted, request, media, accountOrigin, syncNow)'))
+  t.ok(live.includes('const handle = useHandle(hosted, request, rowMedia, accountOrigin, syncNow)'))
   t.ok(live.includes('const memberKey = memberKeyOf(passkey)'), 'the key follows the passkey status, so an account switch reaches it')
   t.ok(live.includes('<RowContexts handle={handle} memberKey={memberKey}>'))
 })

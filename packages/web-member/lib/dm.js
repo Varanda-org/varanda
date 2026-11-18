@@ -118,8 +118,8 @@ const NO_STAMPS = 'o limite de envio de hoje acabou'
 const BAD_REPLY = 'responda uma mensagem desta conversa'
 const NO_TARGET = 'mensagem não encontrada'
 const REACT_MAX = 'limite de reações para esta mensagem atingido'
-const PAGE_NO_REACTIONS = 'conversas com uma Página não têm reações'
 const NOT_REACTABLE = 'esta mensagem não aceita reações'
+const NOTHING_TO_CHANGE = 'nada a alterar'
 const DIGEST_RE = /^[0-9a-f]{64}$/
 const TOO_LONG = 'mensagem longa demais'
 const BAD_TEXT = 'mensagem inválida'
@@ -370,6 +370,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // The own membership certificate, read from block 0 once per unlock.
   let ownCert = null
   const pending = new Map()
+  // The highest rev each page reaction drafted here took, by page, peer and
+  // target (see pageDraft); at most PENDING_MAX, the oldest dropped first.
+  const pageReactRevs = new Map()
   // The reaction ops kv dmReactPending held at an unlock, read into `pending`
   // once per unlock: { gen, p, done } (restorePending).
   let restored = null
@@ -582,6 +585,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     pageStores.clear()
     foldMemo.clear()
     clearPending()
+    pageReactRevs.clear()
     forgetAllBlobs()
     publicItems.clear()
     lastPullComplete = false
@@ -1792,12 +1796,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // reaction ('' with none) sends nothing. -> { ok: true }
   // The pending ops also live sealed in kv dmReactPending, so a reload or a
   // lock keeps them for the user's retry; the node never puts one by itself.
-  // page: the caller read `to` as a Página (its held diary has a roster, a
-  // close or a move): refused before anything is signed or spent, as the
-  // Página would drop the reaction on pull.
-  async function react (own, keyPair, { to, target, emoji }, recipientBox, { page = false } = {}) {
+  // `to` may be a Página: its node files the reaction in the page's store.
+  async function react (own, keyPair, { to, target, emoji }, recipientBox) {
     checkSend(own, to)
-    if (page === true) throw new UsageError(PAGE_NO_REACTIONS)
     await whenLoaded()
     await restorePending()
     const key = 'rx\n' + to + '\n' + target.from + '\n' + target.id
@@ -2262,22 +2263,23 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       // A page message put after its signature's expiry is a replay of a
       // stockpiled signature (core dm.js pageInnerStale): never filed.
       if (body === null || dm.pageInnerStale(body, Date.now())) return null
-      // A Página conversation has no reactions: a v4 body is never filed.
-      if (body.kind === 'react') return null
-      // Nor a history copy pointer or claim (own box only).
+      // A history copy pointer or claim goes to the own box only.
       if (body.kind === 'copy' || body.kind === dm.DM_CLAIM_KIND) return null
-      // Nor a reaction to a momento (v5): a page sends no momento reactions.
-      if (body.v === 5) return null
-      // Of the body as signed, before a carried legacy key is renamed.
-      const digest = dm.bodyDigest(body)
       // A drop to the key a carried legacy box belonged to is filed for this
-      // page, as the bundle's rows are.
+      // page, as the bundle's rows are, with no digest: its sender's thread
+      // is with the old key, so a reaction or bound reply this page signs
+      // would never meet it there (pageDraft refuses it as not reactable).
       if (key !== p.page) {
         if (body.kind === 'ctl' && body.peer === p.page) return null
+        // A momento reaction (a person's v5, a page's v12) names a momento
+        // of the old key's diary.
+        if (body.v === 5 || body.v === dm.DM_PAGE_MOMENT_V) return null
         body = { ...body, from: body.from === key ? p.page : body.from, to: body.to === key ? p.page : body.to }
+        if (body.kind === 'react') body.target = { ...body.target, from: body.target.from === key ? p.page : body.target.from }
         if (body.from === body.to) return null
+        return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, undefined)
       }
-      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, digest)
+      return rowOf(p.page, body, ops, batch, mod.association, p.ctx.local, dm.bodyDigest(body))
     }
     return null
   }
@@ -2294,7 +2296,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     if (lc.hasMessage(body.from, body.id) || batch.some((r) => r.t === 'msg' && r.from === body.from && r.id === body.id)) return null
     // A blocked sender's messages are dropped once they open.
     if (!body.mine && !dmFold.canSend({ self: own, peer, ops })) return null
-    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest, ...(body.v === 5 && Number.isSafeInteger(body.moment) && body.moment >= 1 ? { moment: body.moment } : {}) }
+    return { t: 'msg', id: body.id, peer, from: body.from, text: body.text, ...replyRow(body.replyTo), fwd: body.fwd === 1 ? 1 : 0, media: Array.isArray(body.media) ? body.media.map(mediaItem) : null, card: body.card ? copyLinkCard(body.card, mediaItem) : null, at: body.at, mine: body.mine, digest, ...((body.v === 5 || body.v === dm.DM_PAGE_MOMENT_V) && Number.isSafeInteger(body.moment) && body.moment >= 1 ? { moment: body.moment } : {}) }
   }
 
   // Kept even while its target is not stored: the fold applies it once the
@@ -2723,14 +2725,45 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // out to be signed. keyPair: the identity, whose blob stamps that upload
   // spends, as in a person's send. The draft keeps the sealed blob entries,
   // never a copy of their plaintext.
-  async function pageDraft ({ page, kind, to, text, replyTo, fwd, op, peer, media = null, card = null }, recipientBox, keyPair) {
+  // kind 'react': the page's reaction (inner v11) to a message of its thread
+  // with `to`, target { from, id } as dm.react's; the digest comes from the
+  // stored row. A msg with `moment` (the seq of a momento of `to`, text one
+  // emoji) is the page's reaction to that momento (inner v12).
+  async function pageDraft ({ page, kind, to, text, replyTo, fwd, op, peer, media = null, card = null, target, emoji, moment = null }, recipientBox, keyPair) {
     requireUnlocked()
     const e = pages.need(page)
     pages.requireMatch(page)
     const ctx = await pageCtx(page)
     let fields
     let sealedBlobs = []
-    if (kind === 'msg') {
+    let revKey = null
+    if (kind === 'react') {
+      if (to === page) throw new UsageError(SELF_SEND)
+      if (typeof to !== 'string' || typeof emoji !== 'string' || target === null || typeof target !== 'object' || media !== null || card !== null) throw new UsageError(BAD_TEXT)
+      if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
+      if (typeof recipientBox !== 'string') throw new UsageError(NO_BOX)
+      const c = await threadOf(page, to, ctx)
+      const row = c === null ? undefined : c.messages.find((m) => m.from === target.from && m.id === target.id)
+      if (row === undefined) throw new UsageError(NO_TARGET)
+      // As dm.react: a row with no digest takes no reaction.
+      if (typeof row.digest !== 'string' || !DIGEST_RE.test(row.digest)) throw new UsageError(NOT_REACTABLE)
+      const t = { from: row.from, id: row.id, digest: row.digest }
+      revKey = page + '\n' + to + '\n' + t.from + '\n' + t.id + '\n' + t.digest
+      const stored = ctx.local.reactionRev(to, t, page)
+      const drafted = pageReactRevs.get(revKey) || 0
+      // As dm.react with none pending: the page's own reaction already being
+      // `emoji` ('' with none) would spend a signature and two stamps on
+      // nothing. A draft made here since may have gone, so it lifts the rule.
+      if (drafted <= stored) {
+        const mine = Array.isArray(row.reactions) ? row.reactions.find((r) => r.mine) : undefined
+        if ((mine === undefined ? '' : mine.emoji) === emoji) throw new UsageError(NOTHING_TO_CHANGE)
+      }
+      // One past the stored op and any draft made here before it was sent,
+      // so two drafts never tie on rev.
+      const rev = Math.max(stored, drafted) + 1
+      if (rev > dm.DM_REACT_REV_MAX) throw new UsageError(REACT_MAX)
+      fields = { kind: 'react', from: page, to, target: t, emoji, rev, cert: e.cert }
+    } else if (kind === 'msg') {
       if (typeof to !== 'string' || typeof text !== 'string') throw new UsageError(BAD_TEXT)
       if (to === page) throw new UsageError(SELF_SEND)
       if (!dmFold.canSend({ self: page, peer: to, ops: ctx.local.ops() })) throw new UsageError(BLOCKED)
@@ -2745,9 +2778,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const items = Array.isArray(media) && media.length > 0 ? media.map(mediaItem) : null
       const c = card === null ? null : copyLinkCard(card, mediaItem)
       sealedBlobs = messageItems({ media: items, card: c }).map((item) => entryOfItem(item, to, page))
-      fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, media: items, card: c, cert: e.cert }
+      fields = { kind: 'msg', from: page, to, text, replyTo: reply, fwd: fwd === 1 ? 1 : 0, media: items, card: c, cert: e.cert, ...(moment === null ? {} : { moment }) }
     } else {
-      if (typeof peer !== 'string' || peer === page || !dm.DM_OPS.includes(op)) throw new UsageError('nada a alterar')
+      if (typeof peer !== 'string' || peer === page || !dm.DM_OPS.includes(op)) throw new UsageError(NOTHING_TO_CHANGE)
       if (media !== null || card !== null) throw new UsageError(BAD_TEXT)
       fields = { kind: 'ctl', from: page, to: page, op, peer, cert: e.cert }
     }
@@ -2766,10 +2799,15 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         for (const b of sealedBlobs) await upload(b, keyPair)
         if (gen !== generation) throw new UsageError(LOCKED)
       }
-      pages.putDraft(d.body.id, { page, kind, json: d.json, body: d.body, box: kind === 'msg' ? recipientBox : null, entry: null, blobs: sealedBlobs })
+      pages.putDraft(d.body.id, { page, kind, json: d.json, body: d.body, box: kind === 'ctl' ? null : recipientBox, entry: null, blobs: sealedBlobs })
     } catch (err) {
       wipe(d.json)
       throw err
+    }
+    if (revKey !== null) {
+      pageReactRevs.delete(revKey)
+      pageReactRevs.set(revKey, d.body.rev)
+      if (pageReactRevs.size > PENDING_MAX) pageReactRevs.delete(pageReactRevs.keys().next().value)
     }
     return { id: d.body.id, digest: d.digest, at: d.body.at }
   }
@@ -2875,7 +2913,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         // retry, as the page's ctls do (ctxPrefix).
         prefixes: [prefixOf(d.box), randomPrefix()],
         acked: [false, false],
-        row: { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: b.media, card: b.card, at: b.at, mine: true, digest: dm.bodyDigest(b) },
+        row: pageSentRow(page, b),
         blobs,
         plains,
         local: ctx.local
@@ -2906,6 +2944,14 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     for (const x of entry.blobs) forgetBlob(x)
     entry.blobs = []
     return { id: b.id, at: b.at }
+  }
+
+  // The row a page's sent draft files once its recipient drop is acked: a
+  // reaction (v11), a momento reaction (v12) or a message (v3).
+  function pageSentRow (page, b) {
+    if (b.kind === 'react') return { t: 'rx', id: b.id, peer: b.to, from: page, to: b.to, target: { from: b.target.from, id: b.target.id, digest: b.target.digest }, emoji: b.emoji, rev: b.rev, at: b.at, mine: true }
+    if (b.v === dm.DM_PAGE_MOMENT_V) return { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, replyTo: null, fwd: 0, media: null, card: null, at: b.at, mine: true, digest: dm.bodyDigest(b), moment: b.moment }
+    return { t: 'msg', id: b.id, peer: b.to, from: page, text: b.text, ...replyRow(b.replyTo), fwd: b.fwd, media: b.media, card: b.card, at: b.at, mine: true, digest: dm.bodyDigest(b) }
   }
 
   // A row of the page's history the service held in plaintext: checked with
@@ -3252,6 +3298,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       const prefix = store.pageDmPrefix(page)
       for (const k of [...gone]) if (k.startsWith(prefix)) gone.delete(k)
       for (const k of [...opening.keys()]) if (k.startsWith(prefix)) opening.delete(k)
+      for (const k of [...pageReactRevs.keys()]) if (k.startsWith(page + '\n')) pageReactRevs.delete(k)
       if (s !== undefined) {
         foldMemo.delete(s.local)
         try { await s.ready } catch {}

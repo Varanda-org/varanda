@@ -1949,7 +1949,7 @@ test('dm.send between two nodes: a bound reply quotes the message both sides sto
 const PAGE_AT = '2026-11-03T12:00:00.000Z'
 const PAGE_NONCE = 'r'.repeat(43)
 
-test('a reaction drop to a Página is dropped, never filed, and the pull goes on past it', async (t) => {
+test('reactions in a Página conversation: a person reacts to its message and momento, the page reacts and withdraws', async (t) => {
   t.timeout(240000)
   const assoc = generateAssociationKeyPair()
   const issuerKp = crypto.keyPair()
@@ -1972,31 +1972,89 @@ test('a reaction drop to a Página is dropped, never filed, and the pull goes on
   await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
   await copyDiary(C, A)
 
-  const draft = await A.web.request('dm.pageDraft', { page: P, kind: 'msg', to: C.key, text: 'da página' })
-  const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
-  await A.web.request('dm.pageSend', { page: P, id: draft.id, signature: dmCore.signDigest(draft.digest, pageKp.secretKey, expiresAt), expiresAt })
-  await C.web.request('dm.pull')
-  t.alike((await C.web.request('dm.thread', { peer: P })).messages.map((x) => x.text), ['da página'])
+  const pageSign = (digest) => {
+    const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
+    return { signature: dmCore.signDigest(digest, pageKp.secretKey, expiresAt), expiresAt }
+  }
+  const pageSend = async (params) => {
+    const draft = await A.web.request('dm.pageDraft', { page: P, ...params })
+    return { ...(await A.web.request('dm.pageSend', { page: P, id: draft.id, ...pageSign(draft.digest) })), digest: draft.digest }
+  }
+  const pageRows = async () => (await A.web.request('dm.thread', { page: P, peer: C.key })).messages
+  const personRows = async () => (await C.web.request('dm.thread', { peer: P })).messages
+  const reactionsOf = (rows, text) => rows.find((x) => x.text === text).reactions || []
 
-  // C holds the Página's diary: the node refuses, before anything is spent.
+  const sent = await pageSend({ kind: 'msg', to: C.key, text: 'da página' })
+  await C.web.request('dm.pull')
+  t.alike((await personRows()).map((x) => x.text), ['da página'])
+
+  // A person reacts to the page's message (inner v4): signed and stamped as
+  // any reaction, filed in the page's store.
   const wallet0 = (await store.readDmStamps(C.storage)).items.length
-  const refused = await errorOf(C.web.request('dm.react', { to: P, target: { from: P, id: draft.id }, emoji: '\u{1f44d}' }))
-  t.is(refused && refused.message, 'conversas com uma Página não têm reações')
-  t.absent(refused && refused.uncertain, 'nothing was sent')
-  t.is((await store.readDmStamps(C.storage)).items.length, wallet0, 'no stamp spent')
-  // A node without that diary cannot tell: a reaction drop it would send is
-  // put by hand here, with one of C's stamps.
-  const key = await dmLocalKeyFromPrf(C.prf)
-  const w = await store.readDmStamps(C.storage)
-  const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
-  await store.writeDmStamps(C.storage, { items: w.items.slice(1), kids: w.kids })
-  const rx = dmCore.buildInner({ kind: 'react', id: dmCore.newMessageId(), at: new Date().toISOString(), to: P, target: { from: P, id: draft.id, digest: 'ab'.repeat(32) }, emoji: '\u{1f44d}', rev: 1, cert: createCert({ member: C.key }, assoc) }, C.keyPair)
-  t.ok(seeder.pool.submit(dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(rx, made.box) })), 'the pool takes the reaction drop')
-  await C.web.request('dm.send', { to: P, text: 'depois da reação' })
+  t.alike(await C.web.request('dm.react', { to: P, target: { from: P, id: sent.id }, emoji: '\u{1f44d}' }), { ok: true })
+  t.is((await store.readDmStamps(C.storage)).items.length, wallet0 - 2, 'two stamps, as a dm.send')
+  t.alike(reactionsOf(await personRows(), 'da página'), [{ emoji: '\u{1f44d}', mine: true }])
   await A.web.request('dm.pull')
-  const rows = (await A.web.request('dm.thread', { page: P, peer: C.key })).messages
-  t.alike(rows.map((x) => x.text), ['da página', 'depois da reação'], 'the message after it is filed')
-  t.absent(rows.some((x) => 'reactions' in x), 'no reaction in a Página conversation')
+  t.alike(reactionsOf(await pageRows(), 'da página'), [{ emoji: '\u{1f44d}', mine: false }], 'the page sees the reaction')
+
+  // The page reacts to the person's message (inner v11), drafted, signed with
+  // the page key and sent like its messages.
+  await C.web.request('dm.send', { to: P, text: 'oi página' })
+  await A.web.request('dm.pull')
+  const theirs = (await pageRows()).find((x) => x.text === 'oi página')
+  const heart = '❤️'
+  const draft = await A.web.request('dm.pageDraft', { page: P, kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: heart })
+  const forged = await errorOf(A.web.request('dm.pageSend', { page: P, id: draft.id, signature: dmCore.signDigest(draft.digest, crypto.keyPair().secretKey, Date.now() + 60000), expiresAt: Date.now() + 60000 }))
+  t.is(forged && forged.message, 'assinatura inválida', 'a signature by another key is refused before anything is put')
+  await A.web.request('dm.pageSend', { page: P, id: draft.id, ...pageSign(draft.digest) })
+  t.alike(reactionsOf(await pageRows(), 'oi página'), [{ emoji: heart, mine: true }], 'filed for the page once acked')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'oi página'), [{ emoji: heart, mine: false }], 'the person sees the page reaction')
+
+  // A missing or digestless target is refused before anything is signed.
+  const missing = await errorOf(A.web.request('dm.pageDraft', { page: P, kind: 'react', to: C.key, target: { from: C.key, id: dmCore.newMessageId() }, emoji: heart }))
+  t.is(missing && missing.message, 'mensagem não encontrada')
+
+  // The page withdraws: '' wins with the higher rev on both sides.
+  await pageSend({ kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: '' })
+  t.alike(reactionsOf(await pageRows(), 'oi página'), [], 'withdrawn on the page')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'oi página'), [], 'withdrawn for the person')
+
+  // Stamps put by hand, as a node that sends these drops would.
+  const key = await dmLocalKeyFromPrf(C.prf)
+  const putByHand = async (inner, box) => {
+    const w = await store.readDmStamps(C.storage)
+    const stamp = { kid: w.items[0].kid, ...gc.openRecord({ nonce: w.items[0].nonce, box: w.items[0].box }, key) }
+    await store.writeDmStamps(C.storage, { items: w.items.slice(1), kids: w.kids })
+    return seeder.pool.submit(dmCore.encodeDrop({ dropId: dmCore.newDropId(), kid: b4a.from(stamp.kid, 'hex'), rsaSig: b4a.from(stamp.sig, 'base64'), token: b4a.from(stamp.token, 'hex'), sealed: dmCore.sealInner(inner, box) }))
+  }
+
+  // A person's reaction to a momento of the page (inner v5) is filed for it.
+  const cCert = createCert({ member: C.key }, assoc)
+  const onMoment = dmCore.buildInner({ kind: 'msg', to: P, text: '\u{1f525}', moment: 3, cert: cCert }, C.keyPair)
+  t.ok(await putByHand(onMoment, made.box), 'the pool takes the momento reaction')
+  await A.web.request('dm.pull')
+  const moment = (await pageRows()).find((x) => x.moment === 3)
+  t.ok(moment, 'filed in the page conversation')
+  t.is(moment && moment.text, '\u{1f525}')
+  t.is(moment && moment.mine, false)
+
+  // A v11 signed by a key other than the page's never opens for the person;
+  // the same drop signed with the page key does. Its target is the page's
+  // message, whose digest is the one its draft answered.
+  const cBox = hex((await dmBoxKeyPairFromPrf(C.prf, 1)).publicKey)
+  const byHand = (signer) => {
+    const d = dmCore.innerDigest({ kind: 'react', from: P, to: C.key, target: { from: P, id: sent.id, digest: sent.digest }, emoji: '\u{1f602}', rev: 1, cert: pageCert })
+    const exp = Date.now() + 60000
+    return dmCore.assembleInner(d.json, dmCore.signDigest(d.digest, signer.secretKey, exp), exp)
+  }
+  t.ok(await putByHand(byHand(crypto.keyPair()), cBox), 'the pool takes the forged drop')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'da página'), [{ emoji: '\u{1f44d}', mine: true }], 'a forged page reaction is never filed')
+  t.ok(await putByHand(byHand(pageKp), cBox), 'the pool takes the genuine drop')
+  await C.web.request('dm.pull')
+  t.alike(reactionsOf(await personRows(), 'da página'), [{ emoji: '\u{1f602}', mine: false }, { emoji: '\u{1f44d}', mine: true }], 'the page key one is')
   t.is((await A.web.request('dm.pull')).added, 0, 'a second pull is clean')
 })
 

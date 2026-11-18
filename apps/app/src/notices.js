@@ -377,6 +377,14 @@ export function serializeSeen (ownKey, ids) {
 
 // The notice shown in place of the list, or null. Web-only wins over
 // unsupported, which wins over offline.
+// Who loads the Avisos list: the hosted app, and a core node acting as a
+// Página with Páginas on, whose delegate pair signs the 'notices' read
+// (page.sign) for the account service. Its personal notices stay web only.
+export function noticesReadable ({ hosted, page, pagesCore }) {
+  if (hosted === true) return true
+  return pagesCore === true && typeof page === 'string' && /^[0-9a-f]{64}$/i.test(page)
+}
+
 export function noticesNotice ({ hosted, supported, online, loadedAt }) {
   if (hosted !== true) return 'web-only'
   if (supported === false) return 'unsupported'

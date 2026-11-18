@@ -24,6 +24,7 @@ import { accountOriginOf, pagesCore } from './pageGate.js'
 import * as actingStore from './actingAs.js'
 import { actingPageStopped, actorBoxOf, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
 import { oldPageKeys } from './pageOldKeys.js'
+import { CORE_DM_NONE, CORE_DM_OFF } from './coreDm.js'
 import { carriesPrivateItems } from './pageGroupMedia.js'
 
 const { MAX_AVATAR_BYTES } = rpc
@@ -48,7 +49,9 @@ const READ_MAX_BODY = 1024 * 1024
 // signature sent nothing, and the service keeps no answer for a same-nonce
 // resend.
 const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'group-topics', 'group-voters', 'group-events', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
-const DEFINITE = ['assinatura-invalida', 'pedido-invalido']
+// A retry answered by one of these is the service's answer, not a lost one:
+// nothing to resend. A page's listing-rate refusals hold whatever the body.
+const DEFINITE = ['assinatura-invalida', 'pedido-invalido', 'consentimento-invalido', 'avaliacao-enviada', 'avaliacao-propria']
 const FEED_KEYS = 64
 
 let dmDropObserver = () => {}
@@ -81,6 +84,10 @@ export const TEXTS = Object.freeze({
   'aguardando-chave': 'aguardando nova chave',
   'fora-da-comunidade': 'A página ainda não está na comunidade deste grupo',
   privado: 'Este grupo é privado: a mensagem precisa ser cifrada neste aparelho',
+  // A page's rating of a listing (listing-rate).
+  'consentimento-invalido': 'Esta oferta não pode ser avaliada pela página.',
+  'avaliacao-enviada': 'A página já avaliou esta oferta.',
+  'avaliacao-propria': 'Uma página não avalia anúncios de quem cuida dela.',
   // The account service's word check (apps/cli/lib/account/word-check.js):
   // the app checks the same list first, so this shows only when the service
   // has a term this build does not.
@@ -284,7 +291,7 @@ const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group
 // The page's own messages go through the node (5.114); dm-legacy-read and
 // dm-legacy-done serve only the sealed bundle of a legacy page's old ones.
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
-const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent']
+const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate']
 const STATEMENT_ACTIONS = ['list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'rename',
   'follow', 'follows', 'notices', 'terms', 'choice', 'moment', 'post-share', 'post-unshare', ...GROUP_ACTIONS, ...DM_ACTIONS, ...LISTING_ACTIONS]
 const ACTIONS = [...STATEMENT_ACTIONS, ...RECORD_ACTIONS, 'create', 'invite', 'move']
@@ -496,10 +503,54 @@ export const pagesDmBoxRead = (node, { member, page }) => pagesDm(node, { member
 export const PAGE_DM_NO_OWN_BOX = 'Suas Conversas ainda não estão ativas neste aparelho'
 export const PAGE_DM_NO_BOX = 'Essa pessoa ainda não recebe mensagens'
 export const PAGE_DM_CORE_ONLY = 'Para remover administradores ou mudar a chave desta página, use o app no celular ou na web.'
+// Conversas not activated on this core node yet: a remove, a move or a page's
+// activation would turn them on (dm.enable) without the activation screen
+// and its note.
+export const PAGE_DM_CORE_OFF = 'Ative primeiro as Conversas deste aparelho; depois tente de novo.'
 // A core node's dm.* refusal: it cannot hold a page's keys.
-const NODE_DM_BROWSER_ONLY = 'mensagens diretas disponíveis só no navegador'
+const NODE_DM_BROWSER_ONLY = CORE_DM_NONE
 const coreOnly = () => Object.assign(new Error(PAGE_DM_CORE_ONLY), { coreOnly: true })
-export const pagesDmCoreOnly = (node) => !!node && node.hosted === false
+// Probes kept per request function and account origin: the request keeps
+// one identity for the whole app session, across a change of node.
+const dmProbes = new WeakMap()
+
+// Whether and how this node holds page keys -> Promise<'hosted' | 'none' |
+// 'off' | 'on'>. A hosted node always does; a node that is not hosted (a
+// core node) does only when it answers the page Conversas methods (the
+// engine of worklet/main.js or varanda-serve). One dm.list, which writes
+// nothing, tells, as coreDm.js probeCoreDm: CORE_DM_NONE is no engine,
+// CORE_DM_OFF an engine whose Conversas were never activated (nothing
+// stored; not kept, activation changes it), any other USAGE answer an
+// engine. Any other failure (closed, offline) is thrown and not kept, so it
+// is never read as any answer.
+function dmKeysState (node) {
+  if (!node || node.hosted !== false) return Promise.resolve('hosted')
+  const call = signer(node)
+  if (call === null) return Promise.resolve('none')
+  const fn = typeof node.request === 'function' ? node.request : node.call
+  let byOrigin = dmProbes.get(fn)
+  if (byOrigin === undefined) {
+    byOrigin = new Map()
+    dmProbes.set(fn, byOrigin)
+  }
+  const origin = String(node.accountOrigin)
+  const kept = byOrigin.get(origin)
+  if (kept !== undefined) return kept
+  const probe = Promise.resolve().then(() => call('dm.list', { limit: 1 })).then(() => 'on', (err) => {
+    if (err && err.message === NODE_DM_BROWSER_ONLY) return 'none'
+    if (err && err.message === CORE_DM_OFF) return 'off'
+    if (err && err.code === 'USAGE') return 'on'
+    throw err
+  })
+  byOrigin.set(origin, probe)
+  const drop = () => { if (byOrigin.get(origin) === probe) byOrigin.delete(origin) }
+  probe.then((state) => { if (state === 'off') drop() }, drop)
+  return probe
+}
+
+// Whether this node can hold no page keys (a core node without the engine).
+// A core node whose Conversas are not activated yet can: false. -> Promise<boolean>
+export const pagesDmCoreOnly = (node) => dmKeysState(node).then((state) => state === 'none')
 export const PAGE_DM_OWN_BOX_PENDING = 'A chave de mensagens deste aparelho ainda não foi publicada; tente de novo em instantes'
 // 'dm-legacy-read' answers up to 8 chunks; a bundle has at most 1024.
 const MAX_LEGACY_READS = 1024
@@ -596,7 +647,10 @@ export async function pagesDmAdoptNew (node, { member, page, gen }) {
 export async function pagesDmPrepare (node, args) {
   // Fail closed on a node without page keys: no rotation, so no remove or
   // move either, and a plain refusal with no retry.
-  if (pagesDmCoreOnly(node)) throw coreOnly()
+  const state = await dmKeysState(node)
+  if (state === 'none') throw coreOnly()
+  // Refused before dm.enable: activation is the Conversas screen's.
+  if (state === 'off') throw new Error(PAGE_DM_CORE_OFF)
   try {
     return await prepare(node, args)
   } catch (err) {
@@ -893,8 +947,10 @@ export function pagesFeedKeys (follows, max = FEED_KEYS) {
 // core node holds none. -> true when the node forgot it.
 export async function pagesDmForget (node, page) {
   const call = signer(node)
-  if (call === null || pagesDmCoreOnly(node) || !isKey(page)) return false
+  if (call === null || !isKey(page)) return false
   try {
+    const state = await dmKeysState(node)
+    if (state === 'none' || state === 'off') return false
     await call('dm.pageLegacyBlocks', { page })
   } catch {
     return false
@@ -947,11 +1003,25 @@ export async function pagesList (node, { member, also = [] } = {}) {
   }
   const call = signer(node)
   const closed = pagesRun(data).closed
+  const later = (page) => {
+    const pages = walkAgain.get(runKey) || []
+    if (!pages.includes(page)) walkAgain.set(runKey, [...pages, page])
+  }
+  // A node without page keys (no engine, or Conversas never activated) has
+  // none to walk. An unanswered probe decides nothing: the pages wait for the
+  // next list read, as a failed walk does.
+  let state = 'none'
+  if (call !== null && out.gone.length > 0) state = await dmKeysState(node).catch(() => null)
+  const noKeys = state === 'none' || state === 'off'
   for (const page of out.gone) {
     // A closed page is not walked: the keys it moved from are still listed to
-    // its roster. A core node holds no page keys.
-    if (call === null || pagesDmCoreOnly(node) || closed.includes(page)) {
+    // its roster.
+    if (noKeys || closed.includes(page)) {
       forget(page)
+      continue
+    }
+    if (state === null) {
+      later(page)
       continue
     }
     if (walking.has(page)) continue
@@ -966,8 +1036,7 @@ export async function pagesList (node, { member, also = [] } = {}) {
       for (const k of [page, ...keys]) if (!run.includes(k) && !forgetTried.has(k)) forget(k)
     }, () => {
       walking.delete(page)
-      const later = walkAgain.get(runKey) || []
-      if (!later.includes(page)) walkAgain.set(runKey, [...later, page])
+      later(page)
     })
   }
   return data

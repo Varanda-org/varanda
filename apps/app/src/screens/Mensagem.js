@@ -74,7 +74,7 @@ import { OPEN_INVITE, inviteLinkOf } from '../inviteMessage'
 import { listingLinkOf } from '../feiraChat'
 import { parsePriceText, quickReplies } from '../feira'
 import { CONSENT_NOTE, acceptCard, acceptText, buttonState, centsLabel, consentParams, declineCard, declineText, offerCard, offerOfMessage, offerState, offerTarget, proposalText, validCents } from '../feiraOffer'
-import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
+import { heldBubble, mergeMessages, newestOf, pageDmClient, pinToEnd, refreshThread, sendPlan, threadRows, bubbleShape, withDayMarks, messageKey, quoteTargets, dmReactions, reactDebounce, dmReactionGate, dmReactable, withFreshReactions, reactionTap, PAGE_REACTION_HELD, peerReadDelay, olderPagesToReread, mediaUncertainHold, runPageMediaRetry } from '../dm-screen'
 import { pageReadKind } from '../pageNotice'
 import { GROWTH_PLACES, dmTarget as openTargetOf, latchOpen, openPlan, readCursor, settleStep } from '../readPosition'
 import { applyOptimistic, reactionChips, toggleOf } from '../reactions'
@@ -100,6 +100,9 @@ import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
 import { awayCount, jumpVisible } from '../chatGestures'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
+import { dmTextOnly } from '../dmTextOnly'
+import { dmScreenGate } from '../coreDm'
+import { CoreDmActivate, useCoreDm } from '../ui/useCoreDm'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { ChatHeader } from '../ui/ChatHeader'
@@ -222,7 +225,21 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   useEffect(() => { setPageKeyNote('') }, [pageKey, peer])
   const status = node.passkey && node.passkey.status ? node.passkey.status : null
   const unlocked = !!(status && status.unlocked === true)
-  const ownKey = status ? status.publicKey : null
+  // A core node has no passkey: its Conversas open once its engine answers,
+  // and its own key is the node's identity.
+  const core = useCoreDm(node)
+  const gate = dmScreenGate({ hosted, unlocked, core: core.state })
+  const [coreKey, setCoreKey] = useState(null)
+  useEffect(() => {
+    if (hosted || !gate.ready) return undefined
+    let alive = true
+    request('identity.show', {}).then((r) => {
+      const key = r && typeof r.publicKey === 'string' ? r.publicKey.toLowerCase() : null
+      if (alive && key !== null && /^[0-9a-f]{64}$/.test(key)) setCoreKey(key)
+    }, () => {})
+    return () => { alive = false }
+  }, [hosted, gate.ready, request])
+  const ownKey = status ? status.publicKey : coreKey
   const names = useNames()
   const { resolveMany, learnVerified, forgetVerified, isPeeked, peekScope } = names
   useEffect(() => {
@@ -290,7 +307,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [reactionOverrides, setReactionOverrides] = useState(new Map())
   const [reactionError, setReactionError] = useState('')
   const [reactionPicker, setReactionPicker] = useState(null)
-  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
+  const reactionContext = useMemo(() => ({ live: true, sending: new Set(), unsure: new Map(), removed: new Map(), retries: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), pages: new Map(), read: 0, debounce: reactDebounce() }), [peer, ownKey, pageKey, request])
   const reactionContextRef = useRef(reactionContext)
   reactionContextRef.current = reactionContext
   useEffect(() => {
@@ -361,7 +378,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [offerHold, setOfferHold] = useState(null)
   const attachments = useChatAttachments()
   const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
-  const automaticDraft = useLinkDraft({ text: draft, enabled: !initialTarget, photos: attachments.items.length > 0, member: ownKey })
+  // A core node sends text only: no card preview, as no photo or voice.
+  const textOnly = dmTextOnly(node)
+  const automaticDraft = useLinkDraft({ text: draft, enabled: !initialTarget && !textOnly, photos: attachments.items.length > 0, member: ownKey })
   useEffect(() => {
     if (attachments.items.length > 0) setInitialCard((s) => linkDraftStep(s, { type: 'photo' }))
   }, [attachments.items.length])
@@ -422,7 +441,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (!context.live || context !== reactionContextRef.current) return
     for (const item of page) {
       const key = messageKey(item)
-      if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
+      if (context.retries.has(key) || context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0)) continue
       context.unsure.delete(key)
       context.removed.delete(key)
       context.overrides.delete(key)
@@ -477,7 +496,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
         }
       }
       for (const key of new Set([...context.unsure.keys(), ...context.overrides.keys()])) {
-        if (context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
+        if (context.retries.has(key) || context.sending.has(key) || context.debounce.has(key) || started <= (context.settled.get(key) || 0) || covered.has(key) || failed.has(key)) continue
         context.unsure.delete(key)
         context.removed.delete(key)
         context.overrides.delete(key)
@@ -538,6 +557,11 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       return
     }
     const target = { from: item.from, id: item.id }
+    // As a page, the retry of an unconfirmed reaction re-puts the same signed
+    // draft (err.retry from pageDmClient), never a new dm.pageDraft.
+    const put = context.retries.get(key)
+    const replay = typeof put === 'function' && context.unsure.has(key) && context.unsure.get(key) === emoji ? put : null
+    context.retries.delete(key)
     context.unsure.delete(key)
     // Any answer settles the last unconfirmed removal: confirmed, failed, or
     // unconfirmed again (then set anew below).
@@ -546,12 +570,14 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     context.sending.add(key)
     paintReactions(context)
     try {
-      await request('dm.react', { to: peer, target, emoji })
+      if (replay) await replay()
+      else await dm('dm.react', { to: peer, target, emoji })
       if (context.live && context === reactionContextRef.current) holdSent(key, emoji)
     } catch (err) {
       if (!context.live || context !== reactionContextRef.current) return
       if (unsureSend(err)) {
         context.unsure.set(key, emoji)
+        if (err && typeof err.retry === 'function') context.retries.set(key, err.retry)
         // The emoji an unconfirmed removal took away: tapping it again is the
         // retry of that removal (docs/rpc.md 5.119), not a new reaction.
         if (emoji === '') context.removed.set(key, context.bases.get(key)?.find((r) => r.mine)?.emoji || removed || '')
@@ -571,13 +597,19 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   function toggleReaction (key, picked) {
     const context = reactionContext
     if (!context.live || context !== reactionContextRef.current || !canReact(key)) return
+    // A page reaction kept uncertain (its signed re-put held) takes only its
+    // retry until it is settled (reactionTap).
+    const tap = reactionTap({ unsure: context.unsure.has(key) ? context.unsure.get(key) : undefined, removed: context.removed.get(key), held: context.retries.has(key) }, picked)
+    if (tap.locked) {
+      setReactionError(PAGE_REACTION_HELD)
+      return
+    }
     const item = reactionViewRef.current.rawById.get(key)
     const reactions = context.overrides.get(key) || dmReactions(item.reactions)
     if (!context.bases.has(key)) context.bases.set(key, reactions)
     const starting = context.bases.get(key).find((r) => r.mine)?.emoji || ''
-    const unsure = context.unsure.get(key)
-    const retry = context.unsure.has(key) && (unsure === picked || (unsure === '' && picked !== '' && picked === context.removed.get(key)))
-    const emoji = retry ? unsure : toggleOf(reactions, picked)
+    const retry = tap.retry
+    const emoji = retry ? tap.emoji : toggleOf(reactions, picked)
     context.overrides.set(key, applyOptimistic(reactions, emoji))
     setReactionError('')
     paintReactions(context)
@@ -588,7 +620,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (canReact(key)) setReactionPicker(key)
   }
 
-  const ready = hosted && unlocked
+  const ready = gate.ready
 
   // Another acting identity is another inbox: nothing of the old one stays.
   const seenPage = useRef(pageKey)
@@ -655,7 +687,8 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   useEffect(() => {
     // Hidden or offline clears the mark, so coming back reads once more, and
     // leaves any read in flight behind.
-    if (!ready || !isTop || !visible || node.online === false) {
+    // diary.peek is the hosted node's (a core node refuses it).
+    if (!ready || !hosted || !isTop || !visible || node.online === false) {
       peekedFor.current = ''
       peekRun.current++
       return
@@ -679,7 +712,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       if (entry === PEER_GONE) forgetVerified([peer], peekScope)
       else if (entry !== null) learnVerified([[peer, entry]], peekScope)
     })
-  }, [ready, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
+  }, [ready, hosted, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
 
   // The newest line sits at the bottom: show it on open and when a newer one
   // arrives; an older page loaded above leaves the position alone (loading it
@@ -1027,6 +1060,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
     inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
     let snapshot = heldCard === undefined ? linkDraft.take(text) : null
+    if (textOnly) snapshot = null
     const richBlocks = hasRich(text) ? parseRich(text) : null
     if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
@@ -1413,11 +1447,13 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       }
     : undefined
 
-  if (!hosted || !unlocked) {
+  if (!gate.ready) {
     return (
       <View style={styles.root}>
         <TopBar title='Mensagem' onBack={onBack} />
-        <EmptyState icon='conversas' title='Mensagens bloqueadas' body='Desbloqueie com a passkey para ler suas mensagens.' />
+        {gate.activate
+          ? <CoreDmActivate core={core} />
+          : <EmptyState icon='conversas' title='Mensagens bloqueadas' body='Desbloqueie com a passkey para ler suas mensagens.' />}
       </View>
     )
   }
@@ -1550,8 +1586,8 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     const offer = offerStates.get(key)
     if (!offer || offer.id !== m.id || offer.from !== (m.mine ? me : m.from)) return null
     const buttons = buttonState(offer, me, listing)
-    // A page does not rate in v1.
-    const rate = buttons.rate && old === null && pageKey === null && node.online !== false && typeof onAvaliar === 'function'
+    // As a page, `me` is the page key: its own offers, rated as the page.
+    const rate = buttons.rate && old === null && node.online !== false && typeof onAvaliar === 'function'
     return buttons.answer || rate ? { offer, listing, answer: buttons.answer, rate } : null
   }
   const offerBusy = offerAct.pending || offerHold !== null

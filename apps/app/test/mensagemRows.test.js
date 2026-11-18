@@ -81,6 +81,16 @@ test('the row keeps every action wired through the calls', (t) => {
   t.ok(row.includes('} = calls'), 'handlers come from the live calls')
 })
 
+test('a page thread offers Avaliar for its own offers, rated as the page', (t) => {
+  t.ok(src.includes('const me = pageKey !== null ? pageKey : ownKey'), 'as a page, me is the page key')
+  const body = src.slice(src.indexOf('  const offerOfRow = (index) => {'), src.indexOf('  const offerBusy = '))
+  t.ok(body.length > 0)
+  t.ok(body.includes('offerState(offerMsgs, me, listing, origin)'), 'the offer is read for me')
+  const rate = body.match(/const rate = [^\n]*/)[0]
+  t.absent(/pageKey/.test(rate), 'the rate gate does not exclude a page')
+  t.ok(rate.includes('buttons.rate && old === null'), 'the person\'s rules still hold')
+})
+
 test('the Mensagens novas line is fixed text inside the target row, not a data row', (t) => {
   const row = src.slice(src.indexOf('const MessageRow = memo('), src.indexOf('}, sameMessageRow)'))
   t.ok(row.includes("accessibilityLabel='Mensagens novas a partir daqui'"))

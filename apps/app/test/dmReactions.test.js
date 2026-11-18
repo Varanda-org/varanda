@@ -90,12 +90,12 @@ test('reaction debounce spends nothing on net no-ops and flushes on teardown', a
 
 // Execute the screen's handlers themselves, with only their I/O and hook setters supplied.
 async function screenReactions (request, reactions = []) {
-  const { dmReactions, reactDebounce, messageKey, dmReactable, withFreshReactions, olderPagesToReread } = await load()
+  const { dmReactions, reactDebounce, messageKey, dmReactable, withFreshReactions, olderPagesToReread, reactionTap, PAGE_REACTION_HELD } = await load()
   const { applyOptimistic, toggleOf } = await import('../src/reactions.js')
   const clock = fakeClock()
   const item = { from: 'peer', id: 'one', reactions }
   const key = messageKey(item)
-  const context = { live: true, sending: new Set(), unsure: new Map(), removed: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), read: 0, debounce: reactDebounce(600, clock) }
+  const context = { live: true, sending: new Set(), unsure: new Map(), removed: new Map(), retries: new Map(), settled: new Map(), bases: new Map(), overrides: new Map(), read: 0, debounce: reactDebounce(600, clock) }
   const state = { errors: [], reads: 0, painted: new Map() }
   const env = {
     reactionContext: context,
@@ -106,11 +106,14 @@ async function screenReactions (request, reactions = []) {
     dmReactable,
     withFreshReactions,
     olderPagesToReread,
+    reactionTap,
+    PAGE_REACTION_HELD,
     applyOptimistic,
     toggleOf,
     messageKey,
     peer: 'peer',
     request,
+    dm: request,
     unsureSend: (err) => err.uncertain === true || err.message === 'não deu para confirmar o envio',
     errorText: (err) => err.message,
     setReactionOverrides: (rows) => { state.painted = rows },
@@ -123,7 +126,7 @@ async function screenReactions (request, reactions = []) {
   }
   context.view = env.reactionViewRef.current
   const src = screen()
-  const handlers = src.slice(src.indexOf('  const reactionRowReady ='), src.indexOf('  const ready = hosted'))
+  const handlers = src.slice(src.indexOf('  const reactionRowReady ='), src.indexOf('  const ready = gate.ready'))
   const commit = src.slice(src.indexOf('  const commitRead ='), src.indexOf('  const readThread ='))
   const run = runInNewContext(handlers + commit + '\n;({ toggleReaction, canReact, commitRead })', env)
   return { ...run, context, clock, state, env, key, item }
@@ -233,6 +236,59 @@ test('uncertain reactions allow only explicit retries, replacements and removal'
   t.absent(h.context.unsure.has(h.key), 'a missing self copy also clears the quiet note')
   h.clock.tick(6000)
   t.is(sent.length, 4)
+})
+
+test('as a page, the retry of an unconfirmed reaction re-puts the same signed draft', async (t) => {
+  const drafts = []
+  let puts = 0
+  const retry = async () => { puts++ }
+  const h = await screenReactions(async (method, params) => {
+    drafts.push(params.emoji)
+    throw Object.assign(new Error('não deu para confirmar o envio'), { uncertain: true, retry })
+  })
+  h.toggleReaction(h.key, '❤️')
+  h.clock.tick(600)
+  await settled()
+  t.alike(drafts, ['❤️'])
+  t.is(h.context.retries.get(h.key), retry, 'the kept re-put')
+  h.clock.tick(6000)
+  t.is(puts, 0, 'nothing re-puts without a tap')
+  h.toggleReaction(h.key, '❤️')
+  h.clock.tick(600)
+  await settled()
+  t.alike(drafts, ['❤️'], 'no second draft')
+  t.is(puts, 1, 'one tap re-puts the signed draft once')
+  t.absent(h.context.retries.has(h.key), 'confirmed: nothing kept')
+})
+
+test('as a page, a held uncertain reaction locks its message until the retry settles it, past a thread read', async (t) => {
+  const drafts = []
+  let puts = 0
+  const retry = async () => { puts++; throw Object.assign(new Error('não deu para confirmar o envio'), { uncertain: true, retry }) }
+  const h = await screenReactions(async (method, params) => {
+    drafts.push(params.emoji)
+    throw Object.assign(new Error('não deu para confirmar o envio'), { uncertain: true, retry })
+  })
+  h.toggleReaction(h.key, '❤️')
+  h.clock.tick(600)
+  await settled()
+  // The reread after the send does not drop the held state.
+  h.commitRead([h.item], ++h.context.read, h.context)
+  t.is(h.context.unsure.get(h.key), '❤️', 'still unsure after a read')
+  h.toggleReaction(h.key, '👍')
+  h.clock.tick(600)
+  await settled()
+  t.alike(drafts, ['❤️'], 'another emoji signs nothing')
+  t.is(h.state.errors[h.state.errors.length - 1], 'Toque no mesmo emoji para tentar de novo.')
+  h.toggleReaction(h.key, '❤️')
+  h.clock.tick(600)
+  await settled()
+  t.is(puts, 1, 'the same emoji re-puts')
+  t.ok(h.context.retries.has(h.key), 'uncertain again: still held')
+  h.toggleReaction(h.key, '👍')
+  h.clock.tick(600)
+  await settled()
+  t.alike(drafts, ['❤️'], 'still locked')
 })
 
 test('a tap on the removed emoji retries an unconfirmed removal instead of reacting again', async (t) => {
@@ -423,7 +479,7 @@ test('older reaction reads isolate a failed cursor and refresh the newest held p
   t.is(loaded, 0)
 })
 
-test('DM gate hides only confirmed pages and keeps chips on incomplete or unavailable reads', async (t) => {
+test('DM gate never hides by kind: a page takes reactions both ways', async (t) => {
   const { dmReactionGate } = await load()
   const { pageReadKind } = await import('../src/pageNotice.js')
   const gate = (input) => dmReactionGate({ ...input, peerKind: pageReadKind(input.read, input.peer) })
@@ -431,11 +487,13 @@ test('DM gate hides only confirmed pages and keeps chips on incomplete or unavai
   const base = { read: person, peer: 'peer', pageKey: null, hosted: true, online: true, unlocked: true, isTop: true, blocked: false, folder: 'inbox' }
   const shown = { hidden: false, disabled: false }
   const disabled = { hidden: false, disabled: true }
-  const hidden = { hidden: true, disabled: true }
   t.alike(gate(base), shown, 'complete person')
   t.alike(gate({ ...base, read: { ...person, complete: false } }), shown, 'incomplete person')
-  t.alike(gate({ ...base, read: { ...person, complete: false, gen: 1 } }), hidden, 'positive page evidence on an incomplete read')
-  t.alike(gate({ ...base, pageKey: 'our-page' }), hidden, 'acting as a page')
+  t.alike(gate({ ...base, read: { ...person, complete: false, gen: 1 } }), shown, 'a page peer takes reactions')
+  t.alike(gate({ ...base, pageKey: 'our-page' }), shown, 'acting as a page')
+  t.alike(gate({ ...base, pageKey: 'our-page', read: null }), shown, 'acting as a page reads no peer')
+  t.alike(gate({ ...base, pageKey: 'our-page', online: false }), disabled, 'acting as a page, offline')
+  t.alike(gate({ ...base, pageKey: 'our-page', blocked: true }), disabled, 'acting as a page, blocked')
   for (const read of [undefined, null, { ...person, page: 'other' }]) {
     t.alike(gate({ ...base, read }), disabled, 'pending, failed or mismatched read')
   }
@@ -632,7 +690,7 @@ async function screenPeer (request) {
   return { read, context, answers }
 }
 
-test('a confirmed page stays hidden after a refresh without head evidence', async (t) => {
+test('a confirmed page keeps its answer after a refresh without head evidence', async (t) => {
   const { dmReactionGate } = await load()
   const { pageReadKind } = await import('../src/pageNotice.js')
   const page = { page: 'peer', gen: 1, owner: 'owner', complete: true }
@@ -643,7 +701,7 @@ test('a confirmed page stays hidden after a refresh without head evidence', asyn
   await h.read()
   t.is(h.context.answer, page, 'the confirmed answer is retained')
   t.is(h.answers.length, 1, 'the screen state retains its page evidence')
-  t.alike(dmReactionGate({ read: h.answers.at(-1), peer: 'peer', peerKind: pageReadKind(h.answers.at(-1), 'peer'), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: true, disabled: true })
+  t.alike(dmReactionGate({ read: h.answers.at(-1), peer: 'peer', peerKind: pageReadKind(h.answers.at(-1), 'peer'), hosted: true, unlocked: true, online: true, isTop: true, folder: 'inbox' }), { hidden: false, disabled: false })
   answer = { ...page, gen: 2 }
   await h.read()
   t.is(h.context.answer, answer, 'new page evidence replaces the previous answer')

@@ -317,3 +317,13 @@ test('dm-budget: v9 and v10 add signer after from, and v9 measures it', (t) => {
   t.ok(plain >= 4 * 1000, 'the longest text of four-byte characters fits')
   t.is(budget.innerVersion({ media: null, card: null, fwd: 0, replyTo: null }), 1, 'innerVersion never picks v9')
 })
+
+test('page reactions: v11 and v12 sign the v4 and v5 keys, digest-signed like v3', (t) => {
+  t.alike(rpc.DM_INNER_KEYS_V11, rpc.DM_INNER_KEYS_V4)
+  t.alike(rpc.DM_INNER_KEYS_V12, rpc.DM_INNER_KEYS_V5)
+  t.alike(budget.DM_INNER_KEYS_V11, budget.DM_INNER_KEYS_V4)
+  t.alike(budget.DM_INNER_KEYS_V12, budget.DM_INNER_KEYS_V5)
+  t.alike(rpc.DM_INNER_DIGEST_VERSIONS, [3, 11, 12])
+  t.is(rpc.DM_INNER_DIGEST_VERSIONS, budget.DM_INNER_DIGEST_VERSIONS)
+  t.ok(Object.isFrozen(rpc.DM_INNER_DIGEST_VERSIONS))
+})

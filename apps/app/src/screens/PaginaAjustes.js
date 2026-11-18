@@ -502,8 +502,9 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
     let dmBox
     let gen = null
     if (hasDeviceKeys(dmStatus)) {
-      // A core node holds no page keys: the rotation, and so the remove, waits for the app.
-      if (pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
+      // A node without page keys (a core node without Conversas): the
+      // rotation, and so the remove, waits for the app.
+      if (await pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
       const rest = { owner: roster.owner, admins: roster.admins.filter((k) => k !== key) }
       const prep = await pagesDmPrepare(node, { member, page, status: dmStatus, roster: rest })
       dmBox = prep.dmBox
@@ -660,7 +661,7 @@ export default function PaginaAjustes ({ entry, onBack, onChanged, onOpenMember 
       if (!rosterKnown) throw new Error(ADMINS_UNAVAILABLE)
       if (fromSeq === null) throw new Error(MOVE_UNKNOWN)
       if (dmStatus === undefined || dmStatus === null) throw new Error(DM_KEYS_UNKNOWN)
-      if (hasDeviceKeys(dmStatus) && pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
+      if (hasDeviceKeys(dmStatus) && await pagesDmCoreOnly(node)) throw new Error(PAGE_DM_CORE_ONLY)
       // K2 starts with its own keys, gen 1, for the same roster, only when
       // the page has a promoted device gen: a first rotation still pending
       // at gen 0 is discarded by the move, so it carries none.

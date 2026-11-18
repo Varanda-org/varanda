@@ -70,7 +70,7 @@ test('Avisos gives exhausted snippet refs another chance on reload, and speaks t
   t.ok(hook.includes('exhaustedRef.current.add(r)'), 'refs that ran out of tries are remembered apart')
   t.ok(/triedRef\.current\.delete\(r\)\n\s*triesRef\.current\.delete\(r\)/.test(hook), 'a reload releases them')
   t.ok(hook.includes('}, [retryKey])'))
-  t.ok(source.includes('useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)'), 'the reload signal is loadedAt')
+  t.ok(source.includes('useSnippets(shownItems, node.request, active && passkeyHosted && notice === null, loadedAt)'), 'the reload signal is loadedAt')
   t.ok(source.includes("const spoken = [line, subtitle, snippet ? '“' + snippet + '”' : null, unread ? 'não lido' : null].filter(Boolean).join(', ')"))
   t.ok(source.includes("accessibilityLabel={ref === null ? spoken : spoken + ', abrir publicação'}"))
   t.ok(source.includes("accessibilityLabel={spoken + ', ver perfil'}"))
@@ -143,8 +143,8 @@ test('Avisos marks avatar authors tried only after the batch completed and keeps
 
 test('Avisos asks the names cache only while the screen is active and hosted', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
-  t.ok(source.includes("if (active && hosted && shownKeys !== '') resolveMany(shownKeys.split(','))"))
-  t.ok(source.includes('}, [active, hosted, shownKeys, resolveMany])'))
+  t.ok(source.includes("if (active && passkeyHosted && shownKeys !== '') resolveMany(shownKeys.split(','))"))
+  t.ok(source.includes('}, [active, passkeyHosted, shownKeys, resolveMany])'))
 })
 
 test('Avisos gives a snippet read that came back without the post another chance on reload', (t) => {
@@ -417,8 +417,8 @@ test('the Seguir de volta pill is only for the person, only for someone not foll
   t.ok(source.includes("if (followBackRef.current !== null || pageKeyRef.current !== null || actingGet().kind === 'page') return"))
   t.ok(source.includes("import { get as actingGet, subscribe as actingSubscribe } from '../actingAs'"))
   t.ok(source.includes("const pageKey = acting.kind === 'page' ? acting.key : null"))
-  t.ok(source.includes('if (hosted && active && pageKey === null) loadFollows()'), 'a page never reads the person\'s follow set')
-  t.ok(source.includes('}, [hosted, active, pageKey, ownKey, followsVersion, loadFollows])'), 'read again on any follow change or identity')
+  t.ok(source.includes('if (passkeyHosted && active && pageKey === null) loadFollows()'), 'a page never reads the person\'s follow set')
+  t.ok(source.includes('}, [passkeyHosted, active, pageKey, ownKey, followsVersion, loadFollows])'), 'read again on any follow change or identity')
   t.ok(source.includes('const { follows, load: loadFollows, mark: markFollow } = useFollowSet(request)'))
   t.ok(source.includes('label={FOLLOW_BACK_LABEL}'))
   t.ok(source.includes('followDisabled={followBackKey !== null}'), 'one follow back at a time')
