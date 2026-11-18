@@ -301,3 +301,70 @@ test('page momentos: text, media and music, refusals, delete and close, the reco
   for (const seq of seqs) t.ok(dels.includes(seq), 'close tombstones momento ' + seq)
   t.alike(showing(await ctx.writer.readEntries(K), K), [], 'no momento survives the close')
 })
+
+test('page momentos: status lists the page\'s own, live or expired, newest first, only for who holds the page', async (t) => {
+  t.timeout(300000)
+  const s = await setup(t)
+  const { ctx } = s
+  const ana = await s.newMember('ana')
+  const caio = await s.newMember('caio')
+  const made = await s.create(ana, 'quitanda')
+  t.is(made.status, 200, JSON.stringify(made.body))
+  const K = made.page
+
+  async function status (m) {
+    return s.act(m, 'status', K, {})
+  }
+
+  const empty = await status(ana)
+  t.is(empty.status, 200, JSON.stringify(empty.body))
+  t.alike(empty.body.moments, [], 'no momento yet')
+
+  const first = await s.act(ana, 'moment', K, { text: 'Primeiro', media: momentMedia() })
+  t.is(first.status, 200, JSON.stringify(first.body))
+  // A momento past 24 h: the service always stamps now, so this one goes
+  // straight to the writer with a backdated at, and the store is told the
+  // new length as the service's own append would.
+  const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString()
+  const expired = await ctx.writer.append(K, [momentRecord({ text: 'Antigo', media: momentMedia({ id: '4'.repeat(64) }), at: old })])
+  await ctx.pagesStore.expectLength(K, ctx.writer.info(K).length)
+  const second = await s.act(ana, 'moment', K, { text: 'Segundo', media: VIDEO, music: MUSIC })
+  t.is(second.status, 200, JSON.stringify(second.body))
+  // Another kind of record is never listed.
+  const post = await s.act(ana, 'post', K, { text: 'Uma publicação' })
+  t.is(post.status, 200, JSON.stringify(post.body))
+
+  const listed = (await status(ana)).body.moments
+  const atOf = async (seq) => (await recordAt(ctx, K, seq)).at
+  t.alike(listed, [
+    { seq: second.body.seq, at: await atOf(second.body.seq), text: 'Segundo' },
+    { seq: expired.seq, at: old, text: 'Antigo' },
+    { seq: first.body.seq, at: await atOf(first.body.seq), text: 'Primeiro' }
+  ], 'newest first, the expired one too, only seq, at and text')
+  t.absent(showing(await ctx.writer.readEntries(K), K).includes(expired.seq), 'a reader no longer shows the expired one')
+
+  // Status stays gated: a member without a role gets no list.
+  const refused = await status(caio)
+  t.is(refused.body.error, 'sem-permissao', 'a member who is not owner or admin')
+  t.absent('moments' in refused.body, 'no list for a stranger')
+
+  // The expired one, deleted through the page delete action, leaves the list.
+  const del = await s.act(ana, 'delete', K, { to: K + ':' + expired.seq })
+  t.is(del.status, 200, JSON.stringify(del.body))
+  t.alike((await status(ana)).body.moments.map((m) => m.seq), [second.body.seq, first.body.seq], 'a deleted momento is not listed')
+
+  // At most 20: the newest kept.
+  const batch = []
+  for (let i = 0; i < 21; i++) batch.push(momentRecord({ text: 'Lote ' + i, media: momentMedia({ id: (i % 10).toString().repeat(64) }) }))
+  const seqsOfBatch = []
+  for (let i = 0; i < batch.length; i += 7) {
+    const res = await ctx.writer.append(K, batch.slice(i, i + 7))
+    for (let j = 6; j >= 0; j--) seqsOfBatch.push(res.seq - j)
+  }
+  await ctx.pagesStore.expectLength(K, ctx.writer.info(K).length)
+  const capped = (await status(ana)).body.moments
+  t.is(capped.length, 20, 'capped at 20')
+  t.alike(capped.map((m) => m.seq), seqsOfBatch.slice(1).reverse(), 'the 20 newest, newest first')
+  t.is(capped[0].text, 'Lote 20')
+  t.is(capped[19].text, 'Lote 1')
+})

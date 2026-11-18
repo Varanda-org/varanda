@@ -46,8 +46,9 @@
 //   - moment writes a momento, the record a person's moment.create writes
 //     (records.js momentRecord): the admin's device seals and uploads the
 //     public blob itself, so the op carries only its descriptor and there is
-//     nothing here to resolve. delete takes a live momento of the page, and
-//     close tombstones them with the rest.
+//     nothing here to resolve. delete takes a momento of the page that is not
+//     deleted, live or past its 24 hours, and close tombstones them with the
+//     rest.
 //   - close and move are the owner's record actions (docs/protocol.md §12,
 //     "Encerrar" and "Mudar de chave"): the owner-signed page-close, or the
 //     page-moved, page-origin and K2 genesis roster, countersigned here. At
@@ -178,6 +179,10 @@ const MAX_STATUS_REFS = 4096
 // The newest polls and events 'status' answers the page's live choice on
 // (about 75 bytes each), so the whole answer still fits that cap.
 const MAX_STATUS_PICKS = 1024
+// The newest momentos 'status' lists so an owner or admin can find one to
+// delete: a page posts a few a day, and the list stays a small part of the
+// answer.
+const MAX_STATUS_MOMENTS = 20
 const MAX_SUCCESSORS = 1000
 // Actions whose whole effect is the writer's append: its nonce record is the
 // answer. For the others the ACL step after the append is the effect, so a
@@ -216,10 +221,10 @@ function noop () {}
 // withdrawal, newest first; the first one below the poll's count is the live
 // pick, as polls.js livePick (which skips a pick out of range). ->
 // { 'author:seq': [pick, ...] } for the MAX_STATUS_PICKS targets whose last
-// pick is newest.
-function pickedOf (entries) {
+// pick is newest. folded is the diary after applyDeletes.
+function pickedOf (folded) {
   const live = new Map()
-  for (const e of applyDeletes(entries)) {
+  for (const e of folded) {
     if (!e || e.deleted || !isPlainObject(e.record) || e.record.type !== 'choice') continue
     const { to, pick } = e.record
     if (!isPlainObject(to) || !HEX64_RE.test(to.author) || !Number.isSafeInteger(to.seq)) continue
@@ -230,6 +235,22 @@ function pickedOf (entries) {
     if (pick !== null) live.set(ref, [pick, ...prior.filter((p) => p !== pick)])
   }
   return Object.fromEntries([...live].slice(-MAX_STATUS_PICKS))
+}
+
+// The page's own momentos still in its diary, newest first: an expired one
+// is listed too, since its text stays until a tombstone removes it. Only
+// what finding and deleting one needs, never its media or music. ->
+// [{ seq, at, text }]. folded is the diary after applyDeletes.
+function momentsOf (folded) {
+  const out = []
+  for (let i = folded.length - 1; i >= 0 && out.length < MAX_STATUS_MOMENTS; i--) {
+    const e = folded[i]
+    if (!e || e.deleted || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'moment') continue
+    const { at, text } = e.record
+    if (typeof text !== 'string' || typeof at !== 'string' || Number.isNaN(Date.parse(at))) continue
+    out.push({ seq: e.seq, at, text })
+  }
+  return out
 }
 
 function has (obj, k) {
@@ -1445,7 +1466,9 @@ function createPagesRoutes ({
       needHeld(page, member)
       if (action === 'follows') return { follows: writer.follows(page) }
       const eng = await writer.engagement(page)
-      const picked = pickedOf(await writer.readEntries(page))
+      const folded = applyDeletes(await writer.readEntries(page))
+      const picked = pickedOf(folded)
+      const moments = momentsOf(folded)
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1462,6 +1485,7 @@ function createPagesRoutes ({
           truncated: liked.length > MAX_STATUS_REFS || reposted.length > MAX_STATUS_REFS
         },
         picked,
+        moments,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
