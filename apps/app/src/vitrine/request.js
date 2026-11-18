@@ -357,6 +357,20 @@ export function createVitrineRequest (fixtures, options) {
     for (const e of gardenOf(record.type).reverse()) gardenTombstone(e.seq)
     return append(record)
   }
+  // Barraquinha and Enfeites (5.162 to 5.166): blocks above the live on flag
+  // count, as the node reads them.
+  const gardenSince = () => {
+    const flag = gardenOf('garden')[0]
+    return flag && flag.record.on === true ? flag.seq : null
+  }
+  const giveRefusals = {
+    'not-following': 'você só dá mimos para quem você segue',
+    closed: 'a barraquinha só abre aos sábados',
+    'same-day': 'você já deu um mimo para esta pessoa hoje',
+    daily: 'você já deu o máximo de mimos por hoje',
+    invalid: 'parâmetro inválido: to'
+  }
+  const TAKE_KEEP_MS = 691200000
   const helpRefusals = {
     self: 'não dá para regar a própria varanda',
     'not-following': 'você só rega a varanda de quem você segue',
@@ -633,6 +647,7 @@ export function createVitrineRequest (fixtures, options) {
     'identity.forget': unavailable,
     // A Página's keys and sealed posts live only on a device holding them.
     'group.seal': unavailable,
+    'media.sealPageFile': unavailable,
     'dm.pageGenerate': unavailable,
     'dm.pageShare': unavailable,
     'dm.pageSecrets': unavailable,
@@ -925,7 +940,7 @@ export function createVitrineRequest (fixtures, options) {
       return { queued: true }
     },
     'garden.set': ({ on }) => {
-      const blocks = [...gardenOf('garden-state'), ...gardenOf('garden-help')].sort((a, b) => a.seq - b.seq)
+      const blocks = ['garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take'].flatMap(gardenOf).sort((a, b) => a.seq - b.seq)
       if (on && !gardenOn()) gardenLatest({ type: 'garden', on: true, at: stamp() })
       if (!on && (gardenOn() || blocks.length > 0)) {
         for (const e of blocks) gardenTombstone(e.seq)
@@ -974,6 +989,84 @@ export function createVitrineRequest (fixtures, options) {
       if (!view || view.ripe) refuse('USAGE', 'este vaso não tem planta para regar')
       const { seq, ref } = append({ type: 'garden-help', to, pot, at: new Date(now).toISOString() })
       return { seq, ref }
+    },
+    'garden.decor': ({ items }) => {
+      if (!gardenOn()) refuse('USAGE', 'ligue a Varandinha para jogar')
+      const { seq, ref } = gardenLatest({ type: 'garden-decor', items: items.slice(), at: stamp() })
+      return { seq, ref, items: items.slice() }
+    },
+    'garden.stall': () => {
+      const now = demoNow()
+      const today = rpc.garden.dayStart(now)
+      const since = gardenSince()
+      const atMs = (e) => Date.parse(e.record.at)
+      const gifts = gardenOf('garden-gift')
+      const takes = since === null ? [] : gardenOf('garden-take').filter((e) => e.seq > since)
+      const decor = since === null ? undefined : gardenOf('garden-decor').find((e) => e.seq > since)
+      return {
+        open: rpc.garden.stallDay(now),
+        decor: decor ? { seq: decor.seq, items: decor.record.items.slice() } : null,
+        giftsToday: gifts.filter((e) => atMs(e) >= today).length,
+        takesToday: takes.filter((e) => atMs(e) >= today).length,
+        gave: since === null
+          ? []
+          : gifts.filter((e) => rpc.garden.offerListable(atMs(e), now) || atMs(e) >= today).slice(0, rpc.garden.GARDEN_GIFT_ROWS)
+            .map((e) => ({ seq: e.seq, to: e.record.to, item: e.record.item, at: e.record.at })),
+        takes: takes.filter((e) => atMs(e) >= now - TAKE_KEEP_MS).slice(0, rpc.garden.GARDEN_TAKE_ROWS)
+          .map((e) => ({ seq: e.seq, from: e.record.from, gseq: e.record.seq, at: e.record.at }))
+      }
+    },
+    'garden.give': ({ to, pot }) => {
+      const now = Date.parse(stamp())
+      if (to === data.own) refuse('USAGE', 'não dá para dar um mimo para si')
+      if (blockedKeys.has(to)) refuse('USAGE', 'você bloqueou esta pessoa')
+      if (!gardenOn()) refuse('USAGE', 'ligue a Varandinha para jogar')
+      const gifts = gardenOf('garden-gift')
+      const allowed = rpc.garden.giveAllowed({ self: data.own, to, now, follows: new Set(data.follows), own: gifts.map((e) => ({ to: e.record.to, at: e.record.at })) })
+      if (!allowed.ok) refuse('USAGE', giveRefusals[allowed.reason] || giveRefusals.invalid)
+      const prev = gardenOf('garden-state')[0]
+      const n = rpc.garden.saveOrdinal(prev ? prev.record : null, now)
+      if (n === null) refuse('USAGE', 'você já cuidou da varanda o máximo de vezes por hoje')
+      const given = rpc.garden.foldGiven({ self: data.own, pots: prev ? prev.record.pots : null, given: gardenOf('garden-help'), now }).perPot
+      const gave = rpc.garden.applyGive(prev ? prev.record : null, pot, now, { received: Array(6).fill(rpc.garden.GARDEN_HELP_PER_POT), given })
+      if (!gave.ok) refuse('USAGE', gave.reason === 'empty' || gave.reason === 'not-ripe' ? 'este vaso ainda não está pronto' : 'jogada inválida')
+      if (data.pages.some((p) => p.author === to)) refuse('USAGE', 'páginas não têm Varandinha')
+      const theirs = (logs.get(to) || []).filter((e) => e.record.type === 'garden' && !deleted.has(`${to}:${e.seq}`)).sort((a, b) => b.seq - a.seq)[0]
+      if (theirs?.record.on !== true) refuse('USAGE', 'esta pessoa não está na Varandinha')
+      const at = new Date(now).toISOString()
+      const ended = gifts.filter((e) => rpc.garden.dayStart(Date.parse(e.record.at)) + rpc.garden.GARDEN_STALL_WINDOW_MS <= now).reverse().slice(0, 5)
+      for (const e of ended) gardenTombstone(e.seq)
+      gardenLatest({ type: 'garden-state', pots: gave.state.pots, n, at })
+      const { seq, ref } = append({ type: 'garden-gift', to, item: gave.item, at })
+      return { seq, ref, state: gardenShape(gardenOf('garden-state')[0]) }
+    },
+    'garden.take': ({ from, seq }) => {
+      const now = Date.parse(stamp())
+      if (from === data.own) refuse('USAGE', 'este mimo não está mais disponível')
+      if (blockedKeys.has(from)) refuse('USAGE', 'você bloqueou esta pessoa')
+      if (!gardenOn()) refuse('USAGE', 'ligue a Varandinha para jogar')
+      const since = gardenSince()
+      const mine = gardenOf('garden-take')
+      const held = mine.filter((e) => e.seq > since && e.record.from === from && e.record.seq === seq).pop()
+      if (held) return { seq: held.seq, ref: `${data.own}:${held.seq}`, changed: false }
+      const gift = liveEntry(from, seq)
+      const own = mine.filter((e) => e.seq > since).map((e) => ({ from: e.record.from, seq: e.record.seq, at: e.record.at }))
+      const allowed = rpc.garden.takeAllowed({ self: data.own, from, seq, now, own, gift: gift ? gift.record : null })
+      if (!allowed.ok) {
+        refuse('USAGE', allowed.reason === 'not-found' || allowed.reason === 'expired'
+          ? 'este mimo não está mais disponível'
+          : allowed.reason === 'daily' ? 'você já aceitou o máximo de mimos por hoje' : 'jogada inválida')
+      }
+      const stale = mine.filter((e) => e.seq <= since || Date.parse(e.record.at) < now - TAKE_KEEP_MS).reverse().slice(0, 7)
+      for (const e of stale) gardenTombstone(e.seq)
+      return { ...append({ type: 'garden-take', from, seq, at: new Date(now).toISOString() }), changed: true }
+    },
+    'garden.drop': ({ kind, seq }) => {
+      const entry = gardenOf(kind === 'gift' ? 'garden-gift' : 'garden-take').find((e) => e.seq === seq)
+      if (!entry) refuse('USAGE', 'este registro não é um mimo seu')
+      const tombstone = append({ type: 'delete', seq, at: stamp() })
+      deleted.set(`${data.own}:${seq}`, tombstone)
+      return { seq: tombstone.seq, deleted: [seq] }
     },
     'group.create': createGroup,
     'group.join': ({ group, community }) => {

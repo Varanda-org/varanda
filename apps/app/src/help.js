@@ -39,7 +39,9 @@ export const HELP = Object.freeze({
       'Regar a própria planta e receber a rega de um vizinho adiantam a colheita.',
       'Cada pessoa rega a varanda de quem segue, uma vez por dia por varanda.',
       'Tudo no jogo fica público no diário e é declarado por cada pessoa: participar, o que está plantado, as datas de plantio, rega e colheita, e de quem você regou. Quem recebe a rega vê o nome de quem regou.',
-      'Não tem compra, ranking nem prêmio. Sair da Varandinha marca os seus registros do jogo como apagados, mas cópias que outras pessoas já buscaram podem continuar. As regas que vizinhos fizeram na sua varanda ficam no diário deles.'
+      'Não tem compra, ranking nem prêmio. Sair da Varandinha marca os seus registros do jogo como apagados, mas cópias que outras pessoas já buscaram podem continuar. As regas que vizinhos fizeram na sua varanda ficam no diário deles.',
+      'A barraquinha abre aos sábados. Um vaso pronto pode ser dado, como mimo, para alguém que você segue. O mimo só aparece na prateleira de quem recebe depois que a pessoa aceita, e fica até o sábado seguinte.',
+      'Os enfeites são opcionais e vêm de uma lista fixa. Ficam públicos no diário, servem só para a aparência da varanda e não são um prêmio.'
     ])
   }),
   seguindo: Object.freeze({

@@ -64,6 +64,12 @@
 //                       -> Promise<media item>  (lib/node.js momentPutMedia:
 //                          a momento's photo sealed in a fresh blob; the item
 //                          goes back unchanged in moment.create `media`)
+//   media.sealPage({ page, bytes, mime, width, height, kind, ms })
+//                       -> Promise<{ cipher, item }>  (lib/node.js
+//                          pageSealMedia: a Página's photo or voice note
+//                          sealed for one of its private groups; cipher is
+//                          what the app uploads as the page, item the
+//                          private item without core and start)
 //   media.readMoment({ author, seq })
 //                       -> Promise<{ bytes, mime, w, h }>  (lib/node.js
 //                          momentReadMedia: the momento's photo opened with
@@ -1788,6 +1794,14 @@ async function start ({ association, seederUrl } = {}) {
         putMoment (args) {
           try {
             return Promise.resolve(node.momentPutMedia(args))
+          } catch (err) {
+            return Promise.reject(err)
+          }
+        },
+        // Synchronous as putDm: the node copies the bytes before any await.
+        sealPage (args) {
+          try {
+            return Promise.resolve(node.pageSealMedia(args))
           } catch (err) {
             return Promise.reject(err)
           }

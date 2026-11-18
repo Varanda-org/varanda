@@ -15,6 +15,7 @@
 // and media lengths it last wrote, paused, announced, the media core key and
 // the item table
 // (the only check a post's media descriptors are matched against), the
+// sealed table (ciphertext of private group items, which nothing resolves), the
 // idempotency records, and noise-key.json, the link's persistent Noise pair.
 //
 // Idempotency: append, mediaItem and setFollow take { member, nonce }; the
@@ -77,16 +78,18 @@ const { attachAdmission, MAX_INVENTORY } = require('@varanda/core/lib/admission'
 const { generateNoiseKeyPair } = require('@varanda/core/lib/net')
 const {
   MEDIA_BLOCK_BYTES, MAX_MEDIA_BLOCKS, MAX_MEDIA_BYTES, MAX_MEDIA_ITEM_BLOCKS, MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS,
+  AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, validAudioDescriptor,
   AVATAR_SIDE, AVATAR_MIMES, MAX_AVATAR_BLOCKS,
   memberCertRecord, mediaCoreRecord, followRecord, validDescriptor, validVideoDescriptor, validAvatar, validRecordCopy, validateRecord, isHex64
 } = require('@varanda/core/lib/records')
 const { mediaHeader, latestMediaCores } = require('@varanda/core/lib/media')
+const { SEALED_MEDIA_MIME } = require('@varanda/core/lib/group-media')
 const { deletedSeqs, deletedRanges, clearDeleted: clearDeletedSeqs, clearRanges, overlaps } = require('@varanda/core/lib/deletion')
 const { engagementState } = require('@varanda/core/lib/engagement')
 const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { MAX_PAGE_FOLLOWS } = require('@varanda/core/lib/page')
 const { pageLifecycle, verifyClose, verifyMoved } = require('@varanda/core/lib/page-lifecycle')
-const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE } = require('@varanda/rpc')
+const { feira, mediaBounds, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE } = require('@varanda/rpc')
 
 // Resolved from @varanda/core, as apps/cli/lib/seed-ws.js does: the
 // secret-stream the seeder itself speaks, with no dependency of our own.
@@ -202,10 +205,39 @@ function closeBatches (records) {
   return batches
 }
 
-// A still image, or a short video (only ever the second item of a post's
-// [poster, video] pair): a page that stored a video must load it again.
+// A still image, a short video (only ever the second item of a post's
+// [poster, video] pair) or a voice note (only ever a group post's one
+// item): a page that stored one must load it again.
 function validItem (it) {
-  return isPlainObject(it) && (validDescriptor(it) || validVideoDescriptor(it))
+  return isPlainObject(it) && (validDescriptor(it) || validVideoDescriptor(it) || validAudioDescriptor(it))
+}
+
+const SEALED_KEYS = ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256']
+
+// A private group item's ciphertext in the page's media core (a person's
+// private item without what only the sealed record carries: key, nonce and
+// what it hides). Whole blocks only, as group-media.js sealMedia writes.
+function validSealed (it) {
+  return isPlainObject(it) && Object.keys(it).length === SEALED_KEYS.length && SEALED_KEYS.every((k) => Object.prototype.hasOwnProperty.call(it, k)) &&
+    HEX64_RE.test(it.core) && it.mime === SEALED_MEDIA_MIME &&
+    Number.isSafeInteger(it.start) && it.start >= 1 &&
+    Number.isSafeInteger(it.blocks) && it.blocks >= 1 && it.blocks <= MAX_MEDIA_ITEM_BLOCKS &&
+    it.start + it.blocks <= MAX_MEDIA_BLOCKS &&
+    it.bytes === it.blocks * MEDIA_BLOCK_BYTES && typeof it.sha256 === 'string' && HEX64_RE.test(it.sha256)
+}
+
+// -> the container's duration of a voice note the page may store, or null:
+// the strict audioBounds a person's received voice note passes (audio only,
+// no metadata), the bytes already what stripAudioMetadata leaves (the
+// service never rewrites what a member signed), the given ms within
+// AUDIO_MS_TOLERANCE of the container's, which is what gets stored.
+function audioMs (bytes, ms) {
+  if (!Number.isSafeInteger(ms) || ms < 1 || ms > MAX_AUDIO_MS || bytes.byteLength > MAX_AUDIO_BYTES) return null
+  const bounds = audioBounds(bytes)
+  if (bounds === null || Math.abs(ms - bounds.ms) > AUDIO_MS_TOLERANCE) return null
+  const stripped = stripAudioMetadata(bytes)
+  if (stripped === null || !b4a.equals(stripped, bytes)) return null
+  return bounds.ms
 }
 
 // -> the container's duration of a short video the page may store, or
@@ -237,7 +269,7 @@ function validNonces (obj) {
   for (const [id, v] of Object.entries(obj)) {
     if (!NONCE_ID_RE.test(id) || !isPlainObject(v) || !Number.isSafeInteger(v.seq) || v.seq < 0 ||
         !Number.isSafeInteger(v.length) || v.length < 0 || !Number.isSafeInteger(v.expiresAt) ||
-        !(v.descriptor === undefined || validItem(v.descriptor)) ||
+        !(v.descriptor === undefined || validItem(v.descriptor) || validSealed(v.descriptor)) ||
         !(v.first === undefined || (Number.isSafeInteger(v.first) && v.first >= 0 && v.first <= v.seq))) return false
   }
   return true
@@ -277,6 +309,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     readEntries,
     readOwn,
     mediaItem,
+    sealedItem,
     avatarItem,
     items,
     itemBytes,
@@ -342,6 +375,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       announced: p.announced,
       media: p.mediaKey,
       items: p.items,
+      sealed: p.sealed,
       nonces: p.nonces,
       movedTo: p.movedTo,
       closed: p.closed === true
@@ -360,10 +394,12 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
         typeof data.paused !== 'boolean' || typeof data.announced !== 'boolean' ||
         !(data.media === null || (typeof data.media === 'string' && HEX64_RE.test(data.media))) ||
         !Array.isArray(data.items) || !data.items.every(validItem) ||
+        !(data.sealed === undefined || (Array.isArray(data.sealed) && data.sealed.every(validSealed))) ||
         !(data.nonces === undefined || validNonces(data.nonces)) ||
         !(data.movedTo === undefined || data.movedTo === null || (typeof data.movedTo === 'string' && HEX64_RE.test(data.movedTo))) ||
         !(data.closed === undefined || typeof data.closed === 'boolean')) return null
     if (data.nonces === undefined) data.nonces = {}
+    if (data.sealed === undefined) data.sealed = []
     if (data.movedTo === undefined) data.movedTo = null
     if (data.closed === undefined) data.closed = false
     return data
@@ -468,6 +504,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       announced: state ? state.announced : false,
       stateLost: state === null,
       items: state ? state.items : [],
+      sealed: state ? state.sealed : [],
       nonces: state ? state.nonces : {},
       movedTo: state ? state.movedTo : null,
       closed: state ? state.closed : false,
@@ -768,7 +805,7 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
     let p = null
     try {
       core = await openCore(path.join(storeDir, key), publicKey, row.secretKey, 'json')
-      p = { key, core, media: null, mediaKey: null, length: 0, mediaLength: 0, paused: false, announced, items: [], nonces: {}, movedTo: null, closed: false, terminal: null, wipeAfter: null, cert, follows: new Map(), chain: Promise.resolve() }
+      p = { key, core, media: null, mediaKey: null, length: 0, mediaLength: 0, paused: false, announced, items: [], sealed: [], nonces: {}, movedTo: null, closed: false, terminal: null, wipeAfter: null, cert, follows: new Map(), chain: Promise.resolve() }
       saveState(p)
       await appendBatch(p, [memberCertRecord(cert), ...rest])
       core.setKeyPair({ publicKey, secretKey: null })
@@ -912,18 +949,23 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
 
   // ---- media ----------------------------------------------------------
 
-  // `ms` only for a video/mp4 (videoMs), never for a still image.
+  // `ms` only for a video/mp4 (videoMs) or a voice note (audioMs, width
+  // and height 0 as a person's audio descriptor), never for a still image.
   async function mediaItem (key, { bytes: input, mime, width, height, sha256, ms } = {}, opts) {
     const idem = idempotency(opts)
     if (!(input instanceof Uint8Array) || input.byteLength < 1 || input.byteLength > MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES) throw fail('midia-invalida')
     const bytes = b4a.from(input)
     if (typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || sha256Hex(bytes) !== sha256) throw fail('midia-invalida')
     const video = mime === VIDEO_MIME
-    if (typeof mime !== 'string' || (!video && !MEDIA_MIMES.includes(mime))) throw fail('midia-invalida')
-    if (!video && ms !== undefined) throw fail('midia-invalida')
+    const voice = mime === AUDIO_MIME
+    if (typeof mime !== 'string' || (!video && !voice && !MEDIA_MIMES.includes(mime))) throw fail('midia-invalida')
+    if (!video && !voice && ms !== undefined) throw fail('midia-invalida')
     let duration
     if (video) {
       duration = videoMs(bytes, width, height, ms)
+      if (duration === null) throw fail('midia-invalida')
+    } else if (voice) {
+      duration = width === 0 && height === 0 ? audioMs(bytes, ms) : null
       if (duration === null) throw fail('midia-invalida')
     } else {
       // The same strict parser the app runs before showing a received photo:
@@ -938,14 +980,17 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       }
     }
     const blocks = Math.ceil(bytes.byteLength / MEDIA_BLOCK_BYTES)
-    const valid = video ? validVideoDescriptor : validDescriptor
-    const withMs = (d) => video ? { ...d, ms: duration } : d
+    const valid = video ? validVideoDescriptor : voice ? validAudioDescriptor : validDescriptor
+    const withMs = (d) => video || voice ? { ...d, ms: duration } : d
     const shape = withMs({ core: '0'.repeat(64), mime, start: 1, blocks, bytes: bytes.byteLength, sha256, width, height })
     if (!valid(shape)) throw fail('midia-invalida')
 
     return withPage(key, async (p, row) => {
       const prior = recall(p, 'media', idem)
-      if (prior !== null) return { ...prior.descriptor }
+      if (prior !== null) {
+        if (validSealed(prior.descriptor)) throw fail('midia-invalida')
+        return { ...prior.descriptor }
+      }
       const media = await ownMediaCore(p, row)
       if (media.length + blocks > MAX_MEDIA_BLOCKS || media.byteLength + bytes.byteLength > MAX_MEDIA_BYTES) throw fail('limite')
       const declared = latestMediaCores(await readAll(p.core), p.key).some((c) => c.key === p.mediaKey)
@@ -964,6 +1009,48 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       }
       p.mediaLength = media.length
       p.items.push(descriptor)
+      remember(p, 'media', idem, { seq: 0, length: p.core.length, descriptor })
+      saveOrPause(p)
+      return { ...descriptor }
+    })
+  }
+
+  // The ciphertext of one private group item (the device sealed it; the
+  // service never holds its key): whole blocks into the page's media core,
+  // filed in `sealed`, apart from `items`, so no post, profile, listing,
+  // momento or public group post resolves it.
+  // -> { core, mime, start, blocks, bytes, sha256 }.
+  async function sealedItem (key, { bytes: input, sha256 } = {}, opts) {
+    const idem = idempotency(opts)
+    if (!(input instanceof Uint8Array) || input.byteLength < MEDIA_BLOCK_BYTES || input.byteLength % MEDIA_BLOCK_BYTES !== 0 ||
+        input.byteLength > MAX_MEDIA_ITEM_BLOCKS * MEDIA_BLOCK_BYTES) throw fail('midia-invalida')
+    const bytes = b4a.from(input)
+    if (typeof sha256 !== 'string' || !HEX64_RE.test(sha256) || sha256Hex(bytes) !== sha256) throw fail('midia-invalida')
+    const blocks = bytes.byteLength / MEDIA_BLOCK_BYTES
+    return withPage(key, async (p, row) => {
+      const prior = recall(p, 'media', idem)
+      if (prior !== null) {
+        if (!validSealed(prior.descriptor)) throw fail('midia-invalida')
+        return { ...prior.descriptor }
+      }
+      const media = await ownMediaCore(p, row)
+      if (media.length + blocks > MAX_MEDIA_BLOCKS || media.byteLength + bytes.byteLength > MAX_MEDIA_BYTES) throw fail('limite')
+      const declared = latestMediaCores(await readAll(p.core), p.key).some((c) => c.key === p.mediaKey)
+      if (!declared) await appendBatch(p, [mediaCoreRecord({ key: p.mediaKey })])
+      const chunks = []
+      for (let i = 0; i < blocks; i++) chunks.push(b4a.from(bytes.subarray(i * MEDIA_BLOCK_BYTES, (i + 1) * MEDIA_BLOCK_BYTES)))
+      const start = p.mediaLength
+      const descriptor = { core: p.mediaKey, mime: SEALED_MEDIA_MIME, start, blocks, bytes: bytes.byteLength, sha256 }
+      if (!validSealed(descriptor)) throw fail('midia-invalida')
+      check()
+      stillKeyed(p)
+      await media.append(chunks)
+      if (media.length !== start + blocks) {
+        pause(p)
+        throw fail('pausada')
+      }
+      p.mediaLength = media.length
+      p.sealed.push({ ...descriptor })
       remember(p, 'media', idem, { seq: 0, length: p.core.length, descriptor })
       saveOrPause(p)
       return { ...descriptor }
@@ -1088,8 +1175,10 @@ function createPagesWriter ({ dir, keys, association, seederWs = null, log = noo
       check()
       await clearRanges(p.media, ranges)
       const kept = p.items.filter((it) => !ranges.some((r) => overlaps(it, r)))
-      if (kept.length !== p.items.length) {
+      const sealed = p.sealed.filter((it) => !ranges.some((r) => overlaps(it, r)))
+      if (kept.length !== p.items.length || sealed.length !== p.sealed.length) {
         p.items = kept
+        p.sealed = sealed
         saveOrPause(p)
       }
     }

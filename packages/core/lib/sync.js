@@ -3839,8 +3839,9 @@ async function runSync ({
         // A core stored for anything else (another group's writer or root, a
         // binding or followed diary) is never made a header stub: it is held
         // already, so the fold rules on it, and this listing leaves the
-        // table as before (I4).
-        if (header && (!headRefusal(header) || !recorded)) return fail(header, ownVerdict(header))
+        // table as before (I4). A head refusal there is never charged: a
+        // seeder may list the core as another diary's header stub.
+        if (header && (!headRefusal(header) || !recorded)) return fail(header, ownVerdict(header), headRefusal(header))
         // A recorded stub may be another group's writer: never a writer of
         // this group, its blocks are never purged.
         if (!header) writerHere = true
@@ -4307,14 +4308,15 @@ async function runSync ({
         // blocks of a stored core stay, and its honest listing under its
         // own group proceeds). Only a verdict from the writer's own data
         // refuses its key under this group (I1), and a header that is no
-        // writer of the group is charged to the seeder.
+        // writer of the group is charged to the seeder, unless the core is
+        // stored here in another role (`local`).
         if (r.own === true) {
           emit({ event: 'group-skipped', key: e.key, reason: r.reason })
           e.state = 'failed'
           refused.add(groupKey(e.group, e.key))
           if (r.boxless === true) noteBoxRefused(e, r.walk || null)
           dropGroupCore(e.key)
-          if ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group') badHint(e.peer, e.hint)
+          if (r.local !== true && ((r.reason === 'header-invalid' && r.box !== true) || r.reason === 'wrong-group')) badHint(e.peer, e.hint)
           if (r.boxless === true) liftAfterBox({ diary: e.diary, walk: r.walk || null })
           rescanElsewhere(e)
           return

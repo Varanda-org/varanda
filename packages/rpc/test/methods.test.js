@@ -23,7 +23,7 @@ test('method list and mutating set', (t) => {
     'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
-    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
+    'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
     'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
@@ -2427,6 +2427,7 @@ test('page.* (Páginas)', (t) => {
   for (const action of ['list', 'status', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar', 'rename', 'invite',
     'dm-list', 'dm-thread', 'follow', 'follows', 'media', 'notices', 'terms',
     'community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read',
+    'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events',
     'accept', 'remove', 'offer', 'transfer-accept', 'create', 'close', 'move']) {
     ok(t, 'page.sign', { ...base, action })
   }
@@ -2820,6 +2821,64 @@ test('page end-to-end node methods', (t) => {
   ok(t, 'group.read', { group: KEY, page: PAGE })
   ok(t, 'group.seal', { group: KEY, page: PAGE, text: 'oi' }, { group: KEY, page: PAGE, text: 'oi', fwd: 0 })
   bad(t, 'group.seal', { group: KEY, text: 'oi' }, 'page required')
+})
+
+test('group.seal: a page post with sealed media or a card, a reaction, a hide', (t) => {
+  const PAGE = 'cd'.repeat(32)
+  const base = { group: KEY, page: PAGE }
+  const target = { writer: KEY, seq: 3 }
+  const item = { core: KEY, mime: 'application/octet-stream', start: 1, blocks: 2, bytes: 65536, sha256: 'ef'.repeat(32), key: '12'.repeat(32), nonce: '34'.repeat(24), plainMime: 'image/jpeg', plainSha256: '56'.repeat(32), w: 640, h: 480, ms: 0 }
+  const voice = { ...item, start: 3, blocks: 1, bytes: 32768, plainMime: 'audio/mp4', w: 0, h: 0, ms: 3000 }
+  const card = { url: 'https://exemplo.org/a', host: 'exemplo.org', title: 'A', desc: '', image: null }
+  const msg = (params) => validateParams('group.seal', params).message
+  ok(t, 'group.seal', { ...base, text: 'oi', replyTo: target, fwd: 1 })
+  ok(t, 'group.seal', { ...base, text: '', media: [item] }, { ...base, text: '', media: [item], fwd: 0 })
+  ok(t, 'group.seal', { ...base, text: 'legenda', media: [item, { ...item, start: 5 }] })
+  ok(t, 'group.seal', { ...base, text: '', media: [voice] })
+  ok(t, 'group.seal', { ...base, text: 'olha', card })
+  const thumb = { ...item, start: 7, blocks: 1, bytes: 32768 }
+  ok(t, 'group.seal', { ...base, text: 'olha', card: { ...card, image: thumb } })
+  bad(t, 'group.seal', { ...base, text: 'olha', card: { ...card, image: { ...thumb, plainMime: 'image/png' } } }, 'a card image is a JPEG')
+  ok(t, 'group.seal', { ...base, react: { target, emoji: '👍' } }, { ...base, react: { target, emoji: '👍' }, fwd: 0 })
+  ok(t, 'group.seal', { ...base, react: { target, emoji: '' } })
+  ok(t, 'group.seal', { ...base, hide: { target, on: true } })
+  ok(t, 'group.seal', { ...base, hide: { target, on: false } })
+
+  t.is(msg({ ...base, text: 'oi', react: { target, emoji: '👍' } }), 'parâmetro inválido: text', 'text and react together')
+  t.is(msg({ ...base, react: { target, emoji: '👍' }, hide: { target, on: true } }), 'parâmetro inválido: text', 'react and hide together')
+  t.is(msg(base), 'parâmetro inválido: text', 'empty: nothing to seal')
+  t.is(msg({ ...base, text: '' }), 'parâmetro inválido: text', 'no text and no media')
+  for (const extra of [{ replyTo: target }, { fwd: 1 }, { media: [item] }, { card }]) {
+    t.is(msg({ ...base, react: { target, emoji: '👍' }, ...extra }), 'parâmetro inválido: react', 'a reaction takes no post key: ' + Object.keys(extra)[0])
+    t.is(msg({ ...base, hide: { target, on: true }, ...extra }), 'parâmetro inválido: hide', 'a hide takes no post key: ' + Object.keys(extra)[0])
+  }
+  const plain = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 30000, sha256: 'ef'.repeat(32), width: 640, height: 480 }
+  bad(t, 'group.seal', { ...base, text: 'oi', media: [plain] }, 'a plain descriptor is never sealed')
+  bad(t, 'group.seal', { ...base, text: 'oi', card: { ...card, image: plain } }, 'nor a plain card image')
+  bad(t, 'group.seal', { ...base, text: 'oi', media: [item], card }, 'media and card together')
+  bad(t, 'group.seal', { ...base, text: '', media: [voice, item] }, 'a voice note goes alone')
+  bad(t, 'group.seal', { ...base, react: { target, emoji: 'x' } }, 'not a reaction emoji')
+  bad(t, 'group.seal', { ...base, react: { target } }, 'react without emoji')
+  bad(t, 'group.seal', { ...base, react: { target, emoji: '👍', extra: 1 } }, 'react extra key')
+  bad(t, 'group.seal', { ...base, hide: { target, on: 1 } }, 'hide on must be boolean')
+  bad(t, 'group.seal', { ...base, hide: { target: { writer: 'x', seq: 1 }, on: true } }, 'hide bad target')
+  t.absent(isMutating('group.seal'), 'writes nothing')
+})
+
+test('media.sealPageFile: a Página private group photo or voice note from a cache file', (t) => {
+  const PAGE = 'cd'.repeat(32)
+  const params = { name: '0'.repeat(32) + '.bin', page: PAGE, mime: 'image/jpeg', width: 640, height: 480 }
+  ok(t, 'media.sealPageFile', params, params)
+  for (const mime of ['image/png', 'image/webp', 'image/gif']) ok(t, 'media.sealPageFile', { ...params, mime })
+  ok(t, 'media.sealPageFile', { ...params, mime: 'audio/mp4', width: 0, height: 0, kind: 'voice', ms: 3000 })
+  t.absent(isMutating('media.sealPageFile'), 'writes no diary')
+  bad(t, 'media.sealPageFile', { ...params, page: undefined }, 'page required')
+  bad(t, 'media.sealPageFile', { ...params, name: '../x.bin' }, 'only a generated name')
+  bad(t, 'media.sealPageFile', { ...params, mime: 'video/mp4', kind: 'video', ms: 3000 }, 'no video in a private group')
+  bad(t, 'media.sealPageFile', { ...params, mime: 'application/octet-stream' }, 'the node seals: the file is the plain media')
+  bad(t, 'media.sealPageFile', { ...params, mime: 'audio/mp4', width: 0, height: 0, ms: 3000 }, 'a voice note names its kind')
+  bad(t, 'media.sealPageFile', { ...params, ms: 3000 }, 'an image has no duration')
+  bad(t, 'media.sealPageFile', { ...params, sealed: true }, 'always sealed: no flag')
 })
 
 const POSTER = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 30000, sha256: 'cd'.repeat(32), width: 1080, height: 1920 }
