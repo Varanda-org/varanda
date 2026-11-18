@@ -43,6 +43,7 @@ Mesma ordem: Android (build de debug), simulador iOS, depois web.
 12. Nó core com as Conversas ativas: a lista e as conversas abrem; sem o aviso de "desbloquear" da web.
 13. Como Página: abrir uma conversa, responder com texto, ver a mensagem na web do outro lado. Foto e voz recebidas abrem (passo 6).
 14. Como pessoa numa conversa pessoal: a conversa abre e lê; enviar texto ou reagir mostra a recusa em pt-BR, a tela não trava e nada é reenviado.
-15. Como Página, abrir um grupo em que a Página participa: com o core de hoje, a tela fica como antes (indisponível neste nó). Com o core que responde `group.read` com `page` (PR 7): as publicações da Página aparecem, o compositor tem só texto, sem anexo, voz nem cartão.
+15. Como Página, abrir um grupo privado em que a Página participa: com o core de hoje, a tela fica como antes (indisponível neste nó). Com o core que responde `group.read` com `page` (PR 7): as publicações da Página aparecem, o compositor tem só texto, sem anexo, voz nem cartão.
 16. Como Página, aba Avisos: a lista de avisos da Página carrega e atualiza ao puxar; sem nomes resolvidos, avatares nem trechos (ficam só no app hospedado). Como pessoa, os Avisos seguem "Avisos indisponíveis".
 17. Web hospedada: Conversas, grupo como Página e Avisos sem mudança.
+18. Como Página num nó core, num grupo público em que a Página participa (core com o PR 7): anexar uma foto e gravar uma mensagem de voz. Os botões aparecem, porque o envio sobe pelo serviço de conta, assinado pela chave delegada (`page.sign` com `media`), e não pelo nó. Ver a foto e a voz publicadas como a Página na web do outro lado. Num grupo privado, os mesmos botões não aparecem (passo 15).
