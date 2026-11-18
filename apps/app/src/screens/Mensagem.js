@@ -100,6 +100,9 @@ import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
 import { awayCount, jumpVisible } from '../chatGestures'
 import { ChatComposer, useLinkDraft } from '../ui/ChatComposer'
+import { dmTextOnly } from '../dmTextOnly'
+import { dmScreenGate } from '../coreDm'
+import { CoreDmActivate, useCoreDm } from '../ui/useCoreDm'
 import { ChatMedia } from '../ui/ChatMedia'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { ChatHeader } from '../ui/ChatHeader'
@@ -222,7 +225,21 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   useEffect(() => { setPageKeyNote('') }, [pageKey, peer])
   const status = node.passkey && node.passkey.status ? node.passkey.status : null
   const unlocked = !!(status && status.unlocked === true)
-  const ownKey = status ? status.publicKey : null
+  // A core node has no passkey: its Conversas open once its engine answers,
+  // and its own key is the node's identity.
+  const core = useCoreDm(node)
+  const gate = dmScreenGate({ hosted, unlocked, core: core.state })
+  const [coreKey, setCoreKey] = useState(null)
+  useEffect(() => {
+    if (hosted || !gate.ready) return undefined
+    let alive = true
+    request('identity.show', {}).then((r) => {
+      const key = r && typeof r.publicKey === 'string' ? r.publicKey.toLowerCase() : null
+      if (alive && key !== null && /^[0-9a-f]{64}$/.test(key)) setCoreKey(key)
+    }, () => {})
+    return () => { alive = false }
+  }, [hosted, gate.ready, request])
+  const ownKey = status ? status.publicKey : coreKey
   const names = useNames()
   const { resolveMany, learnVerified, forgetVerified, isPeeked, peekScope } = names
   useEffect(() => {
@@ -361,7 +378,9 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   const [offerHold, setOfferHold] = useState(null)
   const attachments = useChatAttachments()
   const initialTarget = initialCard.url !== null && previewTarget(draft) === initialCard.url
-  const automaticDraft = useLinkDraft({ text: draft, enabled: !initialTarget, photos: attachments.items.length > 0, member: ownKey })
+  // A core node sends text only: no card preview, as no photo or voice.
+  const textOnly = dmTextOnly(node)
+  const automaticDraft = useLinkDraft({ text: draft, enabled: !initialTarget && !textOnly, photos: attachments.items.length > 0, member: ownKey })
   useEffect(() => {
     if (attachments.items.length > 0) setInitialCard((s) => linkDraftStep(s, { type: 'photo' }))
   }, [attachments.items.length])
@@ -588,7 +607,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     if (canReact(key)) setReactionPicker(key)
   }
 
-  const ready = hosted && unlocked
+  const ready = gate.ready
 
   // Another acting identity is another inbox: nothing of the old one stays.
   const seenPage = useRef(pageKey)
@@ -655,7 +674,8 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
   useEffect(() => {
     // Hidden or offline clears the mark, so coming back reads once more, and
     // leaves any read in flight behind.
-    if (!ready || !isTop || !visible || node.online === false) {
+    // diary.peek is the hosted node's (a core node refuses it).
+    if (!ready || !hosted || !isTop || !visible || node.online === false) {
       peekedFor.current = ''
       peekRun.current++
       return
@@ -679,7 +699,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       if (entry === PEER_GONE) forgetVerified([peer], peekScope)
       else if (entry !== null) learnVerified([[peer, entry]], peekScope)
     })
-  }, [ready, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
+  }, [ready, hosted, isTop, visible, node.online, peerProfile, peer, peekScope, peekTick, request, learnVerified, forgetVerified, isPeeked])
 
   // The newest line sits at the bottom: show it on open and when a newer one
   // arrives; an older page loaded above leaves the position alone (loading it
@@ -1027,6 +1047,7 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
     // Armed only when the composer shows the text being sent: a held message's retry may run after the draft changed.
     inFlightRef.current = typed === draft ? { text: typed, at: Date.now(), followed: false } : null
     let snapshot = heldCard === undefined ? linkDraft.take(text) : null
+    if (textOnly) snapshot = null
     const richBlocks = hasRich(text) ? parseRich(text) : null
     if (snapshot && cardBesideSpoilers(richBlocks, { url: snapshot.url }) === null) snapshot = null
     let card = heldCard === undefined ? null : heldCard
@@ -1413,11 +1434,13 @@ function MensagemThread ({ peer, initial, oldPage, isTop = true, onBack, onOpenM
       }
     : undefined
 
-  if (!hosted || !unlocked) {
+  if (!gate.ready) {
     return (
       <View style={styles.root}>
         <TopBar title='Mensagem' onBack={onBack} />
-        <EmptyState icon='conversas' title='Mensagens bloqueadas' body='Desbloqueie com a passkey para ler suas mensagens.' />
+        {gate.activate
+          ? <CoreDmActivate core={core} />
+          : <EmptyState icon='conversas' title='Mensagens bloqueadas' body='Desbloqueie com a passkey para ler suas mensagens.' />}
       </View>
     )
   }

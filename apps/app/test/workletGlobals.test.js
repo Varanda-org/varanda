@@ -49,3 +49,31 @@ test('bare-encoding is an exact dependency of the app (bare-pack bundles it)', (
   const pkg = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'))
   t.ok(/^\d+\.\d+\.\d+$/.test(pkg.dependencies['bare-encoding'] || ''), 'exact version')
 })
+
+// Conversas on the core node (worklet/main.js coreDm) load core-dm.js, whose
+// modules are all ones the web kind already loads in the worklet, so they
+// need the same two globals, installed before core-dm loads.
+test('worklet/main.js installs the crypto and encoding globals before core-dm loads', (t) => {
+  const source = fs.readFileSync(path.join(appDir, 'worklet', 'main.js'), 'utf8')
+  const code = source.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
+  const start = code.indexOf('function coreDm')
+  t.ok(start !== -1, 'coreDm is defined')
+  const body = code.slice(start, code.indexOf('\n}\n', start))
+  const coreDm = body.indexOf("require('@varanda/web-member/lib/core-dm')")
+  t.ok(coreDm !== -1, 'core-dm is required inside coreDm')
+  for (const g of ["require('bare-crypto/global')", "require('bare-encoding/global')"]) {
+    const at = body.indexOf(g)
+    t.ok(at !== -1 && at < coreDm, g + ' before core-dm')
+  }
+})
+
+test('bare-encoding/global first: core-dm loads without the encoding globals', (t) => {
+  const r = runWithoutEncoding([
+    "require('bare-encoding/global')",
+    "const { createCoreDm } = require('@varanda/web-member/lib/core-dm')",
+    "if (typeof createCoreDm !== 'function') throw new Error('createCoreDm')",
+    "console.log('ok')"
+  ].join('\n'))
+  t.is(r.status, 0, r.stderr)
+  t.is(r.stdout.trim(), 'ok')
+})

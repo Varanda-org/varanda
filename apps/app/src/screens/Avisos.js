@@ -40,12 +40,13 @@ import { avatarOf, pickAvatar } from '../media/avatar'
 import {
   ACTIVITY_QUIET_TEXT, EMPTY_TEXT, EMPTY_TITLE, NOTICES_FIRST_READ_QUIET_MS, NOTICES_INCOMPLETE_TEXT, NOTICES_OFFLINE_MESSAGE, NOTICES_POLL_MS,
   NOTICES_UNSUPPORTED_MESSAGE, PAGE_EMPTY_TEXT, PAGE_EMPTY_TITLE, PAGE_NOTICES_READ_LINE, PAGE_NOTICES_UNAVAILABLE_TITLE, SEEN_MAX,
-  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, oldFollowSeen, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice,
+  compareNotices, followsReadCovers, followsReadsHere, hasNew, hasPageSeenNamespaces, isLastNoticesPage, isPageNoticesUnavailable, isPageSeenNamespace, isWebOnlyError, markSeenPadded, mergePage, oldFollowSeen, mergeRemoteSeen, noticeIcon, noticeId, noticeKind, noticeLine, noticeParts, noticeRef, noticesNotice, noticesReadable,
   needsAvatar, padSeen, pageNoticesHeader, pageSeenNamespace, parseSeenNamespace, readNotices, remoteFoldPlan, resolveRowAvatars, rowAvatarSource, seenOnScreen, seenUnion, shouldPoll, shouldStartNoticesFirstRead, snippetCut, snippetOf, writeSeenNamespace
 } from '../notices'
 import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
 import { isRef } from '../nav'
 import { pagesNotices } from '../pages'
+import { pagesCore } from '../pageGate'
 import { LOCKED_MESSAGE } from '../outbox'
 import { shouldReloadOnShow } from '../paging'
 import { clearSeenText, loadSeenText, saveSeenText } from '../seenStore'
@@ -66,7 +67,7 @@ import { space, type } from '../ui/theme'
 import { FilterChips } from '../ui/FilterChips'
 import { FollowPill } from '../ui/FollowPill'
 import { FILTER_EMPTY_TEXT, FILTER_EMPTY_TITLE, FOLLOW_BACK_LABEL, NOTICE_FILTERS, filterNotices, isDayHeader, showsFollowBack, withDayHeaders } from '../noticesView'
-import { peekAll, postAt, useFollowSet } from './Conversa'
+import { memberKeyOf, peekAll, postAt, useFollowSet } from './Conversa'
 
 function useActing () {
   return useSyncExternalStore(actingSubscribe, actingGet, actingGet)
@@ -491,7 +492,9 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const bottomPad = useBottomPad()
   const acting = useActing()
   const pageKey = acting.kind === 'page' ? acting.key : null
-  const hosted = node.hosted === true && node.passkey !== null
+  const passkeyHosted = node.hosted === true && node.passkey !== null
+  const corePage = pagesCore({ hosted: node.hosted, accountOrigin: node.accountOrigin })
+  const hosted = noticesReadable({ hosted: passkeyHosted, page: pageKey, pagesCore: corePage })
   const peekWarm = useSyncExternalStore(subscribePeekWarm, getPeekWarmState, getPeekWarmState)
   // The association line is a page notice, and only while the list can load.
   const showReadLine = usePageReadLine(hosted && pageKey !== null)
@@ -531,6 +534,10 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   pageKeyRef.current = pageKey
   const ownKeyRef = useRef(ownKey)
   ownKeyRef.current = ownKey
+  const nodeRef = useRef(node)
+  nodeRef.current = node
+  const corePageRef = useRef(corePage)
+  corePageRef.current = corePage
   // Every read goes through readNotices: a short page that still has a
   // cursor (a gap of candidates the node filtered out) is followed by the
   // pages after it, a bounded number of times, so the followers behind the
@@ -552,8 +559,11 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
     const page = pageKeyRef.current
     return readNotices(async (method, params) => {
       if (method !== 'notices.list') throw new Error('Pedido inválido')
-      const member = typeof ownKeyRef.current === 'string' ? ownKeyRef.current.toLowerCase() : ''
-      const data = await pagesNotices({ request: send }, {
+      const n = nodeRef.current
+      const member = corePageRef.current
+        ? await memberKeyOf(send, n)
+        : (typeof ownKeyRef.current === 'string' ? ownKeyRef.current.toLowerCase() : '')
+      const data = await pagesNotices({ request: send, hosted: n.hosted, accountOrigin: n.accountOrigin }, {
         member,
         page,
         after: params ? params.after : undefined,
@@ -710,7 +720,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const loadFirst = useCallback(async (opts) => {
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
-    if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    if (pageKeyRef.current && !corePageRef.current && typeof ownKeyRef.current !== 'string') return
     // Only the scheduled hidden read sets quiet. A tap passes a press event
     // or nothing, and stays a visible request.
     const quiet = !!(opts && opts.quiet === true)
@@ -839,7 +849,7 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const poll = useCallback(async () => {
     const current = stateRef.current
     if (!hosted || current.unsupported || current.locked) return
-    if (pageKeyRef.current && typeof ownKeyRef.current !== 'string') return
+    if (pageKeyRef.current && !corePageRef.current && typeof ownKeyRef.current !== 'string') return
     if (current.loadedAt === null) {
       loadFirst()
       return
@@ -965,8 +975,8 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const { follows, load: loadFollows, mark: markFollow } = useFollowSet(request)
   followsSetRef.current = follows
   useEffect(() => {
-    if (hosted && active && pageKey === null) loadFollows()
-  }, [hosted, active, pageKey, ownKey, followsVersion, loadFollows])
+    if (passkeyHosted && active && pageKey === null) loadFollows()
+  }, [passkeyHosted, active, pageKey, ownKey, followsVersion, loadFollows])
   const [followBackKey, setFollowBackKey] = useState(null)
   const followBackRef = useRef(null)
   // One follow.add per press, as the person, and pending in the same tick
@@ -1203,10 +1213,12 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
   const shownItems = notice === null ? withoutBlockedKeys(items, blocks.has) : []
   const shownKeys = shownItems.map((i) => i.key).join(',')
   useEffect(() => {
-    if (active && hosted && shownKeys !== '') resolveMany(shownKeys.split(','))
-  }, [active, hosted, shownKeys, resolveMany])
-  const avatars = useRowAvatars(shownItems, profileOf, node.request, active && hosted && notice === null, avatarCycle)
-  const snippets = useSnippets(shownItems, node.request, active && hosted && notice === null, loadedAt)
+    if (active && passkeyHosted && shownKeys !== '') resolveMany(shownKeys.split(','))
+  }, [active, passkeyHosted, shownKeys, resolveMany])
+  // Names, avatars and snippets read through the hosted node's peeks; a core
+  // node acting as a Página shows the rows without them.
+  const avatars = useRowAvatars(shownItems, profileOf, node.request, active && passkeyHosted && notice === null, avatarCycle)
+  const snippets = useSnippets(shownItems, node.request, active && passkeyHosted && notice === null, loadedAt)
   // The chips and day headers only change what is drawn: settle, the seen
   // marks and the badge always take the whole loaded list.
   const filteredItems = filterNotices(shownItems, filter)
