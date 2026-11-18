@@ -407,6 +407,8 @@ async function sender (overrides = {}) {
     media: null,
     setUploading: () => {},
     confirm: () => {},
+    cacheGeneration: () => 0,
+    parseRef: (await import('../src/thread.js')).parseRef,
     seqOf: (value) => value.seq,
     published: (...args) => { state.published.push(args) },
     GATE_MESSAGE: 'gate',

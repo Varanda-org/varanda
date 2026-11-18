@@ -14,7 +14,7 @@ Segundo PR de uma pilha de quatro, sobre `feat/music-trending-tracks`. O primeir
   - O registro continua `{ event: 'audius', reason: 'em-alta' }`, sem o tipo.
 - [x] App, cliente (`apps/app/src/music.js`, `apps/app/src/account.js`): `trendingBody(kind)` monta `{}` para faixas e `{ kind: 'playlist' }` para playlists; outro tipo recusa com `pedido-invalido` sem abrir a sessão. Um 400 do serviço vira `pedido-invalido`.
 - [x] App, seletor (`apps/app/src/ui/MusicPicker.js`): um estado de sugestões por aba (`useMusicSuggest`). A aba Playlists pede a lista na primeira vez que aparece com o campo vazio; trocar de aba, digitar e limpar reaproveitam a lista. Na aba Playlists, `pedido-invalido` (um serviço do nível do PR 1) deixa a aba sem sugestões e sem aviso. O seletor de momentos continua só com faixas.
-- [x] Termos e Política na versão 94 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): a lista de playlists da semana, não personalizada, o mesmo limite de 200 para as duas listas, as mesmas regras de memória e de espera, e as capas das playlists.
+- [x] Termos e Política na versão 95 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): a lista de playlists da semana, não personalizada, o mesmo limite de 200 para as duas listas, as mesmas regras de memória e de espera, e as capas das playlists.
 - [x] `docs/protocol.md` (corpo, as duas listas, limite único, espera por lista, o que chega ao Audius) e `docs/app.md` (seletor de post e de momento).
 
 ## Conferência ao vivo (18/11/2026, 15:39 UTC)
@@ -23,7 +23,7 @@ Segundo PR de uma pilha de quatro, sobre `feat/music-trending-tracks`. O primeir
 
 ## Testes automáticos
 
-Rodados localmente no Node 24, sobre `feat/music-trending-tracks` (`2c463f17`, que parte de `origin/main@16b61a19`): `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (64 arquivos, todos passando). Os principais:
+Rodados localmente no Node 24, sobre `feat/music-trending-tracks` (`2c463f17`, que parte de `origin/main@16b61a19`) e de novo depois de juntar a branch de baixo com `origin/main@5fcf3d30`: `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (64 arquivos, todos passando). Os principais:
 
 | Arquivo | Testes | Asserções |
 |---|---|---|
@@ -68,4 +68,4 @@ Não conferido em aparelho neste PR. Roteiro para a pessoa, primeiro no Android 
 ## Fora do alcance desta branch
 
 - Chips de gênero (PR `feat/music-trending-genres`), recentes e gênero favorito (PR `feat/music-recents-genre`).
-- Termos 94 seguem a revisão jurídica pendente das versões anteriores.
+- Termos 95 seguem a revisão jurídica pendente das versões anteriores.

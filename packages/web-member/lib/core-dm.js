@@ -552,6 +552,12 @@ function createCoreDm ({ dataDir, association, accountOrigin, createSocket, fetc
     'dm.list': serial(async (params) => engine.list(await requireDm(), params)),
     'dm.thread': serial(async (params) => engine.thread(await requireDm(), params)),
     'dm.seen': serial(async ({ peer, page }) => engine.seen(await requireDm(), peer, page)),
+    // Memory only and needs no unlock: the app sets it once per node epoch,
+    // possibly before DMs are enabled, and sends seal with it later.
+    'dm.noticeKey': async ({ key }) => {
+      engine.setNoticeKey(key)
+      return {}
+    },
     'dm.pageGenerate': serial(async (params) => {
       await requireDm()
       return withDelegate((actor, pair) => engine.pageGenerate(actor, pair, params))

@@ -88,9 +88,11 @@ import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore, wipeLegacyPageNotices } from './src/pageNoticeStore'
 import { inviteDropOnceId, syncedPageNoticeStore, withOnceTokens } from './src/onceMarks'
 import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, onceKeyOf, onceMember, onceMemberFor, onceRegistry, setOnceMember } from './src/onceSync'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, pushWakeKey, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
-import { ackCaughtUp, cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass, snapshotOnAnswer } from './src/seenSync'
+import { cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass } from './src/seenSync'
+import { badgeListParams, conversasDot, settleGroups } from './src/conversasDot'
+import { createGroupsDotScheduler, readGroupsUnread } from './src/groupsUnreadRead'
 import { STATUS_RETRY_MS, ajustesTarget, newReceipt, statusReadDue, statusUpdate } from './src/accountDeletion'
 import { enrolWith } from './src/passkeyEnrol'
 import { loadDeletionReceipt, saveDeletionReceipt } from './src/deletionReceiptStore'
@@ -370,7 +372,10 @@ if (hostedPage === true) capturePostPath(globalThis.location, globalThis.history
 let initialUrlTaken = false
 const NATIVE_APP = Platform.OS !== 'web'
 setCoreReach(CROSS_ORIGIN_PAGES)
-const NO_VERSIONS = Object.freeze({})
+const DM_DOT_RETRY_MS = 15000
+// The DM notice key: tries after a failed read or handoff, doubling from 30 s.
+const NOTICE_KEY_TRIES = 5
+const NOTICE_KEY_RETRY_MS = 30000
 // Lookup retries for a profile link while the account service does not
 // answer (offline, 429, 5xx, timeout): 15 s, 30 s, then every 60 s, 10 times.
 const INVITE_RETRIES = 10
@@ -2423,10 +2428,6 @@ function Member () {
   const stackDepth = nav.depth(stack)
   useEffect(() => { closeHelp() }, [stackDepth, sheetOpen])
 
-  // --- Comunidades (a hosted node: the site or the app on an installation) ---
-  // Versions restart at 0 with every epoch, so what was seen is kept with its
-  // epoch and compared with !==. The dot shows when a group the node follows
-  // moved since the Comunidades tab (or that group) was last on screen.
   const nodeEpoch = node.epoch
   // A lock, a sign-out or another identity ends Publicar como. A socket
   // reconnect also bumps the epoch, but the same unlocked identity keeps
@@ -2434,51 +2435,23 @@ function Member () {
   const actingIdentity = locked ? 'locked' : (typeof ownKey === 'string' ? ownKey : 'none')
   const acting = useActing()
   useEffect(() => { actingAs.reset() }, [actingIdentity])
-  const [groupSeen, setGroupSeen] = useState({ epoch: nodeEpoch, map: {} })
-  const seenMap = groupSeen.epoch === nodeEpoch ? groupSeen.map : {}
+  const pageKey = acting.kind === 'page' && pagesOn({ hosted: node.hosted === true, accountOrigin: node.accountOrigin }) ? acting.key : null
   const topEntry = nav.top(stack)
-  // The Conversas tab lists the groups beside the private conversations.
-  const groupsTab = tab === 'comunidades'
-  const groupsOnScreen = mode === 'hosted' && ready && (groupsTab || (topEntry !== null && topEntry.screen === 'grupo'))
-  const groupVersions = node.groupVersions || NO_VERSIONS
-  useEffect(() => {
-    const open = topEntry !== null && topEntry.screen === 'grupo' ? topEntry.key : null
-    setGroupSeen((cur) => {
-      const base = cur.epoch === nodeEpoch ? cur.map : {}
-      let map = base
-      if (groupsOnScreen) {
-        const all = groupsTab && topEntry === null
-        for (const g of Object.keys(groupVersions)) {
-          if ((all || g === open) && base[g] !== groupVersions[g]) {
-            if (map === base) map = { ...base }
-            map[g] = groupVersions[g]
-          }
-        }
-      }
-      return map === base && cur.epoch === nodeEpoch ? cur : { epoch: nodeEpoch, map }
-    })
-  }, [nodeEpoch, groupsOnScreen, groupsTab, topEntry, groupVersions])
-  const groupsBadge = mode === 'hosted' && !groupsOnScreen &&
-    Object.keys(groupVersions).some((g) => groupVersions[g] !== (seenMap[g] || 0))
 
   // --- Conversas: the tab dot, the foreground pull and the push opener ---
   // dm.changed is only a hint: the dot is re-read from dm.list after every
   // dm.pull attempt (node.bumpDm), on dm.changed and when a pushed screen
   // closes. inboxUnread and requests cover every page (docs/rpc.md 5.77).
   const [dmOpenCount, setDmOpenCount] = useState(0)
-  const [dmDot, setDmDot] = useState(false)
+  const [dmDotState, setDmDotState] = useState(null)
   const dmReady = mode === 'hosted' && ready && !locked && termsOk
   const dmRequest = node.request
   const bumpDm = node.bumpDm
   const dmDotGen = useRef(0)
-  const readDmDot = useCallback(async () => {
-    const gen = ++dmDotGen.current
-    try {
-      const r = await dmRequest('dm.list', { folder: 'inbox', limit: 1 })
-      if (gen !== dmDotGen.current) return
-      setDmDot(r.inboxUnread === true || r.requests === true)
-    } catch {}
-  }, [dmRequest])
+  const dmDotRetry = useRef(null)
+  useLayoutEffect(() => {
+    setDmDotState(null)
+  }, [ownKey, pageKey, dmReady])
   // The first read waits for A Rua's first rows (or a quiet node, for a start
   // elsewhere): the dot is not worth a place in the boot chain.
   const [dmDotGate, setDmDotGate] = useState(false)
@@ -2502,13 +2475,84 @@ function Member () {
       wait.cancel()
     }
   }, [dmReady, feedBoot.details, nodeWhenIdle])
+  useLayoutEffect(() => () => {
+    dmDotGen.current++
+    if (dmDotRetry.current !== null) clearTimeout(dmDotRetry.current)
+    dmDotRetry.current = null
+  }, [nodeEpoch, ownKey, pageKey, dmReady, dmDotGate])
+  const readDmDot = useCallback(() => {
+    const gen = ++dmDotGen.current
+    if (dmDotRetry.current !== null) clearTimeout(dmDotRetry.current)
+    dmDotRetry.current = null
+    async function read (retry) {
+      try {
+        const r = await dmRequest('dm.list', badgeListParams(pageKey))
+        if (gen !== dmDotGen.current) return
+        const next = { inboxUnread: r.inboxUnread === true, requests: r.requests === true }
+        // The same flags keep the same object, so an unchanged answer does not re-render Member.
+        setDmDotState((prev) => (prev !== null && prev.inboxUnread === next.inboxUnread && prev.requests === next.requests ? prev : next))
+      } catch {
+        if (gen !== dmDotGen.current || retry) return
+        dmDotRetry.current = setTimeout(() => {
+          dmDotRetry.current = null
+          read(true)
+        }, DM_DOT_RETRY_MS)
+      }
+    }
+    read(false)
+  }, [dmRequest, pageKey])
   useEffect(() => {
     if (dmReady && dmDotGate) readDmDot()
-    else {
-      dmDotGen.current++
-      setDmDot(false)
+  }, [dmReady, dmDotGate, readDmDot, nodeEpoch, ownKey, node.dmVersion, stackDepth])
+
+  const [groupsDot, setGroupsDot] = useState(false)
+  const groupsReportEpoch = useRef(null)
+  const ownGroups = dmReady && pageKey === null
+  const actingPage = acting.kind === 'page'
+  useLayoutEffect(() => {
+    setGroupsDot(false)
+  }, [ownKey, locked])
+  useLayoutEffect(() => {
+    if (actingPage) setGroupsDot(false)
+  }, [actingPage])
+  useLayoutEffect(() => {
+    groupsReportEpoch.current = ownGroups ? nodeEpoch : null
+    return () => { groupsReportEpoch.current = null }
+  }, [nodeEpoch, ownKey, ownGroups])
+  const onGroupsUnread = useCallback((value) => {
+    if (groupsReportEpoch.current === nodeEpoch) setGroupsDot((prev) => settleGroups(prev, value))
+  }, [nodeEpoch])
+
+  const groupsTab = tab === 'comunidades'
+  const conversasOnScreen = groupsTab && topEntry === null
+  const groupsRead = useRef(null)
+  const groupsDotInputs = useRef(null)
+  useLayoutEffect(() => {
+    const scheduler = createGroupsDotScheduler({
+      read: (alive, onUnread) => readGroupsUnread(groupsDotInputs.current.request, { alive, onUnread }),
+      apply: (result) => setGroupsDot((prev) => settleGroups(prev, result)),
+      canRead: () => groupsDotInputs.current.enabled,
+      now: Date.now,
+      setTimer: setTimeout,
+      clearTimer: clearTimeout
+    })
+    groupsRead.current = scheduler
+    return () => {
+      scheduler.stop()
+      groupsRead.current = null
     }
-  }, [dmReady, dmDotGate, readDmDot, node.dmVersion, stackDepth])
+  }, [])
+  // Opening or leaving the Conversas list also drops a sweep in flight: on the
+  // list the screen reports the value, and an older sweep landing after it
+  // would overwrite that report.
+  useLayoutEffect(() => {
+    const scheduler = groupsRead.current
+    return () => scheduler.reset()
+  }, [ownGroups, dmDotGate, nodeEpoch, ownKey, conversasOnScreen])
+  useLayoutEffect(() => {
+    groupsDotInputs.current = { request: dmRequest, enabled: ownGroups && dmDotGate && !conversasOnScreen }
+    groupsRead.current.trigger()
+  }, [ownGroups, dmDotGate, conversasOnScreen, dmRequest, nodeEpoch, ownKey, node.groupVersions, seenTick, node.dmVersion, stackDepth])
   // --- Feira: the tab dot from saved searches (src/feiraAlerts.js) ---
   // The searches run when the Feira opens and on the 15-minute foreground
   // timer below; this reads the counts they left on the device. Counts
@@ -2564,6 +2608,52 @@ function Member () {
   const feiraBadge = mode === 'hosted' && !locked && termsOk && !feiraOnScreen && feiraAlerts !== null &&
     feiraAlerts.epoch === nodeEpoch && feiraAlerts.origin === feiraAlertsOrigin &&
     alertsBadge({ node, enabled: true, searches: feiraAlerts.value.searches, counts: feiraAlerts.value.counts })
+  // --- Conversas: the push notice key (docs/rpc.md dm.noticeKey) ---
+  // The node seals a wake for the recipient after each DM send, so every
+  // member hands it the key, push on or not. The key comes only from this
+  // installation's account service, and lives only in the node's memory:
+  // asked once per node epoch, while online. No key or a failure leaves the
+  // node without it (it then sends no wake) and asks again after 30 s, 1, 2,
+  // 4 and 8 min: an HTTP failure neither ends the epoch nor takes the node
+  // offline, so without these tries a passing 503 would silence the notices
+  // until the next lock or reconnect. A later epoch, or the node coming back
+  // online, starts the tries over.
+  const noticeKeyEpochRef = useRef(null)
+  const noticeKeyRunRef = useRef(0)
+  const noticeKeyFailsRef = useRef({ epoch: null, n: 0 })
+  const [noticeKeyTry, setNoticeKeyTry] = useState(0)
+  const noticeKeyRequestRef = useRef(node.request)
+  noticeKeyRequestRef.current = node.request
+  const noticeKeyReady = dmReady && node.online === true
+  useEffect(() => {
+    if (!noticeKeyReady || noticeKeyEpochRef.current === nodeEpoch) return
+    const epoch = nodeEpoch
+    const request = noticeKeyRequestRef.current
+    const run = ++noticeKeyRunRef.current
+    const current = () => run === noticeKeyRunRef.current
+    let retryTimer = null
+    const retry = () => {
+      if (!current()) return
+      const fails = noticeKeyFailsRef.current
+      const n = fails.epoch === epoch ? fails.n + 1 : 1
+      noticeKeyFailsRef.current = { epoch, n }
+      if (n > NOTICE_KEY_TRIES) return
+      retryTimer = setTimeout(() => setNoticeKeyTry((x) => x + 1), NOTICE_KEY_RETRY_MS * 2 ** (n - 1))
+    }
+    pushWakeKey()
+      .then((key) => {
+        if (!current()) return
+        if (key === null) return retry()
+        return request('dm.noticeKey', { key }).then(() => {
+          if (current()) noticeKeyEpochRef.current = epoch
+        }, retry)
+      })
+      .catch(retry)
+    return () => {
+      noticeKeyRunRef.current++
+      if (retryTimer !== null) clearTimeout(retryTimer)
+    }
+  }, [noticeKeyReady, nodeEpoch, noticeKeyTry])
   // --- Visto em todos os aparelhos (src/seenSync.js) ---
   // The same passkey on another device marked notices, conversations or
   // groups as seen: a pass reads the encrypted seen document from the account
@@ -2587,8 +2677,6 @@ function Member () {
   seenOnlineRef.current = node.online
   const seenRequestRef = useRef(node.request)
   seenRequestRef.current = node.request
-  const groupVersionsRef = useRef(groupVersions)
-  groupVersionsRef.current = groupVersions
   const nodeEpochRef = useRef(nodeEpoch)
   nodeEpochRef.current = nodeEpoch
   // Filled by Avisos: the seen tokens of rows it has loaded, per namespace.
@@ -2652,22 +2740,14 @@ function Member () {
     const member = seenMember
     const appearance = seenAppearanceRef.current
     const run = async () => {
-      // caughtUp describes the groups as the merge saw them when it
-      // answered: the versions known at that answer are acknowledged, so a
-      // post that lands after it keeps its dot. Versions restart per node
-      // epoch, so the epoch is taken with them.
-      const { request, snap } = snapshotOnAnswer(seenRequestRef.current, 'seen.merge', () => ({
-        versions: groupVersionsRef.current,
-        epoch: nodeEpochRef.current
-      }))
       const sent = cleanAvisos(withOnceTokens(avisosSeenRef.current, onceRegistry.unsynced(member)))
       const result = await runSeenPass({
         member,
-        request,
+        request: seenRequestRef.current,
         http: { seenStart, seenFinish },
         avisos: sent
       })
-      if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return
+      if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return undefined
       // Answered or failed, the invite monitor no longer waits for it.
       stepFirstPass({ type: 'pass', member })
       if (result.avisos) {
@@ -2684,11 +2764,8 @@ function Member () {
       if (result.blocksChanged) refreshBlocks().catch(() => {})
       if (result.testimonialsChanged) testimonialsChanged()
       if (result.momentsChanged) refreshMomentSeen().catch(() => {})
-      if (result.groupChanged) {
-        bumpSeen()
-        const taken = { epoch: snap.epoch, versions: snap.versions }
-        setGroupSeen((cur) => ackCaughtUp(cur, result.caughtUp, taken))
-      }
+      if (result.groupChanged) bumpSeen()
+      return result
     }
     const scheduler = createSeenScheduler({
       run,
@@ -3169,6 +3246,13 @@ function Member () {
       requestDmOpen()
       return
     }
+    // A Pagina DM notice names no Pagina (privacy): the Paginas list is the
+    // landing, the same screen Ajustes opens. Without Paginas, Conversas.
+    if (intent.kind === 'dm-page') {
+      if (!deleteFromAviso && pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin })) pushScreen({ screen: 'paginas' })
+      else requestDmOpen()
+      return
+    }
     // A convite names nobody: Convidar pessoas opens for whoever is unlocked.
     if (intent.kind === 'convite') {
       openInvites()
@@ -3187,7 +3271,7 @@ function Member () {
         openThread({ ref: intent.ref })
       }
     }
-  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites, phoneClear, deleteFromAviso])
+  }, [launchSeq, atTabs, ajustes, launchKey, clearStack, openThread, enterAvisos, openInvites, phoneClear, deleteFromAviso, pushScreen, node.hosted, node.accountOrigin])
   // The record is untrusted and may have changed in another render: every
   // step re-reads it (from tab storage, or memory when storage refused it).
   // The memory copy keeps the stored record's 1 h limit (readInvite applies
@@ -4427,6 +4511,7 @@ function Member () {
                           onOpenOldKey={openOldKey}
                           showInbox={dmOpenCount}
                           seenTick={seenTick}
+                          onGroupsUnread={onGroupsUnread}
                           composing={convCompose}
                           onComposing={setConvCompose}
                         />
@@ -4553,7 +4638,7 @@ function Member () {
           onClose={() => setShareTarget(null)}
         />
         {/* Avisos is not a tab: the bar keeps the tab it was opened from, and that tab's icon closes it. */}
-        {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: groupsBadge || dmDot, feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
+        {barsHidden ? null : <TabBar current={tab === 'avisos' ? returnTab : tab} onSelect={setTab} onReselect={tab === 'avisos' ? closeAvisos : reselectTab} badges={{ comunidades: conversasDot({ dm: dmDotState, groups: groupsDot, actingPage: pageKey !== null }), feira: feiraBadge }} tabs={tabsFor(mode)} me={tabMe} />}
       </View>
     )
     // Entries that left the stack drop their handlers.

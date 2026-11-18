@@ -22,7 +22,10 @@ const { memberCertRecord } = require('../lib/records')
 const { generateNoiseKeyPair, attachAdmission } = require('../lib/net')
 const { attachDm } = require('../lib/dm-net')
 const { attachDmStamp } = require('../lib/dm-stamp-net')
-const { encodeDrop, DM_SEALED_BYTES } = require('../lib/dm')
+const { attachDmNotice, DM_NOTICE_PROTOCOL } = require('../lib/dm-notice-net')
+const { DM_NOTICE_BOX_BYTES, DM_NOTICE_TTL_MS } = require('../lib/dm-notice')
+const { encodeDrop, decodeDrop, DM_SEALED_BYTES, DM_PROTOCOL_V2, VISIT_PROTOCOL } = require('../lib/dm')
+const clock = require('../lib/clock')
 const { signNoticeProof } = require('../lib/notices-v2')
 const postage = require('../lib/dm-postage')
 
@@ -168,11 +171,9 @@ test('seeder dm: a stamped drop is stored, paged, kept across a restart; bad sta
   const assoc = makeAssociation()
   const dataDir = prepareSeederDir(t, assoc)
   let gets = 0
-  const drops = []
   const dm = {
     postage: { get: async () => { gets++; return { keys: [K1] } } },
-    stampsPerDay: 2,
-    onDrop: (...args) => drops.push(args)
+    stampsPerDay: 2
   }
   const first = await startSeeder(t, bootstrap, dataDir, assoc, dm)
   t.is(gets, 0, 'start never asks for the postage key')
@@ -206,7 +207,6 @@ test('seeder dm: a stamped drop is stored, paged, kept across a restart; bad sta
   t.is(await ch.supported, true)
   const bytes = dropFor(s1)
   t.alike(await ch.put(bytes), { ok: true, reason: null })
-  t.alike(drops, [[]], 'onDrop is called once with no arguments')
   const bad = dropFor({ ...s2, sig: s2.sig + 1n })
   t.alike(await ch.put(bad), { ok: false, reason: 'invalido' }, 'a bad stamp is invalido')
   const page = await ch.requestPage({ after: 0, limit: 8 })
@@ -510,10 +510,115 @@ test('seeder dm: copy-stamps.json is read back after a restart and a day key in 
   t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, copyStampsPerWeek: 0 } }), /copyStampsPerWeek/)
 })
 
+// The seeder's ack comes before its take and onNotice, both synchronous, so
+// once notice() resolves the seeder has decided.
+test('seeder dm: a wake passes the box on once, only for a new drop stored on the same socket', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const notices = []
+  const { events, port } = await startSeeder(t, bootstrap, dataDir, assoc, {
+    postage: { get: async () => ({ keys: [K1] }) },
+    onNotice: (...args) => notices.push(args)
+  })
+  const realNow = clock.now
+  let skew = 0
+  clock.now = () => realNow() + skew
+  t.teardown(() => { clock.now = realNow })
+
+  const a = await link(t, port)
+  const dmA = attachDm(a, { role: 'member' })
+  const noteA = attachDmNotice(a, { role: 'member' })
+  t.is(await noteA.supported, true, 'the seeder answers the notice channel')
+  const bytes = dropFor(directStamp(K1))
+  const id = hex(decodeDrop(bytes).dropId)
+  const box = hcrypto.randomBytes(DM_NOTICE_BOX_BYTES)
+
+  t.is(await noteA.notice(id, box), true, 'a wake before any put is acked')
+  t.alike(notices, [], 'and passes nothing on')
+
+  t.alike(await dmA.put(bytes), { ok: true, reason: null })
+  const b = await link(t, port)
+  const noteB = attachDmNotice(b, { role: 'member' })
+  t.is(await noteB.notice(id, box), true, 'a wake on another socket is acked')
+  t.alike(notices, [], 'and passes nothing on')
+
+  t.is(await noteA.notice(id, box), true)
+  t.is(notices.length, 1, 'the wake on the socket that stored the drop passes the box on')
+  t.is(notices[0].length, 1, 'onNotice gets the box only')
+  t.ok(b4a.isBuffer(notices[0][0]))
+  t.alike(notices[0][0], box, 'the same bytes, unopened')
+
+  t.is(await noteA.notice(id, box), true, 'a second wake of the same id is acked')
+  t.is(notices.length, 1, 'and passes nothing on')
+
+  t.alike(await dmA.put(bytes), { ok: true, reason: null }, 'a repeated put is a success')
+  t.is(await noteA.notice(id, box), true)
+  t.is(notices.length, 1, 'a repeated put opens no new wake')
+
+  const dmB = attachDm(b, { role: 'member' })
+  t.alike(await dmB.put(bytes), { ok: true, reason: null })
+  t.is(await noteB.notice(id, box), true)
+  t.is(notices.length, 1, 'nor does a repeated put on another socket')
+
+  const late = dropFor(directStamp(K1))
+  t.alike(await dmA.put(late), { ok: true, reason: null })
+  skew += DM_NOTICE_TTL_MS + 1000
+  t.is(await noteA.notice(hex(decodeDrop(late).dropId), box), true, 'a late wake is acked')
+  t.is(notices.length, 1, 'and passes nothing on')
+
+  const v2 = attachDm(a, { role: 'member', protocol: DM_PROTOCOL_V2 })
+  t.is(await v2.supported, true)
+  const bucketed = dropFor(directStamp(K1))
+  t.alike(await v2.put(bucketed, 0), { ok: true, reason: null })
+  const box2 = hcrypto.randomBytes(DM_NOTICE_BOX_BYTES)
+  t.is(await noteA.notice(decodeDrop(bucketed).dropId, box2), true)
+  t.is(notices.length, 2, 'a drop stored on the bucketed lane opens a wake too')
+  t.alike(notices[1][0], box2)
+
+  const visit = attachDm(a, { role: 'member', protocol: VISIT_PROTOCOL })
+  const ping = dropFor(directStamp(K1))
+  t.alike(await visit.put(ping), { ok: true, reason: null })
+  t.is(await noteA.notice(decodeDrop(ping).dropId, box), true)
+  t.is(notices.length, 2, 'a visit ping opens none')
+
+  t.is(noteA.badMessages, 0)
+  t.absent(JSON.stringify(events).includes(id), 'no drop id in the log')
+  t.absent(JSON.stringify(events).includes(b4a.toString(box, 'base64')), 'no box in the log')
+})
+
+test('seeder dm: with no onNotice a wake is acked and dropped', async (t) => {
+  t.timeout(120000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const { seeder, port } = await startSeeder(t, bootstrap, dataDir, assoc, { postage: { get: async () => ({ keys: [K1] }) } })
+  const a = await link(t, port)
+  const dmA = attachDm(a, { role: 'member' })
+  const note = attachDmNotice(a, { role: 'member' })
+  const bytes = dropFor(directStamp(K1))
+  t.alike(await dmA.put(bytes), { ok: true, reason: null })
+  t.is(await note.notice(decodeDrop(bytes).dropId, hcrypto.randomBytes(DM_NOTICE_BOX_BYTES)), true)
+  t.ok(seeder._peers.size > 0, 'the link stays up')
+  t.alike(await dmA.put(bytes), { ok: true, reason: null }, 'and the DM lane still answers')
+})
+
+test('seeder dm: without the dm option the notice channel is not answered', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const dataDir = prepareSeederDir(t, assoc)
+  const { port } = await startSeeder(t, bootstrap, dataDir, assoc, null)
+  const note = attachDmNotice(await link(t, port), { role: 'member' })
+  t.is(await note.supported, false)
+  t.is(note.protocol, DM_NOTICE_PROTOCOL)
+})
+
 test('seeder dm: invalid options are refused', (t) => {
   t.exception.all(() => new Seeder({ dm: {} }), /dm.postage.get/)
   t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, stampsPerDay: 0 } }), /stampsPerDay/)
-  t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, onDrop: 1 } }), /onDrop/)
+  t.exception.all(() => new Seeder({ dm: { postage: { get () {} }, onNotice: 1 } }), /onNotice/)
 })
 
 test('seeder dm: a blocked diary loses its dm, blob and copy stamp rows, in memory, on disk and after a restart', async (t) => {

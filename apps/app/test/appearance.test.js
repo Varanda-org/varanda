@@ -161,3 +161,36 @@ test('web store round-trips and ignores corrupt data', async (t) => {
     else delete globalThis.localStorage
   }
 })
+
+test('the web document takes a thin scrollbar in the scheme colours', async (t) => {
+  const { light, dark } = await load()
+  const web = await import('../src/appearanceStore.web.js')
+  const prev = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const fake = () => ({
+    documentElement: { style: {}, dataset: {} },
+    body: { style: {} },
+    querySelectorAll: () => []
+  })
+  try {
+    for (const [scheme, colors] of [['light', light], ['dark', dark]]) {
+      const doc = fake()
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: doc })
+      web.applySchemeToDocument(scheme, { bg: colors.bg, themeColor: colors.bg, thumb: colors.outline })
+      t.is(doc.documentElement.style.scrollbarColor, colors.outline + ' ' + colors.bg, scheme + ': outline thumb on the bg track')
+      t.is(doc.documentElement.style.colorScheme, scheme)
+    }
+    const doc = fake()
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: doc })
+    web.applySchemeToDocument('dark', { bg: dark.bg, themeColor: dark.bg })
+    t.is(doc.documentElement.style.scrollbarColor, undefined, 'no thumb, no scrollbar colour')
+  } finally {
+    if (prev) Object.defineProperty(globalThis, 'document', prev)
+    else delete globalThis.document
+  }
+})
+
+test('index.html makes every scroll area thin', (t) => {
+  const html = readFileSync(join(__dirname, '..', 'public', 'index.html'), 'utf8')
+  const reset = /<style id="expo-reset">([\s\S]*?)<\/style>/.exec(html)
+  t.ok(reset && /\*\s*\{\s*scrollbar-width: thin;\s*\}/.test(reset[1]), 'a universal thin rule, since scrollbar-width is not inherited')
+})

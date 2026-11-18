@@ -331,3 +331,46 @@ export function commentedLabel (by) {
   }
   return name(list[0]) + ' e mais ' + (list.length - 1) + ' comentaram'
 }
+
+export function withOwnReplies (items, own, ownKey) {
+  const list = Array.isArray(items) ? items : []
+  if (!Array.isArray(own) || typeof ownKey !== 'string' || ownKey === '') return list
+  const author = ownKey.toLowerCase()
+  const replies = own.filter((item) => isReply(item) && authorOf(item) === author)
+  return replies.length === 0 ? list : replies.concat(list)
+}
+
+export function keepOwnReply (list, item, max = 20) {
+  const ref = refOf(item)
+  if (ref === null) return list
+  return [item, ...list.filter((entry) => refOf(entry) !== ref)].slice(0, max)
+}
+
+export function dropOwnReplies (list, refs) {
+  const remaining = list.filter((item) => !refs.has(refOf(item)))
+  return remaining.length === list.length ? list : remaining
+}
+
+// Once the feed carries a reply it is the truth: the local copy goes, so a
+// deletion made on another device is not kept alive by it.
+export function dropFedReplies (list, items) {
+  if (!Array.isArray(list) || list.length === 0 || !Array.isArray(items)) return list
+  const fed = new Set()
+  for (const item of items) {
+    const ref = refOf(item)
+    if (ref !== null) fed.add(ref)
+  }
+  return dropOwnReplies(list, fed)
+}
+
+// The index counts direct replies only, so use the larger of the two counts.
+export function knownReplies (fold) {
+  if (!isPlain(fold) || (fold.kind !== undefined && fold.kind !== 'comentarios') || !Array.isArray(fold.comments)) return 0
+  const tops = new Set()
+  for (const comment of fold.comments) {
+    if (!isPlain(comment)) continue
+    const { top } = comment
+    if (typeof top === 'string' && top !== '') tops.add(top)
+  }
+  return tops.size
+}

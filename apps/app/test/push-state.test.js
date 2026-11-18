@@ -233,6 +233,36 @@ test('invite messages accept only the single type key on a plain object', async 
   ]) t.is(parseMessage(data), null)
 })
 
+test('Pagina DM launches accept one notice without member fields and clean the query', async (t) => {
+  const { parseLaunch, stripLaunch } = await load()
+  const page = { kind: 'dm-page' }
+  t.alike(parseLaunch('?aviso=dm-page'), page)
+  t.alike(parseLaunch('aviso=dm-page'), page)
+  t.alike(parseLaunch('?conta=x&aviso=dm-page'), page)
+  for (const search of [
+    '?aviso=dm-page&aviso=dm-page', '?aviso=dm-page&aviso=dm',
+    '?aviso=dm&aviso=dm-page', '?aviso=dm-page&%61viso=dm-page',
+    '?aviso=DM-page', '?aviso=dm-page%20', '?aviso=dm-pagex', '?aviso=dm-page&actor=' + actor,
+    '?aviso=dm-page&recipient=' + recipient, '?aviso=dm-page&ref=' + ref,
+    '?aviso=dm-page&actor=', '?aviso=dm-page&recipient=', '?aviso=dm-page&ref='
+  ]) t.is(parseLaunch(search), null, search)
+  t.is(stripLaunch('?aviso=dm-page'), '')
+  t.is(stripLaunch('?conta=x%20y&aviso=dm-page&a=1'), '?conta=x%20y&a=1')
+})
+
+test('Pagina DM messages accept only the single type key on a plain object', async (t) => {
+  const { parseMessage } = await load()
+  const message = { type: 'varanda-page-dm-open' }
+  t.alike(parseMessage(message), { kind: 'dm-page' })
+  for (const data of [
+    { ...message, extra: 1 }, { ...message, actor }, { ...message, recipient },
+    { ...message, ref }, { ...message, source: 'varanda-push' },
+    { ...message, kind: 'dm-page' }, { type: 'varanda-page-dm-open ' },
+    { type: 'dm-page' }, { type: 'varanda-dm-open' }, [message],
+    Object.create(message), Object.assign(new Date(0), message)
+  ]) t.is(parseMessage(data), null)
+})
+
 test('stripLaunch drops the launch fields and keeps the rest in order', async (t) => {
   const { stripLaunch } = await load()
   t.is(stripLaunch('?conta=abc&aviso=follow&actor=' + actor + '&recipient=' + recipient), '?conta=abc')
