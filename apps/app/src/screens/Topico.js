@@ -12,6 +12,14 @@
 // The totals are folded by the member's own node, so no seeder-claim notice;
 // the own pick comes from the own diary. "Quem votou" reads group.voters. A vote or a reply answered
 // UNCERTAIN is never resent: the screen re-reads and the person decides.
+// Acting as a Page (the forum is public only), the vote goes as one signed
+// 'group-choice' and the reply as one signed 'group-post', with the same word
+// check. A page reads through the service ('group-read' with topic,
+// 'group-voters'), whose `mine` is the page's, never the node's: the pick
+// shown is that one, or the one just answered until a read shows it, and a
+// failed read keeps the last one. An uncertain page vote resends only on a
+// tap of the same option again (another option signs a new statement); an
+// answer that lands after the acting identity changed is dropped.
 //
 // The event: a root may carry one instead of a poll. group.read (topic) returns
 // the root's event as `event` beside `poll` (summary without voter lists), and
@@ -23,6 +31,11 @@ import { MAX_TEXT, displayText } from '@varanda/rpc'
 import { countChars, relativeTime } from '../format'
 import { HIDDEN_LABEL, keepsTail, refOf, replyAllowed, threadOf, topicTitle } from '../forum'
 import { nextPick, pollCard } from '../polls'
+import { pageGroupChoiceOp, pageGroupErrorText, pageGroupPostOp, pageMode } from '../groups'
+import { pagesOn } from '../pageGate'
+import { pagesGroup } from '../pages'
+import { PAGE_VOTE_NOTICE, PAGE_VOTE_UNCERTAIN, pickRef, tapAfterUncertain } from '../pageChoice'
+import { memberKeyOf, useActing } from './Conversa'
 import { useNames } from '../names'
 import { useNode } from '../node'
 import { publicGroupRefusal } from '../wordCheck'
@@ -69,13 +82,21 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
   const hosted = node.hosted === true
   const group = entry && entry.params && typeof entry.params.group === 'string' && HEX64.test(entry.params.group) ? entry.params.group : null
   const root = refParts(entry && entry.key)
+  const acting = useActing()
+  const asPage = pageMode({ acting, on: pagesOn({ hosted, accountOrigin: node.accountOrigin }) })
+  const pageKey = asPage.page ? asPage.key : null
+  const pageKeyRef = useRef(pageKey)
+  pageKeyRef.current = pageKey
   const ownKey = node.passkey && node.passkey.status ? node.passkey.status.publicKey : null
   const navRoot = entry && entry.params && entry.params.root && typeof entry.params.root === 'object' && typeof entry.params.root.text === 'string'
     ? { hidden: entry.params.root.hidden === true, text: entry.params.root.text }
     : null
   const now = useNow(60 * 1000)
 
-  const [read, setRead] = useState(null)
+  // The read and the identity it was made for: another identity's is never shown.
+  const [readState, setReadState] = useState(null)
+  const read = readState !== null && readState.by === pageKey ? readState.value : null
+  const setRead = (value, by) => setReadState({ value, by })
   const [tail, setTail] = useState(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreError, setMoreError] = useState('')
@@ -87,6 +108,9 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
   const [voters, setVoters] = useState(null)
   const [votersError, setVotersError] = useState('')
   const [note, setNote] = useState('')
+  // The page's pick just answered, until a read shows it.
+  const [sent, setSent] = useState(null)
+  const retryRef = useRef(null)
   const vote = useAction()
   const reply = useAction()
   const seq = useRef(0)
@@ -94,27 +118,35 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
   const headRef = useRef(null)
   useEffect(() => () => { seq.current += 1; moreSeq.current += 1 }, [])
 
+  // The thread and the page of older replies: through the node as a person,
+  // through the service as a page (its `mine` and voters are the page's).
+  const readThread = async (params) => {
+    if (pageKeyRef.current === null) return request('group.read', params)
+    return pagesGroup(node, { member: await memberKeyOf(request, node), page: pageKeyRef.current, action: 'group-read', op: params })
+  }
+
   const load = useCallback(async (pull = false) => {
     if (!hosted || group === null || root === null) return
     const mine = ++seq.current
+    const asKey = pageKeyRef.current
     if (pull) setRefreshing(true)
     else setLoading(true)
     setLoadError('')
     try {
-      const value = await request('group.read', { group, topic: root })
-      if (mine === seq.current) {
+      const value = await readThread({ group, topic: root })
+      if (mine === seq.current && pageKeyRef.current === asKey) {
         // A page of older replies loaded earlier stays only while it still
         // joins the fresh newest page.
         if (!keepsTail(headRef.current, value)) { setTail(null); moreSeq.current += 1 }
         headRef.current = value
-        setRead(value)
+        setRead(value, asKey)
       }
     } catch (err) {
-      if (mine === seq.current) setLoadError(errorText(err))
+      if (mine === seq.current && pageKeyRef.current === asKey) setLoadError(pageKeyRef.current === null ? errorText(err) : pageGroupErrorText(err))
     } finally {
       if (mine === seq.current) { setLoading(false); setRefreshing(false) }
     }
-  }, [hosted, group, request, entry && entry.key])
+  }, [hosted, group, request, entry && entry.key, pageKey])
 
   const thread = useMemo(() => threadOf(read, tail), [read, tail])
   const threadRef = useRef(thread)
@@ -124,24 +156,25 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
     const before = threadRef.current.next
     if (before === null || loadingMore || !hosted || group === null || root === null) return
     const mine = ++moreSeq.current
+    const asKey = pageKeyRef.current
     setLoadingMore(true)
     setMoreError('')
     try {
-      const value = await request('group.read', { group, topic: root, before })
-      if (mine !== moreSeq.current) return
+      const value = await readThread({ group, topic: root, before })
+      if (mine !== moreSeq.current || pageKeyRef.current !== asKey) return
       const items = value && Array.isArray(value.items) ? value.items : []
       setTail((prev) => ({ items: (prev ? prev.items : []).concat(items), next: value && value.next ? value.next : null }))
     } catch (err) {
-      if (mine === moreSeq.current) setMoreError(errorText(err))
+      if (mine === moreSeq.current && pageKeyRef.current === asKey) setMoreError(asKey === null ? errorText(err) : pageGroupErrorText(err))
     } finally {
       if (mine === moreSeq.current) setLoadingMore(false)
     }
-  }, [loadingMore, hosted, group, request, entry && entry.key])
+  }, [loadingMore, hosted, group, request, entry && entry.key, pageKey])
 
   const loadRef = useRef(load)
   loadRef.current = load
   const version = hosted && group !== null ? node.getGroupVersion(group) : null
-  useEffect(() => { loadRef.current() }, [version, group, entry && entry.key])
+  useEffect(() => { loadRef.current() }, [version, group, entry && entry.key, pageKey])
 
   const rootKey = root === null ? null : refOf(root)
   const items = thread.items
@@ -149,7 +182,31 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
   const replies = items.filter((i) => refOf(i) !== rootKey)
   const eventRow = read && read.event && typeof read.event === 'object' && read.event.writer === (root && root.writer) && read.event.seq === (root && root.seq) ? read.event : null
   const poll = read && read.poll && typeof read.poll === 'object' ? read.poll : null
-  const card = useMemo(() => (poll === null ? null : pollCard({ poll, totals: poll.totals, own: poll.mine })), [poll])
+  // A page's `mine` is the service's for the page (the read is tagged with it).
+  const readPick = poll === null ? undefined : (Number.isSafeInteger(poll.mine) ? poll.mine : null)
+  const shownPick = pageKey !== null && sent !== null && sent.page === pageKey ? sent.pick : readPick
+  const card = useMemo(() => (poll === null ? null : pollCard({ poll, totals: poll.totals, own: shownPick })), [poll, shownPick])
+
+  useEffect(() => {
+    retryRef.current = null
+    vote.clearError()
+    reply.clearError()
+    setNote('')
+    setSent(null)
+    setTail(null)
+    headRef.current = null
+    moreSeq.current += 1
+    setLoadingMore(false)
+    setMoreError('')
+  }, [pageKey])
+
+  // A read that shows the answered pick settles it, and the unsure notice goes.
+  useEffect(() => {
+    if (sent !== null && readPick === sent.pick) setSent(null)
+    // Only the notice of the tap that read confirms: a later tap's stays.
+    const pending = retryRef.current
+    if (pending !== null && readPick === pending.value) { retryRef.current = null; setNote('') }
+  }, [readPick, sent])
 
   useEffect(() => {
     const keys = [...new Set(items.map((i) => i.diary).filter((k) => typeof k === 'string'))]
@@ -160,8 +217,34 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
     const next = nextPick(card, index)
     if (!next.write || root === null || vote.pending) return
     setNote('')
-    const r = await vote.run(() => request('group.choose', { group, target: root, pick: next.pick }))
-    if (r.ok) setVoters(null)
+    const page = pageKey
+    const ref = pickRef(root.writer, root.seq)
+    const pending = retryRef.current
+    retryRef.current = null
+    // The same option tapped again resends the bytes already signed (whatever
+    // the toggle would now be); another option signs a new statement.
+    const resend = page !== null && tapAfterUncertain(pending, { page, ref, pick: index }) === 'resend'
+    const value = resend && pending.value !== undefined ? pending.value : next.pick
+    const r = await vote.run(async () => {
+      if (page === null) return request('group.choose', { group, target: root, pick: next.pick })
+      try {
+        return await (resend
+          ? pending.retry()
+          : pagesGroup(node, { member: await memberKeyOf(request, node), page, action: 'group-choice', op: pageGroupChoiceOp({ group, target: root, pick: next.pick }) }))
+      } catch (err) {
+        if (err && err.uncertain === true) {
+          if (typeof err.retry === 'function') retryRef.current = { page, ref, pick: index, value, retry: err.retry }
+          throw err
+        }
+        throw Object.assign(new Error(pageGroupErrorText(err)), { code: err && err.code })
+      }
+    })
+    if (pageKeyRef.current !== page) return
+    if (page !== null && r.uncertain) setNote(PAGE_VOTE_UNCERTAIN)
+    if (r.ok) {
+      setVoters(null)
+      if (page !== null) setSent({ page, pick: value })
+    }
     // Uncertain or not, the screen only re-reads: the vote is never resent here.
     loadRef.current(true)
   }
@@ -174,7 +257,17 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
     const refused = publicGroupRefusal('public', text)
     setReplyRefusal(refused)
     if (refused !== '') return
-    const r = await reply.run(() => request('group.post', { group, text, replyTo: root }))
+    const page = pageKey
+    const r = await reply.run(async () => {
+      if (page === null) return request('group.post', { group, text, replyTo: root })
+      try {
+        return await pagesGroup(node, { member: await memberKeyOf(request, node), page, action: 'group-post', op: pageGroupPostOp({ group, text, replyTo: root }) })
+      } catch (err) {
+        if (err && err.uncertain === true) throw err
+        throw Object.assign(new Error(pageGroupErrorText(err)), { code: err && err.code })
+      }
+    })
+    if (pageKeyRef.current !== page) return
     if (r.ok) setDraft('')
     loadRef.current(true)
   }
@@ -182,7 +275,11 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
   async function showVoters () {
     setVotersError('')
     try {
-      const value = await request('group.voters', { group, target: root })
+      const asKey = pageKeyRef.current
+      const value = asKey === null
+        ? await request('group.voters', { group, target: root })
+        : await pagesGroup(node, { member: await memberKeyOf(request, node), page: asKey, action: 'group-voters', op: { group, target: root } })
+      if (pageKeyRef.current !== asKey) return
       const list = value && Array.isArray(value.voters) ? value.voters : []
       const keys = [...new Set(list.flatMap((v) => (Array.isArray(v.by) ? v.by : [])))]
       if (keys.length > 0 && names && typeof names.resolveMany === 'function') names.resolveMany(keys)
@@ -251,13 +348,13 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
       {card !== null
         ? (
           <View style={styles.pollBox} accessibilityLabel='enquete'>
-            {card.notice ? <Soft>{card.notice}</Soft> : null}
+            {card.notice ? <Soft>{pageKey !== null ? PAGE_VOTE_NOTICE : card.notice}</Soft> : null}
             {card.options.map((o) => (
               <Pressable
                 key={o.index}
                 accessibilityRole='button'
                 accessibilityState={{ selected: o.own, disabled: !card.ownKnown || vote.pending }}
-                accessibilityLabel={displayText(o.label) + (o.countLabel ? ', ' + o.countLabel : '') + (o.own ? ', seu voto' : '')}
+                accessibilityLabel={displayText(o.label) + (o.countLabel ? ', ' + o.countLabel : '') + (o.own ? (pageKey !== null ? ', voto da Página' : ', seu voto') : '')}
                 disabled={!card.ownKnown || vote.pending || !node.online}
                 onPress={() => choose(o.index)}
                 style={({ pressed }) => [styles.option, o.own && styles.optionOwn, pressed && styles.pressed]}

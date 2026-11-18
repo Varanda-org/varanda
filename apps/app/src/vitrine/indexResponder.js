@@ -129,6 +129,34 @@ function gardenIndex (owner) {
   return { on, state: newestSeq(mine, 'garden-state'), helps: helps.slice(0, rpc.garden.GARDEN_HELP_ROWS), given: given.slice(0, rpc.garden.GARDEN_HELP_ROWS), ...flags }
 }
 
+// The Barraquinha pointers (docs/protocol.md "Seeder Varandinha index"), at
+// the demo clock: only blocks above the owner's live on flag count. Pending
+// reuses foldPending so the pick and the order match what the app folds.
+function gardenStall (owner) {
+  const live = liveEntries()
+  const now = Date.parse(fixtures.now)
+  const mine = live.filter((e) => e.author === owner)
+  const flag = mine.filter((e) => e.record.type === 'garden').sort((a, b) => b.seq - a.seq)[0]
+  if (flag === undefined || flag.record.on !== true) return { decor: null, pending: [], shelf: [], ...flags }
+  const above = mine.filter((e) => e.seq > flag.seq)
+  const takes = above.filter((e) => e.record.type === 'garden-take' && e.record.from !== owner).sort((a, b) => b.seq - a.seq)
+  const giftOf = (author, seq) => live.find((e) => e.author === author && e.seq === seq && e.record.type === 'garden-gift')
+  const shelf = takes.filter((e) => {
+    const g = giftOf(e.record.from, e.record.seq)
+    return g !== undefined && g.record.to === owner && rpc.garden.offerListable(Date.parse(g.record.at), now)
+  }).map((e) => ({ seq: e.seq, from: e.record.from, gseq: e.record.seq }))
+  const gifts = live.filter((e) => e.author !== owner && e.record.type === 'garden-gift' && e.record.to === owner).flatMap((e) => {
+    const followSeq = liveFollowSeq(live, e.author, owner)
+    const follow = followSeq === null ? undefined : live.find((x) => x.author === e.author && x.seq === followSeq)
+    return follow === undefined ? [] : [{ author: e.author, seq: e.seq, record: e.record, follow: follow.record, followSeq }]
+  })
+  const followed = new Set(lastWrites(mine.filter((e) => e.record.type === 'follow'), (r) => r.key).map((e) => e.record.key))
+  const taken = takes.map((e) => ({ from: e.record.from, seq: e.record.seq }))
+  const rows = rpc.garden.foldPending({ owner, now, gifts, taken, followed }).rows
+  const pending = rows.map((r) => ({ author: r.author, seq: r.seq, followSeq: gifts.find((g) => g.author === r.author && g.seq === r.seq).followSeq }))
+  return { decor: newestSeq(above, 'garden-decor'), pending, shelf: shelf.slice(0, rpc.garden.GARDEN_SHELF_ROWS), ...flags }
+}
+
 function gardenStreet (owner, cursor) {
   if (cursor !== undefined && !isKey(cursor)) notFound()
   const live = liveEntries()
@@ -520,8 +548,9 @@ export function vitrineIndex (url, request) {
   }
 
   if (route === 'garden') {
-    if (!isKey(key) || (part !== undefined && part !== 'rua') || (part === undefined && cursor !== undefined)) notFound()
+    if (!isKey(key) || (part !== undefined && part !== 'rua' && part !== 'mimos') || (part !== 'rua' && cursor !== undefined)) notFound()
     requireProfile(key)
+    if (part === 'mimos') return gardenStall(key)
     return part === undefined ? gardenIndex(key) : gardenStreet(key, cursor)
   }
 

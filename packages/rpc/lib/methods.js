@@ -758,7 +758,7 @@ const PAGE_ACTIONS = [
   'create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile', 'avatar',
   'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
-  'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
+  'group-post', 'group-read', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
   'choice', 'moment', 'post-share', 'post-unshare', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
@@ -1379,10 +1379,32 @@ const SPECS = {
       return null
     }
   },
-  // A private-group post sealed for a page (docs/rpc.md 5.114); writes
-  // nothing, the owner or admin signs and sends it through 'group-seal'.
+  // One private-group record sealed for a page (docs/rpc.md 5.114): a post
+  // (text, with sealed media or a card), a reaction or a hide of the page's
+  // own post. Writes nothing, the owner or admin signs and sends it through
+  // 'group-seal'.
   'group.seal': {
-    fields: { group: req(isKey), page: req(isKey), text: req(str(0, L.MAX_TEXT)), replyTo: opt(isGroupRef), fwd: opt(int(0, 1), 0) }
+    fields: {
+      group: req(isKey),
+      page: req(isKey),
+      text: opt(str(0, L.MAX_TEXT)),
+      replyTo: opt(isGroupRef),
+      fwd: opt(int(0, 1), 0),
+      media: opt(isGroupMediaList),
+      card: opt((v) => isGroupCard(v, true)),
+      react: opt((v) => isPlainObject(v) && Object.keys(v).length === 2 && isGroupRef(v.target) && (v.emoji === '' || isReaction(v.emoji))),
+      hide: opt((v) => isPlainObject(v) && Object.keys(v).length === 2 && isGroupRef(v.target) && isBool(v.on))
+    },
+    cross: (given, value) => {
+      const kinds = ['text', 'react', 'hide'].filter((k) => hasOwn(value, k))
+      if (kinds.length !== 1) return 'parâmetro inválido: text'
+      if (kinds[0] !== 'text') {
+        if (['replyTo', 'fwd', 'media', 'card'].some((k) => hasOwn(given, k))) return 'parâmetro inválido: ' + kinds[0]
+        return null
+      }
+      if (value.media && !value.media.every((item) => item.mime === 'application/octet-stream')) return 'parâmetro inválido: media'
+      return postCross(given, value)
+    }
   },
   // Idempotent local mark like dm.seen. Result { ok: true }: writes no diary,
   // never goes to peers; the client re-reads community.info. upTo is optional,
@@ -1874,6 +1896,24 @@ const SPECS = {
     },
     mutating: true,
     cross: momentPutCross
+  },
+  // IPC only, in-app web-node worklet (docs/rpc.md 5.114): a Página's photo,
+  // GIF or voice note for one of its private groups, read from a cache file
+  // as media.uploadFile and sealed by pageSealMedia. The ciphertext comes
+  // back in a read-dir file, as media.readFile's, since it is far above
+  // MAX_MESSAGE; the answer is { name, item }. No video: a private group
+  // takes none. Not mutating: it writes no diary and stores nothing.
+  'media.sealPageFile': {
+    fields: {
+      name: req(isMediaName),
+      page: req(isKey),
+      mime: req(isUploadMime),
+      width: req(int(0, MEDIA_SIDE_MAX)),
+      height: req(int(0, MEDIA_SIDE_MAX)),
+      kind: opt((v) => v === 'voice'),
+      ms: opt(int(1, MAX_AUDIO_MS))
+    },
+    cross: mediaUploadCross
   },
   // IPC only, in-app web-node worklet (docs/rpc.md 5.89): the opened image
   // of a chat item is written to a file in the worklet's read directory and

@@ -24,6 +24,7 @@ import { accountOriginOf, pagesCore } from './pageGate.js'
 import * as actingStore from './actingAs.js'
 import { actingPageStopped, actorBoxOf, isLegacyPage, legacyBundleOf, nextGen, pagesNoLongerRun, pagesRun, planShares, secretsParams } from './pageSecrets.js'
 import { oldPageKeys } from './pageOldKeys.js'
+import { carriesPrivateItems } from './pageGroupMedia.js'
 
 const { MAX_AVATAR_BYTES } = rpc
 
@@ -46,7 +47,7 @@ const READ_MAX_BODY = 1024 * 1024
 // 'dm-sign', 'dm-box-read' and 'dm-legacy-read' are signed reads too: a lost
 // signature sent nothing, and the service keeps no answer for a same-nonce
 // resend.
-const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
+const READS = ['list', 'status', 'follows', 'notices', 'terms', 'group-read', 'group-topics', 'group-voters', 'group-events', 'dm-sign', 'dm-box-read', 'dm-legacy-read']
 const DEFINITE = ['assinatura-invalida', 'pedido-invalido']
 const FEED_KEYS = 64
 
@@ -279,7 +280,7 @@ const PAGELESS = ['create', 'list', 'terms']
 const RECORD_ACTIONS = ['accept', 'remove', 'offer', 'transfer-accept', 'close']
 // A page's post in a private group is sealed on the device (node group.seal)
 // and sent as 'group-seal'; the service cannot read it (docs/rpc.md 5.114).
-const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox']
+const GROUP_ACTIONS = ['community-join', 'community-leave', 'group-join', 'group-leave', 'group-post', 'group-read', 'group-seal', 'group-rebox', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events']
 // The page's own messages go through the node (5.114); dm-legacy-read and
 // dm-legacy-done serve only the sealed bundle of a legacy page's old ones.
 const DM_ACTIONS = ['dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done']
@@ -324,6 +325,8 @@ function checkPreview (action, op) {
 }
 
 function checkMedia (action, op) {
+  // A private group's item keys never go out in a plain 'group-post'.
+  if (action === 'group-post' && carriesPrivateItems(op)) return false
   if (!MEDIA_ACTIONS.includes(action) || !isObject(op)) return true
   if (!checkPreview(action, op)) return false
   // A preview never travels with media (records.js POST_PREVIEW_KEYS).

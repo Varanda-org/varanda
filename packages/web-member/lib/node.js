@@ -32,6 +32,8 @@
 //   await node.dmPutMedia({ bytes, mime, width, height }) // -> dm.send media item
 //   await node.dmReadMedia({ from, id, index, page })     // -> { bytes, mime }
 //   await node.groupReadMedia({ diary, item })             // -> { bytes, mime, w, h }
+//   await node.pageSealMedia({ page, bytes, mime, width, height, kind, ms })
+//                                // -> { cipher, item } (a Página's private group item)
 // The chat photo calls (docs/rpc.md 5.88) are host controls for the same
 // reason: dmPutMedia seals a photo and puts it on the anonymous blob channel
 // (the native IPC dm.putMedia calls the same function after reading its
@@ -140,6 +142,7 @@ function createBrowserNode ({ storage, ...options } = {}) {
     dmPutMedia: (args) => session.dmPutMedia(args),
     dmReadMedia: (args) => session.dmReadMedia(args),
     groupReadMedia: (args) => session.groupReadMedia(args),
+    pageSealMedia: (args) => session.pageSealMedia(args),
     momentPutMedia: (args) => session.momentPutMedia(args),
     momentReadMedia: (args) => session.momentReadMedia(args),
     legacyFollows: () => session.legacyFollows(),
