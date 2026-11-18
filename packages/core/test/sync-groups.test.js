@@ -84,11 +84,18 @@ test('more than 64 writers are fully paged; a writer whose header names another 
   const { bootstrap } = await testnet(t)
   const kp = generateAssociationKeyPair()
   const group = hex(crypto.randomBytes(32))
-  const diary = hex(crypto.randomBytes(32))
   const items = []
   // One diary each: a diary counts at most MAX_GROUP_WRITERS_PER_DIARY writers.
   for (let i = 0; i < 69; i++) items.push({ key: hex(crypto.randomBytes(32)), diary: hex(crypto.randomBytes(32)), length: 1, seq: 1 })
   const fake = await fakeSeeder(t, bootstrap, kp, items)
+  // Listed under a diary the fake seeder serves, whose join seq names no
+  // such writer: a header stub is never proven, so the header's verdict
+  // stands (#350).
+  const dc = fake.store.get({ name: 'diary' })
+  await dc.ready()
+  const diary = hex(dc.key)
+  await dc.append(b4a.from(JSON.stringify(memberCertRecord(createCert({ member: diary }, kp)))))
+  await dc.append(b4a.from(JSON.stringify(groupJoinRecord({ group, writer: hex(crypto.randomBytes(32)), on: true }))))
   // A real core the fake seeder serves: a writer header for another group.
   const bad = fake.store.get({ name: 'bad' })
   await bad.ready()

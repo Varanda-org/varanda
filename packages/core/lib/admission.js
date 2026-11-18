@@ -52,6 +52,10 @@ const CAP_WRITER_CUTS = 4
 // A seeder accepts `prove` (lib/peer-proof.js): a member that proves it owns a
 // diary the seeder serves keeps its connection slot when the table is full.
 const CAP_PEER_PROOF = 8
+// A member holds a listed writer whose block 0 can never count for the
+// diary that joined it as a header stub, block 0 alone, once that diary
+// proves the join (docs/protocol.md section 10, "Header stubs").
+const CAP_HEADER_STUBS = 16
 
 const HEX64 = /^[0-9a-f]{64}$/
 const HEX64_ANY = /^[0-9a-fA-F]{64}$/
@@ -606,6 +610,7 @@ module.exports = {
   CAP_DISCOVERY,
   CAP_WRITER_CUTS,
   CAP_PEER_PROOF,
+  CAP_HEADER_STUBS,
   HEX64,
   HEX64_ANY,
   REASON_RE,
