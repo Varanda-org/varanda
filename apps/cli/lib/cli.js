@@ -71,6 +71,9 @@ Comandos:
   page close|move            encerra a página ou muda a sua chave (--page)
   page join|leave            a página entra ou sai (--page, --community ou --group)
   page group-post            a página publica num grupo (--page, --group, --text)
+  page dm-list <página>      conversas da página neste aparelho, depois de buscar as novas
+  page dm-read <página> <conversa>     lê a conversa; com --save <dir> grava as mídias recebidas (0600)
+  page dm-reply <página> <conversa> <texto>  responde como a página (só texto)
   secrets key                chave X25519 deste servidor para os segredos (--out; imprime só a pública)
   secrets signing-key        chave Ed25519 de quem sela (--out; imprime só a pública)
   secrets seal               sela e assina as credenciais compartilhadas (--file, --recipients, --signing-key, --seq, --out)
@@ -83,13 +86,13 @@ Opções globais:
   --bootstrap <host:porta>   repetível (ou VARANDA_BOOTSTRAP, separado por vírgula)
   --dht-host <ip>            endereço local da DHT (ou VARANDA_DHT_HOST)
   --json                     saída JSON na última linha
-  page: VARANDA_ACCOUNT_ORIGIN, origem https do serviço de conta
+  page: VARANDA_ACCOUNT_ORIGIN ou --account-origin, origem https do serviço de conta
 Opções dos comandos:
   --member --seeder --age-band --method --out --cert-file --name --bio --text
   --to --author --limit --before --once --timeout-ms --health-port --health-host --ws-port --ws-host
   --ws-origin --issuer --account-port --account-host --moderator --no-publish --new-list --server --yes
   --join --undo --private --community --force --no-dm --page --key --username --group --file --blob-bytes --release
-  --recipients --key-file --signing-key --signers --seq
+  --recipients --key-file --signing-key --signers --seq --save --account-origin
   --timeout-ms vai até 2147483647 ms. No assoc certify*, --out recusa arquivo existente e link simbólico.
   --blob-bytes: teto do conjunto de mídia das conversas no seed (bytes, padrão 4294967296).`
 
@@ -101,7 +104,7 @@ const stringFlags = new Set([
   '--health-port', '--health-host', '--ws-port', '--ws-host', '--ws-origin',
   '--issuer', '--account-port', '--account-host', '--moderator', '--server', '--join',
   '--page', '--key', '--username', '--group', '--file', '--blob-bytes',
-  '--recipients', '--key-file', '--signing-key', '--signers', '--seq'
+  '--recipients', '--key-file', '--signing-key', '--signers', '--seq', '--save', '--account-origin'
 ])
 
 function key (value, message = 'chave inválida') {
@@ -318,7 +321,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     username: get('username'),
     files,
     // Raw: only the page commands read it (commands/page.js accountOrigin).
-    accountOrigin: env.VARANDA_ACCOUNT_ORIGIN === undefined ? null : env.VARANDA_ACCOUNT_ORIGIN,
+    accountOrigin: get('account-origin') ?? (env.VARANDA_ACCOUNT_ORIGIN === undefined ? null : env.VARANDA_ACCOUNT_ORIGIN),
     dhtHost,
     healthPort: port(get('health-port') ?? env.VARANDA_HEALTH_PORT ?? null, 'health-port'),
     healthHost,
@@ -360,6 +363,7 @@ function parseArgs (argv, env = process.env, cwd = process.cwd()) {
     keyFile: get('key-file') === null ? null : path.resolve(cwd, get('key-file')),
     signingKey: get('signing-key') === null ? null : path.resolve(cwd, get('signing-key')),
     signers: get('signers') === null ? null : path.resolve(cwd, get('signers')),
+    save: get('save') === null ? null : path.resolve(cwd, get('save')),
     // Raw: `secrets seal` validates it (commands/secrets.js).
     seq: get('seq'),
     name: get('name'),
