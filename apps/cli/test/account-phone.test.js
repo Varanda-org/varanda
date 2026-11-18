@@ -88,7 +88,7 @@ async function linkDirect (store, iss, m, username) {
 // of the fake moderation desk: [{ member, reportIds }].
 // `before(dir, iss)` runs before the stores open.
 // `passkeys: true` opens a passkey store, so Excluir conta can run.
-async function setup (t, { loopback = false, phone = true, age = true, inviting = false, maxMembers = null, dailyLimit, withIssuer = true, key, sendTimeoutMs, burst, before, passkeys = false } = {}) {
+async function setup (t, { loopback = false, phone = true, age = true, inviting = false, maxMembers = null, dailyLimit, withIssuer = true, key, sendTimeoutMs, burst, before, passkeys = false, review } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const c = { offset: 0, guardOk: true, blocked: [] }
   c.now = () => Date.now() + c.offset
@@ -133,6 +133,7 @@ async function setup (t, { loopback = false, phone = true, age = true, inviting 
     opts.phones = phones
   }
   if (dailyLimit !== undefined) opts.phoneDailyLimit = dailyLimit
+  if (review !== undefined) opts.phoneReview = review
   if (burst !== undefined) {
     opts.burst = burst
     opts.ratePerSecond = burst
@@ -435,6 +436,36 @@ test('phone gates on: authorize is retired; finish, rename and invites require a
   const status = await s.api('GET', '/account/status?member=' + m.hex)
   t.absent(/phone|telefone|celular/i.test(status.text), 'no phone in /account/status')
   noPersonalData(t, s, [m])
+})
+
+test('phone review accounts: a listed key passes the phone gate with no number and no proof, any other still needs one', async (t) => {
+  const r = member()
+  const s = await setup(t, { loopback: true, review: [r.hex] })
+  await s.band(r)
+  const st = await s.step(r, 'status')
+  t.is(st.status, 200)
+  t.alike(st.body, { state: 'verificado' }, 'verificado, never a proof: the issuer signs no number that does not exist')
+
+  const started = await s.post('/account/start', { member: r.hex, username: 'revisao' })
+  t.is(started.status, 200, started.text)
+  const fin = await s.post('/account/finish', { signature: sign(s, r, 'finish', started.body.nonce, 'revisao', phoneSub(r.hex)) }, { cookie: cookieOf(started) })
+  t.is(fin.status, 200, fin.text)
+  t.is(fin.body.cert.v, 2)
+  t.ok(s.store.status(r.hex).linked)
+  t.is(s.phones.live(r.hex), null, 'no phone row')
+  t.is((await renameFinish(s, r, 'revisao')).status, 200, 'rename')
+  t.alike((await s.step(r, 'status')).body, { state: 'verificado' }, 'still no proof once linked')
+
+  const other = member()
+  await s.band(other)
+  t.alike((await s.step(other, 'status')).body, { state: 'nenhum' })
+  const o = await s.post('/account/start', { member: other.hex, username: 'bia' })
+  const refused = await s.post('/account/finish', { signature: sign(s, other, 'finish', o.body.nonce, 'bia', phoneSub(other.hex)) }, { cookie: cookieOf(o) })
+  t.is(refused.status, 403)
+  t.alike(refused.body, { error: 'telefone-pendente' })
+  t.is((await renameFinish(s, s.linked, 'ana')).status, 403, 'a linked key off the list still needs a number')
+  t.is(s.sends().length, 0, 'the provider is never called')
+  noPersonalData(t, s, [r, other])
 })
 
 test('phone: with no band idade-pendente wins and the provider is never called', async (t) => {
@@ -1140,7 +1171,12 @@ test('createPhoneRoutes: malformed options throw', (t) => {
   t.exception.all(() => createPhoneRoutes({ ...base, linked: true }), /linked/)
   t.exception.all(() => createPhoneRoutes({ ...base, dailyLimit: 0 }), /phoneDailyLimit/)
   t.exception.all(() => createPhoneRoutes({ ...base, issuer: {} }), /issuer/)
+  const key = member().hex
+  for (const bad of ['x', key, [key.toUpperCase()], [key.slice(2)], [key, 7]]) {
+    t.exception.all(() => createPhoneRoutes({ ...base, review: bad }), /review/)
+  }
   t.execution(() => createPhoneRoutes(base), 'off: accepted')
+  t.is(createPhoneRoutes({ ...base, review: [key] }).verified(key), false, 'off: a review key is not verified')
 })
 
 // The provider's check answers only once `release()` is called.

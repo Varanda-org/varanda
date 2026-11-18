@@ -89,7 +89,7 @@ const {
 // the browser subscriptions live in push.json (./push-store.js). The seeder
 // relays notices to POST /push-event only when both services share
 // VARANDA_PUSH_TOKEN.
-const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
+const USAGE = 'node bin/varanda.js account [key|push-key|cert add|status|export|reports [--member <hex>]|phone [--release] --member <hex>|phone --username <nome>|phone --waiting|delete (--member <hex>|--username <nome>) [--yes|--undo]]'
 const PUSH_VAPID_FILE = 'push-vapid.json'
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const HEX64_RE = /^[0-9a-f]{64}$/
@@ -134,6 +134,12 @@ const DIDIT_DAILY_MAX = 100000
 const PHONE_DAILY_DEFAULT = 200
 const PHONE_DAILY_MAX = 100000
 const PHONE_KEY_INVALID = 'VARANDA_PHONE_KEY inválida: use 64 caracteres hexadecimais minúsculos'
+// Review accounts belong to the association, for the app stores' reviewers;
+// a short list keeps the exemption from becoming a way around the phone check.
+const PHONE_REVIEW_MAX = 4
+const PHONE_REVIEW_INVALID = 'VARANDA_PHONE_REVIEW inválida: use até ' + PHONE_REVIEW_MAX + ' chaves de membro diferentes (64 caracteres hexadecimais minúsculos) separadas por vírgula'
+// `account phone --waiting` prints at most this many keys.
+const WAITING_MAX = 10
 
 function print (flags, result, line) {
   process.stdout.write((flags.json ? jsonLine(result) : line) + '\n')
@@ -592,8 +598,10 @@ function readDiditEnv (env) {
 // seals and indexes the numbers in phone.json, so a malformed key refuses
 // to start instead of reading as off. The code goes through the same Didit
 // API key, so the age pair must be on: the age band is also the brake on the
-// paid sends. No value is ever echoed.
-// -> { key: Buffer(32), dailyLimit } | null
+// paid sends. VARANDA_PHONE_REVIEW (optional, read only when on) lists the
+// member keys of the association's review accounts, separated by commas,
+// which pass the phone gate with no number. No value is ever echoed.
+// -> { key: Buffer(32), dailyLimit, review: [hex] } | null
 function readPhoneEnv (env, diditConfig) {
   const raw = env.VARANDA_PHONE_KEY
   if (raw === undefined || raw === '') return null
@@ -607,7 +615,17 @@ function readPhoneEnv (env, diditConfig) {
     if (!(value >= 1 && value <= PHONE_DAILY_MAX)) throw new UsageError('VARANDA_PHONE_DAILY_LIMIT inválido')
     dailyLimit = value
   }
-  return { key: Buffer.from(raw, 'hex'), dailyLimit }
+  return { key: Buffer.from(raw, 'hex'), dailyLimit, review: readPhoneReview(env.VARANDA_PHONE_REVIEW) }
+}
+
+function readPhoneReview (raw) {
+  if (raw === undefined || (typeof raw === 'string' && raw.trim() === '')) return []
+  if (typeof raw !== 'string') throw new UsageError(PHONE_REVIEW_INVALID)
+  const keys = raw.split(',').map((k) => k.trim())
+  if (keys.length > PHONE_REVIEW_MAX || !keys.every((k) => HEX64_RE.test(k)) || new Set(keys).size !== keys.length) {
+    throw new UsageError(PHONE_REVIEW_INVALID)
+  }
+  return keys
 }
 
 // The key alone, for `account phone`: it needs no Didit pair. Exit 1, and
@@ -997,6 +1015,8 @@ async function serve (flags, env) {
       log({ event: 'telefone', reason: 'arquivo-sem-chave' })
     }
     log({ event: 'telefone', reason: phoneClient !== null ? 'ligada' : 'desligada' })
+    // Never the keys: only that the exemption is on, so it is not forgotten.
+    if (phoneClient !== null && phoneConfig.review.length > 0) log({ event: 'telefone', reason: 'contas-de-revisao' })
     if (phoneClient === null) log({ event: 'cadastro' })
     log({ event: 'gif', reason: gif !== null ? 'ligada' : 'desligada' })
     log({ event: 'audius', reason: audius !== null ? 'ligada' : 'desligada' })
@@ -1070,7 +1090,7 @@ async function serve (flags, env) {
       const listingReader = groupToken === null
         ? null
         : createListingReader({ baseUrl: seederHttp, token: groupToken, association, revokedIssuers: () => revokedIssuerSet(moderation.pending().published.snapshot) })
-      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, deletionRequests, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, guard: held, ...pageClientsOf(pageClients) } })
+      const server = createAccountServer({ association, origin, store, issuer, log, moderation, googleMod, modEmails, statsEmails, usage, triage: triage === null ? null : triage.worker, triageForget: triage === null ? createTriageForget({ dataDir: flags.dataDir, moderation }) : null, groupCheck, terms, recovery, passkeys, deletionRequests, androidCertSha256, invites, feiraInvites, listingReader, drops, invitesMode: drops !== null ? 'sorteio' : 'semanal', push, seen: seenStore, didit, ages, ageDailyLimit: diditConfig === null ? undefined : diditConfig.dailyLimit, phoneClient, phones, phoneDailyLimit: phoneConfig === null ? undefined : phoneConfig.dailyLimit, phoneReview: phoneConfig === null ? [] : phoneConfig.review, ageSince, ageCheck, ageDirectoryFloor, gif, audius, preview, maxConnections, ratePerSecond, burst, pages: pagesWriter === null ? null : { keys: pageKeys, writer: pagesWriter, pagesStore, dir: flags.dataDir, guard: held, ...pageClientsOf(pageClients) } })
       try {
         listener = await server.listen({ host, port })
       } catch (err) {
@@ -1386,7 +1406,15 @@ async function run (flags) {
   // service's lock, so it refuses while the service runs, prints no number
   // and leaves the moderation desk (the key's block) as it is.
   // --username finds the account that held the name, current or past.
+  // --waiting lists the keys a review account can be among (README
+  // "Conta de revisão"): no number is read, so it needs no key.
   if (sub === 'phone' && subsub === undefined) {
+    if (flags.waiting) {
+      if (flags.member !== null || flags.username != null || flags.release) throw new UsageError('use --waiting sozinho')
+      checkConfig(flags.dataDir, flags.association)
+      for (const line of waitingKeys(flags.dataDir)) process.stdout.write(jsonLine(line) + '\n')
+      return 0
+    }
     if ((flags.member === null) === (flags.username == null)) throw new UsageError('use --member ou --username')
     if (flags.release && flags.member === null) throw new UsageError('informe --member <chave>')
     if (flags.username != null) {
@@ -1496,6 +1524,25 @@ function holdOf (passkeys, member) {
   } catch {
     throw new Error('passkeys.json inválido')
   }
+}
+
+// The keys with an age band that have not linked yet, newest band first, at
+// most WAITING_MAX: { member, checkedAt } only. A new account stops at the
+// phone step right after its band, so the operator finds the review
+// account's key here by the time of its age check. Safe while the service
+// runs: both files are read, never written.
+function waitingKeys (dataDir) {
+  const ages = openAgeStore(dataDir, { readOnly: true })
+  if (!ages.available()) throw new Error('age.json inválido')
+  const accounts = openAccountStore(dataDir, { readOnly: true })
+  return ages.entries()
+    .filter((e) => {
+      const st = accounts.status(e.member)
+      return !st.linked && st.unavailable !== true && accounts.deletedAt(e.member) === null
+    })
+    .sort((a, b) => (a.checkedAt < b.checkedAt ? 1 : a.checkedAt > b.checkedAt ? -1 : 0))
+    .slice(0, WAITING_MAX)
+    .map((e) => ({ member: e.member, checkedAt: e.checkedAt }))
 }
 
 // The phone store needs the seal key only to open a number; whether a live

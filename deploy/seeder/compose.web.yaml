@@ -180,6 +180,9 @@ services:
       # diário de envios vazio mantém o padrão do serviço.
       VARANDA_PHONE_KEY: "${VARANDA_PHONE_KEY:-}"
       VARANDA_PHONE_DAILY_LIMIT: "${VARANDA_PHONE_DAILY_LIMIT:-}"
+      # Chaves das contas de revisão da associação (lojas de apps), que
+      # passam pela etapa do celular sem número. Vazia = nenhuma.
+      VARANDA_PHONE_REVIEW: "${VARANDA_PHONE_REVIEW:-}"
       # Limites do serviço account. Vazios mantêm os padrões do serviço.
       VARANDA_ACCOUNT_MAX_CONNECTIONS: "${VARANDA_ACCOUNT_MAX_CONNECTIONS:-}"
       VARANDA_ACCOUNT_RATE: "${VARANDA_ACCOUNT_RATE:-}"

@@ -29,6 +29,12 @@ const { TIMEOUT_MS } = require('./phone-client')
 //     carries `proof`, a phone-verified attestation dated the row's
 //     verifiedAt, when the service has an issuer.
 //
+// `review` lists the member keys of the association's own review accounts
+// (App Store and Google Play reviewers sign in with them), set by the
+// operator in VARANDA_PHONE_REVIEW: each passes verified() with no number,
+// so status answers 'verificado' without a proof. The issuer never signs a
+// phone-verified attestation for a number that does not exist.
+//
 // Uniqueness and burns are answered only after a correct code: send gives
 // the same answers and the same log lines for a free, a taken and a burned
 // number, so it never tells anyone whose number is whose. A blocked member is
@@ -153,6 +159,7 @@ function createPhoneRoutes ({
   blocked = () => false,
   cleared = () => false,
   issuer = null,
+  review = [],
   log = () => {},
   now = Date.now,
   http,
@@ -175,6 +182,8 @@ function createPhoneRoutes ({
   const pendingBound = maxPending ?? maxKeysFor(dailyLimit)
   if (!Number.isSafeInteger(pendingBound) || pendingBound < 1) throw new TypeError('maxPending must be a positive integer')
   if (issuer !== null && (typeof issuer !== 'object' || !issuer.keyPair || !issuer.cert)) throw new TypeError('issuer must be { keyPair, cert } or null')
+  if (!Array.isArray(review) || !review.every((m) => typeof m === 'string' && HEX64_RE.test(m))) throw new TypeError('review must be an array of member keys')
+  const reviewKeys = new Set(review)
 
   // A store that failed to open is still on: the gates then stay shut
   // instead of silently opening.
@@ -260,6 +269,7 @@ function createPhoneRoutes ({
 
   function verified (member) {
     if (!on) return false
+    if (reviewKeys.has(member)) return true
     try {
       return phones.verified(member) === true
     } catch {
