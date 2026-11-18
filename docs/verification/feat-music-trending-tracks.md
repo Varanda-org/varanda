@@ -13,7 +13,7 @@ Primeiro PR de uma pilha de quatro. O pedido: "Quando vai fazer post na hora de 
   - O único registro é `{ event: 'audius', reason: 'em-alta' }`.
 - [x] App, cliente (`apps/app/src/account.js`): `audiusTrending()` faz o POST com `{}`, lê a resposta com `parseMusicSearch` e recusa uma resposta com `next`. `feature-off` e `nao-encontrado` (serviço antigo) viram o texto de música indisponível.
 - [x] App, seletor (`apps/app/src/ui/MusicPicker.js`, textos em `apps/app/src/music.js`): com a busca vazia na aba de faixas, mostra "Em alta no Audius" e a lista, ou "Nenhuma sugestão agora" se ela vier vazia. Uma falha mostra o erro e "Tentar de novo"; o serviço desligado ou antigo deixa o seletor quieto. A busca não abre mais o teclado sozinha. Uma troca de sessão descarta a lista e pede de novo. Estado num reducer próprio (`musicSuggestStep`) em que toda ação parte de `{ ...state }`, para o gênero do PR 3 sobreviver.
-- [x] Termos e Política na versão 93 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): a lista da semana, não personalizada; o limite próprio de 200; o que o Audius recebe (período, posição, tamanho, nome do app e chave do operador); os 10 min de reaproveitamento, 1 min de espera depois de falha e a lista apagada ao reiniciar.
+- [x] Termos e Política na versão 94 (`packages/core/lib/terms.js`, `apps/app/src/legal.js`, páginas do site geradas com `node apps/site/scripts/render-legal.js`, linhas LGPD de `docs/design.md`): a lista da semana, não personalizada; o limite próprio de 200; o que o Audius recebe (período, posição, tamanho, nome do app e chave do operador); os 10 min de reaproveitamento, 1 min de espera depois de falha e a lista apagada ao reiniciar.
 - [x] `docs/protocol.md` (rota, limites, erros do provider, o que chega ao Audius, registro `em-alta`) e `docs/app.md` (seletor de post e de momento).
 
 ## Conferência ao vivo (18/11/2026, 15:01 UTC)
@@ -22,7 +22,7 @@ Primeiro PR de uma pilha de quatro. O pedido: "Quando vai fazer post na hora de 
 
 ## Testes automáticos
 
-Rodados localmente no Node 24, sobre `origin/main@16b61a19`: `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (64 arquivos, todos passando). Os principais:
+Rodados localmente no Node 24, sobre `origin/main@16b61a19` e de novo depois de juntar `origin/main@5fcf3d30`: `npm run lint`, `node apps/site/scripts/render-legal.js --check`, `npm run demo` (DEMO OK) e cada arquivo de teste que importa um módulo alterado, sozinho (64 arquivos, todos passando). Os principais:
 
 | Arquivo | Testes | Asserções |
 |---|---|---|
@@ -45,7 +45,7 @@ Novos casos da rota: lista reaproveitada por até 10 minutos, uma só chamada pa
 A revisão apontou e esta branch corrigiu:
 
 - **Capa de uma faixa que uma busca posterior trocou.** A lista em alta guardada lia a marca de capa da linha antiga da faixa, e a rota da capa lê a linha atual. Agora a resposta lê a linha atual de cada faixa, como a resposta de playlist em cache. O teste `a trending hit reads each cover flag from the track row a later search replaced` falha sem a correção.
-- **Termos 93 diziam "ao abrir a escolha de música".** A lista só aparece com o campo de busca vazio na aba de faixas; o texto dos Termos, da Privacidade e da base legal diz isso agora. A frase de retenção passou a dizer que o serviço conta, na memória, quantas vezes cada conta abriu a lista no dia (o limite de 200).
+- **Termos 94 diziam "ao abrir a escolha de música".** A lista só aparece com o campo de busca vazio na aba de faixas; o texto dos Termos, da Privacidade e da base legal diz isso agora. A frase de retenção passou a dizer que o serviço conta, na memória, quantas vezes cada conta abriu a lista no dia (o limite de 200).
 - **`docs/app.md` prometia silêncio para `feature-off` em qualquer etapa.** Só a resposta `feature-off` ou `nao-encontrado` da própria rota da lista deixa o seletor quieto; uma falha ao abrir a sessão de música aparece como as outras. Sem mudança de código: o seletor só aparece com a música disponível (`audiusPolicy`), então o caso pede o recurso desligado entre a leitura da política e a primeira sessão.
 
 Conferido sem mudança: a chamada ao Audius só começa uma vez para pedidos simultâneos (`trendingLoad` é atribuído antes do primeiro `await` e limpo no `finally` da própria chamada); as recusas antes do contato não começam a espera de 1 minuto; uma resposta atrasada do seletor é descartada pela geração e pelo `AbortController`. A auditoria de segurança não achou nada.
@@ -65,4 +65,4 @@ Não conferido em aparelho neste PR. Roteiro para a pessoa, primeiro no Android 
 ## Fora do alcance desta branch
 
 - Playlists em alta (PR `feat/music-trending-playlists`), chips de gênero (PR `feat/music-trending-genres`), recentes e gênero favorito (PR `feat/music-recents-genre`).
-- Termos 93 seguem a revisão jurídica pendente das versões anteriores.
+- Termos 94 seguem a revisão jurídica pendente das versões anteriores.

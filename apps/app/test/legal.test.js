@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 93)
+  t.is(LEGAL_VERSION, 94)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 93, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 94, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,6 +388,22 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 93 describes the Conversas notice sent to the recipient only', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 93)
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    t.absent(/pode haver uma mensagem nova/iu.test(all(doc)), doc.title + ': the old anonymous wake is gone')
+  }
+  t.ok(all(TERMS).includes('um aviso que diz apenas "Nova mensagem nas Conversas", ou, para quem administra uma Página, "Nova mensagem para uma página que você administra"'), 'terms: the two fixed sentences')
+  t.ok(all(TERMS).includes('o serviço de conta da associação fica sabendo que a pessoa recebeu uma mensagem e quando, mesmo que ela não tenha ligado os avisos, mas nunca quem enviou nem o conteúdo'), 'terms: what the service learns')
+  t.ok(all(PRIVACY).includes('A chave desse lacre vem do próprio serviço de conta, nunca de um semeador.'), 'privacy: wake key source')
+  t.ok(all(PRIVACY).includes('o serviço de conta fica sabendo que você recebeu uma mensagem e quando, mesmo que você não tenha ligado os avisos no aparelho, mas nunca quem enviou nem o conteúdo'), 'privacy: what the service learns, also without a subscription')
+  t.ok(all(PRIVACY).includes('no máximo um a cada 15 minutos por destinatário e 60 por pessoa por hora, só para quem aceitou a versão 93 destes documentos ou uma mais nova'), 'privacy: limits and terms gate')
+  t.ok(all(PRIVACY).includes('o serviço de push do navegador vê o momento de cada aviso'), 'privacy: push service sees timing')
+  t.ok(all(PRIVACY).includes('Avisos de mensagem nova: para avisar quem recebe uma mensagem, a base legal proposta é execução de contrato, Art. 7º, V'), 'privacy: proposed legal basis')
+})
+
 test('legal: version 92 describes reactions in a page\'s Conversas', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   t.ok(LEGAL_VERSION >= 92)
@@ -439,7 +455,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '3c858f3a21564b213c1f6facae4c6eedeb8e69351a453f5ae13ee354861ab853', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '4feb60920491aaf8cb0579d30c613eb9a8bcbee0f02ee6a0c592ce7c306b00fb', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -467,9 +483,9 @@ test('legal: version 41 describes group and conversation reactions and chat form
   t.ok(text(PRIVACY).includes('as reações nos grupos e nas mensagens diretas'), 'legal basis of reactions')
 })
 
-test('legal: version 93 describes the weekly list', async (t) => {
+test('legal: version 94 describes the weekly list', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
-  t.ok(LEGAL_VERSION >= 93)
+  t.ok(LEGAL_VERSION >= 94)
   const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
   const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
   t.ok(audius(TERMS).includes('a escolha de música mostra as faixas em alta no Audius nesta semana. A lista não é personalizada nem escolhida a partir do que você faz, e pode mudar no Audius.'), 'terms: trending, not personalised')

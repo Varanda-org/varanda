@@ -39,7 +39,7 @@ export function ThemeProvider ({ children }) {
   // A layout effect runs before every passive effect of the commit, so the
   // sunset band meta set by the shell (applyBandMeta) wins over this one.
   useLayoutEffect(() => {
-    applySchemeToDocument(scheme, { bg: colors.bg, themeColor: colors.bg })
+    applySchemeToDocument(scheme, { bg: colors.bg, themeColor: colors.bg, thumb: colors.outline })
   }, [scheme, colors])
 
   const value = useMemo(() => ({

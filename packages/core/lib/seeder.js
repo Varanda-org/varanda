@@ -148,13 +148,20 @@
 // peer and its own pool under <dataDir>/visit-pool/, VISIT_POOL_MAX drops,
 // kept VISIT_RETENTION_MS (3 days) with spent stamps remembered as long as
 // the DM pool does, the DM stamps and kids. A visit pool that fails to open
-// fails start() (fail closed: without it a stamp could be spent twice). A stored visit ping never calls
-// dm.onDrop (no push wake), and a full visit pool refuses visit puts only.
+// fails start() (fail closed: without it a stamp could be spent twice). A stored visit ping opens no
+// wake (dm.onNotice below), and a full visit pool refuses visit puts only.
 // A stamp spent in either pool is refused by the other. Swept on the DM tick.
 // Both lanes also come as 'varanda/dm/2' and 'varanda/visit/2' with buckets
 // (docs/protocol.md section 11): the same pools, each drop stored with a tag
 // from the put's bucket, a page filtered by the buckets asked for, the bits
 // from the served count (lib/dm.js bucketBits) once per channel.
+// Each peer with the DM lanes also gets 'varanda/dm-notice/1'
+// (lib/dm-notice-net.js): after a put, the member hands over a box sealed to
+// the account service (lib/dm-notice.js) and dm.onNotice(box) passes it on.
+// The window is per socket and only a NEW drop stored on that socket's DM
+// lanes (v1 or v2, never a visit, never a repeated put) opens one wake, for
+// DM_NOTICE_TTL_MS: a drop id read from the pool, or a retry, wakes nobody.
+// The seeder holds no key for the box and never opens it.
 const fs = require('#fs')
 const path = require('#path')
 const process = require('#process')
@@ -212,11 +219,13 @@ const { createBlocklistState, verifySnapshot, compareSnapshots } = require('./bl
 const { attachBlocklist } = require('./blocklist-net')
 const { createNoticeIndex } = require('./notices')
 const { noteGrowth, countActive, weekBefore } = require('./activity')
-const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, VISIT_POOL_MAX, bucketBits } = require('./dm')
+const { DM_STAMPS_PER_DAY, DM_STAMP_PROTOCOL, VISIT_PROTOCOL, DM_PROTOCOL_V2, VISIT_PROTOCOL_V2, VISIT_POOL_MAX, bucketBits, decodeDrop } = require('./dm')
 const { tagFor } = require('./dm-pool')
 const { createDmPool, VISIT_POOL_DIR, VISIT_RETENTION_MS, VISIT_TOKEN_RETENTION_MS } = require('./dm-pool')
 const { attachDm } = require('./dm-net')
 const { attachDmStamp } = require('./dm-stamp-net')
+const { createNoticeWindow } = require('./dm-notice')
+const { attachDmNotice } = require('./dm-notice-net')
 const dmPostage = require('./dm-postage')
 const { createBlobPool } = require('./blob-pool')
 const { attachBlob } = require('./blob-net')
@@ -1350,10 +1359,10 @@ function dmOptions (dm) {
   if (typeof dm !== 'object' || dm.postage === null || typeof dm.postage !== 'object' || typeof dm.postage.get !== 'function') {
     throw new TypeError('dm.postage.get must be a function')
   }
-  const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onDrop = noop, visitMax = VISIT_POOL_MAX } = dm
+  const { postage, stampsPerDay = DM_STAMPS_PER_DAY, onNotice = noop, visitMax = VISIT_POOL_MAX } = dm
   const { blobPostage = null, blobStampsPerDay = dmPostage.BLOB_STAMPS_PER_DAY, copyStampsPerWeek = dmPostage.COPY_STAMPS_PER_WEEK, blobBytes = BLOB_POOL_BYTES } = dm
   if (!Number.isSafeInteger(stampsPerDay) || stampsPerDay < 1) throw new TypeError('invalid dm.stampsPerDay')
-  if (typeof onDrop !== 'function') throw new TypeError('dm.onDrop must be a function')
+  if (typeof onNotice !== 'function') throw new TypeError('dm.onNotice must be a function')
   if (!Number.isSafeInteger(visitMax) || visitMax < 1) throw new TypeError('invalid dm.visitMax')
   if (blobPostage !== null && (typeof blobPostage !== 'object' || typeof blobPostage.get !== 'function')) {
     throw new TypeError('dm.blobPostage.get must be a function')
@@ -1362,7 +1371,7 @@ function dmOptions (dm) {
   if (!Number.isSafeInteger(blobStampsPerDay) || blobStampsPerDay < 1) throw new TypeError('invalid dm.blobStampsPerDay')
   if (!Number.isSafeInteger(copyStampsPerWeek) || copyStampsPerWeek < 1) throw new TypeError('invalid dm.copyStampsPerWeek')
   if (!Number.isSafeInteger(blobBytes) || blobBytes < BLOB_CHUNK_BYTES) throw new TypeError('invalid dm.blobBytes')
-  return { postage, stampsPerDay, onDrop, visitMax, blobPostage, blobStampsPerDay, copyStampsPerWeek, blobBytes }
+  return { postage, stampsPerDay, onNotice, visitMax, blobPostage, blobStampsPerDay, copyStampsPerWeek, blobBytes }
 }
 
 // The postage keys usable by the seeder, newest first, at most two (the
@@ -1581,11 +1590,13 @@ class Seeder {
   // is ignored). A mention of a name
   // nobody verifiably held then pushes when the name settles, within 24 h.
   // dm (header comment) is not a test hook either: { postage: { get() },
-  // stampsPerDay = DM_STAMPS_PER_DAY, onDrop }. postage.get() resolves to
+  // stampsPerDay = DM_STAMPS_PER_DAY, onNotice }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
-  // newest first; only the first two count. onDrop() is called with no
-  // arguments after each new drop is stored (a throw is ignored). null
-  // leaves both direct message channels unanswered. blobPostage ({ get() },
+  // newest first; only the first two count. onNotice(box) gets the sealed
+  // notice of a wake the socket's window took (header comment), a Buffer of
+  // DM_NOTICE_BOX_BYTES never opened here; a throw or a rejection is
+  // ignored. null leaves both direct message channels unanswered.
+  // blobPostage ({ get() },
   // same shape, a DIFFERENT key file) turns on blob stamps, with
   // blobStampsPerDay = BLOB_STAMPS_PER_DAY, and the blob pool and channel,
   // with blobBytes = BLOB_POOL_BYTES; without it blob requests on the stamp
@@ -9244,6 +9255,20 @@ class Seeder {
     return e.rootScanning || e.rootScanned < e.core.contiguousLength
   }
 
+  // Whether a scanned root (a community's or a public group's) is not read
+  // up to the length the seeder downloads of it: the whole signed log, or,
+  // under a cut, the blocks kept below it (the void blocks above are never
+  // fetched). A served root missing or dropped while its header is still
+  // indexed counts as a gap. A private root is never scanned: false.
+  _rootGap (key) {
+    const header = this._groupIndex.header(key)
+    if (header === null || !this._rootScanned(header)) return false
+    const e = this._groupServed.get(key)
+    if (!e || e.dropped || e.group !== key) return true
+    const end = e.cut === null ? e.core.length : Math.min(keptBelow(e.cut), e.core.length)
+    return e.rootScanned < end
+  }
+
   // Whether community C, the parent a group header names, may still change
   // what its catalogue says here: being admitted, its header not verified,
   // its root not scanned yet, or cores of it in admission. A
@@ -9374,6 +9399,75 @@ class Seeder {
       const page = this._groupIndex.search(segment, visible)
       if (page === null) return null
       return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete: !this._groupsUnsettled() }
+    } catch {
+      return null
+    }
+  }
+
+  // The filters of the discovery lists: a group and its creator unblocked,
+  // its root served; its community answerable (_communityVisible); members
+  // counted as _communityAnswer counts them.
+  _browseFilters () {
+    return {
+      visible: (group, creator) => !this._isBlocked(group) && !this._isBlocked(creator) && this._groupCoreVisible(group),
+      parent: (C) => this._communityVisible(C),
+      members: (diary, key) => (this._indexVisible(diary) || this._keptRootRow(diary, key)) && this._groupCoreVisible(key)
+    }
+  }
+
+  // _groupsUnsettled ignores community root scans (the search never reads
+  // them), but the discovery lists show the community's name and read its
+  // group-create records, which also decide which group is its Geral.
+  _discoveryUnsettled () {
+    if (this._groupsUnsettled()) return true
+    for (const [k, e] of this._groupServed) {
+      if (k !== e.group) continue
+      const h = this._groupIndex.header(k)
+      if (h !== null && h.kind === 'community' && this._rootScanBehind(k)) return true
+    }
+    return false
+  }
+
+  // GET /index/group-browse/<order>: public groups attached to a served
+  // community, by member count ('members') or creation date ('recent');
+  // null for an unknown order. Nothing about the request is logged.
+  indexGroupBrowse (order) {
+    try {
+      const page = this._groupIndex.browse(order, Date.now(), this._browseFilters())
+      if (page === null) return null
+      return { groups: page.groups, more: page.more, indexing: !this._passesStarted, complete: !this._discoveryUnsettled() }
+    } catch {
+      return null
+    }
+  }
+
+  // GET /index/public-groups/<D>[/<after>]: the open public groups diary D
+  // takes part in (its community's Geral left out), for a profile box; null
+  // where /index/groups/<D> answers null, so the route's 404 is the same.
+  // `hidden` is always false until a signed opt-out record exists; it is on
+  // the wire now so the shape never changes.
+  indexPublicGroups (diaryHex, after = null) {
+    try {
+      const base = this.indexGroups(diaryHex)
+      if (base === null) return null
+      // A root not read in order up to what the seeder downloads of it (a
+      // scan behind, or a hole below a later block) may hold a group-meta
+      // that closed the join: the group is left out and the answer is not
+      // complete. publicGroupsOf asks only for a group the list would
+      // otherwise show, so a Geral, an approval, a private or an unlisted
+      // root never counts.
+      let unsettled = false
+      const joined = (group, writer) => {
+        if (!this._groupCoreVisible(writer)) return false
+        if (this._rootScanBehind(group) || this._rootGap(group)) {
+          unsettled = true
+          return false
+        }
+        return true
+      }
+      const page = this._groupIndex.publicGroupsOf(diaryHex, { ...this._browseFilters(), joined, after })
+      if (page === null) return null
+      return { groups: page.groups, next: page.next, hidden: false, indexing: !this._passesStarted, complete: base.complete && !unsettled && !this._discoveryUnsettled() }
     } catch {
       return null
     }
@@ -10075,11 +10169,14 @@ class Seeder {
     // once the peer opens it (the postage key is loaded then, never before).
     // A peer from before them never opens either and stays connected.
     if (this._dm !== null) {
+      // Per socket: a member who read a drop id from the pool must not spend
+      // the wake of a drop someone else put.
+      const noticeWindow = createNoticeWindow({ now: () => clock.now() })
       let dm = null
       try {
         dm = attachDm(socket, {
           role: 'seeder',
-          put: (bytes) => this._dmPut(bytes),
+          put: (bytes) => this._dmPut(bytes, undefined, noticeWindow),
           page: (q) => this._dm.page(q),
           log: (ev) => this.log(ev)
         })
@@ -10111,7 +10208,7 @@ class Seeder {
       // log line below ever carries a bucket, a tag or the bits.
       const bits = this._dmBucketBits()
       for (const lane of [
-        { protocol: DM_PROTOCOL_V2, put: (b, t) => this._dmPut(b, t), page: (q) => this._dm.page(q) },
+        { protocol: DM_PROTOCOL_V2, put: (b, t) => this._dmPut(b, t, noticeWindow), page: (q) => this._dm.page(q) },
         { protocol: VISIT_PROTOCOL_V2, put: (b, t) => this._visitPut(b, t), page: (q) => this._visit.page(q) }
       ]) {
         let h = null
@@ -10124,6 +10221,20 @@ class Seeder {
         this._dmHandles.add(h)
         release.push(() => this._dmHandles.delete(h))
       }
+      let notice = null
+      try {
+        notice = attachDmNotice(socket, {
+          role: 'seeder',
+          window: noticeWindow,
+          onWake: (box) => this._dmOpts.onNotice(box),
+          log: (ev) => this.log(ev)
+        })
+      } catch {
+        socket.destroy()
+        return
+      }
+      this._dmHandles.add(notice)
+      release.push(() => this._dmHandles.delete(notice))
       if (this._blob !== null) {
         let blob = null
         try {
@@ -10227,7 +10338,6 @@ class Seeder {
   // ---- Direct messages (header comment) -------------------------------
 
   _openDm () {
-    const { onDrop } = this._dmOpts
     this._dmStamps = readDmStamps(this.dataDir, (ev) => this.log(ev))
     if (this._dmOpts.blobPostage !== null) {
       this._blobStamps = readDmStamps(this.dataDir, (ev) => this.log(ev), BLOB_STAMPS_FILE, 'blob-stamps-unreadable')
@@ -10237,13 +10347,10 @@ class Seeder {
       dir: this.dataDir,
       verifyStamp: (kid, token, sig) => this._verifyStamp(kid, token, sig),
       isKidAccepted: (kid) => this._dmKidAccepted(kid),
-      onStored: () => {
-        try { onDrop() } catch {}
-      },
       spentElsewhere: (h) => this._visit !== null && this._visit.hasSpent(h),
       log: (ev) => this.log(ev)
     })
-    // No onStored: a visit ping wakes nobody.
+    // A visit ping wakes nobody: its lanes have no notice window.
     this._visit = createDmPool({
       dir: this.dataDir,
       name: VISIT_POOL_DIR,
@@ -10337,8 +10444,10 @@ class Seeder {
     return bucketBits(this._served.size)
   }
 
-  // info: { bucket, bits } from a v2 channel, absent on a v1 one.
-  async _dmPut (bytes, info) {
+  // info: { bucket, bits } from a v2 channel, absent on a v1 one. window:
+  // the socket's notice window, which a NEW drop opens (a repeated put
+  // stored nothing, so it opens no second wake).
+  async _dmPut (bytes, info, window = null) {
     try {
       await this._dmPostageKeys()
     } catch (err) {
@@ -10348,6 +10457,10 @@ class Seeder {
     const result = this._dm.submit(bytes, info === undefined ? 0 : tagFor(info.bits, info.bucket))
     const reason = result === 'cheio' ? 'cheio' : result !== null && typeof result === 'object' ? 'guardada' : 'invalido'
     this.log({ event: 'dm', reason })
+    if (window !== null && reason === 'guardada' && result.repeated !== true) {
+      const drop = decodeDrop(bytes)
+      if (drop !== null) window.add(drop.dropId)
+    }
     return result
   }
 

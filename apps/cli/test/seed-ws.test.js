@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
   INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
@@ -2002,6 +2002,16 @@ function groupSeeder () {
     stub.calls.push(['indexGroupSearch', segment])
     return segment === 'jardim' ? { groups: [{ group: G, name: 'Jardim', members: 2 }], more: false, indexing: false, complete: true } : null
   }
+  // Rows carry an extra key the wire must never show.
+  stub.indexGroupBrowse = async (order) => {
+    stub.calls.push(['indexGroupBrowse', order])
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 2, created: 1700000000000, active: 1700000500000, score: 9 }], more: true, indexing: false, complete: true }
+  }
+  stub.indexPublicGroups = async (diary, after) => {
+    stub.calls.push(['indexPublicGroups', diary, after])
+    if (diary !== A) return null
+    return { groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 2, created: 1 }], next: G, hidden: false, indexing: false, complete: true, extra: 1 }
+  }
   return stub
 }
 
@@ -2040,17 +2050,61 @@ test('startSeedWs /index/group*: routes answer the wire shapes; HEAD the headers
   t.is(found.status, 200)
   t.alike(JSON.parse(found.body.toString()), { groups: [{ group: G, name: 'Jardim', writerCount: 2 }], more: false, indexing: false, complete: true })
 
+  for (const order of ['members', 'recent']) {
+    const browse = await mediaRequest(server.port, '/index/group-browse/' + order)
+    t.is(browse.status, 200)
+    jsonHeaders(t, browse)
+    const body = JSON.parse(browse.body.toString())
+    t.alike(body, {
+      groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 2, created: 1700000000000, active: 1700000500000 }],
+      more: true,
+      indexing: false,
+      complete: true
+    })
+    t.alike(Object.keys(body).sort(), ['complete', 'groups', 'indexing', 'more'])
+    t.alike(Object.keys(body.groups[0]).sort(), ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount'], 'browse row keys are exact')
+    t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupBrowse', order])
+  }
+
+  const pub = await mediaRequest(server.port, '/index/public-groups/' + A)
+  t.is(pub.status, 200)
+  jsonHeaders(t, pub)
+  const pubBody = JSON.parse(pub.body.toString())
+  t.alike(pubBody, {
+    groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', writerCount: 2 }],
+    next: G,
+    hidden: false,
+    indexing: false,
+    complete: true
+  })
+  t.alike(Object.keys(pubBody).sort(), ['complete', 'groups', 'hidden', 'indexing', 'next'], 'per-diary body keys are exact')
+  t.alike(Object.keys(pubBody.groups[0]).sort(), ['community', 'communityName', 'creator', 'group', 'name', 'writerCount'], 'per-diary row keys are exact')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexPublicGroups', A, null])
+  t.is((await mediaRequest(server.port, '/index/public-groups/' + A + '/' + G)).status, 200)
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexPublicGroups', A, G], 'the cursor reaches the seeder')
+
   const head = await mediaRequest(server.port, '/index/group/' + G, { method: 'HEAD' })
   t.is(head.status, 200)
   jsonHeaders(t, head)
   t.is(head.headers['content-length'], g.headers['content-length'])
   t.is(head.body.byteLength, 0)
 
-  for (const url of ['/index/group/' + 'f'.repeat(64), '/index/groups/' + 'f'.repeat(64), '/index/group-search/zzz']) {
+  for (const url of ['/index/group/' + 'f'.repeat(64), '/index/groups/' + 'f'.repeat(64), '/index/group-search/zzz', '/index/public-groups/' + 'f'.repeat(64)]) {
     const got = await mediaRequest(server.port, url)
     t.is(got.status, 404, url + ' unknown -> 404')
     t.is(got.body.toString(), 'não encontrado\n')
   }
+})
+
+test('startSeedWs /index/public-groups: a hidden answer sends no rows and no cursor whatever the seeder holds', async (t) => {
+  t.timeout(20000)
+  const seeder = groupSeeder()
+  seeder.indexPublicGroups = async () => ({ groups: [{ group: G, name: 'Jardim', creator: A, community: W, communityName: 'Bairro', members: 2 }], next: G, hidden: true, indexing: false, complete: true })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const got = await mediaRequest(server.port, '/index/public-groups/' + A)
+  t.is(got.status, 200)
+  t.alike(JSON.parse(got.body.toString()), { groups: [], next: null, hidden: true, indexing: false, complete: true })
 })
 
 test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 421 and method 405 policy', async (t) => {
@@ -2061,12 +2115,21 @@ test('startSeedWs /index/group*: malformed paths never reach the seeder; Host 42
   t.ok(INDEX_GROUP_RE.test('/index/group/' + G + '/' + W))
   t.ok(INDEX_GROUPS_RE.test('/index/groups/' + A))
   t.ok(INDEX_GROUP_SEARCH_RE.test('/index/group-search/a-b'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/members'))
+  t.ok(INDEX_GROUP_BROWSE_RE.test('/index/group-browse/recent'))
+  t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A))
+  t.ok(INDEX_PUBLIC_GROUPS_RE.test('/index/public-groups/' + A + '/' + G))
   const bad = [
     '/index/group', '/index/group/', '/index/group/' + 'a'.repeat(63), '/index/group/' + 'A'.repeat(64),
     '/index/group/' + G + '/', '/index/group/' + G + '/abc', '/index/group/' + G + '/' + W + '/' + W,
     '/index/group/' + G + '?x=1', '/index/groups', '/index/groups/' + A + '/x', '/index/groups/' + 'a'.repeat(65),
     '/index/group-search', '/index/group-search/', '/index/group-search/Ana', '/index/group-search/a-b-c-d-e',
-    '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na'
+    '/index/group-search/' + 'a'.repeat(21), '/index/group-search/%61na',
+    '/index/group-browse', '/index/group-browse/', '/index/group-browse/trending', '/index/group-browse/Members',
+    '/index/group-browse/members/x', '/index/group-browse/members?x=1',
+    '/index/public-groups', '/index/public-groups/', '/index/public-groups/' + 'a'.repeat(63), '/index/public-groups/' + 'A'.repeat(64),
+    '/index/public-groups/' + A + '/', '/index/public-groups/' + A + '/abc', '/index/public-groups/' + A + '/' + 'a'.repeat(63),
+    '/index/public-groups/' + A + '/' + G + '/' + W
   ]
   for (const url of bad) {
     const got = await mediaRequest(server.port, url)
@@ -2124,6 +2187,10 @@ test('startSeedWs /index/group*: the real Seeder\'s answers carry the public nam
   t.alike(found.groups, [{ group: G, name: 'Jardim Botânico', writerCount: 2 }])
   const gs = JSON.parse((await mediaRequest(server.port, '/index/groups/' + B)).body.toString())
   t.alike(gs.groups, [{ group: G, writer: 'f'.repeat(64), seq: 2, left: false }], 'one row per group, the newest join')
+  const browse = await mediaRequest(server.port, '/index/group-browse/members')
+  t.is(browse.status, 200)
+  t.ok(Array.isArray(JSON.parse(browse.body.toString()).groups), 'the real Seeder answers a browse page')
+  t.is((await mediaRequest(server.port, '/index/public-groups/' + '1'.repeat(64))).status, 404, 'a diary not served is the generic 404')
 })
 
 test('startSeedWs /index/group*: a throw or a seeder without the methods is 404; worst-case bodies stay within 64 KiB', async (t) => {
@@ -2154,6 +2221,20 @@ test('startSeedWs /index/group*: a throw or a seeder without the methods is 404;
   const gsr = await mediaRequest(server.port, '/index/group-search/jardim')
   t.is(gsr.status, 200)
   t.ok(gsr.body.byteLength <= INDEX_MAX_BODY, 'search worst case is ' + gsr.body.byteLength + ' bytes')
+
+  // The discovery lists carry two names per row: 20 browse rows and 32
+  // per-diary rows fit; 64 per-diary rows would not, hence its page of 32.
+  const wide = (i) => ({ group: hex(i), name, creator: hex(200 + i), community: hex(400 + i), communityName: name, members: max, created: max, active: max })
+  seeder.indexGroupBrowse = async () => ({ groups: Array.from({ length: 20 }, (_, i) => wide(i)), more: true, indexing: true, complete: false })
+  const gb = await mediaRequest(server.port, '/index/group-browse/recent')
+  t.is(gb.status, 200)
+  t.ok(gb.body.byteLength <= INDEX_MAX_BODY, 'browse worst case is ' + gb.body.byteLength + ' bytes')
+  seeder.indexPublicGroups = async () => ({ groups: Array.from({ length: 32 }, (_, i) => wide(i)), next: hex(31), hidden: false, indexing: true, complete: false })
+  const pg = await mediaRequest(server.port, '/index/public-groups/' + A + '/' + G)
+  t.is(pg.status, 200)
+  t.ok(pg.body.byteLength <= INDEX_MAX_BODY, 'per-diary worst case is ' + pg.body.byteLength + ' bytes')
+  seeder.indexPublicGroups = async () => ({ groups: Array.from({ length: 64 }, (_, i) => wide(i)), next: hex(63), hidden: false, indexing: true, complete: false })
+  t.is((await mediaRequest(server.port, '/index/public-groups/' + A)).status, 404, '64 per-diary rows would exceed INDEX_MAX_BODY')
 
   seeder.indexGroups = async () => ({ groups: Array.from({ length: 3000 }, (_, i) => ({ group: hex(i), writer: hex(i), seq: max, left: true })), indexing: true, complete: false })
   const over = await mediaRequest(server.port, '/index/groups/' + A)

@@ -28,6 +28,12 @@ const { MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY } = re
 const { foldTokens, parseQuery, searchRank, RESULTS_MAX } = require('./search-text')
 
 const DEFAULT_MAX_GROUPS = 4096
+const BROWSE_MAX = RESULTS_MAX
+const RECENT_PER_CREATOR = 2
+const PUBLIC_GROUPS_PAGE = 32
+// A header date is the creator's own claim, so a later date must not buy a
+// better place in 'recent'; 5 minutes covers ordinary device clock drift.
+const CREATED_SKEW_MS = 300000
 const PAGE_MAX = 64
 const HEX64 = /^[0-9a-f]{64}$/
 
@@ -41,6 +47,12 @@ function cmp (a, b) {
 
 function validSeq (seq) {
   return Number.isSafeInteger(seq) && seq >= 1
+}
+
+function createdOf (at) {
+  if (typeof at !== 'string') return null
+  const ms = Date.parse(at)
+  return Number.isSafeInteger(ms) && ms >= 0 && new Date(ms).toISOString() === at ? ms : null
 }
 
 function shown (fn, ...args) {
@@ -65,7 +77,7 @@ function count (fn, key) {
 function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup = MAX_GROUP_WRITERS } = {}) {
   const groupCap = Number.isSafeInteger(maxGroups) && maxGroups >= 1 ? maxGroups : DEFAULT_MAX_GROUPS
   const writerCap = Number.isSafeInteger(maxWritersPerGroup) && maxWritersPerGroup >= 1 ? maxWritersPerGroup : MAX_GROUP_WRITERS
-  // group -> { header: null | { kind, visibility, join, diary, name, community, member }, tokens,
+  // group -> { header: null | { kind, visibility, join, diary, name, community, member }, created, tokens,
   //   writers: Map<writer, { diary, seq, left }>, ...rootState() }
   const groups = new Map()
   const writerGroup = new Map() // writer -> group
@@ -78,7 +90,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     let g = groups.get(group)
     if (g) return g
     if (groups.size >= groupCap) return null
-    g = { header: null, tokens: [], writers: new Map(), ...rootState() }
+    g = { header: null, created: null, tokens: [], writers: new Map(), ...rootState() }
     groups.set(group, g)
     return g
   }
@@ -217,6 +229,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
         const g = groups.get(group)
         if (!g) return false
         g.header = null
+        g.created = null
         g.tokens = []
         Object.assign(g, rootState())
         dropCreates(group)
@@ -228,12 +241,14 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
       const { kind, visibility, join, diary, name } = header
       const community = isHex64(header.community) ? header.community : null
       const member = isHex64(header.member) ? header.member : null
+      const created = createdOf(header.at)
       if (g.header !== null && g.header.kind !== kind) {
         Object.assign(g, rootState())
         dropCreates(group)
       }
       const shownName = visibility === 'public' && typeof name === 'string' ? name : null
       g.header = { kind, visibility, join, diary, name: shownName, community, member }
+      g.created = created
       retoken(g)
       return true
     } catch {
@@ -455,10 +470,113 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
+  // The root folds in log order, so its first create names Geral.
+  function generalOf (C) {
+    try {
+      if (!isHex64(C)) return null
+      const set = creates.get(C)
+      return set === undefined || set.size === 0 ? null : set.values().next().value
+    } catch {
+      return null
+    }
+  }
+
   function memberCount (g, visible) {
     const members = new Set()
     for (const [key, w] of g.writers) if (!w.left && shown(visible, w.diary, key)) members.add(w.diary)
     return members.size
+  }
+
+  function listed (key, g, f) {
+    if (g.header === null || g.header.kind !== 'group' || g.header.visibility !== 'public') return null
+    const name = groupName(g)
+    if (typeof name !== 'string' || name.length === 0) return null
+    const { community: C, diary: creator } = g.header
+    if (!isHex64(C) || !attached(C, key) || !shown(f.parent, C)) return null
+    const c = groups.get(C)
+    const communityName = c.metaSeen ? c.meta : c.header.name
+    if (typeof communityName !== 'string' || communityName.length === 0) return null
+    if (!shown(f.visible, key, creator)) return null
+    const members = memberCount(g, f.members)
+    if (members < 1) return null
+    return { group: key, name, creator, community: C, communityName, members, created: g.created, active: null }
+  }
+
+  function browse (order, now, filters = {}) {
+    try {
+      if ((order !== 'members' && order !== 'recent') || !Number.isSafeInteger(now)) return null
+      const { visible, parent, members } = filters
+      const f = { visible, parent, members }
+      let rows = []
+      for (const [key, g] of groups) {
+        const row = listed(key, g, f)
+        if (row === null) continue
+        if (row.created !== null && row.created > now + CREATED_SKEW_MS) row.created = null
+        if (order === 'recent' && row.created === null) continue
+        rows.push(row)
+      }
+      if (order === 'members') {
+        rows.sort((a, b) => b.members - a.members || cmp(a.group, b.group))
+      } else {
+        rows.sort((a, b) => b.created - a.created || cmp(a.group, b.group))
+        const perCreator = new Map()
+        rows = rows.filter(({ creator }) => {
+          const kept = perCreator.get(creator) || 0
+          if (kept >= RECENT_PER_CREATOR) return false
+          perCreator.set(creator, kept + 1)
+          return true
+        })
+      }
+      return { groups: rows.slice(0, BROWSE_MAX), more: rows.length > BROWSE_MAX }
+    } catch {
+      return null
+    }
+  }
+
+  function publicGroupsOf (diary, options = {}) {
+    try {
+      if (!isHex64(diary)) return null
+      const { visible, parent, members, joined, after = null, limit = PUBLIC_GROUPS_PAGE } = options
+      if (after !== null && !isHex64(after)) return null
+      if (!Number.isSafeInteger(limit) || limit < 1) return null
+      const max = Math.min(limit, PUBLIC_GROUPS_PAGE)
+      const set = diaryWriters.get(diary)
+      if (!set) return { groups: [], next: null }
+      const live = new Map()
+      for (const writer of set) {
+        const group = writerGroup.get(writer)
+        if (groups.get(group).writers.get(writer).left) continue
+        const writers = live.get(group)
+        if (writers) writers.push(writer)
+        else live.set(group, [writer])
+      }
+
+      // `joined` runs last and only for a group the list would show, so it
+      // never judges a Geral, an approval or an unlisted group (the seeder's
+      // completeness check lives in it), and for every candidate, those
+      // before the cursor and past the page too, so every page agrees.
+      const f = { visible, parent, members }
+      const rows = []
+      let next = null
+      for (const key of [...live.keys()].sort(cmp)) {
+        const g = groups.get(key)
+        const row = listed(key, g, f)
+        if (row === null || generalOf(row.community) === key) continue
+        // A live writer may still be awaiting admission in an approval group.
+        if ((g.metaJoin || g.header.join) !== 'open') continue
+        if (!live.get(key).some((writer) => shown(joined, key, writer))) continue
+        if (after !== null && key <= after) continue
+        if (rows.length >= max) {
+          next = rows[rows.length - 1].group
+          continue
+        }
+        const { group, name, creator, community, communityName, members } = row
+        rows.push({ group, name, creator, community, communityName, members })
+      }
+      return { groups: rows, next }
+    } catch {
+      return null
+    }
   }
 
   // Community root C: its display name (the last group-meta, else its
@@ -512,10 +630,14 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, writer, page, groupsOf, search, foldRoot, resetRoot, attached, communityOf, createdIn, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, writer, page, groupsOf, search, browse, publicGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
 }
 
 module.exports = {
   DEFAULT_MAX_GROUPS,
+  BROWSE_MAX,
+  RECENT_PER_CREATOR,
+  PUBLIC_GROUPS_PAGE,
+  CREATED_SKEW_MS,
   createGroupIndex
 }
