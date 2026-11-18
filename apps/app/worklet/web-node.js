@@ -128,9 +128,9 @@ function createWebNode (args, { onInternalError } = {}) {
     return putDmMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, to, page })
   }
 
-  function putMoment ({ name, mime, width, height, ms, kind }) {
+  function putMoment ({ name, mime, width, height, ms, kind, ahead }) {
     if (cacheDir === null) throw new RpcError('USAGE', BAD_MEDIA_FILE)
-    return putMomentMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind })
+    return putMomentMedia({ read: () => readCacheFile(name), session, unlink, isClosing: lifecycle.isClosing }, { mime, width, height, ms, kind, ahead })
   }
 
   // Opened chat images on disk: cleared at start, on every lock and at

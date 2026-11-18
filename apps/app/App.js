@@ -3333,15 +3333,11 @@ function Member () {
   const openComposer = () => setComposer((c) => ({ ...c, open: true }))
   // The composer in Momento mode (the strip's own ring, 'Novo momento' in the
   // own viewer): `moment` is a counter, so every request switches it again.
-  // A momento is the person's own: a page chosen in Publicar como is set
-  // back to the person for this open, or Publicar would not offer Momento.
+  // The momento is published as whoever is acting, a Page included.
   const openMomentComposer = () => {
     clearStack()
-    actingAs.enterMoment()
     setComposer((c) => ({ ...c, open: true, reply: null, quote: null, moment: (c.moment || 0) + 1 }))
   }
-  // The page is back once the composer closes, published or cancelled.
-  useEffect(() => { if (!composer.open) actingAs.leaveMoment() }, [composer.open])
   const reselectTab = (id) => setScrollSignal((s) => ({ ...s, [id]: (s[id] || 0) + 1 }))
   // Handlers for the memoized screens, updated on every render of the tabs
   // (see the module comment above).

@@ -119,7 +119,7 @@ function hooks () {
   }
 }
 
-async function momentHarness ({ file = null, request = async () => ({}), putMoment, pickVideo = async () => ({}), prepareVideo = async () => clip(), gate = { open: true } } = {}) {
+async function momentHarness ({ file = null, request = async () => ({}), putMoment, pagesMoment = null, pickVideo = async () => ({}), prepareVideo = async () => clip(), gate = { open: true } } = {}) {
   const mod = await load()
   const h = hooks()
   const photo = {
@@ -135,6 +135,9 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     ...mod,
     ...(await import('../src/musicDraft.js')),
     ...(await import('../src/moments.js')),
+    ...(await import('../src/pageMoment.js')),
+    pagesMoment: pagesMoment || (async () => { throw new Error('the person never publishes as a page') }),
+    memberKeyOf: async () => 'a'.repeat(64),
     useMomentMusicAvailable: () => gate.open,
     useChatAttachments: () => photo,
     pickVideo,
@@ -157,7 +160,7 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
   // Destructuring is part of the real functions' signatures.
   deps.momentValid = evaluate('export function momentValid', 'function ({ files, ready, text, video = null, preparing = false })', deps)
   deps.useVideoDraft = evaluate('function useVideoDraft', 'function ({ active, moment = false })', deps)
-  const useMomentDraft = evaluate('function useMomentDraft', 'function ({ node, member, open, active })', deps)
+  const useMomentDraft = evaluate('function useMomentDraft', 'function ({ node, member, open, active, asPage = null, asLabel = \'você\' })', deps)
   const calls = []
   const node = {
     online: true,
@@ -509,6 +512,65 @@ test('switching away during putMoment keeps its item but never creates the late 
   t.ok(await h.render().send())
   t.alike(h.calls.map(([op]) => op), ['put', 'moment.create'])
   t.alike(h.calls[1][1].media, { id: 9 })
+})
+
+const PAGE = 'cd'.repeat(32)
+
+test('a Page momento: ahead upload, a short wallet shows the notice and the next press publishes', async (t) => {
+  const published = []
+  let short = true
+  const h = await momentHarness({
+    putMoment: () => { if (short) { short = false; throw new Error('envio em preparo') } return { id: 7 } },
+    pagesMoment: async (node, args) => { published.push(args) }
+  })
+  h.args.asPage = PAGE
+  h.args.asLabel = 'Padaria'
+  await h.render().pickClip()
+  t.absent(await h.render().send(), 'nothing published on the refusal')
+  t.is(h.render().error, 'Preparando o envio. Tente de novo em instantes.')
+  t.is(h.calls[0][1].ahead, true, 'the Page upload buys no stamp right before it')
+  t.is(published.length, 0)
+  t.absent(h.render().held, 'the draft stays free for the next press')
+  t.ok(await h.render().send(), 'the next press')
+  t.alike(h.calls.map(([op]) => op), ['put', 'put'], 'the media is put again, never a moment.create')
+  t.alike(published.map((p) => [p.page, p.media]), [[PAGE, { id: 7 }]])
+})
+
+test('an identity switch during a Page upload: the late item is not kept for anyone', async (t) => {
+  const wait = deferred()
+  let n = 0
+  const h = await momentHarness({ putMoment: () => (++n === 1 ? wait.promise : { id: 2 }), pagesMoment: async () => {} })
+  h.args.asPage = PAGE
+  await h.render().pickClip()
+  const sending = h.render().send()
+  h.args.asPage = null
+  h.render()
+  h.args.asPage = PAGE
+  h.render()
+  wait.resolve({ id: 1 })
+  t.absent(await sending, 'the switch cancelled that send')
+  t.ok(await h.render().send())
+  t.alike(h.calls.filter(([op]) => op === 'put').length, 2, 'the item that came back after the switch was not reused')
+})
+
+test('a Page send that lands after an identity switch clears the draft and says for whom', async (t) => {
+  const wait = deferred()
+  const h = await momentHarness({ pagesMoment: () => wait.promise })
+  h.args.asPage = PAGE
+  h.args.asLabel = 'Padaria'
+  await h.render().pickClip()
+  h.render().setText('oi')
+  const sending = h.render().send()
+  await new Promise((resolve) => setImmediate(resolve))
+  h.args.asPage = null
+  h.args.asLabel = 'você'
+  h.render()
+  wait.resolve({ seq: 1 })
+  t.absent(await sending, 'no onPublished for a composer now acting as someone else')
+  const d = h.render()
+  t.is(d.note, 'Momento publicado como Padaria.')
+  t.is(d.text, '', 'the draft went')
+  t.is(d.video.state.phase, 'empty')
 })
 
 test('removing a video during upload drops late success and late failure', async (t) => {

@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 84)
+  t.is(LEGAL_VERSION, 85)
   t.is(LEGAL_DATE, '17/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 84, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 85, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -363,7 +363,7 @@ test('legal: privacy identifies unresolved retention and contact', async (t) => 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '58faae50b2411f0243a4fbe1ddc314c276534302265eba92a3b8dbd6b13c0b85', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '1b5b9f189c9caa6da3553884404710f87cfeee9594923e14941d3874371f933a', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -849,7 +849,7 @@ test('legal: version 66 says the account service checks a new @nome and what a p
     'Um @nome que você já tem não é conferido de novo'
   ]) t.ok(all(TERMS).includes(required), 'terms: ' + required)
   for (const required of [
-    'o serviço de conta confere o texto (publicação, resposta, citação, perfil, anúncio e mensagem em grupo público)',
+    'o serviço de conta confere o texto (publicação, resposta, citação,',
     'O texto recusado não é guardado, e o registro da recusa tem só o tipo do pedido e o motivo'
   ]) t.ok(all(PRIVACY).includes(required), 'privacy: ' + required)
   t.absent(all(TERMS).includes('\u2014') || all(PRIVACY).includes('\u2014'), 'no em dash')
@@ -957,11 +957,25 @@ test('legal: version 81 describes the keys of added passkeys, the recovery floor
 test('legal: version 80 describes polls, events, votes and RSVPs of a page', async (t) => {
   const { TERMS, PRIVACY } = await load()
   const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
-  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela e quem ela segue, é público como a página'))
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela'))
   t.ok(text(TERMS).includes('Como os de uma pessoa, um voto ou uma resposta de presença da página é um registro no diário dela, e retirá-lo grava um novo registro que deixa os anteriores públicos.'))
   t.ok(text(TERMS).includes('ao que uma página publica por ele (publicações, com as opções de uma enquete e o título e o lugar de um evento, respostas,'))
-  t.ok(text(PRIVACY).includes('imagens das prévias de links, enquetes, eventos, os votos e as respostas de presença da página e a lista de quem a página segue'))
-  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links, votos, respostas de presença e quem ela segue)'))
+  t.ok(text(PRIVACY).includes('imagens das prévias de links, enquetes, eventos, os votos e as respostas de presença da página'))
+  t.ok(text(PRIVACY).includes('cópia completa do diário da página (publicações, perfil, fotos, vídeos, imagens das prévias de links, votos, respostas de presença'))
+  for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
+})
+
+test('legal: version 83 describes momentos of a page and who the seeder can tie them to', async (t) => {
+  const { TERMS, PRIVACY } = await load()
+  const text = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(text(TERMS).includes('Tudo o que a página publica, como publicações, fotos, vídeos, prévias de links, enquetes, eventos, os votos e as respostas de presença dela, os momentos e quem ela segue, é público como a página'))
+  t.ok(text(TERMS).includes('Uma página também pode publicar momentos, como uma pessoa, e eles seguem as mesmas regras dos momentos descritas acima'))
+  t.ok(text(TERMS).includes('A foto ou o vídeo de um momento da página é enviado ao semeador pelo aparelho de quem o publica, o dono ou um administrador, e pago com os selos de envio da conta dessa pessoa.'))
+  t.ok(text(TERMS).includes('o semeador pode ligar aquele momento da página a quem o publicou. A lista do dono e dos administradores já é pública; o que fica exposto nesse caso é qual deles publicou aquele momento.'))
+  t.ok(text(TERMS).includes('ao que uma página publica por ele (publicações, com as opções de uma enquete e o título e o lugar de um evento, respostas, citações, momentos, perfil,'))
+  t.ok(text(PRIVACY).includes('os votos e as respostas de presença da página, os momentos, com o texto e a referência da foto ou do vídeo, e a lista de quem a página segue'))
+  t.ok(text(PRIVACY).includes('votos, respostas de presença, o texto e a referência da mídia dos momentos e quem ela segue)'))
+  t.ok(text(PRIVACY).includes('o serviço de conta confere o texto (publicação, resposta, citação, momento, perfil, anúncio e mensagem em grupo público)'))
   for (const doc of [TERMS, PRIVACY]) t.absent(text(doc).includes(String.fromCharCode(0x2014)), 'no em dash')
 })
 

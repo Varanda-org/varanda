@@ -759,7 +759,7 @@ const PAGE_ACTIONS = [
   'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
-  'choice', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
+  'choice', 'moment', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
 const PAGE_OP_MAX_BYTES = 16 * 1024
@@ -1869,7 +1869,8 @@ const SPECS = {
       width: req(int(1, MEDIA_SIDE_MAX)),
       height: req(int(1, MEDIA_SIDE_MAX)),
       kind: opt((v) => v === 'video'),
-      ms: opt(int(1, L.MAX_MOMENT_VIDEO_MS))
+      ms: opt(int(1, L.MAX_MOMENT_VIDEO_MS)),
+      ahead: opt((v) => v === true)
     },
     mutating: true,
     cross: momentPutCross

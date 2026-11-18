@@ -169,9 +169,10 @@ export function webNodeHandle (request) {
       if (page !== undefined && (typeof page !== 'string' || !/^[0-9a-f]{64}$/.test(page))) throw new TypeError('mídia inválida')
       return sendFile(bytes, 'dm.putMedia', { to, ...(page !== undefined ? { page } : {}), mime, width, height, ...voiceOf({ ms, kind }) })
     },
-    // A momento's photo or video: a fresh blob of its own (5.113).
-    putMoment: ({ bytes, mime, width, height, ms, kind } = {}) =>
-      sendFile(bytes, 'moment.putMedia', { mime, width, height, ...videoOf({ ms, kind }) }),
+    // A momento's photo or video: a fresh blob of its own (5.113). `ahead`
+    // (a Página's momento) buys no stamps right before the upload.
+    putMoment: ({ bytes, mime, width, height, ms, kind, ahead } = {}) =>
+      sendFile(bytes, 'moment.putMedia', { mime, width, height, ...videoOf({ ms, kind }), ...(ahead === true ? { ahead } : {}) }),
     read: async (ref) => {
       if (ref === null || typeof ref !== 'object') throw new TypeError('mídia inválida')
       let params

@@ -66,7 +66,8 @@ const ACTIONS = Object.freeze([
   'listing-edit',
   'listing-status',
   'listing-consent',
-  'choice'
+  'choice',
+  'moment'
 ])
 // Actions that are not about one existing page sign page = ''.
 const PAGELESS = Object.freeze(['create', 'list', 'terms'])
