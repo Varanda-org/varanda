@@ -318,6 +318,8 @@
 // ticks a pull every DM_PULL_EVERY_MS and a wallet check (top-ups over the
 // separate stamp link, at most one per 10 minutes, and once after an
 // unlock with a dm-key). reset() removes the local store and the dm kv.
+// dm.noticeKey hands the engine the account service's wake key, in memory,
+// for the push notice after a send (./dm.js).
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { RpcError, isSafeMessage, capList, capSyncResult, clipText, MAX_LINE, MAX_ID, PEEK_TIMEOUT_MS, PEEK_SEQS_MAX, TESTIMONIAL_PENDING_MAX, TESTIMONIAL_KEPT_MAX, TESTIMONIAL_DECLINED_MAX, FEED_INCOMPLETE_MAX, mediaBounds, audioBounds, stripAudioMetadata, AUDIO_MS_TOLERANCE, videoBounds, stripVideoMetadata, VIDEO_MS_TOLERANCE, garden } = require('@varanda/rpc')
@@ -5940,6 +5942,14 @@ function createBrowserSession ({
       } catch (err) {
         throw toRpcError(err, reportInternal)
       }
+    },
+
+    // The account service's wake key for push notices (docs/rpc.md 5.167):
+    // memory only, no identity needed; the next call replaces it.
+    'dm.noticeKey': async ({ key }) => {
+      if (closed) throw rpcError('LOCKED', CLOSED_MESSAGE)
+      dmEngine.setNoticeKey(key)
+      return {}
     },
 
     // The recipient's key is looked up first (off the chain), then the send

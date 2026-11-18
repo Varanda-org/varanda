@@ -1,0 +1,7 @@
+### Adicionado
+
+- Aviso de mensagem nova só para quem recebe, na web hospedada com os avisos no aparelho ligados: "Nova mensagem nas Conversas" ou, para quem administra uma Página, "Nova mensagem para uma página que você administra", sem nome e sem texto. Um toque abre as Conversas, ou a lista de Páginas no aviso de uma Página. Depois que o semeador confirma a cópia de quem recebe e a cópia própria, o nó de quem envia passa ao semeador, no canal `varanda/dm-notice/1`, uma caixa lacrada com a chave de quem recebe, que só o serviço de conta abre. O semeador responde sempre igual, nunca abre a caixa e só a repassa uma vez, para um envelope que guardou naquela mesma conexão nos últimos 60 s. O serviço de conta manda no máximo um aviso por destinatário a cada 15 min e 60 por pessoa por hora, só a quem aceitou os Termos 93. A chave do lacre vem do serviço de conta (`wake` em `GET /account/push/key`), entregue ao nó pelo método novo `dm.noticeKey`, nunca de um semeador. O serviço de conta fica sabendo que a pessoa recebeu uma mensagem e quando, nunca quem enviou nem o conteúdo. Termos e Política de Privacidade na versão 93, com novo aceite. Ordem de implantação: serviço de conta, semeadores, apps. Verificação em `docs/verification/feat-dm-recipient-notice.md`.
+
+### Removido
+
+- O aviso global "Pode haver uma mensagem nova na Varanda", que ia para todas as inscrições a cada 15 min: o serviço de conta aceita e descarta o `dm-wake` de um semeador antigo, e o service worker ainda mostra um `dm-wake` antigo por mais uma versão.
