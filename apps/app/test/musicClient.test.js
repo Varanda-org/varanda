@@ -318,6 +318,53 @@ test('audiusTrending: other refusals keep their route-specific codes and never r
   }
 })
 
+test('audiusTrending: playlists use an explicit kind and require playlist items with a null next', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const routes = session({ '/account/audius/trending': json(200, { items: [playlist], next: null }) })
+  const calls = stub(t, routes)
+  const opts = { kind: 'playlist', member: M, request: signer([]) }
+  t.alike(await a.audiusTrending(opts), { items: [playlist], next: null })
+  t.is(calls[2].init.body, '{"kind":"playlist"}')
+  for (const body of [{ items: [track], next: null }, { items: [playlist], next: '12' }]) {
+    routes['/account/audius/trending'] = json(200, body)
+    t.is(await code(t, a.audiusTrending(opts)), 'indisponivel', JSON.stringify(body))
+  }
+})
+
+test('audiusTrending: an invalid kind never opens a session', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session())
+  const signs = []
+  for (const kind of ['album', 7]) {
+    t.is(await code(t, a.audiusTrending({ kind, member: M, request: signer(signs) })), 'pedido-invalido')
+  }
+  t.is(calls.length, 0)
+  t.is(signs.length, 0)
+})
+
+test('audiusTrending: a 400 on a playlist request keeps its code after one read', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const calls = stub(t, session({ '/account/audius/trending': json(400, { error: 'pedido-invalido' }) }))
+  const opts = { kind: 'playlist', member: M, request: signer([]) }
+  t.is(await code(t, a.audiusTrending(opts)), 'pedido-invalido')
+  t.is(reads(calls, '/trending').length, 1)
+  t.is(calls.length, 3, 'one session and one read')
+})
+
+test('audiusTrending: a playlist read repeats its body once after a 401', async (t) => {
+  const a = await load()
+  a.forgetAudiusSession()
+  const signs = []
+  const calls = stub(t, session({ '/account/audius/trending': json(401, { error: 'nao-autorizado' }) }))
+  const opts = { kind: 'playlist', member: M, request: signer(signs) }
+  t.is(await code(t, a.audiusTrending(opts)), 'nao-autorizado')
+  t.alike(reads(calls, '/trending').map(({ init }) => init.body), ['{"kind":"playlist"}', '{"kind":"playlist"}'])
+  t.is(signs.length, 2, 'one fresh session')
+})
+
 test('audiusItem: { kind, id } in the body, strict answer', async (t) => {
   const a = await load()
   a.forgetAudiusSession()

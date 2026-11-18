@@ -27,16 +27,19 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     ignores the query, so a newer app can ask without breaking it. With
 //     `?info=1`, each track (never a playlist) also carries `genre` and `year`
 //     when the provider had them; without it the keys are today's exact ones.
-//   - POST /account/audius/trending {} (bearer) answers { items, next: null }:
-//     at most PAGE_SIZE tracks of the week's trending list, with covers and
-//     info as on search, TRENDINGS_PER_DAY per member. The list is one for
-//     every member, kept in memory only: a list that came back fine is reused
-//     for up to CACHE_TTL_MS, concurrent misses share one provider call (the
-//     member that started it pays it), a failed attempt that reached the
-//     provider stops new ones for TRENDING_RETRY_MS (answered 503, the use
-//     given back), and a restart erases the list. What reaches Audius on this
-//     route: the fixed time=week, the list's limit and offset, the app name,
-//     the key and this service's address, nothing of the member.
+//   - POST /account/audius/trending {} or { kind } (bearer, kind 'track' or
+//     'playlist', 'track' when absent) answers { items, next: null }: at most
+//     PAGE_SIZE items of the week's trending tracks or playlists, with covers
+//     as on search and, for tracks only, info as on search. One daily counter,
+//     TRENDINGS_PER_DAY per member, serves both kinds. There is one list per
+//     kind for every member, kept in memory only: a list that came back fine
+//     is reused for up to CACHE_TTL_MS, concurrent misses of a kind share one
+//     provider call (the member that started it pays it), a failed attempt
+//     that reached the provider stops new requests for that list for
+//     TRENDING_RETRY_MS (answered 503, the use given back), and a restart
+//     erases both. A playlist's tracks are not asked. What reaches Audius on
+//     this route: the fixed time=week, the list's limit and offset, the app
+//     name, the key and this service's address, nothing of the member.
 //   - POST /account/audius/art { kind, id } (bearer, covers switch on)
 //     answers { mime, bytes } with the item's 150x150 cover: at most
 //     ART_MAX_BYTES, JPEG, PNG or WebP by magic bytes only, ARTS_PER_DAY per
@@ -113,7 +116,7 @@ const { requestFor, fromTrack, fromPlaylist, fromResolve, isAudiusPermalink, lis
 //     as any other.
 //
 // What reaches the provider: the query text, an id, a permalink or the
-// trending list's fixed time=week, limit and offset, the operator's key (in
+// trending lists' fixed time=week, limit and offset, the operator's key (in
 // a header, first hop only, never to a kept storage URL) and app name, this
 // service's address and a fixed User-Agent. Never the member's address, key
 // or token.
@@ -346,13 +349,15 @@ function createAudiusRoutes ({
   const memberRelays = new Map()
   // member -> its art requests waiting on a host fetch, started or joined.
   const memberArts = new Map()
-  // The week's trending list, shared by every member and keyed by none:
-  // { rows, expiresAt }, rows being cached track rows. `trendingLoad` is the
-  // running provider call every concurrent miss awaits, and `trendingHold`
-  // the time before which a miss asks nothing after a failed call.
-  let trendingSlot = null
-  let trendingLoad = null
-  let trendingHold = 0
+  // The week's trending lists, shared by every member and keyed only by the
+  // validated kind ('track' or 'playlist'), never by a member. A list key
+  // maps to { rows, expiresAt }, rows being cached track or playlist rows, or
+  // to { failedUntil }, the time before which a miss asks nothing after a
+  // failed call: a hold is only written on a miss, so it never replaces a
+  // valid list. `trendingLoads` holds the running provider call of a key,
+  // which every concurrent miss of that key awaits.
+  const trendingLists = new Map()
+  const trendingLoads = new Map()
   let streams = 0
   let inflight = 0
   let artInflight = 0
@@ -695,50 +700,64 @@ function createAudiusRoutes ({
     send(res, 200, { kind: 'playlist', item: shown(playlistItem(row), row, withCovers) })
   }
 
-  // The trending rows while they are valid, by the rule of recalled().
-  function trendingRows () {
-    if (trendingSlot === null) return null
+  // The rows of the list `key` while they are valid, by the rule of recalled().
+  function trendingRows (key) {
+    const entry = trendingLists.get(key)
+    if (entry === undefined || entry.rows === undefined) return null
     const t = now()
-    if (trendingSlot.expiresAt <= t || trendingSlot.expiresAt - t > CACHE_TTL_MS) {
-      trendingSlot = null
+    if (entry.expiresAt <= t || entry.expiresAt - t > CACHE_TTL_MS) {
+      trendingLists.delete(key)
       return null
     }
-    return trendingSlot.rows
+    return entry.rows
   }
 
-  function trendingHeld () {
+  function trendingHeld (key) {
+    const entry = trendingLists.get(key)
+    if (entry === undefined || entry.failedUntil === undefined) return false
     const t = now()
-    if (trendingHold > t && trendingHold - t <= TRENDING_RETRY_MS) return true
-    trendingHold = 0
+    if (entry.failedUntil > t && entry.failedUntil - t <= TRENDING_RETRY_MS) return true
+    trendingLists.delete(key)
     return false
   }
 
-  // One provider call for the list, charged to `member`. Rejects like
-  // providerJson; a failure after the provider was contacted starts the hold.
-  async function loadTrending (member) {
+  // One provider call for the list `kind`, charged to `member`. Rejects like
+  // providerJson; a failure after the provider was contacted holds that list
+  // only.
+  async function loadTrending (kind, member) {
     try {
-      const list = listOf(await providerJson(requestFor(config, 'trendingTracks', { limit: TRENDING_ASK, offset: 0 }), member))
+      const spec = requestFor(config, kind === 'track' ? 'trendingTracks' : 'trendingPlaylists', { limit: TRENDING_ASK, offset: 0 })
+      const list = listOf(await providerJson(spec, member))
       if (list === null) throw new Error('forma')
       const rows = []
       const seen = new Set()
       for (const it of list) {
         if (rows.length >= PAGE_SIZE) break
-        // Checked before mappedTrack caches it: a duplicate must not replace
-        // the row whose cover flag this list answers.
-        const track = fromTrack(it)
-        if (track === null || seen.has(track.id)) continue
-        seen.add(track.id)
-        rows.push(mappedTrack(it))
+        // Checked before mappedTrack or rememberPlaylist caches it: a
+        // duplicate must not replace the row whose cover flag this list
+        // answers.
+        const mapped = kind === 'track' ? fromTrack(it) : fromPlaylist(it)
+        if (mapped === null || seen.has(mapped.id)) continue
+        seen.add(mapped.id)
+        rows.push(kind === 'track' ? mappedTrack(it) : rememberPlaylist(mapped))
       }
-      trendingSlot = { rows, expiresAt: now() + CACHE_TTL_MS }
-      trendingHold = 0
+      // A list lives no longer than the cached rows its cover flags follow:
+      // a playlist row cached with its tracks is updated in place and keeps
+      // its own, earlier expiry, and once it is gone the art route asks the
+      // provider again.
+      let expiresAt = now() + CACHE_TTL_MS
+      for (const row of rows) {
+        const entry = cache.get(kind + ':' + row.id)
+        if (entry !== undefined && entry.expiresAt < expiresAt) expiresAt = entry.expiresAt
+      }
+      trendingLists.set(kind, { rows, expiresAt })
       return rows
     } catch (err) {
       const token = err && err.message
-      if (token !== 'pedido' && token !== 'lotado' && token !== 'limite' && token !== 'orcamento') trendingHold = now() + TRENDING_RETRY_MS
+      if (token !== 'pedido' && token !== 'lotado' && token !== 'limite' && token !== 'orcamento') trendingLists.set(kind, { failedUntil: now() + TRENDING_RETRY_MS })
       throw err
     } finally {
-      trendingLoad = null
+      trendingLoads.delete(kind)
     }
   }
 
@@ -754,36 +773,41 @@ function createAudiusRoutes ({
   }
 
   async function trending (res, member, body, url) {
-    exactKeys(body, [])
+    exactKeys(body, [], ['kind'])
+    const kind = body.kind === undefined ? 'track' : kindParam(body.kind)
     if (!limits.trending(member)) throw overLimit()
-    let rows = trendingRows()
-    if (rows === null && trendingLoad !== null) {
+    let rows = trendingRows(kind)
+    const running = trendingLoads.get(kind)
+    if (rows === null && running !== undefined) {
       // The leader's refusal (its own 'limite' above all) says nothing about
       // this member, so a joiner only ever hears indisponivel.
       try {
-        rows = await trendingLoad
+        rows = await running
       } catch {
         limits.trending.giveBack(member)
         throw unavailable()
       }
     } else if (rows === null) {
-      if (trendingHeld()) {
+      if (trendingHeld(kind)) {
         limits.trending.giveBack(member)
         throw unavailable()
       }
-      trendingLoad = loadTrending(member)
+      const load = loadTrending(kind, member)
+      trendingLoads.set(kind, load)
       try {
-        rows = await trendingLoad
+        rows = await load
       } catch (err) {
         throw trendingFailed(err, member)
       }
     }
     log({ event: 'audius', reason: 'em-alta' })
     const withCovers = wantsCovers(url)
+    // As in a playlist answer, the flag comes from the item's own row, which
+    // a later search may have replaced (or, for a playlist, updated in place
+    // without returning it): that row is what the art route reads.
+    const own = (row) => (withCovers ? recalled(kind + ':' + row.id) ?? row : row)
+    if (kind === 'playlist') return send(res, 200, { items: rows.map((row) => shown(playlistItem(row), own(row), withCovers)), next: null })
     const withInfo = wantsInfo(url)
-    // As in a playlist answer, the flag comes from the track's own row, which
-    // a later search may have replaced: that row is what the art route reads.
-    const own = (row) => (withCovers ? recalled('track:' + row.id) ?? row : row)
     send(res, 200, { items: rows.map((row) => shown(trackItem(row), own(row), withCovers, withInfo)), next: null })
   }
 
