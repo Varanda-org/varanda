@@ -45,7 +45,7 @@ const makeStyles = (colors) => StyleSheet.create({
   pressed: { opacity: 0.6 },
   chip: {
     paddingHorizontal: space.md,
-    paddingVertical: space.sm,
+    paddingVertical: 6,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.line,
