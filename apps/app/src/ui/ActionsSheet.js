@@ -1,4 +1,4 @@
-// The actions of one message (or any item) in a compact bottom panel: one 44 pt row per
+// The actions of one message (or any item) in a compact bottom panel: one 56 pt row per
 // action, an icon and a label, danger rows in the danger colour. A row closes
 // the sheet first and then runs its onPress once it is gone, so an action that opens another
 // sheet or a confirmation never stacks on this one. A light haptic marks the
@@ -30,6 +30,8 @@ import { layout, radius, space, type } from './theme'
 import { holdEmbeds } from '../embedLive'
 import { useHandedOpen } from './Sheet'
 
+const ROW_ICON_SIZE = 22
+
 // Open menus, so a parent layer with its own key handling can leave Escape
 // to the menu on top of it.
 export function actionsSheetOpen () {
@@ -47,6 +49,7 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
   const insets = useSafeAreaInsets()
   const { height } = useWindowDimensions()
   const rows = usableActions(actions)
+  const hasIcons = rows.some((a) => typeof a.icon === 'string')
   const shown = !!open && rows.length > 0
   useEffect(() => {
     if (shown) tap()
@@ -121,7 +124,7 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
           <View style={styles.grabber} />
           {lastHeader.current}
           {typeof title === 'string' && title !== ''
-            ? <View style={styles.titleBox}><Text style={styles.title} numberOfLines={1} accessibilityRole='header'>{displayText(title)}</Text></View>
+            ? <View style={styles.titleBox}><Text style={[styles.title, hasIcons && styles.titleWithIcons]} numberOfLines={1} accessibilityRole='header'>{displayText(title)}</Text></View>
             : null}
           <ScrollView bounces={false} style={styles.rows} keyboardShouldPersistTaps='handled'>
             {rows.map((a, i) => {
@@ -138,7 +141,7 @@ export function ActionsSheet ({ open, onClose, title, actions, header }) {
                   onPress={off ? undefined : run(a.onPress)}
                   style={({ pressed }) => [styles.row, off && !selected && styles.off, pressed && !off && styles.pressed]}
                 >
-                  {typeof a.icon === 'string' ? <Icon name={a.icon} size={22} color={tint} /> : null}
+                  {hasIcons && <View style={styles.rowIcon}>{typeof a.icon === 'string' ? <Icon name={a.icon} size={ROW_ICON_SIZE} color={tint} /> : null}</View>}
                   <View style={styles.text}>
                     <Text style={[styles.label, { color: tint }]}>{a.pending ? a.label + '…' : a.label}</Text>
                     {typeof a.description === 'string' && a.description !== '' ? <Text style={styles.description}>{displayText(a.description)}</Text> : null}
@@ -168,18 +171,21 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingTop: space.sm
   },
   grabber: { alignSelf: 'center', width: 36, height: 5, borderRadius: radius.pill, backgroundColor: colors.line, marginBottom: space.sm },
-  titleBox: { paddingHorizontal: space.xl, paddingBottom: space.sm, marginBottom: space.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  titleBox: { paddingHorizontal: space.sm + space.lg, paddingBottom: space.sm, marginBottom: space.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   title: { ...type.replyMark, fontWeight: '600', color: colors.soft },
+  titleWithIcons: { marginStart: ROW_ICON_SIZE + space.lg },
   row: {
-    minHeight: layout.hit + space.sm,
+    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.lg,
-    paddingHorizontal: space.xl
+    marginHorizontal: space.sm,
+    paddingHorizontal: space.lg
   },
+  rowIcon: { width: ROW_ICON_SIZE },
   text: { flex: 1, minWidth: 0, paddingVertical: space.xs },
-  label: { ...type.cancel },
+  label: { ...type.rowName },
   description: { ...type.replyMark, color: colors.soft },
   off: { opacity: 0.45 },
-  pressed: { backgroundColor: colors.skeleton }
+  pressed: { borderRadius: radius.bubble, backgroundColor: colors.skeleton }
 })
