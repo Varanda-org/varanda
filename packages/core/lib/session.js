@@ -1110,8 +1110,8 @@ function createSession ({
     }),
 
     // Varandinha (docs/rpc.md garden.*): the help check needs peeks of the
-    // owner's diary and the seeder index the core node does not read; refused
-    // the same way, nothing written.
+    // owner's diary and the seeder index the core node does not read, and a
+    // give and a take do too. Refused the same way, before any core is opened.
     'garden.set': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
@@ -1122,6 +1122,21 @@ function createSession ({
       throw new UsageError(PEEK_WEB_ONLY)
     }),
     'garden.help': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.decor': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.stall': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.give': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.take': serial(async () => {
+      throw new UsageError(PEEK_WEB_ONLY)
+    }),
+    'garden.drop': serial(async () => {
       throw new UsageError(PEEK_WEB_ONLY)
     }),
 

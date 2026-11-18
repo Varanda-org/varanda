@@ -69,6 +69,9 @@ const {
   gardenRecord,
   gardenStateRecord,
   gardenHelpRecord,
+  gardenDecorRecord,
+  gardenGiftRecord,
+  gardenTakeRecord,
   choiceRecord,
   momentRecord,
   postShareRecord,
@@ -1643,25 +1646,48 @@ const GARDEN_OFF_HELP = 'ligue a Varandinha para regar'
 const GARDEN_NOT_FOLLOWING = 'você só rega a varanda de quem você segue'
 const GARDEN_SAME_DAY = 'você já regou esta varanda hoje'
 const GARDEN_HELPS_FULL = 'você já regou o máximo de varandas por hoje'
+const GARDEN_STALL_CLOSED = 'a barraquinha só abre aos sábados'
+const GARDEN_GIFT_SELF = 'não dá para dar um mimo para si'
+const GARDEN_GIFT_NOT_FOLLOWING = 'você só dá mimos para quem você segue'
+const GARDEN_GIFT_SAME_DAY = 'você já deu um mimo para esta pessoa hoje'
+const GARDEN_GIFTS_FULL = 'você já deu o máximo de mimos por hoje'
+const GARDEN_NOT_RIPE = 'este vaso ainda não está pronto'
+const GARDEN_GIFT_GONE = 'este mimo não está mais disponível'
+const GARDEN_TAKES_FULL = 'você já aceitou o máximo de mimos por hoje'
+const GARDEN_NOT_GIFT = 'este registro não é um mimo seu'
+// docs/protocol.md section 2: an honest take prunes own takes dated more
+// than eight days ago.
+const GARDEN_TAKE_KEEP_MS = 691200000
 
-// The own game blocks of the raw entries, read once: the newest live
-// `garden` flag copy (null for none), and every live `garden-state` and
-// `garden-help` copy as { seq, record }, ascending. A copy that fails
+// The own game blocks of the raw entries, read once: whether the newest live
+// `garden` flag is on and its seq (onSeq, null when off or none), and every
+// live `garden-state`, `garden-help`, `garden-decor`, `garden-gift` and
+// `garden-take` copy as { seq, record }, ascending. A copy that fails
 // validRecordCopy is skipped.
 function gardenBlocks (raw) {
   const deleted = deletedSeqs(raw)
   let flag = null
+  let flagSeq = null
   const states = []
   const helps = []
+  const decors = []
+  const gifts = []
+  const takes = []
   for (const { seq, record } of raw) {
     if (deleted.has(seq)) continue
     const copy = validRecordCopy(record, seq)
     if (copy === null) continue
-    if (copy.type === 'garden') flag = copy
-    else if (copy.type === 'garden-state') states.push({ seq, record: copy })
+    if (copy.type === 'garden') {
+      flag = copy
+      flagSeq = seq
+    } else if (copy.type === 'garden-state') states.push({ seq, record: copy })
     else if (copy.type === 'garden-help') helps.push({ seq, record: copy })
+    else if (copy.type === 'garden-decor') decors.push({ seq, record: copy })
+    else if (copy.type === 'garden-gift') gifts.push({ seq, record: copy })
+    else if (copy.type === 'garden-take') takes.push({ seq, record: copy })
   }
-  return { on: flag !== null && flag.on === true, states, helps }
+  const on = flag !== null && flag.on === true
+  return { on, onSeq: on ? flagSeq : null, states, helps, decors, gifts, takes }
 }
 
 async function readGarden (diary) {
@@ -1701,15 +1727,17 @@ async function gardenSet (ctx) {
   return publishLatest(ctx, buildRecord(() => gardenRecord({ on: true })))
 }
 
-// Leaves the game: tombstones every live garden-state and garden-help, oldest
-// first, then writes the off flag LAST, so a leave cut short still reads on
-// and a repeat re-reads the live blocks and converges. -> { seq, ref } of the
-// flag, or null when there was nothing to do (flag not on, nothing live).
+// Leaves the game: tombstones every live garden-state, garden-help,
+// garden-decor, garden-gift and garden-take, oldest first, then writes the
+// off flag LAST, so a leave cut short still reads on and a repeat re-reads
+// the live blocks and converges. -> { seq, ref } of the flag, or null when
+// there was nothing to do (flag not on, nothing live).
 async function gardenLeave (ctx) {
   const done = await withIdentity(ctx, async ({ diary, ownHex }) => {
     const g = await readGarden(diary)
-    if (!g.on && g.states.length === 0 && g.helps.length === 0) return null
-    const seqs = [...g.states, ...g.helps].map((e) => e.seq).sort((a, b) => a - b)
+    const live = [...g.states, ...g.helps, ...g.decors, ...g.gifts, ...g.takes]
+    if (!g.on && live.length === 0) return null
+    const seqs = live.map((e) => e.seq).sort((a, b) => a - b)
     if (seqs.length === 0) return { last: null }
     const at = nowIso()
     const tombs = seqs.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
@@ -1793,22 +1821,34 @@ function gardenTargetSeqs (index) {
   return [...wanted].sort((a, b) => a - b)
 }
 
+// Judges whether a target's balcony is open, from the same index answer and
+// peek as gardenTargetVerdict, with no pot check (a mimo goes to the person,
+// not to a pot). -> null (an opted-in member), 'page', 'off' or
+// 'unavailable' (anything the peek did not prove).
+function gardenOpenVerdict (index, peek, now) {
+  const { on } = index
+  if (peek.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster')) return 'page'
+  if ([1, 2].some((q) => q < peek.length && peek.missing.includes(q))) return 'unavailable'
+  if (on === null) return 'off'
+  const flag = peek.entries.find((e) => e.seq === on)
+  if (flag === undefined || flag.record.type !== 'garden') return 'unavailable'
+  // Readers drop a flag dated past MAX_FUTURE (foldBalcony).
+  if (flag.record.on !== true || !(Date.parse(flag.record.at) <= now + garden.GARDEN_MAX_FUTURE_MS)) return 'off'
+  return null
+}
+
 // Judges a help target from the index answer and the verified peek of the
 // gardenTargetSeqs blocks (`{ entries: [{ seq, record }], missing, length }`).
 // -> null (a planted, growing pot of an opted-in member), 'page', 'off',
 // 'no-plant' or 'unavailable' (anything the peek did not prove).
 function gardenTargetVerdict (index, peek, pot, now) {
+  const open = gardenOpenVerdict(index, peek, now)
+  if (open !== null) return open
   const { on, state } = index
   const at = (seq) => peek.entries.find((e) => e.seq === seq)
-  if (peek.entries.some((e) => e.seq <= 2 && e.record.type === 'page-roster')) return 'page'
-  if ([1, 2].some((q) => q < peek.length && peek.missing.includes(q))) return 'unavailable'
-  if (on === null) return 'off'
-  const flag = at(on)
-  if (flag === undefined || flag.record.type !== 'garden') return 'unavailable'
   const ahead = now + garden.GARDEN_MAX_FUTURE_MS
-  // Readers drop a flag or state dated past MAX_FUTURE (foldBalcony).
-  if (flag.record.on !== true || !(Date.parse(flag.record.at) <= ahead)) return 'off'
   if (state === null) return 'no-plant'
+  // Readers drop a state dated past MAX_FUTURE (foldBalcony).
   // An honest diary's live state follows its live on flag: a leave
   // tombstones every state before the off flag, a rejoin writes a new flag.
   if (state < on) return 'unavailable'
@@ -1839,6 +1879,186 @@ async function gardenHelp (ctx, { to, pot, writer, now }) {
     const seq = await appendChunked(ctx, diary, [...tombs, buildRecord(() => gardenHelpRecord({ to, pot, at }))])
     if (old.length > 0) await clearAfterDelete(ctx, diary, ownHex, old.map((h) => h.seq), tombs)
     return { seq, ref: formatRef({ author: ownHex, seq }) }
+  })
+}
+
+// The own live takes above the live on flag: one at or below it was left by
+// an older join, so it neither shows, nor answers taken, nor counts toward
+// the day.
+function takesAbove (g) {
+  return g.onSeq === null ? [] : g.takes.filter((e) => e.seq > g.onSeq)
+}
+
+// The own Barraquinha -> { open, decor, giftsToday, takesToday, gave, takes }.
+// An unreadable clock reads both budgets spent and the stall closed, never a
+// fresh budget. takesToday counts what gardenTake's daily check counts.
+async function gardenStallOwn (ctx, now) {
+  const g = await withIdentity(ctx, ({ diary }) => readGarden(diary))
+  const today = garden.dayStart(now)
+  const blind = Number.isNaN(today)
+  const gifts = g.gifts.map((e) => ({ seq: e.seq, to: e.record.to, item: e.record.item, at: e.record.at, ms: Date.parse(e.record.at) }))
+  const takes = takesAbove(g).map((e) => ({ seq: e.seq, from: e.record.from, gseq: e.record.seq, at: e.record.at, ms: Date.parse(e.record.at) }))
+  const out = {
+    open: !blind && garden.stallDay(now),
+    decor: null,
+    giftsToday: blind ? garden.GARDEN_GIFTS_DAILY_MAX : gifts.filter((e) => e.ms >= today).length,
+    takesToday: blind ? garden.GARDEN_TAKES_DAILY_MAX : takes.filter((e) => e.ms >= today).length,
+    gave: [],
+    takes: []
+  }
+  if (!g.on) return out
+  const decor = g.decors.length === 0 ? null : g.decors[g.decors.length - 1]
+  if (decor !== null && decor.seq > g.onSeq) out.decor = { seq: decor.seq, items: decor.record.items }
+  // A gift that counts toward giftsToday is always listed, so garden.drop
+  // can take it back even when offerListable drops it (dated too far ahead).
+  out.gave = gifts
+    .filter((e) => garden.offerListable(e.ms, now) || (!blind && e.ms >= today))
+    .sort((a, b) => b.seq - a.seq)
+    .slice(0, garden.GARDEN_GIFT_ROWS)
+    .map(({ seq, to, item, at }) => ({ seq, to, item, at }))
+  out.takes = takes
+    .filter((e) => e.ms >= now - GARDEN_TAKE_KEEP_MS)
+    .sort((a, b) => b.seq - a.seq)
+    .slice(0, garden.GARDEN_TAKE_ROWS)
+    .map(({ seq, from, gseq, at }) => ({ seq, from, gseq, at }))
+  return out
+}
+
+// Sets the enfeites (publishLatest: every earlier live garden-decor goes).
+// -> { seq, ref, items }.
+async function gardenDecor (ctx, { items }) {
+  await withIdentity(ctx, async ({ diary }) => {
+    if (!(await readGarden(diary)).on) throw new UsageError(GARDEN_OFF_PLAY)
+  })
+  const record = buildRecord(() => gardenDecorRecord({ items }))
+  const { seq, ref } = await publishLatest(ctx, record)
+  return { seq, ref, items: record.items.slice() }
+}
+
+function giveRefusal (reason) {
+  if (reason === 'self') return GARDEN_GIFT_SELF
+  if (reason === 'not-following') return GARDEN_GIFT_NOT_FOLLOWING
+  if (reason === 'closed') return GARDEN_STALL_CLOSED
+  if (reason === 'same-day') return GARDEN_GIFT_SAME_DAY
+  if (reason === 'daily') return GARDEN_GIFTS_FULL
+  return GARDEN_BAD_PLAY
+}
+
+// The give checks over one open own diary -> { g, n, pots, item }, or a
+// UsageError. Follows come from the diary's live `follow` records, as in
+// checkHelp. A give needs a save ordinal: a gift whose pot stays planted
+// could be harvested or given again.
+async function checkGive (diary, ownHex, { to, pot, writer, now, received }) {
+  if (ownHex !== writer) throw new UsageError(store.LOCKED)
+  if (to === ownHex) throw new UsageError(GARDEN_GIFT_SELF)
+  const g = await readGarden(diary)
+  if (!g.on) throw new UsageError(GARDEN_OFF_PLAY)
+  const follows = new Set(diary.length === 0 ? [] : followSet(await store.readAll(diary), ownHex))
+  const own = g.gifts.map((e) => ({ to: e.record.to, at: e.record.at }))
+  const verdict = garden.giveAllowed({ self: ownHex, to, follows, own, now })
+  if (verdict.ok !== true) throw new UsageError(giveRefusal(verdict.reason))
+  const prev = g.states.length === 0 ? null : g.states[g.states.length - 1].record
+  const n = garden.saveOrdinal(prev, now)
+  if (n === null) throw new UsageError(GARDEN_SAVES_FULL)
+  const given = garden.foldGiven({ self: ownHex, pots: prev === null ? null : prev.pots, given: g.helps, now }).perPot
+  const r = garden.applyGive(prev, pot, now, { received, given })
+  if (r === null || typeof r !== 'object' || r.ok !== true) {
+    throw new UsageError(r !== null && typeof r === 'object' && (r.reason === 'empty' || r.reason === 'not-ripe') ? GARDEN_NOT_RIPE : GARDEN_BAD_PLAY)
+  }
+  return { g, n, pots: r.state.pots, item: r.item }
+}
+
+// gardenGive's checks alone, writing nothing. -> undefined, or gardenGive's
+// UsageError.
+async function gardenGiveCheck (ctx, args) {
+  await withIdentity(ctx, ({ diary, ownHex }) => checkGive(diary, ownHex, args))
+}
+
+// Gives ripe pot `pot` to `to` as a mimo. The final append is ONE atomic
+// write: tombstones of own gifts whose week ended (oldest first, at most
+// APPEND_MAX - 3), the newest prior state's tombstone, the emptied state and
+// the gift last, so a failed append leaves the previous balcony and no gift.
+// Older live states, if any, are tombstoned first in earlier chunks, as
+// publishLatest does: no old state stays live.
+// -> { seq, ref, state: { seq, pots, n, at } }, seq and ref the gift's.
+async function gardenGive (ctx, args) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const { g, n, pots, item } = await checkGive(diary, ownHex, args)
+    const { to, now } = args
+    const at = new Date(now).toISOString()
+    const ended = g.gifts
+      .filter((e) => garden.dayStart(Date.parse(e.record.at)) + garden.GARDEN_STALL_WINDOW_MS <= now)
+      .slice(0, APPEND_MAX - 3)
+    const older = g.states.slice(0, -1)
+    const newest = g.states.slice(-1)
+    const tomb = (e) => buildRecord(() => deleteRecord({ seq: e.seq, at }))
+    const olderTombs = older.map(tomb)
+    const finalTombs = [...ended, ...newest].map(tomb)
+    const state = buildRecord(() => gardenStateRecord({ pots, n, at }))
+    const gift = buildRecord(() => gardenGiftRecord({ to, item, at }))
+    let written = null
+    let seq
+    try {
+      if (olderTombs.length > 0) written = await appendChunked(ctx, diary, olderTombs)
+      seq = await appendAll(ctx, diary, [...finalTombs, state, gift])
+    } catch (err) {
+      if (written !== null && err !== null && typeof err === 'object' && !Number.isSafeInteger(err.written)) err.written = written
+      throw err
+    }
+    const gone = [...older, ...ended, ...newest].map((e) => e.seq)
+    if (gone.length > 0) await clearAfterDelete(ctx, diary, ownHex, gone, [...olderTombs, ...finalTombs])
+    return { seq, ref: formatRef({ author: ownHex, seq }), state: { seq: seq - 1, pots, n, at } }
+  })
+}
+
+function takeRefusal (reason) {
+  if (reason === 'self' || reason === 'not-found' || reason === 'expired') return GARDEN_GIFT_GONE
+  if (reason === 'daily') return GARDEN_TAKES_FULL
+  return GARDEN_BAD_PLAY
+}
+
+// Accepts the mimo at block `seq` of `from` (`record` that block as peeked
+// now, null when unavailable). A live take above the on flag already naming
+// it answers that take and writes nothing. Else one append: tombstones of
+// own takes at or below the on flag or dated more than eight days ago
+// (oldest first, at most APPEND_MAX - 1), then the take last.
+// -> { seq, ref, changed }.
+async function gardenTake (ctx, { from, seq, record, now }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    const g = await readGarden(diary)
+    if (!g.on) throw new UsageError(GARDEN_OFF_PLAY)
+    const above = takesAbove(g)
+    const existing = above.find((e) => e.record.from === from && e.record.seq === seq)
+    if (existing !== undefined) return { seq: existing.seq, ref: formatRef({ author: ownHex, seq: existing.seq }), changed: false }
+    const own = above.map((e) => ({ from: e.record.from, seq: e.record.seq, at: e.record.at }))
+    const verdict = garden.takeAllowed({ self: ownHex, from, seq, gift: record, own, now })
+    if (verdict.ok !== true) throw new UsageError(takeRefusal(verdict.reason))
+    const cutoff = now - GARDEN_TAKE_KEEP_MS
+    const old = g.takes
+      .filter((e) => e.seq <= g.onSeq || !(Date.parse(e.record.at) >= cutoff))
+      .slice(0, APPEND_MAX - 1)
+    const at = new Date(now).toISOString()
+    const tombs = old.map((e) => buildRecord(() => deleteRecord({ seq: e.seq, at })))
+    const taken = await appendAll(ctx, diary, [...tombs, buildRecord(() => gardenTakeRecord({ from, seq, at }))])
+    if (old.length > 0) await clearAfterDelete(ctx, diary, ownHex, old.map((e) => e.seq), tombs)
+    return { seq: taken, ref: formatRef({ author: ownHex, seq: taken }), changed: true }
+  })
+}
+
+// Tombstones the own live garden-gift (kind 'gift') or garden-take (kind
+// 'take') at `seq`. Needs neither the flag nor a seeder, so a member can
+// always take a mimo back. -> { seq, deleted: [seq] }.
+async function gardenDrop (ctx, { kind, seq }) {
+  const type = kind === 'gift' ? 'garden-gift' : kind === 'take' ? 'garden-take' : null
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (type === null || !Number.isSafeInteger(seq) || seq < 1 || seq >= diary.length) throw new UsageError(GARDEN_NOT_GIFT)
+    const raw = await store.readRaw(diary)
+    const target = deletedSeqs(raw).has(seq) ? null : recordAt(raw, seq)
+    if (target === null || target.type !== type) throw new UsageError(GARDEN_NOT_GIFT)
+    const tomb = buildRecord(() => deleteRecord({ seq, at: nowIso() }))
+    const at = await appendOwn(ctx, diary, tomb)
+    await clearAfterDelete(ctx, diary, ownHex, [seq], [tomb])
+    return { seq: at, deleted: [seq] }
   })
 }
 
@@ -6914,6 +7134,13 @@ module.exports = {
   gardenHelp,
   gardenTargetSeqs,
   gardenTargetVerdict,
+  gardenStallOwn,
+  gardenDecor,
+  gardenGiveCheck,
+  gardenGive,
+  gardenOpenVerdict,
+  gardenTake,
+  gardenDrop,
   GARDEN_OFF_PLAY,
   GARDEN_SAVES_FULL,
   GARDEN_BAD_PLAY,
@@ -6922,6 +7149,15 @@ module.exports = {
   GARDEN_NOT_FOLLOWING,
   GARDEN_SAME_DAY,
   GARDEN_HELPS_FULL,
+  GARDEN_STALL_CLOSED,
+  GARDEN_GIFT_SELF,
+  GARDEN_GIFT_NOT_FOLLOWING,
+  GARDEN_GIFT_SAME_DAY,
+  GARDEN_GIFTS_FULL,
+  GARDEN_NOT_RIPE,
+  GARDEN_GIFT_GONE,
+  GARDEN_TAKES_FULL,
+  GARDEN_NOT_GIFT,
   profileExtraDelete,
   momentCreate,
   momentDelete,
