@@ -10,6 +10,7 @@ const HEX = 'ab'.repeat(32)
 const ORIGIN = 'https://bora.varanda.app'
 const BASE = '/p/' + HEX + '/7'
 const APP = '/publicacao/' + HEX + '/7'
+const FALLBACK_IMAGE = ORIGIN + '/og/convite.png'
 
 function image (n, mime = 'image/jpeg') {
   return { core: 'cd'.repeat(32), mime, start: n + 1, blocks: 1, bytes: 1000, sha256: 'ef'.repeat(32), width: 800, height: 600 }
@@ -27,9 +28,13 @@ function page (over, recordOver) {
   return renderPostPage({ origin: ORIGIN, author: HEX, seq: 7, record: post(recordOver), name: 'Ana Souza', username: 'ana', ...over })
 }
 
-function meta (html, prop) {
-  const m = html.match(new RegExp('<meta property="' + prop + '" content="([^"]*)">'))
+function meta (html, prop, attr = 'property') {
+  const m = html.match(new RegExp('<meta ' + attr + '="' + prop + '" content="([^"]*)">'))
   return m ? m[1] : null
+}
+
+function metaCount (html, prop) {
+  return (html.match(new RegExp('<meta property="' + prop + '" ', 'g')) || []).length
 }
 
 function anchors (html) {
@@ -91,6 +96,14 @@ test('hostile text, name, username and card title are escaped', (t) => {
   t.is(meta(html, 'og:title'), 'Publicação de &lt;b onmouseover=&quot;x&quot;&gt;Eva&lt;/b&gt;&lt;/title&gt; na Varanda')
   t.ok(html.includes('<title>Publicação de &lt;b onmouseover=&quot;x&quot;&gt;Eva&lt;/b&gt;&lt;/title&gt; na Varanda</title>'))
   t.is((html.match(/<\/title>/g) || []).length, 1, 'a peer string never closes the title')
+  const desc = '&lt;/p&gt;&lt;script src=//x&gt;&lt;/script&gt;&lt;img onerror=1 src=x&gt;&quot;&#39;&amp;&lt;/title&gt;'
+  t.is(meta(html, 'description', 'name'), desc, 'the description meta is escaped')
+  t.is(meta(html, 'og:description'), desc)
+  t.is(meta(html, 'og:url'), ORIGIN + BASE)
+  t.is(meta(html, 'og:image'), FALLBACK_IMAGE)
+  t.is(meta(html, 'og:image:alt'), 'Varanda')
+  const metas = html.match(/<meta [^>]*>/g)
+  t.ok(metas.every((tag) => /^<meta (name|property|charset)="[^"]*"( content="[^"<>]*")?>$/.test(tag)), 'every meta tag keeps its shape')
 })
 
 test('control and direction characters are stripped', (t) => {
@@ -212,15 +225,69 @@ test('head: noindex meta, viewport, og:title and og:description', (t) => {
   t.ok(anon.includes('<title>Publicação na Varanda</title>'))
 })
 
-test('og:image: absent without photos, absolute with one, only on an https origin', (t) => {
-  t.is(meta(page(), 'og:image'), null)
-  t.is(meta(page({}, { media: [image(0)] }), 'og:image'), ORIGIN + BASE + '/foto/1')
+test('head: the full link preview tag set for a photo post', (t) => {
+  const html = page({}, { media: [image(0), image(1)] })
+  t.is(meta(html, 'description', 'name'), 'Bom dia, vizinhança. Café pronto.')
+  t.is(meta(html, 'og:type'), 'website')
+  t.is(meta(html, 'og:site_name'), 'Varanda')
+  t.is(meta(html, 'og:locale'), 'pt_BR')
+  t.is(meta(html, 'og:url'), ORIGIN + BASE)
+  t.is(meta(html, 'og:image'), ORIGIN + BASE + '/foto/1')
+  t.is(meta(html, 'og:image:type'), 'image/jpeg')
+  t.is(meta(html, 'og:image:width'), '800')
+  t.is(meta(html, 'og:image:height'), '600')
+  t.is(meta(html, 'og:image:alt'), 'Foto da publicação')
+  t.is(meta(html, 'twitter:card', 'name'), 'summary_large_image')
+  t.is(metaCount(html, 'og:image'), 1, 'exactly one og:image')
+  t.is((html.match(/<img /g) || []).length, 2, 'the body images stay')
+  t.absent(html.includes('<img src="/og/'), 'the body never shows the brand card')
+  const video = page({}, { media: [image(0), videoItem()] })
+  t.is(meta(video, 'og:image:alt'), 'Capa do vídeo')
+})
+
+test('og:image: the brand card when the post has no photo', (t) => {
+  const html = page()
+  assertSafe(t, html, 'text only')
+  t.is(meta(html, 'og:image'), FALLBACK_IMAGE)
+  t.is(meta(html, 'og:image:type'), 'image/png')
+  t.is(meta(html, 'og:image:width'), '1200')
+  t.is(meta(html, 'og:image:height'), '630')
+  t.is(meta(html, 'og:image:alt'), 'Varanda')
+  t.is(meta(html, 'og:url'), ORIGIN + BASE)
+  t.is(metaCount(html, 'og:image'), 1, 'exactly one og:image')
+  t.absent(/<img /.test(html), 'the body shows no image')
+  t.is(meta(page({}, { text: '' }), 'og:image'), FALLBACK_IMAGE, 'an empty post too')
+})
+
+test('og:image sizes only when both are believable', (t) => {
+  const sized = (width, height) => page({}, { media: [{ ...image(0), width, height }] })
+  const big = sized(16384, 1)
+  t.is(meta(big, 'og:image:width'), '16384')
+  t.is(meta(big, 'og:image:height'), '1')
+  for (const [w, h] of [[0, 600], [800, 16385], [800.5, 600], ['800', 600], [800, null], [-1, 600], [Number.MAX_SAFE_INTEGER + 1, 600], [800, undefined]]) {
+    const html = sized(w, h)
+    t.is(meta(html, 'og:image'), ORIGIN + BASE + '/foto/1', 'the photo stays for ' + w + 'x' + h)
+    t.is(meta(html, 'og:image:width'), null, 'no width for ' + w + 'x' + h)
+    t.is(meta(html, 'og:image:height'), null, 'no height for ' + w + 'x' + h)
+    t.is(meta(html, 'og:image:alt'), 'Foto da publicação')
+    assertSafe(t, html, w + 'x' + h)
+  }
+})
+
+test('og:url and og:image only on an https origin', (t) => {
   t.is(meta(page({ origin: ORIGIN + '/' }, { media: [image(0)] }), 'og:image'), ORIGIN + BASE + '/foto/1')
-  for (const origin of ['http://bora.varanda.app', 'javascript:alert(1)', '//evil.example', 'https://u:p@evil.example', 'https://bora.varanda.app/x', 'https://a.example?q', '', null, 42]) {
-    const html = page({ origin }, { media: [image(0)] })
-    t.is(meta(html, 'og:image'), null, 'no og:image for ' + String(origin))
-    t.ok(html.includes('<img src="' + BASE + '/foto/1"'), 'the relative image stays')
-    assertSafe(t, html, String(origin))
+  t.is(meta(page({ origin: ORIGIN + '/' }), 'og:url'), ORIGIN + BASE)
+  for (const origin of ['http://bora.varanda.app', 'javascript:alert(1)', '//evil.example', 'https://u:p@evil.example', 'https://bora.varanda.app/x', 'https://a.example?q', 'https://a.example/"><script>', '', null, 42]) {
+    for (const media of [[image(0)], undefined]) {
+      const html = page({ origin }, { media })
+      t.is(meta(html, 'og:image'), null, 'no og:image for ' + String(origin))
+      t.is(meta(html, 'og:url'), null, 'no og:url for ' + String(origin))
+      t.absent(html.includes('og:image'), 'no og:image tag of any kind for ' + String(origin))
+      t.absent(html.includes('twitter:card'), 'no large card without an image for ' + String(origin))
+      t.is(meta(html, 'og:site_name'), 'Varanda', 'the origin-free tags stay')
+      if (media) t.ok(html.includes('<img src="' + BASE + '/foto/1"'), 'the relative image stays')
+      assertSafe(t, html, String(origin))
+    }
   }
 })
 
@@ -230,13 +297,19 @@ test('an AVIF item is a photo; og:image skips AVIF and names its type', (t) => {
   const only = page({}, { media: [avif] })
   assertSafe(t, only, 'avif only')
   t.ok(only.includes('<img src="' + BASE + '/foto/1"'), 'the AVIF photo is shown')
-  t.is(meta(only, 'og:image'), null, 'no og:image when every photo is AVIF')
-  t.is(meta(only, 'og:image:type'), null)
+  t.is(meta(only, 'og:image'), FALLBACK_IMAGE, 'the brand card when every photo is AVIF')
+  t.is(meta(only, 'og:image:type'), 'image/png')
+  t.is(meta(only, 'og:image:width'), '1200')
+  t.is(meta(only, 'og:image:height'), '630')
+  t.is(metaCount(only, 'og:image'), 1)
   const mixed = page({}, { media: [avif, image(1, 'image/webp'), image(2)] })
   assertSafe(t, mixed, 'avif first')
   t.is((mixed.match(/<img /g) || []).length, 3)
   t.is(meta(mixed, 'og:image'), ORIGIN + BASE + '/foto/2', 'the first photo that is not AVIF')
   t.is(meta(mixed, 'og:image:type'), 'image/webp')
+  t.is(meta(mixed, 'og:image:width'), '800')
+  t.is(meta(mixed, 'og:image:height'), '600')
+  t.is(metaCount(mixed, 'og:image'), 1)
   t.is(meta(page({}, { media: [image(0), avif] }), 'og:image:type'), 'image/jpeg', 'the type of a JPEG first photo')
   t.is(meta(page({ origin: 'http://bora.varanda.app' }, { media: [image(0)] }), 'og:image:type'), null, 'no type without og:image')
   t.is(postPreviewData({ record: post({ media: [avif, image(1)] }) }).photoCount, 2, 'the preview counts the AVIF photo')
