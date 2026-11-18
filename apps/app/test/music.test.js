@@ -238,6 +238,15 @@ test('searchBody: { q, kind } or with a canonical cursor', async (t) => {
   ]) t.is(searchBody(q, kind, cursor), null, JSON.stringify([q, kind, cursor]))
 })
 
+test('trendingBody: an empty body for tracks, an explicit kind for playlists', async (t) => {
+  const { trendingBody } = await load()
+  t.alike(trendingBody(undefined), {})
+  t.alike(trendingBody('track'), {})
+  t.alike(trendingBody('playlist'), { kind: 'playlist' })
+  t.is(trendingBody('album'), null)
+  t.is(trendingBody(7), null)
+})
+
 test('parseSearch: the exact shape for each kind, or null', async (t) => {
   const { parseSearch } = await load()
   t.alike(parseSearch({ items: [track], next: '12' }, 'track'), { items: [track], next: '12' })

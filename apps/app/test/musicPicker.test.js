@@ -236,10 +236,12 @@ test('search errors use the shared texts and retry only on request', async (t) =
   }
 })
 
-test('suggestions follow the normalized query and track tab', async (t) => {
+test('suggestions follow the normalized query on both tabs', async (t) => {
   const { musicSearchIdle, musicSearchStep, musicSuggestShown } = await helpers()
-  for (const [text, kind, shown] of [['', 'track', true], ['  ', 'track', true], ['samba', 'track', false], ['', 'playlist', false]]) {
-    t.is(musicSuggestShown(musicSearchStep(musicSearchIdle, { type: 'query', text, kind })), shown)
+  for (const kind of ['track', 'playlist']) {
+    for (const [text, shown] of [['', true], ['  ', true], ['samba', false]]) {
+      t.is(musicSuggestShown(musicSearchStep(musicSearchIdle, { type: 'query', text, kind })), shown)
+    }
   }
 })
 
@@ -260,6 +262,8 @@ test('suggestion transitions preserve extra state and accept only the current lo
   const off = failed('feature-off')
   t.alike(off, { ...loading, phase: 'off' })
   t.alike(failed('nao-encontrado'), off)
+  t.alike(failed('pedido-invalido'), error)
+  t.alike(step(loading, { ...fail, error: { code: 'pedido-invalido' }, extended: true }), off)
   t.alike(step(error, { type: 'retry' }), { ...loading, gen: 2 })
   for (const state of [idle, loading, ready, error, off]) {
     if (state !== idle) t.is(step(state, { type: 'load' }), state)
@@ -638,7 +642,11 @@ async function suggestionFixture (t, props, stubs) {
     },
     ...stubs
   })
-  return { ...picker, calls }
+  const selectTab = (kind) => {
+    picker.render().find((n) => n.type === 'Segmented').props.onSelect(kind)
+    return picker.render()
+  }
+  return { ...picker, calls, selectTab, kinds: () => calls.map(({ session }) => session.kind) }
 }
 
 const headingOf = (nodes) => nodes.find((n) => n.props.accessibilityRole === 'header')
@@ -665,15 +673,7 @@ test('typing while suggestions load preserves the page for the empty track tab',
   nodes = await f.search('')
   t.alike(headingOf(nodes).children, ['Em alta no Audius'])
   t.alike(f.rows(nodes).map((row) => row.props.item), [item])
-  nodes.find((n) => n.type === 'Segmented').props.onSelect('playlist')
-  nodes = f.render()
-  t.alike(f.rows(nodes), [])
-  t.absent(headingOf(nodes))
-  t.absent(noticeOf(nodes))
-  nodes.find((n) => n.type === 'Segmented').props.onSelect('track')
-  nodes = f.render()
-  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
-  t.is(f.calls.length, 1)
+  t.alike(f.kinds(), ['track'])
   t.alike(f.searches, [['samba', 'track']])
   t.alike(f.preview, [])
   f.p.open = false
@@ -698,7 +698,7 @@ test('an editor-first opening waits for back and a suggested track opens the sni
   sheetOf(f.render()).props.onBack()
   t.is(f.calls.length, 0)
   f.render()
-  t.is(f.calls.length, 1)
+  t.alike(f.kinds(), ['track'])
   f.calls[0].resolve({ items: [item], next: null })
   await f.flush()
   const [row] = f.rows(f.render())
@@ -708,12 +708,100 @@ test('an editor-first opening waits for back and a suggested track opens the sni
   t.is(editor.props.kind, 'snippet')
   t.is(editor.props.item, item)
   t.alike(f.preview, [])
-  const playlist = await suggestionFixture(t, { modes: ['playlist'] })
-  const nodes = playlist.render()
-  t.is(playlist.calls.length, 0)
+})
+
+test('the empty Playlists tab shows Em alta after one request and keeps its own page', async (t) => {
+  const f = await suggestionFixture(t)
+  await f.search('samba')
+  f.selectTab('playlist')
+  await f.flush()
+  t.alike(f.kinds(), ['track'], 'switching tabs with a query asks for no suggestions')
+  let nodes = await f.search('')
+  t.alike(f.kinds(), ['track', 'playlist'])
+  t.alike(headingOf(nodes).children, ['Em alta no Audius'])
+  f.selectTab('track')
+  f.selectTab('playlist')
+  t.ok(f.calls.every(({ session }) => !session.signal.aborted))
+  const item = { id: 'weekly', title: 'Lista da semana', artist: 'A', count: 3 }
+  f.calls[1].resolve({ items: [item], next: null })
+  await f.flush()
+  f.calls[0].resolve({ items: [track('weekly-track')], next: null })
+  await f.flush()
+  nodes = f.render()
+  t.alike(f.rows(nodes).map((row) => row.props.item), [item])
+  nodes = await f.search('jazz')
+  t.alike(f.searches.at(-1), ['jazz', 'playlist'])
+  t.absent(headingOf(nodes))
+  t.alike(f.rows(nodes).map((row) => row.props.item.id), ['pl'])
+  nodes = await f.search('')
+  t.alike(headingOf(nodes).children, ['Em alta no Audius'])
+  const [row] = f.rows(nodes)
+  t.is(row.props.item, item)
+  t.is(row.props.kind, 'playlist')
+  t.absent(previewOf(row))
+  mainOf(row).props.onPress()
+  const editor = f.render().find((n) => n.type === 'MusicEditor')
+  t.is(editor.props.kind, 'playlist')
+  t.is(editor.props.item, item)
+  sheetOf(f.render()).props.onBack()
+  t.alike(f.rows(f.selectTab('track')).map((row) => row.props.item.id), ['weekly-track'])
+  t.alike(f.kinds(), ['track', 'playlist'])
+  t.alike(f.preview, [])
+  f.p.open = false
+  f.render()
+  t.ok(f.calls.every(({ session }) => session.signal.aborted))
+  f.p.open = true
+  t.alike(f.rows(f.render()), [])
+  t.alike(f.rows(f.selectTab('playlist')), [])
+  t.alike(f.kinds(), ['track', 'playlist', 'track', 'playlist'])
+})
+
+test('a playlist-only picker waits for Voltar and retries only its playlist request', async (t) => {
+  const item = { id: 'pl', title: 'Lista', artist: 'A', count: 3 }
+  const f = await suggestionFixture(t, { modes: ['playlist'], initial: { ref: { kind: 'playlist', id: 'pl' }, item } })
+  sheetOf(f.render()).props.onBack()
+  t.alike(f.kinds(), [])
+  const input = f.render().find((n) => n.type === 'TextInput')
+  t.is(input.props.autoFocus, false)
+  t.alike(f.kinds(), ['playlist'])
+  f.calls[0].reject({ code: 'indisponivel' })
+  await f.flush()
+  t.alike(noticeOf(f.render()).children, ['Música indisponível agora'])
+  await f.search('samba')
+  const nodes = await f.search('')
+  t.alike(f.kinds(), ['playlist'])
+  retryOf(nodes).props.onPress()
+  f.render()
+  t.alike(f.kinds(), ['playlist', 'playlist'])
+  f.calls[1].resolve({ items: [], next: null })
+  await f.flush()
+  t.alike(noticeOf(f.render()).children, ['Nenhuma sugestão agora'])
+  t.alike(f.preview, [])
+})
+
+test('pedido-invalido leaves playlists quiet and lets tracks retry independently', async (t) => {
+  const f = await suggestionFixture(t)
+  f.render()
+  f.selectTab('playlist')
+  t.alike(f.kinds(), ['track', 'playlist'])
+  for (const call of f.calls) call.reject({ code: 'pedido-invalido' })
+  await f.flush()
+  const nodes = f.render()
+  t.alike(f.rows(nodes), [])
   t.absent(headingOf(nodes))
   t.absent(noticeOf(nodes))
-  t.alike(playlist.rows(nodes), [])
+  t.absent(retryOf(nodes))
+  t.absent(nodes.some((n) => n.type === 'ActivityIndicator'))
+  const tracks = f.selectTab('track')
+  t.alike(noticeOf(tracks).children, ['Música indisponível agora'])
+  retryOf(tracks).props.onPress()
+  f.render()
+  t.alike(f.kinds(), ['track', 'playlist', 'track'])
+  f.calls[2].resolve({ items: [track('weekly')], next: null })
+  await f.flush()
+  t.alike(f.rows(f.selectTab('playlist')), [])
+  t.alike(f.rows(f.selectTab('track')).map((row) => row.props.item.id), ['weekly'])
+  t.alike(f.kinds(), ['track', 'playlist', 'track'])
 })
 
 test('only a tap retries suggestions and an empty search has its own notice', async (t) => {
@@ -763,28 +851,41 @@ test('session changes discard the previous suggestion page and abort pending ans
   f.calls[0].resolve({ items: [track('first')], next: null })
   await f.flush()
   t.is(f.rows(f.render())[0].props.item.id, 'first')
+  f.selectTab('playlist')
+  t.alike(f.kinds(), ['track', 'playlist'])
+  f.calls[1].resolve({ items: [{ id: 'pl', title: 'Lista', artist: 'A', count: 3 }], next: null })
+  await f.flush()
+  t.is(f.rows(f.render())[0].props.item.id, 'pl')
   f.p.member = 'b'
   t.alike(f.rows(f.render()), [])
-  t.is(f.calls.length, 2)
-  t.is(f.calls[1].session.member, 'b')
+  t.alike(f.kinds(), ['track', 'playlist', 'playlist'])
+  t.is(f.calls[2].session.member, 'b')
+  t.alike(f.rows(f.selectTab('track')), [])
+  t.is(f.calls[3].session.kind, 'track')
   f.p.origin = 'second'
   f.render()
-  t.ok(f.calls[1].session.signal.aborted)
-  t.is(f.calls.length, 3)
-  t.is(f.calls[2].session.origin, 'second')
+  t.ok(f.calls[2].session.signal.aborted)
+  t.ok(f.calls[3].session.signal.aborted)
+  t.is(f.calls.length, 5)
+  t.is(f.calls[4].session.origin, 'second')
   f.p.request = () => {}
   f.render()
-  t.ok(f.calls[2].session.signal.aborted)
-  t.is(f.calls.length, 4)
-  t.is(f.calls[3].session.request, f.p.request)
-  f.calls[3].resolve({ items: [track('current')], next: null })
+  t.ok(f.calls[4].session.signal.aborted)
+  t.is(f.calls.length, 6)
+  t.is(f.calls[5].session.request, f.p.request)
+  f.calls[5].resolve({ items: [track('current')], next: null })
   await f.flush()
-  f.calls[1].resolve({ items: [track('stale')], next: null })
-  f.calls[2].reject({ code: 'limite-musica' })
+  f.calls[3].resolve({ items: [track('stale')], next: null })
+  f.calls[4].reject({ code: 'limite-musica' })
   await f.flush()
   const nodes = f.render()
   t.alike(f.rows(nodes).map((row) => row.props.item.id), ['current'])
   t.absent(noticeOf(nodes))
+  f.selectTab('playlist')
+  t.is(f.calls[6].session.kind, 'playlist')
+  f.calls[2].resolve({ items: [{ id: 'stale-pl' }], next: null })
+  await f.flush()
+  t.alike(f.rows(f.render()), [])
 })
 
 test('a row preview plays without opening the editor', async (t) => {

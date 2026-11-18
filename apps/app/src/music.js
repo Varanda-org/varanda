@@ -176,6 +176,12 @@ export function searchBody (q, kind, cursor) {
   return { q: text, kind, cursor }
 }
 
+export function trendingBody (kind) {
+  if (kind === undefined || kind === 'track') return {}
+  if (kind === 'playlist') return { kind }
+  return null
+}
+
 // A title or artist exactly as the service cuts it: cardText's output, never
 // empty.
 const isText = (v) => typeof v === 'string' && v !== '' && cardText(v, MAX_CARD_TITLE) === v

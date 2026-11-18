@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 93)
+  t.is(LEGAL_VERSION, 94)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 93, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 94, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -439,7 +439,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '3c858f3a21564b213c1f6facae4c6eedeb8e69351a453f5ae13ee354861ab853', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'b0852ff242e09294c3e871a665adca8909ec561729acbe2478570dd30a7fba93', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {
@@ -480,9 +480,26 @@ test('legal: version 93 describes the weekly list', async (t) => {
   t.ok(privacy.includes('sem texto de busca, gênero, conta, histórico de escuta nem endereço de internet do aparelho'), 'privacy: what Audius does not get')
   t.ok(privacy.includes('reaproveitada para todos os membros por até 10 minutos'), 'privacy: shared for 10 minutes')
   t.ok(privacy.includes('por 1 minuto e responde "indisponível"'), 'privacy: one minute after a failure')
-  t.ok(all(PRIVACY).includes('o serviço não registra em log qual membro a viu; ele só conta, na memória, quantas vezes cada conta abriu a lista no dia'), 'privacy: retention does not record who saw it')
-  t.ok(all(PRIVACY).includes('Para a lista de faixas em alta, saem do Brasil o período fixo da semana'), 'privacy: leaves Brazil')
+  t.ok(all(PRIVACY).includes('o serviço não guarda qual conta viu qual lista e não registra isso em log. Ele só conta, na memória, quantas vezes cada conta abriu qualquer das listas no dia'), 'privacy: retention does not record who saw it')
+  t.ok(all(PRIVACY).includes('Para as listas em alta, de faixas e de playlists, saem do Brasil o período fixo da semana'), 'privacy: leaves Brazil')
   t.ok(all(PRIVACY).includes('vale para mostrar, na escolha de música com o campo de busca vazio, a lista de faixas em alta'), 'privacy: legal basis covers the list')
+})
+
+test('legal: version 94 describes trending playlists', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 94)
+  const audius = (doc) => doc.sections.filter(({ heading }) => heading === 'Música do Audius').flatMap(({ paragraphs }) => paragraphs).join(' ')
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  t.ok(audius(TERMS).includes('Na aba Playlists, com o campo de busca vazio, a escolha de música mostra também playlists em alta no Audius nesta semana. Como a lista de faixas, ela é igual para todo mundo, não é personalizada e pode mudar no provedor.'), 'terms: trending playlists')
+  const privacy = audius(PRIVACY)
+  t.ok(privacy.includes('Abrir a aba Playlists com o campo de busca vazio pede do mesmo modo a lista de playlists em alta, e o serviço fica sabendo que a sua conta abriu essa aba'), 'privacy: asked when the tab opens, the service knows')
+  t.ok(privacy.includes('Os dois pedidos contam num só limite diário próprio, de 200 aberturas por conta por dia, somadas as das duas listas'), 'privacy: one counter for both lists')
+  t.ok(privacy.includes('Cada lista, de faixas ou de playlists, segue a mesma regra: uma lista que voltou bem é reaproveitada para todos os membros por até 10 minutos'), 'privacy: each list is shared for 10 minutes')
+  t.ok(privacy.includes('por 1 minuto e responde "indisponível"'), 'privacy: one minute after a failure')
+  t.ok(all(PRIVACY).includes('As listas em alta, de faixas e de playlists, ficam só na memória do serviço, valem por até 10 minutos cada e somem ao reiniciar'), 'privacy: retention covers both lists')
+  t.ok(all(PRIVACY).includes('e, na aba Playlists, a lista de playlists em alta'), 'privacy: legal basis covers the playlists')
+  t.absent(all(PRIVACY).includes('no máximo uma vez a cada 10 minutos'), 'privacy: no fixed-interval promise')
+  for (const doc of [TERMS, PRIVACY]) t.absent(all(doc).includes('\u2014'), doc.title + ': no em dash')
 })
 
 test('legal: version 19 describes extra passkeys and the recovery code for the same account', async (t) => {

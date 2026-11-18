@@ -13,7 +13,7 @@ import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
 import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
-import { MUSIC_ART_MAX_BYTES, MUSIC_ID_RE, MUSIC_UNAVAILABLE_TEXT, artMime, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody } from './music.js'
+import { MUSIC_ART_MAX_BYTES, MUSIC_ID_RE, MUSIC_UNAVAILABLE_TEXT, artMime, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody, trendingBody } from './music.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -1130,10 +1130,12 @@ const AUDIUS_TRENDING_MESSAGES = {
   'nao-encontrado': MUSIC_UNAVAILABLE_TEXT
 }
 
-export const audiusTrending = async ({ origin, member, request, signal } = {}) => {
+export const audiusTrending = async ({ kind = 'track', origin, member, request, signal } = {}) => {
+  const body = trendingBody(kind)
+  if (body === null) throw toError('pedido-invalido')
   return audius.withSession({ member, origin, request }, async (sessionToken) => {
-    const json = await call('POST', '/account/audius/trending?covers=1&info=1', {}, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS, messages: AUDIUS_TRENDING_MESSAGES })
-    const parsed = parseMusicSearch(json, 'track')
+    const json = await call('POST', '/account/audius/trending?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS, messages: AUDIUS_TRENDING_MESSAGES })
+    const parsed = parseMusicSearch(json, kind)
     if (parsed === null || parsed.next !== null) throw toError('indisponivel')
     return { items: parsed.items, next: null }
   })

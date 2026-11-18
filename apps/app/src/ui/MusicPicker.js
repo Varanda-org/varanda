@@ -75,7 +75,7 @@ export function musicSuggestStep (state, action) {
     }
     case 'fail':
       if (state.phase !== 'loading' || action.gen !== state.gen) return state
-      if (action.error?.code === 'feature-off' || action.error?.code === 'nao-encontrado') {
+      if (action.error?.code === 'feature-off' || action.error?.code === 'nao-encontrado' || (action.extended === true && action.error?.code === 'pedido-invalido')) {
         return { ...state, phase: 'off', items: [], error: '' }
       }
       return { ...state, phase: 'error', error: musicErrorText(action.error) }
@@ -87,7 +87,7 @@ export function musicSuggestStep (state, action) {
 }
 
 export function musicSuggestShown (search) {
-  return search.query === '' && search.kind === 'track'
+  return search.query === ''
 }
 
 export function musicPickStep (kind, modes) {
@@ -272,15 +272,8 @@ function MusicContent ({ onEdit, edit, onKind, onStart, member, origin, request,
   )
 }
 
-function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, visible }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  const track = modes.includes('snippet') || modes.includes('track')
-  const playlist = modes.includes('playlist')
-  const [state, dispatch] = useReducer(musicSearchStep, { ...musicSearchIdle, kind: track ? 'track' : 'playlist' })
-  const { gen, query, kind, phase, next } = state
+function useMusicSuggest ({ eligible, kind, member, origin, request }) {
   const [suggest, dispatchSuggest] = useReducer(musicSuggestStep, musicSuggestIdle)
-  const eligible = visible && track && musicSuggestShown(state)
   const session = useMemo(() => ({ member, origin, request }), [member, origin, request])
   const previousSession = useRef(session)
   const sessionChanged = previousSession.current !== session
@@ -289,21 +282,39 @@ function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onTogg
     previousSession.current = session
     dispatchSuggest({ type: 'reset' })
   }, [session])
+  const canLoad = eligible && !sessionChanged
   useEffect(() => {
-    if (eligible && suggest.phase === 'idle') dispatchSuggest({ type: 'load' })
-  }, [suggest.phase, eligible])
+    if (canLoad && suggest.phase === 'idle') dispatchSuggest({ type: 'load' })
+  }, [suggest.phase, canLoad])
   useEffect(() => {
     // A new session must finish its reset before starting its own request.
     if (sessionChanged || suggest.phase !== 'loading') return
     const gen = suggest.gen
     const controller = new AbortController()
     const { signal } = controller
-    audiusTrending({ ...session, signal }).then(
+    audiusTrending({ kind, ...session, signal }).then(
       (page) => { if (!signal.aborted) dispatchSuggest({ type: 'page', gen, page }) },
-      (error) => { if (!signal.aborted) dispatchSuggest({ type: 'fail', gen, error }) }
+      (error) => { if (!signal.aborted) dispatchSuggest({ type: 'fail', gen, error, extended: kind === 'playlist' }) }
     )
     return () => controller.abort()
   }, [suggest.gen, session])
+  return [suggest, dispatchSuggest, sessionChanged]
+}
+
+function MusicSearch ({ member, origin, request, modes, onSelect, onStop, onToggle, active, phase: previewPhase, previewError, visible }) {
+  const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
+  const track = modes.includes('snippet') || modes.includes('track')
+  const playlist = modes.includes('playlist')
+  const [state, dispatch] = useReducer(musicSearchStep, { ...musicSearchIdle, kind: track ? 'track' : 'playlist' })
+  const { gen, query, kind, phase, next } = state
+  const shown = musicSuggestShown(state)
+  const tracksEligible = visible && track && shown && kind === 'track'
+  const playlistsEligible = visible && playlist && shown && kind === 'playlist'
+  const tracks = useMusicSuggest({ eligible: tracksEligible, kind: 'track', member, origin, request })
+  const playlists = useMusicSuggest({ eligible: playlistsEligible, kind: 'playlist', member, origin, request })
+  const [suggest, dispatchSuggest, sessionChanged] = kind === 'playlist' ? playlists : tracks
+  const eligible = tracksEligible || playlistsEligible
   useEffect(() => { dispatch({ type: 'retry' }) }, [member, origin, request])
   useEffect(() => {
     if (phase !== 'waiting' && phase !== 'more') return

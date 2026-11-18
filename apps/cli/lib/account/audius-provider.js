@@ -115,6 +115,12 @@ function requestFor (config, kind, params = {}) {
     if (page === null) return null
     path = '/tracks/trending'
     query = { time: 'week', ...page }
+  } else if (kind === 'trendingPlaylists') {
+    // The week window is fixed: a caller cannot pick time, genre, type or a query.
+    const page = paging(params)
+    if (page === null) return null
+    path = '/playlists/trending'
+    query = { time: 'week', ...page }
   } else {
     const { id } = params
     if (typeof id !== 'string' || !ID_RE.test(id)) return null
