@@ -30,6 +30,7 @@ test('titles, actions and stages', async (t) => {
   t.is(v.STAGE_LABELS.length, 4)
   t.is(v.SOIL_LABELS.dry, 'seca')
   t.is(v.SOIL_LABELS.wet, 'molhada')
+  t.is(v.THIRSTY_LABEL, 'precisa de água')
   t.is(v.WHO_WATERED, 'Quem regou')
   t.is(v.CONSENT_SWITCH_LABEL, 'Entendi e quero participar')
 })
@@ -243,4 +244,31 @@ test('varandinha help tells the stall and the enfeites without naming the classi
   t.ok(added.includes('aparência'))
   t.ok(added.includes('não são um prêmio'))
   t.absent(added.includes('Feira') || added.includes('feira') || added.includes('\u2014') || added.includes('–'))
+})
+
+// A restyle that drops a key from makeStyles leaves its users unstyled with
+// no error, so every styles.<key> the screens read must still be defined.
+test('the Varandinha screens define every style key they read', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  for (const file of ['Varandinha.js', 'VarandinhaRua.js']) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', file), 'utf8')
+    const start = src.indexOf('const makeStyles = ')
+    t.ok(start > 0, file + ' has makeStyles')
+    const defined = new Set([...src.slice(start).matchAll(/^ {2}([a-zA-Z]+): /gm)].map((m) => m[1]))
+    const used = new Set([...src.slice(0, start).matchAll(/\bstyles\.([a-zA-Z]+)/g)].map((m) => m[1]))
+    t.ok(used.size > 0, file + ' reads styles')
+    for (const key of used) t.ok(defined.has(key), file + ' defines styles.' + key)
+  }
+})
+
+// Android breaks a line after a hyphen only with hyphenation on. Without it a
+// large font split the narrow grid cell's "Espada-de-são-jorge" inside "jorge".
+test('the plant grid lets Android break a plant name after its hyphens', (t) => {
+  const fs = require('fs')
+  const path = require('path')
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Varandinha.js'), 'utf8')
+  const name = src.match(/<Text style=\{\[g\.tileName, styles\.plantName\]\}[^>]*>/)
+  t.ok(name, 'the grid draws the plant name')
+  t.ok(name && name[0].includes("android_hyphenationFrequency='normal'"), 'the name allows hyphen breaks')
 })

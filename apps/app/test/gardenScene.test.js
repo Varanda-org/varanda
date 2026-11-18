@@ -38,21 +38,39 @@ function overlaps (a, b) {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-function boxOk (x0, y0, x1, y1) {
-  return x0 >= 0 && y0 >= 0 && x1 <= 100 && y1 <= 100 && x1 >= x0 && y1 >= y0
+// A path is pairs of numbers after M, L, C, Q and Z only, so every point
+// can be bounded.
+const PATH = /^(?:[MLCQ]-?\d+(?:\.\d+)?(?: -?\d+(?:\.\d+)?)*|Z)+$/
+
+function pathPairs (d) {
+  if (!PATH.test(String(d))) return null
+  const nums = String(d).match(/-?\d+(?:\.\d+)?/g).map(Number)
+  if (nums.length % 2 !== 0) return null
+  const pairs = []
+  for (let i = 0; i < nums.length; i += 2) pairs.push([nums[i], nums[i + 1]])
+  return pairs
 }
 
-function assertShape (t, shape, label, keys) {
-  t.ok(shape && typeof shape.fill === 'string' && keys.includes(shape.fill), label + ' fill ' + (shape && shape.fill))
+function assertPaint (t, shape, label, keys) {
+  t.ok(shape && (shape.fill === 'none' || keys.includes(shape.fill)), label + ' fill ' + (shape && shape.fill))
+  if (shape.stroke !== undefined) t.ok(keys.includes(shape.stroke) && shape.sw > 0, label + ' stroke ' + shape.stroke)
+  if (shape.opacity !== undefined) t.ok(shape.opacity > 0 && shape.opacity <= 1, label + ' opacity')
+  t.absent('transform' in shape, label + ' has no transform')
+}
+
+function assertShape (t, shape, label, keys, area) {
+  const [ax0, ay0, ax1, ay1] = area || [0, 0, 100, 100]
+  const ok = (x0, y0, x1, y1) => x0 >= ax0 && y0 >= ay0 && x1 <= ax1 && y1 <= ay1 && x1 >= x0 && y1 >= y0
+  assertPaint(t, shape, label, keys)
   if (shape.kind === 'rect') {
-    t.ok(boxOk(shape.x, shape.y, shape.x + shape.w, shape.y + shape.h), label + ' rect')
+    t.ok(ok(shape.x, shape.y, shape.x + shape.w, shape.y + shape.h), label + ' rect')
   } else if (shape.kind === 'circle') {
-    t.ok(boxOk(shape.cx - shape.r, shape.cy - shape.r, shape.cx + shape.r, shape.cy + shape.r), label + ' circle')
+    t.ok(ok(shape.cx - shape.r, shape.cy - shape.r, shape.cx + shape.r, shape.cy + shape.r), label + ' circle')
   } else if (shape.kind === 'ellipse') {
-    t.ok(boxOk(shape.cx - shape.rx, shape.cy - shape.ry, shape.cx + shape.rx, shape.cy + shape.ry), label + ' ellipse')
+    t.ok(ok(shape.cx - shape.rx, shape.cy - shape.ry, shape.cx + shape.rx, shape.cy + shape.ry), label + ' ellipse')
   } else if (shape.kind === 'path') {
-    const nums = (String(shape.d).match(/-?\d+\.?\d*/g) || []).map(Number)
-    t.ok(nums.length > 0 && nums.every((n) => n >= 0 && n <= 100), label + ' path')
+    const pairs = pathPairs(shape.d)
+    t.ok(pairs && pairs.length > 0 && pairs.every(([x, y]) => ok(x, y, x, y)), label + ' path')
   } else {
     t.fail(label + ' kind')
   }
@@ -76,13 +94,19 @@ test('gardenScene: four distinct stages per plant', async (t) => {
       }
     }
   }
-  t.ok(m.PLANT_STAGES.manjericao[3].some((shape) => shape.fill === 'basil'))
+  t.ok(m.PLANT_STAGES.manjericao[3].some((shape) => shape.fill === 'leaf'))
   t.ok(m.PLANT_STAGES.tomate[3].some((shape) => shape.fill === 'tomato'))
-  t.ok(m.PLANT_STAGES.pimenta[3].some((shape) => shape.fill === 'pepper'))
-  t.ok(m.PLANT_STAGES.alecrim[3].some((shape) => shape.fill === 'rosemary'))
+  t.ok(m.PLANT_STAGES.pimenta[3].some((shape) => shape.fill === 'chili'))
+  t.ok(m.PLANT_STAGES.alecrim[3].some((shape) => shape.stroke === 'ros'))
   t.ok(m.PLANT_STAGES.samambaia[3].some((shape) => shape.fill === 'fern'))
   const sword = m.PLANT_STAGES.espada[3].map((shape) => shape.fill)
   t.ok(sword.includes('snake') && sword.includes('snakeEdge'), 'ripe snake plant has a yellow edge')
+  for (const id of ids) {
+    const sparks = (stage) => m.PLANT_STAGES[id][stage].filter((shape) => shape.fill === 'spark').length
+    t.ok(sparks(3) >= 2, id + ' sparkles when ripe')
+    t.is(sparks(0) + sparks(1), 0, id + ' does not sparkle while young')
+    t.ok(m.PLANT_STAGES[id][3].some((shape) => shape.stroke === 'ink'), id + ' is outlined')
+  }
 })
 
 test('gardenScene: fills name keys of both palettes', async (t) => {
@@ -98,7 +122,10 @@ test('gardenScene: fills name keys of both palettes', async (t) => {
     t.ok(HEX.test(m.LIGHT[key]), 'light ' + key)
     t.ok(HEX.test(m.DARK[key]), 'dark ' + key)
   }
-  for (const key of ['wall', 'floor', 'railing', 'railingShade', 'potClay', 'potRim', 'soilDry', 'soilWet', 'stem', 'leaf', 'leafDark', 'basil', 'tomato', 'pepper', 'rosemary', 'fern', 'snake', 'snakeEdge']) {
+  const style = await import('../src/ui/gardenStyle.js')
+  t.is(m.LIGHT, style.GARDEN_LIGHT, 'the scene palette is the style palette')
+  t.is(m.DARK, style.GARDEN_DARK)
+  for (const key of ['sky1', 'orb', 'city', 'roof', 'wood', 'woodHi', 'ink', 'floor', 'tile', 'pot', 'rim', 'soilDry', 'soilWet', 'stem', 'leaf', 'leaf2', 'tomato', 'chili', 'ros', 'fern', 'snake', 'snakeEdge', 'spark', 'glow', 'dotOn', 'dotOff', 'badge', 'drop']) {
     t.ok(lightKeys.includes(key), 'palette has ' + key)
   }
   const groups = [
@@ -114,6 +141,8 @@ test('gardenScene: fills name keys of both palettes', async (t) => {
     t.ok(Array.isArray(shapes) && shapes.length > 0, label)
     for (const shape of shapes) assertShape(t, shape, label, lightKeys)
   }
+  assertShape(t, m.RIPE_GLOW, 'glow', lightKeys)
+  t.is(m.RIPE_GLOW.grad, 'glow')
   t.alike(m.EMPTY, m.POT_SHAPES.concat(m.SOIL_DRY))
   t.not(signature(m.SOIL_DRY), signature(m.SOIL_WET))
 })
@@ -266,7 +295,7 @@ test('GardenSceneView: native driver off the web, plant-only sway', (t) => {
   t.absent(src.includes('anyRipe'))
 })
 
-const PHASE_KEYS = ['width', 'height', 'wall', 'floor', 'railing', 'pots']
+const PHASE_KEYS = ['width', 'height', 'wall', 'floor', 'roof', 'horizon', 'railing', 'pots']
 const DECOR_ORDER = ['rede', 'varal', 'gato', 'pisca']
 
 test('gardenScene: missing decor keeps the phase 1 balcony', async (t) => {
@@ -281,10 +310,102 @@ test('gardenScene: missing decor keeps the phase 1 balcony', async (t) => {
     t.ok(plain.height > 0 && plain.height < width, width + ' phase 1 height')
   }
   const at360 = m.gardenLayout(360)
-  t.is(at360.height, 316)
-  t.alike(at360.wall, { x: 0, y: 0, w: 360, h: 96 })
-  t.alike(at360.pots[0], { index: 0, x: 15, y: 22, w: 103, h: 118, hit: { x: 15, y: 22, w: 103, h: 118 } })
-  t.alike(at360.pots[5], { index: 5, x: 243, y: 148, w: 103, h: 118, hit: { x: 243, y: 148, w: 103, h: 118 } })
+  t.is(at360.height, 297)
+  t.alike(at360.wall, { x: 0, y: 0, w: 360, h: 196 })
+  t.alike(at360.floor, { x: 0, y: 196, w: 360, h: 101 })
+  t.alike(at360.roof, { x: 0, y: 0, w: 360, h: 31 })
+  t.is(at360.horizon, 144)
+  t.alike(at360.pots[0], { index: 0, x: 15, y: 39, w: 103, h: 118, hit: { x: 15, y: 39, w: 103, h: 118 } })
+  t.alike(at360.pots[5], { index: 5, x: 243, y: 165, w: 103, h: 118, hit: { x: 243, y: 165, w: 103, h: 118 } })
+})
+
+test('gardenScene: the back row stands on the cap, the front row on the floor', async (t) => {
+  const m = await load()
+  for (const width of [172, 360, 375, 1280]) {
+    for (const decor of [[], DECOR_ORDER]) {
+      const layout = m.gardenLayout(width, { decor })
+      const label = width + ' ' + decor.join(',')
+      const back = layout.pots[0]
+      const front = layout.pots[3]
+      const base = (pot) => pot.y + Math.round(pot.h * (95 - m.POT_BOX.y) / m.POT_BOX.h)
+      t.is(layout.horizon, base(back), label + ' cap top under the back pots')
+      const cap = layout.railing.find((bar) => bar.fill === 'woodHi')
+      t.ok(cap && cap.y === layout.horizon && cap.w === layout.wall.w, label + ' the cap spans the balcony')
+      t.ok(layout.floor.y < base(front) && base(front) < layout.height, label + ' front pots on the floor')
+      t.ok(layout.roof.h > 0 && layout.roof.y === 0 && layout.roof.x === layout.wall.x && layout.roof.w === layout.wall.w, label + ' roof on top')
+      for (const pot of layout.pots) t.absent(overlaps(pot, layout.roof), label + ' pot under the roof')
+      const posts = layout.railing.filter((bar) => bar.y === layout.roof.h)
+      t.is(posts.length, 2, label + ' two posts from the roof')
+      for (const post of posts) t.is(post.y + post.h, layout.floor.y, label + ' post down to the floor')
+    }
+  }
+})
+
+test('gardenScene: the backdrop fills the scene, stars only at night', async (t) => {
+  const m = await load()
+  const style = await import('../src/ui/gardenStyle.js')
+  const keys = Object.keys(m.LIGHT)
+  for (const width of [172, 360, 1280]) {
+    for (const decor of [[], DECOR_ORDER]) {
+      const layout = m.gardenLayout(width, { decor })
+      const label = width + ' ' + decor.join(',')
+      const area = [layout.wall.x, 0, layout.wall.x + layout.wall.w, layout.height]
+      for (const scheme of ['light', 'dark']) {
+        const shapes = m.backdropShapes(layout, scheme)
+        t.ok(Array.isArray(shapes) && shapes.length > 0 && Object.isFrozen(shapes), label + ' ' + scheme)
+        t.is(m.backdropShapes(layout, scheme), shapes, label + ' ' + scheme + ' cached')
+        for (const shape of shapes) {
+          assertShape(t, shape, label + ' ' + scheme, keys, area)
+          if (shape.grad !== undefined) t.ok(Object.hasOwn(style.gardenGradients(scheme), shape.grad), 'gradient ' + shape.grad)
+        }
+      }
+      const fills = (scheme) => m.backdropShapes(layout, scheme).map((shape) => shape.fill)
+      t.absent(fills('light').includes('star') || fills('light').includes('window'), label + ' day draws no stars or windows')
+      t.ok(fills('dark').includes('star') && fills('dark').includes('window'), label + ' night has stars and lit windows')
+      t.is(m.backdropShapes(layout, 'light')[0].grad, 'sky', label + ' sky first')
+      const rails = m.railShapes(layout)
+      t.is(rails.length, layout.railing.length, label + ' one shape per bar')
+      t.is(m.railShapes(layout), rails, label + ' rails cached')
+      for (const shape of rails) assertShape(t, shape, label + ' rail', keys, area)
+    }
+  }
+  for (const bad of [null, undefined, 0, 'x', {}, { wall: { x: 0, y: 0, w: 10, h: 10 } }, m.gardenLayout(40)]) {
+    t.alike(m.backdropShapes(bad, 'light'), [], 'nothing for ' + String(bad))
+  }
+  const hostile = Object.freeze(new Proxy({}, { get () { throw new Error('get') }, getOwnPropertyDescriptor () { throw new Error('desc') } }))
+  t.alike(m.backdropShapes(hostile, 'dark'), [])
+  t.alike(m.railShapes(hostile), [])
+  t.alike(m.railShapes(null), [])
+})
+
+test('gardenScene: cues are the stage dots and, when it can take water, the drop', async (t) => {
+  const m = await load()
+  const keys = Object.keys(m.LIGHT)
+  const area = [0, m.POT_BOX.y, m.POT_BOX.w, m.POT_BOX.y + m.POT_BOX.h]
+  for (const bad of [null, undefined, 0, 'tomate', { plant: 'rosa', stage: 1 }, { plant: 'tomate', stage: 9 }]) {
+    t.alike(m.potCues(bad), [], 'an empty pot says nothing')
+  }
+  for (let stage = 0; stage < 4; stage++) {
+    const cues = m.potCues({ plant: 'alecrim', stage, dry: true, canWater: false })
+    t.ok(Object.isFrozen(cues))
+    t.is(cues.length, 4, 'four dots at stage ' + stage)
+    t.is(cues.filter((shape) => shape.fill === 'dotOn').length, stage + 1, 'filled up to stage ' + stage)
+    for (const shape of cues) assertShape(t, shape, 'cue', keys, area)
+    for (const shape of cues) t.ok(shape.cy - shape.r > 95, 'dots under the pot')
+  }
+  const thirsty = m.potCues({ plant: 'tomate', stage: 1, dry: true, canWater: true })
+  t.ok(thirsty.length > 4 && thirsty.some((shape) => shape.fill === 'drop'), 'the drop shows')
+  for (const shape of thirsty) assertShape(t, shape, 'badge', keys, area)
+  t.absent(m.potCues({ plant: 'tomate', stage: 1, dry: true, canWater: 1 }).some((shape) => shape.fill === 'drop'), 'only exactly true')
+  const trap = { plant: 'tomate', stage: 1 }
+  Object.defineProperty(trap, 'canWater', { enumerable: true, get () { throw new Error('canWater') } })
+  let err = null
+  try {
+    t.is(m.potCues(trap).length, 4, 'a getter is not called')
+  } catch (e) {
+    err = e
+  }
+  t.is(err, null)
 })
 
 test('gardenScene: DECOR_IDS matches the rules list', async (t) => {
@@ -311,6 +432,7 @@ test('gardenScene: enfeite bands clear the pots and the railing', async (t) => {
       wholePixels(layout, bad, label)
       t.alike(bad, [], label + ' whole pixels')
       t.alike(Object.keys(layout), PHASE_KEYS.concat(['decor']), label + ' keys')
+      t.ok(Object.isFrozen(layout.roof), label + ' roof frozen')
       t.alike(Object.keys(layout.decor), DECOR_ORDER.filter((id) => decor.includes(id)), label + ' decor keys')
       t.ok(layout.height > plain.height, label + ' adds height')
       t.is(layout.width, width)
@@ -340,6 +462,7 @@ test('gardenScene: enfeite bands clear the pots and the railing', async (t) => {
         t.ok(span(rect), label + ' ' + ids[i] + ' in the balcony')
         for (const pot of layout.pots) t.absent(overlaps(rect, pot), label + ' ' + ids[i] + ' pot')
         for (const bar of layout.railing) t.absent(overlaps(rect, bar), label + ' ' + ids[i] + ' rail')
+        t.absent(overlaps(rect, layout.roof), label + ' ' + ids[i] + ' roof')
         for (let j = i + 1; j < ids.length; j++) {
           t.absent(overlaps(rect, layout.decor[ids[j]]), label + ' ' + ids[i] + ' ' + ids[j])
         }
@@ -354,23 +477,23 @@ test('gardenScene: enfeite rects are fixed for the frame', async (t) => {
   const m = await load()
   const all = m.gardenLayout(360, { decor: ['pisca', 'varal', 'rede', 'gato'] })
   t.alike(all.decor, {
-    rede: { x: 15, y: 52, w: 160, h: 52 },
-    varal: { x: 186, y: 52, w: 160, h: 52 },
-    gato: { x: 243, y: 360, w: 103, h: 46 },
-    pisca: { x: 15, y: 22, w: 331, h: 22 }
+    rede: { x: 15, y: 53, w: 160, h: 52 },
+    varal: { x: 186, y: 53, w: 160, h: 52 },
+    gato: { x: 243, y: 361, w: 103, h: 46 },
+    pisca: { x: 15, y: 31, w: 331, h: 22 }
   })
-  t.is(all.height, 456)
+  t.is(all.height, 421)
   t.alike(m.gardenLayout(360, { decor: ['pisca'] }).decor, {
-    pisca: { x: 15, y: 22, w: 331, h: 22 }
+    pisca: { x: 15, y: 31, w: 331, h: 22 }
   })
   t.alike(m.gardenLayout(360, { decor: ['rede'] }).decor, {
-    rede: { x: 15, y: 22, w: 160, h: 52 }
+    rede: { x: 15, y: 31, w: 160, h: 52 }
   })
   t.alike(m.gardenLayout(360, { decor: ['varal'] }).decor, {
-    varal: { x: 186, y: 22, w: 160, h: 52 }
+    varal: { x: 186, y: 31, w: 160, h: 52 }
   })
   t.alike(m.gardenLayout(360, { decor: ['gato'] }).decor, {
-    gato: { x: 243, y: 270, w: 103, h: 46 }
+    gato: { x: 243, y: 287, w: 103, h: 46 }
   })
   const redeOnly = m.gardenLayout(360, { decor: ['rede'] })
   const redeLit = m.gardenLayout(360, { decor: ['rede', 'pisca'] })

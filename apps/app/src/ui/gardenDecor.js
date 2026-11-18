@@ -1,102 +1,130 @@
-// Enfeites for the Varandinha balcony. Shapes name palette keys, so one
-// drawing serves both schemes. Geometry is flat, original, and local to
-// each drawing: the view scales the box, so nothing here reads a frame.
+// Enfeites for the Varandinha balcony, in the "Pôr do sol" look: flat colour
+// with an ink outline. Shapes name palette keys and follow the vocabulary of
+// gardenStyle.js, so one drawing serves both schemes. Geometry is original
+// and local to each drawing, in whole units: the view scales the box, so
+// nothing here reads a frame. A bulb marked glow gets a halo at night.
 
 export const DECOR_LIGHT = deepFreeze({
-  rope: '#8a5a32',
-  cloth: '#d4534a',
-  clothAlt: '#f0d7a2',
-  lamp: '#f2c14e',
-  fur: '#e0a15a',
-  furDark: '#7a4a28'
+  ink: '#1f2a24',
+  rope: '#9a6b45',
+  wood: '#b98d74',
+  cloth: '#e8805a',
+  clothAlt: '#fff6dd',
+  fur: '#f0a35e',
+  furDark: '#b8622c',
+  furLight: '#fde3c0',
+  wire: '#3a2a22',
+  bulb1: '#f6c453',
+  bulb2: '#e8805a',
+  bulb3: '#5dcaa0',
+  bulb4: '#fff6dd'
 })
 
-// Same keys, lightened so rope, cloth and fur still read on a dark page.
+// Same keys at night: lit bulbs, and rope and cloth that still read on the
+// dark sky.
 export const DECOR_DARK = deepFreeze({
-  rope: '#e0b888',
-  cloth: '#f09284',
-  clothAlt: '#f6e6c0',
-  lamp: '#ffe08a',
-  fur: '#f0c48a',
-  furDark: '#c48a5c'
+  ink: '#090c0b',
+  rope: '#c9a27e',
+  wood: '#84675a',
+  cloth: '#c96b4c',
+  clothAlt: '#e9dcc0',
+  fur: '#d98f4e',
+  furDark: '#9a5428',
+  furLight: '#e8cfae',
+  wire: '#4a5068',
+  bulb1: '#ffd45e',
+  bulb2: '#ff9a6e',
+  bulb3: '#7fe0b6',
+  bulb4: '#fffbe8'
 })
 
 export function decorPalette (scheme) {
   return scheme === 'dark' ? DECOR_DARK : DECOR_LIGHT
 }
 
+const OUTLINE = { stroke: 'ink', sw: 1.5 }
+
 export const DECOR_DRAWINGS = deepFreeze({
   rede: {
     w: 150,
     h: 50,
     shapes: [
-      { kind: 'path', d: 'M6 2 L14 2 L34 18 L26 18 Z', fill: 'rope' },
-      { kind: 'path', d: 'M144 2 L136 2 L116 18 L124 18 Z', fill: 'rope' },
-      { kind: 'path', d: 'M26 14 L124 14 L124 18 L26 18 Z', fill: 'rope' },
-      { kind: 'path', d: 'M26 16 L124 16 L112 38 L38 38 Z', fill: 'cloth' },
-      { kind: 'path', d: 'M38 38 L112 38 L102 46 L48 46 Z', fill: 'clothAlt' },
-      { kind: 'circle', cx: 30, cy: 18, r: 3, fill: 'rope' },
-      { kind: 'circle', cx: 120, cy: 18, r: 3, fill: 'rope' }
+      { kind: 'path', d: 'M3 3L28 17M147 3L122 17', fill: 'none', stroke: 'rope', sw: 2, cap: 'round' },
+      { kind: 'circle', cx: 3, cy: 3, r: 2, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'circle', cx: 147, cy: 3, r: 2, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'path', d: 'M26 16C40 46 110 46 124 16Z', fill: 'cloth', ...OUTLINE },
+      { kind: 'path', d: 'M30 18C46 30 104 30 120 18', fill: 'none', stroke: 'clothAlt', sw: 2 },
+      { kind: 'path', d: 'M34 22C50 40 100 40 116 22', fill: 'none', stroke: 'clothAlt', sw: 3 },
+      { kind: 'ellipse', cx: 42, cy: 21, rx: 8, ry: 4, fill: 'clothAlt', stroke: 'ink', sw: 1 },
+      { kind: 'circle', cx: 27, cy: 17, r: 3, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'circle', cx: 123, cy: 17, r: 3, fill: 'wood', stroke: 'ink', sw: 1 }
     ]
   },
   varal: {
     w: 150,
     h: 50,
     shapes: [
-      { kind: 'rect', x: 4, y: 6, w: 142, h: 2, fill: 'rope' },
-      { kind: 'rect', x: 26, y: 4, w: 6, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 72, y: 4, w: 6, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 116, y: 4, w: 6, h: 6, fill: 'rope' },
-      { kind: 'path', d: 'M16 10 L46 10 L50 40 L12 40 Z', fill: 'cloth' },
-      { kind: 'path', d: 'M60 10 L90 10 L86 44 L56 44 Z', fill: 'clothAlt' },
-      { kind: 'path', d: 'M104 10 L134 10 L138 36 L100 36 Z', fill: 'cloth' }
+      { kind: 'path', d: 'M2 6Q75 14 148 6', fill: 'none', stroke: 'rope', sw: 1.5, cap: 'round' },
+      { kind: 'path', d: 'M14 9L24 7L28 11L32 7L42 9L46 19L40 21L40 42L16 42L16 21L10 19Z', fill: 'cloth', ...OUTLINE },
+      { kind: 'rect', x: 60, y: 10, w: 30, h: 32, rx: 2, fill: 'clothAlt', ...OUTLINE },
+      { kind: 'path', d: 'M60 34L90 34M60 38L90 38', fill: 'none', stroke: 'cloth', sw: 2 },
+      { kind: 'path', d: 'M104 9L134 9L136 34L122 34L119 20L116 34L102 34Z', fill: 'cloth', ...OUTLINE },
+      { kind: 'rect', x: 22, y: 5, w: 3, h: 6, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'rect', x: 32, y: 5, w: 3, h: 6, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'rect', x: 63, y: 7, w: 3, h: 6, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'rect', x: 84, y: 7, w: 3, h: 6, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'rect', x: 108, y: 6, w: 3, h: 6, fill: 'wood', stroke: 'ink', sw: 1 },
+      { kind: 'rect', x: 127, y: 6, w: 3, h: 6, fill: 'wood', stroke: 'ink', sw: 1 }
     ]
   },
   gato: {
     w: 100,
     h: 100,
     shapes: [
-      { kind: 'path', d: 'M74 68 L94 46 L98 56 L80 78 Z', fill: 'furDark' },
-      { kind: 'ellipse', cx: 48, cy: 70, rx: 24, ry: 20, fill: 'fur' },
-      { kind: 'ellipse', cx: 66, cy: 74, rx: 16, ry: 14, fill: 'fur' },
-      { kind: 'path', d: 'M52 62 L66 76 L60 80 L48 66 Z', fill: 'furDark' },
-      { kind: 'ellipse', cx: 36, cy: 90, rx: 10, ry: 6, fill: 'fur' },
-      { kind: 'ellipse', cx: 58, cy: 90, rx: 10, ry: 6, fill: 'fur' },
-      { kind: 'path', d: 'M30 30 L22 10 L42 26 Z', fill: 'fur' },
-      { kind: 'path', d: 'M28 18 L24 12 L36 18 Z', fill: 'furDark' },
-      { kind: 'path', d: 'M50 28 L64 8 L68 30 Z', fill: 'fur' },
-      { kind: 'path', d: 'M58 18 L64 10 L66 20 Z', fill: 'furDark' },
-      { kind: 'circle', cx: 46, cy: 40, r: 16, fill: 'fur' },
-      { kind: 'path', d: 'M38 30 L46 44 L42 44 L34 32 Z', fill: 'furDark' },
-      { kind: 'circle', cx: 40, cy: 40, r: 2, fill: 'furDark' },
-      { kind: 'circle', cx: 52, cy: 40, r: 2, fill: 'furDark' },
-      { kind: 'ellipse', cx: 46, cy: 46, rx: 3, ry: 2, fill: 'furDark' },
-      { kind: 'path', d: 'M42 48 L46 52 L50 48 Z', fill: 'furDark' }
+      { kind: 'path', d: 'M70 88C88 90 96 76 90 62', fill: 'none', stroke: 'ink', sw: 8, cap: 'round' },
+      { kind: 'path', d: 'M70 88C88 90 96 76 90 62', fill: 'none', stroke: 'fur', sw: 5, cap: 'round' },
+      { kind: 'ellipse', cx: 50, cy: 74, rx: 24, ry: 20, fill: 'fur', ...OUTLINE },
+      { kind: 'ellipse', cx: 50, cy: 79, rx: 11, ry: 13, fill: 'furLight' },
+      { kind: 'path', d: 'M30 66Q35 68 36 74M70 66Q65 68 64 74', fill: 'none', stroke: 'furDark', sw: 2.5, cap: 'round' },
+      { kind: 'ellipse', cx: 40, cy: 93, rx: 7, ry: 4, fill: 'furLight', ...OUTLINE },
+      { kind: 'ellipse', cx: 60, cy: 93, rx: 7, ry: 4, fill: 'furLight', ...OUTLINE },
+      { kind: 'path', d: 'M33 34L30 14L47 27Z', fill: 'fur', ...OUTLINE },
+      { kind: 'path', d: 'M67 34L70 14L53 27Z', fill: 'fur', ...OUTLINE },
+      { kind: 'path', d: 'M35 30L33 19L43 27Z', fill: 'furDark' },
+      { kind: 'path', d: 'M65 30L67 19L57 27Z', fill: 'furDark' },
+      { kind: 'circle', cx: 50, cy: 42, r: 18, fill: 'fur', ...OUTLINE },
+      { kind: 'path', d: 'M50 25L50 32M44 26L46 32M56 26L54 32', fill: 'none', stroke: 'furDark', sw: 2.5, cap: 'round' },
+      { kind: 'ellipse', cx: 50, cy: 49, rx: 8, ry: 5, fill: 'furLight' },
+      { kind: 'ellipse', cx: 43, cy: 42, rx: 2, ry: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 57, cy: 42, rx: 2, ry: 3, fill: 'ink' },
+      { kind: 'path', d: 'M48 47L52 47L50 49Z', fill: 'cloth', stroke: 'ink', sw: 0.6 },
+      { kind: 'path', d: 'M50 49Q48 53 45 51M50 49Q52 53 55 51', fill: 'none', stroke: 'ink', sw: 1, cap: 'round' },
+      { kind: 'path', d: 'M39 48L28 47M39 51L29 53M61 48L72 47M61 51L71 53', fill: 'none', stroke: 'ink', sw: 0.8, opacity: 0.6 }
     ]
   },
   pisca: {
     w: 300,
     h: 20,
     shapes: [
-      { kind: 'rect', x: 8, y: 2, w: 284, h: 2, fill: 'rope' },
-      { kind: 'circle', cx: 8, cy: 3, r: 2, fill: 'rope' },
-      { kind: 'circle', cx: 292, cy: 3, r: 2, fill: 'rope' },
-      { kind: 'rect', x: 23, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 61, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 99, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 137, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 175, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 213, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 251, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'rect', x: 289, y: 4, w: 2, h: 6, fill: 'rope' },
-      { kind: 'circle', cx: 24, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 62, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 100, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 138, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 176, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 214, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 252, cy: 13, r: 4, fill: 'lamp' },
-      { kind: 'circle', cx: 290, cy: 13, r: 4, fill: 'lamp' }
+      { kind: 'path', d: 'M4 2Q150 16 296 2', fill: 'none', stroke: 'wire', sw: 1.5, cap: 'round' },
+      { kind: 'rect', x: 31, y: 5, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 33, cy: 12, rx: 3, ry: 4, fill: 'bulb1', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 60, y: 6, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 62, cy: 13, rx: 3, ry: 4, fill: 'bulb2', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 90, y: 8, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 92, cy: 15, rx: 3, ry: 4, fill: 'bulb3', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 119, y: 9, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 121, cy: 16, rx: 3, ry: 4, fill: 'bulb4', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 148, y: 9, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 150, cy: 16, rx: 3, ry: 4, fill: 'bulb1', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 177, y: 9, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 179, cy: 16, rx: 3, ry: 4, fill: 'bulb2', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 206, y: 8, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 208, cy: 15, rx: 3, ry: 4, fill: 'bulb3', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 236, y: 6, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 238, cy: 13, rx: 3, ry: 4, fill: 'bulb4', stroke: 'ink', sw: 1, glow: true },
+      { kind: 'rect', x: 265, y: 5, w: 4, h: 3, fill: 'ink' },
+      { kind: 'ellipse', cx: 267, cy: 12, rx: 3, ry: 4, fill: 'bulb1', stroke: 'ink', sw: 1, glow: true }
     ]
   }
 })

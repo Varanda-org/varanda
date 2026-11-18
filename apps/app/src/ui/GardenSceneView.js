@@ -1,12 +1,14 @@
-// The Varandinha balcony. Boxes and pot drawings come from gardenScene.js,
-// enfeites from gardenDecor.js.
-// A ripe pot sways until the person asks for less motion, then it stands still.
+// The Varandinha balcony. Boxes and drawings come from gardenScene.js,
+// enfeites from gardenDecor.js, the renderer from GardenArt.js.
+// A ripe pot sways and its glow breathes until the person asks for less
+// motion, then both stand still.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, Animated, Easing, Platform, Pressable, StyleSheet, View } from 'react-native'
-import Svg, { Circle, Ellipse, G, Path, Rect } from 'react-native-svg'
+import Svg, { G } from 'react-native-svg'
+import { GardenDefs, ShapeList } from './GardenArt'
 import { decorDrawing, decorPalette } from './gardenDecor'
-import { DECOR_IDS, gardenLayout, gardenPalette, plantShapes, potBase } from './gardenScene'
+import { DECOR_IDS, POT_BOX, RIPE_GLOW, SOIL_Y, backdropShapes, gardenLayout, gardenPalette, plantShapes, potBase, potCues, railShapes } from './gardenScene'
 import { hiddenFromReaders } from './SplashSceneView'
 import { loopTiming } from './loopMotion'
 
@@ -21,12 +23,24 @@ const SWAY_MS = 3400
 const STEPS = 16
 const MAX_TILT = 2.5
 
+const POT_VIEWBOX = POT_BOX.x + ' ' + POT_BOX.y + ' ' + POT_BOX.w + ' ' + POT_BOX.h
+const BACKDROP_GRADS = ['sky', 'halo', 'glow']
+const GLOW_ONLY = ['glow']
+
 function tiltRange (index) {
   const sign = index % 2 === 0 ? 1 : -1
   const out = []
   for (let k = 0; k <= STEPS; k++) {
     out.push((sign * MAX_TILT * Math.sin(2 * Math.PI * k / STEPS)).toFixed(3) + 'deg')
   }
+  return out
+}
+
+// The glow is brightest when the plant stands upright and dims at the far
+// end of the lean, on the same clock, so it needs no loop of its own.
+function glowRange () {
+  const out = []
+  for (let k = 0; k <= STEPS; k++) out.push(Number((0.75 + 0.25 * Math.cos(2 * Math.PI * k / STEPS)).toFixed(3)))
   return out
 }
 
@@ -38,7 +52,8 @@ function createSway () {
     inputRange,
     outputRange: tiltRange(index)
   }))
-  return { sway, tilts }
+  const glow = sway.interpolate({ inputRange, outputRange: glowRange() })
+  return { sway, tilts, glow }
 }
 
 function useKnownReduceMotion () {
@@ -96,41 +111,45 @@ function labelAt (labels, index) {
   return typeof label === 'string' ? label : ''
 }
 
-function Shape ({ shape, fill }) {
-  if (shape.kind === 'rect') return <Rect x={shape.x} y={shape.y} width={shape.w} height={shape.h} fill={fill} />
-  if (shape.kind === 'circle') return <Circle cx={shape.cx} cy={shape.cy} r={shape.r} fill={fill} />
-  if (shape.kind === 'ellipse') return <Ellipse cx={shape.cx} cy={shape.cy} rx={shape.rx} ry={shape.ry} fill={fill} />
-  if (shape.kind === 'path') return <Path d={shape.d} fill={fill} />
-  return null
-}
-
-function Drawing ({ pot, shapes, palette }) {
+// One pot layer: the pot box fitted in the slot, so every layer of a pot
+// shares its coordinates.
+function Layer ({ pot, shapes, palette, scheme, grads }) {
   return (
-    <Svg width={pot.w} height={pot.h} viewBox='0 0 100 100' preserveAspectRatio='xMidYMid meet'>
-      {shapes.map((shape, i) => <Shape key={i} shape={shape} fill={palette[shape.fill]} />)}
+    <Svg width={pot.w} height={pot.h} viewBox={POT_VIEWBOX} preserveAspectRatio='xMidYMid meet'>
+      {grads ? <GardenDefs scheme={scheme} ids={grads} /> : null}
+      <ShapeList shapes={shapes} palette={palette} scheme={scheme} />
     </Svg>
   )
 }
 
-// Pot and soil stand still; only the plant leans, pivoting at the soil line.
-// The square drawing sits in the slot's middle, so local y 64 is 0.14 of the
-// slot's width below the slot's centre.
-function Art ({ pot, view, palette, tilt }) {
+// A still pot is one drawing. A moving one splits in three: the breathing
+// glow, the clay with its dots, and the plant, which leans about the soil.
+function Art ({ pot, view, palette, scheme, tilt, glow }) {
   const size = { position: 'absolute', left: 0, top: 0, width: pot.w, height: pot.h }
-  const pivot = Math.round(pot.w * 14 / 100)
-  const plant = <Drawing pot={pot} shapes={plantShapes(view)} palette={palette} />
+  const ripe = isRipe(view)
+  if (!tilt) {
+    const shapes = (ripe ? [RIPE_GLOW] : []).concat(potBase(view), plantShapes(view), potCues(view))
+    return (
+      <View pointerEvents='none' style={size} {...hiddenFromReaders}>
+        <Layer pot={pot} shapes={shapes} palette={palette} scheme={scheme} grads={ripe ? GLOW_ONLY : null} />
+      </View>
+    )
+  }
+  const scale = Math.min(pot.w / POT_BOX.w, pot.h / POT_BOX.h)
+  const pivot = Math.round((SOIL_Y - (POT_BOX.y + POT_BOX.h / 2)) * scale)
   return (
     <View pointerEvents='none' style={size} {...hiddenFromReaders}>
-      <Drawing pot={pot} shapes={potBase(view)} palette={palette} />
-      {tilt
-        ? (
-          <Animated.View
-            style={[size, { transform: [{ translateY: pivot }, { rotate: tilt }, { translateY: -pivot }] }]}
-          >
-            {plant}
-          </Animated.View>
-          )
-        : <View style={size}>{plant}</View>}
+      <Animated.View style={[size, { opacity: glow }]}>
+        <Layer pot={pot} shapes={[RIPE_GLOW]} palette={palette} scheme={scheme} grads={GLOW_ONLY} />
+      </Animated.View>
+      <View style={size}>
+        <Layer pot={pot} shapes={potBase(view).concat(potCues(view))} palette={palette} scheme={scheme} />
+      </View>
+      <Animated.View
+        style={[size, { transform: [{ translateY: pivot }, { rotate: tilt }, { translateY: -pivot }] }]}
+      >
+        <Layer pot={pot} shapes={plantShapes(view)} palette={palette} scheme={scheme} />
+      </Animated.View>
     </View>
   )
 }
@@ -164,7 +183,7 @@ function joinedDecor (decor) {
 // One matrix scales about the drawing origin and then shifts it. A transform
 // list would depend on which end runs first. Spare room stays above the
 // drawing, so a short rect still rests on its floor.
-function DecorArt ({ id, rect, palette }) {
+function DecorArt ({ id, rect, palette, scheme }) {
   try {
     const drawing = decorDrawing(id)
     const w = drawing.w
@@ -180,13 +199,34 @@ function DecorArt ({ id, rect, palette }) {
     const transform = 'matrix(' + scale + ' 0 0 ' + scale + ' ' + x + ' ' + y + ')'
     return (
       <G transform={transform}>
-        {shapes.map((shape, i) => <Shape key={i} shape={shape} fill={palette[shape.fill]} />)}
+        <ShapeList shapes={shapes} palette={palette} scheme={scheme} />
       </G>
     )
   } catch {
     return null
   }
 }
+
+// Sky, city, floor and roof, then the enfeites, then the railing over them.
+// It changes only with the frame, the enfeites or the scheme, so the
+// screen's clock tick never redraws it.
+const Backdrop = memo(function Backdrop ({ layout, scheme }) {
+  const palette = gardenPalette(scheme)
+  return (
+    <View pointerEvents='none' style={StyleSheet.absoluteFill} {...hiddenFromReaders}>
+      <Svg width={layout.width} height={layout.height}>
+        <GardenDefs scheme={scheme} ids={BACKDROP_GRADS} />
+        <ShapeList shapes={backdropShapes(layout, scheme)} palette={palette} scheme={scheme} />
+        {layout.decor
+          ? Object.keys(layout.decor).map((id) => (
+            <DecorArt key={id} id={id} rect={layout.decor[id]} palette={decorPalette(scheme)} scheme={scheme} />
+          ))
+          : null}
+        <ShapeList shapes={railShapes(layout)} palette={palette} scheme={scheme} />
+      </Svg>
+    </View>
+  )
+})
 
 export function GardenSceneView ({ width, pots, scheme, labels, onPressPot, decor }) {
   const motion = useRef(null)
@@ -196,7 +236,6 @@ export function GardenSceneView ({ width, pots, scheme, labels, onPressPot, deco
     decor: decorIds === '' ? [] : decorIds.split(',')
   }), [width, decorIds])
   const palette = gardenPalette(scheme)
-  const decorFill = decorPalette(scheme)
   const reduce = useKnownReduceMotion()
   const canPress = typeof onPressPot === 'function'
   const sway = motion.current.sway
@@ -227,27 +266,7 @@ export function GardenSceneView ({ width, pots, scheme, labels, onPressPot, deco
 
   return (
     <View style={{ width: layout.width, height: layout.height, position: 'relative' }}>
-      <View pointerEvents='none' style={StyleSheet.absoluteFill} {...hiddenFromReaders}>
-        <Svg width={layout.width} height={layout.height}>
-          <Rect x={layout.wall.x} y={layout.wall.y} width={layout.wall.w} height={layout.wall.h} fill={palette.wall} />
-          <Rect x={layout.floor.x} y={layout.floor.y} width={layout.floor.w} height={layout.floor.h} fill={palette.floor} />
-          {layout.decor
-            ? Object.keys(layout.decor).map((id) => (
-              <DecorArt key={id} id={id} rect={layout.decor[id]} palette={decorFill} />
-            ))
-            : null}
-          {layout.railing.map((bar, i) => (
-            <Rect
-              key={i}
-              x={bar.x}
-              y={bar.y}
-              width={bar.w}
-              height={bar.h}
-              fill={palette[bar.fill]}
-            />
-          ))}
-        </Svg>
-      </View>
+      {layout.height > 0 ? <Backdrop layout={layout} scheme={scheme} /> : null}
       {layout.height > 0 && layout.pots.map((pot) => {
         const view = viewAt(pots, pot.index)
         const moving = isRipe(view) && reduce === false
@@ -265,7 +284,9 @@ export function GardenSceneView ({ width, pots, scheme, labels, onPressPot, deco
               pot={pot}
               view={view}
               palette={palette}
+              scheme={scheme}
               tilt={moving ? motion.current.tilts[pot.index] : null}
+              glow={motion.current.glow}
             />
           </Pressable>
         )

@@ -6,7 +6,7 @@
 // only on an explicit tap, never as a chain, and nothing here writes.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, Text, View } from 'react-native'
 import { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useBlocks } from '../blocksProvider'
 import { readFollowKeys } from '../follow'
@@ -19,13 +19,16 @@ import { whoOf } from '../who'
 import { NOTICES, STREET_TITLE } from '../varandinhaView'
 import { Soft, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { StickerCard, useGardenStyles } from '../ui/GardenArt'
+import { gardenTokens } from '../ui/gardenStyle'
+import { Icon } from '../ui/Icon'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
-import { layout, space, type } from '../ui/theme'
-import { useStyles } from '../ui/ThemeProvider'
+import { space } from '../ui/theme'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const HEX64 = /^[0-9a-f]{64}$/
 const OFFLINE = 'Sem conexão. Tente de novo quando a internet voltar.'
@@ -44,21 +47,23 @@ function failureOf (reason) {
 
 function StreetRow ({ keyHex, profile, onOpen }) {
   const styles = useStyles(makeStyles)
+  const g = useGardenStyles()
+  const { scheme } = useTheme()
   const who = whoOf(profile)
   const title = displayText(who.title)
   return (
-    <Pressable
-      accessibilityRole='link'
-      accessibilityLabel={ROW_HINT + title}
-      onPress={() => onOpen(keyHex)}
-      style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-    >
-      <Avatar name={who.avatarName} publicKey={keyHex} size={44} picture={(profile || {}).avatar} />
-      <View style={styles.who}>
-        <Text style={styles.name} numberOfLines={1}>{title}</Text>
-        {who.subtitle ? <Text style={styles.handle} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
-      </View>
-    </Pressable>
+    <View style={styles.row}>
+      <StickerCard accessibilityRole='link' accessibilityLabel={ROW_HINT + title} onPress={() => onOpen(keyHex)}>
+        <View style={g.row}>
+          <Avatar name={who.avatarName} publicKey={keyHex} size={44} picture={(profile || {}).avatar} />
+          <View style={g.rowText}>
+            <Text style={g.rowName} numberOfLines={1}>{title}</Text>
+            {who.subtitle ? <Text style={g.rowSub} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
+          </View>
+          <Icon name='seta' size={18} color={gardenTokens(scheme).muted} />
+        </View>
+      </StickerCard>
+    </View>
   )
 }
 
@@ -181,9 +186,5 @@ const makeStyles = (colors) => StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   notice: { paddingHorizontal: space.lg, paddingVertical: space.sm },
   more: { paddingHorizontal: space.lg, paddingVertical: space.md, alignItems: 'flex-start' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingVertical: space.sm, paddingHorizontal: space.lg },
-  pressed: { opacity: 0.6 },
-  who: { flex: 1, minWidth: 0 },
-  name: { ...type.rowName, color: colors.ink },
-  handle: { ...type.caption, color: colors.soft }
+  row: { paddingHorizontal: space.lg, paddingVertical: space.xs }
 })

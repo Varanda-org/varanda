@@ -11,7 +11,7 @@
 // are for the owner's own balcony.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
+import { ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native'
 import rpc, { FOLLOW_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useBlocks } from '../blocksProvider'
@@ -24,23 +24,25 @@ import { fetchGarden } from '../indexClient'
 import { useNames } from '../names'
 import { useNode } from '../node'
 import {
-  ACTIONS, CONSENT_LINES, CONSENT_SWITCH_LABEL, NOTICES, SOIL_LABELS, STAGE_LABELS, TITLE, STREET_TITLE, WHO_WATERED,
+  ACTIONS, CONSENT_LINES, CONSENT_SWITCH_LABEL, NOTICES, SOIL_LABELS, STAGE_LABELS, THIRSTY_LABEL, TITLE, STREET_TITLE, WHO_WATERED,
   harvestVerb, pendingLabel, plantLabel, readyIn, refusalNotice, visitorLine, wateredDay
 } from '../varandinhaView'
 import { whoOf } from '../who'
 import { Btn, ConfirmStack, ErrorText, Soft, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { GardenButton, GardenSection, PotArt, StageDots, StickerCard, useGardenStyles } from '../ui/GardenArt'
 import { GardenSceneView } from '../ui/GardenSceneView'
+import { gardenTokens } from '../ui/gardenStyle'
 import { Icon } from '../ui/Icon'
 import { OfflineNote } from '../ui/OfflineNote'
-import { Pill } from '../ui/Pill'
 import { RefreshableList } from '../ui/RefreshableList'
 import { Sheet } from '../ui/Sheet'
 import { EmptyState, ErrorState, Skeleton } from '../ui/States'
 import { SwitchRow } from '../ui/SwitchRow'
 import { TopActions } from '../ui/TopActions'
+import { hiddenFromReaders } from '../ui/SplashSceneView'
 import { TopBar } from '../ui/TopBar'
-import { layout, space, type } from '../ui/theme'
+import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 
 const HEX64 = /^[0-9a-f]{64}$/
@@ -61,6 +63,12 @@ const OFFLINE = 'Sem conexão. Tente de novo quando a internet voltar.'
 const UNAVAILABLE = 'Não deu para abrir esta varanda agora.'
 const POT_WORD = 'Vaso '
 const EMPTY_POT = 'vazio'
+
+// Each plant as it looks grown, for the planting cards.
+const PLANT_PREVIEWS = Object.freeze(Object.fromEntries(rpc.garden.GARDEN_PLANTS.map((p) => [p.id, Object.freeze({ plant: p.id, stage: 3 })])))
+// The balcony before the game starts: six empty pots, nothing to press.
+const NO_POTS = Object.freeze(new Array(GARDEN_POTS).fill(null))
+const NO_LABELS = Object.freeze([])
 
 // A failed index read, as the person reads it.
 function indexFailure (reason) {
@@ -179,33 +187,45 @@ function ownViews (pending, received, givenPer, now) {
 
 function potLabel (index, view, occupied) {
   const head = POT_WORD + (index + 1) + ', '
-  if (view) return head + plantLabel(view.plant) + ', ' + STAGE_LABELS[view.stage]
+  if (view) return head + plantLabel(view.plant) + ', ' + STAGE_LABELS[view.stage] + (view.canWater === true ? ', ' + THIRSTY_LABEL : '')
   return head + (occupied ? STAGE_LABELS[0] : EMPTY_POT)
 }
 
+// The pot the sheet is about: its art, the growth dots and what it needs.
 function PotInfo ({ view, now }) {
-  const { colors } = useTheme()
   const styles = useStyles(makeStyles)
+  const g = useGardenStyles()
   if (!view) return null
   return (
-    <View style={styles.potInfo}>
-      <Text style={[styles.potName, { color: colors.ink }]}>{plantLabel(view.plant)}</Text>
-      <Soft>{[STAGE_LABELS[view.stage], 'terra ' + SOIL_LABELS[view.dry ? 'dry' : 'wet'], view.ripe ? null : readyIn(view.ripeAt, now)].filter(Boolean).join(' · ')}</Soft>
-    </View>
+    <StickerCard>
+      <View style={g.row}>
+        <PotArt view={view} size={64} cues={false} />
+        <View style={[g.rowText, styles.potText]}>
+          <Text style={g.rowName}>{plantLabel(view.plant)}</Text>
+          <StageDots view={view} width={44} />
+          <Text style={g.rowSub}>{[STAGE_LABELS[view.stage], 'terra ' + SOIL_LABELS[view.dry ? 'dry' : 'wet'], view.ripe ? null : readyIn(view.ripeAt, now)].filter(Boolean).join(' · ')}</Text>
+        </View>
+      </View>
+    </StickerCard>
   )
 }
 
 function HelperRow ({ author, at, now, profile }) {
   const styles = useStyles(makeStyles)
+  const g = useGardenStyles()
   const who = whoOf(profile)
   const title = displayText(who.title)
   return (
-    <View style={styles.helper} accessibilityLabel={title + ', ' + wateredDay(at, now)}>
-      <Avatar name={who.avatarName} publicKey={author} size={40} picture={(profile || {}).avatar} />
-      <View style={styles.who}>
-        <Text style={styles.name} numberOfLines={1}>{title}</Text>
-        <Text style={styles.when} numberOfLines={1}>{wateredDay(at, now)}</Text>
-      </View>
+    <View style={styles.cardRow}>
+      <StickerCard>
+        <View style={g.row} accessibilityLabel={title + ', ' + wateredDay(at, now)}>
+          <Avatar name={who.avatarName} publicKey={author} size={40} picture={(profile || {}).avatar} />
+          <View style={g.rowText}>
+            <Text style={g.rowName} numberOfLines={1}>{title}</Text>
+            <Text style={g.rowSub} numberOfLines={1}>{wateredDay(at, now)}</Text>
+          </View>
+        </View>
+      </StickerCard>
     </View>
   )
 }
@@ -213,14 +233,15 @@ function HelperRow ({ author, at, now, profile }) {
 // On someone else's balcony, whose it is.
 function OwnerRow ({ owner, profile }) {
   const styles = useStyles(makeStyles)
+  const g = useGardenStyles()
   const who = whoOf(profile)
   const title = displayText(who.title)
   return (
-    <View style={styles.helper} accessibilityRole='header' accessibilityLabel={OWNER_PREFIX + title}>
+    <View style={[g.row, styles.owner]} accessibilityRole='header' accessibilityLabel={OWNER_PREFIX + title}>
       <Avatar name={who.avatarName} publicKey={owner} size={40} picture={(profile || {}).avatar} />
-      <View style={styles.who}>
-        <Text style={styles.name} numberOfLines={1}>{title}</Text>
-        {who.subtitle ? <Text style={styles.when} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
+      <View style={g.rowText}>
+        <Text style={g.rowName} numberOfLines={1}>{title}</Text>
+        {who.subtitle ? <Text style={g.rowSub} numberOfLines={1}>{displayText(who.subtitle)}</Text> : null}
       </View>
     </View>
   )
@@ -228,7 +249,9 @@ function OwnerRow ({ owner, profile }) {
 
 export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToast, registerBackGuard }) {
   const styles = useStyles(makeStyles)
+  const g = useGardenStyles()
   const { scheme, colors } = useTheme()
+  const tokens = gardenTokens(scheme)
   const node = useNode()
   const hosted = node.hosted === true
   const names = useNames()
@@ -538,7 +561,15 @@ export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToa
       <View style={styles.screen}>
         {bar}
         <OfflineNote />
-        <EmptyState icon='gente' title={TITLE} body={CONSENT_LINES[0]} actionLabel={BEGIN_LABEL} onAction={() => { setNotice(''); setConsent(openConsent()) }} />
+        <ScrollView contentContainerStyle={{ paddingBottom: bottomPad }}>
+          <View style={styles.scene} {...hiddenFromReaders}>
+            <GardenSceneView width={width} pots={NO_POTS} scheme={scheme} labels={NO_LABELS} />
+          </View>
+          <View style={styles.invite}>
+            <Soft>{CONSENT_LINES[0]}</Soft>
+            <GardenButton label={BEGIN_LABEL} onPress={() => { setNotice(''); setConsent(openConsent()) }} />
+          </View>
+        </ScrollView>
         {consentSheet}
       </View>
     )
@@ -617,19 +648,18 @@ export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToa
       {!own && result && !result.loading && !page ? <View style={styles.note}><Text style={[styles.count, { color: colors.ink }]}>{visitorLine(result.helpers.length + (helped === 'ok' && !result.helpers.some((h) => h.author === self) ? 1 : 0))}</Text></View> : null}
       {own && typeof onOpenStreet === 'function'
         ? (
-          <Pressable
-            accessibilityRole='link'
-            accessibilityLabel={STREET_TITLE}
-            onPress={() => guard(onOpenStreet)}
-            style={({ pressed }) => [styles.streetRow, pressed && styles.pressed]}
-          >
-            <Icon name='gente' size={22} color={colors.ink} />
-            <Text style={styles.streetLabel}>{STREET_TITLE}</Text>
-            <Icon name='seta' size={18} color={colors.soft} />
-          </Pressable>
+          <View style={styles.cardRow}>
+            <StickerCard accessibilityRole='link' accessibilityLabel={STREET_TITLE} onPress={() => guard(onOpenStreet)}>
+              <View style={g.row}>
+                <Icon name='gente' size={22} color={tokens.text} />
+                <Text style={[g.rowName, styles.grow]}>{STREET_TITLE}</Text>
+                <Icon name='seta' size={18} color={tokens.muted} />
+              </View>
+            </StickerCard>
+          </View>
           )
         : null}
-      {own ? <Text style={styles.section} accessibilityRole='header'>{WHO_WATERED}</Text> : null}
+      {own ? <View style={styles.section}><GardenSection title={WHO_WATERED} /></View> : null}
     </View>
   )
 
@@ -640,7 +670,7 @@ export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToa
     else empty = <View style={styles.note}><Soft>{visitorLine(0)}</Soft></View>
   }
   const footer = own
-    ? <View style={styles.more}><Pill label={LEAVE_LABEL} danger onPress={() => { setNotice(''); setLeaveOpen(true) }} /></View>
+    ? <View style={styles.more}><GardenButton label={LEAVE_LABEL} danger onPress={() => { setNotice(''); setLeaveOpen(true) }} /></View>
     : null
 
   return (
@@ -666,11 +696,15 @@ export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToa
       {own && pending6 > 0
         ? (
           <View style={[styles.pendingBar, { paddingBottom: insets.bottom + space.sm }]}>
-            <Text style={[styles.pendingText, { color: colors.ink }]}>{pendingLabel(pending6)}</Text>
-            <View style={styles.pendingActions}>
-              <Pill label={ACTIONS.discard} disabled={act.pending} onPress={() => { setPending(discard(pending)); setNotice('') }} />
-              <Pill label={ACTIONS.save} filled pending={act.pending} disabled={exhausted} onPress={save} />
-            </View>
+            <StickerCard>
+              <View style={styles.pendingRow}>
+                <Text style={[g.rowName, styles.grow]}>{pendingLabel(pending6)}</Text>
+                <View style={styles.pendingActions}>
+                  <GardenButton label={ACTIONS.discard} secondary disabled={act.pending} onPress={() => { setPending(discard(pending)); setNotice('') }} />
+                  <GardenButton label={ACTIONS.save} pending={act.pending} disabled={exhausted} onPress={save} />
+                </View>
+              </View>
+            </StickerCard>
           </View>
           )
         : null}
@@ -680,24 +714,38 @@ export default function Varandinha ({ entry, ownKey, onBack, onOpenStreet, onToa
           {own && potOpen !== null && !occupied
             ? (
               <>
-                <Text style={styles.section} accessibilityRole='header'>{ACTIONS.plant}</Text>
-                {rpc.garden.GARDEN_PLANTS.map((p) => (
-                  <Btn key={p.id} label={plantLabel(p.id)} accessibilityLabel={ACTIONS.plant + ' ' + plantLabel(p.id)} secondary disabled={exhausted} onPress={() => tap('plant', potOpen, p.id)} />
-                ))}
+                <GardenSection title={ACTIONS.plant} />
+                <View style={styles.plantGrid}>
+                  {rpc.garden.GARDEN_PLANTS.map((p) => (
+                    <StickerCard
+                      key={p.id}
+                      style={styles.plantCell}
+                      faceStyle={styles.plantFace}
+                      accessibilityLabel={ACTIONS.plant + ' ' + plantLabel(p.id)}
+                      disabled={exhausted}
+                      onPress={() => tap('plant', potOpen, p.id)}
+                    >
+                      <PotArt view={PLANT_PREVIEWS[p.id]} size={72} cues={false} />
+                      {/* Android breaks after a hyphen only with hyphenation on, so at a
+                          large font "Espada-de-são-jorge" split inside "jorge". */}
+                      <Text style={[g.tileName, styles.plantName]} numberOfLines={2} android_hyphenationFrequency='normal'>{plantLabel(p.id)}</Text>
+                    </StickerCard>
+                  ))}
+                </View>
               </>
               )
             : null}
           {own && potOpen !== null && occupied
             ? (
               <>
-                {sheetView && sheetView.canWater ? <Btn label={ACTIONS.water} disabled={exhausted} onPress={() => tap('water', potOpen)} /> : null}
-                {sheetView && sheetView.ripe ? <Btn label={harvestVerb(sheetView.plant)} disabled={exhausted} onPress={() => tap('harvest', potOpen)} /> : null}
-                <Btn label={ACTIONS.clear} danger disabled={exhausted} onPress={() => tap('clear', potOpen)} />
+                {sheetView && sheetView.canWater ? <GardenButton label={ACTIONS.water} disabled={exhausted} onPress={() => tap('water', potOpen)} /> : null}
+                {sheetView && sheetView.ripe ? <GardenButton label={harvestVerb(sheetView.plant)} disabled={exhausted} onPress={() => tap('harvest', potOpen)} /> : null}
+                <GardenButton label={ACTIONS.clear} danger disabled={exhausted} onPress={() => tap('clear', potOpen)} />
               </>
               )
             : null}
           {!own && potOpen !== null && canHelp && sheetView && !sheetView.ripe
-            ? <Btn label={ACTIONS.water} pending={act.pending} onPress={() => water(potOpen)} />
+            ? <GardenButton label={ACTIONS.water} pending={act.pending} onPress={() => water(potOpen)} />
             : null}
           <ErrorText>{notice}</ErrorText>
         </ScrollView>
@@ -731,19 +779,19 @@ const makeStyles = (colors) => StyleSheet.create({
   scene: { alignItems: 'center' },
   note: { paddingHorizontal: space.lg, paddingVertical: space.sm },
   count: { ...type.rowName },
-  more: { paddingHorizontal: space.lg, paddingVertical: space.lg, alignItems: 'flex-start' },
-  section: { ...type.section, color: colors.soft, paddingHorizontal: space.lg, paddingTop: space.lg, paddingBottom: space.xs },
-  streetRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingVertical: space.sm, paddingHorizontal: space.lg },
-  streetLabel: { ...type.rowName, color: colors.ink, flex: 1 },
-  pressed: { opacity: 0.6 },
-  helper: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingVertical: space.sm, paddingHorizontal: space.lg },
-  who: { flex: 1, minWidth: 0 },
-  name: { ...type.rowName, color: colors.ink },
-  when: { ...type.caption, color: colors.soft },
-  pendingBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: space.md, paddingHorizontal: space.lg, paddingVertical: space.sm, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.card },
-  pendingText: { ...type.rowName, flexShrink: 1 },
+  more: { paddingHorizontal: space.lg, paddingVertical: space.lg },
+  invite: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.lg },
+  section: { paddingHorizontal: space.lg, paddingTop: space.lg, paddingBottom: space.xs },
+  cardRow: { paddingHorizontal: space.lg, paddingVertical: space.xs },
+  owner: { paddingHorizontal: space.lg, paddingVertical: space.sm },
+  grow: { flex: 1, minWidth: 0 },
+  pendingBar: { paddingHorizontal: space.md, paddingTop: space.sm, backgroundColor: colors.bg },
+  pendingRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, minHeight: 44 },
   pendingActions: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  potInfo: { gap: space.xs },
-  potName: { ...type.postName },
+  potText: { gap: space.xs },
+  plantGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  plantCell: { flexBasis: '45%', flexGrow: 1 },
+  plantFace: { alignItems: 'center', justifyContent: 'center', gap: space.xs, minHeight: 112 },
+  plantName: { textAlign: 'center' },
   sheetBody: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg }
 })
