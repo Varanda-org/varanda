@@ -126,8 +126,10 @@ export function SkeletonTile () {
     <Skeleton>
       <View style={styles.skTile}>
         <View style={styles.skImage} />
-        <View style={[styles.skBar, { width: '80%' }]} />
-        <View style={[styles.skBar, { width: '45%' }]} />
+        <View style={styles.skTileText}>
+          <View style={[styles.skBar, { width: '80%' }]} />
+          <View style={[styles.skBar, { width: '45%' }]} />
+        </View>
       </View>
     </Skeleton>
   )
@@ -223,16 +225,18 @@ const makeStyles = (colors) => StyleSheet.create({
   skAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.skeleton },
   skLines: { flex: 1, gap: 10, justifyContent: 'center' },
   skBar: { height: 12, borderRadius: 6, backgroundColor: colors.skeleton },
-  skTile: { gap: space.md, padding: space.lg },
-  skImage: { width: '100%', aspectRatio: 1, borderRadius: radius.md, backgroundColor: colors.skeleton },
+  // The Feira card's frame, photo and text block, so the grid does not jump when the listings arrive.
+  skTile: { padding: space.sm, borderRadius: radius.bubble, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  skImage: { width: '100%', aspectRatio: 4 / 5, borderRadius: 16, backgroundColor: colors.skeleton },
+  skTileText: { minHeight: space.md * 2 + type.price.lineHeight + space.xs + type.tileTitle.lineHeight, padding: space.md, gap: space.sm, justifyContent: 'center' },
   skBubble: { width: '65%', height: 56, margin: space.lg, borderRadius: radius.bubble, backgroundColor: colors.skeleton },
   skProfile: { width: '100%' },
   skBand: { height: PROFILE_BAND, backgroundColor: colors.skeleton },
-  skProfileHead: { width: '100%', maxWidth: layout.column, alignSelf: 'center', marginTop: -layout.hit, paddingHorizontal: space.lg },
-  skProfileRing: { width: layout.hit * 2 + space.sm, height: layout.hit * 2 + space.sm, borderRadius: (layout.hit * 2 + space.sm) / 2, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
-  skProfileAvatar: { width: layout.hit * 2, height: layout.hit * 2, borderRadius: layout.hit, backgroundColor: colors.skeleton },
-  skProfileLines: { width: '100%', maxWidth: layout.column, alignSelf: 'center', gap: 10, paddingTop: space.md, paddingHorizontal: space.lg, paddingBottom: space.md },
-  skProfileCounts: { flexDirection: 'row', gap: space.lg, marginTop: space.sm },
+  skProfileHead: { width: '100%', maxWidth: layout.column, alignSelf: 'center', marginTop: -space.xxl, paddingHorizontal: space.xl },
+  skProfileRing: { width: space.xxl * 2 + space.sm, height: space.xxl * 2 + space.sm, borderRadius: (space.xxl * 2 + space.sm) / 2, backgroundColor: colors.bg, alignItems: 'center', justifyContent: 'center' },
+  skProfileAvatar: { width: space.xxl * 2, height: space.xxl * 2, borderRadius: space.xxl, backgroundColor: colors.skeleton },
+  skProfileLines: { width: '100%', maxWidth: layout.column, alignSelf: 'center', gap: 10, paddingTop: space.md, paddingHorizontal: space.xl, paddingBottom: space.md },
+  skProfileCounts: { flexDirection: 'row', gap: space.xl, marginTop: space.sm },
   skMediaWrap: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingHorizontal: space.lg, paddingVertical: space.md },
   // A post photo, not the square listing tile, clipped like MediaGrid.
   skMedia: { width: '100%', aspectRatio: 4 / 3, borderRadius: 14, backgroundColor: colors.skeleton },

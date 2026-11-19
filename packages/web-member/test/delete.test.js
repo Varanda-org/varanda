@@ -15,11 +15,12 @@ const { WebSocket } = require('ws')
 const { testnet } = require('./helpers/net')
 const { connectClient, errorOf } = require('./helpers/session')
 const { createCert, generateAssociationKeyPair } = require('@varanda/core/lib/cert')
-const { profileRecord, likeRecord, followRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
+const { profileRecord, likeRecord, followRecord, postRecord, postShareRecord, postCoverRecord, deleteRecord, nowIso, validateRecord, MAX_DELETE_RANGES } = require('@varanda/core/lib/records')
 const { memoryNodeStorage } = require('../lib/node-storage')
 const store = require('../lib/node-store')
 const member = require('../lib/member-ops')
 const { createBrowserNode } = require('../lib/node')
+const { jpegHead } = require('./helpers/photo')
 
 const LOCKED = 'identidade bloqueada: entre com a passkey'
 const BAD_REF = 'referência inválida'
@@ -311,4 +312,97 @@ test('readAll folds tombstones and keeps every index', async (t) => {
     else t.alike(folded.raw[2], { seq: 2, record: null }, 'by default the deleted bytes are cleared, so readRaw has no record')
     t.is(folded.raw[3].record.type, 'delete', 'the tombstone is kept')
   }
+})
+
+test('post.delete of a shared post tombstones its cover with the cover\'s range', async (t) => {
+  await testnet(t)
+  const s = await certified(t)
+  const bytes = b4a.alloc(3000)
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7) & 0xff
+  const cover = await s.node.mediaUpload({ bytes: jpegHead(bytes, 1200, 630), mime: 'image/jpeg', width: 1200, height: 630 })
+  const photo = await s.node.mediaUpload({ bytes: jpegHead(b4a.alloc(3100), 640, 480), mime: 'image/jpeg', width: 640, height: 480 })
+  // 1: media-core declaration
+  t.is((await s.web.request('post.create', { text: 'pública', media: [photo] })).seq, 2)
+  const to = s.key + ':2'
+  t.alike(await s.web.request('post.share', { to }), { shareSeq: 3, created: true })
+  t.alike(await s.web.request('post.cover', { to, image: cover }), { coverSeq: 4, created: true })
+
+  t.alike(await s.web.request('post.delete', { to }), { seq: 6, ref: s.key + ':6', changed: true, deleted: [2] }, 'the answer names the post only')
+  const log = await s.web.request('log.read', {})
+  const tombs = log.entries.filter((e) => e.seq >= 5).map((e) => e.record)
+  t.alike(tombs.map((r) => [r.type, r.seq, r.media]), [['delete', 2, [{ core: photo.core, start: photo.start, blocks: photo.blocks }]], ['delete', 4, [{ core: cover.core, start: cover.start, blocks: cover.blocks }]]], 'the post, then its cover with its range, in one append')
+  t.is(tombs[0].at, tombs[1].at, 'one deletion')
+  t.alike(log.invalid.filter((i) => i.seq === 4), [{ seq: 4, reason: 'deleted' }], 'the cover block is cleared')
+  t.alike(await s.web.request('post.delete', { to }), { seq: 5, ref: s.key + ':5', changed: false, deleted: [2] }, 'the repeat writes nothing')
+  t.alike(s.internal, [], 'no internal error')
+})
+
+test('a repeat post.delete of a cleared post tombstones the covers an older writer left live', async (t) => {
+  await testnet(t)
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [postRecord({ text: 'pública' }), postShareRecord({ seq: 1 }), postCoverRecord({ seq: 1, image }), deleteRecord({ seq: 1 })])
+  await member.withIdentity({ storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }, ({ diary }) => diary.clear(1, 2))
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: null })
+  const to = p.key + ':1'
+  t.alike(await web.request('post.delete', { to }), { seq: 5, ref: p.key + ':5', changed: true, deleted: [1] })
+  const tomb = (await web.request('log.read', {})).entries.find((e) => e.seq === 5).record
+  t.alike([tomb.type, tomb.seq, 'media' in tomb], ['delete', 3, false], 'the leftover cover, no range in an undeclared core')
+  t.alike(await web.request('post.delete', { to }), { seq: 4, ref: p.key + ':4', changed: false, deleted: [1] }, 'with no cover left the repeat writes nothing')
+})
+
+test('post.delete past one append: the post\'s tombstones go first, together; a failed later chunk is finished by a repeat', async (t) => {
+  await testnet(t)
+  const core = 'ab'.repeat(32)
+  const image = (start) => ({ core, mime: 'image/jpeg', start, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 })
+  // 1 media-core, 2 the post (10 photos: 3 tombstones), 3 its share, 4 to 9
+  // six live covers another writer left: 9 tombstones, two appends.
+  const p = await prepared(() => [
+    { type: 'media-core', key: core, at: nowIso() },
+    postRecord({ text: 'dez fotos', media: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(image) }),
+    postShareRecord({ seq: 2 }),
+    ...[11, 12, 13, 14, 15].map((start) => postCoverRecord({ seq: 2, image: image(start) }))
+  ])
+  await member.withIdentity({ storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }, ({ diary }) => store.appendRecords(diary, [postCoverRecord({ seq: 2, image: image(16) })]))
+  const to = p.key + ':2'
+  // 10 to 17 the first append; 18 is refused.
+  const first = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: null, limits: { maxLogBlocks: 18 } })
+  const err = await errorOf(first.web.request('post.delete', { to }))
+  t.is(err && err.message, 'limite do diário atingido', 'the second append fails')
+  const landed = (await first.web.request('log.read', {})).entries.filter((e) => e.seq >= 10).map((e) => e.record.seq)
+  t.alike(landed, [2, 2, 2, 4, 5, 6, 7, 8], 'the post\'s three tombstones in the first append, then the oldest covers')
+  await first.node.close()
+
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: p.keyPair, mediaKeyPair: null })
+  t.alike(await web.request('post.delete', { to }), { seq: 18, ref: p.key + ':18', changed: true, deleted: [2] }, 'the repeat tombstones the cover left')
+  const log = await web.request('log.read', {})
+  const tombs = log.entries.filter((e) => e.seq >= 10).map((e) => e.record)
+  t.alike(tombs.map((r) => r.seq), [2, 2, 2, 4, 5, 6, 7, 8, 9], 'every block of the post tombstoned')
+  const freed = tombs.filter((r) => r.seq === 2).flatMap((r) => r.media.map((m) => m.start)).sort((a, b) => a - b)
+  t.alike(freed, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 'no range of the post left live')
+  t.alike(tombs[8].media, [{ core, start: 16, blocks: 1 }], 'the last cover with its range')
+  t.alike(log.entries.filter((e) => e.record.type === 'post-cover'), [], 'no live cover')
+  t.alike(await web.request('post.delete', { to }), { seq: 12, ref: p.key + ':12', changed: false, deleted: [2] }, 'nothing left: the post\'s tombstone answers')
+})
+
+test('D-FIX: post delete prefixes keep ranges shared with later covers', async (t) => {
+  const image = { core: 'ab'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [
+    { type: 'media-core', key: image.core, at: nowIso() },
+    postRecord({ text: 'foto', media: [image] }),
+    ...Array.from({ length: 6 }, () => postCoverRecord({ seq: 2, image }))
+  ])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  await member.withIdentity(ctx, ({ diary }) => store.appendRecords(diary, Array.from({ length: 3 }, () => postCoverRecord({ seq: 2, image }))))
+  ctx.limits = { maxLogBlocks: 20 }
+  const to = { author: p.key, seq: 2 }
+  const err = await errorOf(member.postDelete(ctx, { to }))
+  t.is(err && err.message, 'limite do diário atingido', 'the second append fails')
+  const raw = () => member.withIdentity(ctx, async ({ diary }) => (await store.readHeld(diary)).entries)
+  const first = (await raw()).filter((e) => e.record && e.record.type === 'delete')
+  t.is(first.length, 8)
+  t.ok(first.every((e) => e.record.media === undefined), 'neither the post nor an early cover releases the range')
+  delete ctx.limits
+  await member.postDelete(ctx, { to })
+  const tombs = (await raw()).filter((e) => e.record && e.record.type === 'delete')
+  t.alike(tombs.filter((e) => e.record.media).map((e) => [e.record.seq, e.record.media]), [[11, [{ core: image.core, start: 1, blocks: 1 }]]], 'only the last cover releases it')
 })

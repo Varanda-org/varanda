@@ -1,8 +1,7 @@
 'use strict'
 
-// post.shared, post.share and post.unshare are browser-node only (docs/rpc.md
-// 5.121 to 5.123): the core session answers them with USAGE before anything
-// opens.
+// Public post sharing belongs to the browser node (docs/rpc.md 5.121 to
+// 5.123 and 5.169).
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -26,17 +25,20 @@ function listTree (dir, top = true) {
   return out
 }
 
-test('the core node refuses post.shared, post.share and post.unshare before anything opens', async (t) => {
+test('the core node refuses public post sharing before opening the diary', async (t) => {
   const NO = { code: 'USAGE', message: 'A página pública de uma publicação só pode ser ligada pelo app ou pelo navegador.' }
   const dataDir = tmpDir(t)
   const assocDir = path.join(tmpDir(t, 'varanda-assoc-'), 'assoc')
   const { publicKey: assoc } = initAssociation(assocDir)
-  const session = newSession(t, { dataDir, association: assoc, bootstrap: ['127.0.0.1:49737'] })
-  await connect(t, session)
+  const session = newSession(t, { dataDir, association: assoc, dhtHost: '127.0.0.1', bootstrap: ['127.0.0.1:49737'] })
+  const { call } = await connect(t, session)
   const before = listTree(dataDir)
   const to = A + ':1'
   t.alike(await failure(session.handlers['post.shared']({ to })), NO)
   t.alike(await failure(session.handlers['post.share']({ to })), NO)
   t.alike(await failure(session.handlers['post.unshare']({ to })), NO)
+  const image = { core: A, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: A, width: 1, height: 1 }
+  t.alike(await failure(call('post.cover', { to, image })), NO)
+  t.absent(fs.existsSync(path.join(dataDir, 'store')), 'store was never opened')
   t.alike(listTree(dataDir), before, 'no file created')
 })

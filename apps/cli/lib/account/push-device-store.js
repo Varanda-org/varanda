@@ -25,10 +25,11 @@
 // is written. guard() refusal affects only that request, while fail() and a
 // malformed file make the store unavailable. Another holder's removals cannot
 // be inferred from a missing row: a retained row may cost one failed push,
-// which removeToken discards only if the member still holds that exact token.
+// which removeToken discards only if the member still holds that exact row.
 
 const fs = require('node:fs')
 const path = require('node:path')
+const { timingSafeEqual } = require('node:crypto')
 const { writeGuarded, isRefused } = require('./guarded-write')
 const { isLowerHex, isPlainObject, refuseSymlinkDir } = require('@varanda/core/lib/cert')
 
@@ -328,6 +329,10 @@ function openPushDeviceStore (dataDir, { now = Date.now, readOnly = false, guard
         return { changed: false }
       }
       const found = findToken(next, input.transport, input.token)
+      if (found && found.member !== member && !timingSafeEqual(Buffer.from(found.row.key, 'base64url'), Buffer.from(input.key, 'base64url'))) {
+        settle(next, evicted, stale)
+        throw fail('pedido-invalido')
+      }
       // Admission counts members after the transfer, as in push-store.js.
       const leaving = found && found.member !== member && next.members[found.member].length === 1 ? 1 : 0
       if (!next.members[member] && Object.keys(next.members).length - leaving >= MAX_MEMBERS) {
@@ -375,11 +380,12 @@ function openPushDeviceStore (dataDir, { now = Date.now, readOnly = false, guard
     })
   }
 
-  function removeToken (member, transport, token) {
+  function removeToken (member, transport, token, key, createdAt) {
     return enqueue(() => {
       checkMember(member)
       if (!validToken(transport, token)) throw new TypeError('invalid device token')
-      return removeMatching(member, (r) => r.transport === transport && r.token === token)
+      if (!validKey(key) || !Number.isSafeInteger(createdAt)) throw new TypeError('invalid device row')
+      return removeMatching(member, (r) => r.transport === transport && r.token === token && r.key === key && r.createdAt === createdAt)
     })
   }
 

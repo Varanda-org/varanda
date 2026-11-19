@@ -2977,7 +2977,18 @@ function createBrowserSession ({
     if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
     await requireUnlocked()
     await ensureCaughtUp(epoch)
-    const r = await withStore((c) => remove(c, about === undefined ? { to: ref } : { to: ref, about }))
+    let r
+    try {
+      r = await withStore((c) => remove(c, about === undefined ? { to: ref } : { to: ref, about }))
+    } catch (err) {
+      // Part of the tombstones landed (a chunked delete): count and push
+      // them, never retry the rest, and answer the original error.
+      if (err !== null && typeof err === 'object' && Number.isSafeInteger(err.written)) {
+        wrote(err.written)
+        try { await pushAfterWrite() } catch {}
+      }
+      throw err
+    }
     if (r.changed) wrote(r.seq)
     await pushAfterWrite()
     return { seq: r.seq, ref: r.ref, changed: r.changed, deleted: r.deleted }
@@ -3004,17 +3015,18 @@ function createBrowserSession ({
     return r
   }
 
-  // post.share / post.unshare (docs/rpc.md 5.122, 5.123): the recordDelete
-  // path. pushAfterWrite is called even when nothing was written: it still
-  // pushes while the seeder has not confirmed the local length.
-  async function shareWrite (write, to, epoch) {
+  // post.share / post.unshare / post.cover (docs/rpc.md 5.122, 5.123,
+  // 5.169): the recordDelete path. pushAfterWrite is called even when
+  // nothing was written: it still pushes while the seeder has not confirmed
+  // the local length. `extra`: the method's params besides `to`.
+  async function shareWrite (write, to, epoch, extra = {}) {
     const ref = parseRef(to)
     if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')
     await requireUnlocked()
     await ensureCaughtUp(epoch)
     let r
     try {
-      r = await withStore((c) => write(c, { to: ref }))
+      r = await withStore((c) => write(c, { ...extra, to: ref }))
     } catch (err) {
       // Part of the append landed (post.unshare across chunks): count and
       // push it, never retry the rest, and answer the original error.
@@ -4831,6 +4843,11 @@ function createBrowserSession ({
     'post.share': serial(async ({ to }, epoch) => {
       const r = await shareWrite(member.postShare, to, epoch)
       return { shareSeq: r.shareSeq, created: r.created }
+    }),
+
+    'post.cover': serial(async ({ to, image }, epoch) => {
+      const r = await shareWrite(member.postCover, to, epoch, { image })
+      return { coverSeq: r.coverSeq, created: r.created }
     }),
 
     'post.unshare': serial(async ({ to }, epoch) => {

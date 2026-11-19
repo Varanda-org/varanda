@@ -26,6 +26,7 @@ import {
 } from '../scraps'
 import { refusalOf } from '../wordCheck'
 import { ErrorText, Page, Soft, errorText, useBottomPad, useNow } from '../ui'
+import { Divider } from '../ui/Divider'
 import { OfflineNote } from '../ui/OfflineNote'
 import { Pill } from '../ui/Pill'
 import { RadioMark } from '../ui/Radio'
@@ -419,18 +420,21 @@ export function WallSetting ({ active }) {
 function WallOption ({ label, checked, pending, disabled, onPress, first }) {
   const styles = useStyles(makeStyles)
   return (
-    <Pressable
-      style={({ pressed }) => [styles.option, !first && styles.optionDivider, pressed && styles.optionPressed]}
-      accessibilityRole='radio'
-      accessibilityLabel={label}
-      accessibilityState={{ checked, disabled }}
-      aria-checked={checked}
-      disabled={disabled}
-      onPress={onPress}
-    >
-      <Text style={styles.optionLabel}>{pending ? label + '…' : label}</Text>
-      <RadioMark checked={checked} />
-    </Pressable>
+    <View>
+      {first ? null : <Divider />}
+      <Pressable
+        style={({ pressed }) => [styles.option, pressed && styles.optionPressed]}
+        accessibilityRole='radio'
+        accessibilityLabel={label}
+        accessibilityState={{ checked, disabled }}
+        aria-checked={checked}
+        disabled={disabled}
+        onPress={onPress}
+      >
+        <Text style={styles.optionLabel}>{pending ? label + '…' : label}</Text>
+        <RadioMark checked={checked} />
+      </Pressable>
+    </View>
   )
 }
 
@@ -460,7 +464,6 @@ const makeStyles = (colors) => StyleSheet.create({
   counterOver: { color: colors.danger },
   group: { backgroundColor: colors.card, borderRadius: radius.md, overflow: 'hidden' },
   option: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: 44, paddingHorizontal: space.lg, paddingVertical: space.md },
-  optionDivider: { borderTopWidth: 1, borderTopColor: colors.line },
   optionPressed: { opacity: 0.6 },
   optionLabel: { ...type.postName, color: colors.ink, flex: 1 }
 })

@@ -70,6 +70,7 @@ const ACTIONS = Object.freeze([
   'choice',
   'moment',
   'post-share',
+  'post-cover',
   'post-unshare',
   'group-react',
   'group-hide',

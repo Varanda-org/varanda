@@ -122,12 +122,34 @@ test('rotation keeps one row and stale removeToken cannot remove it', async (t) 
   t.alike(await store.add(m, rotated), { changed: true })
   t.alike(store.list(m), [rotated])
   t.alike(open().list(m), [rotated])
-  t.is(await store.removeToken(m, first.transport, first.token), false)
-  t.is(await store.removeToken(memberKey(), rotated.transport, rotated.token), false)
+  t.is(await store.removeToken(m, first.transport, first.token, first.key, first.createdAt), false)
+  t.is(await store.removeToken(memberKey(), rotated.transport, rotated.token, rotated.key, rotated.createdAt), false)
   t.alike(store.list(m), [rotated])
-  t.is(await store.removeToken(m, rotated.transport, rotated.token), true)
-  t.is(await store.removeToken(m, rotated.transport, rotated.token), false)
+  t.is(await store.removeToken(m, rotated.transport, rotated.token, rotated.key, rotated.createdAt), true)
+  t.is(await store.removeToken(m, rotated.transport, rotated.token, rotated.key, rotated.createdAt), false)
   t.is(store.count(), 0)
+})
+
+test('late removeToken preserves a re-registration with a new key or generation', async (t) => {
+  const { store, c, open } = setup(t)
+  const m = memberKey()
+  const first = row()
+  await store.add(m, first)
+  c.t += MIN
+  const replacement = { ...first, key: deviceKey(), createdAt: c.t }
+  await open().add(m, replacement)
+  t.is(await store.removeToken(m, first.transport, first.token, first.key, first.createdAt), false)
+  t.alike(store.list(m), [replacement])
+  t.is(await store.removeToken(m, first.transport, first.token, first.key, replacement.createdAt), false, 'device key must match')
+  t.alike(store.list(m), [replacement])
+  await store.remove(m, replacement.key)
+  c.t += MIN
+  const renewed = { ...replacement, createdAt: c.t }
+  await store.add(m, renewed)
+  t.is(await store.removeToken(m, replacement.transport, replacement.token, replacement.key, replacement.createdAt), false, 'generation must match')
+  t.alike(store.list(m), [renewed])
+  t.alike(open().list(m), [renewed])
+  t.is(await store.removeToken(m, renewed.transport, renewed.token, renewed.key, renewed.createdAt), true)
 })
 
 test('removeToken re-reads a rotation made by another holder', async (t) => {
@@ -138,11 +160,11 @@ test('removeToken re-reads a rotation made by another holder', async (t) => {
   c.t += MIN
   const rotated = row({ key: first.key, createdAt: c.t })
   await open().add(m, rotated)
-  t.is(await store.removeToken(m, first.transport, first.token), false)
+  t.is(await store.removeToken(m, first.transport, first.token, first.key, first.createdAt), false)
   t.alike(store.list(m), [rotated])
 })
 
-test('a token moves to another member or key and leaves one owner', async (t) => {
+test('a token moves to another member only with the same device key', async (t) => {
   const { store, c, file } = setup(t)
   const a = memberKey()
   const b = memberKey()
@@ -150,11 +172,16 @@ test('a token moves to another member or key and leaves one owner', async (t) =>
   await store.add(a, first)
   const stale = readFile(file)
   c.t += MIN
-  const moved = { ...first, key: deviceKey(), createdAt: c.t }
+  const before = fs.readFileSync(file)
+  await rejects(t, store.add(b, { ...first, key: deviceKey(), createdAt: c.t }), 'pedido-invalido')
+  t.alike(store.list(a), [first])
+  t.alike(store.list(b), [])
+  t.ok(fs.readFileSync(file).equals(before), 'refusal leaves the file unchanged')
+  const moved = { ...first, createdAt: c.t }
   await store.add(b, moved)
   t.alike(store.list(a), [])
   t.alike(store.list(b), [moved])
-  t.is(await store.removeToken(a, first.transport, first.token), false)
+  t.is(await store.removeToken(a, first.transport, first.token, first.key, first.createdAt), false)
   c.t += MIN
   const rekeyed = { ...moved, key: deviceKey(), createdAt: c.t }
   await store.add(b, rekeyed)
@@ -172,7 +199,7 @@ test('rotation into an owned token removes both replaced rows', async (t) => {
     const a = memberKey()
     const b = sameMember ? a : memberKey()
     const first = row()
-    const second = row()
+    const second = row(sameMember ? {} : { key: first.key })
     await store.add(a, first)
     await store.add(b, second)
     c.t += MIN
@@ -192,8 +219,8 @@ test('token identity includes transport and device keys are scoped by member', a
   await store.add(a, first)
   await store.add(b, second)
   t.is(store.count(), 2)
-  t.is(await store.removeToken(a, 'fcm', first.token), false)
-  t.is(await store.removeToken(a, 'apns', first.token), true)
+  t.is(await store.removeToken(a, 'fcm', first.token, first.key, first.createdAt), false)
+  t.is(await store.removeToken(a, 'apns', first.token, first.key, first.createdAt), true)
   t.alike(store.list(b), [second])
 })
 
@@ -259,7 +286,7 @@ test('invalid arguments fail without echoing the supplied token or key', async (
   const good = row()
   const invalid = [null, [], {}, { ...good, extra: true }, { ...good, transport: 'web' }, { ...good, token: good.token + '\n' }, { ...good, key: good.key + '=' }, { ...good, createdAt: 1.5 }, { ...good, createdAt: Infinity }, { ...good, createdAt: String(T0) }]
   const calls = invalid.map((r) => () => store.add(m, r))
-  calls.push(() => store.add('AB'.repeat(32), good), () => store.remove(m, good.key + '='), () => store.removeToken(m, 'apns', 'bad'), () => store.removeMember('bad'))
+  calls.push(() => store.add('AB'.repeat(32), good), () => store.remove(m, good.key + '='), () => store.removeToken(m, 'apns', 'bad', good.key, good.createdAt), () => store.removeMember('bad'))
   for (const call of calls) {
     try {
       await call()
@@ -315,7 +342,7 @@ test('malformed files fail closed and are never rewritten', async (t) => {
     t.is(store.available(), false)
     await rejects(t, store.add(m, good), 'indisponivel')
     await rejects(t, store.remove(m, good.key), 'indisponivel')
-    await rejects(t, store.removeToken(m, good.transport, good.token), 'indisponivel')
+    await rejects(t, store.removeToken(m, good.transport, good.token, good.key, good.createdAt), 'indisponivel')
     await rejects(t, store.removeMember(m), 'indisponivel')
     for (const call of [() => store.list(m), () => store.all(), () => store.devices(m), () => store.count()]) t.exception(call)
     t.is(await store.heal(), false)
@@ -345,7 +372,7 @@ test('readOnly and fail refuse mutations', async (t) => {
     if (!readOnly) store.fail()
     await rejects(t, store.add(m, r), 'indisponivel')
     await rejects(t, store.remove(m, r.key), 'indisponivel')
-    await rejects(t, store.removeToken(m, r.transport, r.token), 'indisponivel')
+    await rejects(t, store.removeToken(m, r.transport, r.token, r.key, r.createdAt), 'indisponivel')
     await rejects(t, store.removeMember(m), 'indisponivel')
     t.is(await store.heal(), false)
     t.absent(fs.existsSync(file))
@@ -476,7 +503,7 @@ test('rotation beats stale copies even after the clock moves back', async (t) =>
   replaceUnder(file, stale)
   await store.heal()
   t.alike(store.list(m), current)
-  t.is(await store.removeToken(m, first.transport, first.token), false)
+  t.is(await store.removeToken(m, first.transport, first.token, first.key, first.createdAt), false)
   await store.remove(m, first.key)
   replaceUnder(file, stale)
   await store.heal()
@@ -588,7 +615,7 @@ test('admission caps members but permits a transfer at the cap', async (t) => {
   const store = open()
   const m = memberKey()
   await rejects(t, store.add(m, row()), 'limite')
-  t.alike(await store.add(m, row({ token: 'fixture:0' })), { changed: true })
+  t.alike(await store.add(m, row({ token: 'fixture:0', key: sharedKey })), { changed: true })
   t.is(store.devices(m), 1)
   t.is(store.count(), MAX_MEMBERS)
 })
@@ -631,7 +658,7 @@ test('the native store never reads the Web Push sidecar', async (t) => {
   store.all()
   store.devices(m)
   store.count()
-  await store.removeToken(m, first.transport, first.token)
+  await store.removeToken(m, first.transport, first.token, first.key, first.createdAt)
   await store.remove(m, first.key)
   await store.removeMember(m)
   openPushDeviceStore(dir)

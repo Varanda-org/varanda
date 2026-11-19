@@ -555,9 +555,11 @@ test('no publish button on the Depoimentos screen', async (t) => {
 
 test('visual round 2: toast wraps, Enviados aligned, counter over the limit', (t) => {
   const app = readFileSync(join(__dirname, '../App.js'), 'utf8')
-  t.ok(app.includes("maxWidth: '92%'") && app.includes("<View pointerEvents='none' style={styles.toastLabel}>") && app.includes('toastLabel: { flexShrink: 1 }'), 'a long toast wraps inside the screen')
+  const toast = read('ui/Toast.js')
+  t.ok(app.includes("maxWidth: '92%'") && toast.includes("<View pointerEvents='none' style={styles.label}>") && toast.includes('label: { flexShrink: 1 }'), 'a long toast wraps inside the screen')
   t.ok(app.includes('bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12'), 'the toast sits above the publish button when it shows')
-  t.ok(app.indexOf('{fabShown ? <Fab onPress={openComposer} /> : null}') < app.indexOf('<View pointerEvents=\'none\' style={styles.toastLabel}>'), 'and paints after it')
+  const fabAt = app.indexOf('{fabShown ? <Fab onPress={openComposer} /> : null}')
+  t.ok(fabAt !== -1 && app.indexOf('<Toast\n') > fabAt, 'and paints after it')
   t.ok(app.includes('toast && !(viewerOnTop || viewerLeaving)'), 'no toast over the viewer')
   const om = app.slice(app.indexOf('const openMomentos = useCallback('))
   t.ok(om.slice(0, om.indexOf('}, [pushScreen])')).includes('setToast(null)'), 'opening the viewer clears the toast')

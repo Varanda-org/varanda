@@ -8,7 +8,7 @@ import { FilterChips } from './FilterChips'
 import { Pill } from './Pill'
 import { Sheet, TEXT_CAP } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
-import { layout, radius, space, type } from './theme'
+import { layout, space, type, webInputReset } from './theme'
 
 const SORT_OPTIONS = [
   { id: 'recentes', label: 'Recentes' },
@@ -24,6 +24,8 @@ export function FeiraFilters ({ open, onClose, value = EMPTY, onApply }) {
   const { sort = 'recentes', min = '', max = '', kind = 'todos' } = value
   const [draft, setDraft] = useState({ sort, min, max, kind })
   const [error, setError] = useState('')
+  const [focused, setFocused] = useState(null)
+  useEffect(() => { if (!open) setFocused(null) }, [open])
   useEffect(() => {
     if (!open) return
     setDraft({ sort, min, max, kind })
@@ -57,9 +59,19 @@ export function FeiraFilters ({ open, onClose, value = EMPTY, onApply }) {
           <Text style={styles.label}>Faixa de preço</Text>
           <View style={styles.range}>
             {[['min', 'De'], ['max', 'Até']].map(([field, label]) => (
-              <View key={field} style={styles.field}>
+              <View key={field} style={[styles.field, focused === field && styles.fieldFocused]}>
                 <Text style={styles.prefix}>R$</Text>
-                <TextInput accessibilityLabel={label} placeholder={label} placeholderTextColor={colors.soft} value={draft[field]} onChangeText={(next) => change(field, next)} style={styles.input} />
+                <TextInput
+                  accessibilityLabel={label}
+                  placeholder={label}
+                  placeholderTextColor={colors.soft}
+                  value={draft[field]}
+                  onChangeText={(next) => change(field, next)}
+                  onFocus={() => setFocused(field)}
+                  onBlur={() => setFocused((current) => current === field ? null : current)}
+                  underlineColorAndroid='transparent'
+                  style={[styles.input, focused === field && webInputReset]}
+                />
               </View>
             ))}
           </View>
@@ -78,7 +90,8 @@ const makeStyles = (colors) => StyleSheet.create({
   body: { padding: space.lg, gap: space.md },
   fill: { flex: 1 },
   range: { flexDirection: 'row', gap: space.md },
-  field: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: layout.hit, borderWidth: 1, borderColor: colors.line, borderRadius: radius.sm, paddingHorizontal: space.md, backgroundColor: colors.bg },
+  field: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: 56, borderBottomWidth: 1, borderBottomColor: colors.controlOff, paddingHorizontal: space.md },
+  fieldFocused: { borderBottomWidth: 2, borderBottomColor: colors.accent },
   prefix: { ...type.postText, color: colors.soft },
   label: { ...type.postName, color: colors.ink },
   input: { ...type.postText, flex: 1, color: colors.ink, minHeight: layout.hit },

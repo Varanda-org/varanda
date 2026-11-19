@@ -305,14 +305,14 @@ function loadVapid (dataDir) {
 
 function loadNativePush (env) {
   const required = ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC']
-  const enabled = [...required, 'VARANDA_APNS_SANDBOX'].some((name) => env[name] !== undefined)
+  const enabled = [...required, 'VARANDA_APNS_SANDBOX'].some((name) => env[name] !== undefined && env[name] !== '')
   let apns = null
   let fcm = null
   if (enabled) {
     for (const name of required) {
       if (typeof env[name] !== 'string' || !env[name].trim() || /[\r\n\0]/.test(env[name])) throw new Error(name + ' inválida ou ausente')
     }
-    if (env.VARANDA_APNS_SANDBOX !== undefined && env.VARANDA_APNS_SANDBOX !== '1') throw new Error('VARANDA_APNS_SANDBOX inválida')
+    if (env.VARANDA_APNS_SANDBOX !== undefined && env.VARANDA_APNS_SANDBOX !== '' && env.VARANDA_APNS_SANDBOX !== '1') throw new Error('VARANDA_APNS_SANDBOX inválida')
     try {
       apns = createApns({
         key: fs.readFileSync(env.VARANDA_APNS_KEY_FILE, 'utf8'),
@@ -325,7 +325,7 @@ function loadNativePush (env) {
       throw new Error('VARANDA_APNS_KEY_FILE inválida ou ilegível')
     }
   }
-  if (env.VARANDA_FCM_ACCOUNT_FILE !== undefined) {
+  if (env.VARANDA_FCM_ACCOUNT_FILE !== undefined && env.VARANDA_FCM_ACCOUNT_FILE !== '') {
     try {
       fcm = createFcm({ account: JSON.parse(fs.readFileSync(env.VARANDA_FCM_ACCOUNT_FILE, 'utf8')) })
     } catch {

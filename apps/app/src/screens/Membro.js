@@ -1169,7 +1169,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const [tabsBottom, setTabsBottom] = useState(null)
   const [segmentedHeight, setSegmentedHeight] = useState(null)
   const tabsTop = tabsBottom !== null && segmentedHeight !== null ? tabsBottom - segmentedHeight : null
-  const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 42, tabsTop, topInset: insets.top })
+  const bar = useProfileBar(insets.top + BAND, { controlsBottom: insets.top + 52, tabsTop, topInset: insets.top })
   const listRef = useRef(null)
   const selectPinnedTab = usePinnedTabSelect(bar, listRef, shownTab, setTab)
   const head = (

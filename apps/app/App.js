@@ -156,6 +156,7 @@ import { TabBarShown } from './src/ui/tabBarShown'
 import { ScreenCovered, ScreenVisible } from './src/ui/screenVisible'
 import { holdAllEmbeds } from './src/embedLive'
 import { usePreviewsEnabled } from './src/ui/usePreviewsEnabled'
+import { Toast } from './src/ui/Toast'
 import { TopBar } from './src/ui/TopBar'
 import { ActionCapsule, TopActions } from './src/ui/TopActions'
 import { StackLayer, stackBusy, useReduceMotion, useStackMotion } from './src/ui/StackLayer'
@@ -4635,23 +4636,15 @@ function Member () {
         {toast && !(viewerOnTop || viewerLeaving)
           ? (
             <View style={[styles.toast, { bottom: fabShown ? insets.bottom + layout.tabBar + layout.fabAboveTabs + layout.fabSize + 12 : (barsHidden ? 0 : layout.tabBar) + insets.bottom + 12 }, chromeHidden && { bottom: insets.bottom + 12 }]} pointerEvents='box-none'>
-              {/* Only the action takes touches: under box-none the label would
-                  otherwise swallow taps meant for the screen below. */}
-              <View pointerEvents='none' style={styles.toastLabel}>
-                <Text style={styles.toastText} accessibilityRole='alert'>{toast.text}</Text>
-              </View>
-              {toast.onAction
-                ? (
-                  <Pressable
-                    onPress={() => { clearTimeout(toastTimer.current); setToast(null); toast.onAction() }}
-                    accessibilityRole='button'
-                    accessibilityLabel={toast.actionLabel}
-                    style={styles.toastAction}
-                  >
-                    <Text style={styles.toastActionText}>{toast.actionLabel}</Text>
-                  </Pressable>
-                  )
-                : null}
+              <Toast
+                text={toast.text}
+                actionLabel={toast.actionLabel}
+                onAction={toast.onAction && (() => {
+                  clearTimeout(toastTimer.current)
+                  setToast(null)
+                  toast.onAction()
+                })}
+              />
             </View>
             )
           : null}
@@ -4823,18 +4816,6 @@ const makeStyles = (colors) => StyleSheet.create({
     position: 'absolute',
     alignSelf: 'center',
     // A long text wraps inside the screen instead of running off its edge.
-    maxWidth: '92%',
-    backgroundColor: colors.toastBg,
-    borderRadius: 24,
-    minHeight: 36,
-    paddingVertical: 8,
-    paddingLeft: 16,
-    paddingRight: 12,
-    flexDirection: 'row',
-    alignItems: 'center'
-  },
-  toastLabel: { flexShrink: 1 },
-  toastText: { ...type.counter, color: colors.toastInk },
-  toastAction: { marginLeft: 8, minHeight: 44, minWidth: 44, justifyContent: 'center', alignItems: 'center' },
-  toastActionText: { ...type.counter, color: colors.toastInk, fontWeight: '800' }
+    maxWidth: '92%'
+  }
 })

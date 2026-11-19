@@ -13,7 +13,7 @@ const read = (file) => readFileSync(join(__dirname, '..', 'src', 'ui', file), 'u
 test('the active tab has a pill and no label text', (t) => {
   const src = read('TabBar.js')
   t.absent(src.includes('\u2014'), 'no em dash')
-  t.ok(src.includes('minHeight: layout.tabBar - 1'), '48 pt targets stay inside the 49 pt bar')
+  t.ok(src.includes('height: 58'), '58 pt targets fill the floating pill')
   t.absent(src.includes('paddingTop: 6'), 'the bar does not pad the tabs from above')
   t.absent(/<Text[\s>/]/.test(src), 'no label text')
   t.absent(src.includes('type.tab'), 'no tab label style')
@@ -22,7 +22,7 @@ test('the active tab has a pill and no label text', (t) => {
   t.ok(src.includes('borderRadius: radius.pill'), 'pill radius')
   const pill = src.slice(src.indexOf('  pill: {'), src.indexOf('}', src.indexOf('  pill: {')))
   t.absent(pill.includes('%') || pill.includes('margin'), 'no percent inset with a negative margin (shifted right on iOS and Android)')
-  t.ok(pill.includes('left: (TAB_ICON - PILL_WIDTH) / 2') && pill.includes('top: (TAB_ICON - PILL_HEIGHT) / 2'), 'centred from the icon size')
+  t.ok(['left: 0', 'right: 0', 'top: 0', 'bottom: 0'].every((edge) => pill.includes(edge)) && tabPillOutsideIcon(src), 'the highlight fills the tab instead of the icon')
   t.ok(src.includes('<Icon name={tab.icon} size={TAB_ICON}'), 'the icon uses the same size')
   t.ok(src.includes('const duration = reduceMotion ? 0 : motion.fast'), 'motion.fast, instant under reduce motion')
   t.ok(src.includes('opacity.setValue(toValue)'), 'reduced motion snaps')
@@ -33,6 +33,11 @@ test('the active tab has a pill and no label text', (t) => {
   t.ok(tab.includes('{!showAvatar && <TabPill'), 'the avatar tab draws no pill')
   t.ok(src.includes('selected ? 1 : 0'), 'only the active tab shows the pill')
 })
+
+function tabPillOutsideIcon (src) {
+  const start = src.indexOf('{tabs.map')
+  return src.indexOf('<TabPill', start) < src.indexOf('<View style={[styles.iconWrap', start)
+}
 
 test('ActionsSheet renders a header above the title and hands it closeThen', (t) => {
   const src = read('ActionsSheet.js')

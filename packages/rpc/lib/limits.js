@@ -46,6 +46,10 @@ const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
 const MAX_AVATAR_BYTES = 262144
 const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
+// Public post cover, same values as records.js.
+const MAX_SHARE_COVER_SIDE = 1200
+const MAX_SHARE_COVER_BLOCKS = 8
+const MAX_SHARE_COVER_BYTES = 262144
 // Short videos, same values as records.js: a post's [JPEG poster, video]
 // pair and a momento video (its blob bytes add the DM_MEDIA_MAC_BYTES MAC).
 const VIDEO_MIME = 'video/mp4'
@@ -267,6 +271,9 @@ module.exports = {
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
+  MAX_SHARE_COVER_SIDE,
+  MAX_SHARE_COVER_BLOCKS,
+  MAX_SHARE_COVER_BYTES,
   VIDEO_MIME,
   MAX_VIDEO_MS,
   MAX_VIDEO_DIMENSION,

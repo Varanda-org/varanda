@@ -111,8 +111,8 @@ const { isUsername } = require('@varanda/core/lib/account-link')
 const { writeGuarded } = require('./guarded-write')
 const { refuseSymlinkDir } = require('@varanda/core/lib/cert')
 const { issuerSignLink, verifyClose, verifyMoved, pageLifecycle } = require('@varanda/core/lib/page-lifecycle')
-const { applyDeletes, deletedSeqs, shownMedia } = require('@varanda/core/lib/deletion')
-const { foldShare, POST_SHARES_PER_DIARY } = require('@varanda/core/lib/post-share')
+const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, overlaps } = require('@varanda/core/lib/deletion')
+const { foldShare, foldCover, POST_SHARES_PER_DIARY, POST_COVERS_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan, verifyConsent } = require('@varanda/core/lib/listing')
 const { feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
@@ -122,8 +122,8 @@ const { findTerm } = require('./word-check')
 const { MAX_PAGES_PER_OWNER, MAX_PAGE_MOVES } = require('./pages-store')
 const { parseBox, parseInviteShare } = require('./pages-dm')
 const {
-  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord, listingRateRecord,
-  parseRef, validDescriptor, validPostMedia, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
+  postRecord, likeRecord, repostRecord, choiceRecord, momentRecord, postShareRecord, postCoverRecord, validRecordCopy, validMomentMedia, deleteRecords, profileRecords, latestProfile, followRecord, listingRecord, listingStatusRecord, listingRateRecord,
+  parseRef, validDescriptor, validPostMedia, validShareCover, hasPostStill, validPreview, validPreviewImage, isCanonicalIso, PAGE_KEYS, MEDIA_BLOCK_BYTES, MAX_MEDIA_ITEM_BLOCKS,
   MEDIA_MIMES, VIDEO_MIME, MAX_VIDEO_MS, DESCRIPTOR_KEYS, VIDEO_DESCRIPTOR_KEYS, MAX_AVATAR_BYTES, AVATAR_MIMES, MAX_MEDIA_PER_POST, POLL_MAX,
   AUDIO_MIME, MAX_AUDIO_MS, MAX_AUDIO_BYTES, AUDIO_DESCRIPTOR_KEYS, validAudioDescriptor, charLength
 } = require('@varanda/core/lib/records')
@@ -148,8 +148,9 @@ const SUCCESSOR = PREFIX + 'successor/'
 // What a close tombstones: everything the page still shows, never a page-*
 // record (pages-writer.js DELETABLE). Every choice goes, a withdrawal too, so
 // no earlier vote comes back. A share goes too, so no reader that missed a
-// post's tombstone keeps it on the public web page.
-const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'profile', 'listing', 'listing-edit']
+// post's tombstone keeps it on the public web page, and a cover with its
+// image range.
+const CLOSE_DELETES = ['post', 'like', 'repost', 'choice', 'moment', 'post-share', 'post-cover', 'profile', 'listing', 'listing-edit']
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 // The rebox retry (reboxSweep): every minute, a failing page backed off up
@@ -195,8 +196,9 @@ const GROUP_IDEMPOTENT = ['group-react', 'group-hide', 'group-choice']
 // Feira listings as the page (docs/rpc.md 5.103 to 5.109).
 const LISTING_ACTIONS = ['listing', 'listing-edit', 'listing-status', 'listing-rate']
 // A page post on the installation's public web page (docs/protocol.md §2,
-// "Public share"), by a person's post.share and post.unshare rules.
-const SHARE_ACTIONS = ['post-share', 'post-unshare']
+// "Public share"), by a person's post.share, post.unshare and post.cover
+// rules.
+const SHARE_ACTIONS = ['post-share', 'post-unshare', 'post-cover']
 const STATEMENTS = ['create', 'list', 'status', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'profile',
   'avatar', 'rename', 'invite', 'follow', 'follows', 'media', 'notices', 'terms', ...DM_ACTIONS, ...GROUP_ACTIONS,
   'listing', 'listing-edit', 'listing-status', 'listing-consent', 'listing-rate', 'choice', 'moment', ...SHARE_ACTIONS]
@@ -220,6 +222,7 @@ const MAX_SUCCESSORS = 1000
 const WRITER_ANSWERS = ['create', 'post', 'reply', 'quote', 'delete', 'like', 'repost', 'choice', 'moment', 'profile', 'rename', 'follow', 'media', 'avatar',
   ...LISTING_ACTIONS, ...SHARE_ACTIONS]
 // The tombstones one post-unshare appends: one writer append, one nonce.
+// A post-cover appends at most MAX_UNSHARE - 1 of them, then the cover.
 const MAX_UNSHARE = 8
 
 const WRITER_TOKENS = Object.freeze({
@@ -325,6 +328,34 @@ function sharedOf (raw) {
   return out.sort((a, b) => a - b)
 }
 
+// Each valid post-cover block as { post, seq, record }, in block order. Over
+// raw blocks it sees tombstoned covers too.
+function coverBlocks (entries) {
+  const out = []
+  for (const e of entries) {
+    if (!e || !Number.isSafeInteger(e.seq) || !isPlainObject(e.record) || e.record.type !== 'post-cover') continue
+    const copy = validRecordCopy(e.record, e.seq)
+    if (copy !== null && copy.type === 'post-cover') out.push({ post: copy.seq, seq: e.seq, record: copy })
+  }
+  return out
+}
+
+// The readers' fold of the raw diary (post-share.js foldCover, tombstoned
+// covers included): post seq -> its highest cover seq.
+function coverFold (raw) {
+  const fold = new Map()
+  for (const c of coverBlocks(raw)) foldCover(fold, c.post, c.seq)
+  return fold
+}
+
+// The seqs of `shared` (sharedOf, at most POST_SHARES_PER_DIARY) whose
+// highest cover is live: the posts the public page shows with a cover.
+function coveredOf (raw, shared) {
+  const deleted = deletedSeqs(raw)
+  const fold = coverFold(raw)
+  return shared.filter((p) => fold.has(p) && !deleted.has(fold.get(p)))
+}
+
 // Whether a listing-rate for `offer` is in the raw blocks, deletes not
 // applied (a tombstoned rating still holds its offer), as the nodes check.
 function rateSent (raw, offer) {
@@ -341,6 +372,11 @@ function has (obj, k) {
 
 function iso (ms) {
   return new Date(ms).toISOString()
+}
+
+// The first n items of list, none for n <= 0.
+function oldest (list, n) {
+  return n > 0 ? list.slice(0, n) : []
 }
 
 function sameList (a, b) {
@@ -689,6 +725,7 @@ function createPagesRoutes ({
           // Only a use that appended has a writer record: the share was
           // created, or the tombstones were written.
           if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+          if (action === 'post-cover') return a.kept === undefined ? { coverSeq: seq, created: true, replay: true } : { coverSeq: a.kept, created: false, replay: true }
           if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
           const out = { seq, length: a.length, pushed: false, replay: true }
           if (action === 'create') out.page = page
@@ -705,6 +742,7 @@ function createPagesRoutes ({
       // The ACL spends a share's nonce only after its append: the writer's
       // record may be gone (evicted, or its state lost), the answer is not.
       if (action === 'post-share') return { shareSeq: seq, created: true, replay: true }
+      if (action === 'post-cover') return { coverSeq: seq, created: true, replay: true }
       if (action === 'post-unshare') return { ok: true, changed: true, replay: true }
       const out = { seq, replay: true }
       if (action === 'move') {
@@ -1229,10 +1267,31 @@ function createPagesRoutes ({
   }
 
   // The media ranges a tombstone of this record frees: everything it shows
-  // (deletion.js shownMedia), a post's link card thumbnail included.
-  function rangesOf (record) {
-    const items = shownMedia(record).filter(isPlainObject)
+  // (deletion.js shownMedia), a post's link card thumbnail included, except
+  // what `live` (the refs that stay live after the append) overlaps. Such a
+  // range listed would be cleared by a seeder that does not hold the live
+  // record yet, and never fetched again (docs/protocol.md section 2,
+  // "Deletion": a writer lists only ranges no survivor overlaps).
+  function rangesOf (record, live = []) {
+    const items = shownMedia(record).filter((d) => isPlainObject(d) && !live.some((l) => overlaps(l, d)))
     return items.length > 0 ? items.map((d) => ({ core: d.core, start: d.start, blocks: d.blocks })) : undefined
+  }
+
+  // The live covers of post `postSeq` in the writer's own blocks, oldest
+  // first. A bounded append takes the oldest, as the browser and core nodes
+  // do, and a repeat of the same use finishes the rest.
+  function liveCoversOf (raw, postSeq) {
+    const deleted = deletedSeqs(raw)
+    return coverBlocks(raw).filter((c) => c.post === postSeq && !deleted.has(c.seq))
+  }
+
+  // A tombstone for each of `covers` (taken from liveCoversOf) with its
+  // image range, one record each, a cover having one range. `going`: the
+  // other blocks the same append tombstones; every other live record,
+  // a cover left for a later append included, keeps the range it overlaps.
+  function coverDeletes (raw, covers, at, going = []) {
+    const live = liveMediaRefs(raw, going.concat(covers.map((c) => c.seq)))
+    return covers.flatMap((c) => deleteRecords({ seq: c.seq, at, media: rangesOf(c.record, live) }))
   }
 
   function target (ref) {
@@ -1367,8 +1426,26 @@ function createPagesRoutes ({
         // Never a tombstone over a page record: a delete must not undo a
         // roster, an accept or an offer. A momento names no media range (its
         // blob expires on the seeder by itself), as a person's moment.delete.
+        // A post already tombstoned whose covers did not all fit its append
+        // (deletedAlready lets it through only then): the covers left.
+        if (e && e.deleted === true) {
+          const raw = await writer.readOwn(page, { required: true })
+          const left = coverDeletes(raw, oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE))
+          if (left.length === 0) throw refuse('pedido-invalido')
+          return left
+        }
         if (!e || !isPlainObject(e.record) || !['post', 'like', 'repost', 'moment'].includes(e.record.type)) throw refuse('pedido-invalido')
-        return deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
+        let records = deleteRecords({ seq: t.seq, media: rangesOf(e.record) })
+        if (e.record.type !== 'post') return records
+        // The post's live covers go in the same append, so their image
+        // ranges are freed with its photos; a repeat delete takes any left.
+        const raw = await writer.readOwn(page, { required: true })
+        const covers = oldest(liveCoversOf(raw, t.seq), MAX_UNSHARE - records.length)
+        const going = new Set(covers.map((c) => c.seq))
+        const deleted = deletedSeqs(raw)
+        const kept = coverBlocks(raw).filter((c) => !deleted.has(c.seq) && !going.has(c.seq)).map((c) => c.record.image)
+        records = deleteRecords({ seq: t.seq, media: rangesOf(e.record, kept) })
+        return [...records, ...coverDeletes(raw, covers, undefined, [t.seq])]
       }
       if (action === 'listing') {
         if (!exactKeys(op, ['kind', 'title', 'text', 'price', 'unit', 'cat', 'place'], ['media'])) throw refuse('pedido-invalido')
@@ -1430,7 +1507,9 @@ function createPagesRoutes ({
   // A delete whose target is already tombstoned answers that tombstone:
   // nothing appended and no op charged, as a person's moment.delete
   // (web-member member-ops.js recordDelete). A bad op goes on to recordsFor,
-  // which refuses it.
+  // which refuses it, and so does a tombstoned post that still has live
+  // covers: the 8 records of one append may not have held them all, and
+  // their image ranges stay held until a tombstone names them.
   async function deletedAlready (page, op) {
     let t
     try {
@@ -1446,7 +1525,8 @@ function createPagesRoutes ({
     for (const e of folded) {
       if (e && !e.deleted && isPlainObject(e.record) && e.record.type === 'delete' && e.record.seq === t.seq && (seq === null || e.seq > seq)) seq = e.seq
     }
-    return seq === null ? null : { seq, length: writer.info(page).length, pushed: false }
+    if (seq === null || liveCoversOf(await writer.readOwn(page, { required: true }), t.seq).length > 0) return null
+    return { seq, length: writer.info(page).length, pushed: false }
   }
 
   // A durable answer to a listing-rate keeps no body hash: after a restart
@@ -1589,12 +1669,28 @@ function createPagesRoutes ({
   // unshare tombstones the newest MAX_UNSHARE live shares of the post in one
   // append (a page writer leaves one); a repeat finishes any left. The raw
   // blocks are read, so tombstoned shares count toward the fold as they do
-  // for a reader.
+  // for a reader. An unshare also tombstones the post's live covers, each
+  // with its image range unless a record that stays live shows it.
+  //
+  // post-cover ({ seq, image }), a person's post.cover (docs/rpc.md 5.169):
+  // the image link crawlers show for a post whose highest share is live
+  // ('pedido-invalido' before the share). The image must be one of the
+  // page's own items (its declared media core, past a photo's byte checks)
+  // and a valid cover, sharing no range with other live media or with a
+  // range a tombstone freed; the service decodes nothing and fetches nothing. The
+  // same image as the post's highest cover, still live, answers
+  // { created: false }, appending only the tombstones of any older live
+  // cover, so a retry finishes a cleanup an earlier writer left. Otherwise
+  // every live cover of the post is tombstoned with its range in the same
+  // append as the new one, so only the newest is ever live (docs/protocol.md
+  // section 2, "Public share").
   async function share (action, body) {
     const { member, page, nonce, op, hash } = await statement(body, action, false)
-    if (!exactKeys(op, ['seq']) || !Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+    const cover = action === 'post-cover'
+    if (!exactKeys(op, cover ? ['seq', 'image'] : ['seq']) || !Number.isSafeInteger(op.seq) || op.seq < 1) throw refuse('pedido-invalido')
+    if (cover && !validShareCover(op.image)) throw refuse('midia-invalida')
     const prior = claim(member, nonce, hash, false, page, action)
-    if (prior !== null) return prior
+    if (prior !== null) return cover && prior.replay === true ? coverReplay(page, op.seq, prior) : prior
     return once(member, nonce, () => withLock(page, async () => {
       need(writableRow(page), member, 'admin')
       // Charged before the read, the no-op answers included (unlike a
@@ -1602,7 +1698,7 @@ function createPagesRoutes ({
       chargeOps(page)
       let raw
       try {
-        raw = await writer.readOwn(page)
+        raw = await writer.readOwn(page, { required: true })
       } catch (err) {
         throw tokenOf(err)
       }
@@ -1613,34 +1709,106 @@ function createPagesRoutes ({
       const live = shareBlocks(raw).filter(([p, seq]) => p === op.seq && !deleted.has(seq)).map(([, seq]) => seq)
       const fold = shareFold(raw)
       const highest = fold.get(op.seq)
+      const at = iso(now())
       let result = null
       // Shared as the seeder sees it: the highest share is live. Otherwise a
       // new share becomes the highest, even beside an older live one.
       if (action === 'post-share' && highest !== undefined && !deleted.has(highest)) result = { shareSeq: highest, created: false }
-      if (action === 'post-unshare' && live.length === 0) result = { ok: true, changed: false }
+      // A cover left from an earlier share counts too.
+      const covers = action === 'post-share' ? [] : liveCoversOf(raw, op.seq)
+      if (action === 'post-unshare' && live.length === 0 && covers.length === 0) result = { ok: true, changed: false }
+      let image = null
+      let covered = null
+      let kept = null
+      if (cover) {
+        if (highest === undefined || deleted.has(highest) || !hasPostStill(post)) throw refuse('pedido-invalido')
+        image = mediaOf(page, [op.image], 1)[0]
+        covered = coverFold(raw)
+        const top = covered.get(op.seq)
+        const shown = top === undefined || deleted.has(top) ? null : coverBlocks(raw).find((c) => c.seq === top)
+        if (shown && DESCRIPTOR_KEYS.every((k) => shown.record.image[k] === image[k])) {
+          kept = top
+          if (covers.every((r) => r.seq === top)) result = { coverSeq: top, created: false }
+        }
+        // As a person's post.cover (docs/rpc.md 5.169): a new cover shares
+        // no bytes with other live media, or the cover's own tombstone would
+        // free them later, nor with a range a tombstone freed, which
+        // seeders cleared for good. The item table keeps freed items until
+        // a clear, so it does not tell.
+        if (kept === null && liveMediaRefs(raw, []).concat(tombstonedRanges(raw)).some((l) => overlaps(l, image))) throw refuse('midia-invalida')
+      }
       if (result !== null) {
         settle(member, nonce, result)
         return result
       }
       let records
-      const at = iso(now())
       if (action === 'post-share') {
         if (highest === undefined && fold.size >= POST_SHARES_PER_DIARY) throw refuse('limite')
         records = [postShareRecord({ seq: op.seq, at })]
+      } else if (cover) {
+        if (!covered.has(op.seq) && covered.size >= POST_COVERS_PER_DIARY) throw refuse('limite')
+        records = kept !== null
+          ? coverDeletes(raw, oldest(covers.filter((c) => c.seq !== kept), MAX_UNSHARE), at)
+          : [...coverDeletes(raw, oldest(covers, MAX_UNSHARE - 1), at), postCoverRecord({ seq: op.seq, image, at })]
       } else {
-        records = live.slice(-MAX_UNSHARE).flatMap((seq) => deleteRecords({ seq, at }))
+        // Shares first: withdrawing the post matters more than freeing a
+        // range, and a repeat finishes any left.
+        const shares = live.slice(-MAX_UNSHARE).flatMap((seq) => deleteRecords({ seq, at }))
+        records = [...shares, ...coverDeletes(raw, oldest(covers, MAX_UNSHARE - shares.length), at)]
       }
       // The reads above awaited: the role is read again before the append.
       need(writableRow(page), member, 'admin')
       await refreshRoster(page)
       need(writableRow(page), member, 'admin')
-      const res = await append(page, records, { member, nonce })
+      // A cleanup-only cover keeps its answer with the writer's nonce
+      // record; the spent nonce holds only the last block, a tombstone.
+      const res = await append(page, records, kept === null ? { member, nonce } : { member, nonce, kept })
       await after(() => pagesStore.expectLength(page, res.length, { spend: spendOf(member, nonce, res.seq) }))
-      result = action === 'post-share' ? { shareSeq: res.seq, created: true } : { ok: true, changed: true }
+      if (action === 'post-share') result = { shareSeq: res.seq, created: true }
+      else if (cover) result = kept !== null ? { coverSeq: kept, created: false } : { coverSeq: res.seq, created: true }
+      else result = { ok: true, changed: true }
       settle(member, nonce, result)
       keep(page, action, member, res.seq)
       return result
     }))
+  }
+
+  // A durable post-cover answer. The writer's nonce record keeps the cover a
+  // cleanup-only use kept (created: false, answered as is); the spent nonce
+  // keeps only the last block of the append. That block is the new cover,
+  // or a tombstone after the post's highest cover, which that use kept. A
+  // tombstone is never cleared, so a cleared last block was the cover. The
+  // kept cover is the newest live cover between the tombstone's target
+  // and that append. Unrelated cleared blocks do not hide it; deleted
+  // covers left by a partial cleanup never count as the kept cover.
+  async function coverReplay (page, postSeq, prior) {
+    if (prior.created === false) return prior
+    let raw
+    try {
+      raw = await writer.readOwn(page, { required: true })
+    } catch (err) {
+      throw tokenOf(err)
+    }
+    const bySeq = new Map()
+    for (const e of raw) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+    const last = bySeq.get(prior.coverSeq)
+    if (last === undefined) throw refuse('pedido-invalido')
+    if (last.record === null) return prior
+    const copy = validRecordCopy(last.record, prior.coverSeq)
+    // Another post's cover: the same nonce with another body.
+    if (copy !== null && copy.type === 'post-cover') {
+      if (copy.seq !== postSeq) throw refuse('expirado')
+      return prior
+    }
+    if (copy === null || copy.type !== 'delete') throw refuse('pedido-invalido')
+    const deleted = deletedSeqs(raw)
+    for (let seq = prior.coverSeq - 1; seq > copy.seq; seq--) {
+      const e = bySeq.get(seq)
+      if (e === undefined || e.record === null || deleted.has(seq)) continue
+      const c = validRecordCopy(e.record, seq)
+      if (c !== null && c.type === 'post-cover' && c.seq === postSeq) return { coverSeq: seq, created: false, replay: true }
+    }
+    throw refuse('pedido-invalido')
   }
 
   // ---- Feira consent ---------------------------------------------------------
@@ -1701,8 +1869,12 @@ function createPagesRoutes ({
       const picked = pickedOf(folded)
       const moments = momentsOf(folded)
       // Tombstoned shares count in the seeder's fold: only the raw blocks
-      // carry them.
-      const shared = sharedOf(await writer.readOwn(page))
+      // carry them. The lenient read: a paused page still answers its
+      // status (the owner closes or moves it from there), and a cover
+      // offered on a wrong `covered: false` fails closed at post-cover.
+      const own = await writer.readOwn(page)
+      const shared = sharedOf(own)
+      const covered = coveredOf(own, shared)
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1721,6 +1893,7 @@ function createPagesRoutes ({
         picked,
         moments,
         shared,
+        covered,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,
@@ -2153,14 +2326,14 @@ function createPagesRoutes ({
     } catch (err) {
       throw tokenOf(err)
     }
-    const out = []
-    for (const e of applyDeletes(entries)) {
-      if (!e || e.deleted || !Number.isSafeInteger(e.seq) || e.seq < 1) continue
-      const r = e.record
-      if (!isPlainObject(r) || !CLOSE_DELETES.includes(r.type)) continue
-      out.push(...deleteRecords({ seq: e.seq, media: rangesOf(r) }))
-    }
-    return out
+    const pending = applyDeletes(entries).filter((e) => e && !e.deleted && Number.isSafeInteger(e.seq) && e.seq >= 1 && isPlainObject(e.record) && CLOSE_DELETES.includes(e.record.type))
+    const live = liveMediaRefs(entries, pending.map((e) => e.seq))
+    // Each prefix must be safe even when the next close batch fails.
+    return pending.slice().reverse().map((e) => {
+      const records = deleteRecords({ seq: e.seq, media: rangesOf(e.record, live) })
+      live.push(...shownMedia(e.record))
+      return records
+    }).reverse().flat()
   }
 
   // A paused page gets no block: its ACL and directory entry close and its

@@ -179,10 +179,23 @@ function ogSide (value) {
   return Number.isSafeInteger(value) && value >= 1 && value <= MAX_OG_SIDE ? value : 0
 }
 
-// The one og:image: the first photo a crawler can render, else the brand
+// The share cover's size, or null when there is no cover the page can name.
+// Only the seeder's checked cover reaches here, but a size that is not
+// believable still leaves the cover out rather than naming it unsized.
+function coverOf (cover) {
+  if (!isPlainObject(cover)) return null
+  if (ogSide(cover.width) === 0 || ogSide(cover.height) === 0 || cover.width * cover.height > MAX_OG_PIXELS) return null
+  return { width: cover.width, height: cover.height }
+}
+
+// The one og:image: the share cover (a JPEG the author's device made for
+// crawlers), else the first photo a crawler can render, else the brand
 // card. Sizes come from the peer's descriptor and are named only when both
 // are believable.
-function ogImage (origin, base, photos) {
+function ogImage (origin, base, photos, cover) {
+  if (cover !== null) {
+    return { url: origin + base + '/capa', mime: 'image/jpeg', width: cover.width, height: cover.height, alt: photos.video ? 'Capa do vídeo' : 'Foto da publicação' }
+  }
   const og = photos.items.findIndex((item) => mimeOf(item) !== NO_OG_MIME)
   if (og === -1) return { url: origin + OG_FALLBACK.path, mime: OG_FALLBACK.mime, width: OG_FALLBACK.width, height: OG_FALLBACK.height, alt: OG_FALLBACK.alt }
   const item = photos.items[og]
@@ -339,7 +352,7 @@ function avatarHtml (author, name, username) {
   return '<div class="avatar a' + stripe + '" aria-hidden="true">' + (initials !== '' ? esc(initials) : ICON_USER) + '</div>\n'
 }
 
-function render (origin, author, seq, record, rawName, rawUsername) {
+function render (origin, author, seq, record, rawName, rawUsername, rawCover) {
   const post = isPlainObject(record) ? record : {}
   const name = cleanCut(rawName, MAX_NAME_CHARS, false).trim()
   const username = cleanCut(rawUsername, MAX_USERNAME_CHARS, false).trim()
@@ -361,7 +374,7 @@ function render (origin, author, seq, record, rawName, rawUsername) {
     metaTag('property', 'og:title', ogTitle) +
     metaTag('property', 'og:description', description)
   if (imageOrigin !== '') {
-    const image = ogImage(imageOrigin, base, photos)
+    const image = ogImage(imageOrigin, base, photos, coverOf(rawCover))
     head += metaTag('property', 'og:url', imageOrigin + base) +
       metaTag('property', 'og:image', image.url) +
       metaTag('property', 'og:image:type', image.mime)
@@ -416,16 +429,18 @@ function render (origin, author, seq, record, rawName, rawUsername) {
   return shell(head, html)
 }
 
-// renderPostPage({ origin, author, seq, record, name, username }) -> string,
-// a full HTML document. `origin` is the installation's https origin (only for
-// the absolute og:url and og:image); `author` a lowercase hex64 and `seq` a safe integer
-// >= 1, else the fallback page that only points at '/'.
+// renderPostPage({ origin, author, seq, record, name, username, cover }) ->
+// string, a full HTML document. `origin` is the installation's https origin
+// (only for the absolute og:url and og:image); `author` a lowercase hex64 and
+// `seq` a safe integer >= 1, else the fallback page that only points at '/'.
+// `cover` is { width, height } of the share cover /capa serves, or absent;
+// it changes only og:image, never the body.
 function renderPostPage (args) {
   try {
     if (!isPlainObject(args)) return FALLBACK
-    const { origin, author, seq, record, name, username } = args
+    const { origin, author, seq, record, name, username, cover } = args
     if (!validTarget(author, seq)) return FALLBACK
-    return render(origin, author, seq, record, name, username)
+    return render(origin, author, seq, record, name, username, cover)
   } catch {
     return FALLBACK
   }

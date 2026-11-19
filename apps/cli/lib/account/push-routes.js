@@ -59,6 +59,8 @@ const { pushBody, inviteDropPayload, deletionPayload } = require('./push-text')
 // 'group' on their notice lines; never whom a notice was for.
 
 const MAX_BODY = 4096
+// Maximum compact device finish JSON is 4445 bytes with a 4096-byte FCM token.
+const DEVICE_BODY_MAX = 8192
 const RELAY_BODY_MAX = 8192
 const NONCE_TTL_MS = 600 * 1000
 const MAX_NONCES = 1000
@@ -264,7 +266,7 @@ function createPushRoutes ({
   function available (action, transport) {
     if (transport !== undefined) {
       if (!validTransport(transport)) throw refuse('pedido-invalido')
-      if (!deviceStoreUsable() || nativeSender(transport) === null) throw refuse('indisponivel')
+      if (!deviceStoreUsable() || (action === 'on' && nativeSender(transport) === null)) throw refuse('indisponivel')
     } else if (!storeUsable() || (action === 'on' && vapid === null)) {
       throw refuse('indisponivel')
     }
@@ -492,7 +494,8 @@ function createPushRoutes ({
     if (req.method === 'GET' && p === '/account/push/key') return key(req, res)
     if (req.method === 'POST' && Object.hasOwn(POST, p)) {
       checkPost(req)
-      const body = await readJsonBody(req, MAX_BODY)
+      const max = p === '/account/push/device/finish' || p === '/account/push/device/check' ? DEVICE_BODY_MAX : MAX_BODY
+      const body = await readJsonBody(req, max)
       if (p === '/account/push/start') return POST[p](req, res, body)
       return subscriptions(() => POST[p](req, res, body))
     }
@@ -1162,7 +1165,7 @@ function createPushRoutes ({
     let reason = outcome === 'ok' ? 'enviado' : 'falhou'
     if (outcome === 'gone') {
       try {
-        await subscriptions(() => pushDeviceStore.removeToken(member, row.transport, row.token))
+        await subscriptions(() => pushDeviceStore.removeToken(member, row.transport, row.token, row.key, row.createdAt))
         reason = 'removido'
       } catch {}
     }

@@ -95,6 +95,7 @@ import { chatMediaRefs, followAutocorrect, retryChatSend, runChatSend, stagedOf 
 import { Btn, ErrorText, Field, Soft, errorText, useAction, useVisibleNow } from '../ui'
 import { useStyles } from '../ui/ThemeProvider'
 import { Bubble } from '../ui/Bubble'
+import { Divider } from '../ui/Divider'
 import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
@@ -118,6 +119,7 @@ import { EmptyState, Skeleton } from '../ui/States'
 import { ForwardSheet } from '../ui/ForwardSheet'
 import { dmForwardSource, pageForwardSource } from '../forward'
 import { TopBar } from '../ui/TopBar'
+import { space } from '../ui/theme'
 import { memberKeyOf, useActing } from './Conversa'
 
 const BLOCKED_SEND = 'você bloqueou esta pessoa'
@@ -2032,9 +2034,7 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
         {newMark
           ? (
             <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
-              <View style={styles.newLine} />
-              <Text style={styles.newText}>Mensagens novas</Text>
-              <View style={styles.newLine} />
+              <Divider label='Mensagens novas' />
             </View>
             )
           : null}
@@ -2086,9 +2086,7 @@ const MessageRow = memo(function MessageRow ({ item, index, calls, styles, shape
 const makeStyles = (colors) => StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   quoteFlash: { backgroundColor: colors.line },
-  newMark: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
-  newLine: { flex: 1, height: 1, backgroundColor: colors.line },
-  newText: { color: colors.soft, fontSize: 13 },
+  newMark: { paddingHorizontal: space.lg, paddingVertical: space.sm },
   quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
   quoteToastText: { color: colors.bg, textAlign: 'center' },
   // The offer and accept sheets' body, with the side margins of the other sheets.

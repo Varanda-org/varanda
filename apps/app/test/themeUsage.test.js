@@ -134,7 +134,7 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.alike({ ...theme.radius }, { sm: 8, md: 12, lg: 18, bubble: 24, pill: 999 })
   t.alike({ ...theme.layout }, {
     topBar: 64,
-    tabBar: 49,
+    tabBar: 78,
     fabSize: 56,
     fabRight: 20,
     fabAboveTabs: 17,

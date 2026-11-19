@@ -4,7 +4,8 @@
 
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { Icon } from './Icon'
-import { layout, radius, space, type } from './theme'
+import { ListGroup, ListRow } from './ListRow'
+import { layout, space, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 export function OptionsToggle ({ label, open, onPress, disabled }) {
@@ -28,27 +29,11 @@ export function OptionsToggle ({ label, open, onPress, disabled }) {
 }
 
 export function OptionList ({ children }) {
-  const styles = useStyles(makeStyles)
-  return <View style={styles.list}>{children}</View>
+  return <ListGroup>{children}</ListGroup>
 }
 
 export function OptionRow ({ icon, label, onPress, disabled, pending, first }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  const off = disabled === true || pending === true
-  return (
-    <Pressable
-      accessibilityRole='button'
-      accessibilityState={{ disabled: off }}
-      disabled={off}
-      onPress={onPress}
-      style={({ pressed }) => [styles.row, !first && styles.divider, pressed && styles.rowPressed, off && styles.off]}
-    >
-      <Icon name={icon} size={22} color={colors.soft} />
-      <Text style={styles.rowText}>{label + (pending ? '…' : '')}</Text>
-      <Icon name='seta' size={20} color={colors.soft} />
-    </Pressable>
-  )
+  return <ListRow icon={icon} label={label} onPress={onPress} disabled={disabled} pending={pending} first={first} />
 }
 
 export function OptionBlock ({ children, first }) {
@@ -61,10 +46,6 @@ const makeStyles = (colors) => StyleSheet.create({
   toggleText: { ...type.pill, color: colors.accent },
   togglePressed: { opacity: 0.6 },
   off: { opacity: 0.45 },
-  list: { backgroundColor: colors.card, borderRadius: radius.bubble, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, overflow: 'hidden' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit + space.sm, paddingHorizontal: space.lg, paddingVertical: space.md },
-  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  rowPressed: { backgroundColor: colors.skeleton },
-  rowText: { fontSize: 16, lineHeight: 22, color: colors.ink, flex: 1 },
+  divider: { borderTopWidth: 1, borderTopColor: colors.line },
   block: { padding: space.lg, gap: space.sm }
 })

@@ -5,6 +5,7 @@ const { readFileSync } = require('node:fs')
 const { join } = require('node:path')
 
 const src = readFileSync(join(__dirname, '../src/screens/Mensagem.js'), 'utf8')
+const groupSrc = readFileSync(join(__dirname, '../src/screens/Grupo.js'), 'utf8')
 
 function helper (name) {
   const match = src.match(new RegExp('(?:export )?function ' + name + ' \\([^]*?\\n\\}'))
@@ -93,8 +94,11 @@ test('a page thread offers Avaliar for its own offers, rated as the page', (t) =
 
 test('the Mensagens novas line is fixed text inside the target row, not a data row', (t) => {
   const row = src.slice(src.indexOf('const MessageRow = memo('), src.indexOf('}, sameMessageRow)'))
+  const marker = /<View style=\{styles\.newMark\} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>\s*<Divider label='Mensagens novas' \/>\s*<\/View>/
   t.ok(row.includes("accessibilityLabel='Mensagens novas a partir daqui'"))
   t.ok(row.includes("pointerEvents='none'"))
+  t.ok(marker.test(row), 'Mensagem renders one labelled Divider in the marker')
+  t.ok(marker.test(groupSrc), 'Grupo renders one labelled Divider in the marker')
   t.ok(src.includes('newMark={item.key === openKey}'))
   t.ok(src.includes('data={rows}'), 'no extra row is added to the list data')
 })

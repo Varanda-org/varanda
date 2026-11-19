@@ -20,13 +20,15 @@ Aterrissagem em 19/11/2026, local, no Node do repositório: `npm run lint` passo
 | `apps/cli/test/push-relay.test.js` | 21 | 158 |
 | `apps/app/test/sw.test.js` | 107 | 1609 |
 | `apps/app/test/dmNoticeKey.test.js` | 5 | 72 |
-| `apps/app/test/legal.test.js` | 72 | 2155 |
+| `apps/app/test/legal.test.js` | 73 | 2242 |
 | `apps/site/test/legal.test.js` | 7 | 115 |
 | `packages/core/test/terms.test.js` | 8 | 126 |
 
 Na rodada com os 305 arquivos em paralelo, `packages/core/test/seeder-slots.test.js` (tempo esgotado em "external displaced") e `packages/core/test/sync.test.js` (teste 3, prazo de uma partida de rede parada) falharam. Sozinhos, passaram: 10/10 testes e 90/90 asserções, e 43/43 testes e 244/244 asserções. Nenhum dos dois arquivos é mudado por este PR; as falhas dependem de carga.
 
 `group-notice.test.js` foi rodado de novo depois da correção dos ciclos de referência (ordem que depende de um ciclo responde `unknown`), com `seeder-groups.test.js` e o lint dos dois arquivos. Depois da junção com a `main` (#814 e #815, sem conflito), `seeder-groups.test.js` e `seeder-group-browse.test.js` (10/10, 108/108) passaram de novo.
+
+Depois da junção com a `main` em `0d0e50dd` (o #830 levou os Termos 98, e este PR passou para os Termos 99), a aterrissagem rodou de novo: lint, 308 arquivos de teste e `DEMO OK`; a tabela traz as contagens dessa rodada. `seeder-slots.test.js` falhou de novo em paralelo, por tempo esgotado em "external displaced", e passou sozinho (10/10 testes, 91/91 asserções).
 
 ## No aparelho
 

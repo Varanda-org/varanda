@@ -20,7 +20,9 @@ const fcmError = { '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError
 async function setup (t, { oauth, message, ...options } = {}) {
   const requests = []
   const tokens = []
+  const sockets = new Set()
   const server = http.createServer(async (req, res) => {
+    sockets.add(req.socket)
     let body = ''
     for await (const chunk of req) body += chunk.toString()
     const request = { method: req.method, url: req.url, headers: req.headers, body, res }
@@ -42,7 +44,7 @@ async function setup (t, { oauth, message, ...options } = {}) {
     server.closeAllConnections()
     await new Promise(resolve => server.close(resolve))
   })
-  return { sender, requests, tokens }
+  return { sender, requests, tokens, sockets }
 }
 
 function respond (request, status, body) {
@@ -136,6 +138,33 @@ test('FCM caches OAuth until five minutes before expiry and refreshes after expi
   t.is(tokens.length, 3)
 })
 
+test('FCM shares concurrent OAuth exchanges and reuses one dedicated connection', async t => {
+  let time = 1800000000000
+  const { sender, tokens, requests, sockets } = await setup(t, { now: () => time })
+  const agents = []
+  const original = http.request
+  http.request = (url, options, callback) => {
+    agents.push(options.agent)
+    return original(url, options, callback)
+  }
+  try {
+    for (let batch = 1; batch <= 2; batch++) {
+      t.alike(await Promise.all(Array.from({ length: 8 }, () => sender.send(notice))), Array(8).fill('ok'))
+      t.is(tokens.length, batch, 'one exchange for an empty or expired cache')
+      t.is(requests.length, batch * 8, 'each message sent once')
+      time += 3600 * 1000
+    }
+  } finally {
+    http.request = original
+  }
+  t.is(agents.length, 18)
+  t.ok(agents[0] instanceof http.Agent && agents[0] !== http.globalAgent, 'dedicated agent')
+  t.ok(agents.every(agent => agent === agents[0]), 'same agent for OAuth and messages')
+  t.is(agents[0]?.keepAlive, true)
+  t.is(agents[0]?.maxSockets, 1)
+  t.is(sockets.size, 1, 'all requests reuse the same socket')
+})
+
 test('FCM accepts boundary device token lengths and a 200 character alert', async t => {
   const { sender, requests } = await setup(t)
   for (const token of ['a', 'b'.repeat(4096)]) {
@@ -167,11 +196,11 @@ test('FCM marks only a typed 404 NOT_FOUND UNREGISTERED detail as gone', async t
   t.is(tokens.length, 1, 'delivery failures do not trigger another OAuth request')
 })
 
-test('FCM retries a failed OAuth exchange only on the next send', async t => {
+test('FCM shares a failed OAuth exchange and retries it only on the next send', async t => {
   const { sender, requests, tokens } = await setup(t, {
     oauth: (request, count) => respond(request, count === 1 ? 500 : 200, { access_token: accessToken, expires_in: 3600 })
   })
-  t.is(await sender.send(notice), 'dropped')
+  t.alike(await Promise.all(Array.from({ length: 8 }, () => sender.send(notice))), Array(8).fill('dropped'))
   t.is(tokens.length, 1)
   t.is(requests.length, 0)
   t.is(await sender.send(notice), 'ok')

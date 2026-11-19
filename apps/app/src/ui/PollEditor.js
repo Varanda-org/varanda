@@ -4,8 +4,9 @@
 // the poll with editorPoll and checks the words with wordCheck before sending.
 // Every control is a 44 pt target.
 
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { editorAddOption, editorCanAdd, editorCanRemove, editorPoll, editorRemoveOption, editorSetOption, POLL_OPTION_MAX } from '../polls'
+import { Field } from './index'
 import { Icon } from './Icon'
 import { layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -37,16 +38,16 @@ export function PollEditor ({ state, onChange, onClose, disabled = false }) {
       </View>
       {options.map((value, index) => (
         <View key={index} style={styles.line}>
-          <TextInput
-            style={styles.input}
-            value={value}
-            editable={!disabled}
-            maxLength={POLL_OPTION_MAX}
-            placeholder={'Opção ' + (index + 1)}
-            placeholderTextColor={colors.placeholder}
-            accessibilityLabel={'opção ' + (index + 1) + ' da enquete'}
-            onChangeText={(text) => change(editorSetOption(state, index, text))}
-          />
+          <View style={styles.optionField}>
+            <Field
+              value={value}
+              editable={!disabled}
+              maxLength={POLL_OPTION_MAX}
+              placeholder={'Opção ' + (index + 1)}
+              inputProps={{ accessibilityLabel: 'opção ' + (index + 1) + ' da enquete', placeholderTextColor: colors.placeholder }}
+              onChangeText={(text) => change(editorSetOption(state, index, text))}
+            />
+          </View>
           {canRemove
             ? (
               <Pressable
@@ -89,7 +90,7 @@ const makeStyles = (colors) => StyleSheet.create({
   head: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   title: { ...type.postName, color: colors.ink },
   line: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  input: { ...type.postText, flex: 1, minHeight: layout.hit, color: colors.ink, paddingVertical: 8 },
+  optionField: { flex: 1, minWidth: 0 },
   icon: { width: layout.hit, height: layout.hit, alignItems: 'center', justifyContent: 'center' },
   add: { minHeight: layout.hit, justifyContent: 'center' },
   addText: { ...type.more, color: colors.accent },

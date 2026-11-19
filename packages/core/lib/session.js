@@ -997,10 +997,11 @@ function createSession ({
     'block.set': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
     'block.list': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
 
-    // post.shared, post.share and post.unshare are offered by the browser
-    // node only (docs/rpc.md 5.121 to 5.123). Nothing is opened.
+    // Public post sharing belongs to the browser node (docs/rpc.md 5.121
+    // to 5.123 and 5.169).
     'post.shared': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.share': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
+    'post.cover': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.unshare': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
 
     // Conversas seal to an X25519 box key derived from the Ed25519 identity

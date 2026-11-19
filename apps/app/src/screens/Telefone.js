@@ -17,7 +17,7 @@ import { usePhoneVerify } from '../usePhoneVerify'
 import { Btn, ErrorText, Field, Label, Notice, Page, Soft } from '../ui'
 import { Stepper, StepLink, StepNotice } from '../ui/Stepper'
 import { useStyles } from '../ui/ThemeProvider'
-import { radius, type, webInputReset } from '../ui/theme'
+import { type, webInputReset } from '../ui/theme'
 import { KeyboardForm } from './Perfil'
 
 const OFFLINE_TEXT = 'Sem conexão. A confirmação precisa de internet.'
@@ -39,16 +39,14 @@ const makeStyles = (colors) => StyleSheet.create({
   cells: { flexDirection: 'row', gap: 8 },
   cell: {
     flex: 1,
-    minHeight: 52,
+    minHeight: 56,
     paddingVertical: 4,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: radius.md
+    borderBottomWidth: 1,
+    borderBottomColor: colors.controlOff
   },
-  cellOn: { borderColor: colors.accent, borderWidth: 2 },
+  cellOn: { borderBottomColor: colors.accent, borderBottomWidth: 2, paddingBottom: 3 },
   cellText: { ...type.threadTitle, color: colors.ink },
   // The digits are drawn by the cells; the input stays on top, invisible, so
   // typing, pasting and the keyboard all go to one field.

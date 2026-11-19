@@ -1,8 +1,9 @@
-// A Page's web share of its own post (account service actions 'post-share'
-// and 'post-unshare', docs/rpc.md 5.84; the page `status` answers `shared`).
+// A Page's web share of its own post (account service actions 'post-share',
+// 'post-cover' and 'post-unshare', docs/rpc.md 5.84; the page `status`
+// answers `shared` and, from a current service, `covered`).
 // Pure ES module: the caller passes `share({ seq })`, so tests run it without
 // a node. Nothing here retries: one call sends one request.
-import { UNCERTAIN_MESSAGE } from './postShare.js'
+import { UNCERTAIN_MESSAGE, claimCover, coverAnswerState, coverErrorState, releaseCover, sendCover } from './postShare.js'
 import { webShareRef } from './postShareCompose.js'
 
 const KEY = /^[0-9a-f]{64}$/i
@@ -14,6 +15,19 @@ const READ_FAILED = 'Não deu para ver se esta publicação está na web.'
 // The page action's op for a post of the page.
 export function pageShareOp (seq) {
   return { seq }
+}
+
+// The page action's op for a cover of a post of the page.
+export function pageCoverOp (seq, image) {
+  return { seq, image }
+}
+
+// Whether the status answer lists `seq` in `covered`: true or false, or null
+// when an older service sent no `covered` (unknown, so no repair is offered).
+export function coveredState (status, seq) {
+  const list = status !== null && typeof status === 'object' ? status.covered : undefined
+  if (!Array.isArray(list)) return null
+  return list.includes(seq)
 }
 
 // The refs `<pageKey>:<seq>` of a status answer's `shared` list, a Set.
@@ -53,9 +67,23 @@ export function shareErrorState (err, action) {
   return { state: 'error', shareSeq: null, message }
 }
 
+// One 'post-cover' request through `write(op)`. Never rejects. Any refusal,
+// an older service's 'pedido-invalido' or unknown action included, is 'off':
+// the page keeps the seeder's own preview.
+export async function coverAsPage (write, seq, image) {
+  if (typeof write !== 'function' || !Number.isSafeInteger(seq) || seq < 1) return coverErrorState({})
+  try {
+    return coverAnswerState(await write(pageCoverOp(seq, image)))
+  } catch (err) {
+    return coverErrorState(err)
+  }
+}
+
 // Never rejects. -> { ref, result } like postShareCompose.shareNew: a page
-// post that went out is never failed by its share.
-export async function shareNewAsPage (share, page, seq) {
+// post that went out is never failed by its share, nor by its cover.
+// `cover` (optional) is sendCover's input with `write(op)` the 'post-cover'
+// action and `upload` the page media upload.
+export async function shareNewAsPage (share, page, seq, cover = null) {
   const ref = webShareRef(page, seq)
   if (ref === null || typeof share !== 'function') return { ref: null, result: null }
   let result
@@ -63,6 +91,14 @@ export async function shareNewAsPage (share, page, seq) {
     result = shareAnswerState(await share(pageShareOp(seq)), 'publish')
   } catch (err) {
     result = shareErrorState(err, 'publish')
+  }
+  if (result.state === 'on' && cover !== null && typeof cover === 'object' && claimCover(ref)) {
+    const { write, ...rest } = cover
+    try {
+      await sendCover({ ...rest, setCover: (image) => coverAsPage(write, seq, image) })
+    } finally {
+      releaseCover(ref)
+    }
   }
   return { ref, result }
 }
@@ -79,11 +115,13 @@ export function pageSeqOf (page, ref) {
 // What PostShareSheet's page mode runs instead of the person's post.shared /
 // post.share / post.unshare. `status()`, `share(seq)` and `unshare(seq)` are
 // the account service calls; each op resolves to { state, shareSeq, message }
-// and never rejects, one request per call.
+// and never rejects, one request per call. read adds `cover` (coveredState).
+// `ops.page` names the page, so the sheet can upload a cover as the page.
 export function pageShareOps ({ page, status, share, unshare }) {
   const wrong = { state: 'error', shareSeq: null, message: 'Não encontramos esta publicação. Ela pode ter sido apagada.' }
   // The sheet calls each op unbound (ops[action](target)), so none uses this.
   const ops = {
+    page: typeof page === 'string' && KEY.test(page) ? page.toLowerCase() : null,
     async read (ref) {
       const seq = pageSeqOf(page, ref)
       if (seq === null) return wrong
@@ -93,8 +131,8 @@ export function pageShareOps ({ page, status, share, unshare }) {
           return { state: 'uncertain', shareSeq: null, message: UNCERTAIN_MESSAGE }
         }
         return sharedRefs(page, answer).has(ref.toLowerCase())
-          ? { state: 'on', shareSeq: null, message: '' }
-          : { state: 'off', shareSeq: null, message: '' }
+          ? { state: 'on', shareSeq: null, message: '', cover: coveredState(answer, seq) }
+          : { state: 'off', shareSeq: null, message: '', cover: false }
       } catch (err) {
         return shareErrorState(err, 'read')
       }
