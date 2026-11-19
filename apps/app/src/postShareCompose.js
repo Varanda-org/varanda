@@ -1,7 +1,7 @@
 // The composer's "Publicar também na web" box: one post.share after the post
 // is written, never repeated. Pure ES module: the caller passes the rpc
 // `call(method, params)`, so tests run it without a node.
-import { UNCERTAIN_MESSAGE, publish } from './postShare.js'
+import { UNCERTAIN_MESSAGE, addCover, claimCover, publish, releaseCover, sendCover } from './postShare.js'
 
 export const WEB_SHARE_LABEL = 'Publicar também na web'
 export const WEB_SHARE_SENT = 'Enviado para a web. Se o link ainda não mostrar a publicação, tente de novo em instantes.'
@@ -35,9 +35,13 @@ export function webShareRef (author, seq) {
   return author.toLowerCase() + ':' + seq
 }
 
-// Never rejects and sends at most one request: a lost answer is unknown, not
-// a reason to ask again.
-export async function shareNew (call, author, seq) {
+// Never rejects and sends at most one post.share: a lost answer is unknown,
+// not a reason to ask again. `cover` (optional, postShare.js sendCover's
+// { post, held, fetchStill, encodeThumbnail, upload }) adds the crawler's
+// cover once the share answered 'on': one upload and one post.cover at most.
+// Whatever the cover does, `result` is the share's: the page then shows the
+// seeder's own preview, and nothing says more.
+export async function shareNew (call, author, seq, cover = null) {
   const ref = webShareRef(author, seq)
   if (ref === null) return { ref: null, result: null }
   let result
@@ -46,7 +50,29 @@ export async function shareNew (call, author, seq) {
   } catch (err) {
     result = { state: 'uncertain', shareSeq: null, message: UNCERTAIN_MESSAGE }
   }
+  // Claimed like the share sheet's attempt, so the sheet opened meanwhile
+  // offers no second cover for the same post.
+  if (result.state === 'on' && cover !== null && typeof cover === 'object' && claimCover(ref)) {
+    try {
+      await sendCover({ ...cover, setCover: (image) => addCover(call, ref, image) })
+    } finally {
+      releaseCover(ref)
+    }
+  }
   return { ref, result }
+}
+
+// The bytes the composer still holds of a sent post's first still, for
+// sendCover's `held`: `media` the sent descriptors, `encoded` the held
+// { bytes, mime } in the same order (null where it holds none). A video
+// post's first still is its JPEG poster, held at index 0.
+export function heldStill (media, encoded) {
+  if (!Array.isArray(media) || !Array.isArray(encoded)) return null
+  const at = media.findIndex((d) => d && typeof d === 'object' && typeof d.mime === 'string' && d.mime.startsWith('image/'))
+  if (at < 0) return null
+  const held = encoded[at]
+  if (!held || !(held.bytes instanceof Uint8Array) || held.mime !== media[at].mime) return null
+  return { bytes: held.bytes, mime: held.mime }
 }
 
 export function webShareAfter (web) {

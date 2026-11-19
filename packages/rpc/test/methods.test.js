@@ -25,13 +25,13 @@ test('method list and mutating set', (t) => {
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
     'block.set', 'cert.add', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.invitePolicy', 'community.join', 'community.leave', 'community.meta', 'community.removeGroup', 'device.disconnect', 'device.hello', 'device.reconnect', 'dm.enable', 'dm.pageForget', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.putMedia', 'dm.react', 'dm.send', 'dm.set', 'fan.set', 'follow.add', 'follow.remove', 'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.take', 'group.admin', 'group.admit', 'group.ban',
     'group.choose', 'group.create', 'group.hide', 'group.invitePolicy', 'group.join', 'group.leave', 'group.meta', 'group.post', 'group.react', 'group.rekey', 'groups.show', 'identity.clear', 'identity.create', 'identity.forget',
-    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.create', 'post.delete',
+    'identity.install', 'identity.recoveryBind', 'identity.reset', 'identity.sessionSaved', 'like.set', 'listing.create', 'listing.delete', 'listing.edit', 'listing.rate', 'listing.status', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.putMedia', 'node.close', 'page.register', 'post.cover', 'post.create', 'post.delete',
     'post.quote', 'post.reply', 'post.share', 'post.unshare',
     'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.set', 'repost.set', 'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'sync.start', 'sync.stop', 'testimonial.decide', 'testimonial.delete', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.note', 'visits.set'
   ])
@@ -3069,6 +3069,37 @@ test('post.shared, post.share and post.unshare take one canonical ref and nothin
     for (const to of [null, 1, {}, { author: KEY, seq: 1 }, 'x', KEY, KEY + ':0', KEY + ':01', KEY + ':-1', KEY + ':1.5', KEY.toUpperCase() + ':1', KEY + ':9007199254740992']) {
       t.is(validateParams(method, { to }).message, 'parâmetro inválido: to', method + ' ' + JSON.stringify(to))
     }
+  }
+})
+
+test('post.cover and page.sign post-cover take a bounded JPEG descriptor', (t) => {
+  const to = KEY + ':1'
+  const image = { core: KEY, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 1, sha256: KEY, width: 1, height: 1 }
+  const page = { action: 'post-cover', nonce: 'A'.repeat(43), page: KEY }
+  for (const desc of [image, { ...image, blocks: 8, bytes: 262144, width: 1200, height: 1200 }]) {
+    const params = { to, image: desc }
+    const signed = { ...page, op: { seq: 1, image: desc } }
+    ok(t, 'post.cover', params, params)
+    ok(t, 'page.sign', signed, signed)
+  }
+  t.is(validateParams('post.cover', { image }).message, 'parâmetro obrigatório: to')
+  t.is(validateParams('post.cover', { to }).message, 'parâmetro obrigatório: image')
+  t.is(validateParams('post.cover', { to, image, extra: true }).message, 'parâmetro desconhecido')
+  bad(t, 'post.cover', { to: KEY + ':0', image })
+  for (const desc of [
+    { ...image, mime: 'image/webp' },
+    { ...image, width: 0 },
+    { ...image, width: 1201 },
+    { ...image, height: 1201 },
+    { ...image, blocks: 9, bytes: 262145 },
+    { ...image, blocks: 8, bytes: 262145 },
+    { ...image, extra: true }
+  ]) {
+    t.is(validateParams('post.cover', { to, image: desc }).message, 'parâmetro inválido: image')
+    t.is(validateParams('page.sign', { ...page, op: { seq: 1, image: desc } }).message, 'parâmetro inválido: op')
+  }
+  for (const op of [{ seq: 1 }, { image }, { seq: 0, image }, { seq: 1, image, extra: true }]) {
+    t.is(validateParams('page.sign', { ...page, op }).message, 'parâmetro inválido: op')
   }
 })
 

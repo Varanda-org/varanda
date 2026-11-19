@@ -296,6 +296,8 @@ export function createVitrineRequest (fixtures, options) {
   }
   // The live post-share seqs for one post, ascending.
   const liveShares = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-share' && e.record.seq === seq && liveEntry(data.own, e.seq)).map((e) => e.seq)
+  // The live post-cover entries for one post, ascending (5.169).
+  const liveCovers = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-cover' && e.record.seq === seq && liveEntry(data.own, e.seq))
   // The web node's verifyShow: a show stands only while the writer block is
   // live, addressed to the show's diary and commits to the shown text.
   function showHolds (author, record) {
@@ -834,6 +836,7 @@ export function createVitrineRequest (fixtures, options) {
       if (!entry || entry.record.type !== 'post') refuse('USAGE', 'referência inválida')
       const result = append({ type: 'delete', seq: target.seq, at: stamp() })
       deleted.set(to, result)
+      for (const e of liveCovers(target.seq)) deleted.set(`${data.own}:${e.seq}`, append({ type: 'delete', seq: e.seq, at: stamp() }))
       // As the real feed (packages/core/lib/feed.js), a repost whose target
       // is deleted leaves the feed with it.
       data.feed = data.feed.filter((p) => (p.author !== data.own || p.seq !== target.seq) &&
@@ -842,8 +845,21 @@ export function createVitrineRequest (fixtures, options) {
     },
     // Public share (5.121 to 5.123): the newest live post-share decides.
     'post.shared': ({ to }) => {
-      const shares = liveShares(shareTarget(to))
-      return { shareSeq: shares.length > 0 ? shares[shares.length - 1] : null }
+      const seq = shareTarget(to)
+      const shares = liveShares(seq)
+      return { shareSeq: shares.length > 0 ? shares[shares.length - 1] : null, cover: shares.length > 0 && liveCovers(seq).length > 0 }
+    },
+    // The demo holds no media bytes, so the byte checks of 5.169 are not
+    // made here; the share rule and the newest-cover rule are.
+    'post.cover': ({ to, image }) => {
+      const seq = shareTarget(to)
+      if (liveShares(seq).length === 0) refuse('USAGE', 'a publicação não está na web')
+      const covers = liveCovers(seq)
+      const newest = covers.length > 0 ? covers[covers.length - 1] : null
+      const same = newest !== null && ['core', 'mime', 'start', 'blocks', 'bytes', 'sha256', 'width', 'height'].every((k) => newest.record.image[k] === image[k])
+      for (const e of same ? covers.slice(0, -1) : covers) deleted.set(`${data.own}:${e.seq}`, append({ type: 'delete', seq: e.seq, at: stamp() }))
+      if (same) return { coverSeq: newest.seq, created: false }
+      return { coverSeq: append({ type: 'post-cover', seq, image: { ...image }, at: stamp() }).seq, created: true }
     },
     'post.share': ({ to }) => {
       const seq = shareTarget(to)
@@ -852,9 +868,10 @@ export function createVitrineRequest (fixtures, options) {
       return { shareSeq: append({ type: 'post-share', seq, at: stamp() }).seq, created: true }
     },
     'post.unshare': ({ to }) => {
-      const shares = liveShares(shareTarget(to))
-      for (const seq of shares) deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
-      return { ok: true, changed: shares.length > 0 }
+      const target = shareTarget(to)
+      const seqs = liveShares(target).concat(liveCovers(target).map((e) => e.seq))
+      for (const seq of seqs) deleted.set(`${data.own}:${seq}`, append({ type: 'delete', seq, at: stamp() }))
+      return { ok: true, changed: seqs.length > 0 }
     },
     'like.set': (params) => toggle('like', params),
     'repost.set': (params) => toggle('repost', params),

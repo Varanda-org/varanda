@@ -905,7 +905,7 @@ test('old readers: unknown types stay malformed', async (t) => {
 test('group-join records', async (t) => {
   await testnet(t)
   const { groupJoinRecord, TYPES, MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY } = records
-  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'], 'TYPES parity')
+  t.alike([...TYPES], ['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'], 'TYPES parity')
   t.ok(Object.isFrozen(TYPES))
   t.alike([MAX_GROUP_WRITERS, MAX_GROUPS_PER_DIARY, MAX_GROUPS_PER_COMMUNITY, MAX_GROUP_CUTS, MAX_GROUP_NAME, MAX_GROUP_WRITERS_PER_DIARY], [512, 64, 32, 16, 80, 8])
   const gj = { type: 'group-join', group: K1, writer: K2, on: true, at: AT }
@@ -1275,6 +1275,101 @@ test('validateRecord: post-share records', async (t) => {
   await t.exception.all(async () => postShareRecord({ at: AT }), /post-share-invalid/)
   await t.exception.all(async () => postShareRecord(), /post-share-invalid/)
   await t.exception.all(async () => postShareRecord({ seq: 3, at: 'x' }), /date-invalid/)
+})
+
+const COVER = { core: K2, mime: 'image/jpeg', start: 3, blocks: 4, bytes: 120000, sha256: 'e'.repeat(64), width: 1200, height: 630 }
+
+test('validateRecord: post-cover records', async (t) => {
+  const { postCoverRecord, POST_COVER_KEYS, POST_SHARE_KEYS, validShareCover } = records
+  t.is(records.SHARE_COVER_SIDE, 1200)
+  t.is(records.MAX_SHARE_COVER_BLOCKS, 8)
+  t.is(records.MAX_SHARE_COVER_BYTES, 262144)
+  t.alike([...POST_COVER_KEYS], ['type', 'seq', 'image', 'at'])
+  t.ok(Object.isFrozen(POST_COVER_KEYS))
+  t.alike([...POST_SHARE_KEYS], ['type', 'seq', 'at'], 'a cover is not consent: the share keys do not change')
+  const cover = { type: 'post-cover', seq: 3, image: COVER, at: AT }
+  t.is(validateRecord(cover, 7), null)
+  t.is(validateRecord(cover, 4), null, 'the block right after the post')
+  t.ok(validShareCover(COVER))
+  t.is(validateRecord({ ...cover, image: { ...COVER, width: 1, height: 1, blocks: 1, bytes: 1 } }, 7), null, 'smallest')
+  t.is(validateRecord({ ...cover, image: { ...COVER, blocks: 8, bytes: 262144 } }, 7), null, 'largest')
+  t.is(validateRecord(cover, 0), 'genesis-required')
+
+  const extra = { ...COVER, extra: 1 }
+  const missing = { ...COVER }
+  delete missing.sha256
+  for (const image of [
+    { ...COVER, mime: 'image/webp' },
+    { ...COVER, mime: 'image/png' },
+    { ...COVER, mime: 'image/avif' },
+    { ...COVER, width: 1201 },
+    { ...COVER, height: 1201 },
+    { ...COVER, width: 0 },
+    { ...COVER, blocks: 9, bytes: 8 * MEDIA_BLOCK_BYTES + 1 },
+    { ...COVER, blocks: 9, bytes: 9 * MEDIA_BLOCK_BYTES },
+    { ...COVER, blocks: 8, bytes: 262145 },
+    { ...COVER, bytes: 1 },
+    { ...COVER, mime: 'video/mp4', ms: 1000 },
+    extra,
+    missing,
+    null,
+    undefined,
+    [COVER],
+    'x',
+    {}
+  ]) {
+    t.is(validateRecord({ ...cover, image }, 7), 'media-invalid', JSON.stringify(image))
+    t.absent(validShareCover(image))
+  }
+
+  t.is(validateRecord({ ...cover, extra: 1 }, 7), 'malformed', 'a fifth key')
+  t.is(validateRecord({ type: 'post-cover', seq: 3, at: AT }, 7), 'malformed', 'no image')
+  t.is(validateRecord({ type: 'post-cover', seq: 3, image: COVER }, 7), 'malformed', 'no at')
+  t.is(validateRecord({ type: 'post-cover', seq: 3, media: [COVER], at: AT }, 7), 'malformed', 'media is not image')
+  t.is(validateRecord({ ...cover, seq: 7 }, 7), 'post-cover-invalid', 'self target')
+  t.is(validateRecord({ ...cover, seq: 8 }, 7), 'post-cover-invalid', 'forward target')
+  for (const seq of [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1, NaN]) {
+    t.is(validateRecord({ ...cover, seq }, 7), 'post-cover-invalid', 'seq ' + String(seq))
+  }
+  t.is(validateRecord(cover, undefined), 'post-cover-invalid', 'no block index')
+  t.is(validateRecord({ ...cover, at: '2026-01-01' }, 7), 'date-invalid')
+
+  const hostile = { type: 'post-cover', seq: 3, at: AT }
+  Object.defineProperty(hostile, 'image', { enumerable: true, get () { throw new Error('boom') } })
+  t.is(validateRecord(hostile, 7), 'malformed', 'a throwing getter never throws')
+  const inner = { ...COVER }
+  Object.defineProperty(inner, 'width', { enumerable: true, get () { throw new Error('boom') } })
+  t.absent(validShareCover(inner))
+  const { proxy: revoked, revoke } = Proxy.revocable({ ...COVER }, {})
+  revoke()
+  t.absent(validShareCover(revoked))
+  t.is(validateRecord({ ...cover, image: revoked }, 7), 'media-invalid')
+
+  t.alike(postCoverRecord({ seq: 3, image: COVER, at: AT }), cover)
+  t.alike(Object.keys(postCoverRecord({ seq: 3, image: COVER, at: AT })), ['type', 'seq', 'image', 'at'])
+  const built = postCoverRecord({ seq: 1, image: COVER })
+  t.ok(isCanonicalIso(built.at))
+  t.not(built.image, COVER, 'the image is copied')
+  await t.exception.all(async () => postCoverRecord({ seq: 3, image: { ...COVER, mime: 'image/webp' }, at: AT }), /media-invalid/)
+  await t.exception.all(async () => postCoverRecord({ seq: 0, image: COVER, at: AT }), /post-cover-invalid/)
+  await t.exception.all(async () => postCoverRecord({ seq: 3, at: AT }), /media-invalid/)
+  await t.exception.all(async () => postCoverRecord(), /post-cover-invalid/)
+})
+
+test('a post-cover leaves the post and its share as they were', (t) => {
+  const post = postRecord({ text: 'oi', at: AT })
+  const log = [
+    { seq: 1, record: post },
+    { seq: 2, record: records.postShareRecord({ seq: 1, at: AT }) },
+    { seq: 3, record: records.postCoverRecord({ seq: 1, image: COVER, at: AT }) }
+  ]
+  t.alike(log.map(({ seq, record }) => validateRecord(record, seq)), [null, null, null])
+  t.alike(records.validRecordCopy(log[0].record, 1), post, 'the post still validates')
+  t.alike(records.validRecordCopy(log[1].record, 2), { type: 'post-share', seq: 1, at: AT })
+  // A post never takes a cover in its own block.
+  t.is(validateRecord({ ...post, image: COVER }, 1), 'malformed')
+  t.is(validateRecord({ ...post, cover: COVER }, 1), 'malformed')
+  t.is(validateRecord({ type: 'post-share', seq: 1, image: COVER, at: AT }, 2), 'malformed', 'a share carries no image')
 })
 
 test('validateRecord: dm-key', (t) => {
@@ -2251,4 +2346,14 @@ test('event posts: key set, rules and builder', async (t) => {
   await t.exception.all(async () => postRecord({ text: 'q', at: AT, event: { ...event, end: event.start } }), /event-invalid/)
   await t.exception.all(async () => postRecord({ text: 'q', at: AT, replyTo: { author: K1, seq: 1 }, event }), /reply-invalid/)
   await t.exception.all(async () => postRecord({ text: '', at: AT, event }), /text-length/)
+})
+
+test('D-FIX: only a post with a still can expose a public cover', (t) => {
+  const image = { core: K1, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 3000, sha256: K2, width: 1200, height: 630 }
+  const { hasPostStill } = records
+  t.ok(hasPostStill(postRecord({ text: 'foto', media: [image] })))
+  t.ok(hasPostStill({ type: 'post', media: [image, { mime: 'video/mp4' }] }), 'a video poster is a still')
+  for (const record of [null, {}, postRecord({ text: 'texto' }), { type: 'post', media: [] }, { type: 'post', media: [{ mime: 'video/mp4' }] }, { type: 'profile', media: [image] }]) {
+    t.absent(hasPostStill(record))
+  }
 })

@@ -5,7 +5,8 @@ const nodeCrypto = require('node:crypto')
 const path = require('node:path')
 const { WebSocketServer, createWebSocketStream } = require('ws')
 const { MAX_EXTERNAL_FRAME } = require('@varanda/core/lib/seeder')
-const { MEDIA_BLOCK_BYTES } = require('@varanda/core/lib/records')
+const { MEDIA_BLOCK_BYTES, validShareCover } = require('@varanda/core/lib/records')
+const { stillImageSize } = require('@varanda/core/lib/still-image')
 const { feira, garden: gardenRules, mediaBounds } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
@@ -381,6 +382,12 @@ const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 //   same share after the bytes are read; else the generic 404. In-flight
 //   POST_PHOTO_MAX_IN_FLIGHT, deadline POST_PHOTO_DEADLINE_MS, /media
 //   token bucket.
+// - /p/<D>/<seq>/capa (no query string): the post's share cover (the
+//   newest live post-cover postPublic names), the page's og:image. Checked
+//   as a photo, then held to validShareCover and to its JPEG frame size,
+//   and served only if postPublic still answers with the same share and the
+//   same cover after the bytes are read; else the generic 404. The photos'
+//   in-flight cap, deadline and bucket.
 // - anything else under /p/ is the generic 404.
 const DEFAULT_HOST = '127.0.0.1'
 const PATH = '/seeder'
@@ -575,6 +582,7 @@ const POST_POLICY = '/p/policy'
 // Any digit string, so a non-canonical seq still gets the uniform 302.
 const POST_PAGE_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)$/
 const POST_FOTO_RE = /^\/p\/([0-9a-f]{64})\/([1-9][0-9]{0,15})\/foto\/([1-4])$/
+const POST_CAPA_RE = /^\/p\/([0-9a-f]{64})\/([1-9][0-9]{0,15})\/capa$/
 // Any digit string, so a non-canonical seq still gets the uniform answer.
 const POST_PREVIA_RE = /^\/p\/([0-9a-f]{64})\/([0-9]+)\/previa$/
 const CANONICAL_SEQ_RE = /^[1-9][0-9]{0,15}$/
@@ -1802,6 +1810,14 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return answer
   }
 
+  // The size of the share cover /capa may serve for a shown post, or null.
+  // A seeder from before the cover answers no `cover`, and the page then
+  // names the image it named before.
+  function shownCover (shown) {
+    if (!Number.isSafeInteger(shown.coverSeq) || !validShareCover(shown.cover)) return null
+    return { width: shown.cover.width, height: shown.cover.height }
+  }
+
   async function servePostPage (req, res, hex, digits) {
     if (postsOn === null || typeof seeder.postPublic !== 'function') return postAway(res, hex, digits)
     const seq = Number(digits)
@@ -1819,7 +1835,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     const answer = await Promise.race([late, slotted(res, postPageDeadlineMs * 2, () => { postPageInFlight-- }, async () => {
       const shown = shownPost(await seeder.postPublic(hex, seq))
       if (shown === null) return null
-      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username })
+      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username, cover: shownCover(shown) })
       if (typeof html !== 'string' || Buffer.byteLength(html) > POST_PAGE_MAX_BODY) return null
       return html
     })])
@@ -1881,12 +1897,31 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return got
   }
 
-  async function servePostPhoto (req, res, hex, seq, n) {
+  // The share cover of what the page shows, read like a photo and held to
+  // validShareCover first (so at most MAX_SHARE_COVER_BYTES are read).
+  // descriptorBytes checks size, hash and magic only, so the JPEG frame size
+  // is checked here against the descriptor, which is what og:image:width and
+  // og:image:height named. Served only if the same share AND the same cover
+  // still stand once the bytes are read; else null.
+  async function postCoverBytes (hex, seq, isClosed) {
+    const shown = shownPost(await seeder.postPublic(hex, seq))
+    if (shown === null || shownCover(shown) === null) return null
+    const got = await descriptorBytes(hex, shown.cover, isClosed)
+    if (got === null || isClosed() || got.mime !== 'image/jpeg') return null
+    const size = stillImageSize(got.bytes, 'image/jpeg')
+    if (size === null || size.width !== shown.cover.width || size.height !== shown.cover.height) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    if (again === null || again.shareSeq !== shown.shareSeq || again.coverSeq !== shown.coverSeq) return null
+    return got
+  }
+
+  // A photo or the cover: `read(isClosed)` is postPhotoBytes or
+  // postCoverBytes, under the same gate, bucket, slot and headers.
+  async function servePostPhoto (req, res, hex, seq, read) {
     if (postsOn === null || typeof seeder.postPublic !== 'function' || !Number.isSafeInteger(seq)) return send(res, 404, NOT_FOUND)
     if (!takeToken() || postPhotoInFlight >= postPhotoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
     postPhotoInFlight++
-    const answer = await slotted(res, postPhotoDeadlineMs, () => { postPhotoInFlight-- },
-      (isClosed) => postPhotoBytes(hex, seq, n, isClosed))
+    const answer = await slotted(res, postPhotoDeadlineMs, () => { postPhotoInFlight-- }, read)
     if (answer === CLOSED) return
     if (answer === null) return send(res, 404, NOT_FOUND)
     res.writeHead(200, {
@@ -1901,8 +1936,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
 
   // Every path under /p/, whatever the switch says. The page matches the
   // path without its query, so a link a messenger decorated still lands; the
-  // preview and the photos are no link anyone pastes, so they match the whole
-  // URL.
+  // preview, the photos and the cover are no link anyone pastes, so they
+  // match the whole URL.
   function servePosts (req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'método não permitido\n', { Allow: 'GET, HEAD' })
     if (pathname === POST_POLICY) {
@@ -1915,7 +1950,15 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     m = POST_PREVIA_RE.exec(req.url)
     if (m) return servePostPreview(req, res, m[1], m[2])
     m = POST_FOTO_RE.exec(req.url)
-    if (m) return servePostPhoto(req, res, m[1], Number(m[2]), Number(m[3]))
+    if (m) {
+      const [hex, seq, n] = [m[1], Number(m[2]), Number(m[3])]
+      return servePostPhoto(req, res, hex, seq, (isClosed) => postPhotoBytes(hex, seq, n, isClosed))
+    }
+    m = POST_CAPA_RE.exec(req.url)
+    if (m) {
+      const [hex, seq] = [m[1], Number(m[2])]
+      return servePostPhoto(req, res, hex, seq, (isClosed) => postCoverBytes(hex, seq, isClosed))
+    }
     return send(res, 404, NOT_FOUND)
   }
 
@@ -2352,6 +2395,7 @@ module.exports = {
   POST_POLICY,
   POST_PAGE_RE,
   POST_FOTO_RE,
+  POST_CAPA_RE,
   POST_PAGE_MAX_IN_FLIGHT,
   POST_PAGE_RATE,
   POST_PAGE_BURST,

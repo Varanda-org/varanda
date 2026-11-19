@@ -233,6 +233,15 @@ function isAvatar (v) {
     v.bytes <= L.MAX_AVATAR_BYTES
 }
 
+function isShareCover (v) {
+  return isDescriptor(v) &&
+    v.mime === 'image/jpeg' &&
+    v.width <= L.MAX_SHARE_COVER_SIDE &&
+    v.height <= L.MAX_SHARE_COVER_SIDE &&
+    v.blocks <= L.MAX_SHARE_COVER_BLOCKS &&
+    v.bytes <= L.MAX_SHARE_COVER_BYTES
+}
+
 // By index, never every(): a hole in a sparse array is undefined and invalid.
 function isMediaList (v, max = L.MAX_MEDIA_PER_POST) {
   if (!Array.isArray(v) || v.length < 1 || v.length > max) return false
@@ -781,7 +790,7 @@ const PAGE_ACTIONS = [
   'rename', 'invite', 'dm-list', 'dm-thread', 'dm-sign', 'dm-box', 'dm-box-share', 'dm-box-read', 'dm-legacy-read', 'dm-legacy-done', 'actor-box', 'group-seal', 'group-rebox', 'follow',
   'follows', 'media', 'notices', 'terms', 'community-join', 'community-leave', 'group-join', 'group-leave',
   'group-post', 'group-read', 'group-react', 'group-hide', 'group-choice', 'group-topics', 'group-voters', 'group-events', 'listing', 'listing-edit', 'listing-status', 'listing-consent',
-  'listing-rate', 'choice', 'moment', 'post-share', 'post-unshare', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
+  'listing-rate', 'choice', 'moment', 'post-share', 'post-cover', 'post-unshare', 'accept', 'remove', 'offer', 'transfer-accept', 'close', 'move'
 ]
 const PAGE_PAGELESS = ['create', 'list', 'terms']
 const PAGE_OP_MAX_BYTES = 16 * 1024
@@ -1202,6 +1211,7 @@ const SPECS = {
   'post.delete': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'post.shared': { fields: { to: req((v) => isRef(v, 1)) } },
   'post.share': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
+  'post.cover': { fields: { to: req((v) => isRef(v, 1)), image: req(isShareCover) }, mutating: true },
   'post.unshare': { fields: { to: req((v) => isRef(v, 1)) }, mutating: true },
   'like.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
   'repost.set': { fields: { to: req((v) => isRef(v, 1)), on: req(isBool) }, mutating: true },
@@ -1708,6 +1718,11 @@ const SPECS = {
     cross (given, value) {
       if (value.page === '' && !PAGE_PAGELESS.includes(value.action)) return 'parâmetro inválido: page'
       if (value.action === 'offer' && !isPageOfferPair(value.op)) return 'parâmetro inválido: op'
+      if (value.action === 'post-cover') {
+        const { op } = value
+        if (Object.keys(op).length !== 2 || !hasOwn(op, 'seq') || !hasOwn(op, 'image') ||
+          !Number.isSafeInteger(op.seq) || op.seq < 1 || !isShareCover(op.image)) return 'parâmetro inválido: op'
+      }
       return null
     }
   },

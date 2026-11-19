@@ -8,6 +8,7 @@ const {
   deletedSeqs,
   applyDeletes,
   deletedRanges,
+  tombstonedRanges,
   liveMediaRefs,
   shownMedia,
   overlaps,
@@ -181,6 +182,22 @@ test('deletedRanges: never a range a surviving record overlaps', (t) => {
   t.alike(deletedRanges([...entries, del(5, 2), del(6, 3)], [K2]), [shared, { core: K2, start: 5, blocks: 1 }], 'freed once the survivors are deleted too')
 })
 
+test('tombstonedRanges: every range an effective tombstone lists, a survivor overlapping it or not', (t) => {
+  const shared = { core: K2, start: 1, blocks: 2 }
+  const own = { core: K3, start: 4, blocks: 1 }
+  const entries = [
+    genesis,
+    post(1, { media: [desc(K2, 1, 2), desc(K3, 4, 1)] }),
+    profile(2, { avatar: desc(K2, 2, 1) }),
+    del(3, 1, [shared, own])
+  ]
+  t.alike(deletedRanges(entries, [K2, K3]), [own], 'the avatar keeps the shared range off the clear')
+  t.alike(tombstonedRanges(entries), [shared, own], 'but it was listed, whatever core')
+  t.alike(tombstonedRanges([...entries, del(4, 3)]), [], 'an undone tombstone lists nothing')
+  t.not(tombstonedRanges(entries)[0], entries[3].record.media[0], 'a copy')
+  for (const v of [null, undefined, 1, 'x', {}]) t.alike(tombstonedRanges(v), [])
+})
+
 test('deletedRanges: thousands of survivors and tombstone ranges stay fast and match the naive scan', (t) => {
   const cores = []
   for (let c = 0; c < 8; c++) cores.push(c.toString(16).padStart(64, '0'))
@@ -337,6 +354,28 @@ test('deletedRanges: a tombstone never frees a live preview thumbnail', (t) => {
   const entries = [genesis, post(1, { preview: card(desc(K2, 7, 1, 'image/jpeg')) }), post(2, { media: [desc(K2, 7, 1)] }), del(3, 2, [range])]
   t.alike(deletedRanges(entries, [K2]), [], 'post 1 still shows the block')
   t.alike(deletedRanges([...entries, del(4, 1, [range])], [K2]), [range, range], 'freed once the preview post is deleted too')
+})
+
+const coverImage = (start, blocks = 1) => ({ ...desc(K2, start, blocks, 'image/jpeg'), width: 1200, height: 630 })
+const cover = (seq, target, image) => ({ seq, record: { type: 'post-cover', seq: target, image, at: AT } })
+
+test('shownMedia and liveMediaRefs: a live post cover keeps its range like an avatar', (t) => {
+  const image = coverImage(9, 2)
+  const entries = [genesis, post(1), cover(2, 1, image)]
+  t.is(validateRecord(entries[2].record, 2), null, 'the fixture is a valid cover')
+  t.alike(shownMedia(entries[2].record), [image])
+  t.alike(liveMediaRefs(entries), [{ core: K2, start: 9, blocks: 2 }])
+  t.alike(liveMediaRefs([...entries, del(3, 1)]), [{ core: K2, start: 9, blocks: 2 }], 'the cover block, not the post, keeps it')
+  t.alike(liveMediaRefs([...entries, del(3, 2)]), [], 'a tombstoned cover keeps nothing')
+})
+
+test('deletedRanges: a live cover protects its range, a tombstoned cover frees it', (t) => {
+  const range = { core: K2, start: 9, blocks: 2 }
+  const entries = [genesis, post(1, { media: [desc(K2, 9, 2)] }), cover(2, 1, coverImage(9, 2)), del(3, 1, [range])]
+  t.alike(deletedRanges(entries, [K2]), [], 'the live cover still shows the blocks')
+  t.alike(deletedRanges([...entries, del(4, 2, [range])], [K2]), [range, range], 'freed once the cover is tombstoned too')
+  t.alike(deletedRanges([genesis, post(1), cover(2, 1, coverImage(9, 2)), del(3, 2, [range])], [K2]), [range], 'a cover tombstone carries its own range')
+  t.alike(deletedRanges([genesis, post(1), cover(2, 1, coverImage(9, 2)), del(3, 2, [range])], [K3]), [], 'not in an undeclared core')
 })
 
 test('overlaps: same core interval test', (t) => {
