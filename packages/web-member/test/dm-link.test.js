@@ -19,6 +19,10 @@ const { attachBlob } = require('@varanda/core/lib/blob-net')
 const { BLOB_FRAME_BYTES } = require('@varanda/core/lib/blob')
 const { openDmLink, openStampLink, openBlobLink, openVisitLink } = require('../lib/dm-link')
 const { attachDm } = require('@varanda/core/lib/dm-net')
+const { attachDmNotice, DM_NOTICE_PROTOCOL } = require('@varanda/core/lib/dm-notice-net')
+const { createNoticeWindow, openDmNotice } = require('@varanda/core/lib/dm-notice')
+const c = require('compact-encoding')
+const sodium = require('sodium-universal')
 const { dmSeeder } = require('./helpers/dm-seeder')
 const { wsStream } = require('../lib/ws-stream')
 
@@ -184,21 +188,27 @@ test('blob link: a seeder of another association is refused before any put; a lo
 })
 
 // A seeder stand-in with the dm channel and, when `visit`, the quiet visit
-// lane, each over its own recorded in-memory list.
-async function laneSeeder (t, { signer, visit = true }) {
+// lane, each over its own recorded in-memory list. notice: 'none' (a seeder
+// from before the channel), 'ack' (the seeder role, its window per link fed
+// by the drops put on that link; every wake frame is recorded in `wakes`, a
+// handed-on box in `boxes`) or 'silent' (the channel opens, records the
+// frames and never answers).
+async function laneSeeder (t, { signer, visit = true, notice = 'none' }) {
   const keyPair = crypto.keyPair()
   const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await new Promise((resolve) => wss.once('listening', resolve))
-  const seeder = { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', dm: [], visit: [] }
+  const seeder = { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', dm: [], visit: [], wakes: [], boxes: [] }
   t.teardown(async () => {
     for (const s of wss.clients) s.terminate()
     await new Promise((resolve) => wss.close(() => resolve()))
   }, { force: true })
-  const lane = (list) => ({
+  const lane = (list, window = null) => ({
     role: 'seeder',
     put: (bytes) => {
       list.push(b4a.from(bytes))
+      const d = dm.decodeDrop(bytes)
+      if (window !== null && d !== null) window.add(d.dropId)
       return { seq: list.length }
     },
     page: ({ after, limit }) => {
@@ -211,8 +221,17 @@ async function laneSeeder (t, { signer, visit = true }) {
     noise.on('error', noop)
     noise.once('connect', () => {
       Hypercore.createProtocolStream(noise)
-      attachDm(noise, lane(seeder.dm))
+      const window = createNoticeWindow()
+      attachDm(noise, lane(seeder.dm, window))
       if (visit) attachDm(noise, { ...lane(seeder.visit), protocol: dm.VISIT_PROTOCOL })
+      if (notice === 'ack') {
+        const taking = { take: (id) => { seeder.wakes.push(id); return window.take(id) } }
+        attachDmNotice(noise, { role: 'seeder', window: taking, onWake: (box) => seeder.boxes.push(b4a.from(box)) })
+      } else if (notice === 'silent') {
+        const ch = noise.userData.createChannel({ protocol: DM_NOTICE_PROTOCOL })
+        ch.addMessage({ encoding: c.buffer, onmessage: (buf) => seeder.wakes.push(JSON.parse(b4a.toString(buf, 'utf8')).id) })
+        ch.open()
+      }
       attachAdmission(noise, { role: 'seeder', cert, have: [] })
     })
   })
@@ -248,4 +267,106 @@ test('visit link: a seeder without the lane is unsupported, and nothing falls ba
   const wrong = await openVisitLink({ seederUrl: seeder.url, createSocket, association: hex(other.publicKey) }).then(() => null, (e) => e)
   t.is(wrong && wrong.message, 'sem conexão com o semeador', 'another association is no seeder')
   t.absent(wrong && wrong.unsupported)
+})
+
+function serviceKeyPair () {
+  const publicKey = b4a.alloc(32)
+  const secretKey = b4a.alloc(32)
+  sodium.crypto_box_keypair(publicKey, secretKey)
+  return { publicKey, secretKey }
+}
+
+function fakeDrop () {
+  return dm.encodeDrop({
+    dropId: dm.newDropId(),
+    kid: b4a.alloc(8, 1),
+    rsaSig: b4a.alloc(256, 2),
+    token: crypto.randomBytes(32),
+    sealed: b4a.alloc(dm.DM_SEALED_BYTES, 3)
+  })
+}
+
+test('dm link notice: one wake naming the drop just put, its box opens to the recipient for the service only', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc, notice: 'ack' })
+  const service = serviceKeyPair()
+  const recipient = hex(crypto.keyPair().publicKey)
+  const link = await openDmLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey), noticeKey: () => service.publicKey })
+  const drop = fakeDrop()
+  t.alike(await link.put(drop), { ok: true, reason: null })
+  const id = dm.decodeDrop(drop).dropId
+  t.is(await link.notice(id, recipient), true, 'acked')
+  t.alike(seeder.wakes, [hex(id)], 'one wake, the drop id as lowercase hex')
+  t.is(seeder.boxes.length, 1, 'the window took it: the box is handed on')
+  t.is(openDmNotice(seeder.boxes[0], service), recipient, 'the service opens the recipient key')
+  t.is(openDmNotice(seeder.boxes[0], serviceKeyPair()), null, 'nobody else does')
+  t.absent(seeder.wakes.some((w) => w === recipient), 'the recipient key never crosses in clear')
+  link.close()
+})
+
+test('dm link notice: no key set sends nothing; a key set later is read at the notice', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc, notice: 'ack' })
+  let key = null
+  const link = await openDmLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey), noticeKey: () => key })
+  const drop = fakeDrop()
+  await link.put(drop)
+  const id = dm.decodeDrop(drop).dropId
+  t.is(await link.notice(id, hex(crypto.keyPair().publicKey)), false)
+  t.is(seeder.wakes.length, 0, 'no frame without a key')
+  key = serviceKeyPair().publicKey
+  t.is(await link.notice(id, hex(crypto.keyPair().publicKey)), true)
+  t.is(seeder.wakes.length, 1)
+  t.is(await link.notice(id, 'not a key'), false, 'a bad recipient resolves false, never throws')
+  t.is(seeder.wakes.length, 1)
+  link.close()
+
+  const plain = await openDmLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey) })
+  t.is(await plain.notice(id, hex(crypto.keyPair().publicKey)), false, 'no noticeKey option: none set')
+  plain.close()
+  t.is(seeder.wakes.length, 1)
+})
+
+test('dm link notice: a seeder without the channel answers false at once, and puts go on as before', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc })
+  const link = await openDmLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey), noticeKey: () => serviceKeyPair().publicKey })
+  const drop = fakeDrop()
+  t.alike(await link.put(drop), { ok: true, reason: null })
+  const started = Date.now()
+  t.is(await link.notice(dm.decodeDrop(drop).dropId, hex(crypto.keyPair().publicKey)), false)
+  t.ok(Date.now() - started < 2000, 'well before the 3 s cap')
+  t.alike(await link.put(fakeDrop()), { ok: true, reason: null })
+  t.is(seeder.dm.length, 2)
+  link.close()
+})
+
+test('dm link notice: a seeder that never acks costs at most the cap, the wake is never repeated, and the dm lane stays', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc, notice: 'silent' })
+  const link = await openDmLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey), noticeKey: () => serviceKeyPair().publicKey })
+  const drop = fakeDrop()
+  await link.put(drop)
+  const id = dm.decodeDrop(drop).dropId
+  const started = Date.now()
+  t.is(await link.notice(id, hex(crypto.keyPair().publicKey)), false)
+  const took = Date.now() - started
+  t.ok(took >= 2900 && took < 6000, 'the default 3 s cap (' + took + ' ms)')
+  t.is(await link.notice(id, hex(crypto.keyPair().publicKey)), false, 'the channel is done after a timeout')
+  t.alike(seeder.wakes, [hex(id)], 'one frame, never repeated')
+  t.alike(await link.put(fakeDrop()), { ok: true, reason: null }, 'the dm lane still works')
+  link.close()
+})
+
+test('the visit link opens no notice channel', async (t) => {
+  t.timeout(60000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await laneSeeder(t, { signer: assoc, notice: 'ack' })
+  const link = await openVisitLink({ seederUrl: seeder.url, createSocket, association: hex(assoc.publicKey) })
+  t.absent('notice' in link)
+  link.close()
 })

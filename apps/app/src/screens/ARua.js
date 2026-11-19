@@ -54,7 +54,8 @@ import { replyMarkOf, whoOf } from '../who'
 import { COUNTS_MAX, MAX_COOLDOWN_MS, fetchCounts, fetchMember } from '../indexClient'
 import { assembleMember, planPeeks } from '../thread'
 import { feedSeeds } from '../feedSeeds'
-import { commentedLabel, foldFeed, foldNeeds, previewName } from '../feedFold'
+import { commentedLabel, dropFedReplies, dropOwnReplies, foldFeed, foldNeeds, keepOwnReply, knownReplies, previewName, withOwnReplies } from '../feedFold'
+import { onOwnReply, onOwnReplyGone } from '../ownReply'
 import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'
 import { applyToggle, countAnswerApplies, countsAfter, diaryPeekSlots, emptyState, mergeCounts, poolMap, secondPassRefs } from '../engagement'
 import { orderRefs } from '../visibleFirst'
@@ -1431,7 +1432,10 @@ export function socialRowProps ({ post, ref, repostedBy = null, social, profileO
   const publishable = postRef !== null && own !== null && ((authorKey === own && authorKey !== actingPage) || actingOwn) &&
     repostedBy === null && Number.isSafeInteger(post.seq)
   // While the index is still being built a count would be misleadingly small.
-  const counts = s.flags.indexing ? null : (s.counts.get(ref) || null)
+  // Once it is known, it is only ever raised to the direct replies the card shows.
+  const indexed = s.flags.indexing ? null : (s.counts.get(ref) || null)
+  const known = knownReplies(fold)
+  const counts = indexed !== null && Number.isSafeInteger(indexed.replies) && known > indexed.replies ? { ...indexed, replies: known } : indexed
   const fnOf = (f) => typeof f === 'function'
   const offers = {
     thread: fnOf(h.onOpenThread),
@@ -2010,6 +2014,37 @@ export default function ARua (props) {
     return <PostSheetProvider><PageARua {...props} acting={acting} /></PostSheetProvider>
   }
   return <PostSheetProvider><MemberARua {...props} /></PostSheetProvider>
+}
+
+// Confirmed replies for the life of this screen. They never enter `items`,
+// so the snapshot cannot store them. A generation other than the current
+// one, null included, is a late completion after a wipe and is dropped.
+const EMPTY = []
+
+function useOwnSent (ownKey, items) {
+  const [sent, setSent] = useState(EMPTY)
+  // The latest fed items: a reply the feed already carries is never kept, so
+  // a deletion made on another device cannot be hidden by a local copy.
+  const fedRef = useRef(items)
+  fedRef.current = items
+  useEffect(() => {
+    setSent(EMPTY)
+    const offReply = onOwnReply((item) => {
+      if (item.gen !== cacheGeneration()) return
+      // A Página reply never shows here, so it must not take a member's slot.
+      if (typeof ownKey !== 'string' || item.author !== ownKey.toLowerCase()) return
+      setSent((prev) => dropFedReplies(keepOwnReply(prev, item), fedRef.current))
+    })
+    const offGone = onOwnReplyGone((refs) => setSent((prev) => dropOwnReplies(prev, refs)))
+    return () => {
+      offReply()
+      offGone()
+    }
+  }, [ownKey])
+  useEffect(() => {
+    setSent((prev) => dropFedReplies(prev, items))
+  }, [items])
+  return sent
 }
 
 function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, scrollToTop, onFollowSomeone, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onDeletedPost, onBoot, onMessage, onOpenMomentos, onCreateMoment, onScrollFrame, onUserScroll }) {
@@ -2708,7 +2743,9 @@ function MemberARua ({ active, refresh, onReply, onReport, ownKey, followCount, 
   const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: blockedKeys }
   foldOfRef.current = (list) => foldFeed(list, foldOpts).rows
   const foldRef = useRef(null)
-  const fold = useMemo(() => keepFold(foldFeed(shownItems, foldOpts), foldRef.current, shownItems), [shownItems, foldOriginal, pending, ownKey, blockedKeys])
+  const ownSent = useOwnSent(ownKey, shownItems)
+  const foldItems = useMemo(() => withOwnReplies(shownItems, ownSent, ownKey), [shownItems, ownSent, ownKey])
+  const fold = useMemo(() => keepFold(foldFeed(foldItems, foldOpts), foldRef.current, foldItems), [foldItems, foldOriginal, pending, ownKey, blockedKeys])
   foldRef.current = fold
   const rows = fold.rows
   rowsRef.current = rows

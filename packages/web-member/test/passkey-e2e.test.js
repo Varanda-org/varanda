@@ -7,7 +7,9 @@
 //   followed by a push run the seeder confirms (seederConfirmed);
 // - a fresh device recovers its own diary (certificate included) from the
 //   seeder before it may write, and both devices' writes interleave;
-// - a live continuous run tracking the own diary stands in for the gate.
+// - a live continuous run tracking the own diary stands in for the gate;
+// - a reply on a device that is behind waits on its live continuous run,
+//   which catches up before the append (no fork).
 // Kept apart from session-e2e.test.js so each file stays under the runner's
 // per-file limit (scripts/run-tests.js).
 const test = require('brittle')
@@ -97,7 +99,7 @@ async function diaryHolds (storage, needle) {
 }
 
 // A device: a node over `storage` with the gate on, unlocked with keyPair.
-async function device (t, { storage, association, seederUrl, keyPair, writeGateTimeoutMs = 15000 }) {
+async function device (t, { storage, association, seederUrl, keyPair, writeGateTimeoutMs = 15000, writeGateRideMs }) {
   const internal = []
   const node = createBrowserNode({
     storage,
@@ -110,7 +112,8 @@ async function device (t, { storage, association, seederUrl, keyPair, writeGateT
     },
     onInternalError: (err) => internal.push(err),
     syncOptions: { retryMinMs: 100, retryMaxMs: 300 },
-    writeGateTimeoutMs
+    writeGateTimeoutMs,
+    writeGateRideMs
   })
   t.teardown(() => node.close(), { force: true })
   await node.setKeyPair(keyPair)
@@ -296,6 +299,161 @@ test('two devices with the same passkey: gate, push, recovery and a stale device
   }
   const seederLog = jsonLines(seed.stdout)
   t.ok(seederLog.some((e) => e.event === 'admitted' && e.key === keyHex), 'the seeder admitted the diary')
+  seed.kill()
+  await seed.exited
+})
+
+// A loopback relay in front of `url`: while `held` (true at first), a new
+// connection's answers are held, so its dial hangs in the handshake.
+// release() lets every held answer through and stops holding; drop() closes
+// every connection, as a seeder that goes. The upgrade request is passed on
+// naming the seeder in its Host header, which the seeder checks.
+async function heldRelay (t, url) {
+  const target = new URL(url)
+  const relay = { held: true, waiting: [], sockets: new Set() }
+  const server = net.createServer((socket) => {
+    const upstream = net.connect(Number(target.port), target.hostname)
+    for (const s of [socket, upstream]) {
+      relay.sockets.add(s)
+      s.on('error', () => {})
+      s.on('close', () => {
+        relay.sockets.delete(s)
+        socket.destroy()
+        upstream.destroy()
+      })
+    }
+    let head = Buffer.alloc(0)
+    const request = (chunk) => {
+      head = Buffer.concat([head, chunk])
+      const end = head.indexOf('\r\n\r\n')
+      if (end === -1) return
+      socket.off('data', request)
+      const lines = head.subarray(0, end).toString('latin1').replace(/\r\nhost: [^\r]*/i, '\r\nHost: ' + target.host)
+      upstream.write(Buffer.concat([Buffer.from(lines, 'latin1'), head.subarray(end)]))
+      socket.pipe(upstream)
+    }
+    socket.on('data', request)
+    const answer = () => { if (!socket.destroyed) upstream.pipe(socket) }
+    if (relay.held) relay.waiting.push(answer)
+    else answer()
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.teardown(() => {
+    for (const s of relay.sockets) s.destroy()
+    return new Promise((resolve) => server.close(() => resolve()))
+  }, { force: true })
+  relay.url = 'ws://127.0.0.1:' + server.address().port + target.pathname
+  relay.release = () => {
+    relay.held = false
+    for (const answer of relay.waiting.splice(0)) answer()
+  }
+  relay.drop = () => {
+    relay.waiting.length = 0
+    for (const s of [...relay.sockets]) s.destroy()
+  }
+  return relay
+}
+
+// The CLI seeder of the two-device test, with its association.
+async function cliSeeder (t, bootstrap) {
+  const assocDir = tmpDir(t, 'varanda-pk-assoc-')
+  const association = (await run(t, bootstrap, ['assoc', 'init', '--data', assocDir, '--json'])).publicKey
+  const assocKp = loadAssociationKeyPair(path.join(assocDir, 'association.json'))
+  const seederDir = tmpDir(t, 'varanda-pk-seed-')
+  Seeder.ensureConfig(seederDir, association)
+  const { publicKey: seederKey } = Seeder.createKey(seederDir)
+  const seederCertFile = path.join(tmpDir(t, 'varanda-pk-sc-'), 'seeder-cert.json')
+  fs.writeFileSync(seederCertFile, JSON.stringify(createSeederCert({ seeder: seederKey }, assocKp)))
+  Seeder.addCert(seederDir, seederCertFile, association)
+  const seed = varanda(t, bootstrap, ['seed', '--data', seederDir, '--ws-port', '0', '--json'])
+  const wsEvent = await until(() => jsonLines(seed.stdout).find((e) => e.event === 'ws'), { name: 'ws do semeador', timeoutMs: 30000 })
+  await until(() => jsonLines(seed.stdout).some((e) => e.event === 'ready'), { name: 'semeador pronto', timeoutMs: 30000 })
+  return { association, assocKp, seed, seederUrl: 'ws://127.0.0.1:' + wsEvent.port + '/seeder' }
+}
+
+test('a reply on a device that is behind waits on its continuous run: no gate run, no fork, a link loss refuses', async (t) => {
+  t.timeout(150000)
+  const { bootstrap } = await testnet(t)
+  const { association, assocKp, seed, seederUrl } = await cliSeeder(t, bootstrap)
+  const keyPair = crypto.keyPair()
+  const keyHex = b4a.toString(keyPair.publicKey, 'hex')
+  const storageA = memoryNodeStorage()
+  storageA.close = async () => {}
+  const storageB = memoryNodeStorage()
+  storageB.close = async () => {}
+  const linesOf = (web, runId) => web.events.filter((e) => e.name === 'sync.event' && e.data.runId === runId).map((e) => e.data.line)
+
+  // ---- A writes; B recovers the diary and goes away; A writes again ----
+  const a = await device(t, { storage: storageA, association, seederUrl, keyPair })
+  await a.web.request('identity.create')
+  await gatedWrite(t, a.web, 'cert.add', { cert: createCert({ member: keyHex }, assocKp) }, 'A cert.add')
+  t.alike((await gatedWrite(t, a.web, 'post.create', { text: 'de A' }, 'A post.create')).result, { seq: 1, ref: keyHex + ':1' })
+  const away = await device(t, { storage: storageB, association, seederUrl, keyPair })
+  await away.web.request('identity.create')
+  const { runId: recovery } = await away.web.request('sync.start', { once: true, timeoutMs: 30000 })
+  t.is((await stoppedOf(away.web.events, recovery)).reason, 'done', 'B recovered the diary')
+  t.is((await away.web.request('log.read', {})).entries.length, 2)
+  await away.node.close()
+  t.alike((await gatedWrite(t, a.web, 'post.create', { text: 'de A depois' }, 'A post.create while B is away')).result, { seq: 2, ref: keyHex + ':2' })
+
+  // ---- B is back: the seeder holds its answer until the reply is waiting ----
+  const relay = await heldRelay(t, seederUrl)
+  const b = await device(t, { storage: storageB, association, seederUrl: relay.url, keyPair, writeGateRideMs: 15000 })
+  const { runId } = await b.web.request('sync.start', {})
+  const from = b.web.events.length
+  let settled = false
+  const reply = b.web.request('post.reply', { to: keyHex + ':1', text: 'resposta de B' }).then((result) => {
+    settled = true
+    return { result, at: b.web.events.length }
+  })
+  reply.catch(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  t.absent(settled, 'the reply waits while the seeder holds its answer')
+  relay.release()
+  const { result, at } = await reply
+  t.alike(result, { seq: 3, ref: keyHex + ':3' }, 'the reply goes after A\'s post, never on a seq A used')
+  const before = b.web.events.slice(0, at).filter((e) => e.name === 'sync.event' && e.data.runId === runId).map((e) => e.data.line)
+  const behind = before.indexOf('diário próprio atrasado (2/3)')
+  t.ok(behind !== -1, 'B\'s continuous run saw itself behind before the reply resolved')
+  t.ok(before.indexOf('diário próprio sincronizado (3)') > behind, 'and caught up before it')
+  const after = b.web.events.slice(from)
+  t.absent(after.some((e) => e.name === 'sync.event' && e.data.line === GATE_LINE), 'no gate run during the reply')
+  t.ok(after.some((e) => e.name === 'sync.stopped' && e.data.runId === runId && e.data.reason === 'preempted'), 'the continuous run was preempted for the append')
+  const restarted = after.find((e) => e.name === 'sync.started')
+  t.ok(restarted && restarted.data.once === false, 'and restarted')
+  await until(() => linesOf(b.web, restarted.data.runId).includes('have ' + keyHex + ' 4'), { name: 'semeador com a resposta', timeoutMs: 30000 })
+  t.alike(await b.web.request('sync.stop'), { stopped: true })
+
+  // A's next write catches up with one diary holding both writes.
+  const postA = await gatedWrite(t, a.web, 'post.create', { text: 'fim' }, 'A post.create after B\'s reply')
+  t.ok(postA.gate.lines.includes('diário próprio atrasado (3/4)'), 'A saw B\'s reply')
+  t.alike(postA.result, { seq: 4, ref: keyHex + ':4' })
+  const logA = await a.web.request('log.read', {})
+  t.alike(logA.entries.map((e) => [e.seq, e.record.text || e.record.type]), [[0, 'member-cert'], [1, 'de A'], [2, 'de A depois'], [3, 'resposta de B'], [4, 'fim']], 'one diary, no fork')
+  t.alike(logA.invalid, [])
+
+  // ---- B's seeder link goes while a reply waits: refused, nothing written ----
+  const length = (await b.web.request('log.read', {})).entries.length
+  relay.held = true
+  const { runId: second } = await b.web.request('sync.start', {})
+  const mark = b.web.events.length
+  let refusedSettled = false
+  const pending = errorOf(b.web.request('post.reply', { to: keyHex + ':1', text: 'sem semeador' })).then((err) => {
+    refusedSettled = true
+    return err
+  })
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  t.absent(refusedSettled, 'the reply waits on the run')
+  relay.drop()
+  const refused = await pending
+  t.is(refused && refused.code, 'USAGE')
+  t.is(refused && refused.message, NOT_SYNCED, 'the same refusal')
+  t.absent(b.web.events.slice(mark).some((e) => e.name === 'sync.started' || e.name === 'sync.stopped'), 'no gate run, the run not stopped')
+  t.is((await b.web.request('log.read', {})).entries.length, length, 'B\'s diary did not grow')
+  t.alike(await b.web.request('sync.status'), { state: 'running', runId: second, once: false })
+  t.alike(await b.web.request('sync.stop'), { stopped: true })
+
+  for (const [name, d] of [['A', a], ['B', b]]) t.is(d.internal.length, 0, name + ': no internal error')
   seed.kill()
   await seed.exited
 })
