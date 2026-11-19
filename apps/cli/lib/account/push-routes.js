@@ -4,10 +4,11 @@ const nodeCrypto = require('node:crypto')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { endpointHash, verifyPush } = require('@varanda/core/lib/push-proof')
 const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
-const { validateDmWake, DM_WAKE_COOLDOWN_MS } = require('@varanda/core/lib/dm-wake')
+const { openDmNotice, DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
 const { isAllowedEndpoint, sendPush, PUSH_TTL_S, TOPIC_RE } = require('./web-push')
 const { validEndpoint, validP256dh, validAuth } = require('./push-store')
-const { pushBody, dmWakePayload, inviteDropPayload, deletionPayload } = require('./push-text')
+const { isPlainObject } = require('@varanda/core/lib/cert')
+const { pushBody, inviteDropPayload, deletionPayload } = require('./push-text')
 
 // Web Push for the hosted PWA (mounted by ./server.js):
 //
@@ -28,11 +29,12 @@ const { pushBody, dmWakePayload, inviteDropPayload, deletionPayload } = require(
 //     event is answered 202 before any delivery, so the answer never says
 //     whether the recipient has a subscription. An undone follow, like or
 //     repost ({ v: 1, op: 'cancel' }) recalls that notice while it still
-//     waits for its delay. The seeder's DM wake
-//     ({ v: 1, kind: 'dm-wake' }, packages/core/lib/dm-wake.js) names nobody
-//     and becomes one identical notice to every stored subscription, at most
-//     once per DM_WAKE_COOLDOWN_MS per process: who got a message is never
-//     known here, so everyone with push on is told there may be one.
+//     waits for its delay. The seeder's DM notice ({ v: 1, kind: 'dm', box })
+//     forwards a box a member sealed to the wake key
+//     (packages/core/lib/dm-notice.js): only this service opens it, and the
+//     member key inside (or a Página's owner and admins) gets one kind-only
+//     notice. The old global wake ({ v: 1, kind: 'dm-wake' }) is accepted
+//     and dropped, so a seeder not yet updated gets no error.
 //   - notifyInvite, called in process by the account service: an invite
 //     drop ({ v: 1, kind: 'invite-drop' }) to every device of one member.
 //     No social window is charged (the weekly allowance bounds it), and its
@@ -47,8 +49,8 @@ const { pushBody, dmWakePayload, inviteDropPayload, deletionPayload } = require(
 //
 // An endpoint is a capability URL: it is never echoed, counted in an answer
 // or logged, and neither are keys, nonces, signatures, tokens, names or the
-// notice text. Logs carry only { event, reason } tokens, plus a number
-// (count) when a DM wake fan-out hits the queue cap.
+// notice text. Logs carry only { event, reason } tokens, plus kind: 'dm' on
+// the lines about a DM notice; never whom a DM notice was for.
 
 const MAX_BODY = 4096
 const RELAY_BODY_MAX = 1024
@@ -68,6 +70,16 @@ const ACTIONS = ['on', 'off']
 // length of the actor's name. The account payload JSON is far below it.
 const PUSH_PAD_TO = 1024
 const INVITE_QUEUE_MAX = Math.floor(MAX_QUEUE / 4)
+// DM notices only enter while the queue is under this many jobs (dmRoom).
+const DM_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
+// The Terms version whose text describes DM notices: a member who accepted
+// only an older text agreed to push for social notices, not for these.
+const DM_NOTICE_TERMS_FLOOR = 93
+// One DM notice per received key in this window, however many boxes name it.
+const DM_COOLDOWN_MS = 15 * 60 * 1000
+const BOX_B64U_LENGTH = Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3)
+const B64U_RE = /^[A-Za-z0-9_-]+$/
+const RELAY_DM_KEYS = 'box,kind,v'
 
 const sha256 = (value) => nodeCrypto.createHash('sha256').update(value).digest()
 // Privacy delay before every Web Push send (maintainer decision 2026-11-15).
@@ -82,6 +94,12 @@ function createPushRoutes ({
   terms = null,
   pushStore = null,
   vapid = null,
+  // { publicKey, secretKey } of ./push-wake-key.js, or null: DM boxes are
+  // then dropped and /account/push/key carries no wake key.
+  wakeKey = null,
+  // The Páginas ACL (./pages-store.js) or null: a DM box that names a live
+  // Página notifies its owner and admins.
+  pagesStore = null,
   send = sendPush,
   relayTokenHash = null,
   // The Topic header travels in clear to the browser vendor's push service.
@@ -116,7 +134,11 @@ function createPushRoutes ({
     // One actor's share of the whole queue: one post can mention several
     // members, so pair and recipient alone let one diary fill MAX_QUEUE.
     actor: keyedWindow(30, 3600 * 1000, now),
-    cooldown: keyedWindow(1, COOLDOWN_MS, now)
+    cooldown: keyedWindow(1, COOLDOWN_MS, now),
+    // Keyed on the key the box named, before a Página is expanded.
+    dmCooldown: keyedWindow(1, DM_COOLDOWN_MS, now),
+    // Per member reached by a DM notice, apart from the social budget.
+    dmRecipient: keyedWindow(60, 3600 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
 
@@ -135,10 +157,6 @@ function createPushRoutes ({
   let dropped = 0
   // Invite jobs still waiting in the queue, against INVITE_QUEUE_MAX.
   let invitesQueued = 0
-  // Start of the current DM wake window; one fan-out per window. The
-  // offset rotates which subscriptions a capped fan-out reaches first.
-  let wakeAt = null
-  let wakeAfter = null
   let timer = null
   let closed = false
 
@@ -206,9 +224,15 @@ function createPushRoutes ({
     for (const [k, v] of nonces) if (v.expiresAt <= t) nonces.delete(k)
   }
 
+  // `wake` is the only place a client takes the wake key from: a seeder
+  // never hands it out, so one cannot swap in a key it holds.
+  const wakePublic = wakeKey === null ? null : Buffer.from(wakeKey.publicKey).toString('base64url')
+
   async function key (req, res) {
     if (vapid === null || !storeUsable()) throw refuse('indisponivel')
-    reply(res, 200, { key: vapid.publicKey })
+    const out = { key: vapid.publicKey }
+    if (wakePublic !== null) out.wake = wakePublic
+    reply(res, 200, out)
   }
 
   async function start (req, res, body) {
@@ -338,10 +362,16 @@ function createPushRoutes ({
     if (!relayAuthorized(req)) return hidden(req, res)
     checkPost(req, { requireOrigin: false })
     const event = await readJsonBody(req, RELAY_BODY_MAX)
-    if (validateDmWake(event)) {
+    if (isLegacyWake(event)) {
+      reply(res, 202, {})
+      return log({ event: 'push', reason: 'descartado' })
+    }
+    if (isDmEvent(event)) {
+      // Answered before the box is opened, so the answer never says whether
+      // it named anyone.
       reply(res, 202, {})
       try {
-        wake()
+        dmNotice(event.box)
       } catch {
         log({ event: 'push', reason: 'falhou' })
       }
@@ -461,50 +491,128 @@ function createPushRoutes ({
     limits.recipient.release(n.recipient, n.charged)
   }
 
-  // One global event: no per-actor window or cooldown applies, and a wake
-  // inside the window is accepted and dropped. The window starts only once
-  // a job is queued, so a member who turns push on right after a wake that
-  // reached nobody still hears of the next one.
-  //
-  // A fan-out shares the MAX_QUEUE jobs with member notices, which is enough
-  // at pilot scale but not for every subscription of a large service. Past
-  // the cap the rest of this window's wake is dropped and counted, and the
-  // next wake starts where this one stopped, so the same tail is never the
-  // one always skipped. Each job keeps its row's member only to check and
-  // remove the row; the payload names nobody.
-  function wake () {
-    const t = now()
-    if (wakeAt !== null && t - wakeAt < DM_WAKE_COOLDOWN_MS) return log({ event: 'push', reason: 'descartado' })
-    if (vapid === null || !storeUsable()) return
-    const subs = pushStore.all()
-    if (subs.length === 0) return
-    // Any member with stamps decides when a wake fires, so a wake takes at
-    // most half the queue: member notices always keep the other half.
-    const take = Math.min(subs.length, Math.max(0, Math.floor(MAX_QUEUE / 2) - queue.length))
-    const skipped = subs.length - take
-    if (skipped > 0) {
-      dropped += skipped
-      log({ event: 'push', reason: 'teto', count: skipped })
+  // --- DM notices -------------------------------------------------------------
+
+  function isLegacyWake (e) {
+    return isPlainObject(e) && Object.keys(e).sort().join(',') === 'kind,v' && e.v === 1 && e.kind === 'dm-wake'
+  }
+
+  // The shape only: a box that does not decode or open is still answered
+  // 202, like one that names a member without a device.
+  function isDmEvent (e) {
+    return isPlainObject(e) && Object.keys(e).sort().join(',') === RELAY_DM_KEYS && e.v === 1 && e.kind === 'dm' &&
+      typeof e.box === 'string' && e.box.length <= RELAY_BODY_MAX
+  }
+
+  // Exactly DM_NOTICE_BOX_BYTES in canonical unpadded base64url, or null: a
+  // second spelling of one box would be a second, unrelated-looking event.
+  function decodeBox (value) {
+    if (value.length !== BOX_B64U_LENGTH || !B64U_RE.test(value)) return null
+    const box = Buffer.from(value, 'base64url')
+    return box.length === DM_NOTICE_BOX_BYTES && box.toString('base64url') === value ? box : null
+  }
+
+  function dmNotice (value) {
+    if (wakeKey === null) return log({ event: 'push', kind: 'dm', reason: 'indisponivel' })
+    const box = decodeBox(value)
+    const key = box === null ? null : openDmNotice(box, wakeKey)
+    if (key === null) return log({ event: 'push', kind: 'dm', reason: 'caixa-invalida' })
+    notifyDm(key)
+  }
+
+  // A live Página's row, or null. A closed or moved page (moved implies
+  // closed) has nobody to tell. An unreadable pages store reads as "not a
+  // page": the key then only reaches its own subscriptions, and a page key
+  // never has any (turning push on needs a linked member's proof).
+  function livePage (key) {
+    if (pagesStore === null) return null
+    let row
+    try {
+      row = pagesStore.get(key)
+    } catch {
+      return null
     }
-    if (take === 0) return
-    // Resume after the last endpoint served, found again by value: a removed
-    // row shifts every later index, so a numeric offset would skip rows.
-    const after = wakeAfter === null ? -1 : subs.findIndex((s) => s.endpoint === wakeAfter)
-    const start = (after + 1) % subs.length
-    wakeAfter = subs[(start + take - 1) % subs.length].endpoint
-    wakeAt = t
-    const payload = dmWakePayload()
-    const topic = nodeCrypto.createHmac('sha256', topicKey).update('dm-wake ' + t).digest('hex').slice(0, 32)
-    const at = t + delayMs()
-    for (let i = 0; i < take; i++) {
-      const { member, endpoint, p256dh, auth } = subs[(start + i) % subs.length]
-      enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic }, at)
+    if (row === null || row.closed !== null || row.movedTo !== null) return null
+    return row
+  }
+
+  function runsPage (key, member) {
+    const row = livePage(key)
+    return row !== null && (row.owner === member || row.admins.includes(member))
+  }
+
+  function dmTermsAccepted (member) {
+    try {
+      return terms.list(member).some((e) => e.version >= DM_NOTICE_TERMS_FLOOR)
+    } catch {
+      return false
     }
+  }
+
+  // DM jobs enter only while the queue is under half full, like invites: a
+  // member with stamps decides when a box arrives, so member notices always
+  // keep room of their own.
+  function dmRoom () {
+    return Math.max(0, DM_QUEUE_MAX - queue.length)
+  }
+
+  // `key` is the key a box named: a member, or a Página whose owner and
+  // admins are told instead. The payload names nobody, only the kind and
+  // the enqueue time, so the app knows which Conversas to look at and how
+  // old the notice is. The cooldown is charged only once a job is queued: a
+  // box that reaches nobody (Terms below the floor, no device, no room, the
+  // hourly cap) must not hold back the next message's notice for 15 minutes.
+  function notifyDm (key) {
+    if (closed || vapid === null || !storeUsable()) return
+    if (terms === null || !terms.available()) return log({ event: 'push', kind: 'dm', reason: 'indisponivel' })
+    if (!limits.dmCooldown(key, false)) return log({ event: 'push', kind: 'dm', reason: 'descartado' })
+    const page = livePage(key)
+    const kind = page === null ? 'dm' : 'dm-page'
+    const members = page === null ? [key] : [page.owner, ...page.admins]
+    const g = now()
+    const payload = JSON.stringify({ v: 1, kind, g })
+    let queued = false
+    for (const member of members) {
+      if (!dmTermsAccepted(member)) {
+        log({ event: 'push', kind: 'dm', reason: 'termos-pendentes' })
+        continue
+      }
+      let subs
+      try {
+        subs = pushStore.list(member)
+      } catch {
+        log({ event: 'push', kind: 'dm', reason: 'indisponivel' })
+        continue
+      }
+      if (subs.length === 0) continue
+      if (dmRoom() < subs.length) {
+        dropped += subs.length
+        log({ event: 'push', kind: 'dm', reason: 'descartado' })
+        continue
+      }
+      if (!limits.dmRecipient(member)) {
+        log({ event: 'push', kind: 'dm', reason: 'teto' })
+        continue
+      }
+      // A fresh topic per notice, as for a social one: the push service sees
+      // it in clear, and a topic repeated per member would mark these
+      // notices apart and tie them to each other.
+      const topic = nodeCrypto.createHmac('sha256', topicKey).update('dm ' + key + ' ' + g + ' ' + member).digest('hex').slice(0, 32)
+      // One delay per member, shared only by that member's own devices: a
+      // delay shared by a Página's owner and admins would tie their notices
+      // together for the push service, as one topic would.
+      const at = g + delayMs()
+      for (const { endpoint, p256dh, auth } of subs) {
+        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, ...(page === null ? {} : { page: key }) }, at)
+      }
+      queued = true
+    }
+    if (queued) limits.dmCooldown(key)
     pump()
   }
 
-  // Invites only enter while the queue is under half full: a DM wake may hold
-  // the other half (wake), so member notices always keep room of their own.
+  // Invites only enter while the queue is under half full: DM notices may
+  // hold the other half (dmRoom), so member notices always keep room of their own.
   // No transport means no room: the loop then claims nothing, so the week's
   // slots are still sent once push comes back. A closed service has no room
   // either: a slot claimed after close() would never be sent.
@@ -635,9 +743,16 @@ function createPushRoutes ({
     }
   }
 
-  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline, notice }) {
+  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline, notice, page }) {
     const subscription = current(recipient, queued)
     if (subscription === null) {
+      dropped++
+      return log({ event: 'push', reason: 'descartado' })
+    }
+    // A Página's notice reaches only who still runs it once the delay ends:
+    // an admin removed, or a page closed or moved, while the job waited is
+    // not told. An unreadable pages store tells nobody.
+    if (page !== undefined && !runsPage(page, recipient)) {
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
@@ -687,6 +802,8 @@ function createPushRoutes ({
 
 module.exports = {
   RELAY_BODY_MAX,
+  DM_NOTICE_TERMS_FLOOR,
+  DM_COOLDOWN_MS,
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,

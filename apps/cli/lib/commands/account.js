@@ -32,6 +32,7 @@ const { parseGifConfig } = require('../account/gif-routes')
 const { parseAudiusConfig } = require('../account/audius-provider')
 const { removeWalletFiles } = require('../account/wallet-cleanup')
 const { generateVapidKeys } = require('../account/web-push')
+const { loadOrCreateWakeKey } = require('../account/push-wake-key')
 const { openModerationStore, FILE: MODERATION_FILE } = require('../account/moderation-store')
 const { parseModEmails } = require('../account/mod-routes')
 const { revokedIssuerSet } = require('@varanda/core/lib/blocklist')
@@ -978,9 +979,14 @@ async function serve (flags, env) {
     pushStore = openPushStore(flags.dataDir, { guard: held })
     if (!pushStore.available()) log({ event: 'push', reason: 'indisponivel' })
     stopPushHeal = startHeal(pushStore, 'push', log)
+    // The DM notice key: created on the first start, and a bad file stops
+    // the service (loadOrCreateWakeKey), since a new key would orphan every
+    // box already sealed to the old one.
+    const wakeKey = loadOrCreateWakeKey(flags.dataDir)
     const push = {
       pushStore,
       vapid: vapid === null ? null : { publicKey: vapid.publicKey, privateKey: vapid.privateKey, subject: origin },
+      wakeKey,
       relayTokenHash: flags.pushToken ? nodeCrypto.createHash('sha256').update(flags.pushToken).digest() : null
     }
     log({ event: 'push', reason: vapid !== null ? 'ligado' : 'desligado' })
