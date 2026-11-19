@@ -23,6 +23,7 @@ export const light = Object.freeze({
   dim: 'rgba(31,42,36,0.35)',
   tabBar: 'rgba(251,248,243,1)',
   danger: '#a3201a',
+  dangerSoft: 'rgba(163,32,26,0.10)',
   warn: '#8a5a00',
   placeholder: '#616c67',
   skeleton: 'rgba(31,42,36,0.08)',
@@ -34,7 +35,11 @@ export const light = Object.freeze({
   toastInk: '#ffffff',
   // The own chat bubble: a clear mint, so an own message reads at a glance.
   bubbleMine: '#d9efe2',
-  shadow: 'rgba(31,42,36,0.28)'
+  shadow: 'rgba(31,42,36,0.28)',
+  // Media roles sit over photos, not the page, so both schemes share them.
+  onMedia: '#ffffff',
+  mediaBg: '#000000',
+  mediaScrim: 'rgba(0,0,0,0.55)'
 })
 
 export const dark = Object.freeze({
@@ -52,6 +57,7 @@ export const dark = Object.freeze({
   dim: 'rgba(0,0,0,0.55)',
   tabBar: 'rgba(16,16,16,1)',
   danger: '#ff8f87',
+  dangerSoft: 'rgba(255,143,135,0.16)',
   warn: '#e7c36a',
   placeholder: '#b0b0b0',
   skeleton: 'rgba(245,245,245,0.10)',
@@ -62,7 +68,10 @@ export const dark = Object.freeze({
   toastBg: '#f5f5f5',
   toastInk: '#101010',
   bubbleMine: '#2c4a3d',
-  shadow: 'rgba(0,0,0,0.45)'
+  shadow: 'rgba(0,0,0,0.45)',
+  onMedia: '#ffffff',
+  mediaBg: '#000000',
+  mediaScrim: 'rgba(0,0,0,0.55)'
 })
 
 export function paletteFor (scheme) {

@@ -61,7 +61,7 @@ const makeStyles = (colors) => StyleSheet.create({
   toggleText: { ...type.pill, color: colors.accent },
   togglePressed: { opacity: 0.6 },
   off: { opacity: 0.45 },
-  list: { backgroundColor: colors.card, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, overflow: 'hidden' },
+  list: { backgroundColor: colors.card, borderRadius: radius.bubble, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, overflow: 'hidden' },
   row: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit + space.sm, paddingHorizontal: space.lg, paddingVertical: space.md },
   divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   rowPressed: { backgroundColor: colors.skeleton },

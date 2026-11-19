@@ -5,6 +5,7 @@
 // badge } it passes as `right`.
 
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Badge } from './Badge'
 import { HelpButton } from './Help'
 import { Icon } from './Icon'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -26,7 +27,7 @@ export function BellButton ({ onPress, badged, active, color, style }) {
     >
       <View style={styles.iconWrap}>
         <Icon name='sino' size={22} color={active ? colors.accent : tint} />
-        {badged ? <View style={styles.dot} /> : null}
+        {badged ? <View style={styles.dotPosition}><Badge /></View> : null}
       </View>
     </Pressable>
   )
@@ -56,7 +57,7 @@ export function IconAction ({ icon, label, onPress, badge, color, disabled, pend
         {pending === true ? <ActivityIndicator size='small' color={tint} /> : <Icon name={icon} size={22} color={tint} />}
         {count > 0
           ? <View style={styles.count}><Text style={styles.countText} numberOfLines={1}>{countText}</Text></View>
-          : dot ? <View style={styles.dot} /> : null}
+          : dot ? <View style={styles.dotPosition}><Badge /></View> : null}
       </View>
     </Pressable>
   )
@@ -89,15 +90,7 @@ const makeStyles = (colors) => StyleSheet.create({
   disabled: { opacity: 0.4 },
   // Anchors the dot to the icon's corner, as in the tab bar.
   iconWrap: { position: 'relative' },
-  dot: {
-    position: 'absolute',
-    top: 0,
-    right: -2,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.accent
-  },
+  dotPosition: { position: 'absolute', top: 0, right: -2 },
   count: {
     position: 'absolute',
     top: -6,

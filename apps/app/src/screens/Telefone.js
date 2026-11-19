@@ -14,9 +14,9 @@ import { codeDigits, isCode, phoneChangeOutcome } from '../phone'
 import { cellsOf, shouldAutoSubmit } from '../phoneEntry'
 import { STEP_HINTS, STEP_TITLES } from '../onboarding'
 import { usePhoneVerify } from '../usePhoneVerify'
-import { Btn, ErrorText, Label, Notice, Page, Soft } from '../ui'
+import { Btn, ErrorText, Field, Label, Notice, Page, Soft } from '../ui'
 import { Stepper, StepLink, StepNotice } from '../ui/Stepper'
-import { useStyles, useTheme } from '../ui/ThemeProvider'
+import { useStyles } from '../ui/ThemeProvider'
 import { radius, type, webInputReset } from '../ui/theme'
 import { KeyboardForm } from './Perfil'
 
@@ -34,16 +34,6 @@ const TROCAR_TITLE = 'Trocar o celular'
 const makeStyles = (colors) => StyleSheet.create({
   center: { textAlign: 'center' },
   field: { gap: 4 },
-  input: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: radius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 16,
-    color: colors.ink
-  },
   off: { backgroundColor: colors.inputOff, color: colors.soft },
   codeBox: { position: 'relative' },
   cells: { flexDirection: 'row', gap: 8 },
@@ -68,26 +58,20 @@ const makeStyles = (colors) => StyleSheet.create({
 
 const NO_AUTOFILL = { autoComplete: 'off', autoCorrect: false, autoCapitalize: 'none', spellCheck: false, importantForAutofill: 'no', textContentType: 'none' }
 
+// Field spreads inputProps last, so NO_AUTOFILL overrides its defaults.
 function Input ({ label, value, onChangeText, keyboardType, maxLength, editable, onSubmitEditing }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
   return (
-    <View style={styles.field}>
-      <Label>{label}</Label>
-      <TextInput
-        style={[styles.input, !editable && styles.off]}
-        value={value}
-        onChangeText={onChangeText}
-        keyboardType={keyboardType}
-        maxLength={maxLength}
-        editable={editable}
-        placeholderTextColor={colors.placeholder}
-        accessibilityLabel={label}
-        onSubmitEditing={onSubmitEditing}
-        returnKeyType='done'
-        {...NO_AUTOFILL}
-      />
-    </View>
+    <Field
+      label={label}
+      value={value}
+      onChangeText={onChangeText}
+      keyboardType={keyboardType}
+      maxLength={maxLength}
+      editable={editable}
+      onSubmitEditing={onSubmitEditing}
+      returnKeyType='done'
+      inputProps={NO_AUTOFILL}
+    />
   )
 }
 

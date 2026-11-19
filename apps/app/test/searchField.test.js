@@ -111,6 +111,7 @@ test('SearchField uses the active palette and shows focus on the pill', async (t
     t.absent(input.style[0].fontFamily, 'the input keeps the system font')
     t.is(pillStyle(tree).borderRadius, theme.radius.pill)
     t.ok(pillStyle(tree).minHeight >= 44)
+    t.is(pillStyle(tree).paddingHorizontal, theme.space.lg)
     t.is(pillStyle(tree).backgroundColor, colors.inputOff)
     input.onFocus()
     t.is(pillStyle(render()).borderColor, colors.accent, scheme + ': focus uses the accent')

@@ -139,7 +139,7 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
     fabRight: 20,
     fabAboveTabs: 17,
     sheetTop: 52,
-    sheetRadius: 24,
+    sheetRadius: 48,
     sheetTopRow: 56,
     band: 150,
     column: 640,
@@ -150,7 +150,16 @@ test('theme usage: space, radius and the hit target are frozen', async (t) => {
   t.ok(Object.isFrozen(theme.layout))
   t.alike(theme.type.replyMark, { fontSize: 13, fontWeight: '400', lineHeight: 18 })
   t.alike(theme.type.meta, { fontSize: 13, fontWeight: '400', lineHeight: 18 })
-  t.alike(theme.elevation, { raised: '0px 6px 16px' })
+  t.alike(theme.elevation, {
+    xs: '0px 4px 4px 0px rgba(0,0,0,0.01), 0px 1px 2px 0px rgba(0,0,0,0.04)',
+    sm: '0px 3px 5px -2px rgba(0,0,0,0.05), 0px 9px 10px -2px rgba(0,0,0,0.03)',
+    md: '0px 4px 6px -4px rgba(0,0,0,0.08), 0px 10px 15px -3px rgba(0,0,0,0.05)',
+    lg: '0px 5px 6px -5px rgba(0,0,0,0.05), 0px 12px 18px -3px rgba(0,0,0,0.08)',
+    xl: '0px 6px 10px -5px rgba(0,0,0,0.10), 0px 14px 20px -5px rgba(0,0,0,0.08)',
+    xxl: '0px 8px 10px -6px rgba(0,0,0,0.12), 0px 25px 30px -6px rgba(0,0,0,0.12)',
+    edge: '6px 0px 12px -4px rgba(0,0,0,0.08)',
+    raised: '0px 6px 16px'
+  })
 })
 
 test('theme usage: rounded fields drop the browser focus ring and show focus on the pill', (t) => {

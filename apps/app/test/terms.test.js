@@ -498,6 +498,15 @@ test('the terms gate keeps its legal words on the shared frame', (t) => {
   t.is(src.split('onPress={onAccept}').length - 1, 1, 'only the accept button accepts')
 })
 
+test('the terms screen controls each standalone document accordion', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'screens', 'Termos.js'), 'utf8')
+  t.ok(src.includes("<Accordion title={doc.title} cueClosed='mostrar' cueOpen='esconder' expanded={expanded} onToggle={onToggle}>"), 'the accordion receives the title, cues and state')
+  t.ok(src.includes('const sections = expanded && doc.sections.map('), 'sections are built only while open')
+  t.ok(src.includes('<View style={styles.docBody}>{sections}</View>') && src.includes('docBody: { gap: space.sm }'), 'the open document keeps the 8 pt gap between headings and paragraphs')
+  t.ok(src.includes('<LegalDoc doc={TERMS} expanded={openTerms} onToggle={setOpenTerms} />'), 'Termos controls the terms accordion')
+  t.ok(src.includes('<LegalDoc doc={PRIVACY} expanded={openPrivacy} onToggle={setOpenPrivacy} />'), 'Termos controls the privacy accordion')
+})
+
 // The accept button is a short label, so the sentence above it is what asks
 // the person to read and accept both documents: it must stay on the gate.
 test('the terms gate shows the consent sentence above the accept button', (t) => {

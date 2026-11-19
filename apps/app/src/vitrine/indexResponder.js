@@ -1,11 +1,19 @@
 /* global URL */
 
 import rpc from '@varanda/rpc'
+import { findTags } from '../hashtags.js'
 import { fixtures } from './fixtures.js'
 import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'
 import { testimonialPointers, testimonialSource } from './testimonialIndex.js'
 
 const { isKey, isRef } = rpc
+let currentRequest
+
+export function createIndexedVitrineRequest (data, options) {
+  currentRequest = createVitrineRequest(data, options)
+  return currentRequest
+}
+
 const flags = { indexing: false, complete: true }
 const posts = [...fixtures.feed, ...fixtures.noticePosts]
 const profiles = [...fixtures.members, ...fixtures.pages, ...fixtures.applicants]
@@ -291,17 +299,42 @@ function fanRows (author) {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || compare(a.key, b.key))
 }
 
+async function readGroupItems (request, group) {
+  const items = []
+  let before = null
+  do {
+    const page = await request('group.read', { group, limit: rpc.GROUP_LIMIT_MAX, ...(before && { before }) })
+    items.push(...page.items)
+    before = page.next
+  } while (before !== null)
+  return items
+}
+
+function withGroups (request, groups, answer) {
+  if (!request) return answer(groups)
+  // Read the roster and posts from the fixture node to pick up session changes.
+  return Promise.all(groups.map(async (g) => {
+    const [{ members }, items] = await Promise.all([
+      request('group.members', { group: g.group }),
+      readGroupItems(request, g.group)
+    ])
+    return { ...g, items, roster: new Set(members.map((m) => m.member)) }
+  })).then(answer)
+}
+
+const hasJoined = (group, diary) => group.roster === undefined || group.roster.has(diary)
+
 function writersOf (group) {
-  const rows = new Map([[group.writer, { key: group.writer, diary: fixtures.own, seq: 1, length: 2, signed: 2, left: false }]])
+  const rows = new Map([[group.writer, { key: group.writer, diary: fixtures.own, seq: 1, length: 2, signed: 2, left: !hasJoined(group, fixtures.own) }]])
   for (const item of group.items) {
     const previous = rows.get(item.writer)
     const seq = Math.max(previous ? previous.seq : 1, item.seq)
-    rows.set(item.writer, { key: item.writer, diary: item.diary, seq, length: seq + 1, signed: seq + 1, left: false })
+    rows.set(item.writer, { key: item.writer, diary: item.diary, seq, length: seq + 1, signed: seq + 1, left: !hasJoined(group, item.diary) })
   }
   return [...rows.values()].sort((a, b) => compare(a.key, b.key))
 }
 
-const diaryCount = (group) => new Set(writersOf(group).map((w) => w.diary)).size
+const diaryCount = (group) => new Set(writersOf(group).filter((w) => !w.left).map((w) => w.diary)).size
 
 function activeReposts (author, request) {
   const latest = new Map()
@@ -314,10 +347,87 @@ function activeReposts (author, request) {
   return [...latest.values()].filter((e) => e.record.on).map((e) => e.seq)
 }
 
-function communityRows (community, after) {
-  return fixtures.groups.filter((g) => g.community === community && (after === undefined || g.group > after))
-    .sort((a, b) => compare(a.group, b.group))
+function communityRows (groups) {
+  return groups.sort((a, b) => compare(a.group, b.group))
     .map((g) => ({ group: g.group, join: g.join, visibility: g.visibility, name: g.visibility === 'private' ? null : g.name, writerCount: g.visibility === 'private' ? null : diaryCount(g) }))
+}
+
+// Discovery rows (/index/group-browse, /index/public-groups): public groups
+// only. The fixtures carry no header date, so a group can only be dated
+// from its first post. Activity uses the seeder's time bounds at the fixture clock.
+const ACTIVE_WINDOW_MS = 7 * 86400000
+const TREND_MIN_ACTIVE = 2
+const BROWSE_MAX = 20
+const PUBLIC_GROUPS_PAGE = 32
+const RECENT_PER_CREATOR = 2
+
+function publicRow (g) {
+  const c = fixtures.communities.find((c) => c.community === g.community)
+  return { group: g.group, name: g.name, creator: g.creator, community: g.community, communityName: c.name, writerCount: diaryCount(g) }
+}
+
+function groupCreated (g) {
+  const dates = g.items.map((item) => Date.parse(item.at))
+  return dates.length === 0 ? null : Math.min(...dates)
+}
+
+function groupActive (g) {
+  const now = Date.parse(fixtures.now)
+  const diaries = g.items.filter((item) => {
+    const ms = Date.parse(item.at)
+    return hasJoined(g, item.diary) && ms >= now - ACTIVE_WINDOW_MS && ms <= now + MAX_FUTURE_MS
+  }).map((item) => item.diary)
+  return new Set(diaries).size
+}
+
+function groupBrowse (order, groups) {
+  // As the seeder, a group whose last counted member left is not listed:
+  // the client refuses a whole page with a row of writerCount 0.
+  let rows = groups.map((g) => ({ ...publicRow(g), created: groupCreated(g), active: order === 'trending' ? groupActive(g) : null })).filter((r) => r.writerCount >= 1)
+  if (order === 'members') rows.sort((a, b) => b.writerCount - a.writerCount || compare(a.group, b.group))
+  if (order === 'trending') rows = rows.filter((r) => r.active >= TREND_MIN_ACTIVE).sort((a, b) => b.active - a.active || compare(a.group, b.group))
+  if (order === 'recent') {
+    const perCreator = new Map()
+    rows = rows.filter((r) => r.created !== null).sort((a, b) => b.created - a.created || compare(a.group, b.group)).filter((r) => {
+      const n = (perCreator.get(r.creator) || 0) + 1
+      perCreator.set(r.creator, n)
+      return n <= RECENT_PER_CREATOR
+    })
+  }
+  return { ...flags, groups: rows.slice(0, BROWSE_MAX), more: rows.length > BROWSE_MAX }
+}
+
+function publicGroupsOf (diary, after, request) {
+  const setting = liveEntries().filter((e) => e.author === diary && e.record.type === 'groups-show').sort((a, b) => b.seq - a.seq)[0]
+  if (setting?.record.on === false) return { ...flags, groups: [], next: null, hidden: true }
+  // A community's Geral is left out, as the seeder does.
+  const gerais = new Set(fixtures.communities.map((c) => c.general))
+  const candidates = fixtures.groups.filter((g) => g.visibility === 'public' && g.join === 'open' && !gerais.has(g.group) && (after === undefined || g.group > after))
+  return withGroups(request, candidates, (live) => {
+    const rows = live.filter((g) => writersOf(g).some((w) => w.diary === diary && !w.left))
+      .sort((a, b) => compare(a.group, b.group))
+      .map(publicRow)
+    const groups = rows.slice(0, PUBLIC_GROUPS_PAGE)
+    return { ...flags, groups, next: rows.length > PUBLIC_GROUPS_PAGE ? groups[groups.length - 1].group : null, hidden: false }
+  })
+}
+
+// Assuntos do momento: per tag, the distinct fixture authors whose posts
+// carry it. The seeder keeps a tag only from 3 authors; the Vitrine has few,
+// so 1 is enough here.
+const TOPIC_TREND_MAX = 10
+
+function topicTrend () {
+  const authors = new Map()
+  for (const p of posts) {
+    for (const { tag } of findTags(p.text)) {
+      if (!authors.has(tag)) authors.set(tag, new Set())
+      authors.get(tag).add(p.author)
+    }
+  }
+  const topics = [...authors].map(([tag, set]) => ({ tag, authors: set.size }))
+    .sort((a, b) => b.authors - a.authors || compare(a.tag, b.tag))
+  return { topics: topics.slice(0, TOPIC_TREND_MAX), ...flags }
 }
 
 function feiraIndex (segments, request) {
@@ -395,7 +505,7 @@ function pollIndex (author, seqText, pickText, cursorText) {
 }
 
 // Only fixture references are returned: screens verify them through diary.peek.
-export function vitrineIndex (url, request) {
+export function vitrineIndex (url, request = currentRequest) {
   let path
   try { path = new URL(url, 'https://vitrine.invalid').pathname } catch { notFound() }
   const segments = path.split('/')
@@ -404,6 +514,7 @@ export function vitrineIndex (url, request) {
     if (segments.length < 5 || segments.length > 7) notFound()
     return pollIndex(segments[3], segments[4], segments[5], segments[6])
   }
+  if (segments.length === 3 && segments[1] === 'index' && segments[2] === 'topic-trend') return topicTrend()
   const [, index, route, key, part, cursor, ...extra] = segments
   if (index !== 'index' || !key || extra.length) notFound()
 
@@ -498,27 +609,34 @@ export function vitrineIndex (url, request) {
   if (route === 'group' && cursor === undefined) {
     const g = fixtures.groups.find((g) => g.group === key)
     if (!g || (part !== undefined && !isKey(part))) notFound()
-    const rows = writersOf(g).filter((w) => part === undefined || w.key > part)
-    const writers = rows.slice(0, 64)
-    return { ...flags, kind: 'group', visibility: g.visibility, join: g.join, name: g.visibility === 'private' ? null : g.name, creator: g.creator, community: g.community, attached: true, rootServed: true, writers, next: rows.length > 64 ? writers[writers.length - 1].key : null }
+    return withGroups(request, [g], ([group]) => {
+      const rows = writersOf(group).filter((w) => part === undefined || w.key > part)
+      const writers = rows.slice(0, 64)
+      return { ...flags, kind: 'group', visibility: g.visibility, join: g.join, name: g.visibility === 'private' ? null : g.name, creator: g.creator, community: g.community, attached: true, rootServed: true, writers, next: rows.length > 64 ? writers[writers.length - 1].key : null }
+    })
   }
 
   if (route === 'groups' && part === undefined) {
     requireProfile(key)
-    const groups = fixtures.groups.flatMap((g) => {
-      const writer = writersOf(g).find((w) => w.diary === key)
-      return writer ? [{ group: g.group, writer: writer.key, seq: writer.seq, left: writer.left }] : []
+    return withGroups(request, fixtures.groups, (live) => {
+      const groups = live.flatMap((g) => {
+        const writer = writersOf(g).find((w) => w.diary === key)
+        return writer ? [{ group: g.group, writer: writer.key, seq: writer.seq, left: writer.left }] : []
+      })
+      return { ...flags, groups }
     })
-    return { ...flags, groups }
   }
 
   if (route === 'community') {
     const c = fixtures.communities.find((c) => c.community === key)
     if (!c || (part !== undefined && (part !== 'groups' || !isKey(cursor)))) notFound()
-    const rows = communityRows(key, cursor)
-    const groups = rows.slice(0, 32)
-    const body = { ...flags, groups, next: rows.length > 32 ? groups[groups.length - 1].group : null }
-    return part === undefined ? { ...body, name: c.name, join: c.join, creator: c.creator, members: fixtures.members.length } : body
+    const candidates = fixtures.groups.filter((g) => g.community === key && (cursor === undefined || g.group > cursor))
+    return withGroups(request, candidates, (live) => {
+      const rows = communityRows(live)
+      const groups = rows.slice(0, 32)
+      const body = { ...flags, groups, next: rows.length > 32 ? groups[groups.length - 1].group : null }
+      return part === undefined ? { ...body, name: c.name, join: c.join, creator: c.creator, members: fixtures.members.length } : body
+    })
   }
 
   if (route === 'testimonials' && part === undefined) {
@@ -562,7 +680,20 @@ export function vitrineIndex (url, request) {
 
   if (route === 'group-search' && part === undefined) {
     const rows = fixtures.groups.filter((g) => g.visibility === 'public' && matches(g.name, key))
-    return { ...flags, groups: rows.slice(0, 20).map((g) => ({ group: g.group, name: g.name, writerCount: diaryCount(g) })), more: rows.length > 20 }
+    return withGroups(request, rows.slice(0, 20), (live) => ({
+      ...flags, groups: live.map((g) => ({ group: g.group, name: g.name, writerCount: diaryCount(g) })), more: rows.length > 20
+    }))
+  }
+
+  if (route === 'group-browse' && part === undefined) {
+    if (!['members', 'recent', 'trending'].includes(key)) notFound()
+    return withGroups(request, fixtures.groups.filter((g) => g.visibility === 'public'), (live) => groupBrowse(key, live))
+  }
+
+  if (route === 'public-groups' && cursor === undefined) {
+    requireProfile(key)
+    if (part !== undefined && !isKey(part)) notFound()
+    return publicGroupsOf(key, part, request)
   }
 
   notFound()

@@ -121,7 +121,7 @@ async function ui (stubs = {}, code = source, names = 'MusicContent, MusicPicker
     radius: {},
     space: {},
     webInputReset: {},
-    ...Object.fromEntries(['ActivityIndicator', 'FlatList', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View', 'Btn', 'FilterChips', 'Icon', 'Segmented', 'Sheet', 'MusicCover', 'MusicEditor', 'MusicStrip', 'Pill'].map((name) => [name, name])),
+    ...Object.fromEntries(['ActivityIndicator', 'FlatList', 'Pressable', 'ScrollView', 'Text', 'TextInput', 'View', 'Btn', 'FilterChips', 'Icon', 'SegmentedControl', 'Sheet', 'MusicCover', 'MusicEditor', 'MusicStrip', 'Pill'].map((name) => [name, name])),
     ...stubs
   }
   const input = code.replace(/^import .+\n/gm, '').replace(/\bexport /g, '')
@@ -588,7 +588,7 @@ test('the picker stays shared, uses safe provider text and releases on close, pi
   t.ok(source.includes('MUSIC_DEBOUNCE_MS'))
   t.ok(source.includes('Músicas do Audius'))
   t.ok(source.includes("onEndReached={() => dispatch({ type: 'more' })}"))
-  t.ok(source.includes('{playlist ? <Segmented'))
+  t.ok(source.includes('{playlist ? <SegmentedControl'))
 })
 
 const editorSource = fs.readFileSync(path.join(__dirname, '../src/ui/MusicEditor.js'), 'utf8')
@@ -680,7 +680,7 @@ async function suggestionFixture (t, props, stubs) {
     ...stubs
   })
   const selectTab = (kind) => {
-    picker.render().find((n) => n.type === 'Segmented').props.onSelect(kind)
+    picker.render().find((n) => n.type === 'SegmentedControl').props.onSelect(kind)
     return picker.render()
   }
   const selectGenre = (key) => {
@@ -901,7 +901,7 @@ test('switching to Playlists unlocks its recents and drops the previous lookup',
   const nodes = f.render()
   t.absent(nodes.some((n) => n.type === 'MusicEditor'), 'the recent does not open the editor')
   t.alike(f.preview, [])
-  t.is(nodes.find((n) => n.type === 'Segmented').props.selected, 'playlist')
+  t.is(nodes.find((n) => n.type === 'SegmentedControl').props.selected, 'playlist')
   t.alike(f.rows(nodes).map((row) => row.props.item), [playlist])
 })
 
@@ -1404,7 +1404,7 @@ test('one row previews at a time and a new query stops it', async (t) => {
   nodes = await f.search('jazz')
   t.ok(f.preview.filter((c) => c[0] === 'release').length > released, 'a new query releases the preview')
   t.ok(f.rows(nodes).every((row) => previewOf(row).props.accessibilityLabel === 'Ouvir prévia'))
-  nodes.find((n) => n.type === 'Segmented').props.onSelect('playlist')
+  nodes.find((n) => n.type === 'SegmentedControl').props.onSelect('playlist')
   nodes = f.render()
   await f.flush()
   nodes = f.render()
@@ -1442,7 +1442,7 @@ test('done answers a clamped snippet ref, a track ref with start null and a play
     const f = await pickerFixture(t)
     let nodes = await f.search('samba')
     if (kind === 'playlist') {
-      nodes.find((n) => n.type === 'Segmented').props.onSelect('playlist')
+      nodes.find((n) => n.type === 'SegmentedControl').props.onSelect('playlist')
       f.render()
       await f.flush()
       nodes = f.render()
@@ -1484,7 +1484,7 @@ test('a momento picker offers the strip and no chips', async (t) => {
   const item = track('abc', 90)
   const props = { item, kind: 'snippet', start: 10, modes: ['snippet'], session: {}, onKind () {}, onStart: (s) => starts.push(s), stopRef }
   let nodes = flatten(h.render(h.MusicEditor, props))
-  t.absent(nodes.some((n) => n.type === 'Segmented'), 'no chips')
+  t.absent(nodes.some((n) => n.type === 'SegmentedControl'), 'no chips')
   const strip = nodes.find((n) => n.type === 'MusicStrip')
   t.is(strip.props.start, 10)
   t.is(strip.props.progress, null)
@@ -1504,7 +1504,7 @@ test('a momento picker offers the strip and no chips', async (t) => {
   t.is(nodes.find((n) => n.type === 'MusicStrip').props.progress, 0.5)
   t.ok(nodes.some((n) => n.props.accessibilityLabel === 'Pausar trecho'))
   nodes = flatten(h.render(h.MusicEditor, { ...props, modes: ['snippet', 'track'] }))
-  t.alike(nodes.find((n) => n.type === 'Segmented').props.options.map((o) => o.label), ['15 s', 'Faixa inteira'])
+  t.alike(nodes.find((n) => n.type === 'SegmentedControl').props.options.map((o) => o.label), ['15 s', 'Faixa inteira'])
   nodes = flatten(h.render(h.MusicEditor, { ...props, modes: ['snippet', 'track'], kind: 'track' }))
   t.absent(nodes.some((n) => n.type === 'MusicStrip'))
   t.ok(nodes.some((n) => n.children.includes('A faixa inteira toca na publicação')))

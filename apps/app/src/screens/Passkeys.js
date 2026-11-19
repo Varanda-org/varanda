@@ -33,7 +33,7 @@
 // press. The add itself is never sent again without that press.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { StyleSheet, View } from 'react-native'
 import { useNode } from '../node'
 import { passkeyAdd, passkeyStart, recoveryList, recoveryPut, recoveryRemove, recoveryStart } from '../account'
 import { CONFIRM_TEXT, NOT_STORED_TEXT, confirmExtraKey, createdKeyOf, outcomeText, passkeyEntryOf, prepareExtraKey } from '../extraPasskeyKey'
@@ -41,6 +41,7 @@ import { CHANGE_TEXT, CODE_ONCE_TEXT, LOSS_TEXT, listEntries, registerEntry, rem
 import { copyText } from '../share'
 import { shareNav } from '../shareNav'
 import { Body, Btn, Card, ConfirmStack, ErrorText, Label, Mono, Notice, Page, Soft, Title, UNCERTAIN, errorText } from '../ui'
+import { CheckRow } from '../ui/Checkbox'
 import { Icon } from '../ui/Icon'
 import { MoreButton } from '../ui/MoreButton'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
@@ -155,24 +156,7 @@ function entryName (e) {
 }
 
 function Check ({ checked, label, onPress }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  return (
-    <Pressable
-      style={styles.check}
-      accessibilityRole='checkbox'
-      accessibilityLabel={label}
-      accessibilityState={{ checked }}
-      aria-checked={checked}
-      onPress={onPress}
-      hitSlop={8}
-    >
-      <View style={[styles.box, checked && styles.boxOn]}>
-        {checked ? <Icon name='ok' size={16} color={colors.bg} /> : null}
-      </View>
-      <Text style={styles.checkLabel}>{label}</Text>
-    </Pressable>
-  )
+  return <CheckRow checked={checked} label={label} onPress={onPress} />
 }
 
 export default function Passkeys ({ active, embedded = false }) {
@@ -716,9 +700,5 @@ const makeStyles = (colors) => StyleSheet.create({
   entry: { gap: 6, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   entryRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44 },
   entryText: { flex: 1, minWidth: 0, gap: 2 },
-  confirm: { gap: 8 },
-  check: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
-  box: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
-  boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
-  checkLabel: { fontSize: 16, color: colors.ink }
+  confirm: { gap: 8 }
 })

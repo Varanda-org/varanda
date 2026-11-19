@@ -1386,7 +1386,7 @@ test('relay: private group payloads contain only the kind and enqueue time, publ
   noKeysLogged(t, d.logs)
 })
 
-test('relay: group Terms floor is 98 per member; skipped members keep their cooldown open', async (t) => {
+test('relay: group Terms floor is 99 per member; skipped members keep their cooldown open', async (t) => {
   const old = member()
   const current = member()
   const future = member()
@@ -1398,11 +1398,11 @@ test('relay: group Terms floor is 98 per member; skipped members keep their cool
       available: () => available,
       list: (m) => {
         if (m === unreadable.hex) throw new Error('indisponivel')
-        return [{ version: m === old.hex ? version : m === future.hex ? 99 : 98 }]
+        return [{ version: m === old.hex ? version : m === future.hex ? 100 : 99 }]
       }
     }
   })
-  t.is(GROUP_NOTICE_TERMS_FLOOR, 98)
+  t.is(GROUP_NOTICE_TERMS_FLOOR, 99)
   await d.subscribe(old)
   const currentSub = await d.subscribe(current)
   const futureSub = await d.subscribe(future)
@@ -1412,7 +1412,7 @@ test('relay: group Terms floor is 98 per member; skipped members keep their cool
   await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'eligible group members' })
   t.alike(d.sent.map((s) => s.endpoint), [currentSub.endpoint, futureSub.endpoint])
   t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'group', reason: 'termos-pendentes' })).length, 2)
-  version = 98
+  version = 99
   await d.relay(groupEvent([old.hex], { group: event.group }))
   await until(() => d.sent.length === 3, { name: 'newly accepted terms without waiting' })
 

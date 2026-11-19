@@ -332,7 +332,7 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
           <View style={styles.rootBox}>
             <Text style={styles.rootMeta} maxFontSizeMultiplier={1.3}><Author item={rootItem} /></Text>
             <Text style={styles.rootText} selectable maxFontSizeMultiplier={1.3}>{rootItem.hidden ? HIDDEN : displayText(rootItem.text)}</Text>
-            {canReport(rootItem) ? <View style={styles.inline}><Pill label={DENOUNCE} icon='bandeira' danger small onPress={() => report(rootItem)} accessibilityLabel='denunciar o tópico' /></View> : null}
+            {canReport(rootItem) ? <View style={styles.inline}><Pill label={DENOUNCE} icon='bandeira' danger tonal small onPress={() => report(rootItem)} accessibilityLabel='denunciar o tópico' /></View> : null}
           </View>
           )
         : navRoot !== null
@@ -383,7 +383,7 @@ export function Topico ({ entry, onBack, onReport, isTop = true }) {
       <View style={styles.reply}>
         <Text style={styles.replyMeta} maxFontSizeMultiplier={1.3}><Author item={item} />{at ? ' · ' + at : ''}</Text>
         <Text style={styles.replyText} selectable maxFontSizeMultiplier={1.3}>{item.hidden ? HIDDEN : displayText(item.text)}</Text>
-        {canReport(item) ? <View style={styles.inline}><Pill label={DENOUNCE} icon='bandeira' danger small onPress={() => report(item)} accessibilityLabel='denunciar a resposta' /></View> : null}
+        {canReport(item) ? <View style={styles.inline}><Pill label={DENOUNCE} icon='bandeira' danger tonal small onPress={() => report(item)} accessibilityLabel='denunciar a resposta' /></View> : null}
       </View>
     )
   }

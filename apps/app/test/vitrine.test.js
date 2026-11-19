@@ -155,6 +155,7 @@ const resultKeys = {
   'scrap.write': ['seq', 'ref'],
   'scrap.hide': ['seq', 'ref'],
   'scrap.wall': ['seq', 'ref'],
+  'groups.show': ['seq', 'on', 'changed'],
   'scrap.delete': ['seq', 'deleted'],
   'fan.set': ['seq', 'ref'],
   'top.set': ['seq', 'ref'],
@@ -587,7 +588,7 @@ test('vitrine sources stay pure and omit forbidden status words', (t) => {
     'media.js': ["import { pictures } from './pictures.js'", "import { PICTURE_BASE, postPictureIndex } from './fixtures.js'"],
     'request.js': ["import rpc from '@varanda/rpc'", "import { createVitrineMedia } from './media.js'", "import { sealedTestimonial, signVitrineConsent, testimonialHash, verifyVitrineConsent } from './fixtures.js'", "import { largeFeed } from './large.js'", "import { testimonialPointers, useTestimonialSource } from './testimonialIndex.js'"],
     'large.js': [],
-    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'", "import { testimonialPointers, testimonialSource } from './testimonialIndex.js'"],
+    'indexResponder.js': ["import rpc from '@varanda/rpc'", "import { findTags } from '../hashtags.js'", "import { fixtures } from './fixtures.js'", "import { createVitrineRequest, vitrineFeiraState, vitrineLiveRecords } from './request.js'", "import { testimonialPointers, testimonialSource } from './testimonialIndex.js'"],
     'testimonialIndex.js': ["import { fixtures, testimonialHash } from './fixtures.js'"]
   }
   for (const file of Object.keys(expectedImports)) {
@@ -659,6 +660,7 @@ function samples (f) {
     'scrap.write': { to: member, text: 'Oi, Cecília! Passei para deixar um abraço.' },
     'scrap.hide': { from: f.members[1].author, seq: 90 },
     'scrap.wall': { who: 'everyone' },
+    'groups.show': { on: false },
     'scrap.delete': { seq: 49 },
     'fan.set': { key: f.members[4].author, on: true },
     'top.set': { keys: [f.members[4].author] },
@@ -826,6 +828,54 @@ test('every quoted RPC method used by the app has a documented vitrine answer', 
     else if (destructive.includes(method)) await refused(t, request, method, given, 'USAGE', 'indisponível no modo vitrine')
     else await answer(t, request, method, given)
   }
+})
+
+test('groups.show keeps the default true without writing a record', async (t) => {
+  const { fixtures: f, request } = await load()
+  const peek = () => answer(t, request, 'diary.peek', { author: f.own, seqs: [1] })
+  const before = await peek()
+  const on = await answer(t, request, 'groups.show', { on: true })
+  t.alike(on, { seq: null, on: true, changed: false })
+  t.is((await peek()).length, before.length)
+})
+
+test('groups.show updates only the author’s public-groups index', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { vitrineIndex } = await import('../src/vitrine/indexResponder.js')
+  const { groupBrowseUrl, publicGroupsUrl, validPublicGroups } = await import('../src/indexClient.js')
+  const own = publicGroupsUrl(f.own)
+  const other = publicGroupsUrl(f.members.find((m) => m.author !== f.own).author)
+  const browse = groupBrowseUrl('members')
+  const before = vitrineIndex(own)
+  const otherBefore = vitrineIndex(other)
+  const browseBefore = vitrineIndex(browse)
+  t.is(before.hidden, false)
+  t.ok(before.groups.length > 0)
+  await refused(t, request, 'groups.show', { on: 'false' }, 'USAGE', 'parâmetro inválido: on')
+
+  const off = await answer(t, request, 'groups.show', { on: false })
+  t.is(off.on, false)
+  t.is(off.changed, true)
+  const peek = await answer(t, request, 'diary.peek', { author: f.own, seqs: [off.seq] })
+  t.alike(peek.entries[0].record, { type: 'groups-show', on: false, at: new Date(Date.parse(f.now) + 1000).toISOString() })
+  const hidden = { ...before, groups: [], next: null, hidden: true }
+  t.alike(vitrineIndex(own), hidden)
+  t.alike(vitrineIndex(publicGroupsUrl(f.own, before.groups[0].group)), hidden)
+  t.ok(validPublicGroups(hidden))
+  t.alike(vitrineIndex(other), otherBefore)
+  t.alike(vitrineIndex(browse), browseBefore)
+
+  const stillOff = await answer(t, request, 'groups.show', { on: false })
+  t.alike(stillOff, { seq: off.seq, on: false, changed: false })
+  t.alike(vitrineIndex(own), hidden)
+
+  const on = await answer(t, request, 'groups.show', { on: true })
+  t.alike(on, { seq: off.seq + 1, on: true, changed: true })
+  t.alike(vitrineIndex(own), before)
+  const stillOn = await answer(t, request, 'groups.show', { on: true })
+  t.alike(stillOn, { seq: on.seq, on: true, changed: false })
+  const after = await answer(t, request, 'diary.peek', { author: f.own, seqs: [on.seq] })
+  t.is(after.length, peek.length + 1, 'only the visibility change writes a record')
 })
 
 test('device answers: list, disconnect and the node refusals, per instance', async (t) => {

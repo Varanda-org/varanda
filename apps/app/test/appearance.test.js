@@ -24,6 +24,7 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     dim: 'rgba(31,42,36,0.35)',
     tabBar: 'rgba(251,248,243,1)',
     danger: '#a3201a',
+    dangerSoft: 'rgba(163,32,26,0.10)',
     warn: '#8a5a00',
     placeholder: '#616c67',
     skeleton: 'rgba(31,42,36,0.08)',
@@ -34,7 +35,10 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     toastBg: '#1f2a24',
     toastInk: '#ffffff',
     bubbleMine: '#d9efe2',
-    shadow: 'rgba(31,42,36,0.28)'
+    shadow: 'rgba(31,42,36,0.28)',
+    onMedia: '#ffffff',
+    mediaBg: '#000000',
+    mediaScrim: 'rgba(0,0,0,0.55)'
   })
   t.ok(Object.isFrozen(light))
 })
@@ -78,6 +82,10 @@ test('text pairs reach WCAG AA in both palettes', async (t) => {
       t.ok(ratio >= 4.5, `${name} ${ink} on ${bg}: ${ratio.toFixed(2)}`)
     }
   }
+  // contrastRatio parses hex only, so the scrim stays out of this check.
+  const lightMedia = contrastRatio(light.onMedia, light.mediaBg)
+  const darkMedia = contrastRatio(dark.onMedia, dark.mediaBg)
+  t.ok(lightMedia >= 7 && darkMedia >= 7, `onMedia on mediaBg: light ${lightMedia.toFixed(2)}, dark ${darkMedia.toFixed(2)}`)
 })
 
 test('controlOff reaches 3:1 on bg, card and inputOff in both modes', async (t) => {
