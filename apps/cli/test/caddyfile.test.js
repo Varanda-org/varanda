@@ -378,7 +378,7 @@ test('Caddyfile: /account/feira/idade has its own per-address zone and global ce
 // rate_limit logger (it prints remote_ip on every 429); it must not set an
 // output or any other option, and no site block has a log directive.
 // The Feira public pages and robots.txt, both before the SPA catch-all.
-test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/ and /p/, before the SPA handle', (t) => {
+test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/, /p/ and /og/, before the SPA handle', (t) => {
   const feira = block('handle /f/* {').map((l) => l.trim())
   t.ok(feira.length > 0, 'handle /f/*')
   t.is(count('handle /f/* {'), 1, 'exactly one /f/* handle')
@@ -394,7 +394,7 @@ test('Caddyfile: /f/* goes to the seeder and /robots.txt allows only /f/ and /p/
   const rstart = lines.findIndex((l) => l.trim() === 'handle /robots.txt {')
   t.ok(start !== -1 && spa > start && rstart !== -1 && spa > rstart, 'both come before the catch-all handle')
   t.alike(robots.map((l) => l.trim()).slice(robots.findIndex((l) => l.trim() === 'body <<ROBOTS') + 1, -2),
-    ['User-agent: *', 'Allow: /f/', 'Allow: /p/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
+    ['User-agent: *', 'Allow: /f/', 'Allow: /p/', 'Allow: /og/', 'Disallow: /', 'Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml', 'ROBOTS'], 'robots body'
   )
   t.is(count('Sitemap:'), 1, 'one sitemap, the Feira one: /p/ has none')
   t.ok(robots.some((l) => l.trim() === 'header Content-Type "text/plain; charset=utf-8"'), 'robots is text/plain')

@@ -1870,6 +1870,173 @@ test('dm wake: member notices still show while muted or with a focused window', 
   t.alike(win.messages, [], 'no wake message for notices')
 })
 
+const G = 1763400000000
+const DM_NOTICES = {
+  dm: { body: 'Nova mensagem nas Conversas', tag: 'varanda-dm' },
+  'dm-page': { body: 'Nova mensagem para uma página que você administra', tag: 'varanda-dm-page' }
+}
+
+// The notices a push left on screen (a quiet one closed at once is not).
+async function noticeShown (w, payload) {
+  const before = w.shown.length
+  await startPush(w, pushData(payload))
+  return w.shown.slice(before).filter((n) => !w.closed.has(n))
+}
+
+test('push: a DM notice shows the fixed sentence of its kind, naming nobody', async (t) => {
+  const w = renderedWorker()
+  for (const [kind, want] of Object.entries(DM_NOTICES)) {
+    for (const g of [G, 1, Number.MAX_SAFE_INTEGER]) {
+      const shown = await push(w, pushData({ v: 1, kind, g }))
+      t.is(shown.title, 'Varanda', kind)
+      t.is(shown.options.body, want.body, kind)
+      t.is(shown.options.icon, '/icon-192.png', kind)
+      t.is(shown.options.tag, want.tag, kind)
+      t.is(shown.options.renotify, false, kind)
+      t.alike(plain(shown.options.data), { kind, g }, kind + ' g ' + g)
+    }
+  }
+})
+
+test('push: a malformed DM notice shows only the fallback sentence', async (t) => {
+  const w = renderedWorker()
+  for (const kind of Object.keys(DM_NOTICES)) {
+    const bads = {
+      'extra key': { v: 1, kind, g: G, x: 1 },
+      'with a group': { v: 1, kind, g: G, group: 'c'.repeat(64) },
+      'with a body': { v: 1, kind, g: G, body: 'Ana mandou' },
+      'with an actor': { v: 1, kind, g: G, actor: ACTOR },
+      'missing g': { v: 1, kind },
+      'g swapped for another key': { v: 1, kind, group: G },
+      'g a string': { v: 1, kind, g: String(G) },
+      'g zero': { v: 1, kind, g: 0 },
+      'g negative': { v: 1, kind, g: -G },
+      'g not an integer': { v: 1, kind, g: G + 0.5 },
+      'g past safe integers': { v: 1, kind, g: Number.MAX_SAFE_INTEGER + 1 },
+      'g null': { v: 1, kind, g: null },
+      'wrong version': { v: 2, kind, g: G },
+      'missing version': { kind, g: G }
+    }
+    for (const [label, bad] of Object.entries(bads)) {
+      const shown = await push(w, pushData(bad))
+      t.is(shown.title, 'Varanda', kind + ': ' + label)
+      t.is(shown.options.body, FALLBACK, kind + ': ' + label)
+      t.is(shown.options.tag, 'varanda-generic', kind + ': ' + label)
+      t.alike(plain(shown.options.data), {}, kind + ': ' + label)
+    }
+  }
+  const unknown = await push(w, pushData({ v: 1, kind: 'dm-group', g: G }))
+  t.is(unknown.options.body, FALLBACK, 'an unknown DM kind')
+})
+
+test('dm notice: a visible focused app window takes it and the worker shows only the quiet notice', async (t) => {
+  for (const kind of ['dm']) {
+    const w = renderedWorker()
+    const win = activeWindow(ORIGIN + '/')
+    const hidden = fakeWindow(ORIGIN + '/')
+    w.windows = [hidden, win]
+    t.alike(await noticeShown(w, { v: 1, kind, g: G }), [], kind + ': nothing left on screen')
+    t.is(w.shown.length, 1, kind + ': one notice shown (WebKit: a push always shows something)')
+    const quiet = w.shown[0]
+    if (quiet) {
+      t.is(quiet.options.tag, 'varanda-dm-wake-quiet', kind)
+      t.is(quiet.options.silent, true, kind + ': no sound or vibration')
+      t.is(quiet.options.body, DM_NOTICES[kind].body, kind + ': the notice sentence, not the old wake one')
+      t.ok(w.closed.has(quiet), kind + ': closed')
+    }
+    t.alike(plain(win.messages), [{ type: 'varanda-dm-wake' }], kind + ': the focused window re-reads')
+    t.alike(plain(hidden.messages), [{ type: 'varanda-dm-wake' }], kind + ': the other app window re-reads')
+
+    // A window that is visible but not focused does not take it.
+    const other = renderedWorker()
+    const unfocused = activeWindow(ORIGIN + '/')
+    unfocused.focused = false
+    other.windows = [unfocused]
+    const shown = await noticeShown(other, { v: 1, kind, g: G })
+    t.is(shown.length, 1, kind + ': shown with an unfocused window')
+    if (shown[0]) t.is(shown[0].options.tag, DM_NOTICES[kind].tag, kind)
+    t.alike(unfocused.messages, [], kind + ': nothing posted')
+  }
+})
+
+// The focused window's hand-off only re-reads the member inbox; a Pagina's
+// thread lives in the Pagina's own inbox, so its notice must always show.
+test('dm-page notice: shown even with a visible focused app window, which gets no wake', async (t) => {
+  const w = renderedWorker()
+  const win = activeWindow(ORIGIN + '/')
+  const hidden = fakeWindow(ORIGIN + '/')
+  w.windows = [hidden, win]
+  const shown = await noticeShown(w, { v: 1, kind: 'dm-page', g: G })
+  t.is(shown.length, 1, 'shown')
+  if (shown[0]) {
+    t.is(shown[0].options.tag, 'varanda-dm-page')
+    t.is(shown[0].options.body, DM_NOTICES['dm-page'].body)
+    t.is(shown[0].options.silent, undefined, 'not the quiet notice')
+  }
+  t.is(w.shown.length, 1, 'no quiet notice besides it')
+  t.alike(win.messages, [], 'no wake to the focused window')
+  t.alike(hidden.messages, [], 'no wake to the other window')
+})
+
+test('dm notice: shown 1 s after an own send, while a DM wake is still muted', async (t) => {
+  for (const kind of Object.keys(DM_NOTICES)) {
+    const w = renderedWorker()
+    w.now = 1000000
+    await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+    w.now = 1000000 + 1000
+    const shown = await noticeShown(w, { v: 1, kind, g: G })
+    t.is(shown.length, 1, kind + ': shown inside the mute window')
+    if (shown[0]) {
+      t.is(shown[0].options.tag, DM_NOTICES[kind].tag, kind)
+      t.is(shown[0].options.body, DM_NOTICES[kind].body, kind)
+    }
+    t.alike(await wakeShown(w), [], kind + ': the wake itself stays muted')
+  }
+})
+
+// A dm notice opens Conversas; a dm-page notice opens Paginas, since its
+// thread is in the Pagina's own inbox and the notice names no Pagina.
+const DM_CLICKS = {
+  dm: { message: { type: 'varanda-dm-open' }, path: '/?aviso=dm' },
+  'dm-page': { message: { type: 'varanda-page-dm-open' }, path: '/?aviso=dm-page' }
+}
+
+test('notificationclick: a DM notice focuses the app and posts its open message', async (t) => {
+  for (const kind of Object.keys(DM_NOTICES)) {
+    const want = DM_CLICKS[kind]
+    const w = renderedWorker()
+    const mine = fakeWindow(ORIGIN + '/')
+    w.windows = [mine]
+    t.ok(await click(w, { kind, g: G }), kind + ': closed')
+    t.is(mine.focused, 1, kind)
+    t.alike(plain(mine.messages), [want.message], kind)
+    t.alike(w.opened, [], kind)
+
+    const fresh = renderedWorker()
+    t.ok(await click(fresh, { kind, g: G }))
+    t.alike(fresh.opened, [want.path], kind + ': no window opens the app on its screen')
+
+    const stuck = renderedWorker()
+    const refusing = fakeWindow(ORIGIN + '/')
+    refusing.focus = async () => { throw new Error('InvalidAccessError') }
+    stuck.windows = [refusing]
+    t.ok(await click(stuck, { kind, g: G }))
+    t.alike(stuck.opened, [want.path], kind + ': a window that refuses focus')
+    t.alike(refusing.messages, [], kind)
+
+    // Anything but the shape the worker itself stored is not a DM notice.
+    t.ok(await click(w, { kind, g: G, actor: ACTOR }))
+    t.ok(await click(w, { kind, g: '1' }))
+    t.ok(await click(w, { kind }))
+    t.is(mine.messages.length, 1, kind + ': nothing more posted')
+    const bad = renderedWorker()
+    await click(bad, { kind, g: G, actor: ACTOR })
+    await click(bad, { kind, g: 0 })
+    await click(bad, { kind })
+    t.alike(bad.opened, ['/', '/', '/'], kind + ': malformed data opens the root')
+  }
+})
+
 const SHARE = ORIGIN + '/compartilhar'
 const SHARE_PREFIX = ORIGIN + '/__varanda-share/'
 const SHARE_META_KEYS = ['at', 'files', 'id', 'text', 'title', 'total', 'url', 'v', 'videos']

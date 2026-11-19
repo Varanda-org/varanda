@@ -40,6 +40,7 @@
 //   when it is an object (and the number is above 0).
 // - liked, reposted: the own state; pending: null | 'like' | 'repost' (that
 //   button is disabled while its request runs).
+// - sending: the time slot shows 'Enviando…' while this row is still being sent (default false).
 // - onOpen (the text, the time ('abrir conversa') and the empty body area;
 //   the photos keep their own viewer taps),
 //   onOpenAuthor (avatar and name), onOpenParent (the reply chip; plain text
@@ -141,6 +142,8 @@ const HEAD_ROOM_BELOW = CAPTION_GAP
 const REPOSTED_ROW = 18
 const REPOSTED_FOLLOW_ROW = 28
 
+const SENDING_LABEL = 'Enviando…'
+
 const fn = (f) => (typeof f === 'function' ? f : undefined)
 
 // The number of a count field when counts are known, else null.
@@ -234,7 +237,7 @@ function usePerfRow (key) {
 
 function PostRowView ({
   author, name, username, avatar, at, text, poll, event, replyToName, level, tag, replyQuote, replyPreviews, previewsMore, commentedBy, media, preview, persistMedia = true, now,
-  quote, repostedBy, counts, liked, reposted, pending, expanded = false,
+  quote, repostedBy, counts, liked, reposted, pending, sending = false, expanded = false,
   onOpen, onOpenAuthor, onOpenParent, onOpenPreviews, onOpenReposter, onFollowReposter, onOpenMention,
   onReply, onQuote, onLike, onRepost, onOpenLikes, onOpenReposts, onOpenQuotes, onFollow, followPending, onReport, onBlock, onDelete, link, onNotice,
   seq, onMessage, publishable
@@ -438,7 +441,7 @@ function PostRowView ({
   // The window width decides the first render; the header's measured width
   // is stored only when it decides otherwise, so a row still renders once.
   const [headWidth, setHeadWidth] = useState(undefined)
-  const narrowAt = (width) => headStacks({ room: width - HEAD_INSET, reserve: headPad, handle: !!handle, time, fontSize: type.meta.fontSize, fontScale })
+  const narrowAt = (width) => headStacks({ room: width - HEAD_INSET, reserve: headPad, handle: !!handle, time: sending ? SENDING_LABEL : time, fontSize: type.meta.fontSize, fontScale })
   const narrowHead = headActions && narrowAt(headWidth ?? windowWidth)
   const measureHead = (event) => {
     const width = event.nativeEvent.layout.width
@@ -560,7 +563,7 @@ function PostRowView ({
     tagText || null,
     quoteSpoken || (replyToName !== null ? ('respondendo a ' + displayText(replyToName)) : null),
     shownText,
-    spokenTime
+    sending ? SENDING_LABEL : spokenTime
   ].filter(Boolean)
   const bodyLabel = bodyParts.join('. ')
   const replyLabel = replyToName ? replyChip({ name: replyToName }) : ''
@@ -745,7 +748,7 @@ function PostRowView ({
                     hitSlop={metaSlop}
                     style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
                   >
-                    <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
+                    <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + (sending ? SENDING_LABEL : time)}</Text>
                   </Pressable>
                 </View>
               </View>

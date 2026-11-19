@@ -96,11 +96,11 @@ async function helpers () {
 async function compileRowProps () {
   const { replyMarkOf } = await import('../src/who.js')
   const { cachedRow } = await import('../src/namesCache.js')
-  const { commentedLabel } = await import('../src/feedFold.js')
+  const { commentedLabel, knownReplies } = await import('../src/feedFold.js')
   const body = [fnText(code, 'refOf'), fnText(code, 'withActions'), fnText(code, 'socialRowProps')].join('\n')
   // eslint-disable-next-line no-new-func
-  return new Function('replyMarkOf', 'cachedRow', 'commentedLabel', 'pickAvatar', 'installationOrigin', 'postLink', 'actingPageKey', 'canDelete',
-    body + '\nreturn socialRowProps')(replyMarkOf, cachedRow, commentedLabel, () => null, () => null, () => null, () => null, () => false)
+  return new Function('replyMarkOf', 'cachedRow', 'commentedLabel', 'knownReplies', 'pickAvatar', 'installationOrigin', 'postLink', 'actingPageKey', 'canDelete',
+    body + '\nreturn socialRowProps')(replyMarkOf, cachedRow, commentedLabel, knownReplies, () => null, () => null, () => null, () => null, () => false)
 }
 
 function fakeSocial ({ originals = new Map(), counts = new Map(), indexing = false } = {}) {
@@ -117,7 +117,8 @@ function fakeSocial ({ originals = new Map(), counts = new Map(), indexing = fal
 }
 
 test('A Rua takes its comment rows from feedFold and nothing else', (t) => {
-  t.ok(code.includes("import { commentedLabel, foldFeed, foldNeeds, previewName } from '../feedFold'"), 'feedFold is the source of the fold')
+  t.ok(code.includes("import { commentedLabel, dropFedReplies, dropOwnReplies, foldFeed, foldNeeds, keepOwnReply, knownReplies, previewName, withOwnReplies } from '../feedFold'"), 'feedFold is the source of the fold')
+  t.ok(code.includes("import { onOwnReply, onOwnReplyGone } from '../ownReply'"), 'a confirmed reply is announced to the screens already open')
   t.ok(code.includes("import { FOLD_STRANGER_READS, foldOriginalOf, foldRounds, foldTracker, parentAsks, pendingOf, queueIngest, replayIngest, rootIngest, staleOf } from '../foldRounds'"), 'foldRounds.js reads it')
   t.absent(/\nfunction staleOf \(/.test(code), 'no local copy of staleOf')
   for (const gone of ['replyPreviewMap', 'useReplyPreviews', 'cheapReplies', 'replyPreviewsByRef', "from '../threadRows'"]) {
@@ -132,7 +133,9 @@ test('A Rua takes its comment rows from feedFold and nothing else', (t) => {
 
 test('all three list paths derive their rows from one memoized fold', (t) => {
   t.ok(page.includes('const fold = useMemo(() => keepFold(foldFeed(items, foldOpts), foldRef.current, items), [items, foldOriginal, pending, ownKey, blockedKeys])'), 'the page list')
-  t.ok(member.includes('const fold = useMemo(() => keepFold(foldFeed(shownItems, foldOpts), foldRef.current, shownItems), [shownItems, foldOriginal, pending, ownKey, blockedKeys])'), 'the member list')
+  t.ok(member.includes('const fold = useMemo(() => keepFold(foldFeed(foldItems, foldOpts), foldRef.current, foldItems), [foldItems, foldOriginal, pending, ownKey, blockedKeys])'), 'the member list')
+  t.ok(member.includes('const ownSent = useOwnSent(ownKey, shownItems)'), 'the member list holds a confirmed reply')
+  t.ok(member.includes('const foldItems = useMemo(() => withOwnReplies(shownItems, ownSent, ownKey), [shownItems, ownSent, ownKey])'), 'joined for the fold, not stored in items')
   t.ok(preview.includes('const fold = useMemo(() => foldFeed(shown, { originalOf: view.original, pendingOf: view.pending, ownKey, blocked: blockedKeys }), [shown, view, ownKey, blockedKeys])'), 'the cold-start preview')
   for (const [name, body] of [['page', page], ['member', member]]) {
     t.ok(body.includes('const foldOpts = { originalOf: foldOriginal, pendingOf: pending, ownKey, blocked: blockedKeys }'), name + ': originalOf is social.foldOriginal, never the raw map')
@@ -153,6 +156,25 @@ test('all three list paths derive their rows from one memoized fold', (t) => {
   t.ok(view.includes("<RepostPlaceholder verb='comentou'"), 'a pending fold row is the commenter over a loading card')
   t.ok(view.includes('ref: item.root') && view.includes('rowKey: item.key') && view.includes('fold: item'), 'a fold row is its root, keyed by the row')
   t.absent(view.includes('.top'), 'nothing is drawn from a comment top (it may be a blocked author)')
+})
+
+test('a confirmed reply joins the member fold and a stale generation is dropped', (t) => {
+  const hook = textOf(code, 'useOwnSent')
+  t.ok(code.includes('const EMPTY = []'), 'one empty list to reset to')
+  t.ok(hook.includes('const [sent, setSent] = useState(EMPTY)'), 'held in state for the screen')
+  t.ok(hook.includes('setSent(EMPTY)') && hook.indexOf('setSent(EMPTY)') < hook.indexOf('onOwnReply('), 'an own key starts empty, then subscribes')
+  t.ok(hook.includes('onOwnReply((item) => {'), 'subscribes to a confirmed reply')
+  t.ok(hook.includes('if (item.gen !== cacheGeneration()) return'), 'a stale or null generation is dropped')
+  t.ok(hook.includes('if (item.gen !== cacheGeneration()) return') && hook.indexOf('if (item.gen !== cacheGeneration()) return') < hook.indexOf('keepOwnReply(prev, item)'), 'dropped before it is kept')
+  t.ok(hook.includes('setSent((prev) => dropFedReplies(keepOwnReply(prev, item), fedRef.current))'), 'keeps the reply unless the feed already carries it')
+  t.ok(hook.includes("if (typeof ownKey !== 'string' || item.author !== ownKey.toLowerCase()) return") && hook.indexOf('item.author !== ownKey.toLowerCase()') < hook.indexOf('keepOwnReply(prev, item)'), 'only the member own replies take a slot')
+  t.ok(hook.includes('const fedRef = useRef(items)') && hook.includes('fedRef.current = items'), 'reads the latest fed items')
+  t.ok(hook.includes('onOwnReplyGone((refs) => setSent((prev) => dropOwnReplies(prev, refs)))'), 'subscribes to a reply leaving')
+  t.ok(hook.includes('setSent((prev) => dropFedReplies(prev, items))') && hook.includes('}, [items])'), 'a reply the feed carries leaves the local list')
+  t.ok(hook.includes('}, [ownKey])'), 'keyed on ownKey')
+  const cleanup = hook.slice(hook.indexOf('return () =>'))
+  t.ok(hook.includes('return () =>') && cleanup.includes('offReply()') && cleanup.includes('offGone()'), 'both removed on cleanup')
+  t.absent(page.includes('useOwnSent') || preview.includes('useOwnSent'), 'the page list and the cold-start preview are unchanged')
 })
 
 test('a reply whose root resolved never stands alone, and own replies place no card', async (t) => {
@@ -292,6 +314,34 @@ test('socialRowProps draws a fold: header, lines, more line and the focused open
   t.not(moved, once, 'another header rebuilds')
   for (const field of ['folded,', 'replyPreviews: previews', 'previewsMore,', 'commentLabel,', 'commenter,', 'focusRef,', 'focusTop,']) t.ok(inputs.includes(field), 'cache input ' + field)
   t.ok(props.includes('replyPreviews: previews, previewsMore, ...(openPreviews ? { onOpenPreviews: openPreviews } : {})'), 'the more line comes with or without its handler')
+})
+
+test('socialRowProps raises a reply count to the direct replies the card shows', async (t) => {
+  const socialRowProps = await compileRowProps()
+  const root = post(A, 1, { text: 'raiz' })
+  const ref = refOf(root)
+  const fold = {
+    by: [{ author: C, name: 'Caio' }, { author: B, name: 'Bia' }],
+    lines: [{ key: C + ':9', name: 'Caio', text: 'oi' }, { key: B + ':4', name: 'Bia', text: 'olá' }],
+    comments: [{ ref: C + ':9', top: C + ':9' }, { ref: B + ':4', top: B + ':4' }]
+  }
+  const base = { post: root, ref, profileOf: () => undefined, now: 0, ownKey: E, h: {}, fold }
+  const stored = { replies: 0, likes: 3, reposts: 0, quotes: 0 }
+  const raised = socialRowProps({ ...base, social: fakeSocial({ counts: new Map([[ref, stored]]) }) })
+  t.is(raised.counts.replies, 2, 'two distinct tops raise a smaller index count')
+  t.is(raised.counts.likes, 3, 'the other numbers stay')
+  t.is(stored.replies, 0, 'the index object is left as it was')
+  t.is(raised.previewsMore, 'Ver comentários', 'a total that says no more than the lines')
+  const higher = socialRowProps({ ...base, social: fakeSocial({ counts: new Map([[ref, { replies: 5, likes: 0, reposts: 0, quotes: 0 }]]) }) })
+  t.is(higher.counts.replies, 5, 'a larger index count stays')
+  t.is(higher.previewsMore, 'Ver todos os 5 comentários', 'the more line still uses that total')
+  const unknown = socialRowProps({ ...base, social: fakeSocial() })
+  t.is(unknown.counts, null, 'an unknown total stays unknown')
+  const indexing = socialRowProps({ ...base, social: fakeSocial({ counts: new Map([[ref, { replies: 0, likes: 0, reposts: 0, quotes: 0 }]]), indexing: true }) })
+  t.is(indexing.counts, null, 'indexing stays unknown')
+  t.ok(props.includes('const indexed = s.flags.indexing ? null : (s.counts.get(ref) || null)'), 'unknown while the index is building')
+  t.ok(props.includes('const known = knownReplies(fold)'), 'what the card itself shows')
+  t.ok(props.includes('const counts = indexed !== null && Number.isSafeInteger(indexed.replies) && known > indexed.replies ? { ...indexed, replies: known } : indexed'), 'raised only, never added')
 })
 
 test('the cold-start preview draws the more line of its fold rows as live does', async (t) => {
