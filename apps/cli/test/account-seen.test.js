@@ -279,16 +279,60 @@ test('seen: a blob of the wrong size is refused and no file is written', async (
   t.absent(fs.existsSync(s.file(s.m)))
 })
 
-test('seen: the 31st read in 600 s is 429', async (t) => {
-  const s = await setup(t)
-  for (let i = 0; i < 30; i++) {
+// A frozen clock, so the global bucket never refills: its burst covers every
+// request of these tests.
+function clocked () {
+  const c = { t: Date.now() }
+  return { c, serverOptions: { now: () => c.t, ratePerSecond: 1000, burst: 1000 } }
+}
+
+test('seen: the 121st read in 600 s is 429 and spends nothing', async (t) => {
+  const { c, serverOptions } = clocked()
+  const s = await setup(t, { serverOptions })
+  for (let i = 0; i < 120; i++) {
     const r = await s.run(s.m, 'read')
     t.is(r.status, 200, 'read ' + (i + 1))
   }
-  const over = await s.run(s.m, 'read')
+  c.t += 300 * 1000
+  const started = await s.start(s.m, 'read')
+  const nonce = started.body.nonce
+  const signature = s.sign(s.m, nonce, 'read', HASH_NONE, null)
+  const over = await s.finish(s.m, nonce, 'read', HASH_NONE, null, signature)
   t.is(over.status, 429)
   t.alike(over.body, { error: 'pedido-invalido' })
   t.is((await s.run(s.other, 'read')).status, 200, 'another member keeps its window')
+  c.t += 300 * 1000
+  const later = await s.finish(s.m, nonce, 'read', HASH_NONE, null, signature)
+  t.is(later.status, 200, 'the refused nonce was not spent: ' + later.text)
+})
+
+test('seen: the 65th write in 600 s is 429 and spends nothing', async (t) => {
+  const { c, serverOptions } = clocked()
+  const s = await setup(t, { serverOptions })
+  await s.acceptTerms(s.m)
+  let prev = HASH_NONE
+  for (let i = 0; i < 64; i++) {
+    const blob = sealed(s, s.m, i + 1)
+    const r = await s.run(s.m, 'write', prev, blob)
+    t.is(r.status, 200, 'write ' + (i + 1) + ': ' + r.text)
+    prev = blobHash(blob)
+  }
+  const before = fs.readFileSync(s.file(s.m))
+  c.t += 300 * 1000
+  const blob = sealed(s, s.m, 1000)
+  const started = await s.start(s.m, 'write')
+  const nonce = started.body.nonce
+  const signature = s.sign(s.m, nonce, 'write', prev, blob)
+  const over = await s.finish(s.m, nonce, 'write', prev, blob, signature)
+  t.is(over.status, 429)
+  t.alike(over.body, { error: 'pedido-invalido' })
+  t.alike(fs.readFileSync(s.file(s.m)), before, 'the stored file is unchanged')
+  c.t += 300 * 1000
+  const later = await s.finish(s.m, nonce, 'write', prev, blob, signature)
+  t.is(later.status, 200, 'the refused nonce was not spent: ' + later.text)
+  t.alike(later.body, { ok: true, hash: blobHash(blob) })
+  const again = await s.finish(s.m, nonce, 'write', blobHash(blob), blob, s.sign(s.m, nonce, 'write', blobHash(blob), blob))
+  t.is(again.body && again.body.error, 'expirado', 'now it is spent')
 })
 
 test('seen: delete needs the current hash (HASH_NONE only when absent), a stale hash conflicts', async (t) => {

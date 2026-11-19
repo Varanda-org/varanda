@@ -13,7 +13,7 @@ import { accountOriginOf } from './pageGate.js'
 import { isAppClient } from './appClient.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
 import { MAX_BYTES as GIF_MAX_BYTES, imageUrl, parseSearch, searchBody } from './gif.js'
-import { MUSIC_ART_MAX_BYTES, MUSIC_ID_RE, artMime, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody } from './music.js'
+import { MUSIC_ART_MAX_BYTES, MUSIC_ID_RE, MUSIC_UNAVAILABLE_TEXT, artMime, audioPath, isAudiusPage, parseItem, parsePlay, parseResolve, parseSearch as parseMusicSearch, searchBody as musicSearchBody, trendingBody } from './music.js'
 
 const USERNAME_RE = /^[a-z][a-z0-9_]{2,19}$/
 const HEX6_RE = /^[0-9a-f]{6}$/ // would collide with the default handle (@e905a4)
@@ -350,6 +350,47 @@ export const pushKey = async () => {
     return null
   }
 }
+
+// The account service's X25519 key for sealed DM wakes (the `wake` field of
+// the same answer) -> 64 lowercase hex, or null unless it is the canonical
+// unpadded base64url of exactly 32 bytes. Re-encoding and comparing refuses
+// non-zero trailing bits, which would let two strings stand for one key.
+const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+const WAKE_KEY_RE = /^[A-Za-z0-9_-]{43}$/
+export function wakeKeyHex (value) {
+  if (typeof value !== 'string' || !WAKE_KEY_RE.test(value)) return null
+  const bytes = []
+  let acc = 0
+  let bits = 0
+  for (let i = 0; i < value.length; i++) {
+    acc = (acc << 6) | B64URL.indexOf(value[i])
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      bytes.push((acc >> bits) & 0xff)
+    }
+    acc &= (1 << bits) - 1
+  }
+  if (bytes.length !== 32) return null
+  let again = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | ((bytes[i + 1] || 0) << 8) | (bytes[i + 2] || 0)
+    const chars = Math.min(4, Math.ceil((bytes.length - i) * 8 / 6))
+    for (let j = 0; j < chars; j++) again += B64URL[(n >> (18 - 6 * j)) & 63]
+  }
+  if (again !== value) return null
+  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+// Read only from this installation's own account service, never from a
+// seeder or a peer: the node seals each DM wake to it.
+export const pushWakeKey = async () => {
+  try {
+    const data = await call('GET', '/account/push/key')
+    return wakeKeyHex(data.wake)
+  } catch {
+    return null
+  }
+}
 export const pushStart = async ({ member, action }) => {
   const data = await call('POST', '/account/push/start', { member, action })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
@@ -377,7 +418,7 @@ const isSeenHash = (v) => typeof v === 'string' && SEEN_HASH_RE.test(v)
 const isSeenBlob = (v) => typeof v === 'string' && v.length === SEEN_BLOB_B64 && SEEN_B64_RE.test(v)
 
 export const seenStart = async ({ member, action }) => {
-  const data = await call('POST', '/account/seen/start', { member, action })
+  const data = await call('POST', '/account/seen/start', { member, action }, { withStatus: true })
   if (typeof data.nonce !== 'string') throw toError('indisponivel')
   return { nonce: data.nonce }
 }
@@ -393,7 +434,7 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
   }
   let data
   try {
-    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS })
+    data = await call('POST', '/account/seen/finish', body, { uncertain: writes, errorBody: true, maxBody: SEEN_MAX_BODY, timeoutMs: SEEN_TIMEOUT_MS, withStatus: true })
   } catch (err) {
     const b = err.body || {}
     delete err.body
@@ -1122,6 +1163,22 @@ export const audiusSearch = async (q, { kind, cursor, origin, member, request, s
     const parsed = parseMusicSearch(await call('POST', '/account/audius/search?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS }), kind)
     if (parsed === null) throw toError('indisponivel')
     return parsed
+  })
+}
+
+const AUDIUS_TRENDING_MESSAGES = {
+  'feature-off': MUSIC_UNAVAILABLE_TEXT,
+  'nao-encontrado': MUSIC_UNAVAILABLE_TEXT
+}
+
+export const audiusTrending = async ({ kind = 'track', genre, origin, member, request, signal } = {}) => {
+  const body = trendingBody(kind, genre)
+  if (body === null) throw toError('pedido-invalido')
+  return audius.withSession({ member, origin, request }, async (sessionToken) => {
+    const json = await call('POST', '/account/audius/trending?covers=1&info=1', body, { origin, sessionToken, signal, maxBody: AUDIUS_LIST_BODY, timeoutMs: AUDIUS_TIMEOUT_MS, messages: AUDIUS_TRENDING_MESSAGES })
+    const parsed = parseMusicSearch(json, kind)
+    if (parsed === null || parsed.next !== null) throw toError('indisponivel')
+    return { items: parsed.items, next: null }
   })
 }
 
