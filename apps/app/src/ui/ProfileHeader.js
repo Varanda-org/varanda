@@ -26,7 +26,7 @@ import { useStyles, useTheme } from './ThemeProvider'
 
 const STACK_SCALE = 1.3
 
-// A Pill with an icon and no label is a 40 pt circle: it keeps its size
+// A Pill with an icon and no label is a 44 pt circle: it keeps its size
 // instead of taking a share of the row.
 const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'string' && (typeof el.props.label !== 'string' || el.props.label === '')
 

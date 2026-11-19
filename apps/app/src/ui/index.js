@@ -389,18 +389,18 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 17,
     alignSelf: 'flex-start',
-    minHeight: 40,
+    minHeight: 44,
     justifyContent: 'center'
   },
-  btnLarge: { minHeight: 52, paddingVertical: 15 },
+  btnLarge: { minHeight: 56, paddingVertical: 15 },
   btnRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   confirmStack: { flexDirection: 'column', alignItems: 'stretch', gap: 8 },
   btnBlock: { alignSelf: 'stretch' },
   btnOutline: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   btnOutlineLarge: { paddingVertical: 14 },
-  btnSmall: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 },
+  btnSmall: { minHeight: 36, paddingVertical: 0, paddingHorizontal: 12 },
   btnSmallCenter: { alignSelf: 'center' },
-  // The pressable is layout.hit because the web ignores hitSlop, so a 32 pt
+  // The pressable is layout.hit because the web ignores hitSlop, so a 36 pt
   // face cannot grow to the 44 pt target that way.
   btnSmallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start' },
   btnDanger: { borderColor: colors.danger },
@@ -408,8 +408,8 @@ const makeStyles = (colors) => StyleSheet.create({
   btnPressed: { opacity: PRESSED_OPACITY },
   // The 1 pt sides absorb Android's rounding with the 1.5 pt outline: the label got its
   // exact width, lost a pixel and wrapped its last word out of sight ("Trocar passkey").
-  btnText: { ...type.pill, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },
-  btnTextSmall: { fontSize: 13, lineHeight: 16 },
+  btnText: { ...type.rowName, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },
+  btnTextSmall: { fontSize: 14, lineHeight: 20 },
   btnTextOutline: { color: colors.ink },
   btnTextDanger: { color: colors.danger },
   field: { gap: 4 },
