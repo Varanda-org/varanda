@@ -3,6 +3,7 @@
 const test = require('brittle')
 const { readFileSync } = require('node:fs')
 const { join } = require('node:path')
+const { runInNewContext } = require('node:vm')
 
 const source = () => readFileSync(join(__dirname, '../src/indexClient.js'), 'utf8')
 const refOf = (p) => `${p.author}:${p.seq}`
@@ -53,6 +54,12 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.communityUrl(community), c.validCommunity],
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
     [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
+    [c.groupBrowseUrl('members'), (b) => c.validGroupBrowse(b, 'members')],
+    [c.groupBrowseUrl('recent'), (b) => c.validGroupBrowse(b, 'recent')],
+    [c.groupBrowseUrl('trending'), (b) => c.validGroupBrowse(b, 'trending')],
+    [c.publicGroupsUrl(f.own), (b) => c.validPublicGroups(b)],
+    [c.publicGroupsUrl(f.own, group.group), (b) => c.validPublicGroups(b, group.group)],
+    [c.topicTrendUrl(), c.validTopicTrend],
     [c.testimonialsUrl(f.own), (b) => c.validTestimonials(b, f.own)],
     [c.testimonialsUrl(f.members[1].author), (b) => c.validTestimonials(b, f.members[1].author)],
     [c.scrapsUrl(f.own), (b) => c.validScraps(b, f.own)],
@@ -158,6 +165,151 @@ test('post, member, search, engagement and follow references resolve through dia
   t.alike(respond(c.topicUrl('praca', cursorOf(first))).items, topic.items.slice(1), 'topic cursor advances')
   const reply = f.noticePosts.find((p) => p.replyTo)
   t.alike(respond(c.postUrl(refOf(reply.replyTo), cursorOf(reply))).replies, [], 'reply cursor advances')
+})
+
+test('discovery lists show public groups only, told apart by community name', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const hidden = f.groups.filter((g) => g.visibility === 'private').map((g) => g.group)
+  t.is(hidden.length, 1, 'the fixture has a private group')
+  const publicGroups = f.groups.filter((g) => g.visibility === 'public')
+  const lists = ['members', 'recent', 'trending'].map((order) => [order, c.validGroupBrowse(respond(c.groupBrowseUrl(order)), order)])
+  const own = c.validPublicGroups(respond(c.publicGroupsUrl(f.own)))
+  for (const [order, body] of [...lists, ['public-groups', own]]) {
+    t.ok(body, order + ' validates')
+    if (!body) continue
+    t.ok(body.groups.length > 0, order + ' lists groups')
+    t.absent(body.groups.some((g) => hidden.includes(g.group)), order + ': private group absent')
+    for (const row of body.groups) {
+      const g = f.groups.find((x) => x.group === row.group)
+      t.is(row.name, g.name)
+      t.is(row.communityName, f.communities.find((x) => x.community === g.community).name)
+    }
+  }
+  const members = lists[0][1]
+  t.alike(members.groups.map((g) => g.group).sort(), publicGroups.map((g) => g.group).sort(), 'members lists every public group')
+  const gerais = members.groups.filter((g) => g.name === 'Geral')
+  t.is(gerais.length, 3)
+  t.is(new Set(gerais.map((g) => g.communityName)).size, 3, 'the three Geral rows have distinct community names')
+  t.ok(lists[2][1].groups.every((g) => g.active >= 2 && g.active <= g.writerCount), 'trending active within writerCount')
+  const geralKeys = new Set(f.communities.map((x) => x.general))
+  const nonGeral = publicGroups.filter((g) => g.join === 'open' && !geralKeys.has(g.group))
+  t.alike(own.groups.map((g) => g.group), nonGeral.map((g) => g.group).sort(), 'own diary lists every open public group but the Geral ones')
+  t.alike(own.groups.map((g) => g.name), ['Passeios de bicicleta'])
+  t.is(own.hidden, false)
+  t.is(own.next, null)
+  t.alike(respond(c.publicGroupsUrl(f.own, '0'.repeat(64))).groups, own.groups, 'a cursor below every key keeps the list')
+  t.alike(respond(c.publicGroupsUrl(f.own, own.groups[0].group)).groups, [], 'cursor advances past the last row')
+  const member = f.groups[3].items[0].diary
+  t.absent(respond(c.publicGroupsUrl(member)).groups.some((g) => hidden.includes(g.group)), 'a private group writer sees no private row')
+  const trend = c.validTopicTrend(respond(c.topicTrendUrl()))
+  t.ok(trend.topics.length > 0, 'fixture posts carry hashtags')
+  t.ok(trend.topics[0].authors >= 2, 'one tag is used by two authors or more')
+  t.exception(() => respond('/index/group-browse/popular'), /not-found/)
+  t.exception(() => respond('/index/public-groups/' + f.own + '/nope'), /not-found/)
+  t.exception(() => respond('/index/public-groups/' + 'ab'.repeat(32)), /not-found/)
+  t.exception(() => respond('/index/topic-trend/x'), /not-found/)
+})
+
+test('trending browse requires two active diaries', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const { createVitrineRequest } = await import('../src/vitrine/request.js')
+  const [solo, ...others] = f.groups
+  const request = createVitrineRequest({ ...f, groups: [{ ...solo, items: solo.items.slice(0, 1) }, ...others] })
+  const trending = c.validGroupBrowse(await respond(c.groupBrowseUrl('trending'), request), 'trending')
+  t.ok(trending.groups.length > 0)
+  t.absent(trending.groups.some((g) => g.group === solo.group), 'a group with one active diary is left out')
+})
+
+test('an empty group has no creation date and is left out of recent browse', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const group = f.communities.find((c) => c.name === 'Horta Comunitária').general
+  const members = c.validGroupBrowse(respond(c.groupBrowseUrl('members')), 'members')
+  t.is(members.groups.find((g) => g.group === group).created, null)
+  const recent = respond(c.groupBrowseUrl('recent'))
+  t.absent(recent.groups.some((g) => g.group === group))
+})
+
+test('leaving a group or community withdraws the diary from its public group and counts', async (t) => {
+  const { client: c, fixtures: f } = await load()
+  const { createIndexedVitrineRequest, vitrineIndex: respond } = await import('../src/vitrine/indexResponder.js?live-groups')
+  const { group, community } = f.groups.find((g) => g.name === 'Passeios de bicicleta')
+  const profile = c.publicGroupsUrl(f.own)
+  for (const [method, params] of [['group.leave', { group }], ['community.leave', { community }]]) {
+    const request = createIndexedVitrineRequest(f)
+    await request('group.post', { group, text: 'Até sábado!' })
+    const active = async () => (await respond(c.groupBrowseUrl('trending'))).groups.find((g) => g.group === group).active
+    const beforeActive = await active()
+    const before = await respond(profile)
+    const row = before.groups.find((g) => g.group === group)
+    t.ok(row)
+    t.is((await request(method, params)).state, 'left')
+    t.alike((await respond(profile)).groups, [])
+    const browse = await respond(c.groupBrowseUrl('members'))
+    t.is(browse.groups.find((g) => g.group === group).writerCount, row.writerCount - 1)
+    t.is(await active(), beforeActive - 1)
+    const root = await respond(c.groupUrl(group))
+    t.is(root.writers.find((w) => w.diary === f.own).left, true)
+  }
+})
+
+test('a group whose only member left drops out of browse and the page still validates', async (t) => {
+  const { client: c, fixtures: f } = await load()
+  const { createIndexedVitrineRequest, vitrineIndex: respond } = await import('../src/vitrine/indexResponder.js?last-member')
+  const group = f.communities.find((c) => c.name === 'Horta Comunitária').general
+  const request = createIndexedVitrineRequest(f)
+  t.ok((await respond(c.groupBrowseUrl('members'))).groups.some((g) => g.group === group))
+  t.is((await request('group.leave', { group })).state, 'left')
+  for (const order of ['members', 'recent', 'trending']) {
+    const page = c.validGroupBrowse(await respond(c.groupBrowseUrl(order)), order)
+    t.ok(page !== null, order + ' still validates')
+    t.absent(page.groups.some((g) => g.group === group), order + ' leaves the group out')
+  }
+})
+
+test('trending browse counts a distinct diary posting during the session', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond, request } = await load()
+  const { group } = f.groups.find((g) => g.name === 'Passeios de bicicleta')
+  const active = async () => (await respond(c.groupBrowseUrl('trending'), request)).groups.find((g) => g.group === group).active
+  const before = await active()
+  await request('group.post', { group, text: 'Vou levar água para o passeio.' })
+  const { items } = await request('group.read', { group })
+  t.ok(Date.parse(items[0].at) > Date.parse(f.now), 'the new post is past the fixture clock')
+  t.is(await active(), before + 1)
+  await request('group.post', { group, text: 'Até sábado!' })
+  t.is(await active(), before + 1, 'each diary counts once')
+  const { createVitrineRequest } = await import('../src/vitrine/request.js')
+  const [boundary, ...otherGroups] = f.groups
+  const day = 86400000
+  const boundaryItems = boundary.items.map((item, i) => ({
+    ...item,
+    at: new Date(Date.parse(f.now) + [-7 * day, day, -7 * day - 1, day + 1][i]).toISOString()
+  }))
+  const boundaryRequest = createVitrineRequest({ ...f, groups: [{ ...boundary, items: boundaryItems }, ...otherGroups] })
+  const trending = await respond(c.groupBrowseUrl('trending'), boundaryRequest)
+  t.is(trending.groups.find((g) => g.group === boundary.group)?.active, 2, 'both time bounds are inclusive')
+})
+
+test('Vitrine groups.show invalidates the version snapshot after a successful write', async (t) => {
+  const { fixtures: f, request } = await load()
+  const { isMutating } = require('@varanda/rpc')
+  const { bumpGroupVersion } = await import('../src/groupVersions.js')
+  const code = readFileSync(join(__dirname, '../src/node.js'), 'utf8')
+  const start = code.indexOf('  const vitrineRequest = useCallback')
+  const end = code.indexOf('  const getGroupVersion', start)
+  const before = Object.freeze({ [f.groups[0].group]: 1 })
+  let versions = before
+  const call = runInNewContext(code.slice(start, end) + '\nvitrineRequest', {
+    fixtureRequest: request,
+    useCallback: (fn) => fn,
+    setGroupVersions: (update) => { versions = update(versions) },
+    bumpGroupVersion,
+    isMutating
+  })
+  await t.exception(call('groups.show', { on: 'false' }), /parâmetro inválido/)
+  t.is(versions, before)
+  t.is((await call('groups.show', { on: false })).on, false)
+  t.not(versions, before, 'profile readers see a new version snapshot')
+  t.alike({ ...versions }, before, 'individual group versions are preserved')
 })
 
 test('group and community indexes match the Vitrine RPC and preserve private names', async (t) => {
