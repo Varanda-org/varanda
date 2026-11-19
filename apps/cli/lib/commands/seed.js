@@ -99,10 +99,11 @@ function noop () {}
 // them the blob stamps, the blob channel and the /blob route (all off with
 // --no-dm). The postage key files (dm-postage.json and blob-postage.json, two
 // separate key pairs) are read or made only when a peer first needs them,
-// never here. onDrop is the push relay's wake when there is one.
-function dmOption (flags, onDrop = noop) {
+// never here. onNotice hands a DM notice box to the push relay when there is
+// one; without it the seeder still acks each wake and drops the box.
+function dmOption (flags, onNotice = noop) {
   if (flags.noDm === true) return null
-  const dm = { postage: createPostageFile(flags.dataDir), blobPostage: createBlobPostageFile(flags.dataDir), onDrop }
+  const dm = { postage: createPostageFile(flags.dataDir), blobPostage: createBlobPostageFile(flags.dataDir), onNotice }
   if (flags.blobBytes != null) dm.blobBytes = flags.blobBytes
   return dm
 }
@@ -126,7 +127,7 @@ async function runSeeder (flags) {
   const relay = flags.pushToken == null ? null : createPushRelay({ baseUrl: flags.accountHttp, token: flags.pushToken, log })
   if (relay !== null) options.onPush = (ev) => relay.send(ev)
   log({ event: 'push', reason: relay === null ? 'desligado' : 'ligado' })
-  options.dm = dmOption(flags, relay === null ? noop : () => { relay.sendDmWake() })
+  options.dm = dmOption(flags, relay === null ? noop : (box) => { relay.sendDm(box) })
   const seeder = new Seeder(options)
   // Handlers go in BEFORE start(): a signal during startup (DHT join) must not
   // take Node's default terminate path; the seeder is closed once start settles.

@@ -913,6 +913,8 @@ export function createVitrineRequest (fixtures, options) {
       dmEnabled = true
       return { box: data.own, gen: 1, seq }
     },
+    // The demo has no account service, so it never sends a wake.
+    'dm.noticeKey': () => ({}),
     'dm.pull': () => {
       pullCursor = Math.max(pullCursor, messageId)
       return { added: 0, cursor: pullCursor, incomplete: false }

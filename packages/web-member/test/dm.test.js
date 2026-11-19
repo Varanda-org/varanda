@@ -3109,3 +3109,275 @@ test('a pull that fails after a complete one leaves the automatic copy waiting',
   await s.engine.autoCopy(s.own, s.kp, view)
   t.is(claimPuts(), puts + 1, 'a claim put after a complete pull')
 })
+
+// ---- push notices (docs/rpc.md 5.167) ----
+
+const { WebSocketServer } = require('ws')
+const NoiseSecretStream = require('@hyperswarm/secret-stream')
+const c = require('compact-encoding')
+const sodium = require('sodium-universal')
+const { createSeederCert } = require('@varanda/core/lib/cert')
+const { attachAdmission } = require('@varanda/core/lib/admission')
+const { attachDm } = require('@varanda/core/lib/dm-net')
+const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
+const { attachDmNotice, DM_NOTICE_PROTOCOL } = require('@varanda/core/lib/dm-notice-net')
+const { createNoticeWindow, openDmNotice } = require('@varanda/core/lib/dm-notice')
+const { memoryPool } = require('./helpers/dm-seeder')
+const { wsStream } = require('../lib/ws-stream')
+
+function serviceKeyPair () {
+  const publicKey = b4a.alloc(32)
+  const secretKey = b4a.alloc(32)
+  sodium.crypto_box_keypair(publicKey, secretKey)
+  return { publicKey, secretKey }
+}
+
+// helpers/dm-seeder.js's stand-in (v1 lane, stamps, admission) plus the
+// notice channel. notice 'ack': the seeder role, its window per link fed by
+// the drops that link stored; every wake frame in `wakes` (its id), every
+// handed-on box in `boxes`. 'silent': the channel opens, records the frames
+// and never answers.
+async function noticeSeeder (t, { signer, notice = 'ack' }) {
+  const keyPair = crypto.keyPair()
+  const cert = createSeederCert({ seeder: hex(keyPair.publicKey) }, signer)
+  const rsa = rsaKey()
+  const pub = postage.publicKey(rsa.n)
+  const pool = memoryPool(pub)
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 })
+  await new Promise((resolve) => wss.once('listening', resolve))
+  const seeder = { url: 'ws://127.0.0.1:' + wss.address().port + '/seeder', assoc: hex(signer.publicKey), pool, puts: [], wakes: [], boxes: [] }
+  t.teardown(async () => {
+    for (const s of wss.clients) s.terminate()
+    await new Promise((resolve) => wss.close(() => resolve()))
+  }, { force: true })
+  wss.on('connection', (ws) => {
+    const noise = new NoiseSecretStream(false, wsStream(ws), { keyPair })
+    noise.on('error', noop)
+    noise.once('connect', () => {
+      Hypercore.createProtocolStream(noise)
+      const window = createNoticeWindow()
+      attachDm(noise, {
+        role: 'seeder',
+        putRate: 1000,
+        putBurst: 1000,
+        put: (bytes) => {
+          seeder.puts.push(b4a.from(bytes))
+          const r = pool.submit(bytes)
+          if (r !== null && !r.repeated) window.add(dmCore.decodeDrop(bytes).dropId)
+          return r
+        },
+        page: (q) => pool.page(q)
+      })
+      attachDmStamp(noise, {
+        role: 'seeder',
+        issueBurst: 1000,
+        issueRate: 1000,
+        postage: { publicKey: pub, sign: (blinded) => postage.sign(blinded, rsa.n, rsa.d) },
+        budget: { take: () => true }
+      })
+      if (notice === 'ack') {
+        const taking = { take: (id) => { seeder.wakes.push(id); return window.take(id) } }
+        attachDmNotice(noise, { role: 'seeder', window: taking, onWake: (box) => seeder.boxes.push(b4a.from(box)) })
+      } else if (notice === 'silent') {
+        const ch = noise.userData.createChannel({ protocol: DM_NOTICE_PROTOCOL })
+        ch.addMessage({ encoding: c.buffer, onmessage: (buf) => seeder.wakes.push(JSON.parse(b4a.toString(buf, 'utf8')).id) })
+        ch.open()
+      }
+      attachAdmission(noise, { role: 'seeder', cert, have: [] })
+    })
+  })
+  return seeder
+}
+
+function dropIdOf (bytes) {
+  return hex(dmCore.decodeDrop(bytes).dropId)
+}
+
+test('push notice: one notice for the recipient copy, after the message is filed and the self copy is put, before the link closes; none for a reaction or a ctl', async (t) => {
+  const { engine, calls, link, own, kp, peer, recipientBox, send, set } = await sendingEngine(t, { stamps: 4 })
+  const putBytes = []
+  const put = link.put
+  link.put = async (bytes, prefix) => {
+    putBytes.push(b4a.from(bytes))
+    return put(bytes, prefix)
+  }
+  let filedAtNotice = null
+  link.notice = async (id, recipientKey) => {
+    calls.push(['notice', hex(id), recipientKey])
+    filedAtNotice = (await engine.thread(own, { peer })).messages.length
+    return true
+  }
+  link.close = () => calls.push(['close'])
+  const sent = await send()
+  t.alike(calls.map((x) => x[0]), ['dm.sending', 'put', 'dm.sending', 'put', 'notice', 'close'])
+  t.alike(calls[4], ['notice', dropIdOf(putBytes[0]), peer], 'the recipient copy\'s drop id and the key it is addressed to')
+  t.not(calls[4][1], dropIdOf(putBytes[1]), 'never the self copy')
+  t.is(filedAtNotice, 1, 'the message was already filed here when the notice went out')
+  calls.length = 0
+  t.alike(await engine.react(own, kp, { to: peer, target: { from: own, id: sent.id }, emoji: '\u{1f44d}' }, recipientBox), { ok: true })
+  t.alike(await set(), { ok: true })
+  t.absent(calls.some((x) => x[0] === 'notice'), 'a reaction and a ctl wake nobody')
+})
+
+test('push notice: a notice that throws leaves the send answer and the self copy as they were', async (t) => {
+  const { calls, link, send } = await sendingEngine(t)
+  link.notice = async () => {
+    calls.push(['notice'])
+    throw new Error('boom')
+  }
+  const r = await send()
+  t.ok(r.id && r.at)
+  t.alike(calls.map((x) => x[0]), ['dm.sending', 'put', 'dm.sending', 'put', 'notice'], 'the self copy still went out')
+})
+
+test('push notice: a lock while the notice waits leaves the sent message filed here, so a resend after unlock is not needed', async (t) => {
+  const { engine, calls, link, own, peer, prf, send } = await sendingEngine(t)
+  let release
+  const waiting = new Promise((resolve) => {
+    link.notice = async () => {
+      calls.push(['notice'])
+      engine.lock()
+      resolve()
+      await new Promise((resolve) => { release = resolve })
+      return false
+    }
+  })
+  const pending = send().then(() => null, (err) => err)
+  await waiting
+  release()
+  await pending
+  t.alike(calls.map((x) => x[0]), ['dm.sending', 'put', 'dm.sending', 'put', 'notice'], 'one recipient put and the self copy, before the notice')
+  await engine.unlock(prf)
+  await engine.loaded()
+  t.is((await engine.thread(own, { peer })).messages.length, 1, 'filed once, before the lock')
+})
+
+test('push notice: dm.noticeKey takes exactly one 64 lowercase hex key and answers {}', async (t) => {
+  t.timeout(120000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url, { enable: false, certify: false })
+  for (const params of [{}, { key: 'AB'.repeat(32) }, { key: 'ab'.repeat(31) }, { key: 1 }, { key: hex(serviceKeyPair().publicKey), more: 1 }]) {
+    const err = await errorOf(A.web.request('dm.noticeKey', params))
+    t.is(err && err.code, 'USAGE', JSON.stringify(params))
+  }
+  t.alike(await A.web.request('dm.noticeKey', { key: hex(serviceKeyPair().publicKey) }), {})
+})
+
+test('push notice: a send wakes its recipient once over the seeder; no key set, nothing', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+
+  const before = seeder.puts.length
+  await A.web.request('dm.send', { to: B.key, text: 'sem chave' })
+  t.is(seeder.puts.length, before + 2, 'the two copies went out')
+  t.is(seeder.wakes.length, 0, 'no key set: no wake frame')
+
+  const service = serviceKeyPair()
+  t.alike(await A.web.request('dm.noticeKey', { key: hex(service.publicKey) }), {})
+  const at = seeder.puts.length
+  const r = await A.web.request('dm.send', { to: B.key, text: 'com chave' })
+  t.ok(r.id)
+  t.is(seeder.puts.length, at + 2)
+  t.alike(seeder.wakes, [dropIdOf(seeder.puts[at])], 'one wake, naming the recipient copy')
+  t.is(seeder.boxes.length, 1, 'the seeder\'s window took it')
+  t.is(openDmNotice(seeder.boxes[0], service), B.key, 'the service reads the recipient')
+
+  const row = (await A.web.request('dm.thread', { peer: B.key })).messages.find((m) => m.text === 'com chave')
+  t.alike(await A.web.request('dm.react', { to: B.key, target: { from: A.key, id: row.id }, emoji: '\u{1f44d}' }), { ok: true })
+  t.alike(await A.web.request('dm.set', { peer: B.key, state: 'accepted' }), { ok: true })
+  t.is(seeder.wakes.length, 1, 'a reaction and a ctl send no wake')
+  await B.web.request('dm.pull')
+  t.alike((await B.web.request('dm.thread', { peer: A.key })).messages.map((m) => m.text).sort(), ['com chave', 'sem chave'])
+})
+
+test('push notice: a seeder without the channel gets the same two puts and the send answers as before', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc, notice: 'none' })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await A.web.request('dm.noticeKey', { key: hex(serviceKeyPair().publicKey) })
+  const at = seeder.puts.length
+  const started = Date.now()
+  const r = await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  t.ok(r.id && r.at)
+  t.ok(Date.now() - started < 3000, 'no wait for a channel that is not there')
+  t.is(seeder.puts.length, at + 2)
+  t.is(seeder.wakes.length, 0)
+})
+
+test('push notice: a seeder that never acks costs the 3 s cap once; the send is filed and answers as before', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const seeder = await noticeSeeder(t, { signer: assoc, notice: 'silent' })
+  const A = await memberNode(t, assoc, seeder.url)
+  const B = await memberNode(t, assoc, seeder.url)
+  await copyDiary(B, A)
+  await A.web.request('dm.noticeKey', { key: hex(serviceKeyPair().publicKey) })
+  const at = seeder.puts.length
+  const started = Date.now()
+  const r = await A.web.request('dm.send', { to: B.key, text: 'oi' })
+  const took = Date.now() - started
+  t.ok(r.id && r.at)
+  t.alike(Object.keys(r).sort(), ['at', 'id'])
+  t.ok(took >= 2900, 'waited the cap (' + took + ' ms)')
+  t.is(seeder.puts.length, at + 2, 'the self copy still went out')
+  t.alike(seeder.wakes, [dropIdOf(seeder.puts[at])], 'one wake, never repeated')
+  t.alike((await A.web.request('dm.thread', { peer: B.key })).messages.map((m) => m.id), [r.id], 'filed')
+})
+
+test('push notice: a Página\'s message wakes the person, its reaction does not; a person\'s message wakes the Página', async (t) => {
+  t.timeout(240000)
+  const assoc = generateAssociationKeyPair()
+  const issuerKp = crypto.keyPair()
+  const issuerCert = createIssuerCert({ issuer: hex(issuerKp.publicKey) }, assoc)
+  const seeder = await noticeSeeder(t, { signer: assoc })
+  const A = await memberNode(t, assoc, seeder.url)
+  const C = await memberNode(t, assoc, seeder.url)
+  const pageKp = crypto.keyPair()
+  const P = hex(pageKp.publicKey)
+  const pageCert = createCert({ member: P }, assoc)
+  const made = await A.web.request('dm.pageGenerate', { page: P, gen: 1, recipients: [{ member: A.key, box: hex((await dmBoxKeyPairFromPrf(A.prf, 1)).publicKey) }] })
+  const m = await createMember({ storage: memoryStorage(), association: hex(assoc.publicKey), keyPair: pageKp })
+  t.teardown(() => m.close(), { force: true })
+  await m.setCert(pageCert)
+  const fields = { page: P, gen: 1, owner: A.key, admins: [], prev: null, at: PAGE_AT, nonce: PAGE_NONCE, association: hex(assoc.publicKey) }
+  await m.core.append(issuerCountersign({ type: 'page-roster', ...fields, signature: signRoster(fields, A.keyPair) }, issuerKp, issuerCert))
+  await m.core.append({ type: 'dm-key', box: made.box, gen: 1, at: PAGE_AT })
+  for (const n of [A, C]) await holdCore(m.core, n.storage)
+  const self = made.shares[0]
+  await A.web.request('dm.pageSecrets', { page: P, gen: 1, sealed: self.sealed, by: A.key, sig: self.sig, box: made.box, groupBox: made.groupBox, cert: pageCert })
+  await copyDiary(C, A)
+  const service = serviceKeyPair()
+  for (const n of [A, C]) await n.web.request('dm.noticeKey', { key: hex(service.publicKey) })
+
+  const pageSend = async (params) => {
+    const draft = await A.web.request('dm.pageDraft', { page: P, ...params })
+    const expiresAt = Date.now() + dmCore.DM_V3_TTL_MS
+    return A.web.request('dm.pageSend', { page: P, id: draft.id, signature: dmCore.signDigest(draft.digest, pageKp.secretKey, expiresAt), expiresAt })
+  }
+  let at = seeder.puts.length
+  await pageSend({ kind: 'msg', to: C.key, text: 'da página' })
+  t.is(seeder.puts.length, at + 2)
+  t.alike(seeder.wakes, [dropIdOf(seeder.puts[at])], 'one wake for the person\'s copy')
+  t.is(openDmNotice(seeder.boxes[0], service), C.key, 'naming the person')
+
+  at = seeder.puts.length
+  await C.web.request('dm.send', { to: P, text: 'oi página' })
+  t.is(seeder.wakes.length, 2)
+  t.is(seeder.wakes[1], dropIdOf(seeder.puts[at]))
+  t.is(openDmNotice(seeder.boxes[1], service), P, 'a message to a Página names the Página')
+
+  await A.web.request('dm.pull')
+  const theirs = (await A.web.request('dm.thread', { page: P, peer: C.key })).messages.find((x) => x.text === 'oi página')
+  at = seeder.puts.length
+  await pageSend({ kind: 'react', to: C.key, target: { from: C.key, id: theirs.id }, emoji: '\u{1f44d}' })
+  t.is(seeder.puts.length, at + 2, 'the reaction went out')
+  t.is(seeder.wakes.length, 2, 'a page reaction wakes nobody')
+})

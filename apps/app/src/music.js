@@ -11,7 +11,7 @@
 
 import rpc from '@varanda/rpc'
 
-const { cardText, cardUrlHost, MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC } = rpc
+const { cardText, cardUrlHost, MAX_CARD_URL, MAX_CARD_TITLE, MAX_CARD_DESC, MUSIC_GENRES, isMusicGenre } = rpc
 
 export const SNIPPET_S = 15
 // The picker badge for that fixed window, not a length measured from the track.
@@ -176,6 +176,50 @@ export function searchBody (q, kind, cursor) {
   return { q: text, kind, cursor }
 }
 
+export const MUSIC_GENRE_ALL_TEXT = 'Todos'
+export const MUSIC_GENRE_LABELS = Object.freeze({
+  Pop: 'Pop',
+  'Hip-Hop/Rap': 'Hip-hop e rap',
+  Rock: 'Rock',
+  Electronic: 'Eletrônica',
+  'R&B/Soul': 'R&B e soul',
+  Latin: 'Latina',
+  Funk: 'Funk',
+  Reggae: 'Reggae',
+  Jazz: 'Jazz',
+  Alternative: 'Alternativa',
+  Indie: 'Indie',
+  Metal: 'Metal',
+  Folk: 'Folk',
+  Acoustic: 'Acústica',
+  Classical: 'Clássica',
+  'Lo-Fi': 'Lo-fi',
+  House: 'House',
+  Techno: 'Techno',
+  Trance: 'Trance',
+  Dubstep: 'Dubstep',
+  'Drum & Bass': 'Drum & bass',
+  Trap: 'Trap',
+  'Deep House': 'Deep house',
+  'Tech House': 'Tech house'
+})
+
+export function musicGenreChips (order = MUSIC_GENRES) {
+  return [
+    { id: '', label: MUSIC_GENRE_ALL_TEXT },
+    ...order.filter(isMusicGenre).map((id) => ({ id, label: MUSIC_GENRE_LABELS[id] }))
+  ]
+}
+
+export function trendingBody (kind = 'track', genre = '') {
+  if (kind === 'track') {
+    if (genre === '') return {}
+    return isMusicGenre(genre) ? { genre } : null
+  }
+  if (kind === 'playlist' && genre === '') return { kind }
+  return null
+}
+
 // A title or artist exactly as the service cuts it: cardText's output, never
 // empty.
 const isText = (v) => typeof v === 'string' && v !== '' && cardText(v, MAX_CARD_TITLE) === v
@@ -186,6 +230,18 @@ const isText = (v) => typeof v === 'string' && v !== '' && cardText(v, MAX_CARD_
 // added, so an artwork URL from a confused service still refuses the item.
 const isGenre = (v) => typeof v === 'string' && v !== '' && Array.from(v).length <= MAX_GENRE && !CONTROL_RE.test(v)
 const isYear = (v) => Number.isInteger(v) && v >= 1900 && v <= 2100
+
+// The listed genre a track's genre text names, or null. The provider's text
+// may list several genres joined by ',' ('/' and '&' are part of names), and
+// the service cuts it to MAX_GENRE code points and trims it: at MAX_GENRE - 1
+// or more, the last part may be a cut word that happens to be a listed name
+// ('House' from 'Housewife'), so it is dropped. Exact names only.
+export function musicGenreOf (text) {
+  if (!isGenre(text)) return null
+  const parts = text.split(',').map((part) => part.trim())
+  if (Array.from(text).length >= MAX_GENRE - 1) parts.pop()
+  return parts.find(isMusicGenre) ?? null
+}
 const COVER_ONLY = { cover: (v) => typeof v === 'boolean' }
 const TRACK_EXTRAS = { ...COVER_ONLY, genre: isGenre, year: isYear }
 
@@ -216,6 +272,19 @@ function playlistFields (json) {
 
 function playlistItem (json) {
   return itemKeys(json, ['id', 'title', 'artist', 'count', 'url']) ? playlistFields(json) : null
+}
+
+// The fields a recent pick keeps on this device, read one by one from an
+// item or a stored entry: no duration, year, cover or anything else.
+export function recentItem (kind, json) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null
+  const { id, title, artist, url } = json
+  if (!isId(id) || !isText(title) || !isText(artist) || !isAudiusPage(url)) return null
+  if (kind === 'track') return { id, title, artist, url }
+  if (kind !== 'playlist') return null
+  const { count } = json
+  if (!Number.isInteger(count) || count < 1 || count > MAX_PLAYLIST) return null
+  return { id, title, artist, count, url }
 }
 
 // { items, next } or null. Strict: any extra key, bad item or cursor out of
@@ -350,11 +419,17 @@ export function musicQuery (text) {
 export const MUSIC_DEBOUNCE_MS = 350
 export const MUSIC_SOURCE = 'Audius'
 export const MUSIC_EMPTY_TEXT = 'Nenhuma música encontrada'
+export const MUSIC_SUGGEST_TEXT = 'Em alta no Audius'
+export const MUSIC_SUGGEST_EMPTY_TEXT = 'Nenhuma sugestão agora'
 export const MUSIC_UNAVAILABLE_TEXT = 'Música indisponível agora'
 export const MUSIC_LIMIT_TEXT = 'Limite de músicas por hoje'
 export const MUSIC_NEEDS_TEXT = 'Escreva algo para publicar com a música'
 export const MUSIC_SEEK_TEXT = 'Não foi possível começar nesse ponto'
 export const MUSIC_FULL_LIST_TEXT = 'Ver a playlist inteira no Audius'
+export const MUSIC_RECENTS_TEXT = 'Recentes'
+export const MUSIC_RECENTS_CLEAR_TEXT = 'Limpar'
+export const MUSIC_RECENTS_CLEAR_LABEL = 'Limpar músicas recentes'
+export const MUSIC_RECENTS_CLEAR_FAIL_TEXT = 'Não foi possível limpar agora'
 
 export function musicErrorText (err) {
   return err && err.code === 'limite-musica' ? MUSIC_LIMIT_TEXT : MUSIC_UNAVAILABLE_TEXT
