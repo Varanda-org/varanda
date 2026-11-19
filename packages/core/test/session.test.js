@@ -436,6 +436,18 @@ test('push.sign is refused by the node session (USAGE, not INTERNAL)', async (t)
   t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
 })
 
+test('pushDevice.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
+  const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
+  const params = { nonce: 'n'.repeat(43), action: 'on', transport: 'apns', token: 'ab'.repeat(32), key: 'A'.repeat(22) }
+  const fresh = await member(t)
+  t.alike(await failure(fresh.call('pushDevice.sign', params)), NO, 'before an identity')
+  const m = await member(t, { cert: true })
+  const before = await m.call('log.read')
+  t.alike(await failure(m.call('pushDevice.sign', params)), NO, 'after identity.create')
+  t.alike(await m.call('log.read'), before, 'nothing written')
+  t.alike([fresh.session.internal, m.session.internal], [[], []], 'no internal error')
+})
+
 test('age.sign is refused by the node session (USAGE, not INTERNAL)', async (t) => {
   const NO = { code: 'USAGE', message: 'assinatura disponível só no navegador' }
   const params = { action: 'session', nonce: 'n'.repeat(43) }

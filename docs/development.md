@@ -118,6 +118,34 @@ Conversas (text only) on this node need `--account-origin https://<host>`: the n
 
 The `dist` directory is ignored by version control. The first export was run on 2026-10-22 (see [verification.md](verification.md)): it reports `Exported: dist`. A full `npm run export:web` now leaves in `apps/app/dist`: `index.html` (with the `varanda-release` meta), `sw.js`, `manifest.webmanifest`, the icons (`icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `apple-touch-icon.png`), `favicon.ico`, `varanda-node.js` and its copy `varanda-node-<release>.js` (the name a released page loads, so it only ever runs the node of its own release; only the copy is precached), `metadata.json` and the bundle under `_expo/static/js/web/`. A bare `npx expo export --platform web` (as in the commands above) has no `sw.js` and no release meta, so the page it serves never registers a worker.
 
+## Avisos nativos: configuração do serviço de conta
+
+O serviço de conta pode enviar avisos de Conversas e grupos pelo APNs, da Apple, e pelo FCM, do Google. Cada transporte vem desligado sem sua configuração; configuração parcial impede a partida do serviço. Sem essas credenciais, nenhum aviso nativo é enviado. Esta entrega prepara o serviço: a opção de ligar os avisos no app instalado fica para `feat/app-native-push`. Configurar o servidor não liga avisos para nenhuma pessoa. O cadastro exige os Termos correntes, e o envio nativo exige aceite dos Termos 101 ou mais novos.
+
+### APNs (iPhone)
+
+O operador prepara uma chave de autenticação APNs em arquivo `.p8` e informa ao processo do serviço de conta:
+
+| Variável | Valor a fornecer pelo operador |
+|---|---|
+| `VARANDA_APNS_KEY_FILE` | Caminho do arquivo privado `.p8`, legível pelo usuário do serviço |
+| `VARANDA_APNS_KEY_ID` | Identificador da chave APNs correspondente |
+| `VARANDA_APNS_TEAM_ID` | Identificador da equipe Apple Developer |
+| `VARANDA_APNS_TOPIC` | Topic APNs do app, correspondente ao bundle identifier do build que recebe o aviso |
+| `VARANDA_APNS_SANDBOX` | `1` para o ambiente sandbox de desenvolvimento; sem a opção, ambiente de produção |
+
+A chave, a equipe, o topic e o ambiente precisam corresponder ao build e ao token do aparelho. Depois de preparar a configuração completa, reinicie o serviço de conta pelo procedimento da instalação e confira `GET /account/push/device/info`: `apns` deve ser `true`. O transporte usa HTTP/2 e autenticação de provedor ES256. Para desligá-lo, retire a configuração APNs inteira e reinicie; não deixe somente parte das variáveis.
+
+### FCM (Android)
+
+O operador prepara um arquivo JSON de conta de serviço do projeto Firebase usado pelo app, com permissão para enviar pelo FCM HTTP v1. Defina `VARANDA_FCM_ACCOUNT_FILE` com o caminho desse arquivo para o processo do serviço de conta e reinicie pelo procedimento da instalação. `GET /account/push/device/info` deve responder `fcm: true`. O serviço obtém um token OAuth e o reaproveita enquanto válido. Para desligar FCM, retire essa variável e reinicie. APNs e FCM podem ser configurados independentemente.
+
+Os dois arquivos contêm segredos: ficam fora do repositório e do git, com modo `0600`, acessíveis só ao usuário do serviço. Na instalação com Compose, coloque os dois arquivos no volume `account-data`, montado em `/data` no serviço `account`, e use caminhos do contêiner em `VARANDA_APNS_KEY_FILE` e `VARANDA_FCM_ACCOUNT_FILE`, por exemplo `/data/apns.p8` e `/data/fcm-account.json`. O `compose.web.yaml` repassa as seis variáveis de configuração ao serviço; o overlay `compose.release.web.yaml` mantém esse ambiente e troca só a imagem. Não coloque seu conteúdo em exemplos, fixtures, logs, capturas de tela ou arquivos de verificação. Não há chave nem token de exemplo neste procedimento. Os testes automatizados usam substitutos locais e nunca fazem entregas reais à Apple ou ao Google.
+
+Os registros nativos ficam em `push-devices.json`, no diretório de dados do serviço, modo `0600`: transporte, token, chave aleatória e instante de criação, até quatro aparelhos por membro. Rotação com a mesma chave atualiza o registro no lugar. Desligar os avisos remove o registro; APNs 410 `Unregistered` ou FCM 404 `UNREGISTERED` remove só o token que deixou de funcionar; excluir a conta remove todos os registros nativos dela. Falhas não são reenviadas. A frase visível, o token, o momento, o tipo e a tag própria do aparelho ficam visíveis ao provedor, como descrito nos Termos 101.
+
+A entrega real em iPhone e Android depende dos segredos do operador e de builds com a integração do app. Continua devida, conforme `docs/verification/feat-native-push-transport.md`. Conferir primeiro nos aparelhos, incluindo sandbox APNs e o ambiente correspondente ao build, depois conferir que o Web Push continua funcionando. `device/info` confirma configuração, não entrega no aparelho.
+
 ## iOS
 
 The detail, with the simulator commands and the evidence, is in [ios-gate.md](ios-gate.md) ("Commands, in order"). The short form, from the repo root:

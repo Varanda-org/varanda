@@ -112,6 +112,8 @@ PODS:
     - libwebp/sharpyuv
   - PasskeyPrf (0.1.0):
     - ExpoModulesCore
+  - PushDevice (0.1.0):
+    - ExpoModulesCore
   - RCTDeprecation (0.83.10)
   - RCTRequired (0.83.10)
   - RCTSwiftUI (0.83.10)
@@ -2146,6 +2148,7 @@ DEPENDENCIES:
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - ImagePrep (from `../modules/image-prep/ios`)
   - PasskeyPrf (from `../modules/passkey-prf/ios`)
+  - PushDevice (from `../modules/push-device/ios`)
   - RCTDeprecation (from `../../../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../../../node_modules/react-native/Libraries/Required`)
   - RCTSwiftUI (from `../../../node_modules/react-native/ReactApple/RCTSwiftUI`)
@@ -2286,6 +2289,8 @@ EXTERNAL SOURCES:
     :path: "../modules/image-prep/ios"
   PasskeyPrf:
     :path: "../modules/passkey-prf/ios"
+  PushDevice:
+    :path: "../modules/push-device/ios"
   RCTDeprecation:
     :path: "../../../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation"
   RCTRequired:
@@ -2474,6 +2479,7 @@ SPEC CHECKSUMS:
   ImagePrep: 28f15953bf68907f2a07ed8488837562f50543b8
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
   PasskeyPrf: 1301f9140e7ccbe8d4c48397119a6e0a45c97ea0
+  PushDevice: 2781ba44dbd8a9d328d87329fd39dd75fcc4cbd4
   RCTDeprecation: 86774ca0048c2293d01cc7dfb71811fd32ebbd46
   RCTRequired: c7f2bc9661a7c341d33f411fc161f057c97cc731
   RCTSwiftUI: 3b36c814293f91f5179c0f113a885ce47853035c

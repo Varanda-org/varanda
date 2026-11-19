@@ -38,6 +38,7 @@ const resultKeys = {
   'inviteCard.sign': ['signature'],
   'inviteCard.verify': ['ok', 'reason'],
   'push.sign': ['signature'],
+  'pushDevice.sign': ['signature'],
   'seen.sign': ['signature', 'prevHash'],
   'outbox.seal': ['box'],
   'outbox.open': ['to', 'text'],
@@ -699,6 +700,7 @@ function samples (f) {
     'inviteCard.sign': card,
     'inviteCard.verify': { ...card, member: 'ab'.repeat(32), signature: '0'.repeat(128) },
     'push.sign': { action: 'on', nonce, endpoint: 'https://push.example.org/vitrine', p256dh: 'vitrine', auth: 'vitrine' },
+    'pushDevice.sign': { action: 'on', nonce, transport: 'apns', token: 'ab'.repeat(32), key: 'A'.repeat(22) },
     'outbox.seal': { ...queued, to: null, text: 'Fica para depois.' },
     'outbox.open': { ...queued, box: Buffer.from(JSON.stringify([1, queued.id, queued.author, queued.association, queued.kind, null, 'Fica para depois.', queued.writtenAt])).toString('base64url') },
     'seen.sign': { nonce, action: 'read' },
@@ -1242,7 +1244,7 @@ test('page signing covers every documented result variant with fake signatures',
   const cancelled = await answer(t, request, 'page.sign', { action: 'offer', nonce, page, op: { ...base, to: null, exp: null } })
   t.is(cancelled.record.to, null)
   t.is(cancelled.record.exp, null)
-  for (const method of ['account.sign', 'age.sign', 'phone.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
+  for (const method of ['account.sign', 'age.sign', 'phone.sign', 'invite.sign', 'inviteCard.sign', 'push.sign', 'pushDevice.sign', 'report.sign', 'appeal.sign', 'dm.reportSign', 'terms.sign', 'recovery.sign']) {
     t.is((await answer(t, request, method, samples(f)[method])).signature, signature)
   }
   // The development build never vouches for a card.
