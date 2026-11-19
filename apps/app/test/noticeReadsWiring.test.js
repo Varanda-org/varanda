@@ -232,6 +232,33 @@ test('acting as a Pagina reports neither group nor social read rows', async (t) 
   t.alike(ownApp.sync.tags(), [], 'another member namespace cannot supply read rows')
 })
 
+test('a successful remote seen pass preserves notices despite cached local reads', async (t) => {
+  const app = await shell()
+  const { cleanAvisos } = await import('../src/seenSync.js')
+  const { withOnceTokens } = await import('../src/onceMarks.js')
+  app.sync.update({ dm: { unread: 0, requests: false } })
+  t.alike(app.sync.tags(), ['varanda-dm'])
+  const result = { error: null }
+  let run
+  sourceCallback('App.js', 'useEffect(() => {\n    if (seenMember === null) return\n    const member = seenMember\n    const appearance', {
+    ...app.context,
+    seenMember: B,
+    seenMemberRef: { current: B },
+    seenAppearanceRef: { current: 1 },
+    seenRequestRef: { current: async () => {} },
+    cleanAvisos,
+    withOnceTokens,
+    onceRegistry: { unsynced: () => [] },
+    runSeenPass: async () => result,
+    stepFirstPass: () => {},
+    createSeenScheduler: (options) => { run = options.run; return {} }
+  })()
+  t.is(await run('remote'), result, 'the remote pass succeeds')
+  t.alike(app.closed, [], 'cached reads cannot close a newer delivered notice')
+  t.is(await run('changed'), result, 'the local pass succeeds')
+  t.alike(app.closed, [['varanda-dm']], 'other wake reasons still close local read notices')
+})
+
 test('the rendered screens receive the shell callbacks and import the pure adapters', (t) => {
   const app = source('App.js')
   t.ok(/<Conversas\b[^>]*onGroupsUnread=\{onGroupsUnread\}/.test(app))

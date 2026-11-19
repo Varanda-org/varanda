@@ -924,6 +924,10 @@ function createSession ({
       throw new UsageError('assinatura disponível só no navegador')
     }),
 
+    'pushDevice.sign': serial(async () => {
+      throw new UsageError('assinatura disponível só no navegador')
+    }),
+
     // And for the age-verification request (docs/rpc.md 5.32).
     'age.sign': serial(async () => {
       throw new UsageError('assinatura disponível só no navegador')

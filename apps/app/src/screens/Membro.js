@@ -1131,7 +1131,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
     !own && asPageMode && !closedPage && !blockedHere
       ? { icon: 'seguir', label: asPageFollowing ? 'Deixar de seguir como a página' : 'Seguir como a página', pending: following, disabled: pageFollows === null, onPress: togglePageFollow }
       : null,
-    profileUrl !== null ? { icon: 'compartilhar', label: 'Compartilhar perfil', onPress: () => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) } } : null,
+    profileUrl !== null ? { icon: 'compartilhar', label: isPage ? 'Compartilhar página' : 'Compartilhar perfil', onPress: () => { shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) }) } } : null,
     canWriteTestimonial && myTestimonial === null ? { icon: 'lapis', label: 'Escrever depoimento', onPress: () => setWritingTestimonial(true) } : null,
     canTestimonial && myTestimonial !== null ? { icon: 'lixeira', label: 'Retirar depoimento', danger: true, onPress: () => setRetractingTestimonial(true) } : null,
     canReport ? { icon: 'bandeira', label: 'Denunciar a conta', danger: true, onPress: () => onReport({ author, name: header.name, username: header.username }) } : null,
@@ -1258,9 +1258,9 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
       />
       {profileUrl !== null
         ? (
-          <Sheet open={sharing} onClose={() => setSharing(false)} title='Compartilhar perfil' closeLabel='Fechar'>
+          <Sheet open={sharing} onClose={() => setSharing(false)} title={isPage ? 'Compartilhar página' : 'Compartilhar perfil'} closeLabel='Fechar'>
             <View style={styles.shareBody}>
-              <ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
+              <ShareProfile url={profileUrl} labels={isPage ? { field: 'link da página', copyLabel: 'copiar link da página', shareLabel: 'compartilhar página' } : undefined} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />
             </View>
           </Sheet>
           )

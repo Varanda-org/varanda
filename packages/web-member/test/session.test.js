@@ -33,7 +33,8 @@ const { verifyInvite } = require('@varanda/core/lib/invite')
 const { signInviteCard, verifyInviteCard } = require('@varanda/core/lib/invite-card')
 const { verifyAge } = require('@varanda/core/lib/age')
 const { verifyPhone } = require('@varanda/core/lib/phone')
-const { verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { PREFIX: PUSH_PREFIX, verifyPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { verifyPushDevice, tokenHash } = require('@varanda/core/lib/push-device-proof')
 const { createBrowserNode } = require('../lib/node')
 const { createBrowserSession } = require('../lib/session')
 const { memoryNodeStorage } = require('../lib/node-storage')
@@ -1776,6 +1777,77 @@ test('push.sign: the unlocked key signs the push-subscription statement, locked 
   t.alike([locked.code, locked.message], ['USAGE', LOCKED])
   t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
   t.alike(s.internal, [], 'no internal error')
+})
+
+test('pushDevice.sign: signs the device statement only, invalid params and unavailable identity refuse', async (t) => {
+  await testnet(t)
+  const assoc = association()
+  const keyPair = crypto.keyPair()
+  const params = { nonce: 'A-_9'.repeat(11), action: 'on', transport: 'apns', token: 'ab'.repeat(32), key: 'A'.repeat(22) }
+  const none = await setup(t, { assoc })
+  const missing = await errorOf(none.web.request('pushDevice.sign', params))
+  t.alike([missing.code, missing.message], ['NOT_FOUND', 'identidade não encontrada'], 'no identity')
+
+  const s = await certified(t, { assoc, keyPair })
+  const before = await s.web.request('log.read', {})
+  for (const transport of ['apns', 'fcm']) {
+    const token = transport === 'apns' ? params.token : 'device_token:FCM-123'
+    for (const action of ['on', 'off']) {
+      const r = await s.web.request('pushDevice.sign', { ...params, action, transport, token })
+      t.alike(Object.keys(r), ['signature'], 'only the signature')
+      t.ok(/^[0-9a-f]{128}$/.test(r.signature))
+      const fields = { nonce: params.nonce, member: s.key, association: assoc.hex, action, transport, tokenHash: tokenHash(transport, token), key: params.key }
+      t.ok(verifyPushDevice({ ...fields, signature: r.signature }), transport + ' ' + action + ' verifies')
+      for (const changed of [
+        { nonce: 'B'.repeat(43) },
+        { member: hex(crypto.keyPair().publicKey) },
+        { association: 'cd'.repeat(32) },
+        { action: action === 'on' ? 'off' : 'on' },
+        { transport: transport === 'apns' ? 'fcm' : 'apns' },
+        { tokenHash: tokenHash(transport, token + 'ab') },
+        { key: 'B'.repeat(21) + 'A' }
+      ]) {
+        t.is(verifyPushDevice({ ...fields, ...changed, signature: r.signature }), false, 'signature binds ' + Object.keys(changed)[0])
+      }
+      const pushBytes = b4a.from([PUSH_PREFIX, fields.nonce, fields.member, fields.association, fields.action, fields.transport, fields.tokenHash, fields.key].join('\n'), 'utf8')
+      const pushSignature = hex(crypto.sign(pushBytes, keyPair.secretKey))
+      t.is(verifyPushDevice({ ...fields, signature: pushSignature }), false, 'push.sign prefix cannot sign a device statement')
+    }
+  }
+
+  for (const bad of [
+    { nonce: 'short' },
+    { action: 'other' },
+    { transport: 'web' },
+    { token: 'AB'.repeat(32) },
+    { token: '' },
+    { token: 42 },
+    { key: 'abc' },
+    { key: 'B'.repeat(22) }
+  ]) {
+    const field = Object.keys(bad)[0]
+    const invalid = await errorOf(s.web.request('pushDevice.sign', { ...params, ...bad }))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'parâmetro inválido: ' + field], field)
+  }
+  for (const field of Object.keys(params)) {
+    const incomplete = { ...params }
+    delete incomplete[field]
+    const invalid = await errorOf(s.web.request('pushDevice.sign', incomplete))
+    t.alike([invalid.code, invalid.message], ['USAGE', 'parâmetro obrigatório: ' + field], 'missing ' + field)
+  }
+  for (const field of ['member', 'association', 'tokenHash']) {
+    const extra = await errorOf(s.web.request('pushDevice.sign', { ...params, [field]: 'ab'.repeat(32) }))
+    t.alike([extra.code, extra.message], ['USAGE', 'parâmetro desconhecido'], 'the caller cannot choose the ' + field)
+  }
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written')
+  t.is((await s.node.identityStatus()).unlocked, true, 'the key stays set')
+  t.alike(await s.web.request('sync.status'), { state: 'idle' })
+
+  await s.node.clearKeyPair()
+  const locked = await errorOf(s.web.request('pushDevice.sign', params))
+  t.alike([locked.code, locked.message], ['USAGE', LOCKED])
+  t.alike(await s.web.request('log.read', {}), before, 'nothing written while locked')
+  t.alike([none.internal, s.internal], [[], []], 'no internal error')
 })
 
 test('username.add: appends a verified username record once, locked and foreign records refused', async (t) => {
