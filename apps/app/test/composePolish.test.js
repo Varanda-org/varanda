@@ -158,7 +158,7 @@ test('long moment captions expand, pause and resume without changing navigation'
   t.ok(step.includes('setCaptionExpanded(false)') && !step.includes('setHeld(false)'), 'stepping clears the caption pause without clearing a held press')
   t.ok(src.includes('captionExpanded ? captionExpandedHeight : captionCollapsedHeight'), 'expanded clip uses the available room')
   t.ok(/if \(!captionExpanded\) \{\s*captionOffsetRef.current = 0\s*if \(captionScrollRef.current\) captionScrollRef.current.scrollTo\(\{ y: 0, animated: false \}\)/.test(src), 'collapse resets the pull guard without waiting for a scroll event')
-  t.ok(src.includes("text: { ...type.postText, color: '#ffffff', ...TEXT_SHADOW }") && !src.includes('includeFontPadding: false'), 'caption preserves the viewer text style')
+  t.ok(src.includes('text: { ...type.postText, color: colors.onMedia, ...TEXT_SHADOW }') && !src.includes('includeFontPadding: false'), 'caption preserves the viewer text style')
   t.ok(src.includes('scrollEnabled={captionScrolls}') && src.includes('style={[styles.caption, { maxHeight: captionMax }]}'), 'the caption keeps its capped scroll container')
   t.ok((src.match(/<ActivityIndicator color=\{colors.ink\}/g) || []).length === 2, 'both loading states use the viewer theme')
 })
