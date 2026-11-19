@@ -170,7 +170,7 @@ const makeStyles = (colors) => StyleSheet.create({
     borderTopRightRadius: layout.sheetRadius,
     paddingTop: space.sm
   },
-  grabber: { alignSelf: 'center', width: 36, height: 5, borderRadius: radius.pill, backgroundColor: colors.line, marginBottom: space.sm },
+  grabber: { alignSelf: 'center', width: 48, height: 5, borderRadius: radius.pill, backgroundColor: colors.line, marginBottom: space.sm },
   titleBox: { paddingHorizontal: space.sm + space.lg, paddingBottom: space.sm, marginBottom: space.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   title: { ...type.replyMark, fontWeight: '600', color: colors.soft },
   titleWithIcons: { marginStart: ROW_ICON_SIZE + space.lg },

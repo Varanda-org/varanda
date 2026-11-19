@@ -24,6 +24,8 @@ test('Sheet shows a grabber by default and only its panel header claims drags', 
   t.ok(header.includes('{...drag.panHandlers}'), 'the header owns the responder')
   t.ok(header.startsWith('<View style={[styles.dragHeader, { paddingLeft: padL, paddingRight: padR }]} collapsable={false} {...drag.panHandlers}>'), 'Android keeps a native view for the header, so a touch on its empty part reaches the responder')
   t.ok(header.includes("{grabber ? <View style={styles.grabberRow} pointerEvents='none'>"), 'the decorative grabber shares the drag target')
+  const grabberRow = modal.slice(modal.indexOf('  grabberRow: {'), modal.indexOf('  grabber: {'))
+  t.ok(grabberRow.length > 0 && !grabberRow.includes('zIndex') && header.indexOf('styles.grabberRow') < header.indexOf('<TopRow'), 'a wide header pill paints over the grabber')
   t.ok(header.includes('<TopRow onClose={onClose}'), 'header controls stay inside the target')
   t.is((modal.match(/\{\.\.\.drag.panHandlers\}/g) || []).length, 1, 'no responder on the panel or scrolling body')
   t.ok(panel.includes('onLayout={drag.handleLayout}'), 'the threshold uses measured panel height')
