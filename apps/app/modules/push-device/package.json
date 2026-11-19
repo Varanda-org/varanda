@@ -1,0 +1,7 @@
+{
+  "name": "push-device",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native push registration and notification intents for the Varanda app",
+  "main": "index.js"
+}
