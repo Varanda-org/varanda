@@ -27,7 +27,7 @@ test('manifest has the members an installable app needs', (t) => {
   // web the tab bar above it is the same opaque dark bg in both schemes.
   t.is(manifest.theme_color, '#101010', 'theme_color is the dark bg')
   const tabBar = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'TabBar.js'), 'utf8')
-  t.ok(tabBar.includes("const alwaysDark = Platform.OS === 'web'"), 'the tab bar is always dark on the web')
+  t.ok(!/alwaysDark|Platform|useTheme|useStyles/.test(tabBar) && tabBar.includes('const colors = DARK'), 'the tab bar stays dark on every platform and scheme')
   t.ok(tabBar.includes('makeStyles({ ...DARK, tabBar: DARK.bg })'), 'the web tab bar is opaque dark bg, not the translucent tabBar')
   const icon = (size, purpose) => manifest.icons.find((i) => i.sizes === size && i.purpose === purpose)
   t.ok(icon('192x192', 'any'), '192 any icon')

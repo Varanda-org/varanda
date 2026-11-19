@@ -130,8 +130,17 @@ test('Telefone: one transparent code input under six hidden cells', (t) => {
   t.ok(box.includes('onBlur={() => setFocused(false)}'))
   t.ok(box.includes('<View key={i} style={[styles.cell, editable && focused && i === at && styles.cellOn, !editable && styles.off]}>'), 'the active cell shows only while focused')
   t.is(count(box, 'styles.cellOn'), 1)
-  t.ok(code.includes('minHeight: 52,'), 'cells grow with the font scale')
-  t.absent(/\bheight: 52\b/.test(code.replace('minHeight: 52', '')))
+  t.ok(code.includes(`cell: {
+    flex: 1,
+    minHeight: 56,
+    paddingVertical: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: colors.controlOff
+  },
+  cellOn: { borderBottomColor: colors.accent, borderBottomWidth: 2, paddingBottom: 3 }`), 'underline cells grow with the font scale and keep digits still on focus')
+  t.absent(/\bheight: 56\b/.test(code.replace('minHeight: 56', '')))
   t.ok(code.includes("codeInput: { ...StyleSheet.absoluteFillObject, color: 'transparent', backgroundColor: 'transparent'"))
   t.is(count(code, '<TextInput'), 1, 'the code input; the number input is a Field')
   t.is(count(code, '{...NO_AUTOFILL}'), 1, 'the code input asks for no autofill')

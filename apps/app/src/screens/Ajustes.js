@@ -65,10 +65,11 @@ import { usePush } from '../usePush'
 import { HELP, SHORT } from '../help'
 import { HelpNote } from '../ui/Help'
 import { Icon } from '../ui/Icon'
-import { RadioMark } from '../ui/Radio'
+import { Divider } from '../ui/Divider'
+import { ListGroup, ListRow } from '../ui/ListRow'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
 import { useEscapeLayer } from '../ui/escapeLayer'
-import { radius, space, type } from '../ui/theme'
+import { space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { MODES, MODE_LABELS } from '../appearance'
 import { Btn, ConfirmStack, ErrorText, FlushSectionHeader, Notice, Page, Soft, useAction } from '../ui'
@@ -141,43 +142,23 @@ const SIGN_OUT_TEXT = 'Sair desta conta neste aparelho? Para voltar, use qualque
 const RESET_TEXT = 'Isto apaga a conta guardada neste aparelho e as publicações que ainda aguardam envio. Para voltar à mesma conta, entre com qualquer passkey cadastrada nela ou com o código de recuperação. Sem passkey e sem código, a conta antiga não pode ser reconstruída: será preciso entrar de novo e vincular outra vez.'
 
 function Item ({ icon, label, onPress, first = false, trailing = 'seta', trailingText = null, pending = false, disabled = false, expanded, checked, toggle = false, caption = null, danger = false }) {
-  const styles = useStyles(makeStyles)
-  const { colors } = useTheme()
-  const state = { disabled: disabled || pending }
-  if (expanded !== undefined) state.expanded = expanded
-  if (checked !== undefined) state.checked = checked
   const radio = checked !== undefined
-  // react-native-web drops accessibilityState (aria-checked carries it) and
-  // presses only buttons on Space, so a radio row handles Space itself.
-  const radioKeys = radio && !(disabled || pending)
-    ? (e) => {
-        if (e.key !== ' ' && e.key !== 'Spacebar') return
-        e.preventDefault()
-        onPress()
-      }
-    : undefined
   return (
-    <Pressable
-      style={({ pressed }) => [styles.row, !first && styles.rowDivider, pressed && styles.rowPressed]}
-      accessibilityRole={radio ? (toggle ? 'switch' : 'radio') : 'button'}
-      accessibilityLabel={label}
-      accessibilityState={state}
-      aria-checked={radio ? checked : undefined}
-      disabled={disabled || pending}
+    <ListRow
+      icon={icon}
+      label={label}
       onPress={onPress}
-      onKeyDown={radioKeys}
-    >
-      <Icon name={icon} size={22} color={danger ? colors.danger : colors.soft} />
-      <View style={styles.copy}>
-        <Text style={[styles.label, danger && styles.labelDanger]}>{pending ? label + '…' : label}</Text>
-        {caption ? <Text style={styles.caption}>{caption}</Text> : null}
-      </View>
-      {trailingText !== null
-        ? <Text style={styles.trailing}>{trailingText}</Text>
-        : radio
-          ? <RadioMark checked={checked} />
-          : (trailing ? <Icon name={trailing} size={20} color={colors.soft} /> : null)}
-    </Pressable>
+      first={first}
+      trailing={trailing}
+      trailingText={trailingText}
+      pending={pending}
+      disabled={disabled}
+      expanded={expanded}
+      checked={checked}
+      caption={caption}
+      danger={danger}
+      role={radio ? (toggle ? 'switch' : 'radio') : 'button'}
+    />
   )
 }
 
@@ -556,7 +537,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
           <Page>
             <Notice>{saved}</Notice>
             <FlushSectionHeader>Perfil e conta</FlushSectionHeader>
-            <View style={styles.group}>
+            <ListGroup style={styles.group}>
               {/* Until the own profile is read, the plain row stands in. */}
               {own.key && profile
                 ? <AccountCard ownKey={own.key} profile={profile} onPress={() => { setSaved(''); onNavigate('perfil') }} />
@@ -566,9 +547,9 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {pagesOn({ hosted: node.hosted, accountOrigin: node.accountOrigin }) && typeof onOpenPaginas === 'function'
                 ? <Item icon='gente' label='Páginas' onPress={openPaginas} />
                 : null}
-            </View>
+            </ListGroup>
             <FlushSectionHeader>Privacidade e segurança</FlushSectionHeader>
-            <View style={styles.group}>
+            <ListGroup style={styles.group}>
               {account && unlocked ? <Item first icon='shield' label='Passkeys e recuperação' onPress={() => onNavigate('passkeys')} /> : null}
               {showChangePhone ? <Item first={!(account && unlocked)} icon='phone' label='Trocar o celular' onPress={() => { setSaved(''); onNavigate('telefone') }} /> : null}
               {account ? <Item first={!(account && unlocked) && !showChangePhone} icon='shield' label='Recorrer de um bloqueio' onPress={() => onNavigate('recurso')} /> : null}
@@ -579,7 +560,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
               {visitasOn ? <Item icon='olho' label={VISITAS_TITLE} trailingText={visitas === null ? null : (stateOn(visitas) ? ROW_ON : ROW_OFF)} onPress={openVisitasSheet} /> : null}
               {node.hosted === true && typeof onOpenVarandinha === 'function' ? <Item icon='droplet' label='Varandinha' onPress={openVarandinha} /> : null}
               <Item first={!account && !showChangePhone && !hosted && !devicesOffered} icon='file-text' label='Termos e privacidade' onPress={() => onNavigate('termos')} />
-            </View>
+            </ListGroup>
             {hosted
               ? (
                 <Sheet open={groupsShowActive} onClose={closeGroupsShow} dismissable={!groupsShowAct.pending} title={GROUPS_SHOW_TITLE} closeLabel='Fechar'>
@@ -631,7 +612,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 )
               : null}
             <FlushSectionHeader>Aparência e avisos</FlushSectionHeader>
-            <View style={styles.group}>
+            <ListGroup style={styles.group}>
               <Item first icon='sun' label='Aparência' trailingText={MODE_LABELS[mode]} onPress={() => onNavigate('aparencia')} />
               {pushRow
                 ? (
@@ -650,9 +631,8 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 ? <Item icon='download' label='Guardar dados neste aparelho' trailing={null} pending={persistPending} onPress={doPersist} />
                 : null}
               {hasPasskey && Platform.OS === 'web' ? <Item icon='smartphone' label='Instalar o app' onPress={() => onNavigate('instalar')} /> : null}
-              <View style={styles.rowDivider}>
-                <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
-              </View>
+              <Divider />
+              <SwitchRow label={PREVIEW_PREF_LABEL} caption={PREVIEW_PREF_NOTE} value={previews} onValueChange={togglePreviews} />
               <View style={styles.notes}>
                 {pushNote || pushRow
                   ? (
@@ -673,15 +653,15 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                     </>
                     )}
               </View>
-            </View>
+            </ListGroup>
 
             {unlocked
               ? (
                 <>
-                  <View style={styles.group}>
+                  <ListGroup style={styles.group}>
                     <Item first icon='log-out' label='Sair' danger trailing={null} onPress={() => { exit.clearError(); setConfirm(confirm === 'sair' ? null : 'sair') }} />
                     {account ? <Item icon='lixeira' label='Excluir conta' danger onPress={() => { setConfirm(null); onNavigate('excluir') }} /> : null}
-                  </View>
+                  </ListGroup>
                   <Sheet open={screen === 'lista' && confirm === 'sair'} onClose={dismissConfirm} dismissable={!exit.pending} title='Sair'>
                     {/* The panel clips: at large text the buttons scroll into reach. */}
                     <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.confirm}>
@@ -697,7 +677,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                 )
               : null}
 
-            <View style={[styles.group, styles.advanced]}>
+            <ListGroup style={[styles.group, styles.advanced]}>
               <Item
                 first
                 icon='sliders'
@@ -718,7 +698,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   </>
                   )
                 : null}
-            </View>
+            </ListGroup>
             {hasPasskey
               ? (
                 <Sheet open={screen === 'lista' && advanced && confirm === 'recomecar'} onClose={dismissConfirm} dismissable={!reset.pending} title='Recomeçar'>
@@ -896,7 +876,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
         </View>
         <View style={shown('aparencia')}>
           <Page>
-            <View style={styles.group} accessibilityRole='radiogroup' accessibilityLabel='Aparência'>
+            <ListGroup style={styles.group} accessibilityRole='radiogroup' accessibilityLabel='Aparência'>
               {MODES.map((m, i) => (
                 <Item
                   key={m}
@@ -907,7 +887,7 @@ export default function Ajustes ({ screen, onNavigate, onClose, onInfo, termsInf
                   onPress={() => setMode(m)}
                 />
               ))}
-            </View>
+            </ListGroup>
             <Soft>Sistema segue o modo claro ou escuro do aparelho.</Soft>
           </Page>
         </View>
@@ -944,27 +924,16 @@ const makeStyles = (colors) => StyleSheet.create({
   cancel: { ...type.cancel, color: colors.ink },
   closeHit: { minHeight: 44, justifyContent: 'center' },
   back: { minWidth: 40, minHeight: 40, justifyContent: 'center', marginLeft: -8 },
-  group: {
-    backgroundColor: colors.card,
-    borderRadius: radius.bubble,
-    borderWidth: 1,
-    borderColor: colors.line,
-    overflow: 'hidden',
-    marginBottom: 12
-  },
+  // The page column adds 12 more: 24 pt from a group to the next header, as before ListGroup.
+  group: { marginBottom: 12 },
   notes: { paddingHorizontal: space.lg, paddingBottom: space.md },
   advanced: { marginTop: space.lg },
   confirm: { gap: space.md, paddingHorizontal: space.lg, paddingBottom: space.lg },
   card: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 16 },
   cardName: { fontSize: 17, fontWeight: '600', color: colors.ink },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, paddingVertical: 14, paddingHorizontal: 16 },
-  rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   rowPressed: { backgroundColor: colors.skeleton },
   copy: { flex: 1, minWidth: 0, gap: 2 },
-  label: { fontSize: 16, color: colors.ink },
-  labelDanger: { color: colors.danger },
   caption: { fontSize: 13, lineHeight: 18, color: colors.soft },
-  trailing: { fontSize: 15, color: colors.soft },
   version: { alignItems: 'center', justifyContent: 'center', minHeight: 48, paddingVertical: 12, gap: 2 },
   versionItem: { minHeight: 44, justifyContent: 'center', alignSelf: 'stretch' },
   versionText: { fontSize: 12, lineHeight: 16, color: colors.soft, textAlign: 'center' }

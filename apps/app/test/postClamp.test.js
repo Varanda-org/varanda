@@ -177,14 +177,43 @@ test('measurements ignore the rendered cap and preserve a larger full count', as
 
 test('ClampText defaults to the body column until a positive finite width is measured', (t) => {
   const src = read('ui/ClampText.js')
-  t.ok(src.includes('const ROW_PADDING = space.lg * 2'))
-  t.ok(src.includes('const AVATAR_SIZE = 40'))
-  t.ok(src.includes('const AVATAR_GAP = 12'))
-  t.ok(src.includes('return Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP'))
+  t.ok(src.includes('space.xl * 2'))
+  t.absent(src.includes('AVATAR_SIZE'), 'the avatar does not narrow the caption')
+  t.absent(src.includes('AVATAR_GAP'), 'the header gap does not narrow the caption')
+  t.ok(src.includes('return Math.min(windowWidth, layout.column) - space.xl * 2'))
   t.ok(src.includes('const defaultWidth = captionEstimate(windowWidth)'))
   t.ok(src.includes('const textWidth = Number.isFinite(width) && width > 0 ? width : defaultWidth'), 'undefined, zero, negative and non-finite widths use the default')
   t.ok(src.includes('width: textWidth,'), 'the estimate receives the effective width')
   t.ok(/body.*measured width.*onLayout/.test(src), 'caller guidance names the body onLayout measurement')
+})
+
+test('the caption estimate matches the card caption box at 320 and 390 pt', async (t) => {
+  const { compileFunction } = require('node:vm')
+  const { captionWidthNext } = await import('../src/postRowLayout.js')
+  const theme = read('ui/theme.js')
+  const token = (name) => compileFunction('return ' + theme.match(new RegExp('export const ' + name + ' = Object.freeze\\((\\{[^}]*\\})\\)'))[1])()
+  const space = token('space')
+  const layout = token('layout')
+  const clamp = read('ui/ClampText.js')
+  const estimate = compileFunction(clamp.match(/export function captionEstimate \(windowWidth\) \{([^}]+)\}/)[1], ['windowWidth', 'space', 'layout'])
+  const post = read('ui/PostRow.js')
+  const style = (name) => compileFunction('return ' + post.match(new RegExp('\\n  ' + name + ': (\\{[^}]*\\})'))[1], ['space', 'colors', 'ROW_PAD_TOP'])(space, {}, Number(post.match(/const ROW_PAD_TOP = (\d+)/)[1]))
+  const caption = post.slice(post.indexOf('  const textNode ='), post.indexOf('  const mediaNode ='))
+  t.ok(/<View style=\{styles.gutter\}>\s*<View style=\{styles.body\} onLayout=\{measureCaption\}>/.test(caption), 'the gutter wraps the measured caption')
+  t.absent(/MediaGrid|mediaNode|QuoteCard|previewNode/.test(caption), 'the measured node holds only the caption')
+  t.is(style('gutter').paddingHorizontal, 24, 'the caption starts 24 pt from the row edge')
+  t.absent(Object.keys(style('body')).some((key) => /padding/.test(key)), 'the measured body has no padding')
+  const row = style('row')
+  t.alike([row.paddingTop, row.paddingBottom, row.paddingHorizontal || 0, row.borderBottomWidth || 0], [16, 16, 0, 0], 'card spacing with no side padding or divider')
+  t.absent([style('main'), style('content')].some((box) => box.flexDirection === 'row' || box.paddingHorizontal), 'the avatar does not consume caption width')
+  t.ok(!style('media').paddingHorizontal && /<MediaGrid[^\n]* bleed \/>/.test(post), 'media reaches both row edges without rounded corners')
+  t.alike([style('cards').paddingHorizontal, style('bar').marginHorizontal], [24, 24], 'cards and actions share the caption gutters')
+  t.alike([style('media').paddingTop + 8, style('cards').paddingTop + 8, style('cards').gap + 8, style('bar').marginTop], [12, 12, 12, 12], 'blocks keep 12 pt including the existing card and media margins')
+  for (const width of [320, 390]) {
+    const captionBox = Math.min(width, layout.column) - 2 * style('gutter').paddingHorizontal
+    t.is(estimate(width, space, layout), captionBox, width + ' pt: estimate equals the caption box width')
+    t.is(captionWidthNext(estimate(width, space, layout), captionBox), undefined, width + ' pt: the matching measurement needs no extra render')
+  }
 })
 
 test('ClampText hides the control when expansion is forced', (t) => {
@@ -240,7 +269,7 @@ test('ClampText wires the estimate, the hit target and the labels', (t) => {
   t.ok(src.includes('refine'))
   t.ok(src.includes('type.postText.fontSize'), 'the estimate uses the post text size')
   t.ok(src.includes('useWindowDimensions'))
-  t.ok(src.includes('space.lg * 2'), 'default width subtracts the row padding on both sides')
+  t.ok(src.includes('space.xl * 2'), 'default width subtracts the row padding on both sides')
   t.ok(src.includes('onTextLayout'))
   t.ok(src.includes('layout.hit'), 'the control hit area is the 44 pt target')
   t.ok(src.includes('maxFontSizeMultiplier={TEXT_CAP}'))

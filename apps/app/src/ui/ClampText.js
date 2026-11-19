@@ -12,11 +12,6 @@ import { TEXT_CAP } from './Sheet'
 import { useStyles } from './ThemeProvider'
 import { layout, space, type } from './theme'
 
-const ROW_PADDING = space.lg * 2
-// PostRow's avatar and gap also reduce the body's available text width.
-const AVATAR_SIZE = 40
-const AVATAR_GAP = 12
-
 const CONTROL_LABELS = {
   mais: 'mais, ver texto completo',
   'ver mais': 'ver mais, texto completo',
@@ -31,7 +26,7 @@ const verticalHitSlop = Math.max(0, (layout.hit - type.more.lineHeight) / 2)
 // The caption width the clamp assumes before a measurement, so a row can skip
 // storing a measurement that matches it.
 export function captionEstimate (windowWidth) {
-  return Math.min(windowWidth, layout.column) - ROW_PADDING - AVATAR_SIZE - AVATAR_GAP
+  return Math.min(windowWidth, layout.column) - space.xl * 2
 }
 
 export function useClamp ({ text, hasMedia, width, forceExpanded } = {}) {

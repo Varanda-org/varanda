@@ -14,7 +14,7 @@ import { pinnedTabOffset, profileBarRestPlan, profileBarSnap, profileBarState, t
 import { Icon } from './Icon'
 import { SunsetBand } from './SunsetBand'
 import { PressScale } from './PressScale'
-import { space, type } from './theme'
+import { layout, radius, space, type } from './theme'
 import { useStyles } from './ThemeProvider'
 import { TEXT_CAP } from './Sheet'
 
@@ -183,15 +183,16 @@ const makeStyles = (colors) => StyleSheet.create({
     left: 0,
     right: 0,
     height: BAR,
-    paddingHorizontal: space.lg,
+    // The header's back button and band buttons sit 24 pt in: the pinned bar keeps them in place.
+    paddingHorizontal: space.xl,
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.sm
   },
   back: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: layout.hit,
+    height: layout.hit,
+    borderRadius: radius.pill,
     backgroundColor: colors.dim,
     alignItems: 'center',
     justifyContent: 'center'
@@ -199,7 +200,7 @@ const makeStyles = (colors) => StyleSheet.create({
   name: { flex: 1 },
   // The bar is a fixed topInset + BAR tall: the title stops growing at TEXT_CAP
   // (like every header) so its line fits the bar at the largest text size.
-  title: { ...type.sheetTitle, color: '#ffffff' },
+  title: { ...type.sheetTitle, color: colors.onMedia },
   controls: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   tabs: { backgroundColor: colors.bg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line }
 })

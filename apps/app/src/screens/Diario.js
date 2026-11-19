@@ -29,7 +29,7 @@
 // Design: apps/site/artwork/app-design.md.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native'
+import { StyleSheet, Text, useWindowDimensions, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { LOG_LIMIT_MAX, displayText } from '@varanda/rpc'
 import { perfMarks, useNode } from '../node'
@@ -50,6 +50,7 @@ import { fillState, hideFuture, tilesFromLog } from '../mural'
 import { ErrorText, SectionHeader, Soft, errorText, plainMessage, useAction, useBottomPad, useVisibleNow } from '../ui'
 import { VISITAS_ENTRY_LABEL } from '../visitasView'
 import { Icon } from '../ui/Icon'
+import { ListGroup, ListRow } from '../ui/ListRow'
 import { Pill } from '../ui/Pill'
 import { useSaved } from '../savedProvider'
 import { SAVED_ENTRY_LABEL } from '../savedView'
@@ -82,7 +83,7 @@ import { HelpButton } from '../ui/Help'
 import { HELP } from '../help'
 import { COUNTS_INCOMPLETE_NOTE } from '../pessoas'
 import { useFollowCounts } from '../useFollowCounts'
-import { LARGE_TEXT, layout, space, type } from '../ui/theme'
+import { LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import Perfil from './Perfil'
 import { CountsNote, RepostPlaceholder, SocialToast, liveBinding, refOf, snapshotRowsShown, socialRowProps, useRowPropsCache, useSocial } from './ARua'
@@ -666,7 +667,7 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
   const disc = (style, inBar) => (tint !== null && !inBar ? [style, { backgroundColor: tint.disc }] : style)
   const bandControls = (inBar) => (
     <>
-      <HelpButton doc={HELP.diario} color={tint !== null && !inBar ? tint.icon : '#ffffff'} style={disc(inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info), inBar)} />
+      <HelpButton doc={HELP.diario} color={tint !== null && !inBar ? tint.icon : colors.onMedia} style={disc(inBar ? styles.barButton : (hasBell ? styles.infoShifted : styles.info), inBar)} />
       <PressScale
         accessibilityRole='button'
         accessibilityLabel='Ajustes'
@@ -674,9 +675,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
         onPress={() => onSettings('lista')}
         style={disc(inBar ? styles.barButton : (hasBell ? styles.gearShifted : styles.gear), inBar)}
       >
-        <Icon name='engrenagem' size={20} color={tint !== null && !inBar ? tint.icon : '#ffffff'} />
+        <Icon name='engrenagem' size={20} color={tint !== null && !inBar ? tint.icon : colors.onMedia} />
       </PressScale>
-      {hasBell ? <BellButton color={tint !== null && !inBar ? tint.icon : '#ffffff'} badged={avisosNew === true} onPress={onAvisos} style={disc(inBar ? styles.barButton : styles.bell, inBar)} /> : null}
+      {hasBell ? <BellButton color={tint !== null && !inBar ? tint.icon : colors.onMedia} badged={avisosNew === true} onPress={onAvisos} style={disc(inBar ? styles.barButton : styles.bell, inBar)} /> : null}
     </>
   )
 
@@ -741,6 +742,12 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       )
     : null
 
+  const showSalvos = node.hosted === true && savedList.available && typeof onOpenSalvos === 'function'
+  const showEventos = node.hosted === true && ownPublicKey && typeof onOpenEventos === 'function'
+  const showVisitas = node.hosted === true && typeof onOpenVisitas === 'function'
+  const showRecados = node.hosted === true && ownPublicKey && typeof onOpenRecados === 'function'
+  const showVarandinha = node.hosted === true && ownPublicKey && typeof onOpenVarandinha === 'function'
+
   const header = info === null
     ? (
       <View>
@@ -802,74 +809,15 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
               {publicGroups.hidden || typeof onOpenGroup !== 'function'
                 ? null
                 : <PublicGroupsBox items={publicGroups.rows} title='Seus grupos públicos' note='É isto que qualquer pessoa vê no seu perfil: grupos públicos de entrada aberta, sem a Geral de cada comunidade. Para esconder, use Ajustes, em Privacidade e segurança.' onOpen={onOpenGroup} />}
-              {node.hosted === true && savedList.available && typeof onOpenSalvos === 'function'
+              {showSalvos || showEventos || showVisitas || showRecados || showVarandinha
                 ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel={SAVED_ENTRY_LABEL}
-                    onPress={onOpenSalvos}
-                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
-                  >
-                    <Icon name='salvar' size={20} color={colors.soft} />
-                    <Text style={styles.salvosText}>{SAVED_ENTRY_LABEL}</Text>
-                    <Icon name='seta' size={20} color={colors.soft} />
-                  </Pressable>
-                  )
-                : null}
-              {node.hosted === true && ownPublicKey && typeof onOpenEventos === 'function'
-                ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel='Eventos'
-                    onPress={() => onOpenEventos(ownPublicKey)}
-                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
-                  >
-                    <Icon name='evento' size={20} color={colors.soft} />
-                    <Text style={styles.salvosText}>Eventos</Text>
-                    <Icon name='seta' size={20} color={colors.soft} />
-                  </Pressable>
-                  )
-                : null}
-              {node.hosted === true && typeof onOpenVisitas === 'function'
-                ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel={VISITAS_ENTRY_LABEL}
-                    onPress={onOpenVisitas}
-                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
-                  >
-                    <Icon name='olho' size={20} color={colors.soft} />
-                    <Text style={styles.salvosText}>{VISITAS_ENTRY_LABEL}</Text>
-                    <Icon name='seta' size={20} color={colors.soft} />
-                  </Pressable>
-                  )
-                : null}
-              {node.hosted === true && ownPublicKey && typeof onOpenRecados === 'function'
-                ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel='Recados'
-                    onPress={() => onOpenRecados(ownPublicKey)}
-                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
-                  >
-                    <Icon name='recado' size={20} color={colors.soft} />
-                    <Text style={styles.salvosText}>Recados</Text>
-                    <Icon name='seta' size={20} color={colors.soft} />
-                  </Pressable>
-                  )
-                : null}
-              {node.hosted === true && ownPublicKey && typeof onOpenVarandinha === 'function'
-                ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel='Varandinha'
-                    onPress={() => onOpenVarandinha(ownPublicKey)}
-                    style={({ pressed }) => [styles.salvos, pressed && styles.salvosPressed]}
-                  >
-                    <Icon name='droplet' size={20} color={colors.soft} />
-                    <Text style={styles.salvosText}>Varandinha</Text>
-                    <Icon name='seta' size={20} color={colors.soft} />
-                  </Pressable>
+                  <ListGroup style={styles.shortcuts}>
+                    {showSalvos ? <ListRow first icon='salvar' label={SAVED_ENTRY_LABEL} accessibilityLabel={SAVED_ENTRY_LABEL} onPress={onOpenSalvos} /> : null}
+                    {showEventos ? <ListRow first={!showSalvos} icon='evento' label='Eventos' accessibilityLabel='Eventos' onPress={() => onOpenEventos(ownPublicKey)} /> : null}
+                    {showVisitas ? <ListRow first={!showSalvos && !showEventos} icon='olho' label={VISITAS_ENTRY_LABEL} accessibilityLabel={VISITAS_ENTRY_LABEL} onPress={onOpenVisitas} /> : null}
+                    {showRecados ? <ListRow first={!showSalvos && !showEventos && !showVisitas} icon='recado' label='Recados' accessibilityLabel='Recados' onPress={() => onOpenRecados(ownPublicKey)} /> : null}
+                    {showVarandinha ? <ListRow first={!showSalvos && !showEventos && !showVisitas && !showRecados} icon='droplet' label='Varandinha' accessibilityLabel='Varandinha' onPress={() => onOpenVarandinha(ownPublicKey)} /> : null}
+                  </ListGroup>
                   )
                 : null}
               <View onLayout={(e) => setSegmentedHeight(e.nativeEvent.layout.height)}>
@@ -1078,9 +1026,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
 const bandButton = (colors) => ({
   position: 'absolute',
   bottom: 12,
-  width: 34,
-  height: 34,
-  borderRadius: 17,
+  width: layout.hit,
+  height: layout.hit,
+  borderRadius: radius.pill,
   backgroundColor: colors.dim,
   alignItems: 'center',
   justifyContent: 'center'
@@ -1089,17 +1037,16 @@ const bandButton = (colors) => ({
 const makeStyles = (colors) => StyleSheet.create({
   list: { flex: 1, backgroundColor: colors.bg },
   plainBand: { backgroundColor: colors.bg },
-  barButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
+  barButton: { width: layout.hit, height: layout.hit, borderRadius: radius.pill, backgroundColor: colors.dim, alignItems: 'center', justifyContent: 'center' },
   // The band buttons, right to left: bell (when there is one), gear, help.
-  bell: { ...bandButton(colors), right: 16 },
-  gear: { ...bandButton(colors), right: 16 },
-  gearShifted: { ...bandButton(colors), right: 58 },
+  bell: { ...bandButton(colors), right: space.xl },
+  gear: { ...bandButton(colors), right: space.xl },
+  gearShifted: { ...bandButton(colors), right: space.xl + 52 },
   countsNote: { marginTop: space.xs },
-  salvos: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingHorizontal: space.lg },
-  salvosPressed: { opacity: 0.6 },
-  salvosText: { ...type.pill, color: colors.ink, flex: 1 },
-  info: { ...bandButton(colors), right: 58 },
-  infoShifted: { ...bandButton(colors), right: 100 },
+  // The tabs slot is full bleed; the card keeps the 16 pt page margin and clears the segmented rule.
+  shortcuts: { marginHorizontal: space.lg, marginVertical: space.sm },
+  info: { ...bandButton(colors), right: space.xl + 52 },
+  infoShifted: { ...bandButton(colors), right: space.xl + 104 },
   shareBody: { padding: 16, gap: 12 },
   pending: {
     paddingVertical: 10,

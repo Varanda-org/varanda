@@ -46,6 +46,7 @@ import { countChars } from '../format'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { Btn, ErrorText, Field, Label, Soft, errorText, useAction } from '../ui'
+import { Divider } from '../ui/Divider'
 import { HelpNote } from '../ui/Help'
 import { mediaHashDeps } from '../ui/MediaView'
 import { Pill } from '../ui/Pill'
@@ -335,18 +336,21 @@ function ReasonRow ({ label, checked, first, onPress }) {
     onPress()
   }
   return (
-    <Pressable
-      accessibilityRole='radio'
-      accessibilityLabel={label}
-      accessibilityState={{ checked }}
-      aria-checked={checked}
-      onPress={onPress}
-      onKeyDown={onKeyDown}
-      style={({ pressed }) => [styles.reason, !first && styles.reasonDivider, pressed && styles.reasonPressed]}
-    >
-      <Text style={styles.reasonText}>{label}</Text>
-      <RadioMark checked={checked} />
-    </Pressable>
+    <View>
+      {first ? null : <Divider />}
+      <Pressable
+        accessibilityRole='radio'
+        accessibilityLabel={label}
+        accessibilityState={{ checked }}
+        aria-checked={checked}
+        onPress={onPress}
+        onKeyDown={onKeyDown}
+        style={({ pressed }) => [styles.reason, pressed && styles.reasonPressed]}
+      >
+        <Text style={styles.reasonText}>{label}</Text>
+        <RadioMark checked={checked} />
+      </Pressable>
+    </View>
   )
 }
 
@@ -358,7 +362,6 @@ const makeStyles = (colors) => StyleSheet.create({
   pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   reasons: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, backgroundColor: colors.card, overflow: 'hidden' },
   reason: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: layout.hit, paddingHorizontal: space.lg, paddingVertical: space.md },
-  reasonDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   reasonPressed: { backgroundColor: colors.skeleton },
   reasonText: { ...type.postText, color: colors.ink, flex: 1 },
   quoteBox: { gap: 4, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.bg },
