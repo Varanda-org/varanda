@@ -1165,7 +1165,7 @@ function createPushRoutes ({
     let reason = outcome === 'ok' ? 'enviado' : 'falhou'
     if (outcome === 'gone') {
       try {
-        await subscriptions(() => pushDeviceStore.removeToken(member, row.transport, row.token))
+        await subscriptions(() => pushDeviceStore.removeToken(member, row.transport, row.token, row.key, row.createdAt))
         reason = 'removido'
       } catch {}
     }

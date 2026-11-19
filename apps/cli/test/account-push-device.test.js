@@ -13,7 +13,7 @@ const { openPushDeviceStore } = require('../lib/account/push-device-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
 const { createPushRoutes, NATIVE_PUSH_TERMS_FLOOR, MAX_QUEUE } = require('../lib/account/push-routes')
-const { keyedWindow } = require('../lib/account/server')
+const { createAccountServer, keyedWindow } = require('../lib/account/server')
 const { tmpDir, until } = require('./helpers/net')
 
 const association = 'ab'.repeat(32)
@@ -206,6 +206,50 @@ test('device finish: signed registration, check, rotation and removal for both t
   }
 })
 
+for (const http of [false, true]) {
+  test('device finish: another member needs the same device key' + (http ? ' over HTTP' : ''), async (t) => {
+    const s = setup(t)
+    const other = crypto.keyPair()
+    const member = Buffer.from(other.publicKey).toString('hex')
+    let request = s.request
+    if (http) {
+      const origin = 'https://account.example.test'
+      const server = createAccountServer({
+        association,
+        origin,
+        store: { start: () => {}, status: () => ({ linked: true }) },
+        terms: { available: () => true, list: () => [{ version: TERMS_VERSION }] },
+        push: { pushStore: s.pushStore, pushDeviceStore: s.pushDeviceStore, apns: { send: async () => 'ok' } },
+        now: () => s.clock.t
+      })
+      const listener = await server.listen({ host: '127.0.0.1', port: 0 })
+      t.teardown(() => listener.close(), { force: true })
+      request = async (pathname, body) => {
+        const res = await fetch('http://127.0.0.1:' + listener.port + '/account/push/' + pathname, {
+          method: 'POST',
+          headers: { origin, 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        })
+        return { status: res.status, body: await res.json() }
+      }
+    }
+    const row = device()
+    const first = await request('start', { member: s.member, action: 'on', transport: row.transport })
+    t.alike((await request('device/finish', s.sign(first.body.nonce, row))).body, { ok: true, changed: true })
+    const { nonce } = (await request('start', { member, action: 'on', transport: row.transport })).body
+    const { transport, token } = row
+    const key = freshKey()
+    const signature = Buffer.from(crypto.sign(pushDevicePayload({ nonce, member, association, action: 'on', transport, tokenHash: tokenHash(transport, token), key }), other.secretKey)).toString('hex')
+    const body = { nonce, member, action: 'on', transport, token, key, signature }
+    const refused = await request('device/finish', body)
+    if (http) t.is(refused.status, 400)
+    t.alike(refused.body, { error: 'pedido-invalido' })
+    t.alike((await request('device/finish', body)).body, { error: 'expirado' })
+    t.alike((await request('device/check', { member: s.member, transport, token, key: row.key })).body, { registered: true })
+    t.alike((await request('device/check', { member, transport, token, key })).body, { registered: false })
+  })
+}
+
 test('device finish: exact fields, single use, binding and proof domain', async (t) => {
   const s = setup(t)
   const row = device()
@@ -328,6 +372,23 @@ test('native fan-out: gone removes one token, an in-flight rotation survives', a
   await s.dm()
   t.is(s.pushDeviceStore.devices(s.member), 2)
   t.ok(s.pushDeviceStore.list(s.member).some((r) => r.token === replacement.token))
+})
+
+test('native fan-out: late gone preserves the same token registered with a new key', async (t) => {
+  const row = device()
+  const replacement = { ...row, key: freshKey() }
+  const s = setup(t, {
+    sendNative: async () => {
+      s.clock.t++
+      t.alike((await s.finish(replacement)).body, { ok: true, changed: true })
+      return 'gone'
+    }
+  })
+  await s.finish(row)
+  await s.dm()
+  t.is(s.calls.length, 1)
+  t.alike((await s.check(replacement)).body, { registered: true })
+  t.alike((await s.check(row)).body, { registered: false })
 })
 
 test('native fan-out: floor 101 applies at enqueue and again at send', async (t) => {
