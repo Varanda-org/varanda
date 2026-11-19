@@ -179,7 +179,7 @@ function loadWorker (code, server, opts = {}) {
       },
       getNotifications: async (filter) => w.shown
         .filter((n) => !w.closed.has(n) && !n.dropped && (!filter || !filter.tag || n.options.tag === filter.tag))
-        .map((n) => ({ close: () => { if (n.posted) w.closed.add(n); else n.dropped = true } }))
+        .map((n) => ({ tag: n.options.tag, data: n.options.data, close: () => { if (n.posted) w.closed.add(n); else n.dropped = true } }))
     }
   }
   const clients = {
@@ -189,7 +189,8 @@ function loadWorker (code, server, opts = {}) {
     },
     openWindow: async (url) => { w.opened.push(url) }
   }
-  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
+  w.context = vm.createContext({ self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, TextEncoder, btoa, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
+  vm.runInContext(code, w.context)
   return w
 }
 
@@ -1097,6 +1098,24 @@ test('push: a valid payload shows its body, tag and data', async (t) => {
   t.is(long.options.body, '😀'.repeat(120), '120 code points are allowed')
 })
 
+test('push: social payloads accept only the legacy fields and an optional generation', async (t) => {
+  const w = renderedWorker()
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const ref = kind === 'follow' ? null : (['quote', 'mention'].includes(kind) ? ACTOR_REF : REF)
+    const legacy = valid({ kind, ref })
+    for (const extra of [{}, { g: 0 }, { g: 100 }, { g: Number.MAX_SAFE_INTEGER }]) {
+      const shown = await push(w, pushData({ ...legacy, ...extra }))
+      t.is(shown.options.body, legacy.body)
+      t.is(shown.options.tag, 'varanda-' + kind + '-' + (ref || ACTOR))
+      t.alike(plain(shown.options.data), { kind, actor: ACTOR, recipient: RECIPIENT, ref, ...extra })
+    }
+    for (const extra of [{ x: 1 }, { g: 100, x: 1 }, ...[undefined, null, -1, 0.5, '100', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map((g) => ({ g }))]) {
+      const shown = await push(w, pushData({ ...legacy, ...extra }))
+      t.is(shown.options.body, FALLBACK, 'rejects extra fields or an invalid generation')
+    }
+  }
+})
+
 test('push: a quote or a mention points at the actor\'s own post', async (t) => {
   const w = renderedWorker()
   const quote = await push(w, pushData(valid({ kind: 'quote', body: 'Ana citou sua publicação', ref: ACTOR_REF })))
@@ -1343,7 +1362,7 @@ test('message: the push ping is answered on its port, anything else ignored', (t
   }
   const ping = port()
   w.handlers.message({ data: { type: 'varanda-push-ping' }, ports: [ping] })
-  t.alike(plain(ping.sent), [{ source: 'varanda-sw', push: 1 }])
+  t.alike(plain(ping.sent), [{ source: 'varanda-sw', push: 1, caps: ['seen-sync'] }])
 
   for (const data of [null, 'varanda-push-ping', { type: 'other' }, { type: 'varanda-push-ping', x: 1 }, ['varanda-push-ping']]) {
     const p = port()
@@ -1354,6 +1373,223 @@ test('message: the push ping is answered on its port, anything else ignored', (t
   t.execution(() => w.handlers.message({ data: { type: 'varanda-push-ping' } }))
   t.execution(() => w.handlers.message({}))
   t.execution(() => w.handlers.message(null))
+})
+
+const NOTICE_TAG_VECTORS = JSON.parse(fs.readFileSync(path.join(__dirname, 'notice-tag-vectors.json'), 'utf8'))
+const seenSignal = (over = {}) => ({ v: 1, kind: 'seen-sync', close: [NOTICE_TAG_VECTORS.hashes[0].hash], asOf: 100, ...over })
+
+function shownNotice (w, tag, data) {
+  const n = { options: { tag, data }, posted: true }
+  w.shown.push(n)
+  return n
+}
+
+test('notice tags: the worker mirrors every shared vector', async (t) => {
+  const w = renderedWorker()
+  const mirrored = vm.runInContext('typeof validTag === "function" && typeof tagHash === "function"', w.context)
+  t.ok(mirrored, 'the worker has both mirrors')
+  if (!mirrored) return
+  const { validTag, tagHash, CLOSE_MAX } = vm.runInContext('({ validTag, tagHash, CLOSE_MAX })', w.context)
+  t.is(CLOSE_MAX, 16)
+  for (const tag of NOTICE_TAG_VECTORS.valid) t.ok(validTag(tag), 'accepts a valid vector')
+  for (const tag of NOTICE_TAG_VECTORS.invalid) t.not(validTag(tag), 'rejects an invalid vector')
+  for (const { tag, hash } of NOTICE_TAG_VECTORS.hashes) {
+    t.ok(await tagHash(tag) === hash, 'matches the shared hash')
+  }
+  for (const { payload, tag } of NOTICE_TAG_VECTORS.payloads) {
+    const shown = await push(w, pushData(payload))
+    const actual = validTag(shown.options.tag) ? shown.options.tag : null
+    t.ok(actual === tag, 'matches the shared payload tag')
+  }
+})
+
+test('seen sync: only listed notices at or before asOf close', async (t) => {
+  const w = renderedWorker()
+  const [old] = await noticeShown(w, { v: 1, kind: 'dm', g: 99 })
+  const [equal] = await noticeShown(w, { v: 1, kind: 'dm', g: 100 })
+  const [newer] = await noticeShown(w, { v: 1, kind: 'dm', g: 101 })
+  const [unlisted] = await noticeShown(w, { v: 1, kind: 'dm-page', g: 99 })
+  const missing = shownNotice(w, 'varanda-dm')
+  const invalidTimes = [undefined, null, '99', true, NaN, Infinity, -Infinity].map((g) => shownNotice(w, 'varanda-dm', { g }))
+  await startPush(w, pushData(seenSignal()))
+  t.ok(w.closed.has(old), 'older notice closed')
+  t.ok(w.closed.has(equal), 'equal timestamp closed')
+  t.not(w.closed.has(newer), 'newer notice kept')
+  t.not(w.closed.has(unlisted), 'unlisted notice kept')
+  t.not(w.closed.has(missing), 'missing data kept')
+  t.ok(invalidTimes.every((n) => !w.closed.has(n)), 'nonnumeric and missing times kept')
+  t.is(openNotices(w).length, 10, 'only the unread and undated notices remain')
+  const quietNotice = w.shown[w.shown.length - 1]
+  t.ok(quietNotice.options.silent, 'the WebKit notice is silent')
+  t.is(quietNotice.options.renotify, false)
+  t.ok(w.closed.has(quietNotice), 'the quiet notice leaves the tray')
+})
+
+test('seen sync: social notices close only with a listed hash and a generation at or before asOf', async (t) => {
+  const w = renderedWorker()
+  const { tagHash } = vm.runInContext('({ tagHash })', w.context)
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const ref = kind === 'follow' ? null : (['quote', 'mention'].includes(kind) ? ACTOR_REF : REF)
+    const payload = valid({ kind, ref })
+    const [old] = await noticeShown(w, { ...payload, g: 99 })
+    const [equal] = await noticeShown(w, { ...payload, g: 100 })
+    const [newer] = await noticeShown(w, { ...payload, g: 101 })
+    const [legacy] = await noticeShown(w, payload)
+    const [unlisted] = await noticeShown(w, valid({ kind: 'reply', ref: RECIPIENT + ':99', g: 99 }))
+    const hash = await tagHash('varanda-' + kind + '-' + (ref || ACTOR))
+    await startPush(w, pushData(seenSignal({ close: [hash] })))
+    t.ok(w.closed.has(old), kind + ': older notice closed')
+    t.ok(w.closed.has(equal), kind + ': equal timestamp closed')
+    t.not(w.closed.has(newer), kind + ': newer notice kept')
+    t.not(w.closed.has(legacy), kind + ': legacy notice kept')
+    t.not(w.closed.has(unlisted), kind + ': unlisted notice kept')
+  }
+})
+
+test('seen sync: every app window wakes, including hidden and uncontrolled windows', async (t) => {
+  const w = renderedWorker()
+  const broken = fakeWindow(ORIGIN + '/')
+  broken.postMessage = () => { throw new Error('closed') }
+  const hidden = fakeWindow(ORIGIN + '/conversas')
+  const focused = activeWindow(ORIGIN + '/')
+  const others = ['https://other.test/', ORIGIN + '/account/mod/', ORIGIN + '/seeder/', ORIGIN + '/media/photo', ORIGIN + '/p/post'].map(fakeWindow)
+  w.windows = [broken, hidden, ...others, focused]
+  await startPush(w, pushData(seenSignal()))
+  for (const app of [hidden, focused]) t.alike(plain(app.messages), [{ type: 'varanda-seen-sync' }])
+  t.ok(others.every((c) => c.messages.length === 0), 'non-app windows receive nothing')
+  t.alike(w.matchAllOpts && plain(w.matchAllOpts), { type: 'window', includeUncontrolled: true })
+  t.is(openNotices(w).length, 0, 'no quiet notice remains')
+})
+
+test('seen sync: malformed payloads close no notices and wake no windows', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  w.windows = [app]
+  const notice = shownNotice(w, 'varanda-dm', { g: 1 })
+  const hash = NOTICE_TAG_VECTORS.hashes[0].hash
+  const bad = [
+    ...[undefined, null, 0, 2, '1'].map((v) => seenSignal({ v })),
+    ...[undefined, null, -1, 0.5, '100', NaN, Infinity].map((asOf) => seenSignal({ asOf })),
+    ...[undefined, null, hash, {}, [null], [1], [hash.slice(1)], [hash + 'a'], [hash + '\n'], ['='.repeat(16)], ['+'.repeat(16)], ['/'.repeat(16)], [hash, 'bad'], Array(65).fill(hash), Array(1)].map((close) => seenSignal({ close })),
+    seenSignal({ extra: true }),
+    seenSignal({ pad: '' })
+  ]
+  for (const key of ['v', 'close', 'asOf']) {
+    const payload = seenSignal()
+    delete payload[key]
+    bad.push(payload)
+  }
+  for (const payload of bad) {
+    await startPush(w, pushData(payload))
+    t.not(w.closed.has(notice), 'invalid payload leaves the existing notice open')
+    t.is(openNotices(w).length, 1, 'invalid signal leaves no quiet notice')
+    t.is(app.messages.length, 0, 'invalid payload does not wake the app')
+  }
+})
+
+test('seen sync: empty lists, zero time and sixteen hashes are accepted', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  w.windows = [app]
+  const notice = shownNotice(w, 'varanda-dm', { g: 0 })
+  await startPush(w, pushData(seenSignal({ close: [], asOf: 0 })))
+  t.not(w.closed.has(notice), 'empty list preserves notices')
+  t.is(app.messages.length, 1, 'empty list still wakes the scheduler')
+  const vectors = NOTICE_TAG_VECTORS.hashes.filter(({ tag }) => NOTICE_TAG_VECTORS.valid.includes(tag))
+  const notices = vectors.map(({ tag }) => shownNotice(w, tag, { g: 0 }))
+  const hashes = vectors.map(({ hash }) => hash)
+  while (hashes.length < 16) hashes.push(hashes[0])
+  await startPush(w, pushData({ asOf: 0, close: hashes, kind: 'seen-sync', v: 1 }))
+  t.ok(w.closed.has(notice), 'zero is an accepted timestamp')
+  t.ok(notices.every((n) => w.closed.has(n)), 'all listed tag kinds close')
+  t.is(app.messages.length, 2, 'key order does not matter')
+  t.is(openNotices(w).length, 0)
+})
+
+for (const count of [17, 64, 65]) {
+  test('seen sync: a coalesced signal with ' + count + ' hashes respects the push limit', async (t) => {
+    const w = renderedWorker()
+    const tags = Array.from({ length: count }, (_, i) => 'varanda-like-' + ACTOR + ':' + (i + 1))
+    const notices = tags.map((tag) => shownNotice(w, tag, { g: 100 }))
+    const unlisted = shownNotice(w, 'varanda-dm', { g: 100 })
+    const close = tags.map((tag) => crypto.createHash('sha256').update(tag).digest().subarray(0, 12).toString('base64url'))
+    await startPush(w, pushData(seenSignal({ close })))
+    t.is(notices.filter((n) => w.closed.has(n)).length, count <= 64 ? count : 0, 'only accepted signals close listed notices')
+    t.not(w.closed.has(unlisted), 'unlisted notice stays open')
+  })
+}
+
+test('seen sync: Android waits for its quiet notice to be posted before closing it', async (t) => {
+  const clock = fakeTimers()
+  const w = renderedWorker({ navigator: { userAgent: ANDROID_UA }, timers: clock })
+  w.postDelayMs = 500
+  const done = startPush(w, pushData(seenSignal()))
+  await settle(() => w.shown.length === 1)
+  t.is(w.shown.length, 1, 'WebKit requires a shown notice')
+  t.ok(w.shown[0].options.silent)
+  clock.advance(1999)
+  await settle(() => false, 5)
+  t.is(openNotices(w).length, 1, 'the close waits for posting')
+  clock.advance(1)
+  await done
+  t.is(openNotices(w).length, 0, 'the quiet notice leaves the tray')
+  t.ok(w.closed.has(w.shown[0]), 'the system kept the close')
+})
+
+test('notices close: an app window closes exact tags without a timestamp cutoff', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  const tags = NOTICE_TAG_VECTORS.valid
+  const notices = tags.map((tag) => shownNotice(w, tag, {}))
+  const duplicate = shownNotice(w, tags[0], { g: 101 })
+  const other = shownNotice(w, tags[0] + '-extra', { g: 1 })
+  await message(w, { type: 'varanda-notices-close', tags: [] }, app)
+  t.is(w.closed.size, 0, 'empty list closes nothing')
+  await message(w, { type: 'varanda-notices-close', tags: [tags[0]] }, app)
+  t.ok(w.closed.has(notices[0]), 'an undated notice closes')
+  t.ok(w.closed.has(duplicate), 'all notices with the exact tag close')
+  t.ok(notices.slice(1).every((n) => !w.closed.has(n)), 'unlisted tags stay')
+  const full = tags.slice()
+  while (full.length < 16) full.push(tags[0])
+  await message(w, { type: 'varanda-notices-close', tags: full }, app)
+  t.ok(notices.every((n) => w.closed.has(n)), 'sixteen tags are accepted')
+  t.not(w.closed.has(other), 'a prefix match never closes')
+  t.is(w.shown.length, notices.length + 2, 'window messages show no notice')
+})
+
+test('notices close: a window message with seventeen tags closes nothing', async (t) => {
+  const w = renderedWorker()
+  const tags = Array.from({ length: 17 }, (_, i) => 'varanda-like-' + ACTOR + ':' + (i + 1))
+  const notices = tags.map((tag) => shownNotice(w, tag, { g: 100 }))
+  await message(w, { type: 'varanda-notices-close', tags }, fakeWindow(ORIGIN + '/'))
+  t.ok(notices.every((n) => !w.closed.has(n)), 'the window limit stays at sixteen tags')
+})
+
+test('notices close: invalid tags, shapes and non-app sources close nothing', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  const tag = NOTICE_TAG_VECTORS.valid[0]
+  const notice = shownNotice(w, tag, { g: 1 })
+  const good = { type: 'varanda-notices-close', tags: [tag] }
+  const bad = [
+    ...NOTICE_TAG_VECTORS.invalid.map((invalid) => ({ ...good, tags: [tag, invalid] })),
+    ...[undefined, null, tag, {}, Array(17).fill(tag), [tag].concat(Array(1))].map((tags) => ({ ...good, tags })),
+    { type: good.type },
+    { ...good, extra: true },
+    [good],
+    null
+  ]
+  for (const data of bad) {
+    await message(w, data, app)
+    t.not(w.closed.has(notice), 'invalid message closes nothing')
+  }
+  const sources = [null, {}, { ...app, type: 'worker' }, fakeWindow('https://other.test/'), fakeWindow(ORIGIN + '/account/mod/'), fakeWindow('invalid')]
+  for (const source of sources) {
+    await message(w, good, source)
+    t.not(w.closed.has(notice), 'only an app window may close notices')
+  }
+  await message(w, good, app)
+  t.ok(w.closed.has(notice), 'a valid message still closes the notice')
 })
 
 test('push: a DM wake shows the fixed sentence naming nobody; anything more is the fallback', async (t) => {
@@ -2034,6 +2270,243 @@ test('notificationclick: a DM notice focuses the app and posts its open message'
     await click(bad, { kind, g: 0 })
     await click(bad, { kind })
     t.alike(bad.opened, ['/', '/', '/'], kind + ': malformed data opens the root')
+  }
+})
+
+const GROUP_KEY = 'd'.repeat(64)
+const GROUP_NAME = 'Varanda'
+
+function groupPublic (over = {}) {
+  return { v: 1, kind: 'group', group: GROUP_KEY, body: GROUP_NAME, g: G, ...over }
+}
+
+test('push: a group notice shows the sentence, tag and data of its kind', async (t) => {
+  const w = renderedWorker()
+  const cases = [
+    {
+      label: 'public with a name',
+      payload: (g) => groupPublic({ g }),
+      body: 'Nova mensagem em ' + GROUP_NAME,
+      tag: 'varanda-group-' + GROUP_KEY,
+      kind: 'group'
+    },
+    {
+      label: 'public with no name',
+      payload: (g) => groupPublic({ body: null, g }),
+      body: 'Nova mensagem num grupo',
+      tag: 'varanda-group-' + GROUP_KEY,
+      kind: 'group'
+    },
+    {
+      label: 'private',
+      payload: (g) => ({ v: 1, kind: 'group-private', g }),
+      body: 'Nova mensagem num grupo privado',
+      tag: 'varanda-group-private',
+      kind: 'group-private'
+    }
+  ]
+  for (const c of cases) {
+    for (const g of [G, 1, Number.MAX_SAFE_INTEGER]) {
+      const shown = await push(w, pushData(c.payload(g)))
+      t.is(shown.title, 'Varanda', c.label)
+      t.is(shown.options.body, c.body, c.label)
+      t.is(shown.options.icon, '/icon-192.png', c.label)
+      t.is(shown.options.tag, c.tag, c.label)
+      t.is(shown.options.renotify, false, c.label)
+      t.alike(plain(shown.options.data), { kind: c.kind, g }, c.label + ' g ' + g)
+      t.absent(shown.options.body.includes(GROUP_KEY), c.label + ': the sentence names no key')
+    }
+  }
+
+  // Key order is not part of the shape: the same keys in another order still show.
+  const reordered = await push(w, pushData({ body: GROUP_NAME, g: G, v: 1, group: GROUP_KEY, kind: 'group' }))
+  t.is(reordered.options.body, 'Nova mensagem em ' + GROUP_NAME, 'reordered public keys')
+  t.is(reordered.options.tag, 'varanda-group-' + GROUP_KEY, 'reordered public keys')
+  t.alike(plain(reordered.options.data), { kind: 'group', g: G }, 'reordered public keys')
+  const reorderedPrivate = await push(w, pushData({ g: G, kind: 'group-private', v: 1 }))
+  t.is(reorderedPrivate.options.body, 'Nova mensagem num grupo privado', 'reordered private keys')
+  t.is(reorderedPrivate.options.tag, 'varanda-group-private', 'reordered private keys')
+  t.alike(plain(reorderedPrivate.options.data), { kind: 'group-private', g: G }, 'reordered private keys')
+
+  const long = '😀'.repeat(120)
+  const named = await push(w, pushData(groupPublic({ body: long })))
+  t.is(named.options.body, 'Nova mensagem em ' + long, '120 code points are allowed')
+  t.is(named.options.renotify, false, '120 code points')
+  // validBody accepts a one-space name: it is not the null name.
+  const space = await push(w, pushData(groupPublic({ body: ' ' })))
+  t.is(space.options.body, 'Nova mensagem em  ', 'a name validBody accepts is shown')
+  t.is(space.options.tag, 'varanda-group-' + GROUP_KEY, 'a one-space name still tags the group')
+})
+
+test('push: a malformed public group notice shows only the fallback sentence', async (t) => {
+  const w = renderedWorker()
+  const refused = async (payload, label) => {
+    const shown = await push(w, pushData(payload))
+    t.is(shown.title, 'Varanda', label)
+    t.is(shown.options.body, FALLBACK, label)
+    t.is(shown.options.tag, 'varanda-generic', label)
+    t.alike(plain(shown.options.data), {}, label)
+  }
+  const bodies = {
+    'empty body': '',
+    'body too long': 'a'.repeat(121),
+    '121 emoji': '😀'.repeat(121),
+    newline: 'Varanda\n',
+    'line separator': 'Varanda\u2028',
+    'bidi override': 'Varanda\u202e',
+    'left to right mark': 'Varanda\u200e',
+    'body a number': 1,
+    'body an object': { name: GROUP_NAME },
+    'body an array': [GROUP_NAME],
+    'body false': false
+  }
+  for (const [label, body] of Object.entries(bodies)) await refused(groupPublic({ body }), label)
+  const groups = {
+    uppercase: 'A'.repeat(64),
+    'mixed case': 'a'.repeat(63) + 'F',
+    short: 'a'.repeat(63),
+    long: 'a'.repeat(65),
+    'not hex': 'g'.repeat(64),
+    'empty group': '',
+    'group null': null,
+    'group a number': 1
+  }
+  for (const [label, group] of Object.entries(groups)) await refused(groupPublic({ group }), label)
+  await refused({ kind: 'group', group: GROUP_KEY, body: GROUP_NAME, g: G }, 'missing v')
+  await refused({ v: 1, group: GROUP_KEY, body: GROUP_NAME, g: G }, 'missing kind')
+  await refused({ v: 1, kind: 'group', body: GROUP_NAME, g: G }, 'missing group')
+  await refused({ v: 1, kind: 'group', group: GROUP_KEY, g: G }, 'missing body')
+  await refused({ v: 1, kind: 'group', group: GROUP_KEY, body: GROUP_NAME }, 'missing g')
+  await refused(groupPublic({ x: 1 }), 'extra key')
+  await refused(groupPublic({ body: null, x: 1 }), 'null name with an extra key')
+  await refused(groupPublic({ actor: ACTOR }), 'with an actor')
+  await refused(groupPublic({ name: GROUP_NAME }), 'with a name key')
+  await refused(groupPublic({ visibility: 'public' }), 'with a visibility')
+  const times = {
+    'g a string': String(G),
+    'g zero': 0,
+    'g negative': -G,
+    'g not an integer': G + 0.5,
+    'g past safe integers': Number.MAX_SAFE_INTEGER + 1,
+    'g null': null
+  }
+  for (const [label, g] of Object.entries(times)) await refused(groupPublic({ g }), label)
+  await refused(groupPublic({ v: 2 }), 'wrong version')
+  await refused({ v: 1, kind: 'group', g: G }, 'only the dm keys')
+  await refused(groupPublic({ kind: 'groups' }), 'wrong kind')
+})
+
+test('push: a private group notice with a group, a body or an extra key shows only the fallback sentence', async (t) => {
+  const w = renderedWorker()
+  const refused = async (payload, label) => {
+    const shown = await push(w, pushData(payload))
+    t.is(shown.title, 'Varanda', label)
+    t.is(shown.options.body, FALLBACK, label)
+    t.is(shown.options.tag, 'varanda-generic', label)
+    t.alike(plain(shown.options.data), {}, label)
+  }
+  const priv = { v: 1, kind: 'group-private', g: G }
+  await refused({ ...priv, group: GROUP_KEY }, 'with a group')
+  await refused({ ...priv, body: 'Segredo' }, 'with a body')
+  await refused({ ...priv, body: null }, 'with a null body')
+  await refused({ ...priv, group: GROUP_KEY, body: null }, 'with a group and a body')
+  await refused({ ...priv, x: 1 }, 'extra key')
+  await refused({ v: 1, kind: 'group-private' }, 'missing g')
+  await refused({ kind: 'group-private', g: G }, 'missing version')
+  await refused({ v: 2, kind: 'group-private', g: G }, 'wrong version')
+  await refused({ v: 1, kind: 'group-secret', g: G }, 'unknown kind')
+  const times = {
+    'g a string': String(G),
+    'g zero': 0,
+    'g negative': -G,
+    'g not an integer': G + 0.5,
+    'g past safe integers': Number.MAX_SAFE_INTEGER + 1,
+    'g null': null
+  }
+  for (const [label, g] of Object.entries(times)) await refused({ v: 1, kind: 'group-private', g }, label)
+})
+
+// The focused window's hand-off only re-reads the member inbox; a group
+// thread is not in it, so a group notice must always show.
+test('group notice: shown even with a visible focused app window, which gets no wake', async (t) => {
+  const cases = [
+    ['public with a name', groupPublic(), 'Nova mensagem em ' + GROUP_NAME, 'varanda-group-' + GROUP_KEY],
+    ['public with no name', groupPublic({ body: null }), 'Nova mensagem num grupo', 'varanda-group-' + GROUP_KEY],
+    ['private', { v: 1, kind: 'group-private', g: G }, 'Nova mensagem num grupo privado', 'varanda-group-private']
+  ]
+  for (const [label, payload, body, tag] of cases) {
+    const w = renderedWorker()
+    const win = activeWindow(ORIGIN + '/')
+    const hidden = fakeWindow(ORIGIN + '/')
+    w.windows = [hidden, win]
+    const shown = await noticeShown(w, payload)
+    t.is(shown.length, 1, label + ': shown')
+    if (shown[0]) {
+      t.is(shown[0].options.tag, tag, label)
+      t.is(shown[0].options.body, body, label)
+      t.is(shown[0].options.renotify, false, label)
+      t.is(shown[0].options.silent, undefined, label + ': not the quiet notice')
+    }
+    t.is(w.shown.length, 1, label + ': no quiet notice besides it')
+    t.alike(win.messages, [], label + ': no wake to the focused window')
+    t.alike(hidden.messages, [], label + ': no wake to the other window')
+  }
+})
+
+test('group notice: shown 1 s after an own send, while a DM wake is still muted', async (t) => {
+  const cases = [
+    ['public with a name', groupPublic()],
+    ['public with no name', groupPublic({ body: null })],
+    ['private', { v: 1, kind: 'group-private', g: G }]
+  ]
+  for (const [label, payload] of cases) {
+    const w = renderedWorker()
+    w.now = 1000000
+    await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+    w.now = 1000000 + 1000
+    const shown = await noticeShown(w, payload)
+    t.is(shown.length, 1, label + ': shown inside the mute window')
+    t.alike(await wakeShown(w), [], label + ': the wake itself stays muted')
+  }
+})
+
+// A group notice opens Conversas, the same screen as a dm notice: groups
+// live on that list, and the notification names no group.
+test('notificationclick: a group notice focuses the app and opens Conversas', async (t) => {
+  for (const kind of ['group', 'group-private']) {
+    const w = renderedWorker()
+    const mine = fakeWindow(ORIGIN + '/')
+    w.windows = [mine]
+    t.ok(await click(w, { kind, g: G }), kind + ': closed')
+    t.is(mine.focused, 1, kind)
+    t.alike(plain(mine.messages), [{ type: 'varanda-group-open' }], kind)
+    t.alike(w.opened, [], kind)
+
+    const fresh = renderedWorker()
+    t.ok(await click(fresh, { kind, g: G }))
+    t.alike(fresh.opened, ['/?aviso=grupo'], kind + ': no window opens the app on Conversas')
+
+    const stuck = renderedWorker()
+    const refusing = fakeWindow(ORIGIN + '/')
+    refusing.focus = async () => { throw new Error('InvalidAccessError') }
+    stuck.windows = [refusing]
+    t.ok(await click(stuck, { kind, g: G }))
+    t.alike(stuck.opened, ['/?aviso=grupo'], kind + ': a window that refuses focus')
+    t.alike(refusing.messages, [], kind)
+
+    // Anything but the shape the worker itself stored is not a group notice.
+    t.ok(await click(w, { kind, g: G, group: GROUP_KEY }))
+    t.ok(await click(w, { kind, g: G, body: GROUP_NAME }))
+    t.ok(await click(w, { kind, group: GROUP_KEY }))
+    t.ok(await click(w, { kind, g: '1' }))
+    t.ok(await click(w, { kind }))
+    t.is(mine.messages.length, 1, kind + ': nothing more posted')
+    const bad = renderedWorker()
+    await click(bad, { kind, g: G, group: GROUP_KEY })
+    await click(bad, { kind, group: GROUP_KEY })
+    await click(bad, { kind, g: 0 })
+    await click(bad, { kind })
+    t.alike(bad.opened, ['/', '/', '/', '/'], kind + ': malformed data opens the root')
   }
 })
 

@@ -6,6 +6,7 @@
 // is logged or kept beyond the dedupe keys.
 const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
 const { DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
+const { validateGroupNotice } = require('@varanda/core/lib/group-notice')
 
 // Same rule as VARANDA_ACCOUNT_HTTP in cli.js: the bearer token must never
 // leave the machine.
@@ -132,6 +133,21 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
     return true
   }
 
+  function sendGroup (event) {
+    if (closed) return false
+    if (!validateGroupNotice(event)) {
+      counts.invalid++
+      return false
+    }
+    if (queue.length >= maxPending) {
+      counts.full++
+      return false
+    }
+    queue.push(JSON.stringify(event))
+    if (!draining) drain()
+    return true
+  }
+
   function stats () {
     return { ...counts, pending: queue.length, inflight: inflight === null ? 0 : 1 }
   }
@@ -142,7 +158,7 @@ function createPushRelay ({ baseUrl, token, fetch = globalThis.fetch, timeoutMs 
     if (inflight !== null) inflight.abort()
   }
 
-  return { send, sendDm, stats, close }
+  return { send, sendDm, sendGroup, stats, close }
 }
 
 module.exports = { createPushRelay }

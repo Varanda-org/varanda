@@ -1211,3 +1211,42 @@ test('Excluir conta: the server wires the retention pass into the sweep, after a
   t.is(s.moderation.get(about.id), null, 'purged by the sweep')
   t.is(sweeps, before + 1, 'the phone sweep ran before the purge')
 })
+
+test('deletion caps: own purge step erases caps even if subscription removal failed, preserving another member', async (t) => {
+  const { openPushCapsStore } = require('../lib/account/push-caps-store')
+  const dir = tmpDir(t)
+  const caps = openPushCapsStore(dir)
+  const m = keyPair()
+  const keep = keyPair()
+  const hash = 'c'.repeat(64)
+  for (const who of [m, keep]) await caps.put({ member: who.hex, hash, caps: ['seen-sync'] })
+  let broken = true
+  const logs = []
+  const sweep = createDeletionSweep({
+    accounts: { deleted: () => [m.hex], purged: async () => {} },
+    pushStore: { available: () => !broken, devices: () => 1, removeAll: async () => {} },
+    pushCapsStore: caps,
+    log: (e) => logs.push(e)
+  })
+  t.alike(await sweep.purge(m.hex), { pending: 1 })
+  t.absent(caps.holds(m.hex))
+  t.absent(openPushCapsStore(dir).holds(m.hex), 'gone from disk')
+  t.ok(caps.holds(keep.hex))
+  broken = false
+  t.alike(await sweep.purge(m.hex), { pending: 0 })
+  for (const key of [m.hex, keep.hex, hash]) t.absent(JSON.stringify(logs).includes(key))
+})
+
+test('deletion caps: an unavailable capability store keeps deletion pending until a later purge', async (t) => {
+  let available = false
+  let holds = true
+  const sweep = createDeletionSweep({
+    accounts: { deleted: () => [], purged: async () => {} },
+    pushCapsStore: { available: () => available, holds: () => holds, removeAll: async () => { holds = false } }
+  })
+  t.alike(await sweep.purge('a'.repeat(64)), { pending: 1 })
+  t.ok(holds)
+  available = true
+  t.alike(await sweep.purge('a'.repeat(64)), { pending: 0 })
+  t.absent(holds)
+})

@@ -259,6 +259,72 @@ test('stats carry counts only', async (t) => {
 
 const BOX_BYTES = 116
 
+function groupEvent (overrides = {}) {
+  return { v: 1, kind: 'group', group: ACTOR, visibility: 'public', name: 'Praia', nid: 'ab'.repeat(16), recipients: [RECIPIENT], ...overrides }
+}
+
+function groupRelay (t, opts = {}) {
+  const requests = []
+  const relay = relayFor(t, 'http://127.0.0.1:8790', {
+    fetch: async (url, request) => {
+      requests.push({ url, ...request })
+      return { status: 204 }
+    },
+    ...opts
+  })
+  return { relay, requests }
+}
+
+test('sendGroup posts validated chunks with the same nid and no event logs', async (t) => {
+  const logs = []
+  const { relay, requests } = groupRelay(t, { log: (e) => logs.push(e) })
+  const first = groupEvent()
+  const second = groupEvent({ recipients: ['c3'.repeat(32)] })
+  t.is(relay.sendGroup(first), true)
+  t.is(relay.sendGroup(second), true)
+  await settled(relay)
+  t.alike(requests.map((r) => JSON.parse(r.body)), [first, second])
+  t.is(requests[0].method, 'POST')
+  t.is(requests[0].url, 'http://127.0.0.1:8790/push-event')
+  t.is(requests[0].headers.Authorization, 'Bearer ' + TOKEN)
+  t.is(requests[0].redirect, 'error')
+  t.alike(logs, [])
+  relay.close()
+  t.is(relay.sendGroup(first), false)
+})
+
+test('sendGroup rejects invalid events before making a request', async (t) => {
+  const { relay, requests } = groupRelay(t)
+  const bad = [null, groupEvent({ visibility: 'private' }), groupEvent({ recipients: [] }),
+    groupEvent({ recipients: Array(65).fill(RECIPIENT) }), groupEvent({ nid: 'AB'.repeat(16) }),
+    { ...groupEvent(), author: ACTOR }]
+  for (const ev of bad) t.is(relay.sendGroup(ev), false)
+  t.is(relay.stats().invalid, bad.length)
+  t.is(requests.length, 0)
+  t.is(relay.sendGroup(groupEvent({ visibility: 'private', name: null })), true)
+  await settled(relay)
+  t.is(requests.length, 1)
+})
+
+test('sendGroup shares the queue bound and timeout without retrying', async (t) => {
+  let calls = 0
+  const relay = relayFor(t, 'http://127.0.0.1:8790', {
+    maxPending: 1,
+    timeoutMs: 30,
+    fetch: async (url, { signal }) => {
+      calls++
+      await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('timeout')), { once: true }))
+    }
+  })
+  t.is(relay.sendGroup(groupEvent()), true)
+  t.is(relay.sendGroup(groupEvent()), true)
+  t.is(relay.sendGroup(groupEvent()), false)
+  await settled(relay)
+  t.is(calls, 2)
+  t.is(relay.stats().failed, 2)
+  t.is(relay.stats().full, 1)
+})
+
 function box (fill = 7, n = BOX_BYTES) {
   return Buffer.alloc(n, fill)
 }

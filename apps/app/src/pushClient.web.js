@@ -243,13 +243,13 @@ export async function disablePush ({ node, member, registration = null, subscrip
   return { ok: false, reason: uncertain ? 'uncertain' : 'failed', unsubscribed }
 }
 
-// The DM wake click (scripts/sw.js) opens /?aviso=dm: exactly one aviso,
+// DM and group clicks carry no identity: exactly one aviso,
 // and none of the member notice fields beside it.
-export function dmLaunch (search) {
+export function dmLaunch (search, kind = 'dm') {
   try {
     const params = new URLSearchParams(typeof search === 'string' ? search : '')
     const aviso = params.getAll('aviso')
-    return aviso.length === 1 && aviso[0] === 'dm' && !params.has('actor') && !params.has('recipient') && !params.has('ref')
+    return aviso.length === 1 && aviso[0] === kind && !params.has('actor') && !params.has('recipient') && !params.has('ref')
   } catch {
     return false
   }
@@ -262,7 +262,7 @@ export function captureLaunch () {
   if (hostedPage !== true) return null
   try {
     const search = location.search || ''
-    const intent = dmLaunch(search) ? { kind: 'dm' } : parseLaunch(search)
+    const intent = dmLaunch(search) ? { kind: 'dm' } : dmLaunch(search, 'grupo') ? { kind: 'group' } : parseLaunch(search)
     const kept = stripLaunch(search)
     if (kept !== search) {
       try {

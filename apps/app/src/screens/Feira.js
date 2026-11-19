@@ -30,7 +30,7 @@ import { SearchField } from '../ui/SearchField'
 import { Segmented } from '../ui/Segmented'
 import { TEXT_CAP } from '../ui/Sheet'
 import { EmptyState, SkeletonTile } from '../ui/States'
-import { useStyles } from '../ui/ThemeProvider'
+import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { elevation, fonts, LARGE_TEXT, layout, radius, space, type } from '../ui/theme'
 
 const NO_BLOCKS = new Set()
@@ -45,8 +45,7 @@ const SAVE_FAILED = 'Não foi possível salvar neste aparelho.'
 const listingId = (listing) => listing.author + ':' + listing.seq
 
 // locationStore: { load, save }, backed by createLocationStore at integration.
-// Photos nearly touch, as in the other grids.
-const GRID_GAP = 2
+const GRID_GAP = space.sm
 
 export default function Feira ({
   active = true, ownKey, origin, blocked = NO_BLOCKS, locationStore,
@@ -55,6 +54,7 @@ export default function Feira ({
   const byAuthor = typeof author === 'string' && /^[0-9a-f]{64}$/.test(author) ? author : null
   const node = useNode()
   const styles = useStyles(makeStyles)
+  const { colors } = useTheme()
   const insets = useSafeAreaInsets()
   const bottomPad = useBottomPad()
   const { fontScale } = useWindowDimensions()
@@ -600,7 +600,7 @@ export default function Feira ({
             onPress={onAnnounce}
             style={({ pressed }) => [styles.fab, { bottom: insets.bottom + layout.tabBar + layout.fabAboveTabs }, pressed && styles.pressed]}
           >
-            <Text style={styles.fabText} maxFontSizeMultiplier={TEXT_CAP}>+</Text>
+            <Icon name='plus' size={26} color={colors.accentInk} />
           </PressScale>
           )
         : null}
@@ -639,6 +639,5 @@ const makeStyles = (colors) => StyleSheet.create({
   note: { paddingHorizontal: space.lg, paddingVertical: space.md },
   message: { ...type.postText, color: colors.soft },
   fab: { position: 'absolute', right: layout.fabRight, width: layout.fabSize, height: layout.fabSize, borderRadius: layout.fabSize / 2, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', boxShadow: `${elevation.raised} ${colors.shadow}` },
-  fabText: { ...type.heroTitle, color: colors.accentInk },
   pressed: { opacity: 0.7 }
 })

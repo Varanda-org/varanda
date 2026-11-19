@@ -16,12 +16,14 @@ const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
 const { createIssuerCert } = require('@varanda/core/lib/cert')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
-const { signPush } = require('@varanda/core/lib/push-proof')
+const { CLOSE_MAX, tagOf, tagHash } = require('@varanda/core/lib/notice-tags')
+const { openPushCapsStore } = require('../lib/account/push-caps-store')
+const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
 const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { generateVapidKeys, sendPush, encryptPayload } = require('../lib/account/web-push')
-const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT, DM_NOTICE_TERMS_FLOOR } = require('../lib/account/push-routes')
+const { createPushRoutes, OUTSTANDING_MAX, OUTSTANDING_MS, SEEN_SIGNAL_MS, SEEN_SIGNAL_MAX, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT, DM_NOTICE_TERMS_FLOOR, GROUP_NOTICE_TERMS_FLOOR, RELAY_BODY_MAX } = require('../lib/account/push-routes')
 const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
 const { sealDmNotice, DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
 const { createAccountServer, keyedWindow } = require('../lib/account/server')
@@ -118,6 +120,7 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
   await linkDirect(store, iss, actor, 'bia', '2222222222222222222222', 'bia@example.test')
   const terms = openTermsStore(dir, { now: c.now })
   const pushStore = openPushStore(dir, { now: c.now })
+  const pushCapsStore = openPushCapsStore(dir)
   const keys = vapid ? generateVapidKeys() : null
   const wakeKey = loadOrCreateWakeKey(dir)
   const relayToken = nodeCrypto.randomBytes(32).toString('hex')
@@ -141,6 +144,7 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
     push: push
       ? {
           pushStore,
+          pushCapsStore,
           vapid: keys === null ? null : { ...keys, subject: ORIGIN },
           send: send ?? ((args) => sendPush({ ...args, fetch: fakeFetch, now: c.now() })),
           delayMs: () => 0,
@@ -229,7 +233,7 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
     return sub
   }
 
-  return { dir, c, iss, store, terms, pushStore, keys, wakeKey, dmBox, relayDm, subscribe, relayToken, delivered, statusOf, logs, texts, secrets, listener, server, m, actor, request, post, start, sign, finish, toggle, check, acceptTerms, relay, like }
+  return { dir, c, iss, store, terms, pushStore, pushCapsStore, keys, wakeKey, dmBox, relayDm, subscribe, relayToken, delivered, statusOf, logs, texts, secrets, listener, server, m, actor, request, post, start, sign, finish, toggle, check, acceptTerms, relay, like }
 }
 
 // No endpoint, key, nonce, signature, token or notice text in any log line.
@@ -291,7 +295,10 @@ test('push: on and off with a real proof; check follows the stored row', async (
   t.alike((await s.check(s.m, subscription())).body, { registered: false }, 'unknown endpoint')
   t.alike((await s.check(s.actor, sub)).body, { registered: false }, 'another member')
 
+  await s.check(s.m, sub, { caps: ['seen-sync'] })
+  t.alike(s.pushCapsStore.get(s.m.hex, endpointHash(sub.endpoint)), ['seen-sync'])
   const off = await s.toggle(s.m, 'off', sub)
+  t.absent(s.pushCapsStore.holds(s.m.hex))
   t.is(off.status, 200, off.text)
   t.alike(off.body, { ok: true, changed: true })
   t.alike(s.pushStore.list(s.m.hex), [])
@@ -504,7 +511,7 @@ test('relay: without a token nothing is read; a wrong token or an Origin never r
   const bad = await s.relay({ ...s.like(s.actor, s.m), extra: 1 })
   t.is(bad.status, 400)
   t.alike(bad.body, { error: 'pedido-invalido' })
-  t.is((await s.relay('x'.repeat(2000))).status, 413, 'body over 1024 bytes')
+  t.is((await s.relay('x'.repeat(9 * 1024))).status, 413, 'body over 8192 bytes')
   t.is(s.delivered.length, 0)
   cleanLogs(t, s)
 })
@@ -1019,7 +1026,7 @@ const PAGES_THROW_KEY = 'fe'.repeat(32)
 
 // createPushRoutes with a real push store and keyedWindow, a stub pages
 // store and Terms store, and a send spy.
-async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStore = null, delay = 0, delayMs = () => delay } = {}) {
+async function dmRoutes (t, { pages = new Map(), accepted = () => true, terms = null, pushStore = null, delay = 0, delayMs = () => delay } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const clock = { t: Date.parse('2026-11-18T12:00:00.000Z') }
   clock.now = () => clock.t
@@ -1033,7 +1040,7 @@ async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStor
   const r = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
-    terms: { available: () => true, list: (member) => accepted(member) ? [{ version: DM_NOTICE_TERMS_FLOOR }] : [{ version: DM_NOTICE_TERMS_FLOOR - 1 }] },
+    terms: terms ?? { available: () => true, list: (member) => accepted(member) ? [{ version: DM_NOTICE_TERMS_FLOOR }] : [{ version: DM_NOTICE_TERMS_FLOOR - 1 }] },
     pagesStore: {
       get (key) {
         if (key === PAGES_THROW_KEY) throw new Error('indisponivel')
@@ -1068,9 +1075,10 @@ async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStor
 function noKeysLogged (t, logs) {
   const all = logs.join('\n')
   t.absent(/[0-9a-f]{64}/.test(all), 'no member or page key in the logs')
+  t.absent(/[0-9a-f]{32}/.test(all), 'no notice id or key in the logs')
   for (const line of logs) {
     const e = JSON.parse(line)
-    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason' || (k === 'kind' && e.kind === 'dm')), 'only event, reason and kind: ' + line)
+    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason' || (k === 'kind' && ['dm', 'group'].includes(e.kind))), 'only event, reason and kind: ' + line)
   }
 }
 
@@ -1265,6 +1273,255 @@ test('relay: DM notices only enter while the queue is under half full, a member 
   t.is(d.r.stats().dropped, HALF + 1 + 5)
   t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'dm', reason: 'descartado' })).length, 2)
   t.is(d.sent.length, 0, 'still waiting for the delay')
+  noKeysLogged(t, d.logs)
+})
+
+function groupEvent (recipients, extra = {}) {
+  return {
+    v: 1,
+    kind: 'group',
+    group: member().hex,
+    visibility: 'public',
+    name: 'Clube de leitura',
+    nid: nodeCrypto.randomBytes(16).toString('hex'),
+    recipients,
+    ...extra
+  }
+}
+
+function groupRoutes (t, options = {}) {
+  return dmRoutes(t, {
+    terms: { available: () => true, list: () => [{ version: GROUP_NOTICE_TERMS_FLOOR }] },
+    ...options
+  })
+}
+
+test('relay: a group notice fans out to 64 members once, including overlapping chunks after the cooldown', async (t) => {
+  const d = await groupRoutes(t)
+  const members = Array.from({ length: 64 }, () => member())
+  const endpoints = []
+  for (const m of members) endpoints.push((await d.subscribe(m)).endpoint)
+  const event = groupEvent(members.map((m) => m.hex))
+  await d.relay(event)
+  t.alike(d.replies, [202])
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: '64 group notices drained' })
+  t.alike(d.sent.map((s) => s.endpoint).sort(), endpoints.sort(), 'each member once')
+  t.is(d.r.stats().seen, 64, 'one seen entry per recipient')
+  for (const s of d.sent) t.alike(s.payload, { v: 1, kind: 'group', group: event.group, body: event.name, g: d.clock.t })
+  await d.relay(event)
+  t.is(d.sent.length, 64, 'immediate replay sends nothing')
+
+  d.clock.t += 10 * 60 * 1000
+  await d.relay(event)
+  t.is(d.sent.length, 64, 'seen survives the cooldown')
+  const next = member()
+  const sub = await d.subscribe(next)
+  await d.relay({ ...event, recipients: [members[0].hex, next.hex] })
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'overlapping chunk drained' })
+  t.is(d.sent.length, 65, 'only the new recipient in the later chunk')
+  t.is(d.sent[64].endpoint, sub.endpoint)
+  t.is(d.r.stats().seen, 65)
+  t.absent(d.logs.join('\n').includes(event.name), 'no group name in logs')
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group cooldown is per group and member and ends at ten minutes', async (t) => {
+  const d = await groupRoutes(t)
+  const a = member()
+  const b = member()
+  const sa = await d.subscribe(a)
+  const sb = await d.subscribe(b)
+  const event = groupEvent([a.hex])
+  const next = (recipients = [a.hex]) => groupEvent(recipients, { group: event.group })
+  await d.relay(event)
+  await d.relay(next([a.hex, b.hex]))
+  await until(() => d.sent.length === 2, { name: 'one notice each' })
+  t.alike(d.sent.map((s) => s.endpoint), [sa.endpoint, sb.endpoint])
+  await d.relay(groupEvent([a.hex]))
+  await until(() => d.sent.length === 3, { name: 'another group' })
+  d.clock.t += 10 * 60 * 1000 - 1
+  await d.relay(next())
+  t.is(d.sent.length, 3, 'still inside the window')
+  d.clock.t++
+  await d.relay(next())
+  await until(() => d.sent.length === 4, { name: 'next group window' })
+  t.is(d.sent[3].endpoint, sa.endpoint)
+  t.not(d.sent[3].topic, d.sent[0].topic, 'fresh topic for the next notice')
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group validation accepts 64 recipients and refuses extra keys, private names and a 9 KB body', async (t) => {
+  const s = await setup(t)
+  const event = groupEvent(Array.from({ length: 64 }, () => member().hex))
+  t.is(RELAY_BODY_MAX, 8192)
+  t.ok(Buffer.byteLength(JSON.stringify(event)) > 1024, 'larger than the old body limit')
+  const good = await s.relay(event)
+  t.is(good.status, 202)
+  t.alike(good.body, {})
+  for (const bad of [
+    { ...event, author: s.actor.hex },
+    { ...event, visibility: 'private' },
+    { ...event, recipients: [...event.recipients, s.m.hex] },
+    { ...event, recipients: [s.m.hex, s.m.hex] },
+    { ...event, recipients: [] },
+    { ...event, nid: 'A'.repeat(32) },
+    { ...event, name: '\u001b[31mnome' }
+  ]) {
+    const r = await s.relay(bad)
+    t.is(r.status, 400)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const oversized = JSON.stringify(event).padEnd(9 * 1024, ' ')
+  t.is((await s.relay(oversized)).status, 413, 'valid JSON still exceeds the body limit')
+  t.is(s.delivered.length, 0)
+  noKeysLogged(t, s.logs)
+})
+
+test('relay: private group payloads contain only the kind and enqueue time, public names may be null', async (t) => {
+  const d = await groupRoutes(t)
+  const m = member()
+  await d.subscribe(m)
+  const event = groupEvent([m.hex], { visibility: 'private', name: null })
+  await d.relay(event)
+  await until(() => d.sent.length === 1, { name: 'private notice' })
+  t.alike(d.sent[0].payload, { v: 1, kind: 'group-private', g: d.clock.t })
+  t.absent(/[0-9a-f]{32}/.test(JSON.stringify(d.sent[0].payload)), 'no group, member or notice id')
+  const publicEvent = groupEvent([m.hex], { name: null })
+  await d.relay(publicEvent)
+  await until(() => d.sent.length === 2, { name: 'unnamed public notice' })
+  t.alike(d.sent[1].payload, { v: 1, kind: 'group', group: publicEvent.group, body: null, g: d.clock.t })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group Terms floor is 99 per member; skipped members keep their cooldown open', async (t) => {
+  const old = member()
+  const current = member()
+  const future = member()
+  const unreadable = member()
+  let available = true
+  let version = 93
+  const d = await groupRoutes(t, {
+    terms: {
+      available: () => available,
+      list: (m) => {
+        if (m === unreadable.hex) throw new Error('indisponivel')
+        return [{ version: m === old.hex ? version : m === future.hex ? 100 : 99 }]
+      }
+    }
+  })
+  t.is(GROUP_NOTICE_TERMS_FLOOR, 99)
+  await d.subscribe(old)
+  const currentSub = await d.subscribe(current)
+  const futureSub = await d.subscribe(future)
+  await d.subscribe(unreadable)
+  const event = groupEvent([old.hex, current.hex, future.hex, unreadable.hex])
+  await d.relay(event)
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'eligible group members' })
+  t.alike(d.sent.map((s) => s.endpoint), [currentSub.endpoint, futureSub.endpoint])
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'group', reason: 'termos-pendentes' })).length, 2)
+  version = 99
+  await d.relay(groupEvent([old.hex], { group: event.group }))
+  await until(() => d.sent.length === 3, { name: 'newly accepted terms without waiting' })
+
+  const idle = member()
+  const empty = groupEvent([idle.hex])
+  await d.relay(empty)
+  await d.subscribe(idle)
+  available = false
+  await d.relay(groupEvent([idle.hex], { group: empty.group }))
+  t.ok(d.logs.includes(JSON.stringify({ event: 'push', kind: 'group', reason: 'indisponivel' })))
+  available = true
+  await d.relay(groupEvent([idle.hex], { group: empty.group }))
+  await until(() => d.sent.length === 4, { name: 'new device without waiting' })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group notices have a separate hourly cap of 60 per member', async (t) => {
+  const d = await groupRoutes(t)
+  const m = member()
+  const other = member()
+  await d.subscribe(m)
+  const otherSub = await d.subscribe(other)
+  const first = groupEvent([m.hex])
+  await d.relay(first)
+  for (let i = 0; i < 61; i++) await d.relay(groupEvent([m.hex], { group: first.group }))
+  for (let i = 0; i < 59; i++) await d.relay(groupEvent([m.hex]))
+  const capped = groupEvent([m.hex, other.hex])
+  await d.relay(capped)
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'hourly group cap drained' })
+  t.is(d.sent.length, 61, 'cooldown refusals do not spend the hourly cap')
+  t.is(d.sent[60].endpoint, otherSub.endpoint, 'the other member has a separate budget')
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'group', reason: 'teto' })).length, 1)
+  await d.dm(m.hex)
+  await d.relay({ v: 1, kind: 'like', actor: other.hex, recipient: m.hex, seq: 1, ref: m.hex + ':7', name: null })
+  await until(() => d.sent.length === 63, { name: 'DM and social budgets remain available' })
+  t.alike(d.sent.slice(61).map((s) => s.payload.kind), ['dm', 'like'])
+  d.clock.t += 3600 * 1000 - 1
+  await d.relay(groupEvent([m.hex], { group: capped.group }))
+  t.is(d.sent.length, 63, 'still capped just before the next hour')
+  d.clock.t++
+  await d.relay(groupEvent([m.hex], { group: capped.group }))
+  await until(() => d.sent.length === 64, { name: 'next hour without a cooldown charge from the refusal' })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group notices take at most half the queue and only charge a cooldown when every device fits', async (t) => {
+  const half = Math.floor(MAX_QUEUE / 2)
+  const big = member()
+  const fits = member()
+  const late = member()
+  const broken = member()
+  let unreadable = true
+  const rows = new Map([[big.hex, half + 1], [fits.hex, half - 4], [late.hex, 5], [broken.hex, 1]])
+  const pushStore = {
+    available: () => true,
+    list: (m) => {
+      if (m === broken.hex && unreadable) throw new Error('indisponivel')
+      return Array.from({ length: rows.get(m) || 0 }, (_, i) => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/' + m.slice(0, 8) + i, p256dh: 'p' + i, auth: 'a' + i }))
+    }
+  }
+  const d = await groupRoutes(t, { pushStore, delay: 60000 })
+  const event = groupEvent([big.hex, fits.hex, late.hex, broken.hex])
+  await d.relay(event)
+  t.is(d.r.stats().queued, half - 4, 'only the member whose devices fit')
+  t.is(d.r.stats().dropped, half + 1 + 5)
+  t.ok(d.logs.includes(JSON.stringify({ event: 'push', kind: 'group', reason: 'indisponivel' })))
+  rows.set(big.hex, 1)
+  rows.set(late.hex, 2)
+  unreadable = false
+  await d.relay(groupEvent([big.hex, late.hex, broken.hex], { group: event.group }))
+  t.is(d.r.stats().queued, half, 'the refused members still have their windows open')
+  t.is(d.sent.length, 0, 'all notices wait for their delay')
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group delays and HMAC topics are per member and shared by that member devices', async (t) => {
+  let draws = 0
+  const d = await groupRoutes(t, { delayMs: () => ++draws * 20 })
+  const a = member()
+  const b = member()
+  const idle = member()
+  const subs = [await d.subscribe(a), await d.subscribe(a), await d.subscribe(b)]
+  const event = groupEvent([a.hex, b.hex, idle.hex])
+  const g = d.clock.t
+  await d.relay(event)
+  t.is(draws, 2, 'one draw per member with devices')
+  t.is(d.sent.length, 0)
+  d.clock.t += 20
+  await until(() => d.sent.length === 2, { name: 'first member devices' })
+  t.alike(d.sent.map((s) => s.endpoint).sort(), subs.slice(0, 2).map((s) => s.endpoint).sort())
+  d.clock.t += 20
+  await until(() => d.sent.length === 3, { name: 'second member device' })
+  t.is(d.sent[2].endpoint, subs[2].endpoint)
+  t.is(d.sent[0].topic, d.sent[1].topic)
+  t.not(d.sent[0].topic, d.sent[2].topic)
+  for (const s of d.sent) {
+    const recipient = s.endpoint === subs[2].endpoint ? b.hex : a.hex
+    const input = 'group ' + event.nid + ' ' + g + ' ' + recipient
+    t.is(s.topic, nodeCrypto.createHmac('sha256', TOPIC_KEY).update(input).digest('hex').slice(0, 32))
+    t.not(s.topic, sha256(input).toString('hex').slice(0, 32), 'never a bare hash')
+    t.is(s.payload.g, g, 'enqueue time, not send time')
+  }
   noKeysLogged(t, d.logs)
 })
 
@@ -2207,3 +2464,474 @@ for (const outcomes of [['gone', 'ok'], ['gone', 'dropped']]) {
     await r.close()
   })
 }
+
+async function seenPush (t, options = {}) {
+  const clock = { t: 1800000000000 }
+  const dir = tmpDir(t)
+  const pushStore = openPushStore(dir)
+  const pushCapsStore = openPushCapsStore(dir)
+  const timers = new Set()
+  const sent = []
+  const logs = []
+  const releases = []
+  const token = 'de'.repeat(32)
+  const wakeKey = loadOrCreateWakeKey(path.join(tmpDir(t), 'wake'))
+  let body
+  const r = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: true, username: null }) },
+    terms: { available: () => true, list: () => [{ version: TERMS_VERSION }] },
+    pushStore,
+    pushCapsStore,
+    vapid: { ...generateVapidKeys(), subject: ORIGIN },
+    wakeKey,
+    relayTokenHash: sha256(token),
+    seenSignal: true,
+    seenDelayMs: () => 0,
+    delayMs: () => 60000,
+    now: () => clock.t,
+    send: async (args) => { sent.push(args); return 'ok' },
+    setTimer: (fn, ms) => { const timer = { fn, at: clock.t + ms }; timers.add(timer); return timer },
+    clearTimer: (timer) => timers.delete(timer),
+    log: (e) => logs.push(e),
+    http: {
+      ...HTTP_STUB,
+      send: (res, status, body) => Object.assign(res, { status, body }),
+      readJsonBody: async () => body,
+      keyedWindow: (...args) => {
+        const window = keyedWindow(...args)
+        const release = window.release
+        window.release = (...args) => { releases.push(args); release(...args) }
+        return window
+      }
+    },
+    ...options
+  })
+  t.teardown(() => r.close())
+  async function advance (ms) {
+    const end = clock.t + ms
+    for (;;) {
+      const next = [...timers].filter((timer) => timer.at <= end).sort((a, b) => a.at - b.at)[0]
+      if (!next) break
+      clock.t = next.at
+      timers.delete(next)
+      next.fn()
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+    }
+    clock.t = end
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+  async function subscribe (who, caps = ['seen-sync']) {
+    const sub = subscription()
+    await pushStore.put({ member: who.hex, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth })
+    await pushCapsStore.put({ member: who.hex, hash: endpointHash(sub.endpoint), caps })
+    return sub
+  }
+  async function relay (event) {
+    body = event
+    await r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  }
+  async function check (who, sub, extra = {}) {
+    body = { member: who.hex, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, ...extra }
+    const res = {}
+    await r.handle({ method: 'POST' }, res, { pathname: '/account/push/check' })
+    return res
+  }
+  let seq = 0
+  const follow = (who, from = member()) => relay({ v: 1, kind: 'follow', actor: from.hex, recipient: who.hex, seq: ++seq, ref: null, name: null })
+  const dm = (who) => relay({ v: 1, kind: 'dm', box: sealDmNotice(who.hex, wakeKey.publicKey).toString('base64url') })
+  async function toggle (who, action, sub) {
+    const start = {}
+    body = { member: who.hex, action }
+    await r.handle({ method: 'POST' }, start, { pathname: '/account/push/start' })
+    const nonce = start.body.nonce
+    body = { member: who.hex, action, nonce, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth }
+    body.signature = signPush({ member: who.hex, action, nonce, p256dh: sub.p256dh, auth: sub.auth, association: options.association ?? '0'.repeat(64), endpointHash: endpointHash(sub.endpoint) }, who.kp)
+    const res = {}
+    await r.handle({ method: 'POST' }, res, { pathname: '/account/push/finish' })
+    return res
+  }
+  const signals = () => sent.map((s) => JSON.parse(s.payload)).filter((p) => p.kind === 'seen-sync')
+  return { r, dir, clock, pushStore, pushCapsStore, timers, sent, signals, logs, releases, advance, subscribe, relay, check, toggle, follow, dm }
+}
+
+test('seen push: switch off recalls queued copies and refunds every social charge without a signal', async (t) => {
+  const s = await seenPush(t, { seenSignal: false })
+  const m = member()
+  await s.subscribe(m)
+  await s.subscribe(m)
+  for (let i = 0; i < 65; i++) {
+    await s.follow(m)
+    const tags = s.r.outstanding(m.hex)
+    s.r.seenWritten(m.hex, tags.slice(-1), s.clock.t)
+  }
+  t.is(s.r.stats().queued, 0)
+  t.is(s.releases.length, 65 * 4, 'recipient, pair, actor and cooldown refunded once per notice')
+  await s.advance(120000)
+  t.alike(s.sent, [])
+  t.alike(s.signals(), [])
+  t.absent(JSON.stringify(s.logs).includes('varanda-'), 'no tag logged')
+  t.absent(JSON.stringify(s.logs).includes(m.hex), 'no member logged')
+})
+
+test('seen push: five writes coalesce after twenty quiet seconds with union and min asOf, capable devices only', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  const capable = await s.subscribe(m)
+  await s.subscribe(m, [])
+  const tags = []
+  const asOf = s.clock.t
+  for (let i = 0; i < 5; i++) {
+    await s.follow(m)
+    const tag = s.r.outstanding(m.hex).at(-1)
+    tags.push(tag)
+    s.r.seenWritten(m.hex, [tag, tags[0]], s.clock.t)
+    await s.advance(3000)
+  }
+  t.alike(s.signals(), [])
+  await s.advance(SEEN_SIGNAL_MS - 3001)
+  t.alike(s.signals(), [])
+  await s.advance(1)
+  t.alike(s.signals(), [{ v: 1, kind: 'seen-sync', close: tags.map(tagHash), asOf }])
+  t.is(s.sent[0].subscription.endpoint, capable.endpoint)
+  t.is(s.sent[0].padTo, PUSH_PAD_TO)
+  for (const tag of tags) t.absent(JSON.stringify(s.logs).includes(tag))
+})
+
+for (const otherTag of [false, true]) {
+  test('seen push: a later write cannot advance an earlier hash cutoff (' + otherTag + ')', async (t) => {
+    const s = await seenPush(t)
+    const m = member()
+    const actor = member()
+    await s.subscribe(m)
+    await s.follow(m, actor)
+    const tag = s.r.outstanding(m.hex)[0]
+    const t0 = s.clock.t
+    s.r.seenWritten(m.hex, [tag], t0)
+    await s.advance(1000)
+    await s.follow(m, actor)
+    const t1 = s.clock.t
+    await s.advance(1000)
+    if (otherTag) await s.follow(m)
+    s.r.seenWritten(m.hex, otherTag ? s.r.outstanding(m.hex).slice(-1) : [], s.clock.t)
+    t.is(s.r.stats().queued, 1, 'the unread notice remains queued')
+    await s.advance(SEEN_SIGNAL_MS)
+    t.is(s.signals().length, 1)
+    t.ok(s.signals()[0].close.includes(tagHash(tag)))
+    t.is(s.signals()[0].asOf, t0)
+    t.ok(s.signals()[0].asOf < t1, 'the signal cannot close the unread replacement')
+  })
+}
+
+test('seen push: social generation is sent only to capable subscriptions with fixed padding', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  const actor = member()
+  const capable = await s.subscribe(m)
+  const legacy = await s.subscribe(m, [])
+  let seq = 0
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const ref = kind === 'follow' ? null : (['quote', 'mention'].includes(kind) ? actor.hex : m.hex) + ':' + (seq + 1)
+    const g = s.clock.t
+    await s.relay({ v: 1, kind, actor: actor.hex, recipient: m.hex, seq: ++seq, ref, name: null })
+    await s.advance(60000)
+    const copies = s.sent.slice(-2)
+    const current = copies.find((copy) => copy.subscription.endpoint === capable.endpoint)
+    const old = copies.find((copy) => copy.subscription.endpoint === legacy.endpoint)
+    const payload = JSON.parse(current.payload)
+    const expected = { v: 1, kind, body: payload.body, actor: actor.hex, recipient: m.hex, ref }
+    t.alike(payload, { ...expected, g }, kind + ': enqueue generation')
+    t.is(old.payload, JSON.stringify(expected), kind + ': exact legacy bytes')
+    for (const copy of copies) t.is(copy.padTo, PUSH_PAD_TO)
+    const ciphertext = (copy) => encryptPayload({ ...copy.subscription, plaintext: copy.payload, padTo: copy.padTo })
+    t.is(ciphertext(current).length, ciphertext(old).length, kind + ': fixed ciphertext size')
+  }
+})
+
+for (const enabled of [true, false]) {
+  test('seen push: social generation follows the capability ' + (enabled ? 'removed' : 'added') + ' during the delivery delay', async (t) => {
+    const s = await seenPush(t)
+    const m = member()
+    const actor = member()
+    const sub = await s.subscribe(m, enabled ? ['seen-sync'] : [])
+    const g = s.clock.t
+    await s.follow(m, actor)
+    t.is(s.r.stats().queued, 1)
+    await s.advance(30000)
+    t.alike((await s.check(m, sub, { caps: enabled ? [] : ['seen-sync'] })).body, { registered: true })
+    await s.advance(29999)
+    t.is(s.sent.length, 0, 'the copy still waits for its delivery time')
+    await s.advance(1)
+    t.is(s.sent.length, 1)
+    const copy = s.sent[0]
+    const payload = JSON.parse(copy.payload)
+    const expected = { v: 1, kind: 'follow', body: payload.body, actor: actor.hex, recipient: m.hex, ref: null }
+    t.is(copy.payload, JSON.stringify(enabled ? expected : { ...expected, g }), 'exact keys and original generation for the current capability')
+    t.is(copy.padTo, PUSH_PAD_TO)
+  })
+}
+
+test('seen push: social recall matches both tag and enqueue generation for both capabilities', async (t) => {
+  const s = await seenPush(t, { seenSignal: false })
+  const m = member()
+  const actor = member()
+  await s.subscribe(m)
+  await s.subscribe(m, [])
+  const event = { v: 1, kind: 'reply', actor: actor.hex, recipient: m.hex, seq: 1, ref: m.hex + ':1', name: null }
+  await s.relay(event)
+  const asOf = s.clock.t
+  await s.relay({ ...event, seq: 2, ref: m.hex + ':2' })
+  await s.advance(1)
+  await s.relay({ ...event, seq: 3 })
+  const tag = 'varanda-reply-' + event.ref
+  s.r.seenWritten(m.hex, [tag], asOf)
+  t.is(s.r.stats().queued, 4, 'only the two older copies of the listed tag are recalled')
+  await s.advance(60000)
+  t.is(s.sent.length, 4)
+  const current = s.sent.map((copy) => JSON.parse(copy.payload)).filter((payload) => payload.g !== undefined)
+  t.alike(current.map(({ g, ...payload }) => [tagOf(payload), g]), [
+    ['varanda-reply-' + m.hex + ':2', asOf],
+    [tag, asOf + 1]
+  ])
+})
+
+test('seen push: an enqueue after asOf and an in-flight job are not recalled or refunded', async (t) => {
+  let settle
+  const inFlight = []
+  const s = await seenPush(t, { delayMs: () => 0, send: (args) => { inFlight.push(args); return new Promise((resolve) => { settle = resolve }) } })
+  const m = member()
+  await s.subscribe(m)
+  await s.follow(m)
+  const tags = s.r.outstanding(m.hex)
+  s.r.seenWritten(m.hex, tags, s.clock.t)
+  t.is(s.r.stats().inFlight, 1)
+  t.alike(s.releases, [])
+  settle('ok')
+  await s.advance(0)
+  t.is(inFlight.length, 1)
+  const newer = await seenPush(t)
+  await newer.subscribe(m)
+  const asOf = newer.clock.t
+  await newer.advance(1)
+  await newer.follow(m)
+  const tag = newer.r.outstanding(m.hex)[0]
+  newer.r.seenWritten(m.hex, [tag], asOf)
+  t.is(newer.r.stats().queued, 1)
+  t.alike(newer.releases, [])
+  await newer.advance(SEEN_SIGNAL_MS)
+  t.is(newer.signals()[0].asOf, asOf, 'worker receives the cutoff, not the flush time')
+  await newer.advance(60000)
+  t.is(newer.sent.filter((s) => {
+    const { g, ...payload } = JSON.parse(s.payload)
+    return tagOf(payload) === tag
+  }).length, 1)
+})
+
+test('seen push: outstanding is member-scoped, bounded and expires; unsent and malformed tags never enter the signal', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  const other = member()
+  await s.subscribe(m)
+  for (let i = 0; i < OUTSTANDING_MAX + 1; i++) {
+    await s.follow(m)
+    s.r.seenWritten(m.hex, s.r.outstanding(m.hex).slice(-1), s.clock.t)
+  }
+  t.is(s.r.outstanding(m.hex).length, OUTSTANDING_MAX)
+  t.alike(s.r.outstanding(other.hex), [])
+  const neverSent = 'varanda-follow-' + other.hex
+  s.r.seenWritten(m.hex, [neverSent], s.clock.t)
+  s.r.seenWritten(m.hex, ['invalid'], s.clock.t)
+  await s.advance(SEEN_SIGNAL_MS)
+  t.absent(s.signals()[0].close.includes(tagHash(neverSent)))
+  await s.advance(OUTSTANDING_MS)
+  t.alike(s.r.outstanding(m.hex), [])
+  t.absent(JSON.stringify(s.logs).includes(neverSent))
+})
+
+test('seen push: one and sixteen hashes have identical padded ciphertext lengths', async (t) => {
+  async function ciphertext (count) {
+    const s = await seenPush(t)
+    const m = member()
+    await s.subscribe(m)
+    for (let i = 0; i < count; i++) await s.follow(m)
+    s.r.seenWritten(m.hex, s.r.outstanding(m.hex), s.clock.t)
+    await s.advance(SEEN_SIGNAL_MS)
+    t.is(s.signals()[0].close.length, count)
+    const { subscription, payload, padTo } = s.sent[0]
+    return encryptPayload({ ...subscription, plaintext: payload, padTo }).length
+  }
+  const one = await ciphertext(1)
+  t.is(await ciphertext(CLOSE_MAX), one)
+  const sub = subscription()
+  t.is(encryptPayload({ ...sub, plaintext: JSON.stringify({ v: 1, kind: 'dm', g: 1800000000000 }), padTo: PUSH_PAD_TO }).length, one)
+})
+
+test('seen push: signal hourly budget is thirty, independent of the sixty social notices', async (t) => {
+  const s = await seenPush(t, { delayMs: () => 0 })
+  const m = member()
+  await s.subscribe(m)
+  for (let i = 0; i < 60; i++) await s.follow(m)
+  for (let i = 0; i < SEEN_SIGNAL_MAX + 1; i++) {
+    s.r.seenWritten(m.hex, [], s.clock.t)
+    await s.advance(SEEN_SIGNAL_MS)
+  }
+  t.is(s.signals().length, SEEN_SIGNAL_MAX)
+  t.is(s.sent.length - s.signals().length, 60)
+  await s.advance(3600000)
+  s.r.seenWritten(m.hex, [], s.clock.t)
+  await s.advance(SEEN_SIGNAL_MS)
+  t.is(s.signals().length, SEEN_SIGNAL_MAX + 1)
+})
+
+test('seen push: DM and group recall refunds their cooldown and hourly budget', async (t) => {
+  const s = await seenPush(t, { seenSignal: false })
+  const m = member()
+  await s.subscribe(m)
+  const group = 'a'.repeat(64)
+  for (let i = 0; i < 61; i++) {
+    await s.dm(m)
+    await s.relay(groupEvent([m.hex], { group, nid: i.toString(16).padStart(32, '0') }))
+    t.is(s.r.stats().queued, 2)
+    s.r.seenWritten(m.hex, ['varanda-dm', 'varanda-group-' + group], s.clock.t)
+  }
+  t.is(s.r.stats().queued, 0)
+  t.is(s.releases.length, 61 * 4)
+  await s.advance(60000)
+  t.alike(s.sent, [])
+})
+
+test('seen push: check persists exact worker capabilities only after endpoint and both keys match', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  const sub = await s.subscribe(m, [])
+  const hash = endpointHash(sub.endpoint)
+  for (const caps of [null, {}, 'seen-sync', ['unknown'], ['seen-sync', 'seen-sync'], ['seen-sync', 'unknown']]) {
+    await t.exception(s.check(m, sub, { caps }), /pedido-invalido/)
+  }
+  t.alike(s.pushCapsStore.get(m.hex, hash), [])
+  const wrong = subscription()
+  t.alike((await s.check(m, sub, { caps: ['seen-sync'], auth: wrong.auth })).body, { registered: false })
+  t.alike((await s.check(m, sub, { caps: ['seen-sync'], p256dh: wrong.p256dh })).body, { registered: false })
+  t.alike(s.pushCapsStore.get(m.hex, hash), [])
+  t.alike((await s.check(m, sub, { caps: ['seen-sync'] })).body, { registered: true })
+  t.alike(openPushCapsStore(s.dir).get(m.hex, hash), ['seen-sync'])
+  await s.check(m, sub)
+  t.alike(s.pushCapsStore.get(m.hex, hash), ['seen-sync'], 'old checks do not change a capability')
+  await s.check(m, sub, { caps: [] })
+  t.alike(s.pushCapsStore.get(m.hex, hash), [])
+  const rows = JSON.parse(fs.readFileSync(path.join(s.dir, 'push.json'))).members[m.hex]
+  t.alike(Object.keys(rows[0]).sort(), ['auth', 'createdAt', 'endpoint', 'p256dh'])
+})
+
+test('seen push: a removed capability during the signal delay suppresses delivery; a gone subscription erases it', async (t) => {
+  const s = await seenPush(t, { seenDelayMs: () => 5000 })
+  const m = member()
+  const sub = await s.subscribe(m)
+  s.r.seenWritten(m.hex, [], s.clock.t)
+  await s.advance(SEEN_SIGNAL_MS)
+  t.is(s.r.stats().queued, 1)
+  await s.check(m, sub, { caps: [] })
+  await s.advance(5000)
+  t.alike(s.sent, [])
+  const gone = await seenPush(t, { send: async () => 'gone' })
+  await gone.subscribe(m)
+  gone.r.seenWritten(m.hex, [], gone.clock.t)
+  await gone.advance(SEEN_SIGNAL_MS)
+  await until(() => gone.r.stats().inFlight === 0)
+  t.is(gone.pushStore.devices(m.hex), 0)
+  t.absent(openPushCapsStore(gone.dir).holds(m.hex))
+})
+
+test('seen push: opt-out and cap eviction erase persisted capabilities', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  const sub = await s.subscribe(m)
+  t.alike(s.pushCapsStore.get(m.hex, endpointHash(sub.endpoint)), ['seen-sync'])
+  t.is((await s.toggle(m, 'off', sub)).status, 200)
+  t.absent(s.pushCapsStore.holds(m.hex))
+  const first = await s.subscribe(m)
+  for (let i = 0; i < 4; i++) t.is((await s.toggle(m, 'on', subscription())).status, 200)
+  t.alike(s.pushCapsStore.get(m.hex, endpointHash(first.endpoint)), [])
+})
+
+test('seen push: repeated tag after the read keeps its later generation queued and beyond the signal cutoff', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  await s.subscribe(m)
+  await s.relay(groupEvent([m.hex], { visibility: 'private', name: null }))
+  const asOf = s.clock.t
+  const tags = s.r.outstanding(m.hex)
+  await s.advance(1)
+  await s.relay(groupEvent([m.hex], { group: 'f'.repeat(64), nid: 'e'.repeat(32), visibility: 'private', name: null }))
+  t.alike(s.r.outstanding(m.hex), tags)
+  t.is(s.r.stats().queued, 2)
+  s.r.seenWritten(m.hex, tags, asOf)
+  t.is(s.r.stats().queued, 1)
+  t.is(s.releases.length, 2)
+  await s.advance(60000)
+  const signal = s.signals()[0]
+  const notice = s.sent.map((s) => JSON.parse(s.payload)).find((p) => p.kind === 'group-private')
+  t.is(signal.asOf, asOf)
+  t.ok(notice.g > signal.asOf, 'worker cutoff cannot close the later generation')
+})
+
+test('seen push: Página recall refunds shared DM cooldown only after every member copy is recalled', async (t) => {
+  const owner = member()
+  const admin = member()
+  const page = member()
+  const s = await seenPush(t, { seenSignal: false, pagesStore: { get: () => ({ owner: owner.hex, admins: [admin.hex], closed: null, movedTo: null }) } })
+  await s.subscribe(owner)
+  await s.subscribe(admin)
+  await s.dm(page)
+  s.r.seenWritten(owner.hex, ['varanda-dm-page'], s.clock.t)
+  t.is(s.r.stats().queued, 1)
+  t.is(s.releases.length, 1, 'only the owner budget was refunded')
+  await s.dm(page)
+  t.is(s.r.stats().queued, 1, 'shared cooldown still held')
+  s.r.seenWritten(admin.hex, ['varanda-dm-page'], s.clock.t)
+  t.is(s.releases.length, 3, 'admin budget and shared cooldown refunded')
+  await s.dm(page)
+  t.is(s.r.stats().queued, 2)
+})
+
+test('seen push: environment enables signals only for the exact value 1', async (t) => {
+  const previous = process.env.VARANDA_SEEN_SIGNAL
+  try {
+    for (const value of [undefined, '', '0', 'true', '1']) {
+      if (value === undefined) delete process.env.VARANDA_SEEN_SIGNAL
+      else process.env.VARANDA_SEEN_SIGNAL = value
+      const s = await seenPush(t, { seenSignal: undefined })
+      const m = member()
+      await s.subscribe(m)
+      await s.dm(m)
+      s.r.seenWritten(m.hex, ['varanda-dm'], s.clock.t)
+      t.is(s.r.stats().queued, 0, 'recall is independent of the switch')
+      await s.advance(SEEN_SIGNAL_MS)
+      t.is(s.signals().length, value === '1' ? 1 : 0)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.VARANDA_SEEN_SIGNAL
+    else process.env.VARANDA_SEEN_SIGNAL = previous
+  }
+})
+
+test('seen push: union retains up to sixty-four outstanding hashes with the common padding', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  await s.subscribe(m)
+  let oldest
+  for (let i = 0; i < 65; i++) {
+    await s.follow(m)
+    const tag = s.r.outstanding(m.hex).at(-1)
+    if (i === 0) oldest = tag
+    s.r.seenWritten(m.hex, [tag], s.clock.t)
+  }
+  await s.advance(SEEN_SIGNAL_MS)
+  t.is(s.signals().length, 1)
+  t.is(s.signals()[0].close.length, 64)
+  t.absent(s.signals()[0].close.includes(tagHash(oldest)))
+  const { subscription, payload, padTo } = s.sent[0]
+  t.ok(Buffer.byteLength(payload) < padTo)
+  t.is(encryptPayload({ ...subscription, plaintext: payload, padTo }).length,
+    encryptPayload({ ...subscription, plaintext: '{}', padTo: PUSH_PAD_TO }).length)
+})

@@ -45,6 +45,7 @@ import {
 } from '../notices'
 import { getPeekWarmState, isSeederBusyError, subscribePeekWarm, updatePeekWarmState } from '../peek'
 import { isRef } from '../nav'
+import { avisoReadRows } from '../noticeReads'
 import { pagesNotices } from '../pages'
 import { pagesCore } from '../pageGate'
 import { LOCKED_MESSAGE } from '../outbox'
@@ -681,8 +682,12 @@ export default function Avisos ({ active, refresh, ownKey, scrollToTop, onFollow
       }
       badge(hasNew(list, seenUnion(seen.ids, remote)))
     }
-    // Only tokens of loaded rows leave: the padding stays on this device.
-    if (shown && typeof onSeenStateRef.current === 'function') onSeenStateRef.current(seenNamespace, seenOnScreen(list, seen.ids))
+    // A hidden poll can invalidate a shared tag without marking its new rows.
+    if (typeof onSeenStateRef.current === 'function') {
+      if (!seen.noticeReads) seen.noticeReads = {}
+      onSeenStateRef.current(seenNamespace, shown ? seenOnScreen(list, seen.ids) : [],
+        isPageSeenNamespace(seenNamespace) ? undefined : avisoReadRows(list, seenUnion(seen.ids, remote), seen.noticeReads))
+    }
   }, [seenNamespace, badge])
   settleRef.current = settle
 

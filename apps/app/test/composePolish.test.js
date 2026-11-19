@@ -198,6 +198,17 @@ test('composer toolbar is revealed on focus and layout, with photo action and pr
   t.ok(src.includes('export const COUNT_SHOW_AT = 0.8') && src.includes("{len < MAX_TEXT * COUNT_SHOW_AT ? '' :") && src.includes("{momentCount < MOMENT_TEXT_MAX * COUNT_SHOW_AT ? '' :"), 'both counter numbers show only near the limit')
   t.ok(src.includes("import { composeStatus } from '../composeStatus'") && (src.match(/momentStatus === '/g) || []).length === 4, 'the moment composer shows one status sentence')
   t.ok(src.includes('momentBody: { gap: space.md') && src.includes('paddingVertical: space.sm'), 'composer spacing uses tokens')
+  t.ok(
+    src.includes("compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: space.xl }") &&
+    /markRow: \{[^}]*paddingHorizontal: space\.xl/.test(src) &&
+    /quoteCard: \{[^}]*marginHorizontal: space\.xl/.test(src) &&
+    src.includes('<Text style={[styles.quote, styles.replyQuote]} numberOfLines={2}>') &&
+    src.includes('replyQuote: { paddingHorizontal: space.xl }') &&
+    src.includes('paddingLeft: space.lg,\n    paddingRight: space.xl') &&
+    src.includes('errors: { paddingHorizontal: space.xl, gap: 4 }'),
+    'every composer row shares the 24 pt gutter, so the reply line, the quote and the tools line up with the avatar'
+  )
+  t.ok(src.includes("tools: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 4, flex: 1 }"), 'the tools wrap instead of running under the counter')
 })
 
 test('intro preserves shared buttons and the top-right skip action', (t) => {
