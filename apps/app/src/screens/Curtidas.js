@@ -28,6 +28,7 @@ import { Soft, errorText, useBottomPad } from '../ui'
 import { Avatar } from '../ui/Avatar'
 import { OfflineNote } from '../ui/OfflineNote'
 import { RefreshableList } from '../ui/RefreshableList'
+import { Segmented } from '../ui/Segmented'
 import { EmptyState, ErrorState, ListFooter, Skeleton } from '../ui/States'
 import { TopBar } from '../ui/TopBar'
 import { type } from '../ui/theme'
@@ -251,29 +252,16 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
   // No automatic continuation over an empty list: there the 'mostrar mais'
   // of the empty view is the only way forward.
   const canMore = hosted && online !== false && ready && next !== null && !moreError && rows.length > 0
+  const options = TABS.map((k) => {
+    const label = tabLabel(k, tabs[k])
+    return { id: k, label: label.text, spoken: label.spoken }
+  })
 
   return (
     <View style={styles.flex}>
       <TopBar title={ENGAGERS_TITLE} onBack={onBack} />
       <OfflineNote />
-      <View style={styles.tabs} accessibilityRole='tablist'>
-        {TABS.map((k) => {
-          const selected = k === kind
-          const label = tabLabel(k, tabs[k])
-          return (
-            <Pressable
-              key={k}
-              accessibilityRole='tab'
-              accessibilityState={{ selected }}
-              accessibilityLabel={label.spoken}
-              onPress={() => setKind(k)}
-              style={[styles.tab, selected && styles.tabOn]}
-            >
-              <Text style={[styles.tabText, selected && styles.tabTextOn]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7} maxFontSizeMultiplier={1.5}>{label.text}</Text>
-            </Pressable>
-          )
-        })}
-      </View>
+      <Segmented options={options} selected={kind} onSelect={setKind} />
       <View style={styles.flex}>
         <RefreshableList
           // One list per tab: a shared one would carry the scroll offset and
@@ -312,20 +300,6 @@ export default function Curtidas ({ entry, onBack, onOpenMember }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
-  tabs: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.line },
-  tab: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 44,
-    paddingVertical: 10,
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent'
-  },
-  tabOn: { borderBottomColor: colors.accent },
-  // A shrunk count stays centred in the tab instead of riding low.
-  tabText: { ...type.pill, color: colors.soft, alignSelf: 'stretch', textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false },
-  tabTextOn: { color: colors.accent },
   head: { paddingHorizontal: 16, paddingVertical: 12, gap: 4 },
   row: {
     flexDirection: 'row',

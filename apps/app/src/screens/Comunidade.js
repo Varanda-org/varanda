@@ -36,6 +36,7 @@ import { actAs, pagesGroup } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { Body, Btn, Card, ErrorText, SectionHeader, Soft, Title, UNCERTAIN, errorText, useAction, useBottomPad, useNow } from '../ui'
 import { Avatar } from '../ui/Avatar'
+import { Badge } from '../ui/Badge'
 import { ChatHeader } from '../ui/ChatHeader'
 import { Icon } from '../ui/Icon'
 import { Pill } from '../ui/Pill'
@@ -114,7 +115,7 @@ function GroupRow ({ title, group, image, imageAuthor, detail, own, time, unread
                 {own ? <Text style={styles.own}>{OWN_LABEL + ': '}</Text> : null}
                 {displayText(detail || '')}
               </Text>
-              {unread ? <View style={styles.dot} /> : null}
+              {unread ? <Badge /> : null}
             </View>
             )
           : null}
@@ -720,8 +721,6 @@ const makeStyles = (colors) => StyleSheet.create({
   // As in Conversas (ui/ConversationRow): an unread row's date takes the accent.
   timeUnread: { color: colors.accent, fontWeight: '600' },
   grow: { flex: 1, minWidth: 0 },
-  // The 8 pt disc of ConversationRow: the spoken label already carries the count.
-  dot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0, backgroundColor: colors.accent },
   agenda: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: 44, paddingHorizontal: space.lg },
   agendaText: { ...type.pill, color: colors.ink, flex: 1 },
   hitText: { flex: 1, minWidth: 0, gap: 2 }

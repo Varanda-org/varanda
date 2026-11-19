@@ -1,24 +1,26 @@
 // Full-width underline tabs (Fotos, Posts, ...). One is selected, marked by a
-// 2 pt accent line; each tab is a 44 pt tall touch target.
+// 2 pt accent line.
 
 import { useState } from 'react'
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native'
 import { tap } from './haptics'
 import { useStyles } from './ThemeProvider'
-import { layout, space, type } from './theme'
+import { space, type } from './theme'
 import { segmentedFit } from './segmentedFit'
 
 // adjustsFontSizeToFit is a native Text prop that react-native-web ignores:
 // only the web needs the fixed tight size, phones keep shrinking per label.
 const SHRINKS = Platform.OS !== 'web'
 
-// options: [{ id, label }]. Three tabs at large text get narrow. Shrinking
+// options: [{ id, label, spoken? }]. Three tabs at large text get narrow. Shrinking
 // fits each label on its own, so three tabs would show three sizes: with
 // three or more the text scale is capped lower (segmentedCap) so all fit at
 // one size on a 390 pt phone, and shrinking down to 70% is only the narrow
-// phone fallback, never '…'.
+// phone fallback, never '…'. At 16/600, 1.1 fits "Depoimentos" (about 104 pt)
+// in a third of a 390 pt phone, and the largest label stays near the 18 pt
+// the old 15 pt label reached at 1.2.
 export const SEGMENTED_CAP_TWO = 1.5
-export const SEGMENTED_CAP_MANY = 1.2
+export const SEGMENTED_CAP_MANY = 1.1
 
 export function segmentedCap (count) {
   return count >= 3 ? SEGMENTED_CAP_MANY : SEGMENTED_CAP_TWO
@@ -29,7 +31,8 @@ export function Segmented ({ options, selected, onSelect }) {
   const list = Array.isArray(options) ? options : []
   const cap = segmentedCap(list.length)
   const [width, setWidth] = useState(0)
-  const fit = segmentedFit(width, list.length, SHRINKS)
+  const longest = list.reduce((n, option) => Math.max(n, typeof option.label === 'string' ? option.label.length : 0), 0)
+  const fit = segmentedFit(width, list.length, SHRINKS, longest)
   return (
     <View style={styles.wrap} accessibilityRole='tablist' onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
       {list.map((option) => {
@@ -40,7 +43,7 @@ export function Segmented ({ options, selected, onSelect }) {
             accessibilityRole='tab'
             accessibilityState={{ selected: on }}
             aria-selected={on}
-            accessibilityLabel={option.label}
+            accessibilityLabel={option.spoken || option.label}
             onPress={() => {
               if (!on) tap('select')
               onSelect(option.id)
@@ -57,10 +60,10 @@ export function Segmented ({ options, selected, onSelect }) {
 
 const makeStyles = (colors) => StyleSheet.create({
   wrap: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.line },
-  tab: { flex: 1, minHeight: layout.hit, paddingHorizontal: space.sm, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent', marginBottom: -1 },
+  tab: { flex: 1, minHeight: 48, paddingHorizontal: space.sm, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent', marginBottom: -1 },
   tabOn: { borderBottomColor: colors.accent },
   pressed: { opacity: 0.6 },
   // A shrunk label stays centred in the tab instead of riding low.
-  label: { ...type.pill, color: colors.soft, textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false },
-  labelOn: { color: colors.ink, fontWeight: '600' }
+  label: { ...type.rowName, color: colors.soft, textAlign: 'center', textAlignVertical: 'center', includeFontPadding: false },
+  labelOn: { color: colors.accent }
 })

@@ -1528,6 +1528,12 @@ export function createVitrineRequest (fixtures, options) {
       if (!['following', 'everyone', 'nobody'].includes(who)) refuse('USAGE', 'registro inválido: malformed')
       return append({ type: 'scrap-wall', who, at: stamp() })
     },
+    'groups.show': ({ on }) => {
+      const current = logs.get(data.own).slice().reverse().find((e) => e.record.type === 'groups-show' && !deleted.has(`${data.own}:${e.seq}`))
+      if ((current?.record.on ?? true) === on) return { seq: current?.seq ?? null, on, changed: false }
+      const { seq } = append({ type: 'groups-show', on, at: stamp() })
+      return { seq, on, changed: true }
+    },
     'scrap.delete': ({ seq }) => {
       if (deleted.has(`${data.own}:${seq}`)) return { seq: deleted.get(`${data.own}:${seq}`).seq, deleted: [seq] }
       const entry = liveEntry(data.own, seq)
@@ -1681,7 +1687,9 @@ export function createVitrineRequest (fixtures, options) {
   const request = async (method, params = {}) => {
     useTestimonialSource(testimonialSource)
     if (!Object.hasOwn(handlers, method)) refuse('USAGE', 'método desconhecido')
-    const checked = validateParams(method, params)
+    // Standalone Vitrine can use the same boolean param check before groups.show is registered.
+    const contractMethod = method === 'groups.show' && !rpc.isMethod(method) ? 'visits.set' : method
+    const checked = validateParams(contractMethod, params)
     if (!checked.ok) refuse(checked.code, checked.message)
     return copy(await handlers[method](copy(checked.value)))
   }

@@ -31,6 +31,7 @@ test('feiraCompose: stepped creation keeps the fields, preview and publication c
   t.ok(step('preco', 'revisao').includes('priceFieldLabel(form.kind)'))
   t.ok(step('revisao').includes("<ListingTile listing={previewListing(form)} width='100%' />"))
   t.ok(step('revisao').includes("accessibilityRole='checkbox'") && step('revisao').includes('{ACK_TEXT}'))
+  t.ok(step('revisao').includes('<CheckboxMark checked={ack} disabled={locked} />'), 'the acknowledgement draws the shared mark inside its own checkbox row')
   t.ok(src.includes('Público na web e em buscadores'))
   t.ok(src.includes("<Sheet open={confirmLeave} onClose={() => setConfirmLeave(false)} title='Descartar anúncio?'>"))
   t.ok(src.includes("<Soft>{pending !== null ? UNKNOWN_PUBLICATION : 'O que você preencheu será perdido.'}</Soft>"), 'leaving an uncertain publication warns to check existing listings')
@@ -620,6 +621,7 @@ test('feiraCompose: Anunciar and AnuncioEditar use the photo grid, a thin progre
     t.ok(src.includes('pickImages(MAX_PHOTOS)') && !/expo-camera/.test(src), 'library picker, no camera')
   }
   t.ok(create.includes("accessibilityRole='progressbar'") && create.includes('(index + 1) / STEPS.length'), 'progress bar from the step count')
+  t.ok(/accessibilityRole='progressbar'[^>]*>\s+<ProgressBar value=\{\(index \+ 1\) \/ STEPS\.length\}/.test(create), 'the progressbar role wraps the shared ProgressBar')
   t.ok(create.indexOf('<View style={[styles.bar, { paddingBottom: keyboardOpen ? space.md : insets.bottom + space.md }]}>') > create.indexOf('</ScrollView>'), 'Continuar sits in a bar below the scroll')
   t.ok(/<View style=\{\[styles\.bar, \{ paddingBottom: keyboardOpen \? space\.md : insets\.bottom \+ space\.md \}\]\}>\s+\{error !== '' \? <ErrorText>\{error\}<\/ErrorText> : null\}\s+<Btn label='Salvar' block onPress=\{save\}/.test(edit), 'Salvar is in the sticky bar, under the repeated error')
   t.ok(edit.indexOf("label='Salvar'") > edit.indexOf('</ScrollView>'), 'Salvar sits below the scroll')

@@ -15,7 +15,7 @@ import { ScreenVisible } from './screenVisible'
 import { createVisibleNow } from '../visibleNow'
 import { fieldBounds, fieldFull } from './fieldHeight'
 import { GROWS_ITSELF } from './fieldMeasure'
-import { fonts, layout, type, webInputReset } from './theme'
+import { fonts, layout, radius, type, webInputReset } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 export { TABS, tabsFor } from '../tabs'
@@ -233,9 +233,9 @@ export function Notice ({ children }) {
   return <Text style={styles.notice}>{children}</Text>
 }
 
-export function Spinner ({ size = 'small' }) {
+export function Spinner ({ size = 'small', color }) {
   const { colors } = useTheme()
-  return <ActivityIndicator size={size} color={colors.accent} />
+  return <ActivityIndicator size={size} color={color === undefined ? colors.accent : color} />
 }
 
 export function Card ({ children }) {
@@ -266,18 +266,20 @@ export function Btn ({ label, icon, onPress, disabled, pending, secondary, dange
   ]
   const content = (
     <>
-      {typeof icon === 'string' ? <Icon name={icon} size={18} color={danger ? colors.danger : outline ? colors.ink : colors.accentInk} /> : null}
-      <Text style={[styles.btnText, small && styles.btnTextSmall, outline && styles.btnTextOutline, danger && styles.btnTextDanger]}>
-        {pending ? label + '…' : label}
+      {typeof icon === 'string' ? <Icon name={icon} size={18} color={danger ? colors.danger : outline ? colors.ink : colors.accentInk} style={pending && styles.btnHidden} /> : null}
+      <Text style={[styles.btnText, small && styles.btnTextSmall, outline && styles.btnTextOutline, danger && styles.btnTextDanger, pending && styles.btnHidden]}>
+        {label}
       </Text>
+      {pending ? <View style={styles.btnLoading} pointerEvents='none' aria-hidden accessibilityElementsHidden importantForAccessibility='no-hide-descendants'><Spinner color={danger ? colors.danger : outline ? colors.ink : colors.accentInk} /></View> : null}
     </>
   )
   return (
     <Pressable
       accessibilityRole='button'
-      accessibilityState={{ disabled: off, expanded }}
-      // react-native-web does not map accessibilityState.expanded.
+      accessibilityState={{ disabled: off, busy: pending === true, expanded }}
+      // react-native-web does not map accessibilityState.expanded or busy.
       aria-expanded={expanded}
+      aria-busy={pending === true ? true : undefined}
       accessibilityLabel={accessibilityLabel}
       disabled={off}
       onPress={onPress}
@@ -388,7 +390,7 @@ const makeStyles = (colors) => StyleSheet.create({
   mono: { fontSize: 13, lineHeight: 19, color: colors.ink, fontFamily: fonts.mono },
   error: { fontSize: 14, lineHeight: 20, color: colors.danger },
   notice: { fontSize: 14, lineHeight: 20, color: colors.warn },
-  card: { backgroundColor: colors.card, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, padding: 12, gap: 8 },
+  card: { backgroundColor: colors.card, borderRadius: radius.bubble, borderWidth: 1, borderColor: colors.line, padding: 12, gap: 8 },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   btn: {
     backgroundColor: colors.accent,
@@ -413,6 +415,9 @@ const makeStyles = (colors) => StyleSheet.create({
   btnDanger: { borderColor: colors.danger },
   btnOff: { opacity: 0.45 },
   btnPressed: { opacity: PRESSED_OPACITY },
+  // Retain the content's dimensions while the spinner sits over the face.
+  btnHidden: { opacity: 0 },
+  btnLoading: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
   // The 1 pt sides absorb Android's rounding with the 1.5 pt outline: the label got its
   // exact width, lost a pixel and wrapped its last word out of sight ("Trocar passkey").
   btnText: { ...type.rowName, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },

@@ -48,7 +48,7 @@ test('Conversas is one list with three chips, a pinned Pedidos dot and nav pushe
   t.ok(src.includes('return applyFilter(rows, filter)') && !src.includes('communitiesRow(), ...rows'), 'the pinned rows left the list data')
   t.ok(src.includes("<StripPart kind='requests' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenRequests === 'function') onOpenRequests() }} />"), 'Pedidos shows a dot and pushes the request folder')
   t.ok(src.includes("<StripPart kind='communities' title={item.title} dot={item.unread === true} onPress={() => { if (typeof onOpenCommunities === 'function') onOpenCommunities() }} />"), 'Comunidades is its own part with its own push')
-  t.ok(src.includes('{dot ? <View style={styles.dot} /> : null}'), 'a dot, never a count')
+  t.ok(src.includes('{dot ? <Badge /> : null}'), 'a dot, never a count')
   t.ok(src.includes("requests: { label: 'Pedidos', news: ', há pedidos novos' }") && src.includes("communities: { label: 'Comunidades', news: ', há novidades' }"), 'the strip reads Pedidos · Comunidades')
   t.ok(src.includes('accessibilityLabel={title + (dot ? part.news : \'\')}'), 'each part speaks its full title and its own news')
   t.absent(src.includes('<Mensagens') || src.includes('setView('), 'the request folder is a stacked screen, not an inline view')

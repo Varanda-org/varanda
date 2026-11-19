@@ -41,6 +41,7 @@ import { whoOf } from '../who'
 import { confirmedVoters, voterSeqs } from './pollVoters'
 import { learnPeeked, memberKeyOf, peekAll, readPagePick, setPagePick, useActing } from '../screens/Conversa'
 import { PAGE_PICK_UNREAD, PAGE_RSVP_NOTICE, PAGE_RSVP_UNCERTAIN, choiceNotice, choicePage, pickRef, refusalText, tapAfterUncertain } from '../pageChoice'
+import { Chip } from './Chip'
 import { Icon } from './Icon'
 import { tap } from './haptics'
 import { layout, type } from './theme'
@@ -285,17 +286,16 @@ export function EventCard ({ author, seq, event, group = null, writer = null, to
 
   const canAnswer = hosted && online && known && !busy && !past
   const chip = (index, label) => (
-    <Pressable
-      accessibilityRole='button'
-      accessibilityLabel={label + (pick === index ? (page !== null ? ', resposta da Página, toque para tirar' : ', sua resposta, toque para tirar') : '')}
-      accessibilityState={{ selected: pick === index, disabled: !canAnswer }}
-      disabled={!canAnswer}
-      onPress={() => answer(index)}
-      style={({ pressed }) => [styles.chip, pick === index && styles.chipOn, !canAnswer && styles.chipOff, pressed && styles.pressed]}
-    >
-      {pick === index ? <Icon name='ok' size={16} color={colors.accent} /> : null}
-      <Text style={[styles.chipText, pick === index && styles.chipTextOn]}>{label}</Text>
-    </Pressable>
+    <View style={styles.answer}>
+      <Chip
+        label={label}
+        selected={pick === index}
+        icon={pick === index ? 'ok' : null}
+        accessibilityLabel={label + (pick === index ? (page !== null ? ', resposta da Página, toque para tirar' : ', sua resposta, toque para tirar') : '')}
+        disabled={!canAnswer}
+        onPress={() => answer(index)}
+      />
+    </View>
   )
   const total = counts(shownTotals)
   const spoken = title + ', ' + when + (place ? ', ' + place : '') + (past ? ', já passou' : '')
@@ -393,11 +393,7 @@ const makeStyles = (colors) => StyleSheet.create({
   meta: { ...type.meta, color: colors.soft },
   past: { ...type.meta, color: colors.soft, fontWeight: '700' },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { minHeight: layout.hit, minWidth: 96, paddingHorizontal: 16, borderRadius: 22, borderWidth: 1, borderColor: colors.line, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.bg },
-  chipOn: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
-  chipOff: { opacity: 0.55 },
-  chipText: { ...type.pill, color: colors.ink },
-  chipTextOn: { color: colors.accent },
+  answer: { minWidth: 96 },
   link: { minHeight: layout.hit, justifyContent: 'center', alignSelf: 'flex-start' },
   linkRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   linkText: { ...type.more, color: colors.accent },

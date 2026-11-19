@@ -791,7 +791,7 @@ test('Denunciar: reasons are radio rows, the privacy caption stays and the submi
   t.ok(src.includes('{REASONS.map(([id, label], i) => (\n            <ReasonRow key={id} label={label} first={i === 0} checked={reason === id} onPress={() => setReason(id)} />'), 'same ids and labels, one row each')
   const row = src.slice(src.indexOf('function ReasonRow'), src.indexOf('const makeStyles'))
   t.ok(row.includes("accessibilityRole='radio'") && row.includes('accessibilityState={{ checked }}') && row.includes('aria-checked={checked}'), 'each row is a checked radio')
-  t.ok(row.includes("{checked ? <Icon name='ok'"), 'a check marks the selected reason')
+  t.ok(row.includes('<RadioMark checked={checked}'), 'a radio mark shows the selected reason')
   t.ok(row.includes("e.key !== ' '") && row.includes('e.preventDefault()'), 'Space selects on the web')
   t.ok(src.includes('<HelpNote doc={HELP.denuncia}><Soft>{SHORT.reportPrivacy}</Soft></HelpNote>'), 'the privacy sentence stays visible')
   t.is(src.split("label='enviar denúncia'").length - 1, 1, 'one submit button')

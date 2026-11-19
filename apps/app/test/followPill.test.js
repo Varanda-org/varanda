@@ -156,8 +156,8 @@ test('Seguir flips at once, taps light and calls onFollow once per press', (t) =
   const base = { following: false, title: 'Bia', pending: false, disabled: false, onFollow: c.onFollow, onUnfollow: c.onUnfollow }
   const first = h.render(base)
   t.is(pill(first).props.label, 'Seguir')
-  t.is(pill(first).props.filled, true)
-  t.absent(pill(first).props.tonal)
+  t.is(pill(first).props.weak, true)
+  t.absent(pill(first).props.filled || pill(first).props.tonal)
   t.alike(h.taps, [], 'rendering does not tap')
 
   const press = pill(first).props.onPress

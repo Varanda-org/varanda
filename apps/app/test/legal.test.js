@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 98)
+  t.is(LEGAL_VERSION, 99)
   t.is(LEGAL_DATE, '19/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 98, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 99, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,6 +388,27 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 94 describes public group discovery', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 94)
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+    t.ok(text.includes('Entrar num grupo público é público.'), doc.title + ': public membership')
+    t.ok(text.includes('com o nome do grupo e da comunidade. A Geral de cada comunidade, os grupos que pedem aprovação para entrar e os grupos privados ficam fora dessa lista.'), doc.title + ': profile list and exclusions')
+    t.ok(text.includes('Você pode desligar a opção "Grupos públicos no perfil" em Ajustes, em Privacidade e segurança. Com a opção desligada, seu perfil não lista esses grupos e você não conta na lista "Grupos de quem você segue" de outras pessoas. Dentro de cada grupo público, a sua participação continua pública.'), doc.title + ': hiding the list keeps membership public')
+    t.ok(text.includes('"Mais membros" vai do grupo com mais membros para o com menos.'), doc.title + ': member order')
+    t.ok(text.includes('"Criados recentemente" vai do mais novo para o mais antigo, pela data declarada por quem criou, com no máximo 2 grupos por pessoa.'), doc.title + ': creation order and cap')
+    t.ok(text.includes('"Em alta" ordena pela quantidade de pessoas diferentes que escreveram no grupo nos últimos 7 dias, contadas nas mensagens recentes que o semeador leu. Cada pessoa conta uma vez, Páginas não contam e só entram grupos de entrada aberta com pelo menos 2 pessoas que escreveram.'), doc.title + ': public group activity order')
+    t.ok(text.includes('o semeador não acompanha aprovações nem banimentos dentro dos grupos.'), doc.title + ': approximate counts')
+    t.ok(text.includes('ele guarda só na memória a data da mensagem mais recente de cada pessoa em cada grupo. Não lê mensagens de grupos privados.'), doc.title + ': activity data kept in memory')
+    t.ok(text.includes('A lista "Grupos de quem você segue" é calculada no seu aparelho. O app consulta os grupos públicos de até 24 pessoas que você segue por vez e mostra primeiro os grupos com mais delas. O semeador recebe essas consultas, mas não monta nem guarda essa lista.'), doc.title + ': local followed groups list')
+    t.ok(text.includes('"Assuntos do momento" mostra as hashtags usadas por mais pessoas nas últimas 24 horas, em publicações públicas guardadas pelo semeador. Cada pessoa conta uma vez por hashtag.'), doc.title + ': hashtag order and window')
+    t.ok(text.includes('Contam até as 10 primeiras hashtags de cada publicação e as 50 publicações com hashtag mais recentes de cada pessoa. Páginas não contam. Só entram hashtags usadas por pelo menos 3 pessoas, até 10 hashtags na lista, e termos da lista de palavras bloqueadas ficam de fora.'), doc.title + ': hashtag limits and exclusions')
+    t.ok(text.includes('Pedir essa lista não envia nenhuma palavra ao semeador. A lista é a mesma para todo mundo.'), doc.title + ': shared list with no search word sent')
+    t.ok(text.includes('As listas não têm anúncios. A ordem de cada lista segue as regras descritas acima, sem outras formas de personalização. Chaves bloqueadas ficam fora.'), doc.title + ': no ads or personalized order')
+  }
+})
+
 test('legal: version 93 describes the Conversas notice sent to the recipient only', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   t.ok(LEGAL_VERSION >= 93)
@@ -468,7 +489,7 @@ test('legal: public group and community images stay stored after replacement or 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'ca99f4b7175acc0e417838372955b2614f3547790a766d13566af951773bfbc6', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '46fcce8032f9a3a8941b53193261ab739a104433bad46d06a8cc6ca0dfff9f23', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

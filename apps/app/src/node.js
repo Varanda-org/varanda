@@ -325,7 +325,7 @@ export function perfMarks () { return marks }
 let vitrine = null
 if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA_VITRINE === '1' && VITRINE) {
   const { fixtures } = require('./vitrine/fixtures')
-  const { createVitrineRequest } = require('./vitrine/request')
+  const { createIndexedVitrineRequest } = require('./vitrine/indexResponder')
   const { saveTermsRecord } = require('./termsStore')
   const { withMember, withSynced } = require('./terms')
   const { LEGAL_VERSION } = require('./legal')
@@ -341,7 +341,7 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
   saveTermsRecord(withSynced(withMember(null, LEGAL_VERSION, fixtures.own, new Date().toISOString()), fixtures.own)).catch(() => {})
   vitrine = {
     fixtures,
-    createVitrineRequest,
+    createIndexedVitrineRequest,
     status: { exists: true, publicKey: fixtures.own, legacy: false, unlocked: true, synced: true, resumed: false, passkeyKnown: false, credentialId: null, rpId: null, signedOut: false }
   }
 }
@@ -355,7 +355,7 @@ export function NodeProvider ({ children }) {
 function VitrineNodeProvider ({ children }) {
   // The device clock (vitrine sources never read it): Momentos keep their
   // demo-clock ages, so the 24 h rule on the device still shows them.
-  const [fixtureRequest] = useState(() => vitrine.createVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, rich: VITRINE_RICH, embeds: VITRINE_EMBEDS, clock: Date.now }))
+  const [fixtureRequest] = useState(() => vitrine.createIndexedVitrineRequest(vitrine.fixtures, { large: VITRINE_LARGE, rich: VITRINE_RICH, embeds: VITRINE_EMBEDS, clock: Date.now }))
   const [dmVersion, setDmVersion] = useState(0)
   const bumpDm = useCallback(() => setDmVersion((n) => n + 1), [])
   const [autoWanted, setAutoWanted] = useState(false)
@@ -371,7 +371,7 @@ function VitrineNodeProvider ({ children }) {
         const group = params && typeof params.group === 'string' ? params.group : null
         return group !== null ? bumpGroupVersion(prev, group) : { ...prev }
       })
-    }
+    } else if (method === 'groups.show') setGroupVersions((prev) => ({ ...prev }))
     if (method === 'follow.add' || method === 'follow.remove') setFollowsVersion((n) => n + 1)
     return result
   }), [fixtureRequest])
