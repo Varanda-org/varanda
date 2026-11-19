@@ -212,6 +212,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
   const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(false)
   const [shareNote, setShareNote] = useState('')
+  const [createNote, setCreateNote] = useState(null)
   const [joinNote, setJoinNote] = useState('')
   // The seeder index's view, for someone whose node holds nothing of this
   // community yet: { status, name, groups, partial, join, members, error }.
@@ -619,7 +620,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
           : null}
         <SectionHeader>Grupos</SectionHeader>
         {ordered.length === 0
-          ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel={canCreate && !offline ? 'Novo grupo' : 'Tentar de novo'} onAction={canCreate && !offline ? () => setNewGroup(true) : load} secondaryLabel='Voltar' onSecondary={onBack} />
+          ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel={canCreate && !offline ? 'Novo grupo' : 'Tentar de novo'} onAction={canCreate && !offline ? () => { setCreateNote(null); setNewGroup(true) } : load} secondaryLabel='Voltar' onSecondary={onBack} />
           : ordered.map((g) => {
             const name = typeof g.name === 'string' && g.name !== '' ? displayText(g.name) : (g.general === true ? GENERAL_LABEL : PRIVATE_LABEL)
             // As the page: no personal role, last line or unread count.
@@ -658,7 +659,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         {canCreate
           ? (
             <View style={styles.block}>
-              <Btn label='Novo grupo' onPress={() => setNewGroup(true)} disabled={offline} />
+              <Btn label='Novo grupo' onPress={() => { setCreateNote(null); setNewGroup(true) }} disabled={offline} />
             </View>
             )
           : null}
@@ -688,6 +689,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         ]}
       />
       {shareNote ? <View style={styles.block}><Soft>{shareNote}</Soft></View> : null}
+      {createNote ? <View style={styles.block}><Soft>{createNote.notice}</Soft><Btn label='Abrir grupo' onPress={() => { setCreateNote(null); openGroup(createNote.group) }} secondary /></View> : null}
       <ScrollView
         contentContainerStyle={{ paddingBottom: bottomPad }}
         keyboardShouldPersistTaps='handled'
@@ -699,10 +701,11 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         community={community}
         visible={newGroup}
         onClose={() => { setNewGroup(false); load() }}
-        onCreated={(group) => {
+        onCreated={(group, notice = '') => {
+          setCreateNote(notice ? { group, notice } : null)
           setNewGroup(false)
           load()
-          if (typeof group === 'string') openGroup(group)
+          if (!notice && typeof group === 'string') openGroup(group)
         }}
       />
     </View>

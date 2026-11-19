@@ -1126,3 +1126,360 @@ test('private image reconciliation compares the private fields and never resends
   t.alike(h.calls.map(([m]) => m), ['group.image', 'group.info'])
   t.absent(h.find('ErrorText').props.children)
 })
+
+async function newGroupSheet (options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { runInNewContext } = require('node:vm')
+  const bytes = new Uint8Array([
+    0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3,
+    1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
+    0xff, 0xda, 0, 12, 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3f, 0, 1, 2, 3, 0xff, 0xd9
+  ])
+  const publicImage = { core: OTHER, start: 1, blocks: 1, bytes: bytes.length, sha256: ME, mime: 'image/jpeg', width: 512, height: 512 }
+  const privateImage = { core: OTHER, start: 1, blocks: 1, bytes: 32768, sha256: ME, mime: 'application/octet-stream', key: G, nonce: 'a'.repeat(48), plainMime: 'image/jpeg', plainSha256: OTHER, w: 512, h: 512, ms: 0 }
+  const calls = []
+  const created = []
+  let released = 0
+  let closed = 0
+  const handle = {
+    uri: 'file:chosen',
+    width: 900,
+    height: 700,
+    release () { released++ },
+    async encode (...args) {
+      calls.push(['encode', ...args.map((arg) => typeof arg === 'object' ? { ...arg } : arg)])
+      return options.encode ? options.encode() : { bytes, mime: 'image/jpeg' }
+    }
+  }
+  const node = {
+    hosted: true,
+    online: true,
+    media: {
+      async upload (input) {
+        calls.push(['upload', input])
+        const image = input.sealed ? privateImage : publicImage
+        return options.upload ? options.upload(image) : image
+      }
+    },
+    async request (method, params) {
+      calls.push([method, { ...params }])
+      if (method === 'group.create') {
+        if (options.createError) throw options.createError
+        return options.create ? options.create() : { group: G }
+      }
+      if (method === 'group.image') {
+        if (options.imageError) throw options.imageError
+        return { ok: true }
+      }
+      if (method === 'community.info') return { community: C, groups: [{ name: 'Novo', role: 'creator' }], incomplete: false }
+      throw new Error('unexpected method: ' + method)
+    },
+    ...options.node
+  }
+  let cursor = 0
+  const slots = []
+  let effects = []
+  const hooks = {
+    useCallback: (fn) => fn,
+    useRef (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { current: value }
+      return slots[i]
+    },
+    useState (value) {
+      const i = cursor++
+      if (!slots[i]) slots[i] = { value: typeof value === 'function' ? value() : value }
+      return [slots[i].value, (next) => { slots[i].value = typeof next === 'function' ? next(slots[i].value) : next }]
+    },
+    useEffect (fn, deps) {
+      const i = cursor++
+      if (!slots[i] || deps.some((v, j) => !Object.is(v, slots[i].deps[j]))) {
+        const prev = slots[i]
+        slots[i] = { deps }
+        effects.push(() => { prev?.cleanup?.(); slots[i].cleanup = fn() })
+      }
+    }
+  }
+  const actionSource = ui('index.js').split('export function useAction () {')[1].split('// Runs the latest')[0]
+  const useAction = require('node:vm').runInNewContext('(function useAction () {' + actionSource + ')', { ...hooks, errorText: (err) => err.message || 'incerto' })
+  const element = (type, props) => ({ type, props })
+  const modules = {
+    react: hooks,
+    'react/jsx-runtime': { jsx: element, jsxs: element, Fragment: 'Fragment' },
+    'react-native': { View: 'View', Text: 'Text', Pressable: 'Pressable', StyleSheet: { create: (s) => s } },
+    '@varanda/rpc': require('@varanda/rpc'),
+    '../node': { useNode: () => node },
+    '../groups': await groups(),
+    '../wordCheck': await import('../src/wordCheck.js'),
+    '../groupImageCreate': await import('../src/groupImageCreate.js'),
+    '../media/avatar': await import('../src/media/avatar.js'),
+    '../media/attach': { pickImage: async () => { calls.push(['pick']); return options.pick ? options.pick() : {} } },
+    '../media/avatarEncode': { openImage: async () => options.open ? options.open(handle) : handle },
+    '../ui/Avatar': { Avatar: 'Avatar' },
+    '../ui/AvatarEditor': { AvatarEditor: 'AvatarEditor' },
+    '../ui/Sheet': { Sheet: 'Sheet' },
+    '../ui/escapeLayer': { useEscapeLayer () {} },
+    '../ui': { Btn: 'Btn', Field: 'Field', Label: 'Label', Soft: 'Soft', ErrorText: 'ErrorText', UNCERTAIN: 'incerto', useAction, errorText: (err) => err.message },
+    '../ui/ThemeProvider': { useStyles: (fn) => fn({ accent: 'blue' }) },
+    '../ui/theme': { type: { postMeta: {} } }
+  }
+  const { code } = transformSync(screen('NovoGrupo.js'), {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const exported = {}
+  runInNewContext(code, { exports: exported, require: (name) => modules[name] || {} })
+  let props = { community: C, visible: true, onClose: () => { closed++ }, onCreated: (...args) => created.push(args) }
+  const render = (next) => {
+    props = { ...props, ...next }
+    let tree
+    do {
+      cursor = 0
+      tree = exported.NovoGrupo(props)
+      const pending = effects
+      effects = []
+      for (const effect of pending) effect()
+      if (!pending.length) break
+    } while (true)
+    return tree
+  }
+  const find = (type, label) => imageNodes(render()).find((n) => (n.type === type || n.type?.name === type) && (!label || n.props.label === label || n.props.accessibilityLabel === label))
+  const choose = async () => {
+    await find('Pressable', 'Escolher foto').props.onPress()
+    await find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+  }
+  find('Field', 'Nome').props.onChangeText('Novo')
+  return { node, calls, created, bytes, render, find, choose, unmount: () => { for (const slot of slots) slot.cleanup?.() }, get released () { return released }, get closed () { return closed } }
+}
+
+for (const visibility of ['public', 'private']) {
+  test('new ' + visibility + ' group sends create, upload and image once, using the submitted visibility', async (t) => {
+    let finishCreate
+    const h = await newGroupSheet({ create: () => new Promise((resolve) => { finishCreate = () => resolve({ group: G }) }) })
+    h.find('Choice', 'Visibilidade').props.onChange(visibility === 'public' ? 'private' : 'public')
+    await h.choose()
+    h.find('Choice', 'Visibilidade').props.onChange(visibility)
+    const consent = imageNodes(h.render()).filter((n) => n.type === 'Soft').map((n) => n.props.children)
+    t.ok(consent.includes(visibility === 'private' ? 'Só quem participa do grupo vê a foto.' : 'A foto do grupo é pública, como o nome.'))
+    const create = h.find('Btn', 'Criar grupo').props.onPress
+    const first = create()
+    await create()
+    h.find('Choice', 'Visibilidade').props.onChange(visibility === 'public' ? 'private' : 'public')
+    finishCreate()
+    await first
+    await create()
+    t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create', 'upload', 'group.image'])
+    t.alike(h.calls.find(([method]) => method === 'group.create')[1], { name: 'Novo', join: visibility === 'private' ? 'approval' : 'open', visibility, community: C })
+    t.alike(h.calls.find(([method]) => method === 'upload')?.[1], { bytes: h.bytes, mime: 'image/jpeg', width: 512, height: 512, ...(visibility === 'private' ? { sealed: true } : {}) })
+    t.alike(h.calls.find(([method]) => method === 'encode').slice(2), [262144, { format: 'jpeg' }])
+    t.is(h.calls.find(([method]) => method === 'group.image')?.[1].group, G)
+    t.alike(h.created, [[G, '']])
+    t.is(h.released, 1)
+  })
+}
+
+test('new group creation failures and uncertain reconciliation never send the photo', async (t) => {
+  for (const uncertain of [false, true]) {
+    const h = await newGroupSheet({ createError: { message: 'criação falhou', uncertain } })
+    await h.choose()
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create'])
+    t.alike(h.created, [])
+    if (uncertain) {
+      await h.find('Btn', 'Criar grupo').props.onPress()
+      await h.find('Btn', 'Conferir').props.onPress()
+      t.alike(h.created, [[null]], 'a name match gives no key for the photo')
+      t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create', 'community.info'])
+    }
+  }
+  const h = await newGroupSheet({ create: () => ({}) })
+  await h.choose()
+  await h.find('Btn', 'Criar grupo').props.onPress()
+  t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create'], 'a missing key never starts the upload')
+})
+
+test('new group image failure keeps the group and the parent notice after closing', async (t) => {
+  const { words } = await import('../src/groupImageCreate.js')
+  for (const options of [
+    { upload: () => { throw new Error('envio falhou') } },
+    { imageError: new Error('foto recusada') },
+    { imageError: { uncertain: true } }
+  ]) {
+    const h = await newGroupSheet(options)
+    await h.choose()
+    const create = h.find('Btn', 'Criar grupo').props.onPress
+    await create()
+    await create()
+    t.alike(h.created, [[G, words.groupFailed]])
+    t.is(h.calls.filter(([method]) => method === 'group.create').length, 1)
+    t.is(h.calls.filter(([method]) => method === 'upload').length, 1)
+    t.is(h.calls.filter(([method]) => method === 'group.image').length, options.upload ? 0 : 1)
+    const src = screen('Comunidade.js')
+    const callback = /onCreated=\{(\(group, notice = ''\) => \{[\s\S]*?\n {8}\})\}/.exec(src)
+    const events = []
+    const parent = require('node:vm').runInNewContext('(' + callback[1] + ')', {
+      setCreateNote: (note) => events.push(['notice', { ...note }]),
+      setNewGroup: (open) => events.push(['sheet', open]),
+      load: () => events.push(['load']),
+      openGroup: (key) => events.push(['open', key])
+    })
+    parent(...h.created[0])
+    t.alike(events, [['notice', { group: G, notice: words.groupFailed }], ['sheet', false], ['load']], 'failure stays visible on the community instead of navigating away')
+    t.ok(src.includes('<Soft>{createNote.notice}</Soft>'))
+  }
+})
+
+test('new group keeps submission locked throughout the image upload', async (t) => {
+  let finish
+  const h = await newGroupSheet({ upload: (image) => new Promise((resolve) => { finish = () => resolve(image) }) })
+  await h.choose()
+  const first = h.find('Btn', 'Criar grupo').props.onPress()
+  for (let i = 0; i < 10; i++) {
+    if (finish) break
+    await Promise.resolve()
+  }
+  t.ok(finish)
+  t.ok(h.find('Btn', 'Criar grupo').props.pending)
+  t.is(h.find('Sheet').props.dismissable, false)
+  h.find('Sheet').props.onClose()
+  t.is(h.closed, 0, 'image upload blocks closing')
+  await h.find('Btn', 'Criar grupo').props.onPress()
+  if (finish) finish()
+  await first
+  t.is(h.calls.filter(([method]) => method === 'group.create').length, 1)
+  t.is(h.calls.filter(([method]) => method === 'group.image').length, 1)
+  t.is(h.find('Sheet').props.dismissable, true)
+  h.find('Sheet').props.onClose()
+  t.is(h.closed, 1, 'completed work releases the close lock')
+})
+
+test('new group photo capability, target size, cancel and closing discard the draft', async (t) => {
+  for (const node of [{ hosted: false }, { media: null }]) {
+    const h = await newGroupSheet({ node })
+    t.absent(h.find('Pressable', 'Escolher foto'))
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.alike(h.calls.map(([method]) => method), ['group.create'])
+  }
+  for (const discard of ['cancel', 'remove', 'close', 'hide', 'unmount']) {
+    const h = await newGroupSheet()
+    const target = h.find('Pressable', 'Escolher foto')
+    t.ok(target.props.style.minHeight >= 44 && target.props.style.minWidth >= 44)
+    if (discard === 'cancel') {
+      await target.props.onPress()
+      h.find('AvatarEditor').props.onCancel()
+    } else {
+      await h.choose()
+      if (discard === 'remove') h.find('Btn', 'Remover foto').props.onPress()
+      if (discard === 'close') h.find('Sheet').props.onClose()
+      if (discard === 'hide') h.render({ visible: false })
+      if (discard === 'unmount') h.unmount()
+    }
+    t.is(h.released, 1)
+    if (discard === 'close' || discard === 'hide') {
+      h.render({ visible: false })
+      h.render({ visible: true })
+      h.find('Field', 'Nome').props.onChangeText('Novo')
+    }
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.absent(h.calls.some(([method]) => method === 'upload' || method === 'group.image'), discard)
+  }
+})
+
+test('new group ignores a picker or crop finishing after being hidden', async (t) => {
+  for (const stage of ['pick', 'open', 'encode']) {
+    let finish
+    const h = await newGroupSheet({
+      ...(stage === 'pick' ? { pick: () => new Promise((resolve) => { finish = () => resolve({}) }) } : {}),
+      ...(stage === 'open' ? { open: (handle) => new Promise((resolve) => { finish = () => resolve(handle) }) } : {}),
+      ...(stage === 'encode' ? { encode: () => new Promise((resolve) => { finish = () => resolve({ bytes: h.bytes, mime: 'image/jpeg' }) }) } : {})
+    })
+    let work = h.find('Pressable', 'Escolher foto').props.onPress()
+    if (stage === 'encode') {
+      await work
+      work = h.find('AvatarEditor').props.onConfirm({ sx: 0, sy: 0, size: 700 })
+    }
+    for (let i = 0; i < 10; i++) {
+      if (finish) break
+      await Promise.resolve()
+    }
+    t.ok(finish, stage)
+    h.find('Sheet').props.onClose()
+    t.is(h.closed, 0, 'busy sheet cannot close')
+    t.is(h.find('Sheet').props.dismissable, false)
+    h.render({ visible: false })
+    finish()
+    await work
+    h.render({ visible: false })
+    h.render({ visible: true })
+    h.find('Field', 'Nome').props.onChangeText('Novo')
+    await h.find('Btn', 'Criar grupo').props.onPress()
+    t.absent(h.calls.some(([method]) => method === 'upload' || method === 'group.image'), stage)
+    t.is(h.released, stage === 'pick' ? 0 : 1)
+  }
+})
+
+test('new group refuses malformed or non-JPEG crops before creating', async (t) => {
+  for (const mime of ['image/jpeg', 'image/webp']) {
+    const h = await newGroupSheet({ encode: () => ({ bytes: new Uint8Array([1]), mime }) })
+    await h.choose()
+    t.ok(h.find('AvatarEditor').props.error)
+    t.absent(h.find('Btn', 'Criar grupo'), 'only the crop editor is shown')
+    t.absent(h.calls.some(([method]) => method === 'group.create' || method === 'upload'))
+    h.unmount()
+    t.is(h.released, 1)
+  }
+})
+
+test('new group hidden before the create answer never starts the image upload', async (t) => {
+  let finish
+  const h = await newGroupSheet({ create: () => new Promise((resolve) => { finish = () => resolve({ group: G }) }) })
+  await h.choose()
+  const work = h.find('Btn', 'Criar grupo').props.onPress()
+  h.find('Sheet').props.onClose()
+  t.is(h.closed, 0, 'busy sheet cannot close')
+  t.is(h.find('Sheet').props.dismissable, false)
+  h.render({ visible: false })
+  finish()
+  await work
+  t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create'])
+  t.alike(h.created, [])
+  t.is(h.closed, 0)
+})
+
+test('new group crop editor replaces the entire form at the top of the sheet', (t) => {
+  const src = screen('NovoGrupo.js')
+  const fields = src.match(/const fields = editor !== null\s*\? (<AvatarEditor[^]*?\/>)\s*:\s*\(\s*<>([^]*?)<\/>\s*\)/)
+  t.ok(fields, 'editor and form are exclusive branches')
+  t.absent(/<Field\b|<Choice\b|<Btn\b/.test(fields?.[1] || ''), 'editor branch has no form controls')
+  for (const label of ['Nome', 'Visibilidade', 'Entrada', 'Criar grupo']) {
+    t.ok(fields?.[2].includes("label='" + label + "'"), label + ' is in the form branch')
+  }
+  t.ok(/<Sheet\b[^>]*>\s*(?:\{\/\*[^]*?\*\/\}\s*)?<ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle=\{styles.body\}>\s*\{fields\}\s*<\/ScrollView>\s*<\/Sheet>/.test(src), 'sheet body scrolls and contains only the selected branch')
+})
+
+test('new group sheet disables dismissal throughout pending work', (t) => {
+  const src = screen('NovoGrupo.js')
+  t.ok(/<Sheet\b[^>]*dismissable=\{!pending\}/.test(src), 'native swipe and drag follow pending work')
+  t.ok(src.includes('if (sessionRef.current?.busy) return'), 'close callback also checks the execution lock')
+})
+
+test('new group upload finishing after hiding or unmounting never sets the image', async (t) => {
+  for (const end of ['hide', 'reopen', 'unmount']) {
+    let finish
+    const h = await newGroupSheet({ upload: (image) => new Promise((resolve) => { finish = () => resolve(image) }) })
+    await h.choose()
+    const work = h.find('Btn', 'Criar grupo').props.onPress()
+    await new Promise((resolve) => setImmediate(resolve))
+    t.ok(finish, end + ' reached the upload')
+    if (end === 'unmount') h.unmount()
+    else h.render({ visible: false })
+    if (end === 'reopen') h.render({ visible: true })
+    finish()
+    await work
+    t.alike(h.calls.map(([method]) => method), ['pick', 'encode', 'group.create', 'upload'], end + ' never writes the image or retries')
+    t.alike(h.created, [], 'ended session never notifies the caller')
+    t.is(h.released, 1, 'photo handle released once')
+    h.unmount()
+  }
+})

@@ -382,3 +382,479 @@ test('an empty search does not read group.list', async (t) => {
   t.alike(h.calls, [])
   h.unmount()
 })
+
+function sheetNodes (node) {
+  if (Array.isArray(node)) return node.flatMap(sheetNodes)
+  if (!node || typeof node !== 'object') return []
+  return [node, ...sheetNodes(node.props.children)]
+}
+
+async function createHarness (options = {}) {
+  const { transformSync } = require('@babel/core')
+  const { imageAfterCreate, words: imageWords } = await import('../src/groupImageCreate.js')
+  const avatar = await import('../src/media/avatar.js')
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const sheet = source.slice(source.indexOf('export function NovaComunidade ('), source.indexOf('export function Comunidades (')).replace('export ', '')
+  const ui = fs.readFileSync(path.join(__dirname, '../src/ui/index.js'), 'utf8')
+  const action = ui.slice(ui.indexOf('export function useAction ('), ui.indexOf('// Runs the latest')).replace('export ', '')
+  const { code } = transformSync(action + sheet, {
+    babelrc: false,
+    configFile: false,
+    plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { pragma: 'element', pragmaFrag: 'Fragment' }]]
+  })
+  const slots = []
+  const effects = []
+  const calls = []
+  const created = []
+  const encodes = []
+  let cursor = 0
+  let dirty = false
+  let released = 0
+  let uncertain = 0
+  let closed = 0
+  let writes = 0
+  const encoded = { bytes: new Uint8Array([255, 216, 255, 192, 0, 11, 8, 2, 0, 2, 0, 1, 1, 17, 0]), mime: 'image/jpeg' }
+  const handle = {
+    uri: 'local-photo',
+    width: 512,
+    height: 512,
+    encode: async (...args) => { encodes.push(args); return options.encode ? options.encode() : encoded },
+    release: () => { released++ }
+  }
+  const node = {
+    hosted: true,
+    online: true,
+    request: async (method, params) => {
+      calls.push([method, params])
+      if (options.request) return options.request(method, params)
+      return method === 'community.create' ? { community: key(1) } : {}
+    },
+    media: { upload: async (params) => { calls.push(['upload', params]); return options.upload ? options.upload() : image } },
+    ...options.node
+  }
+  const useState = (initial) => {
+    const slot = (slots[cursor++] ??= { value: initial })
+    return [slot.value, (value) => { slot.value = typeof value === 'function' ? value(slot.value) : value; dirty = true; writes++ }]
+  }
+  const useRef = (initial) => (slots[cursor++] ??= { current: initial })
+  const useEffect = (effect, deps) => {
+    const slot = (slots[cursor++] ??= {})
+    if (slot.deps && deps.every((value, i) => Object.is(value, slot.deps[i]))) return
+    slot.deps = deps
+    effects.push(() => { slot.cleanup?.(); slot.cleanup = effect() })
+  }
+  const components = Object.fromEntries(['Sheet', 'View', 'ScrollView', 'Field', 'ErrorText', 'Choice', 'Soft', 'Btn', 'Label', 'AvatarEditor'].map((name) => [name, name]))
+  const context = {
+    ...components,
+    ...avatar,
+    useState,
+    useRef,
+    useEffect,
+    useCallback: (fn) => fn,
+    useStyles: () => ({}),
+    makeStyles: () => ({}),
+    useNode: () => node,
+    useEscapeClose: () => {},
+    errorText: (err) => err.message,
+    refusalOf: () => '',
+    nameLength: (text) => Array.from(text).length,
+    NAME_MAX: 80,
+    HEX64: /^[0-9a-f]{64}$/,
+    UNCERTAIN: 'Não foi possível confirmar',
+    imageAfterCreate,
+    imageWords,
+    pickImage: async () => options.pick ? options.pick() : options.cancelPick ? null : { uri: 'local-photo' },
+    openImage: async () => options.open ? options.open(handle) : handle,
+    element: (type, props, ...children) => ({ type, props: { ...props, children } }),
+    Fragment: 'Fragment'
+  }
+  // eslint-disable-next-line no-new-func
+  const renderSheet = new Function(...Object.keys(context), code + '\nreturn NovaComunidade')(...Object.values(context))
+  const props = { visible: true, onClose: () => { closed++ }, onCreated: (...args) => created.push(args), onUncertain: () => { uncertain++ } }
+  const render = () => {
+    let tree
+    do {
+      dirty = false
+      cursor = 0
+      tree = renderSheet(props)
+      for (const effect of effects.splice(0)) effect()
+    } while (dirty)
+    return sheetNodes(tree)
+  }
+  const find = (type, label) => render().find((n) => n.type === type && (label === undefined || n.props.label === label))?.props
+  render()
+  find('Field', 'Nome').onChangeText('  Jardim  ')
+  return {
+    calls,
+    created,
+    encoded,
+    encodes,
+    node,
+    props,
+    find,
+    render,
+    imageWords,
+    released: () => released,
+    uncertain: () => uncertain,
+    closed: () => closed,
+    writes: () => writes,
+    visible (value) { props.visible = value; return render() },
+    async pick () {
+      await find('Btn', 'Escolher foto')?.onPress()
+      await find('AvatarEditor')?.onConfirm({ x: 0, y: 0, width: 512, height: 512 })
+    },
+    unmount () { for (const slot of slots) slot.cleanup?.() }
+  }
+}
+
+test('community creation with a cropped photo sends create, upload and community.image once', async (t) => {
+  const h = await createHarness()
+  t.ok(h.find('Btn', 'Escolher foto'), 'optional photo row')
+  await h.pick()
+  t.alike(h.calls, [], 'choosing and cropping send nothing')
+  t.alike(h.encodes, [[{ x: 0, y: 0, width: 512, height: 512 }, 262144, { format: 'jpeg' }]])
+  t.is(h.released(), 1, 'crop handle released')
+  const create = h.find('Btn', 'Criar comunidade').onPress
+  await create()
+  await create()
+  t.alike(h.calls, [
+    ['community.create', { name: 'Jardim', join: 'open' }],
+    ['upload', { ...h.encoded, width: 512, height: 512 }],
+    ['community.image', { community: key(1), image }]
+  ], 'unchanged create params, public upload and one image write')
+  t.alike(h.created, [[key(1), '']])
+  h.unmount()
+})
+
+test('failed, uncertain and keyless community creates never upload a chosen photo', async (t) => {
+  for (const result of ['failed', 'uncertain', 'keyless']) {
+    const h = await createHarness({
+      request: async () => {
+        if (result === 'keyless') return {}
+        throw Object.assign(new Error('create failed'), { uncertain: result === 'uncertain' })
+      }
+    })
+    await h.pick()
+    const create = h.find('Btn', 'Criar comunidade').onPress
+    await create()
+    if (result === 'uncertain') await create()
+    t.alike(h.calls.map(([method]) => method), ['community.create'], result)
+    t.alike(h.created, [])
+    t.is(h.uncertain(), result === 'uncertain' ? 1 : 0)
+    h.unmount()
+  }
+})
+
+test('photo failures preserve the created community and never repeat create, upload or image', async (t) => {
+  for (const stage of ['upload', 'community.image']) {
+    for (const uncertain of [false, true]) {
+      const fail = () => { throw Object.assign(new Error('photo failed'), { uncertain }) }
+      const h = await createHarness({
+        upload: stage === 'upload' ? fail : undefined,
+        request: async (method) => method === 'community.create' ? { community: key(1) } : fail()
+      })
+      await h.pick()
+      const create = h.find('Btn', 'Criar comunidade').onPress
+      await create()
+      await create()
+      t.alike(h.calls.map(([method]) => method), stage === 'upload' ? ['community.create', 'upload'] : ['community.create', 'upload', 'community.image'])
+      t.alike(h.created, [[key(1), h.imageWords.communityFailed]])
+      t.is(h.uncertain(), 0, 'photo uncertainty is not create uncertainty')
+      h.unmount()
+    }
+  }
+})
+
+test('photo upload holds the create lock and blocks closing the sheet', async (t) => {
+  let finish
+  const h = await createHarness({ upload: () => new Promise((resolve) => { finish = resolve }) })
+  await h.pick()
+  const create = h.find('Btn', 'Criar comunidade').onPress
+  const running = create()
+  await new Promise((resolve) => setImmediate(resolve))
+  await create()
+  h.find('Sheet').onClose()
+  t.is(h.closed(), 0)
+  t.is(h.find('Sheet').dismissable, false)
+  t.is(h.find('Btn', 'Criar comunidade').pending, true)
+  t.alike(h.calls.map(([method]) => method), ['community.create', 'upload'])
+  finish(image)
+  await running
+  t.is(h.created.length, 1)
+  t.is(h.find('Sheet').dismissable, true)
+  h.unmount()
+})
+
+test('failed community create keeps the sheet open and releases dismissal', async (t) => {
+  let fail
+  const h = await createHarness({ request: () => new Promise((resolve, reject) => { fail = reject }) })
+  const work = h.find('Btn', 'Criar comunidade').onPress()
+  t.is(h.find('Sheet').dismissable, false)
+  h.find('Sheet').onClose()
+  t.is(h.closed(), 0)
+  fail(new Error('create failed'))
+  await work
+  t.is(h.find('Sheet').dismissable, true)
+  t.ok(h.render().some((n) => n.type === 'ErrorText' && n.props.children.includes('create failed')), 'failure stays visible')
+  t.is(h.find('Field', 'Nome').value, '  Jardim  ')
+  t.is(h.find('Btn', 'Criar comunidade').pending, false)
+  t.alike(h.calls.map(([method]) => method), ['community.create'], 'no automatic retry')
+  h.unmount()
+})
+
+test('community photo selection follows capabilities and remains optional', async (t) => {
+  for (const node of [{ hosted: false }, { media: {} }, { online: false }]) {
+    const h = await createHarness({ node })
+    const choose = h.find('Btn', 'Escolher foto')
+    if (node.online === false) t.is(choose?.disabled, true)
+    else t.absent(choose)
+    h.unmount()
+  }
+  for (const mode of ['none', 'cancel', 'remove']) {
+    const h = await createHarness({ cancelPick: mode === 'cancel' })
+    if (mode !== 'none') await h.pick()
+    if (mode === 'remove') h.find('Btn', 'Tirar foto').onPress()
+    await h.find('Btn', 'Criar comunidade').onPress()
+    t.alike(h.calls, [['community.create', { name: 'Jardim', join: 'open' }]], mode)
+    t.alike(h.created, [[key(1), '']])
+    h.unmount()
+  }
+})
+
+test('bad crops send nothing and closing releases an open community crop', async (t) => {
+  const h = await createHarness({ encode: () => ({ bytes: new Uint8Array([1]), mime: 'image/jpeg' }) })
+  await h.pick()
+  t.ok(h.find('AvatarEditor').error, 'invalid image stays in the crop with an error')
+  t.absent(h.find('Btn', 'Criar comunidade'), 'only the crop editor is shown')
+  t.alike(h.calls, [])
+  h.find('AvatarEditor').onCancel()
+  t.is(h.released(), 1)
+  await h.find('Btn', 'Escolher foto').onPress()
+  h.unmount()
+  t.is(h.released(), 2)
+})
+
+test('new community crop editor replaces the entire form at the top of the sheet', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  const fields = src.match(/const fields = editor !== null\s*\? (<AvatarEditor[^]*?\/>)\s*:\s*\(\s*<>([^]*?)<\/>\s*\)/)
+  t.ok(fields, 'editor and form are exclusive branches')
+  t.absent(/<Field\b|<Choice\b|<Btn\b/.test(fields?.[1] || ''), 'editor branch has no form controls')
+  for (const label of ['Nome', 'Entrada', 'Criar comunidade']) {
+    t.ok(fields?.[2].includes("label='" + label + "'"), label + ' is in the form branch')
+  }
+  t.ok(/<Sheet\b[^>]*>\s*(?:\{\/\*[^]*?\*\/\}\s*)?<ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle=\{styles.sheet\}>\s*\{fields\}\s*<\/ScrollView>\s*<\/Sheet>/.test(src), 'sheet body scrolls and contains only the selected branch')
+})
+
+test('new community sheet disables dismissal throughout pending work', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, '../src/screens/Comunidades.js'), 'utf8')
+  t.ok(/<Sheet\b[^>]*dismissable=\{!pending\}/.test(src), 'native swipe and drag follow pending work')
+  t.ok(src.includes('if (sessionRef.current?.busy) return'), 'close callback also checks the execution lock')
+})
+
+test('both community sheet callers keep partial success visible before navigation', async (t) => {
+  const { words } = await import('../src/groupImageCreate.js')
+  for (const file of ['Comunidades.js', 'Conversas.js']) {
+    const source = fs.readFileSync(path.join(__dirname, '../src/screens', file), 'utf8')
+    const callback = source.match(/onCreated=\{(\(community, note\) => \{[\s\S]*?)\}\}/)?.[1] + '}'
+    const opened = []
+    let notice
+    let creating = true
+    let composing = true
+    // eslint-disable-next-line no-new-func
+    const created = new Function('setCreating', 'load', 'groupsLoad', 'setCreatedNotice', 'openCommunity', 'onOpenCommunity', 'closeCompose', 'return ' + callback)(
+      (value) => { creating = value }, () => {}, () => {}, (value) => { notice = value },
+      (key) => opened.push(key), (key) => opened.push(key), () => { composing = false }
+    )
+    created(key(1), words.communityFailed)
+    t.is(creating, false, file + ' closes the create sheet')
+    t.alike(notice, { community: key(1), note: words.communityFailed })
+    t.alike(opened, [], 'partial result remains on the caller')
+    if (file === 'Conversas.js') t.is(composing, false, 'compose sheet cannot cover the notice')
+    const noticeAt = source.indexOf('      {createdNotice')
+    const root = source.slice(noticeAt, source.indexOf('<RefreshableList', noticeAt))
+    t.ok(root.includes('<Soft>{createdNotice.note}</Soft>'), file + ' shows the note outside the list')
+    t.ok(root.includes("label='Abrir comunidade'"), 'explicit navigation after reading the note')
+    created(key(2), '')
+    t.alike(opened, [key(2)], 'complete success still navigates')
+    t.is(notice, null)
+  }
+})
+
+for (const stage of ['pick', 'open', 'encode', 'create', 'create failed', 'create uncertain']) {
+  test('reopened community sheet ignores a previous ' + stage, async (t) => {
+    let finish
+    let firstCreate = true
+    const h = await createHarness({
+      pick: stage === 'pick' ? () => new Promise((resolve) => { finish = () => resolve({ uri: 'old-photo' }) }) : undefined,
+      open: stage === 'open' ? (handle) => new Promise((resolve) => { finish = () => resolve(handle) }) : undefined,
+      encode: stage === 'encode' ? () => new Promise((resolve) => { finish = () => resolve(h.encoded) }) : undefined,
+      request: async () => {
+        if (stage.startsWith('create') && firstCreate) {
+          firstCreate = false
+          return new Promise((resolve, reject) => {
+            finish = () => stage === 'create'
+              ? resolve({ community: key(1) })
+              : reject(Object.assign(new Error('old create failed'), { uncertain: stage === 'create uncertain' }))
+          })
+        }
+        return { community: key(2) }
+      }
+    })
+    let work
+    if (stage.startsWith('create')) {
+      await h.pick()
+      work = h.find('Btn', 'Criar comunidade').onPress()
+    } else {
+      work = h.find('Btn', 'Escolher foto').onPress()
+      if (stage === 'encode') {
+        await work
+        work = h.find('AvatarEditor').onConfirm({ x: 0, y: 0, width: 512, height: 512 })
+      }
+    }
+    await new Promise((resolve) => setImmediate(resolve))
+    t.ok(finish, 'first opening has pending work')
+    h.visible(false)
+    h.visible(true)
+    h.find('Field', 'Nome').onChangeText('Segundo')
+    h.find('Choice', 'Entrada').onChange('approval')
+    t.is(h.find('Btn', 'Criar comunidade').pending, false, 'new opening has its own lock')
+    const form = () => JSON.stringify(h.render(), (key, value) => key === 'children' ? undefined : value)
+    const before = form()
+    const writes = h.writes()
+    const calls = h.calls.slice()
+    finish()
+    await work
+    t.is(h.writes(), writes, 'stale continuation never updates the new form')
+    t.is(form(), before, 'name, entry, photo, error and pending state stay unchanged')
+    t.alike(h.calls, calls, 'old create never uploads or sets an image')
+    t.alike(h.created, [], 'no stale completion reaches the caller')
+    t.is(h.uncertain(), 0, 'old uncertainty cannot affect the new opening')
+    t.is(h.released(), stage === 'pick' ? 0 : 1, 'old handle released once')
+    await h.find('Btn', 'Criar comunidade')?.onPress()
+    t.alike(h.calls.at(-1), ['community.create', { name: 'Segundo', join: 'approval' }])
+    t.absent(h.calls.some(([method]) => method === 'upload' || method === 'community.image'), 'old picked photo was discarded')
+    t.alike(h.created, [[key(2), '']], 'new opening can create independently')
+    h.unmount()
+  })
+}
+
+test('community upload finishing after hiding or unmounting never sets the image', async (t) => {
+  for (const end of ['hide', 'reopen', 'unmount']) {
+    let finish
+    const h = await createHarness({ upload: () => new Promise((resolve) => { finish = () => resolve(image) }) })
+    await h.pick()
+    const work = h.find('Btn', 'Criar comunidade').onPress()
+    await new Promise((resolve) => setImmediate(resolve))
+    t.ok(finish, end + ' reached the upload')
+    if (end === 'unmount') h.unmount()
+    else h.visible(false)
+    if (end === 'reopen') h.visible(true)
+    const writes = h.writes()
+    finish()
+    await work
+    t.alike(h.calls.map(([method]) => method), ['community.create', 'upload'], end + ' never writes the image or retries')
+    t.alike(h.created, [], 'ended session never notifies the caller')
+    t.is(h.writes(), writes, 'no state update from the ended upload')
+    t.is(h.released(), 1, 'photo handle released once')
+    h.unmount()
+  }
+})
+
+function noticeCaller (file) {
+  const { parseSync, transformSync } = require('@babel/core')
+  const traverse = require('@babel/traverse').default
+  const source = fs.readFileSync(path.join(__dirname, '../src/screens', file), 'utf8')
+  const group = file === 'Comunidade.js'
+  const noticeName = group ? 'createNote' : 'createdNotice'
+  const setter = group ? 'setNewGroup' : 'setCreating'
+  const openings = []
+  let noticeExpression
+  let createdExpression
+  const ast = parseSync(source, { babelrc: false, configFile: false, parserOpts: { plugins: ['jsx'] } })
+  traverse(ast, {
+    JSXExpressionContainer ({ node }) {
+      if (node.expression.type === 'ConditionalExpression' && node.expression.test.name === noticeName) {
+        noticeExpression = source.slice(node.expression.start, node.expression.end)
+      }
+    },
+    JSXAttribute ({ node }) {
+      if (node.name.name === 'onCreated') createdExpression = source.slice(node.value.expression.start, node.value.expression.end)
+    },
+    ArrowFunctionExpression (path) {
+      let opens = false
+      path.traverse({
+        CallExpression ({ node }) {
+          if (node.callee.name === setter && node.arguments[0]?.value === true) opens = true
+        }
+      })
+      if (opens) openings.push(source.slice(path.node.start, path.node.end))
+    }
+  })
+  let notice = null
+  let creating = true
+  const opened = []
+  const context = () => ({
+    [noticeName]: notice,
+    setCreateNote: (value) => { notice = value },
+    setCreatedNotice: (value) => { notice = value },
+    [setter]: (value) => { creating = value },
+    load: () => {},
+    groupsLoad: () => {},
+    closeCompose: () => {},
+    openGroup: (value) => opened.push(value),
+    openCommunity: (value) => opened.push(value),
+    onOpenCommunity: (value) => opened.push(value),
+    styles: {},
+    View: 'View',
+    Soft: 'Soft',
+    Btn: 'Btn',
+    element: (type, props, ...children) => ({ type, props: { ...props, children } })
+  })
+  const evaluate = (expression) => {
+    const { code } = transformSync('const value = (' + expression + ')', {
+      babelrc: false,
+      configFile: false,
+      plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { pragma: 'element' }]]
+    })
+    const values = context()
+    // eslint-disable-next-line no-new-func
+    return new Function(...Object.keys(values), code + '\nreturn value')(...Object.values(values))
+  }
+  return {
+    opened,
+    openings: () => openings.map(evaluate),
+    created: (...args) => evaluate(createdExpression)(...args),
+    render: () => sheetNodes(evaluate(noticeExpression)),
+    creating: () => creating
+  }
+}
+
+for (const file of ['Comunidade.js', 'Comunidades.js', 'Conversas.js']) {
+  test(file + ' partial success notice opens the entity and clears on opening another create', async (t) => {
+    const { words } = await import('../src/groupImageCreate.js')
+    const h = noticeCaller(file)
+    const group = file === 'Comunidade.js'
+    const note = group ? words.groupFailed : words.communityFailed
+    h.created(key(1), note)
+    t.is(h.creating(), false, 'sheet closes')
+    t.alike(h.opened, [], 'partial success stays on the caller')
+    t.ok(h.render().some((n) => n.type === 'Soft' && n.props.children.includes(note)), 'line remains visible after closing')
+    const button = h.render().find((n) => n.type === 'Btn' && n.props.label === (group ? 'Abrir grupo' : 'Abrir comunidade'))
+    t.ok(button, 'notice offers the created entity')
+    button?.props.onPress()
+    t.alike(h.opened, [key(1)], 'button navigates to the created key')
+    t.alike(h.render(), [], 'line is gone when returning from the entity')
+    const openings = h.openings()
+    t.is(openings.length, file === 'Conversas.js' ? 3 : 2, 'covers every create entry point')
+    for (const open of openings) {
+      h.created(key(1), note)
+      open()
+      t.is(h.creating(), true, 'entry point opens the sheet')
+      t.alike(h.render(), [], 'reopening clears the line')
+    }
+    h.created(key(1), note)
+    h.created(key(2), '')
+    t.alike(h.opened, [key(1), key(2)], 'a later successful create still navigates')
+    t.alike(h.render(), [], 'a later successful create clears the line')
+  })
+}

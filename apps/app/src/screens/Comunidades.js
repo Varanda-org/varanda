@@ -15,8 +15,13 @@
 // acting as the member.
 
 import { pictureProps } from '../groupImage'
+import { imageAfterCreate, words as imageWords } from '../groupImageCreate'
+import { pickImage } from '../media/attach'
+import { openImage } from '../media/avatarEncode'
+import { AVATAR_SIDE, MAX_AVATAR_BYTES, checkAvatarBytes } from '../media/avatar'
+import { AvatarEditor } from '../ui/AvatarEditor'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Keyboard, StyleSheet, Text, View } from 'react-native'
+import { Keyboard, ScrollView, StyleSheet, Text, View } from 'react-native'
 import rpc from '@varanda/rpc'
 import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
@@ -29,7 +34,7 @@ import { pagesOn } from '../pageGate'
 import { actAs } from '../pages'
 import { memberKeyOf, useActing } from './Conversa'
 import { liveBinding } from './ARua'
-import { Btn, ErrorText, Field, SectionHeader, Soft, UNCERTAIN, errorText, useAction, useBottomPad } from '../ui'
+import { Btn, ErrorText, Field, Label, SectionHeader, Soft, UNCERTAIN, errorText, useBottomPad } from '../ui'
 import { refusalOf } from '../wordCheck'
 import { Avatar } from '../ui/Avatar'
 import { Badge } from '../ui/Badge'
@@ -281,41 +286,150 @@ export function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
   const [name, setName] = useState('')
   const [join, setJoin] = useState('open')
   const [uncertain, setUncertain] = useState(false)
-  const action = useAction()
-  const clearRef = useRef(action.clearError)
-  clearRef.current = action.clearError
-  useEscapeClose(visible, onClose)
+  const [hasPhoto, setHasPhoto] = useState(false)
+  const [createError, setCreateError] = useState('')
+  const [editor, setEditor] = useState(null)
+  const [photoError, setPhotoError] = useState('')
+  const [pending, setPending] = useState(false)
+  const sessionRef = useRef(null)
+  const release = (session) => {
+    if (!session) return
+    try { session.handle?.release() } catch {}
+    session.handle = null
+    session.picked = null
+  }
+  const close = () => {
+    if (sessionRef.current?.busy) return
+    if (sessionRef.current) sessionRef.current.open = false
+    release(sessionRef.current)
+    setEditor(null)
+    setHasPhoto(false)
+    onClose()
+  }
+  useEscapeClose(visible, close)
 
   useEffect(() => {
     if (!visible) return
+    const session = { open: true, busy: false, done: false, handle: null, picked: null }
+    sessionRef.current = session
     setName('')
     setJoin('open')
     setUncertain(false)
-    clearRef.current()
+    setHasPhoto(false)
+    setEditor(null)
+    setPhotoError('')
+    setPending(false)
+    setCreateError('')
+    return () => { session.open = false; release(session) }
   }, [visible])
 
   const trimmed = name.trim()
   const tooLong = nameLength(trimmed) > NAME_MAX
   const offline = node.online === false
   const refused = refusalOf(trimmed)
-  const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && !uncertain
+  const canPick = node.hosted === true && typeof node.media?.upload === 'function'
+  const ready = trimmed.length > 0 && !tooLong && refused === '' && !offline && !uncertain && !pending && editor === null
 
-  const create = async () => {
-    if (!ready) return
-    const res = await action.run(() => node.request('community.create', { name: trimmed, join }))
-    if (res.ok && res.value && typeof res.value.community === 'string') {
-      if (typeof onCreated === 'function') onCreated(res.value.community)
-      return
+  const cancelPhoto = () => {
+    const session = sessionRef.current
+    if (!session?.open || session.busy) return
+    release(session)
+    setHasPhoto(false)
+    setEditor(null)
+    setPhotoError('')
+  }
+  const choosePhoto = async () => {
+    const session = sessionRef.current
+    if (!session?.open || !canPick || offline || session.busy || session.done || session.handle) return
+    session.busy = true
+    setPending(true)
+    setPhotoError('')
+    try {
+      const file = await pickImage()
+      if (!file || !session.open) return
+      const handle = await openImage(file)
+      if (!session.open) {
+        handle.release()
+        return
+      }
+      session.handle = handle
+      setEditor(handle)
+    } catch (err) {
+      if (session.open) setPhotoError(errorText(err))
+    } finally {
+      session.busy = false
+      if (session.open) setPending(false)
     }
-    if (res.uncertain) {
-      setUncertain(true)
-      if (typeof onUncertain === 'function') onUncertain()
+  }
+  const savePhoto = async (rect) => {
+    const session = sessionRef.current
+    if (!session?.open || session.busy || !session.handle) return
+    session.busy = true
+    setPending(true)
+    setPhotoError('')
+    try {
+      const encoded = await session.handle.encode(rect, MAX_AVATAR_BYTES, { format: 'jpeg' })
+      if (!session.open) return
+      if (!encoded || encoded.mime !== 'image/jpeg' || !checkAvatarBytes(encoded.bytes, { mime: encoded.mime, width: AVATAR_SIDE, height: AVATAR_SIDE })) throw new Error('Não foi possível preparar a foto.')
+      release(session)
+      session.picked = { bytes: encoded.bytes, mime: encoded.mime }
+      setHasPhoto(true)
+      setEditor(null)
+    } catch (err) {
+      if (session.open) setPhotoError(errorText(err))
+    } finally {
+      session.busy = false
+      if (session.open) setPending(false)
     }
   }
 
-  return (
-    <Sheet open={!!visible} onClose={onClose} title='Nova comunidade'>
-      <View style={styles.sheet}>
+  const create = async () => {
+    const session = sessionRef.current
+    if (!ready || !session?.open || session.busy || session.done || session.handle) return
+    session.busy = true
+    setPending(true)
+    try {
+      setCreateError('')
+      const value = await node.request('community.create', { name: trimmed, join })
+      if (!session.open) return
+      if (value && typeof value.community === 'string' && HEX64.test(value.community)) {
+        session.done = true
+        const result = await imageAfterCreate({
+          key: value.community,
+          kind: 'community',
+          picked: canPick ? session.picked : null,
+          upload: (params) => node.media.upload(params),
+          setImage: (method, params) => {
+            if (!session.open) throw new Error('A criação foi fechada.')
+            return node.request(method, params)
+          }
+        })
+        release(session)
+        if (!session.open) return
+        setHasPhoto(false)
+        const note = result === 'failed' || result === 'uncertain' ? imageWords.communityFailed : ''
+        if (typeof onCreated === 'function') onCreated(value.community, note)
+      }
+    } catch (err) {
+      if (!session.open) return
+      setCreateError(errorText(err))
+      if (err?.uncertain === true) {
+        release(session)
+        setHasPhoto(false)
+        session.done = true
+        setUncertain(true)
+        if (typeof onUncertain === 'function') onUncertain()
+      }
+    } finally {
+      session.busy = false
+      if (session.open) setPending(false)
+    }
+  }
+
+  const fields = editor !== null
+    ? <AvatarEditor source={editor} pending={pending} error={photoError} onCancel={cancelPhoto} onConfirm={savePhoto} />
+    : (
+      <>
         <Field
           label='Nome'
           value={name}
@@ -332,12 +446,32 @@ export function NovaComunidade ({ visible, onClose, onCreated, onUncertain }) {
           options={[{ value: 'open', label: 'Aberta' }, { value: 'approval', label: 'Com aprovação' }]}
         />
         <Soft>Uma comunidade reúne até 32 grupos sob a mesma moderação e já nasce com o grupo Geral.</Soft>
+        {canPick
+          ? (
+            <View style={styles.sheet}>
+              <Label>{imageWords.communityLabel}</Label>
+              <Soft>{imageWords.communityPublic}</Soft>
+              {hasPhoto ? <Soft>Foto escolhida.</Soft> : null}
+              <Btn label={hasPhoto ? 'Trocar foto' : 'Escolher foto'} onPress={choosePhoto} disabled={offline || pending || uncertain} secondary />
+              {hasPhoto ? <Btn label='Tirar foto' onPress={cancelPhoto} disabled={pending || uncertain} secondary /> : null}
+              <ErrorText>{photoError}</ErrorText>
+            </View>
+            )
+          : null}
         {offline ? <Soft>Sem internet: conecte-se para criar a comunidade.</Soft> : null}
         {uncertain
           ? <ErrorText>{UNCERTAIN + '. Confira em Minhas comunidades antes de criar de novo.'}</ErrorText>
-          : <ErrorText>{action.error}</ErrorText>}
-        <Btn label='Criar comunidade' onPress={create} disabled={!ready} pending={action.pending} />
-      </View>
+          : <ErrorText>{createError}</ErrorText>}
+        <Btn label='Criar comunidade' onPress={create} disabled={!ready} pending={pending} />
+      </>
+      )
+
+  return (
+    <Sheet open={!!visible} onClose={close} dismissable={!pending} title='Nova comunidade'>
+      {/* The crop editor is taller than a small phone's sheet. */}
+      <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.sheet}>
+        {fields}
+      </ScrollView>
     </Sheet>
   )
 }
@@ -368,6 +502,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const liveMarked = useRef(false)
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
+  const [createdNotice, setCreatedNotice] = useState(null)
   const search = useGroupSearch(node, hosted ? query : '')
   const communityNames = useCommunityNames(search.groups)
   const searchImages = useIndexGroupImages(node, search.rows, search.groups, search.status === 'done')
@@ -458,7 +593,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   // The icon set has no plus glyph ('mais' is the overflow dots), so the + is text.
   const plus = hosted && pageKey === null
     ? (
-      <PressScale accessibilityRole='button' accessibilityLabel='Nova comunidade' onPress={() => setCreating(true)} style={styles.plus}>
+      <PressScale accessibilityRole='button' accessibilityLabel='Nova comunidade' onPress={() => { setCreatedNotice(null); setCreating(true) }} style={styles.plus}>
         <Text style={styles.plusText} maxFontSizeMultiplier={1.5}>+</Text>
       </PressScale>
       )
@@ -558,7 +693,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   } else if (!list.loaded) {
     empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
-    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou. Uma comunidade reúne até 32 grupos sob a mesma moderação.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => setCreating(true) : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
+    empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou. Uma comunidade reúne até 32 grupos sob a mesma moderação.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => { setCreatedNotice(null); setCreating(true) } : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
   }
 
   const refresh = () => {
@@ -588,6 +723,9 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   return (
     <View style={styles.root}>
       {bar}
+      {createdNotice
+        ? <View style={styles.block}><Soft>{createdNotice.note}</Soft><Btn label='Abrir comunidade' onPress={() => { setCreatedNotice(null); openCommunity(createdNotice.community) }} secondary /></View>
+        : null}
       {/* The search sits under the list: with the keyboard open (Android
           draws edge to edge) the list must shrink so a result scrolls into
           view above it. */}
@@ -610,10 +748,11 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
         visible={creating}
         onClose={() => { setCreating(false); load() }}
         onUncertain={load}
-        onCreated={(community) => {
+        onCreated={(community, note) => {
           setCreating(false)
           load()
-          openCommunity(community)
+          setCreatedNotice(note ? { community, note } : null)
+          if (!note) openCommunity(community)
         }}
       />
     </View>
