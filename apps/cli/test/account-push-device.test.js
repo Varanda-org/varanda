@@ -20,9 +20,9 @@ const association = 'ab'.repeat(32)
 const freshKey = () => nodeCrypto.randomBytes(16).toString('base64url')
 const device = (transport = 'apns') => ({ transport, token: nodeCrypto.randomBytes(32).toString('hex'), key: freshKey(), createdAt: 1 })
 
-function setup (t, { web = true, native = true, delay = 0, sendNative = null, phoneChecked = () => {}, pagesStore = null } = {}) {
-  const dir = path.join(tmpDir(t), 'account')
-  const kp = crypto.keyPair()
+function setup (t, { web = true, native = true, delay = 0, sendNative = null, phoneChecked = () => {}, pagesStore = null, dataDir = null, keyPair = null } = {}) {
+  const dir = dataDir || path.join(tmpDir(t), 'account')
+  const kp = keyPair || crypto.keyPair()
   const member = Buffer.from(kp.publicKey).toString('hex')
   const clock = { t: 1800000000000 }
   const now = () => clock.t
@@ -114,7 +114,7 @@ function setup (t, { web = true, native = true, delay = 0, sendNative = null, ph
     await pushStore.put({ member, ...row })
     return row
   }
-  return { routes, request, start, sign, finish, check, relay, dm, group, subscribeWeb, pushStore, pushDeviceStore, member, kp, clock, state, calls, webCalls, logs }
+  return { dir, routes, request, start, sign, finish, check, relay, dm, group, subscribeWeb, pushStore, pushDeviceStore, member, kp, clock, state, calls, webCalls, logs }
 }
 
 test('device routes: no native sender leaves Web Push intact', async (t) => {
@@ -123,15 +123,66 @@ test('device routes: no native sender leaves Web Push intact', async (t) => {
   t.is((await s.start()).body.error, 'indisponivel')
   t.is((await s.start('on', 'fcm')).body.error, 'indisponivel')
   const row = device()
-  t.is((await s.check(row)).body.error, 'indisponivel')
-  const started = await s.start('on', null)
-  t.is(started.status, 200)
-  t.is((await s.request('device/finish', s.sign(started.body.nonce, row))).body.error, 'indisponivel')
+  t.alike((await s.check(row)).body, { registered: false })
+  for (const transport of ['apns', 'fcm']) {
+    const started = await s.start('on', null)
+    t.is(started.status, 200)
+    t.is((await s.request('device/finish', s.sign(started.body.nonce, device(transport)))).body.error, 'indisponivel')
+  }
   const sub = await s.subscribeWeb()
   t.alike((await s.request('check', { member: s.member, ...sub })).body, { registered: true })
   await s.dm()
   t.is(s.webCalls.length, 1)
   t.is(s.calls.length, 0)
+})
+
+test('device routes: check and opt-out survive removal of transport configuration', async (t) => {
+  const before = setup(t, { web: false })
+  const rows = [device('apns'), device('fcm')]
+  for (const row of rows) t.is((await before.finish(row)).status, 200)
+  await before.routes.close()
+  const s = setup(t, { web: false, native: false, dataDir: before.dir, keyPair: before.kp })
+  s.state.versions = []
+  for (const row of rows) {
+    t.is((await s.start('on', row.transport)).body.error, 'indisponivel')
+    t.alike((await s.check(row)).body, { registered: true })
+    t.alike((await s.check(row, { key: freshKey() })).body, { registered: false })
+    t.alike((await s.check(row, { token: device(row.transport).token })).body, { registered: false })
+    const started = await s.start('off', row.transport)
+    t.is(started.status, 200)
+    if (started.status !== 200) continue
+    t.alike((await s.request('device/finish', s.sign(started.body.nonce, row, 'off'))).body, { ok: true, changed: true })
+    t.alike((await s.check(row)).body, { registered: false })
+  }
+  t.is(s.pushDeviceStore.devices(s.member), 0)
+})
+
+test('device routes: opt-out and check still require a usable store', async (t) => {
+  const s = setup(t, { native: false })
+  const row = device()
+  const nonce = (await s.start('off', null)).body.nonce
+  s.pushDeviceStore.fail()
+  t.is((await s.start('off')).body.error, 'indisponivel')
+  t.is((await s.check(row)).body.error, 'indisponivel')
+  t.is((await s.request('device/finish', s.sign(nonce, row, 'off'))).body.error, 'indisponivel')
+})
+
+test('device routes: maximum FCM token fits finish and check, with bounded bodies', async (t) => {
+  const s = setup(t)
+  const row = { ...device('fcm'), token: 'a'.repeat(4096) }
+  const nonce = (await s.start('on', 'fcm')).body.nonce
+  const body = s.sign(nonce, row)
+  t.is(Buffer.byteLength(JSON.stringify({ ...body, action: 'off' })), 4445, 'maximum finish fields with compact JSON')
+  t.is(Buffer.byteLength(JSON.stringify({ member: s.member, transport: row.transport, token: row.token, key: row.key })), 4233, 'maximum check fields with compact JSON')
+  t.alike((await s.request('device/finish', body)).body, { ok: true, changed: true })
+  t.alike((await s.check(row)).body, { registered: true })
+  for (const route of ['device/finish', 'device/check']) {
+    t.is((await s.request(route, { padding: 'x'.repeat(8192) })).status, 413)
+    t.not((await s.request(route, { padding: 'x'.repeat(8192 - 14) })).status, 413, 'exactly 8192 bytes reaches field validation')
+  }
+  for (const route of ['start', 'finish', 'check']) {
+    t.is((await s.request(route, { padding: 'x'.repeat(4096) })).status, 413, 'web body limit is unchanged')
+  }
 })
 
 test('device finish: signed registration, check, rotation and removal for both transports', async (t) => {
@@ -176,7 +227,7 @@ test('device finish: exact fields, single use, binding and proof domain', async 
   s.clock.t += 600001
   t.is((await s.request('device/finish', s.sign(nonce, row))).body.error, 'expirado')
   t.is((await s.start('on', 'web')).body.error, 'pedido-invalido')
-  t.is((await s.request('device/finish', { padding: 'x'.repeat(4096) })).status, 413)
+  t.is((await s.request('device/finish', { padding: 'x'.repeat(8192) })).status, 413)
   t.is((await s.check(row, { signature: 'a'.repeat(128) })).body.error, 'pedido-invalido')
   t.is(s.pushDeviceStore.devices(s.member), 0)
 })

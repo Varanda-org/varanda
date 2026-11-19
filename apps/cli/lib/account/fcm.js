@@ -18,10 +18,10 @@ function endpoint (value, name, originOnly = false) {
   }
 }
 
-function post (url, headers, body, signal) {
+function post (url, headers, body, signal, agent) {
   return new Promise((resolve, reject) => {
     const transport = url.protocol === 'https:' ? https : http
-    const req = transport.request(url, { method: 'POST', headers, signal }, (res) => {
+    const req = transport.request(url, { method: 'POST', headers, signal, agent }, (res) => {
       let size = 0
       const chunks = []
       res.on('data', (chunk) => {
@@ -72,21 +72,33 @@ function createFcm (config = {}) {
   }
   const origin = endpoint(config.origin === undefined ? 'https://fcm.googleapis.com' : config.origin, 'origin', true)
   const messageUrl = new URL('/v1/projects/' + account.project_id + '/messages:send', origin)
+  const agents = {
+    'https:': new https.Agent({ keepAlive: true, maxSockets: 1 }),
+    'http:': new http.Agent({ keepAlive: true, maxSockets: 1 })
+  }
   let accessToken = null
   let refreshAt = 0
   let issuedAt = 0
+  let tokenExchange = null
 
   async function oauthToken (signal) {
     const time = now()
     if (!Number.isFinite(time)) throw new Error('now inválido')
     if (accessToken && time >= issuedAt && time < refreshAt) return accessToken
+    if (tokenExchange === null) {
+      tokenExchange = exchangeToken(time, signal).finally(() => { tokenExchange = null })
+    }
+    return tokenExchange
+  }
+
+  async function exchangeToken (time, signal) {
     const iat = Math.floor(time / 1000)
     const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
     const claims = Buffer.from(JSON.stringify({ iss: email, scope: 'https://www.googleapis.com/auth/firebase.messaging', aud: audience, iat, exp: iat + 3600 })).toString('base64url')
     const input = header + '.' + claims
     const assertion = input + '.' + crypto.sign('RSA-SHA256', Buffer.from(input), privateKey).toString('base64url')
     const body = new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }).toString()
-    const { status, data } = await post(tokenUrl, { 'content-type': 'application/x-www-form-urlencoded' }, body, signal)
+    const { status, data } = await post(tokenUrl, { 'content-type': 'application/x-www-form-urlencoded' }, body, signal, agents[tokenUrl.protocol])
     if (status !== 200 || !data || typeof data.access_token !== 'string' || !data.access_token.length || /[^\x21-\x7e]/.test(data.access_token) || !Number.isFinite(data.expires_in) || data.expires_in <= 0) throw new Error('resposta OAuth inválida')
     accessToken = data.access_token
     issuedAt = time
@@ -113,7 +125,7 @@ function createFcm (config = {}) {
           data: { k: kind, t: tag }
         }
       })
-      const { status, data } = await post(messageUrl, { authorization: 'Bearer ' + credential, 'content-type': 'application/json' }, body, controller.signal)
+      const { status, data } = await post(messageUrl, { authorization: 'Bearer ' + credential, 'content-type': 'application/json' }, body, controller.signal, agents[messageUrl.protocol])
       if (status === 200) return 'ok'
       const error = data && data.error
       if (status === 404 && error && error.status === 'NOT_FOUND' && Array.isArray(error.details) && error.details.some(detail => detail && detail['@type'] === 'type.googleapis.com/google.firebase.fcm.v1.FcmError' && detail.errorCode === 'UNREGISTERED')) return 'gone'
