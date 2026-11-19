@@ -189,7 +189,7 @@ test('welcome building blocks', (t) => {
   for (const forbidden of ['setTimeout', 'numberOfLines', 'ActionsSheet', 'Promise']) {
     t.absent(options.includes(forbidden), 'options have no ' + forbidden)
   }
-  t.ok(options.includes('minHeight: layout.hit + space.sm'), 'large option targets')
+  t.ok(options.includes('<ListRow icon={icon} label={label} onPress={onPress} disabled={disabled} pending={pending} first={first} />'), 'options use ListRow with a direct tap callback')
   t.ok(options.includes('onPress={onPress}'), 'tap callback passed directly')
 })
 

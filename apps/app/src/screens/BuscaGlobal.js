@@ -41,8 +41,9 @@ import {
   BUSCA_EMPTY, BUSCA_EMPTY_CODE, BUSCA_LABEL, BUSCA_NOT_HOSTED, BUSCA_NOT_HOSTED_TITLE, BUSCA_PLACEHOLDER, CATEGORIES, CATEGORY_LABEL,
   CODE_FIELD_LABEL, buscaNotice, debouncePlan, plan, staleGuard
 } from '../buscaGlobal'
-import { ErrorText, Notice, Soft, useAction, useBottomPad } from '../ui'
+import { ErrorText, Notice, SectionHeader, Soft, useAction, useBottomPad } from '../ui'
 import { HelpNote } from '../ui/Help'
+import { ListRow } from '../ui/ListRow'
 import { MemberRow } from '../ui/MemberRow'
 import { HashtagContext } from '../ui/MentionText'
 import { Pill } from '../ui/Pill'
@@ -327,21 +328,23 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
     ? null
     : (
       <View style={styles.recents}>
-        <View style={styles.recentRow}>
-          <Text style={styles.recentsTitle} accessibilityRole='header'>{RECENTS_TITLE}</Text>
-          <Pressable accessibilityRole='button' accessibilityLabel={RECENTS_CLEAR_LABEL} onPress={() => setRecents((r) => ({ ...r, [cat]: clearRecents() }))} style={styles.recentAction}>
-            <Text style={styles.link}>{RECENTS_CLEAR}</Text>
-          </Pressable>
-        </View>
-        {recents[cat].map((q) => (
-          <View key={q} style={styles.recentRow}>
-            <Pressable accessibilityRole='button' accessibilityLabel={'buscar ' + displayText(q)} onPress={() => chooseRecent(cat, q)} style={styles.recentQuery}>
-              <Text style={styles.recentText} numberOfLines={1}>{displayText(q)}</Text>
-            </Pressable>
-            <Pressable accessibilityRole='button' accessibilityLabel={'remover ' + displayText(q)} onPress={() => setRecents((r) => ({ ...r, [cat]: removeRecent(r[cat], q) }))} style={styles.recentAction}>
-              <Text style={styles.link}>{RECENTS_REMOVE}</Text>
-            </Pressable>
-          </View>
+        <SectionHeader
+          flush
+          right={<Pill label={RECENTS_CLEAR} accessibilityLabel={RECENTS_CLEAR_LABEL} link small onPress={() => setRecents((r) => ({ ...r, [cat]: clearRecents() }))} />}
+        >
+          {RECENTS_TITLE}
+        </SectionHeader>
+        {recents[cat].map((q, i) => (
+          <ListRow
+            key={q}
+            first={i === 0}
+            icon='relogio'
+            label={displayText(q)}
+            accessibilityLabel={'buscar ' + displayText(q)}
+            trailing={null}
+            onPress={() => chooseRecent(cat, q)}
+            action={<Pill label={RECENTS_REMOVE} accessibilityLabel={'remover ' + displayText(q)} link small onPress={() => setRecents((r) => ({ ...r, [cat]: removeRecent(r[cat], q) }))} />}
+          />
         ))}
       </View>
       ))
@@ -612,10 +615,5 @@ const makeStyles = (colors) => StyleSheet.create({
   field: { flex: 1, minWidth: 0 },
   cancel: { minHeight: layout.hit, justifyContent: 'center', paddingHorizontal: space.xs },
   link: { ...type.more, color: colors.accent },
-  recents: { marginBottom: space.sm },
-  recentRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm, minHeight: layout.hit },
-  recentsTitle: { ...type.postName, flex: 1, color: colors.ink },
-  recentQuery: { flex: 1, minWidth: 0, minHeight: layout.hit, justifyContent: 'center' },
-  recentText: { ...type.postText, color: colors.ink },
-  recentAction: { minHeight: layout.hit, minWidth: layout.hit, alignItems: 'flex-end', justifyContent: 'center' }
+  recents: { marginBottom: space.sm }
 })

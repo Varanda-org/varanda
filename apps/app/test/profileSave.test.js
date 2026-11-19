@@ -20,7 +20,7 @@ test('Perfil: Salvar waits for the photo editor, flush versions header, capitali
   const gate = embedded.indexOf('{editor === null')
   t.ok(gate > 0 && embedded.indexOf("<Pill label='Salvar'") > gate, 'Salvar only with the editor closed')
   t.is(src.split('<SectionHeader flush>Versões do perfil</SectionHeader>').length - 1, 2, 'the header lines up with the page')
-  t.ok(src.includes('i > 0 && styles.versionRule'), 'no double rule under the header')
+  t.ok(src.includes('{i > 0 ? <Divider /> : null}'), 'no double rule under the header')
   t.ok(src.includes("label={'Nome ('") && src.includes("label={'Bio ('"))
 })
 
