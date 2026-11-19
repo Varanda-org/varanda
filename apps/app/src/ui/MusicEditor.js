@@ -10,7 +10,7 @@ import { Icon } from './Icon'
 import { MusicCover } from './MusicCover'
 import { useMusicCover } from './useMusicCover'
 import { MusicStrip } from './MusicStrip'
-import { Segmented } from './Segmented'
+import { SegmentedControl } from './SegmentedControl'
 import { useStyles, useTheme } from './ThemeProvider'
 import { space } from './theme'
 
@@ -49,7 +49,7 @@ export function MusicEditor ({ item, kind, start, modes, session, onKind, onStar
       {kind === 'playlist'
         ? <Text style={styles.artist}>{displayText(musicRowLine(item))}</Text>
         : <Text style={styles.artist}>{displayText(item.artist)}</Text>}
-      {choose ? <Segmented options={KINDS} selected={kind} onSelect={select} /> : null}
+      {choose ? <SegmentedControl options={KINDS} selected={kind} onSelect={select} /> : null}
       {kind === 'snippet'
         ? (
           <View style={styles.snippet}>

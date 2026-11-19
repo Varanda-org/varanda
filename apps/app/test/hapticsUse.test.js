@@ -25,7 +25,10 @@ const theme = {
   motion: { fast: 150 },
   radius: { pill: 999 },
   space: { xs: 4, sm: 8, md: 12, lg: 16 },
-  type: { pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 } }
+  type: {
+    pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 },
+    rowName: { fontSize: 16, fontWeight: '600', lineHeight: 24 }
+  }
 }
 
 function element (type, props) {
@@ -280,4 +283,5 @@ test('selection sources tap select once and leave the tab chrome in place', (t) 
   t.ok(segmented.includes("accessibilityRole='tab'"), 'tab role stays')
   t.ok(segmented.includes('accessibilityState={{ selected: on }}'), 'selected state stays')
   t.ok(segmented.includes('aria-selected={on}'), 'web selected state stays')
+  t.ok(/tab: \{[^}]*minHeight: 48\b/.test(segmented), 'tab minimum height is 48')
 })
