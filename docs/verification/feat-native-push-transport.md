@@ -11,7 +11,26 @@
 
 ## Testes automatizados
 
-Preenchido na aterrissagem.
+Aterrissagem em `cbcdb93f`, Node 24, local: `npm run lint` passou; os 325 arquivos de teste alcançados pelo diff contra `origin/main` passaram, cada um sozinho; `npm run demo` terminou com `DEMO OK`. Os arquivos de teste que este PR mudou:
+
+| Arquivo | Testes | Asserções |
+|---|---|---|
+| `apps/app/test/legal.test.js` | 74/74 | 2351/2351 |
+| `apps/cli/test/account-delete.test.js` | 34/34 | 281/281 |
+| `apps/cli/test/account-push-device.test.js` | 25/25 | 172/172 |
+| `apps/cli/test/apns.test.js` | 11/11 | 129/129 |
+| `apps/cli/test/cli.test.js` | 11/11 | 1428/1428 |
+| `apps/cli/test/deploy.test.js` | 66/66 | 916/916 |
+| `apps/cli/test/fcm.test.js` | 12/12 | 145/145 |
+| `apps/cli/test/push-device-store.test.js` | 32/32 | 1677/1677 |
+| `apps/site/test/legal.test.js` | 7/7 | 115/115 |
+| `packages/core/test/push-device-proof.test.js` | 9/9 | 266/266 |
+| `packages/core/test/session.test.js` | 47/47 | 481/481 |
+| `packages/core/test/terms.test.js` | 8/8 | 126/126 |
+| `packages/rpc/test/methods.test.js` | 170/170 | 8058/8058 |
+| `packages/web-member/test/session.test.js` | 89/89 | 858/858 |
+
+Regressões conferidas removendo a correção: os testes da troca de dono de um token com outra chave de aparelho e da resposta `gone` atrasada que apagava uma linha mais nova falham sem ela.
 
 ## No aparelho
 
