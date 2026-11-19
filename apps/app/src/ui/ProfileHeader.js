@@ -32,12 +32,11 @@ const isIconOnly = (el) => !!el && !!el.props && typeof el.props.icon === 'strin
 
 export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBack, bandButtons, avatar, title, subtitle, bio, counts, note, actions, more, rows, tabs, corner, theme = null, mood, about, fan, top, onTabsLayout }) {
   const styles = useStyles(makeStyles)
-  const { scheme } = useTheme()
+  const { colors, scheme } = useTheme()
   // On a themed band the back disc is the ink color with the band color as the
   // icon, which keeps the palette's contrast; the sunset band keeps white on the scrim.
   const tint = bandTint(theme, scheme)
-  const { width } = useWindowDimensions()
-  const avatarSize = width >= layout.column ? space.xxl * 2 + space.sm : layout.hit * 2
+  const avatarSize = space.xxl * 2
   const shownCounts = Array.isArray(counts) ? counts.filter((c) => c && c.value !== null && c.value !== undefined) : []
   const shownActions = Array.isArray(actions) ? actions.filter(Boolean) : []
   const a = avatar || {}
@@ -66,8 +65,8 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
   return (
     <View onLayout={onRootLayout}>
       <ProfileBand height={bandHeight} theme={theme}>
-        {/* At the top: the avatar row below rises 44 pt into the band from
-            x=16 and is drawn later, so a bottom-left control would get no touches. */}
+        {/* The avatar row rises into the band and draws over its lower left,
+            so the back button sits at the top. */}
         {typeof onBack === 'function'
           ? (
             <PressScale
@@ -77,7 +76,7 @@ export function ProfileHeader ({ loading = false, bandHeight, topInset = 0, onBa
               onPress={onBack}
               style={[styles.back, { top: topInset + space.sm }, tint !== null && { backgroundColor: tint.disc }]}
             >
-              <Icon name='voltar' size={22} color={tint !== null ? tint.icon : '#ffffff'} />
+              <Icon name='voltar' size={22} color={tint !== null ? tint.icon : colors.onMedia} />
             </PressScale>
             )
           : null}
@@ -173,10 +172,10 @@ const makeStyles = (colors) => StyleSheet.create({
   statusText: { ...type.caption, color: colors.ink, flexShrink: 1 },
   back: {
     position: 'absolute',
-    left: space.lg,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    left: space.xl,
+    width: layout.hit,
+    height: layout.hit,
+    borderRadius: radius.pill,
     backgroundColor: colors.dim,
     alignItems: 'center',
     justifyContent: 'center'
@@ -185,19 +184,19 @@ const makeStyles = (colors) => StyleSheet.create({
     width: '100%',
     maxWidth: layout.column,
     alignSelf: 'center',
-    paddingHorizontal: space.lg,
+    paddingHorizontal: space.xl,
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between'
   },
   corner: { flexShrink: 1, paddingBottom: space.xs },
-  data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.lg, paddingBottom: space.md, gap: space.xs },
+  data: { width: '100%', maxWidth: layout.column, alignSelf: 'center', paddingTop: space.md, paddingHorizontal: space.xl, paddingBottom: space.md, gap: space.xs },
   name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink },
   keyText: { ...type.postMeta, color: colors.soft },
   about: { marginTop: space.md, gap: space.md },
   fan: { marginTop: space.md, alignSelf: 'stretch' },
   bio: { ...type.postText, color: colors.ink, marginTop: space.sm },
-  countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.lg, rowGap: space.sm, marginTop: space.sm },
+  countsRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: space.xl, rowGap: space.sm, marginTop: space.sm },
   countLink: { maxWidth: '100%', flexShrink: 1, minHeight: layout.hit, justifyContent: 'center' },
   counts: { ...type.postMeta, color: colors.soft, flexShrink: 1 },
   countsNum: { color: colors.ink, fontWeight: '700' },
