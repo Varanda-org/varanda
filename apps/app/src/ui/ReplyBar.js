@@ -16,7 +16,7 @@ const SEND = 40
 const PAD_V = (SEND - LINE_HEIGHT) / 2
 const MIN_HEIGHT = SEND
 
-export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTarget, busy = false, disabled = false, note = '', focusSignal, draft = '', onDraftChange, me = null, nonFocalTarget = false, placeholder = 'Escreva uma resposta', sendLabel = 'Responder' }) {
+export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTarget, busy = false, disabled = false, note = '', focusSignal, draft = '', onDraftChange, me = null, nonFocalTarget = false, placeholder = 'Escreva uma resposta', sendLabel = 'Responder', sendingShown = false }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const { fontScale } = useWindowDimensions()
@@ -35,6 +35,8 @@ export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTa
   const attachOff = off || typeof onAttach !== 'function'
   const sendOff = off || text.trim() === ''
   const length = [...text].length
+  // The thread shows the text as a row being sent; a failure brings it back.
+  const masked = busy && sendingShown === true
 
   useEffect(() => {
     if (focusSignal !== undefined && inputRef.current) inputRef.current.focus()
@@ -95,7 +97,7 @@ export function ReplyBar ({ target = null, onSend, onExpand, onAttach, onClearTa
             {me ? <View style={styles.avatar}><Avatar name={me.name} publicKey={me.publicKey} picture={me.picture} size={28} persist /></View> : null}
             <TextInput
               ref={inputRef}
-              value={text}
+              value={masked ? '' : text}
               onChangeText={setText}
               editable={!off}
               multiline

@@ -570,6 +570,8 @@
 	# noindex de cada página pública de publicação (um Disallow esconderia o
 	# noindex e o link poderia aparecer na busca mesmo assim). Antes do
 	# handle do app: sem este, /robots.txt viria do www.
+	# Allow: /og/ deixa os rastreadores que respeitam robots.txt buscar as imagens
+	# dos cartões de prévia (og:image) das páginas de post e do convite.
 	handle /robots.txt {
 		header Content-Type "text/plain; charset=utf-8"
 		# Heredoc: o Caddyfile não interpreta \n dentro de aspas.
@@ -578,6 +580,7 @@
 				User-agent: *
 				Allow: /f/
 				Allow: /p/
+				Allow: /og/
 				Disallow: /
 				Sitemap: https://{$VARANDA_DOMAIN}/f/sitemap.xml
 				ROBOTS

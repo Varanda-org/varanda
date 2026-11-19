@@ -139,6 +139,7 @@ async function momentHarness ({ file = null, request = async () => ({}), putMome
     pagesMoment: pagesMoment || (async () => { throw new Error('the person never publishes as a page') }),
     memberKeyOf: async () => 'a'.repeat(64),
     useMomentMusicAvailable: () => gate.open,
+    noteMusicRecent: () => {},
     useChatAttachments: () => photo,
     pickVideo,
     prepareVideo,
@@ -232,6 +233,8 @@ async function postHarness ({ request = async () => ({ seq: 1 }), upload, photo 
       }
     },
     confirm: () => {},
+    cacheGeneration: () => 0,
+    parseRef: (await import('../src/thread.js')).parseRef,
     seqOf: (value) => value.seq,
     published: (sent) => { published = true; draftText = sent; draft.clear() },
     canQueue: false,
