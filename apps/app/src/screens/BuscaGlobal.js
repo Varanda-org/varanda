@@ -33,6 +33,8 @@ import { isUsername, lookupUsername, usernameMatches } from '../account'
 import { whoOf } from '../who'
 import { HELP, SHORT } from '../help'
 import { PARTIAL_KEY_TEXT } from '../followInput'
+import { fetchTopicTrend } from '../indexClient'
+import { TOPIC_TREND_REFRESH_MS, trendRows } from '../topicTrend'
 import { SEARCH_INPUT_MAX, SEARCH_INVALID, SEARCH_TRUNCATED } from '../topics'
 import { RECENTS_CLEAR, RECENTS_CLEAR_LABEL, RECENTS_REMOVE, RECENTS_TITLE, clearRecents, recordRecent, removeRecent } from '../searchRecents'
 import {
@@ -43,11 +45,13 @@ import { ErrorText, Notice, SectionHeader, Soft, useAction, useBottomPad } from 
 import { HelpNote } from '../ui/Help'
 import { ListRow } from '../ui/ListRow'
 import { MemberRow } from '../ui/MemberRow'
+import { HashtagContext } from '../ui/MentionText'
 import { Pill } from '../ui/Pill'
 import { ScreenVisible } from '../ui/screenVisible'
 import { SearchField } from '../ui/SearchField'
 import { Segmented } from '../ui/Segmented'
 import { EmptyState, SkeletonRow } from '../ui/States'
+import { TrendingTopics } from '../ui/TrendingTopics'
 import { layout, space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
 import { useMemberSearch } from '../useMemberSearch'
@@ -374,6 +378,34 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
   // Publicações.
   const [query, setQuery] = useState(null)
   const postsGate = buscaNotice({ hosted })
+  const openTag = useContext(HashtagContext)
+  const [trend, setTrend] = useState(null)
+  const lastTrendFetch = useRef(null)
+  const trendPending = useRef(false)
+  const trendGeneration = useRef(0)
+  const trendAvailable = postsGate === null && drafts.publicacoes.trim() === '' && typeof openTag === 'function'
+  const showTrend = active && visible && category === 'publicacoes' && trendAvailable
+  useEffect(() => () => {
+    trendPending.current = false
+    trendGeneration.current += 1
+  }, [])
+  useEffect(() => {
+    if (!showTrend || trendPending.current) return
+    const now = Date.now()
+    const last = lastTrendFetch.current
+    if (last !== null && (last.refresh === refresh || now - last.at < TOPIC_TREND_REFRESH_MS)) return
+    trendPending.current = true
+    const generation = ++trendGeneration.current
+    fetchTopicTrend().catch(() => ({ ok: false })).then((result) => {
+      if (generation !== trendGeneration.current) return
+      trendPending.current = false
+      if (!result.ok) return
+      const { indexing, complete } = result.value
+      const rows = trendRows(result.value.topics)
+      if (!indexing || rows.length > 0) lastTrendFetch.current = { at: now, refresh }
+      setTrend({ rows, indexing, complete: complete !== false })
+    })
+  }, [showTrend, refresh])
   // While typing, debouncePlan holds a query back until the person pauses
   // (the seeder allows a few /index requests per client per 10 s); submit
   // runs it at once. Every edit advances the sequence so a pending timer of
@@ -461,6 +493,19 @@ export default function BuscaGlobal ({ active, ownKey, scrollToTop, paneRequest,
     postsPane = (
       <ScrollView ref={postsScroll} keyboardShouldPersistTaps='handled' contentContainerStyle={[styles.pane, { paddingBottom: bottomPad }]}>
         {recentList('publicacoes')}
+        {trendAvailable && trend !== null
+          ? (
+            <TrendingTopics
+              rows={trend.rows}
+              indexing={trend.indexing}
+              complete={trend.complete}
+              onOpen={(tag) => {
+                Keyboard.dismiss()
+                openTag(tag)
+              }}
+            />
+            )
+          : null}
         {drafts.publicacoes.trim() === ''
           ? <EmptyState icon='lupa' title={CATEGORY_LABEL.publicacoes} body={BUSCA_EMPTY.publicacoes} actionLabel={BUSCA_LABEL.publicacoes} onAction={() => inputRef.current?.focus()} secondaryLabel={CATEGORY_LABEL.contas} onSecondary={() => setCategory('contas')} />
           : plan('publicacoes', drafts.publicacoes).query === null

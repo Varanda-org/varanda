@@ -7,7 +7,8 @@
 const test = require('brittle')
 const { testnet, until } = require('./helpers/net')
 const { createSnapshot } = require('../lib/blocklist')
-const { groupJoinRecord } = require('../lib/records')
+const { groupJoinRecord, groupsShowRecord, deleteRecord } = require('../lib/records')
+const { Seeder } = require('../lib/seeder')
 const { groupPost, groupCreateRecord, groupMeta } = require('../lib/group')
 const {
   makeAssociation,
@@ -92,6 +93,31 @@ function keys (answer) {
   return answer.groups.map((r) => r.group)
 }
 
+test('a pending owner scan answers with the last groups-show choice it has read', async (t) => {
+  const diary = 'd'.repeat(64)
+  const row = { group: 'a'.repeat(64) }
+  const seeder = new Seeder({ dataDir: '/nonexistent' })
+  const blocks = [null, encode(groupsShowRecord({ on: false })), encode(groupsShowRecord({ on: true }))]
+  const core = { length: 2, contiguousLength: 2, get: (seq) => blocks[seq] }
+  const entry = { core, present: 2, scanned: 2, indexed: 1, gated: true, groupLive: new Map() }
+  seeder._served.set(diary, entry)
+  seeder._admitted.set(diary, true)
+  seeder._passesStarted = true
+  seeder._indexStartup = new Set()
+  seeder._groupIndex.publicGroupsOf = () => ({ groups: [row], next: null })
+
+  const shown = { groups: [row], next: null, hidden: false, indexing: false, complete: true }
+  const hidden = { groups: [], next: null, hidden: true, indexing: false, complete: true }
+  t.alike(seeder.indexPublicGroups(diary), { ...shown, complete: false }, 'the unread off record leaves the group listed')
+  await seeder._runIndex(diary, entry)
+  t.alike(seeder.indexPublicGroups(diary), hidden)
+
+  core.length = core.contiguousLength = entry.present = entry.scanned = 3
+  t.alike(seeder.indexPublicGroups(diary), { ...hidden, complete: false }, 'the unread on record leaves the box hidden')
+  await seeder._runIndex(diary, entry)
+  t.alike(seeder.indexPublicGroups(diary), shown)
+})
+
 test('members and recent list the public groups of a served community; a private group and an unserved community\'s group never appear', async (t) => {
   t.timeout(150000)
   const { seeder, events, A, C, G, H, P, X, at, other } = await setup(t)
@@ -118,7 +144,7 @@ test('members and recent list the public groups of a served community; a private
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
 })
 
-test('the public groups of a diary: open ones only, its community\'s Geral left out, a group it left omitted, hidden always false', async (t) => {
+test('the public groups of a diary: open ones only, its community\'s Geral left out, a group it left omitted, shown by default', async (t) => {
   t.timeout(150000)
   const { seeder, events, A, D, E, C, H, X, w } = await setup(t)
 
@@ -142,6 +168,37 @@ test('the public groups of a diary: open ones only, its community\'s Geral left 
   t.is(after.next, null)
   t.is(seeder.indexPublicGroups(E.key).groups[0].members, 2, 'D no longer counts in H')
   t.is(events.filter((e) => e.event === 'fatal').length, 0)
+})
+
+test('groups-show hides only the member\'s profile list and a tombstone restores the previous choice', async (t) => {
+  t.timeout(150000)
+  const { seeder, D, E, H, w } = await setup(t)
+  const shown = seeder.indexPublicGroups(D.key)
+  t.alike(keys(shown), [H])
+  await D.cores.dh.append(encode(groupPost({ text: 'oi' })))
+  await E.cores.eh.append(encode(groupPost({ text: 'olá' })))
+  await until(() => seeder.indexGroupBrowse('trending').groups.some((row) => row.group === H && row.active === 2), { name: 'H em alta' })
+
+  async function appendChoice (record) {
+    await D.diary.append(record)
+    const entry = seeder._served.get(D.key)
+    await until(() => entry.indexed >= D.diary.length && entry.scanned >= D.diary.length && seeder.indexPublicGroups(D.key).complete, { name: 'escolha de D lida' })
+    return seeder.indexPublicGroups(D.key)
+  }
+
+  const hidden = { groups: [], next: null, hidden: true, indexing: false, complete: true }
+  t.alike(await appendChoice(groupsShowRecord({ on: false })), hidden)
+  t.alike(seeder.indexPublicGroups(D.key, H), hidden, 'every page omits the group key and cursor')
+  t.is(seeder.indexPublicGroups(D.key, 'zz'), null, 'a malformed cursor is still refused')
+  t.alike(keys(seeder.indexPublicGroups(E.key)), [H], 'the other profile still lists H')
+  t.is(seeder.indexGroupBrowse('members').groups.find((row) => row.group === H).members, 3)
+  t.is(seeder.indexGroupBrowse('trending').groups.find((row) => row.group === H).active, 2)
+  t.ok(seeder.indexGroup(H).writers.some((row) => row.key === w.DH && row.diary === D.key), 'report confirmation still sees the writer')
+
+  t.alike(await appendChoice(groupsShowRecord({ on: true })), shown)
+  const offSeq = D.diary.length
+  t.alike(await appendChoice(groupsShowRecord({ on: false })), hidden)
+  t.alike(await appendChoice(deleteRecord({ seq: offSeq })), shown)
 })
 
 test('a blocked member is not counted; a blocked group and a blocked community never appear; a blocked diary answers null', async (t) => {
