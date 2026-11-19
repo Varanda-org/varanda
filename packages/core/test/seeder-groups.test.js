@@ -81,20 +81,25 @@ test('root image scanning and public hints use validated records and settled bin
     records.push(groupImage({ image }))
     await scan()
     t.alike(seeder.groupImagePublic(root), { image, author: diary }, kind + ' image passed the byte and record filters')
+    t.alike(seeder.indexGroupImages([root]), { images: [{ group: root, image, author: diary }], indexing: false })
+    const searchAnswer = JSON.stringify(seeder.indexGroupSearch('praia'))
     const groupAnswer = JSON.stringify(seeder.indexGroup(root))
     const communityAnswer = JSON.stringify(seeder.indexCommunity(root))
     seeder._groupIndex.resetRoot(root)
     t.is(seeder.groupImagePublic(root), null)
     t.is(JSON.stringify(seeder.indexGroup(root)), groupAnswer, 'group answer bytes unchanged')
+    t.is(JSON.stringify(seeder.indexGroupSearch('praia')), searchAnswer, 'search answer bytes unchanged')
     t.is(JSON.stringify(seeder.indexCommunity(root)), communityAnswer, 'community answer bytes unchanged')
     entry.rootScanned = 0
     await scan()
     t.alike(seeder.groupImagePublic(root), { image, author: diary }, 'rescan restores the image')
     entry.rootScanned--
     t.is(seeder.groupImagePublic(root), null, 'scan behind')
+    t.alike(seeder.indexGroupImages([root]), { images: [], indexing: false })
     entry.rootScanned++
     entry.headerOk = false
     t.is(seeder.groupImagePublic(root), null, 'unverified')
+    t.alike(seeder.indexGroupImages([root]), { images: [], indexing: false })
     entry.headerOk = true
     const unrelated = 'ac'.repeat(32)
     seeder._served.set(unrelated, { gated: true, scanned: 1, core: { length: 2, contiguousLength: 2 } })
@@ -105,17 +110,21 @@ test('root image scanning and public hints use validated records and settled bin
     seeder._served.delete(unrelated)
     blocked.add(root)
     t.is(seeder.groupImagePublic(root), null, 'blocked root')
+    t.alike(seeder.indexGroupImages([root]), { images: [], indexing: false })
     blocked.delete(root)
     blocked.add(diary)
     t.is(seeder.groupImagePublic(root), null, 'blocked author')
+    t.alike(seeder.indexGroupImages([root]), { images: [], indexing: false })
     blocked.delete(diary)
     seeder._groupIndex.removeWriter(root)
     t.is(seeder.groupImagePublic(root), null, 'a served header diary without its own binding is not the author')
+    t.alike(seeder.indexGroupImages([root]), { images: [], indexing: false })
     seeder._groupIndex.addWriter(root, root, diary, 1)
     t.alike(seeder.groupImagePublic(root), { image, author: diary }, 'the settled bound root is visible again')
     records.push(groupImage({ image: null }))
     await scan()
     t.is(seeder.groupImagePublic(root), null, 'clear')
+    t.alike(seeder.indexGroupImages([root]), { images: [], indexing: false })
   }
   seeder._groupIndex.setHeader(root, groupHeader({ diary, visibility: 'private', join: 'approval', name: null, box: 'ee'.repeat(32) }))
   const entry = seeder._groupServed.get(root)
@@ -127,6 +136,73 @@ test('root image scanning and public hints use validated records and settled bin
   for (const key of [null, undefined, {}, Symbol('root'), 'invalid', 'ff'.repeat(32)]) {
     t.is(seeder.groupImagePublic(key), null, 'unknown or malformed root never throws')
   }
+})
+
+test('indexGroupImages keeps public root order and never throws on invalid keys', (t) => {
+  const seeder = new Seeder({})
+  const diary = 'aa'.repeat(32)
+  const roots = ['bb'.repeat(32), 'cc'.repeat(32)]
+  const image = { core: 'dc'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'dd'.repeat(32), width: 512, height: 512 }
+  seeder._admitted.set(diary, {})
+  seeder._served.set(diary, { gated: true, scanned: 1, core: { length: 1, contiguousLength: 1 } })
+  for (const [i, root] of roots.entries()) {
+    seeder._groupIndex.setHeader(root, groupHeader({ diary, kind: i === 0 ? 'group' : 'community' }))
+    seeder._groupIndex.addWriter(root, root, diary, 1)
+    seeder._groupIndex.foldRoot(root, groupImage({ image }))
+    seeder._groupServed.set(root, { group: root, headerOk: true, rootScanned: 2, core: { length: 2, contiguousLength: 2 } })
+  }
+  const keys = [roots[1], 'ff'.repeat(32), roots[0]]
+  const images = [roots[1], roots[0]].map(group => ({ group, image, author: diary }))
+  t.alike(seeder.indexGroupImages(keys), { images, indexing: true })
+  seeder._passesStarted = true
+  t.alike(seeder.indexGroupImages(keys), { images, indexing: false })
+  t.alike(seeder.indexGroupImages([roots[0], roots[0]]).images, [images[1]], 'at most one row per root')
+  for (const keys of [null, undefined, {}, Symbol('keys'), 'invalid', [], [null, {}, Symbol('key'), 'invalid'], Array(33).fill(roots[0])]) {
+    t.alike(seeder.indexGroupImages(keys), { images: [], indexing: false }, 'invalid input never throws')
+  }
+})
+
+test('indexGroupImages hides a private root with a real sealed image even from a stale cache', async (t) => {
+  const seeder = new Seeder({})
+  seeder._passesStarted = true
+  const diary = 'aa'.repeat(32)
+  const root = 'bb'.repeat(32)
+  const unknown = 'ff'.repeat(32)
+  const jpeg = b4a.from([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 2, 0, 2, 0, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 0xff, 0xd9])
+  const image = { core: 'ed'.repeat(32), start: 1, ...sealMedia(jpeg, { plainMime: 'image/jpeg', w: 512, h: 512 }).item }
+  const pair = gc.newBoxKeyPair()
+  const epoch = gc.newEpochKey()
+  t.teardown(() => { gc.wipe(pair.secretKey); gc.wipe(epoch) })
+  const kid = { writer: root, seq: 1 }
+  const inner = { ...groupImage({ image: null, seen: kid }), image }
+  const sealed = gc.sealRecord(sealedInner(inner, { writer: root, group: root, kid }), epoch)
+  const records = [
+    groupHeader({ diary, visibility: 'private', join: 'approval', name: null, box: hex(pair.publicKey) }),
+    groupKey({ keys: [{ writer: root, sealed: b4a.toString(gc.sealEpochKey(epoch, root, kid, pair.publicKey), 'base64') }], commit: hex(gc.keyCommit(epoch, root, kid)) }),
+    groupSealed({ kid, ...sealed, at: inner.at })
+  ]
+  seeder._admitted.set(diary, {})
+  seeder._served.set(diary, { gated: true, scanned: 1, core: { length: 1, contiguousLength: 1 } })
+  seeder._groupIndex.setHeader(root, records[0])
+  seeder._groupIndex.addWriter(root, root, diary, 1)
+  const entry = { group: root, headerOk: true, rootScanned: 0, core: { length: records.length, contiguousLength: records.length, async get (i) { return encode(records[i]) } } }
+  seeder._groupServed.set(root, entry)
+  seeder._scanRoot(root, entry)
+  const empty = JSON.stringify({ images: [], indexing: false })
+  const check = () => {
+    const body = JSON.stringify(seeder.indexGroupImages([root]))
+    t.is(body, empty, 'a private image has no row')
+    t.is(body, JSON.stringify(seeder.indexGroupImages([unknown])), 'private and unknown bodies are identical')
+    t.absent(body.includes(image.key), 'no item key')
+    t.absent(body.includes(image.nonce), 'no item nonce')
+    t.absent(body.includes(sealed.nonce), 'no envelope nonce')
+  }
+  check()
+  t.is(entry.rootScanned, 0, 'the real sealed root stays unscanned')
+  // Isolate the public reader's private guard from the cache's own guard.
+  // Otherwise removing that check could pass solely because the cache is empty.
+  seeder._groupIndex.imageOf = () => image
+  check()
 })
 
 test('root and writer need both bindings, are listed before open, served over the swarm and paged on the channel', async (t) => {
@@ -1771,11 +1847,12 @@ test('public group images are validated, diary-bound and hidden while pending', 
   t.is(seeder.groupImagePublic(R), null, 'a post mentioning the needle and an invalid image are not folded')
   t.is(seeder._groupServed.get(R).rootDecoded, 2, 'both needle hits reached the real filters')
   t.is(seeder.groupImagePublic(P), null, 'the sealed image has no public answer')
-  for (const answer of [seeder.groupImagePublic(P), seeder.indexGroup(P), seeder.indexCommunity(P), seeder.indexGroups(A.key), await seeder.linkPublic('g', P)]) {
+  for (const answer of [seeder.indexGroupImages([P]), seeder.groupImagePublic(P), seeder.indexGroup(P), seeder.indexCommunity(P), seeder.indexGroups(A.key), await seeder.linkPublic('g', P)]) {
     const body = JSON.stringify(answer)
     t.absent(body.includes(privateImage.key), 'no item key in a public answer')
     t.absent(body.includes(privateImage.nonce), 'no item nonce in a public answer')
   }
+  t.is(JSON.stringify(seeder.indexGroupImages([P])), JSON.stringify(seeder.indexGroupImages(['ff'.repeat(32)])), 'private and unknown image batches are byte identical')
   t.is(seeder._groupServed.get(P).rootScanned, 0, 'a private root stays unscanned')
   t.is(seeder.groupImagePublic(U), null, 'the header diary never bound this root')
   t.alike(seeder._groupIndex.imageOf(U), image, 'the unbound root did fold its image')

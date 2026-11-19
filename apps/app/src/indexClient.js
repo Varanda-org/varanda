@@ -1,6 +1,7 @@
 /* global fetch, AbortController, TextDecoder, __DEV__ */
 
 import rpc from '@varanda/rpc'
+import { validGroupImage } from './groupImage.js'
 import { isAppClient } from './appClient.js'
 import { resolveUrl } from './installation.js'
 import { vitrineEnabled } from './vitrine/enabled.js'
@@ -64,6 +65,8 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
 // fetch function takes injectable deps
 // `{ fetch, timeoutMs, now, setTimeout, clearTimeout, sleep }`; the clock
 // ones drive the queue, the cooldown, the cache TTL and the 8 s timeout.
+//
+// fetchGroupImages returns a Map instead, empty on any failure.
 //
 // Groups: /index/group/<G>[/<after>], /index/groups/<D>,
 // /index/community/<C> and /index/group-search/<segment> (the segment as for
@@ -500,6 +503,17 @@ export function groupSearchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
   if (segment.replace(/-/g, '').length < 2) return null
   return resolveUrl('/index/group-search/' + segment)
+}
+
+function groupImagesInput (keys) {
+  if (!Array.isArray(keys) || keys.length < 1 || keys.length > 32) return null
+  const list = Array.from(keys, inputAuthor)
+  return list.includes(null) ? null : [...new Set(list)]
+}
+
+export function groupImagesUrl (keys) {
+  const list = groupImagesInput(keys)
+  return list === null ? null : resolveUrl('/index/group-image/' + list.join(','))
 }
 
 export function groupBrowseUrl (order) {
@@ -1553,6 +1567,19 @@ export function validGroupSearch (body) {
   return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
 }
 
+export function validGroupImages (body, keys) {
+  const list = groupImagesInput(keys)
+  if (list === null || !hasExactKeys(body, ['images', 'indexing']) || typeof body.indexing !== 'boolean') return null
+  if (!Array.isArray(body.images) || body.images.length > list.length) return null
+  const images = new Map()
+  for (const row of body.images) {
+    if (!hasExactKeys(row, ['author', 'group', 'image']) || !isHex64(row.author) ||
+      !list.includes(row.group) || images.has(row.group) || !validGroupImage(row.image) || row.image.mime !== 'image/jpeg') return null
+    images.set(row.group, { image: { ...row.image }, author: row.author })
+  }
+  return images
+}
+
 // A discovery row names a public group, so both names are required.
 function publicRowOk (r, keys) {
   if (!hasExactKeys(r, keys)) return false
@@ -1904,6 +1931,13 @@ export function fetchCommunityGroups (community, cursor, deps = {}) {
 
 export function fetchGroupSearch (segment, deps = {}) {
   return run(groupSearchUrl(segment), validGroupSearch, deps)
+}
+
+// Optional hints: older seeders and doubtful responses leave images absent.
+export async function fetchGroupImages (keys, deps = {}) {
+  const list = groupImagesInput(keys)
+  const result = await run(groupImagesUrl(list), (body) => validGroupImages(body, list), deps)
+  return result.ok ? result.value : new Map()
 }
 
 export function fetchGroupBrowse (order, deps = {}) {

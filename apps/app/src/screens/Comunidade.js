@@ -47,7 +47,7 @@ import { radius, space, type } from '../ui/theme'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { shouldOpenQueued } from '../groupRedirect'
 import { NovoGrupo } from './NovoGrupo'
-import { UNAVAILABLE_MESSAGE, UNAVAILABLE_TITLE } from './Comunidades'
+import { indexImageRow, useIndexGroupImages, UNAVAILABLE_MESSAGE, UNAVAILABLE_TITLE } from './Comunidades'
 
 const { displayText } = rpc
 const HEX64 = /^[0-9a-f]{64}$/
@@ -91,7 +91,7 @@ function JoinCard ({ title, header, join, showJoin, onJoin, pending, offline, er
   )
 }
 
-function GroupRow ({ title, group, visibility, image, imageAuthor, detail, own, time, unread, onPress }) {
+function GroupRow ({ title, group, visibility, image, imageAuthor, catalogue, detail, own, time, unread, onPress }) {
   const styles = useStyles(makeStyles)
   const preview = displayText(detail || '')
   const spokenPreview = !own && readsAs(preview.split(':')[0], OWN_LABEL) ? preview.replace(/^[^:]+:/, 'Pessoa:') : preview
@@ -102,7 +102,9 @@ function GroupRow ({ title, group, visibility, image, imageAuthor, detail, own, 
       accessibilityLabel={[title, own ? OWN_LABEL + ': ' + spokenPreview : spokenPreview, time, unread ? (unread === '1' ? '1 mensagem nova' : unread === '99+' ? '99 ou mais mensagens novas' : unread + ' mensagens novas') : '', 'abre o grupo'].filter(Boolean).join(', ')}
       onPress={onPress}
     >
-      <Avatar name={title} publicKey={group} {...pictureProps({ visibility, image, imageAuthor })} size={48} shape='square' />
+      {catalogue && visibility === 'private'
+        ? <Icon name='cadeira' size={48} />
+        : <Avatar name={title} publicKey={group} {...pictureProps({ visibility, image, imageAuthor })} size={48} shape='square' />}
       <View style={styles.hitText}>
         <View style={styles.line}>
           <Text style={[styles.name, unread && styles.nameUnread]} numberOfLines={1}>{title}</Text>
@@ -266,7 +268,10 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
       return
     }
     loadIndex()
+    return () => { idxGen.current++ }
   }, [needIndex, loadIndex])
+
+  const indexImages = useIndexGroupImages(node, [...idx.groups, { ...info, community }], idx, needIndex && idx.status === 'done')
 
   useEffect(() => {
     if (!hosted) return
@@ -535,15 +540,22 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         <SectionHeader>Grupos</SectionHeader>
         {idx.groups.length === 0
           ? <EmptyState icon='gente' title='Nenhum grupo ainda.' actionLabel='Voltar' onAction={onBack} />
-          : idx.groups.map((g) => (
-            <GroupRow
-              key={g.group}
-              group={g.group}
-              title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
-              detail={membersLabel(g.writerCount) || 'grupo privado'}
-              onPress={() => openGroup(g.group)}
-            />
-          ))}
+          : idx.groups.map((row) => {
+            const g = indexImageRow(row, indexImages)
+            return (
+              <GroupRow
+                key={g.group}
+                group={g.group}
+                catalogue
+                visibility={g.visibility}
+                image={g.image}
+                imageAuthor={g.imageAuthor}
+                title={typeof g.name === 'string' ? displayText(g.name) : PRIVATE_LABEL}
+                detail={membersLabel(g.writerCount) || 'grupo privado'}
+                onPress={() => openGroup(g.group)}
+              />
+            )
+          })}
       </View>
     )
   } else if (info === null && loadError && idx.status === 'loading') {
@@ -666,7 +678,7 @@ export function Comunidade ({ community, afterGroup, isTop, seenTick, onBack, on
         title={pending ? (indexName || 'Comunidade ainda chegando') : title}
         subtitle={subtitle}
         publicKey={community}
-        {...pictureProps(info)}
+        {...pictureProps(needIndex ? indexImageRow({ ...info, community }, indexImages) : info)}
         onBack={onBack}
         onPress={canInfo ? openInfo : undefined}
         pressLabel={INFO_LABEL}

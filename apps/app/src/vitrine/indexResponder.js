@@ -606,6 +606,12 @@ export function vitrineIndex (url, request = currentRequest) {
     return { ...flags, members: rows.slice(0, 20).map((p) => ({ author: p.author, ...hint(), ...pageHint(p.author) })), more: rows.length > 20 }
   }
 
+  if (route === 'group-image' && part === undefined) {
+    const keys = key.split(',')
+    if (keys.length > 32 || !keys.every(isKey) || new Set(keys).size !== keys.length) notFound()
+    return { images: [], indexing: false }
+  }
+
   if (route === 'group' && cursor === undefined) {
     const g = fixtures.groups.find((g) => g.group === key)
     if (!g || (part !== undefined && !isKey(part))) notFound()
