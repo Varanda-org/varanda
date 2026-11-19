@@ -33,9 +33,9 @@ const MAX_NOTICE_NAME = MAX_GROUP_NAME
 const NID = /^[0-9a-f]{32}$/
 
 // Estimates include the digest, keys, maps and node, then the folded entry
-// and each retained cut/reference (including its memo maps). A 16-cut entry
-// costs 9 KiB before seen/lifts; engine overhead varies. Marks pay the base
-// too, so cannot grow uncharged.
+// and each retained cut/reference (including order edges and SCC memo).
+// A 16-cut entry costs 9 KiB before seen/lifts; engine overhead varies.
+// Marks pay the base too, so cannot grow uncharged.
 const GROUP_HINT_BLOCK_BYTES = 512
 const GROUP_HINT_ENTRY_BYTES = 512
 const GROUP_HINT_REFERENCE_BYTES = 512
@@ -83,8 +83,7 @@ function foldRecord (copy, seq) {
   return record
 }
 
-// The records the hint folds; every other valid block is accepted and
-// dropped (it can only bind a writer through its header).
+// Other valid blocks retain only ordering references, never their bodies.
 const FOLDED = new Set(['group-admit', 'group-ban', 'group-admin', 'group-leave', 'group-meta'])
 // The blocks a writer's cut keeps from the cut on (lib/group.js keptPastCut).
 const KEPT_PAST_CUT = new Set(['group-leave', 'group-key'])
@@ -151,16 +150,23 @@ function pushTo (map, k, v) {
   else map.set(k, [v])
 }
 
-// The blocks a record names (lib/group.js referencesOf, for the types the
-// hint folds): each orders the record after that block and every earlier
-// block of its core.
-function refsOf (record, step) {
+// Mirrors lib/group.js referencesOf, including ordering-only records:
+// each reference orders after that block and every earlier block of its core.
+function refsOf (record, step, root) {
   const refs = []
   if (record.seen) refs.push(record.seen)
+  for (const key of ['replyTo', 'target', 'rejoin', 'kid']) {
+    step()
+    if (record[key]) refs.push(record[key])
+  }
+  for (const ref of record.basis || []) {
+    step()
+    refs.push(ref)
+  }
   if (Array.isArray(record.cuts)) {
     for (const c of record.cuts) {
       step()
-      if (c.seq >= 1) refs.push({ writer: c.writer, seq: c.seq - 1 })
+      if (c.seq >= 1 && (record.type !== 'group-leave' || c.writer === root)) refs.push({ writer: c.writer, seq: c.seq - 1 })
     }
   }
   if (record.type === 'group-ban' && record.lifts) refs.push(record.lifts)
@@ -170,21 +176,121 @@ function refsOf (record, step) {
 // Whether `a` is known to come after `b`: on the same core at a higher seq,
 // or naming `b` (or a later block of its core) directly. The fold ignores a
 // reference past the last node it holds of that core, so one past
-// `lastOf(writer)` orders nothing. Mutual references are UNKNOWN: the fold
-// breaks cycles by causalOrder, which the hint does not run. No transitive
-// closure: anything else is undecided.
-function after (a, b, lastOf, step) {
+// `lastOf(writer)` orders nothing. Cross-core order downstream of a cycle
+// is UNKNOWN: the fold can release a writer head before its predecessors.
+// Same-core order survives that tiebreak. No transitive closure is needed.
+function after (a, b, lastOf, uncertain, step, root) {
   step()
   if (a.writer === b.writer) return a.seq > b.seq
-  const names = (x, y) => {
-    const last = lastOf(y.writer)
-    return refsOf(x.record, step).some((r) => {
+  const cycles = uncertain()
+  if (cycles.has(a.writer + ':' + a.seq) || cycles.has(b.writer + ':' + b.seq)) return UNKNOWN
+  const last = lastOf(b.writer)
+  return refsOf(a.record, step, root).some((r) => {
+    step()
+    return r.writer === b.writer && r.seq >= b.seq && r.seq <= last
+  })
+}
+
+// Iterative Tarjan over predecessor edges. Components finish after their
+// dependencies, so one pass also marks descendants of cycles. This is
+// deliberately conservative: a cycle need not lie on every ordering path
+// for the fold to release a head early.
+function cycleDependents (logs, step, root) {
+  const resolve = (ref) => {
+    const list = logs.get(ref.writer)
+    if (!list || list.length === 0 || ref.seq > list[list.length - 1].seq) return null
+    let lo = 0
+    let hi = list.length - 1
+    let found = null
+    while (lo <= hi) {
       step()
-      return r.writer === y.writer && r.seq >= y.seq && r.seq <= last
+      const mid = (lo + hi) >> 1
+      if (list[mid].seq <= ref.seq) {
+        found = list[mid]
+        lo = mid + 1
+      } else hi = mid - 1
+    }
+    return found
+  }
+  for (const list of logs.values()) {
+    step()
+    list.sort((a, b) => {
+      step()
+      return a.seq - b.seq
     })
   }
-  if (!names(a, b)) return false
-  return names(b, a) ? UNKNOWN : true
+  for (const [writer, list] of logs) {
+    step()
+    for (let i = 0; i < list.length; i++) {
+      step()
+      const n = list[i]
+      n.preds = i > 0 ? [list[i - 1]] : []
+      for (const ref of refsOf(n.record, step, root)) {
+        step()
+        if (ref.writer === writer && ref.seq >= n.seq) continue
+        const p = resolve(ref)
+        if (p !== null) n.preds.push(p)
+      }
+    }
+  }
+  let index = 0
+  const stack = []
+  const uncertain = new Set()
+  const enter = (n) => {
+    step()
+    n.index = n.low = index++
+    n.open = true
+    stack.push(n)
+    return { n, i: 0 }
+  }
+  for (const list of logs.values()) {
+    step()
+    for (const start of list) {
+      step()
+      if (start.index !== undefined) continue
+      const walk = [enter(start)]
+      while (walk.length > 0) {
+        step()
+        const frame = walk[walk.length - 1]
+        const n = frame.n
+        if (frame.i < n.preds.length) {
+          const p = n.preds[frame.i++]
+          if (p.index === undefined) walk.push(enter(p))
+          else if (p.open) n.low = Math.min(n.low, p.index)
+          continue
+        }
+        walk.pop()
+        if (walk.length > 0) {
+          const parent = walk[walk.length - 1].n
+          parent.low = Math.min(parent.low, n.low)
+        }
+        if (n.low !== n.index) continue
+        const component = { uncertain: false }
+        const members = []
+        let p
+        do {
+          step()
+          p = stack.pop()
+          p.open = false
+          p.component = component
+          members.push(p)
+        } while (p !== n)
+        component.uncertain = members.length > 1
+        for (const m of members) {
+          step()
+          for (const dep of m.preds) {
+            step()
+            if (dep.component.uncertain) component.uncertain = true
+          }
+        }
+        for (const m of members) {
+          step()
+          if (component.uncertain) uncertain.add(m.id)
+        }
+      }
+    }
+  }
+  return uncertain
 }
 
 function validConfig (c) {
@@ -211,7 +317,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
   const marks = new Map()
   // Writers whose block 0 does not count here.
   const refused = new Set()
-  // writer -> seq -> { kept, virtual }: the blocks the fold makes nodes of
+  // writer -> seq -> { kept, virtual, record }: the blocks the fold makes nodes of
   // its causal order, so a reference is judged against what a core holds.
   const nodes = new Map()
   // writer:seq -> { diary, digest } of every block fed, valid or not: a seq
@@ -301,14 +407,26 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
           if (!m) nodes.set(writer, (m = new Map()))
           const virtual = copy.type === 'group-leave' || (VIRTUAL_TYPES.has(copy.type) && copy.group === G)
           if (!m.has(seq)) {
-            m.set(seq, { kept: KEPT_PAST_CUT.has(copy.type), virtual })
+            let record
+            if (FOLDED.has(copy.type)) record = foldRecord(copy, seq)
+            else {
+              record = { type: copy.type }
+              let references = 0
+              for (const key of ['seen', 'replyTo', 'target', 'kid', 'basis']) {
+                if (!copy[key]) continue
+                record[key] = copy[key]
+                references += Array.isArray(copy[key]) ? copy[key].length : 1
+              }
+              if (!take(references * GROUP_HINT_REFERENCE_BYTES)) return false
+            }
+            m.set(seq, { kept: KEPT_PAST_CUT.has(copy.type), virtual, record })
             memo = null
           }
         }
         if (!FOLDED.has(copy.type)) return true
       }
       if (entries.has(k)) return true
-      const folded = foldRecord(copy, seq)
+      const folded = seq === 0 ? foldRecord(copy, seq) : nodes.get(writer).get(seq).record
       const references = (folded.cuts ? folded.cuts.length : 0) +
         (folded.seen ? 1 : 0) + (folded.lifts ? 1 : 0) + (folded.rejoin ? 1 : 0)
       if (!take(GROUP_HINT_ENTRY_BYTES + references * GROUP_HINT_REFERENCE_BYTES)) return false
@@ -366,7 +484,6 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
     if (tainted) return null
     const Cc = community.creator
     const layer = (events, writer, seq) => layerAt(events, writer, seq, step)
-    const ordered = (a, b, lastOf) => after(a, b, lastOf, step)
     // Writer headers: writer -> diary, per scope.
     const writerDiary = new Map([[G, creator], [C, Cc]])
     const headers = { g: [], c: [] }
@@ -563,8 +680,8 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
         pending.push({ s, e })
       }
     }
-    // Root grants are now complete. An ordinary member's references cannot
-    // matter to membership ordering, even when they name many other cores.
+    // Ordinary members cannot change membership, but their order edges
+    // still participate in the fold's cycles.
     for (const { s, e } of pending) {
       step()
       if (!everAdmin[e.community ? 'c' : 'g'].has(e.diary)) continue
@@ -701,6 +818,33 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
 
     // The order edges of a scope reach only the nodes the fold holds.
     const lastOfScope = (s) => (w) => lastNode(w, s === 'g' && cWriters.has(w))
+    const cycleMemo = new Map()
+    const uncertainOrder = (s) => {
+      if (cycleMemo.has(s)) return cycleMemo.get(s)
+      const logs = new Map()
+      for (const writer of writerDiary.keys()) {
+        step()
+        if (status.get(writer) !== 'ok' || refused.has(writer)) continue
+        const onC = cWriters.has(writer)
+        if (s === 'c' && !onC) continue
+        const virtual = s === 'g' && onC
+        const list = []
+        const header = entries.get(writer + ':0')
+        if (!virtual && header && header.record.rejoin) {
+          list.push({ id: writer + ':0', seq: 0, record: { rejoin: header.record.rejoin } })
+        }
+        for (const [seq, n] of nodes.get(writer) || []) {
+          step()
+          if ((virtual && !n.virtual) || !keeps(writer, seq, n.record.type)) continue
+          list.push({ id: writer + ':' + seq, seq, record: virtual && n.record.type === 'group-leave' ? {} : n.record })
+        }
+        logs.set(writer, list)
+      }
+      const result = cycleDependents(logs, step, s === 'c' ? C : G)
+      cycleMemo.set(s, result)
+      return result
+    }
+    const ordered = (a, b, s) => after(a, b, lastOfScope(s), () => uncertainOrder(s), step, s === 'c' ? C : G)
 
     // Banned: some counted ban no counted unban after it lifts. The fold
     // only lifts the latest ban; reading "any ban left standing" is never
@@ -714,7 +858,6 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       const list = bans[s].get(d) || []
       const sh = shielded(d)
       const eff = (e) => and3(auth(e), not3(sh))
-      const lastOf = lastOfScope(s)
       let out = false
       for (const b of list) {
         step()
@@ -729,7 +872,7 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
           })) continue
           const authority = eff(u)
           if (authority === false) continue
-          lifted = or3(lifted, and3(authority, ordered(u, b, lastOf)))
+          lifted = or3(lifted, and3(authority, ordered(u, b, s)))
           if (lifted === true) break
         }
         out = or3(out, and3(active, not3(lifted)))
@@ -781,16 +924,15 @@ function createGroupHint ({ group, creator, join, visibility = 'public', communi
       // One core has a total order. Across cores, only attempt a bounded
       // number of pairs; a dense order question leaves this diary unknown.
       if (writers.size > 1 && ons.length * offs.length > 2 * (ons.length + offs.length)) return UNKNOWN
-      const lastOf = lastOfScope(s)
       let result = false
       for (const a of ons) {
         step()
         if (writers.size === 1) {
           if (a.e.seq > lastOff) result = or3(result, a.x)
           else if (a.e.seq >= lastSureOff) result = or3(result, UNKNOWN)
-        } else if (offs.every((o) => ordered(a.e, o.e, lastOf) === true)) {
+        } else if (offs.every((o) => ordered(a.e, o.e, s) === true)) {
           result = or3(result, a.x)
-        } else if (!offs.some((o) => o.x === true && ordered(o.e, a.e, lastOf) === true)) {
+        } else if (!offs.some((o) => o.x === true && ordered(o.e, a.e, s) === true)) {
           result = or3(result, UNKNOWN)
         }
         if (result === true) break
