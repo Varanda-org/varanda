@@ -21,7 +21,7 @@ const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { generateVapidKeys, sendPush, encryptPayload } = require('../lib/account/web-push')
-const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT, DM_NOTICE_TERMS_FLOOR } = require('../lib/account/push-routes')
+const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT, DM_NOTICE_TERMS_FLOOR, GROUP_NOTICE_TERMS_FLOOR, RELAY_BODY_MAX } = require('../lib/account/push-routes')
 const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
 const { sealDmNotice, DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
 const { createAccountServer, keyedWindow } = require('../lib/account/server')
@@ -504,7 +504,7 @@ test('relay: without a token nothing is read; a wrong token or an Origin never r
   const bad = await s.relay({ ...s.like(s.actor, s.m), extra: 1 })
   t.is(bad.status, 400)
   t.alike(bad.body, { error: 'pedido-invalido' })
-  t.is((await s.relay('x'.repeat(2000))).status, 413, 'body over 1024 bytes')
+  t.is((await s.relay('x'.repeat(9 * 1024))).status, 413, 'body over 8192 bytes')
   t.is(s.delivered.length, 0)
   cleanLogs(t, s)
 })
@@ -1019,7 +1019,7 @@ const PAGES_THROW_KEY = 'fe'.repeat(32)
 
 // createPushRoutes with a real push store and keyedWindow, a stub pages
 // store and Terms store, and a send spy.
-async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStore = null, delay = 0, delayMs = () => delay } = {}) {
+async function dmRoutes (t, { pages = new Map(), accepted = () => true, terms = null, pushStore = null, delay = 0, delayMs = () => delay } = {}) {
   const dir = path.join(tmpDir(t), 'account')
   const clock = { t: Date.parse('2026-11-18T12:00:00.000Z') }
   clock.now = () => clock.t
@@ -1033,7 +1033,7 @@ async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStor
   const r = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
-    terms: { available: () => true, list: (member) => accepted(member) ? [{ version: DM_NOTICE_TERMS_FLOOR }] : [{ version: DM_NOTICE_TERMS_FLOOR - 1 }] },
+    terms: terms ?? { available: () => true, list: (member) => accepted(member) ? [{ version: DM_NOTICE_TERMS_FLOOR }] : [{ version: DM_NOTICE_TERMS_FLOOR - 1 }] },
     pagesStore: {
       get (key) {
         if (key === PAGES_THROW_KEY) throw new Error('indisponivel')
@@ -1068,9 +1068,10 @@ async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStor
 function noKeysLogged (t, logs) {
   const all = logs.join('\n')
   t.absent(/[0-9a-f]{64}/.test(all), 'no member or page key in the logs')
+  t.absent(/[0-9a-f]{32}/.test(all), 'no notice id or key in the logs')
   for (const line of logs) {
     const e = JSON.parse(line)
-    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason' || (k === 'kind' && e.kind === 'dm')), 'only event, reason and kind: ' + line)
+    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason' || (k === 'kind' && ['dm', 'group'].includes(e.kind))), 'only event, reason and kind: ' + line)
   }
 }
 
@@ -1265,6 +1266,255 @@ test('relay: DM notices only enter while the queue is under half full, a member 
   t.is(d.r.stats().dropped, HALF + 1 + 5)
   t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'dm', reason: 'descartado' })).length, 2)
   t.is(d.sent.length, 0, 'still waiting for the delay')
+  noKeysLogged(t, d.logs)
+})
+
+function groupEvent (recipients, extra = {}) {
+  return {
+    v: 1,
+    kind: 'group',
+    group: member().hex,
+    visibility: 'public',
+    name: 'Clube de leitura',
+    nid: nodeCrypto.randomBytes(16).toString('hex'),
+    recipients,
+    ...extra
+  }
+}
+
+function groupRoutes (t, options = {}) {
+  return dmRoutes(t, {
+    terms: { available: () => true, list: () => [{ version: GROUP_NOTICE_TERMS_FLOOR }] },
+    ...options
+  })
+}
+
+test('relay: a group notice fans out to 64 members once, including overlapping chunks after the cooldown', async (t) => {
+  const d = await groupRoutes(t)
+  const members = Array.from({ length: 64 }, () => member())
+  const endpoints = []
+  for (const m of members) endpoints.push((await d.subscribe(m)).endpoint)
+  const event = groupEvent(members.map((m) => m.hex))
+  await d.relay(event)
+  t.alike(d.replies, [202])
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: '64 group notices drained' })
+  t.alike(d.sent.map((s) => s.endpoint).sort(), endpoints.sort(), 'each member once')
+  t.is(d.r.stats().seen, 64, 'one seen entry per recipient')
+  for (const s of d.sent) t.alike(s.payload, { v: 1, kind: 'group', group: event.group, body: event.name, g: d.clock.t })
+  await d.relay(event)
+  t.is(d.sent.length, 64, 'immediate replay sends nothing')
+
+  d.clock.t += 10 * 60 * 1000
+  await d.relay(event)
+  t.is(d.sent.length, 64, 'seen survives the cooldown')
+  const next = member()
+  const sub = await d.subscribe(next)
+  await d.relay({ ...event, recipients: [members[0].hex, next.hex] })
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'overlapping chunk drained' })
+  t.is(d.sent.length, 65, 'only the new recipient in the later chunk')
+  t.is(d.sent[64].endpoint, sub.endpoint)
+  t.is(d.r.stats().seen, 65)
+  t.absent(d.logs.join('\n').includes(event.name), 'no group name in logs')
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group cooldown is per group and member and ends at ten minutes', async (t) => {
+  const d = await groupRoutes(t)
+  const a = member()
+  const b = member()
+  const sa = await d.subscribe(a)
+  const sb = await d.subscribe(b)
+  const event = groupEvent([a.hex])
+  const next = (recipients = [a.hex]) => groupEvent(recipients, { group: event.group })
+  await d.relay(event)
+  await d.relay(next([a.hex, b.hex]))
+  await until(() => d.sent.length === 2, { name: 'one notice each' })
+  t.alike(d.sent.map((s) => s.endpoint), [sa.endpoint, sb.endpoint])
+  await d.relay(groupEvent([a.hex]))
+  await until(() => d.sent.length === 3, { name: 'another group' })
+  d.clock.t += 10 * 60 * 1000 - 1
+  await d.relay(next())
+  t.is(d.sent.length, 3, 'still inside the window')
+  d.clock.t++
+  await d.relay(next())
+  await until(() => d.sent.length === 4, { name: 'next group window' })
+  t.is(d.sent[3].endpoint, sa.endpoint)
+  t.not(d.sent[3].topic, d.sent[0].topic, 'fresh topic for the next notice')
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group validation accepts 64 recipients and refuses extra keys, private names and a 9 KB body', async (t) => {
+  const s = await setup(t)
+  const event = groupEvent(Array.from({ length: 64 }, () => member().hex))
+  t.is(RELAY_BODY_MAX, 8192)
+  t.ok(Buffer.byteLength(JSON.stringify(event)) > 1024, 'larger than the old body limit')
+  const good = await s.relay(event)
+  t.is(good.status, 202)
+  t.alike(good.body, {})
+  for (const bad of [
+    { ...event, author: s.actor.hex },
+    { ...event, visibility: 'private' },
+    { ...event, recipients: [...event.recipients, s.m.hex] },
+    { ...event, recipients: [s.m.hex, s.m.hex] },
+    { ...event, recipients: [] },
+    { ...event, nid: 'A'.repeat(32) },
+    { ...event, name: '\u001b[31mnome' }
+  ]) {
+    const r = await s.relay(bad)
+    t.is(r.status, 400)
+    t.alike(r.body, { error: 'pedido-invalido' })
+  }
+  const oversized = JSON.stringify(event).padEnd(9 * 1024, ' ')
+  t.is((await s.relay(oversized)).status, 413, 'valid JSON still exceeds the body limit')
+  t.is(s.delivered.length, 0)
+  noKeysLogged(t, s.logs)
+})
+
+test('relay: private group payloads contain only the kind and enqueue time, public names may be null', async (t) => {
+  const d = await groupRoutes(t)
+  const m = member()
+  await d.subscribe(m)
+  const event = groupEvent([m.hex], { visibility: 'private', name: null })
+  await d.relay(event)
+  await until(() => d.sent.length === 1, { name: 'private notice' })
+  t.alike(d.sent[0].payload, { v: 1, kind: 'group-private', g: d.clock.t })
+  t.absent(/[0-9a-f]{32}/.test(JSON.stringify(d.sent[0].payload)), 'no group, member or notice id')
+  const publicEvent = groupEvent([m.hex], { name: null })
+  await d.relay(publicEvent)
+  await until(() => d.sent.length === 2, { name: 'unnamed public notice' })
+  t.alike(d.sent[1].payload, { v: 1, kind: 'group', group: publicEvent.group, body: null, g: d.clock.t })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group Terms floor is 94 per member; skipped members keep their cooldown open', async (t) => {
+  const old = member()
+  const current = member()
+  const future = member()
+  const unreadable = member()
+  let available = true
+  let version = 93
+  const d = await groupRoutes(t, {
+    terms: {
+      available: () => available,
+      list: (m) => {
+        if (m === unreadable.hex) throw new Error('indisponivel')
+        return [{ version: m === old.hex ? version : m === future.hex ? 95 : 94 }]
+      }
+    }
+  })
+  t.is(GROUP_NOTICE_TERMS_FLOOR, 94)
+  await d.subscribe(old)
+  const currentSub = await d.subscribe(current)
+  const futureSub = await d.subscribe(future)
+  await d.subscribe(unreadable)
+  const event = groupEvent([old.hex, current.hex, future.hex, unreadable.hex])
+  await d.relay(event)
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'eligible group members' })
+  t.alike(d.sent.map((s) => s.endpoint), [currentSub.endpoint, futureSub.endpoint])
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'group', reason: 'termos-pendentes' })).length, 2)
+  version = 94
+  await d.relay(groupEvent([old.hex], { group: event.group }))
+  await until(() => d.sent.length === 3, { name: 'newly accepted terms without waiting' })
+
+  const idle = member()
+  const empty = groupEvent([idle.hex])
+  await d.relay(empty)
+  await d.subscribe(idle)
+  available = false
+  await d.relay(groupEvent([idle.hex], { group: empty.group }))
+  t.ok(d.logs.includes(JSON.stringify({ event: 'push', kind: 'group', reason: 'indisponivel' })))
+  available = true
+  await d.relay(groupEvent([idle.hex], { group: empty.group }))
+  await until(() => d.sent.length === 4, { name: 'new device without waiting' })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group notices have a separate hourly cap of 60 per member', async (t) => {
+  const d = await groupRoutes(t)
+  const m = member()
+  const other = member()
+  await d.subscribe(m)
+  const otherSub = await d.subscribe(other)
+  const first = groupEvent([m.hex])
+  await d.relay(first)
+  for (let i = 0; i < 61; i++) await d.relay(groupEvent([m.hex], { group: first.group }))
+  for (let i = 0; i < 59; i++) await d.relay(groupEvent([m.hex]))
+  const capped = groupEvent([m.hex, other.hex])
+  await d.relay(capped)
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'hourly group cap drained' })
+  t.is(d.sent.length, 61, 'cooldown refusals do not spend the hourly cap')
+  t.is(d.sent[60].endpoint, otherSub.endpoint, 'the other member has a separate budget')
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'group', reason: 'teto' })).length, 1)
+  await d.dm(m.hex)
+  await d.relay({ v: 1, kind: 'like', actor: other.hex, recipient: m.hex, seq: 1, ref: m.hex + ':7', name: null })
+  await until(() => d.sent.length === 63, { name: 'DM and social budgets remain available' })
+  t.alike(d.sent.slice(61).map((s) => s.payload.kind), ['dm', 'like'])
+  d.clock.t += 3600 * 1000 - 1
+  await d.relay(groupEvent([m.hex], { group: capped.group }))
+  t.is(d.sent.length, 63, 'still capped just before the next hour')
+  d.clock.t++
+  await d.relay(groupEvent([m.hex], { group: capped.group }))
+  await until(() => d.sent.length === 64, { name: 'next hour without a cooldown charge from the refusal' })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group notices take at most half the queue and only charge a cooldown when every device fits', async (t) => {
+  const half = Math.floor(MAX_QUEUE / 2)
+  const big = member()
+  const fits = member()
+  const late = member()
+  const broken = member()
+  let unreadable = true
+  const rows = new Map([[big.hex, half + 1], [fits.hex, half - 4], [late.hex, 5], [broken.hex, 1]])
+  const pushStore = {
+    available: () => true,
+    list: (m) => {
+      if (m === broken.hex && unreadable) throw new Error('indisponivel')
+      return Array.from({ length: rows.get(m) || 0 }, (_, i) => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/' + m.slice(0, 8) + i, p256dh: 'p' + i, auth: 'a' + i }))
+    }
+  }
+  const d = await groupRoutes(t, { pushStore, delay: 60000 })
+  const event = groupEvent([big.hex, fits.hex, late.hex, broken.hex])
+  await d.relay(event)
+  t.is(d.r.stats().queued, half - 4, 'only the member whose devices fit')
+  t.is(d.r.stats().dropped, half + 1 + 5)
+  t.ok(d.logs.includes(JSON.stringify({ event: 'push', kind: 'group', reason: 'indisponivel' })))
+  rows.set(big.hex, 1)
+  rows.set(late.hex, 2)
+  unreadable = false
+  await d.relay(groupEvent([big.hex, late.hex, broken.hex], { group: event.group }))
+  t.is(d.r.stats().queued, half, 'the refused members still have their windows open')
+  t.is(d.sent.length, 0, 'all notices wait for their delay')
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: group delays and HMAC topics are per member and shared by that member devices', async (t) => {
+  let draws = 0
+  const d = await groupRoutes(t, { delayMs: () => ++draws * 20 })
+  const a = member()
+  const b = member()
+  const idle = member()
+  const subs = [await d.subscribe(a), await d.subscribe(a), await d.subscribe(b)]
+  const event = groupEvent([a.hex, b.hex, idle.hex])
+  const g = d.clock.t
+  await d.relay(event)
+  t.is(draws, 2, 'one draw per member with devices')
+  t.is(d.sent.length, 0)
+  d.clock.t += 20
+  await until(() => d.sent.length === 2, { name: 'first member devices' })
+  t.alike(d.sent.map((s) => s.endpoint).sort(), subs.slice(0, 2).map((s) => s.endpoint).sort())
+  d.clock.t += 20
+  await until(() => d.sent.length === 3, { name: 'second member device' })
+  t.is(d.sent[2].endpoint, subs[2].endpoint)
+  t.is(d.sent[0].topic, d.sent[1].topic)
+  t.not(d.sent[0].topic, d.sent[2].topic)
+  for (const s of d.sent) {
+    const recipient = s.endpoint === subs[2].endpoint ? b.hex : a.hex
+    const input = 'group ' + event.nid + ' ' + g + ' ' + recipient
+    t.is(s.topic, nodeCrypto.createHmac('sha256', TOPIC_KEY).update(input).digest('hex').slice(0, 32))
+    t.not(s.topic, sha256(input).toString('hex').slice(0, 32), 'never a bare hash')
+    t.is(s.payload.g, g, 'enqueue time, not send time')
+  }
   noKeysLogged(t, d.logs)
 })
 

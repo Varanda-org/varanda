@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 93)
+  t.is(LEGAL_VERSION, 94)
   t.is(LEGAL_DATE, '18/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 93, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 94, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,6 +388,43 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 94 describes group message notices and the membership exposure', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 94)
+  const all = (doc) => doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = all(doc)
+    for (const required of [
+      '"Nova mensagem em"',
+      '"Nova mensagem num grupo"',
+      '"Nova mensagem num grupo privado"',
+      'quais membros pertencem a um grupo com atividade e quando, mesmo que não tenham ligado os avisos',
+      'O semeador já conhecia os participantes.',
+      'inclusive ao esconder uma mensagem, reagir ou mudar o nome do grupo',
+      'no máximo um aviso de grupo a cada 10 minutos por grupo e por pessoa e 60 avisos por pessoa por hora, só para quem aceitou a versão 94 destes documentos ou uma mais nova',
+      'Os 10 minutos só começam quando um aviso entra na fila.',
+      'um aviso perdido não é reenviado',
+      'Avisos de mensagens em grupos: para avisar os membros de que há atividade no grupo, a base legal proposta é execução de contrato, Art. 7º, V, a confirmar em parecer jurídico.'
+    ]) t.ok(text.includes(required), doc.title + ': ' + required)
+  }
+  t.ok(all(TERMS).includes('aparece mesmo com a janela em foco e um toque abre as Conversas'), 'terms: display and tap')
+  t.ok(all(TERMS).includes('recebe a chave do grupo e, se ele for público, o nome; nunca recebe por esse aviso quem escreveu nem o conteúdo'), 'terms: group key for both visibilities, public name only, no author or content')
+  for (const required of [
+    'recebe a chave do grupo e, se ele for público, o nome; nunca recebe por esse aviso quem escreveu nem o conteúdo',
+    'O nome do grupo privado nunca vai nesse aviso.',
+    'O aviso de grupo privado não leva a chave do grupo.',
+    'O serviço de push do navegador vê o momento de cada aviso.',
+    'Quando não consegue confirmar a participação, deixa a pessoa de fora ou não manda o aviso.',
+    'o histórico da abertura não gera aviso',
+    'por grupo e por escritor, podem sair até quatro de uma vez, e depois a capacidade se repõe em um a cada 30 segundos; o excesso é descartado',
+    'Cada envio ao serviço de conta leva até 64 destinatários, em vários envios quando há mais membros.',
+    'O serviço manda cada aviso no máximo uma vez por destinatário',
+    'Avisos de grupos ocupam no máximo metade da fila, esperam de 0 a 60 segundos, por sorteio, e recebem o mesmo enchimento dos outros avisos para manter o tamanho fixo.',
+    'Os registros de operação não levam a chave nem o nome do grupo, o identificador do aviso ou os destinatários.',
+    'Semeadores antigos não mandam esses avisos'
+  ]) t.ok(all(PRIVACY).includes(required), 'privacy: ' + required)
+})
+
 test('legal: version 93 describes the Conversas notice sent to the recipient only', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   t.ok(LEGAL_VERSION >= 93)
@@ -455,7 +492,7 @@ test("legal: version 89 describes a page's media, reactions and hides in private
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, '2505cd1e2875e3c81f964e2dc9366ee212cf48169152b3c3ab93a55cbdc20842', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, '8b9d9cc261492e9369f72cdbad2650c63e822b720858e33babcbf91f933560ab', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

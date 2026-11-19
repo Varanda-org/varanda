@@ -5,6 +5,7 @@ const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { endpointHash, verifyPush } = require('@varanda/core/lib/push-proof')
 const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
 const { openDmNotice, DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
+const { validateGroupNotice, noticeName } = require('@varanda/core/lib/group-notice')
 const { isAllowedEndpoint, sendPush, PUSH_TTL_S, TOPIC_RE } = require('./web-push')
 const { validEndpoint, validP256dh, validAuth } = require('./push-store')
 const { isPlainObject } = require('@varanda/core/lib/cert')
@@ -49,11 +50,11 @@ const { pushBody, inviteDropPayload, deletionPayload } = require('./push-text')
 //
 // An endpoint is a capability URL: it is never echoed, counted in an answer
 // or logged, and neither are keys, nonces, signatures, tokens, names or the
-// notice text. Logs carry only { event, reason } tokens, plus kind: 'dm' on
-// the lines about a DM notice; never whom a DM notice was for.
+// notice text. Logs carry only { event, reason } tokens, plus kind: 'dm' or
+// 'group' on their notice lines; never whom a notice was for.
 
 const MAX_BODY = 4096
-const RELAY_BODY_MAX = 1024
+const RELAY_BODY_MAX = 8192
 const NONCE_TTL_MS = 600 * 1000
 const MAX_NONCES = 1000
 const MAX_SEEN = 10000
@@ -77,6 +78,9 @@ const DM_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
 const DM_NOTICE_TERMS_FLOOR = 93
 // One DM notice per received key in this window, however many boxes name it.
 const DM_COOLDOWN_MS = 15 * 60 * 1000
+const GROUP_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
+const GROUP_NOTICE_TERMS_FLOOR = 94
+const GROUP_COOLDOWN_MS = 10 * 60 * 1000
 const BOX_B64U_LENGTH = Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3)
 const B64U_RE = /^[A-Za-z0-9_-]+$/
 const RELAY_DM_KEYS = 'box,kind,v'
@@ -138,15 +142,17 @@ function createPushRoutes ({
     // Keyed on the key the box named, before a Página is expanded.
     dmCooldown: keyedWindow(1, DM_COOLDOWN_MS, now),
     // Per member reached by a DM notice, apart from the social budget.
-    dmRecipient: keyedWindow(60, 3600 * 1000, now)
+    dmRecipient: keyedWindow(60, 3600 * 1000, now),
+    groupCooldown: keyedWindow(1, GROUP_COOLDOWN_MS, now),
+    groupRecipient: keyedWindow(60, 3600 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
 
   // Pending opt-ins and opt-outs by nonce: { member, action, expiresAt },
   // single-use, the oldest evicted for room (start needs no proof).
   const nonces = new Map()
-  // actor:seq:recipient of the events already taken, FIFO: the seeder may relay one
-  // record twice (a restart before its cursor was saved).
+  // actor:seq:recipient, or nid:recipient for groups, FIFO: the seeder may
+  // relay one record twice (a restart before its cursor was saved).
   const seen = new Set()
   const queue = []
   // Member notices no device has got yet, oldest first, for cancel: a recall
@@ -374,6 +380,15 @@ function createPushRoutes ({
         dmNotice(event.box)
       } catch {
         log({ event: 'push', reason: 'falhou' })
+      }
+      return
+    }
+    if (validateGroupNotice(event)) {
+      reply(res, 202, {})
+      try {
+        notifyGroup(event)
+      } catch {
+        log({ event: 'push', kind: 'group', reason: 'indisponivel' })
       }
       return
     }
@@ -611,6 +626,70 @@ function createPushRoutes ({
     pump()
   }
 
+  function groupTermsAccepted (member) {
+    try {
+      return terms.list(member).some((e) => e.version >= GROUP_NOTICE_TERMS_FLOOR)
+    } catch {
+      return false
+    }
+  }
+
+  function groupRoom () {
+    return Math.max(0, GROUP_QUEUE_MAX - queue.length)
+  }
+
+  function notifyGroup ({ group, visibility, name, nid, recipients }) {
+    if (closed || vapid === null || !storeUsable()) return
+    if (terms === null || !terms.available()) return log({ event: 'push', kind: 'group', reason: 'indisponivel' })
+    const g = now()
+    const payload = JSON.stringify(visibility === 'private'
+      ? { v: 1, kind: 'group-private', g }
+      : { v: 1, kind: 'group', group, body: noticeName(name), g })
+    for (const member of recipients) {
+      const id = nid + ':' + member
+      if (seen.has(id)) {
+        log({ event: 'push', kind: 'group', reason: 'descartado' })
+        continue
+      }
+      seen.add(id)
+      while (seen.size > MAX_SEEN) seen.delete(seen.values().next().value)
+      const cooldown = group + ' ' + member
+      if (!limits.groupCooldown(cooldown, false)) {
+        log({ event: 'push', kind: 'group', reason: 'descartado' })
+        continue
+      }
+      if (!groupTermsAccepted(member)) {
+        log({ event: 'push', kind: 'group', reason: 'termos-pendentes' })
+        continue
+      }
+      let subs
+      try {
+        subs = pushStore.list(member)
+      } catch {
+        log({ event: 'push', kind: 'group', reason: 'indisponivel' })
+        continue
+      }
+      if (subs.length === 0) continue
+      if (groupRoom() < subs.length) {
+        dropped += subs.length
+        log({ event: 'push', kind: 'group', reason: 'descartado' })
+        continue
+      }
+      if (!limits.groupRecipient(member)) {
+        log({ event: 'push', kind: 'group', reason: 'teto' })
+        continue
+      }
+      const topic = nodeCrypto.createHmac('sha256', topicKey).update('group ' + nid + ' ' + g + ' ' + member).digest('hex').slice(0, 32)
+      const at = g + delayMs()
+      for (const { endpoint, p256dh, auth } of subs) {
+        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic }, at)
+      }
+      // A notice that reaches nobody must leave the next message's window open.
+      limits.groupCooldown(cooldown)
+    }
+    pump()
+  }
+
   // Invites only enter while the queue is under half full: DM notices may
   // hold the other half (dmRoom), so member notices always keep room of their own.
   // No transport means no room: the loop then claims nothing, so the week's
@@ -804,6 +883,7 @@ module.exports = {
   RELAY_BODY_MAX,
   DM_NOTICE_TERMS_FLOOR,
   DM_COOLDOWN_MS,
+  GROUP_NOTICE_TERMS_FLOOR,
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,

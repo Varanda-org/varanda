@@ -2884,7 +2884,8 @@ function Member () {
   }, [dmReady, node.visible, dmRequest, bumpDm])
   // A window that was already visible gets no visibility change, so the
   // pull the wake is for runs here too.
-  useEffect(() => onDmOpen(() => {
+  useEffect(() => onDmOpen((kind) => {
+    if (kind === 'group') actingAs.me()
     clearStack()
     setConvCompose(false)
     setTab('comunidades')
@@ -3242,8 +3243,8 @@ function Member () {
     if (!launchDue({ kind: intent.kind, atTabs, sheetOpen: ajustes !== null, phoneClear, deleteFromAviso })) return
     launchRef.current = null
     // A DM wake names nobody: Conversas opens for whoever is unlocked.
-    if (intent.kind === 'dm') {
-      requestDmOpen()
+    if (intent.kind === 'dm' || intent.kind === 'group') {
+      requestDmOpen(intent.kind)
       return
     }
     // A Pagina DM notice names no Pagina (privacy): the Paginas list is the

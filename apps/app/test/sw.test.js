@@ -2037,6 +2037,243 @@ test('notificationclick: a DM notice focuses the app and posts its open message'
   }
 })
 
+const GROUP_KEY = 'd'.repeat(64)
+const GROUP_NAME = 'Varanda'
+
+function groupPublic (over = {}) {
+  return { v: 1, kind: 'group', group: GROUP_KEY, body: GROUP_NAME, g: G, ...over }
+}
+
+test('push: a group notice shows the sentence, tag and data of its kind', async (t) => {
+  const w = renderedWorker()
+  const cases = [
+    {
+      label: 'public with a name',
+      payload: (g) => groupPublic({ g }),
+      body: 'Nova mensagem em ' + GROUP_NAME,
+      tag: 'varanda-group-' + GROUP_KEY,
+      kind: 'group'
+    },
+    {
+      label: 'public with no name',
+      payload: (g) => groupPublic({ body: null, g }),
+      body: 'Nova mensagem num grupo',
+      tag: 'varanda-group-' + GROUP_KEY,
+      kind: 'group'
+    },
+    {
+      label: 'private',
+      payload: (g) => ({ v: 1, kind: 'group-private', g }),
+      body: 'Nova mensagem num grupo privado',
+      tag: 'varanda-group-private',
+      kind: 'group-private'
+    }
+  ]
+  for (const c of cases) {
+    for (const g of [G, 1, Number.MAX_SAFE_INTEGER]) {
+      const shown = await push(w, pushData(c.payload(g)))
+      t.is(shown.title, 'Varanda', c.label)
+      t.is(shown.options.body, c.body, c.label)
+      t.is(shown.options.icon, '/icon-192.png', c.label)
+      t.is(shown.options.tag, c.tag, c.label)
+      t.is(shown.options.renotify, false, c.label)
+      t.alike(plain(shown.options.data), { kind: c.kind, g }, c.label + ' g ' + g)
+      t.absent(shown.options.body.includes(GROUP_KEY), c.label + ': the sentence names no key')
+    }
+  }
+
+  // Key order is not part of the shape: the same keys in another order still show.
+  const reordered = await push(w, pushData({ body: GROUP_NAME, g: G, v: 1, group: GROUP_KEY, kind: 'group' }))
+  t.is(reordered.options.body, 'Nova mensagem em ' + GROUP_NAME, 'reordered public keys')
+  t.is(reordered.options.tag, 'varanda-group-' + GROUP_KEY, 'reordered public keys')
+  t.alike(plain(reordered.options.data), { kind: 'group', g: G }, 'reordered public keys')
+  const reorderedPrivate = await push(w, pushData({ g: G, kind: 'group-private', v: 1 }))
+  t.is(reorderedPrivate.options.body, 'Nova mensagem num grupo privado', 'reordered private keys')
+  t.is(reorderedPrivate.options.tag, 'varanda-group-private', 'reordered private keys')
+  t.alike(plain(reorderedPrivate.options.data), { kind: 'group-private', g: G }, 'reordered private keys')
+
+  const long = '😀'.repeat(120)
+  const named = await push(w, pushData(groupPublic({ body: long })))
+  t.is(named.options.body, 'Nova mensagem em ' + long, '120 code points are allowed')
+  t.is(named.options.renotify, false, '120 code points')
+  // validBody accepts a one-space name: it is not the null name.
+  const space = await push(w, pushData(groupPublic({ body: ' ' })))
+  t.is(space.options.body, 'Nova mensagem em  ', 'a name validBody accepts is shown')
+  t.is(space.options.tag, 'varanda-group-' + GROUP_KEY, 'a one-space name still tags the group')
+})
+
+test('push: a malformed public group notice shows only the fallback sentence', async (t) => {
+  const w = renderedWorker()
+  const refused = async (payload, label) => {
+    const shown = await push(w, pushData(payload))
+    t.is(shown.title, 'Varanda', label)
+    t.is(shown.options.body, FALLBACK, label)
+    t.is(shown.options.tag, 'varanda-generic', label)
+    t.alike(plain(shown.options.data), {}, label)
+  }
+  const bodies = {
+    'empty body': '',
+    'body too long': 'a'.repeat(121),
+    '121 emoji': '😀'.repeat(121),
+    newline: 'Varanda\n',
+    'line separator': 'Varanda\u2028',
+    'bidi override': 'Varanda\u202e',
+    'left to right mark': 'Varanda\u200e',
+    'body a number': 1,
+    'body an object': { name: GROUP_NAME },
+    'body an array': [GROUP_NAME],
+    'body false': false
+  }
+  for (const [label, body] of Object.entries(bodies)) await refused(groupPublic({ body }), label)
+  const groups = {
+    uppercase: 'A'.repeat(64),
+    'mixed case': 'a'.repeat(63) + 'F',
+    short: 'a'.repeat(63),
+    long: 'a'.repeat(65),
+    'not hex': 'g'.repeat(64),
+    'empty group': '',
+    'group null': null,
+    'group a number': 1
+  }
+  for (const [label, group] of Object.entries(groups)) await refused(groupPublic({ group }), label)
+  await refused({ kind: 'group', group: GROUP_KEY, body: GROUP_NAME, g: G }, 'missing v')
+  await refused({ v: 1, group: GROUP_KEY, body: GROUP_NAME, g: G }, 'missing kind')
+  await refused({ v: 1, kind: 'group', body: GROUP_NAME, g: G }, 'missing group')
+  await refused({ v: 1, kind: 'group', group: GROUP_KEY, g: G }, 'missing body')
+  await refused({ v: 1, kind: 'group', group: GROUP_KEY, body: GROUP_NAME }, 'missing g')
+  await refused(groupPublic({ x: 1 }), 'extra key')
+  await refused(groupPublic({ body: null, x: 1 }), 'null name with an extra key')
+  await refused(groupPublic({ actor: ACTOR }), 'with an actor')
+  await refused(groupPublic({ name: GROUP_NAME }), 'with a name key')
+  await refused(groupPublic({ visibility: 'public' }), 'with a visibility')
+  const times = {
+    'g a string': String(G),
+    'g zero': 0,
+    'g negative': -G,
+    'g not an integer': G + 0.5,
+    'g past safe integers': Number.MAX_SAFE_INTEGER + 1,
+    'g null': null
+  }
+  for (const [label, g] of Object.entries(times)) await refused(groupPublic({ g }), label)
+  await refused(groupPublic({ v: 2 }), 'wrong version')
+  await refused({ v: 1, kind: 'group', g: G }, 'only the dm keys')
+  await refused(groupPublic({ kind: 'groups' }), 'wrong kind')
+})
+
+test('push: a private group notice with a group, a body or an extra key shows only the fallback sentence', async (t) => {
+  const w = renderedWorker()
+  const refused = async (payload, label) => {
+    const shown = await push(w, pushData(payload))
+    t.is(shown.title, 'Varanda', label)
+    t.is(shown.options.body, FALLBACK, label)
+    t.is(shown.options.tag, 'varanda-generic', label)
+    t.alike(plain(shown.options.data), {}, label)
+  }
+  const priv = { v: 1, kind: 'group-private', g: G }
+  await refused({ ...priv, group: GROUP_KEY }, 'with a group')
+  await refused({ ...priv, body: 'Segredo' }, 'with a body')
+  await refused({ ...priv, body: null }, 'with a null body')
+  await refused({ ...priv, group: GROUP_KEY, body: null }, 'with a group and a body')
+  await refused({ ...priv, x: 1 }, 'extra key')
+  await refused({ v: 1, kind: 'group-private' }, 'missing g')
+  await refused({ kind: 'group-private', g: G }, 'missing version')
+  await refused({ v: 2, kind: 'group-private', g: G }, 'wrong version')
+  await refused({ v: 1, kind: 'group-secret', g: G }, 'unknown kind')
+  const times = {
+    'g a string': String(G),
+    'g zero': 0,
+    'g negative': -G,
+    'g not an integer': G + 0.5,
+    'g past safe integers': Number.MAX_SAFE_INTEGER + 1,
+    'g null': null
+  }
+  for (const [label, g] of Object.entries(times)) await refused({ v: 1, kind: 'group-private', g }, label)
+})
+
+// The focused window's hand-off only re-reads the member inbox; a group
+// thread is not in it, so a group notice must always show.
+test('group notice: shown even with a visible focused app window, which gets no wake', async (t) => {
+  const cases = [
+    ['public with a name', groupPublic(), 'Nova mensagem em ' + GROUP_NAME, 'varanda-group-' + GROUP_KEY],
+    ['public with no name', groupPublic({ body: null }), 'Nova mensagem num grupo', 'varanda-group-' + GROUP_KEY],
+    ['private', { v: 1, kind: 'group-private', g: G }, 'Nova mensagem num grupo privado', 'varanda-group-private']
+  ]
+  for (const [label, payload, body, tag] of cases) {
+    const w = renderedWorker()
+    const win = activeWindow(ORIGIN + '/')
+    const hidden = fakeWindow(ORIGIN + '/')
+    w.windows = [hidden, win]
+    const shown = await noticeShown(w, payload)
+    t.is(shown.length, 1, label + ': shown')
+    if (shown[0]) {
+      t.is(shown[0].options.tag, tag, label)
+      t.is(shown[0].options.body, body, label)
+      t.is(shown[0].options.renotify, false, label)
+      t.is(shown[0].options.silent, undefined, label + ': not the quiet notice')
+    }
+    t.is(w.shown.length, 1, label + ': no quiet notice besides it')
+    t.alike(win.messages, [], label + ': no wake to the focused window')
+    t.alike(hidden.messages, [], label + ': no wake to the other window')
+  }
+})
+
+test('group notice: shown 1 s after an own send, while a DM wake is still muted', async (t) => {
+  const cases = [
+    ['public with a name', groupPublic()],
+    ['public with no name', groupPublic({ body: null })],
+    ['private', { v: 1, kind: 'group-private', g: G }]
+  ]
+  for (const [label, payload] of cases) {
+    const w = renderedWorker()
+    w.now = 1000000
+    await message(w, { type: 'varanda-dm-sent' }, fakeWindow(ORIGIN + '/'))
+    w.now = 1000000 + 1000
+    const shown = await noticeShown(w, payload)
+    t.is(shown.length, 1, label + ': shown inside the mute window')
+    t.alike(await wakeShown(w), [], label + ': the wake itself stays muted')
+  }
+})
+
+// A group notice opens Conversas, the same screen as a dm notice: groups
+// live on that list, and the notification names no group.
+test('notificationclick: a group notice focuses the app and opens Conversas', async (t) => {
+  for (const kind of ['group', 'group-private']) {
+    const w = renderedWorker()
+    const mine = fakeWindow(ORIGIN + '/')
+    w.windows = [mine]
+    t.ok(await click(w, { kind, g: G }), kind + ': closed')
+    t.is(mine.focused, 1, kind)
+    t.alike(plain(mine.messages), [{ type: 'varanda-group-open' }], kind)
+    t.alike(w.opened, [], kind)
+
+    const fresh = renderedWorker()
+    t.ok(await click(fresh, { kind, g: G }))
+    t.alike(fresh.opened, ['/?aviso=grupo'], kind + ': no window opens the app on Conversas')
+
+    const stuck = renderedWorker()
+    const refusing = fakeWindow(ORIGIN + '/')
+    refusing.focus = async () => { throw new Error('InvalidAccessError') }
+    stuck.windows = [refusing]
+    t.ok(await click(stuck, { kind, g: G }))
+    t.alike(stuck.opened, ['/?aviso=grupo'], kind + ': a window that refuses focus')
+    t.alike(refusing.messages, [], kind)
+
+    // Anything but the shape the worker itself stored is not a group notice.
+    t.ok(await click(w, { kind, g: G, group: GROUP_KEY }))
+    t.ok(await click(w, { kind, g: G, body: GROUP_NAME }))
+    t.ok(await click(w, { kind, group: GROUP_KEY }))
+    t.ok(await click(w, { kind, g: '1' }))
+    t.ok(await click(w, { kind }))
+    t.is(mine.messages.length, 1, kind + ': nothing more posted')
+    const bad = renderedWorker()
+    await click(bad, { kind, g: G, group: GROUP_KEY })
+    await click(bad, { kind, group: GROUP_KEY })
+    await click(bad, { kind, g: 0 })
+    await click(bad, { kind })
+    t.alike(bad.opened, ['/', '/', '/', '/'], kind + ': malformed data opens the root')
+  }
+})
+
 const SHARE = ORIGIN + '/compartilhar'
 const SHARE_PREFIX = ORIGIN + '/__varanda-share/'
 const SHARE_META_KEYS = ['at', 'files', 'id', 'text', 'title', 'total', 'url', 'v', 'videos']
