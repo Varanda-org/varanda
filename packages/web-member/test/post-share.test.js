@@ -1,5 +1,5 @@
 // post.shared, post.share, post.unshare and post.cover on the browser node
-// (docs/rpc.md 5.121 to 5.123, 5.167): lib/session.js through lib/node.js and an in-memory
+// (docs/rpc.md 5.121 to 5.123, 5.168): lib/session.js through lib/node.js and an in-memory
 // client, member-ops' live-share walk, on memory storage. Any live share
 // counts, the target must be a live post of the own diary, a locked
 // identity reads but never writes, and a write pushes to the seeder. Most
@@ -411,7 +411,7 @@ test('post.delete that fails across appends counts and pushes what landed', asyn
   t.alike(targets, [1, 3, 4, 5, 6, 7, 8, 9], 'the post first, then the oldest covers; nothing retried')
 })
 
-// ---- the cover (docs/rpc.md 5.167) ----
+// ---- the cover (docs/rpc.md 5.168) ----
 
 // A JPEG of `width` x `height` the node's photo check takes; `n` varies the
 // content so each upload is its own range.

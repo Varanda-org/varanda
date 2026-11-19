@@ -59,7 +59,7 @@ const NO_PAGE_KEY = 'sem chave da página'
 const DM_CORE_METHODS = Object.freeze([
   'dm.enable', 'dm.lookup', 'dm.send', 'dm.react', 'dm.pull', 'dm.list', 'dm.thread', 'dm.set', 'dm.seen',
   'dm.pageGenerate', 'dm.pageShare', 'dm.pageSecrets', 'dm.pageDraft', 'dm.pageSend',
-  'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget', 'dm.actorBox'
+  'dm.pageLegacyChunk', 'dm.pageLegacyBlocks', 'dm.pageForget', 'dm.actorBox', 'dm.noticeKey'
 ])
 const SEEN_WEB_ONLY = 'estado de vistos sincronizado só no navegador'
 const BLOCK_WEB_ONLY = 'bloqueio de membros disponível só no navegador'
@@ -994,7 +994,7 @@ function createSession ({
     'block.list': serial(async () => { throw new UsageError(BLOCK_WEB_ONLY) }),
 
     // Public post sharing belongs to the browser node (docs/rpc.md 5.121
-    // to 5.123 and 5.167).
+    // to 5.123 and 5.168).
     'post.shared': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.share': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.cover': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
@@ -1012,6 +1012,7 @@ function createSession ({
     'dm.thread': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.set': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.seen': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
+    'dm.noticeKey': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     // A Página's secrets live on the browser node only (docs/rpc.md 5.114).
     'dm.pageGenerate': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),
     'dm.pageShare': serial(async () => { throw new UsageError(DM_WEB_ONLY) }),

@@ -82,6 +82,9 @@ import { useOutbox } from '../outboxProvider'
 import { GATE_MESSAGE, LOCKED_MESSAGE } from '../outbox'
 import { countChars } from '../format'
 import { sentMatcher } from '../replySend'
+import { announceOwnReply, ownReplyItem } from '../ownReply'
+import { cacheGeneration } from '../localCaches'
+import { parseRef } from '../thread'
 import { whoOf } from '../who'
 import { ringState } from '../composeRing'
 import { composeStatus } from '../composeStatus'
@@ -106,6 +109,7 @@ import { LINK_DRAFT_DELAY_MS, cardForSend, withCardFallback } from '../linkCard'
 import { fallbackCard, isAudiusLink } from '../musicEmbed'
 import { musicOriginOf } from '../music'
 import { MUSIC_PHOTOS_TEXT, MUSIC_VIDEO_TEXT, MUSIC_MOMENT_VIDEO_TEXT, musicBlocks, musicSnapshot, resolveTarget, momentChoiceOf } from '../musicDraft'
+import { noteMusicRecent } from '../musicRecentsStore'
 import { audiusPolicy, audiusReady, audiusResolve } from '../account'
 import { playbackEpoch } from '../media/chatMedia'
 import { previewTarget } from '../preview'
@@ -331,7 +335,10 @@ function useMomentDraft ({ node, member, open, active, asPage = null, asLabel = 
   const pickMusic = (choice) => {
     if (busyRef.current || held || !musicAvailable || choice?.ref?.kind !== 'snippet') return
     const ref = momentMusicOf({ music: { p: 'audius', id: choice.ref.id, start: choice.ref.start } })
-    if (ref !== null) setMusic({ ref, item: choice.item })
+    if (ref !== null) {
+      setMusic({ ref, item: choice.item })
+      noteMusicRecent(member, 'track', choice.item)
+    }
   }
   const removeMusic = () => {
     setMusic(null)
@@ -1131,6 +1138,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (musicSnapshot(draft) === null) return
     setNote('')
     setMusicDraft(draft)
+    noteMusicRecent(member, draft.ref.kind === 'playlist' ? 'playlist' : 'track', draft.item)
   }
   const cardRef = useRef(null)
   // A page never queues: it needs the service.
@@ -1557,7 +1565,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // Clears only what was sent (an edit made meanwhile stays) and tells the
   // shell, which shows the toast and clears the reply or quote if it still
   // matches.
-  const published = (sent, sentReply, sentIds = [], sentQuote = null, web = null) => {
+  const published = (sent, sentReply, sentIds = [], sentQuote = null, web = null, own = null) => {
     tap('success')
     setPollDraft(null)
     setEventDraft(null)
@@ -1570,6 +1578,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (video.draft.state.file && sentIds.includes(video.draft.state.file)) video.draft.clear()
     if (sentIds.length > 0) removeItems(sentIds)
     if (sentQuote) return onPublished('quote', sentQuote.ref)
+    if (sentReply && own && mountedRef.current) announceOwnReply(ownReplyItem({ author: own.author, seq: own.seq, to: sentReply.ref, text: sent, media: own.media, gen: own.gen }), 'publicar')
     onPublished(sentReply ? 'reply' : 'post', sentReply ? sentReply.ref : null, web)
   }
 
@@ -1622,6 +1631,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const page = asPage
     const pending = pageRetryRef.current
     if (pending !== null) {
+      const gen = cacheGeneration()
       // Like the person path's late share after an uncertain post: one
       // post-share for the post this tap settles, never resent, inside the
       // same pending action so a second Send cannot slip in meanwhile.
@@ -1637,7 +1647,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       if (r.ok) {
         setPageRetry(null)
         pagePosterRef.current = null
-        published(pending.sent, pending.reply, pending.ids, pending.quote, late !== null && mountedRef.current ? late : null)
+        // A Página's answer is { seq, length, pushed }: the Página is the author.
+        const own = pending.reply ? { author: pending.page, seq: seqOf(r.value), media: pending.media || null, gen } : null
+        published(pending.sent, pending.reply, pending.ids, pending.quote, late !== null && mountedRef.current ? late : null, own)
       } else if (!r.uncertain) {
         // Refused for sure: nothing was published, the draft is free again.
         setPageRetry(null)
@@ -1726,6 +1738,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   }
 
   const sendNewAsPage = async (page, sent, sentReply, sentQuote, sentMusic, structured = {}) => {
+    const gen = cacheGeneration()
     const plain = structured.poll === undefined && structured.event === undefined
     const videoFile = hasVideo ? video.draft.state.file : null
     const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
@@ -1818,10 +1831,11 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     })
     if (r.ok) {
       pagePosterRef.current = null
-      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null)
+      const own = sentReply ? { author: page, seq: seqOf(r.value), media: sentMedia, gen } : null
+      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null, own)
     }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
-      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb, cover: sentCover })
+      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb, cover: sentCover, media: sentMedia })
     }
   }
 
@@ -1909,6 +1923,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     }
     // The node stamps `at` from the same clock: a match must be this send's.
     const startedAt = Date.now()
+    const gen = cacheGeneration()
     const base = sentMedia !== null ? { text: sent, media: sentMedia } : { text: sent }
     const method = sentQuote ? 'post.quote' : sentReply ? 'post.reply' : 'post.create'
     const to = sentQuote ? { to: sentQuote.ref } : sentReply ? { to: sentReply.ref } : {}
@@ -1964,7 +1979,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     if (r.ok) {
       confirm(seqOf(r.value))
       // A lock unmounts this screen: the share's answer is dropped then.
-      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null)
+      const own = sentReply ? { author: parseRef(r.value?.ref)?.author, seq: seqOf(r.value), media: sentMedia, gen } : null
+      return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null, own)
     }
     // The write gate could not reach the seeder: nothing was written, so the
     // post waits in the outbox (text only: a post with photos or a quote
@@ -1998,7 +2014,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         confirm(foundSeq)
         action.clearError()
         const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq, sentCover).catch(() => ({ ref: null, result: null })) : null
-        published(sent, sentReply, sentIds, sentQuote, late !== null && mountedRef.current ? late : null)
+        const own = sentReply ? { author: res.key, seq: foundSeq, media: sentMedia, gen } : null
+        published(sent, sentReply, sentIds, sentQuote, late !== null && mountedRef.current ? late : null, own)
       }
     } catch (err) {
       setCheckError(errorText(err))
@@ -2010,7 +2027,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   // The crawler's cover for a post sent with 'Publicar também na web'
   // (postShare.js sendCover), built from the bytes this composer still holds:
   // `held` the encoded { bytes, mime } in sentMedia's order. Only a node with
-  // an installation writes covers (post.cover is the browser node's, 5.167).
+  // an installation writes covers (post.cover is the browser node's, 5.168).
   // -> sendCover's input, or null for none. node.hosted is read first, so
   // nothing else is touched for a node without an installation.
   const coverFor = (sentMedia, held, page = null) => {

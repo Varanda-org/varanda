@@ -1320,7 +1320,7 @@ function coverPlan (held, to, image) {
   return { same: null, old: live.slice(0, APPEND_MAX - 1) }
 }
 
-// docs/rpc.md 5.167. A cover equal to the newest live one reads no bytes
+// docs/rpc.md 5.168. A cover equal to the newest live one reads no bytes
 // (it may live in another device's media core) and only tombstones older
 // live covers, if any. Otherwise the bytes are checked, then the older live
 // covers are tombstoned with their ranges and the new cover appended, all in

@@ -423,3 +423,107 @@ test('sendPageTextReply resends through retry: no act, no new signature', async 
   t.is(unexpected.retry, odd, 'an answer without a seq keeps the same bytes to resend')
   t.is(acts, 0)
 })
+
+test('replyFloor uses the highest valid diary sequence', async (t) => {
+  const { replyFloor } = await load()
+  t.is(replyFloor(9, null), 8)
+  t.is(replyFloor(1, null), 0)
+  for (const length of [0, null, '9', -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    t.is(replyFloor(length, null), null)
+  }
+  t.is(replyFloor(null, 12), 12)
+  t.is(replyFloor(null, 0), 0)
+  t.is(replyFloor(9, 12), 12)
+  t.is(replyFloor(20, 12), 19)
+  for (const confirmed of ['12', -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    t.is(replyFloor(9, confirmed), 8)
+  }
+})
+
+test('sendTextReply skips the pre-read with a diary floor and reconciles only above it', async (t) => {
+  const { replyFloor, sendTextReply } = await load()
+  const lastSeq = replyFloor(9, null)
+  const error = Object.assign(new Error('incerto'), { uncertain: true })
+  const success = { ok: true, ref: A + ':9', error: null }
+  const calls = []
+  const sent = await sendTextReply({
+    text: 'resposta',
+    replyTo: TO,
+    lastSeq,
+    request: async (method) => {
+      calls.push(method)
+      return { seq: 9, ref: A + ':9' }
+    }
+  })
+  t.alike(sent, success)
+  t.alike(calls, ['post.reply'])
+
+  for (const appended of [true, false]) {
+    const calls = []
+    const result = await sendTextReply({
+      text: 'resposta',
+      replyTo: TO,
+      lastSeq,
+      request: async (method) => {
+        calls.push(method)
+        if (method === 'post.reply') throw error
+        const recent = { at: new Date().toISOString() }
+        const entries = [entry(recent, 8)]
+        if (appended) entries.push(entry(recent, 9))
+        return { key: A, entries }
+      }
+    })
+    t.alike(result, appended ? success : { ok: false, ref: null, error })
+    t.alike(calls, ['post.reply', 'log.read'])
+  }
+})
+
+test('sendTextReply requires a record from the attempt when the floor may be stale', async (t) => {
+  const { sendTextReply } = await load()
+  const now = Date.now
+  Date.now = () => T0
+  t.teardown(() => { Date.now = now })
+  const error = Object.assign(new Error('incerto'), { uncertain: true })
+  for (const [lastSeqStale, offset, expected] of [
+    [true, -1000, false], [true, 1000, true], [false, -1000, true]
+  ]) {
+    const calls = []
+    const result = await sendTextReply({
+      text: 'resposta',
+      replyTo: TO,
+      lastSeq: 8,
+      lastSeqStale,
+      request: async (method) => {
+        calls.push(method)
+        if (method === 'post.reply') throw error
+        return { key: A, entries: [entry({ at: new Date(T0 + offset).toISOString() }, 9)] }
+      }
+    })
+    t.alike(result, expected ? { ok: true, ref: A + ':9', error: null } : { ok: false, ref: null, error })
+    t.alike(calls, ['post.reply', 'log.read'])
+  }
+})
+
+test('sendTextReply keeps the usual slack when it read the floor itself', async (t) => {
+  const { sendTextReply } = await load()
+  const now = Date.now
+  Date.now = () => T0
+  t.teardown(() => { Date.now = now })
+  const error = Object.assign(new Error('incerto'), { uncertain: true })
+  const calls = []
+  const result = await sendTextReply({
+    text: 'resposta',
+    replyTo: TO,
+    lastSeq: null,
+    lastSeqStale: true,
+    request: async (method) => {
+      calls.push(method)
+      if (method === 'post.reply') throw error
+      return calls.length === 1
+        ? { key: A, entries: [entry({ text: 'antes' }, 8)], entriesTruncated: 0 }
+        : { key: A, entries: [entry({ text: 'antes' }, 8), entry({ at: new Date(T0 - 1000).toISOString() }, 9)] }
+    }
+  })
+  t.alike(result, { ok: true, ref: A + ':9', error: null })
+  t.alike(calls, ['log.read', 'post.reply', 'log.read'])
+})

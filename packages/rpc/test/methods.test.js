@@ -19,7 +19,7 @@ const bad = (t, method, params, label) => {
 test('method list and mutating set', (t) => {
   t.alike([...METHODS].sort(), [
     'account.sign', 'age.proof', 'age.sign', 'appeal.sign', 'block.list', 'block.set', 'cert.add', 'choice.mine', 'choice.set', 'community.admin', 'community.admit', 'community.ban', 'community.create', 'community.info', 'community.invitePolicy', 'community.join', 'community.leave', 'community.list', 'community.members', 'community.meta', 'community.removeGroup', 'community.requests', 'device.disconnect', 'device.hello', 'device.list', 'device.reconnect', 'diary.peek',
-    'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
+    'dm.actorBox', 'dm.enable', 'dm.list', 'dm.lookup', 'dm.noticeKey', 'dm.pageDraft', 'dm.pageForget', 'dm.pageGenerate', 'dm.pageLegacyBlocks', 'dm.pageLegacyChunk', 'dm.pageSecrets', 'dm.pageSend', 'dm.pageShare', 'dm.pull', 'dm.putMedia', 'dm.react', 'dm.reportSign', 'dm.seen', 'dm.send', 'dm.set', 'dm.thread', 'engagement.read', 'fan.set', 'feed.read', 'follow.add', 'follow.list', 'follow.remove',
     'garden.decor', 'garden.drop', 'garden.give', 'garden.help', 'garden.play', 'garden.set', 'garden.stall', 'garden.state', 'garden.take', 'group.admin', 'group.admit', 'group.ban', 'group.choose', 'group.create', 'group.events', 'group.hide', 'group.info', 'group.invitePolicy', 'group.join', 'group.leave', 'group.list', 'group.members',
     'group.meta', 'group.post', 'group.react', 'group.reactors', 'group.read', 'group.rekey', 'group.requests', 'group.seal', 'group.seen', 'group.topics', 'group.voters',
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
@@ -56,6 +56,16 @@ test('device.*: params and the mutating set', (t) => {
   bad(t, 'device.disconnect', { previous: false }, 'previous false')
   bad(t, 'device.disconnect', { id: 'AB'.repeat(32) }, 'uppercase id')
   bad(t, 'device.disconnect', { id: KEY, extra: 1 }, 'extra key')
+})
+
+test('dm.noticeKey: exactly { key }, 64 lowercase hex, not mutating', (t) => {
+  t.absent(isMutating('dm.noticeKey'))
+  ok(t, 'dm.noticeKey', { key: KEY }, { key: KEY })
+  bad(t, 'dm.noticeKey', {}, 'missing key')
+  bad(t, 'dm.noticeKey', { key: KEY, page: KEY }, 'extra key')
+  for (const key of ['AB'.repeat(32), 'ab'.repeat(31), 'ab'.repeat(33), 'zz'.repeat(32), '', null, 1, true, [KEY], Buffer.alloc(32).toString('base64url')]) {
+    bad(t, 'dm.noticeKey', { key }, 'key ' + JSON.stringify(key))
+  }
 })
 
 test('moment.seen and moments.seen: a u32 momento ref, no params, not mutating', (t) => {

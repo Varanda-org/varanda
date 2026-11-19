@@ -1,7 +1,7 @@
 'use strict'
 
 // Public post sharing belongs to the browser node (docs/rpc.md 5.121 to
-// 5.123 and 5.167).
+// 5.123 and 5.168).
 const test = require('brittle')
 const fs = require('node:fs')
 const path = require('node:path')
