@@ -36,7 +36,7 @@ test('Publicar builds no preview for a shared link until the person asks or edit
   t.ok(/useLinkDraft\(\{ text, enabled: open === true && !shareLinkHeld[ ,]/.test(src), 'a held link never builds')
   t.ok(src.includes('setLinkHold((hold) => sharedLinkHold(current, merged.text, hold))'), 'applying a share sets the hold, keeping one still in place')
   t.ok(/if \(linkHold !== null && linkHold !== text\) setLinkHold\(null\)/.test(src), 'an edit releases it')
-  t.ok(/onPress=\{\(\) => setLinkHold\(null\)\}[\s\S]{0,200}Mostrar prévia do link/.test(src), 'the tap releases it')
+  t.ok(/<Pill label='Mostrar prévia do link'[^>]*onPress=\{\(\) => setLinkHold\(null\)\}/.test(src), 'the tap releases it')
 })
 
 test('the shell holds a share off the deleted-account screen and wires taken', (t) => {
