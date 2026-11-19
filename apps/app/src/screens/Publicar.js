@@ -130,7 +130,7 @@ import { ProgressBar } from '../ui/ProgressBar'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
 import { measureField } from '../ui/fieldMeasure'
-import { layout, space, type } from '../ui/theme'
+import { layout, radius, space, type } from '../ui/theme'
 import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
@@ -2411,17 +2411,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     {'respondendo a '}
                     <Text style={styles.markName}>{replyName}</Text>
                   </Text>
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityState={{ disabled: busy }}
-                    disabled={held}
-                    onPress={onClearReply}
-                    hitSlop={8}
-                  >
-                    <Text style={styles.markCancel}>cancelar resposta</Text>
-                  </Pressable>
+                  <Pill label='cancelar resposta' link small disabled={held} onPress={onClearReply} />
                 </View>
-                <Text style={styles.quote} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
+                <Text style={[styles.quote, styles.replyQuote]} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
               </>
               )
             : null}
@@ -2435,15 +2427,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   </Text>
                   {typeof onClearQuote === 'function'
                     ? (
-                      <Pressable
-                        accessibilityRole='button'
-                        accessibilityState={{ disabled: busy }}
-                        disabled={held}
-                        onPress={onClearQuote}
-                        hitSlop={8}
-                      >
-                        <Text style={styles.markCancel}>cancelar citação</Text>
-                      </Pressable>
+                      <Pill label='cancelar citação' link small disabled={held} onPress={onClearQuote} />
                       )
                     : null}
                 </View>
@@ -2512,17 +2496,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               ? null
               : shareLinkHeld && open === true && previewsEnabled(previewPrefStore())
                 ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel='Mostrar prévia do link'
-                    accessibilityState={{ disabled: frozen }}
-                    disabled={frozen}
-                    onPress={() => setLinkHold(null)}
-                    hitSlop={6}
-                    style={({ pressed }) => [styles.linkAsk, pressed && styles.toolPressed]}
-                  >
-                    <Text style={styles.linkAskText}>Mostrar prévia do link</Text>
-                  </Pressable>
+                  <View style={styles.linkAsk}>
+                    <Pill label='Mostrar prévia do link' link small disabled={frozen} onPress={() => setLinkHold(null)} />
+                  </View>
                   )
                 : <LinkDraftCard draft={linkDraft} />}
           {musicDraft !== null && items.length === 0
@@ -2552,7 +2528,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, videoOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
-                    <Icon name='video' size={21} color={colors.soft} />
+                    <Icon name='video' size={24} color={colors.soft} />
                   </PressScale>
                   )
                 : null}
@@ -2565,7 +2541,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 hitSlop={6}
                 style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
               >
-                <Icon name='smile' size={21} color={emojiOpen ? colors.accent : colors.soft} />
+                <Icon name='smile' size={24} color={emojiOpen ? colors.accent : colors.soft} />
               </PressScale>
               {canAttach
                 ? (
@@ -2581,7 +2557,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
-                    <Icon name='image' size={21} color={colors.soft} />
+                    <Icon name='image' size={24} color={colors.soft} />
                   </PressScale>
                   )
                 : null}
@@ -2596,7 +2572,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Icon name='enquete' size={21} color={pollDraft !== null ? colors.accent : colors.soft} />
+                    <Icon name='enquete' size={24} color={pollDraft !== null ? colors.accent : colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -2611,7 +2587,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Icon name='evento' size={21} color={eventDraft !== null ? colors.accent : colors.soft} />
+                    <Icon name='evento' size={24} color={eventDraft !== null ? colors.accent : colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -2626,7 +2602,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Icon name='musica' size={21} color={colors.soft} />
+                    <Icon name='musica' size={24} color={colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -2765,7 +2741,7 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMov
     <View style={[styles.thumbWrap, canMove && styles.thumbWrapWide]}>
       {/* The X stays on the 80 image. The wider wrap is only for the arrows. */}
       <View style={styles.thumbFrame}>
-        <View style={styles.thumb} accessible accessibilityRole='image' accessibilityLabel={cover ? label + ', capa' : label}>
+        <View style={[styles.thumb, count === 1 && styles.singlePhoto]} accessible accessibilityRole='image' accessibilityLabel={cover ? label + ', capa' : label}>
           {item.thumb
             ? <Image source={{ uri: item.thumb }} style={styles.thumbImg} resizeMode='cover' />
             : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={20} color={colors.soft} /></View>}
@@ -2789,7 +2765,7 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMov
           style={styles.remove}
         >
           <View style={styles.removeDot}>
-            <Icon name='x' size={14} color='#ffffff' />
+            <Icon name='x' size={14} color={colors.onMedia} />
           </View>
         </Pressable>
       </View>
@@ -2851,7 +2827,7 @@ const makeStyles = (colors) => StyleSheet.create({
   draftConflict: { padding: 24, gap: 16 },
   draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
-  thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
+  thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   thumbWrap: { width: 80, gap: 4 },
   thumbWrapWide: { width: 88 },
   thumbFrame: { width: 80 },
@@ -2872,6 +2848,7 @@ const makeStyles = (colors) => StyleSheet.create({
   // On the cover there is no "antes" arrow; "depois" keeps its right-hand place.
   moveAfter: { marginLeft: 'auto' },
   thumb: { width: 80, height: 80, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  singlePhoto: { borderRadius: radius.bubble },
   thumbImg: { ...StyleSheet.absoluteFillObject },
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
   bar: { position: 'absolute', left: 6, right: 6, bottom: 6 },
@@ -2887,22 +2864,22 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'flex-start',
     padding: 4
   },
-  removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.6)' },
+  removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.mediaScrim },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
-  momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  momentBody: { gap: space.md, paddingHorizontal: space.xl, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
+  momentPhoto: { width: 160, height: 200, borderRadius: radius.bubble, overflow: 'hidden', backgroundColor: colors.skeleton },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   // Keeps its line while empty: no jump at 80%, and still a place to focus.
   momentCounter: { alignSelf: 'flex-end', marginTop: -4, minHeight: type.counter.lineHeight },
-  tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
-  linkAsk: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginLeft: 60, paddingHorizontal: 8, borderRadius: 22 },
-  linkAskText: { ...type.replyMark, color: colors.accent, fontWeight: '600' },
+  // Six 44 pt tools and a long counter do not fit one line on a phone: the last tools wrap instead of running under the counter.
+  tools: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 4, flex: 1 },
+  linkAsk: { alignSelf: 'flex-start', marginLeft: space.xl + 40 + 12 },
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },
   toolPressed: { backgroundColor: colors.accentSoft },
   count: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   retryRow: { flexDirection: 'row', marginTop: 8 },
-  asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
+  asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: space.xl, paddingTop: 8 },
   asLabel: { ...type.replyMark, color: colors.soft },
   // A Page name runs to 80 characters: the cap keeps the chip in the sheet and ends the name in an ellipsis.
   asChip: { maxWidth: 200 },
@@ -2911,16 +2888,17 @@ const makeStyles = (colors) => StyleSheet.create({
     flexWrap: 'wrap',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: space.xl,
     marginTop: 4
   },
   mark: { ...type.replyMark, color: colors.soft, flexShrink: 1 },
   markName: { color: colors.accent, fontWeight: '600' },
-  markCancel: { ...type.replyMark, color: colors.soft },
   quote: { fontSize: 14, lineHeight: 20, color: colors.soft, paddingHorizontal: 16 },
+  // The replied text sits on the sheet, not in a card: the sheet's 24 pt gutter.
+  replyQuote: { paddingHorizontal: space.xl },
   quoteCard: {
     marginTop: 8,
-    marginHorizontal: 16,
+    marginHorizontal: space.xl,
     paddingVertical: 8,
     borderWidth: 1,
     borderColor: colors.line,
@@ -2928,7 +2906,7 @@ const makeStyles = (colors) => StyleSheet.create({
     gap: 2
   },
   quoteCardName: { ...type.postName, color: colors.ink, paddingHorizontal: 16 },
-  compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: 16 },
+  compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: space.xl },
   // minWidth 0 so a long name ellipsizes instead of widening the row on native.
   composeBody: { flex: 1, minWidth: 0 },
   author: { paddingTop: 2 },
@@ -2952,15 +2930,15 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 7,
     paddingVertical: space.sm,
-    // The tools pad their own 8, so icons and counter both sit 16 from the edges.
-    paddingLeft: space.sm,
-    paddingRight: space.lg
+    // The tools pad their own 8, so icons and counter both sit 24 from the edges.
+    paddingLeft: space.lg,
+    paddingRight: space.xl
   },
   counterAnnouncement: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },
-  errors: { paddingHorizontal: 16, gap: 4 },
+  errors: { paddingHorizontal: space.xl, gap: 4 },
   webRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
   webText: { color: colors.ink, fontSize: 15, flexShrink: 1 },
   ring: { width: 20, height: 20 },
