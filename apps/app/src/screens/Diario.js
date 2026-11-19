@@ -74,6 +74,8 @@ import { bandTint, extraView } from '../profileExtraView.js'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
 import { CommunitiesBox } from '../ui/CommunitiesBox'
+import { PublicGroupsBox } from '../ui/PublicGroupsBox'
+import { usePublicGroups } from '../usePublicGroups'
 import { communitiesOf } from '../communitiesBox'
 import { BAR, ProfileBar, usePinnedTabSelect, useProfileBar } from '../ui/ProfileBar'
 import { BellButton } from '../ui/TopActions'
@@ -299,7 +301,7 @@ export default function Diario (props) {
   return <PostSheetProvider><DiarioList {...props} /></PostSheetProvider>
 }
 
-function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onOpenVisitas, onOpenVarandinha, onTabChange, onOpenTop }) {
+function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onQuote, onToast, onReport, ownKey, scrollToTop, onDeletedPost, onAvisos, avisosNew, onOpenPeople, onOpenCommunity, onOpenGroup, onOpenTestimonials, onMessage, onOpenMomentos, onOpenSalvos, onOpenRecados, onOpenEventos, onOpenVisitas, onOpenVarandinha, onTabChange, onOpenTop }) {
   const styles = useStyles(makeStyles)
   const { colors, scheme } = useTheme()
   const node = useNode()
@@ -460,6 +462,15 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
       clearTimeout(timer)
     }
   }, [node.hosted, request, refresh, pulls, active, groupVersions])
+  // What anyone sees on this profile, read on the same signals as the
+  // communities. Away from the tab the last version stands, so leaving it
+  // costs no read; coming back reads again.
+  const publicGroupsVersionRef = useRef(null)
+  const publicGroupsVersion = useMemo(() => {
+    if (active !== false || publicGroupsVersionRef.current === null) publicGroupsVersionRef.current = { refresh, pulls, groupVersions }
+    return publicGroupsVersionRef.current
+  }, [refresh, pulls, active, groupVersions])
+  const publicGroups = usePublicGroups(ownPublicKey, { enabled: node.hosted === true, version: publicGroupsVersion })
   // Replaces the rows with the newest page (a refresh).
   const loadNewest = useCallback(async (refreshProfile = false) => {
     const mine = ++seqRef.current
@@ -795,6 +806,9 @@ function DiarioList ({ active, refresh, onSettings, onReply, onPublish, onOpenTh
                   )}
               {node.hosted === true ? <ReminderBanner now={now} onOpenThread={onOpenThread} /> : null}
               <CommunitiesBox items={communities} title='Suas comunidades' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              {publicGroups.hidden || typeof onOpenGroup !== 'function'
+                ? null
+                : <PublicGroupsBox items={publicGroups.rows} title='Seus grupos públicos' note='É isto que qualquer pessoa vê no seu perfil: grupos públicos de entrada aberta, sem a Geral de cada comunidade. Para esconder, use Ajustes, em Privacidade e segurança.' onOpen={onOpenGroup} />}
               {showSalvos || showEventos || showVisitas || showRecados || showVarandinha
                 ? (
                   <ListGroup style={styles.shortcuts}>

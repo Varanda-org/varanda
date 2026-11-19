@@ -81,6 +81,8 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { MuralFooter, MuralRow, muralGridRows } from '../ui/MuralGrid'
 import { Segmented } from '../ui/Segmented'
 import { CommunitiesBox } from '../ui/CommunitiesBox'
+import { PublicGroupsBox } from '../ui/PublicGroupsBox'
+import { usePublicGroups } from '../usePublicGroups'
 import { commonCommunities, communitiesOf, MAX_COMMON_LOOKUPS } from '../communitiesBox'
 import { EmptyState, ErrorState, ListFooter, SkeletonRow } from '../ui/States'
 import { LARGE_TEXT, space, type } from '../ui/theme'
@@ -290,7 +292,7 @@ export default function Membro (props) {
   return <PostSheetProvider><MembroList {...props} /></PostSheetProvider>
 }
 
-function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onOpenVarandinha, onToast, onTabChange }) {
+function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onReply, onQuote, onReport, onOpenThread, onOpenMember, onOpenMention, onOpenEngagers, onOpenQuotes, onOpenPageSettings, onOpenPeople, onOpenCommunity, onOpenGroup, onOpenListings, onOpenTestimonials, onOpenRecados, onOpenEventos, onOpenVarandinha, onToast, onTabChange }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
   const node = useNode()
@@ -913,6 +915,9 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
   const rich = useProfileExtra({ author, enabled: node.hosted === true && !isPage && !blockedHere, request })
   const extraShown = extraView(rich.held, now)
   const hostedHere = node.hosted === true && !isPage && !blockedHere
+  // Read again on a refresh or a group change, like the communities in common.
+  const publicGroupsVersion = useMemo(() => ({ tick, groupVersions }), [tick, groupVersions])
+  const publicGroups = usePublicGroups(author, { enabled: hostedHere && !own, version: publicGroupsVersion }).rows
   // The seeder's pointer may name a flag that is off, so the row waits for one
   // verified peek of that seq.
   const gardenSeq = rich.index && Number.isSafeInteger(rich.index.garden) ? rich.index.garden : null
@@ -1243,6 +1248,7 @@ function MembroList ({ entry, ownKey, onBack, onFollowsChanged, onMessage, onRep
           ? (
             <View>
               <CommunitiesBox items={common} title='Comunidades em comum' onOpen={typeof onOpenCommunity === 'function' ? onOpenCommunity : undefined} />
+              <PublicGroupsBox items={typeof onOpenGroup === 'function' ? publicGroups : []} title='Grupos públicos' onOpen={onOpenGroup} />
               <View onLayout={(e) => setSegmentedHeight(e.nativeEvent.layout.height)}>
                 <Segmented options={tabs} selected={shownTab} onSelect={setTab} />
               </View>

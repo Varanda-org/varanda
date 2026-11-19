@@ -68,6 +68,17 @@ if (typeof __DEV__ !== 'undefined' && __DEV__ && process.env.EXPO_PUBLIC_VARANDA
 // Groups: /index/group/<G>[/<after>], /index/groups/<D>,
 // /index/community/<C> and /index/group-search/<segment> (the segment as for
 // the account search). Same transport, scheduler and budget; never cached.
+// Discovery: /index/group-browse/(members|recent|trending) lists at most 20
+// public groups { group, name, creator, community, communityName,
+// writerCount, created, active } in the stated order (members: writerCount
+// down; recent: created down, at most 2 per creator; trending: active down,
+// 1 <= active <= writerCount; ties by group key up), and
+// /index/public-groups/<D>[/<after>] pages, 32 at a time by group key, the
+// public groups the diary writes in { group, name, creator, community,
+// communityName, writerCount }; `hidden: true` (the person turned the list
+// off) comes with no rows and no next. A row out of order is malformed.
+// Topic trend: /index/topic-trend lists at most 10 { tag, authors }, tag a
+// folded word of [a-z0-9] (2..32 chars), authors down, ties by tag up.
 //
 // Follows (public): /index/follows/<author> (the two counts) and
 // /index/follows/<author>/(seguindo|seguidores)[/<atMs>.<key>]. A
@@ -111,6 +122,9 @@ export const GROUP_WRITERS_MAX = 64
 export const GROUPS_MAX = 64
 export const GROUP_SEARCH_MAX = 20
 export const COMMUNITY_GROUPS_MAX = 32
+export const GROUP_BROWSE_MAX = 20
+export const PUBLIC_GROUPS_PAGE = 32
+export const TOPIC_TREND_MAX = 10
 export const TESTIMONIALS_MAX = 64
 export const GROUP_NAME_MAX = 80
 export const SCRAPS_MAX = 50
@@ -158,6 +172,14 @@ const GROUP_HIT_KEYS = ['group', 'name', 'writerCount']
 const COMMUNITY_KEYS = ['complete', 'creator', 'groups', 'indexing', 'join', 'members', 'name', 'next']
 const COMMUNITY_GROUPS_KEYS = ['complete', 'groups', 'indexing', 'next']
 const COMMUNITY_ROW_KEYS = ['group', 'join', 'name', 'visibility', 'writerCount']
+const GROUP_BROWSE_KEYS = ['complete', 'groups', 'indexing', 'more']
+const GROUP_BROWSE_ROW_KEYS = ['active', 'community', 'communityName', 'created', 'creator', 'group', 'name', 'writerCount']
+const PUBLIC_GROUPS_KEYS = ['complete', 'groups', 'hidden', 'indexing', 'next']
+const PUBLIC_GROUPS_ROW_KEYS = ['community', 'communityName', 'creator', 'group', 'name', 'writerCount']
+const TOPIC_TREND_KEYS = ['complete', 'indexing', 'topics']
+const TOPIC_TREND_ROW_KEYS = ['authors', 'tag']
+const BROWSE_ORDERS = ['members', 'recent', 'trending']
+const TREND_TAG = /^[a-z0-9]{2,32}$/
 const ENGAGERS_KEYS = ['authors', 'complete', 'indexing', 'items', 'kind', 'next', 'ref', 'total']
 const FOLLOW_COUNTS_KEYS = ['complete', 'indexing', 'seguidores', 'seguindo']
 const FOLLOWS_KEYS = ['author', 'authors', 'complete', 'indexing', 'items', 'kind', 'next', 'total']
@@ -478,6 +500,26 @@ export function groupSearchUrl (segment) {
   if (typeof segment !== 'string' || !SEGMENT.test(segment)) return null
   if (segment.replace(/-/g, '').length < 2) return null
   return resolveUrl('/index/group-search/' + segment)
+}
+
+export function groupBrowseUrl (order) {
+  return BROWSE_ORDERS.includes(order) ? resolveUrl('/index/group-browse/' + order) : null
+}
+
+// /index/public-groups/<D>[/<after>]: both keys lowercased, then checked.
+export function publicGroupsUrl (diary, after = null) {
+  const d = inputAuthor(diary)
+  if (d === null) return null
+  let a = null
+  if (after !== null) {
+    a = inputAuthor(after)
+    if (a === null) return null
+  }
+  return resolveUrl('/index/public-groups/' + d + (a === null ? '' : '/' + a))
+}
+
+export function topicTrendUrl () {
+  return resolveUrl('/index/topic-trend')
 }
 
 // Feira search. `uf` one of the 27 UFs as @varanda/rpc feira spells them
@@ -1511,6 +1553,119 @@ export function validGroupSearch (body) {
   return groups === null ? null : { groups, more: body.more, indexing: body.indexing, complete: body.complete }
 }
 
+// A discovery row names a public group, so both names are required.
+function publicRowOk (r, keys) {
+  if (!hasExactKeys(r, keys)) return false
+  if (!isHex64(r.group) || !isHex64(r.creator) || !isHex64(r.community)) return false
+  if (r.name === null || !isName(r.name) || r.communityName === null || !isName(r.communityName)) return false
+  return isCount(r.writerCount) && r.writerCount >= 1
+}
+
+// The largest time a Date holds.
+const MAX_DATE_MS = 8640000000000000
+const isCreated = (v) => isCount(v) && v <= MAX_DATE_MS
+
+// The key each order sorts by (down), or null when the row cannot be in it.
+function browseRank (r, order) {
+  if (order === 'members') {
+    if (r.active !== null || (r.created !== null && !isCreated(r.created))) return null
+    return r.writerCount
+  }
+  if (order === 'recent') {
+    if (r.active !== null || !isCreated(r.created)) return null
+    return r.created
+  }
+  if (r.created !== null && !isCreated(r.created)) return null
+  if (!isCount(r.active) || r.active < 1 || r.active > r.writerCount) return null
+  return r.active
+}
+
+// <= 20 public groups, distinct, in the order asked for: its key down, ties
+// by group key up; 'recent' holds at most 2 groups of one creator. A list
+// out of order is malformed, not re-sorted: the seeder chose the page.
+export function validGroupBrowse (body, order) {
+  if (!BROWSE_ORDERS.includes(order)) return null
+  if (!hasExactKeys(body, GROUP_BROWSE_KEYS) || !isFlags(body) || typeof body.more !== 'boolean') return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > GROUP_BROWSE_MAX) return null
+  const seen = new Set()
+  const perCreator = new Map()
+  const groups = []
+  let prev = null
+  for (const r of list) {
+    if (!publicRowOk(r, GROUP_BROWSE_ROW_KEYS) || seen.has(r.group)) return null
+    const rank = browseRank(r, order)
+    if (rank === null) return null
+    if (prev !== null && (rank > prev.rank || (rank === prev.rank && r.group <= prev.group))) return null
+    if (order === 'recent') {
+      const n = (perCreator.get(r.creator) || 0) + 1
+      if (n > 2) return null
+      perCreator.set(r.creator, n)
+    }
+    seen.add(r.group)
+    prev = { rank, group: r.group }
+    groups.push({
+      group: r.group,
+      name: r.name,
+      creator: r.creator,
+      community: r.community,
+      communityName: r.communityName,
+      writerCount: r.writerCount,
+      created: r.created,
+      active: r.active
+    })
+  }
+  return { groups, more: body.more, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 32 public groups of one diary, ascending by group key and after the
+// cursor asked for. `hidden`: the diary turned the list off, so no rows.
+export function validPublicGroups (body, after = null) {
+  if (after !== null && !isHex64(after)) return null
+  if (!hasExactKeys(body, PUBLIC_GROUPS_KEYS) || !isFlags(body) || typeof body.hidden !== 'boolean') return null
+  if (body.next !== null && !isHex64(body.next)) return null
+  const list = body.groups
+  if (!Array.isArray(list) || list.length > PUBLIC_GROUPS_PAGE) return null
+  if (body.hidden && (list.length !== 0 || body.next !== null)) return null
+  let prev = after
+  const groups = []
+  for (const r of list) {
+    if (!publicRowOk(r, PUBLIC_GROUPS_ROW_KEYS)) return null
+    if (prev !== null && r.group <= prev) return null
+    prev = r.group
+    groups.push({
+      group: r.group,
+      name: r.name,
+      creator: r.creator,
+      community: r.community,
+      communityName: r.communityName,
+      writerCount: r.writerCount
+    })
+  }
+  if (!nextOk(body.next, groups)) return null
+  return { groups, next: body.next, hidden: body.hidden, indexing: body.indexing, complete: body.complete }
+}
+
+// <= 10 tags, distinct, authors down, ties by tag up.
+export function validTopicTrend (body) {
+  if (!hasExactKeys(body, TOPIC_TREND_KEYS) || !isFlags(body)) return null
+  const list = body.topics
+  if (!Array.isArray(list) || list.length > TOPIC_TREND_MAX) return null
+  const seen = new Set()
+  const topics = []
+  let prev = null
+  for (const t of list) {
+    if (!hasExactKeys(t, TOPIC_TREND_ROW_KEYS)) return null
+    if (typeof t.tag !== 'string' || !TREND_TAG.test(t.tag) || seen.has(t.tag)) return null
+    if (!isCount(t.authors) || t.authors < 1) return null
+    if (prev !== null && (t.authors > prev.authors || (t.authors === prev.authors && t.tag <= prev.tag))) return null
+    seen.add(t.tag)
+    prev = t
+    topics.push({ tag: t.tag, authors: t.authors })
+  }
+  return { topics, indexing: body.indexing, complete: body.complete }
+}
+
 // `next` must name the page's last row: a cursor that pointed anywhere else
 // could send the reader backwards and page forever.
 function nextOk (next, groups) {
@@ -1749,6 +1904,20 @@ export function fetchCommunityGroups (community, cursor, deps = {}) {
 
 export function fetchGroupSearch (segment, deps = {}) {
   return run(groupSearchUrl(segment), validGroupSearch, deps)
+}
+
+export function fetchGroupBrowse (order, deps = {}) {
+  return run(groupBrowseUrl(order), (body) => validGroupBrowse(body, order), deps)
+}
+
+export function fetchPublicGroups (diary, after = null, deps = {}) {
+  const url = publicGroupsUrl(diary, after)
+  const a = url === null || after === null ? null : inputAuthor(after)
+  return run(url, (body) => validPublicGroups(body, a), deps)
+}
+
+export function fetchTopicTrend (deps = {}) {
+  return run(topicTrendUrl(), validTopicTrend, deps)
 }
 
 // Never cached: a status or an edit changes what a listing shows.

@@ -2,7 +2,8 @@
 // Comunidades row (nav 'comunidades'). Minhas comunidades from community.list
 // (rpc 5.62), a search of public groups through the index (/index/group-search;
 // private groups never appear there) whose rows name the community of each
-// group when the index knows it, and the Nova comunidade sheet (also opened
+// group when the index knows it, the discovery shelves under the search
+// while it is empty (../useGroupShelves.js), and the Nova comunidade sheet (also opened
 // from the Conversas "+" sheet, hence the export). There is no paste field: a
 // /c/ or /g/ link opens its screen (App.js). Groups live inside a community:
 // there is no "Novo grupo" here. Hosted node only: a node that is not hosted
@@ -34,6 +35,8 @@ import { Badge } from '../ui/Badge'
 import { PressScale } from '../ui/PressScale'
 import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
+import { GroupShelf } from '../ui/GroupShelf'
+import { useGroupShelves } from '../useGroupShelves'
 import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -280,6 +283,10 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const [creating, setCreating] = useState(false)
   const search = useGroupSearch(hosted ? query : '')
   const communityNames = useCommunityNames(search.groups)
+  // The person's own diary, left out of the followed shelf's count.
+  const ownKey = snapshotBinding !== null ? snapshotBinding.owner : null
+  const versions = node.groupVersions
+  const { shelves, reload: reloadShelves } = useGroupShelves({ enabled: hosted, request: node.request, pageKey, bindingKey, ownKey, groupVersions: versions })
   // The version of each community when the person last opened it (or when
   // the list first showed it), for this session only.
   const seenRef = useRef(new Map())
@@ -331,7 +338,6 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
 
   // Roles and counts move with groups.changed: re-read the list, coalesced so
   // a burst of events costs one read.
-  const versions = node.groupVersions
   const firstVersions = useRef(versions)
   useEffect(() => {
     if (!hosted || versions === firstVersions.current) return
@@ -443,6 +449,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
         {searchState}
       </View>
       {search.status === 'done' && hits.length > 0 ? <View>{hits}</View> : null}
+      {query.trim() === '' ? shelves.map((s) => <GroupShelf key={s.id} title={s.title} orderText={s.orderText} note={s.note} items={s.items} onOpen={openGroup} />) : null}
     </View>
   )
 
@@ -460,6 +467,11 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     empty = <View>{[0, 1, 2].map((key) => <SkeletonRow key={key} />)}</View>
   } else {
     empty = <EmptyState icon='cadeira' title='Nenhuma comunidade ainda' body={pageKey !== null ? PAGE_EMPTY_TEXT : 'Crie uma comunidade, busque um grupo público ou abra o link de convite que alguém da comunidade mandou. Uma comunidade reúne até 32 grupos sob a mesma moderação.'} actionLabel={pageKey === null ? 'Nova comunidade' : 'Voltar'} onAction={pageKey === null ? () => setCreating(true) : onBack} secondaryLabel={pageKey === null ? 'Voltar' : undefined} onSecondary={onBack} />
+  }
+
+  const refresh = () => {
+    load()
+    reloadShelves()
   }
 
   const renderItem = ({ item }) => {
@@ -494,7 +506,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           ListHeaderComponent={header}
           ListEmptyComponent={empty}
           contentContainerStyle={{ paddingBottom: bottomPad }}
-          onRefresh={load}
+          onRefresh={refresh}
           refreshing={list.loading && list.loaded}
           atEnd
         />

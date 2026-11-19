@@ -1682,6 +1682,7 @@ const SPECS = {
   // the balcony of `to`, a diary key. No date parameter: the node sets every
   // `at` from its own clock.
   'garden.set': { fields: { on: req(isBool) }, mutating: true },
+  'groups.show': { fields: { on: req(isBool) }, mutating: true },
   'garden.state': { fields: none },
   'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
   'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
