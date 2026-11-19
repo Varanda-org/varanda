@@ -29,6 +29,14 @@ const MAX_CARD_CHARS = 300
 const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
 // Some link crawlers cannot render AVIF, so og:image never names one.
 const NO_OG_MIME = 'image/avif'
+// The brand card the account service's neutral invite card names too
+// (account/og-routes.js), so a post with no usable photo still previews as a
+// large card instead of a bare link.
+const OG_FALLBACK = { path: '/og/convite.png', mime: 'image/png', width: 1200, height: 630, alt: 'Varanda' }
+// A peer-declared size past this is not believable, so the tags leave it out.
+const MAX_OG_SIDE = 16384
+// The same area cap mediaBounds holds a photo to.
+const MAX_OG_PIXELS = 16777216
 const VIDEO_MIME = 'video/mp4'
 const HEX64 = /^[0-9a-f]{64}$/
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
@@ -153,7 +161,8 @@ function dateOf (at) {
   return pad(d.getUTCDate()) + '/' + pad(d.getUTCMonth() + 1) + '/' + d.getUTCFullYear()
 }
 
-// The origin og:image is built on: a bare https origin, or '' (no og:image).
+// The origin og:url and og:image are built on: a bare https origin, or ''
+// (neither tag).
 function httpsOrigin (origin) {
   try {
     if (typeof origin !== 'string' || !/^https:\/\/[^/\s]/i.test(origin) || /\s/.test(origin)) return ''
@@ -164,6 +173,31 @@ function httpsOrigin (origin) {
   } catch {
     return ''
   }
+}
+
+function ogSide (value) {
+  return Number.isSafeInteger(value) && value >= 1 && value <= MAX_OG_SIDE ? value : 0
+}
+
+// The one og:image: the first photo a crawler can render, else the brand
+// card. Sizes come from the peer's descriptor and are named only when both
+// are believable.
+function ogImage (origin, base, photos) {
+  const og = photos.items.findIndex((item) => mimeOf(item) !== NO_OG_MIME)
+  if (og === -1) return { url: origin + OG_FALLBACK.path, mime: OG_FALLBACK.mime, width: OG_FALLBACK.width, height: OG_FALLBACK.height, alt: OG_FALLBACK.alt }
+  const item = photos.items[og]
+  const sized = ogSide(item.width) !== 0 && ogSide(item.height) !== 0 && item.width * item.height <= MAX_OG_PIXELS
+  return {
+    url: origin + base + '/foto/' + (og + 1),
+    mime: mimeOf(item),
+    width: sized ? item.width : 0,
+    height: sized ? item.height : 0,
+    alt: photos.video ? 'Capa do vídeo' : 'Foto da publicação'
+  }
+}
+
+function metaTag (attr, key, value) {
+  return '<meta ' + attr + '="' + key + '" content="' + esc(clean(String(value), false)) + '">\n'
 }
 
 function validTarget (author, seq) {
@@ -320,13 +354,20 @@ function render (origin, author, seq, record, rawName, rawUsername) {
   const imageOrigin = httpsOrigin(origin)
 
   let head = '<title>' + esc(ogTitle) + '</title>\n' +
-    '<meta property="og:type" content="website">\n' +
-    '<meta property="og:title" content="' + esc(ogTitle) + '">\n' +
-    '<meta property="og:description" content="' + esc(description) + '">\n'
-  const og = photos.items.findIndex((item) => mimeOf(item) !== NO_OG_MIME)
-  if (og !== -1 && imageOrigin !== '') {
-    head += '<meta property="og:image" content="' + esc(imageOrigin + base + '/foto/' + (og + 1)) + '">\n' +
-      '<meta property="og:image:type" content="' + esc(mimeOf(photos.items[og])) + '">\n'
+    metaTag('name', 'description', description) +
+    metaTag('property', 'og:type', 'website') +
+    metaTag('property', 'og:site_name', 'Varanda') +
+    metaTag('property', 'og:locale', 'pt_BR') +
+    metaTag('property', 'og:title', ogTitle) +
+    metaTag('property', 'og:description', description)
+  if (imageOrigin !== '') {
+    const image = ogImage(imageOrigin, base, photos)
+    head += metaTag('property', 'og:url', imageOrigin + base) +
+      metaTag('property', 'og:image', image.url) +
+      metaTag('property', 'og:image:type', image.mime)
+    if (image.width !== 0) head += metaTag('property', 'og:image:width', image.width) + metaTag('property', 'og:image:height', image.height)
+    head += metaTag('property', 'og:image:alt', image.alt) +
+      metaTag('name', 'twitter:card', 'summary_large_image')
   }
 
   let html = '<article class="row">\n' + avatarHtml(author, name, username) +
@@ -377,7 +418,7 @@ function render (origin, author, seq, record, rawName, rawUsername) {
 
 // renderPostPage({ origin, author, seq, record, name, username }) -> string,
 // a full HTML document. `origin` is the installation's https origin (only for
-// the absolute og:image); `author` a lowercase hex64 and `seq` a safe integer
+// the absolute og:url and og:image); `author` a lowercase hex64 and `seq` a safe integer
 // >= 1, else the fallback page that only points at '/'.
 function renderPostPage (args) {
   try {

@@ -16,6 +16,12 @@
 //   prefixes are 6-bit bucket prefixes of the box a drop is sealed to (null
 //   or none: untagged, every bucket), which dm-net truncates to the seeder's
 //   bits and a v1 lane ignores. A put is never repeated here.
+//   The link also opens 'varanda/dm-notice/1' (lib/dm-notice-net.js, member
+//   role): notice(id, recipientKey) -> boolean asks the seeder to hand the
+//   account service a wake for the drop `id` this link just put, the
+//   recipient's key sealed to the service's wake key (noticeKey(), from
+//   dm.noticeKey; none set: nothing is sent). One wake, never repeated,
+//   at most limits.noticeTimeoutMs (3 s) for the ack; it never throws.
 // - openStampLink: 'varanda/dm-stamp/1' (lib/dm-stamp-net.js, member role),
 //   the proof signed by the identity key over THIS link's Noise key: v1 for
 //   a diary whose key is that public key, v2 when `diary` names a Hypercore
@@ -40,6 +46,8 @@ const b4a = require('b4a')
 const { seederCertForKey } = require('@varanda/core/lib/cert')
 const { attachAdmission } = require('@varanda/core/lib/admission')
 const { attachDm, DM_REQUEST_TIMEOUT_MS } = require('@varanda/core/lib/dm-net')
+const { attachDmNotice, DM_NOTICE_TIMEOUT_MS } = require('@varanda/core/lib/dm-notice-net')
+const { sealDmNotice } = require('@varanda/core/lib/dm-notice')
 const { attachDmStamp } = require('@varanda/core/lib/dm-stamp-net')
 const { isDiaryOfSigner } = require('@varanda/core/lib/diary-signer')
 const { attachBlob } = require('@varanda/core/lib/blob-net')
@@ -174,9 +182,12 @@ function laneChooser (v2, v1, timeoutMs) {
   }
 }
 
-async function openDmLink ({ seederUrl, createSocket, association, log = noop, limits = {} } = {}) {
+// noticeKey: () -> the account service's 32-byte wake key or null, read at
+// each notice, so a key set after the link opened still counts.
+async function openDmLink ({ seederUrl, createSocket, association, log = noop, limits = {}, noticeKey = () => null } = {}) {
   let dm = null
   let dm2 = null
+  let notices = null
   const link = await dial({
     seederUrl,
     createSocket,
@@ -188,9 +199,14 @@ async function openDmLink ({ seederUrl, createSocket, association, log = noop, l
       const extra = limits.requestTimeoutMs ? { requestTimeoutMs: limits.requestTimeoutMs } : {}
       dm2 = attachDm(noise, { role: 'member', protocol: DM_PROTOCOL_V2, ...extra })
       dm = attachDm(noise, { role: 'member', protocol: DM_PROTOCOL, ...extra })
+      // Opened with the lanes: a channel opened late would miss the
+      // seeder's open. A seeder without it refuses the open, and a notice
+      // then answers false at once.
+      notices = attachDmNotice(noise, { role: 'member' })
     }
   })
   const choose = laneChooser(dm2, dm, limits.requestTimeoutMs || DM_REQUEST_TIMEOUT_MS)
+  const noticeTimeoutMs = limits.noticeTimeoutMs || DM_NOTICE_TIMEOUT_MS
   return {
     async put (bytes, prefix = null) {
       try {
@@ -210,9 +226,22 @@ async function openDmLink ({ seederUrl, createSocket, association, log = noop, l
         throw lost()
       }
     },
+    // A failed or slow notice is the caller's to ignore: the message is out
+    // either way, and only the push is lost.
+    async notice (id, recipientKey) {
+      try {
+        const key = noticeKey()
+        if (!(key instanceof Uint8Array) || notices === null) return false
+        const box = sealDmNotice(recipientKey, key)
+        return (await notices.notice(id, box, { timeoutMs: noticeTimeoutMs })) === true
+      } catch {
+        return false
+      }
+    },
     close () {
       try { dm.close() } catch {}
       try { dm2.close() } catch {}
+      try { notices.close() } catch {}
       link.noise.destroy()
     }
   }

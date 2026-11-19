@@ -85,6 +85,15 @@
 // switch is on, only for a day that is fresh and not before the switch went
 // on, never from a blocked sender, and once per sender and inner id.
 //
+// Push notices (docs/rpc.md 5.167, protocol "DM notices"): once the seeder
+// acked the recipient's copy of a dm.send or a page's message
+// (dm.pageSend), the message is filed here and the self copy is put, the
+// same link asks it to hand the account service one
+// sealed wake naming the recipient (./dm-link.js notice). Only with the
+// service's wake key set (setNoticeKey, memory only); never for a self
+// copy, a reaction, a ctl, a visit or a history copy. It is never retried
+// and never changes the send's answer: a lost notice loses only the push.
+//
 // Nothing here logs a key, a text or a peer.
 const b4a = require('b4a')
 const hcrypto = require('hypercore-crypto')
@@ -377,7 +386,11 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
   // once per unlock: { gen, p, done } (restorePending).
   let restored = null
   let reactSaveLock = Promise.resolve()
-  const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link }
+  // The account service's wake key (dm.noticeKey), 32 bytes or null. A
+  // public key, kept in memory only and through a lock: the app sets it
+  // again on every node start.
+  let noticeKey = null
+  const linkOpts = { seederUrl, createSocket, association, log: (t) => { try { log(t) } catch {} }, limits: L.link, noticeKey: () => noticeKey }
   // Both throw while locked: the blob wallet is sealed under the local key.
   const blobs = createBlobClient({
     stampDiary,
@@ -1568,6 +1581,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       if (err instanceof UsageError) throw err
       throw new UsageError('sem conexão com o semeador')
     }
+    let wake = false
     try {
       for (let i = 0; i < entry.drops.length; i++) {
         if (entry.acked[i]) continue
@@ -1586,12 +1600,38 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
           throw refusal(r.reason)
         }
         entry.acked[i] = true
-        if (i === 0) await fileSent(entry)
+        if (i === 0) {
+          wake = entry.notice !== undefined
+          await fileSent(entry)
+        }
       }
+      // Last, once the message is filed here and the self copy is out: a lock
+      // or crash during the wait (up to 3 s) then loses only the push, never
+      // the sender's record, so a resend cannot make a second message.
+      if (wake) await noticeOf(link, entry.drops[0], entry.notice)
     } finally {
       link.close()
     }
     await fileSent(entry)
+  }
+
+  // One wake for the recipient's drop acked on `link` (the seeder only
+  // takes a wake for a drop put on the same link). Never throws.
+  async function noticeOf (link, drop, recipientKey) {
+    try {
+      const d = dm.decodeDrop(drop)
+      if (d !== null) await link.notice(d.dropId, recipientKey)
+    } catch {}
+  }
+
+  // The account service's wake key (64 lowercase hex), or null to stop.
+  function setNoticeKey (hex) {
+    if (hex === null) {
+      noticeKey = null
+      return
+    }
+    if (typeof hex !== 'string' || !/^[0-9a-f]{64}$/.test(hex)) throw new TypeError('invalid notice key')
+    noticeKey = b4a.from(hex, 'hex')
   }
 
   // Files the sent message here once its recipient drop was acked; separate
@@ -1784,7 +1824,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
       acked: [false, false],
       row: { t: 'msg', id, peer: to, from: own, text, ...replyRow(replyTo), fwd, media: items, card, at, mine: true, digest, ...(moment === null ? {} : { moment }) },
       blobs: sealedBlobs,
-      plains
+      plains,
+      // The key drop 0 is addressed to, for the push notice.
+      notice: to
     }
   }
 
@@ -2916,7 +2958,9 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
         row: pageSentRow(page, b),
         blobs,
         plains,
-        local: ctx.local
+        local: ctx.local,
+        // A page's reaction wakes nobody, as a person's.
+        ...(b.kind === 'react' ? {} : { notice: b.to })
       }
       d.entry = entry
     }
@@ -3425,6 +3469,7 @@ function createDmEngine ({ storage, association, seederUrl, createSocket, log = 
     heldPageBoxes,
     holdsPage: (page) => pages.get(page) !== null,
     setPageMismatch,
+    setNoticeKey,
     topUp,
     walletSize,
     visitSentToday,

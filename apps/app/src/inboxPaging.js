@@ -1,10 +1,10 @@
 // The paging rules of the Conversas inbox (dm.list pages), pure so they load
-// in tests. A refresh keeps the depth the person has loaded and a search pages
-// through the rest on the device; neither changes the protocol.
+// in tests. A refresh keeps the depth the person has loaded, and a search or the
+// Não lidas chip pages through the rest on the device; none changes the protocol.
 
 // A refresh re-reads at most this many pages (the rows loaded past them stay),
-// and a search pages through at most SEARCH_PAGES_MAX more before it asks the
-// person to go on, so a huge inbox never turns into a long walk.
+// and a search or the Não lidas walk pages through at most SEARCH_PAGES_MAX more
+// before it asks the person to go on, so a huge inbox never turns into a long walk.
 export const REFRESH_PAGES_MAX = 10
 export const SEARCH_PAGES_MAX = 20
 // Pause between two search pages: the walk never spins on a fast answer.
@@ -76,5 +76,13 @@ export function settleRefresh ({ rows, next }, deep, loadedDepth) {
 // exists, nothing failed and the budget is not spent.
 export function searchPaging ({ needle, next, pages, failed }) {
   return typeof needle === 'string' && needle !== '' && !!next && failed !== true &&
+    Number.isInteger(pages) && pages < SEARCH_PAGES_MAX
+}
+
+// Keep the unread chip from saying "nothing new" while an unread conversation
+// may still be on a page the inbox has yet to load.
+export function unreadPaging ({ filter, unreadRows, inboxUnread, next, pages, failed }) {
+  return filter === 'nao-lidas' && Number.isInteger(unreadRows) && unreadRows === 0 &&
+    inboxUnread === true && !!next && failed !== true &&
     Number.isInteger(pages) && pages < SEARCH_PAGES_MAX
 }
