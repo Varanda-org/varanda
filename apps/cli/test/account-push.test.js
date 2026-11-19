@@ -2574,12 +2574,13 @@ test('seen push: switch off recalls queued copies and refunds every social charg
   t.absent(JSON.stringify(s.logs).includes(m.hex), 'no member logged')
 })
 
-test('seen push: five writes coalesce after twenty quiet seconds with union and max asOf, capable devices only', async (t) => {
+test('seen push: five writes coalesce after twenty quiet seconds with union and min asOf, capable devices only', async (t) => {
   const s = await seenPush(t)
   const m = member()
   const capable = await s.subscribe(m)
   await s.subscribe(m, [])
   const tags = []
+  const asOf = s.clock.t
   for (let i = 0; i < 5; i++) {
     await s.follow(m)
     const tag = s.r.outstanding(m.hex).at(-1)
@@ -2591,10 +2592,107 @@ test('seen push: five writes coalesce after twenty quiet seconds with union and 
   await s.advance(SEEN_SIGNAL_MS - 3001)
   t.alike(s.signals(), [])
   await s.advance(1)
-  t.alike(s.signals(), [{ v: 1, kind: 'seen-sync', close: tags.map(tagHash), asOf: s.clock.t - SEEN_SIGNAL_MS }])
+  t.alike(s.signals(), [{ v: 1, kind: 'seen-sync', close: tags.map(tagHash), asOf }])
   t.is(s.sent[0].subscription.endpoint, capable.endpoint)
   t.is(s.sent[0].padTo, PUSH_PAD_TO)
   for (const tag of tags) t.absent(JSON.stringify(s.logs).includes(tag))
+})
+
+for (const otherTag of [false, true]) {
+  test('seen push: a later write cannot advance an earlier hash cutoff (' + otherTag + ')', async (t) => {
+    const s = await seenPush(t)
+    const m = member()
+    const actor = member()
+    await s.subscribe(m)
+    await s.follow(m, actor)
+    const tag = s.r.outstanding(m.hex)[0]
+    const t0 = s.clock.t
+    s.r.seenWritten(m.hex, [tag], t0)
+    await s.advance(1000)
+    await s.follow(m, actor)
+    const t1 = s.clock.t
+    await s.advance(1000)
+    if (otherTag) await s.follow(m)
+    s.r.seenWritten(m.hex, otherTag ? s.r.outstanding(m.hex).slice(-1) : [], s.clock.t)
+    t.is(s.r.stats().queued, 1, 'the unread notice remains queued')
+    await s.advance(SEEN_SIGNAL_MS)
+    t.is(s.signals().length, 1)
+    t.ok(s.signals()[0].close.includes(tagHash(tag)))
+    t.is(s.signals()[0].asOf, t0)
+    t.ok(s.signals()[0].asOf < t1, 'the signal cannot close the unread replacement')
+  })
+}
+
+test('seen push: social generation is sent only to capable subscriptions with fixed padding', async (t) => {
+  const s = await seenPush(t)
+  const m = member()
+  const actor = member()
+  const capable = await s.subscribe(m)
+  const legacy = await s.subscribe(m, [])
+  let seq = 0
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const ref = kind === 'follow' ? null : (['quote', 'mention'].includes(kind) ? actor.hex : m.hex) + ':' + (seq + 1)
+    const g = s.clock.t
+    await s.relay({ v: 1, kind, actor: actor.hex, recipient: m.hex, seq: ++seq, ref, name: null })
+    await s.advance(60000)
+    const copies = s.sent.slice(-2)
+    const current = copies.find((copy) => copy.subscription.endpoint === capable.endpoint)
+    const old = copies.find((copy) => copy.subscription.endpoint === legacy.endpoint)
+    const payload = JSON.parse(current.payload)
+    const expected = { v: 1, kind, body: payload.body, actor: actor.hex, recipient: m.hex, ref }
+    t.alike(payload, { ...expected, g }, kind + ': enqueue generation')
+    t.is(old.payload, JSON.stringify(expected), kind + ': exact legacy bytes')
+    for (const copy of copies) t.is(copy.padTo, PUSH_PAD_TO)
+    const ciphertext = (copy) => encryptPayload({ ...copy.subscription, plaintext: copy.payload, padTo: copy.padTo })
+    t.is(ciphertext(current).length, ciphertext(old).length, kind + ': fixed ciphertext size')
+  }
+})
+
+for (const enabled of [true, false]) {
+  test('seen push: social generation follows the capability ' + (enabled ? 'removed' : 'added') + ' during the delivery delay', async (t) => {
+    const s = await seenPush(t)
+    const m = member()
+    const actor = member()
+    const sub = await s.subscribe(m, enabled ? ['seen-sync'] : [])
+    const g = s.clock.t
+    await s.follow(m, actor)
+    t.is(s.r.stats().queued, 1)
+    await s.advance(30000)
+    t.alike((await s.check(m, sub, { caps: enabled ? [] : ['seen-sync'] })).body, { registered: true })
+    await s.advance(29999)
+    t.is(s.sent.length, 0, 'the copy still waits for its delivery time')
+    await s.advance(1)
+    t.is(s.sent.length, 1)
+    const copy = s.sent[0]
+    const payload = JSON.parse(copy.payload)
+    const expected = { v: 1, kind: 'follow', body: payload.body, actor: actor.hex, recipient: m.hex, ref: null }
+    t.is(copy.payload, JSON.stringify(enabled ? expected : { ...expected, g }), 'exact keys and original generation for the current capability')
+    t.is(copy.padTo, PUSH_PAD_TO)
+  })
+}
+
+test('seen push: social recall matches both tag and enqueue generation for both capabilities', async (t) => {
+  const s = await seenPush(t, { seenSignal: false })
+  const m = member()
+  const actor = member()
+  await s.subscribe(m)
+  await s.subscribe(m, [])
+  const event = { v: 1, kind: 'reply', actor: actor.hex, recipient: m.hex, seq: 1, ref: m.hex + ':1', name: null }
+  await s.relay(event)
+  const asOf = s.clock.t
+  await s.relay({ ...event, seq: 2, ref: m.hex + ':2' })
+  await s.advance(1)
+  await s.relay({ ...event, seq: 3 })
+  const tag = 'varanda-reply-' + event.ref
+  s.r.seenWritten(m.hex, [tag], asOf)
+  t.is(s.r.stats().queued, 4, 'only the two older copies of the listed tag are recalled')
+  await s.advance(60000)
+  t.is(s.sent.length, 4)
+  const current = s.sent.map((copy) => JSON.parse(copy.payload)).filter((payload) => payload.g !== undefined)
+  t.alike(current.map(({ g, ...payload }) => [tagOf(payload), g]), [
+    ['varanda-reply-' + m.hex + ':2', asOf],
+    [tag, asOf + 1]
+  ])
 })
 
 test('seen push: an enqueue after asOf and an in-flight job are not recalled or refunded', async (t) => {
@@ -2623,7 +2721,10 @@ test('seen push: an enqueue after asOf and an in-flight job are not recalled or 
   await newer.advance(SEEN_SIGNAL_MS)
   t.is(newer.signals()[0].asOf, asOf, 'worker receives the cutoff, not the flush time')
   await newer.advance(60000)
-  t.is(newer.sent.filter((s) => tagOf(JSON.parse(s.payload)) === tag).length, 1)
+  t.is(newer.sent.filter((s) => {
+    const { g, ...payload } = JSON.parse(s.payload)
+    return tagOf(payload) === tag
+  }).length, 1)
 })
 
 test('seen push: outstanding is member-scoped, bounded and expires; unsent and malformed tags never enter the signal', async (t) => {

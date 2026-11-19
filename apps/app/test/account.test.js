@@ -1728,19 +1728,21 @@ async function noticePass (t, sync, notices, { fail = false, duringWrite } = {})
   })
   let merged = false
   const signed = []
+  const request = async (method, params) => {
+    if (method === 'seen.sign') {
+      signed.push(params)
+      return { signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB }
+    }
+    const pending = !merged
+    merged = true
+    return { pending }
+  }
+  const http = sync.http(request)
   const result = await runSeenPass({
     member: M,
-    http: sync.http(),
+    http,
     avisos: { own: [], pages: {} },
-    request: async (method, params) => {
-      if (method === 'seen.sign') {
-        signed.push(params)
-        return { signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB }
-      }
-      const pending = !merged
-      merged = true
-      return { pending }
-    }
+    request: http.request
   })
   return { result, signed, bodies: calls.map(({ init }) => JSON.parse(init.body)) }
 }
@@ -1831,6 +1833,78 @@ test('seen notices: a tag that became unread before write is excluded', async (t
   const calls = stub(t, json(200, { ok: true, hash: SEEN_HASH }))
   await seenFinish(http, 'write')
   t.alike(JSON.parse(calls[0].init.body).close, [])
+})
+
+test('seen notices: a read between the pass snapshot and merge closes on the next pass without newer marks', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const { runSeenPass } = await import('../src/seenSync.js')
+  const sync = createSeenNoticeSync()
+  const groupTag = 'varanda-group-' + M
+  sync.update({ dm: { unread: 0, requests: false } })
+  let reads = 0
+  const calls = stub(t, () => {
+    const body = JSON.parse(calls.at(-1).init.body)
+    if (calls.at(-1).url.endsWith('/start')) return json(200, { nonce: body.action })
+    if (body.action === 'read') return json(200, { hash: null, blob: null, outstanding: ['varanda-dm', groupTag], asOf: ++reads })
+    return json(200, { ok: true, hash: SEEN_HASH })
+  })
+  let dirty = true
+  let firstRead = true
+  const request = async (method, params) => {
+    if (method === 'seen.sign') {
+      if (params.action === 'read' && firstRead) {
+        firstRead = false
+        sync.update({ groups: [{ group: M, unread: 0 }] })
+      }
+      return { signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB }
+    }
+    if (params.blob === SEEN_BLOB) dirty = false
+    return { pending: dirty }
+  }
+  const pass = async () => {
+    const http = sync.http(request)
+    return runSeenPass({ member: M, request: http.request || request, http })
+  }
+  t.is((await pass()).error, null)
+  t.is(dirty, false, 'the first written blob includes both read marks')
+  t.is((await pass()).error, null)
+  const writes = calls.map(({ init }) => JSON.parse(init.body)).filter((b) => b.blob)
+  t.ok(writes.some((b) => b.close.includes(groupTag)), 'the read made during the pass is eventually sent')
+  t.ok(writes.every((b) => b.close.length <= 16 && b.close.every((tag) => ['varanda-dm', groupTag].includes(tag))))
+  t.is(writes.at(-1).asOf, reads, 'the next write uses its own signed read answer')
+  const count = writes.length
+  t.is((await pass()).writes, 0, 'successful closes do not force another write')
+  t.is(calls.filter(({ init }) => JSON.parse(init.body).blob).length, count)
+})
+
+test('seen notices: pending closes cannot force writes without a current read tag and signed outstanding', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const { runSeenPass } = await import('../src/seenSync.js')
+  const cases = [
+    { notices: {} },
+    { notices: { outstanding: [], asOf: 1 } },
+    { notices: { outstanding: ['varanda-dm'], asOf: 1 }, unread: true },
+    { notices: { outstanding: ['varanda-dm'], asOf: 1 }, page: true }
+  ]
+  for (const scenario of cases) {
+    const sync = createSeenNoticeSync()
+    sync.update({ dm: { unread: 0, requests: false } })
+    const calls = stub(t, () => {
+      if (calls.at(-1).url.endsWith('/start')) return json(200, { nonce: 'read' })
+      return json(200, { hash: null, blob: null, ...scenario.notices })
+    })
+    const request = async (method) => {
+      if (method === 'seen.sign') return { signature: SEEN_SIG, prevHash: SEEN_HASH }
+      if (scenario.unread) sync.update({ dm: { unread: 1, requests: false } })
+      if (scenario.page) sync.reset({ actingPage: true })
+      return { pending: false }
+    }
+    const http = sync.http(request)
+    const result = await runSeenPass({ member: M, request: http.request, http })
+    t.is(result.error, null)
+    t.is(result.writes, 0)
+    t.is(calls.length, 2, 'only the signed read is sent')
+  }
 })
 
 test('seenFinish: outstanding and asOf are preserved on every read shape and validated', async (t) => {

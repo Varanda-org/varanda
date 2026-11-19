@@ -34,6 +34,8 @@ async function shell (pageKey = null) {
   const avisosSeenRef = { current: { own: [], pages: {} } }
   const context = {
     noticeReads: { current: sync },
+    createSeenNoticeSync,
+    acting: pageKey === null ? { kind: 'me' } : { kind: 'page', key: pageKey },
     dmReady: true,
     closeNotices: (tags) => closed.push([...tags]),
     nodeEpoch: 1,
@@ -48,9 +50,26 @@ async function shell (pageKey = null) {
     seenSchedulerRef: { current: { wake: (reason) => wakes.push(reason) } },
     reportAvisosSeen
   }
+  let previousDeps = []
+  context.useLayoutEffect = (effect, deps) => {
+    if (deps.some((dep, i) => dep !== previousDeps[i])) effect()
+    previousDeps = deps
+  }
+  const appSource = source('App.js')
+  const resetSource = appSource.slice(appSource.indexOf('  useLayoutEffect(() => {\n    noticeReads.current'), appSource.indexOf('  const closeReadNotices'))
+  const renderIdentity = (key) => {
+    context.pageKey = key
+    context.acting = key === null ? { kind: 'me' } : { kind: 'page', key }
+    groupsReportEpoch.current = key === null ? 1 : null
+    vm.runInNewContext(resetSource, context)
+  }
+  renderIdentity(pageKey)
   context.closeReadNotices = sourceCallback('App.js', 'const closeReadNotices = useCallback(', context)
   return {
-    sync,
+    get sync () { return context.noticeReads.current },
+    context,
+    renderIdentity,
+    closeReadNotices: context.closeReadNotices,
     closed,
     dots,
     wakes,
@@ -167,12 +186,12 @@ test('Avisos settled seen rows reach the push tags for every shared social vecto
   }
 })
 
-test('Avisos preserves unread rows sharing a tag and does not report a hidden poll', async (t) => {
+test('Avisos preserves unread rows sharing a tag and reports hidden read snapshots', async (t) => {
   const app = await shell()
   const row = { kind: 'reply', key: A, seq: 3, post: B + ':7', seen: 'c'.repeat(32) }
   const screen = await avisos(app, { ids: [row.seen] })
   screen.settle([row], false, false)
-  t.alike(app.closed, [])
+  t.alike(app.closed.at(-1), ['varanda-reply-' + B + ':7'])
   screen.settle([row], false)
   t.alike(app.sync.tags(), ['varanda-reply-' + B + ':7'])
   screen.settle([row, { ...row, seq: 4, seen: 'd'.repeat(32) }], false)
@@ -217,6 +236,100 @@ test('the rendered screens receive the shell callbacks and import the pure adapt
   const app = source('App.js')
   t.ok(/<Conversas\b[^>]*onGroupsUnread=\{onGroupsUnread\}/.test(app))
   t.ok(/<Avisos\b[^>]*onSeenState=\{onAvisosSeen\}/.test(app))
+  t.ok(app.includes('const http = noticeReads.current.http(seenRequestRef.current)'))
+  t.ok(/runSeenPass\(\{\s*member,\s*request: http.request,\s*http,/.test(app))
   t.ok(source('src/screens/Conversas.js').includes("import { groupReadState } from '../noticeReads'"))
   t.ok(source('src/screens/Avisos.js').includes("import { avisoReadRows } from '../noticeReads'"))
+})
+
+async function refreshDm (app, inboxes) {
+  const { badgeListParams } = await import('../src/conversasDot.js')
+  const calls = []
+  Object.assign(app.context, {
+    dmDotGen: { current: 0 },
+    dmDotRetry: { current: null },
+    clearTimeout,
+    setTimeout: () => { throw new Error('unexpected DM retry') },
+    badgeListParams,
+    dmRequest: async (method, params) => {
+      calls.push({ method, params })
+      return inboxes.get(params.page || null)
+    },
+    setDmDotState: () => {}
+  })
+  sourceCallback('App.js', 'const readDmDot = useCallback(', app.context)()
+  await new Promise((resolve) => setImmediate(resolve))
+  return calls
+}
+
+test('an empty Pagina inbox cannot close the shared tag while another Pagina is unread', async (t) => {
+  const app = await shell(A)
+  const inboxes = new Map([
+    [A, { inboxUnread: false, requests: false }],
+    [B, { inboxUnread: true, requests: false }]
+  ])
+  const calls = await refreshDm(app, inboxes)
+  t.is(calls.length, 1)
+  t.is(calls[0].params.page, A, 'the answer covers only A')
+  t.absent(app.sync.tags().includes('varanda-dm-page'))
+  t.ok(app.closed.every((tags) => !tags.includes('varanda-dm-page')))
+})
+
+test('switching from member to Pagina drops read tags for every close trigger and an in-flight pass', async (t) => {
+  const app = await shell()
+  const reads = {
+    dm: { unread: 0, requests: false },
+    groups: [{ group: A, unread: 0 }],
+    privateUnread: 0,
+    avisos: [{ kind: 'like', post: B + ':7', read: true }]
+  }
+  const tags = app.sync.update(reads)
+  t.is(tags.length, 4)
+  const http = app.sync.http()
+  const realFetch = globalThis.fetch
+  t.teardown(() => { globalThis.fetch = realFetch })
+  const writes = []
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    const data = body.action === 'read'
+      ? { hash: null, blob: null, outstanding: tags, asOf: 10 }
+      : { ok: true, hash: A }
+    if (body.action === 'write') writes.push(body)
+    return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(data) }
+  }
+  await http.seenFinish({ action: 'read' })
+  app.renderIdentity(A)
+  t.alike(app.sync.tags(), [], 'acting identity invalidates all member snapshots')
+  await refreshDm(app, new Map([[A, { inboxUnread: false, requests: false }]]))
+  for (const trigger of ['visible', 'open', 'pass']) {
+    app.closeReadNotices()
+    t.alike(app.closed.at(-1), [], trigger)
+  }
+  app.onSeenState(B, [], reads.avisos)
+  app.onGroupsUnread(false, reads)
+  t.alike(app.sync.tags(), [], 'late member callbacks stay excluded')
+  t.alike(app.sync.update(reads), [], 'a member snapshot cannot enter while acting as a Pagina')
+  await http.seenFinish({ action: 'write', blob: 'x' })
+  t.alike(writes.at(-1).close, [], 'a pass started as the member cannot close after the switch')
+  const pageHttp = app.sync.http()
+  await pageHttp.seenFinish({ action: 'read' })
+  await pageHttp.seenFinish({ action: 'write', blob: 'x' })
+  t.alike(writes.at(-1).close, [], 'a pass started as a Pagina cannot close member tags')
+  app.renderIdentity(null)
+  t.alike(app.sync.tags(), [], 'returning to the member needs fresh answers')
+})
+
+test('a hidden poll removes a read like tag when another like on the same post arrives', async (t) => {
+  const app = await shell()
+  const screen = await avisos(app)
+  const row = { kind: 'like', key: A, seq: 3, post: B + ':7', seen: 'c'.repeat(32) }
+  screen.settle([row], true)
+  t.alike(app.sync.tags(), ['varanda-like-' + B + ':7'])
+  screen.settle([row, { ...row, seq: 4, seen: 'd'.repeat(32) }], false, false)
+  t.is(screen.badges.at(-1), true)
+  t.alike(app.sync.tags(), [], 'the unread row invalidates the shared tag even while hidden')
+  app.closeReadNotices()
+  t.alike(app.closed.at(-1), [])
+  t.alike([...screen.seenRef.current.ids], [row.seen], 'the poll does not mark the new row')
+  t.alike(app.wakes, ['changed'], 'the poll supplies no new read tokens')
 })

@@ -2449,8 +2449,8 @@ function Member () {
   const noticeReads = useRef(null)
   if (noticeReads.current === null) noticeReads.current = createSeenNoticeSync()
   useLayoutEffect(() => {
-    noticeReads.current = createSeenNoticeSync()
-  }, [ownKey, nodeEpoch, dmReady])
+    noticeReads.current.reset({ actingPage: acting.kind === 'page' })
+  }, [ownKey, nodeEpoch, dmReady, acting.kind, acting.key])
   const closeReadNotices = useCallback(() => {
     if (dmReady) closeNotices(noticeReads.current.tags())
   }, [dmReady])
@@ -2499,9 +2499,10 @@ function Member () {
         const r = await dmRequest('dm.list', badgeListParams(pageKey))
         if (gen !== dmDotGen.current) return
         const next = { inboxUnread: r.inboxUnread === true, requests: r.requests === true }
-        noticeReads.current.update({
-          [pageKey === null ? 'dm' : 'pageDm']: { unread: r.inboxUnread === false ? 0 : undefined, requests: r.requests }
-        })
+        // A page-scoped answer cannot cover the shared notice of every page.
+        if (pageKey === null) {
+          noticeReads.current.update({ dm: { unread: r.inboxUnread === false ? 0 : undefined, requests: r.requests } })
+        }
         closeReadNotices()
         // The same flags keep the same object, so an unchanged answer does not re-render Member.
         setDmDotState((prev) => (prev !== null && prev.inboxUnread === next.inboxUnread && prev.requests === next.requests ? prev : next))
@@ -2765,10 +2766,11 @@ function Member () {
     const appearance = seenAppearanceRef.current
     const run = async () => {
       const sent = cleanAvisos(withOnceTokens(avisosSeenRef.current, onceRegistry.unsynced(member)))
+      const http = noticeReads.current.http(seenRequestRef.current)
       const result = await runSeenPass({
         member,
-        request: seenRequestRef.current,
-        http: noticeReads.current.http(),
+        request: http.request,
+        http,
         avisos: sent
       })
       if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return undefined

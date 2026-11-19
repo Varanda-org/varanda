@@ -1098,6 +1098,24 @@ test('push: a valid payload shows its body, tag and data', async (t) => {
   t.is(long.options.body, '😀'.repeat(120), '120 code points are allowed')
 })
 
+test('push: social payloads accept only the legacy fields and an optional generation', async (t) => {
+  const w = renderedWorker()
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const ref = kind === 'follow' ? null : (['quote', 'mention'].includes(kind) ? ACTOR_REF : REF)
+    const legacy = valid({ kind, ref })
+    for (const extra of [{}, { g: 0 }, { g: 100 }, { g: Number.MAX_SAFE_INTEGER }]) {
+      const shown = await push(w, pushData({ ...legacy, ...extra }))
+      t.is(shown.options.body, legacy.body)
+      t.is(shown.options.tag, 'varanda-' + kind + '-' + (ref || ACTOR))
+      t.alike(plain(shown.options.data), { kind, actor: ACTOR, recipient: RECIPIENT, ref, ...extra })
+    }
+    for (const extra of [{ x: 1 }, { g: 100, x: 1 }, ...[undefined, null, -1, 0.5, '100', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map((g) => ({ g }))]) {
+      const shown = await push(w, pushData({ ...legacy, ...extra }))
+      t.is(shown.options.body, FALLBACK, 'rejects extra fields or an invalid generation')
+    }
+  }
+})
+
 test('push: a quote or a mention points at the actor\'s own post', async (t) => {
   const w = renderedWorker()
   const quote = await push(w, pushData(valid({ kind: 'quote', body: 'Ana citou sua publicação', ref: ACTOR_REF })))
@@ -1405,6 +1423,27 @@ test('seen sync: only listed notices at or before asOf close', async (t) => {
   t.ok(quietNotice.options.silent, 'the WebKit notice is silent')
   t.is(quietNotice.options.renotify, false)
   t.ok(w.closed.has(quietNotice), 'the quiet notice leaves the tray')
+})
+
+test('seen sync: social notices close only with a listed hash and a generation at or before asOf', async (t) => {
+  const w = renderedWorker()
+  const { tagHash } = vm.runInContext('({ tagHash })', w.context)
+  for (const kind of ['follow', 'reply', 'quote', 'mention', 'like', 'repost']) {
+    const ref = kind === 'follow' ? null : (['quote', 'mention'].includes(kind) ? ACTOR_REF : REF)
+    const payload = valid({ kind, ref })
+    const [old] = await noticeShown(w, { ...payload, g: 99 })
+    const [equal] = await noticeShown(w, { ...payload, g: 100 })
+    const [newer] = await noticeShown(w, { ...payload, g: 101 })
+    const [legacy] = await noticeShown(w, payload)
+    const [unlisted] = await noticeShown(w, valid({ kind: 'reply', ref: RECIPIENT + ':99', g: 99 }))
+    const hash = await tagHash('varanda-' + kind + '-' + (ref || ACTOR))
+    await startPush(w, pushData(seenSignal({ close: [hash] })))
+    t.ok(w.closed.has(old), kind + ': older notice closed')
+    t.ok(w.closed.has(equal), kind + ': equal timestamp closed')
+    t.not(w.closed.has(newer), kind + ': newer notice kept')
+    t.not(w.closed.has(legacy), kind + ': legacy notice kept')
+    t.not(w.closed.has(unlisted), kind + ': unlisted notice kept')
+  }
 })
 
 test('seen sync: every app window wakes, including hidden and uncontrolled windows', async (t) => {

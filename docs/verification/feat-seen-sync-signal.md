@@ -25,7 +25,7 @@ Na revisão T22, os quatro arquivos de teste passaram, assim como `node apps/sit
 
 - a fazer: em duas instalações da mesma conta, conferir DM, Página DM, grupo público, grupo privado e aviso social com push local simulado. Ler em uma instalação e conferir o fechamento na outra, só para avisos com `g <= asOf`.
 - a fazer: manter um aviso na fila, ler e confirmar a retirada com devolução de cotas, tanto com o sinal ligado quanto desligado. Um aviso já em voo não é retirado.
-- a fazer: conferir a união dos hashes e o maior `asOf` em 20 s, o teto separado de 30 por hora e a ausência de sinal para worker sem a capacidade.
+- a fazer: conferir a união dos hashes e o menor `asOf` em 20 s, o teto separado de 30 por hora e a ausência de sinal para worker sem a capacidade.
 - a fazer: abrir o app, voltar à janela visível e atualizar Conversas e Avisos; conferir o fechamento local. Receber `varanda-seen-sync` deve acordar a sincronização de vistos.
 
 ## O que não foi conferido
@@ -38,5 +38,9 @@ Na revisão T22, os quatro arquivos de teste passaram, assim como `node apps/sit
 
 - O serviço aprende quando o aparelho mostrou como lido um aviso que ele próprio enfileirou ou enviou nas últimas 24 h, pela tag, e quais inscrições suportam o sinal. Não aprende por esse sinal sobre itens que não notificou. O serviço de push vê o momento do sinal. Logs nunca levam tag, chave de membro ou destinatário.
 - Marcas de Página DM não são sincronizadas. Uma marca de grupo só se aplica em outro aparelho que já tenha a publicação.
+- O aviso de Página DM nunca é fechado pelo sinal: a tag é a mesma para todas as Páginas que a pessoa administra, e o app só sabe o que foi lido na Página aberta.
+- Um aviso de resposta não é fechado em outro aparelho: a linha de Avisos não traz a publicação respondida, que dá nome à tag.
+- Avisos sociais só são fechados por workers atualizados: o campo `g` vai apenas para inscrições que anunciaram `seen-sync`, para que workers antigos continuem aceitando o formato anterior.
+- Juntando gravações em 20 s, o sinal usa o menor `asOf` entre elas; um aviso recebido depois da primeira gravação pode continuar aberto.
 - Uma mensagem guardada antes da resposta de leitura, mas ainda não buscada pelo aparelho que lê, pode ter seu aviso fechado. Fechar um aviso não apaga a mensagem.
 - O sinal vem desligado por padrão, depende de capacidade anunciada pelo worker e tem limite de envio. O app nativo ainda não fecha avisos locais por esse mecanismo.

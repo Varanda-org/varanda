@@ -661,7 +661,9 @@ function validTarget (kind, actor, recipient, ref) {
 function validPush (p) {
   if (!isPlainObject(p)) return false
   const keys = Object.keys(p)
-  if (keys.length !== PUSH_KEYS.length || !PUSH_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  const hasGeneration = Object.prototype.hasOwnProperty.call(p, 'g')
+  if (keys.length !== PUSH_KEYS.length + Number(hasGeneration) || !PUSH_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  if (hasGeneration && (!Number.isSafeInteger(p.g) || p.g < 0)) return false
   return p.v === 1 && validBody(p.body) && validTarget(p.kind, p.actor, p.recipient, p.ref)
 }
 
@@ -971,6 +973,7 @@ async function showPush (data) {
       renotify: false,
       data: { kind: p.kind, actor: p.actor, recipient: p.recipient, ref: p.ref }
     }
+    if (Object.prototype.hasOwnProperty.call(p, 'g')) options.data.g = p.g
   }
   try {
     await self.registration.showNotification(title, options)

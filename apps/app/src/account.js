@@ -476,9 +476,17 @@ export function createSeenNoticeSync () {
   let state = {}
   let tags = []
   let revision = 0
+  let enabled = true
   const pending = new Map()
   return {
+    reset ({ actingPage = false } = {}) {
+      state = {}
+      tags = []
+      pending.clear()
+      enabled = !actingPage
+    },
     update (patch) {
+      if (!enabled) return tags
       state = { ...state, ...patch }
       const next = readTags(state)
       for (const tag of next) {
@@ -491,22 +499,32 @@ export function createSeenNoticeSync () {
       return tags
     },
     tags: () => tags,
-    http () {
+    http (request) {
       const marks = new Map(pending)
       let read = null
+      const closeTags = () => [...marks.keys()].filter((tag) => pending.get(tag) === marks.get(tag) &&
+        read?.outstanding?.includes(tag)).slice(0, CLOSE_MAX)
       return {
         seenStart,
+        async request (method, params) {
+          const answer = await request(method, params)
+          // A mark made during the previous pass may already be in its blob,
+          // but its close still needs a write with this pass's signed read.
+          if (method === 'seen.merge' && answer && typeof answer === 'object' && closeTags().length > 0) {
+            return { ...answer, pending: true }
+          }
+          return answer
+        },
         async seenFinish (args) {
           let extra = {}
           if (args.action === 'write' && read && Array.isArray(read.outstanding)) {
-            const close = [...marks.keys()].filter((tag) => pending.get(tag) === marks.get(tag) && read.outstanding.includes(tag)).slice(0, CLOSE_MAX)
-            extra = { close, asOf: read.asOf }
+            extra = { close: closeTags(), asOf: read.asOf }
           }
           const answer = await seenFinish({ ...args, ...extra })
           if (args.action === 'read') read = answer
           if (args.action === 'write') {
-            for (const [tag, version] of marks) {
-              if (pending.get(tag) === version) pending.delete(tag)
+            for (const tag of extra.close || []) {
+              if (pending.get(tag) === marks.get(tag)) pending.delete(tag)
             }
           }
           return answer

@@ -603,7 +603,8 @@ function createPushRoutes ({
     const hashes = new Set([...known].map(tagHash))
     for (const hash of signal.hashes) if (!hashes.has(hash)) signal.hashes.delete(hash)
     for (const tag of tags) signal.hashes.add(tagHash(tag))
-    signal.asOf = Math.max(signal.asOf, asOf)
+    // A later cutoff could close an unread replacement of an earlier tag.
+    signal.asOf = Math.min(signal.asOf, asOf)
     if (signal.timer !== null) clearTimer(signal.timer)
     signal.timer = setTimer(() => {
       signals.delete(member)
@@ -951,7 +952,7 @@ function createPushRoutes ({
     }
   }
 
-  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline, notice, page, signal }) {
+  async function deliverOne ({ recipient, subscription: queued, payload, tag, g, topic, deadline, notice, page, signal }) {
     const subscription = current(recipient, queued)
     if (subscription === null || (signal === true && !capable(recipient, subscription))) {
       dropped++
@@ -963,6 +964,10 @@ function createPushRoutes ({
     if (page !== undefined && !runsPage(page, recipient)) {
       dropped++
       return log({ event: 'push', reason: 'descartado' })
+    }
+    if (tag !== null && capable(recipient, subscription)) {
+      const body = JSON.parse(payload)
+      if (body.g === undefined) payload = JSON.stringify({ ...body, g })
     }
     const opts = { subscription, payload, vapid, topic, padTo: PUSH_PAD_TO }
     if (deadline !== undefined) {

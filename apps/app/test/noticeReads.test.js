@@ -59,3 +59,56 @@ test('aviso read snapshots use valid seen tokens and preserve the target of a re
   t.is(avisoReadRows([{ ...row, post: undefined }], [row.seen])[0].post, undefined, 'no fallback to the reply ref')
   t.is(row.read, undefined, 'the screen row is untouched')
 })
+
+test('aviso read snapshots remember an unread like omitted by later first pages', async (t) => {
+  const { avisoReadRows } = await load()
+  const { readTags } = await import('../src/noticeTags.js')
+  const state = {}
+  const newer = { kind: 'like', key: A, seq: 2, post: B + ':7', seen: 'a'.repeat(32) }
+  const older = { ...newer, seq: 1, seen: 'b'.repeat(32) }
+  const tags = (rows, ids) => readTags({ avisos: avisoReadRows(rows, ids, state, 1000) })
+  t.alike(tags([newer, older], [newer.seen]), [])
+  t.alike(tags([newer], [newer.seen]), [], 'moving the unread like to page two cannot close the post tag')
+  t.alike(tags([], [newer.seen]), [], 'an empty poll cannot forget the unread row')
+  t.alike(tags([newer], [newer.seen]), [], 'later polls still exclude the tag')
+  t.alike(tags([older], [newer.seen, older.seen]), ['varanda-like-' + B + ':7'], 'a later answer confirms the older like read')
+  t.alike(tags([newer], [newer.seen]), ['varanda-like-' + B + ':7'])
+})
+
+test('aviso unread retention expires after 24 hours without promoting the shared tag', async (t) => {
+  const { avisoReadRows } = await load()
+  const { readTags } = await import('../src/noticeTags.js')
+  const state = {}
+  const newer = { kind: 'like', key: A, seq: 2, post: B + ':7', seen: 'a'.repeat(32) }
+  const older = { ...newer, seq: 1, seen: 'b'.repeat(32) }
+  const other = { ...newer, seq: 3, post: B + ':8' }
+  const ttl = 24 * 3600 * 1000
+  avisoReadRows([newer, older], [newer.seen], state, 1000)
+  t.alike(readTags({ avisos: avisoReadRows([newer], [newer.seen], state, 1000 + ttl - 1) }), [])
+  t.is(state.unread?.size, 1, 'an omitted unread row survives until the deadline')
+  const expired = avisoReadRows([newer, other], [newer.seen], state, 1000 + ttl)
+  t.is(state.unread?.size, 0, 'polls do not extend retention of omitted rows')
+  t.alike(readTags({ avisos: expired }), ['varanda-like-' + B + ':8'], 'forgetting a row is not evidence that its tag is read')
+  t.alike(readTags({ avisos: avisoReadRows([newer], [newer.seen], state, 1000 + ttl * 2) }), [], 'the forgotten row cannot be rediscovered as read by a later poll')
+})
+
+test('aviso unread retention caps rows and excludes tags whose evidence was dropped', async (t) => {
+  const { avisoReadRows } = await load()
+  const { readTags } = await import('../src/noticeTags.js')
+  const state = {}
+  const rows = Array.from({ length: 257 }, (_, i) => ({ kind: 'like', key: A, seq: i + 1, post: B + ':' + (i + 1), seen: 'b'.repeat(32) }))
+  const newer = { ...rows[0], seq: 258, seen: 'a'.repeat(32) }
+  const other = { ...newer, seq: 259, post: B + ':300' }
+  const first = avisoReadRows([newer, ...rows], [newer.seen], state, 1000)
+  t.alike(readTags({ avisos: first }), [], 'overflow never promotes an unread tag')
+  t.is(state.unread?.size, 256, 'remembered rows are capped')
+  t.alike(readTags({ avisos: avisoReadRows([newer], [newer.seen], state, 1001) }), [], 'the evicted row still prevents closing its tag')
+  const later = avisoReadRows([newer, other, ...rows.slice(1)], [newer.seen, 'b'.repeat(32)], state, 1002)
+  t.absent(readTags({ avisos: later }).includes('varanda-like-' + B + ':1'), 'reading the retained rows cannot prove the dropped row read')
+  t.ok(readTags({ avisos: avisoReadRows([other], [other.seen], state, 1003) }).includes('varanda-like-' + B + ':300'), 'unrelated read tags remain available')
+  avisoReadRows(rows, [], state, 1004)
+  avisoReadRows(rows.map((row) => ({ ...row, seq: row.seq + 1000, post: B + ':' + (row.seq + 1000) })), [], state, 1005)
+  t.ok(state.unread?.size <= 256)
+  t.ok(state.blocked?.size <= 256, 'forgotten tags are also bounded')
+  t.alike(readTags({ avisos: avisoReadRows([newer, other], [newer.seen], state, 1006) }), [], 'exhausted evidence fails closed')
+})
