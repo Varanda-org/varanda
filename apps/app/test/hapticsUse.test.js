@@ -21,10 +21,11 @@ const colors = {
 }
 
 const theme = {
-  layout: { hit: 44, tabBar: 49 },
+  layout: { hit: 44, tabBar: 78, column: 640 },
+  elevation: { lg: 'shadow-lg' },
   motion: { fast: 150 },
   radius: { pill: 999 },
-  space: { xs: 4, sm: 8, md: 12, lg: 16 },
+  space: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 },
   type: {
     pill: { fontSize: 15, fontWeight: '700', lineHeight: 18 },
     rowName: { fontSize: 16, fontWeight: '600', lineHeight: 24 }
@@ -277,7 +278,7 @@ test('selection sources tap select once and leave the tab chrome in place', (t) 
   t.ok(tab.includes('backgroundColor: colors.accentSoft'), 'the active pill stays accentSoft')
   t.ok(tab.includes('borderRadius: radius.pill'), 'pill radius stays')
   t.ok(tab.includes('<Icon name={tab.icon} size={TAB_ICON}'), 'the glyphs stay on TAB_ICON')
-  t.ok(tab.includes("const alwaysDark = Platform.OS === 'web'"), 'the web bar stays dark')
+  t.absent(/alwaysDark|Platform|useTheme|useStyles/.test(tab), 'no platform or scheme gate changes the dark bar')
   const chip = read('Chip.js')
   t.ok(chip.includes('backgroundColor: colors.ink'), 'selected chip is an ink fill')
   t.ok(chip.includes('borderColor: colors.ink'), 'the ink fill covers the border')
