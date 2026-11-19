@@ -24,7 +24,7 @@ test('another person profile moves secondary actions into the overflow', (t) => 
   const src = read('screens/Membro.js')
   t.ok(src.includes('<MoreButton'), 'uses MoreButton')
   t.ok(/label: 'Denunciar a conta', danger: true/.test(src), 'report row is danger')
-  t.ok(src.includes("label: 'Compartilhar perfil'"), 'share row')
+  t.ok(src.includes("label: isPage ? 'Compartilhar página' : 'Compartilhar perfil'"), 'share row')
   t.ok(src.includes('.slice(0, 2)'), 'at most two pills')
   t.absent(/<Pill\s+label='denunciar a conta'/.test(src), 'no report pill')
 })
@@ -58,7 +58,7 @@ test('the Anúncios row is a link above the tabs, and the page actions have icon
   t.ok(row.includes("<Icon name='seta'"), 'chevron')
   const header = read('ui/ProfileHeader.js')
   t.ok(header.indexOf('{rows || null}') !== -1 && header.indexOf('{rows || null}') < header.indexOf('{tabs || null}'), 'rows render before the tabs')
-  for (const label of ['Agir como esta página', 'Deixar de agir como a página', 'Ajustes da página', 'Seguir como a página', 'Deixar de seguir como a página', 'Compartilhar perfil']) {
+  for (const label of ['Agir como esta página', 'Deixar de agir como a página', 'Ajustes da página', 'Seguir como a página', 'Deixar de seguir como a página', 'Compartilhar página', 'Compartilhar perfil']) {
     const at = src.indexOf(label)
     t.ok(at !== -1 && /icon: /.test(src.slice(src.lastIndexOf('{', at) - 0, at)), label + ' has an icon')
   }
@@ -75,7 +75,15 @@ test('profile share buttons share directly and open the sheet only when that fai
   for (const file of ['screens/Membro.js', 'screens/Diario.js']) {
     const src = read(file)
     t.ok(src.includes('shareProfileDirect(profileUrl).then((done) => { if (!done) setSharing(true) })'), file + ' direct share with sheet fallback')
-    t.ok(src.includes("<ShareProfile url={profileUrl} onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />"), file + ' sheet reuses the toast')
+    const labels = file === 'screens/Membro.js' ? " labels={isPage ? { field: 'link da página', copyLabel: 'copiar link da página', shareLabel: 'compartilhar página' } : undefined}" : ''
+    t.ok(src.includes('<ShareProfile url={profileUrl}' + labels + " onNotice={typeof onToast === 'function' ? (m) => { setSharing(false); onToast(m) } : undefined} />"), file + ' sheet reuses the toast')
   }
   t.ok(read('screens/Membro.js').includes("icon='mensagem' accessibilityLabel={LABELS.message}"), 'Mensagem is icon-only')
+})
+
+test('page sharing uses page wording only for pages in both the menu and sheet', (t) => {
+  const src = read('screens/Membro.js')
+  t.ok(src.includes("label: isPage ? 'Compartilhar página' : 'Compartilhar perfil'"), 'menu wording depends on isPage')
+  t.ok(src.includes("title={isPage ? 'Compartilhar página' : 'Compartilhar perfil'}"), 'sheet wording depends on isPage')
+  t.ok(src.includes("labels={isPage ? { field: 'link da página', copyLabel: 'copiar link da página', shareLabel: 'compartilhar página' } : undefined}"), 'page labels depend on isPage and people keep the defaults')
 })
