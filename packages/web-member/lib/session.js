@@ -2996,9 +2996,11 @@ function createBrowserSession ({
       }
       throw err
     }
-    wrote(r.seq)
-    await pushAfterWrite()
-    return { seq: r.seq, ref: r.ref }
+    if (r.changed !== false) {
+      wrote(r.seq)
+      await pushAfterWrite()
+    }
+    return r
   }
 
   // post.share / post.unshare (docs/rpc.md 5.122, 5.123): the recordDelete
@@ -5417,6 +5419,14 @@ function createBrowserSession ({
         return { on: false }
       })({})
     },
+
+    'groups.show': serial(async ({ on }, epoch) => {
+      await requireUnlocked()
+      await ensureCaughtUp(epoch)
+      const r = await profileExtraWrite((c) => member.groupsShow(c, { on }))
+      if (r.changed === false) await pushAfterWrite()
+      return r
+    }),
 
     // The own diary alone, as choice.mine: no key needed to read it. Unlocked,
     // a device that does not hold what the seeder holds for it (ownHeld)

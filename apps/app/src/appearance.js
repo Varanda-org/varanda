@@ -29,6 +29,7 @@ export const light = Object.freeze({
   pillBg: '#1d6b4f',
   pillInk: '#ffffff',
   inputOff: '#efece5',
+  controlOff: '#7f8882',
   toastBg: '#1f2a24',
   toastInk: '#ffffff',
   // The own chat bubble: a clear mint, so an own message reads at a glance.
@@ -57,6 +58,7 @@ export const dark = Object.freeze({
   pillBg: '#5dcaa0',
   pillInk: '#10241c',
   inputOff: '#2a2a2a',
+  controlOff: '#757575',
   toastBg: '#f5f5f5',
   toastInk: '#101010',
   bubbleMine: '#2c4a3d',

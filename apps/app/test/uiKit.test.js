@@ -169,7 +169,7 @@ test('welcome building blocks', (t) => {
   const theme = read('ui/theme.js')
   const welcome = read('ui/Welcome.js')
   const options = read('ui/OptionRow.js')
-  t.ok(index.includes('btnLarge: { minHeight: 52'), 'large button height')
+  t.ok(index.includes('btnLarge: { minHeight: 56'), 'large button height')
   t.ok(index.includes('btnOutlineLarge: { paddingVertical: 14 }'), 'large outline padding')
   t.ok(index.includes('pageGrow: { flexGrow: 1 }'), 'page can fill the screen')
   t.ok(/export function Btn \(\{[^}]*icon[^}]*accessibilityLabel/.test(index), 'Btn keeps icon and label')
@@ -295,6 +295,11 @@ test('a Sheet header pill is capped like the rest of the header', (t) => {
     const src = read(f)
     t.ok(/right=\{(?:editor !== null \? null : )?<Pill .*maxFontSizeMultiplier=\{TEXT_CAP\} \/>\}/.test(src), f + ' caps its header pill')
   }
+  // The 56 pt header row would clip a 44 pt pill whose label grows past the cap.
+  t.ok(read('ui/FeiraFilters.js').includes("right={<Pill label='Limpar' onPress={clear} maxFontSizeMultiplier={TEXT_CAP} />}"), 'Feira filters cap Limpar')
+  const music = read('ui/MusicPicker.js')
+  t.ok(music.includes("<Pill label='Voltar' icon='voltar' onPress={back} maxFontSizeMultiplier={TEXT_CAP} />"), 'music editor caps Voltar')
+  t.ok(music.includes("<Pill label='Concluído' filled onPress={done} maxFontSizeMultiplier={TEXT_CAP} />"), 'music editor caps Concluído')
 })
 
 test('Sheet and ActionsSheet take web Escape through the shared layer stack', (t) => {
@@ -343,22 +348,31 @@ test('the web backdrop is not a button, so the modal focus trap skips it', (t) =
   t.absent(web.includes('accessibilityRole') || web.includes('Pressable') || web.includes('tabIndex'), 'no role, no tab stop')
 })
 
-test('small Btn and Pill keep a 32 pt face inside a 44 pt target', (t) => {
+test('small Btn and Pill keep a 36 pt face inside a 44 pt target', (t) => {
   t.absent(index.includes('\u2014') || pill.includes('\u2014'), 'no em dash')
   t.ok(/export function Btn \(\{[^}]*small, expanded, large \}/.test(index), 'small sits before expanded and large stays last')
-  t.ok(index.includes('btnSmall: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 }'), 'small button face and horizontal padding')
-  t.ok(index.includes('btnTextSmall: { fontSize: 13, lineHeight: 16 }'), 'small button label is 13')
+  t.ok(index.includes('btnSmall: { minHeight: 36, paddingVertical: 0, paddingHorizontal: 12 }'), 'small button face and horizontal padding')
+  t.ok(index.includes('btnTextSmall: { fontSize: 14, lineHeight: 20 }'), 'small button label is 14/20')
   t.ok(index.includes("btnSmallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start' }"), 'small button target is the 44 pt hit')
   t.ok(index.includes('btnPressed: { opacity: PRESSED_OPACITY }'), 'Btn uses the shared pressed opacity')
   const btn = index.slice(index.indexOf('export function Btn'), index.indexOf('export function ConfirmStack'))
   t.absent(btn.includes('haptics') || btn.includes('tap('), 'Btn has no haptic')
   t.ok(/export function Pill \(\{[^}]*small \}/.test(pill), 'Pill gains small')
-  t.ok(pill.includes('small: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 }'), 'small pill face and horizontal padding')
-  t.ok(pill.includes('textSmall: { fontSize: 13, lineHeight: 16 }'), 'small pill label is 13')
+  t.ok(pill.includes('small: { minHeight: 36, paddingVertical: 0, paddingHorizontal: 12 }'), 'small pill face and horizontal padding')
+  t.ok(pill.includes('textSmall: { fontSize: 14, lineHeight: 20 }'), 'small pill label is 14/20')
   t.ok(pill.includes("smallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' }"), 'small pill target is the 44 pt hit')
   t.ok(pill.includes('pressed: { opacity: PRESSED_OPACITY }'), 'Pill uses the shared pressed opacity')
   t.absent(pill.includes('haptics') || pill.includes('tap('), 'Pill has no haptic')
   t.ok(read('ui/PressScale.js').includes('pressed && !disabled ? { opacity: PRESSED_OPACITY } : null'), 'PressScale fades on press without skipping reduced motion')
+})
+
+test('Btn and Pill labels use the 16/600/24 row type', (t) => {
+  t.ok(index.includes('btnText: { ...type.rowName,'), 'Btn label is type.rowName')
+  t.ok(pill.includes('text: { ...type.rowName,'), 'Pill label is type.rowName')
+  t.ok(/\bbtn: \{[^}]*minHeight: 44,/.test(index), 'Btn face is 44 pt')
+  t.ok(pill.includes('gap: 6, minHeight: 44 }'), 'Pill face is 44 pt')
+  t.ok(pill.includes('round: { width: 44, height: 44,'), 'icon-only Pill is a 44 pt circle')
+  t.ok(pill.includes('smallRound: { width: 36, height: 36, minHeight: 36,'), 'small icon-only Pill is a 36 pt circle')
 })
 
 test('a sheet title shrinks to fit at large text before it is cut', (t) => {

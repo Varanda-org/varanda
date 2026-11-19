@@ -16,7 +16,7 @@ import { useMusicCover } from './useMusicCover'
 import { MusicEditor } from './MusicEditor'
 import { Pill } from './Pill'
 import { Segmented } from './Segmented'
-import { Sheet } from './Sheet'
+import { Sheet, TEXT_CAP } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, webInputReset } from './theme'
 
@@ -218,8 +218,8 @@ export function MusicPicker ({ open, onClose, onPick, member, origin, request, m
       open={open}
       onClose={close}
       title='Música'
-      left={editing ? <Pill label='Voltar' icon='voltar' onPress={back} /> : undefined}
-      right={editing ? <Pill label='Concluído' filled onPress={done} /> : undefined}
+      left={editing ? <Pill label='Voltar' icon='voltar' onPress={back} maxFontSizeMultiplier={TEXT_CAP} /> : undefined}
+      right={editing ? <Pill label='Concluído' filled onPress={done} maxFontSizeMultiplier={TEXT_CAP} /> : undefined}
       onBack={editing ? back : undefined}
     >
       {open

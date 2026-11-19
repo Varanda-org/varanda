@@ -30,6 +30,7 @@ test('light palette keeps the strings the app shipped with', async (t) => {
     pillBg: '#1d6b4f',
     pillInk: '#ffffff',
     inputOff: '#efece5',
+    controlOff: '#7f8882',
     toastBg: '#1f2a24',
     toastInk: '#ffffff',
     bubbleMine: '#d9efe2',
@@ -75,6 +76,16 @@ test('text pairs reach WCAG AA in both palettes', async (t) => {
     for (const [ink, bg] of [['accentInk', 'accent'], ['pillInk', 'pillBg'], ['toastInk', 'toastBg'], ['soft', 'inputOff']]) {
       const ratio = contrastRatio(p[ink], p[bg])
       t.ok(ratio >= 4.5, `${name} ${ink} on ${bg}: ${ratio.toFixed(2)}`)
+    }
+  }
+})
+
+test('controlOff reaches 3:1 on bg, card and inputOff in both modes', async (t) => {
+  const { light, dark, contrastRatio } = await load()
+  for (const [name, p] of [['light', light], ['dark', dark]]) {
+    for (const surface of ['bg', 'card', 'inputOff']) {
+      const ratio = contrastRatio(p.controlOff, p[surface])
+      t.ok(ratio >= 3, `${name} controlOff on ${surface}: ${ratio.toFixed(2)}`)
     }
   }
 })
