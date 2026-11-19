@@ -127,6 +127,7 @@ function better (a, b) {
 function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
   const cap = Number.isSafeInteger(maxAuthors) && maxAuthors >= 0 ? maxAuthors : DEFAULT_MAX_AUTHORS
   const entries = new Map()
+  const usernames = new Map()
   // author -> every seq forget() was called with, current profile or not and
   // whether or not the author holds an entry. A rescan of the raw diary must
   // not restore a deleted name; an older seq can still be the newest one left.
@@ -190,6 +191,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
           entry.nameTokens = foldTokens(profileName)
         }
       } else if (entry.usernameWatermark === null || seq > entry.usernameWatermark) {
+        unmapUsername(author, entry)
         entry.usernameWatermark = seq
         entry.candidate = { seq, record: username }
         entry.username = null
@@ -229,6 +231,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
       entry.profileSeq = null
       entry.nameTokens = []
       entry.candidate = null
+      unmapUsername(author, entry)
       entry.username = null
       entry.usernameTokens = null
       entry.usernameSeq = null
@@ -303,7 +306,37 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
       entry.usernameTokens = foldTokens(record.username)
       entry.usernameSeq = seq
       entry.issuer = record.issuer
+      let authors = usernames.get(entry.username)
+      if (authors === undefined) usernames.set(entry.username, (authors = new Set()))
+      authors.add(author)
     } catch {}
+  }
+
+  function unmapUsername (author, entry) {
+    if (entry === undefined || entry.username === null) return
+    const authors = usernames.get(entry.username)
+    if (authors === undefined) return
+    authors.delete(author)
+    if (authors.size === 0) usernames.delete(entry.username)
+  }
+
+  function byUsername (username, visible, usableIssuer) {
+    try {
+      if (!isValidUsername(username) || typeof visible !== 'function' || typeof usableIssuer !== 'function') return null
+      const authors = usernames.get(username)
+      if (authors === undefined) return null
+      let found = null
+      for (const author of authors) {
+        const entry = entries.get(author)
+        if (entry === undefined || entry.username !== username || !usable(usableIssuer, entry.issuer) || !shown(visible, author)) continue
+        if (entries.get(author) !== entry || entry.username !== username) return null
+        if (found !== null) return null
+        found = author
+      }
+      return found
+    } catch {
+      return null
+    }
   }
 
   function forget (author, seq) {
@@ -329,6 +362,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
 
   function remove (author) {
     try {
+      unmapUsername(author, entries.get(author))
       if (typeof author === 'string') forgottenProfiles.delete(author)
       return typeof author === 'string' && entries.delete(author)
     } catch {
@@ -338,6 +372,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
 
   function clear () {
     entries.clear()
+    usernames.clear()
     forgottenProfiles.clear()
   }
 
@@ -395,7 +430,7 @@ function createNameIndex ({ maxAuthors, verifyUsername, verifyPage } = {}) {
     return { authors: entries.size, maxAuthors: cap }
   }
 
-  return { note, settle, forget, remove, clear, search, stats, hint, endSeq, endUnverified }
+  return { note, settle, forget, remove, clear, search, byUsername, stats, hint, endSeq, endUnverified }
 }
 
 module.exports = {

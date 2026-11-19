@@ -279,13 +279,14 @@ test('Caddyfile: /index/* goes to the seeder, before the SPA handle', (t) => {
 // Caddy's memory: never logged, never sent upstream.
 test('Caddyfile: /index/*, /media/* and /blob/* have a per-client rate limit', (t) => {
   t.ok(lines.some((l) => l.trim() === 'order rate_limit before reverse_proxy'), 'order rate_limit before reverse_proxy')
-  t.is(count('rate_limit {'), 12, 'exactly twelve rate_limit blocks (each Feira entry handle and the SMS deletion send have two)')
+  t.is(count('rate_limit {'), 13, 'exactly thirteen rate_limit blocks (each Feira entry handle and the SMS deletion send have two)')
   const limits = {
     'handle /index/* {': ['index', '20', '10s'],
     'handle /media/* {': ['media', '120', '10s'],
     'handle /blob/* {': ['blob', '300', '10s'],
     'handle /f/* {': ['feira', '30', '10s'],
     'handle /p/* {': ['publicacao', '30', '10s'],
+    'handle @previaLink {': ['previa-link', '30', '10s'],
     'handle /account/feira/* {': ['feira-entrada', '5', '60s']
   }
   {
@@ -520,6 +521,56 @@ test('Caddyfile: the crawler case gets no no-cache, humans on /convite/* keep it
   }
   t.ok(lines.some((l) => l.trim() === 'header @mutavel Cache-Control "no-cache"'), '@mutavel still stamps no-cache')
   t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'humans still get index.html')
+})
+
+const SHARE_PATH = 'path_regexp ^(/(g|c|m)/[a-f0-9]{64}|/@[A-Za-z0-9_]{3,20})$'
+
+test('Caddyfile: share previews match complete paths and the invite crawler expression', (t) => {
+  const matcher = block('@previaLink {').map((l) => l.trim())
+  t.is(count('@previaLink {'), 2, 'one matcher and one handle')
+  t.alike(matcher.slice(1, -1), [SHARE_PATH, PREVIEW_UA], 'only the path and crawler pair')
+  t.is(matcher[2], block('@previaConvite {')[2].trim(), 'same User-Agent expression as invites')
+  const re = new RegExp((matcher[1] || '').replace('path_regexp ', ''))
+  // Lowercase only, as the seeder's link route: an upper-case key goes to the app.
+  const hex = 'ab09'.repeat(16)
+  const valid = ['/g/' + hex, '/c/' + hex, '/m/' + hex, '/@Ab_', '/@' + 'a'.repeat(20)]
+  for (const value of valid) {
+    t.ok(re.test(value), 'accepts ' + value)
+    t.absent(re.test(value + '/extra'), 'rejects a longer path ' + value)
+    t.absent(re.test(value + '/'), 'rejects a trailing slash ' + value)
+    t.absent(re.test('/prefix' + value), 'rejects a prefixed path ' + value)
+  }
+  for (const value of [
+    '/g/' + hex.slice(1), '/c/' + hex + 'a', '/m/' + 'z'.repeat(64), '/m/' + 'aB09'.repeat(16),
+    '/G/' + hex, '/x/' + hex, '/@ab', '/@' + 'a'.repeat(21), '/@a-b', '/@ação',
+    '/p/g/' + hex, '/f/' + hex, '/media/' + hex, '/account/' + hex, '/og/' + hex,
+    '/convite/' + hex, '/g', '/c', '/m', '/@'
+  ]) t.absent(re.test(value), 'rejects ' + value)
+})
+
+test('Caddyfile: share crawlers rewrite to the seeder before the app, with the public page limits', (t) => {
+  const handle = block('handle @previaLink {').map((l) => l.trim())
+  t.is(count('handle @previaLink {'), 1, 'one share preview handle')
+  t.ok(handle.includes('rewrite * /p{path}'), 'prefixes the path with /p and keeps the query')
+  const body = (b) => b.slice(1, -1).map((l) => l.trim()).filter((l) => !l.startsWith('rewrite ')).map((l) => l.replace('zone previa-link {', 'zone publicacao {'))
+  t.alike(body(handle), body(block('handle /p/* {')), 'same limits, proxy port and stripped client headers as /p/*')
+  t.ok(handle.indexOf('rewrite * /p{path}') < handle.indexOf('reverse_proxy 127.0.0.1:{$VARANDA_WS_PORT} {'), 'rewrite before proxy')
+  const m = lines.findIndex((l) => l.trim() === '@previaLink {')
+  const h = lines.findIndex((l) => l.trim() === 'handle @previaLink {')
+  const spa = lines.findIndex((l) => l.trim() === 'handle {')
+  t.ok(m !== -1 && h > m && spa > h, 'matcher and handle before the app')
+})
+
+test('Caddyfile: share crawler exclusions use the original path and leave humans in the app', (t) => {
+  t.is(count(SHARE_PATH), 3, 'path expression appears only in the matcher and two exclusions')
+  for (const head of ['@mutavel {', '@ausenteApp {']) {
+    const b = block(head).map((l) => l.trim())
+    const start = b.indexOf(SHARE_PATH)
+    t.ok(start > 0, head + ' has the original path matcher')
+    t.alike(b.slice(start - 1, start + 3), ['not {', SHARE_PATH, PREVIEW_UA, '}'], head + ' excludes only the path and crawler pair')
+    t.is(b.filter((l) => l === 'not {').length, 2, head + ' retains the invite exclusion separately')
+  }
+  t.ok(block('handle {').some((l) => l.trim() === 'rewrite @semExtensao /index.html'), 'people still get index.html')
 })
 
 // Excluir conta sem a passkey: every matched send is a paid SMS and the

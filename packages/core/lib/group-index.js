@@ -270,6 +270,17 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     }
   }
 
+  // The name a community root shows (its latest group-meta, else the header
+  // name), or null, without building the community's group list.
+  function communityNameOf (C) {
+    try {
+      const c = groups.get(C)
+      return c && c.header !== null && c.header.kind === 'community' ? (c.metaSeen ? c.meta : c.header.name) : null
+    } catch {
+      return null
+    }
+  }
+
   function imageOf (root) {
     try {
       const g = groups.get(root)
@@ -676,7 +687,7 @@ function createGroupIndex ({ maxGroups = DEFAULT_MAX_GROUPS, maxWritersPerGroup 
     return { groups: groups.size, writers: writerGroup.size, maxGroups: groupCap, saturated: groups.size >= groupCap }
   }
 
-  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, imageOf, writer, page, groupsOf, search, browse, publicGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
+  return { addWriter, setLeft, removeWriter, removeDiary, removeGroup, setHeader, header, nameOf, communityNameOf, imageOf, writer, page, groupsOf, search, browse, publicGroupsOf, foldRoot, resetRoot, attached, communityOf, createdIn, generalOf, community, clear, stats }
 }
 
 module.exports = {

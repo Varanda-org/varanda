@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 103
+export const LEGAL_VERSION = 104
 export const LEGAL_DATE = '19/11/2026'
-export const REVIEW_NOTE = 'Versão 103, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 104, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 const discoveryParagraphs = [
   'Entrar num grupo público é público. Na versão web hospedada e no app instalado, qualquer pessoa pode ver no seu perfil os grupos públicos de entrada aberta de que você participa, com o nome do grupo e da comunidade. A Geral de cada comunidade, os grupos que pedem aprovação para entrar e os grupos privados ficam fora dessa lista. Você pode desligar a opção "Grupos públicos no perfil" em Ajustes, em Privacidade e segurança. Com a opção desligada, seu perfil não lista esses grupos e você não conta na lista "Grupos de quem você segue" de outras pessoas. Dentro de cada grupo público, a sua participação continua pública.',
@@ -173,6 +173,13 @@ export const TERMS = {
       ]
     },
     {
+      heading: 'Prévias de links fora do Varanda',
+      paragraphs: [
+        'Um link de grupo público, de comunidade ou de Página mostra o nome e a imagem na prévia que aplicativos de mensagem montam, inclusive para pessoas fora do Varanda. Para uma Página, a prévia mostra também o @nome e um trecho da bio. O link de um grupo privado mostra apenas uma prévia genérica, sem o nome nem a imagem do grupo. O link do perfil de uma pessoa mostra apenas uma prévia genérica, sem os dados do perfil.',
+        'Qualquer pessoa pode pedir essa página de prévia, sem conta no Varanda. A conferência do User-Agent, a identificação que o aplicativo envia no pedido, e a instrução noindex, que pede aos buscadores que não indexem a página, não são controle de acesso. O cache da prévia mantido pelo aplicativo de mensagem fica fora da instalação e do controle da associação. A instalação não acrescenta nenhum registro da busca dessa prévia.'
+      ]
+    },
+    {
       heading: 'Página pública de uma publicação',
       paragraphs: [
         'Onde a instalação ligou essa função, você pode publicar uma das suas publicações, uma de cada vez, numa página da web no endereço da instalação, que qualquer pessoa lê sem conta. É uma escolha sua, por publicação, e você pode retirá-la a qualquer momento ou apagar a publicação.',
@@ -296,6 +303,13 @@ export const PRIVACY = {
         'O arquivo feira-invites.json guarda só a chave de quem é responsável pelo convite e o hash do código, nunca o código em si.',
         'Os anúncios salvos e as buscas salvas ficam só no seu aparelho, e a pesquisa repetida não é guardada. Os valores de uma oferta viajam apenas dentro da conversa selada. A conversa com uma Página que ativou as Conversas privadas é cifrada entre você e quem administra a página, com os limites descritos em Páginas.',
         'Cópias, prévias e caches de buscadores fora desta instalação podem continuar existindo depois que um anúncio é removido. A associação nunca cobra nem move dinheiro.'
+      ]
+    },
+    {
+      heading: 'Prévias de links fora do Varanda',
+      paragraphs: [
+        'Um link de grupo público, de comunidade ou de Página mostra o nome e a imagem na prévia que aplicativos de mensagem montam, inclusive para pessoas fora do Varanda. Para uma Página, a prévia mostra também o @nome e um trecho da bio. O link de um grupo privado mostra apenas uma prévia genérica, sem o nome nem a imagem do grupo. O link do perfil de uma pessoa mostra apenas uma prévia genérica, sem os dados do perfil.',
+        'Qualquer pessoa pode pedir essa página de prévia, sem conta no Varanda. A conferência do User-Agent, a identificação que o aplicativo envia no pedido, e a instrução noindex, que pede aos buscadores que não indexem a página, não são controle de acesso. O cache da prévia mantido pelo aplicativo de mensagem fica fora da instalação e do controle da associação. A instalação não acrescenta nenhum registro da busca dessa prévia.'
       ]
     },
     {

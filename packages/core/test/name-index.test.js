@@ -31,6 +31,70 @@ function username (member, name, issuer = ISSUER) {
 const yes = () => true
 const ALL = [yes, yes]
 
+test('byUsername follows verified candidates, profile forget, remove and clear', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ verifyUsername: (author, record) => record.signature !== '00'.repeat(64) })
+  idx.note(a, 1, profile('ana'))
+  idx.note(b, 1, profile('ana'))
+  t.is(idx.byUsername('ana', ...ALL), null, 'display names never resolve')
+  idx.note(a, 2, username(a, 'ana'))
+  t.is(idx.byUsername('ana', ...ALL), null, 'pending is not verified')
+  idx.settle(a)
+  t.is(idx.byUsername('ana', ...ALL), a)
+  t.ok(idx.forget(a, 1))
+  t.is(idx.byUsername('ana', ...ALL), a, 'forget only removes the profile')
+  t.is(idx.forget(a, 2), false)
+  t.is(idx.byUsername('ana', ...ALL), a, 'a username is not a deletable profile')
+  idx.note(a, 3, username(a, 'ana_nova'))
+  t.is(idx.byUsername('ana', ...ALL), null, 'a newer candidate immediately clears the old name')
+  t.is(idx.byUsername('ana_nova', ...ALL), null)
+  idx.settle(a)
+  t.is(idx.byUsername('ana_nova', ...ALL), a)
+  idx.note(a, 2, username(a, 'ana'))
+  idx.settle(a)
+  t.is(idx.byUsername('ana', ...ALL), null, 'an older record cannot restore the name')
+  idx.note(a, 4, { ...username(a, 'ana_bad'), signature: '00'.repeat(64) })
+  idx.settle(a)
+  t.is(idx.byUsername('ana_bad', ...ALL), null)
+  t.is(idx.byUsername('ana_nova', ...ALL), null, 'failed verification has no fallback')
+  idx.note(a, 5, username(a, 'ana'))
+  idx.settle(a)
+  idx.remove(a)
+  t.is(idx.byUsername('ana', ...ALL), null)
+  idx.note(b, 2, username(b, 'ana'))
+  idx.settle(b)
+  t.is(idx.byUsername('ana', ...ALL), b)
+  idx.clear()
+  t.is(idx.byUsername('ana', ...ALL), null)
+})
+
+test('byUsername is exact, visible, issuer-usable and unambiguous', (t) => {
+  const a = hex(1)
+  const b = hex(2)
+  const idx = createNameIndex({ verifyUsername: yes, verifyPage: yes })
+  idx.note(a, 1, username(a, 'ana_silva'))
+  idx.settle(a)
+  for (const query of ['ana', 'ANA_SILVA', '@ana_silva', 'ana-silva', '', null, {}, Symbol('name')]) {
+    t.is(idx.byUsername(query, ...ALL), null)
+  }
+  t.is(idx.byUsername('ana_silva', () => false, yes), null)
+  t.is(idx.byUsername('ana_silva', yes, () => false), null)
+  const throws = () => { throw new Error('predicate') }
+  t.is(idx.byUsername('ana_silva', throws, yes), null)
+  t.is(idx.byUsername('ana_silva', yes, throws), null)
+  t.is(idx.byUsername('ana_silva', null, yes), null)
+  t.is(idx.byUsername('ana_silva', yes, null), null)
+  idx.note(b, 1, username(b, 'ana_silva'))
+  idx.settle(b)
+  t.is(idx.byUsername('ana_silva', ...ALL), null, 'two usable authors cannot resolve as one')
+  t.is(idx.byUsername('ana_silva', (author) => author === a, yes), a)
+  idx.remove(b)
+  t.is(idx.byUsername('ana_silva', ...ALL), a, 'removing another author preserves the mapping')
+  idx.note(a, 2, closeRecord(a))
+  t.is(idx.byUsername('ana_silva', ...ALL), null, 'a page end forgets the reverse mapping too')
+})
+
 function counter (result = true) {
   const calls = []
   const fn = (author, record) => {
