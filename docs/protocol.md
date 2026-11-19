@@ -843,11 +843,45 @@ The account service (`handleRelay` in `apps/cli/lib/account/push-routes.js`) has
 **Account routes** (`apps/cli/lib/account/push-routes.js`), HTTPS from the hosted page to the account service, never from the swarm:
 
 - `GET /account/push/key` answers `{ key, wake }` (the VAPID public key, and the DM notice wake key as unpadded base64url of 32 bytes, section 11, "Push notice") or 503 when there is no key or the store cannot be used. An older service answers `{ key }` only; the app then hands the node no wake key and the node sends no notice.
+  With only a native transport configured and its device store usable, the answer is `{ wake }` without `key`, provided the wake key exists. If neither field can be returned, the service answers 503 `indisponivel`.
 - `POST /account/push/start` takes `{ member, action }` with `action` `on` or `off` and answers `{ nonce }` (base64url of 32 bytes). The nonce lives 600 s (`NONCE_TTL_MS`) and at most 1000 nonces are kept (`MAX_NONCES`).
 - `POST /account/push/finish` spends the nonce first, then checks the signature. `on` also needs the current terms accepted (the current `TERMS_VERSION` of `packages/core/lib/terms.js`, or `termos-pendentes`) and an allowlisted endpoint. An endpoint already stored under another member moves only with the same `p256dh` and `auth` (the same browser subscription under a new identity); other keys answer `pedido-invalido`, so knowing an endpoint URL never takes someone else's notices. The per-member window is 10 finishes per 600 s.
 - `POST /account/push/check` takes `{ member, endpoint, p256dh, auth }`, all required and validated as in finish, and answers `{ registered }`. It needs no proof. `registered` is true only when the member's stored row has that exact endpoint and equal `p256dh` and `auth` (compared in constant time once decoded). The browser vendor's push service knows every endpoint it issued but never sees these keys, so it cannot ask which member owns one of its devices. The window is 30 checks per 600 s per member and endpoint hash, so checks with a guessed endpoint never drain the window of the real one.
 
 The check also accepts optional `caps`, an exact list with no value other than `'seen-sync'` allowed today. The app forwards the worker's capabilities. They are kept in `push-caps.json`, keyed by member and endpoint hash, and erased with the subscription row and on account deletion. Only subscriptions whose worker reported `seen-sync` receive the read signal.
+
+**Native device routes (Terms 101).** In addition to the Web Push routes above, the account service exposes the following over HTTPS. This release provides the service transport; the installed app's opt-in is the next PR, `feat/app-native-push`.
+
+- `GET /account/push/device/info` answers `{ apns, fcm }`, booleans indicating which native transports the association has configured.
+- `POST /account/push/start` also accepts optional `transport` (`'apns'` or `'fcm'`) alongside `member` and `action`, for a native device proof. Omitting it keeps the Web Push flow above.
+- `POST /account/push/device/finish` takes `{ nonce, member, action, transport, token, key, signature }`. The account service supplies its own association for proof verification. `on` requires acceptance of the current `TERMS_VERSION`; it stores `{ transport, token, key, createdAt }` under the member in `push-devices.json`. There are at most four native rows per member, separate from Web Push subscriptions. A token rotation with the same device key updates the row in place. `off` removes the native row. Both actions require the signed proof.
+- `POST /account/push/device/check` checks the native device registration. It is separate from `/account/push/check`, which continues to check Web Push subscriptions.
+
+**Native device statement.** `varanda-push-device-v1` (`packages/core/lib/push-device-proof.js`) is signed by the member's diary key. Its UTF-8 bytes are the prefix followed by nonce, member, association, action, transport, tokenHash and key, joined by LF with no trailing LF. `tokenHash` is lowercase hex BLAKE2b-256 of the UTF-8 string `<transport>:<token>`, without a hash key. The device `key` is 16 random bytes in canonical unpadded base64url, retained for that device across token rotation. It is not an APNs provider key or an FCM credential. RPC `pushDevice.sign` (`docs/rpc.md` 5.169) computes the hash and fills member and association; that section defines field validation and the signature encoding. The registration request carries the raw token over HTTPS; the signed statement contains only its hash. Neither the raw token nor the statement is a diary record or a swarm message.
+
+**Native payload and delivery.** Only `dm`, `dm-page`, `group` and `group-private` notices go to native rows, and only for members who accepted Terms 101 or later. This delivery floor is separate from the current-Terms requirement to register with `on`. The visible alert uses title `Varanda` and the same sentence as the web worker:
+
+| Kind | Visible body |
+|---|---|
+| `dm` | `Nova mensagem nas Conversas` |
+| `dm-page` | `Nova mensagem para uma página que você administra` |
+| `group` | `Nova mensagem em <nome do grupo público>`, or `Nova mensagem num grupo` without a usable name |
+| `group-private` | `Nova mensagem num grupo privado` |
+
+Native custom data contains only `k` (the kind) and `t` (the per-device tag). To obtain `t`, compute BLAKE2b with a 32-byte output, keyed by the row's decoded 16-byte `key`, over the UTF-8 web tag, encode the digest as unpadded base64url and take the first 16 characters. The collapse identifier uses this per-device tag, never the raw web tag: APNs `apns-collapse-id`, FCM Android `collapse_key`. APNs carries the visible alert in `aps.alert` and `k` and `t` as custom fields; FCM carries the visible notification and `data: { k, t }`. Neither contains the sender, message text or private group name. The device key itself is never sent to the provider. Native notices do not carry social notices, invite notices or the `seen-sync` signal.
+
+APNs sends over HTTP/2 with an ES256 provider token. FCM uses HTTP v1 with a cached OAuth token. Apple or Google receives the device token, delivery timing, visible sentence (including a public group name when present), kind and opaque per-device tag. The Web Push ciphertext and padding described below apply to Web Push, not to this provider-visible native alert.
+
+| Provider response | Delivery result and stored row |
+|---|---|
+| APNs success (HTTP 200) or FCM success (HTTP 200) | Delivered to the provider; keep the row. This does not prove display on the device. |
+| APNs HTTP 410 `Unregistered` | `gone`; remove only that native row. |
+| FCM HTTP 404 `UNREGISTERED` | `gone`; remove only that native row. |
+| Other provider errors or transport failures | No retry; do not treat an arbitrary 404 or 410 as proof that a native token is gone. |
+
+Account deletion erases the member's native rows. Otherwise a row lasts until opt-out or the provider reports that token as gone. There is no automatic retry of a failed delivery or client mutation.
+
+**Native transport configuration.** APNs uses `VARANDA_APNS_KEY_FILE`, `VARANDA_APNS_KEY_ID`, `VARANDA_APNS_TEAM_ID`, `VARANDA_APNS_TOPIC` and the sandbox selector `VARANDA_APNS_SANDBOX`. FCM uses `VARANDA_FCM_ACCOUNT_FILE`. With no configuration for a transport, it is off; partial configuration refuses service startup. Credentials live in operator-managed files outside git, mode 0600. See `docs/development.md`, "Avisos nativos: configuração do serviço de conta", for setup. Configuring one transport does not enable the other or opt a person in.
 
 **Canonical endpoint.** An endpoint is a canonical printable-ASCII `https` URL, length 1 to 2048. `isEndpoint` (`packages/core/lib/push-proof.js`) requires code points 0x21 through 0x7e, no backslash (0x5c), no `#` and no `@` in the authority. The WHATWG parser strips tab, CR and LF, reads `\` as `/`, and turns a lone surrogate into U+FFFD, so those spellings must not hash as a second string for one request. `isPushEndpoint` (`packages/rpc/lib/methods.js`, the `push.sign` check) adds `url.protocol === 'https:'`, an empty username, password and hash, and `url.href === v`, which refuses an explicit `:443`, an uppercase host and dot segments. `endpointParam` on the finish and check routes requires `validEndpoint`, `new URL(value).href === value` and a successful `endpointHash`.
 

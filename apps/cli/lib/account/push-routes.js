@@ -1,6 +1,9 @@
 'use strict'
 
 const nodeCrypto = require('node:crypto')
+const sodium = require('sodium-universal')
+const { tokenHash, verifyPushDevice } = require('@varanda/core/lib/push-device-proof')
+const { validTransport, validToken, validKey } = require('./push-device-store')
 const { CLOSE_MAX, validTag, tagOf, tagHash } = require('@varanda/core/lib/notice-tags')
 const { validCaps } = require('./push-caps-store')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
@@ -87,6 +90,8 @@ const DM_NOTICE_TERMS_FLOOR = 93
 const DM_COOLDOWN_MS = 15 * 60 * 1000
 const GROUP_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
 const GROUP_NOTICE_TERMS_FLOOR = 99
+const NATIVE_PUSH_TERMS_FLOOR = 101
+const NATIVE_KINDS = ['dm', 'dm-page', 'group', 'group-private']
 const GROUP_COOLDOWN_MS = 10 * 60 * 1000
 const BOX_B64U_LENGTH = Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3)
 const B64U_RE = /^[A-Za-z0-9_-]+$/
@@ -105,6 +110,9 @@ function createPushRoutes ({
   terms = null,
   pushStore = null,
   pushCapsStore = null,
+  pushDeviceStore = null,
+  apns = null,
+  fcm = null,
   seenSignal = process.env.VARANDA_SEEN_SIGNAL === '1',
   seenDelayMs = () => nodeCrypto.randomInt(0, SEEN_SIGNAL_DELAY_MAX_MS + 1),
   vapid = null,
@@ -214,8 +222,52 @@ function createPushRoutes ({
     return pushStore !== null && pushStore.available()
   }
 
-  function available (action) {
-    if (!storeUsable() || (action === 'on' && vapid === null)) throw refuse('indisponivel')
+  function deviceStoreUsable () {
+    return pushDeviceStore !== null && pushDeviceStore.available()
+  }
+
+  function nativeSender (transport) {
+    return transport === 'apns' ? apns : transport === 'fcm' ? fcm : null
+  }
+
+  function configured () {
+    return vapid !== null || apns !== null || fcm !== null
+  }
+
+  function pipelineUsable () {
+    return configured() && ((vapid !== null && storeUsable()) || ((apns !== null || fcm !== null) && deviceStoreUsable()))
+  }
+
+  function webRows (member) {
+    return vapid !== null && storeUsable() ? pushStore.list(member) : []
+  }
+
+  function nativeTermsAccepted (member) {
+    try {
+      return terms !== null && terms.available() && terms.list(member).some((e) => e.version >= NATIVE_PUSH_TERMS_FLOOR)
+    } catch {
+      return false
+    }
+  }
+
+  function messageRows (member, kind) {
+    const rows = webRows(member)
+    if (!deviceStoreUsable()) return rows
+    const native = pushDeviceStore.list(member).filter((row) => nativeSender(row.transport) !== null)
+    if (native.length > 0 && !nativeTermsAccepted(member)) {
+      log({ event: 'push', kind, reason: 'termos-pendentes' })
+      return rows
+    }
+    return rows.concat(native)
+  }
+
+  function available (action, transport) {
+    if (transport !== undefined) {
+      if (!validTransport(transport)) throw refuse('pedido-invalido')
+      if (!deviceStoreUsable() || nativeSender(transport) === null) throw refuse('indisponivel')
+    } else if (!storeUsable() || (action === 'on' && vapid === null)) {
+      throw refuse('indisponivel')
+    }
   }
 
   function memberParam (value) {
@@ -269,21 +321,23 @@ function createPushRoutes ({
   const wakePublic = wakeKey === null ? null : Buffer.from(wakeKey.publicKey).toString('base64url')
 
   async function key (req, res) {
-    if (vapid === null || !storeUsable()) throw refuse('indisponivel')
-    const out = { key: vapid.publicKey }
+    if (!pipelineUsable()) throw refuse('indisponivel')
+    const out = {}
+    if (vapid !== null && storeUsable()) out.key = vapid.publicKey
     if (wakePublic !== null) out.wake = wakePublic
+    if (Object.keys(out).length === 0) throw refuse('indisponivel')
     reply(res, 200, out)
   }
 
   async function start (req, res, body) {
     const member = memberParam(body.member)
     const action = actionParam(body.action)
-    available(action)
+    available(action, body.transport)
     linked(member)
     sweep()
     while (nonces.size >= MAX_NONCES) nonces.delete(nonces.keys().next().value)
     const nonce = nodeCrypto.randomBytes(32).toString('base64url')
-    nonces.set(nonce, { member, action, expiresAt: now() + NONCE_TTL_MS })
+    nonces.set(nonce, { member, action, transport: body.transport, expiresAt: now() + NONCE_TTL_MS })
     reply(res, 200, { nonce })
   }
 
@@ -298,13 +352,14 @@ function createPushRoutes ({
     const row = nonce === null ? undefined : nonces.get(nonce)
     if (nonce !== null) nonces.delete(nonce)
     if (row === undefined || row.member !== member || row.action !== action || row.expiresAt <= now()) throw refuse('expirado')
+    if (row.transport !== undefined) throw refuse('expirado')
     const endpoint = endpointParam(body.endpoint)
     const { p256dh, auth } = body
     if (!validP256dh(p256dh) || !validAuth(auth)) throw refuse('pedido-invalido')
     const fields = { nonce, member, association, action, endpointHash: endpointHash(endpoint), p256dh, auth }
     if (!verifyPush(fields, signature).ok) throw refuse('assinatura-invalida')
     if (!limits.finish(member)) throw over()
-    available(action)
+    if (!storeUsable() || (action === 'on' && vapid === null)) throw refuse('indisponivel')
     linked(member)
     // Only turning push on: turning it off must stay open to everyone.
     if (action === 'on') phoneChecked(member)
@@ -364,10 +419,67 @@ function createPushRoutes ({
     reply(res, 200, { registered })
   }
 
+  function deviceFields (body, keys) {
+    if (!isPlainObject(body) || Object.keys(body).length !== keys.length || !keys.every((key) => Object.hasOwn(body, key))) throw refuse('pedido-invalido')
+    if (!validTransport(body.transport) || !validToken(body.transport, body.token) || !validKey(body.key)) throw refuse('pedido-invalido')
+  }
+
+  async function deviceFinish (req, res, body) {
+    const member = memberParam(body.member)
+    const action = actionParam(body.action)
+    const nonce = typeof body.nonce === 'string' && TOKEN_RE.test(body.nonce) ? body.nonce : null
+    if (typeof body.signature !== 'string' || !HEX128_RE.test(body.signature)) throw refuse('assinatura-invalida')
+    const row = nonce === null ? undefined : nonces.get(nonce)
+    if (nonce !== null) nonces.delete(nonce)
+    if (row === undefined || row.member !== member || row.action !== action || row.expiresAt <= now() ||
+      (row.transport !== undefined && row.transport !== body.transport)) throw refuse('expirado')
+    deviceFields(body, ['nonce', 'member', 'action', 'transport', 'token', 'key', 'signature'])
+    const { transport, token, key, signature } = body
+    if (!verifyPushDevice({ nonce, member, association, action, transport, tokenHash: tokenHash(transport, token), key, signature })) throw refuse('assinatura-invalida')
+    if (!limits.finish(member)) throw over()
+    available(action, transport)
+    linked(member)
+    if (action === 'on') {
+      phoneChecked(member)
+      if (terms === null || !terms.available()) throw refuse('indisponivel')
+      let accepted
+      try {
+        accepted = terms.list(member).some((e) => e.version === TERMS_VERSION)
+      } catch (err) {
+        throw fromStore(err)
+      }
+      if (!accepted) throw refuse('termos-pendentes')
+    }
+    try {
+      const result = action === 'on'
+        ? await pushDeviceStore.add(member, { transport, token, key, createdAt: now() })
+        : await pushDeviceStore.remove(member, key)
+      reply(res, 200, { ok: true, changed: result.changed })
+    } catch (err) {
+      throw fromStore(err)
+    }
+  }
+
+  async function deviceCheck (req, res, body) {
+    deviceFields(body, ['member', 'transport', 'token', 'key'])
+    const member = memberParam(body.member)
+    const { transport, token, key } = body
+    if (!limits.check(member + ' ' + tokenHash(transport, token))) throw over()
+    available('off', transport)
+    try {
+      const registered = pushDeviceStore.list(member).some((row) => row.transport === transport && row.token === token && sameKey(row.key, key))
+      reply(res, 200, { registered })
+    } catch (err) {
+      throw fromStore(err)
+    }
+  }
+
   const POST = {
     '/account/push/start': start,
     '/account/push/finish': finish,
-    '/account/push/check': check
+    '/account/push/check': check,
+    '/account/push/device/finish': deviceFinish,
+    '/account/push/device/check': deviceCheck
   }
 
   function owns (pathname) {
@@ -376,6 +488,7 @@ function createPushRoutes ({
 
   async function handle (req, res, url) {
     const p = url.pathname
+    if (req.method === 'GET' && p === '/account/push/device/info') return reply(res, 200, { apns: apns !== null, fcm: fcm !== null })
     if (req.method === 'GET' && p === '/account/push/key') return key(req, res)
     if (req.method === 'POST' && Object.hasOwn(POST, p)) {
       checkPost(req)
@@ -469,8 +582,8 @@ function createPushRoutes ({
     if (!limits.cooldown(cooldown)) {
       return log({ event: 'push', reason: 'descartado' })
     }
-    if (vapid === null || !storeUsable()) return
-    const subs = pushStore.list(recipient)
+    if (!pipelineUsable()) return
+    const subs = webRows(recipient)
     if (subs.length === 0) return
     // A full queue drops the notice before any budget is charged for it.
     if (queue.length >= MAX_QUEUE) {
@@ -579,7 +692,7 @@ function createPushRoutes ({
   }
 
   function capable (member, subscription) {
-    if (pushCapsStore === null) return false
+    if (subscription.transport !== undefined || pushCapsStore === null) return false
     try {
       return pushCapsStore.get(member, endpointHash(subscription.endpoint)).includes('seen-sync')
     } catch {
@@ -593,7 +706,7 @@ function createPushRoutes ({
     const known = new Set(outstanding(member))
     const tags = new Set(close.filter((tag) => known.has(tag)))
     recall((job) => job.recipient === member && job.g <= asOf && tags.has(job.tag))
-    if (!seenSignal || vapid === null || !storeUsable()) return
+    if (!seenSignal || !pipelineUsable()) return
     let signal = signals.get(member)
     if (signal === undefined) {
       if (signals.size >= MAX_SEEN) return
@@ -608,9 +721,9 @@ function createPushRoutes ({
     if (signal.timer !== null) clearTimer(signal.timer)
     signal.timer = setTimer(() => {
       signals.delete(member)
-      if (closed || !storeUsable()) return
+      if (closed || !pipelineUsable()) return
       try {
-        const subs = pushStore.list(member).filter((sub) => capable(member, sub))
+        const subs = webRows(member).filter((sub) => capable(member, sub))
         if (subs.length === 0 || queue.length + subs.length > MAX_QUEUE || !limits.seenSignal(member)) return
         const live = new Set(outstanding(member).map(tagHash))
         const payload = JSON.stringify({ v: 1, kind: 'seen-sync', close: [...signal.hashes].filter((hash) => live.has(hash)), asOf: signal.asOf })
@@ -697,7 +810,7 @@ function createPushRoutes ({
   // box that reaches nobody (Terms below the floor, no device, no room, the
   // hourly cap) must not hold back the next message's notice for 15 minutes.
   function notifyDm (key) {
-    if (closed || vapid === null || !storeUsable()) return
+    if (closed || !pipelineUsable()) return
     if (terms === null || !terms.available()) return log({ event: 'push', kind: 'dm', reason: 'indisponivel' })
     if (!limits.dmCooldown(key, false)) return log({ event: 'push', kind: 'dm', reason: 'descartado' })
     const page = livePage(key)
@@ -714,7 +827,7 @@ function createPushRoutes ({
       }
       let subs
       try {
-        subs = pushStore.list(member)
+        subs = messageRows(member, 'dm')
       } catch {
         log({ event: 'push', kind: 'dm', reason: 'indisponivel' })
         continue
@@ -740,8 +853,8 @@ function createPushRoutes ({
       const notice = chargedNotice([[limits.dmRecipient, member]])
       notice.shared = shared
       shared.notices.push(notice)
-      for (const { endpoint, p256dh, auth } of subs) {
-        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, notice, ...(page === null ? {} : { page: key }) }, at)
+      for (const subscription of subs) {
+        enqueue({ recipient: member, subscription, payload, topic, notice, ...(page === null ? {} : { page: key }) }, at)
       }
       queued = true
     }
@@ -765,7 +878,7 @@ function createPushRoutes ({
   }
 
   function notifyGroup ({ group, visibility, name, nid, recipients }) {
-    if (closed || vapid === null || !storeUsable()) return
+    if (closed || !pipelineUsable()) return
     if (terms === null || !terms.available()) return log({ event: 'push', kind: 'group', reason: 'indisponivel' })
     const g = now()
     const payload = JSON.stringify(visibility === 'private'
@@ -790,7 +903,7 @@ function createPushRoutes ({
       }
       let subs
       try {
-        subs = pushStore.list(member)
+        subs = messageRows(member, 'group')
       } catch {
         log({ event: 'push', kind: 'group', reason: 'indisponivel' })
         continue
@@ -810,8 +923,8 @@ function createPushRoutes ({
       // A notice that reaches nobody must leave the next message's window open.
       limits.groupCooldown(cooldown)
       const notice = chargedNotice([[limits.groupRecipient, member], [limits.groupCooldown, cooldown]])
-      for (const { endpoint, p256dh, auth } of subs) {
-        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, notice }, at)
+      for (const subscription of subs) {
+        enqueue({ recipient: member, subscription, payload, topic, notice }, at)
       }
     }
     pump()
@@ -819,9 +932,9 @@ function createPushRoutes ({
 
   // Invites only enter while the queue is under half full: DM notices may
   // hold the other half (dmRoom), so member notices always keep room of their own.
-  // No transport means no room: the loop then claims nothing, so the week's
-  // slots are still sent once push comes back. A closed service has no room
-  // either: a slot claimed after close() would never be sent.
+  // Invites only go to web rows: without usable Web Push the loop must claim
+  // nothing, so the week's slots are still sent once Web Push comes back.
+  // A closed service has no room either: a slot claimed after close() would never be sent.
   function room () {
     if (closed || vapid === null || !storeUsable()) return 0
     return Math.max(0, Math.min(INVITE_QUEUE_MAX - invitesQueued, Math.floor(MAX_QUEUE / 2) - queue.length))
@@ -836,8 +949,8 @@ function createPushRoutes ({
     if (typeof member !== 'string' || !HEX64_RE.test(member)) throw new TypeError('member inválido')
     if (typeof topic !== 'string' || !TOPIC_RE.test(topic)) throw new TypeError('topic inválido')
     if (!Number.isSafeInteger(deadline)) throw new TypeError('deadline inválido')
-    if (vapid === null || !storeUsable()) return 'none'
-    const subs = pushStore.list(member)
+    if (!pipelineUsable()) return 'none'
+    const subs = webRows(member)
     if (subs.length === 0) return 'none'
     if (room() < subs.length) {
       dropped += subs.length
@@ -857,8 +970,8 @@ function createPushRoutes ({
 
   function notifyDeletion ({ member } = {}) {
     if (typeof member !== 'string' || !HEX64_RE.test(member)) throw new TypeError('member inválido')
-    if (vapid === null || !storeUsable()) return 'none'
-    const subs = pushStore.list(member)
+    if (!pipelineUsable()) return 'none'
+    const subs = webRows(member)
     if (subs.length === 0) return 'none'
     if (queue.length + subs.length > MAX_QUEUE) {
       dropped += subs.length
@@ -943,6 +1056,14 @@ function createPushRoutes ({
   // The row queued may have been turned off (or re-keyed) while the job
   // waited: send only to the row as it stands now.
   function current (recipient, queued) {
+    if (queued.transport !== undefined) {
+      if (!deviceStoreUsable() || nativeSender(queued.transport) === null) return null
+      try {
+        return pushDeviceStore.list(recipient).find((row) => row.transport === queued.transport && row.token === queued.token && row.key === queued.key) || null
+      } catch {
+        return null
+      }
+    }
     if (!storeUsable()) return null
     try {
       const row = pushStore.list(recipient).find((r) => r.endpoint === queued.endpoint)
@@ -965,6 +1086,8 @@ function createPushRoutes ({
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
+    if (subscription.transport !== undefined) return deliverNative(recipient, subscription, JSON.parse(payload), tag, notice)
+    if (vapid === null) return
     if (tag !== null && capable(recipient, subscription)) {
       const body = JSON.parse(payload)
       if (body.g === undefined) payload = JSON.stringify({ ...body, g })
@@ -1009,6 +1132,43 @@ function createPushRoutes ({
     log({ event: 'push', reason: 'falhou' })
   }
 
+  async function deliverNative (member, row, payload, tag, notice) {
+    const { kind } = payload
+    if (!NATIVE_KINDS.includes(kind) || tag === null) return
+    if (!nativeTermsAccepted(member)) {
+      dropped++
+      return log({ event: 'push', kind: kind.startsWith('group') ? 'group' : 'dm', reason: 'termos-pendentes' })
+    }
+    const alert = kind === 'dm'
+      ? 'Nova mensagem nas Conversas'
+      : kind === 'dm-page'
+        ? 'Nova mensagem para uma página que você administra'
+        : kind === 'group-private'
+          ? 'Nova mensagem num grupo privado'
+          : payload.body === null ? 'Nova mensagem num grupo' : 'Nova mensagem em ' + payload.body
+    const digest = Buffer.alloc(32)
+    sodium.crypto_generichash(digest, Buffer.from(tag), Buffer.from(row.key, 'base64url'))
+    const nativeTag = digest.toString('base64url').slice(0, 16)
+    let outcome
+    try {
+      outcome = await nativeSender(row.transport).send({ token: row.token, alert, tag: nativeTag, kind })
+    } catch {
+      outcome = 'dropped'
+    }
+    if (outcome !== 'gone' && notice !== undefined) {
+      notice.reached = true
+      pending.delete(notice)
+    }
+    let reason = outcome === 'ok' ? 'enviado' : 'falhou'
+    if (outcome === 'gone') {
+      try {
+        await subscriptions(() => pushDeviceStore.removeToken(member, row.transport, row.token))
+        reason = 'removido'
+      } catch {}
+    }
+    log({ event: 'push', kind, transport: row.transport, reason })
+  }
+
   // Sizes only, never a nonce or an endpoint.
   function stats () {
     return { nonces: nonces.size, seen: seen.size, queued: queue.length, inFlight, dropped }
@@ -1022,6 +1182,7 @@ module.exports = {
   DM_NOTICE_TERMS_FLOOR,
   DM_COOLDOWN_MS,
   GROUP_NOTICE_TERMS_FLOOR,
+  NATIVE_PUSH_TERMS_FLOOR,
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,
