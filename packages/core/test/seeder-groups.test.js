@@ -1,3 +1,5 @@
+'use strict'
+
 // Group cores at the seeder (packages/core/lib/seeder.js header): a writer
 // W is kept only while an admitted diary D holds a live group-join naming W
 // AND W's block 0 is a group-writer header naming the group and D; a root G
@@ -11,7 +13,8 @@ const b4a = require('b4a')
 const Corestore = require('corestore')
 const { discoveryKey, keyPair: signingKeyPair } = require('hypercore-crypto')
 const { testnet, until } = require('./helpers/net')
-const { Seeder, GroupBindings } = require('../lib/seeder')
+const { Seeder, GroupBindings, MAX_GROUP_NOTICE_BYTES } = require('../lib/seeder')
+const { createGroupHintBudget, UNKNOWN, GROUP_HINT_BLOCK_BYTES, GROUP_HINT_ENTRY_BYTES, GROUP_HINT_REFERENCE_BYTES } = require('../lib/group-notice')
 const { createIssuedCert } = require('../lib/cert')
 const { createSnapshot } = require('../lib/blocklist')
 const { writeBlocklist } = require('../lib/store')
@@ -1643,4 +1646,579 @@ test('group bindings count the diaries they name: _groupNames is one lookup, nev
   t.is(groups.size, 2)
   groups.clear()
   t.absent(seeder._groupNames(d3), 'nothing after a clear')
+})
+
+// In-memory cores exercise the notice scan's interleavings without a swarm;
+// the integration test below uses the same local DHT setup as the file.
+function noticeFixture ({ count = 2, private: priv = false, history = true, groups = 1 } = {}) {
+  const { K, community, groupIn } = require('./helpers/groups')
+  const { groupAdmit } = require('../lib/group')
+  const { createGroupIndex } = require('../lib/group-index')
+  const members = Array.from({ length: count }, (_, i) => ({ diary: K(100 + i), cw: K(1000 + i), status: 'member' }))
+  const C = community({ creator: K(1), members })
+  const scopes = Array.from({ length: groups }, (_, n) => {
+    const G = groupIn(C, { key: K(2 + n), visibility: priv ? 'private' : 'public', join: priv ? 'approval' : 'open', box: priv ? K(999) : null })
+    const writers = members.map((m, i) => {
+      const w = K(2000 + n * 10000 + i)
+      G.add(m.diary, w, { box: priv ? K(3000 + i) : null })
+      if (priv) G.push(G.key, groupAdmit({ member: m.diary, on: true, cuts: [{ writer: w, seq: 1 }] }))
+      return w
+    })
+    if (history && !priv) G.push(writers[0], groupPost({ text: 'history' }))
+    return { G, writers }
+  })
+  const { G, writers } = scopes[0]
+  const events = []
+  const seeder = new Seeder({ onGroupNotice: (e) => events.push(e) })
+  seeder._keyPair = signingKeyPair()
+  seeder._passesStarted = true
+  seeder._groupIndex = createGroupIndex()
+  for (const scope of [C, ...scopes.map((s) => s.G)]) {
+    for (const [key, log] of scope.logs) {
+      const core = {
+        fork: 0,
+        get length () { return log.entries.length },
+        get contiguousLength () { return log.entries.length },
+        async get (seq) { return encode(log.entries[seq].record) }
+      }
+      const e = { core, group: scope.key, diary: log.diary, headerOk: true, dropped: false, noticeFrom: core.length, groupNotice: null, cut: null }
+      seeder._groupServed.set(key, e)
+      seeder._groups.set(key, { group: scope.key, diary: log.diary, seq: 1, bound: true })
+      seeder._groupIndex.addWriter(scope.key, key, log.diary, 1)
+      if (key === scope.key) seeder._groupIndex.setHeader(key, log.entries[0].record)
+      let diary = seeder._served.get(log.diary)
+      if (!diary) {
+        diary = { core: { length: 1, contiguousLength: 1 }, scanned: 1, gated: true, dropped: false, groupEvents: new Map(), groupLive: new Map() }
+        seeder._served.set(log.diary, diary)
+      }
+      diary.groupLive.set(key, { group: scope.key, seq: 1, left: false })
+    }
+  }
+  // Real admission queues are exercised by the network test. Here the
+  // fixture supplies complete diary scans and explicit missing-core cases.
+  seeder._groupIncomplete = () => false
+  const scan = async () => {
+    seeder._queueGroupNotices()
+    await until(() => scopes.every(({ G }) => {
+      const state = seeder._groupServed.get(G.key).groupNotice
+      return state !== null && !state.busy
+    }), { name: 'group notice scan' })
+  }
+  const state = () => seeder._groupServed.get(G.key).groupNotice
+  return { seeder, C, G, writers, scopes, members, events, scan, state }
+}
+
+test('group notices: the shared byte budget bounds growing hints without replaying history', async (t) => {
+  const f = noticeFixture({ groups: 2 })
+  const length = (scope) => [...scope.logs.values()].reduce((n, log) => n + log.entries.length, 0)
+  const initial = (length(f.C) * 2 + f.scopes.reduce((n, { G }) => n + length(G), 0)) * GROUP_HINT_BLOCK_BYTES +
+    f.members.length * 4 * GROUP_HINT_ENTRY_BYTES
+  const budget = f.seeder._groupNoticeBudget = createGroupHintBudget(initial + GROUP_HINT_BLOCK_BYTES)
+  await f.scan()
+  t.is(budget.held(), initial, 'both hints pay for the shared community history')
+  t.alike(f.events, [], 'both groups stay silent for history')
+  f.G.push(f.writers[0], groupPost({ text: 'last ordinary block' }))
+  await f.scan()
+  t.is(budget.held(), initial + GROUP_HINT_BLOCK_BYTES)
+  t.is(f.events.length, 1, 'the last ordinary block still permits a notice')
+  f.G.push(f.writers[0], groupPost({ text: 'past the shared limit' }))
+  await f.scan()
+  t.is(f.state().hint.allowed(f.members[0].diary), UNKNOWN)
+  t.is(f.state().hint.members(), null)
+  t.is(f.state().hint.held().blocks, 0, 'the growing hint refunds all its bytes')
+  t.is(f.events.length, 1, 'the incomplete group sends no notice')
+  const other = f.scopes[1]
+  const otherState = f.seeder._groupServed.get(other.G.key).groupNotice
+  t.is(budget.held(), otherState.hint.held().bytes, 'the other group keeps its charges')
+  other.G.push(other.writers[0], groupPost({ text: 'another group' }))
+  f.G.push(f.writers[0], groupPost({ text: 'still incomplete' }))
+  await f.scan()
+  t.is(f.events.length, 2)
+  t.is(f.events[1].group, other.G.key, 'only the complete group notifies')
+  otherState.rebuild = true
+  await f.scan()
+  t.is(budget.held(), otherState.hint.held().bytes, 'rebuilding releases the old hint first')
+  t.is(f.events.length, 2, 'rebuilding never replays history')
+  const entry = f.seeder._groupServed.get(other.G.key)
+  entry.stopFork = entry.stopGrow = entry.stopQuota = () => {}
+  f.seeder._stopEntry(entry)
+  t.is(budget.held(), 0, 'stopping a root releases the shared budget')
+})
+
+test('group notices: weighted bytes survive rebuilds and exhaust the default shared budget', async (t) => {
+  const { K } = require('./helpers/groups')
+  const { groupAdmit } = require('../lib/group')
+  const f = noticeFixture({ groups: 2 })
+  const budget = f.seeder._groupNoticeBudget
+  t.is(MAX_GROUP_NOTICE_BYTES, 64 * 1024 * 1024, 'all hints share at most 64 MiB')
+  await f.scan()
+  const initial = budget.held()
+  const other = f.seeder._groupServed.get(f.scopes[1].G.key).groupNotice
+  const otherBytes = other.hint.held().bytes
+  const record = groupAdmit({
+    member: f.members[1].diary,
+    on: true,
+    cuts: Array.from({ length: 16 }, (_, i) => ({ writer: K(7000 + i), seq: 1 }))
+  })
+  const cost = GROUP_HINT_BLOCK_BYTES + GROUP_HINT_ENTRY_BYTES + 16 * GROUP_HINT_REFERENCE_BYTES
+  f.G.push(f.writers[0], record)
+  await f.scan()
+  t.is(budget.held(), initial + cost, 'even an unauthorized admit retains and pays for its cuts')
+  t.alike(f.events, [], 'membership records do not notify')
+  const retained = budget.held()
+  for (let i = 0; i < 3; i++) {
+    const old = f.state().hint
+    f.state().rebuild = true
+    await f.scan()
+    t.is(old.held().bytes, 0, 'the replaced hint frees its maps')
+    t.is(budget.held(), retained, 'rebuild refunds and charges exactly the same bytes')
+    old.incomplete()
+    t.is(budget.held(), retained, 'a second release of the old hint cannot refund again')
+  }
+  // Reserve the bytes other groups could hold without allocating 64 MiB
+  // just to exercise the production budget's last few bytes.
+  const reserved = MAX_GROUP_NOTICE_BYTES - retained - 2 * GROUP_HINT_BLOCK_BYTES
+  t.ok(budget.take(reserved))
+  f.G.push(f.writers[0], groupPost({ text: 'fits before the cut-heavy record' }))
+  await f.scan()
+  t.is(f.events.length, 1, 'an ordinary block fits the remaining bytes')
+  t.is(budget.held(), MAX_GROUP_NOTICE_BYTES - GROUP_HINT_BLOCK_BYTES)
+  f.G.push(f.writers[0], record)
+  f.G.push(f.writers[1], groupPost({ text: 'cannot notify with missing authority' }))
+  await f.scan()
+  t.is(f.state().hint.allowed(f.members[0].diary), UNKNOWN)
+  t.is(f.state().hint.members(), null)
+  t.is(f.state().hint.held().bytes, 0, 'failure after charging the base refunds that too')
+  t.is(budget.held(), reserved + otherBytes, 'the other hint keeps exactly its charge')
+  t.is(f.events.length, 1, 'the incomplete group sends nothing')
+  budget.release(reserved)
+  for (const { G } of f.scopes) {
+    const entry = f.seeder._groupServed.get(G.key)
+    entry.stopFork = entry.stopGrow = entry.stopQuota = () => {}
+    f.seeder._stopEntry(entry)
+    f.seeder._stopEntry(entry)
+  }
+  t.is(budget.held(), 0, 'closing roots refunds everything once without a negative balance')
+})
+
+test('group notices: a new hint with no shared bytes remains silent', async (t) => {
+  const f = noticeFixture()
+  f.seeder._groupNoticeBudget = createGroupHintBudget(0)
+  await f.scan()
+  t.is(f.state().hint.members(), null)
+  t.is(f.state().hint.held().blocks, 0)
+  t.alike(f.events, [], 'history never notifies even when the hint cannot start')
+  f.G.push(f.writers[0], groupPost({ text: 'new while incomplete' }))
+  await f.scan()
+  t.is(f.state().hint.allowed(f.members[0].diary), UNKNOWN)
+  t.alike(f.events, [], 'new messages cannot notify with an incomplete hint')
+})
+
+test('group notices: history, new posts, replay, hide and reaction', async (t) => {
+  const { groupHide, groupReact } = require('../lib/group')
+  const { validateGroupNotice } = require('../lib/group-notice')
+  const f = noticeFixture()
+  await f.scan()
+  t.alike(f.events, [], 'history is only fed to the hint')
+  const target = f.G.push(f.writers[0], groupPost({ text: 'new' }))
+  await f.scan()
+  t.is(f.events.length, 1)
+  t.alike(f.events[0].recipients, [f.C.logs.get(f.C.key).diary, f.members[1].diary].sort())
+  t.ok(validateGroupNotice(f.events[0]))
+  t.is(f.events[0].name, 'Varanda')
+  const sodium = require('sodium-universal')
+  const input = Buffer.concat([Buffer.from(f.G.key, 'hex'), Buffer.from(target.writer, 'hex'), Buffer.alloc(8)])
+  input.writeBigUInt64BE(BigInt(target.seq), 64)
+  const expected = Buffer.alloc(16)
+  sodium.crypto_generichash(expected, input, f.seeder._keyPair.secretKey)
+  t.is(f.events[0].nid, expected.toString('hex'), 'keyed BLAKE2b-128 with a big-endian sequence')
+  await f.scan()
+  t.is(f.events.length, 1, 'replaying a scan cannot notify twice')
+  f.G.push(f.writers[0], groupHide({ target, on: true }))
+  f.G.push(f.writers[0], groupReact({ target, emoji: '❤️' }))
+  await f.scan()
+  t.is(f.events.length, 1, 'hide and reaction are not messages')
+})
+
+test('group notices: all recipients past 64 get the same opaque block id', async (t) => {
+  const f = noticeFixture({ count: 70 })
+  await f.scan()
+  f.G.push(f.writers[0], groupPost({ text: 'new' }))
+  await f.scan()
+  t.alike(f.events.map((e) => e.recipients.length), [64, 6])
+  t.is(f.events[0].nid, f.events[1].nid)
+  t.alike(f.events.flatMap((e) => e.recipients), [f.C.logs.get(f.C.key).diary, ...f.members.slice(1).map((m) => m.diary)].sort())
+  await f.scan()
+  t.is(f.events.length, 2)
+})
+
+test('group notices: bans in either scope block authors and community-banned recipients', async (t) => {
+  const { groupBan, communityBan } = require('../lib/group')
+  for (const inCommunity of [false, true]) {
+    const f = noticeFixture()
+    await f.scan()
+    const record = { member: f.members[0].diary, on: true, cuts: [{ writer: inCommunity ? f.members[0].cw : f.writers[0], seq: 1 }] }
+    if (inCommunity) f.C.push(f.C.key, communityBan(record))
+    else f.G.push(f.G.key, groupBan(record))
+    const last = inCommunity ? f.C.key : f.G.key
+    const binding = f.seeder._groups.get(last)
+    f.seeder._groups.delete(last)
+    f.seeder._groups.set(last, binding)
+    // The author is scanned before the ban, so the final barrier matters.
+    f.G.push(f.writers[0], groupPost({ text: 'banned author' }))
+    await f.scan()
+    t.is(f.events.length, 0, 'a banned author in ' + (inCommunity ? 'C' : 'G'))
+    f.G.push(f.writers[1], groupPost({ text: 'allowed author' }))
+    await f.scan()
+    t.alike(f.events[0].recipients, [f.C.logs.get(f.C.key).diary], 'banned diary receives nothing')
+  }
+})
+
+test('group notices: missing cores, read failures and writer caps fail closed', async (t) => {
+  for (const problem of ['missing', 'read', 'cap', 'unknown']) {
+    const f = noticeFixture()
+    await f.scan()
+    if (problem === 'missing') f.seeder._groupServed.delete(f.members[1].cw)
+    if (problem === 'read') f.seeder._groupServed.get(f.C.key).core.get = async () => { throw new Error('unreadable') }
+    if (problem === 'cap') f.seeder.maxGroupWriters = 3
+    if (problem === 'unknown') f.state().hint.incomplete()
+    f.C.push(f.C.key, groupMeta({ name: 'Bairro', join: 'open' }))
+    f.G.push(f.writers[0], groupPost({ text: 'new' }))
+    await f.scan()
+    t.alike(f.events, [], problem)
+    t.is(f.state().hint.members(), null, problem + ' taints the hint')
+  }
+})
+
+test('group notices: private envelopes carry no name', async (t) => {
+  const { groupSealed } = require('../lib/group')
+  const f = noticeFixture({ private: true })
+  await f.scan()
+  f.G.push(f.writers[0], groupSealed({ kid: { writer: f.G.key, seq: 1 }, nonce: 'ab'.repeat(24), box: Buffer.alloc(40, 7).toString('base64') }))
+  await f.scan()
+  t.is(f.events.length, 1)
+  t.is(f.events[0].visibility, 'private')
+  t.is(f.events[0].name, null)
+})
+
+test('group notices: group and writer buckets drop without queuing and refill', async (t) => {
+  const f = noticeFixture()
+  await f.scan()
+  for (let i = 0; i < 5; i++) {
+    f.G.push(f.writers[i % 2], groupPost({ text: 'new ' + i }))
+    await f.scan()
+  }
+  t.is(f.events.length, 4, 'the group bucket spans writers')
+  await f.scan()
+  t.is(f.events.length, 4, 'the fifth post was dropped')
+  const state = f.state()
+  const cursor = state.cursors.get(f.writers[0])
+  state.at -= 30000
+  f.G.push(f.writers[0], groupPost({ text: 'refilled group' }))
+  await f.scan()
+  t.is(f.events.length, 5)
+  state.tokens = 4
+  cursor.tokens = 0
+  f.G.push(f.writers[0], groupPost({ text: 'exhausted writer' }))
+  await f.scan()
+  t.is(f.events.length, 5, 'the writer has its own bucket')
+  cursor.at -= 30000
+  f.G.push(f.writers[0], groupPost({ text: 'refilled writer' }))
+  await f.scan()
+  t.is(f.events.length, 6)
+})
+
+test('group notices: group and community cut marks are fed before sending', async (t) => {
+  const { communityBan } = require('../lib/group')
+  const f = noticeFixture()
+  await f.scan()
+  f.seeder._served.get(f.members[0].diary).groupEvents.set(f.G.key, [{ kind: 'cut', writer: f.writers[0], cut: 1 }])
+  f.G.push(f.writers[0], groupPost({ text: 'retired device' }))
+  await f.scan()
+  t.alike(f.events, [], 'cut device cannot notify while its diary is a member')
+  const creator = f.C.logs.get(f.C.key).diary
+  f.seeder._served.get(creator).groupEvents.set(f.C.key, [{ kind: 'cut', writer: f.C.key, cut: 1 }])
+  f.C.push(f.C.key, communityBan({ member: f.members[1].diary, on: true, cuts: [{ writer: f.members[1].cw, seq: 1 }] }))
+  f.G.push(f.writers[1], groupPost({ text: 'banned through the community' }))
+  await f.scan()
+  t.alike(f.events, [], 'a cut on the community root leaves its ban in force, as buildGroup does')
+})
+
+test('group notices: signed admission floor and startup length suppress delayed history', async (t) => {
+  const f = noticeFixture({ history: false })
+  const e = f.seeder._groupServed.get(f.writers[0])
+  e.noticeFrom = 3
+  await f.scan()
+  f.G.push(f.writers[0], groupPost({ text: 'history not downloaded at admission' }))
+  f.G.push(f.writers[0], groupPost({ text: 'more history' }))
+  await f.scan()
+  t.alike(f.events, [])
+  f.G.push(f.writers[0], groupPost({ text: 'new after signed floor' }))
+  await f.scan()
+  t.is(f.events.length, 1)
+  const root = f.seeder._groupServed.get(f.G.key)
+  root.groupNotice.hint.incomplete()
+  root.groupNotice = null
+  for (const core of f.seeder._groupServed.values()) core.noticeFrom = core.core.length
+  await f.scan()
+  t.is(f.events.length, 1, 'rebuilding at startup cannot replay history')
+})
+
+test('group notices: cut writers with permanent holes do not stop other members', async (t) => {
+  const { groupLeave } = require('../lib/group')
+  for (const inCommunity of [false, true]) {
+    const f = noticeFixture()
+    const scope = inCommunity ? f.C : f.G
+    const writer = inCommunity ? f.members[0].cw : f.writers[0]
+    const e = f.seeder._groupServed.get(writer)
+    scope.push(writer, groupPost({ text: 'cleared after retirement' }))
+    const leave = scope.push(writer, groupLeave())
+    e.cut = 1
+    e.cutting = true
+    f.seeder._groups.get(writer).cut = 1
+    const get = e.core.get
+    Object.defineProperty(e.core, 'contiguousLength', { get: () => 1 })
+    e.core.has = async (seq) => seq === 0 || seq >= leave.seq
+    e.core.get = async (seq) => seq > 0 && seq < leave.seq ? null : get(seq)
+    f.seeder._served.get(e.diary).groupEvents.set(scope.key, [{ kind: 'cut', writer, cut: 1 }])
+    await f.scan()
+    t.alike(f.events, [], 'startup history stays silent with a cut in ' + (inCommunity ? 'C' : 'G'))
+    f.G.push(f.writers[1], groupPost({ text: 'after retirement' }))
+    await f.scan()
+    t.is(f.events.length, 1, 'another member still notifies')
+    t.alike(f.events[0]?.recipients, [f.C.logs.get(f.C.key).diary], 'the retained leave excludes the retired member')
+    await f.scan()
+    t.is(f.events.length, 1, 'neither history nor the new post replays')
+    f.state().hint.incomplete()
+    f.seeder._groupServed.get(f.G.key).groupNotice = null
+    for (const entry of f.seeder._groupServed.values()) entry.noticeFrom = entry.core.length
+    await f.scan()
+    t.is(f.events.length, 1, 'restart with the same hole stays silent')
+    f.G.push(f.writers[1], groupPost({ text: 'after restart' }))
+    await f.scan()
+    t.is(f.events.length, 2, 'the first scan after restart does not disable later notices')
+  }
+})
+
+test('group notices: a withholding diary exhausts the shared stall budget', async (t) => {
+  const { groupBan } = require('../lib/group')
+  const f = noticeFixture()
+  delete f.seeder._groupIncomplete
+  const diary = f.seeder._served.get(f.members[0].diary)
+  await f.scan()
+  diary.core.length = 2
+  f.G.push(f.writers[0], groupPost({ text: 'withholding author' }))
+  f.G.push(f.writers[1], groupPost({ text: 'during the wait' }))
+  await f.scan()
+  t.alike(f.events, [], 'the diary still holds the group pending within its budget')
+  const stall = f.seeder._groupStalls.get(f.members[0].diary)
+  t.ok(stall, 'the same diary budget as group pages is used')
+  stall.spent = f.seeder.groupScanStallMs
+  await f.scan()
+  t.alike(f.events, [], 'expiring the budget never replays posts from the wait')
+  f.G.push(f.writers[0], groupPost({ text: 'still withholding' }))
+  f.G.push(f.writers[1], groupPost({ text: 'after the budget' }))
+  await f.scan()
+  t.is(f.events.length, 1, 'only the caught-up author notifies')
+  t.alike(f.events[0]?.recipients, [f.C.logs.get(f.C.key).diary], 'the uncertain diary receives nothing')
+  await f.scan()
+  t.is(f.events.length, 1, 'rebuilding while excluded does not replay')
+  diary.scanned = diary.core.contiguousLength = diary.core.length
+  await f.scan()
+  t.is(f.events.length, 1, 'catching up cannot replay the excluded author')
+  f.G.push(f.writers[0], groupPost({ text: 'caught up' }))
+  await f.scan()
+  t.is(f.events.length, 2, 'a later post from the recovered diary can notify')
+  diary.core.length++
+  f.G.push(f.writers[0], groupBan({ member: f.members[1].diary, on: true, cuts: [{ writer: f.writers[1], seq: 1 }] }))
+  f.G.push(f.writers[1], groupPost({ text: 'uncertain authority' }))
+  await f.scan()
+  t.is(f.state().hint.members(), null, 'an unread cut that could void authority keeps the hint unknown')
+  t.is(f.events.length, 2, 'budget exhaustion never discards uncertain authority to allow a notice')
+})
+
+test('group notices: transient null and thrown reads rebuild without replaying history', async (t) => {
+  for (const throws of [false, true]) {
+    const f = noticeFixture()
+    await f.scan()
+    f.G.push(f.writers[0], groupPost({ text: 'already notified' }))
+    await f.scan()
+    t.is(f.events.length, 1)
+    const e = f.seeder._groupServed.get(f.writers[0])
+    const get = e.core.get
+    e.core.get = async () => {
+      if (throws) throw new Error('transient read failure')
+      return null
+    }
+    f.G.push(f.writers[0], groupPost({ text: 'cleared during get' }))
+    f.G.push(f.writers[1], groupPost({ text: 'arrived before the read failed' }))
+    await f.scan()
+    const poisoned = f.state().hint
+    t.is(poisoned.members(), null, 'a failed read leaves membership unknown')
+    t.is(f.events.length, 1)
+    const reads = new Map()
+    for (const [writer, entry] of f.seeder._groupServed) {
+      const read = entry === e ? get : entry.core.get
+      entry.core.get = async (seq) => {
+        if (seq === 0) reads.set(writer, true)
+        return read(seq)
+      }
+    }
+    await f.scan()
+    t.not(f.state().hint, poisoned, 'recovery creates a fresh hint')
+    t.is(reads.size, f.seeder._groupServed.size, 'every bound core is read again from block zero')
+    t.is(f.events.length, 1, 'recovery replays neither history nor the failed post')
+    f.G.push(f.writers[0], groupPost({ text: 'after recovery' }))
+    await f.scan()
+    t.is(f.events.length, 2, 'the next new post notifies')
+    await f.scan()
+    t.is(f.events.length, 2, 'the recovered post notifies once')
+  }
+})
+
+test('group notices: a community ban arriving during the scan drops the pending post', async (t) => {
+  const { communityBan } = require('../lib/group')
+  const f = noticeFixture()
+  await f.scan()
+  const e = f.seeder._groupServed.get(f.writers[0])
+  const get = e.core.get
+  let changed = false
+  e.core.get = async (seq) => {
+    if (!changed) {
+      changed = true
+      f.C.push(f.C.key, communityBan({ member: f.members[0].diary, on: true, cuts: [{ writer: f.members[0].cw, seq: 1 }] }))
+    }
+    return get(seq)
+  }
+  f.G.push(f.writers[0], groupPost({ text: 'racing ban' }))
+  await f.scan()
+  t.alike(f.events, [], 'C is no longer scanned to its contiguous length')
+  await f.scan()
+  t.alike(f.events, [], 'the dropped candidate never queues for later')
+})
+
+test('group notices: a join left flag cannot decide recipients and missing history cannot notify', async (t) => {
+  const f = noticeFixture()
+  await f.scan()
+  f.seeder._groupIndex.setLeft(f.writers[1], true)
+  f.G.push(f.writers[0], groupPost({ text: 'binding flag' }))
+  await f.scan()
+  t.ok(f.events[0].recipients.includes(f.members[1].diary), 'only the hint decides membership')
+  const e = f.seeder._groupServed.get(f.members[1].cw)
+  Object.defineProperty(e.core, 'length', { get: () => e.core.contiguousLength + 1, configurable: true })
+  f.G.push(f.writers[0], groupPost({ text: 'while missing a block' }))
+  await f.scan()
+  t.is(f.events.length, 1, 'an unread C block could be a ban')
+  t.is(e.noticeFrom, e.core.contiguousLength, 'pending never advances the floor over unread signed blocks')
+  Object.defineProperty(e.core, 'length', { get: () => e.core.contiguousLength })
+  await f.scan()
+  t.is(f.events.length, 1, 'catching up does not replay the missed notice')
+  f.G.push(f.writers[0], groupPost({ text: 'after catching up' }))
+  await f.scan()
+  t.is(f.events.length, 2, 'later posts notify once the condition clears')
+})
+
+test('group notice integration: admitted public history stays silent and growth notifies once', async (t) => {
+  t.timeout(90000)
+  const { bootstrap } = await testnet(t)
+  const assoc = makeAssociation()
+  const { dataDir } = prepareSeederDir(t, assoc)
+  const notices = []
+  const { seeder, events } = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, onGroupNotice: (e) => notices.push(e) })
+  let C
+  let G
+  let W
+  let CW
+  const A = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    C = await make('community', groupHeader({ kind: 'community', diary: key, name: 'Bairro' }))
+    G = await make('group', groupHeader({ diary: key, community: C, member: C, name: 'Praia' }), [groupPost({ text: 'history' })])
+    return [groupJoinRecord({ group: C, writer: C, on: true }), groupJoinRecord({ group: G, writer: G, on: true })]
+  })
+  const B = await member(t, bootstrap, assoc, async ({ key, make }) => {
+    CW = await make('community', writerHeader({ group: C, diary: key, member: null }))
+    W = await make('group', writerHeader({ group: G, diary: key, member: CW }), [groupPost({ text: 'writer history' })])
+    return [groupJoinRecord({ group: C, writer: CW, on: true }), groupJoinRecord({ group: G, writer: W, on: true })]
+  })
+  await admit(A, assoc)
+  await admit(B, assoc)
+  for (const key of [C, G, CW, W]) await admitted(events, key)
+  await until(() => {
+    // Queueing starts a scan at once, so only an idle state that is not done yet asks for another.
+    const state = seeder._groupServed.get(G).groupNotice
+    const done = Boolean(state) && !state.busy && state.hint.allowed(B.key) === true
+    if (!done && !(state && state.busy)) seeder._queueGroupNotices()
+    return done
+  }, { name: 'complete notice hint' })
+  t.alike(notices, [], 'admission history never notifies')
+  await B.cores.group.append(encode(groupPost({ text: 'new' })))
+  await until(() => notices.length === 1, { name: 'group notice' })
+  t.alike(notices[0].recipients, [A.key])
+  t.is(notices[0].name, 'Praia')
+  await seeder.close()
+  const restarted = await startSeeder(t, bootstrap, dataDir, { associationKey: assoc.hex, onGroupNotice: (e) => notices.push(e) })
+  await until(() => scansDone(restarted.seeder), { name: 'restart scans' })
+  restarted.seeder._queueGroupNotices()
+  await until(() => {
+    const state = restarted.seeder._groupServed.get(G).groupNotice
+    return state && !state.busy && state.cursors.size === 4
+  }, { name: 'restart notice scan' })
+  t.is(notices.length, 1, 'startup never notifies on stored history')
+})
+
+test('group notices: a banned writer burst cannot consume an allowed writer slot', async (t) => {
+  const { groupBan } = require('../lib/group')
+  const f = noticeFixture()
+  await f.scan()
+  f.G.push(f.G.key, groupBan({ member: f.members[0].diary, on: true, cuts: [{ writer: f.writers[0], seq: 1 }] }))
+  for (let i = 0; i < 5; i++) f.G.push(f.writers[0], groupPost({ text: 'banned ' + i }))
+  f.G.push(f.writers[1], groupPost({ text: 'allowed' }))
+  await f.scan()
+  t.is(f.events.length, 1)
+  t.alike(f.events[0].recipients, [f.C.logs.get(f.C.key).diary])
+})
+
+test('group notices: one membership evaluation per pass despite blocks and recipient chunks', async (t) => {
+  const f = noticeFixture({ count: 70, groups: 2 })
+  await f.scan()
+  const calls = new Map()
+  for (const { G, writers } of f.scopes) {
+    const hint = f.seeder._groupServed.get(G.key).groupNotice.hint
+    const members = hint.members
+    calls.set(G.key, 0)
+    hint.members = () => {
+      calls.set(G.key, calls.get(G.key) + 1)
+      return members()
+    }
+    hint.allowed = () => t.fail('the pass must reuse the member set for authors')
+    for (let i = 0; i < 3; i++) G.push(writers[i], groupPost({ text: 'new message' }))
+  }
+  await f.scan()
+  t.alike([...calls.values()], [1, 1], 'one query after all blocks have been fed')
+  t.is(f.events.length, 12, 'three posts per group, two recipient chunks per post')
+  await f.scan()
+  t.alike([...calls.values()], [1, 1], 'a pass with no new posts does not evaluate membership')
+})
+
+test('group notices: cached reads yield to the event loop between groups and queued passes', async (t) => {
+  const f = noticeFixture({ groups: 2 })
+  const order = []
+  const scan = f.seeder._scanGroupNotices.bind(f.seeder)
+  let queued = false
+  f.seeder._scanGroupNotices = async (group, ...args) => {
+    order.push('scan:' + group)
+    if (!queued) {
+      queued = true
+      f.seeder._queueGroupNotices(group)
+    }
+    await scan(group, ...args)
+    setImmediate(() => order.push('yield:' + group))
+  }
+  await f.scan()
+  await new Promise((resolve) => setImmediate(resolve))
+  const [first, second] = f.scopes.map(({ G }) => G.key)
+  t.alike(order, [
+    'scan:' + first, 'yield:' + first,
+    'scan:' + second, 'yield:' + second,
+    'scan:' + first, 'yield:' + first
+  ], 'each pass gives the event loop a turn before the next group starts')
 })

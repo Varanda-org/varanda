@@ -167,6 +167,7 @@ const path = require('#path')
 const process = require('#process')
 const b4a = require('b4a')
 const crypto = require('hypercore-crypto')
+const sodium = require('sodium-universal')
 const Hypercore = require('hypercore')
 const Verifier = require('hypercore/lib/verifier')
 const {
@@ -255,8 +256,9 @@ const {
 const { validateMediaHeader, latestMediaCores } = require('./media')
 const { validateGroupHeader, validateWriterHeader, validateGroupRecord, groupJoins, slotWalkState, slotWalkStep } = require('./group')
 const { createGroupIndex } = require('./group-index')
+const { createGroupHint, createGroupHintBudget, noticeFor, noticeName, validateGroupNotice, MAX_NOTICE_RECIPIENTS } = require('./group-notice')
 const { createGroupActivity } = require('./group-activity')
-const { advertisedHeld, peerAnswered, peerOffers, askHeld } = require('./sparse-held')
+const { advertisedHeld, peerAnswered, peerOffers, askHeld, nextHeld } = require('./sparse-held')
 const { attachGroups } = require('./groups-net')
 const { presentState, presentLength, clearDeleted, downloadExcept, downloadExceptPages, pageTargets, deletedRanges, shownMedia, GROUP_HISTORY_TYPES } = require('./deletion')
 const { createEngagementIndex } = require('./engagement-index')
@@ -1065,6 +1067,11 @@ async function localGroupVerdict (core, key, binding, visibility = null) {
   }
 }
 
+// All hints share 64 MiB of estimated retained memory, including each copy
+// of C's history and marks. Charging entries and references as well as the
+// block base keeps cut-heavy histories inside the same byte budget.
+const MAX_GROUP_NOTICE_BYTES = 64 * 1024 * 1024
+
 // Writer cores one diary may hold at a seeder in one group, left ones
 // included (leaving never frees a slot): its live and frozen slots, and a
 // stub of each released writer (#350).
@@ -1599,6 +1606,8 @@ class Seeder {
   // within PUSH_RECALL_MS of its push (push-events.js shapes both; a throw
   // is ignored). A mention of a name
   // nobody verifiably held then pushes when the name settles, within 24 h.
+  // onGroupNotice(event) relays a validated group-notice.js event, only for
+  // new blocks whose group and community membership scans are complete.
   // dm (header comment) is not a test hook either: { postage: { get() },
   // stampsPerDay = DM_STAMPS_PER_DAY, onNotice }. postage.get() resolves to
   // the postage keys, { kid, n, e, d } (decimal strings) or { keys: [...] }
@@ -1645,6 +1654,7 @@ class Seeder {
     flushHook = null, // test-only (see above)
     joinCoresHook = null, // test-only (see above)
     onPush = null,
+    onGroupNotice = null,
     dm = null,
     noClear = null,
     discovery = true,
@@ -1744,6 +1754,8 @@ class Seeder {
     this.joinCoresHook = joinCoresHook
     if (onPush !== null && typeof onPush !== 'function') throw new TypeError('onPush must be a function or null')
     this.onPush = onPush
+    if (onGroupNotice !== null && typeof onGroupNotice !== 'function') throw new TypeError('onGroupNotice must be a function or null')
+    this.onGroupNotice = onGroupNotice
     this._dmOpts = dmOptions(dm)
     this._dm = null
     this._visit = null
@@ -1880,6 +1892,8 @@ class Seeder {
     this._groups = new GroupBindings()
     this._groupsDropping = new Map()
     this._groupServed = new Map() // key -> { core, diary, group, download, stopFork, stopGrow, stopQuota, dropped, headerOk, gating, expected }
+    this._groupNoticeBudget = createGroupHintBudget(MAX_GROUP_NOTICE_BYTES)
+    this._groupNoticeScan = Promise.resolve()
     this._groupReserved = new Map() // key -> group, holding a group slot mid-admission
     this._groupReservedBy = new Map() // key -> diary whose join is admitting it
     this._groupBackoff = new Map() // 'diary:key' -> { reason, step, until } after 'timeout' / 'no-peers'
@@ -3508,6 +3522,7 @@ class Seeder {
   }
 
   _stopEntry (entry) {
+    if (entry.groupNotice) entry.groupNotice.hint.incomplete()
     clearTimeout(entry.headerTimer)
     entry.headerTimer = null
     clearTimeout(entry.indexRetry)
@@ -5105,6 +5120,7 @@ class Seeder {
     }
     // After the join loop, so the new join's admission state is known.
     if (caughtUp) this._dropUnboundStubRows(diary, entry, true)
+    this._queueGroupNotices()
   }
 
   // Once D's scan caught up, a row whose join no longer names K for G goes
@@ -5631,7 +5647,7 @@ class Seeder {
     // store (_gateGroup): a core whose block 0 is then withheld keeps
     // growing its wait instead of starting over at every admission.
     this._groupRefusals.delete(diary + ':' + key)
-    this._serveGroup(key, { diary: owner, group }, core, { expected: res.raw, by: diary })
+    this._serveGroup(key, { diary: owner, group }, core, { expected: res.raw, by: diary, noticeFrom: Math.max(core.length, res.length) })
     const served = this._groupServed.get(key)
     if (!served || served.dropped) return
     this.swarm.join(core.discoveryKey, { server: true, client: true })
@@ -5976,7 +5992,7 @@ class Seeder {
   // Serving a group core: live download, fork watcher, the log quota on
   // every append, no growth broadcast. `expected` and `headerOk` as for
   // media (_serveMedia): a fresh admission is re-gated once block 0 is local.
-  _serveGroup (key, { diary, group }, core, { expected = null, headerOk = false, by = diary, restored = false } = {}) {
+  _serveGroup (key, { diary, group }, core, { expected = null, headerOk = false, by = diary, restored = false, noticeFrom = core.length } = {}) {
     const binding = this._groups.get(key)
     const cut = key !== group && binding && Number.isSafeInteger(binding.cut) ? binding.cut : null
     const entry = {
@@ -5993,6 +6009,8 @@ class Seeder {
       headerOk,
       gating: false,
       expected,
+      noticeFrom,
+      groupNotice: null,
       rootScanned: 0,
       rootScanning: false,
       rootDecoded: 0, // blocks a root scan decoded (past the group-meta prefilter)
@@ -6430,6 +6448,252 @@ class Seeder {
     })
   }
 
+  // The hint has its own cursors: catalogue scans skip writers and private
+  // roots, but either can carry a membership change. Rebuilding a failed
+  // hint must read every bound core again without replaying its notices.
+  _queueGroupNotices (scope = null) {
+    if (this.onGroupNotice === null || this._closing) return
+    for (const [group, root] of this._groupServed) {
+      if (group !== root.group || root.dropped || !root.headerOk) continue
+      const header = this._groupIndex.header(group)
+      if (!header || header.kind !== 'group') continue
+      const C = header.community
+      if (scope !== null && scope !== group && scope !== C) continue
+      const parent = this._groupIndex.header(C)
+      if (!parent || parent.kind !== 'community') continue
+      let state = root.groupNotice
+      if (state === null) {
+        state = root.groupNotice = {
+          hint: createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community: { key: C, creator: parent.diary, join: parent.join }, budget: this._groupNoticeBudget }),
+          cursors: new Map(),
+          rebuild: false,
+          tokens: 4,
+          at: clock.now(),
+          busy: false,
+          again: false,
+          name: noticeName(header.name)
+        }
+      }
+      if (state.busy) {
+        state.again = true
+        continue
+      }
+      state.busy = true
+      // Cached reads may resolve in microtasks. Give sockets and timers a
+      // turn between groups, including passes queued while one is busy.
+      this._groupNoticeScan = this._groupNoticeScan.then(() => new Promise((resolve) => setImmediate(resolve))).then(() => this._scanGroupNotices(group, root, header, state)).catch(() => {
+        state.hint.incomplete()
+        state.rebuild = true
+        for (const e of this._groupServed.values()) {
+          if (e.group === group || e.group === C) e.noticeFrom = Math.max(e.noticeFrom, e.core.contiguousLength)
+        }
+      }).then(() => {
+        state.busy = false
+        if (!state.again) return
+        state.again = false
+        this._queueGroupNotices(group)
+      })
+    }
+  }
+
+  _groupNoticeCores (group, C, hint) {
+    const cores = new Map()
+    let pending = false
+    for (const scope of [group, C]) {
+      if (this._isBlocked(scope) || !this._groupServed.has(scope) ||
+        this._groupCoreCount(scope) >= Math.min(this.maxGroupWriters, MAX_GROUP_WRITERS)) hint.incomplete()
+    }
+    for (const [diary, e] of this._served) {
+      for (const scope of [group, C]) {
+        for (const mark of e.groupEvents.get(scope) || []) {
+          if (mark.kind === 'cut') hint.mark(diary, mark.writer, mark.cut)
+        }
+      }
+      for (const [writer, join] of e.groupLive) {
+        if ((join.group === group || join.group === C) && !this._groups.has(writer)) hint.incomplete()
+      }
+    }
+    for (const [key, binding] of this._groups) {
+      if (!binding || (binding.group !== group && binding.group !== C)) continue
+      const e = this._groupServed.get(key)
+      const diary = this._served.get(binding.diary)
+      const row = this._groupIndex.writer(key)
+      if (!e || e.dropped || e.core.fork !== 0 || !diary || diary.dropped || this._isBlocked(binding.diary)) {
+        hint.incomplete()
+        continue
+      }
+      const uncertain = !diary.gated || !scanCaughtUp(diary)
+      if (uncertain && this._groupScanCounts(binding.diary, diary)) {
+        pending = true
+        continue
+      }
+      const cut = key !== binding.group && Number.isSafeInteger(binding.cut) ? Math.max(1, binding.cut) : null
+      const length = cut === null ? e.core.length : Math.min(cut, e.core.length)
+      if (!e.headerOk || e.core.contiguousLength < length || !row) {
+        if (uncertain) hint.incomplete()
+        else pending = true
+        continue
+      }
+      if (uncertain && key === binding.group) hint.incomplete()
+      if (row.group !== binding.group || row.diary !== binding.diary) {
+        hint.incomplete()
+        continue
+      }
+      if (Number.isSafeInteger(binding.cut)) hint.mark(binding.diary, key, binding.cut)
+      cores.set(key, { entry: e, length, cut, uncertain, signed: e.core.length, held: new Set() })
+    }
+    return pending ? null : cores
+  }
+
+  async _scanGroupNotices (group, root, header, state) {
+    const C = header.community
+    const stale = () => this._closing || root.dropped || this._groupServed.get(group) !== root
+    if (stale()) return
+    const parent = this._groupIndex.header(C)
+    if (!parent) return
+    // Only the hint cursor rewinds. Notice floors and token buckets survive
+    // failures, so rescanning a ban cannot replay earlier messages.
+    const rebuild = () => {
+      state.hint.incomplete()
+      state.hint = createGroupHint({ group, creator: header.diary, join: header.join, visibility: header.visibility, community: { key: C, creator: parent.diary, join: parent.join }, budget: this._groupNoticeBudget })
+      for (const cursor of state.cursors.values()) cursor.scanned = 0
+      state.name = noticeName(header.name)
+      state.rebuild = false
+    }
+    const rebuilt = state.rebuild
+    if (rebuilt) rebuild()
+    const discard = () => {
+      for (const e of this._groupServed.values()) {
+        if (e.group === group || e.group === C) e.noticeFrom = Math.max(e.noticeFrom, e.core.contiguousLength)
+      }
+    }
+    if (this._groupIncomplete(group) || this._groupIncomplete(C)) {
+      discard()
+      return
+    }
+    let cores = this._groupNoticeCores(group, C, state.hint)
+    if (cores === null) {
+      discard()
+      return
+    }
+    // An unread diary suffix may cut its authority records. Recheck even
+    // previously scanned records while that diary is excluded by the budget.
+    if ([...cores.values()].some((c) => c.uncertain)) {
+      if (!rebuilt) {
+        rebuild()
+        cores = this._groupNoticeCores(group, C, state.hint)
+      }
+      state.rebuild = true
+    }
+    const uncertainWriters = new Set([...cores].filter(([, c]) => c.uncertain).map(([writer]) => writer))
+    for (const writer of state.cursors.keys()) {
+      if (!cores.has(writer)) state.hint.incomplete()
+    }
+    const candidates = []
+    for (const [writer, { entry: e, length, cut, uncertain, signed, held }] of cores) {
+      let cursor = state.cursors.get(writer)
+      if (!cursor) {
+        cursor = { entry: e, scanned: 0, notice: e.noticeFrom, tokens: 4, at: clock.now() }
+        state.cursors.set(writer, cursor)
+      }
+      if (cursor.entry !== e) {
+        state.hint.incomplete()
+        continue
+      }
+      const from = Math.max(e.noticeFrom, cursor.notice)
+      cursor.notice = Math.max(cursor.notice, length)
+      let messages = 0
+      // bindCores keeps leaves and keys beyond a cut's holes. Read those
+      // again because a sparse reread can discover one below our cursor.
+      // The cut fetch may wait forever, so use held blocks, not its progress.
+      const seqs = []
+      for (let seq = cursor.scanned; seq < length; seq++) seqs.push(seq)
+      if (cut !== null) {
+        for (let seq = await nextHeld(e.core, length, signed); seq !== -1; seq = await nextHeld(e.core, seq + 1, signed)) seqs.push(seq)
+      }
+      for (const seq of seqs) {
+        const raw = await e.core.get(seq, { wait: false, raw: true })
+        if (stale()) return
+        if (raw === null) {
+          if (cut !== null && seq >= cut) continue
+          state.hint.incomplete()
+          state.rebuild = true
+          break
+        }
+        if (seq < length) cursor.scanned = seq + 1
+        else held.add(seq)
+        let record = null
+        try { record = decodeBlock(raw) } catch {}
+        const valid = state.hint.add(record, { diary: e.diary, writer, seq, community: e.group === C })
+        if (valid && seq > 0 && ['group-admit', 'group-ban', 'group-admin', 'group-meta'].includes(record.type)) {
+          // An unseen cut can void authority or the node a causal reference
+          // orders against. Neither may turn an uncertain member into a yes.
+          const refs = [...(record.cuts || []).map((c) => ({ writer: c.writer, seq: c.seq - 1 })), record.seen, record.lifts].filter((r) => r && r.seq > 0)
+          if ((uncertain && (cut === null || seq < cut)) || refs.some((r) => uncertainWriters.has(r.writer))) state.hint.incomplete()
+        }
+        if (valid && writer === group && record.type === 'group-meta') state.name = noticeName(record.name)
+        if (uncertain || !valid || seq < from || (cut !== null && seq >= cut) || e.group !== group || !noticeFor(record, { private: header.visibility === 'private' })) continue
+        // Each writer can spend at most its burst. Keeping that many per
+        // writer also prevents a banned writer from crowding out another.
+        if (messages++ < 4) candidates.push({ writer, seq, e, cursor })
+      }
+    }
+    for (const c of cores.values()) {
+      if (c.cut === null) continue
+      for (let seq = await nextHeld(c.entry.core, c.length, c.signed); seq !== -1; seq = await nextHeld(c.entry.core, seq + 1, c.signed)) {
+        if (!c.held.has(seq)) return
+      }
+    }
+    if (stale() || this._groupIncomplete(group) || this._groupIncomplete(C)) return
+    const current = this._groupNoticeCores(group, C, state.hint)
+    if (current === null || current.size !== cores.size) return
+    for (const [writer, c] of current) {
+      const cursor = state.cursors.get(writer)
+      const before = cores.get(writer)
+      if (!cursor || !before || before.entry !== c.entry || cursor.scanned < c.length || before.cut !== c.cut || before.uncertain !== c.uncertain || before.signed !== c.signed) return
+    }
+    if (candidates.length === 0) return
+    const members = state.hint.members()
+    if (members === null) return
+    const allowed = new Set(members)
+    const uncertainDiaries = new Set([...current.values()].filter((c) => c.uncertain).map((c) => c.entry.diary))
+    for (const { writer, seq, e, cursor } of candidates) {
+      if (!allowed.has(e.diary)) continue
+      // Membership alone does not authorize a retired device's new posts.
+      const diary = this._served.get(e.diary)
+      const marks = diary.groupEvents.get(group) || []
+      if (marks.some((m) => m.kind === 'cut' && m.writer === writer && seq >= Math.max(1, m.cut)) ||
+        (e.cut !== null && seq >= Math.max(1, e.cut))) continue
+      const recipients = members.filter((d) => d !== e.diary && !uncertainDiaries.has(d)).slice(0, MAX_GROUP_WRITERS)
+      if (recipients.length === 0 || !this._takeGroupNotice(state, cursor)) continue
+      const input = b4a.alloc(72)
+      b4a.copy(b4a.from(group, 'hex'), input, 0)
+      b4a.copy(b4a.from(writer, 'hex'), input, 32)
+      b4a.writeUInt32BE(input, Math.floor(seq / 0x100000000), 64)
+      b4a.writeUInt32BE(input, seq % 0x100000000, 68)
+      const digest = b4a.alloc(16)
+      sodium.crypto_generichash(digest, input, this._keyPair.secretKey)
+      const nid = b4a.toString(digest, 'hex')
+      for (let i = 0; i < recipients.length; i += MAX_NOTICE_RECIPIENTS) {
+        const event = { v: 1, kind: 'group', group, visibility: header.visibility, name: header.visibility === 'private' ? null : state.name, nid, recipients: recipients.slice(i, i + MAX_NOTICE_RECIPIENTS) }
+        if (!validateGroupNotice(event)) continue
+        try { this.onGroupNotice(event) } catch {}
+      }
+    }
+  }
+
+  _takeGroupNotice (group, writer) {
+    const now = clock.now()
+    for (const bucket of [group, writer]) {
+      bucket.tokens = Math.min(4, bucket.tokens + Math.max(0, now - bucket.at) / 30000)
+      bucket.at = now
+    }
+    if (group.tokens < 1 || writer.tokens < 1) return false
+    group.tokens--
+    writer.tokens--
+    return true
+  }
+
   // Folds the catalogue records of a served community root into the group
   // index, each block once, in log order, up to the contiguous prefix
   // (docs/protocol.md section 10, "Protocol v2 admission and scan"):
@@ -6439,6 +6703,7 @@ class Seeder {
   // its group-meta (a rename); a private root seals its meta and is not
   // scanned. One pass at a time per root; growth during a pass runs another.
   _scanRoot (key, entry) {
+    this._queueGroupNotices(entry.group)
     if (key !== entry.group || !entry.headerOk || entry.rootScanning || entry.dropped || this._closing) return
     const header = this._groupIndex.header(key)
     if (header === null || !this._rootScanned(header)) return
@@ -11192,6 +11457,7 @@ Seeder.MAX_BAD_ANNOUNCES = MAX_BAD_ANNOUNCES
 module.exports = {
   Seeder,
   GroupBindings,
+  MAX_GROUP_NOTICE_BYTES,
   startupPhases,
   GATE_TIMEOUT_MS,
   MAX_HANDSHAKE_FRAME,
