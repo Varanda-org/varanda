@@ -2018,8 +2018,8 @@ const makeStyles = (colors) => StyleSheet.create({
   note: { paddingHorizontal: 16, paddingVertical: 12 },
   prompt: { paddingHorizontal: 16, paddingVertical: 12, gap: 8 },
   child: { marginLeft: space.xl, borderLeftWidth: 1, borderLeftColor: colors.line },
-  // 68 is the post text column (PostRow padding 16 + avatar 40 + gap 12). No vertical padding: the 44 pt box of the link is the row.
-  branchAction: { paddingLeft: 68, paddingRight: space.lg, alignItems: 'flex-start' },
+  // Match the post caption gutter. No vertical padding: the 44 pt link box is the row.
+  branchAction: { paddingLeft: space.xl, paddingRight: space.lg, alignItems: 'flex-start' },
   branchError: { paddingTop: space.sm },
   header: { position: 'relative' },
   focal: { position: 'relative' },

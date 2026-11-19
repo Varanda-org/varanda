@@ -53,6 +53,28 @@ test('head sizes under half a point apart are the same', async (t) => {
   t.absent(sameSize({ width: 44, height: 44 }, undefined))
 })
 
+test('a head too narrow for the date beside its targets stacks', async (t) => {
+  const { headStacks } = await load()
+  // 100 pt of header padding; 120 pt of targets: the "seguir" pill (68 pt
+  // until measured), the menu's 44, and the 8 pt before the pill.
+  const at = (width, time, handle = true) => headStacks({ room: width - 100, reserve: 120, handle, time, fontSize: 13, fontScale: 1 })
+  t.ok(at(320, '31 dez 2025'), 'a 320 pt row with a handle stacks a date with the year')
+  t.absent(at(375, '31 dez 2025'), 'it fits at 375 pt')
+  t.absent(at(320, '31 dez'), 'a date without the year fits at 320 pt')
+  t.absent(at(320, '31 dez 2025', false), 'without a handle the date fits at 320 pt')
+  t.absent(headStacks({ room: 260, reserve: 120, handle: true, time: '31 dez 2025', fontSize: 13, fontScale: 1 }), 'it fits at 360 pt')
+  t.ok(headStacks({ room: 260, reserve: 120, handle: true, time: '31 dez 2025', fontSize: 13, fontScale: 1.25 }), 'bigger text needs more room')
+  t.absent(headStacks({ room: 0, reserve: 120, handle: true, time: '31 dez 2025', fontSize: 13, fontScale: 1 }), 'no width, no decision')
+})
+
+test('the post head stacks on a narrow row from the first render', (t) => {
+  const src = read('ui/PostRow.js')
+  t.ok(src.includes('const HEAD_INSET = space.xl + 40 + space.md + space.xl') && src.includes('header: { paddingLeft: space.xl + 40 + space.md, paddingRight: space.xl,'), 'the inset is the header padding')
+  t.ok(src.includes('const narrowHead = headActions && narrowAt(headWidth ?? windowWidth)'), 'the window decides the first render')
+  t.ok(src.includes('<View style={styles.header} onLayout={headActions ? measureHead : undefined}>'), 'the header measures itself')
+  t.ok(src.includes('narrowAt(width) !== narrowHead) setHeadWidth(width)'), 'only a different decision renders again')
+})
+
 test('sheets mount on first open and stay mounted', async (t) => {
   const { openedNext } = await load()
   const none = null

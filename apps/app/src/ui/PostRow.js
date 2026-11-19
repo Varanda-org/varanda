@@ -1,4 +1,4 @@
-// One line of a timeline (no card). It receives the RAW peer strings (author
+// A timeline card. It receives the RAW peer strings (author
 // key, name, username, at, text, replyToName, each reply preview's name and
 // text, the quote's and the reposter's names) and applies displayText itself
 // (the parent chip through replyChip, which escapes on its own), so callers
@@ -97,6 +97,7 @@ import { usePostSheet } from './PostSheetHost'
 import { Avatar } from './Avatar'
 import { ClampControl, captionEstimate, useClamp } from './ClampText'
 import { Icon } from './Icon'
+import { Pill } from './Pill'
 import { ReplyPreview } from './ReplyPreview'
 import { LinkCard } from './LinkCard'
 import { MusicEmbedCard } from './MusicEmbedCard'
@@ -108,7 +109,7 @@ import { EventCard } from './EventCard'
 import { tap } from './haptics'
 import { hasHashtag, hasMention, MentionText, useHashtagOpen } from './MentionText'
 import { useHosted } from '../node'
-import { captionWidthNext, headActionsKey, headReserveOf, openedNext, rememberHeadActions, sameSize, seedHeadActions } from '../postRowLayout'
+import { captionWidthNext, headActionsKey, headReserveOf, headStacks, openedNext, rememberHeadActions, sameSize, seedHeadActions } from '../postRowLayout'
 import { useReduceMotion } from './StackLayer'
 import { closeRow, countRowRender, openRow, perfOn } from '../perfMarks'
 import { PerfListId } from './screenVisible'
@@ -117,16 +118,17 @@ import { screenReaderOn } from './screenReader'
 import { LARGE_TEXT, layout, radius, space, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
-const ICON = 20
+const ICON = 22
 // A split toggle and its number never share touch area: a mis-tap on the
 // toggle writes a public signed record.
 const SPLIT_SLOP = { top: 6, bottom: 6, left: 6, right: 0 }
 const COUNT_SLOP = { top: 6, bottom: 6, left: 0, right: 6 }
-// 'seguir' at the counter size plus its padding, until it is measured.
-const FOLLOW_GUESS = 64
-// (44 - 20) / 2: the 44 pt targets centre on the 20 pt name line, so a post
-// with only ⋯ is no taller than its text.
+// 'seguir' at the small pill size plus its padding, until it is measured.
+const FOLLOW_GUESS = 68
+// (44 - 20) / 2: the name sits centred beside the 44 pt head targets.
 const HEAD_LIFT = 12
+// The header's padding: the gutter, the 40 pt avatar and its gap, the gutter.
+const HEAD_INSET = space.xl + 40 + space.md + space.xl
 // Room the head targets may reach, so a bigger hit area never sits on another
 // target: the row's top padding, the gap under a "republicou" line (split
 // between it and the line below), and the caption's top margin. Below the head
@@ -134,7 +136,7 @@ const HEAD_LIFT = 12
 // caption's first line.
 const ROW_PAD_TOP = 16
 const REPOSTED_GAP = 4
-const CAPTION_GAP = 3
+const CAPTION_GAP = space.md
 const HEAD_ROOM_BELOW = CAPTION_GAP
 const REPOSTED_ROW = 18
 const REPOSTED_FOLLOW_ROW = 28
@@ -431,9 +433,18 @@ function PostRowView ({
   // space before it (Android drew them touching). ⋯ sits inside a wider
   // target and needs no gap.
   const headPad = headReserve.width + (fn(onFollow) ? space.sm : 0)
-  // At large text the date cannot shrink and would run under the targets on a
-  // narrow screen, so the name keeps the first line and the date moves below.
-  const stackHead = headActions && fontScale >= LARGE_TEXT
+  // The date cannot shrink: at large text, or on a row too narrow for it
+  // beside the targets, the name keeps the first line and the date moves below.
+  // The window width decides the first render; the header's measured width
+  // is stored only when it decides otherwise, so a row still renders once.
+  const [headWidth, setHeadWidth] = useState(undefined)
+  const narrowAt = (width) => headStacks({ room: width - HEAD_INSET, reserve: headPad, handle: !!handle, time, fontSize: type.meta.fontSize, fontScale })
+  const narrowHead = headActions && narrowAt(headWidth ?? windowWidth)
+  const measureHead = (event) => {
+    const width = event.nativeEvent.layout.width
+    if (width > 0 && width !== headWidth && narrowAt(width) !== narrowHead) setHeadWidth(width)
+  }
+  const stackHead = headActions && (fontScale >= LARGE_TEXT || narrowHead)
   const longPress = () => {
     if (!hasMore || screenReaderOn()) return
     cancelPendingOpen()
@@ -567,24 +578,30 @@ function PostRowView ({
   const quoteProp = quoteOn ? { ...quote, onOpen: otherPress(quote.onOpen), onOpenMention: quoteMention } : quote
   const label = textOut ? bodyParts.filter((part) => part !== shownText).join('. ') : bodyLabel
   const textNode = hasText
-    ? textOut
-      ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} hashtags />
-      : (
-        <Pressable
-          accessibilityRole={open ? 'link' : 'text'}
-          accessibilityHint={open ? 'abre a conversa' : undefined}
-          disabled={!open && !bodyLongPress}
-          onPress={openTap}
-          onLongPress={bodyLongPress}
-          delayLongPress={350}
-          tabIndex={videoAbove || videoOut ? -1 : undefined}
-          {...a11yOpen}
-        >
-          <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
-        </Pressable>
-        )
+    ? (
+      <View style={styles.gutter}>
+        <View style={styles.body} onLayout={measureCaption}>
+          {textOut
+            ? <MentionText text={body} onOpenMention={openMention} onOpenPlain={openTap} onLongPress={bodyLongPress} onTextLayout={onTextLayout} style={styles.text} hashtags />
+            : (
+              <Pressable
+                accessibilityRole={open ? 'link' : 'text'}
+                accessibilityHint={open ? 'abre a conversa' : undefined}
+                disabled={!open && !bodyLongPress}
+                onPress={openTap}
+                onLongPress={bodyLongPress}
+                delayLongPress={350}
+                tabIndex={videoAbove || videoOut ? -1 : undefined}
+                {...a11yOpen}
+              >
+                <Text style={styles.text} numberOfLines={numberOfLines} onTextLayout={onTextLayout}>{shownText}</Text>
+              </Pressable>
+              )}
+        </View>
+      </View>
+      )
     : null
-  const mediaNode = hasMedia ? <MediaGrid author={author} media={media} persist={persistMedia !== false} /> : null
+  const mediaNode = hasMedia ? <View style={styles.media}><MediaGrid author={author} media={media} persist={persistMedia !== false} bleed /></View> : null
   const quoteNode = quoteOn ? <QuoteCard quote={quoteProp} now={now} /> : null
   // Outside the row's open area: a tap on the card opens the link, never the conversation.
   const previewNode = !hasMedia && preview && typeof preview === 'object'
@@ -665,7 +682,7 @@ function PostRowView ({
           disabled={!openAuthor}
           onPress={openAuthor}
           hitSlop={avatarSlop}
-          style={({ pressed }) => pressed && openAuthor && styles.pressed}
+          style={({ pressed }) => [styles.avatar, pressed && openAuthor && styles.pressed]}
         >
           <Avatar name={who.avatarName} publicKey={author} size={40} picture={avatar} persist={persistMedia !== false} />
         </Pressable>
@@ -673,7 +690,7 @@ function PostRowView ({
             readers read in the order: avatar → post content → actions.
             All visual children are hidden from accessibility; sighted users
             interact with them directly (name, reply-to and text tap targets). */}
-        <View style={styles.body} onLayout={measureCaption}>
+        <View style={styles.content}>
           {/* Never disabled: a thread row has no open, and a disabled body
               would be announced as dimmed; with no handler its taps do nothing. */}
           <Pressable
@@ -687,114 +704,126 @@ function PostRowView ({
             {...bodyA11y}
           >
             <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-              <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headPad }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
-                <Pressable
-                  accessibilityRole='link'
-                  accessibilityLabel={'ver o perfil de ' + title}
-                  disabled={!openAuthor}
-                  onPress={openAuthor}
-                  onLongPress={bodyLongPress}
-                  delayLongPress={350}
-                  hitSlop={nameSlop}
-                  style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
-                >
-                  <Text style={styles.name} numberOfLines={1}>{title}</Text>
-                </Pressable>
-                {tagText ? <Text style={styles.tag} numberOfLines={1}>{tagText}</Text> : null}
-                {handle
-                  ? (
-                    <Pressable
-                      accessible={false}
-                      disabled={!open}
-                      onPress={openTap}
-                      onLongPress={bodyLongPress}
-                      delayLongPress={350}
-                      hitSlop={metaSlop}
-                      style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
-                    >
-                      <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
-                    </Pressable>
-                    )
-                  : null}
-                <Pressable
-                  accessibilityRole={open ? 'link' : 'text'}
-                  accessibilityLabel={open ? 'abrir conversa' : undefined}
-                  disabled={!open}
-                  onPress={openTap}
-                  onLongPress={bodyLongPress}
-                  delayLongPress={350}
-                  {...a11yOpen}
-                  hitSlop={metaSlop}
-                  style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
-                >
-                  <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
-                </Pressable>
-              </View>
-              {quoteShown
-                ? (
-                  <ReplyPreview
-                    name={replyQuote.name}
-                    text={replyQuote.text}
-                    senderKey={replyQuote.senderKey}
-                    onPress={quotePress}
-                    lines={2}
-                  />
-                  )
-                : replyToName
-                  ? openParent
+              <View style={styles.header} onLayout={headActions ? measureHead : undefined}>
+                <View style={[styles.head, stackHead && styles.headStacked, headActions && !stackHead && { paddingRight: headPad }, headActions && !stackHead && fn(onFollow) && { minHeight: headReserve.height - HEAD_LIFT }]}>
+                  <Pressable
+                    accessibilityRole='link'
+                    accessibilityLabel={'ver o perfil de ' + title}
+                    disabled={!openAuthor}
+                    onPress={openAuthor}
+                    onLongPress={bodyLongPress}
+                    delayLongPress={350}
+                    hitSlop={nameSlop}
+                    style={({ pressed }) => [styles.nameBox, handle && styles.nameBeside, stackHead && { width: '100%', paddingRight: headPad, minHeight: headReserve.height, justifyContent: 'center' }, pressed && openAuthor && styles.pressed]}
+                  >
+                    <Text style={styles.name} numberOfLines={1}>{title}</Text>
+                  </Pressable>
+                  {tagText ? <Text style={styles.tag} numberOfLines={1}>{tagText}</Text> : null}
+                  {handle
                     ? (
                       <Pressable
-                        accessibilityRole='link'
-                        accessibilityLabel={replyLabel}
-                        onPress={openParent}
+                        accessible={false}
+                        disabled={!open}
+                        onPress={openTap}
                         onLongPress={bodyLongPress}
                         delayLongPress={350}
-                        style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
+                        hitSlop={metaSlop}
+                        style={({ pressed }) => [styles.metaBox, pressed && open && styles.pressed]}
                       >
-                        <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                        <Text style={styles.handle} numberOfLines={1}>{handle}</Text>
                       </Pressable>
                       )
-                    : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
-                  : null}
+                    : null}
+                  <Pressable
+                    accessibilityRole={open ? 'link' : 'text'}
+                    accessibilityLabel={open ? 'abrir conversa' : undefined}
+                    disabled={!open}
+                    onPress={openTap}
+                    onLongPress={bodyLongPress}
+                    delayLongPress={350}
+                    {...a11yOpen}
+                    hitSlop={metaSlop}
+                    style={({ pressed }) => [styles.timeBox, pressed && open && styles.pressed]}
+                  >
+                    <Text style={styles.time} numberOfLines={1}>{(handle ? '\u00a0· ' : stackHead ? '' : '· ') + time}</Text>
+                  </Pressable>
+                </View>
+              </View>
+              {quoteShown || replyToName
+                ? (
+                  <View style={[styles.gutter, styles.reply]}>
+                    {quoteShown
+                      ? (
+                        <ReplyPreview
+                          name={replyQuote.name}
+                          text={replyQuote.text}
+                          senderKey={replyQuote.senderKey}
+                          onPress={quotePress}
+                          lines={2}
+                        />
+                        )
+                      : replyToName
+                        ? openParent
+                          ? (
+                            <Pressable
+                              accessibilityRole='link'
+                              accessibilityLabel={replyLabel}
+                              onPress={openParent}
+                              onLongPress={bodyLongPress}
+                              delayLongPress={350}
+                              style={({ pressed }) => [styles.replyChip, pressed && styles.pressed]}
+                            >
+                              <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                            </Pressable>
+                            )
+                          : <Text style={styles.replyChipText} numberOfLines={1}>{replyLabel}</Text>
+                        : null}
+                  </View>
+                  )
+                : null}
               {videoOut ? null : mediaNode}
               {textOut || videoAbove || videoOut ? null : textNode}
             </View>
           </Pressable>
-          {videoAbove ? previewNode : null}
+          {videoAbove ? <View style={styles.cards}>{previewNode}</View> : null}
           {videoOut ? mediaNode : null}
           {textUnder}
           {textOut ? textNode : null}
-          <ClampControl control={control} onPress={otherPress(toggle)} />
-          {quoteNode && !quoteOut
+          <View style={styles.gutter}><ClampControl control={control} onPress={otherPress(toggle)} /></View>
+          {quoteNode || (!videoAbove && previewNode) || Array.isArray(poll) || (event && typeof event === 'object')
             ? (
-              <Pressable accessible={false} tabIndex={-1} onPress={openTap} disabled={!open}>
-                <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-                  {quoteNode}
-                </View>
-              </Pressable>
+              <View style={styles.cards}>
+                {quoteNode && !quoteOut
+                  ? (
+                    <Pressable accessible={false} tabIndex={-1} onPress={openTap} disabled={!open}>
+                      <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+                        {quoteNode}
+                      </View>
+                    </Pressable>
+                    )
+                  : null}
+                {videoAbove ? null : previewNode}
+                {quoteOut ? quoteNode : null}
+                {Array.isArray(poll) ? <PollCard author={author} seq={seq} poll={poll} /> : null}
+                {!Array.isArray(poll) && event && typeof event === 'object' ? <EventCard author={author} seq={seq} event={event} /> : null}
+              </View>
               )
             : null}
-          {videoAbove ? null : previewNode}
-          {quoteOut ? quoteNode : null}
-          {Array.isArray(poll) ? <PollCard author={author} seq={seq} poll={poll} /> : null}
-          {!Array.isArray(poll) && event && typeof event === 'object' ? <EventCard author={author} seq={seq} event={event} /> : null}
           {/* After the content, so a screen reader reads the caption before
               them; the position is absolute, so they still draw at the top. */}
           {headActions
             ? (
-              <View style={[styles.headActions, !stackHead && { top: -HEAD_LIFT }]} onLayout={measureHeadActions}>
+              <View style={[styles.headActions, stackHead && { top: HEAD_LIFT }]} onLayout={measureHeadActions}>
                 {fn(onFollow)
                   ? (
-                    <Pressable
-                      accessibilityRole='button'
+                    <Pill
+                      weak
+                      small
+                      label='seguir'
                       accessibilityLabel={'seguir ' + title}
-                      accessibilityState={{ disabled: !!followPending }}
                       disabled={!!followPending}
                       onPress={otherPress(onFollow)}
-                      style={({ pressed }) => [styles.follow, followPending && styles.disabled, pressed && styles.pressed]}
-                    >
-                      <View style={styles.followFace}><Text style={styles.followText}>seguir</Text></View>
-                    </Pressable>
+                    />
                     )
                   : null}
                 {hasMore
@@ -972,28 +1001,30 @@ export const PostRow = memo(BlockGate)
 const makeStyles = (colors) => StyleSheet.create({
   row: {
     paddingTop: ROW_PAD_TOP,
-    paddingHorizontal: 16,
-    paddingBottom: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line,
+    paddingBottom: space.lg,
     backgroundColor: colors.bg
   },
-  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginLeft: 26, marginBottom: REPOSTED_GAP, maxWidth: '100%' },
+  reposted: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: space.xl, marginBottom: REPOSTED_GAP, maxWidth: '100%' },
   repostedLink: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 1 },
   repostedText: { ...type.replyMark, color: colors.soft, fontWeight: '600', flexShrink: 1 },
   repostedFollow: { flexShrink: 0, minHeight: 28, justifyContent: 'center', paddingHorizontal: 2 },
   repostedFollowText: { ...type.counter, color: colors.accent },
-  main: { flexDirection: 'row', gap: 12 },
-  body: { flex: 1, minWidth: 0 },
+  main: { minWidth: 0 },
+  avatar: { position: 'absolute', top: 0, left: space.xl, zIndex: 1 },
+  content: { minWidth: 0 },
+  gutter: { paddingHorizontal: space.xl },
+  body: { minWidth: 0 },
+  header: { paddingLeft: space.xl + 40 + space.md, paddingRight: space.xl, paddingTop: HEAD_LIFT, minHeight: layout.hit },
+  reply: { marginTop: space.md },
+  // Cards and MediaGrid already supply 8 pt above their content.
+  cards: { paddingHorizontal: space.xl, paddingTop: space.md - space.sm, gap: space.md - space.sm },
+  media: { paddingTop: space.md - space.sm },
   // No gap: the name keeps 6 pt on its right and the time starts with a
   // no-break space (web drops a plain leading space under numberOfLines), so
   // the "·" has one space on each side.
   head: { flexDirection: 'row', alignItems: 'baseline' },
   headStacked: { flexWrap: 'wrap' },
-  headActions: { position: 'absolute', top: 0, right: 0, flexDirection: 'row', alignItems: 'center' },
-  follow: { minHeight: layout.hit, minWidth: 44, justifyContent: 'center', alignItems: 'center' },
-  followFace: { minHeight: 32, paddingHorizontal: space.md, borderRadius: radius.pill, backgroundColor: colors.accentSoft, justifyContent: 'center' },
-  followText: { ...type.counter, color: colors.accent },
+  headActions: { position: 'absolute', top: 0, right: space.xl, flexDirection: 'row', alignItems: 'center' },
   // The @nome gives way first and the date never does (as on X): one Text for
   // both cut the date to "· 5…", or dropped it at large text.
   nameBox: { flexShrink: 1, marginRight: 6 },
@@ -1002,8 +1033,9 @@ const makeStyles = (colors) => StyleSheet.create({
   // so a name that fits is never cut. The name keeps flexShrink 1: CSS shares
   // only part of the overflow when the factors left sum to less than 1, so a
   // smaller one would push the date out once the handle is at its floor. The handle stops at 32 pt ("@jo…", never a clipped sliver);
-  // past that the name gives way, so the date always fits, even a 320 pt
-  // screen with "· 31 dez 2025".
+  // past that the name gives way, and a row too narrow even then stacks the
+  // head (headStacks), as a 320 pt screen with "· 31 dez 2025" beside the
+  // targets does.
   nameBeside: { flexShrink: 1 },
   name: { ...type.postName, color: colors.ink },
   // The time sits outside the shrinking box: a box that shrinks can go below
@@ -1033,10 +1065,10 @@ const makeStyles = (colors) => StyleSheet.create({
     flexShrink: 0
   },
   replyChipText: { ...type.meta, color: colors.soft, flexShrink: 1 },
-  previews: { marginTop: 8, minHeight: layout.hit, justifyContent: 'center' },
+  previews: { marginHorizontal: space.xl, marginTop: space.md, minHeight: layout.hit, justifyContent: 'center' },
   previewLine: { ...type.replyMark, color: colors.ink },
   text: { ...type.postText, color: colors.ink, marginTop: CAPTION_GAP },
-  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
+  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: space.md, marginHorizontal: space.xl },
   action: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8 },
   // A split pair is as wide as the combined button (8 + icon + gap + digits +
   // 8), so the bar still fits a 320 pt screen.

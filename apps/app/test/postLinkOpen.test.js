@@ -37,6 +37,8 @@ test('the preview copy says what waits', async (t) => {
   t.is(c.A11Y_REPLY, 'Comentar')
   t.is(c.A11Y_ANSWER, 'Responder')
   t.ok(row.includes("label={shown && model.relation === 'reply' ? A11Y_ANSWER : A11Y_REPLY}"), 'answering a previewed answer is a reply')
+  const target = row.slice(row.indexOf('accessibilityLabel={bodyLabel}'), row.indexOf('accessibilityLabel={A11Y_PROFILE}'))
+  t.ok(target.includes('<View style={styles.main}>') && target.includes('<View style={styles.textBlock}>') && target.includes('numberOfLines={TEXT_LINES}'), 'a screen reader finds the post on its header and on its text')
   t.is(c.A11Y_REPOST, 'Republicar')
   t.is(c.A11Y_LIKE, 'Curtir')
   t.is(c.A11Y_MORE, 'Mais opções')
