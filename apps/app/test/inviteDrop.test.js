@@ -615,7 +615,7 @@ test('shell and note share the push action and gate on hosted capabilities', (t)
   t.ok(launch, 'launch effect found')
   const body = launch[1]
   t.ok(body.includes('if (!launchDue({ kind: intent.kind, atTabs, sheetOpen: ajustes !== null, phoneClear, deleteFromAviso })) return'), 'a convite applies while Ajustes is open (src/launchDue.js)')
-  t.ok(/openInvites, phoneClear, deleteFromAviso\]\)$/.test(launch[0]), 'effect reruns when the phone gate or the explainer delete changes')
+  t.ok(/openInvites, phoneClear, deleteFromAviso(, [^\]]*)?\]\)$/.test(launch[0]), 'effect reruns when the phone gate or the explainer delete changes')
   t.absent(/intent === null \|\| !atTabs/.test(body), 'atTabs alone no longer gates a convite')
   t.ok(body.indexOf("intent.kind === 'convite'") < body.indexOf('intent.recipient !== launchKey'), 'convite before the recipient check')
   t.ok(/\}, \[launchSeq, atTabs, ajustes, launchKey/.test(launch[0]), 'effect reruns when Ajustes opens or closes')

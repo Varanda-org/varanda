@@ -3,6 +3,7 @@
 // Pure Audius music rules (src/music.js) and the decorative strip
 // (src/musicStrip.js). ES module loaded through import().
 const test = require('brittle')
+const { MUSIC_GENRES } = require('@varanda/rpc')
 
 const load = () => import('../src/music.js')
 const loadStrip = () => import('../src/musicStrip.js')
@@ -26,6 +27,14 @@ test('constants', async (t) => {
   t.is(m.MUSIC_LIMIT_TEXT, 'Limite de músicas por hoje')
   t.is(m.MUSIC_NEEDS_TEXT, 'Escreva algo para publicar com a música')
   t.is(m.MUSIC_SEEK_TEXT, 'Não foi possível começar nesse ponto')
+})
+
+test('suggested list strings', async (t) => {
+  const m = await load()
+  t.is(m.MUSIC_SUGGEST_TEXT, 'Em alta no Audius')
+  t.is(m.MUSIC_SUGGEST_EMPTY_TEXT, 'Nenhuma sugestão agora')
+  t.absent(m.MUSIC_SUGGEST_TEXT.includes('\u2014'))
+  t.absent(m.MUSIC_SUGGEST_EMPTY_TEXT.includes('\u2014'))
 })
 
 test('musicRefOf: the three fragments, frozen', async (t) => {
@@ -230,6 +239,45 @@ test('searchBody: { q, kind } or with a canonical cursor', async (t) => {
   ]) t.is(searchBody(q, kind, cursor), null, JSON.stringify([q, kind, cursor]))
 })
 
+test('musicGenreChips: the fixed genres have labels and Todos comes first', async (t) => {
+  const { MUSIC_GENRE_ALL_TEXT, MUSIC_GENRE_LABELS = {}, musicGenreChips } = await load()
+  t.is(MUSIC_GENRE_ALL_TEXT, 'Todos')
+  t.ok(Object.isFrozen(MUSIC_GENRE_LABELS))
+  t.alike(Object.keys(MUSIC_GENRE_LABELS).sort(), [...MUSIC_GENRES].sort())
+  t.is(MUSIC_GENRE_LABELS.Electronic, 'Eletrônica')
+  for (const label of Object.values(MUSIC_GENRE_LABELS)) {
+    t.ok(typeof label === 'string' && label.trim() !== '' && !label.includes('\u2014'), label)
+  }
+  t.alike(musicGenreChips?.(), [
+    { id: '', label: 'Todos' },
+    ...MUSIC_GENRES.map((id) => ({ id, label: MUSIC_GENRE_LABELS[id] }))
+  ])
+  t.alike(musicGenreChips?.(['Drum & Bass', 'Samba', 'Electronic', 'Pop, Rock']), [
+    { id: '', label: 'Todos' },
+    { id: 'Drum & Bass', label: 'Drum & bass' },
+    { id: 'Electronic', label: 'Eletrônica' }
+  ])
+})
+
+test('trendingBody: an optional track genre and an explicit kind for playlists', async (t) => {
+  const { trendingBody } = await load()
+  t.alike(trendingBody(undefined), {})
+  t.alike(trendingBody('track'), {})
+  t.alike(trendingBody('playlist'), { kind: 'playlist' })
+  t.alike(trendingBody(undefined, ''), {})
+  t.alike(trendingBody('track', ''), {})
+  t.alike(trendingBody('playlist', ''), { kind: 'playlist' })
+  t.alike(trendingBody(undefined, 'Drum & Bass'), { genre: 'Drum & Bass' })
+  t.alike(trendingBody('track', 'Hip-Hop/Rap'), { genre: 'Hip-Hop/Rap' })
+  t.is(trendingBody('playlist', 'Pop'), null)
+  t.is(trendingBody('album', 'Pop'), null)
+  for (const genre of ['Samba', 'Pop, Rock', 'rock', ' Rock ', null, 7]) {
+    t.is(trendingBody('track', genre), null, JSON.stringify(genre))
+  }
+  t.is(trendingBody('album'), null)
+  t.is(trendingBody(7), null)
+})
+
 test('parseSearch: the exact shape for each kind, or null', async (t) => {
   const { parseSearch } = await load()
   t.alike(parseSearch({ items: [track], next: '12' }, 'track'), { items: [track], next: '12' })
@@ -395,6 +443,66 @@ test('a track may carry genre and year, each checked; a playlist never does', as
   const card = musicCardFields(info, { kind: 'track', id: info.id, start: null })
   t.alike(Object.keys(card).sort(), ['desc', 'host', 'title', 'url'], 'song info never reaches a card')
   t.is(card.desc, 'Artista')
+})
+
+test('recents strings', async (t) => {
+  const m = await load()
+  t.is(m.MUSIC_RECENTS_TEXT, 'Recentes')
+  t.is(m.MUSIC_RECENTS_CLEAR_TEXT, 'Limpar')
+  t.is(m.MUSIC_RECENTS_CLEAR_LABEL, 'Limpar músicas recentes')
+  t.is(m.MUSIC_RECENTS_CLEAR_FAIL_TEXT, 'Não foi possível limpar agora')
+  for (const text of [m.MUSIC_RECENTS_TEXT, m.MUSIC_RECENTS_CLEAR_TEXT, m.MUSIC_RECENTS_CLEAR_LABEL, m.MUSIC_RECENTS_CLEAR_FAIL_TEXT]) t.absent(text.includes('\u2014'))
+})
+
+test('recentItem: only the kept keys, each checked', async (t) => {
+  const { recentItem } = await load()
+  const info = { ...track, cover: true, genre: 'Pop', year: 2020, start: 30 }
+  t.alike(recentItem('track', info), { id: track.id, title: track.title, artist: track.artist, url: PAGE })
+  t.alike(recentItem('track', track), { id: track.id, title: track.title, artist: track.artist, url: PAGE })
+  t.alike(recentItem('playlist', { ...playlist, cover: false, tracks: [track] }), playlist)
+  t.alike(Object.keys(recentItem('playlist', playlist)), ['id', 'title', 'artist', 'count', 'url'])
+  t.is(recentItem('playlist', track), null, 'a playlist needs a count')
+  for (const kind of ['snippet', 'album', '', null, undefined, 7]) t.is(recentItem(kind, track), null, String(kind))
+  for (const json of [null, undefined, 'x', 7, [track]]) t.is(recentItem('track', json), null, JSON.stringify(json))
+  for (const [item, why] of [
+    [{ ...track, id: 'a-b' }, 'a bad id'],
+    [{ ...track, id: 'a'.repeat(33) }, 'a long id'],
+    [{ ...track, title: ' Faixa' }, 'a title cardText would trim'],
+    [{ ...track, title: 'x'.repeat(81) }, 'a title cardText would cut'],
+    [{ ...track, title: '' }, 'an empty title'],
+    [{ ...track, artist: 'A\u0000B' }, 'a control character'],
+    [{ ...track, url: 'https://evil.example/a/b' }, 'another host'],
+    [{ ...track, url: PAGE + '#varanda-musica=t:T1abc' }, 'a page with a fragment']
+  ]) t.is(recentItem('track', item), null, why)
+  for (const count of [0, 501, 1.5, '12', null]) t.is(recentItem('playlist', { ...playlist, count }), null, 'count ' + count)
+})
+
+test('musicGenreOf: the first listed name of the provider text, or null', async (t) => {
+  const { musicGenreOf } = await load()
+  t.is(musicGenreOf('Techno, Tech House, Melodic'), 'Techno')
+  t.is(musicGenreOf('Samba, Pop'), 'Pop')
+  t.is(musicGenreOf('Hip-Hop/Rap'), 'Hip-Hop/Rap', 'the slash is part of the name')
+  t.is(musicGenreOf('Drum & Bass'), 'Drum & Bass', 'one part')
+  t.is(musicGenreOf('Electronic'), 'Electronic')
+  t.is(musicGenreOf(' Pop ,Rock'), 'Pop', 'each part trimmed')
+  for (const v of ['hip-hop/rap', 'Samba', 'Devotional', 'Pop/Rock', 'Melodic Techno', '', ' ', 7, null, undefined, ['Pop']]) {
+    t.is(musicGenreOf(v), null, JSON.stringify(v))
+  }
+  const cut40 = 'Melodic Techno, Progressive Trance, House'
+  t.is(Array.from(cut40).length, 41)
+  const at40 = cut40.slice(0, 40)
+  t.is(Array.from(at40).length, 40)
+  t.ok(at40.endsWith(', Hous'))
+  const house40 = 'Melodic Techno, Progressive Tranc, House'
+  t.is(Array.from(house40).length, 40)
+  t.is(musicGenreOf(house40), null, 'a last part at the cut is never trusted')
+  const pop39 = 'Pop, Melodic Techno, Progressive, House'
+  t.is(Array.from(pop39).length, 39)
+  t.is(musicGenreOf(pop39), 'Pop', '39 code points loses only its last part')
+  const house38 = 'Melodic Techno, Progressive Tra, House'
+  t.is(Array.from(house38).length, 38)
+  t.is(musicGenreOf(house38), 'House', 'below the cut the last part counts')
+  t.is(musicGenreOf('x'.repeat(41)), null, 'longer than the service ever sends')
 })
 
 test('musicInfoLine: artist, genre and year, only the parts present', async (t) => {
