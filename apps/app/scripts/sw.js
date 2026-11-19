@@ -1,4 +1,4 @@
-/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
+/* global self, caches, fetch, Request, Response, Headers, URL, TextDecoder, TextEncoder, btoa, crypto, clients, MessageChannel, __VARANDA_VERSION__, __VARANDA_PRECACHE__ */
 'use strict'
 
 // Service worker TEMPLATE. scripts/finish-web.js renders it into dist/sw.js
@@ -569,6 +569,64 @@ const DELETE_SCHEDULED_TITLE = 'Pedido de exclusão da sua conta'
 const DELETE_SCHEDULED_TEXT = 'Se não foi você, abra a Varanda e cancele em Ajustes.'
 const HEX64 = /^[0-9a-f]{64}$/
 const REF = /^([0-9a-f]{64}):[1-9][0-9]{0,14}$/
+const CLOSE_MAX = 16
+// A coalesced signal can include every outstanding notice from the service.
+const SEEN_SYNC_MAX = 64
+const TAG = /^varanda-(?:dm|dm-page|group-private|group-[0-9a-f]{64}|follow-[0-9a-f]{64}|(?:reply|quote|mention|like|repost)-[0-9a-f]{64}:[1-9][0-9]{0,14})$/
+const SEEN_SYNC_KEYS = ['v', 'kind', 'close', 'asOf']
+
+// A classic worker cannot import the shared notice-tags helpers.
+function validTag (tag) {
+  if (typeof tag !== 'string' || tag.length > 96) return false
+  const match = TAG.exec(tag)
+  return match !== null && match[0] === tag
+}
+
+async function tagHash (tag) {
+  if (typeof tag !== 'string') throw new TypeError('tag must be a string')
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(tag))
+  const bytes = new Uint8Array(digest).subarray(0, 12)
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_')
+}
+
+function isSeenSync (p) {
+  if (!isPlainObject(p)) return false
+  if (Object.keys(p).length !== SEEN_SYNC_KEYS.length || !SEEN_SYNC_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  return p.v === 1 && p.kind === 'seen-sync' && Number.isInteger(p.asOf) && p.asOf >= 0 &&
+    Array.isArray(p.close) && p.close.length <= SEEN_SYNC_MAX &&
+    Array.from(p.close).every((hash) => typeof hash === 'string' && hash.length === 16 && /^[A-Za-z0-9_-]{16}$/.test(hash))
+}
+
+async function closeNotices (tags) {
+  try {
+    const shown = await self.registration.getNotifications()
+    for (const n of shown) {
+      if (tags.includes(n.tag)) {
+        try { n.close() } catch {}
+      }
+    }
+  } catch {}
+}
+
+async function seenSync (p) {
+  try {
+    const shown = await self.registration.getNotifications()
+    for (const n of shown) {
+      if (!n.data || !Number.isFinite(n.data.g) || n.data.g > p.asOf) continue
+      try {
+        if (p.close.includes(await tagHash(n.tag))) n.close()
+      } catch {}
+    }
+  } catch {}
+  try {
+    const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
+    for (const c of list) {
+      if (isAppWindow(c)) {
+        try { c.postMessage({ type: 'varanda-seen-sync' }) } catch {}
+      }
+    }
+  } catch {}
+}
 
 function isPlainObject (x) {
   return x !== null && typeof x === 'object' && !Array.isArray(x) &&
@@ -661,6 +719,7 @@ function readPush (data) {
   if (!data) return null
   try {
     const p = data.json()
+    if (isPlainObject(p) && p.kind === 'seen-sync') return p
     return validPush(p) || isDmWake(p) || isDmNotice(p) || isGroupNotice(p) || isInviteDrop(p) || isDeleteScheduled(p) ? p : null
   } catch {
     return null
@@ -862,6 +921,11 @@ async function showQuietlyAndClose (body = DM_WAKE_TEXT) {
 
 async function showPush (data) {
   const p = readPush(data)
+  if (p && p.kind === 'seen-sync') {
+    if (isSeenSync(p)) await seenSync(p)
+    await showQuietlyAndClose()
+    return
+  }
   let title = 'Varanda'
   let options = { body: PUSH_FALLBACK, icon: '/icon-192.png', tag: 'varanda-generic', renotify: false, data: {} }
   if (p && isInviteDrop(p)) {
@@ -984,6 +1048,14 @@ self.addEventListener('message', (event) => {
   try {
     const d = event.data
     if (!isPlainObject(d)) return
+    if (d.type === 'varanda-notices-close') {
+      const from = event.source
+      if (Object.keys(d).length !== 2 || !Array.isArray(d.tags) || d.tags.length > CLOSE_MAX || !Array.from(d.tags).every(validTag)) return
+      if (!from || from.type !== 'window' || !isAppWindow(from)) return
+      const done = closeNotices(d.tags)
+      if (typeof event.waitUntil === 'function') event.waitUntil(done)
+      return
+    }
     if (d.type === 'varanda-blocks') {
       const from = event.source
       if (Object.keys(d).length !== 2 || !validBlockKeys(d.keys)) return
@@ -995,7 +1067,7 @@ self.addEventListener('message', (event) => {
     if (Object.keys(d).length !== 1) return
     if (d.type === 'varanda-push-ping') {
       const port = event.ports && event.ports[0]
-      if (port) port.postMessage({ source: 'varanda-sw', push: 1 })
+      if (port) port.postMessage({ source: 'varanda-sw', push: 1, caps: ['seen-sync'] })
       return
     }
     if (d.type !== 'varanda-dm-sent') return

@@ -1717,6 +1717,152 @@ const SEEN_SIG = 'ef'.repeat(64)
 const seenFinish = (a, action, extra = {}) =>
   a.seenFinish({ member: M, nonce: 'n'.repeat(54), action, signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB, ...extra })
 
+async function noticePass (t, sync, notices, { fail = false, duringWrite } = {}) {
+  const { runSeenPass } = await import('../src/seenSync.js')
+  const responses = [{ nonce: 'read' }, { hash: null, blob: null, ...notices }, { nonce: 'write' }]
+  const calls = stub(t, () => {
+    if (responses.length > 0) return json(200, responses.shift())
+    if (duringWrite) duringWrite()
+    if (fail) throw new Error('offline')
+    return json(200, { ok: true, hash: SEEN_HASH })
+  })
+  let merged = false
+  const signed = []
+  const result = await runSeenPass({
+    member: M,
+    http: sync.http(),
+    avisos: { own: [], pages: {} },
+    request: async (method, params) => {
+      if (method === 'seen.sign') {
+        signed.push(params)
+        return { signature: SEEN_SIG, prevHash: SEEN_HASH, blob: SEEN_BLOB }
+      }
+      const pending = !merged
+      merged = true
+      return { pending }
+    }
+  })
+  return { result, signed, bodies: calls.map(({ init }) => JSON.parse(init.body)) }
+}
+
+test('seen notices: the write intersects read tags with this pass outstanding only', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  sync.update({
+    dm: { unread: 0, requests: false },
+    pageDm: { unread: 0, requests: false },
+    groups: [{ group: M, unread: 0 }, { group: SEEN_HASH, unread: 1 }],
+    privateUnread: 0,
+    avisos: [{ key: M, read: true }, { kind: 'like', post: M + ':1', read: false }]
+  })
+  const outstanding = ['varanda-dm', 'varanda-group-' + M, 'varanda-group-' + SEEN_HASH, 'varanda-follow-' + M, 'varanda-like-' + M + ':1']
+  const { result, bodies, signed } = await noticePass(t, sync, { outstanding, asOf: 1234 })
+  t.is(result.error, null)
+  const write = bodies.find((b) => b.action === 'write' && b.blob)
+  t.alike(write.close, ['varanda-dm', 'varanda-follow-' + M, 'varanda-group-' + M])
+  t.is(write.asOf, 1234)
+  t.ok(write.close.every((tag) => outstanding.includes(tag)))
+  t.alike(signed, [{ nonce: 'read', action: 'read' }, { nonce: 'write', action: 'write' }], 'the signed statements stay unchanged')
+  t.ok(bodies.filter((b) => b !== write).every((b) => !Object.hasOwn(b, 'close') && !Object.hasOwn(b, 'asOf')))
+})
+
+test('seen notices: an older service gets neither close nor asOf', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  sync.update({ dm: { unread: 0, requests: false } })
+  const { result, bodies } = await noticePass(t, sync, {})
+  t.is(result.error, null)
+  t.ok(bodies.every((b) => !Object.hasOwn(b, 'close') && !Object.hasOwn(b, 'asOf')))
+})
+
+test('seen notices: close is capped and each pass uses its own read answer', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  const groups = Array.from({ length: 40 }, (_, i) => ({ group: i.toString(16).padStart(64, '0'), unread: 0 }))
+  sync.update({ groups })
+  const outstanding = groups.map(({ group }) => 'varanda-group-' + group)
+  const first = sync.http()
+  const second = sync.http()
+  stub(t, json(200, { hash: null, blob: null, outstanding, asOf: 10 }))
+  await seenFinish(first, 'read')
+  stub(t, json(200, { hash: null, blob: null, outstanding: [], asOf: 20 }))
+  await seenFinish(second, 'read')
+  const calls = stub(t, json(200, { ok: true, hash: SEEN_HASH }))
+  await seenFinish(first, 'write')
+  const body = JSON.parse(calls[0].init.body)
+  t.is(body.close.length, 16)
+  t.ok(body.close.every((tag) => outstanding.includes(tag)))
+  t.is(body.asOf, 10)
+  await seenFinish(second, 'write')
+  t.alike(JSON.parse(calls[1].init.body).close, [])
+  t.is(JSON.parse(calls[1].init.body).asOf, 20)
+})
+
+test('seen notices: only success consumes marks and a later read of the same tag survives', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  const read = { dm: { unread: 0, requests: false } }
+  const unread = { dm: { unread: 1, requests: false } }
+  const notices = { outstanding: ['varanda-dm'], asOf: 10 }
+  sync.update(read)
+  const failed = await noticePass(t, sync, notices, { fail: true })
+  t.ok(failed.result.error.uncertain)
+  t.is(failed.bodies.filter((b) => b.blob).length, 1, 'no resend of the lost write')
+  const retried = await noticePass(t, sync, notices)
+  t.alike(retried.bodies.at(-1).close, ['varanda-dm'])
+  sync.update(read)
+  const unchanged = await noticePass(t, sync, notices)
+  t.alike(unchanged.bodies.at(-1).close, [], 'already written')
+  sync.update(unread)
+  sync.update(read)
+  await noticePass(t, sync, notices, { duringWrite: () => { sync.update(unread); sync.update(read) } })
+  const later = await noticePass(t, sync, notices)
+  t.alike(later.bodies.at(-1).close, ['varanda-dm'], 'a new read during the write is still pending')
+})
+
+test('seen notices: a tag that became unread before write is excluded', async (t) => {
+  const { createSeenNoticeSync } = await load()
+  const sync = createSeenNoticeSync()
+  sync.update({ dm: { unread: 0, requests: false } })
+  const http = sync.http()
+  stub(t, json(200, { hash: null, blob: null, outstanding: ['varanda-dm'], asOf: 10 }))
+  await seenFinish(http, 'read')
+  sync.update({ dm: { unread: 1, requests: false } })
+  const calls = stub(t, json(200, { ok: true, hash: SEEN_HASH }))
+  await seenFinish(http, 'write')
+  t.alike(JSON.parse(calls[0].init.body).close, [])
+})
+
+test('seenFinish: outstanding and asOf are preserved on every read shape and validated', async (t) => {
+  const a = await load()
+  const notices = { outstanding: ['varanda-dm'], asOf: 1234 }
+  for (const shape of [{ hash: null, blob: null }, { hash: SEEN_HASH, blob: SEEN_BLOB }, { hash: SEEN_HASH, blob: null, unchanged: true }]) {
+    stub(t, json(200, { ...shape, ...notices }))
+    const read = await seenFinish(a, 'read')
+    t.alike(read.outstanding, notices.outstanding)
+    t.is(read.asOf, 1234)
+  }
+  for (const bad of [{ outstanding: null }, { outstanding: ['invalid'], asOf: 1 }, { outstanding: Array(65).fill('varanda-dm'), asOf: 1 }, { outstanding: [], asOf: 0.5 }, { outstanding: [] }]) {
+    stub(t, json(200, { hash: null, blob: null, ...bad }))
+    await t.exception(() => seenFinish(a, 'read'), { code: 'indisponivel' })
+  }
+  const outstanding = Array.from({ length: 64 }, (_, i) => 'varanda-mention-' + M + ':' + (100000000000000 + i))
+  const body = { hash: SEEN_HASH, blob: SEEN_BLOB, outstanding, asOf: 1234 }
+  const text = JSON.stringify(body)
+  stub(t, { ok: true, status: 200, headers: { get: () => 'application/json' }, body: new ReadableStream({ start (controller) { controller.enqueue(new TextEncoder().encode(text)); controller.close() } }) })
+  t.alike((await seenFinish(a, 'read')).outstanding, outstanding, 'the encrypted blob and 64 longest tags fit together')
+})
+
+test('pushCheck: caps are forwarded only when reported', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { registered: true }))
+  for (const caps of [undefined, [], ['seen-sync']]) await a.pushCheck({ member: M, ...SUB, caps })
+  const bodies = calls.map(({ init }) => JSON.parse(init.body))
+  t.absent(Object.hasOwn(bodies[0], 'caps'))
+  t.alike(bodies[1].caps, [])
+  t.alike(bodies[2].caps, ['seen-sync'])
+})
+
 test('seenStart: POST with member and action, nonce or a definite refusal', async (t) => {
   const a = await load()
   const calls = stub(t, json(200, { nonce: 'n1' }))

@@ -1,6 +1,8 @@
 'use strict'
 
 const nodeCrypto = require('node:crypto')
+const { CLOSE_MAX, validTag, tagOf, tagHash } = require('@varanda/core/lib/notice-tags')
+const { validCaps } = require('./push-caps-store')
 const { TERMS_VERSION } = require('@varanda/core/lib/terms')
 const { endpointHash, verifyPush } = require('@varanda/core/lib/push-proof')
 const { validatePushCancel, validatePushEvent } = require('@varanda/core/lib/push-events')
@@ -69,7 +71,12 @@ const ACTIONS = ['on', 'off']
 // Every notice is padded to this many plaintext bytes before encryption, so
 // its ciphertext length tells the push service neither the kind nor the
 // length of the actor's name. The account payload JSON is far below it.
-const PUSH_PAD_TO = 1024
+const PUSH_PAD_TO = 2048
+const OUTSTANDING_MAX = 64
+const OUTSTANDING_MS = 24 * 3600 * 1000
+const SEEN_SIGNAL_MS = 20 * 1000
+const SEEN_SIGNAL_MAX = 30
+const SEEN_SIGNAL_DELAY_MAX_MS = 5000
 const INVITE_QUEUE_MAX = Math.floor(MAX_QUEUE / 4)
 // DM notices only enter while the queue is under this many jobs (dmRoom).
 const DM_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
@@ -97,6 +104,9 @@ function createPushRoutes ({
   accounts,
   terms = null,
   pushStore = null,
+  pushCapsStore = null,
+  seenSignal = process.env.VARANDA_SEEN_SIGNAL === '1',
+  seenDelayMs = () => nodeCrypto.randomInt(0, SEEN_SIGNAL_DELAY_MAX_MS + 1),
   vapid = null,
   // { publicKey, secretKey } of ./push-wake-key.js, or null: DM boxes are
   // then dropped and /account/push/key carries no wake key.
@@ -144,7 +154,8 @@ function createPushRoutes ({
     // Per member reached by a DM notice, apart from the social budget.
     dmRecipient: keyedWindow(60, 3600 * 1000, now),
     groupCooldown: keyedWindow(1, GROUP_COOLDOWN_MS, now),
-    groupRecipient: keyedWindow(60, 3600 * 1000, now)
+    groupRecipient: keyedWindow(60, 3600 * 1000, now),
+    seenSignal: keyedWindow(SEEN_SIGNAL_MAX, 3600 * 1000, now)
   }
   const over = () => new RouteError('pedido-invalido', 429)
 
@@ -155,6 +166,8 @@ function createPushRoutes ({
   // relay one record twice (a restart before its cursor was saved).
   const seen = new Set()
   const queue = []
+  const notices = new Map()
+  const signals = new Map()
   // Member notices no device has got yet, oldest first, for cancel: a recall
   // gives their charges back. Gone once a copy reaches a device, once
   // refunded, and past COOLDOWN_MS (a recall then gives nothing back).
@@ -165,6 +178,14 @@ function createPushRoutes ({
   let invitesQueued = 0
   let timer = null
   let closed = false
+  let subscriptionTail = Promise.resolve()
+
+  // Checks and row changes share an order so a late check cannot restore erased caps.
+  function subscriptions (fn) {
+    const work = subscriptionTail.then(fn)
+    subscriptionTail = work.catch(() => {})
+    return work
+  }
 
   // Jobs stay in the queue until their notice's random time (job.at), drawn
   // once per notice so every copy (one per device) leaves together: a push
@@ -173,6 +194,19 @@ function createPushRoutes ({
   // or skips a notice.
   function enqueue (job, at) {
     job.at = at
+    const payload = JSON.parse(job.payload)
+    job.tag = tagOf(payload)
+    job.g = payload.g === undefined ? now() : payload.g
+    if (job.tag !== null) {
+      outstanding(job.recipient)
+      const tags = notices.get(job.recipient) || new Map()
+      tags.delete(job.tag)
+      tags.set(job.tag, now())
+      while (tags.size > OUTSTANDING_MAX) tags.delete(tags.keys().next().value)
+      notices.delete(job.recipient)
+      notices.set(job.recipient, tags)
+      while (notices.size > MAX_SEEN) notices.delete(notices.keys().next().value)
+    }
     queue.push(job)
   }
 
@@ -288,12 +322,17 @@ function createPushRoutes ({
       }
       if (!accepted) throw refuse('termos-pendentes')
       try {
+        if (pushCapsStore !== null && current(member, { endpoint, p256dh, auth }) === null) {
+          await pushCapsStore.remove({ member, hash: endpointHash(endpoint) })
+        }
         result = await pushStore.put({ member, endpoint, p256dh, auth })
+        if (pushCapsStore !== null) await pushCapsStore.prune(pushStore.all())
       } catch (err) {
         throw fromStore(err)
       }
     } else {
       try {
+        if (pushCapsStore !== null) await pushCapsStore.remove({ member, hash: endpointHash(endpoint) })
         result = await pushStore.remove({ member, endpoint })
       } catch (err) {
         throw fromStore(err)
@@ -303,6 +342,7 @@ function createPushRoutes ({
   }
 
   async function check (req, res, body) {
+    if (body.caps !== undefined && !validCaps(body.caps)) throw refuse('pedido-invalido')
     const member = memberParam(body.member)
     const endpoint = endpointParam(body.endpoint)
     const { p256dh, auth } = body
@@ -315,6 +355,9 @@ function createPushRoutes ({
     let registered
     try {
       registered = pushStore.list(member).some((r) => r.endpoint === endpoint && sameKey(r.p256dh, p256dh) && sameKey(r.auth, auth))
+      if (registered && body.caps !== undefined && pushCapsStore !== null) {
+        await pushCapsStore.put({ member, hash: endpointHash(endpoint), caps: body.caps })
+      }
     } catch (err) {
       throw fromStore(err)
     }
@@ -337,7 +380,8 @@ function createPushRoutes ({
     if (req.method === 'POST' && Object.hasOwn(POST, p)) {
       checkPost(req)
       const body = await readJsonBody(req, MAX_BODY)
-      return POST[p](req, res, body)
+      if (p === '/account/push/start') return POST[p](req, res, body)
+      return subscriptions(() => POST[p](req, res, body))
     }
     throw refuse('nao-encontrado')
   }
@@ -477,14 +521,18 @@ function createPushRoutes ({
   // undo loop inside the delay cannot drain a recipient's budget unseen.
   function cancel ({ kind, actor, recipient, ref }) {
     const matches = (n) => n !== undefined && !n.cancelled && n.kind === kind && n.actor === actor && n.recipient === recipient && n.ref === ref
+    recall((job) => matches(job.notice), matches)
+  }
+
+  function recall (matchesJob, matchesPending = () => false) {
     const recalled = new Set()
     for (let i = queue.length - 1; i >= 0; i--) {
-      if (!matches(queue[i].notice)) continue
-      recalled.add(queue[i].notice)
+      if (!matchesJob(queue[i])) continue
+      if (queue[i].notice !== undefined) recalled.add(queue[i].notice)
       queue.splice(i, 1)
     }
     const t = now()
-    for (const n of pending) if (matches(n) && n.charged + COOLDOWN_MS > t) recalled.add(n)
+    for (const n of pending) if (matchesPending(n) && n.charged + COOLDOWN_MS > t) recalled.add(n)
     if (recalled.size === 0) return log({ event: 'push', reason: 'descartado' })
     for (const n of recalled) {
       n.cancelled = true
@@ -500,10 +548,80 @@ function createPushRoutes ({
   function refund (n) {
     if (!n.cancelled || n.reached || n.inFlight > 0 || !pending.has(n)) return
     pending.delete(n)
+    if (n.charges !== undefined) {
+      for (const [window, key] of n.charges) window.release(key, n.charged)
+      n.refunded = true
+      if (n.shared !== undefined && n.shared.notices.every((notice) => notice.refunded)) {
+        limits.dmCooldown.release(n.shared.key, n.shared.charged)
+      }
+      return
+    }
     limits.cooldown.release(n.cooldown, n.charged)
     limits.actor.release(n.actor, n.charged)
     limits.pair.release(n.pairKey, n.charged)
     limits.recipient.release(n.recipient, n.charged)
+  }
+
+  function chargedNotice (charges) {
+    const notice = { charges, charged: now(), inFlight: 0, reached: false, cancelled: false }
+    pending.add(notice)
+    while (pending.size > MAX_SEEN) pending.delete(pending.values().next().value)
+    return notice
+  }
+
+  function outstanding (member) {
+    const tags = notices.get(member)
+    if (tags === undefined) return []
+    const cutoff = now() - OUTSTANDING_MS
+    for (const [tag, at] of tags) if (at <= cutoff) tags.delete(tag)
+    if (tags.size === 0) notices.delete(member)
+    return [...tags.keys()]
+  }
+
+  function capable (member, subscription) {
+    if (pushCapsStore === null) return false
+    try {
+      return pushCapsStore.get(member, endpointHash(subscription.endpoint)).includes('seen-sync')
+    } catch {
+      return false
+    }
+  }
+
+  function seenWritten (member, close, asOf) {
+    if (closed || !Array.isArray(close) || close.length > CLOSE_MAX || !close.every(validTag) ||
+      !Number.isSafeInteger(asOf) || asOf < 0 || asOf > now()) return
+    const known = new Set(outstanding(member))
+    const tags = new Set(close.filter((tag) => known.has(tag)))
+    recall((job) => job.recipient === member && job.g <= asOf && tags.has(job.tag))
+    if (!seenSignal || vapid === null || !storeUsable()) return
+    let signal = signals.get(member)
+    if (signal === undefined) {
+      if (signals.size >= MAX_SEEN) return
+      signal = { hashes: new Set(), asOf, timer: null }
+      signals.set(member, signal)
+    }
+    const hashes = new Set([...known].map(tagHash))
+    for (const hash of signal.hashes) if (!hashes.has(hash)) signal.hashes.delete(hash)
+    for (const tag of tags) signal.hashes.add(tagHash(tag))
+    signal.asOf = Math.max(signal.asOf, asOf)
+    if (signal.timer !== null) clearTimer(signal.timer)
+    signal.timer = setTimer(() => {
+      signals.delete(member)
+      if (closed || !storeUsable()) return
+      try {
+        const subs = pushStore.list(member).filter((sub) => capable(member, sub))
+        if (subs.length === 0 || queue.length + subs.length > MAX_QUEUE || !limits.seenSignal(member)) return
+        const live = new Set(outstanding(member).map(tagHash))
+        const payload = JSON.stringify({ v: 1, kind: 'seen-sync', close: [...signal.hashes].filter((hash) => live.has(hash)), asOf: signal.asOf })
+        const topic = nodeCrypto.randomBytes(16).toString('hex')
+        const at = now() + seenDelayMs()
+        for (const subscription of subs) enqueue({ recipient: member, subscription, payload, topic, signal: true }, at)
+        pump()
+      } catch {
+        log({ event: 'push', reason: 'falhou' })
+      }
+    }, SEEN_SIGNAL_MS)
+    if (signal.timer !== null && typeof signal.timer.unref === 'function') signal.timer.unref()
   }
 
   // --- DM notices -------------------------------------------------------------
@@ -587,6 +705,7 @@ function createPushRoutes ({
     const g = now()
     const payload = JSON.stringify({ v: 1, kind, g })
     let queued = false
+    const shared = { key, charged: g, notices: [] }
     for (const member of members) {
       if (!dmTermsAccepted(member)) {
         log({ event: 'push', kind: 'dm', reason: 'termos-pendentes' })
@@ -617,12 +736,18 @@ function createPushRoutes ({
       // delay shared by a Página's owner and admins would tie their notices
       // together for the push service, as one topic would.
       const at = g + delayMs()
+      const notice = chargedNotice([[limits.dmRecipient, member]])
+      notice.shared = shared
+      shared.notices.push(notice)
       for (const { endpoint, p256dh, auth } of subs) {
-        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, ...(page === null ? {} : { page: key }) }, at)
+        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, notice, ...(page === null ? {} : { page: key }) }, at)
       }
       queued = true
     }
-    if (queued) limits.dmCooldown(key)
+    if (queued) {
+      limits.dmCooldown(key)
+      shared.charged = now()
+    }
     pump()
   }
 
@@ -681,11 +806,12 @@ function createPushRoutes ({
       }
       const topic = nodeCrypto.createHmac('sha256', topicKey).update('group ' + nid + ' ' + g + ' ' + member).digest('hex').slice(0, 32)
       const at = g + delayMs()
-      for (const { endpoint, p256dh, auth } of subs) {
-        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic }, at)
-      }
       // A notice that reaches nobody must leave the next message's window open.
       limits.groupCooldown(cooldown)
+      const notice = chargedNotice([[limits.groupRecipient, member], [limits.groupCooldown, cooldown]])
+      for (const { endpoint, p256dh, auth } of subs) {
+        enqueue({ recipient: member, subscription: { endpoint, p256dh, auth }, payload, topic, notice }, at)
+      }
     }
     pump()
   }
@@ -791,6 +917,9 @@ function createPushRoutes ({
   async function close () {
     if (closed) return
     closed = true
+    for (const signal of signals.values()) if (signal.timer !== null) clearTimer(signal.timer)
+    signals.clear()
+    notices.clear()
     if (timer !== null) clearTimer(timer)
     timer = null
     const jobs = queue.splice(0)
@@ -822,9 +951,9 @@ function createPushRoutes ({
     }
   }
 
-  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline, notice, page }) {
+  async function deliverOne ({ recipient, subscription: queued, payload, topic, deadline, notice, page, signal }) {
     const subscription = current(recipient, queued)
-    if (subscription === null) {
+    if (subscription === null || (signal === true && !capable(recipient, subscription))) {
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
@@ -864,7 +993,11 @@ function createPushRoutes ({
       // the request was out is a live subscription.
       if (current(recipient, subscription) === null) return log({ event: 'push', reason: 'descartado' })
       try {
-        await pushStore.remove({ member: recipient, endpoint: subscription.endpoint })
+        await subscriptions(async () => {
+          if (current(recipient, subscription) === null) return
+          if (pushCapsStore !== null) await pushCapsStore.remove({ member: recipient, hash: endpointHash(subscription.endpoint) })
+          await pushStore.remove({ member: recipient, endpoint: subscription.endpoint })
+        })
         return log({ event: 'push', reason: 'removido' })
       } catch {}
     }
@@ -876,7 +1009,7 @@ function createPushRoutes ({
     return { nonces: nonces.size, seen: seen.size, queued: queue.length, inFlight, dropped }
   }
 
-  return { owns, handle, handleRelay, stats, notifyInvite, notifyDeletion, room, close }
+  return { owns, handle, handleRelay, stats, notifyInvite, notifyDeletion, outstanding, seenWritten, room, close }
 }
 
 module.exports = {
@@ -887,6 +1020,11 @@ module.exports = {
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,
+  OUTSTANDING_MAX,
+  OUTSTANDING_MS,
+  SEEN_SIGNAL_MS,
+  SEEN_SIGNAL_MAX,
+  SEEN_SIGNAL_DELAY_MAX_MS,
   PUSH_DELAY_MAX_MS,
   pushDelay,
   INVITE_QUEUE_MAX,

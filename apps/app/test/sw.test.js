@@ -179,7 +179,7 @@ function loadWorker (code, server, opts = {}) {
       },
       getNotifications: async (filter) => w.shown
         .filter((n) => !w.closed.has(n) && !n.dropped && (!filter || !filter.tag || n.options.tag === filter.tag))
-        .map((n) => ({ close: () => { if (n.posted) w.closed.add(n); else n.dropped = true } }))
+        .map((n) => ({ tag: n.options.tag, data: n.options.data, close: () => { if (n.posted) w.closed.add(n); else n.dropped = true } }))
     }
   }
   const clients = {
@@ -189,7 +189,8 @@ function loadWorker (code, server, opts = {}) {
     },
     openWindow: async (url) => { w.opened.push(url) }
   }
-  vm.runInNewContext(code, { self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
+  w.context = vm.createContext({ self, caches, clients, fetch, Request, Response, Headers, URL, TextDecoder, TextEncoder, btoa, crypto: globalThis.crypto, Date: WorkerDate, MessageChannel, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
+  vm.runInContext(code, w.context)
   return w
 }
 
@@ -1343,7 +1344,7 @@ test('message: the push ping is answered on its port, anything else ignored', (t
   }
   const ping = port()
   w.handlers.message({ data: { type: 'varanda-push-ping' }, ports: [ping] })
-  t.alike(plain(ping.sent), [{ source: 'varanda-sw', push: 1 }])
+  t.alike(plain(ping.sent), [{ source: 'varanda-sw', push: 1, caps: ['seen-sync'] }])
 
   for (const data of [null, 'varanda-push-ping', { type: 'other' }, { type: 'varanda-push-ping', x: 1 }, ['varanda-push-ping']]) {
     const p = port()
@@ -1354,6 +1355,202 @@ test('message: the push ping is answered on its port, anything else ignored', (t
   t.execution(() => w.handlers.message({ data: { type: 'varanda-push-ping' } }))
   t.execution(() => w.handlers.message({}))
   t.execution(() => w.handlers.message(null))
+})
+
+const NOTICE_TAG_VECTORS = JSON.parse(fs.readFileSync(path.join(__dirname, 'notice-tag-vectors.json'), 'utf8'))
+const seenSignal = (over = {}) => ({ v: 1, kind: 'seen-sync', close: [NOTICE_TAG_VECTORS.hashes[0].hash], asOf: 100, ...over })
+
+function shownNotice (w, tag, data) {
+  const n = { options: { tag, data }, posted: true }
+  w.shown.push(n)
+  return n
+}
+
+test('notice tags: the worker mirrors every shared vector', async (t) => {
+  const w = renderedWorker()
+  const mirrored = vm.runInContext('typeof validTag === "function" && typeof tagHash === "function"', w.context)
+  t.ok(mirrored, 'the worker has both mirrors')
+  if (!mirrored) return
+  const { validTag, tagHash, CLOSE_MAX } = vm.runInContext('({ validTag, tagHash, CLOSE_MAX })', w.context)
+  t.is(CLOSE_MAX, 16)
+  for (const tag of NOTICE_TAG_VECTORS.valid) t.ok(validTag(tag), 'accepts a valid vector')
+  for (const tag of NOTICE_TAG_VECTORS.invalid) t.not(validTag(tag), 'rejects an invalid vector')
+  for (const { tag, hash } of NOTICE_TAG_VECTORS.hashes) {
+    t.ok(await tagHash(tag) === hash, 'matches the shared hash')
+  }
+  for (const { payload, tag } of NOTICE_TAG_VECTORS.payloads) {
+    const shown = await push(w, pushData(payload))
+    const actual = validTag(shown.options.tag) ? shown.options.tag : null
+    t.ok(actual === tag, 'matches the shared payload tag')
+  }
+})
+
+test('seen sync: only listed notices at or before asOf close', async (t) => {
+  const w = renderedWorker()
+  const [old] = await noticeShown(w, { v: 1, kind: 'dm', g: 99 })
+  const [equal] = await noticeShown(w, { v: 1, kind: 'dm', g: 100 })
+  const [newer] = await noticeShown(w, { v: 1, kind: 'dm', g: 101 })
+  const [unlisted] = await noticeShown(w, { v: 1, kind: 'dm-page', g: 99 })
+  const missing = shownNotice(w, 'varanda-dm')
+  const invalidTimes = [undefined, null, '99', true, NaN, Infinity, -Infinity].map((g) => shownNotice(w, 'varanda-dm', { g }))
+  await startPush(w, pushData(seenSignal()))
+  t.ok(w.closed.has(old), 'older notice closed')
+  t.ok(w.closed.has(equal), 'equal timestamp closed')
+  t.not(w.closed.has(newer), 'newer notice kept')
+  t.not(w.closed.has(unlisted), 'unlisted notice kept')
+  t.not(w.closed.has(missing), 'missing data kept')
+  t.ok(invalidTimes.every((n) => !w.closed.has(n)), 'nonnumeric and missing times kept')
+  t.is(openNotices(w).length, 10, 'only the unread and undated notices remain')
+  const quietNotice = w.shown[w.shown.length - 1]
+  t.ok(quietNotice.options.silent, 'the WebKit notice is silent')
+  t.is(quietNotice.options.renotify, false)
+  t.ok(w.closed.has(quietNotice), 'the quiet notice leaves the tray')
+})
+
+test('seen sync: every app window wakes, including hidden and uncontrolled windows', async (t) => {
+  const w = renderedWorker()
+  const broken = fakeWindow(ORIGIN + '/')
+  broken.postMessage = () => { throw new Error('closed') }
+  const hidden = fakeWindow(ORIGIN + '/conversas')
+  const focused = activeWindow(ORIGIN + '/')
+  const others = ['https://other.test/', ORIGIN + '/account/mod/', ORIGIN + '/seeder/', ORIGIN + '/media/photo', ORIGIN + '/p/post'].map(fakeWindow)
+  w.windows = [broken, hidden, ...others, focused]
+  await startPush(w, pushData(seenSignal()))
+  for (const app of [hidden, focused]) t.alike(plain(app.messages), [{ type: 'varanda-seen-sync' }])
+  t.ok(others.every((c) => c.messages.length === 0), 'non-app windows receive nothing')
+  t.alike(w.matchAllOpts && plain(w.matchAllOpts), { type: 'window', includeUncontrolled: true })
+  t.is(openNotices(w).length, 0, 'no quiet notice remains')
+})
+
+test('seen sync: malformed payloads close no notices and wake no windows', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  w.windows = [app]
+  const notice = shownNotice(w, 'varanda-dm', { g: 1 })
+  const hash = NOTICE_TAG_VECTORS.hashes[0].hash
+  const bad = [
+    ...[undefined, null, 0, 2, '1'].map((v) => seenSignal({ v })),
+    ...[undefined, null, -1, 0.5, '100', NaN, Infinity].map((asOf) => seenSignal({ asOf })),
+    ...[undefined, null, hash, {}, [null], [1], [hash.slice(1)], [hash + 'a'], [hash + '\n'], ['='.repeat(16)], ['+'.repeat(16)], ['/'.repeat(16)], [hash, 'bad'], Array(65).fill(hash), Array(1)].map((close) => seenSignal({ close })),
+    seenSignal({ extra: true }),
+    seenSignal({ pad: '' })
+  ]
+  for (const key of ['v', 'close', 'asOf']) {
+    const payload = seenSignal()
+    delete payload[key]
+    bad.push(payload)
+  }
+  for (const payload of bad) {
+    await startPush(w, pushData(payload))
+    t.not(w.closed.has(notice), 'invalid payload leaves the existing notice open')
+    t.is(openNotices(w).length, 1, 'invalid signal leaves no quiet notice')
+    t.is(app.messages.length, 0, 'invalid payload does not wake the app')
+  }
+})
+
+test('seen sync: empty lists, zero time and sixteen hashes are accepted', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  w.windows = [app]
+  const notice = shownNotice(w, 'varanda-dm', { g: 0 })
+  await startPush(w, pushData(seenSignal({ close: [], asOf: 0 })))
+  t.not(w.closed.has(notice), 'empty list preserves notices')
+  t.is(app.messages.length, 1, 'empty list still wakes the scheduler')
+  const vectors = NOTICE_TAG_VECTORS.hashes.filter(({ tag }) => NOTICE_TAG_VECTORS.valid.includes(tag))
+  const notices = vectors.map(({ tag }) => shownNotice(w, tag, { g: 0 }))
+  const hashes = vectors.map(({ hash }) => hash)
+  while (hashes.length < 16) hashes.push(hashes[0])
+  await startPush(w, pushData({ asOf: 0, close: hashes, kind: 'seen-sync', v: 1 }))
+  t.ok(w.closed.has(notice), 'zero is an accepted timestamp')
+  t.ok(notices.every((n) => w.closed.has(n)), 'all listed tag kinds close')
+  t.is(app.messages.length, 2, 'key order does not matter')
+  t.is(openNotices(w).length, 0)
+})
+
+for (const count of [17, 64, 65]) {
+  test('seen sync: a coalesced signal with ' + count + ' hashes respects the push limit', async (t) => {
+    const w = renderedWorker()
+    const tags = Array.from({ length: count }, (_, i) => 'varanda-like-' + ACTOR + ':' + (i + 1))
+    const notices = tags.map((tag) => shownNotice(w, tag, { g: 100 }))
+    const unlisted = shownNotice(w, 'varanda-dm', { g: 100 })
+    const close = tags.map((tag) => crypto.createHash('sha256').update(tag).digest().subarray(0, 12).toString('base64url'))
+    await startPush(w, pushData(seenSignal({ close })))
+    t.is(notices.filter((n) => w.closed.has(n)).length, count <= 64 ? count : 0, 'only accepted signals close listed notices')
+    t.not(w.closed.has(unlisted), 'unlisted notice stays open')
+  })
+}
+
+test('seen sync: Android waits for its quiet notice to be posted before closing it', async (t) => {
+  const clock = fakeTimers()
+  const w = renderedWorker({ navigator: { userAgent: ANDROID_UA }, timers: clock })
+  w.postDelayMs = 500
+  const done = startPush(w, pushData(seenSignal()))
+  await settle(() => w.shown.length === 1)
+  t.is(w.shown.length, 1, 'WebKit requires a shown notice')
+  t.ok(w.shown[0].options.silent)
+  clock.advance(1999)
+  await settle(() => false, 5)
+  t.is(openNotices(w).length, 1, 'the close waits for posting')
+  clock.advance(1)
+  await done
+  t.is(openNotices(w).length, 0, 'the quiet notice leaves the tray')
+  t.ok(w.closed.has(w.shown[0]), 'the system kept the close')
+})
+
+test('notices close: an app window closes exact tags without a timestamp cutoff', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  const tags = NOTICE_TAG_VECTORS.valid
+  const notices = tags.map((tag) => shownNotice(w, tag, {}))
+  const duplicate = shownNotice(w, tags[0], { g: 101 })
+  const other = shownNotice(w, tags[0] + '-extra', { g: 1 })
+  await message(w, { type: 'varanda-notices-close', tags: [] }, app)
+  t.is(w.closed.size, 0, 'empty list closes nothing')
+  await message(w, { type: 'varanda-notices-close', tags: [tags[0]] }, app)
+  t.ok(w.closed.has(notices[0]), 'an undated notice closes')
+  t.ok(w.closed.has(duplicate), 'all notices with the exact tag close')
+  t.ok(notices.slice(1).every((n) => !w.closed.has(n)), 'unlisted tags stay')
+  const full = tags.slice()
+  while (full.length < 16) full.push(tags[0])
+  await message(w, { type: 'varanda-notices-close', tags: full }, app)
+  t.ok(notices.every((n) => w.closed.has(n)), 'sixteen tags are accepted')
+  t.not(w.closed.has(other), 'a prefix match never closes')
+  t.is(w.shown.length, notices.length + 2, 'window messages show no notice')
+})
+
+test('notices close: a window message with seventeen tags closes nothing', async (t) => {
+  const w = renderedWorker()
+  const tags = Array.from({ length: 17 }, (_, i) => 'varanda-like-' + ACTOR + ':' + (i + 1))
+  const notices = tags.map((tag) => shownNotice(w, tag, { g: 100 }))
+  await message(w, { type: 'varanda-notices-close', tags }, fakeWindow(ORIGIN + '/'))
+  t.ok(notices.every((n) => !w.closed.has(n)), 'the window limit stays at sixteen tags')
+})
+
+test('notices close: invalid tags, shapes and non-app sources close nothing', async (t) => {
+  const w = renderedWorker()
+  const app = fakeWindow(ORIGIN + '/')
+  const tag = NOTICE_TAG_VECTORS.valid[0]
+  const notice = shownNotice(w, tag, { g: 1 })
+  const good = { type: 'varanda-notices-close', tags: [tag] }
+  const bad = [
+    ...NOTICE_TAG_VECTORS.invalid.map((invalid) => ({ ...good, tags: [tag, invalid] })),
+    ...[undefined, null, tag, {}, Array(17).fill(tag), [tag].concat(Array(1))].map((tags) => ({ ...good, tags })),
+    { type: good.type },
+    { ...good, extra: true },
+    [good],
+    null
+  ]
+  for (const data of bad) {
+    await message(w, data, app)
+    t.not(w.closed.has(notice), 'invalid message closes nothing')
+  }
+  const sources = [null, {}, { ...app, type: 'worker' }, fakeWindow('https://other.test/'), fakeWindow(ORIGIN + '/account/mod/'), fakeWindow('invalid')]
+  for (const source of sources) {
+    await message(w, good, source)
+    t.not(w.closed.has(notice), 'only an app window may close notices')
+  }
+  await message(w, good, app)
+  t.ok(w.closed.has(notice), 'a valid message still closes the notice')
 })
 
 test('push: a DM wake shows the fixed sentence naming nobody; anything more is the fallback', async (t) => {
