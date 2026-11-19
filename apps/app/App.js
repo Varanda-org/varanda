@@ -2771,7 +2771,7 @@ function Member () {
     if (seenMember === null) return
     const member = seenMember
     const appearance = seenAppearanceRef.current
-    const run = async () => {
+    const run = async (reason) => {
       const sent = cleanAvisos(withOnceTokens(avisosSeenRef.current, onceRegistry.unsynced(member)))
       const http = noticeReads.current.http(seenRequestRef.current)
       const result = await runSeenPass({
@@ -2798,7 +2798,8 @@ function Member () {
       if (result.testimonialsChanged) testimonialsChanged()
       if (result.momentsChanged) refreshMomentSeen().catch(() => {})
       if (result.groupChanged) bumpSeen()
-      if (!result.error) closeReadNotices()
+      // Remote closes already check notice age; cached reads can hide newer notices.
+      if (!result.error && reason !== 'remote') closeReadNotices()
       return result
     }
     const scheduler = createSeenScheduler({

@@ -46,6 +46,7 @@ const WEB_CREDENTIALS_PLIST = '<key>VarandaWebCredentials</key><true/>'
 // (standard algorithms, not distributed in France): without it every build
 // waits on "Missing Compliance". docs/development.md has the conditions.
 const EXPORT_COMPLIANCE_PLIST = '<key>ITSAppUsesNonExemptEncryption</key><false/>'
+const BACKGROUND_MODES_PLIST = '<key>UIBackgroundModes</key><array><string>processing</string><string>remote-notification</string></array>'
 // The App Privacy answers for App Store Connect, confirmed on 2026-11-08
 // (NSPrivacyCollectedDataTypePhoneNumber added with the mobile check; the
 // store forms are updated by hand). The form, app.json and the manifest
@@ -77,7 +78,8 @@ function entitlements (xml) {
   return {
     keys: [...body.matchAll(/<key>([^<]*)<\/key>/g)].map((m) => m[1]).sort(),
     domains: strings(ASSOCIATED_DOMAINS_KEY),
-    groups: strings(APP_GROUPS_KEY)
+    groups: strings(APP_GROUPS_KEY),
+    apsEnvironment: body.match(/<key>aps-environment<\/key><string>([^<]*)<\/string>/)?.[1] ?? null
   }
 }
 
@@ -185,7 +187,7 @@ test('the plugin restores the microphone and the camera removal', (t) => {
 test('the iOS entitlement, the passkey flag and the deploy name the same app and host', (t) => {
   const app = JSON.parse(read('app.json')).expo
   const committed = entitlements(read(ENTITLEMENTS))
-  t.alike(committed.keys, [ASSOCIATED_DOMAINS_KEY, APP_GROUPS_KEY], 'only Associated Domains and App Groups for EAS to sync')
+  t.alike(committed.keys, ['aps-environment', ASSOCIATED_DOMAINS_KEY, APP_GROUPS_KEY], 'only push, Associated Domains and App Groups for EAS to sync')
   t.alike(committed.domains, ['webcredentials:bora.varanda.app', 'applinks:bora.varanda.app'], ENTITLEMENTS)
   t.alike(app.ios.associatedDomains, committed.domains, 'app.json repeats the entitlement for prebuild')
   t.ok(compact(read(INFO_PLIST)).includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
@@ -217,7 +219,7 @@ test('the iOS minimum is 18.0 everywhere it is set', (t) => {
   t.is(JSON.parse(read(PODFILE_PROPERTIES))['ios.deploymentTarget'], IOS_MINIMUM, PODFILE_PROPERTIES)
   t.ok(read('ios/Podfile').includes("podfile_properties['ios.deploymentTarget'] || '" + IOS_MINIMUM + "'"), 'the Podfile fallback')
   t.alike(read(PBXPROJ).match(/IPHONEOS_DEPLOYMENT_TARGET = [^;]*;/g), Array(6).fill(DEPLOYMENT_TARGET_LINE), 'project, app and share extension, Debug and Release')
-  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec', 'modules/video-prep/ios/VideoPrep.podspec', 'modules/image-prep/ios/ImagePrep.podspec']) {
+  for (const file of ['modules/passkey-prf/ios/PasskeyPrf.podspec', 'modules/auth-session/ios/AuthSession.podspec', 'modules/share-intake/ios/ShareIntake.podspec', 'modules/video-prep/ios/VideoPrep.podspec', 'modules/image-prep/ios/ImagePrep.podspec', 'modules/push-device/ios/PushDevice.podspec']) {
     t.ok(read(file).includes(":ios => '" + IOS_MINIMUM + "'"), file + ' can drop its availability checks')
   }
 })
@@ -421,7 +423,7 @@ test('the app, the share extension and the share module use one app group', (t) 
   t.alike(app.groups, [APP_GROUP], ENTITLEMENTS)
   t.alike(share.keys, [APP_GROUPS_KEY], SHARE_ENTITLEMENTS + ' has the app group only')
   t.alike(share.groups, [APP_GROUP], SHARE_ENTITLEMENTS)
-  t.alike(JSON.parse(read('app.json')).expo.ios.entitlements, { [APP_GROUPS_KEY]: [APP_GROUP] }, 'app.json repeats it for prebuild')
+  t.alike(JSON.parse(read('app.json')).expo.ios.entitlements, { 'aps-environment': 'development', [APP_GROUPS_KEY]: [APP_GROUP] }, 'app.json repeats it for prebuild')
   t.ok(read(SHARE_INTAKE_SWIFT).includes('static let appGroup = "' + APP_GROUP + '"'), SHARE_INTAKE_SWIFT + ' reads that group')
   t.ok(read(SHARE_CONTROLLER).includes('static let appGroup = "' + APP_GROUP + '"'), SHARE_CONTROLLER + ' writes that group')
   for (const file of [SHARE_INTAKE_SWIFT, SHARE_CONTROLLER]) {
@@ -641,6 +643,257 @@ test('a release build cannot turn on the perf marks or their request hook', asyn
   t.ok(read('src/node.js').includes("perfEnabled({ EXPO_PUBLIC_VARANDA_PERF: process.env.EXPO_PUBLIC_VARANDA_PERF }, typeof __DEV__ !== 'undefined' && __DEV__)"), 'node.js passes __DEV__')
 })
 
+test('push device uses autolinking and keeps native registration private', (t) => {
+  const config = JSON.parse(read('modules/push-device/expo-module.config.json'))
+  t.alike(config.platforms, ['apple', 'android'])
+  t.alike(config.apple.modules, ['PushDeviceModule'])
+  t.alike(config.apple.appDelegateSubscribers, ['PushDeviceAppDelegate'])
+  t.alike(config.android.modules, ['app.varanda.pushdevice.PushDeviceModule'])
+  t.absent(read(APP_DELEGATE).includes('PushDevice'), 'the app delegate stays independent of the module')
+  t.is(entitlements(read(ENTITLEMENTS)).apsEnvironment, 'development')
+  t.is(JSON.parse(read('app.json')).expo.ios.entitlements['aps-environment'], 'development')
+  const delegate = read('modules/push-device/ios/PushDeviceAppDelegate.swift')
+  const module = read('modules/push-device/ios/PushDeviceModule.swift')
+  t.ok(delegate.includes('ExpoAppDelegateSubscriber, UNUserNotificationCenterDelegate'))
+  t.ok(delegate.includes('completionHandler([])'), 'foreground notifications have no presentation')
+  t.ok(module.includes('requestAuthorization(options: [.alert, .sound])'), 'no badge permission')
+  t.absent(/applicationIconBadgeNumber|setBadgeCount/.test(delegate + module), 'never sets a badge')
+  for (const file of ['index.js', 'ios/PushDeviceModule.swift', 'ios/PushDeviceAppDelegate.swift']) {
+    t.absent(/\b(?:console|print|debugPrint|NSLog|os_log|Logger|logger)\b/.test(read('modules/push-device/' + file)), file + ' never logs')
+  }
+})
+
+test('iOS declares silent remote notifications and keeps background processing', (t) => {
+  t.alike(JSON.parse(read('app.json')).expo.ios.infoPlist.UIBackgroundModes, ['processing', 'remote-notification'])
+  t.ok(compact(read(INFO_PLIST)).includes(BACKGROUND_MODES_PLIST))
+})
+
+test('iOS seen-sync validates tags and numeric safe times and preserves unknown or newer notices', (t) => {
+  const source = read('modules/push-device/ios/PushDeviceModule.swift')
+  t.ok(source.includes('let tags = value as? [String], (1...64).contains(tags.count)'))
+  t.ok(source.includes('tag.utf8.count == 16 && tag.utf8.allSatisfy'))
+  t.ok(source.includes('(65...90).contains($0) || (97...122).contains($0) ||'))
+  t.ok(source.includes('(48...57).contains($0) || $0 == 45 || $0 == 95'))
+  t.ok(source.includes('let number = value as? NSNumber'))
+  t.ok(source.includes('CFGetTypeID(number) != CFBooleanGetTypeID()'))
+  t.ok(source.includes('time.isFinite, time >= 0, time <= 9_007_199_254_740_991'))
+  t.ok(source.includes('time.rounded(.down) == time'))
+  t.ok(source.includes('center.getDeliveredNotifications { notifications in'))
+  t.ok(source.includes('let info = notification.request.content.userInfo'))
+  t.ok(source.includes('guard let tag = info["t"] as? String, tags.contains(tag) else { return nil }'))
+  t.ok(/if let asOf = asOf \{\s*guard let g = safeInteger\(info\["g"\]\), g <= asOf else \{ return nil \}/.test(source))
+  t.ok(source.includes('return notification.request.identifier'))
+  t.ok(/center.removeDeliveredNotifications\(withIdentifiers: identifiers\)\s*completion\(\)/.test(source))
+  t.ok(source.includes('asOf: Double? = nil'))
+  t.ok(/AsyncFunction\("clearDelivered"\) \{ \(tags: \[String\], promise: Promise\) in\s*guard let tags = PushDeviceState.validTags\(tags\) else \{\s*promise.resolve\(nil\)\s*return\s*\}\s*PushDeviceState.clearDelivered\(tags\) \{ promise.resolve\(nil\) \}/.test(source), 'open validates and clears without a cutoff')
+})
+
+test('iOS completes remote notification handling on every path and wakes only observing JS', (t) => {
+  const delegate = read('modules/push-device/ios/PushDeviceAppDelegate.swift')
+  const source = read('modules/push-device/ios/PushDeviceModule.swift')
+  t.ok(/didReceiveRemoteNotification userInfo: \[AnyHashable: Any\],\s*fetchCompletionHandler completionHandler: @escaping \(UIBackgroundFetchResult\) -> Void\s*\) \{\s*PushDeviceState.seenSync\(userInfo, completion: completionHandler\)\s*\}/.test(delegate))
+  t.ok(/if info\["k"\] as\? String == "seen-sync" \{\s*PushDeviceState.seenSync\(info\) \{ _ in completionHandler\(\[\]\) \}\s*\} else \{\s*completionHandler\(\[\]\)\s*\}/.test(delegate), 'foreground completes with no presentation')
+  t.ok(/guard info\["k"\] as\? String == "seen-sync",\s*let tags = validTags\(info\["c"\]\), let asOf = safeInteger\(info\["a"\]\) else \{\s*completion\(\.noData\)\s*return\s*\}/.test(source), 'unrelated and invalid payloads complete immediately')
+  t.ok(/clearDelivered\(tags, asOf: asOf\) \{\s*DispatchQueue.main.async \{\s*if shared.observingSync \{ shared.module\?\.sendEvent\("onSync"\) \}\s*completion\(\.newData\)/.test(source), 'valid payloads complete after removal even without JS')
+  t.ok(source.includes('Events("onToken", "onIntent", "onSync")'))
+  t.ok(source.includes('private var observingSync = false'))
+  t.ok(source.includes('if self.module === module { observingSync = observing }'))
+  t.ok(/func attach\(_ module: PushDeviceModule\) \{[\s\S]*?observingSync = false/.test(source))
+  t.ok(/func detach\(_ module: PushDeviceModule\) \{\s*stopObserving\(module\)\s*observeSync\(module, false\)/.test(source))
+  for (const [hook, value] of [['OnStartObserving', true], ['OnStopObserving', false]]) {
+    t.ok(source.includes(hook + '("onSync") { [weak self] in\n      DispatchQueue.main.async { [weak self] in\n        guard let self = self else { return }\n        PushDeviceState.shared.observeSync(self, ' + value + ')'))
+  }
+})
+
+test('iOS keeps the latest tap pending until it is read or observed', (t) => {
+  const source = read('modules/push-device/ios/PushDeviceModule.swift')
+  t.ok(source.includes('private var pendingIntent: String?'))
+  t.ok(source.includes('private var observingIntents = false'))
+  for (const [hook, method] of [['OnStartObserving', 'startObserving'], ['OnStopObserving', 'stopObserving']]) {
+    t.ok(source.includes(hook + '("onIntent") { [weak self] in\n      DispatchQueue.main.async { [weak self] in\n        guard let self = self else { return }\n        PushDeviceState.shared.' + method + '(self)'), hook + ' handles only intent observers on the main queue')
+  }
+  t.ok(/func startObserving\(_ module: PushDeviceModule\)\s*\{\s*guard self.module === module else \{ return \}\s*observingIntents = true\s*if let kind = launchIntent\(\) \{ module.sendEvent\("onIntent", \["kind": kind\]\) \}/.test(source), 'observation consumes the pending slot before emitting')
+  t.ok(/func stopObserving\(_ module: PushDeviceModule\)\s*\{\s*if self.module === module \{ observingIntents = false \}/.test(source))
+  t.ok(/func detach\(_ module: PushDeviceModule\)\s*\{\s*stopObserving\(module\)/.test(source), 'destroyed modules stop observation')
+  t.ok(/if observingIntents, let module = module \{\s*module.sendEvent\("onIntent", \["kind": kind\]\)\s*\} else \{\s*pendingIntent = kind\s*\}/.test(source), 'a tap is either emitted or retained, never both')
+  t.ok(/func launchIntent\(\) -> String\?\s*\{\s*defer \{ pendingIntent = nil \}\s*return pendingIntent/.test(source), 'reading clears the pending slot')
+  t.absent(source.includes('launchIntentRead'), 'reading once does not disable buffering')
+})
+
+function pushDevice (native, platform = 'ios') {
+  const source = read('modules/push-device/index.js')
+  const names = [...source.matchAll(/export (?:async )?function (\w+)/g)].map(match => match[1])
+  const load = new Function('require', source.replace(/export /g, '') + '\nreturn { ' + names.join(', ') + ' }') // eslint-disable-line no-new-func
+  return load((name) => {
+    if (name === 'react-native') return { Platform: { OS: platform } }
+    if (name !== 'expo-modules-core') throw new Error('unexpected dependency')
+    return {
+      requireNativeModule (name) {
+        if (name !== 'PushDevice' || native === null) throw new Error('unavailable')
+        return native
+      }
+    }
+  })
+}
+
+test('push device imports in Node and answers unavailable without native code', async (t) => {
+  const imported = await import('../modules/push-device/index.js')
+  for (const api of [imported, pushDevice(null)]) {
+    t.is(api.isAvailable(), false)
+    t.is(api.transport(), null)
+    t.is(await api.permission(), 'undetermined')
+    t.is(await api.request(), 'undetermined')
+    t.is(await api.token(), null)
+    t.is(await api.launchIntent(), null)
+    t.is(api.onToken(() => t.fail('unexpected token'))(), undefined)
+    t.is(api.onIntent(() => t.fail('unexpected intent'))(), undefined)
+    t.is(await api.clearDelivered(['a'.repeat(16)]), undefined)
+    t.is(api.onSync(() => t.fail('unexpected sync'))(), undefined)
+  }
+})
+
+test('push device clears only valid bounded native tags and resolves failures', async (t) => {
+  const calls = []
+  const api = pushDevice({ clearDelivered: async tags => { calls.push(tags) } })
+  const tag = 'abCD09_-'.repeat(2)
+  for (const tags of [null, undefined, {}, tag, [], Array(1), Array(65).fill(tag), [null], [1], ['a'.repeat(15)], ['a'.repeat(17)], [tag + '\n'], ['!'.repeat(16)], [tag, 'invalid']]) {
+    t.is(await api.clearDelivered(tags), undefined)
+  }
+  t.is(calls.length, 0)
+  for (const tags of [[tag], Array(64).fill(tag)]) {
+    t.is(await api.clearDelivered(tags), undefined)
+    t.alike(calls.at(-1), tags)
+  }
+  t.is(calls.length, 2)
+  t.is(await pushDevice({}).clearDelivered([tag]), undefined)
+  t.is(await pushDevice({ clearDelivered () { throw new Error('gone') } }).clearDelivered([tag]), undefined)
+  t.is(await pushDevice({ clearDelivered: async () => { throw new Error('gone') } }).clearDelivered([tag]), undefined)
+})
+
+test('push device onSync has no payload and cleanup is idempotent and harmless', (t) => {
+  let receive
+  let removed = 0
+  const api = pushDevice({
+    addListener: (event, listener) => {
+      t.is(event, 'onSync')
+      receive = listener
+      return { remove: () => { removed++ } }
+    }
+  })
+  const calls = []
+  const stop = api.onSync((...args) => calls.push(args))
+  receive()
+  receive({ ignored: true })
+  t.alike(calls, [[], []])
+  stop()
+  stop()
+  t.is(removed, 1)
+  t.is(api.onSync(null)(), undefined)
+  t.is(pushDevice({ addListener () { throw new Error('gone') } }).onSync(() => {})(), undefined)
+  t.is(pushDevice({ addListener: () => ({ remove () { throw new Error('gone') } }) }).onSync(() => {})(), undefined)
+})
+
+test('push device validates permission answers and handles native failures', async (t) => {
+  let answer
+  const read = async () => {
+    if (answer instanceof Error) throw answer
+    return answer
+  }
+  const api = pushDevice({ permission: read, request: read, token: read, launchIntent: read })
+  for (answer of ['granted', 'denied', 'undetermined', null, 'other', new Error('native failure')]) {
+    const expected = answer === 'granted' || answer === 'denied' ? answer : 'undetermined'
+    t.is(await api.permission(), expected)
+    t.is(await api.request(), expected)
+  }
+  t.is(await api.token(), null)
+  t.is(await api.launchIntent(), null)
+  const broken = pushDevice({ addListener () { throw new Error('native failure') } })
+  t.is(broken.onToken(() => {})(), undefined)
+  t.is(broken.onIntent(() => {})(), undefined)
+})
+
+test('push device validates token results and rotations with the account limits', async (t) => {
+  for (const platform of ['ios', 'android']) {
+    let answer
+    let emit
+    let removed = 0
+    const native = {
+      configured: () => true,
+      token: async () => answer,
+      addListener (name, listener) {
+        t.is(name, 'onToken')
+        emit = listener
+        return { remove () { removed++ } }
+      }
+    }
+    const api = pushDevice(native, platform)
+    t.is(api.isAvailable(), true)
+    t.is(api.transport(), platform === 'ios' ? 'apns' : 'fcm')
+    const received = []
+    const stop = api.onToken(value => received.push(value))
+    const valid = platform === 'ios' ? ['a'.repeat(64), '0'.repeat(200)] : ['a', 'Az09_:-'.repeat(585).slice(0, 4096)]
+    const invalid = platform === 'ios'
+      ? ['a'.repeat(63), 'a'.repeat(201), 'A'.repeat(64), 'g'.repeat(64), 'a'.repeat(64) + '\n']
+      : ['a'.repeat(4097), 'a.b', 'a/b', 'a b', 'a\n', 'á']
+    for (answer of [...valid, ...invalid, '', null, 42, {}]) {
+      const expected = valid.includes(answer) ? answer : null
+      t.is(await api.token(), expected)
+      emit({ token: answer })
+    }
+    emit(null)
+    t.alike(received, valid)
+    stop()
+    stop()
+    t.is(removed, 1, 'unsubscribe is idempotent')
+    if (platform === 'android') {
+      for (const configured of [false, 'true', new Error('no config')]) {
+        native.configured = () => {
+          if (configured instanceof Error) throw configured
+          return configured
+        }
+        native.token = () => t.fail('must not register without config')
+        t.is(api.transport(), null)
+        t.is(await api.token(), null)
+        emit({ token: 'valid-but-unconfigured' })
+      }
+      t.alike(received, valid)
+    }
+  }
+})
+
+test('push device validates tap intents and consumes the native pending intent once', async (t) => {
+  let pending = 'dm'
+  let emit
+  let removed = 0
+  const api = pushDevice({
+    async launchIntent () {
+      const result = pending
+      pending = null
+      return result
+    },
+    addListener (name, listener) {
+      t.is(name, 'onIntent')
+      emit = listener
+      return { remove () { removed++; throw new Error('already gone') } }
+    }
+  })
+  t.is(await api.launchIntent(), 'dm')
+  t.is(await api.launchIntent(), null)
+  const received = []
+  const stop = api.onIntent(kind => received.push(kind))
+  const valid = ['dm', 'dm-page', 'group', 'group-private']
+  for (const kind of [...valid, 'other', 'dm\n', '', null, {}, 42]) {
+    pending = kind
+    t.is(await api.launchIntent(), valid.includes(kind) ? kind : null)
+    emit({ kind })
+  }
+  emit(null)
+  t.alike(received, valid)
+  stop()
+  stop()
+  t.is(removed, 1)
+})
+
 test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.timeout(120000)
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'varanda-prebuild-'))
@@ -663,6 +916,8 @@ test('prebuild --clean plus the plugin reproduces the committed files', (t) => {
   t.ok(plist.includes(MIC_PLIST), INFO_PLIST + ' declares the microphone')
   t.ok(plist.includes(WEB_CREDENTIALS_PLIST), INFO_PLIST + ' turns the passkey modules on')
   t.ok(plist.includes(EXPORT_COMPLIANCE_PLIST), INFO_PLIST + ' declares the export compliance answer')
+  // expo-task-manager's plugin appends fetch, which the committed file leaves out.
+  t.ok(plist.includes(BACKGROUND_MODES_PLIST.replace('</array>', '')), INFO_PLIST + ' keeps processing and remote notifications')
   const generatedEntitlements = entitlements(fs.readFileSync(path.join(dir, ENTITLEMENTS), 'utf8'))
   t.alike(generatedEntitlements, entitlements(read(ENTITLEMENTS)), ENTITLEMENTS)
   t.alike(generatedEntitlements.groups, [APP_GROUP], ENTITLEMENTS + ' carries the app group from app.json')

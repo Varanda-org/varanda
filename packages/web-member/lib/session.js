@@ -355,6 +355,7 @@ const { strictVerifyInviteCard } = require('./invite-card')
 const { signAge } = require('@varanda/core/lib/age')
 const { signPhone } = require('@varanda/core/lib/phone')
 const { signPush, endpointHash } = require('@varanda/core/lib/push-proof')
+const { pushDevicePayload, tokenHash } = require('@varanda/core/lib/push-device-proof')
 const { signPeerProof } = require('@varanda/core/lib/peer-proof')
 const { verifyUsernameRecord } = require('@varanda/core/lib/cert')
 const { verifyAgeVerified, verifyAgeSince } = require('@varanda/core/lib/age-proof')
@@ -4707,6 +4708,27 @@ function createBrowserSession ({
         throw err
       }
       return { signature }
+    }),
+
+    'pushDevice.sign': serial(async ({ nonce, action, transport, token, key }) => {
+      let own
+      if (ownKey !== null) own = ownKey
+      else if (diaryInfo !== null) own = diaryInfo.publicKey
+      else {
+        own = await requireOwnKey()
+        restartWhenIdle(1)
+      }
+      if (keyPair === null) throw new UsageError(store.LOCKED)
+      if (b4a.toString(keyPair.publicKey, 'hex') !== own) throw new Error(store.MISMATCH)
+      let payload
+      try {
+        payload = pushDevicePayload({ nonce, member: own, association: cfg.association, action, transport, tokenHash: tokenHash(transport, token), key })
+      } catch (err) {
+        if (err instanceof TypeError) throw new UsageError(BAD_PUSH)
+        throw err
+      }
+      if (payload === null) throw new UsageError(BAD_PUSH)
+      return { signature: b4a.toString(crypto.sign(payload, keyPair.secretKey), 'hex') }
     }),
 
     // The seen statement and the seen document (docs/rpc.md 5.95, 5.96):
