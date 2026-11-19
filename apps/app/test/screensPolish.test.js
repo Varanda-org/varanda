@@ -76,12 +76,22 @@ test('incomplete counts keep their explanation in a shared info button', async (
 
 test('shell toast has a 44 point action and extends action lifetime for large text', (t) => {
   const src = fs.readFileSync(path.join(__dirname, '../App.js'), 'utf8')
-  const toastStyle = section(src, '  toast: {', '  toastLabel:')
-  t.ok(toastStyle.includes('borderRadius: 24') && toastStyle.includes('minHeight: 36') && toastStyle.includes('paddingLeft: 16') && toastStyle.includes('paddingRight: 12') && !toastStyle.includes('paddingHorizontal') && !toastStyle.includes('borderWidth') && !toastStyle.includes('borderColor') && toastStyle.includes('backgroundColor: colors.toastBg'), 'the shell toast uses a 24 pt radius, a 36 pt height and 16 and 12 pt side padding')
-  t.ok(/toastAction: \{[^\n]*minHeight: 44[^\n]*minWidth: 44/.test(src), 'both touch dimensions on the visible action')
-  const action = section(src, 'accessibilityLabel={toast.actionLabel}', '<Text style={styles.toastActionText}>')
-  t.absent(action.includes('hitSlop={8}'), 'the shell action has its own target')
-  t.ok(action.includes('style={styles.toastAction}'), 'the shell uses the enlarged target')
+  const toast = read('ui/Toast.js')
+  const toastStyle = section(toast, '  toast: {', '  label:')
+  t.ok(toastStyle.includes('borderRadius: radius.bubble') && toastStyle.includes('minHeight: 36') &&
+    toastStyle.includes('paddingLeft: space.lg') && toastStyle.includes('paddingRight: space.md') && !toastStyle.includes('paddingHorizontal') &&
+    toastStyle.includes('backgroundColor: colors.toastBg') && toastStyle.includes('borderWidth: 1') && toastStyle.includes('borderColor: colors.line'),
+  'the shared toast uses a 24 pt radius, a 36 pt height, 16 and 12 pt side padding and a 1 pt border')
+  const actionStyle = section(toast, '  action: {', '  actionText:')
+  t.ok(actionStyle.includes('minWidth: layout.hit') && actionStyle.includes('minHeight: layout.hit') && /\bhit: 44\b/.test(read('ui/theme.js')), 'both touch dimensions on the visible action')
+  const action = section(toast, '<Pressable', '</Pressable>')
+  t.absent(action.includes('hitSlop'), 'the shared action has its own target')
+  const shellToast = section(src, '<Toast', '/>')
+  const socialToast = section(read('screens/ARua.js'), 'export function SocialToast', 'const pageIncomplete')
+  t.ok(action.includes('accessibilityLabel={actionLabel} onPress={onAction} style={styles.action}') &&
+    shellToast.includes('text={toast.text}') && shellToast.includes('actionLabel={toast.actionLabel}') && shellToast.includes('toast.onAction()') &&
+    socialToast.includes('const handleAction = t.onAction') && socialToast.includes('<Toast text={t.text} actionLabel={t.actionLabel} onAction={handleAction} />'),
+  'both toasts use the shared action target')
   t.ok(src.includes('const { width, fontScale } = useWindowDimensions()'), 'the shell observes text settings')
   t.ok(src.includes('import { LARGE_TEXT, layout, space, type }'), 'the shell shares the theme threshold')
   const constants = section(src, 'const TOAST_MS', '// The native splash')

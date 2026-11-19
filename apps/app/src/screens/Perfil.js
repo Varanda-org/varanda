@@ -33,6 +33,7 @@ import { Btn, ConfirmStack, ErrorText, Field, Label, Page, Row, SectionHeader, S
 import { refusalOf } from '../wordCheck'
 import { Avatar, primeAvatar } from '../ui/Avatar'
 import { AvatarEditor } from '../ui/AvatarEditor'
+import { Divider } from '../ui/Divider'
 import { Icon } from '../ui/Icon'
 import { KeyboardLift } from '../ui/KeyboardLift'
 import { Pill } from '../ui/Pill'
@@ -185,27 +186,30 @@ function ProfileVersions ({ node, ownKey, shown }) {
       <SectionHeader flush>Versões do perfil</SectionHeader>
       {done ? <Soft>versão apagada</Soft> : null}
       {versions.map((v, i) => (
-        <View key={v.seq} style={[styles.version, i > 0 && styles.versionRule]}>
-          <View style={styles.versionRow}>
-            <View style={styles.versionText}>
-              <Text style={styles.versionName}>{displayText(v.name)}</Text>
-              <Soft>{(i === 0 ? 'atual · ' : '') + (relativeTime(v.at) ?? displayText(String(v.at))) + (v.avatar ? ' · com foto' : '')}</Soft>
+        <View key={v.seq}>
+          {i > 0 ? <Divider /> : null}
+          <View style={styles.version}>
+            <View style={styles.versionRow}>
+              <View style={styles.versionText}>
+                <Text style={styles.versionName}>{displayText(v.name)}</Text>
+                <Soft>{(i === 0 ? 'atual · ' : '') + (relativeTime(v.at) ?? displayText(String(v.at))) + (v.avatar ? ' · com foto' : '')}</Soft>
+              </View>
+              {confirm === v.seq
+                ? null
+                : <Pill icon='lixeira' danger tonal accessibilityLabel='Apagar versão' onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
             </View>
             {confirm === v.seq
-              ? null
-              : <Pill icon='lixeira' danger tonal accessibilityLabel='Apagar versão' onPress={() => { action.clearError(); setDone(false); setConfirm(v.seq) }} disabled={action.pending} />}
+              ? (
+                <View style={styles.versionConfirm}>
+                  <Soft>Apagar esta versão do perfil? Ela some do seu diário e dos feeds de quem te segue. A cópia da foto enviada continua na rede.</Soft>
+                  <ConfirmStack
+                    confirm={<Btn label='Apagar versão' danger onPress={() => remove(v)} pending={action.pending} />}
+                    cancel={<Btn label='Cancelar' secondary onPress={() => { action.clearError(); setConfirm(null) }} disabled={action.pending} />}
+                  />
+                </View>
+                )
+              : null}
           </View>
-          {confirm === v.seq
-            ? (
-              <View style={styles.versionConfirm}>
-                <Soft>Apagar esta versão do perfil? Ela some do seu diário e dos feeds de quem te segue. A cópia da foto enviada continua na rede.</Soft>
-                <ConfirmStack
-                  confirm={<Btn label='Apagar versão' danger onPress={() => remove(v)} pending={action.pending} />}
-                  cancel={<Btn label='Cancelar' secondary onPress={() => { action.clearError(); setConfirm(null) }} disabled={action.pending} />}
-                />
-              </View>
-              )
-            : null}
         </View>
       ))}
       {partial ? <Soft>Mostrando só as versões mais recentes.</Soft> : null}
@@ -900,9 +904,7 @@ const makeStyles = (colors) => StyleSheet.create({
   moodOff: { opacity: 0.5 },
   moodEmoji: { fontSize: 22, lineHeight: 28 },
   versions: { gap: 8, marginTop: 8 },
-  // The header draws the rule above the first version.
   version: { gap: 4, paddingVertical: 8 },
-  versionRule: { borderTopWidth: 1, borderTopColor: colors.line },
   // The trash icon sits beside the version, so a red full-width button does not compete with Salvar.
   versionRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   versionText: { flex: 1, gap: 4 },

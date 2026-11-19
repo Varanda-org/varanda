@@ -75,6 +75,7 @@ import { Btn, ConfirmStack, ErrorText, Notice, Soft, errorText, useAction, useNo
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { Avatar } from '../ui/Avatar'
 import { Bubble } from '../ui/Bubble'
+import { Divider } from '../ui/Divider'
 import { ChatSheetProvider } from '../ui/ChatSheetHost'
 import { SwipeReply } from '../ui/SwipeReply'
 import { JumpToEnd } from '../ui/JumpToEnd'
@@ -2152,9 +2153,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
           {row.key === openKey
             ? (
               <View style={styles.newMark} pointerEvents='none' accessible accessibilityLabel='Mensagens novas a partir daqui'>
-                <View style={styles.newLine} />
-                <Text style={styles.newText}>Mensagens novas</Text>
-                <View style={styles.newLine} />
+                <Divider label='Mensagens novas' />
               </View>
               )
             : null}
@@ -2387,9 +2386,7 @@ function GrupoScreen ({ group, onBack, onOpenCommunity, onOpenMember, onMessage,
 
 const makeStyles = (colors) => StyleSheet.create({
   quoteFlash: { backgroundColor: colors.line },
-  newMark: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
-  newLine: { flex: 1, height: 1, backgroundColor: colors.line },
-  newText: { color: colors.soft, fontSize: 13 },
+  newMark: { paddingHorizontal: space.lg, paddingVertical: space.sm },
   quoteToast: { padding: 12, borderRadius: 12, marginHorizontal: 16, backgroundColor: colors.ink },
   quoteToastText: { color: colors.bg, textAlign: 'center' },
   root: { flex: 1, backgroundColor: colors.bg },

@@ -65,7 +65,14 @@ test('the viewer: text through displayText, reply through canReply and openMessa
   t.ok(src.includes('holdMsOf(item, musicStarted)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
   t.ok(src.includes('segmentMs(item, photo.ms)') && src.includes('progressOf(') && src.includes('ringOrder('), 'pure module helpers used')
   t.ok(src.includes('mark(itemKey)'), 'each viewed item marked seen')
-  t.ok(src.includes("backgroundColor: '#000000'"), 'black background')
+  t.ok(
+    src.includes('root: { flex: 1, backgroundColor: colors.mediaBg }') &&
+    src.includes('stage: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.mediaBg }') &&
+    src.includes("segments: { flexDirection: 'row', gap: 4 }") &&
+    src.includes("segment: { flex: 1, height: 2, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.4)', overflow: 'hidden' }") &&
+    src.includes('segmentFill: { height: 2, backgroundColor: colors.onMedia }'),
+    'media background and 2 pt segments with a translucent track'
+  )
 })
 
 test('auto-advance respects reduced motion and pauses', (t) => {
@@ -1283,6 +1290,7 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
     interpolate () { return this.value }
   }
   const elements = ['ActivityIndicator', 'Image', 'Pressable', 'ScrollView', 'Text', 'View', 'ActionsSheet', 'Avatar', 'Icon', 'Pill', 'Scrim', 'IconAction', 'MomentMusic', 'Soft', 'VideoPlayer', 'HelpButton']
+  const colors = { onMedia: '#ffffff', mediaBg: '#000000' }
   const deps = {
     ...moments,
     ...seen,
@@ -1326,14 +1334,15 @@ async function viewerHost ({ music = true, tracks = null, medias = null, policy 
     momentDeleteAs: () => null,
     actAs: async () => { throw new Error('the person deletes with moment.delete') },
     memberKeyOf: async () => A,
-    useStyles: (make) => make({}),
-    useTheme: () => ({ colors: {} }),
+    useStyles: (make) => make(colors),
+    useTheme: () => ({ colors }),
     useNames: () => null,
     useSafeAreaInsets: () => ({ top: 0, bottom: 0 }),
     useWindowDimensions: () => ({ height: 800, width: 400, fontScale: 1 }),
     type: { postText: { lineHeight: 21 } },
     layout: { hit: 44 },
-    space: { xs: 4, sm: 8 },
+    space: { xs: 4, sm: 8, xl: 24 },
+    radius: { pill: 999 },
     StyleSheet: { create: (styles) => styles, absoluteFillObject: {} },
     useNow: () => Date.now(),
     mocked: { data, seenState, env },

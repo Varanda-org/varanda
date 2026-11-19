@@ -129,7 +129,7 @@ test('skeletons share one pulse, and profile and media shapes are exported', (t)
   t.ok(states.includes('const reduceMotion = useReduceMotion()'), 'reduced motion comes from the shared hook')
   t.ok(states.includes('const Block = reduce ? View : Animated.View'), 'reduced motion draws a static block')
   t.ok(states.includes('skBand: { height: PROFILE_BAND, backgroundColor: colors.skeleton }'), 'the profile band uses the skeleton token')
-  t.ok(states.includes('skProfileAvatar: { width: layout.hit * 2, height: layout.hit * 2, borderRadius: layout.hit, backgroundColor: colors.skeleton }'), 'the profile avatar uses the skeleton token')
+  t.ok(states.includes('skProfileAvatar: { width: space.xxl * 2, height: space.xxl * 2, borderRadius: space.xxl, backgroundColor: colors.skeleton }'), 'the profile avatar uses the skeleton token')
   t.ok(states.includes('skMedia: { width: \'100%\', aspectRatio: 4 / 3, borderRadius: 14, backgroundColor: colors.skeleton }'), 'the media block uses the skeleton token')
   t.is((states.match(/new Animated\.Value\(/g) || []).length, 2, 'the shared pulse and the new-items pill')
   t.is((states.match(/Animated\.loop\(/g) || []).length, 1, 'one loop in the file')
@@ -189,7 +189,7 @@ test('welcome building blocks', (t) => {
   for (const forbidden of ['setTimeout', 'numberOfLines', 'ActionsSheet', 'Promise']) {
     t.absent(options.includes(forbidden), 'options have no ' + forbidden)
   }
-  t.ok(options.includes('minHeight: layout.hit + space.sm'), 'large option targets')
+  t.ok(options.includes('<ListRow icon={icon} label={label} onPress={onPress} disabled={disabled} pending={pending} first={first} />'), 'options use ListRow with a direct tap callback')
   t.ok(options.includes('onPress={onPress}'), 'tap callback passed directly')
 })
 

@@ -61,3 +61,23 @@ export function openedNext (opened, sheet) {
   if (typeof sheet !== 'string' || (opened && opened[sheet] === true)) return opened
   return { ...opened, [sheet]: true }
 }
+
+// The date never shrinks and the @nome stops at 32 pt, so on a narrow row
+// they can run under the head targets: at 320 pt, "· 31 dez 2025" beside
+// "seguir" and ⋯ overlapped "seguir", and a tap on the date followed. Such a
+// head stacks as at large text. Half an em a character is wider than the meta
+// size's digits, letters and spaces on average, so a doubtful row stacks
+// rather than overflows.
+const CHAR_EM = 0.5
+const NAME_GAP = 6
+const HANDLE_MIN = 32
+
+export function headStacks ({ room, reserve, handle, time, fontSize, fontScale }) {
+  if (!(room > 0)) return false
+  const scale = Number.isFinite(fontScale) && fontScale > 0 ? fontScale : 1
+  // Beside a handle the time follows a no-break space, a dot and a space;
+  // without one, a dot and a space.
+  const chars = String(time ?? '').length + (handle ? 3 : 2)
+  const date = chars * fontSize * scale * CHAR_EM
+  return room - reserve < NAME_GAP + (handle ? HANDLE_MIN : 0) + date
+}

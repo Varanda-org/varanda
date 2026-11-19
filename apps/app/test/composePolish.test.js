@@ -70,7 +70,7 @@ test('settings notes have titles and version details are separate accessible ite
     t.ok(notes.includes('<FlushSectionHeader>' + title + '</FlushSectionHeader>'), title + ' belongs to the appearance group')
   }
   t.ok(src.includes('caption={PREVIEW_PREF_NOTE}'), 'the switch note is the caption of its own row')
-  t.ok(/<\/View>\s*<\/View>\s*$/.test(notes) && src.includes('advanced: { marginTop: space.lg }'), 'notes close inside their group and advanced has normal spacing')
+  t.ok(/<\/View>\s*<\/ListGroup>\s*$/.test(notes) && src.includes('advanced: { marginTop: space.lg }'), 'notes close inside their group and advanced has normal spacing')
   const footer = src.slice(src.indexOf('<View style={styles.version}'), src.indexOf('</Page>'))
   t.is((footer.match(/aria-live=/g) || []).length, 1, 'one web live region for the footer')
   t.absent(footer.includes('accessibilityLiveRegion='), 'no per-line native live region')
@@ -89,6 +89,13 @@ test('settings notes have titles and version details are separate accessible ite
     }
   }
   t.ok(src.includes('[lines.appLine, lines.serverLine, versionNote].filter(Boolean).map(') && src.includes('accessibilityLabel={line}') && src.includes('onPress={copyVersion}'), 'each version line retains its copy action')
+})
+
+test('settings rows announce the value on their right', (t) => {
+  const src = read('screens/Ajustes.js')
+  const item = src.slice(src.indexOf('function Item ('), src.indexOf('function AccountCard'))
+  t.ok(item.includes('<ListRow') && item.includes('trailingText={trailingText}') && item.includes('caption={caption}'), 'the row gets the value and the caption')
+  t.absent(item.includes('accessibilityLabel='), 'ListRow builds the name from label, caption and value')
 })
 
 test('settings account card opens Editar perfil and falls back to the plain row', (t) => {
@@ -151,7 +158,7 @@ test('long moment captions expand, pause and resume without changing navigation'
   t.ok(step.includes('setCaptionExpanded(false)') && !step.includes('setHeld(false)'), 'stepping clears the caption pause without clearing a held press')
   t.ok(src.includes('captionExpanded ? captionExpandedHeight : captionCollapsedHeight'), 'expanded clip uses the available room')
   t.ok(/if \(!captionExpanded\) \{\s*captionOffsetRef.current = 0\s*if \(captionScrollRef.current\) captionScrollRef.current.scrollTo\(\{ y: 0, animated: false \}\)/.test(src), 'collapse resets the pull guard without waiting for a scroll event')
-  t.ok(src.includes("text: { ...type.postText, color: '#ffffff', ...TEXT_SHADOW }") && !src.includes('includeFontPadding: false'), 'caption preserves the viewer text style')
+  t.ok(src.includes('text: { ...type.postText, color: colors.onMedia, ...TEXT_SHADOW }') && !src.includes('includeFontPadding: false'), 'caption preserves the viewer text style')
   t.ok(src.includes('scrollEnabled={captionScrolls}') && src.includes('style={[styles.caption, { maxHeight: captionMax }]}'), 'the caption keeps its capped scroll container')
   t.ok((src.match(/<ActivityIndicator color=\{colors.ink\}/g) || []).length === 2, 'both loading states use the viewer theme')
 })

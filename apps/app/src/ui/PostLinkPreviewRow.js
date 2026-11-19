@@ -21,7 +21,7 @@ import {
 import { whoOf } from '../who'
 import { Avatar } from './Avatar'
 import { Icon } from './Icon'
-import { layout, radius, type } from './theme'
+import { layout, radius, space, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 const ICON = 20
@@ -45,94 +45,98 @@ export function PostLinkPreviewRow ({ model, origin, post, onAsk, skeleton, hidd
   const bodyLabel = [A11Y_OPEN, title, handle, date, relation, text].filter(Boolean).join('. ')
   return (
     <Pressable accessible={false} focusable={false} tabIndex={-1} onPress={ask} style={styles.row}>
-      <View style={styles.main}>
-        <Pressable
-          accessibilityRole='button'
-          accessibilityLabel={A11Y_PROFILE}
-          onPress={ask}
-          {...off}
-          style={({ pressed }) => [styles.avatarHit, pressed && styles.pressed]}
-        >
-          {shown
-            ? <Avatar name={who.avatarName} size={AVATAR} />
-            : <View style={styles.skAvatar} />}
-        </Pressable>
-        <View style={styles.body}>
-          <Pressable
-            accessibilityRole='button'
-            accessibilityLabel={bodyLabel}
-            onPress={ask}
-            {...off}
-            style={({ pressed }) => pressed && styles.pressed}
-          >
-            <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-              {shown
-                ? (
-                  <View style={styles.head}>
-                    <Text style={styles.name} numberOfLines={1}>{title}</Text>
-                    {handle ? <Text style={styles.handle} numberOfLines={1}>{handle}</Text> : null}
-                    {date ? <Text style={styles.time} numberOfLines={1}>{(handle ? ' · ' : '· ') + date}</Text> : null}
-                  </View>
-                  )
-                : (
-                  <View style={styles.skHead}>
-                    <View style={[styles.skBar, styles.skName]} />
-                    <View style={[styles.skBar, styles.skHandle]} />
-                  </View>
-                  )}
-              {relation ? <Text style={styles.relation} numberOfLines={1}>{relation}</Text> : null}
-              {shown
-                ? (text ? <Text style={styles.text} numberOfLines={TEXT_LINES}>{text}</Text> : null)
-                : (
-                  <View style={styles.skLines}>
-                    <View style={[styles.skBar, { width: '92%' }]} />
-                    <View style={[styles.skBar, { width: '84%' }]} />
-                    <View style={[styles.skBar, { width: '56%' }]} />
-                  </View>
-                  )}
-            </View>
-          </Pressable>
-          {shown
-            ? (model.photoCount > 0 ? <PhotoGrid count={model.photoCount} video={model.video} origin={origin} post={post} onAsk={ask} off={off} /> : null)
-            : <Pressable onPress={ask} accessible={false} focusable={false} tabIndex={-1} style={styles.skMedia} />}
-          {more ? <Line label={more} onAsk={ask} off={off} /> : null}
-          {shown && model.video ? <Line label={VIDEO_LINE} onAsk={ask} off={off} /> : null}
-          {card !== null
-            ? (
-              <Pressable
-                accessibilityRole='button'
-                accessibilityLabel={A11Y_CARD + '. ' + card.title + '. ' + card.host}
-                onPress={ask}
-                {...off}
-                style={({ pressed }) => [styles.card, pressed && styles.pressed]}
-              >
-                <View style={styles.cardBody} accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
-                  <Text style={styles.cardTitle} numberOfLines={2}>{card.title}</Text>
-                  <View style={styles.cardHostRow}>
-                    <Icon name='link' size={14} color={colors.soft} />
-                    <Text style={styles.cardHost} numberOfLines={1}>{card.host}</Text>
-                  </View>
+      {/* The header and the text are one target, so a screen reader finds the
+          post wherever it touches it. The avatar sits on top of it. */}
+      <Pressable
+        accessibilityRole='button'
+        accessibilityLabel={bodyLabel}
+        onPress={ask}
+        {...off}
+        style={({ pressed }) => pressed && styles.pressed}
+      >
+        <View accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+          <View style={styles.main}>
+            {shown
+              ? (
+                <View style={styles.head}>
+                  <Text style={styles.name} numberOfLines={1}>{title}</Text>
+                  {handle ? <Text style={styles.handle} numberOfLines={1}>{handle}</Text> : null}
+                  {date ? <Text style={styles.time} numberOfLines={1}>{(handle ? ' · ' : '· ') + date}</Text> : null}
                 </View>
-              </Pressable>
-              )
-            : null}
-          <View style={styles.headActions}>
-            <Action label={A11Y_MORE} onPress={ask} off={off}>
-              <Icon name='mais' size={ICON} color={colors.soft} />
-            </Action>
+                )
+              : (
+                <View style={styles.skHead}>
+                  <View style={[styles.skBar, styles.skName]} />
+                  <View style={[styles.skBar, styles.skHandle]} />
+                </View>
+                )}
           </View>
-          <View style={styles.bar}>
-            <Action label={shown && model.relation === 'reply' ? A11Y_ANSWER : A11Y_REPLY} onPress={ask} off={off}>
-              <Icon name='resposta' size={ICON} color={colors.soft} />
-            </Action>
-            <Action label={A11Y_REPOST} onPress={ask} off={off}>
-              <Icon name='republicar' size={ICON} color={colors.soft} />
-            </Action>
-            <Action label={A11Y_LIKE} onPress={ask} off={off}>
-              <Icon name='coracao' size={ICON} color={colors.soft} />
-            </Action>
+          <View style={styles.textBlock}>
+            {relation ? <Text style={styles.relation} numberOfLines={1}>{relation}</Text> : null}
+            {shown
+              ? (text ? <Text style={styles.text} numberOfLines={TEXT_LINES}>{text}</Text> : null)
+              : (
+                <View style={styles.skLines}>
+                  <View style={[styles.skBar, { width: '92%' }]} />
+                  <View style={[styles.skBar, { width: '84%' }]} />
+                  <View style={[styles.skBar, { width: '56%' }]} />
+                </View>
+                )}
           </View>
         </View>
+      </Pressable>
+      <Pressable
+        accessibilityRole='button'
+        accessibilityLabel={A11Y_PROFILE}
+        onPress={ask}
+        {...off}
+        style={({ pressed }) => [styles.avatarHit, pressed && styles.pressed]}
+      >
+        {shown
+          ? <Avatar name={who.avatarName} size={AVATAR} />
+          : <View style={styles.skAvatar} />}
+      </Pressable>
+      <View style={styles.body}>
+        {shown
+          ? (model.photoCount > 0 ? <PhotoGrid count={model.photoCount} video={model.video} origin={origin} post={post} onAsk={ask} off={off} /> : null)
+          : <Pressable onPress={ask} accessible={false} focusable={false} tabIndex={-1} style={styles.skMedia} />}
+        {more ? <Line label={more} onAsk={ask} off={off} /> : null}
+        {shown && model.video ? <Line label={VIDEO_LINE} onAsk={ask} off={off} /> : null}
+        {card !== null
+          ? (
+            <Pressable
+              accessibilityRole='button'
+              accessibilityLabel={A11Y_CARD + '. ' + card.title + '. ' + card.host}
+              onPress={ask}
+              {...off}
+              style={({ pressed }) => [styles.card, pressed && styles.pressed]}
+            >
+              <View style={styles.cardBody} accessibilityElementsHidden importantForAccessibility='no-hide-descendants'>
+                <Text style={styles.cardTitle} numberOfLines={2}>{card.title}</Text>
+                <View style={styles.cardHostRow}>
+                  <Icon name='link' size={14} color={colors.soft} />
+                  <Text style={styles.cardHost} numberOfLines={1}>{card.host}</Text>
+                </View>
+              </View>
+            </Pressable>
+            )
+          : null}
+      </View>
+      <View style={styles.headActions}>
+        <Action label={A11Y_MORE} onPress={ask} off={off}>
+          <Icon name='mais' size={ICON} color={colors.soft} />
+        </Action>
+      </View>
+      <View style={styles.bar}>
+        <Action label={shown && model.relation === 'reply' ? A11Y_ANSWER : A11Y_REPLY} onPress={ask} off={off}>
+          <Icon name='resposta' size={ICON} color={colors.soft} />
+        </Action>
+        <Action label={A11Y_REPOST} onPress={ask} off={off}>
+          <Icon name='republicar' size={ICON} color={colors.soft} />
+        </Action>
+        <Action label={A11Y_LIKE} onPress={ask} off={off}>
+          <Icon name='coracao' size={ICON} color={colors.soft} />
+        </Action>
       </View>
     </Pressable>
   )
@@ -252,17 +256,16 @@ function PhotoTile ({ index, single, uri, label, video, mayLoad, onSettled, onAs
 
 const makeStyles = (colors) => StyleSheet.create({
   row: {
-    paddingTop: 16,
-    paddingHorizontal: 16,
-    paddingBottom: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line,
+    paddingTop: space.lg,
+    paddingBottom: 16,
     backgroundColor: colors.bg
   },
-  main: { flexDirection: 'row', gap: 12 },
-  // A 44 pt target around the 40 pt avatar that still takes 40 pt of the row.
-  avatarHit: { alignSelf: 'flex-start', width: layout.hit, height: layout.hit, margin: (AVATAR - layout.hit) / 2, alignItems: 'center', justifyContent: 'center' },
-  body: { flex: 1, minWidth: 0 },
+  // The header line leaves the avatar's 40 pt and a 12 pt gap free on the left.
+  main: { justifyContent: 'center', minHeight: AVATAR, paddingLeft: space.xl + AVATAR + 12, paddingRight: space.xl },
+  // A 44 pt target centred on the 40 pt avatar, over the header.
+  avatarHit: { position: 'absolute', top: space.lg + (AVATAR - layout.hit) / 2, left: space.xl + (AVATAR - layout.hit) / 2, width: layout.hit, height: layout.hit, alignItems: 'center', justifyContent: 'center' },
+  textBlock: { paddingHorizontal: space.xl },
+  body: { paddingHorizontal: space.xl },
   head: { flexDirection: 'row', alignItems: 'baseline', paddingRight: layout.hit },
   name: { ...type.postName, color: colors.ink, flexShrink: 1, marginRight: 6 },
   handle: { ...type.meta, color: colors.soft, flexShrink: 10000, minWidth: 32 },
@@ -285,8 +288,8 @@ const makeStyles = (colors) => StyleSheet.create({
   fill: { ...StyleSheet.absoluteFillObject },
   play: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center' },
   playDisc: { width: 52, height: 52, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.toastBg, opacity: 0.85 },
-  headActions: { position: 'absolute', top: -12, right: 0, flexDirection: 'row', alignItems: 'center' },
-  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: -8, maxWidth: 360 },
+  headActions: { position: 'absolute', top: space.lg + (AVATAR - layout.hit) / 2, right: space.xl, flexDirection: 'row', alignItems: 'center' },
+  bar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 0, marginBottom: -4, marginLeft: space.xl - space.sm, marginRight: space.xl, maxWidth: 360 },
   action: { flexDirection: 'row', alignItems: 'center', minHeight: layout.hit, minWidth: 44, paddingHorizontal: 8, justifyContent: 'center' },
   skAvatar: { width: AVATAR, height: AVATAR, borderRadius: AVATAR / 2, backgroundColor: colors.skeleton },
   skHead: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 20, paddingRight: layout.hit },

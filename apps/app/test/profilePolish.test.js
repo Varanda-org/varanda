@@ -7,11 +7,11 @@ const vm = require('node:vm')
 
 const read = (file) => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
 
-test('profile header wraps counts, uses token spacing and adapts its avatar', (t) => {
+test('profile header wraps counts, uses token spacing and keeps its avatar size', (t) => {
   const src = read('ui/ProfileHeader.js')
   t.ok(/countsRow: \{[^\n]*flexWrap: 'wrap'/.test(src))
   t.ok(src.includes('counts: { ...type.postMeta, color: colors.soft, flexShrink: 1 }'))
-  t.ok(src.includes('columnGap: space.lg, rowGap: space.sm, marginTop: space.sm'))
+  t.ok(src.includes('columnGap: space.xl, rowGap: space.sm, marginTop: space.sm'))
   t.ok(src.includes('bio: { ...type.postText, color: colors.ink, marginTop: space.sm }'))
   t.ok(src.includes("data: { width: '100%', maxWidth: layout.column, alignSelf: 'center'"))
   t.ok(src.includes('name: { ...type.barTitle, fontFamily: fonts.title, color: colors.ink }'))
@@ -20,9 +20,19 @@ test('profile header wraps counts, uses token spacing and adapts its avatar', (t
   const size = src.match(/const avatarSize = (.+)/)
   t.ok(size)
   if (!size) return
-  for (const [width, expected] of [[390, 88], [1280, 72]]) {
+  for (const [width, expected] of [[390, 64], [1280, 64]]) {
     t.is(vm.runInNewContext(size[1], { width, layout: { column: 640, hit: 44 }, space: { xxl: 32, sm: 8 } }), expected)
   }
+})
+
+test('the profile skeleton and the pinned bar keep the header 24 pt gutter', (t) => {
+  const states = read('ui/States.js')
+  t.ok(states.includes('marginTop: -space.xxl, paddingHorizontal: space.xl },'), 'the skeleton avatar row')
+  t.ok(states.includes('gap: 10, paddingTop: space.md, paddingHorizontal: space.xl, paddingBottom: space.md },'), 'the skeleton lines')
+  t.ok(states.includes("skProfileCounts: { flexDirection: 'row', gap: space.xl, marginTop: space.sm },"), 'the skeleton counts')
+  const bar = read('ui/ProfileBar.js')
+  t.ok(/row: \{[^}]*paddingHorizontal: space\.xl,/.test(bar), 'the pinned bar row')
+  t.ok(read('ui/ProfileHeader.js').includes('left: space.xl,'), 'the header back button')
 })
 
 test('profiles show a skeleton header and rows on the first load', (t) => {
