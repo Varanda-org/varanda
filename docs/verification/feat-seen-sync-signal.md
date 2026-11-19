@@ -10,16 +10,30 @@
 
 ## Testes automatizados
 
+Aterrissagem na `849a73b4`, já com `feat/group-message-notice` incorporada: `npm run lint` passou, os 147 arquivos de teste que o diff alcança passaram, e `npm run demo` terminou com `DEMO OK`. `node apps/site/scripts/render-legal.js --check` passou. Os arquivos desta mudança:
+
 | Arquivo | Testes | Asserções |
 |---|---|---|
-| `apps/app/test/legal.test.js` | a preencher na aterrissagem | a preencher na aterrissagem |
-| `apps/site/test/legal.test.js` | a preencher na aterrissagem | a preencher na aterrissagem |
-| `packages/core/test/terms.test.js` | a preencher na aterrissagem | a preencher na aterrissagem |
-| `apps/cli/test/cli.test.js` | a preencher na aterrissagem | a preencher na aterrissagem |
+| `apps/app/test/account.test.js` | 91/91 | 1420/1420 |
+| `apps/app/test/avisosHosted.test.js` | 33/33 | 233/233 |
+| `apps/app/test/noticeClose.test.js` | 5/5 | 38/38 |
+| `apps/app/test/noticeReads.test.js` | 7/7 | 53/53 |
+| `apps/app/test/noticeReadsWiring.test.js` | 10/10 | 112/112 |
+| `apps/app/test/noticeTags.test.js` | 11/11 | 342/342 |
+| `apps/app/test/sw.test.js` | 121/121 | 2077/2077 |
+| `apps/app/test/legal.test.js` | 72/72 | 2185/2185 |
+| `apps/site/test/legal.test.js` | 7/7 | 115/115 |
+| `packages/core/test/notice-tags.test.js` | 4/4 | 150/150 |
+| `packages/core/test/terms.test.js` | 8/8 | 126/126 |
+| `apps/cli/test/account-push.test.js` | 86/86 | 2127/2127 |
+| `apps/cli/test/account-seen.test.js` | 17/17 | 383/383 |
+| `apps/cli/test/account-delete.test.js` | 34/34 | 278/278 |
+| `apps/cli/test/account-phone-gates.test.js` | 7/7 | 43/43 |
+| `apps/cli/test/push-caps-store.test.js` | 5/5 | 70/70 |
+| `apps/cli/test/push-caps-wiring.test.js` | 1/1 | 4/4 |
+| `apps/cli/test/cli.test.js` | 6/6 | 1397/1397 |
 
-Resultados da integração das tarefas: a preencher na aterrissagem. Conferir também `node apps/site/scripts/render-legal.js --check`.
-
-Na revisão T22, os quatro arquivos de teste passaram, assim como `node apps/site/scripts/render-legal.js --check`. A primeira execução isolada do teste legal falhou só no digest antigo (71/72 testes, 2184/2185 asserções); após atualizar o digest com o `actual`, passou (72/72 testes, 2185/2185 asserções). O Node emitiu `MODULE_TYPELESS_PACKAGE_JSON` ao importar `legal.js`, sem impedir os testes ou a renderização. As contagens da tabela ficam para a aterrissagem conjunta. `XDG_CACHE_HOME=/tmp/t22-standard-cache npm run lint` e `git diff --check` passaram. A comparação com a base confirmou que todas as linhas anteriores dos três documentos foram preservadas; nenhum acréscimo contém U+2014.
+Na revisão T22, os quatro arquivos de teste passaram, assim como `node apps/site/scripts/render-legal.js --check`. A primeira execução isolada do teste legal falhou só no digest antigo (71/72 testes, 2184/2185 asserções); após atualizar o digest com o `actual`, passou (72/72 testes, 2185/2185 asserções). O Node emitiu `MODULE_TYPELESS_PACKAGE_JSON` ao importar `legal.js`, sem impedir os testes ou a renderização. `XDG_CACHE_HOME=/tmp/t22-standard-cache npm run lint` e `git diff --check` passaram. A comparação com a base confirmou que todas as linhas anteriores dos três documentos foram preservadas; nenhum acréscimo contém U+2014.
 
 ## No aparelho
 
@@ -30,9 +44,8 @@ Na revisão T22, os quatro arquivos de teste passaram, assim como `node apps/sit
 
 ## O que não foi conferido
 
-- A implementação conjunta do serviço, do worker e do app pertence às outras tarefas; resultados a preencher na aterrissagem.
-- Android, iOS e navegadores não foram conferidos no aparelho nesta tarefa de documentação.
-- A suíte completa (`npm test`) e a demo não foram executadas nesta tarefa. Não houve envio de push real nem teste em rede externa.
+- Android, iOS e navegadores não foram conferidos no aparelho: as conferências de "No aparelho" continuam devidas.
+- A suíte completa (`npm test`) não rodou localmente: roda na CI do GitHub. Não houve envio de push real nem teste em rede externa.
 
 ## Limites conhecidos
 
