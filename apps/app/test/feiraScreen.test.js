@@ -346,7 +346,7 @@ test('Feira source pins: large-text Anunciar, chip padding and keyboard dismisse
   const screen = readFileSync(join(__dirname, '../src/screens/Feira.js'), 'utf8')
   const chips = readFileSync(join(__dirname, '../src/ui/FilterChips.js'), 'utf8')
   t.ok(screen.includes("import { TEXT_CAP } from '../ui/Sheet'"), 'the Anunciar label uses the shared text cap')
-  t.ok(screen.includes('<Text style={styles.fabText} maxFontSizeMultiplier={TEXT_CAP}>+</Text>'), 'the round announce plus is capped at large text')
+  t.ok(screen.includes("<Icon name='plus' size={26} color={colors.accentInk} />"), 'the round announce control uses the 26 pt Feather plus')
   t.ok(screen.includes("accessibilityLabel='Anunciar'") && /<PressScale[^>]*\n[^\n]*\n[^\n]*accessibilityLabel='Anunciar'/.test(screen), 'the announce control is a PressScale labelled Anunciar')
   t.ok(/fab: \{[^}]*width: layout\.fabSize, height: layout\.fabSize, borderRadius: layout\.fabSize \/ 2[^}]*boxShadow/.test(screen), 'the announce control is a 56 pt circle with the kit shadow')
   t.ok(screen.includes("placeholder='Buscar na Feira'") && screen.includes('<SearchField'), 'the words field is one SearchField')
