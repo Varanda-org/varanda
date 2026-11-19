@@ -15,12 +15,114 @@ function navigatorStub (t, serviceWorker) {
   })
 }
 
-test('closeNotices: native does nothing, including without browser globals', async (t) => {
+test('closeNotices: native without its module is harmless and never touches browser globals', async (t) => {
   navigatorStub(t, new Proxy({}, { get () { throw new Error('native touched the browser') } }))
   const native = await import('../src/noticeClose.native.js')
-  t.is(native.closeNotices(['varanda-dm']), undefined)
+  t.is(await native.closeNotices(['varanda-dm']), undefined)
   const off = native.subscribeSeenSync(() => t.fail('native received a signal'))
   t.is(off(), undefined)
+})
+
+async function nativeClose (device, secure) {
+  const source = fs.readFileSync(path.join(__dirname, '../src/noticeClose.native.js'), 'utf8')
+  const { code } = transformSync(source, {
+    babelrc: false,
+    configFile: false,
+    plugins: [require.resolve('@babel/plugin-transform-modules-commonjs')]
+  })
+  const modules = {
+    '../modules/push-device/index.js': device,
+    'expo-secure-store': secure,
+    '@noble/hashes/blake2.js': await import('@noble/hashes/blake2.js'),
+    '@noble/hashes/utils.js': await import('@noble/hashes/utils.js'),
+    './noticeTags.js': await import('../src/noticeTags.js'),
+    './pushDevice.js': await import('../src/pushDevice.js'),
+    './passkeyOptions.js': await import('../src/passkeyOptions.js')
+  }
+  const exports = {}
+  const load = new Function('require', 'exports', code) // eslint-disable-line no-new-func
+  load((name) => {
+    if (!modules[name]) throw new Error('unavailable: ' + name)
+    return modules[name]
+  }, exports)
+  return exports
+}
+
+test('native tags match the server keyed BLAKE2b-256 derivation with sodium-universal', async (t) => {
+  const sodium = require('sodium-universal')
+  const { deriveNativeTag } = await import('../src/noticeClose.native.js')
+  t.is(deriveNativeTag('varanda-dm', 'A'.repeat(22)), '8p34eINm_k8OUlmh')
+  const keys = [Buffer.alloc(16), Buffer.from(Array.from({ length: 16 }, (_, i) => i)), Buffer.alloc(16, 255)]
+  const tags = ['varanda-dm', 'varanda-dm-page', 'varanda-group-private', 'varanda-group-' + 'ab'.repeat(32), 'varanda-like-' + 'cd'.repeat(32) + ':123']
+  for (const key of keys) {
+    for (const tag of tags) {
+      const digest = Buffer.alloc(32)
+      sodium.crypto_generichash(digest, Buffer.from(tag), key)
+      const native = deriveNativeTag(tag, key.toString('base64url'))
+      t.is(native, digest.toString('base64url').slice(0, 16))
+      t.ok(/^[A-Za-z0-9_-]{16}$/.test(native))
+    }
+  }
+  for (const key of [null, '', 'invalid', 'A'.repeat(21) + 'B', 'A'.repeat(22) + '\n']) {
+    t.is(deriveNativeTag('varanda-dm', key), null)
+  }
+  for (const tag of [null, 'invalid', 'varanda-dm\n']) t.is(deriveNativeTag(tag, keys[0].toString('base64url')), null)
+})
+
+test('native close filters and caps web tags before deriving with the installation key', async (t) => {
+  const key = Buffer.alloc(16, 7).toString('base64url')
+  const calls = []
+  const reads = []
+  const native = await nativeClose({
+    isAvailable: () => true,
+    clearDelivered: async tags => calls.push(tags)
+  }, {
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: 17,
+    getItemAsync: async (name, options) => { reads.push([name, options]); return key }
+  })
+  const { CLOSE_MAX } = await import('../src/noticeTags.js')
+  const groups = Array.from({ length: CLOSE_MAX + 4 }, (_, i) => 'varanda-group-' + i.toString(16).padStart(64, '0'))
+  await native.closeNotices([null, {}, 'invalid', 'varanda-dm\n', 'varanda-dm', 'varanda-dm', ...groups])
+  t.alike(reads, [['varanda.push-device.key', { keychainAccessible: 17 }]])
+  t.alike(calls, [['varanda-dm', ...groups.slice(0, CLOSE_MAX - 1)].map(tag => native.deriveNativeTag(tag, key))])
+  for (const tags of [null, [], 'varanda-dm', [null, 'invalid']]) await native.closeNotices(tags)
+  t.is(reads.length, 1)
+  t.is(calls.length, 1)
+})
+
+test('native close with no valid key, unavailable storage or failed module is harmless', async (t) => {
+  let calls = 0
+  for (const key of [null, '', 'invalid', 'A'.repeat(21) + 'B']) {
+    const native = await nativeClose({ isAvailable: () => true, clearDelivered: () => { calls++ } }, { getItemAsync: async () => key })
+    t.is(await native.closeNotices(['varanda-dm']), undefined)
+  }
+  t.is(calls, 0)
+  for (const secure of [null, { getItemAsync: async () => { throw new Error('locked') } }]) {
+    const native = await nativeClose({ isAvailable: () => true, clearDelivered: () => { calls++ } }, secure)
+    t.is(await native.closeNotices(['varanda-dm']), undefined)
+  }
+  t.is(calls, 0)
+  const native = await nativeClose({ isAvailable: () => true, clearDelivered: async () => { calls++; throw new Error('gone') } }, { getItemAsync: async () => 'A'.repeat(22) })
+  t.is(await native.closeNotices(['varanda-dm']), undefined)
+  t.is(calls, 1)
+})
+
+test('native seen-sync wakes remote and unsubscribes from the module', async (t) => {
+  let receive
+  let removed = 0
+  const native = await nativeClose({
+    onSync: listener => {
+      receive = listener
+      return () => { receive = null; removed++ }
+    }
+  })
+  const wakes = []
+  const off = native.subscribeSeenSync(reason => wakes.push(reason))
+  receive()
+  t.alike(wakes, ['remote'])
+  off()
+  t.is(receive, null)
+  t.is(removed, 1)
 })
 
 test('closeNotices: web sends only valid unique tags, at most sixteen, to the active worker', async (t) => {

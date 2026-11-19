@@ -468,7 +468,10 @@ test('compose.web.yaml and env examples: web push variables are optional and sco
   t.is(line(seeder, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'seeder token optional (:-)')
   t.is(line(account, 'VARANDA_PUSH_TOKEN').trim(), 'VARANDA_PUSH_TOKEN: "$' + '{VARANDA_PUSH_TOKEN:-}"', 'account token optional (:-)')
 
-  for (const name of ['VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_PHONE_KEY', 'VARANDA_PHONE_DAILY_LIMIT', 'VARANDA_PHONE_REVIEW']) {
+  for (const name of [
+    'VARANDA_DIDIT_API_KEY', 'VARANDA_DIDIT_WORKFLOW_ID', 'VARANDA_PHONE_KEY', 'VARANDA_PHONE_DAILY_LIMIT', 'VARANDA_PHONE_REVIEW',
+    'VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC', 'VARANDA_APNS_SANDBOX', 'VARANDA_FCM_ACCOUNT_FILE'
+  ]) {
     t.is(keyCount(account, name), 1, name + ' exactly once under account')
     t.is(keyCount(seeder, name), 0, name + ' not on seeder')
     t.is(keyCount(web, name), 0, name + ' not on web')

@@ -645,3 +645,135 @@ test('account refuses a malformed page key or seeder socket without echoing it',
   t.is(badSocket.stderr, 'uso: VARANDA_SEEDER_WS inválido\n')
   t.is(badSocket.stdout, '')
 })
+
+const emptyNativePushEnv = {
+  VARANDA_APNS_KEY_FILE: '',
+  VARANDA_APNS_KEY_ID: '',
+  VARANDA_APNS_TEAM_ID: '',
+  VARANDA_APNS_TOPIC: '',
+  VARANDA_APNS_SANDBOX: '',
+  VARANDA_FCM_ACCOUNT_FILE: ''
+}
+
+test('account native push config: off by default, partial APNs refuses startup', (t) => {
+  const { loadNativePush } = require('../lib/commands/account')
+  t.alike(loadNativePush({}), { apns: null, fcm: null })
+  for (const name of ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC', 'VARANDA_APNS_SANDBOX']) {
+    t.exception(() => loadNativePush({ [name]: '1' }), /VARANDA_APNS_/, name)
+  }
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VARANDA_')))
+  const result = spawnSync(process.execPath, [bin, 'account'], { env: { ...env, VARANDA_APNS_KEY_ID: 'test' }, encoding: 'utf8' })
+  t.not(result.status, 0)
+  t.ok(result.stderr.includes('VARANDA_APNS_KEY_FILE'))
+})
+
+test('account native push config: empty variables are absent, partial APNs still refuses', (t) => {
+  const { loadNativePush } = require('../lib/commands/account')
+  t.alike(loadNativePush(emptyNativePushEnv), { apns: null, fcm: null })
+  for (const name of ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC', 'VARANDA_APNS_SANDBOX']) {
+    const missing = name === 'VARANDA_APNS_KEY_FILE' ? 'VARANDA_APNS_KEY_ID' : 'VARANDA_APNS_KEY_FILE'
+    t.exception(() => loadNativePush({ ...emptyNativePushEnv, [name]: '1' }), new RegExp('^Error: ' + missing + ' inválida ou ausente$'), name)
+  }
+})
+
+test('account native push config: empty variables allow service startup', async (t) => {
+  const { spawn } = require('node:child_process')
+  const { tmpDir, until } = require('./helpers/net')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VARANDA_')))
+  const child = spawn(process.execPath, [bin, 'account', '--json', '--account-port', '0', '--account-host', '127.0.0.1', '--data', tmpDir(t)], {
+    env: {
+      ...env,
+      ...emptyNativePushEnv,
+      VARANDA_ASSOCIATION: lowerKey,
+      VARANDA_PUBLIC_ORIGIN: 'https://varanda.test',
+      VARANDA_GOOGLE_CLIENT_ID: 'test-client',
+      VARANDA_GOOGLE_CLIENT_SECRET: 'test-secret'
+    }
+  })
+  let listening = false
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (data) => {
+    stdout += data
+    listening = stdout.includes('"event":"listening"')
+  })
+  child.stderr.on('data', (data) => { stderr += data })
+  let closed = false
+  const exited = new Promise((resolve) => child.on('close', (code) => { closed = true; resolve(code) }))
+  t.teardown(async () => { child.kill('SIGKILL'); await exited }, { force: true })
+  await until(() => listening || closed, { name: 'account startup' })
+  t.ok(listening, 'account listens with empty native push variables')
+  t.is(stderr, '')
+  child.kill('SIGTERM')
+  t.is(await exited, 0)
+})
+
+test('account native push config: empty sandbox selects production', (t) => {
+  const filename = require.resolve('../lib/commands/account')
+  const requireAccount = require('node:module').createRequire(filename)
+  const module = { exports: {} }
+  let sandbox = null
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module,
+    require: (name) => {
+      if (name === '../account/apns') {
+        return { createApns: (config) => { sandbox = config.sandbox; return requireAccount(name).createApns(config) } }
+      }
+      return requireAccount(name)
+    }
+  }, { filename })
+  const { tmpDir } = require('./helpers/net')
+  const keyFile = path.join(tmpDir(t), 'apns.pem')
+  const ec = require('node:crypto').generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  fs.writeFileSync(keyFile, ec.privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  const senders = module.exports.loadNativePush({
+    ...emptyNativePushEnv,
+    VARANDA_APNS_KEY_FILE: keyFile,
+    VARANDA_APNS_KEY_ID: 'test-key-id',
+    VARANDA_APNS_TEAM_ID: 'test-team-id',
+    VARANDA_APNS_TOPIC: 'test.varanda'
+  })
+  t.teardown(() => senders.apns.close(), { force: true })
+  t.is(typeof senders.apns.send, 'function')
+  t.is(sandbox, false)
+  t.is(senders.fcm, null)
+})
+
+test('account native push config: files validated once, errors name variables only', async (t) => {
+  const { loadNativePush } = require('../lib/commands/account')
+  const { tmpDir } = require('./helpers/net')
+  const crypto = require('node:crypto')
+  const dir = tmpDir(t)
+  const keyFile = path.join(dir, 'apns.pem')
+  const accountFile = path.join(dir, 'fcm.json')
+  const env = {
+    VARANDA_APNS_KEY_FILE: keyFile,
+    VARANDA_APNS_KEY_ID: 'test-key-id',
+    VARANDA_APNS_TEAM_ID: 'test-team-id',
+    VARANDA_APNS_TOPIC: 'test.varanda',
+    VARANDA_APNS_SANDBOX: '1'
+  }
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_APNS_KEY_FILE inválida ou ilegível$/)
+  fs.writeFileSync(keyFile, 'invalid private fixture')
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_APNS_KEY_FILE inválida ou ilegível$/)
+  t.exception(() => loadNativePush({ ...env, VARANDA_APNS_SANDBOX: '0' }), /VARANDA_APNS_SANDBOX/)
+  t.exception(() => loadNativePush({ ...env, VARANDA_APNS_TOPIC: '\n' }), /VARANDA_APNS_TOPIC/)
+  const ec = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  fs.writeFileSync(keyFile, ec.privateKey.export({ type: 'pkcs8', format: 'pem' }))
+  env.VARANDA_FCM_ACCOUNT_FILE = accountFile
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível$/)
+  fs.writeFileSync(accountFile, '{invalid json')
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível$/)
+  fs.writeFileSync(accountFile, JSON.stringify({ private_key: 'invalid private fixture' }))
+  t.exception(() => loadNativePush(env), /^Error: VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível$/)
+  const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+  fs.writeFileSync(accountFile, JSON.stringify({ project_id: 'varanda-test', client_email: 'test@example.test', private_key: rsa.privateKey.export({ type: 'pkcs8', format: 'pem' }), token_uri: 'https://oauth2.googleapis.com/token' }))
+  const senders = loadNativePush(env)
+  fs.unlinkSync(keyFile)
+  fs.unlinkSync(accountFile)
+  t.is(typeof senders.apns.send, 'function')
+  t.is(typeof senders.fcm.send, 'function')
+  t.is(await senders.apns.send(null), 'dropped')
+  t.is(await senders.fcm.send(null), 'dropped')
+  senders.apns.close()
+})

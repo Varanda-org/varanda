@@ -25,7 +25,7 @@ test('method list and mutating set', (t) => {
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'pushDevice.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
@@ -777,6 +777,30 @@ test('phone.proof', (t) => {
   ok(t, 'phone.proof', { verified: { pad: 'x'.repeat(1024 - 10) } })
   bad(t, 'phone.proof', { verified: proof, member: KEY }, 'extra key')
   bad(t, 'phone.proof', { proof }, 'unknown key')
+})
+
+test('pushDevice.sign: exact params, transport token rules and no mutation', (t) => {
+  const base = { nonce: 'A'.repeat(43), action: 'on', transport: 'fcm', token: 'Ab_09:-', key: 'A'.repeat(22) }
+  t.is(isMutating('pushDevice.sign'), false)
+  ok(t, 'pushDevice.sign', base, base)
+  ok(t, 'pushDevice.sign', { ...base, action: 'off', nonce: 'A-_9'.repeat(32) })
+  for (const last of ['A', 'Q', 'g', 'w']) ok(t, 'pushDevice.sign', { ...base, key: '_'.repeat(21) + last })
+  for (const token of ['a', 'a'.repeat(4096)]) ok(t, 'pushDevice.sign', { ...base, token })
+  for (const token of ['a'.repeat(64), 'a'.repeat(65), 'a'.repeat(200)]) ok(t, 'pushDevice.sign', { ...base, transport: 'apns', token })
+  bad(t, 'pushDevice.sign', {})
+  for (const key of Object.keys(base)) {
+    const missing = { ...base }
+    delete missing[key]
+    bad(t, 'pushDevice.sign', missing, 'missing ' + key)
+    for (const value of [null, 1, '']) bad(t, 'pushDevice.sign', { ...base, [key]: value })
+  }
+  for (const key of ['member', 'association', 'tokenHash', 'signature', 'endpoint', 'extra']) bad(t, 'pushDevice.sign', { ...base, [key]: KEY })
+  for (const transport of ['APNS', 'FCM', 'web']) bad(t, 'pushDevice.sign', { ...base, transport })
+  for (const nonce of ['a'.repeat(42), 'a'.repeat(129), base.nonce + '\n']) bad(t, 'pushDevice.sign', { ...base, nonce })
+  for (const action of ['ON', 'toggle']) bad(t, 'pushDevice.sign', { ...base, action })
+  for (const key of ['A'.repeat(21), 'A'.repeat(23), 'A'.repeat(21) + 'B', base.key + '=', base.key + '\n', '+'.repeat(22), '/'.repeat(22)]) bad(t, 'pushDevice.sign', { ...base, key })
+  for (const token of ['a'.repeat(63), 'a'.repeat(201), 'AB'.repeat(32), 'g'.repeat(64), 'a'.repeat(64) + '\n']) bad(t, 'pushDevice.sign', { ...base, transport: 'apns', token })
+  for (const token of ['a'.repeat(4097), 'abc=', 'abc/', 'abc+', 'a b', 'é', 'a\n', 'a\r', 'a\t']) bad(t, 'pushDevice.sign', { ...base, token })
 })
 
 test('push.sign', (t) => {

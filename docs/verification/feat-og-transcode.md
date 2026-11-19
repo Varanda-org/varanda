@@ -8,7 +8,7 @@ Branch `feat/og-transcode`. Sem capa do aparelho, `GET|HEAD /p/<diário>/<seq>/c
 - Semeador (`apps/cli/lib/seed-ws.js`): a capa do aparelho vence; a fonte é relida e conferida por hash a cada pedido, inclusive HEAD e cópia em cache; o compartilhamento e o descritor são conferidos de novo depois da conversão; orçamento próprio (2 pedidos/s, rajada de 4, 2 em andamento) antes de qualquer consulta; toda falha é o mesmo 404.
 - Página (`apps/cli/lib/post-page.js`): cita `/capa` só quando algum filho já confirmou AVIF no host, há um filho de pé, a foto precisa de capa e não foi recusada. Uma renderização com o filho caído inicia outro em segundo plano, um por vez e fora da espera de respawn. Sem conversor, a saída é idêntica à de antes.
 - Recusas: as do filho são guardadas pelo hash da fonte; as que o semeador encontra antes de converter (quadros, tamanho, bytes ou tipo declarados) são guardadas pela chave do diário, o trecho do núcleo e os campos declarados, para que outro diário não desligue a capa de quem publicou os bytes certos.
-- Termos e Política na versão 103, linha LGPD em `docs/design.md`, `docs/protocol.md` §16 e nota de operação no README.
+- Termos e Política na versão 105, linha LGPD em `docs/design.md`, `docs/protocol.md` §16 e nota de operação no README.
 
 ## Verificação local
 
