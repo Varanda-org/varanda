@@ -303,7 +303,7 @@ function VideoStage ({ uri, label, full, startMs, playing, muted, setMuted, sile
 // The poster owns the press so even a failed image can start the clip inside
 // the post. Its image and marks stay out of assistive tech. No player or clip
 // request exists before this explicit tap.
-function VideoPoster ({ author, poster, video, persist, onPress }) {
+function VideoPoster ({ author, poster, video, persist, onPress, bleedStyle }) {
   const seconds = videoSeconds(video && video.ms)
   const label = 'vídeo de ' + seconds + (seconds === 1 ? ' segundo' : ' segundos')
   return (
@@ -311,7 +311,7 @@ function VideoPoster ({ author, poster, video, persist, onPress }) {
       accessibilityRole='button'
       accessibilityLabel={label}
       onPress={onPress}
-      style={({ pressed }) => [styles.videoFrame, pressed && styles.pressed]}
+      style={({ pressed }) => [styles.videoFrame, bleedStyle, pressed && styles.pressed]}
     >
       {/* Nothing in here turns pointer events off: Android counts such a child as
           hovered without letting it send the hover event, so TalkBack's touch
@@ -322,7 +322,7 @@ function VideoPoster ({ author, poster, video, persist, onPress }) {
           descriptor={poster}
           persist={persist}
           label={label}
-          style={[styles.cell, styles.clip, { width: '100%', aspectRatio: frameRatio([poster]) }]}
+          style={[styles.cell, styles.clip, bleedStyle, { width: '100%', aspectRatio: frameRatio([poster]) }]}
           tapRetry={false}
         />
       </View>
@@ -392,7 +392,7 @@ function VideoViewer ({ clip, stage, onRetry, onClose }) {
   )
 }
 
-function VideoTile ({ author, poster, video, persist }) {
+function VideoTile ({ author, poster, video, persist, bleedStyle }) {
   const clip = useVideoClip({ author, video })
   const insets = useSafeAreaInsets()
   const win = useWindowDimensions()
@@ -529,7 +529,7 @@ function VideoTile ({ author, poster, video, persist }) {
     if (p && p.playing) setBlocked(false)
   }
 
-  if (!clip.active) return <VideoPoster author={author} poster={poster} video={video} persist={persist} onPress={start} />
+  if (!clip.active) return <VideoPoster author={author} poster={poster} video={video} persist={persist} onPress={start} bleedStyle={bleedStyle} />
 
   const seconds = videoSeconds(video && video.ms)
   const label = 'vídeo de ' + seconds + (seconds === 1 ? ' segundo' : ' segundos')
@@ -541,7 +541,7 @@ function VideoTile ({ author, poster, video, persist }) {
         onClick={stopClick}
         onKeyDown={stopPressKeys}
         onStartShouldSetResponder={() => true}
-        style={[styles.videoFrame, styles.videoActive, { aspectRatio: frameRatio([poster]) }]}
+        style={[styles.videoFrame, bleedStyle, styles.videoActive, { aspectRatio: frameRatio([poster]) }]}
       >
         {clip.phase === 'loading' || full
           ? (
@@ -551,7 +551,7 @@ function VideoTile ({ author, poster, video, persist }) {
                 descriptor={poster}
                 persist={persist}
                 label={label}
-                style={[styles.cell, styles.clip, { width: '100%', aspectRatio: frameRatio([poster]) }]}
+                style={[styles.cell, styles.clip, bleedStyle, { width: '100%', aspectRatio: frameRatio([poster]) }]}
                 tapRetry={false}
               />
             </View>
@@ -633,7 +633,7 @@ function VideoTile ({ author, poster, video, persist }) {
   )
 }
 
-export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
+export function MediaGrid ({ author, media, persist = true, mosaic = false, bleed = false }) {
   const [viewing, setViewing] = useState(null)
   const [feedIndex, setFeedIndex] = useState(0)
   const [focusTick, setFocusTick] = useState(0)
@@ -649,6 +649,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
     lastViewed.current = null
   }, [viewing])
   if (!Array.isArray(media) || media.length === 0) return null
+  const bleedStyle = bleed && styles.bleed
   const pair = videoPair(media)
   if (pair) {
     return (
@@ -659,6 +660,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
           poster={pair.poster}
           video={pair.video}
           persist={persist}
+          bleedStyle={bleedStyle}
         />
       </View>
     )
@@ -685,7 +687,7 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
   }
   let body
   if (layout === 'one') {
-    body = tile(0, [styles.clip, { width: '100%', aspectRatio: ratioOf(items[0]) }])
+    body = tile(0, [styles.clip, bleedStyle, { width: '100%', aspectRatio: ratioOf(items[0]) }])
   } else if (!mosaic) {
     body = (
       <MediaCarousel
@@ -700,21 +702,21 @@ export function MediaGrid ({ author, media, persist = true, mosaic = false }) {
         showArrows
         onPressItem={(i) => setViewing(i)}
         focusRequest={focusTick}
-        frameStyle={[styles.carouselFrame, { aspectRatio: frameRatio(items) }]}
+        frameStyle={[styles.carouselFrame, bleedStyle, { aspectRatio: frameRatio(items) }]}
       />
     )
   } else if (layout === 'two') {
-    body = <View style={[styles.box, styles.row]}>{tile(0, styles.flex)}{tile(1, styles.flex)}</View>
+    body = <View style={[styles.box, bleedStyle, styles.row]}>{tile(0, styles.flex)}{tile(1, styles.flex)}</View>
   } else if (layout === 'three') {
     body = (
-      <View style={[styles.box, styles.row]}>
+      <View style={[styles.box, bleedStyle, styles.row]}>
         {tile(0, styles.flex)}
         <View style={[styles.flex, styles.column]}>{tile(1, styles.flex)}{tile(2, styles.flex)}</View>
       </View>
     )
   } else if (layout === 'four') {
     body = (
-      <View style={[styles.box, styles.column]}>
+      <View style={[styles.box, bleedStyle, styles.column]}>
         <View style={[styles.flex, styles.row]}>{tile(0, styles.flex)}{tile(1, styles.flex)}</View>
         <View style={[styles.flex, styles.row]}>
           {tile(2, styles.flex)}
@@ -758,6 +760,7 @@ const styles = StyleSheet.create({
   clip: { borderRadius: 14, overflow: 'hidden' },
   carouselFrame: { width: '100%', borderRadius: 14, overflow: 'hidden' },
   box: { width: '100%', aspectRatio: 16 / 9, gap: GAP, borderRadius: 14, overflow: 'hidden' },
+  bleed: { borderRadius: 0 },
   row: { flexDirection: 'row', gap: GAP },
   column: { flexDirection: 'column', gap: GAP },
   flex: { flex: 1 },

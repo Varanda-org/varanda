@@ -219,7 +219,7 @@ export function DiarioMoments ({ hosted, data, now = Date.now(), onOpenOwn, onDe
 
 const makeStyles = (colors) => StyleSheet.create({
   stripWrap: { flexGrow: 0 },
-  strip: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 12 },
+  strip: { flexDirection: 'row', gap: 8, paddingHorizontal: 24, paddingVertical: 12 },
   ringItem: { width: 72, minHeight: 44, alignItems: 'center', gap: 4 },
   pressed: { opacity: 0.6 },
   ring: { width: RING, height: RING, borderRadius: RING / 2, alignItems: 'center', justifyContent: 'center' },

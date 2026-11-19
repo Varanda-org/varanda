@@ -6,9 +6,10 @@
 // readers in their own local time. An event is never edited later: to change
 // or cancel it the post is deleted. Every control is a 44 pt target.
 
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { PLACE_MAX, TITLE_MAX, eventCard, instantMs } from '../events'
 import { DateTimeField, fieldsOf, fieldsToMs } from './DateTimeField'
+import { Field } from './index'
 import { Icon } from './Icon'
 import { layout, type } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
@@ -86,24 +87,20 @@ export function EventEditor ({ state, onChange, onClose, disabled = false, now }
           <Icon name='fechar' size={20} color={colors.soft} />
         </Pressable>
       </View>
-      <TextInput
-        style={styles.input}
+      <Field
         value={s.title}
         editable={!disabled}
         maxLength={TITLE_MAX}
         placeholder='Nome do evento'
-        placeholderTextColor={colors.placeholder}
-        accessibilityLabel='nome do evento'
+        inputProps={{ accessibilityLabel: 'nome do evento', placeholderTextColor: colors.placeholder }}
         onChangeText={(text) => change({ ...s, title: text.replace(/[\r\n]+/g, ' ') })}
       />
-      <TextInput
-        style={styles.input}
+      <Field
         value={s.place}
         editable={!disabled}
         maxLength={PLACE_MAX}
         placeholder='Onde (opcional)'
-        placeholderTextColor={colors.placeholder}
-        accessibilityLabel='lugar do evento'
+        inputProps={{ accessibilityLabel: 'lugar do evento', placeholderTextColor: colors.placeholder }}
         onChangeText={(text) => change({ ...s, place: text.replace(/[\r\n]+/g, ' ') })}
       />
       <DateTimeField label='Começa' value={s.start} disabled={disabled} now={now} onChange={(start) => change({ ...s, start })} />
@@ -146,7 +143,6 @@ const makeStyles = (colors) => StyleSheet.create({
   head: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   headTitle: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   title: { ...type.postName, color: colors.ink },
-  input: { ...type.postText, minHeight: layout.hit, color: colors.ink, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   icon: { width: layout.hit, height: layout.hit, alignItems: 'center', justifyContent: 'center' },
   endBox: { gap: 4 },
   add: { minHeight: layout.hit, justifyContent: 'center', alignSelf: 'flex-start' },

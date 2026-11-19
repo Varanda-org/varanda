@@ -490,3 +490,85 @@ test('deleting a preview post lists its thumbnail in the tombstone', async (t) =
   const result = await member.postDelete(ctx, { to: { author: publicKey, seq: 2 } })
   t.alike((await member.logRead(ctx)).entries.find(e => e.seq === result.seq).record.media, [{ core: image.core, start: 1, blocks: 1 }])
 })
+
+test('deleting a shared post tombstones its live covers with their ranges', async (t) => {
+  const { ctx, dataDir, publicKey } = await setup(t, { cert: true })
+  const { postShareRecord, postCoverRecord } = require('@varanda/core/lib/records')
+  const core = 'ab'.repeat(32)
+  const cover = (start) => ({ core, mime: 'image/jpeg', start, blocks: 1, bytes: 10, sha256: 'cd'.repeat(32), width: 4, height: 4 })
+  await member.withIdentity(ctx, async ({ diary }) => {
+    await storeLib.appendRecord(diary, { type: 'media-core', key: core, at: new Date().toISOString() })
+    await storeLib.appendRecord(diary, postRecord({ text: 'pública' }))
+    await storeLib.appendRecord(diary, postShareRecord({ seq: 2 }))
+    await storeLib.appendRecord(diary, postCoverRecord({ seq: 2, image: cover(1) }))
+    await storeLib.appendRecord(diary, deleteRecord({ seq: 4 }))
+    await storeLib.appendRecord(diary, postCoverRecord({ seq: 2, image: cover(2) }))
+    await storeLib.appendRecord(diary, postRecord({ text: 'outra' }))
+    await storeLib.appendRecord(diary, postCoverRecord({ seq: 7, image: cover(3) }))
+  })
+  const r = await member.postDelete(ctx, { to: { author: publicKey, seq: 2 } })
+  t.alike(r, { seq: 10, ref: publicKey + ':10', changed: true, deleted: [2] }, 'the answer still names the post only')
+  const { entries } = await member.logRead(ctx)
+  const tombs = entries.slice(9).map((e) => e.record)
+  t.alike(tombs.map((x) => x.seq), [2, 6], 'the post and its one live cover, not the other post\'s')
+  t.is(tombs[0].media, undefined, 'a post without media frees nothing')
+  t.alike(tombs[1].media, [{ core, start: 2, blocks: 1 }], 'the cover tombstone carries its range')
+  t.alike((await ownBlocks(dataDir, [2, 6, 8])).has, [false, false, true], 'the cover block is cleared, the other post\'s is kept')
+  t.alike(await member.postDelete(ctx, { to: { author: publicKey, seq: 2 } }), { seq: 9, ref: publicKey + ':9', changed: false, deleted: [2] }, 'a repeat writes nothing and answers the post\'s tombstone')
+})
+
+test('a repeat postDelete of a cleared post tombstones the covers an older writer left live', async (t) => {
+  const { ctx, dataDir, publicKey } = await setup(t, { cert: true })
+  const { postShareRecord, postCoverRecord } = require('@varanda/core/lib/records')
+  const core = 'ab'.repeat(32)
+  const image = { core, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 10, sha256: 'cd'.repeat(32), width: 4, height: 4 }
+  await member.withIdentity(ctx, async ({ diary }) => {
+    await storeLib.appendRecord(diary, { type: 'media-core', key: core, at: new Date().toISOString() })
+    await storeLib.appendRecord(diary, postRecord({ text: 'pública' }))
+    await storeLib.appendRecord(diary, postShareRecord({ seq: 2 }))
+    await storeLib.appendRecord(diary, postCoverRecord({ seq: 2, image }))
+    await storeLib.appendRecord(diary, deleteRecord({ seq: 2 }))
+  })
+  const s = await storeLib.openStore(dataDir)
+  try {
+    const diary = await storeLib.openDiary(s)
+    await diary.clear(2, 3)
+  } finally {
+    await s.close()
+  }
+  const r = await member.postDelete(ctx, { to: { author: publicKey, seq: 2 } })
+  t.alike(r, { seq: 6, ref: publicKey + ':6', changed: true, deleted: [2] })
+  const tomb = (await member.logRead(ctx)).entries[6].record
+  t.alike([tomb.type, tomb.seq, tomb.media], ['delete', 4, [{ core, start: 1, blocks: 1 }]], 'the leftover cover with its range')
+  t.alike((await ownBlocks(dataDir, [4])).has, [false], 'the cover block is cleared')
+  t.alike(await member.postDelete(ctx, { to: { author: publicKey, seq: 2 } }), { seq: 5, ref: publicKey + ':5', changed: false, deleted: [2] }, 'with no cover left the repeat writes nothing')
+})
+
+test('postDelete of a 10-photo post with many live covers fits one append; repeats finish the covers oldest first', async (t) => {
+  const { ctx, publicKey } = await setup(t, { cert: true })
+  const { postShareRecord, postCoverRecord } = require('@varanda/core/lib/records')
+  const core = 'ab'.repeat(32)
+  const image = (start) => ({ core, mime: 'image/jpeg', start, blocks: 1, bytes: 10, sha256: 'cd'.repeat(32), width: 4, height: 4 })
+  // 1 media-core, 2 the post (10 photos: 3 tombstones), 3 its share, 4 to
+  // 17 fourteen live covers another writer left.
+  await member.withIdentity(ctx, async ({ diary }) => {
+    await storeLib.appendRecord(diary, { type: 'media-core', key: core, at: new Date().toISOString() })
+    await storeLib.appendRecord(diary, postRecord({ text: 'dez fotos', media: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(image) }))
+    await storeLib.appendRecord(diary, postShareRecord({ seq: 2 }))
+    for (let i = 0; i < 14; i++) await storeLib.appendRecord(diary, postCoverRecord({ seq: 2, image: image(11 + i) }))
+  })
+  const to = { author: publicKey, seq: 2 }
+  const tombsFrom = async (from) => (await member.logRead(ctx)).entries.filter((e) => e.seq >= from).map((e) => [e.record.type, e.record.seq])
+  t.alike(await member.postDelete(ctx, { to }), { seq: 25, ref: publicKey + ':25', changed: true, deleted: [2] }, 'one append of 8')
+  const first = await tombsFrom(18)
+  t.alike(first, [['delete', 2], ['delete', 2], ['delete', 2], ['delete', 4], ['delete', 5], ['delete', 6], ['delete', 7], ['delete', 8]], 'the post\'s three tombstones, then the oldest covers in the room left')
+  const ranges = (await member.logRead(ctx)).entries.filter((e) => e.seq >= 18 && e.seq <= 20).flatMap((e) => e.record.media.map((m) => m.start))
+  t.alike(ranges.sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 'every photo range freed by the post\'s own tombstones')
+
+  t.alike(await member.postDelete(ctx, { to }), { seq: 33, ref: publicKey + ':33', changed: true, deleted: [2] }, 'a repeat takes at most 8 leftover covers')
+  t.alike((await tombsFrom(26)).map(([, seq]) => seq), [9, 10, 11, 12, 13, 14, 15, 16], 'oldest first')
+  t.alike(await member.postDelete(ctx, { to }), { seq: 34, ref: publicKey + ':34', changed: true, deleted: [2] }, 'the next repeat finishes')
+  const last = (await member.logRead(ctx)).entries.find((e) => e.seq === 34).record
+  t.alike([last.seq, last.media], [17, [{ core, start: 24, blocks: 1 }]], 'the newest cover, with its range')
+  t.alike(await member.postDelete(ctx, { to }), { seq: 20, ref: publicKey + ':20', changed: false, deleted: [2] }, 'nothing left: the post\'s tombstone answers')
+})

@@ -128,7 +128,7 @@ async function ui (stubs = {}) {
     tap: () => {},
     StyleSheet: { create: (value) => value, hairlineWidth: 1 },
     useStyles: (makeStyles) => makeStyles({ accent: 'accent', accentInk: 'accentInk', bg: 'bg', soft: 'soft' }),
-    layout: { hit: 44, topBar: 64, tabBar: 49 },
+    layout: { hit: 44, topBar: 64, tabBar: 78 },
     radius: { sm: 8 },
     space: {},
     useContext: () => true,

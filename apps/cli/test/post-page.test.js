@@ -318,6 +318,38 @@ test('an AVIF item is a photo; og:image skips AVIF and names its type', (t) => {
   t.is(postPreviewData({ record: post({ media: [avif, image(1)] }) }).photoCount, 2, 'the preview counts the AVIF photo')
 })
 
+test('og:image: the share cover comes first, as /capa with image/jpeg and its sizes', (t) => {
+  const avif = image(0, 'image/avif')
+  const cover = { width: 1200, height: 900 }
+  const withCover = page({ cover }, { media: [avif] })
+  const without = page({}, { media: [avif] })
+  assertSafe(t, withCover, 'avif with cover')
+  t.is(meta(withCover, 'og:image'), ORIGIN + BASE + '/capa', 'the cover route')
+  t.is(meta(withCover, 'og:image:type'), 'image/jpeg')
+  t.is(meta(withCover, 'og:image:width'), '1200')
+  t.is(meta(withCover, 'og:image:height'), '900')
+  t.is(meta(withCover, 'og:image:alt'), 'Foto da publicação')
+  t.is(metaCount(withCover, 'og:image'), 1, 'exactly one og:image')
+  t.is(meta(without, 'og:image'), FALLBACK_IMAGE, 'without the cover, the brand card as before')
+  const body = (html) => html.slice(html.indexOf('<body>'))
+  t.is(body(withCover), body(without), 'the body does not change')
+  t.absent(withCover.includes('src="' + BASE + '/capa"'), 'the body never shows the cover')
+
+  t.is(meta(page({ cover }, { media: [image(0)] }), 'og:image'), ORIGIN + BASE + '/capa', 'ahead of a JPEG photo too')
+  t.is(meta(page({ cover }, { text: 'só texto' }), 'og:image'), ORIGIN + BASE + '/capa', 'and ahead of the brand card')
+  t.is(meta(page({ cover }, { media: [image(0), videoItem()] }), 'og:image:alt'), 'Capa do vídeo')
+  t.is(meta(page({ cover, origin: 'http://bora.varanda.app' }, { media: [avif] }), 'og:image'), null, 'no og:image without an https origin')
+
+  // A cover the page cannot name with believable sizes is left out, and the
+  // order before the cover applies.
+  for (const bad of [null, 'capa', [], { width: 0, height: 900 }, { width: 1200 }, { width: 1.5, height: 900 }, { width: 16385, height: 1 }, { width: 8192, height: 4096 }]) {
+    const html = page({ cover: bad }, { media: [image(0)] })
+    t.is(meta(html, 'og:image'), ORIGIN + BASE + '/foto/1', 'the first photo for cover ' + JSON.stringify(bad))
+    t.is(meta(html, 'og:image:width'), '800')
+  }
+  t.alike(postPreviewData({ record: post({ media: [avif] }), cover }), postPreviewData({ record: post({ media: [avif] }) }), 'the preview ignores the cover')
+})
+
 test('bad author or seq gives the fallback page pointing at /', (t) => {
   const cases = [
     { author: HEX.toUpperCase(), seq: 7 },

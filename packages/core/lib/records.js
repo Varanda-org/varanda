@@ -65,6 +65,12 @@ const AVATAR_SIDE = 512
 const MAX_AVATAR_BLOCKS = 8
 const MAX_AVATAR_BYTES = 8 * MEDIA_BLOCK_BYTES
 const AVATAR_MIMES = Object.freeze(['image/jpeg', 'image/webp'])
+// A shared post's cover (docs/protocol.md section 2, "Public share"): one
+// JPEG still that link crawlers fetch from the public page, so only the
+// format every crawler decodes, and small enough for their size limits.
+const SHARE_COVER_SIDE = 1200
+const MAX_SHARE_COVER_BLOCKS = 8
+const MAX_SHARE_COVER_BYTES = 262144
 
 const CERT_KEYS = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'signature']
 const CERT_KEYS_V2 = ['v', 'member', 'ageBand', 'method', 'date', 'association', 'issuer', 'issuerDate', 'issuerSignature', 'signature']
@@ -122,6 +128,8 @@ const DELETE_KEYS = ['type', 'seq', 'at']
 const DELETE_MEDIA_KEYS = ['type', 'seq', 'at', 'media']
 const DELETE_RANGE_KEYS = ['core', 'start', 'blocks']
 const POST_SHARE_KEYS = Object.freeze(['type', 'seq', 'at'])
+// Not consent: a cover never makes a post public, only a live post-share does.
+const POST_COVER_KEYS = Object.freeze(['type', 'seq', 'image', 'at'])
 // Depoimentos (docs/protocol.md): the writer's sealed commitment and the
 // recipient's opt-in copy of the text.
 const TESTIMONIAL_KEYS = ['type', 'to', 'gen', 'hash', 'box', 'at']
@@ -524,6 +532,30 @@ function validAvatar (d) {
   }
 }
 
+// A link cover is only public for a post that already exposes an image
+// to readers and moderation, including a video's JPEG poster.
+function hasPostStill (record) {
+  try {
+    return record !== null && record.type === 'post' && Array.isArray(record.media) && record.media.some((d) => validDescriptor(d))
+  } catch {
+    return false
+  }
+}
+
+// Never throws.
+function validShareCover (d) {
+  try {
+    return validDescriptor(d) &&
+      d.mime === 'image/jpeg' &&
+      d.width <= SHARE_COVER_SIDE &&
+      d.height <= SHARE_COVER_SIDE &&
+      d.blocks <= MAX_SHARE_COVER_BLOCKS &&
+      d.bytes <= MAX_SHARE_COVER_BYTES
+  } catch {
+    return false
+  }
+}
+
 // A post preview's thumbnail: a still JPEG descriptor of one media block.
 // Never throws.
 function validPreviewImage (d) {
@@ -617,7 +649,7 @@ function validPageShape (r) {
     isHex64(r.owner) && r.actor === r.owner && validPageAdmins(r.admins, r.owner)
 }
 
-const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
+const TYPES = Object.freeze(['member-cert', 'profile', 'post', 'username', 'media-core', 'follow', 'like', 'repost', 'group-join', 'delete', 'group-cut', 'group-confirm', 'dm-key', 'page-roster', 'page-accept', 'page-offer', 'page-close', 'page-moved', 'page-origin', 'page-delegate', 'page-link', 'listing', 'listing-edit', 'listing-status', 'listing-rate', 'testimonial', 'testimonial-show', 'moment', 'post-share', 'post-cover', 'scrap', 'scrap-hide', 'scrap-wall', 'profile-about', 'mood', 'fan', 'top-friends', 'choice', 'visits', 'device', 'garden', 'garden-state', 'garden-help', 'garden-decor', 'garden-gift', 'garden-take', 'groups-show'])
 
 // Required lazily: lib/group.js requires this module at load time.
 function weakBoxKey (hex) {
@@ -648,6 +680,13 @@ function check (record, seq) {
   if (type === 'post-share') {
     if (!hasExactKeys(record, POST_SHARE_KEYS)) return 'malformed'
     if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-share-invalid'
+    return isCanonicalIso(record.at) ? null : 'date-invalid'
+  }
+  // Like post-share, whether block `seq` is a live post is the fold's check.
+  if (type === 'post-cover') {
+    if (!hasExactKeys(record, POST_COVER_KEYS)) return 'malformed'
+    if (!Number.isSafeInteger(record.seq) || record.seq < 1 || !(record.seq < seq)) return 'post-cover-invalid'
+    if (!validShareCover(record.image)) return 'media-invalid'
     return isCanonicalIso(record.at) ? null : 'date-invalid'
   }
   // Shape only: the issuer signatures are checked by verifyUsernameRecord
@@ -1088,6 +1127,10 @@ function postShareRecord ({ seq, at = nowIso() } = {}) {
   return build({ type: 'post-share', seq, at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
 }
 
+function postCoverRecord ({ seq, image, at = nowIso() } = {}) {
+  return build({ type: 'post-cover', seq, image: copyDescriptor(image), at }, Number.isSafeInteger(seq) ? seq + 1 : 1)
+}
+
 // Every chunk shares one `at`, read once, so the records of one deletion
 // carry the same instant.
 function deleteRecords ({ seq, at = nowIso(), media } = {}) {
@@ -1352,11 +1395,15 @@ module.exports = {
   MAX_AVATAR_BLOCKS,
   MAX_AVATAR_BYTES,
   AVATAR_MIMES,
+  SHARE_COVER_SIDE,
+  MAX_SHARE_COVER_BLOCKS,
+  MAX_SHARE_COVER_BYTES,
   PROFILE_AVATAR_KEYS,
   POST_PREVIEW_KEYS,
   QUOTE_PREVIEW_KEYS,
   DELETE_RANGE_KEYS,
   POST_SHARE_KEYS,
+  POST_COVER_KEYS,
   LISTING_KEYS: feira.LISTING_KEYS,
   LISTING_MEDIA_KEYS: feira.LISTING_MEDIA_KEYS,
   LISTING_EDIT_KEYS: feira.EDIT_KEYS,
@@ -1411,6 +1458,7 @@ module.exports = {
   deleteRecord,
   deleteRecords,
   postShareRecord,
+  postCoverRecord,
   listingRecord,
   listingEditRecord,
   listingStatusRecord,
@@ -1420,6 +1468,8 @@ module.exports = {
   validVideoDescriptor,
   validPostMedia,
   validAvatar,
+  validShareCover,
+  hasPostStill,
   validPreview,
   validPreviewImage,
   validateRecord,

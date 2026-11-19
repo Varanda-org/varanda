@@ -74,7 +74,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { useNode } from '../node'
 import { useNames } from '../names'
 import * as actingStore from '../actingAs'
-import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesPostShare, pagesStart } from '../pages'
+import { actAs, pagesList, pagesMedia, pagesMoment, pagesOrigin, pagesPostCover, pagesPostShare, pagesStart } from '../pages'
 import { pagePostOp, prepPageVideo } from '../pagePost'
 import { MOMENT_PAGE_UNCERTAIN, MOMENT_PREPARING_NOTICE, createMomentItems, isMomentPreparing, momentComposerOn, momentFailure, momentPublishedAs, momentPutArgs } from '../pageMoment'
 import { memberKeyOf, useActing } from './Conversa'
@@ -95,7 +95,7 @@ import { pickImages, pickVideo } from '../media/attach'
 import { prepareVideo } from '../media/videoPrep'
 import { canComposeVideo, createVideoDraft, videoMomentValid, videoPostValid, VIDEO_OR_PHOTOS, MOMENT_ONE_MEDIA, mediaComposeError } from '../videoCompose'
 import { revokeUrl, urlFromBytes } from '../media/display'
-import { encodeFile } from '../media/encode'
+import { encodeFile, encodeThumbnail } from '../media/encode'
 import { EXPIRED_TEXT, SHARE_TTL_MS, VIDEO_HELD_TEXT, holdShare, linkHeld, mergeDraft, restoreDraft, retryableEncode, settleHold, shareNote, sharedLinkHold } from '../sharedIntent'
 import { dropDraft, takeDraft, watchDraft } from '../draftKeep'
 import { moveById } from '../photoOrder'
@@ -130,7 +130,7 @@ import { ProgressBar } from '../ui/ProgressBar'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
 import { measureField } from '../ui/fieldMeasure'
-import { layout, space, type } from '../ui/theme'
+import { layout, radius, space, type } from '../ui/theme'
 import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
@@ -142,7 +142,7 @@ import { momentsChanged } from './Momentos'
 import { usePostPublic } from '../postPublicContext'
 import { POST_SHARE_CONSENT } from '../ui/PostShareSheet'
 import { shareNewAsPage } from '../pageShare'
-import { WEB_SHARE_LABEL, shareNew, webShareOffered } from '../postShareCompose'
+import { WEB_SHARE_LABEL, heldStill, shareNew, webShareOffered } from '../postShareCompose'
 
 export const MOMENT_TEXT_MAX = 200
 // maxLength counts UTF-16 units on the web: 200 code points of emoji take 400.
@@ -942,7 +942,8 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
   const keepPostOnCloseRef = useRef(false)
   const [roster, setRoster] = useState([])
   const [rosterFailed, setRosterFailed] = useState(false)
-  // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids }):
+  // A sent-but-unknown page post ({ retry, page, sent, reply, quote, ids,
+  // web, cover }):
   // retry() resends the same signed bytes. While it is set the draft is
   // locked and nothing new is signed.
   const pageRetryRef = useRef(null)
@@ -1641,7 +1642,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       const r = await action.run(async () => {
         const value = await pending.retry()
         if (pending.web) {
-          late = await shareNewAsPage(async (o) => pagesPostShare(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page: pending.page, seq: o.seq }), pending.page, seqOf(value)).catch(() => ({ ref: null, result: null }))
+          late = await shareNewAsPage(async (o) => pagesPostShare(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page: pending.page, seq: o.seq }), pending.page, seqOf(value), pending.cover || null).catch(() => ({ ref: null, result: null }))
         }
         return value
       })
@@ -1744,6 +1745,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const plain = structured.poll === undefined && structured.event === undefined
     const videoFile = hasVideo ? video.draft.state.file : null
     const sentIds = hasVideo ? [videoFile] : items.map((item) => item.id)
+    const sentHeld = hasVideo ? [videoFile && videoFile.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
     if (hasMedia) {
       if (!mediaReady || !mediaOnline || (hasVideo && (!canVideo || video.draft.state.phase !== 'ready'))) return
@@ -1816,6 +1818,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // One post-share for the post just written, inside the same pending
     // action; shareNewAsPage never rejects and is never resent.
     const sentWeb = webOn && kind === 'post'
+    const sentCover = sentWeb ? coverFor(sentMedia, sentHeld, page) : null
     let web = null
     const r = await action.run(async () => {
       const member = await memberKeyOf(nodeRequest, nodeRef.current)
@@ -1826,7 +1829,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         raw = err
         throw err
       }
-      if (sentWeb) web = await shareNewAsPage((o) => pagesPostShare(nodeRef.current, { member, page, seq: o.seq }), page, seqOf(value))
+      if (sentWeb) web = await shareNewAsPage((o) => pagesPostShare(nodeRef.current, { member, page, seq: o.seq }), page, seqOf(value), sentCover)
       return value
     })
     if (r.ok) {
@@ -1835,7 +1838,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
       return published(sent, sentReply, sentIds, sentQuote, web !== null && mountedRef.current ? web : null, own)
     }
     if (r.uncertain && raw && typeof raw.retry === 'function') {
-      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb, media: sentMedia })
+      setPageRetry({ retry: raw.retry, page, sent, reply: sentReply, quote: sentQuote, ids: sentIds, web: sentWeb, cover: sentCover, media: sentMedia })
     }
   }
 
@@ -1901,6 +1904,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     const sentWeb = webOn && !sentReply && !sentQuote
     if (sentQuote && (node.online === false || countChars(sent) < 1)) return
     const sentIds = hasVideo ? [video.draft.state.file] : items.map((item) => item.id)
+    const sentHeld = hasVideo ? [video.draft.state.file && video.draft.state.file.poster, null] : items.map((item) => item.encoded)
     let sentMedia = null
     if (hasMedia) {
       if (!mediaReady || !mediaOnline || media === null || (hasVideo && !canVideo)) return
@@ -1966,12 +1970,13 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     // action so a second Publicar cannot slip in; shareNew never rejects, and
     // neither request is ever resent.
     let web = null
+    const sentCover = sentWeb ? coverFor(sentMedia, sentHeld) : null
     const r = await action.run(async () => {
       const value = await call().catch((err) => {
         raw = err
         throw err
       })
-      if (sentWeb) web = await shareNew(node.request, self.publicKey, seqOf(value)).catch(() => ({ ref: null, result: null }))
+      if (sentWeb) web = await shareNew(node.request, self.publicKey, seqOf(value), sentCover).catch(() => ({ ref: null, result: null }))
       return value
     })
     if (r.ok) {
@@ -2011,7 +2016,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
         const foundSeq = Number.isInteger(found.seq) ? found.seq : null
         confirm(foundSeq)
         action.clearError()
-        const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq).catch(() => ({ ref: null, result: null })) : null
+        const late = sentWeb ? await shareNew(node.request, self.publicKey, foundSeq, sentCover).catch(() => ({ ref: null, result: null })) : null
         const own = sentReply ? { author: res.key, seq: foundSeq, media: sentMedia, gen } : null
         published(sent, sentReply, sentIds, sentQuote, late !== null && mountedRef.current ? late : null, own)
       }
@@ -2020,6 +2025,26 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     } finally {
       setChecking(false)
     }
+  }
+
+  // The crawler's cover for a post sent with 'Publicar também na web'
+  // (postShare.js sendCover), built from the bytes this composer still holds:
+  // `held` the encoded { bytes, mime } in sentMedia's order. Only a node with
+  // an installation writes covers (post.cover is the browser node's, 5.169).
+  // -> sendCover's input, or null for none. node.hosted is read first, so
+  // nothing else is touched for a node without an installation.
+  const coverFor = (sentMedia, held, page = null) => {
+    if (node.hosted !== true || !Array.isArray(sentMedia)) return null
+    const base = { post: { media: sentMedia }, held: heldStill(sentMedia, held), encodeThumbnail }
+    if (page !== null) {
+      return {
+        ...base,
+        upload: async (b) => (await uploadBytesForPage(page, b)).descriptor,
+        write: async (op) => pagesPostCover(nodeRef.current, { member: await memberKeyOf(nodeRequest, nodeRef.current), page, op })
+      }
+    }
+    if (media === null) return null
+    return { ...base, upload: (b) => media.upload({ bytes: b.bytes, mime: b.mime, width: b.width, height: b.height }) }
   }
 
   const replyName = reply ? displayText(whoOf({ name: reply.name, username: reply.username }).title) : ''
@@ -2386,17 +2411,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     {'respondendo a '}
                     <Text style={styles.markName}>{replyName}</Text>
                   </Text>
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityState={{ disabled: busy }}
-                    disabled={held}
-                    onPress={onClearReply}
-                    hitSlop={8}
-                  >
-                    <Text style={styles.markCancel}>cancelar resposta</Text>
-                  </Pressable>
+                  <Pill label='cancelar resposta' link small disabled={held} onPress={onClearReply} />
                 </View>
-                <Text style={styles.quote} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
+                <Text style={[styles.quote, styles.replyQuote]} numberOfLines={2}>{displayText(reply.text, { multiline: true })}</Text>
               </>
               )
             : null}
@@ -2410,15 +2427,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                   </Text>
                   {typeof onClearQuote === 'function'
                     ? (
-                      <Pressable
-                        accessibilityRole='button'
-                        accessibilityState={{ disabled: busy }}
-                        disabled={held}
-                        onPress={onClearQuote}
-                        hitSlop={8}
-                      >
-                        <Text style={styles.markCancel}>cancelar citação</Text>
-                      </Pressable>
+                      <Pill label='cancelar citação' link small disabled={held} onPress={onClearQuote} />
                       )
                     : null}
                 </View>
@@ -2487,17 +2496,9 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
               ? null
               : shareLinkHeld && open === true && previewsEnabled(previewPrefStore())
                 ? (
-                  <Pressable
-                    accessibilityRole='button'
-                    accessibilityLabel='Mostrar prévia do link'
-                    accessibilityState={{ disabled: frozen }}
-                    disabled={frozen}
-                    onPress={() => setLinkHold(null)}
-                    hitSlop={6}
-                    style={({ pressed }) => [styles.linkAsk, pressed && styles.toolPressed]}
-                  >
-                    <Text style={styles.linkAskText}>Mostrar prévia do link</Text>
-                  </Pressable>
+                  <View style={styles.linkAsk}>
+                    <Pill label='Mostrar prévia do link' link small disabled={frozen} onPress={() => setLinkHold(null)} />
+                  </View>
                   )
                 : <LinkDraftCard draft={linkDraft} />}
           {musicDraft !== null && items.length === 0
@@ -2527,7 +2528,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, videoOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
-                    <Icon name='video' size={21} color={colors.soft} />
+                    <Icon name='video' size={24} color={colors.soft} />
                   </PressScale>
                   )
                 : null}
@@ -2540,7 +2541,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                 hitSlop={6}
                 style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
               >
-                <Icon name='smile' size={21} color={emojiOpen ? colors.accent : colors.soft} />
+                <Icon name='smile' size={24} color={emojiOpen ? colors.accent : colors.soft} />
               </PressScale>
               {canAttach
                 ? (
@@ -2556,7 +2557,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, attachOff && styles.toolOff, pressed && styles.toolPressed]}
                   >
-                    <Icon name='image' size={21} color={colors.soft} />
+                    <Icon name='image' size={24} color={colors.soft} />
                   </PressScale>
                   )
                 : null}
@@ -2571,7 +2572,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Icon name='enquete' size={21} color={pollDraft !== null ? colors.accent : colors.soft} />
+                    <Icon name='enquete' size={24} color={pollDraft !== null ? colors.accent : colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -2586,7 +2587,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Icon name='evento' size={21} color={eventDraft !== null ? colors.accent : colors.soft} />
+                    <Icon name='evento' size={24} color={eventDraft !== null ? colors.accent : colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -2601,7 +2602,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
                     hitSlop={6}
                     style={({ pressed }) => [styles.tool, pressed && styles.toolPressed]}
                   >
-                    <Icon name='musica' size={21} color={colors.soft} />
+                    <Icon name='musica' size={24} color={colors.soft} />
                   </Pressable>
                   )
                 : null}
@@ -2740,7 +2741,7 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMov
     <View style={[styles.thumbWrap, canMove && styles.thumbWrapWide]}>
       {/* The X stays on the 80 image. The wider wrap is only for the arrows. */}
       <View style={styles.thumbFrame}>
-        <View style={styles.thumb} accessible accessibilityRole='image' accessibilityLabel={cover ? label + ', capa' : label}>
+        <View style={[styles.thumb, count === 1 && styles.singlePhoto]} accessible accessibilityRole='image' accessibilityLabel={cover ? label + ', capa' : label}>
           {item.thumb
             ? <Image source={{ uri: item.thumb }} style={styles.thumbImg} resizeMode='cover' />
             : <View style={[styles.thumbImg, styles.thumbEmpty]}><Icon name='image' size={20} color={colors.soft} /></View>}
@@ -2764,7 +2765,7 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMov
           style={styles.remove}
         >
           <View style={styles.removeDot}>
-            <Icon name='x' size={14} color='#ffffff' />
+            <Icon name='x' size={14} color={colors.onMedia} />
           </View>
         </Pressable>
       </View>
@@ -2826,7 +2827,7 @@ const makeStyles = (colors) => StyleSheet.create({
   draftConflict: { padding: 24, gap: 16 },
   draftConflictText: { ...type.postText, color: colors.ink },
   flex: { flex: 1 },
-  thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 10, paddingLeft: 68, paddingRight: 16 },
+  thumbs: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, paddingTop: 10, paddingLeft: space.xl + 40 + 12, paddingRight: space.xl },
   thumbWrap: { width: 80, gap: 4 },
   thumbWrapWide: { width: 88 },
   thumbFrame: { width: 80 },
@@ -2847,6 +2848,7 @@ const makeStyles = (colors) => StyleSheet.create({
   // On the cover there is no "antes" arrow; "depois" keeps its right-hand place.
   moveAfter: { marginLeft: 'auto' },
   thumb: { width: 80, height: 80, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  singlePhoto: { borderRadius: radius.bubble },
   thumbImg: { ...StyleSheet.absoluteFillObject },
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
   bar: { position: 'absolute', left: 6, right: 6, bottom: 6 },
@@ -2862,22 +2864,22 @@ const makeStyles = (colors) => StyleSheet.create({
     justifyContent: 'flex-start',
     padding: 4
   },
-  removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.6)' },
+  removeDot: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.mediaScrim },
   thumbError: { fontSize: 12, lineHeight: 15, color: colors.danger },
-  momentBody: { gap: space.md, paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
-  momentPhoto: { width: 160, height: 200, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
+  momentBody: { gap: space.md, paddingHorizontal: space.xl, paddingTop: space.md, paddingBottom: space.lg, alignItems: 'flex-start' },
+  momentPhoto: { width: 160, height: 200, borderRadius: radius.bubble, overflow: 'hidden', backgroundColor: colors.skeleton },
   momentInput: { ...type.compose, alignSelf: 'stretch', color: colors.ink, minHeight: MOMENT_MIN_HEIGHT, maxHeight: MOMENT_MAX_HEIGHT, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: colors.card },
   // Keeps its line while empty: no jump at 80%, and still a place to focus.
   momentCounter: { alignSelf: 'flex-end', marginTop: -4, minHeight: type.counter.lineHeight },
-  tools: { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
-  linkAsk: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginLeft: 60, paddingHorizontal: 8, borderRadius: 22 },
-  linkAskText: { ...type.replyMark, color: colors.accent, fontWeight: '600' },
+  // Six 44 pt tools and a long counter do not fit one line on a phone: the last tools wrap instead of running under the counter.
+  tools: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 4, flex: 1 },
+  linkAsk: { alignSelf: 'flex-start', marginLeft: space.xl + 40 + 12 },
   tool: { flexDirection: 'row', alignItems: 'center', gap: 5, minHeight: 44, minWidth: 44, paddingHorizontal: 8, borderRadius: 22, justifyContent: 'center' },
   toolOff: { opacity: 0.45 },
   toolPressed: { backgroundColor: colors.accentSoft },
   count: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   retryRow: { flexDirection: 'row', marginTop: 8 },
-  asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
+  asRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, paddingHorizontal: space.xl, paddingTop: 8 },
   asLabel: { ...type.replyMark, color: colors.soft },
   // A Page name runs to 80 characters: the cap keeps the chip in the sheet and ends the name in an ellipsis.
   asChip: { maxWidth: 200 },
@@ -2886,16 +2888,17 @@ const makeStyles = (colors) => StyleSheet.create({
     flexWrap: 'wrap',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: space.xl,
     marginTop: 4
   },
   mark: { ...type.replyMark, color: colors.soft, flexShrink: 1 },
   markName: { color: colors.accent, fontWeight: '600' },
-  markCancel: { ...type.replyMark, color: colors.soft },
   quote: { fontSize: 14, lineHeight: 20, color: colors.soft, paddingHorizontal: 16 },
+  // The replied text sits on the sheet, not in a card: the sheet's 24 pt gutter.
+  replyQuote: { paddingHorizontal: space.xl },
   quoteCard: {
     marginTop: 8,
-    marginHorizontal: 16,
+    marginHorizontal: space.xl,
     paddingVertical: 8,
     borderWidth: 1,
     borderColor: colors.line,
@@ -2903,7 +2906,7 @@ const makeStyles = (colors) => StyleSheet.create({
     gap: 2
   },
   quoteCardName: { ...type.postName, color: colors.ink, paddingHorizontal: 16 },
-  compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: 16 },
+  compose: { flexDirection: 'row', gap: 12, paddingTop: 10, paddingHorizontal: space.xl },
   // minWidth 0 so a long name ellipsizes instead of widening the row on native.
   composeBody: { flex: 1, minWidth: 0 },
   author: { paddingTop: 2 },
@@ -2927,15 +2930,15 @@ const makeStyles = (colors) => StyleSheet.create({
     alignItems: 'center',
     gap: 7,
     paddingVertical: space.sm,
-    // The tools pad their own 8, so icons and counter both sit 16 from the edges.
-    paddingLeft: space.sm,
-    paddingRight: space.lg
+    // The tools pad their own 8, so icons and counter both sit 24 from the edges.
+    paddingLeft: space.lg,
+    paddingRight: space.xl
   },
   counterAnnouncement: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   counter: { ...type.counter, color: colors.soft },
   counterWarn: { color: colors.warn },
   counterFull: { color: colors.danger },
-  errors: { paddingHorizontal: 16, gap: 4 },
+  errors: { paddingHorizontal: space.xl, gap: 4 },
   webRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
   webText: { color: colors.ink, fontSize: 15, flexShrink: 1 },
   ring: { width: 20, height: 20 },

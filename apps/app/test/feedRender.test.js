@@ -325,6 +325,26 @@ test('a tap plays the video inside the tile', (t) => {
   t.absent(pressKeys.includes('Escape'), 'Escape on the inline player still reaches the app')
 })
 
+test('MediaGrid clips rounded corners by default and squares them with bleed', (t) => {
+  const src = read('ui/MediaGrid.js')
+  const { MediaGrid: grid, VideoTile: tile, VideoPoster: poster } = videoSlices(src)
+  t.ok(/function MediaGrid \(\{[^}]*\bbleed = false\b/.test(grid), 'bleed defaults to false')
+  t.ok(grid.includes('const bleedStyle = bleed && styles.bleed'), 'the override applies only with bleed')
+  for (const frame of ['clip', 'carouselFrame', 'box', 'videoFrame']) {
+    t.ok(new RegExp('^  ' + frame + ': \\{[^}]*borderRadius: 14\\b', 'm').test(src), frame + ' has radius 14 by default')
+  }
+  t.ok(src.includes('bleed: { borderRadius: 0 }'), 'bleed uses radius 0')
+  t.ok(grid.includes('[styles.clip, bleedStyle,'), 'single photo')
+  t.ok(grid.includes('frameStyle={[styles.carouselFrame, bleedStyle,'), 'carousel frame')
+  t.is(grid.split('[styles.box, bleedStyle,').length - 1, 3, 'all mosaic frames')
+  t.ok(/<VideoTile\b[^>]*\bbleedStyle=\{bleedStyle\}/.test(grid), 'the grid passes the override to video')
+  t.ok(/<VideoPoster\b[^>]*\bbleedStyle=\{bleedStyle\}/.test(tile), 'the tile passes the override to the poster')
+  for (const [video, name] of [[tile, 'active video'], [poster, 'video poster']]) {
+    t.ok(video.includes('[styles.videoFrame, bleedStyle,'), name + ' frame')
+    t.ok(video.includes('[styles.cell, styles.clip, bleedStyle,'), name + ' image')
+  }
+})
+
 test('only the photo viewer zooms and drags to close', (t) => {
   const src = read('ui/MediaGrid.js')
   const { VideoViewer: video, MediaGrid: grid } = videoSlices(src)

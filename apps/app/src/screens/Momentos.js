@@ -73,7 +73,7 @@ import { Pill } from '../ui/Pill'
 import { Scrim, scrimColor } from '../ui/Scrim'
 import { Sheet } from '../ui/Sheet'
 import { IconAction } from '../ui/TopActions'
-import { layout, space, type } from '../ui/theme'
+import { layout, radius, space, type } from '../ui/theme'
 import { ThemeContext, useStyles, useTheme } from '../ui/ThemeProvider'
 import { paletteFor } from '../appearance.js'
 import { STACK_MS } from '../stackMotion'
@@ -1252,7 +1252,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
     if (rings.some((r) => r.items.some((it) => !keep(it)))) prune(keep)
   }, [now, rings, prune, hold, listed])
 
-  const closeButton = <IconAction icon='fechar' label='fechar momentos' color='#ffffff' onPress={close} />
+  const closeButton = <IconAction icon='fechar' label='fechar momentos' color={colors.onMedia} onPress={close} />
 
   if (node.hosted !== true || data.phase === 'off') {
     return (
@@ -1378,7 +1378,7 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
           />
         </View>
         {meet ? <View style={[styles.fullScrim, { backgroundColor: scrimColor(BOTTOM_SCRIM.alpha) }]} pointerEvents='none' /> : null}
-        <View style={[styles.top, { paddingTop: insets.top + 8 }]} pointerEvents='box-none' onLayout={(e) => setTopEnd(e.nativeEvent.layout.y + e.nativeEvent.layout.height)}>
+        <View style={[styles.top, { paddingTop: insets.top + 12 }]} pointerEvents='box-none' onLayout={(e) => setTopEnd(e.nativeEvent.layout.y + e.nativeEvent.layout.height)}>
           {meet ? null : <Scrim edge='top' alpha={TOP_SCRIM.alpha} fade={TOP_SCRIM.fade} style={styles.topScrim} />}
           <View style={styles.segments} accessible accessibilityLabel={'momento ' + (pos.item + 1) + ' de ' + ring.items.length}>
             {segments.map((done, n) => (
@@ -1405,12 +1405,12 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
               </View>
             </Pressable>
             {video || musicOn === true
-              ? <IconAction icon={silent ? 'mudo' : 'som'} label={silent ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL} color='#ffffff' onPress={toggleSound} />
+              ? <IconAction icon={silent ? 'mudo' : 'som'} label={silent ? SOUND_UNMUTE_LABEL : SOUND_MUTE_LABEL} color={colors.onMedia} onPress={toggleSound} />
               : null}
             {mine || pageOwn
               ? (
                 <>
-                  <IconAction icon='mais' label='mais ações' color='#ffffff' onPress={openMenu} />
+                  <IconAction icon='mais' label='mais ações' color={colors.onMedia} onPress={openMenu} />
                   <ActionsSheet open={menuShown} onClose={closeMenu} actions={menuActions} />
                 </>
                 )
@@ -1552,27 +1552,26 @@ function Viewer ({ entry, ownKey, isTop = true, covered = false, onBack, onOpenM
   )
 }
 
-// Literal black and white: the viewer is black in both themes.
 const makeStyles = (colors) => StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#000000' },
+  root: { flex: 1, backgroundColor: colors.mediaBg },
   flex: { flex: 1 },
-  stage: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000000' },
+  stage: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.mediaBg },
   photo: { ...StyleSheet.absoluteFillObject },
   warm: { opacity: 0 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 16 },
-  unavailable: { ...type.postName, color: '#ffffff' },
+  unavailable: { ...type.postName, color: colors.onMedia },
   taps: { ...StyleSheet.absoluteFillObject, flexDirection: 'row' },
   half: { flex: 1 },
-  top: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 8, gap: 4 },
+  top: { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: space.xl, paddingVertical: 12, gap: 12 },
   // Solid down to the bottom of the header row, then the fade past it.
   topScrim: { position: 'absolute', top: 0, left: 0, right: 0, bottom: -TOP_SCRIM.fade },
-  segments: { flexDirection: 'row', gap: 4, paddingHorizontal: 8 },
-  segment: { flex: 1, height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.35)', overflow: 'hidden' },
-  segmentFill: { height: 3, backgroundColor: '#ffffff' },
+  segments: { flexDirection: 'row', gap: 4 },
+  segment: { flex: 1, height: 2, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.4)', overflow: 'hidden' },
+  segmentFill: { height: 2, backgroundColor: colors.onMedia },
   headRow: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 44 },
   who: { flex: 1, minWidth: 0, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 8 },
   whoText: { flex: 1, minWidth: 0 },
-  name: { ...type.postName, color: '#ffffff', ...TEXT_SHADOW },
+  name: { ...type.postName, color: colors.onMedia, ...TEXT_SHADOW },
   time: { ...type.postMeta, color: 'rgba(255,255,255,0.8)', ...TEXT_SHADOW },
   pressed: { opacity: 0.6 },
   bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 16, gap: 12 },
@@ -1580,13 +1579,13 @@ const makeStyles = (colors) => StyleSheet.create({
   fullScrim: { ...StyleSheet.absoluteFillObject },
   caption: { flexGrow: 0 },
   captionToggle: { minHeight: layout.hit, alignSelf: 'flex-start', justifyContent: 'center', paddingHorizontal: space.sm },
-  text: { ...type.postText, color: '#ffffff', ...TEXT_SHADOW },
+  text: { ...type.postText, color: colors.onMedia, ...TEXT_SHADOW },
   bar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
   reactionBlock: { width: '100%', gap: space.xs },
   reactionRow: { flexDirection: 'row', justifyContent: 'space-between' },
   reactionHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center' },
-  reactionEmoji: { fontSize: 24, color: '#ffffff' },
-  reactionNote: { ...type.postMeta, color: '#ffffff', ...TEXT_SHADOW },
+  reactionEmoji: { fontSize: 24, color: colors.onMedia },
+  reactionNote: { ...type.postMeta, color: colors.onMedia, ...TEXT_SHADOW },
   sheetBody: { gap: 12, paddingHorizontal: 16, paddingBottom: 16 },
   pageSection: { gap: 4, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.line },
   pageTitle: { ...type.postName, color: colors.ink, paddingHorizontal: 16, minHeight: 44, textAlignVertical: 'center' },
