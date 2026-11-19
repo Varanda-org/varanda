@@ -64,6 +64,7 @@ const resultKeys = {
   'post.quote': ['seq'],
   'post.delete': ['seq', 'ref', 'changed', 'deleted'],
   'post.shared': ['shareSeq', 'cover'],
+  'post.uncovered': ['posts', 'more'],
   'post.share': ['shareSeq', 'created'],
   'post.cover': ['coverSeq', 'created'],
   'post.unshare': ['ok', 'changed'],
@@ -639,6 +640,7 @@ function samples (f) {
     'post.quote': { to, text: 'Vamos conversar sobre isso.' },
     'post.delete': { to },
     'post.shared': { to },
+    'post.uncovered': {},
     'post.share': { to },
     'post.cover': { to, image: { core: 'e'.repeat(64), mime: 'image/jpeg', start: 7, blocks: 2, bytes: 40000, sha256: 'f'.repeat(64), width: 1200, height: 900 } },
     'post.unshare': { to },
@@ -2361,4 +2363,9 @@ test('book club pictures load verified bytes only for their creators', async (t)
     ]) t.is((await vitrineMediaResponse(bad)).status, 404)
   }
   t.not(group.image.core, community.image.core)
+})
+
+test('vitrine never offers automatic covers', async (t) => {
+  const { request } = await load()
+  t.alike(await request('post.uncovered', {}), { posts: [], more: false })
 })

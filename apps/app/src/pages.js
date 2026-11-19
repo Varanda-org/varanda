@@ -352,7 +352,7 @@ function checkMedia (action, op) {
 // `op` may be a function of { nonce, to }: records carry the nonce the service
 // minted for the action, which is known only after start. So may `dmBox`
 // (an async one: move seals for K2, known only after start).
-async function step (node, { member, action, page = '', op = {}, dmBox }) {
+async function step (node, { member, action, page = '', op = {}, dmBox, guard }) {
   const sign = signer(node)
   if (sign === null || !isKey(member) || !ACTIONS.includes(action)) throw pageError('pedido-invalido')
   if (page === '' ? !PAGELESS.includes(action) : !isKey(page)) throw pageError('pedido-invalido')
@@ -368,6 +368,7 @@ async function step (node, { member, action, page = '', op = {}, dmBox }) {
   if (!isObject(theOp) || !checkMedia(action, theOp)) throw pageError('pedido-invalido')
   const box = typeof dmBox === 'function' ? await dmBox({ nonce, to }) : dmBox
   const signed = await sign('page.sign', { action, nonce, page: target, op: theOp })
+  if (guard && !guard()) throw new Error('Passagem encerrada.')
   // From here a signature exists: an unknown outcome is 'uncertain'.
   let data
   if (action === 'create') {
@@ -448,14 +449,14 @@ export function pagesPostUnshare (node, { member, page, seq }) {
 
 // The crawler's cover of a shared page post ('post-cover', docs/rpc.md 5.84):
 // `op` exactly { seq, image }, `image` the page's own upload. One request.
-export function pagesPostCover (node, { member, page, op }) {
-  return actAs(node, { member, action: 'post-cover', page, op })
+export function pagesPostCover (node, { member, page, op, guard }) {
+  return actAs(node, { member, action: 'post-cover', page, op, guard })
 }
 
 // One page media upload of bytes this device already encoded (a post cover):
 // start, page.sign, then the raw bytes. -> the service's descriptor. Never
 // resent here.
-export async function pagesUploadEncoded (node, { member, page, encoded }) {
+export async function pagesUploadEncoded (node, { member, page, encoded, guard }) {
   const sign = signer(node)
   if (sign === null || !isKey(member) || !isKey(page) || !encoded || !(encoded.bytes instanceof Uint8Array)) throw pageError('pedido-invalido')
   const origin = pagesOrigin(node)
@@ -463,6 +464,7 @@ export async function pagesUploadEncoded (node, { member, page, encoded }) {
   const hash = Array.from(sha256(encoded.bytes), (b) => b.toString(16).padStart(2, '0')).join('')
   const op = { sha256: hash, mime: encoded.mime, width: encoded.width, height: encoded.height, bytes: encoded.bytes.byteLength }
   const signed = await sign('page.sign', { action: 'media', nonce, page, op })
+  if (guard && !guard()) throw new Error('Passagem encerrada.')
   const answer = await pagesMedia({ member, nonce, page, op, signature: signed.signature, bytes: encoded.bytes, origin })
   return answer && typeof answer === 'object' ? answer.descriptor : null
 }

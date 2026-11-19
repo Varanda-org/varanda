@@ -848,6 +848,7 @@ export function createVitrineRequest (fixtures, options) {
       return { ...result, changed: true, deleted: [target.seq] }
     },
     // Public share (5.121 to 5.123): the newest live post-share decides.
+    'post.uncovered': () => ({ posts: [], more: false }),
     'post.shared': ({ to }) => {
       const seq = shareTarget(to)
       const shares = liveShares(seq)

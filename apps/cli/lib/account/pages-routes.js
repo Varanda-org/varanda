@@ -115,7 +115,7 @@ const { applyDeletes, deletedSeqs, shownMedia, liveMediaRefs, tombstonedRanges, 
 const { foldShare, foldCover, POST_SHARES_PER_DIARY, POST_COVERS_PER_DIARY } = require('@varanda/core/lib/post-share')
 const groupLib = require('@varanda/core/lib/group')
 const { foldListings, countLive, liveEditOf, editPlan, deletePlan, verifyConsent } = require('@varanda/core/lib/listing')
-const { feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
+const { shareCoverSource, needsShareCover, feira, cardUrlHost, isMomentMusic, profileExtra, GROUP_TOPICS_LIMIT, GROUP_MARKED_LIMIT } = require('@varanda/rpc')
 const { MAX_GROUP_MEDIA, SEALED_MEDIA_MIME } = require('@varanda/core/lib/group-media')
 const { pickCount } = require('@varanda/core/lib/polls')
 const { findTerm } = require('./word-check')
@@ -1875,6 +1875,10 @@ function createPagesRoutes ({
       const own = await writer.readOwn(page)
       const shared = sharedOf(own)
       const covered = coveredOf(own, shared)
+      const pending = new Set(shared.filter((seq) => !covered.includes(seq)))
+      const uncovered = own.filter(({ seq, record }) => pending.has(seq) && needsShareCover(record))
+        .sort((a, b) => a.seq - b.seq).slice(0, 8)
+        .map(({ seq, record }) => ({ seq, image: { ...shareCoverSource(record) } }))
       const liked = [...eng.liked]
       const reposted = [...eng.reposted.keys()]
       const t = now()
@@ -1894,6 +1898,7 @@ function createPagesRoutes ({
         moments,
         shared,
         covered,
+        uncovered,
         follows: row.follows,
         closed: row.closed !== null,
         movedTo: row.movedTo,

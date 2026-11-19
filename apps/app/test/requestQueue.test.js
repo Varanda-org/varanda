@@ -925,3 +925,57 @@ test('clear never mutates the reason and accepts a frozen or non-object one', as
   await first
   t.is(held.calls.length, 1)
 })
+
+test('backfill gates reject cancelled queued writes and still drain the next entry', async (t) => {
+  const { createRequestQueue } = await load()
+  for (const priority of ['visible', 'background', 'control']) {
+    const queue = createRequestQueue({ maxInFlight: 1, maxTotal: 1 })
+    const held = heldSend()
+    const first = queue.run('feed.read', {}, held.send)
+    const sent = []
+    const send = (method) => { sent.push(method); return method }
+    let live = true
+    const cancelled = queue.run('post.cover', {}, send, { priority, gate: () => live }).catch((err) => err)
+    const next = queue.run('next', {}, send, { priority, gate: () => true })
+    live = false
+    held.calls[0].release()
+    await first
+    const err = await cancelled
+    t.is(err.queued, true, priority + ': never sent')
+    t.is(err.name, 'AbortError')
+    t.is(await next, 'next', 'the rejected entry consumes no slot')
+    t.alike(sent, ['next'])
+    const immediate = await queue.run('post.cover', {}, send, { priority, gate: () => false }).catch((err) => err)
+    t.is(immediate.queued, true, 'also checked before enqueueing')
+    t.alike(sent, ['next'])
+  }
+})
+
+test('backfill media guards and signals reach the queue but never the handle args', async (t) => {
+  for (const sharesClient of [true, false]) {
+    const provider = await loadProvider()
+    const held = heldSend()
+    const sent = []
+    const args = { mime: 'image/jpeg' }
+    provider.setConnection({ request: held.send, media: { sharesClient, upload: (args) => { sent.push(args); return Promise.resolve('uploaded') } } })
+    const fillers = fillSlots(provider)
+    let live = sharesClient
+    const ctrl = new AbortController()
+    const upload = provider.mediaCall('upload', args, { signal: ctrl.signal, gate: () => live }).catch((err) => err)
+    live = false
+    for (let i = 0; i < fillers.length; i++) {
+      held.calls[i].release()
+      await fillers[i]
+    }
+    t.is((await upload).queued, true, 'cancelled before dispatch')
+    t.alike(sent, [])
+    t.is(await provider.mediaCall('upload', args, { signal: ctrl.signal, gate: () => true }), 'uploaded')
+    t.alike(sent, [args], 'options stay out of the payload')
+    if (sharesClient) {
+      ctrl.abort()
+      const err = await provider.mediaCall('upload', args, { signal: ctrl.signal }).catch((err) => err)
+      t.is(err.queued, true, 'the queue receives the abort signal')
+      t.alike(sent, [args])
+    }
+  }
+})

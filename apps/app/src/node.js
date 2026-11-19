@@ -1805,15 +1805,18 @@ function LiveNodeProvider ({ children }) {
   // capacity. A clear drops a waiting call unsent (queued: true), which the
   // screens show as a failed upload to try again. Elsewhere (the browser
   // node keeps its bytes in the page) the handle is called directly.
-  const mediaCall = useCallback((name, args) => {
+  const mediaCall = useCallback((name, args, { signal, gate } = {}) => {
     const conn = connRef.current
     if (!conn || !conn.media || typeof conn.media[name] !== 'function') return noConnection()
-    if (!MEDIA_RPC_CALLS.has(name) || conn.media.sharesClient !== true) return conn.media[name](args)
+    if (!MEDIA_RPC_CALLS.has(name) || conn.media.sharesClient !== true) {
+      if (gate && !gate()) return Promise.reject(Object.assign(new Error('Passagem encerrada.'), { queued: true }))
+      return conn.media[name](args)
+    }
     const queue = requestQueueRef.current
     if (!queue) return noConnection()
-    return queue.run('media.' + name, null, () => conn.media[name](args), name === 'read' ? undefined : { priority: 'control' })
+    return queue.run('media.' + name, null, () => conn.media[name](args), { signal, gate, priority: name === 'read' ? 'visible' : 'control' })
   }, [])
-  const mediaUpload = useCallback((args) => mediaCall('upload', args), [mediaCall])
+  const mediaUpload = useCallback((args, options) => mediaCall('upload', args, options), [mediaCall])
   const unlocked = pkStatus !== null && pkStatus.unlocked === true
   // A lock drops the held page keys: what the node flagged goes with them.
   useEffect(() => {

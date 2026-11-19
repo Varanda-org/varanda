@@ -118,7 +118,7 @@ const { sealOffer, commitment } = require('@varanda/core/lib/testimonials')
 const grp = require('@varanda/core/lib/group')
 const gc = require('@varanda/core/lib/group-crypto')
 const { validPrivateItem, copyGroupMedia, PRIVATE_ITEM_KEYS, MAX_GROUP_MEDIA } = require('@varanda/core/lib/group-media')
-const { GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, garden, mediaBounds, videoBounds } = require('@varanda/rpc')
+const { shareCoverSource, needsShareCover, GROUP_LIMIT_DEFAULT, GROUP_MEMBERS_LIMIT_MAX, GROUP_REACTIONS_MAX, GROUP_REACTORS_MAX, GROUP_TOPICS_LIMIT, GROUP_VOTERS_MAX, GROUP_EVENTS_LIMIT, POLL_MAX, COMMUNITY_LIST_MAX, feira, garden, mediaBounds, videoBounds } = require('@varanda/rpc')
 const { livePick } = require('@varanda/core/lib/polls')
 const listing = require('@varanda/core/lib/listing')
 const { POST_SHARES_PER_DIARY, POST_COVERS_PER_DIARY, foldShare, foldCover } = require('@varanda/core/lib/post-share')
@@ -1227,6 +1227,26 @@ function shareRoom (entries, postSeq, maxPosts = POST_SHARES_PER_DIARY) {
   const map = new Map()
   for (const [p, seq] of shareBlocks(entries)) foldShare(map, p, seq, { maxPosts })
   return map.has(postSeq) || map.size < maxPosts
+}
+
+function postUncovered (ctx) {
+  return withIdentity(ctx, ({ diary, ownHex }) => heldDiary(diary, ownHex)).then((held) => {
+    // One fold of the share and cover blocks, the same answers as
+    // liveShares and newestLiveCover, so a diary of many photo posts is not
+    // rescanned once per post.
+    const shared = new Set()
+    for (const [p, seq] of shareBlocks(held.entries)) if (!held.deleted.has(seq)) shared.add(p)
+    const newestCover = new Map()
+    for (const [p, seq] of coverBlocks(held.entries)) if (!newestCover.has(p) || seq > newestCover.get(p)) newestCover.set(p, seq)
+    const posts = []
+    for (const { seq, record } of held.entries) {
+      if (!shared.has(seq) || held.deleted.has(seq) || !record || record.type !== 'post' || !needsShareCover(record)) continue
+      if (newestCover.has(seq) && !held.deleted.has(newestCover.get(seq))) continue
+      posts.push({ seq, image: { ...shareCoverSource(record) } })
+    }
+    posts.sort((a, b) => a.seq - b.seq)
+    return { posts: posts.slice(0, 8), more: posts.length > 8 }
+  })
 }
 
 function postShared (ctx, { to }) {
@@ -7322,6 +7342,7 @@ module.exports = {
   postQuote,
   postDelete,
   postShared,
+  postUncovered,
   postShare,
   postUnshare,
   postCover,

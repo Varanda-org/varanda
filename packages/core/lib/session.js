@@ -999,6 +999,7 @@ function createSession ({
 
     // Public post sharing belongs to the browser node (docs/rpc.md 5.121
     // to 5.123 and 5.169).
+    'post.uncovered': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.shared': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.share': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),
     'post.cover': serial(async () => { throw new UsageError(POST_SHARE_WEB_ONLY) }),

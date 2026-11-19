@@ -709,3 +709,39 @@ test('D-FIX: cover fold capacity is independent of shares', async (t) => {
   t.is(err && err.message, 'limite de publicações na web atingido')
   t.is(await member.withIdentity(ctx, ({ diary }) => diary.length), seq + 2, 'no ignored cover appended')
 })
+
+test('post.uncovered: live shares, cover, unshare, delete and read-only cap', async (t) => {
+  const image = { core: 'ab'.repeat(32), mime: 'image/avif', start: 1, blocks: 1, bytes: 3000, sha256: 'cd'.repeat(32), width: 1200, height: 630 }
+  const p = await prepared(() => [
+    postRecord({ text: 'foto', media: [image] }), postShareRecord({ seq: 1 }),
+    postShareRecord({ seq: 1 }), deleteRecord({ seq: 3 }),
+    postRecord({ text: 'jpeg', media: [{ ...image, mime: 'image/jpeg' }] }), postShareRecord({ seq: 5 }),
+    postRecord({ text: 'privada', media: [image] }), postRecord({ text: 'texto' })
+  ])
+  const ctx = { storage: p.storage, association: p.assoc.hex, keyPair: p.keyPair }
+  const append = (records) => member.withIdentity(ctx, ({ diary }) => store.appendRecords(diary, records))
+  await append([postShareRecord({ seq: 8 })])
+  const before = await member.withIdentity(ctx, ({ diary }) => diary.length)
+  t.alike(await member.postUncovered(ctx), { posts: [{ seq: 1, image }], more: false }, 'an older live share still counts')
+  t.is(await member.withIdentity(ctx, ({ diary }) => diary.length), before, 'read appends nothing')
+  await append([postCoverRecord({ seq: 1, image: { ...image, mime: 'image/jpeg' } })])
+  t.alike(await member.postUncovered(ctx), { posts: [], more: false }, 'covered')
+  await append([deleteRecord({ seq: before })])
+  t.is((await member.postUncovered(ctx)).posts.length, 1, 'newest cover tombstoned')
+  const to = { author: p.key, seq: 1 }
+  await member.postUnshare(ctx, { to })
+  t.alike(await member.postUncovered(ctx), { posts: [], more: false }, 'unshared')
+  await member.postShare(ctx, { to })
+  t.is((await member.postUncovered(ctx)).posts.length, 1)
+  await member.postDelete(ctx, { to })
+  t.alike(await member.postUncovered(ctx), { posts: [], more: false }, 'deleted')
+  const expected = []
+  for (let i = 0; i < 9; i++) {
+    const seq = await member.withIdentity(ctx, ({ diary }) => diary.length)
+    await append([postRecord({ text: 'foto', media: [image] }), postShareRecord({ seq })])
+    expected.push({ seq, image })
+  }
+  t.alike(await member.postUncovered(ctx), { posts: expected.slice(0, 8), more: true })
+  const { web } = await setup(t, { storage: p.storage, assoc: p.assoc, keyPair: null, seederUrl: 'ws://127.0.0.1:1/seeder' })
+  t.alike(await web.request('post.uncovered', {}), { posts: expected.slice(0, 8), more: true }, 'RPC works locked')
+})

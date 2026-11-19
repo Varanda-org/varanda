@@ -232,7 +232,36 @@ function capSyncResult (result) {
   return out
 }
 
+function shareCoverSource (record) {
+  try {
+    if (!record || typeof record !== 'object') return null
+    const media = record.media
+    if (!Array.isArray(media) || media.length < 1 || media.length > MAX_MEDIA_PER_POST) return null
+    for (let i = 0; i < media.length; i++) {
+      const item = media[i]
+      if (item && typeof item === 'object' && typeof item.mime === 'string' && MEDIA_MIMES.includes(item.mime)) return item
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function needsShareCover (record) {
+  try {
+    const source = shareCoverSource(record)
+    if (!source) return false
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(source.mime)) return true
+    const bytes = source.bytes instanceof Uint8Array ? source.bytes.byteLength : source.bytes
+    return !Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_SHARE_COVER_BYTES
+  } catch {
+    return false
+  }
+}
+
 module.exports = {
+  shareCoverSource,
+  needsShareCover,
   PROTOCOL,
   MAX_ID,
   MAX_REQUEST,

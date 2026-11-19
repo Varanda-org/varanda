@@ -4834,6 +4834,7 @@ function createBrowserSession ({
     'post.delete': serial(async ({ to }, epoch) => recordDelete(member.postDelete, { to }, epoch)),
 
     // Local data only, works locked (as listing.mine): docs/rpc.md 5.121.
+    'post.uncovered': serial(() => withCores((c) => member.postUncovered(c))),
     'post.shared': serial(async ({ to }) => {
       const ref = parseRef(to)
       if (ref === null || ref.seq < 1) throw new UsageError('referência inválida')

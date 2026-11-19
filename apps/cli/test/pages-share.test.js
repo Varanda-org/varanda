@@ -1005,7 +1005,7 @@ function localRoutes (t, records, items = []) {
   const issuer = crypto.keyPair()
   const issuerCert = createIssuerCert({ issuer: hex(issuer.publicKey) }, assoc)
   const raw = [{ seq: 0, record: null }, ...records.map((record, i) => ({ seq: i + 1, record }))]
-  const row = { owner: owner.hex, admins: [], movedTo: null, closed: null, paused: false, gen: 1, length: raw.length, rosterSeq: 0 }
+  const row = { owner: owner.hex, admins: [], invites: {}, movedTo: null, closed: null, paused: false, gen: 1, length: raw.length, rosterSeq: 0 }
   const state = { spent: null, lost: false, closed: null }
   class Refusal extends Error {
     constructor (token, status = 400) {
@@ -1024,6 +1024,7 @@ function localRoutes (t, records, items = []) {
     info: () => ({ length: raw.length, paused: state.lost }),
     items: () => items,
     follows: () => [],
+    engagement: async () => ({ liked: new Set(), reposted: new Map() }),
     append: async (_, records) => {
       for (const record of records) raw.push({ seq: raw.length, record })
       return { seq: raw.length - 1, length: raw.length, pushed: false }
@@ -1041,7 +1042,7 @@ function localRoutes (t, records, items = []) {
     keys: { enabled: true },
     writer,
     store: { status: () => ({ linked: true }), closePage: async () => {} },
-    pagesStore: { charge: async () => {}, get: () => row, spent: () => state.spent, expectLength: async () => {}, close: async () => {} },
+    pagesStore: { role: (_, who) => who === owner.hex ? 'owner' : null, charge: async () => {}, get: () => row, spent: () => state.spent, expectLength: async () => {}, close: async () => {} },
     termsStore: { available: () => true, list: () => [{ version: TERMS_VERSION }] },
     http: {
       RouteError: Refusal,
@@ -1156,4 +1157,41 @@ test('D-FIX: the real writer refuses required own reads after state loss', async
   await writer.ready()
   t.alike(await writer.readOwn(key), [], 'display callers keep the legacy empty view')
   await t.exception(writer.readOwn(key, { required: true }), { code: 'fechado' })
+})
+
+test('page status uncovered: source, cap, cover, unshare and delete', async (t) => {
+  const { postRecord, deleteRecord } = require('@varanda/core/lib/records')
+  const image = { ...localImage(), mime: 'image/avif' }
+  const s = localRoutes(t, [
+    postRecord({ text: 'foto', media: [image] }), postShareRecord({ seq: 1 }),
+    postRecord({ text: 'jpeg', media: [localImage()] }), postShareRecord({ seq: 3 }),
+    postRecord({ text: 'texto' }), postShareRecord({ seq: 5 }),
+    postRecord({ text: 'privada', media: [image] })
+  ])
+  const status = () => s.act('status', {})
+  const first = await status()
+  t.absent(first.error, JSON.stringify(first))
+  t.alike(first.uncovered, [{ seq: 1, image }])
+  t.alike(first.shared, [1, 3, 5])
+  t.alike(first.covered, [])
+  const before = s.raw.length
+  await status()
+  t.is(s.raw.length, before, 'status appends nothing')
+  await s.writer.append(s.page, [postCoverRecord({ seq: 1, image: localImage(2) })])
+  t.alike((await status()).uncovered, [], 'covered')
+  await s.writer.append(s.page, [deleteRecord({ seq: before })])
+  t.alike((await status()).uncovered, [{ seq: 1, image }], 'cover deleted')
+  t.is((await s.act('post-unshare', { seq: 1 })).changed, true)
+  t.alike((await status()).uncovered, [], 'unshared')
+  await s.writer.append(s.page, [postShareRecord({ seq: 1 })])
+  t.alike((await status()).uncovered, [{ seq: 1, image }])
+  await s.writer.append(s.page, [deleteRecord({ seq: 1 })])
+  t.alike((await status()).uncovered, [], 'post deleted')
+  const expected = []
+  for (let i = 0; i < 9; i++) {
+    const seq = s.raw.length
+    await s.writer.append(s.page, [postRecord({ text: 'foto', media: [image] }), postShareRecord({ seq })])
+    expected.push({ seq, image })
+  }
+  t.alike((await status()).uncovered, expected.slice(0, 8), 'eight ascending descriptors')
 })

@@ -34,6 +34,7 @@ test('the core node refuses public post sharing before opening the diary', async
   const { call } = await connect(t, session)
   const before = listTree(dataDir)
   const to = A + ':1'
+  t.alike(await failure(call('post.uncovered', {})), NO)
   t.alike(await failure(session.handlers['post.shared']({ to })), NO)
   t.alike(await failure(session.handlers['post.share']({ to })), NO)
   t.alike(await failure(session.handlers['post.unshare']({ to })), NO)
