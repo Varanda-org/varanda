@@ -13,6 +13,7 @@ const MAX_PHOTOS = 4
 const OG_DESCRIPTION_MAX = 160
 const INDEXED_STATUSES = ['disponivel', 'reservado']
 const PHOTO_PATH = /^\/f\/[0-9a-f]{64}\/[1-9][0-9]{0,15}\/foto\/[0-9]{1,2}$/
+const COVER_PATH = /^\/f\/[0-9a-f]{64}\/[1-9][0-9]{0,15}\/capa$/
 // The installed app's own link to the listing. iOS keeps a tap on a link of
 // the same host (the enter button's /anuncio/) in Safari, so a universal
 // link never opens the app from this page; this custom-scheme link does,
@@ -60,6 +61,16 @@ function ogPhoto (view) {
     if (OG_IMAGE_MIMES.includes(mimes[i])) return { url: urls[i], mime: mimes[i] }
   }
   return null
+}
+
+function ogCover (view, pageUrl) {
+  const cover = view.cover
+  if (!cover || typeof cover.url !== 'string' || !COVER_PATH.test(cover.url) ||
+    pageUrl !== originOf(pageUrl) + cover.url.slice(0, -5) ||
+    !Number.isSafeInteger(cover.width) || cover.width < 1 ||
+    !Number.isSafeInteger(cover.height) || cover.height < 1 ||
+    !['image/avif', ...OG_IMAGE_MIMES].includes(view.photoMimes?.[0])) return null
+  return { url: cover.url, mime: 'image/jpeg', width: cover.width, height: cover.height }
 }
 
 function originOf (pageUrl) {
@@ -147,10 +158,14 @@ function renderListingPage (view) {
       head += '<link rel="canonical" href="' + esc(pageUrl) + '">\n' +
         '<meta property="og:url" content="' + esc(pageUrl) + '">\n'
     }
-    const og = ogPhoto(view)
+    const og = ogCover(view, pageUrl) || ogPhoto(view)
     if (og !== null) {
       head += '<meta property="og:image" content="' + esc(originOf(pageUrl) + og.url) + '">\n' +
         '<meta property="og:image:type" content="' + esc(og.mime) + '">\n'
+      if (og.width && og.height) {
+        head += '<meta property="og:image:width" content="' + og.width + '">\n' +
+          '<meta property="og:image:height" content="' + og.height + '">\n'
+      }
     }
 
     let html = '<p class="kicker">Feira' + (cat !== '' ? ' · ' + esc(cat) : '') + '</p>\n' +

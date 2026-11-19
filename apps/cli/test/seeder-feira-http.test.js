@@ -1,3 +1,5 @@
+'use strict'
+
 // The Feira's public HTTP surface of apps/cli/lib/seed-ws.js over a real
 // Seeder on a local testnet: the /f/ page (escaping, canonical link, robots),
 // the photos checked against their descriptors, the sitemap, the
@@ -21,6 +23,7 @@ const {
 } = require('@varanda/core/lib/records')
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { startSeedWs } = require('../lib/seed-ws')
+const { createFakeOgTranscoder, jpegHeader } = require('./helpers/fake-og-transcode')
 
 const ORIGIN = 'https://varanda.test'
 
@@ -287,4 +290,184 @@ test('Feira over a real Seeder: page, photos, edit, status, deletion, block, sit
   t.is((await get(port, base + '/foto/1')).status, 404, 'nor its photos')
   t.absent((await get(port, '/f/sitemap.xml')).body.toString().includes(A.key), 'nor in the sitemap')
   seeder._isBlocked = isBlocked
+})
+
+function coverFixture () {
+  const author = 'ab'.repeat(32)
+  const core = 'cd'.repeat(32)
+  const source = Buffer.from(require('../../../packages/rpc/test/helpers/avif-samples').ios.opaque)
+  const first = { ...descriptor(core, 1, source), mime: 'image/avif', width: 16, height: 16 }
+  const original = { record: listing('produto', 'Bicicleta', 1, { media: [first] }), editSeq: null, status: 'disponivel', statusSeq: null }
+  const state = { shown: original, source, reads: 0, lookups: 0, duringRead: () => {} }
+  const seeder = {
+    async listingPublic () { state.lookups++; return state.shown },
+    async mediaRead () {
+      state.reads++
+      const bytes = state.source
+      return {
+        bytes: bytes.length,
+        blocks: (async function * () { yield bytes; state.duringRead() })()
+      }
+    }
+  }
+  return { author, first, original, source, state, seeder, base: '/f/' + author + '/2' }
+}
+
+const COVER_LIMITS = { transcodeRate: 1000, transcodeBurst: 1000 }
+
+async function coverServer (t, fixture, transcoder, over = {}) {
+  if (transcoder) {
+    await transcoder.ready()
+    t.teardown(() => transcoder.close(), { force: true })
+  }
+  const server = await startSeedWs({ port: 0, seeder: fixture.seeder, publicOrigin: ORIGIN, postsLimits: COVER_LIMITS, transcoder, ...over })
+  t.teardown(() => server.close(), { force: true })
+  return (suffix = '', method = 'GET') => get(server.port, fixture.base + suffix, { method })
+}
+
+test('Feira automatic cover: AVIF GET and HEAD, first photo and independent origin', async (t) => {
+  const fixture = coverFixture()
+  const { state, first, source, original } = fixture
+  const bytes = jpegHeader(16, 16)
+  const transcoder = createFakeOgTranscoder({ bytes })
+  const request = await coverServer(t, fixture, transcoder)
+  const page = (await request()).body.toString()
+  t.ok(page.includes('<meta property="og:image" content="' + ORIGIN + fixture.base + '/capa">\n' +
+    '<meta property="og:image:type" content="image/jpeg">\n' +
+    '<meta property="og:image:width" content="16">\n<meta property="og:image:height" content="16">'), 'Feira alone names its JPEG cover')
+  t.is(state.reads, 0, 'render never reads media')
+  t.is(transcoder.calls.length, 0, 'render never transcodes')
+  for (const method of ['GET', 'HEAD']) {
+    const answer = await request('/capa', method)
+    t.is(answer.status, 200, method)
+    t.is(answer.headers['content-type'], 'image/jpeg', method + ': JPEG')
+    t.is(answer.headers['content-length'], String(bytes.length))
+    t.is(answer.headers['cache-control'], 'no-store')
+    t.alike(answer.body, method === 'HEAD' ? Buffer.alloc(0) : bytes)
+  }
+  t.is(state.reads, 2, 'even a known conversion re-reads the source')
+  t.alike(transcoder.calls[0], { bytes: source, mime: first.mime, sha256: first.sha256, srcWidth: 16, srcHeight: 16, width: 16, height: 16 })
+  const photo = await request('/foto/1')
+  t.is(photo.headers['content-type'], 'image/avif')
+  t.alike(photo.body, source, 'foto/1 remains the stored AVIF')
+  state.shown = { ...original, record: { ...original.record, media: [first, { ...first, mime: 'image/png' }] } }
+  t.ok((await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), 'a later PNG never wins over the first AVIF')
+  state.source = SMALL[0]
+  state.shown = { ...original, record: { ...original.record, media: [descriptor(first.core, 1, state.source)] } }
+  t.alike((await request('/capa')).body, SMALL[0], 'a small JPEG keeps capa is foto 1')
+  t.is(transcoder.calls.length, 2, 'small JPEG never converts')
+  t.ok((await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/foto/1"'))
+  const off = await coverServer(t, fixture, transcoder, { publicOrigin: null, postsOrigin: ORIGIN })
+  t.is((await off()).status, 404, 'posts alone do not enable Feira')
+})
+
+test('Feira automatic cover: refusals and failures keep the stored first photo', async (t) => {
+  for (const kind of ['hash', 'descriptor', 'null', 'failure', 'throw', 'bounds']) {
+    const fixture = coverFixture()
+    const { first, state, source } = fixture
+    const transcoder = kind === 'null'
+      ? null
+      : createFakeOgTranscoder({
+        convert () {
+          if (kind === 'throw') throw new Error('indisponível')
+          return kind === 'failure' ? null : jpegHeader(16, 16)
+        }
+      })
+    if (kind === 'hash') transcoder.refuse(first.sha256)
+    if (kind === 'descriptor') {
+      transcoder.refuse([fixture.author, first.core, first.start, first.blocks, first.sha256, first.mime, first.width + 'x' + first.height, first.bytes].join('/'))
+    }
+    if (kind === 'bounds') fixture.original.record.media[0].width = 17
+    const request = await coverServer(t, fixture, transcoder)
+    const answer = await request('/capa')
+    t.is(answer.status, 200, kind + ': stored photo is the floor')
+    t.is(answer.headers['content-type'], 'image/avif', kind)
+    t.alike(answer.body, source, kind)
+    t.is(state.reads, 1)
+    if (['hash', 'descriptor', 'bounds'].includes(kind)) t.is(transcoder.calls.length, 0, kind + ': no conversion')
+    if (kind !== 'throw') t.absent((await request()).body.toString().includes('og:image'), kind + ': no cover named')
+  }
+})
+
+test('Feira automatic cover: readiness is read on each render and null preserves the page', async (t) => {
+  const fixture = coverFixture()
+  const transcoder = createFakeOgTranscoder({ avif: false, bytes: jpegHeader(16, 16) })
+  const request = await coverServer(t, fixture, transcoder)
+  const legacy = await coverServer(t, fixture, null)
+  const original = (await legacy()).body
+  t.alike((await request()).body, original, 'avif false preserves the page byte for byte')
+  transcoder.avif = () => true
+  t.alike((await request()).body, original, 'unsupported MIME still keeps the page')
+  transcoder.canDo = () => true
+  t.ok((await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), 'a later ready render names the cover')
+  const stored = fixture.original.record.media[0]
+  stored.width = 2400
+  stored.height = 1200
+  t.ok((await request()).body.toString().includes('<meta property="og:image:width" content="1200">\n<meta property="og:image:height" content="600">'), 'the page names coverSize dimensions')
+  stored.width = 1.5
+  t.alike((await request()).body, original, 'unsafe source dimensions never name a cover')
+  t.is(fixture.state.reads, 0)
+  t.is(transcoder.calls.length, 0)
+})
+
+test('Feira automatic cover: edit, status, deletion and block during read or conversion discard cached bytes', async (t) => {
+  for (const phase of ['read', 'conversion']) {
+    for (const change of ['photo', 'edit', 'status', 'statusSeq', 'deleted', 'blocked']) {
+      const fixture = coverFixture()
+      const { state, original, first } = fixture
+      let during = () => {}
+      const bytes = jpegHeader(16, 16)
+      const transcoder = createFakeOgTranscoder({ convert () { during(); return bytes } })
+      const request = await coverServer(t, fixture, transcoder)
+      t.is((await request('/capa')).status, 200, 'prime known conversion')
+      t.ok(transcoder.known(first.sha256))
+      const mutate = () => {
+        if (change === 'deleted' || change === 'blocked') state.shown = null
+        else if (change === 'photo') state.shown = { ...original, record: { ...original.record, media: [{ ...first, start: 2 }] } }
+        else if (change === 'edit') state.shown = { ...original, editSeq: 3 }
+        else if (change === 'statusSeq') state.shown = { ...original, statusSeq: 3 }
+        else state.shown = { ...original, status: 'vendido' }
+      }
+      if (phase === 'read') state.duringRead = mutate
+      else during = mutate
+      const answer = await request('/capa')
+      t.is(answer.status, 404, phase + ': ' + change)
+      t.is(answer.body.toString(), 'não encontrado\n', 'uniform miss, no cached JPEG')
+      t.is(transcoder.calls.length, phase === 'read' ? 1 : 2, 'read changes stop before conversion')
+      if (change === 'deleted' || change === 'blocked') {
+        t.is((await request('/capa')).status, 404, 'later requests cannot use the cached image either')
+      }
+    }
+  }
+})
+
+test('Feira automatic cover: the photo budget gates the lookup, conversion spends its own and falls back to the stored photo', async (t) => {
+  const fixture = coverFixture()
+  const transcoder = createFakeOgTranscoder({ bytes: jpegHeader(16, 16) })
+  const request = await coverServer(t, fixture, transcoder, { postsLimits: { transcodeRate: 0.001, transcodeBurst: 1 } })
+  t.is((await request('/capa')).headers['content-type'], 'image/jpeg')
+  const spent = await request('/capa')
+  t.is(spent.status, 200)
+  t.is(spent.headers['content-type'], 'image/avif', 'a spent conversion token serves the stored photo')
+  t.alike(spent.body, fixture.source)
+  t.is(transcoder.calls.length, 1, 'no conversion without a token')
+
+  const photoGate = await coverServer(t, fixture, createFakeOgTranscoder({ bytes: jpegHeader(16, 16) }), { media: { rate: 0.001, burst: 1 } })
+  t.is((await photoGate('/capa')).status, 200)
+  const lookups = fixture.state.lookups
+  t.is((await photoGate('/capa')).status, 503, 'the photo budget still answers busy')
+  t.is(fixture.state.lookups, lookups, 'spent photo token means no lookup')
+
+  let release
+  const pending = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release(jpegHeader(16, 16)), { force: true })
+  const slow = createFakeOgTranscoder({ convert: () => pending })
+  const limited = await coverServer(t, fixture, slow, { postsLimits: { ...COVER_LIMITS, transcodeMaxInFlight: 1 } })
+  const running = limited('/capa')
+  await until(() => slow.calls.length === 1, { name: 'conversão pendente' })
+  t.is((await limited('/capa')).headers['content-type'], 'image/avif', 'a full conversion slot serves the stored photo')
+  t.is(slow.calls.length, 1)
+  release(jpegHeader(16, 16))
+  t.is((await running).headers['content-type'], 'image/jpeg')
+  t.is((await limited('/capa')).headers['content-type'], 'image/jpeg', 'a settled conversion releases the slot')
 })
