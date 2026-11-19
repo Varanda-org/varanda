@@ -21,6 +21,9 @@ const { createListingReader } = require('../account/feira-read')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
 const { openPushCapsStore } = require('../account/push-caps-store')
+const { openPushDeviceStore } = require('../account/push-device-store')
+const { createApns } = require('../account/apns')
+const { createFcm } = require('../account/fcm')
 const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
@@ -298,6 +301,38 @@ function loadVapid (dataDir) {
     return 'malformed'
   }
   return { publicKey: obj.publicKey, privateKey: obj.privateKey }
+}
+
+function loadNativePush (env) {
+  const required = ['VARANDA_APNS_KEY_FILE', 'VARANDA_APNS_KEY_ID', 'VARANDA_APNS_TEAM_ID', 'VARANDA_APNS_TOPIC']
+  const enabled = [...required, 'VARANDA_APNS_SANDBOX'].some((name) => env[name] !== undefined && env[name] !== '')
+  let apns = null
+  let fcm = null
+  if (enabled) {
+    for (const name of required) {
+      if (typeof env[name] !== 'string' || !env[name].trim() || /[\r\n\0]/.test(env[name])) throw new Error(name + ' inválida ou ausente')
+    }
+    if (env.VARANDA_APNS_SANDBOX !== undefined && env.VARANDA_APNS_SANDBOX !== '' && env.VARANDA_APNS_SANDBOX !== '1') throw new Error('VARANDA_APNS_SANDBOX inválida')
+    try {
+      apns = createApns({
+        key: fs.readFileSync(env.VARANDA_APNS_KEY_FILE, 'utf8'),
+        keyId: env.VARANDA_APNS_KEY_ID,
+        teamId: env.VARANDA_APNS_TEAM_ID,
+        topic: env.VARANDA_APNS_TOPIC,
+        sandbox: env.VARANDA_APNS_SANDBOX === '1'
+      })
+    } catch {
+      throw new Error('VARANDA_APNS_KEY_FILE inválida ou ilegível')
+    }
+  }
+  if (env.VARANDA_FCM_ACCOUNT_FILE !== undefined && env.VARANDA_FCM_ACCOUNT_FILE !== '') {
+    try {
+      fcm = createFcm({ account: JSON.parse(fs.readFileSync(env.VARANDA_FCM_ACCOUNT_FILE, 'utf8')) })
+    } catch {
+      throw new Error('VARANDA_FCM_ACCOUNT_FILE inválida ou ilegível')
+    }
+  }
+  return { apns, fcm }
 }
 
 // { enabled, devices }: devices is the number of stored browser
@@ -828,6 +863,7 @@ async function serve (flags, env) {
   const host = flags.accountHost || DEFAULT_HOST
   if (host === '0.0.0.0' || host === '::') throw new UsageError('account-host inválido')
   const port = flags.accountPort === null ? DEFAULT_PORT : flags.accountPort
+  const nativePush = loadNativePush(env)
   const pagesConfig = readPagesEnv(env)
   const { origin, clientId, clientSecret, modEmails, statsEmails, seederHealth, seederHttp, groupToken, limits, triage: triageConfig, didit: diditConfig, ageSince, phone: phoneConfig, gif, audius, preview, androidCertSha256 } = readEnv(env, flags.dataDir)
   const { maxMembers = null, invitesPerWeek = null, inviteDrops = null, feiraInvitesPerWeek = null, maxPending, maxConnections, ratePerSecond, burst } = limits
@@ -861,6 +897,8 @@ async function serve (flags, env) {
   let feiraInvites = null
   let pushStore = null
   let pushCapsStore = null
+  let pushDeviceStore = null
+  let stopPushDeviceHeal = null
   let seenStore = null
   let stopHeal = null
   let stopRecoveryHeal = null
@@ -884,7 +922,7 @@ async function serve (flags, env) {
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones, pushCapsStore)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones, pushCapsStore, pushDeviceStore)
     }
   })
   // The one guard every sidecar write asks, before it and right before its
@@ -972,7 +1010,7 @@ async function serve (flags, env) {
     }
     // Web Push: on only with a valid push-vapid.json. A malformed one is
     // logged as a token (never its bytes) and push stays off; the key route
-    // then answers 'indisponivel' and nothing is delivered.
+    // then answers 'indisponivel'. Native transports keep their own gate.
     let vapid = loadVapid(flags.dataDir)
     if (vapid === 'malformed') {
       log({ event: 'push', reason: 'indisponivel' })
@@ -983,6 +1021,9 @@ async function serve (flags, env) {
     stopPushHeal = startHeal(pushStore, 'push', log)
     pushCapsStore = openPushCapsStore(flags.dataDir, { guard: held })
     if (!pushCapsStore.available()) log({ event: 'push', reason: 'indisponivel' })
+    pushDeviceStore = openPushDeviceStore(flags.dataDir, { guard: held })
+    if (!pushDeviceStore.available()) log({ event: 'push', reason: 'indisponivel' })
+    stopPushDeviceHeal = startHeal(pushDeviceStore, 'push', log)
     // The DM notice key: created on the first start, and a bad file stops
     // the service (loadOrCreateWakeKey), since a new key would orphan every
     // box already sealed to the old one.
@@ -990,11 +1031,13 @@ async function serve (flags, env) {
     const push = {
       pushStore,
       pushCapsStore,
+      pushDeviceStore,
+      ...nativePush,
       vapid: vapid === null ? null : { publicKey: vapid.publicKey, privateKey: vapid.privateKey, subject: origin },
       wakeKey,
       relayTokenHash: flags.pushToken ? nodeCrypto.createHash('sha256').update(flags.pushToken).digest() : null
     }
-    log({ event: 'push', reason: vapid !== null ? 'ligado' : 'desligado' })
+    log({ event: 'push', reason: vapid !== null || nativePush.apns !== null || nativePush.fcm !== null ? 'ligado' : 'desligado' })
     // The seen blobs (seen/): every write asks the lock again. A bad
     // directory leaves the seen routes answering 'indisponivel'.
     seenStore = openSeenStore(flags.dataDir, { guard: held, log })
@@ -1146,6 +1189,7 @@ async function serve (flags, env) {
     // A tick in flight writes the drops ledger: it ends before the lock goes.
     if (loop !== null) await loop.stop()
     if (listener) await listener.close()
+    if (nativePush.apns !== null) nativePush.apns.close()
     // The page links close before the lock goes: nothing is appended after it.
     await closePageClients(pageClients)
     if (pagesWriter !== null) await pagesWriter.close()
@@ -1168,6 +1212,7 @@ async function serve (flags, env) {
     if (stopInvitesHeal !== null) stopInvitesHeal()
     if (stopDropsHeal !== null) stopDropsHeal()
     if (stopPushHeal !== null) stopPushHeal()
+    if (stopPushDeviceHeal !== null) stopPushDeviceHeal()
     if (stopAgeHeal !== null) stopAgeHeal()
     if (stopPhoneHeal !== null) stopPhoneHeal()
     if (stopSeenHeal !== null) stopSeenHeal()
@@ -1177,6 +1222,7 @@ async function serve (flags, env) {
     if (invites !== null && invites.available()) await invites.heal()
     if (drops !== null && drops.available()) await drops.heal()
     if (pushStore !== null && pushStore.available()) await pushStore.heal()
+    if (pushDeviceStore !== null && pushDeviceStore.available()) await pushDeviceStore.heal()
     if (seenStore !== null && seenStore.available()) await seenStore.heal()
     if (ages !== null && ages.available()) await ages.heal()
     // The sampler waits for an in-flight read and writes the day's last
@@ -1191,6 +1237,7 @@ async function serve (flags, env) {
     if (pageKeys !== null) pageKeys.fail()
     if (pagesWriter !== null) pagesWriter.fail()
     if (pushCapsStore !== null) pushCapsStore.fail()
+    if (pushDeviceStore !== null) pushDeviceStore.fail()
     lock.release()
   }
   return lost || unavailable || closing === 'failed' ? 1 : 0
@@ -1280,7 +1327,7 @@ async function closePageClients (pageClients) {
 // stops. The terms, invites, push, seen, age, phone, recovery and passkey
 // stores, the page keys, the page writer and the invite drops too: their
 // next write must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null, phones = null, pushCapsStore = null) {
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null, phones = null, pushCapsStore = null, pushDeviceStore = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (recovery !== null) recovery.fail()
@@ -1290,6 +1337,7 @@ function loseLock (store, log, stop, terms = null, invites = null, pushStore = n
   if (loop !== null) loop.stop().catch(() => {})
   if (pushStore !== null) pushStore.fail()
   if (pushCapsStore !== null) pushCapsStore.fail()
+  if (pushDeviceStore !== null) pushDeviceStore.fail()
   if (seenStore !== null) seenStore.fail()
   if (ages !== null) ages.fail()
   if (phones !== null) phones.fail()
@@ -1885,5 +1933,6 @@ module.exports = {
   startHeal,
   storeUnavailable,
   createPushKey,
+  loadNativePush,
   writeJsonExclusive
 }

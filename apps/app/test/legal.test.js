@@ -7,9 +7,9 @@ const load = () => import('../src/legal.js')
 
 test('legal: version, date and review note', async (t) => {
   const { LEGAL_VERSION, LEGAL_DATE, REVIEW_NOTE } = await load()
-  t.is(LEGAL_VERSION, 101)
+  t.is(LEGAL_VERSION, 102)
   t.is(LEGAL_DATE, '19/11/2026')
-  t.is(REVIEW_NOTE, 'Versão 101, sujeita a revisão jurídica. Não é parecer jurídico.')
+  t.is(REVIEW_NOTE, 'Versão 102, sujeita a revisão jurídica. Não é parecer jurídico.')
 })
 
 test('legal: this version describes music covers as never stored', async (t) => {
@@ -388,6 +388,35 @@ test("legal: version 87 describes a page's parity in public groups", async (t) =
   t.ok(privacy.includes(kept), 'privacy: closing a page leaves its group posts')
 })
 
+test('legal: version 101 describes native device notices', async (t) => {
+  const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
+  t.ok(LEGAL_VERSION >= 101)
+  for (const doc of [TERMS, PRIVACY]) {
+    const text = doc.sections.flatMap(({ paragraphs }) => paragraphs).join(' ')
+    for (const required of [
+      'No app instalado, quando você ligar os avisos no aparelho e a associação tiver configurado o serviço',
+      'a Apple (iPhone) ou o Google (Android) receberá o token do aparelho, o momento de cada aviso e a frase visível',
+      '"Nova mensagem nas Conversas"',
+      '"Nova mensagem para uma página que você administra"',
+      '"Nova mensagem em", seguida do nome do grupo público',
+      '"Nova mensagem num grupo", quando faltar um nome utilizável',
+      '"Nova mensagem num grupo privado"',
+      'Nunca recebe por esse aviso quem escreveu, o texto da mensagem ou o nome de um grupo privado.',
+      'Só esses avisos de Conversas e grupos vão por esse serviço, e só para quem aceitou a versão 101 destes documentos ou uma mais nova.',
+      'O serviço de conta da associação, no Brasil, guarda o token do aparelho, uma chave aleatória do aparelho e a data e hora de criação do registro',
+      'de no máximo quatro aparelhos por pessoa, até você desligar os avisos, o token deixar de funcionar ou a conta ser excluída',
+      'A troca do token com a mesma chave atualiza o registro daquele aparelho.',
+      'ela não é enviada à Apple nem ao Google',
+      'Esses provedores recebem o tipo do aviso e esse identificador, além da frase visível e do token, e podem tratar esses dados fora do Brasil.',
+      'Avisos no app instalado: para entregar os avisos de Conversas e grupos que você escolheu receber, a base legal proposta é consentimento, Art. 7º, I, a confirmar em parecer jurídico.',
+      'Você pode desligá-los a qualquer momento.',
+      'Nesta versão, está pronto o serviço de envio da associação, desligado enquanto ela não o configurar.',
+      'A opção de ligar esses avisos no app instalado virá numa próxima versão',
+      'Um aviso perdido não é reenviado.'
+    ]) t.ok(text.includes(required), doc.title + ': ' + required)
+  }
+})
+
 test('legal: version 99 describes group message notices and the membership exposure', async (t) => {
   const { TERMS, PRIVACY, LEGAL_VERSION } = await load()
   t.ok(LEGAL_VERSION >= 99)
@@ -526,7 +555,7 @@ test('legal: public group and community images stay stored after replacement or 
 test('legal: published text is pinned to its acceptance version', async (t) => {
   const { LEGAL_VERSION, TERMS, PRIVACY } = await load()
   const digest = createHash('sha256').update(JSON.stringify({ LEGAL_VERSION, TERMS, PRIVACY })).digest('hex')
-  t.is(digest, 'd8fc3054ba860782f670658c5d43f33008368d1843ba6f51d4d4fa195b21319d', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
+  t.is(digest, 'ccebbeae593963218d31ba5a2ab5d0fc542f3b76af52918fbd0daed0c29e87c0', 'o texto mudou: suba LEGAL_VERSION (e TERMS_VERSION em @varanda/core lib/terms.js) e atualize este digest')
 })
 
 test('legal: version 41 describes group and conversation reactions and chat formatting', async (t) => {

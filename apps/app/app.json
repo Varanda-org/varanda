@@ -20,6 +20,7 @@
         "applinks:bora.varanda.app"
       ],
       "entitlements": {
+        "aps-environment": "development",
         "com.apple.security.application-groups": [
           "group.app.varanda"
         ]

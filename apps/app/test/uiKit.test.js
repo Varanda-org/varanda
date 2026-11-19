@@ -427,6 +427,7 @@ test('Sheet closeLabel: Cancelar by default, Fechar on the read-only sheets and 
   t.ok(src('PostLinkSheet').includes("title={SHEET_TITLE} closeLabel='Fechar'"), 'the link sheet')
   t.ok(src('GifPicker').includes("title='GIF' closeLabel='Fechar'"), 'the GIF search sends on a tap and drops only a search word')
   const screens = (name) => fs.readFileSync(path.join(__dirname, '../src/screens', name + '.js'), 'utf8')
-  for (const name of ['Diario', 'Membro']) t.ok(screens(name).includes("title='Compartilhar perfil' closeLabel='Fechar'"), name + ': Compartilhar perfil only shows a link')
+  t.ok(screens('Diario').includes("title='Compartilhar perfil' closeLabel='Fechar'"), 'Diario: Compartilhar perfil only shows a link')
+  t.ok(screens('Membro').includes("title={isPage ? 'Compartilhar página' : 'Compartilhar perfil'} closeLabel='Fechar'"), 'Membro: page and person sharing only show a link')
   t.absent(src('PlaceSheet').includes('closeLabel'), 'the place sheet keeps Cancelar: it drops a typed city')
 })

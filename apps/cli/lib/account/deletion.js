@@ -64,12 +64,13 @@ function usable (s) {
 // `triage` { holdsMember(m), forgetMember(m) }. `scheduled` and `tick` are
 // async functions that never throw. `retention` (createModerationRetention)
 // runs after the per-member purge of every sweep.
-function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, pushCapsStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, deletionRequests = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, retention = null, log = () => {} }) {
+function createDeletionSweep ({ accounts, terms = null, ages = null, pushStore = null, pushCapsStore = null, pushDeviceStore = null, recovery = null, invites = null, drops = null, seen = null, passkeys = null, deletionRequests = null, phones = null, pages = null, pageInvites = null, triage = null, scheduled = null, tick = null, retention = null, log = () => {} }) {
   // [name, store, holds(member), forget(member)] for each store that exists.
   const steps = [
     ['terms', terms, (m) => terms.holds(m), (m) => terms.forget(m)],
     ['idade', ages, (m) => ages.get(m) !== null, (m) => ages.forget(m)],
     ['push', pushStore, (m) => pushStore.devices(m) > 0, (m) => pushStore.removeAll(m)],
+    ['push-devices', pushDeviceStore, (m) => pushDeviceStore.devices(m) > 0, (m) => pushDeviceStore.removeMember(m)],
     ['push-caps', pushCapsStore, (m) => pushCapsStore.holds(m), (m) => pushCapsStore.removeAll(m)],
     ['recuperacao', recovery, (m) => recovery.list(m).length > 0, (m) => recovery.removeMember(m)],
     ['convites', invites, (m) => invites.holds(m), (m) => invites.forget(m)],

@@ -18,6 +18,8 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 credentials.json
+# The operator supplies this file, e.g. as an EAS file secret through VARANDA_GOOGLE_SERVICES_JSON.
+google-services.json
 
 # Metro
 .metro-health-check*
