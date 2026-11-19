@@ -34,6 +34,7 @@ import { diaryPeekSlots } from '../engagement'
 import { readPeerEntry } from '../peerProfile'
 import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settleRefresh, refreshDepth, searchPaging, unreadPaging } from '../inboxPaging'
 import { groupsUnread, showNaoLidasEmpty } from '../conversasDot'
+import { groupReadState } from '../noticeReads'
 import { planRowPeeks, runRowPeeks } from '../rowPeek'
 import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
@@ -482,8 +483,8 @@ export function Conversas ({
     if (typeof onGroupsUnread !== 'function') return
     if (!groups.loaded || groups.loading) return
     const complete = groups.loaded && !groups.loading && !groups.failed && !groups.error
-    onGroupsUnread(groupsUnread(mergeRows({ groups: groups.rows }), { complete }))
-  }, [pageKey, onGroupsUnread, groups.rows, groups.loaded, groups.loading, groups.failed, groups.error])
+    onGroupsUnread(groupsUnread(mergeRows({ groups: groups.rows }), { complete }), groupReadState(groups))
+  }, [pageKey, onGroupsUnread, groups.rows, groups.loaded, groups.loading, groups.failed, groups.error, groups.partial])
 
   // A pull that failed may still have filed messages: read again either way.
   const pull = useCallback(async () => {

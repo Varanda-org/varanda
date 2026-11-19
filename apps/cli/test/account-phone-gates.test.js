@@ -253,7 +253,7 @@ test('phone gates: a seen read and delete pass without a number', async (t) => {
   const m = await s.newMember('ana')
   const read = await s.seen(m, 'read')
   t.is(read.status, 200)
-  t.alike(read.body, { hash: null, blob: null })
+  t.alike(read.body, { hash: null, blob: null, outstanding: [], asOf: read.body.asOf })
   const removed = await s.seen(m, 'delete')
   t.is(removed.status, 200)
   t.is(removed.body.ok, true)

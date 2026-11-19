@@ -88,7 +88,7 @@ import { pageDmPlan, pageReadKind, pageNoticeSeen } from './src/pageNotice'
 import { pageNoticeStore, wipeLegacyPageNotices } from './src/pageNoticeStore'
 import { inviteDropOnceId, syncedPageNoticeStore, withOnceTokens } from './src/onceMarks'
 import { FIRST_PASS_IDLE, FIRST_PASS_MS, firstPassStep, inviteWaitsForSeen, onceKeyOf, onceMember, onceMemberFor, onceRegistry, setOnceMember } from './src/onceSync'
-import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, pushWakeKey, seenFinish, seenStart, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
+import { accountStatus, agePolicy as readAgePolicy, ageResult, ageSince as readAgeSince, ageSession, ageStart, createSeenNoticeSync, invitePolicy as readInvitePolicy, lookupUsername, passkeyAdd, passkeyStart, pushWakeKey, termsFinish, termsHeldFinish, termsHeldStart, termsStart } from './src/account'
 import { NOTICES_POLL_MS } from './src/notices'
 import { cleanAvisos, createSeenScheduler, dropSent, rememberSent, reportAvisosSeen, runSeenPass } from './src/seenSync'
 import { badgeListParams, conversasDot, settleGroups } from './src/conversasDot'
@@ -145,6 +145,7 @@ import { useSharedIntent } from './src/useSharedIntent'
 import { UpdateNote } from './src/ui/UpdateNote'
 import { useInstall } from './src/install'
 import { readPush, usePush } from './src/usePush'
+import { closeNotices, subscribeSeenSync } from './src/noticeClose'
 import { watchRelease } from './src/pwa'
 import { captureLaunch, listenLaunch } from './src/pushClient'
 import { nextLaunch } from './src/push-state'
@@ -2446,6 +2447,15 @@ function Member () {
   const [dmOpenCount, setDmOpenCount] = useState(0)
   const [dmDotState, setDmDotState] = useState(null)
   const dmReady = mode === 'hosted' && ready && !locked && termsOk
+  const noticeReads = useRef(null)
+  if (noticeReads.current === null) noticeReads.current = createSeenNoticeSync()
+  useLayoutEffect(() => {
+    noticeReads.current.reset({ actingPage: acting.kind === 'page' })
+  }, [ownKey, nodeEpoch, dmReady, acting.kind, acting.key])
+  const closeReadNotices = useCallback(() => {
+    if (dmReady) closeNotices(noticeReads.current.tags())
+  }, [dmReady])
+  useEffect(closeReadNotices, [closeReadNotices])
   const dmRequest = node.request
   const bumpDm = node.bumpDm
   const dmDotGen = useRef(0)
@@ -2490,6 +2500,11 @@ function Member () {
         const r = await dmRequest('dm.list', badgeListParams(pageKey))
         if (gen !== dmDotGen.current) return
         const next = { inboxUnread: r.inboxUnread === true, requests: r.requests === true }
+        // A page-scoped answer cannot cover the shared notice of every page.
+        if (pageKey === null) {
+          noticeReads.current.update({ dm: { unread: r.inboxUnread === false ? 0 : undefined, requests: r.requests } })
+        }
+        closeReadNotices()
         // The same flags keep the same object, so an unchanged answer does not re-render Member.
         setDmDotState((prev) => (prev !== null && prev.inboxUnread === next.inboxUnread && prev.requests === next.requests ? prev : next))
       } catch {
@@ -2501,7 +2516,7 @@ function Member () {
       }
     }
     read(false)
-  }, [dmRequest, pageKey])
+  }, [dmRequest, pageKey, closeReadNotices])
   useEffect(() => {
     if (dmReady && dmDotGate) readDmDot()
   }, [dmReady, dmDotGate, readDmDot, nodeEpoch, ownKey, node.dmVersion, stackDepth])
@@ -2520,9 +2535,15 @@ function Member () {
     groupsReportEpoch.current = ownGroups ? nodeEpoch : null
     return () => { groupsReportEpoch.current = null }
   }, [nodeEpoch, ownKey, ownGroups])
-  const onGroupsUnread = useCallback((value) => {
-    if (groupsReportEpoch.current === nodeEpoch) setGroupsDot((prev) => settleGroups(prev, value))
-  }, [nodeEpoch])
+  const onGroupsUnread = useCallback((value, reads) => {
+    if (groupsReportEpoch.current !== nodeEpoch) return
+    setGroupsDot((prev) => settleGroups(prev, value))
+    if (reads) {
+      const { groups, privateUnread } = reads
+      noticeReads.current.update({ groups, privateUnread })
+      closeReadNotices()
+    }
+  }, [nodeEpoch, closeReadNotices])
 
   const groupsTab = tab === 'comunidades'
   const conversasOnScreen = groupsTab && topEntry === null
@@ -2689,14 +2710,18 @@ function Member () {
   const avisosMergedRef = useRef(null)
   // Tokens a merge already received this session: never offered again.
   const avisosDeliveredRef = useRef(new Set())
-  const onAvisosSeen = useCallback((namespace, tokens) => {
+  const onAvisosSeen = useCallback((namespace, tokens, avisos) => {
     if (typeof namespace !== 'string' || !Array.isArray(tokens)) return
+    if (pageKey === null && namespace === ownKey && Array.isArray(avisos)) {
+      noticeReads.current.update({ avisos })
+      closeReadNotices()
+    }
     const { pending, fresh } = reportAvisosSeen(avisosSeenRef.current, avisosMergedRef.current, namespace, tokens, ownKey, avisosDeliveredRef.current)
     avisosSeenRef.current = pending
     // A row seen here for the first time is a local mark: the pass runs
     // within the debounce, not only at the next poll.
     if (fresh && seenSchedulerRef.current) seenSchedulerRef.current.wake('changed')
-  }, [ownKey])
+  }, [ownKey, pageKey, closeReadNotices])
   // A one-time notice shown here travels as an own avisos token: every pass
   // of its member sends the registry's unsynced marks, and a new one asks
   // for a pass without the debounce.
@@ -2742,10 +2767,11 @@ function Member () {
     const appearance = seenAppearanceRef.current
     const run = async () => {
       const sent = cleanAvisos(withOnceTokens(avisosSeenRef.current, onceRegistry.unsynced(member)))
+      const http = noticeReads.current.http(seenRequestRef.current)
       const result = await runSeenPass({
         member,
-        request: seenRequestRef.current,
-        http: { seenStart, seenFinish },
+        request: http.request,
+        http,
         avisos: sent
       })
       if (seenMemberRef.current !== member || seenAppearanceRef.current !== appearance) return undefined
@@ -2766,6 +2792,7 @@ function Member () {
       if (result.testimonialsChanged) testimonialsChanged()
       if (result.momentsChanged) refreshMomentSeen().catch(() => {})
       if (result.groupChanged) bumpSeen()
+      if (!result.error) closeReadNotices()
       return result
     }
     const scheduler = createSeenScheduler({
@@ -2780,7 +2807,10 @@ function Member () {
       scheduler.stop()
       if (seenSchedulerRef.current === scheduler) seenSchedulerRef.current = null
     }
-  }, [seenMember, bumpDm, bumpSeen])
+  }, [seenMember, bumpDm, bumpSeen, closeReadNotices])
+  useEffect(() => subscribeSeenSync((reason) => {
+    if (seenSchedulerRef.current) seenSchedulerRef.current.wake(reason)
+  }), [])
   const seenGeneration = passkey !== null ? passkey.generation : 0
   useEffect(() => {
     if (seenMember !== null && seenSchedulerRef.current) seenSchedulerRef.current.wake('unlock')
@@ -2845,8 +2875,11 @@ function Member () {
   useEffect(() => {
     const was = seenVisibleRef.current
     seenVisibleRef.current = node.visible
-    if (!was && node.visible && seenSchedulerRef.current) seenSchedulerRef.current.wake('visible')
-  }, [node.visible])
+    if (!was && node.visible) {
+      closeReadNotices()
+      if (seenSchedulerRef.current) seenSchedulerRef.current.wake('visible')
+    }
+  }, [node.visible, closeReadNotices])
   useEffect(() => {
     if (seenMember === null || !node.visible) return
     const t = setInterval(() => {
