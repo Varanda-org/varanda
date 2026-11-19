@@ -142,6 +142,32 @@ test('four photos rendered, never a fifth', (t) => {
   t.absent(html.includes(photo(4)))
 })
 
+test('og:image uses the first AVIF cover, including before a PNG', (t) => {
+  const cover = { url: '/f/' + HEX + '/7/capa', width: 1200, height: 600 }
+  for (const mime of ['image/avif', 'image/png']) {
+    const html = renderListingPage(view({ photoUrls: [photo(1), photo(2)], photoMimes: ['image/avif', mime], cover }))
+    t.ok(html.includes('<meta property="og:image" content="' + PAGE + '/capa">\n' +
+      '<meta property="og:image:type" content="image/jpeg">\n' +
+      '<meta property="og:image:width" content="1200">\n' +
+      '<meta property="og:image:height" content="600">'), mime + ': the first photo cover and its size')
+    t.is((html.match(/<meta property="og:image" /g) || []).length, 1, 'exactly one og:image')
+    t.ok(html.includes('<img src="' + photo(1) + '"'), 'the body still shows AVIF')
+    t.ok(html.includes('<img src="' + photo(2) + '"'), 'the second body photo stays')
+  }
+})
+
+test('og:image rejects a foreign cover, another listing and unknown photo mime', (t) => {
+  const cover = { url: '/f/' + HEX + '/7/capa', width: 16, height: 16 }
+  const avif = view({ photoUrls: [photo(1)], photoMimes: ['image/avif'] })
+  for (const url of ['https://evil.example' + cover.url, '/f/' + HEX + '/8/capa', '/f/' + 'cd'.repeat(32) + '/7/capa', cover.url + '?x=1']) {
+    t.is(renderListingPage({ ...avif, cover: { ...cover, url } }), renderListingPage(avif), 'invalid cover leaves the page unchanged: ' + url)
+  }
+  const unknown = view({ photoMimes: ['image/unknown'], cover })
+  t.absent(renderListingPage(unknown).includes('og:image'), 'unknown photo mime cannot gain a cover')
+  const png = { ...avif, photoUrls: [photo(1), photo(2)], photoMimes: ['image/avif', 'image/png'] }
+  t.is(renderListingPage({ ...png, cover: { ...cover, url: '/f/' + HEX + '/8/capa' } }), renderListingPage(png), 'invalid cover keeps the old PNG fallback')
+})
+
 test('procura heading, budget label and offer anchor', (t) => {
   const html = renderListingPage(view({
     kind: 'procura',

@@ -1636,7 +1636,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     const r = card.record
     const place = r.place && typeof r.place === 'object' ? r.place : {}
     const base = '/f/' + hex + '/' + seq
-    return {
+    const view = {
       title: r.title,
       text: r.text,
       priceLabel: feira.priceLabel(r.price, r.unit, r.kind),
@@ -1655,6 +1655,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       enterUrl: origin + '/anuncio/' + hex + '/' + seq,
       appUrl: 'varanda:///anuncio/' + hex + '/' + seq
     }
+    const cover = automaticCover(hex, card, photosOf(r))
+    const size = cover && coverSize(cover.width, cover.height)
+    if (size) view.cover = { url: base + '/capa', ...size }
+    return view
   }
 
   // Runs `work` (which gets an isClosed probe) under a budget slot that is
@@ -1766,11 +1770,42 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return { bytes, mime: d.mime }
   }
 
-  async function serveFeiraPhoto (req, res, match, n) {
+  async function feiraCoverBytes (hex, seq, isClosed) {
+    if (typeof seeder.listingPublic !== 'function') return null
+    const card = await seeder.listingPublic(hex, seq)
+    if (!card || !card.record || isClosed()) return null
+    const descriptor = { ...photosOf(card.record)[0] }
+    const { editSeq, status, statusSeq } = card
+    const current = async () => {
+      const again = await seeder.listingPublic(hex, seq)
+      const first = again && again.record && photosOf(again.record)[0]
+      return !isClosed() && first && again.editSeq === editSeq && again.status === status && again.statusSeq === statusSeq &&
+        Object.keys(descriptor).every((key) => descriptor[key] === first[key])
+    }
+    const got = await descriptorBytes(hex, descriptor, isClosed, () => transcoder.refuse(coverRefusalKey(hex, descriptor)))
+    if (got === null || isClosed() || !await current()) return null
+    if (!needsTranscode(descriptor) || transcoder.refused(descriptor.sha256) || transcoder.refused(coverRefusalKey(hex, descriptor))) return got
+    // The photo budget already gated the lookup; conversion also spends the
+    // shared /capa conversion budget, and without it the stored photo is the
+    // floor, as it was before covers were converted.
+    if (!takePostTranscodeToken() || postTranscodeInFlight >= postTranscodeMaxInFlight) return got
+    postTranscodeInFlight++
+    let bytes = null
+    try {
+      bytes = await transcodeCoverBytes(hex, descriptor, got, coverSize(descriptor.width, descriptor.height))
+    } catch {} finally {
+      postTranscodeInFlight--
+    }
+    if (isClosed() || !await current()) return null
+    return bytes ? { bytes, mime: 'image/jpeg' } : got
+  }
+
+  async function serveFeiraPhoto (req, res, match, n, cover = false) {
     if (!takeToken() || photoInFlight >= photoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
     photoInFlight++
-    const answer = await slotted(res, photoDeadlineMs, () => { photoInFlight-- },
-      (isClosed) => photoBytes(match[1], Number(match[2]), n, isClosed))
+    const answer = await slotted(res, photoDeadlineMs, () => { photoInFlight-- }, (isClosed) => cover
+      ? feiraCoverBytes(match[1], Number(match[2]), isClosed)
+      : photoBytes(match[1], Number(match[2]), n, isClosed))
     if (answer === CLOSED) return
     if (answer === null) return send(res, 404, NOT_FOUND)
     res.writeHead(200, {
@@ -1815,7 +1850,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     m = FEIRA_FOTO_RE.exec(url)
     if (m) return serveFeiraPhoto(req, res, m, Number(m[3]))
     m = FEIRA_CAPA_RE.exec(url)
-    if (m) return serveFeiraPhoto(req, res, m, 1)
+    if (m) return serveFeiraPhoto(req, res, m, 1, transcoder !== null)
     return send(res, 404, NOT_FOUND)
   }
 
@@ -1847,8 +1882,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return { width: shown.cover.width, height: shown.cover.height }
   }
 
-  function automaticCover (hex, shown) {
-    const first = postPhotos(shown.record).items[0]
+  function automaticCover (hex, shown, photos = postPhotos(shown.record).items) {
+    const first = photos[0]
     if (!transcoder || !transcoder.avif() || !needsTranscode(first) || !transcoder.canDo(first.mime) ||
       !Number.isSafeInteger(first.width) || !Number.isSafeInteger(first.height) ||
       transcoder.refused(first.sha256) || transcoder.refused(coverRefusalKey(hex, first))) return null
@@ -1974,12 +2009,22 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     }
     const got = await descriptorBytes(hex, descriptor, isClosed, () => transcoder.refuse(coverRefusalKey(hex, descriptor)))
     if (got === null || isClosed()) return null
+    const bytes = await transcodeCoverBytes(hex, descriptor, got, size)
+    if (!bytes || isClosed()) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    const current = again && postPhotos(again.record).items[0]
+    if (isClosed() || again === null || again.shareSeq !== shareSeq || shownCover(again) !== null || !current ||
+      !Object.keys(descriptor).every((key) => descriptor[key] === current[key])) return null
+    return { bytes, mime: 'image/jpeg' }
+  }
+
+  async function transcodeCoverBytes (hex, descriptor, got, size) {
     const bounds = mediaBounds(got.bytes, descriptor.mime)
-    if (!bounds || bounds.frames !== 1 || bounds.width !== descriptor.width || bounds.height !== descriptor.height) {
+    if (!size || !bounds || bounds.frames !== 1 || bounds.width !== descriptor.width || bounds.height !== descriptor.height) {
       transcoder.refuse(coverRefusalKey(hex, descriptor))
       return null
     }
-    const bytes = await transcoder.transcode({
+    return transcoder.transcode({
       bytes: got.bytes,
       mime: descriptor.mime,
       sha256: descriptor.sha256,
@@ -1987,12 +2032,6 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
       srcHeight: descriptor.height,
       ...size
     })
-    if (!bytes || isClosed()) return null
-    const again = shownPost(await seeder.postPublic(hex, seq))
-    const current = again && postPhotos(again.record).items[0]
-    if (isClosed() || again === null || again.shareSeq !== shareSeq || shownCover(again) !== null || !current ||
-      !Object.keys(descriptor).every((key) => descriptor[key] === current[key])) return null
-    return { bytes, mime: 'image/jpeg' }
   }
 
   // A photo or the cover: `read(isClosed)` is postPhotoBytes or
