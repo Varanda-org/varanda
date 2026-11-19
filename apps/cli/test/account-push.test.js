@@ -21,7 +21,9 @@ const { openAccountStore } = require('../lib/account/store')
 const { openTermsStore } = require('../lib/account/terms-store')
 const { openPushStore } = require('../lib/account/push-store')
 const { generateVapidKeys, sendPush, encryptPayload } = require('../lib/account/web-push')
-const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT } = require('../lib/account/push-routes')
+const { createPushRoutes, PUSH_PAD_TO, INVITE_QUEUE_MAX, MAX_QUEUE, MAX_IN_FLIGHT, DM_NOTICE_TERMS_FLOOR } = require('../lib/account/push-routes')
+const { loadOrCreateWakeKey } = require('../lib/account/push-wake-key')
+const { sealDmNotice, DM_NOTICE_BOX_BYTES } = require('@varanda/core/lib/dm-notice')
 const { createAccountServer, keyedWindow } = require('../lib/account/server')
 const { createPushKey, writeJsonExclusive } = require('../lib/commands/account')
 const { tmpDir, until } = require('./helpers/net')
@@ -117,6 +119,7 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
   const terms = openTermsStore(dir, { now: c.now })
   const pushStore = openPushStore(dir, { now: c.now })
   const keys = vapid ? generateVapidKeys() : null
+  const wakeKey = loadOrCreateWakeKey(dir)
   const relayToken = nodeCrypto.randomBytes(32).toString('hex')
   // What the push service received, and the status it answers per endpoint.
   const delivered = []
@@ -142,7 +145,8 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
           send: send ?? ((args) => sendPush({ ...args, fetch: fakeFetch, now: c.now() })),
           delayMs: () => 0,
           relayTokenHash: token ? sha256(relayToken) : null,
-          topicKey: TOPIC_KEY
+          topicKey: TOPIC_KEY,
+          wakeKey
         }
       : null,
     log: (e) => logs.push(JSON.stringify(e)),
@@ -152,7 +156,7 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
   t.teardown(() => listener.close(), { force: true })
   const base = 'http://127.0.0.1:' + listener.port
   if (keys !== null) secrets.push(keys.privateKey, keys.publicKey)
-  secrets.push(relayToken)
+  secrets.push(relayToken, wakeKey.secretKey.toString('hex'), wakeKey.secretKey.toString('base64url'))
 
   async function request (method, pathname, body, headers = {}) {
     const init = { method, headers }
@@ -213,7 +217,19 @@ async function setup (t, { vapid = true, token = true, push = true, send = null 
     ...extra
   })
 
-  return { dir, c, iss, store, terms, pushStore, keys, relayToken, delivered, statusOf, logs, texts, secrets, listener, server, m, actor, request, post, start, sign, finish, toggle, check, acceptTerms, relay, like }
+  // A DM box for `key` (hex) sealed to this service's wake key, as the
+  // seeder relays it (apps/cli/lib/push-relay.js sendDm).
+  const dmBox = (key, to = wakeKey.publicKey) => sealDmNotice(key, to).toString('base64url')
+  const relayDm = (key, opts) => relay({ v: 1, kind: 'dm', box: dmBox(key) }, opts)
+  // A stored subscription without the opt-in proof, so a test can choose
+  // which Terms version the member accepted.
+  async function subscribe (who, host) {
+    const sub = subscription(host)
+    await pushStore.put({ member: who.hex, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth })
+    return sub
+  }
+
+  return { dir, c, iss, store, terms, pushStore, keys, wakeKey, dmBox, relayDm, subscribe, relayToken, delivered, statusOf, logs, texts, secrets, listener, server, m, actor, request, post, start, sign, finish, toggle, check, acceptTerms, relay, like }
 }
 
 // No endpoint, key, nonce, signature, token or notice text in any log line.
@@ -223,9 +239,10 @@ function cleanLogs (t, s, endpoints = []) {
   t.absent(all.includes('curtiu'), 'no notice text in the logs')
   t.absent(all.includes('Bia Souza'), 'no actor name in the logs')
   t.absent(all.includes(EMAIL), 'no e-mail in the logs')
+  t.absent(/[0-9a-f]{64}/.test(all), 'no member or page key in the logs')
   for (const line of s.logs) {
     const e = JSON.parse(line)
-    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason'), 'only event and reason: ' + line)
+    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason' || (k === 'kind' && e.kind === 'dm')), 'only event, reason and a DM kind: ' + line)
   }
 }
 
@@ -241,7 +258,10 @@ test('push key: 503 without a VAPID key, 200 with one; no push option mounts not
   const res = await fetch('http://127.0.0.1:' + on.listener.port + '/account/push/key')
   t.is(res.status, 200)
   t.is(res.headers.get('cache-control'), 'no-store')
-  t.alike(await res.json(), { key: on.keys.publicKey })
+  const body = await res.json()
+  t.alike(body, { key: on.keys.publicKey, wake: on.wakeKey.publicKey.toString('base64url') })
+  t.is(Buffer.from(body.wake, 'base64url').length, 32, 'the wake key is 32 bytes')
+  t.absent(body.wake.includes('='), 'unpadded')
   on.pushStore.fail()
   t.is((await on.request('GET', '/account/push/key')).status, 503, 'an unavailable store hides the key')
 
@@ -740,7 +760,7 @@ async function serveCli (t, dir, env) {
   const exited = new Promise((resolve) => child.on('close', (code) => resolve(code)))
   t.teardown(() => { child.kill('SIGKILL') }, { force: true })
   return {
-    stop: async () => { child.kill('SIGTERM'); return exited },
+    stop: Object.assign(async () => { child.kill('SIGTERM'); return exited }, { exited }),
     stdout: () => stdout,
     stderr: () => stderr
   }
@@ -780,6 +800,9 @@ test('account push-key prints only the public key and refuses a second run; serv
   t.is(busy.code, 1, 'refused while the service runs')
   t.ok(busy.stderr.includes('serviço de conta em execução'), busy.stderr)
   t.is(await plain.stop(), 0, plain.stderr())
+  const wakeFile = JSON.parse(fs.readFileSync(path.join(dir, 'push-wake.json'), 'utf8'))
+  t.is(fs.statSync(path.join(dir, 'push-wake.json')).mode & 0o777, 0o600, 'the wake key is created on the first start')
+  t.absent(plain.stdout().includes(wakeFile.secretKey), 'the wake secret never printed')
 
   const made = varanda(dir, ['account', 'push-key', '--json'], env)
   t.is(made.code, 0, made.stderr)
@@ -820,8 +843,9 @@ test('account push-key prints only the public key and refuses a second run; serv
   const port2 = await until(() => listeningPort(svc.stdout()), { name: 'listening again' })
   t.ok(svc.stdout().includes(JSON.stringify({ event: 'push', reason: 'ligado' })))
   const key2 = await fetch('http://127.0.0.1:' + port2 + '/account/push/key')
-  t.alike(await key2.json(), { key: printed.publicKey })
+  t.alike(await key2.json(), { key: printed.publicKey, wake: Buffer.from(wakeFile.publicKey, 'hex').toString('base64url') }, 'the wake key of the first start, kept across a restart')
   t.absent(svc.stdout().includes(stored.privateKey), 'the private key never printed')
+  t.absent(svc.stdout().includes(wakeFile.secretKey), 'the wake secret never printed')
   t.absent(svc.stdout().includes(token), 'the token never printed')
   t.is(await svc.stop(), 0, svc.stderr())
 
@@ -833,175 +857,415 @@ test('account push-key prints only the public key and refuses a second run; serv
   t.ok(broken.stdout().includes(JSON.stringify({ event: 'push', reason: 'desligado' })))
   t.is(await broken.stop(), 0, broken.stderr())
   t.ok(varanda(dir, ['account', 'status']).stdout.includes('avisos push: desligados'))
+
+  // A wake key file that is not a pair it wrote stops the service: a new
+  // key would orphan every box sealed to the old one.
+  const badWake = JSON.stringify({ v: 1, publicKey: wakeFile.publicKey, secretKey: 'ab'.repeat(32) })
+  fs.writeFileSync(path.join(dir, 'push-wake.json'), badWake)
+  const refusedWake = await serveCli(t, dir, env)
+  const code = await refusedWake.stop.exited
+  t.not(code, 0, 'refuses to start')
+  t.absent(listeningPort(refusedWake.stdout()), 'never listened')
+  t.absent((refusedWake.stdout() + refusedWake.stderr()).includes('ab'.repeat(32)), 'the secret never printed')
+  t.is(fs.readFileSync(path.join(dir, 'push-wake.json'), 'utf8'), badWake, 'never replaced')
 })
 
-test('relay: a DM wake fans out once to every subscription, names nobody and is coalesced for 15 minutes', async (t) => {
+const DM_KEYS = ['g', 'kind', 'v']
+
+test('relay: a DM box reaches only its member with { v: 1, kind: dm, g }, once per 15 minutes', async (t) => {
   const s = await setup(t)
-  const wake = { v: 1, kind: 'dm-wake' }
+  await s.acceptTerms(s.m, DM_NOTICE_TERMS_FLOOR)
+  await s.acceptTerms(s.actor, DM_NOTICE_TERMS_FLOOR)
+  const mine = [await s.subscribe(s.m), await s.subscribe(s.m, 'updates.push.services.mozilla.com')]
+  const other = await s.subscribe(s.actor)
 
-  // Nobody subscribed: 202, no vendor call, and the window does not start.
-  t.is((await s.relay(wake)).status, 202)
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  t.is(s.delivered.length, 0)
-
-  await s.acceptTerms(s.m)
-  await s.acceptTerms(s.actor)
-  const subs = [subscription(), subscription('updates.push.services.mozilla.com'), subscription()]
-  t.alike((await s.toggle(s.m, 'on', subs[0])).body, { ok: true, changed: true })
-  t.alike((await s.toggle(s.m, 'on', subs[1])).body, { ok: true, changed: true })
-  t.alike((await s.toggle(s.actor, 'on', subs[2])).body, { ok: true, changed: true })
-
-  const r = await s.relay(wake)
+  const before = s.c.now()
+  const r = await s.relayDm(s.m.hex)
   t.is(r.status, 202)
   t.alike(r.body, {})
-  await until(() => s.delivered.length === 3, { name: 'three sends' })
+  await until(() => s.delivered.length === 2, { name: 'two sends' })
+  const after = s.c.now()
   const topics = new Set()
-  for (const sub of subs) {
+  for (const sub of mine) {
     const got = s.delivered.filter((d) => d.url === sub.endpoint)
-    t.is(got.length, 1, 'one send to each subscription')
+    t.is(got.length, 1, 'one send to each of the member\'s devices')
     topics.add(got[0].headers.Topic)
     const plain = decrypt(got[0].body, sub.uaPrivate, sub.auth)
-    t.alike(JSON.parse(plain), wake)
+    const payload = JSON.parse(plain)
+    t.alike(Object.keys(payload).sort(), DM_KEYS)
+    t.is(payload.v, 1)
+    t.is(payload.kind, 'dm')
+    t.ok(Number.isSafeInteger(payload.g) && payload.g >= before && payload.g <= after, 'g is the enqueue time')
     t.absent(/[0-9a-f]{64}/.test(plain), 'no key in the payload')
     t.absent(/ana|bia/i.test(plain), 'no name in the payload')
   }
-  t.is(topics.size, 1, 'one identical topic for the whole fan-out')
+  t.is(topics.size, 1, 'one topic for every device of one notice')
+  t.absent(s.delivered.some((d) => d.url === other.endpoint), 'nobody else is told')
 
-  // A second wake inside the window is accepted and dropped.
-  t.is((await s.relay(wake)).status, 202)
+  // A second box for the same member inside 15 minutes sends nothing.
+  t.is((await s.relayDm(s.m.hex)).status, 202)
   await new Promise((resolve) => setTimeout(resolve, 100))
-  t.is(s.delivered.length, 3, 'one vendor batch per window')
+  t.is(s.delivered.length, 2, 'coalesced')
 
-  // The wake pads to the same ciphertext length as a member notice.
+  // Padded like every other notice.
   await s.relay(s.like(s.actor, s.m))
-  await until(() => s.delivered.length === 5, { name: 'like sends' })
-  const like = s.delivered.find((d, i) => i >= 3 && d.url === subs[0].endpoint)
-  t.is(like.body.length, s.delivered.find((d) => d.url === subs[0].endpoint).body.length, 'same size as other pushes')
+  await until(() => s.delivered.length === 4, { name: 'like sends' })
+  const like = s.delivered.find((d, i) => i >= 2 && d.url === mine[0].endpoint)
+  t.is(like.body.length, s.delivered[0].body.length, 'same size as a like')
 
-  // After the window, the next wake fans out again.
+  // The other member is not under the first member's cooldown.
+  t.is((await s.relayDm(s.actor.hex)).status, 202)
+  await until(() => s.delivered.length === 5, { name: 'other member' })
+  t.is(s.delivered[4].url, other.endpoint)
+
+  // Past the window the member is told again.
   s.c.offset += 15 * 60 * 1000
-  t.is((await s.relay(wake)).status, 202)
-  await until(() => s.delivered.length === 8, { name: 'second window' })
-
-  // A wake that names anyone is the generic rejection.
-  for (const bad of [{ ...wake, actor: s.actor.hex }, { ...wake, recipient: s.m.hex }, { v: 2, kind: 'dm-wake' }]) {
-    const res = await s.relay(bad)
-    t.is(res.status, 400)
-    t.alike(res.body, { error: 'pedido-invalido' })
-  }
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  t.is(s.delivered.length, 8)
-  cleanLogs(t, s, subs.map((x) => x.endpoint))
+  t.is((await s.relayDm(s.m.hex)).status, 202)
+  await until(() => s.delivered.length === 7, { name: 'next window' })
+  cleanLogs(t, s, [...mine, other].map((x) => x.endpoint))
 })
 
-test('relay: a DM wake answered 404 or 410 removes that subscription from its member', async (t) => {
+test('relay: a DM box for a member below the Terms floor or without a device sends nothing', async (t) => {
   const s = await setup(t)
-  await s.acceptTerms(s.m)
-  await s.acceptTerms(s.actor)
-  const gone = subscription()
-  const missing = subscription()
-  const live = subscription()
-  await s.toggle(s.m, 'on', gone)
-  await s.toggle(s.actor, 'on', missing)
-  await s.toggle(s.m, 'on', live)
-  s.statusOf.set(gone.endpoint, 410)
-  s.statusOf.set(missing.endpoint, 404)
-  t.is((await s.relay({ v: 1, kind: 'dm-wake' })).status, 202)
-  await until(() => s.logs.filter((l) => l === JSON.stringify({ event: 'push', reason: 'removido' })).length === 2, { name: 'two removed' })
-  t.alike(s.pushStore.list(s.m.hex).map((r) => r.endpoint), [live.endpoint])
-  t.alike(s.pushStore.list(s.actor.hex), [])
-  for (const d of s.delivered) t.alike(JSON.parse(decrypt(d.body, [gone, missing, live].find((x) => x.endpoint === d.url).uaPrivate, [gone, missing, live].find((x) => x.endpoint === d.url).auth)), { v: 1, kind: 'dm-wake' })
-  cleanLogs(t, s, [gone, missing, live].map((x) => x.endpoint))
+  await s.acceptTerms(s.m, DM_NOTICE_TERMS_FLOOR - 1)
+  const sub = await s.subscribe(s.m)
+  t.is((await s.relayDm(s.m.hex)).status, 202)
+  await until(() => s.logs.includes(JSON.stringify({ event: 'push', kind: 'dm', reason: 'termos-pendentes' })), { name: 'terms refusal' })
+  t.is(s.delivered.length, 0, 'an older acceptance does not cover DM notices')
+
+  await s.acceptTerms(s.m, DM_NOTICE_TERMS_FLOOR)
+  s.c.offset += 15 * 60 * 1000
+  t.is((await s.relayDm(s.m.hex)).status, 202)
+  await until(() => s.delivered.length === 1, { name: 'sent once accepted' })
+  t.is(s.delivered[0].url, sub.endpoint)
+
+  // Accepted, no device: nothing, and no error.
+  await s.acceptTerms(s.actor, DM_NOTICE_TERMS_FLOOR)
+  t.is((await s.relayDm(s.actor.hex)).status, 202)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(s.delivered.length, 1)
+  cleanLogs(t, s, [sub.endpoint])
 })
 
-test('relay: a capped DM wake counts the rest, rotates where the next one starts and never starts the window when nothing was queued', async (t) => {
-  const { MAX_QUEUE, MAX_IN_FLIGHT } = require('../lib/account/push-routes')
-  // A wake takes at most half the queue; member notices keep the rest.
-  const HALF = Math.floor(MAX_QUEUE / 2)
-  const token = 'ef'.repeat(32)
-  const N = HALF + 88
-  const rows = []
-  for (let i = 0; i < N; i++) {
-    const member = nodeCrypto.createHash('sha256').update('m' + (i % 50)).digest('hex')
-    rows.push({ member, endpoint: 'https://fcm.googleapis.com/fcm/send/d' + i, p256dh: 'p' + i, auth: 'a' + i })
+test('relay: a bad DM box is 202 and sends nothing, a bad shape is 400, the old wake is dropped and no Bearer is hidden', async (t) => {
+  const s = await setup(t)
+  await s.acceptTerms(s.m, DM_NOTICE_TERMS_FLOOR)
+  const sub = await s.subscribe(s.m)
+  const good = s.dmBox(s.m.hex)
+  t.is(good.length, Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3), 'the length relayed')
+  // The last character of 116 bytes carries 4 bits and 2 unused ones:
+  // flipping an unused bit decodes to the same bytes.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+  const last = alphabet.indexOf(good[good.length - 1])
+  const nonCanonical = good.slice(0, -1) + alphabet[last ^ 1]
+  t.alike(Buffer.from(nonCanonical, 'base64url'), Buffer.from(good, 'base64url'), 'same bytes, other spelling')
+  const otherKey = loadOrCreateWakeKey(path.join(tmpDir(t), 'other'))
+  const boxes = [
+    ['sealed to another key', s.dmBox(s.m.hex, otherKey.publicKey)],
+    ['one byte short', Buffer.from(good, 'base64url').subarray(1).toString('base64url')],
+    ['one byte long', Buffer.concat([Buffer.from(good, 'base64url'), Buffer.from([0])]).toString('base64url')],
+    ['non-canonical', nonCanonical],
+    ['padded', good + '='],
+    ['standard alphabet', Buffer.from(good, 'base64url').toString('base64')],
+    ['empty', ''],
+    ['flipped byte', (() => { const b = Buffer.from(good, 'base64url'); b[40] ^= 1; return b.toString('base64url') })()]
+  ]
+  for (const [label, box] of boxes) {
+    const r = await s.relay({ v: 1, kind: 'dm', box })
+    t.is(r.status, 202, label + ': 202')
+    t.alike(r.body, {}, label + ': empty answer')
   }
-  const pushStore = {
-    available: () => true,
-    all: () => rows.map((r) => ({ ...r })),
-    list: (member) => rows.filter((r) => r.member === member).map(({ endpoint, p256dh, auth }) => ({ endpoint, p256dh, auth })),
-    remove: async () => ({ changed: true })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(s.delivered.length, 0, 'no bad box sends anything')
+  const invalid = JSON.stringify({ event: 'push', kind: 'dm', reason: 'caixa-invalida' })
+  t.ok(s.logs.filter((l) => l === invalid).length >= 7, 'each logged as caixa-invalida')
+
+  for (const bad of [
+    { v: 1, kind: 'dm', box: good, recipient: s.m.hex },
+    { v: 2, kind: 'dm', box: good },
+    { v: 1, kind: 'dm' },
+    { v: 1, kind: 'dm', box: 7 },
+    { v: 1, kind: 'dm', box: [good] },
+    { v: 1, kind: 'dm-wake', recipient: s.m.hex }
+  ]) {
+    const r = await s.relay(bad)
+    t.is(r.status, 400, JSON.stringify(Object.keys(bad)))
+    t.alike(r.body, { error: 'pedido-invalido' })
   }
+
+  // The old global wake: accepted and dropped.
+  const legacy = await s.relay({ v: 1, kind: 'dm-wake' })
+  t.is(legacy.status, 202)
+  t.alike(legacy.body, {})
+
+  // No Bearer, or a wrong one: the generic 404, as for every relay event.
+  for (const auth of [null, 'Bearer ' + 'ab'.repeat(32)]) {
+    const r = await s.relay({ v: 1, kind: 'dm', box: good }, { auth })
+    t.is(r.status, 404)
+    t.alike(r.body, { error: 'nao-encontrado' })
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(s.delivered.length, 0, 'nothing sent')
+
+  // None of the above spent the member's cooldown.
+  t.is((await s.relay({ v: 1, kind: 'dm', box: good })).status, 202)
+  await until(() => s.delivered.length === 1, { name: 'the good box' })
+  t.is(s.delivered[0].url, sub.endpoint)
+  cleanLogs(t, s, [sub.endpoint])
+})
+
+// The key the stub pages store fails on.
+const PAGES_THROW_KEY = 'fe'.repeat(32)
+
+// createPushRoutes with a real push store and keyedWindow, a stub pages
+// store and Terms store, and a send spy.
+async function dmRoutes (t, { pages = new Map(), accepted = () => true, pushStore = null, delay = 0, delayMs = () => delay } = {}) {
+  const dir = path.join(tmpDir(t), 'account')
+  const clock = { t: Date.parse('2026-11-18T12:00:00.000Z') }
+  clock.now = () => clock.t
+  const store = pushStore ?? openPushStore(dir, { now: clock.now })
+  const wakeKey = loadOrCreateWakeKey(path.join(tmpDir(t), 'wake'))
+  const token = 'dd'.repeat(32)
   const sent = []
-  const held = []
-  let hold = true
-  const send = ({ subscription }) => {
-    sent.push(subscription.endpoint)
-    if (!hold) return Promise.resolve('ok')
-    return new Promise((resolve) => held.push(() => resolve('ok')))
-  }
   const logs = []
-  const clock = { t: Date.parse('2026-11-03T12:00:00.000Z') }
-  const http = {
-    send: () => {},
-    sendError: () => { throw new Error('refused') },
-    readJsonBody: async () => ({ v: 1, kind: 'dm-wake' }),
-    checkPost: () => {},
-    RouteError: Error,
-    refuse: (code) => new Error(code),
-    fromStore: (e) => e,
-    keyedWindow: () => () => true
-  }
+  let next = null
+  const replies = []
   const r = createPushRoutes({
     association: '0'.repeat(64),
     accounts: { status: () => ({ linked: false }) },
+    terms: { available: () => true, list: (member) => accepted(member) ? [{ version: DM_NOTICE_TERMS_FLOOR }] : [{ version: DM_NOTICE_TERMS_FLOOR - 1 }] },
+    pagesStore: {
+      get (key) {
+        if (key === PAGES_THROW_KEY) throw new Error('indisponivel')
+        return pages.has(key) ? { ...pages.get(key) } : null
+      }
+    },
+    pushStore: store,
+    vapid: { ...generateVapidKeys(), subject: ORIGIN },
+    wakeKey,
+    topicKey: TOPIC_KEY,
+    send: async (args) => { sent.push({ endpoint: args.subscription.endpoint, payload: JSON.parse(args.payload), topic: args.topic }); return 'ok' },
+    delayMs,
+    relayTokenHash: sha256(token),
+    log: (e) => logs.push(JSON.stringify(e)),
+    now: clock.now,
+    http: { ...HTTP_STUB, send: (res, status) => replies.push(status), readJsonBody: async () => next, keyedWindow }
+  })
+  t.teardown(() => r.close())
+  const relay = (event) => {
+    next = event
+    return r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  }
+  const dm = (key) => relay({ v: 1, kind: 'dm', box: sealDmNotice(key, wakeKey.publicKey).toString('base64url') })
+  async function subscribe (who) {
+    const sub = subscription()
+    await store.put({ member: who.hex, endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth })
+    return sub
+  }
+  return { r, clock, sent, logs, replies, relay, dm, subscribe }
+}
+
+function noKeysLogged (t, logs) {
+  const all = logs.join('\n')
+  t.absent(/[0-9a-f]{64}/.test(all), 'no member or page key in the logs')
+  for (const line of logs) {
+    const e = JSON.parse(line)
+    t.ok(Object.keys(e).every((k) => k === 'event' || k === 'reason' || (k === 'kind' && e.kind === 'dm')), 'only event, reason and kind: ' + line)
+  }
+}
+
+test('relay: a DM box naming a live Página reaches its owner and admins as dm-page, never the page key', async (t) => {
+  const page = member()
+  const closedPage = member()
+  const movedPage = member()
+  const owner = member()
+  const admin = member()
+  const outsider = member()
+  const pages = new Map([
+    [page.hex, { owner: owner.hex, admins: [admin.hex], closed: null, movedTo: null, paused: false }],
+    [closedPage.hex, { owner: owner.hex, admins: [admin.hex], closed: '2026-11-17T00:00:00.000Z', movedTo: null, paused: false }],
+    [movedPage.hex, { owner: owner.hex, admins: [admin.hex], closed: '2026-11-17T00:00:00.000Z', movedTo: page.hex, paused: false }]
+  ])
+  const d = await dmRoutes(t, { pages })
+  const subs = { owner: await d.subscribe(owner), admin: await d.subscribe(admin), page: await d.subscribe(page), outsider: await d.subscribe(outsider), closed: await d.subscribe(closedPage) }
+
+  await d.dm(page.hex)
+  t.alike(d.replies, [202])
+  await until(() => d.sent.length === 2, { name: 'owner and admin' })
+  t.alike(d.sent.map((x) => x.endpoint).sort(), [subs.owner.endpoint, subs.admin.endpoint].sort())
+  for (const x of d.sent) {
+    t.alike(Object.keys(x.payload).sort(), DM_KEYS)
+    t.is(x.payload.kind, 'dm-page')
+    t.is(x.payload.g, d.clock.t)
+  }
+  t.absent(d.sent.some((x) => x.endpoint === subs.page.endpoint), 'never the page key itself')
+
+  // The cooldown is the page's: a second box for it sends nothing, while the
+  // owner's own DM notice still goes out, as kind dm.
+  await d.dm(page.hex)
+  await d.dm(owner.hex)
+  await until(() => d.sent.length === 3, { name: 'owner own' })
+  t.is(d.sent[2].endpoint, subs.owner.endpoint)
+  t.is(d.sent[2].payload.kind, 'dm')
+  t.not(d.sent[2].topic, d.sent.find((x) => x.endpoint === subs.owner.endpoint).topic, 'a fresh topic per notice')
+
+  // A closed or moved page has no roster to tell: only the key's own rows.
+  await d.dm(closedPage.hex)
+  await d.dm(movedPage.hex)
+  await until(() => d.sent.length === 4, { name: 'closed page own row' })
+  t.is(d.sent[3].endpoint, subs.closed.endpoint)
+  t.is(d.sent[3].payload.kind, 'dm')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  t.is(d.sent.length, 4, 'neither the owner nor the admin of a closed or moved page')
+  t.absent(d.sent.some((x) => x.endpoint === subs.outsider.endpoint))
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: a Página admin below the Terms floor is skipped; one member gets 60 DM notices an hour', async (t) => {
+  const owner = member()
+  const admin = member()
+  const pages = new Map()
+  const keys = []
+  for (let i = 0; i < 62; i++) {
+    const p = member()
+    keys.push(p.hex)
+    pages.set(p.hex, { owner: owner.hex, admins: [admin.hex], closed: null, movedTo: null, paused: false })
+  }
+  const d = await dmRoutes(t, { pages, accepted: (m) => m !== admin.hex })
+  const ownerSub = await d.subscribe(owner)
+  await d.subscribe(admin)
+  for (let i = 0; i < 61; i++) await d.dm(keys[i])
+  await until(() => d.r.stats().queued === 0 && d.r.stats().inFlight === 0, { name: 'drained' })
+  t.is(d.sent.length, 60, 'the 61st page notice in an hour is over the cap')
+  t.ok(d.sent.every((x) => x.endpoint === ownerSub.endpoint), 'the admin below the floor gets nothing')
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'dm', reason: 'teto' })).length, 1)
+  t.ok(d.logs.includes(JSON.stringify({ event: 'push', kind: 'dm', reason: 'termos-pendentes' })))
+  d.clock.t += 3600 * 1000
+  await d.dm(keys[61])
+  await until(() => d.sent.length === 61, { name: 'next hour' })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: a DM box that reaches nobody leaves the 15-minute window open', async (t) => {
+  const m = member()
+  let ok = false
+  const d = await dmRoutes(t, { accepted: () => ok })
+  await d.dm(m.hex)
+  t.ok(d.logs.includes(JSON.stringify({ event: 'push', kind: 'dm', reason: 'termos-pendentes' })), 'below the Terms floor')
+  ok = true
+  await d.dm(m.hex)
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'dm', reason: 'descartado' })).length, 0, 'no device yet, still not charged')
+  const sub = await d.subscribe(m)
+  await d.dm(m.hex)
+  await until(() => d.sent.length === 1, { name: 'first notice that reaches a device' })
+  t.is(d.sent[0].endpoint, sub.endpoint)
+  await d.dm(m.hex)
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'dm', reason: 'descartado' })).length, 1, 'the queued notice took the window')
+  d.clock.t += 15 * 60 * 1000
+  await d.dm(m.hex)
+  await until(() => d.sent.length === 2, { name: 'next window' })
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: each Página member draws its own delay, shared only by its own devices', async (t) => {
+  const page = member()
+  const owner = member()
+  const admin = member()
+  const idle = member()
+  let draws = 0
+  const pages = new Map([[page.hex, { owner: owner.hex, admins: [admin.hex, idle.hex], closed: null, movedTo: null, paused: false }]])
+  const d = await dmRoutes(t, { pages, delayMs: () => { draws++; return 0 } })
+  await d.subscribe(owner)
+  await d.subscribe(owner)
+  await d.subscribe(admin)
+  await d.dm(page.hex)
+  await until(() => d.sent.length === 3, { name: 'owner twice, admin once' })
+  t.is(draws, 2, 'one draw for the owner (two devices), one for the admin, none for an admin with no device')
+})
+
+test('relay: a Página notice skips an admin removed, or a page closed, while it waited', async (t) => {
+  const page = member()
+  const owner = member()
+  const admin = member()
+  const pages = new Map([[page.hex, { owner: owner.hex, admins: [admin.hex], closed: null, movedTo: null, paused: false }]])
+  const d = await dmRoutes(t, { pages, delay: 50 })
+  const subs = { owner: await d.subscribe(owner), admin: await d.subscribe(admin) }
+  const settled = () => d.r.stats().queued === 0 && d.r.stats().inFlight === 0
+  await d.dm(page.hex)
+  t.is(d.r.stats().queued, 2, 'owner and admin queued')
+  pages.set(page.hex, { ...pages.get(page.hex), admins: [] })
+  d.clock.t += 50
+  await until(settled, { name: 'both jobs handled' })
+  t.alike(d.sent.map((s) => s.endpoint), [subs.owner.endpoint], 'only the owner, who still runs the page')
+  t.is(d.r.stats().dropped, 1)
+
+  d.clock.t += 15 * 60 * 1000
+  pages.set(page.hex, { ...pages.get(page.hex), admins: [admin.hex] })
+  await d.dm(page.hex)
+  t.is(d.r.stats().queued, 2)
+  pages.set(page.hex, { ...pages.get(page.hex), closed: '2026-11-18T12:15:00.000Z' })
+  d.clock.t += 50
+  await until(settled, { name: 'jobs of the closed page handled' })
+  t.is(d.sent.length, 1, 'nothing for a page closed meanwhile')
+  t.is(d.r.stats().dropped, 3)
+  noKeysLogged(t, d.logs)
+})
+
+test('relay: an unreadable pages store reads as a member key; no wake key drops every box', async (t) => {
+  const d = await dmRoutes(t)
+  const odd = { hex: PAGES_THROW_KEY }
+  const sub = await d.subscribe(odd)
+  await d.dm(odd.hex)
+  await until(() => d.sent.length === 1, { name: 'member path' })
+  t.is(d.sent[0].endpoint, sub.endpoint)
+  t.is(d.sent[0].payload.kind, 'dm')
+  noKeysLogged(t, d.logs)
+
+  const logs = []
+  const replies = []
+  const sent = []
+  const token = 'ee'.repeat(32)
+  const off = createPushRoutes({
+    association: '0'.repeat(64),
+    accounts: { status: () => ({ linked: false }) },
+    terms: { available: () => true, list: () => [{ version: DM_NOTICE_TERMS_FLOOR }] },
+    pushStore: { available: () => true, list: () => [{ endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth }] },
+    vapid: { ...generateVapidKeys(), subject: ORIGIN },
+    send: async () => { sent.push(1); return 'ok' },
     delayMs: () => 0,
     relayTokenHash: sha256(token),
-    pushStore,
-    vapid: {},
-    send,
     log: (e) => logs.push(e),
-    now: () => clock.t,
-    http
+    http: { ...HTTP_STUB, send: (res, status, body) => replies.push([status, body]), readJsonBody: async () => ({ v: 1, kind: 'dm', box: sealDmNotice(odd.hex, loadOrCreateWakeKey(path.join(tmpDir(t), 'w')).publicKey).toString('base64url') }), keyedWindow }
   })
-  const wake = () => r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
-  const capped = () => logs.filter((e) => e.reason === 'teto')
+  await off.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
+  t.alike(replies, [[202, {}]])
+  t.alike(logs, [{ event: 'push', kind: 'dm', reason: 'indisponivel' }])
+  t.is(sent.length, 0)
+  await off.close()
+})
 
-  // First wake: half the queue is taken, the tail is counted.
-  await wake()
-  t.is(sent.length, MAX_IN_FLIGHT)
-  t.alike(capped(), [{ event: 'push', reason: 'teto', count: N - HALF }])
-  t.is(r.stats().dropped, N - HALF)
-
-  // Next window, the wake's half nearly full: only its free slots, starting
-  // where the first wake stopped.
-  clock.t += 15 * 60 * 1000
-  await wake()
-  t.is(r.stats().queued, HALF)
-  // Next window, the wake's half full: nothing queued, so the window does not
-  // start.
-  clock.t += 15 * 60 * 1000
-  await wake()
-  t.is(capped().length, 3)
-  t.is(capped()[2].count, N)
-
-  hold = false
-  while (held.length > 0) held.shift()()
-  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'drained' })
-  t.is(sent.length, HALF + MAX_IN_FLIGHT)
-  t.alike(sent.slice(HALF), rows.slice(HALF, HALF + MAX_IN_FLIGHT).map((x) => x.endpoint), 'the second wake started at the tail')
-
-  // Same instant as the refused third wake: the window it never started is
-  // open, and the fan-out continues after the second wake's rows.
-  await wake()
-  await until(() => r.stats().queued === 0 && r.stats().inFlight === 0, { name: 'drained again' })
-  const fourth = sent.slice(HALF + MAX_IN_FLIGHT)
-  t.is(fourth.length, HALF)
-  t.is(fourth[0], rows[HALF + MAX_IN_FLIGHT].endpoint)
-  const later = sent.slice(HALF)
-  t.ok(rows.slice(HALF).every((x) => later.includes(x.endpoint)), 'the tail the first wake skipped is reached')
-  // And a wake inside that new window is dropped.
-  await wake()
-  t.is(logs[logs.length - 1].reason, 'descartado')
+test('relay: DM notices only enter while the queue is under half full, a member gets every device or none', async (t) => {
+  const HALF = Math.floor(MAX_QUEUE / 2)
+  const big = member()
+  const fits = member()
+  const late = member()
+  const rows = new Map([[big.hex, HALF + 1], [fits.hex, HALF - 4], [late.hex, 5]])
+  const pushStore = {
+    available: () => true,
+    list: (m) => Array.from({ length: rows.get(m) || 0 }, (_, i) => ({ endpoint: 'https://fcm.googleapis.com/fcm/send/' + m.slice(0, 8) + i, p256dh: 'p' + i, auth: 'a' + i }))
+  }
+  const d = await dmRoutes(t, { pushStore, delay: 60000 })
+  await d.dm(big.hex)
+  t.is(d.r.stats().queued, 0, 'more devices than half the queue: none queued')
+  t.is(d.r.stats().dropped, HALF + 1)
+  await d.dm(fits.hex)
+  t.is(d.r.stats().queued, HALF - 4)
+  await d.dm(late.hex)
+  t.is(d.r.stats().queued, HALF - 4, '5 devices do not fit in the 4 left: none queued')
+  t.is(d.r.stats().dropped, HALF + 1 + 5)
+  t.is(d.logs.filter((l) => l === JSON.stringify({ event: 'push', kind: 'dm', reason: 'descartado' })).length, 2)
+  t.is(d.sent.length, 0, 'still waiting for the delay')
+  noKeysLogged(t, d.logs)
 })
 
 // notifyInvite through createPushRoutes: a real push store on disk, an
@@ -1420,20 +1684,24 @@ test('push delay: the relay path (/push-event) waits too', async (t) => {
   await r.close()
 })
 
-test('push delay: a DM wake waits one delay for every subscription', async (t) => {
+test('push delay: a DM notice waits one delay for every device of the member', async (t) => {
   const token = 'fa'.repeat(32)
+  const wakeKey = loadOrCreateWakeKey(path.join(tmpDir(t), 'wake'))
+  const m = member()
   const { s, r, sent, timers, fire } = await delayedRoutes(t, [10000, 40000], {
     relayTokenHash: sha256(token),
-    http: { ...HTTP_STUB, readJsonBody: async () => ({ v: 1, kind: 'dm-wake' }) }
+    wakeKey,
+    terms: { available: () => true, list: () => [{ version: DM_NOTICE_TERMS_FLOOR }] },
+    http: { ...HTTP_STUB, readJsonBody: async () => ({ v: 1, kind: 'dm', box: sealDmNotice(m.hex, wakeKey.publicKey).toString('base64url') }) }
   })
-  const a = await s.subscribe(member())
-  const b = await s.subscribe(member())
+  const a = await s.subscribe(m)
+  const b = await s.subscribe(m)
   await r.handleRelay({ method: 'POST', headers: { authorization: 'Bearer ' + token } }, {})
   t.is(sent.length, 0, 'not sent at once')
   t.is(r.stats().queued, 2)
-  t.is(timers[timers.length - 1].ms, 10000, 'one draw for the whole fan-out')
+  t.is(timers[timers.length - 1].ms, 10000, 'one draw for every device')
   fire(10000)
-  await until(() => sent.length === 2, { name: 'both wakes together' })
+  await until(() => sent.length === 2, { name: 'both devices together' })
   t.alike(sent.slice().sort(), [a.endpoint, b.endpoint].sort())
   await r.close()
 })
@@ -1691,14 +1959,18 @@ test('recall: only the same kind, actor, recipient and ref is dropped', async (t
   await r.close()
 })
 
-test('recall: an invite drop, a deletion notice and a DM wake never match', async (t) => {
-  const { s, r, sent, fire, relay, undo, reasons } = await recallRoutes(t)
+test('recall: an invite drop, a deletion notice and a DM notice never match', async (t) => {
+  const wakeKey = loadOrCreateWakeKey(path.join(tmpDir(t), 'wake'))
+  const { s, r, sent, fire, relay, undo, reasons } = await recallRoutes(t, {
+    wakeKey,
+    terms: { available: () => true, list: () => [{ version: DM_NOTICE_TERMS_FLOOR }] }
+  })
   const actor = member()
   const m = member()
   await s.subscribe(m)
   t.is(r.notifyInvite(invite(s, m)), 'queued')
   t.is(r.notifyDeletion({ member: m.hex }), 'queued')
-  await relay({ v: 1, kind: 'dm-wake' })
+  await relay({ v: 1, kind: 'dm', box: sealDmNotice(m.hex, wakeKey.publicKey).toString('base64url') })
   t.is(r.stats().queued, 3)
   await undo('follow', actor, m)
   await undo('like', actor, m, m.hex + ':1')
