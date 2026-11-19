@@ -8,19 +8,8 @@ const { transformSync } = require('@babel/core')
 
 const source = readFileSync(join(__dirname, '../src/ui/SwitchRow.js'), 'utf8')
 
-function load () {
-  const taps = []
-  const element = (type, props) => ({ type, props })
-  const colors = { ink: 'ink', soft: 'soft', accent: 'accent', line: 'line', card: 'card', skeleton: 'skeleton' }
-  const modules = {
-    react: { useId: () => 'switch-caption-id' },
-    'react/jsx-runtime': { jsx: element, jsxs: element },
-    'react-native': { Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles, hairlineWidth: 0.5 } },
-    './haptics': { tap: (kind) => taps.push(kind) },
-    './theme': { layout: { hit: 44 }, space: { xs: 4, md: 12, lg: 16 }, type: { postText: {}, replyMark: {} } },
-    './ThemeProvider': { useStyles: (make) => make(colors) }
-  }
-  const { code } = transformSync(source, {
+function compile (src, modules) {
+  const { code } = transformSync(src, {
     babelrc: false,
     configFile: false,
     plugins: [[require.resolve('@babel/plugin-transform-react-jsx'), { runtime: 'automatic' }], require.resolve('@babel/plugin-transform-modules-commonjs')]
@@ -33,13 +22,35 @@ function load () {
       return modules[name]
     }
   })
-  return { render: exports.SwitchRow, taps }
+  return exports
+}
+
+function load () {
+  const taps = []
+  const element = (type, props) => ({ type, props })
+  const colors = { ink: 'ink', soft: 'soft', accent: 'accent', line: 'line', card: 'card', skeleton: 'skeleton', controlOff: 'controlOff' }
+  const modules = {
+    react: { useId: () => 'switch-caption-id' },
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    'react-native': { Pressable: 'Pressable', Text: 'Text', View: 'View', StyleSheet: { create: (styles) => styles, hairlineWidth: 0.5 } },
+    './haptics': { tap: (kind) => taps.push(kind) },
+    './theme': { layout: { hit: 44 }, radius: { pill: 999 }, space: { xs: 4, md: 12, lg: 16 }, type: { postText: {}, replyMark: {} } },
+    './ThemeProvider': { useStyles: (make) => make(colors) }
+  }
+  modules['./Toggle'] = compile(readFileSync(join(__dirname, '../src/ui/Toggle.js'), 'utf8'), modules)
+  return { render: compile(source, modules).SwitchRow, taps }
 }
 
 function nodes (node) {
   if (!node || typeof node !== 'object') return []
   if (Array.isArray(node)) return node.flatMap(nodes)
+  if (typeof node.type === 'function') return nodes(node.type(node.props))
   return [node, ...nodes(node.props?.children)]
+}
+
+function trackOf (wrapper) {
+  const child = wrapper.props.children
+  return typeof child.type === 'function' ? child.type(child.props) : child
 }
 
 function styleOf (node) {
@@ -52,7 +63,6 @@ test('SwitchRow exposes one switch with its label, caption and checked state', (
     const row = render({ label: 'Notificações', caption: 'Avisar sobre respostas', value, onValueChange () {} })
     const tree = nodes(row)
     const hidden = tree.find((node) => node.props.pointerEvents === 'none')
-    const thumb = hidden.props.children
     t.is(row.type, 'Pressable')
     t.is(row.props.accessible, true)
     t.is(row.props.accessibilityRole, 'switch')
@@ -72,20 +82,22 @@ test('SwitchRow exposes one switch with its label, caption and checked state', (
     t.is(hidden.props.accessibilityElementsHidden, true)
     t.is(hidden.props.importantForAccessibility, 'no-hide-descendants')
     t.is(hidden.props['aria-hidden'], true)
-    const trackStyle = styleOf(hidden)
-    t.is(trackStyle.backgroundColor, value ? 'accent' : 'line')
-    t.is(trackStyle.alignItems, value ? 'flex-end' : 'flex-start', 'the thumb follows the checked state')
-    t.is(trackStyle.width, 51)
-    t.is(trackStyle.height, 31)
+    const track = trackOf(hidden)
+    const knob = track.props.children
+    const trackStyle = styleOf(track)
+    t.is(trackStyle.backgroundColor, value ? 'accent' : 'controlOff')
+    t.is(trackStyle.alignItems, value ? 'flex-end' : 'flex-start', 'the knob follows the checked state')
+    t.is(trackStyle.width, 44)
+    t.is(trackStyle.height, 28)
     t.ok(trackStyle.borderRadius >= trackStyle.height / 2, 'the track is fully rounded')
-    t.is(thumb.type, 'View')
-    const thumbStyle = styleOf(thumb)
-    t.is(thumbStyle.width, 27)
-    t.is(thumbStyle.height, 27)
-    t.ok(thumbStyle.borderRadius >= thumbStyle.height / 2, 'the thumb is round')
-    t.is(thumbStyle.backgroundColor, 'card')
-    t.is(thumbStyle.borderColor, 'line')
-    t.is(thumbStyle.borderWidth, 0.5, 'the thumb uses a hairline border')
+    t.is(knob.type, 'View')
+    const knobStyle = styleOf(knob)
+    t.is(knobStyle.width, 22)
+    t.is(knobStyle.height, 22)
+    t.ok(knobStyle.borderRadius >= knobStyle.height / 2, 'the knob is round')
+    t.is(knobStyle.backgroundColor, 'card')
+    t.is(trackStyle.padding, 3, 'the knob sits at an inset of 3')
+    t.is(trackStyle.borderRadius, 999, 'the track uses the pill radius')
     t.absent(tree.slice(1).some((node) => node.props.onPress || node.props.onValueChange || node.props.onKeyDown), 'only the row handles gestures')
   }
 })
@@ -169,6 +181,8 @@ test('SwitchRow disables both entry points without haptics or callbacks', (t) =>
   t.alike({ ...row.props.accessibilityState }, { checked: true, disabled: true })
   t.is(row.props.onKeyDown, undefined, 'a disabled row has no keyboard handler')
   t.is(Object.assign({}, ...row.props.style({ pressed: false }).filter(Boolean)).opacity, 0.45, 'disabled rows keep the fade')
+  const disabledTrack = styleOf(trackOf(nodes(row).find((node) => node.props.pointerEvents === 'none')))
+  t.is(disabledTrack.opacity, undefined, 'the row fade alone dims a disabled track')
   let prevented = 0
   row.props.onPress()
   for (const key of [' ', 'Spacebar']) row.props.onKeyDown?.({ key, preventDefault () { prevented++ } })

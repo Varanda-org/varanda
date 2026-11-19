@@ -12,7 +12,8 @@
 // pull to refresh and every PULL_EVERY_MS while visible; every pull and every
 // dm.set bump node.dmVersion, which re-reads the inbox back to the depth
 // already loaded (inboxPaging.js); a search pages through the rest of dm.list
-// on the device. Reads carry a
+// on the device, and Não lidas does the same while unread is still only on a
+// later page. Reads carry a
 // generation: an answer older than a newer read is dropped. Acting as a page,
 // the inbox is the page's (useDmRequest) and its groups stay in Comunidades.
 // The group rows paint the stored 'conversasGrupos' snapshot
@@ -21,7 +22,7 @@
 // answers.
 // Props: { active, onOpenGroup, onOpenCommunity, onOpenThread,
 // onOpenCommunities, onOpenRequests, showInbox, seenTick, composing,
-// onComposing }.
+// onComposing, onGroupsUnread }.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
@@ -31,7 +32,8 @@ import { useNames } from '../names'
 import { fetchMember } from '../indexClient'
 import { diaryPeekSlots } from '../engagement'
 import { readPeerEntry } from '../peerProfile'
-import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settleRefresh, refreshDepth, searchPaging } from '../inboxPaging'
+import { SEARCH_PAGES_MAX, SEARCH_PAGE_GAP_MS, mergeFirstPage, readDepth, settleRefresh, refreshDepth, searchPaging, unreadPaging } from '../inboxPaging'
+import { groupsUnread, showNaoLidasEmpty } from '../conversasDot'
 import { planRowPeeks, runRowPeeks } from '../rowPeek'
 import { FILTERS, FILTER_LABELS, RECENT_MAX, applyFilter, conversasReadsAllowed, communitiesRow, mergeRows, oldKeyRow, requestsRow } from '../conversas'
 import { ErrorText, Soft, errorText, useBottomPad, useNow } from '../ui'
@@ -140,12 +142,14 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
     const snapshotBinding = bindingRef.current
     setState((s) => ({ ...s, loading: true }))
     let communities
+    let failed = false
     try {
       const res = await requestRef.current('community.list', {})
+      failed = !res
       communities = Array.isArray(res && res.communities) ? res.communities : []
     } catch (err) {
       if (mine !== gen.current) return
-      setState((s) => ({ ...s, loaded: true, loading: false, partial: true, error: errorText(err) }))
+      setState((s) => ({ ...s, loaded: true, loading: false, partial: true, failed: true, error: errorText(err) }))
       return
     }
     const wanted = communities.filter((c) => c && typeof c.community === 'string' && HEX64.test(c.community) &&
@@ -160,6 +164,8 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       try {
         const info = await requestRef.current('community.info', { community: c.community })
         if (mine !== gen.current) return
+        // Only a missing answer is unknown for the tab dot: an incomplete one still answered.
+        if (!info) failed = true
         if (!info || info.incomplete === true) partial = true
         if (!info || info.incomplete === true) missed.add(c.community)
         const name = info && typeof info.name === 'string' && info.name !== '' ? info.name : (typeof c.name === 'string' ? c.name : '')
@@ -172,6 +178,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       } catch {
         partial = true
         missed.add(c.community)
+        failed = true
       }
     })
     if (mine !== gen.current) return
@@ -180,6 +187,7 @@ function useGroupRows ({ enabled, request, versions, seenTick, binding }) {
       loaded: true,
       loading: false,
       partial,
+      failed,
       error: ''
     }))
     if (!liveMarked.current) {
@@ -269,7 +277,7 @@ const NO_KEYS = []
 
 // The inbox folder of dm.list, paged like the old Mensagens list.
 function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
-  const [state, setState] = useState({ rows: [], next: null, requests: false, loaded: false, error: '' })
+  const [state, setState] = useState({ rows: [], next: null, requests: false, inboxUnread: false, loaded: false, error: '' })
   const [loadingMore, setLoadingMore] = useState(false)
   const [pageError, setPageError] = useState('')
   const gen = useRef(0)
@@ -295,16 +303,17 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
     if (mine !== gen.current) return
     const rows = Array.isArray(first.conversations) ? first.conversations : []
     const requests = first.requests === true
+    const inboxUnread = first.inboxUnread === true
     if (depth <= 1) {
       depthRef.current = 1
-      setState({ rows, next: first.next || null, requests, loaded: true, error: '' })
+      setState({ rows, next: first.next || null, requests, inboxUnread, loaded: true, error: '' })
       setPageError('')
       return
     }
     // The fresh first page goes up over the loaded rows at once; the deeper
     // pages are read again and swapped in a single time, so the list never
     // empties or shrinks while the walk runs.
-    setState((s) => ({ ...s, rows: mergeFirstPage(s.rows, rows), requests, loaded: true, error: '' }))
+    setState((s) => ({ ...s, rows: mergeFirstPage(s.rows, rows), requests, inboxUnread, loaded: true, error: '' }))
     setPageError('')
     try {
       const deep = await readDepth({
@@ -319,7 +328,7 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
       wantRef.current = deep.depth
       setState((s) => {
         const out = settleRefresh(s, deep, loadedDepth)
-        return { ...s, rows: out.rows, next: out.next, requests, loaded: true, error: '' }
+        return { ...s, rows: out.rows, next: out.next, requests, inboxUnread, loaded: true, error: '' }
       })
     } catch (err) {
       if (mine !== gen.current) return
@@ -336,7 +345,7 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
     gen.current++
     depthRef.current = 1
     wantRef.current = 0
-    setState({ rows: [], next: null, requests: false, loaded: false, error: '' })
+    setState({ rows: [], next: null, requests: false, inboxUnread: false, loaded: false, error: '' })
     setPageError('')
   }, [pageKey])
 
@@ -373,8 +382,13 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
         result = 'stale'
       }
     } catch (err) {
-      if (mine === gen.current) setPageError(errorText(err))
-      result = 'error'
+      // A refresh that moved the list under this page owns the error state now.
+      if (mine === gen.current) {
+        setPageError(errorText(err))
+        result = 'error'
+      } else {
+        result = 'stale'
+      }
     }
     busy.current = false
     setLoadingMore(false)
@@ -420,7 +434,8 @@ function useInbox ({ ready, dm, dmVersion, pageKey, needle }) {
   }, [ready, needle, hasNext, pageKey, loadMore, walkRound])
 
   const searchSpent = needle !== '' && hasNext && !paging && spent.current >= SEARCH_PAGES_MAX
-  return { ...state, list, loadMore, loadingMore, pageError, paging: paging && needle !== '' && !pageError, searchSpent, searchMore }
+  // The Não lidas walk reads the newest cursor through the ref, not a stale closure.
+  return { ...state, list, loadMore, loadingMore, pageError, paging: paging && needle !== '' && !pageError, searchSpent, searchMore, nextRef }
 }
 
 function matches (text, query) {
@@ -429,7 +444,7 @@ function matches (text, query) {
 
 export function Conversas ({
   active, onOpenGroup, onOpenCommunity, onOpenThread, onOpenCommunities, onOpenRequests, onOpenOldKey, showInbox = 0, seenTick = 0,
-  composing = false, onComposing
+  composing = false, onComposing, onGroupsUnread
 }) {
   const styles = useStyles(makeStyles)
   const node = useNode()
@@ -460,6 +475,14 @@ export function Conversas ({
   const oldKeys = useOldKeys({ enabled: ready && allowed && pageKey !== null, request: node.request, pageKey, dmVersion: node.dmVersion })
   const snapshotBinding = memberSnapshotBinding({ node, acting, pageKey })
   const groups = useGroupRows({ enabled: hosted && allowed && pageKey === null, request: node.request, versions: node.groupVersions, seenTick, binding: snapshotBinding })
+  // Only a finished member read may say no group is unread. A Página has no groups here.
+  useEffect(() => {
+    if (pageKey !== null) return
+    if (typeof onGroupsUnread !== 'function') return
+    if (!groups.loaded || groups.loading) return
+    const complete = groups.loaded && !groups.loading && !groups.failed && !groups.error
+    onGroupsUnread(groupsUnread(mergeRows({ groups: groups.rows }), { complete }))
+  }, [pageKey, onGroupsUnread, groups.rows, groups.loaded, groups.loading, groups.failed, groups.error])
 
   // A pull that failed may still have filed messages: read again either way.
   const pull = useCallback(async () => {
@@ -582,9 +605,71 @@ export function Conversas ({
     const rows = filter === 'todas' ? paged : merged
     return applyFilter(rows, filter)
   }, [merged, paged, needle, filter, profileOf])
-  // Pedidos and Comunidades follow the chip like the rows do, and step aside
-  // while a search runs.
-  const pinned = useMemo(() => (needle !== '' ? [] : applyFilter([requestsRow({ requests: inbox.requests }), ...oldKeys.map(oldKeyRow), communitiesRow()], filter)), [needle, filter, inbox.requests, oldKeys])
+  // A pending Pedidos stays in every chip and during a search. With none
+  // waiting, it follows the chip, and a search still hides the whole strip.
+  // Old keys and Comunidades always follow the chip and step aside for a search.
+  const pinned = useMemo(() => {
+    const filtered = needle !== '' ? [] : applyFilter([requestsRow({ requests: inbox.requests }), ...oldKeys.map(oldKeyRow), communitiesRow()], filter)
+    if (!inbox.requests) return filtered
+    return filtered.some((row) => row.kind === 'requests') ? filtered : [requestsRow({ requests: true }), ...filtered]
+  }, [needle, filter, inbox.requests, oldKeys])
+  // Loaded unread rows, not the pinned Pedidos row: that one must not stop the walk.
+  const unreadLoaded = useMemo(() => applyFilter(merged, 'nao-lidas').filter((row) => row.kind !== 'requests').length, [merged])
+  const unreadLoadedRef = useRef(0)
+  unreadLoadedRef.current = unreadLoaded
+  const [unreadPagingNow, setUnreadPagingNow] = useState(false)
+  const unreadPages = useRef(0)
+  const unreadFor = useRef({ filter, pageKey })
+  const [unreadRound, setUnreadRound] = useState(0)
+  // The person asks to go on after the budget ran out: a new budget.
+  const unreadMore = useCallback(() => {
+    unreadPages.current = 0
+    setUnreadRound((n) => n + 1)
+  }, [])
+  const inboxHasNext = inbox.next !== null
+  const pageError = inbox.pageError
+  // While Não lidas has no unread row loaded but the inbox has some, the walk owns
+  // paging: the list's own loader would pause after a few dry pages and say so.
+  const unreadWalkOwns = filter === 'nao-lidas' && needle === '' && unreadLoaded === 0 && inbox.inboxUnread === true
+  const nextRef = inbox.nextRef
+  const loadMoreInbox = inbox.loadMore
+  useEffect(() => {
+    // Another chip or another Página starts a new budget. unreadMore resets it itself.
+    const leftChip = unreadFor.current.filter === 'nao-lidas' && filter !== 'nao-lidas'
+    const otherInbox = unreadFor.current.pageKey !== pageKey
+    if (leftChip || otherInbox) unreadPages.current = 0
+    unreadFor.current = { filter, pageKey }
+    // A failed page waits for the footer retry; its success clears pageError and resumes the walk.
+    if (!ready || !active || filter !== 'nao-lidas' || needle !== '' || !inboxHasNext || pageError) return undefined
+    const run = { alive: true }
+    let failed = false
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    const walk = async () => {
+      setUnreadPagingNow(true)
+      while (run.alive && unreadPaging({
+        filter,
+        unreadRows: unreadLoadedRef.current,
+        inboxUnread: inbox.inboxUnread,
+        next: nextRef.current,
+        pages: unreadPages.current,
+        failed
+      })) {
+        const got = await loadMoreInbox()
+        if (got === 'error') failed = true
+        // A page someone else is already fetching is not a page this walk read.
+        if (got !== 'busy') unreadPages.current++
+        if (!run.alive) return
+        await wait(SEARCH_PAGE_GAP_MS)
+      }
+      if (run.alive) setUnreadPagingNow(false)
+    }
+    walk()
+    return () => {
+      run.alive = false
+      setUnreadPagingNow(false)
+    }
+  }, [ready, active, filter, needle, inboxHasNext, inbox.inboxUnread, unreadLoaded, loadMoreInbox, nextRef, unreadRound, pageKey, pageError])
+  const unreadSpent = filter === 'nao-lidas' && needle === '' && inboxHasNext && !unreadPagingNow && unreadPages.current >= SEARCH_PAGES_MAX && unreadLoaded === 0 && inbox.inboxUnread === true
   // The sheet's "Conversas recentes": the loaded private conversations,
   // newest first (mergeRows order).
   const recent = useMemo(() => merged.filter((row) => row.kind === 'dm').slice(0, RECENT_MAX).map((row) => row.peer), [merged])
@@ -759,11 +844,21 @@ export function Conversas ({
         <Pill label='Buscar mais' onPress={() => inbox.searchMore()} />
       </View>
     )
+  } else if (filter === 'nao-lidas' && needle === '' && unreadPagingNow && unreadLoaded === 0) {
+    // The walk is still paging toward an unread row: never "nada novo" while it runs.
+    footer = <View accessible accessibilityLabel='Buscando conversas não lidas' accessibilityLiveRegion='polite'>{[0, 1].map((key) => <SkeletonRow key={key} />)}</View>
+  } else if (unreadSpent) {
+    footer = (
+      <View style={styles.pad}>
+        <Soft>Ainda há conversas não lidas mais antigas.</Soft>
+        <Pill label='Buscar mais' onPress={() => unreadMore()} />
+      </View>
+    )
   } else if (items.length === 0 && !partial && (ready || needle !== '' || filter === 'grupos')) {
     if (needle !== '') footer = <EmptyState icon='conversas' title='Nenhuma conversa encontrada.' actionLabel='Limpar busca' onAction={() => setQuery('')} />
     else if (filter === 'todas') footer = <EmptyState icon='conversas' title={EMPTY_TEXT} body={EMPTY_BODY} actionLabel={typeof onComposing === 'function' ? 'Nova conversa' : undefined} onAction={typeof onComposing === 'function' ? () => onComposing(true) : undefined} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
     else if (filter === 'grupos') footer = <EmptyState icon='gente' title='Nenhum grupo ainda' body='Os grupos das suas comunidades aparecem aqui.' actionLabel='Comunidades' onAction={onOpenCommunities} secondaryLabel='Nova comunidade' onSecondary={pageKey === null ? () => setCreating(true) : undefined} />
-    else if (!inbox.requests) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />
+    else if (showNaoLidasEmpty({ rows: items, requests: inbox.requests, more: inbox.next !== null, inboxUnread: inbox.inboxUnread })) footer = <EmptyState icon='conversas' title='Nada novo por aqui' />
   }
 
   const renderItem = ({ item }) => {
@@ -798,7 +893,7 @@ export function Conversas ({
         contentContainerStyle={{ paddingBottom: bottomPad }}
         onRefresh={refresh}
         refreshing={refreshing}
-        onLoadMore={ready && needle === '' && inbox.next && !inbox.loadingMore && !inbox.pageError ? inbox.loadMore : undefined}
+        onLoadMore={ready && needle === '' && !unreadWalkOwns && inbox.next && !inbox.loadingMore && !inbox.pageError ? inbox.loadMore : undefined}
         loadingMore={inbox.loadingMore}
         loadMoreError={inbox.pageError || undefined}
         atEnd={!ready || !inbox.next}

@@ -67,6 +67,7 @@ const {
   topFriendsRecord,
   visitsRecord,
   gardenRecord,
+  groupsShowRecord,
   gardenStateRecord,
   gardenHelpRecord,
   gardenDecorRecord,
@@ -1320,7 +1321,7 @@ function coverPlan (held, to, image) {
   return { same: null, old: live.slice(0, APPEND_MAX - 1) }
 }
 
-// docs/rpc.md 5.167. A cover equal to the newest live one reads no bytes
+// docs/rpc.md 5.169. A cover equal to the newest live one reads no bytes
 // (it may live in another device's media core) and only tombstones older
 // live covers, if any. Otherwise the bytes are checked, then the older live
 // covers are tombstoned with their ranges and the new cover appended, all in
@@ -1634,8 +1635,8 @@ async function scrapDelete (ctx, { seq }) {
 
 // ---- perfil rico (docs/protocol.md, docs/rpc.md) ----
 
-// Appends `record` (a profile-about, a mood or a top-friends) and tombstones every earlier
-// live version of its type, so a version the author replaced cannot show
+// Appends `record` and tombstones every earlier live version of its type,
+// so a version the author replaced cannot show
 // again on a reader that missed the newer one. With up to APPEND_MAX - 1
 // earlier versions everything is one append, the new record last. With more,
 // the oldest tombstones go first in chunks and the newest earlier version's
@@ -1647,21 +1648,25 @@ async function publishLatest (ctx, record) {
   return withIdentity(ctx, async ({ diary, ownHex }) => {
     if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
     const prior = liveSeqsOfType(await store.readRaw(diary), record.type)
-    const at = nowIso()
-    const tombs = prior.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
-    const cut = Math.max(0, tombs.length - (APPEND_MAX - 1))
-    let written = null
-    let seq
-    try {
-      if (cut > 0) written = await appendChunked(ctx, diary, tombs.slice(0, cut))
-      seq = await appendChunked(ctx, diary, [...tombs.slice(cut), record])
-    } catch (err) {
-      if (written !== null && err !== null && typeof err === 'object' && !Number.isSafeInteger(err.written)) err.written = written
-      throw err
-    }
-    if (prior.length > 0) await clearAfterDelete(ctx, diary, ownHex, prior, tombs)
-    return { seq, ref: formatRef({ author: ownHex, seq }) }
+    return replaceLive(ctx, diary, ownHex, prior, record)
   })
+}
+
+async function replaceLive (ctx, diary, ownHex, prior, record) {
+  const at = nowIso()
+  const tombs = prior.map((seq) => buildRecord(() => deleteRecord({ seq, at })))
+  const cut = Math.max(0, tombs.length - (APPEND_MAX - 1))
+  let written = null
+  let seq
+  try {
+    if (cut > 0) written = await appendChunked(ctx, diary, tombs.slice(0, cut))
+    seq = await appendChunked(ctx, diary, [...tombs.slice(cut), record])
+  } catch (err) {
+    if (written !== null && err !== null && typeof err === 'object' && !Number.isSafeInteger(err.written)) err.written = written
+    throw err
+  }
+  if (prior.length > 0) await clearAfterDelete(ctx, diary, ownHex, prior, tombs)
+  return { seq, ref: formatRef({ author: ownHex, seq }) }
 }
 
 // Appends the own `profile-about` record: all seven fields, null for empty,
@@ -1780,6 +1785,19 @@ async function visitsState (ctx) {
 // version is tombstoned). -> { seq, ref }.
 async function visitsSet (ctx, { on }) {
   return publishLatest(ctx, buildRecord(() => visitsRecord({ on: on === true })))
+}
+
+async function groupsShow (ctx, { on }) {
+  return withIdentity(ctx, async ({ diary, ownHex }) => {
+    if (diary.length === 0) throw new Error(GENESIS_REQUIRED)
+    const raw = await store.readRaw(diary)
+    const prior = liveSeqsOfType(raw, 'groups-show')
+    const current = prior.length ? prior[prior.length - 1] : null
+    const shown = current === null || raw[current].record.on
+    if (shown === on) return { seq: current, on, changed: false }
+    const { seq } = await replaceLive(ctx, diary, ownHex, prior, buildRecord(() => groupsShowRecord({ on })))
+    return { seq, on, changed: true }
+  })
 }
 
 // ---- varandinha (docs/rpc.md garden.*) ----
@@ -7341,6 +7359,7 @@ module.exports = {
   ownTopKeys,
   visitsState,
   visitsSet,
+  groupsShow,
   gardenOwn,
   gardenSet,
   gardenLeave,

@@ -39,6 +39,14 @@
 // notice) is not verified: the manual matrix in docs/verification.md section
 // 112 records it, and its results go back to the owner. On Android the close
 // is not at once: it waits QUIET_CLOSE_WAIT_MS (see showQuietlyAndClose).
+//
+// The DM notices (kinds dm and dm-page) replace the wake: the account service
+// sends them to each recipient, never to the sender, so they never take the
+// own-send mute, which would hide a real message that arrives just after this
+// device sent one. A dm notice takes the wake's focused-window hand-off and
+// quiet notice; a dm-page notice always shows, since the hand-off only
+// re-reads the member inbox and the Pagina's thread lives in its own. The
+// wake stays for one release, for an account service that still sends it.
 
 const VERSION = __VARANDA_VERSION__
 const PRECACHE = __VARANDA_PRECACHE__
@@ -533,8 +541,15 @@ const PUSH_KINDS = ['follow', 'reply', 'like', 'repost', 'quote', 'mention']
 const ACTOR_REF_KINDS = ['quote', 'mention']
 const PUSH_KEYS = ['v', 'kind', 'body', 'actor', 'recipient', 'ref']
 const PUSH_FALLBACK = 'Você tem um aviso novo na Varanda'
-// The DM wake names nobody (packages/core/lib/dm-wake.js DM_WAKE_TEXT).
+// The retired DM wake named nobody; shown for one more release.
 const DM_WAKE_TEXT = 'Pode haver uma mensagem nova na Varanda'
+// The DM notices name nobody either, and their sentences live here: the
+// payload carries only its kind and the server's enqueue time g.
+const DM_NOTICE_TEXT = new Map([
+  ['dm', 'Nova mensagem nas Conversas'],
+  ['dm-page', 'Nova mensagem para uma página que você administra']
+])
+const DM_NOTICE_KEYS = ['v', 'kind', 'g']
 // The invite drop carries no text: the sentence lives here, so a payload can
 // never put words of its own on the lock screen.
 const INVITE_DROP_TITLE = 'Chegou um convite pra sua varanda'
@@ -587,6 +602,17 @@ function isDmWake (p) {
   return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'dm-wake'
 }
 
+function validNoticeTime (g) {
+  return Number.isSafeInteger(g) && g > 0
+}
+
+function isDmNotice (p) {
+  if (!isPlainObject(p)) return false
+  const keys = Object.keys(p)
+  if (keys.length !== DM_NOTICE_KEYS.length || !DM_NOTICE_KEYS.every((k) => Object.prototype.hasOwnProperty.call(p, k))) return false
+  return p.v === 1 && DM_NOTICE_TEXT.has(p.kind) && validNoticeTime(p.g)
+}
+
 function isInviteDrop (p) {
   return isPlainObject(p) && Object.keys(p).length === 2 && p.v === 1 && p.kind === 'invite-drop'
 }
@@ -599,7 +625,7 @@ function readPush (data) {
   if (!data) return null
   try {
     const p = data.json()
-    return validPush(p) || isDmWake(p) || isInviteDrop(p) || isDeleteScheduled(p) ? p : null
+    return validPush(p) || isDmWake(p) || isDmNotice(p) || isInviteDrop(p) || isDeleteScheduled(p) ? p : null
   } catch {
     return null
   }
@@ -781,10 +807,10 @@ function postsLate () {
 // because the system posts it asynchronously and the earlier close is lost
 // (inferred from one device report, docs/verification/fix-android-quiet-notice-close.md). A later quiet notice with the same tag replaces this one and closes
 // after its own wait.
-async function showQuietlyAndClose () {
+async function showQuietlyAndClose (body = DM_WAKE_TEXT) {
   try {
     await self.registration.showNotification('Varanda', {
-      body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: DM_WAKE_QUIET_TAG, renotify: false, silent: true, data: { kind: 'dm-wake' }
+      body, icon: '/icon-192.png', tag: DM_WAKE_QUIET_TAG, renotify: false, silent: true, data: { kind: 'dm-wake' }
     })
     const mine = ++quietShows
     if (postsLate()) {
@@ -814,6 +840,14 @@ async function showPush (data) {
       return
     }
     options = { body: DM_WAKE_TEXT, icon: '/icon-192.png', tag: 'varanda-dm-wake', renotify: false, data: { kind: 'dm-wake' } }
+  } else if (p && isDmNotice(p)) {
+    // A focused window only re-reads the member inbox, never the Pagina's,
+    // so a dm-page notice always shows.
+    if (p.kind === 'dm' && (await wakeFocusedWindow())) {
+      await showQuietlyAndClose(DM_NOTICE_TEXT.get('dm'))
+      return
+    }
+    options = { body: DM_NOTICE_TEXT.get(p.kind), icon: '/icon-192.png', tag: 'varanda-' + p.kind, renotify: false, data: { kind: p.kind, g: p.g } }
   } else if (p) {
     if (await actorBlocked(p.actor)) {
       await showQuietlyAndClose()
@@ -837,12 +871,17 @@ async function showPush (data) {
 async function openPush (data) {
   const d = isPlainObject(data) ? data : {}
   const ok = validTarget(d.kind, d.actor, d.recipient, d.ref)
-  // A DM wake opens Conversas; it carries nothing else to pass on.
-  const dm = Object.keys(d).length === 1 && d.kind === 'dm-wake'
+  // A DM wake or notice opens Conversas; neither passes anything on. A
+  // dm-page notice opens Paginas instead: its thread lives in the Pagina's
+  // own inbox, and the notice names no Pagina.
+  const notice = Object.keys(d).length === 2 && DM_NOTICE_TEXT.has(d.kind) && validNoticeTime(d.g)
+  const pageDm = notice && d.kind === 'dm-page'
+  const dm = (Object.keys(d).length === 1 && d.kind === 'dm-wake') || (notice && d.kind === 'dm')
   const invite = Object.keys(d).length === 1 && d.kind === 'invite-drop'
   let path = '/'
   if (ok) path = '/?aviso=' + d.kind + '&actor=' + d.actor + '&recipient=' + d.recipient + (d.ref ? '&ref=' + d.ref : '')
   else if (dm) path = '/?aviso=dm'
+  else if (pageDm) path = '/?aviso=dm-page'
   else if (invite) path = '/?aviso=convite'
   try {
     const list = await clients.matchAll({ type: 'window', includeUncontrolled: true })
@@ -858,6 +897,7 @@ async function openPush (data) {
       if (focused) {
         if (ok) client.postMessage({ source: 'varanda-push', kind: d.kind, actor: d.actor, recipient: d.recipient, ref: d.ref })
         if (dm) client.postMessage({ type: 'varanda-dm-open' })
+        if (pageDm) client.postMessage({ type: 'varanda-page-dm-open' })
         if (invite) client.postMessage({ type: 'varanda-invite-open' })
         return
       }
@@ -886,7 +926,8 @@ self.addEventListener('notificationclick', (event) => {
 // A new release waits for every window of the previous one to close, so an
 // open page can face an older active worker without the push handler: the
 // page pings before offering the toggle. An app window also reports each DM
-// it sends, so the wake that echoes it back stays quiet (DM_WAKE_MUTE_MS).
+// it sends, so the wake that echoes it back stays quiet (DM_WAKE_MUTE_MS); the
+// DM notices never reach the sender, so the mute leaves them alone.
 self.addEventListener('message', (event) => {
   try {
     const d = event.data

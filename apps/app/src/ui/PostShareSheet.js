@@ -13,7 +13,7 @@
 // without that tap and nothing is retried. A failed download keeps the row
 // for another tap; while an attempt for the post runs (this sheet's or one a
 // closed sheet left going), the row is not offered. Only a node with an installation
-// offers it (post.cover is the browser node's, docs/rpc.md 5.167).
+// offers it (post.cover is the browser node's, docs/rpc.md 5.169).
 
 import { useEffect, useRef, useState } from 'react'
 import { ScrollView, StyleSheet, View } from 'react-native'

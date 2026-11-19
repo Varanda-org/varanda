@@ -4,7 +4,7 @@
 
 ### O que mudou
 
-- `apps/app/src/postShare.js`: `readShared` devolve `cover` (falso quando um nó antigo não manda), `addCover` faz um só `post.cover` (5.167), e `sendCover` prepara a capa (`shareCover.js` `buildCover`), envia a mídia uma vez e grava uma vez. Qualquer recusa, inclusive `'método desconhecido'` de um nó antigo, vira "sem capa".
+- `apps/app/src/postShare.js`: `readShared` devolve `cover` (falso quando um nó antigo não manda), `addCover` faz um só `post.cover` (5.169), e `sendCover` prepara a capa (`shareCover.js` `buildCover`), envia a mídia uma vez e grava uma vez. Qualquer recusa, inclusive `'método desconhecido'` de um nó antigo, vira "sem capa".
 - `apps/app/src/postShareCompose.js`: `shareNew` aceita a capa e só a tenta depois que o `post.share` respondeu `on`; o resultado é sempre o do compartilhamento. `heldStill` escolhe os bytes que o rascunho ainda tem da primeira foto ou da capa do vídeo.
 - `apps/app/src/pageShare.js` e `apps/app/src/pages.js`: ação `post-cover` (`{ seq, image }`), `coveredState` (`covered` ausente = desconhecido, sem botão), `coverAsPage`, `pagesPostCover`, `pagesUploadEncoded`.
 - `apps/app/src/screens/Publicar.js`: com a caixa marcada e o nó hospedado (`node.hosted`), a pessoa e a Página enviam a capa depois do compartilhamento, também na segunda tentativa manual de uma Página e no compartilhamento tardio depois de um envio incerto.
@@ -29,7 +29,7 @@ node apps/app/test/platformGate.test.js
 
 - `packages/core/lib/records.js`: registro `post-cover` `{ type, seq, image, at }`, só JPEG (até 1200 px, 8 blocos, 262144 bytes), `foldCover` / `newestCover` e `shownMedia` contando a capa como um avatar.
 - `packages/core/lib/seeder.js`: o semeador dobra as capas, conta a mídia delas (inclusive na recontagem forçada) e `postPublic` devolve `{ cover, coverSeq }`, conferidos de novo depois de cada espera.
-- `packages/web-member/lib/member-ops.js` e `session.js`: `post.cover` (5.167), `cover` em `post.shared`; tirar da web e apagar a publicação apagam as capas, as mais antigas primeiro, com as lápides da própria publicação sempre num só append; um apagamento parcial conta e envia o que escreveu.
+- `packages/web-member/lib/member-ops.js` e `session.js`: `post.cover` (5.169), `cover` em `post.shared`; tirar da web e apagar a publicação apagam as capas, as mais antigas primeiro, com as lápides da própria publicação sempre num só append; um apagamento parcial conta e envia o que escreveu.
 - `packages/core/lib/member.js`: `post.delete` do nó do core apaga as capas no espaço que sobra no append (até 8 registros), as mais antigas primeiro; uma repetição termina as que sobraram.
 - `apps/cli/lib/account/pages-routes.js` e `pages-writer.js`: ação `'post-cover'`, `covered` no `status`, e `'post-unshare'`, `'delete'` e `close` apagam as capas.
 - `packages/rpc`: `post.cover` em `methods.js`, limites da capa em `limits.js`.

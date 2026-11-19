@@ -954,7 +954,7 @@ test('page web share: a cover shares no range with live or freed media, and no t
   const Q = (await s.act(ana, 'post', K, { text: 'Broa de milho', media: [photo] })).body.seq
   for (const seq of [P, Q]) t.is((await s.act(ana, 'post-share', K, { seq })).body.created, true)
 
-  // The person's rule (docs/rpc.md 5.167): no bytes shared with live media.
+  // The person's rule (docs/rpc.md 5.169): no bytes shared with live media.
   let length = ctx.writer.info(K).length
   t.is((await s.act(ana, 'post-cover', K, { seq: P, image: photo })).body.error, 'midia-invalida', 'the post\'s own photo')
   t.is((await s.act(ana, 'post-cover', K, { seq: Q, image: photo })).body.error, 'midia-invalida', 'another live post\'s photo')

@@ -133,10 +133,56 @@ test('Telefone: one transparent code input under six hidden cells', (t) => {
   t.ok(code.includes('minHeight: 52,'), 'cells grow with the font scale')
   t.absent(/\bheight: 52\b/.test(code.replace('minHeight: 52', '')))
   t.ok(code.includes("codeInput: { ...StyleSheet.absoluteFillObject, color: 'transparent', backgroundColor: 'transparent'"))
-  t.is(count(code, '<TextInput'), 2, 'the number input and the code input')
-  t.is(count(code, '{...NO_AUTOFILL}'), 2, 'both ask for no autofill')
+  t.is(count(code, '<TextInput'), 1, 'the code input; the number input is a Field')
+  t.is(count(code, '{...NO_AUTOFILL}'), 1, 'the code input asks for no autofill')
+  t.is(count(code, 'inputProps={NO_AUTOFILL}'), 1, 'the number input asks for no autofill through Field')
   t.ok(code.includes('<CodeInput label={CODE_LABEL} value={code} onChangeText={editCode} editable={!locked} onSubmitEditing={confirm} />'))
   t.absent(src.includes('\u2014'))
+})
+
+// Field spreads inputProps after its own defaults, so every autofill-off
+// attribute of NO_AUTOFILL reaches the TextInput of both screens.
+test('Telefone and ExcluirSemPasskey: the number fields are Fields with autofill off', (t) => {
+  const ui = withoutComments(fs.readFileSync(path.join(__dirname, '../src/ui/index.js'), 'utf8'))
+  const fieldStart = ui.indexOf('export function Field (')
+  t.ok(fieldStart > 0)
+  const field = ui.slice(fieldStart, ui.indexOf('\n}\n', fieldStart))
+  t.ok(field.includes('inputProps'), 'Field takes inputProps')
+  t.is(count(field, '<TextInput'), 1)
+  const rest = field.slice(field.indexOf('<TextInput'))
+  t.ok(rest.includes('{...inputProps}\n      />'), 'inputProps is the last spread on the TextInput')
+  t.ok(rest.indexOf('{...raw}') < rest.indexOf('{...inputProps}') && rest.indexOf('{...submit}') < rest.indexOf('{...inputProps}'), 'so it overrides the defaults')
+
+  const literal = "const NO_AUTOFILL = { autoComplete: 'off', autoCorrect: false, autoCapitalize: 'none', spellCheck: false, importantForAutofill: 'no', textContentType: 'none' }"
+  const screens = {
+    'Telefone.js': ["<Input label={NUMBER_LABEL} value={phone} onChangeText={setPhone} keyboardType='phone-pad' maxLength={20} editable={!verify.sent && !locked} onSubmitEditing={verify.sent ? undefined : send} />"],
+    'ExcluirSemPasskey.js': [
+      '<Input label={SMS_TEXTS.nameLabel} value={name} onChangeText={setName} maxLength={21} editable={!locked} />',
+      "<Input label={SMS_TEXTS.phoneLabel} value={phone} onChangeText={setPhone} keyboardType='phone-pad' maxLength={20} editable={!locked} />",
+      "<Input label={SMS_TEXTS.codeLabel} value={code} onChangeText={setCode} keyboardType='number-pad' maxLength={12} editable={!locked} />"
+    ]
+  }
+  for (const [file, calls] of Object.entries(screens)) {
+    const src = fs.readFileSync(path.join(__dirname, '../src/screens', file), 'utf8')
+    const code = withoutComments(src)
+    t.ok(code.includes(literal), file + ': NO_AUTOFILL keeps every key')
+    t.ok(/^import \{[^}]*\bField\b[^}]*\} from '\.\.\/ui'$/m.test(code), file + ': imports Field')
+    const start = code.indexOf('function Input (')
+    t.ok(start > 0, file + ': has the Input wrapper')
+    const input = code.slice(start, code.indexOf('\n}\n', start))
+    t.is(count(input, '<Field'), 1, file + ': Input renders a Field')
+    t.absent(input.includes('<TextInput'), file + ': and no raw TextInput')
+    t.ok(input.includes('inputProps={NO_AUTOFILL}'), file + ': passes NO_AUTOFILL through')
+    for (const prop of ['label={label}', 'value={value}', 'onChangeText={onChangeText}', 'keyboardType={keyboardType}', 'maxLength={maxLength}', 'editable={editable}']) {
+      t.ok(input.includes(prop), file + ': forwards ' + prop)
+    }
+    for (const call of calls) t.ok(code.includes(call), file + ': call site unchanged')
+    t.absent(src.includes('\u2014'))
+  }
+  const telefone = withoutComments(fs.readFileSync(SCREEN, 'utf8'))
+  const input = telefone.slice(telefone.indexOf('function Input ('), telefone.indexOf('\n}\n', telefone.indexOf('function Input (')))
+  t.ok(input.includes("returnKeyType='done'"))
+  t.ok(input.includes('onSubmitEditing={onSubmitEditing}'))
 })
 
 test('Telefone: a completed code is checked once from the edit, never from an effect', (t) => {

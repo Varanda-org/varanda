@@ -6,7 +6,7 @@ import { KIND_OPTIONS } from '../feiraScreen'
 import { Btn, ErrorText } from './index'
 import { FilterChips } from './FilterChips'
 import { Pill } from './Pill'
-import { Sheet } from './Sheet'
+import { Sheet, TEXT_CAP } from './Sheet'
 import { useStyles, useTheme } from './ThemeProvider'
 import { layout, radius, space, type } from './theme'
 
@@ -49,7 +49,7 @@ export function FeiraFilters ({ open, onClose, value = EMPTY, onApply }) {
   }
   const clear = () => { setDraft({ ...EMPTY }); setError('') }
   return (
-    <Sheet open={open} onClose={onClose} title='Filtros da Feira' right={<Pill label='Limpar' onPress={clear} />}>
+    <Sheet open={open} onClose={onClose} title='Filtros da Feira' right={<Pill label='Limpar' onPress={clear} maxFontSizeMultiplier={TEXT_CAP} />}>
       <View style={styles.fill}>
         <ScrollView keyboardShouldPersistTaps='handled' contentContainerStyle={styles.body}>
           <Text style={styles.label}>Ordenar por</Text>

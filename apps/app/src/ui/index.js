@@ -15,7 +15,7 @@ import { ScreenVisible } from './screenVisible'
 import { createVisibleNow } from '../visibleNow'
 import { fieldBounds, fieldFull } from './fieldHeight'
 import { GROWS_ITSELF } from './fieldMeasure'
-import { fonts, layout, type } from './theme'
+import { fonts, layout, type, webInputReset } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 export { TABS, tabsFor } from '../tabs'
@@ -313,9 +313,13 @@ export function ConfirmStack ({ confirm, cancel }) {
 // Key, JSON and host fields are `mono`: no capitalisation or correction, and
 // the typed value in the monospace font (an empty field keeps its placeholder
 // in the normal one). Free text (name, bio) keeps the platform defaults.
-export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, keyboardType, plain }) {
+export function Field ({ label, value, onChangeText, multiline, maxLength, editable = true, placeholder, mono, lines = 4, onSubmitEditing, returnKeyType, inputProps, keyboardType, plain }) {
   const styles = useStyles(makeStyles)
   const { colors } = useTheme()
+  const [focused, setFocused] = useState(false)
+  // Android sends no blur when a focused field is disabled, so the flag is
+  // dropped here; otherwise re-enabling would light the line with no focus.
+  useEffect(() => { if (!editable) setFocused(false) }, [editable])
   // plain: a search, typed as is (no capitals, no autocorrect) in the normal font.
   const raw = mono || plain ? { autoCapitalize: 'none', autoCorrect: false, spellCheck: false } : {}
   // Forwarded only when passed: existing callers are unchanged.
@@ -335,11 +339,13 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
   const full = grows && fieldFull(laidOut, bounds.maxHeight)
   return (
     <View style={styles.field}>
-      {label ? <Label>{label}</Label> : null}
+      {label ? <Text style={styles.fieldLabel}>{label}</Text> : null}
       <TextInput
-        style={[styles.input, multiline && { ...bounds, textAlignVertical: 'top' }, mono && styles.inputMonoSize, mono && value !== '' && styles.inputMono, !editable && styles.inputOff]}
+        style={[styles.input, focused && editable && webInputReset, multiline && { ...bounds, textAlignVertical: 'top' }, mono && styles.inputMonoSize, mono && value !== '' && styles.inputMono, focused && editable && styles.inputFocused, !editable && styles.inputOff]}
         value={value}
         onChangeText={onChangeText}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         multiline={multiline}
         maxLength={maxLength}
         editable={editable}
@@ -350,6 +356,7 @@ export function Field ({ label, value, onChangeText, multiline, maxLength, edita
         accessibilityLabel={label || placeholder}
         {...raw}
         {...submit}
+        {...inputProps}
       />
     </View>
   )
@@ -389,18 +396,18 @@ const makeStyles = (colors) => StyleSheet.create({
     paddingVertical: 9,
     paddingHorizontal: 17,
     alignSelf: 'flex-start',
-    minHeight: 40,
+    minHeight: 44,
     justifyContent: 'center'
   },
-  btnLarge: { minHeight: 52, paddingVertical: 15 },
+  btnLarge: { minHeight: 56, paddingVertical: 15 },
   btnRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   confirmStack: { flexDirection: 'column', alignItems: 'stretch', gap: 8 },
   btnBlock: { alignSelf: 'stretch' },
   btnOutline: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: colors.outline, paddingVertical: 8, paddingHorizontal: 15 },
   btnOutlineLarge: { paddingVertical: 14 },
-  btnSmall: { minHeight: 32, paddingVertical: 0, paddingHorizontal: 12 },
+  btnSmall: { minHeight: 36, paddingVertical: 0, paddingHorizontal: 12 },
   btnSmallCenter: { alignSelf: 'center' },
-  // The pressable is layout.hit because the web ignores hitSlop, so a 32 pt
+  // The pressable is layout.hit because the web ignores hitSlop, so a 36 pt
   // face cannot grow to the 44 pt target that way.
   btnSmallHit: { minWidth: layout.hit, minHeight: layout.hit, alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-start' },
   btnDanger: { borderColor: colors.danger },
@@ -408,22 +415,25 @@ const makeStyles = (colors) => StyleSheet.create({
   btnPressed: { opacity: PRESSED_OPACITY },
   // The 1 pt sides absorb Android's rounding with the 1.5 pt outline: the label got its
   // exact width, lost a pixel and wrapped its last word out of sight ("Trocar passkey").
-  btnText: { ...type.pill, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },
-  btnTextSmall: { fontSize: 13, lineHeight: 16 },
+  btnText: { ...type.rowName, color: colors.accentInk, textAlign: 'center', paddingHorizontal: 1 },
+  btnTextSmall: { fontSize: 14, lineHeight: 20 },
   btnTextOutline: { color: colors.ink },
   btnTextDanger: { color: colors.danger },
   field: { gap: 4 },
+  fieldLabel: { fontSize: 14, lineHeight: 20, fontWeight: '400', color: colors.soft },
   input: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 12,
-    paddingHorizontal: 12,
+    backgroundColor: 'transparent',
+    borderBottomWidth: 1,
+    borderBottomColor: colors.controlOff,
+    borderRadius: 0,
+    paddingHorizontal: 0,
     paddingVertical: 10,
+    minHeight: 56,
     fontSize: 16,
     color: colors.ink
   },
+  inputFocused: { borderBottomWidth: 2, borderBottomColor: colors.accent, paddingBottom: 9 },
   inputMonoSize: { fontSize: 14 },
   inputMono: { fontFamily: fonts.mono },
-  inputOff: { backgroundColor: colors.inputOff, color: colors.soft }
+  inputOff: { borderBottomColor: colors.line, color: colors.soft }
 })

@@ -44,12 +44,22 @@ export function quickReplyPlan ({ text, nodeReady, actingAsPage, hasLink, refusa
   return { kind: 'send' }
 }
 
+// The attempt window guards a floor below the tip, a floor above it can only keep a send uncertain, and neither causes a resend.
+export function replyFloor (ownLength, confirmed = null) {
+  const synced = Number.isSafeInteger(ownLength) && ownLength >= 1 ? ownLength - 1 : null
+  const own = Number.isSafeInteger(confirmed) && confirmed >= 0 ? confirmed : null
+  if (synced === null) return own
+  return own === null ? synced : Math.max(synced, own)
+}
+
 // A failed mutation is never repeated, even if the diary cannot be read.
 // A definite gate refusal lets the caller offer Publicar's outbox path.
-export async function sendTextReply ({ request, text, replyTo, lastSeq = null }) {
+export async function sendTextReply ({ request, text, replyTo, lastSeq = null, lastSeqStale = false }) {
   const refused = refusalOf(text)
   if (refused) return { ok: false, ref: null, error: null, refused }
   let floor = Number.isSafeInteger(lastSeq) && lastSeq >= 0 ? lastSeq : null
+  // Only a floor the caller passed can lag the diary: one read here is fresh.
+  const stale = lastSeqStale && floor !== null
   if (floor === null) {
     try {
       const page = await request('log.read', {})
@@ -77,7 +87,7 @@ export async function sendTextReply ({ request, text, replyTo, lastSeq = null })
     if (error && error.uncertain === true && floor !== null) {
       try {
         const res = await request('log.read', {})
-        const match = sentMatcher({ text, replyTo }, { startedAt, seqFloor: floor })
+        const match = sentMatcher({ text, replyTo }, { startedAt, seqFloor: floor, slackMs: stale ? 0 : MATCH_SLACK_MS })
         const found = (res.entries || []).filter((entry) => match(entry) &&
           Date.parse(entry.record.at) <= startedAt + ATTEMPT_WINDOW_MS)
         const ref = found.length === 1 ? res.key + ':' + found[0].seq : null

@@ -224,6 +224,12 @@ test('the visitas methods are refused on the node session, nothing written', asy
   t.alike(await failure(m.call('visits.note', { key: 'zz' })), { code: 'USAGE', message: 'parâmetro inválido: key' })
 })
 
+test('groups.show is refused on the node session before an identity exists', async (t) => {
+  const session = newSession(t, { dataDir: tmpDir(t), association: OTHER, bootstrap: BOOTSTRAP })
+  const { call } = await connect(t, session)
+  t.alike(await failure(call('groups.show', { on: false })), { code: 'USAGE', message: 'leitura sob demanda só na versão web' })
+})
+
 test('the varandinha methods are refused on the node session, nothing written', async (t) => {
   const NO = { code: 'USAGE', message: 'leitura sob demanda só na versão web' }
   const m = await member(t)

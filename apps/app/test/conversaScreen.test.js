@@ -141,11 +141,16 @@ test('Conversa quick sends retain uncertain drafts and delegate expansion accept
   t.ok(src.includes('quickReplyPlan({ text, nodeReady: full, actingAsPage: pageKey !== null, hasLink: hasLink(text), refusal })'))
   t.ok(src.includes('const refusal = refusalOf(text)'))
   t.ok(src.includes('if (pageKey === null && result.gated) return expandReply(text, target)'))
-  t.ok(src.includes("import { quickReplyPlan, sendPageTextReply, sendTextReply } from '../replySend'"))
+  t.ok(src.includes("import { quickReplyPlan, replyFloor, sendPageTextReply, sendTextReply } from '../replySend'"))
+  t.ok(src.includes("import { announceOwnReply, announceOwnReplyGone, onOwnReply } from '../ownReply'"))
+  t.ok(src.includes('if (item && cacheEpoch === cacheGeneration()) announceOwnReply({ ...item, gen: cacheEpoch }, ownReplies)'), 'a quick reply reaches the other screens')
+  t.ok(src.includes('  announceOwnReplyGone(refs)\n}'), 'a deletion through useDelete leaves A Rua too')
+  t.ok(src.includes('if (from === ownReplies || item.gen !== cacheGeneration()) return'), 'each Conversa ignores its own and stale announcements')
+  t.ok(src.includes('if (placeOwnRef.current) placeOwnRef.current(item)'))
   t.ok(src.includes("act: (op) => actAs(nodeOf(node), { member, action: 'reply', page: pageKey, op })"))
   t.ok(src.includes('result.error.uncertain === true'))
   t.ok(src.includes('result.refused ||'))
-  t.ok(src.includes('sendTextReply({ request, text, replyTo: target.ref })'), 'replyTo is the exact message')
+  t.ok(src.includes('sendTextReply({ request, text, replyTo: target.ref, lastSeq: floorStaleRef.current ? null : replyFloor(node.signals ? node.signals.ownLength : null, ownSeqRef.current), lastSeqStale: true })'), 'replyTo is the exact message')
   t.ok(src.includes("onPublished('quick-reply', target.ref)"))
   t.ok(app.includes('onPublished={onPublished}'))
   t.ok(app.includes('onReplyDraft={settleReplyDraft}'))
@@ -171,35 +176,45 @@ const RESEND_NOTE = /const RESEND_NOTE = '([^']+)'/.exec(src)[1]
 const MAYBE_SENT_NOTE = /const MAYBE_SENT_NOTE = '([^']+)'/.exec(src)[1]
 const HELD_RETRY_MS = /const HELD_RETRY_MS = ([0-9 *]+)\n/.exec(src)[1].split('*').reduce((n, f) => n * Number(f), 1)
 
-async function localReplies (registerLocalCache = () => {}) {
+async function localReplies (registerLocalCache = () => {}, generation = () => 0) {
   const { withOwnReply } = await import('../src/threadRows.js')
-  return handler(src, 'const ownReplyCache =', 'const INITIAL =', '{ ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, deletionListeners, announceDeleted, forgetOwnReplies, dropOwnReplies, pruneOwnReplies, refsOf, appendComments, topOf }', {
+  const listeners = []
+  const gone = []
+  const out = handler(src, 'const ownReplyCache =', 'const INITIAL =', '{ ownFor, cacheOwnReply, ownReplyCache, ownReplyCopies, deletionListeners, announceDeleted, forgetOwnReplies, dropOwnReplies, pruneOwnReplies, refsOf, appendComments, topOf, setMounted: (n) => { conversasMounted = n } }', {
     withOwnReply,
     registerLocalCache,
-    refOf
+    refOf,
+    cacheGeneration: generation,
+    onOwnReply: (fn) => { listeners.push(fn); return () => {} },
+    announceOwnReplyGone: (refs) => gone.push(refs)
   })
+  return { ...out, listeners, gone }
 }
 
 const item = (seq, parent = 4, author = A, parentAuthor = B) => ({ kind: 'post', author, seq, at: '2026-01-01T00:00:0' + (seq % 10) + '.000Z', text: 'resposta ' + seq, replyTo: { author: parentAuthor, seq: parent } })
 
 async function sending (options = {}) {
-  const { quickReplyPlan, sendTextReply, sendPageTextReply } = await import('../src/replySend.js')
+  const { quickReplyPlan, replyFloor, sendTextReply, sendPageTextReply } = await import('../src/replySend.js')
   const { mergeChildren } = await import('../src/threadRows.js')
   const { parseRef } = await import('../src/thread.js')
   const { refusalOf } = await import('../src/wordCheck.js')
   const { hasLink } = await import('../src/links.js')
   const own = await localReplies()
   const ref = options.target || focal
-  const state = { note: '', busy: false, comments: undefined, rodas: options.rodas || new Map(), open: new Set(), published: [], expanded: [], requests: [], loads: [], pageActs: [], resolved: [] }
+  const state = { note: '', busy: false, comments: undefined, rodas: options.rodas || new Map(), open: new Set(), published: [], expanded: [], requests: [], loads: [], pageActs: [], resolved: [], pendings: [], jumps: [], announced: [], toasts: [], announcedReplies: [] }
   const request = async (method, params) => {
     state.requests.push({ method, params })
     if (options.request) return options.request(method, params)
     if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
     return { ref: A + ':8', seq: 8 }
   }
-  const node = { request, hosted: true, online: options.full !== false }
+  const node = { request, hosted: true, online: options.full !== false, ...(options.signals ? { signals: options.signals } : {}) }
   const context = {
     quickReplyPlan,
+    replyFloor,
+    ownSeqRef: { current: options.ownSeq === undefined ? null : options.ownSeq },
+    floorStaleRef: { current: options.floorStale === true },
+    announceOwnReply: (...args) => state.announcedReplies.push(args),
     sendTextReply,
     sendPageTextReply: options.sendPageTextReply || sendPageTextReply,
     mergeChildren,
@@ -252,6 +267,12 @@ async function sending (options = {}) {
     errorText: (err) => err ? err.message : 'Erro',
     onPublished: (...args) => state.published.push(args),
     expandReply: async (draft, target) => { state.expanded.push({ ...target, draft }); return options.accepted === true },
+    ownKey: options.ownKey === undefined ? A : options.ownKey,
+    setPending: (value) => { state.pending = value; state.pendings.push(value) },
+    pendingJump: { current: null },
+    setJumpTick: () => { state.jumps.push(context.pendingJump.current) },
+    AccessibilityInfo: { announceForAccessibility: (text) => state.announced.push(text) },
+    onToast: (text) => state.toasts.push(text),
     request
   }
   const send = handler(src, '  const sendReply = async', '  const scrollToKey =', 'sendReply', context)
@@ -619,6 +640,226 @@ test('Conversa send handler: a reply to a comment with a closed roda opens and l
   t.is(roda.loaded, false, 'the toggle still loads it')
   t.ok(state.open.has(top))
   t.alike(state.loads, [[top]])
+})
+
+test('Conversa send handler: the node own length skips the diary read and a confirmed reply is announced', async (t) => {
+  const { send, state, context } = await sending({ signals: { ownLength: 8 } })
+  t.is(await send('resposta'), true)
+  t.alike(state.requests.map((r) => r.method), ['post.reply'], 'no diary read before the reply')
+  t.is(context.ownSeqRef.current, 8, 'the answered seq')
+  t.is(state.announcedReplies.length, 1)
+  const [announced, from] = state.announcedReplies[0]
+  t.is(from, context.ownReplies, 'this screen ignores its own announcement')
+  t.is(refOf(announced.author, announced.seq), A + ':8')
+  t.is(announced.gen, 0)
+  t.alike(announced.replyTo, { author: B, seq: 4 })
+
+  const raised = await sending({ ownSeq: 11 })
+  t.is(await raised.send('resposta'), true)
+  t.alike(raised.state.requests.map((r) => r.method), ['post.reply'], 'a seq confirmed here is a floor too')
+  t.is(raised.context.ownSeqRef.current, 11, 'never lowered')
+})
+
+test('Conversa send handler: a failed, uncertain, refused or gated send announces nothing and forgets the floor', async (t) => {
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
+  const cases = [
+    { text: 'resposta', error: new Error('Falha') },
+    { text: 'resposta', error: Object.assign(new Error('caiu'), { uncertain: true }) },
+    { text: 'resposta', error: new Error('Responder pelo outbox') },
+    { text: BLOCKED_TERMS[0] }
+  ]
+  for (const c of cases) {
+    const { send, state, context } = await sending({
+      ownSeq: 5,
+      request: async (method) => {
+        if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+        throw c.error
+      }
+    })
+    await send(c.text)
+    t.alike(state.announcedReplies, [])
+    if (c.error) t.is(context.ownSeqRef.current, null)
+  }
+  const late = await sending({ signals: { ownLength: 8 }, cacheGeneration: (() => { let n = 0; return () => n++ })() })
+  t.is(await late.send('resposta'), true)
+  t.alike(late.state.announcedReplies, [], 'a completion after a wipe announces nothing')
+})
+
+test('Conversa send handler: after a failed send the next one reads the diary until one is confirmed', async (t) => {
+  let fail = true
+  const { send, state, context } = await sending({
+    signals: { ownLength: 8 },
+    request: async (method) => {
+      if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+      if (fail) throw Object.assign(new Error('caiu'), { uncertain: true })
+      return { ref: A + ':9', seq: 9 }
+    }
+  })
+  t.is(await send('resposta'), false)
+  t.is(context.floorStaleRef.current, true, 'the failure may have written')
+  t.alike(state.requests.map((r) => r.method), ['post.reply', 'log.read'], 'the first send trusts the synced length')
+  fail = false
+  state.requests.length = 0
+  t.is(await send('outra'), true)
+  t.alike(state.requests.map((r) => r.method), ['log.read', 'post.reply'], 'the next send reads the diary first')
+  t.is(context.floorStaleRef.current, false)
+  state.requests.length = 0
+  t.is(await send('mais uma'), true)
+  t.alike(state.requests.map((r) => r.method), ['post.reply'], 'a confirmed send trusts the floor again')
+})
+
+test('Conversa send handler: a page reply announces the page item and leaves the member floor alone', async (t) => {
+  const { send, state, context } = await sending({ page: true, signals: { ownLength: 3 } })
+  t.is(await send('como página'), true)
+  t.is(context.ownSeqRef.current, null)
+  t.is(state.announcedReplies.length, 1)
+  t.is(state.announcedReplies[0][0].author, A)
+  t.is(state.announcedReplies[0][0].seq, 8)
+})
+
+test('Conversa send handler: an uncertain reply with the floor from signals reconciles only a record of this attempt', async (t) => {
+  const earlier = { seq: 9, record: { type: 'post', text: 'resposta', replyTo: { author: B, seq: 4 }, at: new Date(Date.now() - 60000).toISOString() } }
+  const { send, state, context } = await sending({
+    signals: { ownLength: 8 },
+    request: async (method) => {
+      if (method === 'log.read') return { key: A, entries: [earlier], entriesTruncated: 0 }
+      throw Object.assign(new Error('caiu'), { uncertain: true })
+    }
+  })
+  t.is(await send('resposta'), false)
+  t.is(state.note, MAYBE_SENT_NOTE, 'still uncertain')
+  t.alike(state.announcedReplies, [])
+  t.is(context.ownSeqRef.current, null)
+  t.is(state.requests.filter((r) => r.method === 'post.reply').length, 1)
+})
+
+async function placing (options = {}) {
+  const sent = await sending(options)
+  const context = { ...sent.context, placeOwnRef: { current: null } }
+  context.viewRef.current.phase = options.phase || 'ready'
+  const place = handler(src, '  const placeOwnReply =', '  const expandReply =', 'placeOwnReply', context)
+  return { place, state: sent.state, context }
+}
+
+const announced = (seq, to, author = C) => ({ kind: 'post', author, seq, at: '2026-01-01T00:00:00.000Z', text: 'de Publicar', replyTo: { author: to.split(':')[0], seq: Number(to.split(':')[1]) }, gen: 0 })
+
+test('Conversa placeOwnReply: a comment from Publicar is prepended once, cached, counted and jumped to', async (t) => {
+  const { place, state, context } = await placing({ comments: [item(2, 4)] })
+  t.is(context.placeOwnRef.current, place)
+  place(announced(7, focal))
+  t.alike(state.comments.map((c) => c.seq), [7, 2])
+  t.is(state.comments[0].name, 'nome de cc')
+  t.is(state.cached.key, focal)
+  t.is(context.eng.counts.get(focal).replies, 1)
+  t.alike(state.jumps, ['comment:' + C + ':7'])
+  place(announced(7, focal))
+  t.alike(state.comments.map((c) => c.seq), [7, 2], 'already shown')
+  t.is(state.jumps.length, 1)
+})
+
+test('Conversa placeOwnReply: a reply to a loaded comment lands in its roda and opens it', async (t) => {
+  const top = A + ':2'
+  const { place, state, context } = await placing({ comments: [item(2, 4)] })
+  place(announced(7, top))
+  t.alike(state.rodas.get(top).replies.map((r) => r.seq), [7])
+  t.ok(state.open.has(top))
+  t.alike(state.loads, [[top]])
+  t.alike([...context.ownReplies.current.keys()], [top])
+  t.alike(state.jumps, ['reply:' + C + ':7'])
+  t.is(state.comments, undefined)
+})
+
+test('Conversa placeOwnReply: an unknown target or a view not ready only keeps it for the next load; a stale gen changes nothing', async (t) => {
+  for (const options of [{}, { phase: 'loading' }]) {
+    const to = options.phase ? focal : C + ':99'
+    const { place, state, context } = await placing({ ...options, comments: [item(2, 4)] })
+    place(announced(7, to))
+    t.is(state.comments, undefined)
+    t.is(state.rodas.size, 0)
+    t.is(state.cached.key, to, 'cached under its direct parent')
+    t.is(state.cached.item.name, 'nome de cc', 'with the name this screen knows')
+    t.alike(state.jumps, [])
+    t.is(context.ownReplies.current.size, 0)
+  }
+  const stale = await placing({ comments: [item(2, 4)] })
+  stale.place({ ...announced(7, focal), gen: 3 })
+  t.is(stale.state.comments, undefined)
+  t.is(stale.state.cached, undefined)
+})
+
+test('Conversa subscriber: an own announcement raises the floor, another key does not', async (t) => {
+  const listeners = []
+  const context = {
+    useRef: (current) => ({ current }),
+    useEffect: (fn) => { fn() },
+    onOwnReply: (fn) => { listeners.push(fn); return () => {} },
+    cacheGeneration: () => 0,
+    ownReplies: { current: new Map() },
+    ownKey: A.toUpperCase(),
+    ownSeqRef: { current: 4 },
+    conversasMounted: 0
+  }
+  const placeOwnRef = handler(src, '  const placeOwnRef = useRef(null)', '  const openRef = useRef(open)', 'placeOwnRef', context)
+  const placed = []
+  placeOwnRef.current = (value) => placed.push(value)
+  listeners[0](announced(9, focal, B), 'publicar')
+  t.is(context.ownSeqRef.current, 4, 'another key')
+  listeners[0]({ ...announced(9, focal, A), gen: 1 }, 'publicar')
+  t.is(context.ownSeqRef.current, 4, 'a stale gen')
+  listeners[0](announced(9, focal, A), context.ownReplies)
+  t.is(context.ownSeqRef.current, 4, 'its own announcement')
+  listeners[0](announced(9, focal, A), 'publicar')
+  t.is(context.ownSeqRef.current, 9)
+  t.is(placed.length, 2)
+})
+
+test('Conversa subscriber: with no placer yet (opened offline) a Publicar reply is cached under its parent', async (t) => {
+  const listeners = []
+  const cached = []
+  const context = {
+    useRef: (current) => ({ current }),
+    useEffect: (fn) => { fn() },
+    onOwnReply: (fn) => { listeners.push(fn); return () => {} },
+    cacheGeneration: () => 0,
+    cacheOwnReply: (key, value) => cached.push([key, value]),
+    refOf,
+    ownReplies: { current: new Map() },
+    ownKey: A,
+    ownSeqRef: { current: null },
+    conversasMounted: 0
+  }
+  handler(src, '  const placeOwnRef = useRef(null)', '  const openRef = useRef(open)', 'placeOwnRef', context)
+  const reply = announced(9, focal, B)
+  listeners[0](reply, 'publicar')
+  t.alike(cached, [[refOf(reply.replyTo.author, reply.replyTo.seq), reply]])
+  listeners[0](announced(10, focal, B), new Map())
+  t.is(cached.length, 1, 'another Conversa caches its own quick reply')
+})
+
+test('Conversa module listener caches a Publicar reply only with no Conversa mounted and a current gen', async (t) => {
+  let gen = 0
+  const own = await localReplies(() => {}, () => gen)
+  t.is(own.listeners.length, 1)
+  const listen = own.listeners[0]
+  listen(announced(7, focal), 'quick')
+  t.is(own.ownReplyCache.size, 0, 'another sender')
+  own.setMounted(1)
+  listen(announced(7, focal), 'publicar')
+  t.is(own.ownReplyCache.size, 0, 'a mounted Conversa places it')
+  own.setMounted(0)
+  gen = 2
+  listen(announced(7, focal), 'publicar')
+  t.is(own.ownReplyCache.size, 0, 'a stale gen')
+  gen = 0
+  listen(announced(7, focal), 'publicar')
+  t.alike(own.ownReplyCache.get(focal).map((r) => r.seq), [7])
+  const top = A + ':2'
+  listen(announced(8, top), 'publicar')
+  t.alike(own.ownReplyCache.get(top).map((r) => r.seq), [8])
+  const refs = new Set([C + ':7'])
+  own.forgetOwnReplies(refs)
+  t.alike(own.gone, [refs], 'a deletion leaves A Rua too')
+  t.is(own.ownReplyCache.has(focal), false)
 })
 
 test('Conversa keeps bar drafts across offline remounts and clears accepted handoffs', async (t) => {
@@ -1001,7 +1242,7 @@ async function loading (options) {
     INITIAL: { phase: 'loading', error: '', meta: null, resolved: null, root: null, status: null, cut: false, post: null, comments: [], unavailable: 0, next: null, loadingMore: false, moreError: '', refreshing: false },
     viewRef: { current: {} },
     commit: (patch) => { context.viewRef.current = { ...context.viewRef.current, ...patch } },
-    peekAll: fakePeekAll(world(options.posts), state.peeks),
+    peekAll: options.duringPeek ? async (...args) => { options.duringPeek(context, ...args); return fakePeekAll(world(options.posts), state.peeks)(...args) } : fakePeekAll(world(options.posts), state.peeks),
     planPeeks: thread.planPeeks,
     postAt,
     request: async () => {},
@@ -1140,6 +1381,41 @@ test('Conversa load: an own deep reply cached under a comment that became an orp
   t.is(view.status, 'orphan')
   t.ok(refsIn(view.comments).includes(D + ':13'), 'an own reply to the root is a comment')
   t.absent(refsIn(view.comments).includes(D + ':12'), 'an own reply to a reply is not')
+})
+
+test('Conversa load: a reply placed while the reads run is kept when the load lands', async (t) => {
+  const placed = item(14, 1, D, A)
+  const { load, context } = await loading({ ...deepThread(), key: R, duringPeek: (ctx) => { ctx.ownReplies.current = new Map([[R, [placed]]]) } })
+  await load(false)
+  t.ok(refsIn(context.viewRef.current.comments).includes(D + ':14'), 'the placed reply survives the load')
+})
+
+test('Conversa load: an own reply the index lists but the peek skipped keeps its cached copy', async (t) => {
+  const mine = item(14, 1, D, A)
+  const { load, context } = await loading({
+    key: R,
+    posts: [[R, null], [C + ':3', R]],
+    indexes: { [R + '|null']: postIndex(R, { replies: [C + ':3', D + ':14'] }) }
+  })
+  context.ownReplies.current = new Map([[R, [mine]]])
+  await load(false)
+  const shown = context.viewRef.current.comments.find((c) => c.author === D && c.seq === 14)
+  t.ok(shown, 'still listed')
+  t.is(shown && shown.text, mine.text, 'the confirmed copy, not an unavailable row')
+})
+
+test('Conversa load: a reply announced during the reads, already listed but unread, keeps its copy', async (t) => {
+  const mine = item(14, 1, D, A)
+  const { load, context } = await loading({
+    key: R,
+    posts: [[R, null], [C + ':3', R]],
+    indexes: { [R + '|null']: postIndex(R, { replies: [C + ':3', D + ':14'] }) },
+    // Only the quote reads, which run after the first look at the cache.
+    duringPeek: (ctx, request, plan) => { if (Array.isArray(plan) && plan.length === 0) ctx.ownReplies.current = new Map([[R, [mine]]]) }
+  })
+  await load(false)
+  const shown = context.viewRef.current.comments.find((c) => c.author === D && c.seq === 14)
+  t.is(shown && shown.text, mine.text)
 })
 
 test('Conversa refresh reuses the resolution, drops the rodas and reloads the open ones', async (t) => {
@@ -2122,4 +2398,152 @@ test('Conversa drops held page bytes once their nonce can no longer be accepted'
   t.is(run.context.pageRetryRef.current, null, 'the dead bytes are dropped')
   t.is(await run.send('texto da pagina'), true)
   t.is(run.state.pageActs.length, 1, 'the next tap signs anew')
+})
+
+test('Conversa pending reply: a comment shows at once, then the confirmed row', async (t) => {
+  let seen = null
+  const run = await sending({
+    request: async (method) => {
+      if (seen === null) seen = { pending: run.state.pending, jumps: run.state.jumps.slice(), announced: run.state.announced.slice() }
+      if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+      return { ref: A + ':8', seq: 8 }
+    }
+  })
+  t.is(await run.send('meu comentario'), true)
+  const p = seen.pending || { item: {} }
+  t.ok(typeof p.id === 'string')
+  t.is(p.toRoot, true)
+  t.is(p.holder, focal)
+  t.is(p.item.kind, 'post')
+  t.is(p.item.author, A)
+  t.is(p.item.text, 'meu comentario')
+  t.is(p.item.at, p.id)
+  t.is(p.item.seq, undefined, 'no seq')
+  t.alike(p.item.replyTo, { author: focal.split(':')[0], seq: Number(focal.split(':')[1]) })
+  t.is(seen.jumps[0], 'comment:pending:' + p.id)
+  t.is(seen.announced[0], 'Enviando comentário')
+  t.is(run.state.pendings[run.state.pendings.length - 1], null)
+  t.is(run.state.jumps[run.state.jumps.length - 1], 'comment:' + A + ':8')
+  t.is(run.state.announced[run.state.announced.length - 1], 'Comentário enviado')
+  t.is(run.state.requests.filter((r) => r.method === 'post.reply').length, 1)
+  t.is(run.state.comments[0].at, p.id)
+})
+
+test('Conversa pending reply: a reply to a loaded comment', async (t) => {
+  const c = item(5, 4, B, B)
+  const cRef = B + ':5'
+  let seen = null
+  const run = await sending({
+    target: cRef,
+    comments: [c],
+    request: async (method) => {
+      if (seen === null) seen = { pending: run.state.pending, jumps: run.state.jumps.slice(), open: run.state.open }
+      if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+      return { ref: A + ':8', seq: 8 }
+    }
+  })
+  const openBefore = run.state.open
+  t.is(await run.send('minha resposta'), true)
+  const p = seen.pending || {}
+  t.is(p.toRoot, false)
+  t.is(p.holder, cRef)
+  t.is(seen.jumps[0], 'reply:pending:' + p.id)
+  t.is(seen.open, openBefore, 'the roda opens only on success')
+  t.is(run.state.jumps[run.state.jumps.length - 1], 'reply:' + A + ':8')
+  t.is(run.state.announced[run.state.announced.length - 1], 'Resposta enviada')
+})
+
+const confirmedJump = (state) => state.jumps.some((j) => j !== null && !j.includes(':pending:'))
+const successSaid = (state) => state.announced.some((a) => a === 'Comentário enviado' || a === 'Resposta enviada')
+
+test('Conversa pending reply: every failure clears the pending row', async (t) => {
+  const runs = []
+  for (const uncertain of [false, true]) {
+    runs.push(await sending({
+      request: async (method) => {
+        if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+        throw Object.assign(new Error('Falha de conexão'), { uncertain })
+      }
+    }))
+  }
+  runs.push(await sending({ page: true, memberKeyOf: async () => { throw new Error('Sem chave') } }))
+  runs.push(await sending({ page: true, sendPageTextReply: async () => ({ ok: false, ref: null, error: Object.assign(new Error('x'), { uncertain: true }), retry: () => {} }) }))
+  const { GATE_MESSAGE } = await import('../src/outbox.js')
+  runs.push(await sending({ accepted: true, request: async (method) => { if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }; throw new Error(GATE_MESSAGE) } }))
+  for (const run of runs) {
+    await run.send('texto qualquer')
+    t.ok(run.state.pendings.length >= 1)
+    t.is(run.state.pendings[run.state.pendings.length - 1], null)
+    t.absent(confirmedJump(run.state))
+    t.absent(successSaid(run.state))
+  }
+  t.is(runs[3].state.note, RESEND_NOTE)
+  t.is(runs[4].state.expanded.length, 1, 'the member gate expands')
+  const moved = await sending({
+    request: async (method) => {
+      moved.context.sessionRef.current += 1
+      if (method === 'log.read') return { key: A, entries: [], entriesTruncated: 0 }
+      return { ref: A + ':8', seq: 8 }
+    }
+  })
+  await moved.send('texto qualquer')
+  t.is(moved.state.pendings[moved.state.pendings.length - 1], null)
+  t.absent(confirmedJump(moved.state))
+  t.absent(successSaid(moved.state))
+})
+
+test('Conversa pending reply: nothing pends without a send', async (t) => {
+  const { BLOCKED_TERMS } = require('@varanda/rpc')
+  const cases = [['', {}], [BLOCKED_TERMS[0], {}], ['https://example.org', {}]]
+  for (const [text, options] of cases) {
+    const run = await sending(options)
+    await run.send(text)
+    t.is(run.state.pendings.length, 0)
+    t.is(run.state.requests.length, 0)
+  }
+  const busy = await sending()
+  busy.context.sendingRef.current = true
+  t.is(await busy.send('texto'), false)
+  t.is(busy.state.pendings.length, 0)
+  t.is(busy.state.requests.length, 0)
+  const stale = await sending({ page: true })
+  stale.context.pageRetryRef.current = { retry: () => {}, page: A, ref: focal, text: 'texto', at: Date.now() - HELD_RETRY_MS - 1 }
+  t.is(await stale.send('texto'), false)
+  t.is(stale.state.pendings.length, 0)
+  t.is(stale.state.requests.length, 0)
+  t.is(stale.state.pageActs.length, 0)
+})
+
+test('Conversa pending reply: no holder, no row, a toast on success', async (t) => {
+  const run = await sending({ target: C + ':9' })
+  t.is(await run.send('resposta funda'), true)
+  t.alike(run.state.pendings, [null], 'only the release')
+  t.alike(run.state.toasts, ['Resposta enviada'])
+  t.absent(successSaid(run.state))
+})
+
+test('Conversa pending reply: the author is the page, or none without a key', async (t) => {
+  let seen = null
+  const page = await sending({
+    page: true,
+    ownKey: B,
+    sendPageTextReply: async () => { seen = page.state.pending; return { ok: true, ref: A + ':8' } }
+  })
+  t.is(await page.send('texto da pagina'), true)
+  t.is(seen && seen.item.author, A)
+  const none = await sending({ ownKey: null })
+  t.is(await none.send('texto'), true)
+  t.alike(none.state.pendings, [null], 'only the release')
+})
+
+test('Conversa pending reply: source pins', (t) => {
+  const call = src.slice(src.indexOf('  const rows = commentRows({'), src.indexOf('  const rowCache ='))
+  t.ok(call.includes('pending'))
+  const reset = src.slice(src.indexOf('    sessionRef.current += 1\n    setOpen'), src.indexOf('    setReplyTarget(null)'))
+  t.ok(reset.includes('setPending(null)'))
+  t.ok(src.includes('row.pending === true'))
+  t.ok(src.includes("pointerEvents='none' style={styles.sendingRow}"))
+  t.ok(src.includes('{...props(row.item, THREAD_ROW)} '))
+  t.ok(src.includes('sendingRow: { opacity: 0.7 }'))
+  t.ok(src.includes('sendingShown={pending !== null}'))
 })

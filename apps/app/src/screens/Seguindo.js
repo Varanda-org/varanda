@@ -513,7 +513,8 @@ const makeStyles = (colors) => StyleSheet.create({
   boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   note: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
   header: { paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
-  addRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
+  // The two 16 pt pill labels need about 318 pt, more than a narrow card leaves.
+  addRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

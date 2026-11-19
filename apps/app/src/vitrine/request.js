@@ -297,7 +297,7 @@ export function createVitrineRequest (fixtures, options) {
   }
   // The live post-share seqs for one post, ascending.
   const liveShares = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-share' && e.record.seq === seq && liveEntry(data.own, e.seq)).map((e) => e.seq)
-  // The live post-cover entries for one post, ascending (5.167).
+  // The live post-cover entries for one post, ascending (5.169).
   const liveCovers = (seq) => logs.get(data.own).filter((e) => e.record.type === 'post-cover' && e.record.seq === seq && liveEntry(data.own, e.seq))
   // The web node's verifyShow: a show stands only while the writer block is
   // live, addressed to the show's diary and commits to the shown text.
@@ -852,7 +852,7 @@ export function createVitrineRequest (fixtures, options) {
       const shares = liveShares(seq)
       return { shareSeq: shares.length > 0 ? shares[shares.length - 1] : null, cover: shares.length > 0 && liveCovers(seq).length > 0 }
     },
-    // The demo holds no media bytes, so the byte checks of 5.167 are not
+    // The demo holds no media bytes, so the byte checks of 5.169 are not
     // made here; the share rule and the newest-cover rule are.
     'post.cover': ({ to, image }) => {
       const seq = shareTarget(to)
@@ -933,6 +933,8 @@ export function createVitrineRequest (fixtures, options) {
       dmEnabled = true
       return { box: data.own, gen: 1, seq }
     },
+    // The demo has no account service, so it never sends a wake.
+    'dm.noticeKey': () => ({}),
     'dm.pull': () => {
       pullCursor = Math.max(pullCursor, messageId)
       return { added: 0, cursor: pullCursor, incomplete: false }

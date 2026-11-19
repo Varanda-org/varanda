@@ -1657,6 +1657,10 @@ const SPECS = {
   // The core node's delegate actor signs its own dm box (docs/rpc.md 5.161).
   // Signs, writes nothing, so it is not mutating.
   'dm.actorBox': { fields: none },
+  // The account service's X25519 wake key for push notices (docs/rpc.md
+  // 5.167), kept by the node in memory only. A repeat sets the same key, so
+  // it is not mutating.
+  'dm.noticeKey': { fields: { key: req(isKey) } },
   // The node fills in member and association and hashes text and quote; the
   // quote is the chosen message as this device decrypted it, which no one
   // can verify. target is the sender's diary key, never its signature.
@@ -1692,6 +1696,7 @@ const SPECS = {
   // the balcony of `to`, a diary key. No date parameter: the node sets every
   // `at` from its own clock.
   'garden.set': { fields: { on: req(isBool) }, mutating: true },
+  'groups.show': { fields: { on: req(isBool) }, mutating: true },
   'garden.state': { fields: none },
   'garden.play': { fields: { acts: req(garden.isActs) }, mutating: true },
   'garden.help': { fields: { to: req(isKey), pot: req(garden.isPotIndex) }, mutating: true },
