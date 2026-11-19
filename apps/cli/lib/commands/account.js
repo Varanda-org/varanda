@@ -20,6 +20,7 @@ const { pairInvites } = require('../account/invites-pair')
 const { createListingReader } = require('../account/feira-read')
 const { openInviteDrops, startInviteDropLoop } = require('../account/invite-drops')
 const { openPushStore } = require('../account/push-store')
+const { openPushCapsStore } = require('../account/push-caps-store')
 const { openSeenStore } = require('../account/seen-store')
 const { openPageKeys } = require('../account/page-keys')
 const { openPagesStore } = require('../account/pages-store')
@@ -859,6 +860,7 @@ async function serve (flags, env) {
   let invites = null
   let feiraInvites = null
   let pushStore = null
+  let pushCapsStore = null
   let seenStore = null
   let stopHeal = null
   let stopRecoveryHeal = null
@@ -882,7 +884,7 @@ async function serve (flags, env) {
   const lock = takeLock(flags.dataDir, {
     onLost: () => {
       lost = true
-      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones)
+      loseLock(store, log, stop, terms, invites, pushStore, ages, pagesStore, pageKeys, pagesWriter, pageClients, drops, loop, recovery, seenStore, passkeys, phones, pushCapsStore)
     }
   })
   // The one guard every sidecar write asks, before it and right before its
@@ -979,12 +981,15 @@ async function serve (flags, env) {
     pushStore = openPushStore(flags.dataDir, { guard: held })
     if (!pushStore.available()) log({ event: 'push', reason: 'indisponivel' })
     stopPushHeal = startHeal(pushStore, 'push', log)
+    pushCapsStore = openPushCapsStore(flags.dataDir, { guard: held })
+    if (!pushCapsStore.available()) log({ event: 'push', reason: 'indisponivel' })
     // The DM notice key: created on the first start, and a bad file stops
     // the service (loadOrCreateWakeKey), since a new key would orphan every
     // box already sealed to the old one.
     const wakeKey = loadOrCreateWakeKey(flags.dataDir)
     const push = {
       pushStore,
+      pushCapsStore,
       vapid: vapid === null ? null : { publicKey: vapid.publicKey, privateKey: vapid.privateKey, subject: origin },
       wakeKey,
       relayTokenHash: flags.pushToken ? nodeCrypto.createHash('sha256').update(flags.pushToken).digest() : null
@@ -1185,6 +1190,7 @@ async function serve (flags, env) {
     // block once the lock is released.
     if (pageKeys !== null) pageKeys.fail()
     if (pagesWriter !== null) pagesWriter.fail()
+    if (pushCapsStore !== null) pushCapsStore.fail()
     lock.release()
   }
   return lost || unavailable || closing === 'failed' ? 1 : 0
@@ -1274,7 +1280,7 @@ async function closePageClients (pageClients) {
 // stops. The terms, invites, push, seen, age, phone, recovery and passkey
 // stores, the page keys, the page writer and the invite drops too: their
 // next write must not land either.
-function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null, phones = null) {
+function loseLock (store, log, stop, terms = null, invites = null, pushStore = null, ages = null, pagesStore = null, pageKeys = null, pagesWriter = null, pageClients = [], drops = null, loop = null, recovery = null, seenStore = null, passkeys = null, phones = null, pushCapsStore = null) {
   if (store !== null) store.fail()
   if (terms !== null) terms.fail()
   if (recovery !== null) recovery.fail()
@@ -1283,6 +1289,7 @@ function loseLock (store, log, stop, terms = null, invites = null, pushStore = n
   if (drops !== null) drops.fail()
   if (loop !== null) loop.stop().catch(() => {})
   if (pushStore !== null) pushStore.fail()
+  if (pushCapsStore !== null) pushCapsStore.fail()
   if (seenStore !== null) seenStore.fail()
   if (ages !== null) ages.fail()
   if (phones !== null) phones.fail()

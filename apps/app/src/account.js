@@ -6,6 +6,7 @@
 /* global __DEV__ */
 
 import { applicationServerKey } from './push-state.js'
+import { CLOSE_MAX, readTags, validTag } from './noticeTags.js'
 import { AGE_STATES } from './age.js'
 import { installationOrigin, resolveUrl } from './installation.js'
 import { cacheGeneration, registerLocalCache } from './localCaches.js'
@@ -410,7 +411,7 @@ export const pushFinish = async ({ member, nonce, action, signature, endpoint, p
 // its shape. Read changes nothing; write and delete are compare-and-swaps on
 // prevHash, so a lost answer is uncertain and is never resent here.
 const SEEN_BLOB_B64 = 43744 // packages/core/lib/seen-blob.js SEEN_BLOB_B64
-const SEEN_MAX_BODY = 49152
+const SEEN_MAX_BODY = 57344
 const SEEN_TIMEOUT_MS = 20000
 const SEEN_HASH_RE = /^[0-9a-f]{64}$/
 const SEEN_B64_RE = /^[A-Za-z0-9+/]*={0,2}$/
@@ -423,10 +424,13 @@ export const seenStart = async ({ member, action }) => {
   return { nonce: data.nonce }
 }
 
-export const seenFinish = async ({ member, nonce, action, signature, prevHash, blob }) => {
+export const seenFinish = async ({ member, nonce, action, signature, prevHash, blob, close, asOf }) => {
   const writes = action === 'write' || action === 'delete'
   const body = { member, nonce, action, signature, prevHash }
-  if (action === 'write') body.blob = blob
+  if (action === 'write') {
+    body.blob = blob
+    if (close !== undefined) Object.assign(body, { close, asOf })
+  }
   const bad = () => {
     const err = toError('indisponivel')
     if (writes) err.uncertain = true
@@ -447,11 +451,16 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
     throw err
   }
   if (action === 'read') {
-    if (data.hash === null && data.blob === null) return { hash: null, blob: null, unchanged: false }
+    const notices = {}
+    if (data.outstanding !== undefined) {
+      if (!Array.isArray(data.outstanding) || data.outstanding.length > 64 || !data.outstanding.every(validTag) || !Number.isSafeInteger(data.asOf) || data.asOf < 0) throw bad()
+      Object.assign(notices, { outstanding: data.outstanding, asOf: data.asOf })
+    }
+    if (data.hash === null && data.blob === null) return { hash: null, blob: null, unchanged: false, ...notices }
     if (!isSeenHash(data.hash)) throw bad()
-    if (data.unchanged === true && data.blob === null) return { hash: data.hash, blob: null, unchanged: true }
+    if (data.unchanged === true && data.blob === null) return { hash: data.hash, blob: null, unchanged: true, ...notices }
     if (!isSeenBlob(data.blob)) throw bad()
-    return { hash: data.hash, blob: data.blob, unchanged: false }
+    return { hash: data.hash, blob: data.blob, unchanged: false, ...notices }
   }
   if (action === 'write') {
     if (data.ok !== true || !isSeenHash(data.hash)) throw bad()
@@ -461,9 +470,75 @@ export const seenFinish = async ({ member, nonce, action, signature, prevHash, b
   return { ok: true, changed: data.changed }
 }
 
-export const pushCheck = async ({ member, endpoint, p256dh, auth }) => {
+// Each pass holds its own read answer. A later read or a failed write cannot
+// consume marks belonging to this pass, including marks made while it writes.
+export function createSeenNoticeSync () {
+  let state = {}
+  let tags = []
+  let revision = 0
+  let enabled = true
+  const pending = new Map()
+  return {
+    reset ({ actingPage = false } = {}) {
+      state = {}
+      tags = []
+      pending.clear()
+      enabled = !actingPage
+    },
+    update (patch) {
+      if (!enabled) return tags
+      state = { ...state, ...patch }
+      const next = readTags(state)
+      for (const tag of next) {
+        if (!tags.includes(tag)) pending.set(tag, ++revision)
+      }
+      for (const tag of pending.keys()) {
+        if (!next.includes(tag)) pending.delete(tag)
+      }
+      tags = next
+      return tags
+    },
+    tags: () => tags,
+    http (request) {
+      const marks = new Map(pending)
+      let read = null
+      const closeTags = () => [...marks.keys()].filter((tag) => pending.get(tag) === marks.get(tag) &&
+        read?.outstanding?.includes(tag)).slice(0, CLOSE_MAX)
+      return {
+        seenStart,
+        async request (method, params) {
+          const answer = await request(method, params)
+          // A mark made during the previous pass may already be in its blob,
+          // but its close still needs a write with this pass's signed read.
+          if (method === 'seen.merge' && answer && typeof answer === 'object' && closeTags().length > 0) {
+            return { ...answer, pending: true }
+          }
+          return answer
+        },
+        async seenFinish (args) {
+          let extra = {}
+          if (args.action === 'write' && read && Array.isArray(read.outstanding)) {
+            extra = { close: closeTags(), asOf: read.asOf }
+          }
+          const answer = await seenFinish({ ...args, ...extra })
+          if (args.action === 'read') read = answer
+          if (args.action === 'write') {
+            for (const tag of extra.close || []) {
+              if (pending.get(tag) === marks.get(tag)) pending.delete(tag)
+            }
+          }
+          return answer
+        }
+      }
+    }
+  }
+}
+
+export const pushCheck = async ({ member, endpoint, p256dh, auth, caps }) => {
   try {
-    const data = await call('POST', '/account/push/check', { member, endpoint, p256dh, auth })
+    const body = { member, endpoint, p256dh, auth }
+    if (caps !== undefined) body.caps = caps
+    const data = await call('POST', '/account/push/check', body)
     return typeof data.registered === 'boolean' ? { registered: data.registered } : null
   } catch {
     return null

@@ -76,7 +76,7 @@ test('Avisos gives exhausted snippet refs another chance on reload, and speaks t
   t.ok(source.includes("accessibilityLabel={spoken + ', ver perfil'}"))
 })
 
-test('Avisos resets the seen ids before folding remote marks, and a hidden poll neither marks nor reports', (t) => {
+test('Avisos resets the seen ids before folding remote marks, and a hidden poll reports rows without marking them', (t) => {
   const source = fs.readFileSync(path.join(__dirname, '../src/screens/Avisos.js'), 'utf8')
   const reset = source.indexOf('shownListRef.current = null')
   const fold = source.indexOf('// A seen pass brought the marks of another device')
@@ -84,7 +84,7 @@ test('Avisos resets the seen ids before folding remote marks, and a hidden poll 
   t.ok(reset < fold, 'the namespace reset effect runs before the remote fold effect')
   t.ok(source.includes('settle(page.notices, false, false)'))
   t.absent(source.includes('settle(page.notices, false)\n'))
-  t.ok(/if \(shown && typeof onSeenStateRef\.current === 'function'\)/.test(source))
+  t.ok(source.includes('onSeenStateRef.current(seenNamespace, shown ? seenOnScreen(list, seen.ids) : [],'))
   // Every settle that only moves the dot stores the loaded rows another
   // device saw, not only the settle right after a pass.
   const settleAt = source.indexOf('const settle = useCallback(')
@@ -181,6 +181,56 @@ function screenCallback (screen, marker, context) {
   const end = source.indexOf('\n  }, [', start) + '\n  }'.length
   return require('node:vm').runInNewContext('(' + source.slice(start, end) + ')', context)
 }
+
+test('Avisos hidden polls cannot close a tag while an older like remains unread', async (t) => {
+  const notices = await import('../src/notices.js')
+  const { avisoReadRows } = await import('../src/noticeReads.js')
+  const { readTags } = await import('../src/noticeTags.js')
+  const ownKey = 'b'.repeat(64)
+  const newer = { kind: 'like', key: 'a'.repeat(64), seq: 2, post: ownKey + ':7', seen: 'a'.repeat(32) }
+  const older = { ...newer, seq: 1, seen: 'b'.repeat(32) }
+  const seenRef = { current: { ids: [newer.seen] } }
+  const reports = []
+  const closed = []
+  const settle = screenCallback('Avisos', 'const settle = useCallback(', {
+    ...notices,
+    avisoReadRows,
+    seenNamespace: ownKey,
+    seenNamespaceRef: { current: ownKey },
+    activeRef: { current: false },
+    lastListRef: { current: null },
+    shownListRef: { current: null },
+    seenRef,
+    ownKeyRef: { current: ownKey },
+    remoteSeenRef: { current: null },
+    remoteFor: () => [],
+    followsSetRef: { current: null },
+    randomBytes: null,
+    badge () {},
+    setUnread () {},
+    onSeenStateRef: {
+      current: (namespace, tokens, avisos) => {
+        reports.push({ namespace, tokens: [...tokens] })
+        closed.push(readTags({ avisos }))
+      }
+    }
+  })
+  settle([newer, older], false)
+  t.alike(closed.at(-1), [])
+  settle([newer], false, false)
+  t.alike(closed.at(-1), [], 'page two still has an unread like for this post')
+  t.alike(reports.at(-1), { namespace: ownKey, tokens: [] }, 'hidden rows are still not uploaded as local marks')
+  settle([older], true)
+  t.alike(closed.at(-1), ['varanda-like-' + ownKey + ':7'], 'showing the older row proves it read')
+  settle([newer], false, false)
+  t.alike(closed.at(-1), ['varanda-like-' + ownKey + ':7'])
+  seenRef.current = { ids: [newer.seen] }
+  settle([newer, older], false, false)
+  t.alike(closed.at(-1), [])
+  seenRef.current = { ids: [newer.seen] }
+  settle([newer], false, false)
+  t.alike(closed.at(-1), ['varanda-like-' + ownKey + ':7'], 'reloading the namespace discards its previous read memory')
+})
 
 // Exercise the actual screen effects without JSX, a platform or a network.
 test('hidden screens serialize the two short links before sync is ready', async (t) => {

@@ -161,7 +161,7 @@ test('ListingTile: the save star is a sibling button, drawn only with onSave', (
   t.ok(star.includes('aria-pressed={saved === true}'), 'the web button carries aria-pressed, not only aria-selected')
   t.ok(star.includes("<Icon name='estrela'") && star.includes('filled={saved === true}'), 'a filled star, not colour alone')
   t.ok(star.includes('onSave()') && !star.includes('onPress()') && !star.includes('onPress={onPress}'), 'the star calls onSave, never the tile onPress')
-  t.ok(/save: \{[^}]*position: 'absolute', top: 0, right: 0, width: layout\.hit, height: layout\.hit/.test(tile), 'a 44 pt target in the top right corner')
+  t.ok(/save: \{[^}]*position: 'absolute', top: space\.sm \+ 1, right: space\.sm \+ 1, width: layout\.hit, height: layout\.hit/.test(tile), 'a 44 pt target in the photo corner')
   t.ok(/badgeRow: \{[^}]*position: 'absolute', top: space\.xs, left: space\.xs, right: layout\.hit/.test(tile), 'the status chip sits top left and stops short of the star')
   t.ok(tile.includes('<View style={styles.badgeRow}><Text style={styles.badge} numberOfLines={1}>'), 'a long status stays on one line inside its bound')
   t.ok(/badge: \{[^}]*flexShrink: 1/.test(tile), 'the chip shrinks to its bound')

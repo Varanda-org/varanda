@@ -126,8 +126,10 @@ export function SkeletonTile () {
     <Skeleton>
       <View style={styles.skTile}>
         <View style={styles.skImage} />
-        <View style={[styles.skBar, { width: '80%' }]} />
-        <View style={[styles.skBar, { width: '45%' }]} />
+        <View style={styles.skTileText}>
+          <View style={[styles.skBar, { width: '80%' }]} />
+          <View style={[styles.skBar, { width: '45%' }]} />
+        </View>
       </View>
     </Skeleton>
   )
@@ -223,8 +225,10 @@ const makeStyles = (colors) => StyleSheet.create({
   skAvatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.skeleton },
   skLines: { flex: 1, gap: 10, justifyContent: 'center' },
   skBar: { height: 12, borderRadius: 6, backgroundColor: colors.skeleton },
-  skTile: { gap: space.md, padding: space.lg },
-  skImage: { width: '100%', aspectRatio: 1, borderRadius: radius.md, backgroundColor: colors.skeleton },
+  // The Feira card's frame, photo and text block, so the grid does not jump when the listings arrive.
+  skTile: { padding: space.sm, borderRadius: radius.bubble, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.card },
+  skImage: { width: '100%', aspectRatio: 4 / 5, borderRadius: 16, backgroundColor: colors.skeleton },
+  skTileText: { minHeight: space.md * 2 + type.price.lineHeight + space.xs + type.tileTitle.lineHeight, padding: space.md, gap: space.sm, justifyContent: 'center' },
   skBubble: { width: '65%', height: 56, margin: space.lg, borderRadius: radius.bubble, backgroundColor: colors.skeleton },
   skProfile: { width: '100%' },
   skBand: { height: PROFILE_BAND, backgroundColor: colors.skeleton },
