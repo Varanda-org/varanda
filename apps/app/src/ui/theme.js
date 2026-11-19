@@ -71,7 +71,15 @@ export const type = {
   stepLabel: { fontSize: 13, fontWeight: '700', lineHeight: 16, letterSpacing: 0.5, textTransform: 'uppercase' }
 }
 
+// Pair raised with colors.shadow for scheme-aware color. The kit levels carry their own colors.
 export const elevation = {
+  xs: '0px 4px 4px 0px rgba(0,0,0,0.01), 0px 1px 2px 0px rgba(0,0,0,0.04)',
+  sm: '0px 3px 5px -2px rgba(0,0,0,0.05), 0px 9px 10px -2px rgba(0,0,0,0.03)',
+  md: '0px 4px 6px -4px rgba(0,0,0,0.08), 0px 10px 15px -3px rgba(0,0,0,0.05)',
+  lg: '0px 5px 6px -5px rgba(0,0,0,0.05), 0px 12px 18px -3px rgba(0,0,0,0.08)',
+  xl: '0px 6px 10px -5px rgba(0,0,0,0.10), 0px 14px 20px -5px rgba(0,0,0,0.08)',
+  xxl: '0px 8px 10px -6px rgba(0,0,0,0.12), 0px 25px 30px -6px rgba(0,0,0,0.12)',
+  edge: '6px 0px 12px -4px rgba(0,0,0,0.08)',
   raised: '0px 6px 16px'
 }
 
