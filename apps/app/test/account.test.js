@@ -286,6 +286,50 @@ test('pushKey: the key, or null on 503, a bad shape or no answer', async (t) => 
   t.is(await a.pushKey(), null, 'transport')
 })
 
+// The account service's X25519 wake key: 32 bytes, unpadded base64url.
+const WAKE_BYTES = Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 0xff))
+const WAKE = WAKE_BYTES.toString('base64url')
+
+test('wakeKeyHex: only the canonical unpadded base64url of exactly 32 bytes', async (t) => {
+  const { wakeKeyHex } = await load()
+  t.is(wakeKeyHex(WAKE), WAKE_BYTES.toString('hex'))
+  t.is(wakeKeyHex('A'.repeat(43)), '0'.repeat(64))
+  t.is(wakeKeyHex(Buffer.alloc(32, 0xff).toString('base64url')), 'f'.repeat(64))
+  // The last character carries 2 spare bits: 'A' and 'B' would both decode.
+  t.is(wakeKeyHex('A'.repeat(42) + 'B'), null, 'non-zero trailing bits')
+  for (const bad of [
+    WAKE + '=', WAKE.slice(1), WAKE + 'A', Buffer.alloc(31, 1).toString('base64url'),
+    Buffer.alloc(33, 1).toString('base64url'), WAKE_BYTES.toString('base64'),
+    '+' + WAKE.slice(1), '/' + WAKE.slice(1), WAKE.slice(0, 42) + '.',
+    ' ' + WAKE.slice(1), WAKE_BYTES.toString('hex'), '', null, undefined, 5, [WAKE], { wake: WAKE }
+  ]) t.is(wakeKeyHex(bad), null, 'refused ' + String(bad).slice(0, 12))
+})
+
+test('pushWakeKey: the hex key from the same answer, or null; pushKey unchanged', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(200, { key: VAPID, wake: WAKE }))
+  t.is(await a.pushWakeKey(), WAKE_BYTES.toString('hex'))
+  t.is(calls[0].init.method + ' ' + calls[0].url, 'GET /account/push/key')
+  t.is(calls[0].init.cache, 'no-store')
+  stub(t, json(200, { key: VAPID, wake: WAKE }))
+  t.is(await a.pushKey(), VAPID, 'pushKey still answers the VAPID key')
+  stub(t, json(200, { key: VAPID }))
+  t.is(await a.pushWakeKey(), null, 'an older service without wake')
+  t.is(await a.pushKey(), VAPID)
+  stub(t, json(200, { key: null, wake: WAKE }))
+  t.is(await a.pushWakeKey(), WAKE_BYTES.toString('hex'), 'push off for this member: the wake key still serves senders')
+  for (const bad of [WAKE + '=', WAKE.slice(1), 'A'.repeat(42) + 'B', 5, null, '']) {
+    stub(t, json(200, { key: VAPID, wake: bad }))
+    t.is(await a.pushWakeKey(), null, 'shape ' + String(bad).slice(0, 8))
+  }
+  stub(t, json(503, { error: 'indisponivel' }))
+  t.is(await a.pushWakeKey(), null, '503')
+  stub(t, json(200, { key: VAPID, wake: WAKE }, 'text/html'))
+  t.is(await a.pushWakeKey(), null, 'not JSON')
+  stub(t, () => { throw new Error('rede') })
+  t.is(await a.pushWakeKey(), null, 'transport')
+})
+
 test('pushStart/pushFinish/pushCheck: same-origin POSTs with exactly those keys', async (t) => {
   const a = await load()
   const calls = stub(t, json(200, { nonce: 'n1', ok: true, changed: true, registered: true }))
@@ -1688,6 +1732,18 @@ test('seenStart: POST with member and action, nonce or a definite refusal', asyn
   try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'nao-vinculado') }
   stub(t, json(200, { nonce: 7 }))
   try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) { t.is(e.code, 'indisponivel') }
+})
+
+test('seen requests expose the HTTP status on a rate limit refusal', async (t) => {
+  const a = await load()
+  const calls = stub(t, json(429, { error: 'pedido-invalido' }))
+  try { await a.seenStart({ member: M, action: 'read' }); t.fail() } catch (e) {
+    t.is(e.status, 429)
+  }
+  try { await seenFinish(a, 'write'); t.fail() } catch (e) {
+    t.is(e.status, 429)
+  }
+  t.alike(calls.map(({ url }) => url), ['/account/seen/start', '/account/seen/finish'])
 })
 
 test('seenFinish: read shapes, and the blob only goes in a write', async (t) => {

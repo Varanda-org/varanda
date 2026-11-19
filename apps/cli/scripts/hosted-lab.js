@@ -460,7 +460,7 @@ async function main () {
       dataDir: seedDir,
       bootstrap,
       host: '127.0.0.1',
-      dm: { postage: createPostageFile(seedDir), blobPostage: createBlobPostageFile(seedDir), onDrop: () => {} }
+      dm: { postage: createPostageFile(seedDir), blobPostage: createBlobPostageFile(seedDir) }
     })
     const origin = labOrigin(opts.port)
     const wsOpts = { host: '127.0.0.1', port: 0, seeder }
