@@ -29,6 +29,10 @@
         "usesNonExemptEncryption": false
       },
       "infoPlist": {
+        "UIBackgroundModes": [
+          "processing",
+          "remote-notification"
+        ],
         "NSMicrophoneUsageDescription": "Para gravar mensagens de voz nas Conversas."
       },
       "privacyManifests": {

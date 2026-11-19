@@ -93,6 +93,7 @@ const DM_COOLDOWN_MS = 15 * 60 * 1000
 const GROUP_QUEUE_MAX = Math.floor(MAX_QUEUE / 2)
 const GROUP_NOTICE_TERMS_FLOOR = 99
 const NATIVE_PUSH_TERMS_FLOOR = 101
+const NATIVE_SEEN_TERMS = 102
 const NATIVE_KINDS = ['dm', 'dm-page', 'group', 'group-private']
 const GROUP_COOLDOWN_MS = 10 * 60 * 1000
 const BOX_B64U_LENGTH = Math.ceil(DM_NOTICE_BOX_BYTES * 4 / 3)
@@ -244,9 +245,9 @@ function createPushRoutes ({
     return vapid !== null && storeUsable() ? pushStore.list(member) : []
   }
 
-  function nativeTermsAccepted (member) {
+  function nativeTermsAccepted (member, floor = NATIVE_PUSH_TERMS_FLOOR) {
     try {
-      return terms !== null && terms.available() && terms.list(member).some((e) => e.version >= NATIVE_PUSH_TERMS_FLOOR)
+      return terms !== null && terms.available() && terms.list(member).some((e) => e.version >= floor)
     } catch {
       return false
     }
@@ -713,12 +714,11 @@ function createPushRoutes ({
     let signal = signals.get(member)
     if (signal === undefined) {
       if (signals.size >= MAX_SEEN) return
-      signal = { hashes: new Set(), asOf, timer: null }
+      signal = { tags: new Set(), asOf, timer: null }
       signals.set(member, signal)
     }
-    const hashes = new Set([...known].map(tagHash))
-    for (const hash of signal.hashes) if (!hashes.has(hash)) signal.hashes.delete(hash)
-    for (const tag of tags) signal.hashes.add(tagHash(tag))
+    for (const tag of signal.tags) if (!known.has(tag)) signal.tags.delete(tag)
+    for (const tag of tags) signal.tags.add(tag)
     // A later cutoff could close an unread replacement of an earlier tag.
     signal.asOf = Math.min(signal.asOf, asOf)
     if (signal.timer !== null) clearTimer(signal.timer)
@@ -727,12 +727,19 @@ function createPushRoutes ({
       if (closed || !pipelineUsable()) return
       try {
         const subs = webRows(member).filter((sub) => capable(member, sub))
-        if (subs.length === 0 || queue.length + subs.length > MAX_QUEUE || !limits.seenSignal(member)) return
-        const live = new Set(outstanding(member).map(tagHash))
-        const payload = JSON.stringify({ v: 1, kind: 'seen-sync', close: [...signal.hashes].filter((hash) => live.has(hash)), asOf: signal.asOf })
+        const live = new Set(outstanding(member))
+        const close = [...signal.tags].filter((tag) => live.has(tag))
+        const native = close.length > 0 && deviceStoreUsable() && nativeTermsAccepted(member, NATIVE_SEEN_TERMS)
+          ? pushDeviceStore.list(member).filter((row) => nativeSender(row.transport) !== null)
+          : []
+        const count = subs.length + native.length
+        if (count === 0 || queue.length + count > MAX_QUEUE || !limits.seenSignal(member)) return
+        const payload = JSON.stringify({ v: 1, kind: 'seen-sync', close: close.map(tagHash), asOf: signal.asOf })
         const topic = nodeCrypto.randomBytes(16).toString('hex')
         const at = now() + seenDelayMs()
         for (const subscription of subs) enqueue({ recipient: member, subscription, payload, topic, signal: true }, at)
+        const nativePayload = JSON.stringify({ kind: 'seen-sync', close, asOf: signal.asOf })
+        for (const subscription of native) enqueue({ recipient: member, subscription, payload: nativePayload, topic, signal: true }, at)
         pump()
       } catch {
         log({ event: 'push', reason: 'falhou' })
@@ -1078,7 +1085,7 @@ function createPushRoutes ({
 
   async function deliverOne ({ recipient, subscription: queued, payload, tag, g, topic, deadline, notice, page, signal }) {
     const subscription = current(recipient, queued)
-    if (subscription === null || (signal === true && !capable(recipient, subscription))) {
+    if (subscription === null || (signal === true && subscription.transport === undefined && !capable(recipient, subscription))) {
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
@@ -1089,7 +1096,7 @@ function createPushRoutes ({
       dropped++
       return log({ event: 'push', reason: 'descartado' })
     }
-    if (subscription.transport !== undefined) return deliverNative(recipient, subscription, JSON.parse(payload), tag, notice)
+    if (subscription.transport !== undefined) return deliverNative(recipient, subscription, JSON.parse(payload), tag, g, notice)
     if (vapid === null) return
     if (tag !== null && capable(recipient, subscription)) {
       const body = JSON.parse(payload)
@@ -1135,12 +1142,19 @@ function createPushRoutes ({
     log({ event: 'push', reason: 'falhou' })
   }
 
-  async function deliverNative (member, row, payload, tag, notice) {
+  function nativeTag (tag, key) {
+    const digest = Buffer.alloc(32)
+    sodium.crypto_generichash(digest, Buffer.from(tag), Buffer.from(key, 'base64url'))
+    return digest.toString('base64url').slice(0, 16)
+  }
+
+  async function deliverNative (member, row, payload, tag, g, notice) {
     const { kind } = payload
-    if (!NATIVE_KINDS.includes(kind) || tag === null) return
-    if (!nativeTermsAccepted(member)) {
+    const silent = kind === 'seen-sync'
+    if (!silent && (!NATIVE_KINDS.includes(kind) || tag === null)) return
+    if (!nativeTermsAccepted(member, silent ? NATIVE_SEEN_TERMS : NATIVE_PUSH_TERMS_FLOOR)) {
       dropped++
-      return log({ event: 'push', kind: kind.startsWith('group') ? 'group' : 'dm', reason: 'termos-pendentes' })
+      return log({ event: 'push', kind: silent ? kind : kind.startsWith('group') ? 'group' : 'dm', reason: 'termos-pendentes' })
     }
     const alert = kind === 'dm'
       ? 'Nova mensagem nas Conversas'
@@ -1149,12 +1163,12 @@ function createPushRoutes ({
         : kind === 'group-private'
           ? 'Nova mensagem num grupo privado'
           : payload.body === null ? 'Nova mensagem num grupo' : 'Nova mensagem em ' + payload.body
-    const digest = Buffer.alloc(32)
-    sodium.crypto_generichash(digest, Buffer.from(tag), Buffer.from(row.key, 'base64url'))
-    const nativeTag = digest.toString('base64url').slice(0, 16)
     let outcome
     try {
-      outcome = await nativeSender(row.transport).send({ token: row.token, alert, tag: nativeTag, kind })
+      const sender = nativeSender(row.transport)
+      outcome = silent
+        ? await sender.sendSilent({ token: row.token, close: payload.close.map((tag) => nativeTag(tag, row.key)), asOf: payload.asOf })
+        : await sender.send({ token: row.token, alert, tag: nativeTag(tag, row.key), kind, g })
     } catch {
       outcome = 'dropped'
     }
@@ -1186,6 +1200,7 @@ module.exports = {
   DM_COOLDOWN_MS,
   GROUP_NOTICE_TERMS_FLOOR,
   NATIVE_PUSH_TERMS_FLOOR,
+  NATIVE_SEEN_TERMS,
   MAX_QUEUE,
   MAX_IN_FLIGHT,
   PUSH_PAD_TO,

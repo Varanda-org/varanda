@@ -67,12 +67,26 @@ function createApns (config = {}) {
   }
 
   async function send (notice) {
+    return deliver(notice, false)
+  }
+
+  async function sendSilent (notice) {
+    return deliver(notice, true)
+  }
+
+  async function deliver (notice, silent) {
     try {
       if (!notice || typeof notice !== 'object') return 'dropped'
-      const { token, alert, tag, kind } = notice
+      const { token, alert, tag, kind, g, close, asOf } = notice
       if (typeof token !== 'string' || token.length < 64 || token.length > 200 || /[^a-f0-9]/.test(token)) return 'dropped'
-      if (typeof alert !== 'string' || !alert.length || alert.length > 200) return 'dropped'
-      if (typeof tag !== 'string' || tag.length !== 16 || !/^[A-Za-z0-9_-]{16}$/.test(tag) || !KINDS.includes(kind)) return 'dropped'
+      if (silent) {
+        if (!Array.isArray(close) || close.length < 1 || close.length > 64 || !Array.from(close).every(tag => typeof tag === 'string' && tag.length === 16 && /^[A-Za-z0-9_-]{16}$/.test(tag))) return 'dropped'
+        if (!Number.isSafeInteger(asOf) || asOf < 0) return 'dropped'
+      } else {
+        if (typeof alert !== 'string' || !alert.length || alert.length > 200) return 'dropped'
+        if (typeof tag !== 'string' || tag.length !== 16 || !/^[A-Za-z0-9_-]{16}$/.test(tag) || !KINDS.includes(kind)) return 'dropped'
+        if (!Number.isSafeInteger(g) || g < 0) return 'dropped'
+      }
       const authorization = 'bearer ' + providerToken()
       const current = connection()
       return await new Promise((resolve) => {
@@ -95,9 +109,9 @@ function createApns (config = {}) {
             ':path': '/3/device/' + token,
             authorization,
             'apns-topic': topic,
-            'apns-push-type': 'alert',
-            'apns-priority': '10',
-            'apns-collapse-id': tag,
+            'apns-push-type': silent ? 'background' : 'alert',
+            'apns-priority': silent ? '5' : '10',
+            ...(silent ? {} : { 'apns-collapse-id': tag }),
             'content-type': 'application/json'
           })
           let status = 0
@@ -123,7 +137,9 @@ function createApns (config = {}) {
             try { reason = JSON.parse(Buffer.concat(chunks).toString()).reason } catch {}
             finish(status === 410 && reason === 'Unregistered' ? 'gone' : 'dropped')
           })
-          stream.end(JSON.stringify({ aps: { alert: { body: alert }, sound: 'default', 'thread-id': kind }, k: kind, t: tag }))
+          stream.end(JSON.stringify(silent
+            ? { aps: { 'content-available': 1 }, k: 'seen-sync', c: close, a: asOf }
+            : { aps: { alert: { body: alert }, sound: 'default', 'thread-id': kind }, k: kind, t: tag, g }))
         } catch {
           finish('dropped')
           if (stream) stream.destroy()
@@ -139,7 +155,7 @@ function createApns (config = {}) {
     session = null
   }
 
-  return { send, close }
+  return { send, sendSilent, close }
 }
 
 module.exports = { createApns }

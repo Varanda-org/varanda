@@ -13,7 +13,7 @@ const account = {
   private_key: keys.privateKey.export({ format: 'pem', type: 'pkcs8' }),
   token_uri: 'https://oauth.example.test/token'
 }
-const notice = { token: 'test_device:123-ABC', alert: 'Você recebeu uma mensagem', tag: 'abcdefghijklmn_-', kind: 'dm' }
+const notice = { token: 'test_device:123-ABC', alert: 'Você recebeu uma mensagem', tag: 'abcdefghijklmn_-', kind: 'dm', g: 1800000000123 }
 const accessToken = crypto.randomBytes(32).toString('base64url')
 const fcmError = { '@type': 'type.googleapis.com/google.firebase.fcm.v1.FcmError', errorCode: 'UNREGISTERED' }
 
@@ -78,6 +78,7 @@ test('FCM rejects invalid notices before OAuth or delivery', async t => {
   for (const token of ['', 'x'.repeat(4097), 'contains space', 'a/b', 'abc\n', 42]) invalid.push({ ...notice, token })
   for (const alert of ['', 'x'.repeat(201), null]) invalid.push({ ...notice, alert })
   for (const tag of ['short', 'x'.repeat(17), 'abcdefghijklmn_\n']) invalid.push({ ...notice, tag })
+  for (const g of [undefined, null, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) invalid.push({ ...notice, g })
   invalid.push({ ...notice, kind: 'other' })
   for (const input of invalid) t.is(await sender.send(input), 'dropped')
   t.is(requests.length, 0)
@@ -100,10 +101,10 @@ test('FCM exchanges a verifiable RS256 assertion and sends only the specified pa
     delete body.message.token
     t.alike(body.message, {
       notification: { body: notice.alert },
-      android: { collapse_key: notice.tag, priority: 'high', notification: { tag: notice.tag, channel_id: 'conversas' } },
-      data: { k: kind, t: notice.tag }
+      android: { collapse_key: notice.tag, priority: 'high', notification: { tag: notice.tag, channel_id: 'conversas', event_time: new Date(notice.g).toISOString() } },
+      data: { k: kind, t: notice.tag, g: String(notice.g) }
     })
-    t.alike(Object.keys(body.message.data).sort(), ['k', 't'])
+    t.alike(Object.keys(body.message.data).sort(), ['g', 'k', 't'])
   }
   t.is(tokens.length, 1)
   t.is(tokens[0].method, 'POST')
@@ -257,4 +258,57 @@ test('FCM never logs device tokens or credentials during delivery', async t => {
   t.absent(logged.includes(accessToken), 'no OAuth token logged')
   t.absent(logged.includes(new URLSearchParams(tokens[0].body).get('assertion')), 'no JWT logged')
   t.absent(logged.includes(account.private_key), 'no private key logged')
+})
+
+test('FCM silent sends only data and shares alert OAuth and connection', async t => {
+  const { sender, requests, tokens, sockets } = await setup(t)
+  const close = [notice.tag, '0123456789ABCDEF']
+  t.is(await sender.send(notice), 'ok')
+  for (const asOf of [0, notice.g, Number.MAX_SAFE_INTEGER]) {
+    t.is(await sender.sendSilent({ token: notice.token, close, asOf, alert: 'ignored', sender: 'ignored', group: 'ignored' }), 'ok')
+    const request = requests.at(-1)
+    t.is(request.method, 'POST')
+    t.is(request.url, '/v1/projects/varanda-test/messages:send')
+    t.is(request.headers.authorization, 'Bearer ' + accessToken)
+    t.is(request.headers['content-type'], 'application/json')
+    t.alike(JSON.parse(request.body), {
+      message: {
+        token: notice.token,
+        data: { k: 'seen-sync', c: close.join(','), a: String(asOf) },
+        android: { priority: 'normal', collapse_key: 'seen-sync' }
+      }
+    })
+  }
+  t.is(tokens.length, 1)
+  t.is(sockets.size, 1)
+})
+
+test('FCM rejects invalid silent input before OAuth or delivery', async t => {
+  const { sender, requests, tokens } = await setup(t)
+  const silent = { token: notice.token, close: [notice.tag], asOf: notice.g }
+  const invalid = [undefined, null, {}, 'notice']
+  for (const close of [undefined, null, [], Array(65).fill(notice.tag), Array(1), [null], [1], ['short'], [notice.tag + '\n'], [notice.tag, 'bad']]) invalid.push({ ...silent, close })
+  for (const asOf of [undefined, null, -1, 0.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) invalid.push({ ...silent, asOf })
+  for (const token of ['', 'x'.repeat(4097), 'a/b', 'contains space', notice.token + '\n', 42]) invalid.push({ ...silent, token })
+  for (const input of invalid) t.is(await sender.sendSilent(input), 'dropped')
+  t.is(requests.length, 0)
+  t.is(tokens.length, 0)
+  t.is(await sender.sendSilent({ ...silent, close: Array(64).fill(notice.tag) }), 'ok')
+})
+
+test('FCM silent outcomes and OAuth or delivery timeout never retry', async t => {
+  const cases = [[404, { error: { status: 'NOT_FOUND', details: [fcmError] } }, 'gone'], [404, { error: { status: 'NOT_FOUND' } }, 'dropped'], [400, { error: { status: 'NOT_FOUND', details: [fcmError] } }, 'dropped'], [500, {}, 'dropped']]
+  const { sender, requests, tokens } = await setup(t, { message: (request, count) => respond(request, cases[count - 1][0], cases[count - 1][1]) })
+  const silent = { token: notice.token, close: [notice.tag], asOf: notice.g }
+  for (const [, , outcome] of cases) t.is(await sender.sendSilent(silent), outcome)
+  t.is(requests.length, cases.length)
+  t.is(tokens.length, 1)
+  const oauth = await setup(t, { oauth: () => {}, timeoutMs: 100 })
+  t.is(await oauth.sender.sendSilent(silent), 'dropped')
+  t.is(oauth.tokens.length, 1)
+  t.is(oauth.requests.length, 0)
+  const delivery = await setup(t, { message: () => {}, timeoutMs: 100 })
+  t.is(await delivery.sender.sendSilent(silent), 'dropped')
+  t.is(delivery.tokens.length, 1)
+  t.is(delivery.requests.length, 1)
 })

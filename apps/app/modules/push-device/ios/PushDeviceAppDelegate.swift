@@ -35,7 +35,20 @@ public class PushDeviceAppDelegate: ExpoAppDelegateSubscriber, UNUserNotificatio
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    completionHandler([])
+    let info = notification.request.content.userInfo
+    if info["k"] as? String == "seen-sync" {
+      PushDeviceState.seenSync(info) { _ in completionHandler([]) }
+    } else {
+      completionHandler([])
+    }
+  }
+
+  public func application(
+    _ application: UIApplication,
+    didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+    fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+  ) {
+    PushDeviceState.seenSync(userInfo, completion: completionHandler)
   }
 
   public func userNotificationCenter(
