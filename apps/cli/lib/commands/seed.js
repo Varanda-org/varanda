@@ -73,8 +73,15 @@ const WS_START_HOLD_MS = 8000
 async function listenWs (flags, seeder) {
   // Loaded only with --ws-port: without it the ws module is never touched.
   const { startSeedWs, DEFAULT_HOST: WS_HOST } = require('../seed-ws')
+  const { createOgTranscoder } = require('../og-transcode')
+  const transcoder = flags.postsOrigin || flags.publicOrigin ? createOgTranscoder() : null
+  if (transcoder) {
+    transcoder.ready().then(({ avif }) => {
+      print(flags, { event: 'photo-preview', avif }, 'prévia de fotos: avif ' + safe(avif))
+    })
+  }
   try {
-    return await startSeedWs({
+    const ws = await startSeedWs({
       host: flags.wsHost || WS_HOST,
       port: flags.wsPort,
       seeder,
@@ -85,9 +92,17 @@ async function listenWs (flags, seeder) {
       triageToken: flags.triageToken,
       publicOrigin: flags.publicOrigin ?? null,
       postsOrigin: flags.postsOrigin ?? null,
+      transcoder,
       startHoldMs: WS_START_HOLD_MS
     })
+    return {
+      ...ws,
+      async close () {
+        try { await ws.close() } finally { if (transcoder) await transcoder.close() }
+      }
+    }
   } catch (err) {
+    if (transcoder) await transcoder.close()
     if (err.code === 'EADDRINUSE') throw new Error('porta em uso')
     throw new Error('não foi possível abrir o websocket (' + safe(err.code || err.message) + ')')
   }

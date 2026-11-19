@@ -14,6 +14,7 @@
 // throws: a malformed field renders as absent.
 
 const { displayText } = require('@varanda/rpc')
+const { coverSize } = require('./og-transcode')
 
 const MAX_PHOTOS = 4
 // packages/core/lib/records.js MAX_MEDIA_PER_POST: a longer list is not a
@@ -189,10 +190,11 @@ function coverOf (cover) {
 }
 
 // The one og:image: the share cover (a JPEG the author's device made for
-// crawlers), else the first photo a crawler can render, else the brand
-// card. Sizes come from the peer's descriptor and are named only when both
-// are believable.
-function ogImage (origin, base, photos, cover) {
+// crawlers), else the seeder's automatic cover, else the first photo a
+// crawler can render, else the brand card. Sizes come from the peer's
+// descriptor and are named only when both are believable.
+function ogImage (origin, base, photos, cover, autoCover) {
+  cover = cover || (autoCover && coverSize(autoCover.width, autoCover.height))
   if (cover !== null) {
     return { url: origin + base + '/capa', mime: 'image/jpeg', width: cover.width, height: cover.height, alt: photos.video ? 'Capa do vídeo' : 'Foto da publicação' }
   }
@@ -352,7 +354,7 @@ function avatarHtml (author, name, username) {
   return '<div class="avatar a' + stripe + '" aria-hidden="true">' + (initials !== '' ? esc(initials) : ICON_USER) + '</div>\n'
 }
 
-function render (origin, author, seq, record, rawName, rawUsername, rawCover) {
+function render (origin, author, seq, record, rawName, rawUsername, rawCover, autoCover) {
   const post = isPlainObject(record) ? record : {}
   const name = cleanCut(rawName, MAX_NAME_CHARS, false).trim()
   const username = cleanCut(rawUsername, MAX_USERNAME_CHARS, false).trim()
@@ -374,7 +376,7 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover) {
     metaTag('property', 'og:title', ogTitle) +
     metaTag('property', 'og:description', description)
   if (imageOrigin !== '') {
-    const image = ogImage(imageOrigin, base, photos, coverOf(rawCover))
+    const image = ogImage(imageOrigin, base, photos, coverOf(rawCover), coverOf(autoCover))
     head += metaTag('property', 'og:url', imageOrigin + base) +
       metaTag('property', 'og:image', image.url) +
       metaTag('property', 'og:image:type', image.mime)
@@ -429,18 +431,19 @@ function render (origin, author, seq, record, rawName, rawUsername, rawCover) {
   return shell(head, html)
 }
 
-// renderPostPage({ origin, author, seq, record, name, username, cover }) ->
+// renderPostPage({ origin, author, seq, record, name, username, cover, autoCover }) ->
 // string, a full HTML document. `origin` is the installation's https origin
 // (only for the absolute og:url and og:image); `author` a lowercase hex64 and
 // `seq` a safe integer >= 1, else the fallback page that only points at '/'.
 // `cover` is { width, height } of the share cover /capa serves, or absent;
-// it changes only og:image, never the body.
+// `autoCover` is the source size of a seeder cover, behind the device cover.
+// Both change only og:image, never the body.
 function renderPostPage (args) {
   try {
     if (!isPlainObject(args)) return FALLBACK
-    const { origin, author, seq, record, name, username, cover } = args
+    const { origin, author, seq, record, name, username, cover, autoCover } = args
     if (!validTarget(author, seq)) return FALLBACK
-    return render(origin, author, seq, record, name, username, cover)
+    return render(origin, author, seq, record, name, username, cover, autoCover)
   } catch {
     return FALLBACK
   }

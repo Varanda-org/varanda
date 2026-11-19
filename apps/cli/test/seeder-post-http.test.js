@@ -29,6 +29,8 @@ const {
 const { mediaHeader } = require('@varanda/core/lib/media')
 const { startSeedWs } = require('../lib/seed-ws')
 const avifSamples = require('../../../packages/rpc/test/helpers/avif-samples')
+const { mediaBounds } = require('@varanda/rpc')
+const { createFakeOgTranscoder, jpegHeader } = require('./helpers/fake-og-transcode')
 
 const ORIGIN = 'https://varanda.test'
 const ROBOTS = 'noindex, nofollow, noarchive'
@@ -845,4 +847,340 @@ test('the share cover from a stub seeder: an answer without a cover, or with one
   t.is(shown.status, 200, 'a share cover is served')
   t.alike(shown.body, COVER)
   t.ok((await get(server.port, '/p/' + hex + '/5')).body.toString().includes('content="' + ORIGIN + '/p/' + hex + '/5/capa"'), 'and named')
+})
+
+function transcodeFixture () {
+  const hex = 'ab'.repeat(32)
+  const core = 'cd'.repeat(32)
+  const first = avifDescriptor(core, 1, AVIF)
+  const original = { record: { type: 'post', text: 'foto', at: at(1), media: [first] }, shareSeq: 3 }
+  const state = { shown: original, source: AVIF, lookups: 0, reads: 0 }
+  const seeder = {
+    async postPublic () { state.lookups++; return state.shown },
+    async mediaRead () {
+      state.reads++
+      const bytes = state.source
+      return { bytes: bytes.length, blocks: (async function * () { yield bytes })() }
+    }
+  }
+  return { hex, core, first, original, state, seeder, base: '/p/' + hex + '/2' }
+}
+
+const TRANSCODE_WIDE = { transcodeRate: 1000, transcodeBurst: 1000, pageRate: 1000, pageBurst: 1000 }
+
+async function transcodeServer (t, fixture, transcoder, over = {}) {
+  const server = await startSeedWs({ port: 0, seeder: fixture.seeder, postsOrigin: ORIGIN, postsLimits: TRANSCODE_WIDE, transcoder, ...over })
+  t.teardown(() => server.close(), { force: true })
+  if (transcoder) t.teardown(() => transcoder.close(), { force: true })
+  return (suffix = '', method = 'GET') => get(server.port, fixture.base + suffix, { method })
+}
+
+test('automatic cover: AVIF GET and HEAD re-read the source even when conversion is cached; preview stays JSON', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  const { state, first } = fixture
+  let conversions = 0
+  const cache = new Map()
+  const transcoder = createFakeOgTranscoder({
+    convert (input) {
+      if (!cache.has(input.sha256)) {
+        conversions++
+        cache.set(input.sha256, jpegHeader(input.width, input.height))
+      }
+      return cache.get(input.sha256)
+    }
+  })
+  const request = await transcodeServer(t, fixture, transcoder)
+  const page = (await request()).body.toString()
+  t.ok(page.includes('<meta property="og:image" content="' + ORIGIN + fixture.base + '/capa">'))
+  t.is(transcoder.calls.length, 0, 'rendering never transcodes')
+  t.is(state.reads, 0, 'rendering never reads media')
+  const beforePreview = (await request('/previa')).body
+  const firstGet = await request('/capa')
+  t.is(firstGet.status, 200)
+  t.alike(firstGet.body, jpegHeader(16, 16))
+  t.is(firstGet.headers['content-type'], 'image/jpeg')
+  t.is(firstGet.headers['cache-control'], 'no-store')
+  t.is(firstGet.headers['x-content-type-options'], 'nosniff')
+  t.is(firstGet.headers['referrer-policy'], 'no-referrer')
+  t.is(firstGet.headers['x-robots-tag'], ROBOTS)
+  t.alike(transcoder.calls[0], { bytes: AVIF, mime: first.mime, sha256: first.sha256, srcWidth: 16, srcHeight: 16, width: 16, height: 16 })
+  t.alike(shape(await request('/capa')), shape(firstGet), 'cached GET')
+  const head = await request('/capa', 'HEAD')
+  t.is(head.status, 200)
+  t.is(head.body.length, 0)
+  t.alike(shape(head).headers, shape(firstGet).headers, 'HEAD keeps the headers')
+  t.is(conversions, 1, 'only one conversion')
+  t.is(state.reads, 3, 'source read on both GETs and HEAD')
+  t.is(state.lookups, 8, 'page, preview and two lookups per cover request')
+  t.ok((await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), 'known success remains eligible')
+  const preview = await request('/previa')
+  t.is(preview.headers['content-type'], 'application/json; charset=utf-8')
+  t.alike(preview.body, beforePreview)
+  t.is(JSON.parse(preview.body).post.photoCount, 1)
+  state.source = Buffer.from(AVIF)
+  state.source[state.source.length - 1] ^= 1
+  t.is((await request('/capa')).status, 404, 'cached JPEG cannot bypass source hash')
+  t.is(transcoder.calls.length, 3, 'bad hash never reaches the transcoder')
+  t.absent(transcoder.refused(first.sha256), 'bad source hash does not poison the descriptor')
+  state.shown = null
+  t.is((await request('/capa')).status, 404, 'cached JPEG cannot outlive the share')
+  state.shown = { ...fixture.original, cover: coverDescriptor(fixture.core, 2, COVER), coverSeq: 4 }
+  state.source = COVER
+  const device = await request('/capa')
+  t.alike(device.body, COVER, 'device cover wins after a cached automatic cover')
+  t.is(transcoder.calls.length, 3, 'device cover never transcodes')
+  t.ok((await request()).body.toString().includes('<meta property="og:image:width" content="120">'))
+})
+
+test('automatic cover: every miss and every change during conversion is the same 404', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  const { state, original, first } = fixture
+  let during = () => {}
+  let refused = false
+  const transcoder = createFakeOgTranscoder({ convert () { during(); return refused ? null : jpegHeader(16, 16) } })
+  const request = await transcodeServer(t, fixture, transcoder)
+  state.shown = null
+  const missing = shape(await request('/capa'))
+  t.is(missing.status, 404)
+  t.is(Buffer.from(missing.body, 'hex').toString(), 'não encontrado\n')
+  t.is(state.reads, 0, 'not shared: no source lookup')
+  const changes = {
+    withdrawn: () => { state.shown = null },
+    deleted: () => { state.shown = null },
+    blocked: () => { state.shown = null },
+    reshared: () => { state.shown = { ...original, shareSeq: 5 } },
+    'different first descriptor': () => { state.shown = { ...original, record: { ...original.record, media: [{ ...first, start: 2 }] } } },
+    'new device cover': () => { state.shown = { ...original, cover: coverDescriptor(fixture.core, 2, COVER), coverSeq: 4 } }
+  }
+  for (const [label, change] of Object.entries(changes)) {
+    state.shown = original
+    during = change
+    t.alike(shape(await request('/capa')), missing, label)
+  }
+  during = () => {}
+  state.source = avifSamples.libavif.opaque
+  const mismatch = avifDescriptor(fixture.core, 1, state.source)
+  mismatch.width = mediaBounds(state.source, mismatch.mime).width + 1
+  state.shown = { ...original, record: { ...original.record, media: [mismatch] } }
+  const calls = transcoder.calls.length
+  t.alike(shape(await request('/capa')), missing, 'size mismatch')
+  t.is(transcoder.calls.length, calls, 'size mismatch checked before conversion')
+  state.shown = { ...original, record: { ...original.record, media: [descriptor(fixture.core, 1, COVER), first] } }
+  const reads = state.reads
+  t.alike(shape(await request('/capa')), missing, 'small JPEG first photo, even with AVIF second')
+  t.is(state.reads, reads, 'small JPEG never read for conversion')
+  state.shown = original
+  state.source = AVIF
+  refused = true
+  t.alike(shape(await request('/capa')), missing, 'refused hash')
+  t.absent((await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), 'a known refusal is not advertised')
+  for (const over of [{ postsOrigin: null }, { postsOrigin: null, publicOrigin: ORIGIN }]) {
+    const off = await transcodeServer(t, fixture, transcoder, over)
+    const lookups = state.lookups
+    t.alike(shape(await off('/capa')), missing, 'posts origin unset')
+    t.is(state.lookups, lookups, 'origin checked before lookup')
+  }
+  const legacy = await transcodeServer(t, fixture, null)
+  t.alike(shape(await legacy('/capa')), missing, 'null transcoder')
+  t.absent((await legacy()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), 'legacy page')
+})
+
+test('automatic cover page waits for AVIF readiness and capability, safe sizes and no known refusal', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  let ready
+  const gate = new Promise((resolve) => { ready = resolve })
+  t.teardown(() => ready({ avif: false }), { force: true })
+  const transcoder = createFakeOgTranscoder({ bytes: jpegHeader(16, 16), probe: () => gate })
+  const request = await transcodeServer(t, fixture, transcoder)
+  const advertises = async () => (await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"')
+  t.absent(await advertises(), 'not ready')
+  ready({ avif: true })
+  t.ok(await advertises(), 'ready')
+  const canDo = transcoder.canDo
+  transcoder.canDo = () => false
+  t.absent(await advertises(), 'unsupported MIME')
+  transcoder.canDo = canDo
+  const refused = transcoder.refused
+  transcoder.refused = () => true
+  t.absent(await advertises(), 'known refusal')
+  transcoder.refused = refused
+  fixture.state.shown = { ...fixture.original, record: { ...fixture.original.record, media: [{ ...fixture.first, width: 1.5 }] } }
+  t.absent(await advertises(), 'unsafe width')
+  fixture.state.shown = fixture.original
+  const unavailable = await transcodeServer(t, fixture, createFakeOgTranscoder({ avif: false }))
+  t.absent((await unavailable()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), 'avif false')
+  t.is(transcoder.calls.length, 0, 'no page transcodes')
+  t.is(fixture.state.reads, 0, 'no page reads media')
+})
+
+test('automatic cover page recovers after a failed startup and a later background probe', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  let time = 0
+  let probes = 0
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release({ avif: false }), { force: true })
+  const transcoder = createFakeOgTranscoder({
+    now: () => time,
+    probe () { return ++probes === 1 ? null : gate }
+  })
+  const request = await transcodeServer(t, fixture, transcoder)
+  const advertises = async () => (await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"')
+  t.absent(await advertises(), 'startup failed')
+  t.is(probes, 1, 'backoff suppresses a new probe')
+  time += 1000
+  t.absent(await advertises(), 'page returns while the next probe is pending')
+  t.is(probes, 2, 'page triggered a background probe')
+  t.absent(await advertises(), 'another page also returns without waiting')
+  t.is(probes, 2, 'only one probe in flight')
+  release({ avif: true })
+  await until(() => transcoder.canDo('image/avif'), { name: 'AVIF pronto' })
+  t.ok(await advertises(), 'later success is visible without restarting the seeder')
+  t.is(transcoder.calls.length, 0, 'no page converts a photo')
+  t.is(fixture.state.reads, 0, 'no page reads media')
+})
+
+test('automatic cover: pre-check refusals stop naming an animated or mismatched first photo', async (t) => {
+  await testnet(t)
+  const chunk = (name, data) => {
+    const header = Buffer.alloc(8)
+    header.writeUInt32BE(data.length)
+    header.write(name, 4)
+    return Buffer.concat([header, data, Buffer.alloc(4)])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(16, 0)
+  ihdr.writeUInt32BE(16, 4)
+  ihdr[8] = 8
+  ihdr[9] = 6
+  const actl = Buffer.alloc(8)
+  actl.writeUInt32BE(2)
+  const frame = (seq) => {
+    const data = Buffer.alloc(26)
+    data.writeUInt32BE(seq)
+    data.writeUInt32BE(16, 4)
+    data.writeUInt32BE(16, 8)
+    return chunk('fcTL', data)
+  }
+  const animated = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('acTL', actl), frame(0),
+    chunk('IDAT', Buffer.alloc(262144)), frame(1),
+    chunk('fdAT', Buffer.from([0, 0, 0, 2, 1])), chunk('IEND', Buffer.alloc(0))
+  ])
+  t.alike(mediaBounds(animated, 'image/png'), { width: 16, height: 16, frames: 2 })
+  const oversized = Buffer.concat([jpegHeader(16, 16), Buffer.alloc(262144)])
+  for (const [label, source, mime, width, extraBytes = 0] of [
+    ['animated PNG', animated, 'image/png', 16],
+    ['declared size mismatch', oversized, 'image/jpeg', 32],
+    ['declared byte count mismatch', oversized, 'image/jpeg', 16, 1],
+    ['declared MIME mismatch', animated, 'image/jpeg', 16]
+  ]) {
+    const fixture = transcodeFixture()
+    const first = { ...descriptor(fixture.core, 1, source), mime, width, height: 16, bytes: source.length + extraBytes }
+    fixture.state.source = source
+    fixture.state.shown = { ...fixture.original, record: { ...fixture.original.record, media: [first] } }
+    const transcoder = createFakeOgTranscoder({ bytes: jpegHeader(16, 16) })
+    const request = await transcodeServer(t, fixture, transcoder)
+    t.ok((await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"'), label + ': initially eligible')
+    t.is((await request('/capa')).status, 404, label + ': first cover rejected')
+    t.absent(transcoder.refused(first.sha256), label + ': the bytes themselves are not refused')
+    const page = (await request()).body.toString()
+    t.absent(page.includes('content="' + ORIGIN + fixture.base + '/capa"'), label + ': no longer names a cover')
+    t.ok(page.includes('<meta property="og:image" content="' + ORIGIN + fixture.base + '/foto/1">'), label + ': previous image picker')
+    t.is(transcoder.calls.length, 0, label + ': rejected before conversion')
+  }
+
+  const victim = transcodeFixture()
+  const transcoder = createFakeOgTranscoder({ bytes: jpegHeader(16, 16) })
+  const right = { ...descriptor(victim.core, 1, oversized), mime: 'image/jpeg', width: 16, height: 16 }
+  for (const [label, declared, source] of [
+    ['a wrong size', { ...right, width: 32 }, oversized],
+    ['other bytes', right, Buffer.concat([oversized, Buffer.alloc(1)])]
+  ]) {
+    const liar = { ...transcodeFixture(), hex: 'ef'.repeat(32), base: '/p/' + 'ef'.repeat(32) + '/2' }
+    liar.state.source = source
+    liar.state.shown = { ...liar.original, record: { ...liar.original.record, media: [declared] } }
+    t.is((await (await transcodeServer(t, liar, transcoder))('/capa')).status, 404, 'another diary declaring ' + label + ' is refused')
+  }
+  victim.state.source = oversized
+  victim.state.shown = { ...victim.original, record: { ...victim.original.record, media: [right] } }
+  const request = await transcodeServer(t, victim, transcoder)
+  t.ok((await request()).body.toString().includes('content="' + ORIGIN + victim.base + '/capa"'), 'the same bytes declared right keep their cover')
+  t.is((await request('/capa')).status, 200, 'and it is served')
+})
+
+test('automatic cover: a cached success before listener startup keeps being named', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  const transcoder = createFakeOgTranscoder({ bytes: jpegHeader(16, 16) })
+  await transcoder.transcode({ ...fixture.first, bytes: AVIF, srcWidth: 16, srcHeight: 16, width: 16, height: 16 })
+  t.ok(transcoder.known(fixture.first.sha256))
+  t.absent(transcoder.refused(fixture.first.sha256))
+  const request = await transcodeServer(t, fixture, transcoder)
+  const advertises = async () => (await request()).body.toString().includes('content="' + ORIGIN + fixture.base + '/capa"')
+  t.ok(await advertises(), 'existing cached success is eligible')
+  t.is((await request('/capa')).status, 200)
+  t.ok(await advertises(), 'converted cover keeps being named')
+})
+
+test('automatic cover budgets refuse before lookup and keep pending work in its slot', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  const transcoder = createFakeOgTranscoder({ bytes: jpegHeader(16, 16) })
+  const limited = await transcodeServer(t, fixture, transcoder, { postsLimits: { transcodeRate: 0.001, transcodeBurst: 1 } })
+  t.is((await limited('/capa')).status, 200)
+  const lookups = fixture.state.lookups
+  const exhausted = shape(await limited('/capa'))
+  t.is(exhausted.status, 404)
+  t.is(fixture.state.lookups, lookups, 'empty bucket checked before lookup')
+  t.is((await limited()).status, 200, 'page budget independent')
+  t.ok(JSON.parse((await limited('/previa')).body).post, 'preview budget independent')
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  t.teardown(() => release(), { force: true })
+  const slowTranscoder = createFakeOgTranscoder({ convert: async () => { await gate; return jpegHeader(16, 16) } })
+  const slow = await transcodeServer(t, fixture, slowTranscoder, { postsLimits: { ...TRANSCODE_WIDE, transcodeMaxInFlight: 1, photoDeadlineMs: 100 } })
+  const pending = slow('/capa')
+  await until(() => slowTranscoder.calls.length === 1, { name: 'conversão iniciada' })
+  const beforeFull = fixture.state.lookups
+  t.alike(shape(await slow('/capa')), exhausted, 'full slot')
+  t.is(fixture.state.lookups, beforeFull, 'full slot checked before lookup')
+  t.alike(shape(await pending), exhausted, 'deadline')
+  t.alike(shape(await slow('/capa')), exhausted, 'slot stays held after deadline')
+  t.is(fixture.state.lookups, beforeFull, 'pending conversion still owns the slot')
+  release()
+  await until(async () => (await slow('/capa')).status === 200, { name: 'vaga de conversão liberada' })
+  fixture.seeder.postPublic = async () => { throw new Error('lookup') }
+  t.alike(shape(await slow('/capa')), exhausted, 'lookup exception')
+})
+
+test('automatic cover: an oversized JPEG and video poster use coverSize without changing body photos', async (t) => {
+  await testnet(t)
+  const fixture = transcodeFixture()
+  const source = Buffer.concat([jpegHeader(2048, 1536), Buffer.alloc(262144)])
+  const first = { ...descriptor(fixture.core, 1, source), width: 2048, height: 1536 }
+  fixture.state.source = source
+  const transcoder = createFakeOgTranscoder({ convert: (input) => jpegHeader(input.width, input.height) })
+  const request = await transcodeServer(t, fixture, transcoder)
+  for (const media of [[first], [first, videoDescriptor(fixture.core, 10, VIDEO)]]) {
+    fixture.state.shown = { ...fixture.original, record: { ...fixture.original.record, media } }
+    const page = (await request()).body.toString()
+    t.ok(page.includes('<meta property="og:image" content="' + ORIGIN + fixture.base + '/capa">'))
+    t.ok(page.includes('<meta property="og:image:width" content="1200">'))
+    t.ok(page.includes('<meta property="og:image:height" content="900">'))
+    t.ok(page.includes('src="' + fixture.base + '/foto/1"'), 'body still names the original photo')
+    const cover = await request('/capa')
+    t.is(cover.status, 200)
+    t.alike(cover.body, jpegHeader(1200, 900))
+    const call = transcoder.calls[transcoder.calls.length - 1]
+    t.is(call.srcWidth, 2048)
+    t.is(call.srcHeight, 1536)
+    t.is(call.width, 1200)
+    t.is(call.height, 900)
+  }
 })

@@ -11,6 +11,7 @@ const { feira, garden: gardenRules, mediaBounds } = require('@varanda/rpc')
 const { renderListingPage, renderNotFound, renderSitemap } = require('./feira-page')
 const { renderPostPage, postPreviewData, postPhotos } = require('./post-page')
 const { renderLinkPage } = require('./link-page')
+const { needsTranscode, coverSize } = require('./og-transcode')
 
 // WebSocket entry of `seed --ws-port` (docs/protocol.md section 7): a phase 0
 // spike that lets a browser-held member replicate through the seeder. Each
@@ -602,6 +603,9 @@ const LINK_DEADLINE_MS = 5000
 const LINK_CSP = "default-src 'none'; img-src https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 const POST_PHOTO_MAX_IN_FLIGHT = 4
 const POST_PHOTO_DEADLINE_MS = 10000
+const POST_TRANSCODE_MAX_IN_FLIGHT = 2
+const POST_TRANSCODE_RATE = 2
+const POST_TRANSCODE_BURST = 4
 const POST_PREVIA_MAX_BODY = 65536
 const POST_PREVIA_MAX_IN_FLIGHT = 4
 const POST_PREVIA_RATE = 8
@@ -911,7 +915,7 @@ function socketCap ({ maxExternal, mediaInFlight, indexInFlight, sockets = null 
   return Math.max(MAX_SOCKETS, maxExternal + mediaInFlight + indexInFlight + 64)
 }
 
-function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, linkLimits = {}, startHoldMs = 0 }) {
+function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media = {}, index = {}, sockets = null, triageToken = null, post = {}, publicOrigin = null, feiraLimits = {}, postsOrigin = null, postsLimits = {}, linkLimits = {}, transcoder = null, startHoldMs = 0 }) {
   if (publicOrigin !== null && publicOrigin !== undefined && (typeof publicOrigin !== 'string' || !PUBLIC_ORIGIN_RE.test(publicOrigin))) {
     throw new TypeError('publicOrigin inválido')
   }
@@ -920,6 +924,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   }
   const origin = publicOrigin || null
   const postsOn = postsOrigin || null
+  if (transcoder) Promise.resolve().then(() => transcoder.ready()).catch(() => {})
+  const postTranscodeMaxInFlight = postsLimits.transcodeMaxInFlight ?? POST_TRANSCODE_MAX_IN_FLIGHT
+  const takePostTranscodeToken = tokenBucket(postsLimits.transcodeRate ?? POST_TRANSCODE_RATE, postsLimits.transcodeBurst ?? POST_TRANSCODE_BURST)
+  let postTranscodeInFlight = 0
   const linkMaxInFlight = linkLimits.maxInFlight ?? LINK_MAX_IN_FLIGHT
   const linkDeadlineMs = linkLimits.deadlineMs ?? LINK_DEADLINE_MS
   const takeLinkToken = tokenBucket(linkLimits.rate ?? LINK_RATE, linkLimits.burst ?? LINK_BURST)
@@ -1722,13 +1730,16 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // The bytes of the still image descriptor `d` of diary `hex`, read through
   // mediaRead and checked against the descriptor (size, sha256) and the
   // declared mime (IMAGE_MAGIC), or null. Shared by the Feira and post photos.
-  async function descriptorBytes (hex, d, isClosed) {
+  async function descriptorBytes (hex, d, isClosed, refuse = () => {}) {
+    const rejected = () => { refuse(); return null }
     if (typeof seeder.mediaRead !== 'function') return null
-    if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return null
-    if (!Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > MEDIA_MAX_BLOCKS * MEDIA_BLOCK_BYTES) return null
+    if (!d || typeof d !== 'object' || !Object.prototype.hasOwnProperty.call(IMAGE_MAGIC, d.mime)) return rejected()
+    if (!Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > MEDIA_MAX_BLOCKS * MEDIA_BLOCK_BYTES) return rejected()
     if (typeof d.sha256 !== 'string' || !HEX64_RE.test(d.sha256)) return null
     const read = await seeder.mediaRead(hex, d.core, d.start, d.blocks)
-    if (!read || read.bytes !== d.bytes || !read.blocks || typeof read.blocks[Symbol.asyncIterator] !== 'function') return null
+    if (!read || isClosed()) return null
+    if (read.bytes !== d.bytes) return rejected()
+    if (!read.blocks || typeof read.blocks[Symbol.asyncIterator] !== 'function') return null
     const parts = []
     let total = 0
     const it = read.blocks[Symbol.asyncIterator]()
@@ -1739,7 +1750,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         if (step.done) break
         if (!(step.value instanceof Uint8Array)) return null
         total += step.value.byteLength
-        if (total > d.bytes) return null
+        if (total > d.bytes) return rejected()
         parts.push(step.value)
       }
     } finally {
@@ -1747,9 +1758,11 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
         if (typeof it.return === 'function') it.return().catch(() => {})
       } catch {}
     }
-    if (total !== d.bytes) return null
+    if (isClosed()) return null
+    if (total !== d.bytes) return rejected()
     const bytes = Buffer.concat(parts, total)
-    if (sha256(bytes).toString('hex') !== d.sha256 || !IMAGE_MAGIC[d.mime](bytes)) return null
+    if (sha256(bytes).toString('hex') !== d.sha256) return null
+    if (!IMAGE_MAGIC[d.mime](bytes)) return rejected()
     return { bytes, mime: d.mime }
   }
 
@@ -1834,6 +1847,22 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return { width: shown.cover.width, height: shown.cover.height }
   }
 
+  function automaticCover (hex, shown) {
+    const first = postPhotos(shown.record).items[0]
+    if (!transcoder || !transcoder.avif() || !needsTranscode(first) || !transcoder.canDo(first.mime) ||
+      !Number.isSafeInteger(first.width) || !Number.isSafeInteger(first.height) ||
+      transcoder.refused(first.sha256) || transcoder.refused(coverRefusalKey(hex, first))) return null
+    return { width: first.width, height: first.height }
+  }
+
+  // A pre-check refusal is about what one diary declares and stores, not about
+  // the bytes: keyed by hash alone, another diary declaring a known hash with a
+  // wrong size, or pointing it at other bytes, would switch off the cover of
+  // every post that carries the real ones.
+  function coverRefusalKey (hex, d) {
+    return [hex, d.core, d.start, d.blocks, d.sha256, d.mime, d.width + 'x' + d.height, d.bytes].join('/')
+  }
+
   async function servePostPage (req, res, hex, digits) {
     if (postsOn === null || typeof seeder.postPublic !== 'function') return postAway(res, hex, digits)
     const seq = Number(digits)
@@ -1851,7 +1880,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     const answer = await Promise.race([late, slotted(res, postPageDeadlineMs * 2, () => { postPageInFlight-- }, async () => {
       const shown = shownPost(await seeder.postPublic(hex, seq))
       if (shown === null) return null
-      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username, cover: shownCover(shown) })
+      const cover = shownCover(shown)
+      const html = renderPostPage({ origin: postsOn, author: hex, seq, record: shown.record, name: shown.name, username: shown.username, cover, autoCover: cover ? null : automaticCover(hex, shown) })
       if (typeof html !== 'string' || Buffer.byteLength(html) > POST_PAGE_MAX_BODY) return null
       return html
     })])
@@ -1921,7 +1951,8 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   // still stand once the bytes are read; else null.
   async function postCoverBytes (hex, seq, isClosed) {
     const shown = shownPost(await seeder.postPublic(hex, seq))
-    if (shown === null || shownCover(shown) === null) return null
+    if (shown === null || isClosed()) return null
+    if (shownCover(shown) === null) return postTranscodedCoverBytes(hex, seq, shown, isClosed)
     const got = await descriptorBytes(hex, shown.cover, isClosed)
     if (got === null || isClosed() || got.mime !== 'image/jpeg') return null
     const size = stillImageSize(got.bytes, 'image/jpeg')
@@ -1931,13 +1962,63 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     return got
   }
 
+  async function postTranscodedCoverBytes (hex, seq, shown, isClosed) {
+    const first = postPhotos(shown.record).items[0]
+    if (!transcoder || !needsTranscode(first)) return null
+    const descriptor = { ...first }
+    const shareSeq = shown.shareSeq
+    const size = coverSize(descriptor.width, descriptor.height)
+    if (!size) {
+      transcoder.refuse(coverRefusalKey(hex, descriptor))
+      return null
+    }
+    const got = await descriptorBytes(hex, descriptor, isClosed, () => transcoder.refuse(coverRefusalKey(hex, descriptor)))
+    if (got === null || isClosed()) return null
+    const bounds = mediaBounds(got.bytes, descriptor.mime)
+    if (!bounds || bounds.frames !== 1 || bounds.width !== descriptor.width || bounds.height !== descriptor.height) {
+      transcoder.refuse(coverRefusalKey(hex, descriptor))
+      return null
+    }
+    const bytes = await transcoder.transcode({
+      bytes: got.bytes,
+      mime: descriptor.mime,
+      sha256: descriptor.sha256,
+      srcWidth: descriptor.width,
+      srcHeight: descriptor.height,
+      ...size
+    })
+    if (!bytes || isClosed()) return null
+    const again = shownPost(await seeder.postPublic(hex, seq))
+    const current = again && postPhotos(again.record).items[0]
+    if (isClosed() || again === null || again.shareSeq !== shareSeq || shownCover(again) !== null || !current ||
+      !Object.keys(descriptor).every((key) => descriptor[key] === current[key])) return null
+    return { bytes, mime: 'image/jpeg' }
+  }
+
   // A photo or the cover: `read(isClosed)` is postPhotoBytes or
-  // postCoverBytes, under the same gate, bucket, slot and headers.
-  async function servePostPhoto (req, res, hex, seq, read) {
+  // postCoverBytes. With a transcoder, /capa has its own budget before any
+  // lookup, including the lookup that decides whether a device cover wins.
+  async function servePostPhoto (req, res, hex, seq, read, transcodeBudget = false) {
     if (postsOn === null || typeof seeder.postPublic !== 'function' || !Number.isSafeInteger(seq)) return send(res, 404, NOT_FOUND)
-    if (!takeToken() || postPhotoInFlight >= postPhotoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
-    postPhotoInFlight++
-    const answer = await slotted(res, postPhotoDeadlineMs, () => { postPhotoInFlight-- }, read)
+    if (transcodeBudget) {
+      if (!takePostTranscodeToken() || postTranscodeInFlight >= postTranscodeMaxInFlight) return send(res, 404, NOT_FOUND)
+      postTranscodeInFlight++
+    } else {
+      if (!takeToken() || postPhotoInFlight >= postPhotoMaxInFlight) return send(res, 503, BUSY, { 'Retry-After': '1' })
+      postPhotoInFlight++
+    }
+    let timer = null
+    const job = slotted(res, postPhotoDeadlineMs * (transcodeBudget ? 2 : 1), () => {
+      if (transcodeBudget) postTranscodeInFlight--
+      else postPhotoInFlight--
+    }, read)
+    const answer = transcodeBudget
+      ? await Promise.race([job, new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), postPhotoDeadlineMs)
+        timer.unref()
+      })])
+      : await job
+    clearTimeout(timer)
     if (answer === CLOSED) return
     if (answer === null) return send(res, 404, NOT_FOUND)
     res.writeHead(200, {
@@ -2033,7 +2114,7 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     m = POST_CAPA_RE.exec(req.url)
     if (m) {
       const [hex, seq] = [m[1], Number(m[2])]
-      return servePostPhoto(req, res, hex, seq, (isClosed) => postCoverBytes(hex, seq, isClosed))
+      return servePostPhoto(req, res, hex, seq, (isClosed) => postCoverBytes(hex, seq, isClosed), transcoder !== null)
     }
     return send(res, 404, NOT_FOUND)
   }

@@ -4,7 +4,9 @@
 // no network.
 
 const test = require('brittle')
+const { createHash } = require('node:crypto')
 const { renderPostPage, postPreviewData, postPhotos, MAX_PHOTOS } = require('../lib/post-page')
+const { coverSize } = require('../lib/og-transcode')
 
 const HEX = 'ab'.repeat(32)
 const ORIGIN = 'https://bora.varanda.app'
@@ -316,6 +318,39 @@ test('an AVIF item is a photo; og:image skips AVIF and names its type', (t) => {
   t.is(meta(page({}, { media: [image(0), avif] }), 'og:image:type'), 'image/jpeg', 'the type of a JPEG first photo')
   t.is(meta(page({ origin: 'http://bora.varanda.app' }, { media: [image(0)] }), 'og:image:type'), null, 'no type without og:image')
   t.is(postPreviewData({ record: post({ media: [avif, image(1)] }) }).photoCount, 2, 'the preview counts the AVIF photo')
+})
+
+test('og:image: automatic covers follow device covers and leave the body and preview intact', (t) => {
+  for (const mime of ['image/avif', 'image/jpeg']) {
+    const first = { ...image(0, mime), bytes: 300000, width: 2048, height: 1536 }
+    const record = { media: [first, image(1)] }
+    const autoCover = { width: first.width, height: first.height }
+    const html = page({ autoCover }, record)
+    const size = coverSize(first.width, first.height)
+    t.is(meta(html, 'og:image'), ORIGIN + BASE + '/capa', mime)
+    t.is(meta(html, 'og:image:type'), 'image/jpeg')
+    t.is(meta(html, 'og:image:width'), String(size.width))
+    t.is(meta(html, 'og:image:height'), String(size.height))
+    t.is(metaCount(html, 'og:image'), 1)
+    t.is(html.slice(html.indexOf('<body>')), page({}, record).slice(page({}, record).indexOf('<body>')), 'same body')
+    const device = page({ autoCover, cover: { width: 120, height: 80 } }, record)
+    t.is(meta(device, 'og:image:width'), '120', 'device width wins')
+    t.is(meta(device, 'og:image:height'), '80', 'device height wins')
+    t.is(metaCount(device, 'og:image'), 1)
+    t.alike(postPreviewData({ record: post(record), autoCover }), postPreviewData({ record: post(record) }), 'same JSON twin')
+    assertSafe(t, html, mime)
+  }
+  t.is(renderPostPage({ autoCover: { width: 2048, height: 1536 } }), renderPostPage({}), 'same fallback page')
+})
+
+test('without autoCover the pre-transcoder HTML stays byte identical', (t) => {
+  const before = {
+    'image/avif': '08cf58e4f5d2df467bf0ffaeb810cd0be6fa683886c27f918dd94e1e9e031ea0',
+    'image/jpeg': 'e31979305cdba18ce48edf66dfe6750aca3bfecfd68419104fb21f2b5883fb15'
+  }
+  for (const [mime, hash] of Object.entries(before)) {
+    t.is(createHash('sha256').update(page({}, { media: [image(0, mime)] })).digest('hex'), hash, mime)
+  }
 })
 
 test('og:image: the share cover comes first, as /capa with image/jpeg and its sizes', (t) => {

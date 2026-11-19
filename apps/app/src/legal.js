@@ -3,9 +3,9 @@
 // Sources: docs/design.md (LGPD, moderation, identity), docs/app.md and
 // SECURITY.md. Planned flows must not read as features already available.
 
-export const LEGAL_VERSION = 100
+export const LEGAL_VERSION = 101
 export const LEGAL_DATE = '19/11/2026'
-export const REVIEW_NOTE = 'Versão 100, sujeita a revisão jurídica. Não é parecer jurídico.'
+export const REVIEW_NOTE = 'Versão 101, sujeita a revisão jurídica. Não é parecer jurídico.'
 
 const discoveryParagraphs = [
   'Entrar num grupo público é público. Na versão web hospedada e no app instalado, qualquer pessoa pode ver no seu perfil os grupos públicos de entrada aberta de que você participa, com o nome do grupo e da comunidade. A Geral de cada comunidade, os grupos que pedem aprovação para entrar e os grupos privados ficam fora dessa lista. Você pode desligar a opção "Grupos públicos no perfil" em Ajustes, em Privacidade e segurança. Com a opção desligada, seu perfil não lista esses grupos e você não conta na lista "Grupos de quem você segue" de outras pessoas. Dentro de cada grupo público, a sua participação continua pública.',
@@ -165,6 +165,7 @@ export const TERMS = {
     {
       heading: 'Prévias de links fora do Varanda',
       paragraphs: [
+        'Para a prévia de links, a instalação pode gerar uma cópia reduzida em JPEG de uma foto que a pessoa já tornou pública numa publicação compartilhada na web ou num anúncio da Feira. A cópia não tem metadados, fica só na memória do servidor por tempo limitado e só é servida enquanto a foto original e o compartilhamento existirem. Ela desaparece quando o servidor reinicia. Cópias que um aplicativo de mensagem já guardou ficam fora do alcance da instalação.',
         'Um link de grupo público, de comunidade ou de Página mostra o nome e a imagem na prévia que aplicativos de mensagem montam, inclusive para pessoas fora do Varanda. Para uma Página, a prévia mostra também o @nome e um trecho da bio. O link de um grupo privado mostra apenas uma prévia genérica, sem o nome nem a imagem do grupo. O link do perfil de uma pessoa mostra apenas uma prévia genérica, sem os dados do perfil.',
         'Qualquer pessoa pode pedir essa página de prévia, sem conta no Varanda. A conferência do User-Agent, a identificação que o aplicativo envia no pedido, e a instrução noindex, que pede aos buscadores que não indexem a página, não são controle de acesso. O cache da prévia mantido pelo aplicativo de mensagem fica fora da instalação e do controle da associação. A instalação não acrescenta nenhum registro da busca dessa prévia.'
       ]
@@ -289,6 +290,7 @@ export const PRIVACY = {
     {
       heading: 'Prévias de links fora do Varanda',
       paragraphs: [
+        'Para a prévia de links, a instalação pode gerar uma cópia reduzida em JPEG de uma foto que a pessoa já tornou pública numa publicação compartilhada na web ou num anúncio da Feira. A cópia não tem metadados, fica só na memória do servidor por tempo limitado e só é servida enquanto a foto original e o compartilhamento existirem. Ela desaparece quando o servidor reinicia. Cópias que um aplicativo de mensagem já guardou ficam fora do alcance da instalação.',
         'Um link de grupo público, de comunidade ou de Página mostra o nome e a imagem na prévia que aplicativos de mensagem montam, inclusive para pessoas fora do Varanda. Para uma Página, a prévia mostra também o @nome e um trecho da bio. O link de um grupo privado mostra apenas uma prévia genérica, sem o nome nem a imagem do grupo. O link do perfil de uma pessoa mostra apenas uma prévia genérica, sem os dados do perfil.',
         'Qualquer pessoa pode pedir essa página de prévia, sem conta no Varanda. A conferência do User-Agent, a identificação que o aplicativo envia no pedido, e a instrução noindex, que pede aos buscadores que não indexem a página, não são controle de acesso. O cache da prévia mantido pelo aplicativo de mensagem fica fora da instalação e do controle da associação. A instalação não acrescenta nenhum registro da busca dessa prévia.'
       ]
