@@ -50,6 +50,10 @@
       body {
         -webkit-tap-highlight-color: transparent;
       }
+      /* Width is not inherited; the theme sets scrollbar-color on html */
+      * {
+        scrollbar-width: thin;
+      }
     </style>
     <style id="varanda-pre-splash-style">
       #varanda-pre-splash { position: fixed; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; margin: 0; background: #fbf8f3; pointer-events: none; animation: vps-expire 0s linear 20s forwards; }

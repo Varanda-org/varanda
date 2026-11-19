@@ -2515,8 +2515,10 @@ test('momento sends only a chosen music reference, checks author text and never 
   const { momentMusicOf } = await import('../src/moments.js')
   const calls = []
   const checked = []
+  const recents = []
   let available = true
   let uncertain = false
+  let fail = false
   const photo = { files: [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }], ready: true, items: [], clear () {}, remove () {} }
   const node = {
     online: true,
@@ -2527,6 +2529,10 @@ test('momento sends only a chosen music reference, checks author text and never 
   const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
   const h = hookHost(input, 'useMomentDraft', {
     momentMusicOf,
+    noteMusicRecent: (...args) => {
+      recents.push(args)
+      if (fail) throw new Error('recent write')
+    },
     useMomentMusicAvailable: () => available,
     useChatAttachments: () => photo,
     useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
@@ -2543,11 +2549,27 @@ test('momento sends only a chosen music reference, checks author text and never 
   })
   t.teardown(h.unmount)
   const props = { node, member: A, open: true, active: true }
+  const choice = { ref: { kind: 'snippet', id: 'abc', start: 30 }, item: { title: 'provider title', artist: 'provider artist', genre: 'Rock' } }
   h.render(props)
-  t.ok(await h.render().send())
-  t.absent(Object.hasOwn(calls.at(-1).body, 'music'), 'no choice omits music, never null')
-  const choice = { ref: { kind: 'snippet', id: 'abc', start: 30 }, item: { title: 'provider title', artist: 'provider artist' } }
+  const sending = h.render().send()
   h.render().pickMusic(choice)
+  t.is(h.render().music, null, 'busy')
+  t.ok(await sending)
+  t.absent(Object.hasOwn(calls.at(-1).body, 'music'), 'no choice omits music, never null')
+
+  available = false
+  h.render().pickMusic(choice)
+  t.is(h.render().music, null, 'music unavailable')
+  available = true
+  h.render().pickMusic({ ...choice, ref: { ...choice.ref, kind: 'track' } })
+  t.is(h.render().music, null, 'non-snippet choice')
+  h.render().pickMusic({ ...choice, ref: { ...choice.ref, start: -1 } })
+  t.is(h.render().music, null, 'invalid ref')
+  t.alike(recents, [])
+
+  h.render().pickMusic(choice)
+  t.alike(recents, [[A, 'track', choice.item]])
+  t.is(recents[0]?.[2], choice.item, 'the store gets the original item')
   h.render().setText('author caption')
   t.ok(await h.render().send())
   t.alike(calls.at(-1), { method: 'moment.create', body: { text: 'author caption', media: { id: 'photo' }, music: { p: 'audius', id: 'abc', start: 30 } } })
@@ -2559,20 +2581,29 @@ test('momento sends only a chosen music reference, checks author text and never 
   h.render().setMusic(null)
   t.ok(await h.render().send())
   t.absent(Object.hasOwn(calls.at(-1).body, 'music'), 'removed choice is omitted')
+  t.is(recents.length, 1, 'publishing and removing the choice do not record')
   h.render().pickMusic(choice)
   uncertain = true
   t.absent(await h.render().send())
   t.ok(h.render().held)
+  h.render().pickMusic({ ...choice, ref: { ...choice.ref, start: 60 } })
+  t.is(h.render().music?.ref.start, 30, 'held')
   const count = calls.length
   t.absent(await h.render().send())
   t.is(calls.length, count, 'uncertain create is never repeated')
   h.render().reset()
   t.is(h.render().music, null, 'discard clears the music draft')
+  t.alike(recents, [[A, 'track', choice.item], [A, 'track', choice.item]], 'only the two accepted picks record')
+  fail = true
+  t.exception(() => h.render().pickMusic(choice), /recent write/)
+  t.is(h.render().music?.item, choice.item, 'the draft is attached before the store is called')
 })
 
 test('a Page publishes its momento with pagesMoment: one put, never resent, a tap retries the same request', async (t) => {
   const source = read('src/screens/Publicar.js')
+  const { momentMusicOf } = await import('../src/moments.js')
   const calls = []
+  const recents = []
   const photo = { files: [{ bytes: new Uint8Array([1]), mime: 'image/jpeg', width: 1, height: 1 }], ready: true, items: [], clear () {}, remove () {} }
   const node = {
     online: true,
@@ -2584,8 +2615,9 @@ test('a Page publishes its momento with pagesMoment: one put, never resent, a ta
   let retries = 0
   const input = source.slice(source.indexOf('export const MOMENT_TEXT_MAX'), source.indexOf('function useMomentMusicAvailable')) + functionSource(source, 'useMomentDraft')
   const h = hookHost(input, 'useMomentDraft', {
-    momentMusicOf: () => null,
-    useMomentMusicAvailable: () => false,
+    momentMusicOf,
+    noteMusicRecent: (...args) => { recents.push(args) },
+    useMomentMusicAvailable: () => true,
     useChatAttachments: () => photo,
     useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),
     ...(await import('../src/videoCompose.js')),
@@ -2604,7 +2636,7 @@ test('a Page publishes its momento with pagesMoment: one put, never resent, a ta
     errorText: () => 'erro'
   })
   t.teardown(h.unmount)
-  const PAGE = 'ab'.repeat(32)
+  const PAGE = 'cd'.repeat(32)
   h.render({ node, member: A, open: true, active: true, asPage: PAGE })
   h.render().setText('Pão saindo')
   t.ok(await h.render().send())
@@ -2616,6 +2648,9 @@ test('a Page publishes its momento with pagesMoment: one put, never resent, a ta
   calls.length = 0
   t.absent(await h.render().send())
   t.is(calls.filter((c) => c === 'put').length, 0, 'a refusal keeps the item for the next explicit press')
+  const choice = { ref: { kind: 'snippet', id: 'abc', start: 30 }, item: { title: 'provider title', artist: 'provider artist' } }
+  h.render().pickMusic(choice)
+  t.alike(recents, [[A, 'track', choice.item]], 'a Page pick records under the person')
   outcome = 'unknown'
   t.absent(await h.render().send())
   t.ok(h.render().held && h.render().canRetry, 'unknown: locked, with a retry on a tap')
@@ -2626,6 +2661,7 @@ test('a Page publishes its momento with pagesMoment: one put, never resent, a ta
   t.is(retries, 1, 'one explicit tap resends the same request once')
   t.ok(h.render().held && h.render().canRetry, 'unknown again: still locked')
   t.is(retries, 1)
+  t.is(recents.length, 1, 'publishing and retrying do not record another pick')
   h.render().reset()
   t.absent(h.render().held)
   t.absent(h.render().canRetry)
@@ -2645,6 +2681,7 @@ test('an identity change drops the item put for the old publisher', async (t) =>
   const sent = []
   const h = hookHost(input, 'useMomentDraft', {
     momentMusicOf: () => null,
+    noteMusicRecent: () => {},
     useMomentMusicAvailable: () => false,
     useChatAttachments: () => photo,
     useVideoDraft: () => ({ state: { phase: 'empty', file: null }, draft: { state: { phase: 'empty', file: null }, clear () {} } }),

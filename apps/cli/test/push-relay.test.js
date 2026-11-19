@@ -257,26 +257,51 @@ test('stats carry counts only', async (t) => {
   t.absent(JSON.stringify(stats).includes(ACTOR))
 })
 
-test('sendDmWake posts exactly { v: 1, kind: dm-wake } with the bearer and logs only a token', async (t) => {
+const BOX_BYTES = 116
+
+function box (fill = 7, n = BOX_BYTES) {
+  return Buffer.alloc(n, fill)
+}
+
+test('sendDm posts exactly { v: 1, kind: dm, box } with the bearer and logs only a token', async (t) => {
   const fake = await fakeAccount(t)
   const logs = []
   const relay = relayFor(t, fake.baseUrl, { log: (e) => logs.push(e) })
-  t.is(relay.sendDmWake(), true)
+  // Bytes whose base64 has + and /, so base64url is told apart.
+  const b = Buffer.alloc(BOX_BYTES, 0xfb)
+  t.is(relay.sendDm(b), true)
   await until(() => relay.stats().sent === 1, { name: 'sent' })
   t.is(fake.requests.length, 1)
   const req = fake.requests[0]
   t.is(req.method, 'POST')
   t.is(req.url, '/push-event')
   t.is(req.headers.authorization, 'Bearer ' + TOKEN)
-  t.is(req.body, JSON.stringify({ v: 1, kind: 'dm-wake' }))
-  t.absent(/[0-9a-f]{64}/.test(req.body), 'no key in the wake')
+  t.is(req.headers['content-type'], 'application/json')
+  t.is(req.body, JSON.stringify({ v: 1, kind: 'dm', box: b.toString('base64url') }))
+  const body = JSON.parse(req.body)
+  t.alike(Object.keys(body), ['v', 'kind', 'box'])
+  t.ok(/^[A-Za-z0-9_-]+$/.test(body.box), 'base64url without padding')
+  t.alike(Buffer.from(body.box, 'base64url'), b, 'the same bytes')
+  t.is(Buffer.from(body.box, 'base64url').toString('base64url'), body.box, 'canonical')
   t.alike(logs, [{ event: 'push', reason: 'dm' }])
+  t.is(relay.sendDmWake, undefined, 'the anonymous wake is gone')
 })
 
-test('a failed wake is never retried', async (t) => {
+test('sendDm refuses a box of the wrong size or type and sends nothing', async (t) => {
+  const fake = await fakeAccount(t)
+  const relay = relayFor(t, fake.baseUrl)
+  const bad = [box(1, BOX_BYTES - 1), box(1, BOX_BYTES + 1), Buffer.alloc(0), new Uint8Array(BOX_BYTES), box(1).toString('base64url'), box(1).toString('base64'), Array.from(box(1)), null, undefined, {}]
+  for (const b of bad) t.is(relay.sendDm(b), false)
+  t.is(relay.stats().invalid, bad.length)
+  t.is(relay.stats().pending, 0)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  t.is(fake.requests.length, 0, 'nothing posted')
+})
+
+test('a failed dm notice is never retried', async (t) => {
   const fake = await fakeAccount(t, (req, res) => { res.statusCode = 500; res.end() })
   const relay = relayFor(t, fake.baseUrl)
-  relay.sendDmWake()
+  relay.sendDm(box())
   await until(() => relay.stats().failed === 1, { name: '500' })
   await new Promise((resolve) => setTimeout(resolve, 100))
   t.is(fake.requests.length, 1)
@@ -284,30 +309,29 @@ test('a failed wake is never retried', async (t) => {
   let calls = 0
   const broken = createPushRelay({ baseUrl: fake.baseUrl, token: TOKEN, fetch: async () => { calls++; throw new Error('ECONNREFUSED') } })
   t.teardown(() => broken.close())
-  broken.sendDmWake()
+  broken.sendDm(box())
   await settled(broken)
   t.is(calls, 1)
 })
 
-test('a waiting wake covers later drops; a full queue drops the wake; closed refuses', async (t) => {
+test('dm notices are not coalesced; a full queue drops one; closed refuses', async (t) => {
   const held = []
   const fake = await fakeAccount(t, (req, res) => held.push(res))
-  const relay = relayFor(t, fake.baseUrl, { maxPending: 1 })
+  const relay = relayFor(t, fake.baseUrl, { maxPending: 2 })
   t.is(relay.send(event({ seq: 1 })), true)
   await until(() => held.length === 1, { name: 'first request arrived' })
-  t.is(relay.sendDmWake(), true)
-  t.is(relay.sendDmWake(), false, 'one wake already waiting')
-  t.is(relay.stats().duplicate, 1)
-  held.shift().end()
-  await until(() => held.length === 1, { name: 'wake arrived' })
-  t.is(relay.send(event({ seq: 2 })), true)
-  t.is(relay.sendDmWake(), false, 'full queue drops the wake')
+  t.is(relay.sendDm(box(1)), true)
+  t.is(relay.sendDm(box(1)), true, 'an identical box still queues: each one is its own notice')
+  t.is(relay.sendDm(box(2)), false, 'full queue drops the notice')
   t.is(relay.stats().full, 1)
-  held.shift().end()
-  await until(() => held.length === 1, { name: 'third arrived' })
-  held.shift().end()
+  t.is(relay.stats().duplicate, 0)
+  for (let i = 0; i < 3; i++) {
+    await until(() => held.length === 1, { name: 'request ' + (i + 1) + ' arrived' })
+    held.shift().end()
+  }
   await settled(relay)
   t.is(fake.requests.length, 3)
+  t.is(fake.requests[1].body, fake.requests[2].body)
   relay.close()
-  t.is(relay.sendDmWake(), false)
+  t.is(relay.sendDm(box()), false)
 })

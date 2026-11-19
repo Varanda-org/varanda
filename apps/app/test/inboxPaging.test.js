@@ -90,6 +90,24 @@ test('searchPaging stops on empty text, no next page, a failure or the budget', 
   t.absent(searchPaging({ needle: 'ana', next: 'c' }), 'a missing count never loops')
 })
 
+test('unreadPaging looks for an unread row within the search page budget', async (t) => {
+  const { unreadPaging, SEARCH_PAGES_MAX } = await load()
+  const pending = { filter: 'nao-lidas', unreadRows: 0, inboxUnread: true, next: 'c', pages: 0 }
+  t.is(unreadPaging(pending), true)
+  t.is(unreadPaging({ ...pending, filter: 'todas' }), false)
+  t.is(unreadPaging({ ...pending, unreadRows: 1 }), false)
+  const { unreadRows, ...withoutUnreadRows } = pending
+  t.is(unreadPaging(withoutUnreadRows), false, 'a missing unread count never loops')
+  t.is(unreadPaging({ ...pending, inboxUnread: false }), false)
+  t.is(unreadPaging({ ...pending, inboxUnread: undefined }), false)
+  t.is(unreadPaging({ ...pending, next: null }), false)
+  t.is(unreadPaging({ ...pending, failed: true }), false, 'a failed page waits for the retry')
+  t.is(unreadPaging({ ...pending, pages: SEARCH_PAGES_MAX }), false)
+  const { pages, ...withoutPages } = pending
+  t.is(unreadPaging(withoutPages), false, 'a missing page count never loops')
+  t.is(unreadPaging({ ...pending, pages: SEARCH_PAGES_MAX - 1 }), true)
+})
+
 test('the inbox refreshes back to the loaded depth and its search pages through the rest', (t) => {
   const { readFileSync } = require('node:fs')
   const { join } = require('node:path')

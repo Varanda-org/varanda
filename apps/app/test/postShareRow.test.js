@@ -48,14 +48,15 @@ async function builders () {
   const { postLink } = await import('../src/postLink.js')
   const { canDelete } = await import('../src/deletion.js')
   const { cachedRow } = await import('../src/namesCache.js')
+  const { knownReplies } = await import('../src/feedFold.js')
   const actingPageKey = () => env.acting
   const installationOrigin = () => env.origin
   const pickAvatar = () => null
   // eslint-disable-next-line no-new-func
   const rua = new Function(
-    'postLink', 'canDelete', 'cachedRow', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyMarkOf',
+    'postLink', 'canDelete', 'cachedRow', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyMarkOf', 'knownReplies',
     [fnText(RUA, 'refOf'), fnText(RUA, 'withActions'), fnText(RUA, 'socialRowProps'), 'return socialRowProps'].join('\n')
-  )(postLink, canDelete, cachedRow, actingPageKey, installationOrigin, pickAvatar, () => null)
+  )(postLink, canDelete, cachedRow, actingPageKey, installationOrigin, pickAvatar, () => null, knownReplies)
   // eslint-disable-next-line no-new-func
   const conversa = new Function(
     'postLink', 'canDelete', 'actingPageKey', 'installationOrigin', 'pickAvatar', 'replyNameOf', 'postAt',
