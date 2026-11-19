@@ -10,7 +10,7 @@ const read = (name) => readFileSync(join(__dirname, '../src', name), 'utf8')
 test('Pill announces `selected` only for a pill that is one choice of a few', (t) => {
   const src = read('ui/Pill.js')
   t.ok(src.includes('selected, small }) {'), 'the prop is taken')
-  t.ok(src.includes('accessibilityState={selected === undefined ? { disabled: off } : { disabled: off, selected: selected === true }}'), 'no selected state unless asked')
+  t.ok(src.includes('accessibilityState={selected === undefined ? { disabled: off, busy: pending === true } : { disabled: off, busy: pending === true, selected: selected === true }}'), 'no selected state unless asked')
   t.ok(src.includes('aria-pressed={selected === undefined ? undefined : selected === true}'), 'web reads a pressed state')
 })
 

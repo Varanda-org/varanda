@@ -97,7 +97,7 @@ test('EmptyState renders an optional quiet secondary action', (t) => {
   const empty = states.slice(states.indexOf('export function EmptyState'), states.indexOf('export function ErrorState'))
   t.ok(empty.includes('secondaryLabel, onSecondary'), 'secondary props')
   t.ok(empty.includes('{actionLabel && onAction ? <Pill label={actionLabel} onPress={onAction} filled /> : null}'), 'primary action stays filled')
-  t.ok(empty.includes('{secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} /> : null}'), 'quiet second button needs a label and a handler')
+  t.ok(empty.includes('{secondaryLabel && onSecondary ? <Pill label={secondaryLabel} onPress={onSecondary} tonal /> : null}'), 'quiet second button needs a label and a handler')
 })
 
 test('skeleton variants reuse Skeleton and its themed placeholders', (t) => {
@@ -199,7 +199,7 @@ test('onboarding step frame', (t) => {
     t.ok(stepper.includes('export function ' + name + ' ('), name + ' export')
   }
   t.ok(stepper.includes('type.heroTitle'), 'hero title token')
-  t.ok(stepper.includes('minHeight: layout.hit'), 'link hit target')
+  t.ok(stepper.includes('<Pill label={label} onPress={onPress} disabled={disabled} link />'), 'step link uses the shared Pill link target with unchanged props')
   t.ok(stepper.includes("accessibilityRole='header'"), 'accessible title')
   t.ok(stepper.includes('paddingTop: space.lg, flexGrow: 1'), 'frame can fill the screen')
   t.ok(stepper.includes('spacer: { flexGrow: 1'), 'actions sit low')

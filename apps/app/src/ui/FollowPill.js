@@ -49,7 +49,7 @@ export function FollowPill ({ following, title, pending, disabled, onFollow, onU
     return (
       <Pill
         label={label}
-        filled
+        weak
         small={small}
         onPress={() => press(true, () => {
           tap('light')
