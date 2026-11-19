@@ -15,7 +15,7 @@ import { ScreenVisible } from './screenVisible'
 import { createVisibleNow } from '../visibleNow'
 import { fieldBounds, fieldFull } from './fieldHeight'
 import { GROWS_ITSELF } from './fieldMeasure'
-import { fonts, layout, type, webInputReset } from './theme'
+import { fonts, layout, radius, type, webInputReset } from './theme'
 import { useStyles, useTheme } from './ThemeProvider'
 
 export { TABS, tabsFor } from '../tabs'
@@ -388,7 +388,7 @@ const makeStyles = (colors) => StyleSheet.create({
   mono: { fontSize: 13, lineHeight: 19, color: colors.ink, fontFamily: fonts.mono },
   error: { fontSize: 14, lineHeight: 20, color: colors.danger },
   notice: { fontSize: 14, lineHeight: 20, color: colors.warn },
-  card: { backgroundColor: colors.card, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, padding: 12, gap: 8 },
+  card: { backgroundColor: colors.card, borderRadius: radius.bubble, borderWidth: 1, borderColor: colors.line, padding: 12, gap: 8 },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   btn: {
     backgroundColor: colors.accent,

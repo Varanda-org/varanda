@@ -38,8 +38,9 @@ import { pickImages } from '../media/attach'
 import { encodeFile } from '../media/encode'
 import { revokeUrl, urlFromBytes } from '../media/display'
 import { Btn, ErrorText, Field, Label, Soft, errorText } from '../ui'
-import { Icon } from '../ui/Icon'
+import { CheckboxMark } from '../ui/Checkbox'
 import { Pill } from '../ui/Pill'
+import { ProgressBar } from '../ui/ProgressBar'
 import { TopBar } from '../ui/TopBar'
 import { StepLink, Stepper } from '../ui/Stepper'
 import { ListingPhotoGrid } from '../ui/ListingPhotoGrid'
@@ -389,8 +390,8 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
     <View style={styles.flex}>
       <TopBar title={asPage !== null ? 'Anunciar como página' : 'Anunciar'} onBack={goBack} />
       <KeyboardForm inWindow>
-        <View style={styles.progress} accessible accessibilityRole='progressbar' accessibilityLabel={'Passo ' + (index + 1) + ' de ' + STEPS.length}>
-          <View style={[styles.progressFill, { width: ((index + 1) / STEPS.length * 100) + '%' }]} />
+        <View accessible accessibilityRole='progressbar' accessibilityLabel={'Passo ' + (index + 1) + ' de ' + STEPS.length}>
+          <ProgressBar value={(index + 1) / STEPS.length} height={3} trackColor={colors.line} />
         </View>
         <ScrollView ref={scrollRef} contentContainerStyle={styles.body} keyboardShouldPersistTaps='handled'>
           <Stepper index={index} title={STEP_TITLES[index]}>
@@ -464,7 +465,7 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
                   <Label>Prévia</Label>
                   <ListingTile listing={previewListing(form)} width='100%' />
                   <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: ack }} disabled={locked} onPress={() => { setAck((v) => !v); clearFieldError() }} style={styles.ack}>
-                    <View style={[styles.box, ack && styles.boxOn]}>{ack ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}</View>
+                    <CheckboxMark checked={ack} disabled={locked} />
                     <Text style={styles.ackText}>{ACK_TEXT}</Text>
                   </Pressable>
                   <Soft>Qualquer pessoa pode ver este anúncio pelo link, mesmo sem conta.</Soft>
@@ -505,14 +506,10 @@ export default function Anunciar ({ initialPlace = null, onBack, registerBackGua
 const makeStyles = (colors) => StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.bg },
   body: { flexGrow: 1, paddingBottom: 24 },
-  progress: { height: 3, backgroundColor: colors.line },
-  progressFill: { height: 3, backgroundColor: colors.accent },
   bar: { padding: 16, gap: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, backgroundColor: colors.bg },
   confirm: { padding: 16, gap: 12 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   undo: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   ack: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 },
-  box: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.outline, alignItems: 'center', justifyContent: 'center' },
-  boxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   ackText: { color: colors.ink, fontSize: 15, flexShrink: 1 }
 })

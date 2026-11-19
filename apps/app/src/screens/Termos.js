@@ -10,8 +10,9 @@ import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { LEGAL_DATE, PRIVACY, REVIEW_NOTE, TERMS } from '../legal'
 import { HELP, SHORT } from '../help'
 import { formatAcceptedAt } from '../terms'
+import { Accordion } from '../ui/Accordion'
 import { HelpNote } from '../ui/Help'
-import { Body, Btn, Card, Label, Page, Soft } from '../ui'
+import { Body, Btn, Label, Page, Soft } from '../ui'
 import { Icon } from '../ui/Icon'
 import { OptionList } from '../ui/OptionRow'
 import { Stepper } from '../ui/Stepper'
@@ -88,19 +89,9 @@ function LegalDoc ({ doc, expanded, onToggle, grouped = false, first = false }) 
     )
   }
   return (
-    <Card>
-      <Pressable
-        accessibilityRole='button'
-        accessibilityState={{ expanded }}
-        accessibilityLabel={doc.title}
-        onPress={onToggle}
-        style={({ pressed }) => [styles.header, pressed && styles.headerPressed]}
-      >
-        <Text style={styles.headerTitle}>{doc.title}</Text>
-        <Text style={styles.cue}>{expanded ? 'esconder' : 'mostrar'}</Text>
-      </Pressable>
-      {sections}
-    </Card>
+    <Accordion title={doc.title} cueClosed='mostrar' cueOpen='esconder' expanded={expanded} onToggle={onToggle}>
+      <View style={styles.docBody}>{sections}</View>
+    </Accordion>
   )
 }
 
@@ -138,8 +129,8 @@ export default function Termos ({ gate = false, reason = 'needed', version, acce
       {syncState === 'so-aparelho' ? <HelpNote doc={HELP.termosAparelho}><Soft>{SHORT.termsDeviceOnly}</Soft></HelpNote> : null}
       <Soft>{REVIEW_NOTE}</Soft>
       <Soft>{'Versão ' + version + ', de ' + LEGAL_DATE}</Soft>
-      <LegalDoc doc={TERMS} expanded={openTerms} onToggle={() => setOpenTerms((v) => !v)} />
-      <LegalDoc doc={PRIVACY} expanded={openPrivacy} onToggle={() => setOpenPrivacy((v) => !v)} />
+      <LegalDoc doc={TERMS} expanded={openTerms} onToggle={setOpenTerms} />
+      <LegalDoc doc={PRIVACY} expanded={openPrivacy} onToggle={setOpenPrivacy} />
     </Page>
   )
 }
@@ -158,5 +149,7 @@ const makeStyles = (colors) => StyleSheet.create({
   center: { textAlign: 'center' },
   groupedDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   groupedHeader: { minHeight: 52, paddingHorizontal: space.lg },
-  groupedBody: { paddingHorizontal: space.lg, paddingBottom: space.lg, gap: space.sm }
+  groupedBody: { paddingHorizontal: space.lg, paddingBottom: space.lg, gap: space.sm },
+  // The Card this replaced spaced headings and paragraphs; the Accordion body has no gap.
+  docBody: { gap: space.sm }
 })
