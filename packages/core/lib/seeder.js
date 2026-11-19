@@ -9784,6 +9784,19 @@ class Seeder {
     }
   }
 
+  indexGroupImages (keys) {
+    const images = []
+    try {
+      if (Array.isArray(keys) && keys.length <= 32) {
+        for (const group of new Set(keys)) {
+          const shown = this.groupImagePublic(group)
+          if (shown !== null) images.push({ group, image: shown.image, author: shown.author })
+        }
+      }
+    } catch {}
+    return { images, indexing: !this._passesStarted }
+  }
+
   // Like the indexed name, this is the root's last record, without a
   // repair-writer pass. Only a diary that bound the root can be its author.
   groupImagePublic (root) {

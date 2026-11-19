@@ -463,6 +463,7 @@ const INDEX_GROUP_BROWSE_RE = /^\/index\/group-browse\/(members|recent|trending)
 const INDEX_PUBLIC_GROUPS_RE = /^\/index\/public-groups\/([0-9a-f]{64})(?:\/([0-9a-f]{64}))?$/
 const INDEX_COMMUNITY_RE = /^\/index\/community\/([0-9a-f]{64})$/
 const INDEX_COMMUNITY_GROUPS_RE = /^\/index\/community\/([0-9a-f]{64})\/groups\/([0-9a-f]{64})$/
+const INDEX_GROUP_IMAGE_RE = /^\/index\/group-image\/([0-9a-f]{64}(?:,[0-9a-f]{64}){0,31})$/
 const INDEX_ENGAGERS_RE = /^\/index\/(likes|reposts)\/([0-9a-f]{64})\/([1-9][0-9]{0,14})(?:\/([0-9]{1,16}\.[0-9a-f]{64}\.[1-9][0-9]{0,14}))?$/
 const INDEX_FOLLOW_COUNTS_RE = /^\/index\/follows\/([0-9a-f]{64})$/
 const INDEX_FOLLOWS_RE = /^\/index\/follows\/([0-9a-f]{64})\/(seguindo|seguidores)(?:\/([0-9]{1,16}\.[0-9a-f]{64}))?$/
@@ -1006,6 +1007,12 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
     if (m) return ['indexCommunity', [m[1]], communityBody]
     m = INDEX_COMMUNITY_GROUPS_RE.exec(url)
     if (m) return ['indexCommunityGroups', [m[1], m[2]], communityGroupsBody]
+    m = INDEX_GROUP_IMAGE_RE.exec(url)
+    if (m) {
+      const keys = m[1].split(',')
+      if (new Set(keys).size !== keys.length) return null
+      return ['indexGroupImages', [keys], groupImagesBody]
+    }
     m = INDEX_FOLLOW_COUNTS_RE.exec(url)
     if (m) return ['indexFollowCounts', [m[1]]]
     m = INDEX_FOLLOWS_RE.exec(url)
@@ -1386,6 +1393,10 @@ function startSeedWs ({ host = DEFAULT_HOST, port, seeder, origins = null, media
   function communityGroupsBody ({ groups, next, indexing, complete }) {
     const rows = communityRows(groups)
     return { groups: rows, next: communityNext(next, rows), indexing, complete }
+  }
+
+  function groupImagesBody ({ images, indexing }) {
+    return { images: images.map(({ group, image, author }) => ({ group, image, author })), indexing }
   }
 
   // The roda route is new, so its answer can be checked key by key from the
@@ -2564,6 +2575,7 @@ module.exports = {
   INDEX_PUBLIC_GROUPS_RE,
   INDEX_COMMUNITY_RE,
   INDEX_COMMUNITY_GROUPS_RE,
+  INDEX_GROUP_IMAGE_RE,
   INDEX_ENGAGERS_RE,
   INDEX_FOLLOW_COUNTS_RE,
   INDEX_FOLLOWS_RE,

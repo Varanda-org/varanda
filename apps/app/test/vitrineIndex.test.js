@@ -54,6 +54,7 @@ test('every index route and cursor returns a deterministic validated fixture bod
     [c.communityUrl(community), c.validCommunity],
     [c.communityGroupsUrl(community, group.group), (b) => c.validCommunityGroups(b, group.group)],
     [c.groupSearchUrl('bicicleta'), c.validGroupSearch],
+    [c.groupImagesUrl([group.group, community]), (b) => c.validGroupImages(b, [group.group, community])],
     [c.groupBrowseUrl('members'), (b) => c.validGroupBrowse(b, 'members')],
     [c.groupBrowseUrl('recent'), (b) => c.validGroupBrowse(b, 'recent')],
     [c.groupBrowseUrl('trending'), (b) => c.validGroupBrowse(b, 'trending')],
@@ -956,4 +957,19 @@ test('a left balcony lists no mimo and no decor on the mimos route', async (t) =
   await request('garden.set', { on: false })
   t.alike(c.validGardenStall(respond(c.gardenStallUrl(f.own)), f.own), { decor: null, pending: [], shelf: [], indexing: false, complete: true })
   t.is(c.validProfile(respond(c.profileUrl(f.own))).garden > 51, true, 'the profile answer still names the newest flag')
+})
+
+test('the singular group-image route keeps fixtures without images on initials', async (t) => {
+  const { client: c, fixtures: f, vitrineIndex: respond } = await load()
+  const keys = [f.groups[0].group, f.communities[0].community]
+  t.is(c.groupImagesUrl(keys), '/index/group-image/' + keys.join(','))
+  t.alike(respond(c.groupImagesUrl(keys)), { images: [], indexing: false })
+  t.alike(c.validGroupImages(respond(c.groupImagesUrl(keys)), keys), new Map())
+  for (const path of [
+    '/index/group-images/' + keys[0],
+    '/index/group-image/invalid',
+    '/index/group-image/' + keys[0] + ',' + keys[0],
+    '/index/group-image/' + keys[0] + '/extra',
+    '/index/group-image/' + Array.from({ length: 33 }, (_, i) => i.toString(16).padStart(64, '0')).join(',')
+  ]) t.exception(() => respond(path), /not-found/, 'refuses malformed group image route')
 })

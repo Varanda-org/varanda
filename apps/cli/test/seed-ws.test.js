@@ -26,7 +26,7 @@ function makeGroupHeader (opts) {
 }
 const {
   startSeedWs, socketCap, MAX_SOCKETS, MAX_PAYLOAD, MEDIA_MAX_BLOCKS, MEDIA_MAX_IN_FLIGHT, MEDIA_RATE, MEDIA_BURST,
-  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_TOPIC_TREND_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
+  INDEX_POST_RE, INDEX_RODA_RE, INDEX_COUNTS_RE, INDEX_MEMBER_RE, INDEX_SEARCH_RE, INDEX_TOPIC_RE, INDEX_TOPIC_TREND_RE, INDEX_ENGAGERS_RE, INDEX_GROUP_RE, INDEX_GROUPS_RE, INDEX_GROUP_SEARCH_RE, INDEX_GROUP_BROWSE_RE, INDEX_PUBLIC_GROUPS_RE, INDEX_COMMUNITY_RE, INDEX_COMMUNITY_GROUPS_RE, INDEX_GROUP_IMAGE_RE, INDEX_FOLLOW_COUNTS_RE, INDEX_FOLLOWS_RE, INDEX_MAX_REFS, INDEX_MAX_IN_FLIGHT, INDEX_RATE, INDEX_BURST, INDEX_DEADLINE_MS, INDEX_MAX_BODY, GROUP_POST_RE,
   INDEX_FEIRA_RE, INDEX_FEIRA_AUTHOR_RE, INDEX_FEIRA_RATINGS_RE, FEIRA_PAGE_RE, FEIRA_FOTO_RE, FEIRA_CAPA_RE, FEIRA_SITEMAP_RE, LISTING_MOD_RE, FEIRA_LISTING_RE
 } = require('../lib/seed-ws')
 
@@ -2323,6 +2323,100 @@ test('startSeedWs /index/group*: a throw or a seeder without the methods is 404;
 const C = '9'.repeat(64)
 
 const row = (group, name, writerCount) => ({ group, visibility: 'public', join: 'open', name, writerCount })
+
+function groupImageSeeder () {
+  const stub = groupSeeder()
+  const image = { core: 'dc'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'dd'.repeat(32), width: 512, height: 512 }
+  stub.indexGroupImages = async (keys) => {
+    stub.calls.push(['indexGroupImages', keys])
+    return { images: keys.filter(key => key === G || key === C).map(group => ({ group, image, author: A, extra: true })), indexing: false, extra: true }
+  }
+  return stub
+}
+
+test('startSeedWs /index/group-image: public rows keep request order without a posts origin', async (t) => {
+  const seeder = groupImageSeeder()
+  seeder.indexCommunity = async () => ({ name: 'Bairro', join: 'open', creator: A, members: 3, groups: [row(G, 'Jardim', 2)], next: null, indexing: false, complete: true })
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const prefix = '/index/group-image/'
+  const U = 'f'.repeat(64)
+  const keys = [C, W, G, U]
+  const got = await mediaRequest(server.port, prefix + keys.join(','))
+  t.is(got.status, 200)
+  jsonHeaders(t, got)
+  const image = { core: 'dc'.repeat(32), mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: 'dd'.repeat(32), width: 512, height: 512 }
+  t.alike(JSON.parse(got.body), { images: [{ group: C, image, author: A }, { group: G, image, author: A }], indexing: false })
+  t.alike(seeder.calls, [['indexGroupImages', keys]], 'one named method receives the batch')
+  const hidden = await mediaRequest(server.port, prefix + W)
+  const unknown = await mediaRequest(server.port, prefix + U)
+  t.is(hidden.status, 200)
+  t.is(unknown.status, 200)
+  t.is(hidden.body.toString(), '{"images":[],"indexing":false}\n')
+  t.is(hidden.body.toString(), unknown.body.toString())
+  const head = await mediaRequest(server.port, prefix + keys.join(','), { method: 'HEAD' })
+  t.is(head.status, 200)
+  t.is(head.body.byteLength, 0)
+  t.is(head.headers['content-length'], got.headers['content-length'])
+  const page = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.is((await mediaRequest(server.port, prefix + page.join(','))).status, 200, 'one catalogue page fits')
+  t.alike(seeder.calls[seeder.calls.length - 1], ['indexGroupImages', page])
+
+  const unchanged = [
+    ['/index/group/' + G, { kind: 'group', visibility: 'public', join: 'open', name: 'Jardim', creator: A, rootServed: true, community: null, attached: false, writers: [{ key: W, diary: A, length: 3, seq: 1, left: false }], next: null, indexing: false, complete: true }],
+    ['/index/group-search/jardim', { groups: [{ group: G, name: 'Jardim', writerCount: 2 }], more: false, indexing: false, complete: true }],
+    ['/index/community/' + C, { name: 'Bairro', join: 'open', creator: A, members: 3, groups: [row(G, 'Jardim', 2)], next: null, indexing: false, complete: true }]
+  ]
+  for (const [url, body] of unchanged) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 200)
+    t.is(got.body.toString(), JSON.stringify(body) + '\n', 'existing answer bytes: ' + url)
+  }
+})
+
+test('startSeedWs /index/group-image: whole paths, distinct keys, method and missing-method shapes', async (t) => {
+  const seeder = groupImageSeeder()
+  const server = await startSeedWs({ port: 0, seeder })
+  t.teardown(() => server.close(), { force: true })
+  const prefix = '/index/group-image/'
+  const page = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.ok(INDEX_GROUP_IMAGE_RE.test(prefix + G))
+  t.ok(INDEX_GROUP_IMAGE_RE.test(prefix + page.join(',')))
+  const bad = [prefix, prefix + G.toUpperCase(), prefix + G + ',', prefix + G + '?x=1', prefix + G + '/', prefix + G.slice(1), prefix + G + ',,' + C, prefix + [...page, G].join(',')]
+  for (const url of bad) t.absent(INDEX_GROUP_IMAGE_RE.test(url))
+  bad.push(prefix + G + ',' + G)
+  for (const url of bad) {
+    const got = await mediaRequest(server.port, url)
+    t.is(got.status, 404)
+    t.is(got.body.toString(), 'não encontrado\n')
+  }
+  const post = await mediaRequest(server.port, prefix + G, { method: 'POST' })
+  t.is(post.status, 405)
+  t.is(post.headers.allow, 'GET, HEAD')
+  t.is(seeder.calls.length, 0, 'invalid requests do no lookup')
+  delete seeder.indexGroupImages
+  const old = await mediaRequest(server.port, prefix + G)
+  t.is(old.status, 404, 'an older seeder has no batch method')
+  t.is(old.body.toString(), 'não encontrado\n')
+})
+
+test('startSeedWs /index/group-image: the shared index budget refuses before any lookup', async (t) => {
+  const seeder = groupImageSeeder()
+  const server = await startSeedWs({ port: 0, seeder, index: { rate: 0, burst: 1 } })
+  t.teardown(() => server.close(), { force: true })
+  t.is((await mediaRequest(server.port, '/index/group/' + G)).status, 200)
+  const busy = await mediaRequest(server.port, '/index/group-image/' + G)
+  t.is(busy.status, 503)
+  t.is(busy.body.toString(), 'ocupado\n')
+  t.is(busy.headers['retry-after'], '1')
+  t.alike(seeder.calls, [['indexGroup', G, null]], 'no image lookup after spending the shared token')
+
+  const capped = groupImageSeeder()
+  const s2 = await startSeedWs({ port: 0, seeder: capped, index: { maxInFlight: 0 } })
+  t.teardown(() => s2.close(), { force: true })
+  t.is((await mediaRequest(s2.port, '/index/group-image/' + G)).status, 503)
+  t.is(capped.calls.length, 0, 'the in-flight cap also precedes the lookup')
+})
 
 test('startSeedWs /index/community: wire shape, HEAD, unknown and malformed are 404', async (t) => {
   t.timeout(20000)

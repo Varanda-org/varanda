@@ -22,7 +22,7 @@ import { perfMarks, useNode } from '../node'
 import { cacheGeneration } from '../localCaches'
 import { buildScreenSnapshot } from '../screenSnapshot'
 import { clearScreenSnapshot, loadScreenSnapshot, saveScreenSnapshot } from '../screenSnapshotStore'
-import { fetchCommunity, fetchGroup, fetchGroupSearch } from '../indexClient'
+import { fetchCommunity, fetchGroup, fetchGroupImages, fetchGroupSearch } from '../indexClient'
 import { queryPath } from '../search'
 import { COMMUNITY_JOIN_LABELS, PAGE_EMPTY_TEXT, PUBLIC_LABEL, membersLabel, pageCommunities, pageErrorText, pageMode, pageRoleOf, roleLabel } from '../groups'
 import { pagesOn } from '../pageGate'
@@ -38,6 +38,7 @@ import { RefreshableList } from '../ui/RefreshableList'
 import { SearchField } from '../ui/SearchField'
 import { GroupShelf } from '../ui/GroupShelf'
 import { useGroupShelves } from '../useGroupShelves'
+import { GROUP_LIST_LIMIT, GROUP_LIST_PAGES } from '../groupShelves'
 import { EmptyState, ErrorState, SkeletonRow } from '../ui/States'
 import { space, type } from '../ui/theme'
 import { useStyles } from '../ui/ThemeProvider'
@@ -100,6 +101,79 @@ export function saveGroupSnapshot (kind, binding, rows, gen) {
   else saveScreenSnapshot(kind, snapshot, gen)
 }
 
+// A held row's explicit null is also a node answer: an index hint cannot
+// restore a removed image. Pending rows only carry placeholder nulls.
+// Private catalogue rows never disclose their key here.
+function indexImageKey (row) {
+  if (!row || row.visibility === 'private') return null
+  if (row.state !== 'pending' && (Object.hasOwn(row, 'image') || Object.hasOwn(row, 'imageAuthor'))) return null
+  const key = row.group || row.community
+  return typeof key === 'string' && HEX64.test(key) ? key : null
+}
+
+export function indexImageRow (row, images) {
+  const key = indexImageKey(row)
+  const hit = key && images.get(key)
+  if (!hit || !hit.image || hit.image.mime !== 'image/jpeg') return row
+  const candidate = { ...row, image: hit.image, imageAuthor: hit.author }
+  return pictureProps(candidate).picture ? candidate : row
+}
+
+// A missing or failed node read must not turn every hit into an index request.
+export function heldSearchRows (hits, nodeRows) {
+  const held = nodeRows === null ? null : new Map(nodeRows.map((row) => [row.group, row]))
+  return hits.map((hit) => {
+    const row = held && held.get(hit.group)
+    if (held && !row) return hit
+    return { ...hit, image: row?.image ?? null, imageAuthor: row?.imageAuthor ?? null }
+  })
+}
+
+async function readHeldSearchGroups (request, alive) {
+  const rows = []
+  let offset = 0
+  for (let i = 0; i < GROUP_LIST_PAGES; i++) {
+    const page = await request('group.list', { offset, limit: GROUP_LIST_LIMIT })
+    if (!alive()) return null
+    if (page === null || typeof page !== 'object' || !Array.isArray(page.groups) || !Number.isSafeInteger(page.total) || page.total < 0) return null
+    for (const row of page.groups) {
+      if (row === null || typeof row !== 'object' || typeof row.group !== 'string' || typeof row.role !== 'string') return null
+    }
+    rows.push(...page.groups)
+    offset += page.groups.length
+    if (page.groups.length === 0 || offset >= page.total) break
+  }
+  return rows
+}
+
+// Kept apart from the rows that feed snapshots. Every page goes through the
+// index client's scheduler, including a full catalogue plus its header.
+export function useIndexGroupImages (node, rows, page = rows, enabled = true) {
+  const active = enabled && node.hosted === true && node.online === true
+  const keys = [...new Set(rows.map(indexImageKey).filter(Boolean))].join(',')
+  const [state, setState] = useState(null)
+  useEffect(() => {
+    let alive = true
+    setState(null)
+    if (!active || keys === '') return
+    const wanted = keys.split(',')
+    ;(async () => {
+      const images = new Map()
+      for (let offset = 0; offset < wanted.length; offset += 32) {
+        if (!alive) return
+        try {
+          const batch = await fetchGroupImages(wanted.slice(offset, offset + 32))
+          if (!alive) return
+          for (const [key, image] of batch) images.set(key, image)
+        } catch {}
+      }
+      if (alive) setState({ page, keys, images })
+    })()
+    return () => { alive = false }
+  }, [active, keys, page])
+  return active && state && state.page === page && state.keys === keys ? state.images : new Map()
+}
+
 function communityTitle (row) {
   if (row.state !== 'ready') return 'Comunidade ainda chegando'
   return typeof row.name === 'string' && row.name !== '' ? displayText(row.name) : 'Comunidade sem nome'
@@ -130,34 +204,46 @@ function Row ({ title, subtitle, dot, hint, seed, avatarName, image, imageAuthor
   )
 }
 
-function useGroupSearch (text) {
-  const [state, setState] = useState({ status: 'idle', groups: [], more: false, indexing: false, partial: false, unavailable: false, error: '' })
+function useGroupSearch (node, text) {
+  const [state, setState] = useState({ status: 'idle', groups: [], nodeRows: null, more: false, indexing: false, partial: false, unavailable: false, error: '' })
   const [attempt, setAttempt] = useState(0)
   const gen = useRef(0)
+  const requestRef = useRef(node.request)
+  requestRef.current = node.request
   const path = queryPath(text)
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
   useEffect(() => {
     const mine = ++gen.current
     if (path === null) {
-      setState({ status: 'idle', groups: [], more: false, indexing: false, partial: false, unavailable: false, error: '' })
+      setState({ status: 'idle', groups: [], nodeRows: null, more: false, indexing: false, partial: false, unavailable: false, error: '' })
       return
     }
-    setState((s) => ({ ...s, status: 'loading', error: '' }))
+    setState((s) => ({ ...s, status: 'loading', nodeRows: null, error: '' }))
     const timer = setTimeout(async () => {
       const res = await fetchGroupSearch(path)
       if (mine !== gen.current) return
       if (!res || !res.ok) {
         const unavailable = !!res && res.reason === 'not-found'
         const error = unavailable ? 'A busca ainda não está disponível.' : 'Não foi possível buscar agora.'
-        setState({ status: 'error', groups: [], more: false, indexing: false, partial: false, unavailable, error })
+        setState({ status: 'error', groups: [], nodeRows: null, more: false, indexing: false, partial: false, unavailable, error })
         return
       }
       const v = res.value
-      setState({ status: 'done', groups: v.groups, more: v.more === true, indexing: v.indexing === true, partial: v.complete === false, unavailable: false, error: '' })
+      setState({ status: 'done', groups: v.groups, nodeRows: null, more: v.more === true, indexing: v.indexing === true, partial: v.complete === false, unavailable: false, error: '' })
+      if (v.groups.length === 0) return
+      let nodeRows = null
+      try {
+        nodeRows = await readHeldSearchGroups(requestRef.current, () => mine === gen.current)
+      } catch {}
+      if (mine !== gen.current) return
+      setState((s) => ({ ...s, nodeRows }))
     }, SEARCH_DELAY_MS)
-    return () => clearTimeout(timer)
+    return () => {
+      clearTimeout(timer)
+      gen.current++
+    }
   }, [path, attempt])
-  return { ...state, path, retry }
+  return { ...state, rows: heldSearchRows(state.groups, state.nodeRows), path, retry }
 }
 
 // The community name of each search row: /index/group/<G> names the
@@ -282,8 +368,10 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   const liveMarked = useRef(false)
   const [query, setQuery] = useState('')
   const [creating, setCreating] = useState(false)
-  const search = useGroupSearch(hosted ? query : '')
+  const search = useGroupSearch(node, hosted ? query : '')
   const communityNames = useCommunityNames(search.groups)
+  const searchImages = useIndexGroupImages(node, search.rows, search.groups, search.status === 'done')
+  const communityImages = useIndexGroupImages(node, list.rows, list.rows, list.loaded)
   // The person's own diary, left out of the followed shelf's count.
   const ownKey = snapshotBinding !== null ? snapshotBinding.owner : null
   const versions = node.groupVersions
@@ -385,7 +473,8 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
     )
   }
 
-  const hits = search.groups.map((h) => {
+  const hits = search.rows.map((hit) => {
+    const h = indexImageRow(hit, searchImages)
     const community = typeof communityNames[h.group] === 'string' ? displayText(communityNames[h.group]) : ''
     return (
       <Row
@@ -396,6 +485,8 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
         // The community name and the count both matter: up to three lines.
         metaLines={3}
         seed={h.group}
+        image={h.image}
+        imageAuthor={h.imageAuthor}
         avatarName={typeof h.name === 'string' ? h.name : null}
         onPress={() => openGroup(h.group)}
       />
@@ -476,6 +567,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
   }
 
   const renderItem = ({ item }) => {
+    item = indexImageRow(item, communityImages)
     const seen = seenRef.current.has(item.community) ? seenRef.current.get(item.community) : getVersion(item.community)
     return (
       <Row
@@ -505,7 +597,7 @@ export function Comunidades ({ onBack, onOpenGroup, onOpenCommunity }) {
           data={list.rows}
           keyExtractor={(c) => c.community}
           renderItem={renderItem}
-          extraData={{ versions, getVersion }}
+          extraData={{ versions, getVersion, communityImages }}
           ListHeaderComponent={header}
           ListEmptyComponent={empty}
           contentContainerStyle={{ paddingBottom: bottomPad }}

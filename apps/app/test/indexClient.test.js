@@ -52,7 +52,7 @@ function fakeClock (start = Date.parse('2026-10-26T12:00:00Z')) {
 
 // Fresh module state per test (no cache, pacer or cooldown leaks between
 // cases); the fetch* functions run on the fake clock.
-const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
+const DEPS_AT = { fetchPost: 2, fetchRoda: 2, fetchCounts: 1, fetchMember: 2, refetchMember: 1, fetchSearch: 1, fetchTopic: 2, fetchEngagers: 3, fetchFollowCounts: 1, fetchFollows: 3, fetchFans: 2, fetchEvents: 2, fetchPoll: 3, fetchPollVoters: 4, fetchGroup: 2, fetchGroups: 1, fetchCommunity: 1, fetchCommunityGroups: 2, fetchGroupSearch: 1, fetchGroupImages: 1, fetchGroupBrowse: 1, fetchPublicGroups: 2, fetchTopicTrend: 0, fetchTestimonials: 1, fetchFeira: 1, fetchFeiraAuthor: 2, fetchFeiraRatings: 2 }
 async function load () {
   const m = await import('../src/indexClient.js')
   m.resetIndexClient()
@@ -2589,4 +2589,66 @@ test('fetchGardenStall: request, contract and failures', async (t) => {
   let called = false
   t.alike(await fetchGardenStall('nope', { fetch: async () => { called = true } }), { ok: false, reason: 'invalid-input' })
   t.is(called, false)
+})
+
+function groupImage () {
+  return { core: B, mime: 'image/jpeg', start: 1, blocks: 1, bytes: 100, sha256: C, width: 512, height: 512 }
+}
+
+test('group images: bounded keys, configured origin and public images mapped by group', async (t) => {
+  const { groupImagesUrl, fetchGroupImages, validGroupImages } = await load()
+  const { setInstallation } = await import('../src/installation.js')
+  t.teardown(() => setInstallation(null))
+  t.is(groupImagesUrl([A.toUpperCase(), B, A]), '/index/group-image/' + A + ',' + B)
+  const keys = Array.from({ length: 32 }, (_, i) => i.toString(16).padStart(64, '0'))
+  t.is(groupImagesUrl(keys), '/index/group-image/' + keys.join(','))
+  for (const bad of [null, A, [], [null], new Array(1), ['bad'], [A + '/x'], [...keys, C]]) {
+    t.is(groupImagesUrl(bad), null)
+    t.alike(await fetchGroupImages(bad, { fetch: () => t.fail('invalid input reached fetch') }), new Map())
+  }
+  t.ok(setInstallation('https://example.test'))
+  const image = groupImage()
+  const body = { images: [{ group: A, image, author: B }], indexing: false }
+  const calls = []
+  const mapped = await fetchGroupImages([A.toUpperCase(), C], {
+    fetch: async (url, init) => { calls.push({ url, init }); return response(JSON.stringify(body)) }
+  })
+  t.alike(mapped, new Map([[A, { image, author: B }]]))
+  t.is(calls[0].url, 'https://example.test/index/group-image/' + A + ',' + C)
+  t.is(calls[0].init.credentials, 'omit')
+  t.is(calls[0].init.redirect, 'error')
+  t.is(calls[0].init.cache, 'no-store')
+  const copy = validGroupImages(body, [A])
+  copy.get(A).image.bytes = 99
+  t.is(image.bytes, 100, 'validated images are copied')
+  t.alike(await fetchGroupImages(keys, { fetch: json({ images: keys.map((group) => ({ group, image, author: B })), indexing: true }) }),
+    new Map(keys.map((group) => [group, { image, author: B }])))
+})
+
+test('group images: doubtful bodies and transport failures return an empty Map', async (t) => {
+  const { fetchGroupImages, MAX_BODY_BYTES } = await load()
+  const image = groupImage()
+  const row = { group: A, image, author: B }
+  const body = { images: [row], indexing: false }
+  const privateImage = { core: B, mime: 'application/octet-stream', start: 1, blocks: 1, bytes: 32768, sha256: C, key: A, nonce: 'ab'.repeat(24), plainMime: 'image/jpeg', plainSha256: C, w: 512, h: 512, ms: 0 }
+  for (const bad of [
+    null, [], {}, { ...body, extra: true }, { images: [row] }, { ...body, indexing: 1 },
+    { ...body, images: {} },
+    ...[
+      { ...row, extra: true }, { ...row, group: C }, { ...row, group: A.toUpperCase() },
+      { ...row, author: 'bad' }, { ...row, author: B.toUpperCase() },
+      { ...row, image: { ...image, mime: 'image/webp' } }, { ...row, image: privateImage },
+      { ...row, image: { ...image, extra: true } }, { ...row, image: null }
+    ].map((badRow) => ({ ...body, images: [badRow] })),
+    { ...body, images: [row, row] },
+    { ...body, images: [row, { ...row, group: B, author: 'bad' }] }
+  ]) t.alike(await fetchGroupImages([A, B], { fetch: json(bad) }), new Map())
+  for (const opts of [{ status: 404 }, { status: 500 }, { status: 302 }, { redirected: true }]) {
+    t.alike(await fetchGroupImages([A], { fetch: json(body, opts) }), new Map())
+  }
+  t.alike(await fetchGroupImages([A], { fetch: async () => { throw new Error('offline') } }), new Map())
+  t.alike(await fetchGroupImages([A], { fetch: async () => response('{') }), new Map())
+  t.alike(await fetchGroupImages([A], { fetch: async () => response(' '.repeat(MAX_BODY_BYTES + 1)) }), new Map())
+  t.alike(await fetchGroupImages([A], { fetch: () => new Promise(() => {}), timeoutMs: 1 }), new Map())
+  t.alike(await fetchGroupImages([A], { fetch: json({ images: [], indexing: true }) }), new Map())
 })
