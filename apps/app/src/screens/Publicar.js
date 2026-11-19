@@ -124,6 +124,8 @@ import { editorInit, editorPoll } from '../polls'
 import { PollEditor } from '../ui/PollEditor'
 import { EventEditor, eventEditorEvent, eventEditorInit, eventEditorTexts } from '../ui/EventEditor'
 import { Sheet, TEXT_CAP } from '../ui/Sheet'
+import { CheckboxMark } from '../ui/Checkbox'
+import { ProgressBar } from '../ui/ProgressBar'
 import { tap } from '../ui/haptics'
 import { KeyboardLift } from '../ui/KeyboardLift'
 import { measureField } from '../ui/fieldMeasure'
@@ -131,7 +133,7 @@ import { layout, space, type } from '../ui/theme'
 import { PressScale } from '../ui/PressScale'
 import { useStyles, useTheme } from '../ui/ThemeProvider'
 import { pagesOn } from '../pageGate'
-import { Segmented } from '../ui/Segmented'
+import { SegmentedControl } from '../ui/SegmentedControl'
 import { useChatAttachments } from '../ui/AttachSheet'
 import { canPublishMoment } from '../momentSeen'
 import { momentMusicOf } from '../moments'
@@ -2207,7 +2209,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
     setMode(id)
   }
   const modeSwitch = momentOn
-    ? <Segmented options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
+    ? <SegmentedControl options={MODES} selected={momentMode ? 'moment' : 'post'} onSelect={handleMode} />
     : null
 
   if (replyDraftConflict) {
@@ -2627,7 +2629,7 @@ export default function Publicar ({ open, reply: replyProp, quote = null, moment
             ? (
               <View style={styles.errors}>
                 <Pressable accessibilityRole='checkbox' accessibilityState={{ checked: webShare, disabled: held }} disabled={held} onPress={toggleWebShare} style={styles.webRow}>
-                  <View style={[styles.webBox, webShare && styles.webBoxOn]}>{webShare ? <Icon name='ok' size={14} color={colors.accentInk} /> : null}</View>
+                  <CheckboxMark checked={webShare} disabled={held} />
                   <Text style={styles.webText}>{WEB_SHARE_LABEL}</Text>
                 </Pressable>
                 {webShare ? <Soft>{POST_SHARE_CONSENT}</Soft> : null}
@@ -2753,7 +2755,7 @@ function Thumb ({ item, index, count, busy, onRemove, onRetry, onReencode, onMov
           {showBar
             ? (
               <View style={styles.bar}>
-                <View style={[styles.barFill, { width: Math.round(item.progress * 100) + '%' }]} />
+                <ProgressBar value={item.progress} height={4} trackColor='rgba(255,255,255,0.6)' />
               </View>
               )
             : null}
@@ -2855,8 +2857,7 @@ const makeStyles = (colors) => StyleSheet.create({
   thumb: { width: 80, height: 80, borderRadius: 12, overflow: 'hidden', backgroundColor: colors.skeleton },
   thumbImg: { ...StyleSheet.absoluteFillObject },
   thumbEmpty: { alignItems: 'center', justifyContent: 'center' },
-  bar: { position: 'absolute', left: 6, right: 6, bottom: 6, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.6)', overflow: 'hidden' },
-  barFill: { height: 4, backgroundColor: colors.accent },
+  bar: { position: 'absolute', left: 6, right: 6, bottom: 6 },
   // The touch target is full size; the dot stays small so it does not cover
   // most of an 80 pt thumbnail.
   remove: {
@@ -2946,8 +2947,6 @@ const makeStyles = (colors) => StyleSheet.create({
   counterFull: { color: colors.danger },
   errors: { paddingHorizontal: 16, gap: 4 },
   webRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44 },
-  webBox: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: colors.outline, alignItems: 'center', justifyContent: 'center' },
-  webBoxOn: { backgroundColor: colors.accent, borderColor: colors.accent },
   webText: { color: colors.ink, fontSize: 15, flexShrink: 1 },
   ring: { width: 20, height: 20 },
   track: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2.5, borderColor: colors.ring },
