@@ -25,7 +25,7 @@ test('method list and mutating set', (t) => {
     'identity.clear', 'identity.create', 'identity.forget', 'identity.install', 'identity.recoveryBind', 'identity.recoveryLookup', 'identity.recoveryOpen', 'identity.recoveryWrap',
     'identity.reset', 'identity.sessionSaved', 'identity.show', 'identity.status', 'invite.sign', 'inviteCard.sign', 'inviteCard.verify', 'like.set', 'listing.consent', 'listing.create', 'listing.delete', 'listing.edit', 'listing.mine', 'listing.rate', 'listing.ratings', 'listing.status', 'log.read', 'media.readFile', 'media.sealPageFile', 'media.uploadFile', 'moment.create', 'moment.delete', 'moment.lookup', 'moment.putMedia', 'moment.seen', 'moments.read', 'moments.seen', 'node.close', 'node.info', 'notices.list', 'outbox.open', 'outbox.seal',
     'page.feed', 'page.read', 'page.register', 'page.sign', 'peek.read', 'phone.proof', 'phone.sign',
-    'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
+    'post.cover', 'post.create', 'post.delete', 'post.quote', 'post.reply', 'post.share', 'post.shared', 'post.uncovered', 'post.unshare', 'profile.about', 'profile.delete', 'profile.extra.delete', 'profile.mood', 'profile.read', 'profile.set', 'push.sign', 'recovery.sign', 'report.sign', 'repost.set',
     'scrap.delete', 'scrap.hide', 'scrap.wall', 'scrap.write', 'seen.merge', 'seen.onceKey', 'seen.sign', 'session.open', 'sync.start', 'sync.status', 'sync.stop', 'terms.sign', 'testimonial.decide', 'testimonial.delete', 'testimonial.pending', 'testimonial.show', 'testimonial.write', 'top.set', 'username.add', 'visits.clear', 'visits.list', 'visits.note', 'visits.set', 'visits.state'
   ])
   t.alike([...MUTATING].sort(), [
@@ -3640,4 +3640,32 @@ test('group.choose, group.topics and group.voters', (t) => {
   bad(t, 'group.voters', { group: KEY })
   bad(t, 'group.voters', { target })
   bad(t, 'group.voters', { group: KEY, target, pick: 0 })
+})
+
+test('post.uncovered is a read without params', (t) => {
+  ok(t, 'post.uncovered', {})
+  bad(t, 'post.uncovered', { to: KEY + ':1' })
+  bad(t, 'post.uncovered', { limit: 8 })
+  t.absent(isMutating('post.uncovered'))
+})
+
+test('share cover source and byte predicate', (t) => {
+  const { shareCoverSource, needsShareCover, MAX_SHARE_COVER_BYTES: cap } = require('..')
+  for (const [mime, bytes, expected] of [
+    ['image/avif', 1, true], ['image/gif', 1, true],
+    ['image/jpeg', cap, false], ['image/jpeg', cap + 1, true],
+    ['image/png', 1, false], ['image/webp', new Uint8Array(1), false],
+    ['image/jpeg', 0, true], ['image/jpeg', 1.5, true],
+    ['image/jpeg', Number.MAX_SAFE_INTEGER + 1, true]
+  ]) {
+    const image = { mime, bytes }
+    const record = { media: [{ mime: 'video/mp4' }, image, { mime: 'image/avif' }] }
+    t.is(shareCoverSource(record), image)
+    t.is(needsShareCover(record), expected)
+  }
+  for (const record of [null, {}, { text: 'texto' }, { media: 'bad' }, { media: [] }, { media: [null, 1, {}] }, { media: [{ mime: 'video/mp4' }] }, { media: Array(11).fill({ mime: 'image/avif' }) }, { get media () { throw new Error('bad') } }]) {
+    t.is(shareCoverSource(record), null)
+    t.is(needsShareCover(record), false)
+  }
+  t.is(needsShareCover({ media: [{ mime: 'image/jpeg', get bytes () { throw new Error('bad') } }] }), false)
 })
